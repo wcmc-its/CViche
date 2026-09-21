@@ -436,6 +436,34 @@ def _extend_ancestors_to_cover_repaired_children(
             section["element_idx_end"] = max(section["element_idx_end"], child_max_end)
 
 
+def _clip_leaves_to_next_header(sections: list[SectionRecord]) -> None:
+    """
+    Clip every leaf section's end to just before the next mapped section
+    header in document order, whatever the tree says about siblings.
+
+    Retires three mechanisms that let leaf ranges overlap (#916): the
+    out-of-order fallback (`compute_bounds`'s `end_idx < element_idx`
+    branch and `_repair_out_of_order_section_bounds`), sibling disorder (a
+    section's end taken from the next *listed* sibling rather than the next
+    sibling in document order), and the late-Personal-Data preamble
+    extension swallowing earlier sections. Parents (`has_children == True`)
+    keep their subtree-covering ranges -- only leaves are clipped.
+
+    Mutates `sections` in place.
+    """
+    for section in sections:
+        if section["has_children"]:
+            continue
+        current_start = section["element_idx_start"]
+        next_starts = [
+            s["element_idx_start"]
+            for s in sections
+            if s["element_idx_start"] > current_start
+        ]
+        if next_starts:
+            section["element_idx_end"] = min(section["element_idx_end"], min(next_starts) - 1)
+
+
 def _apply_preamble_handling(sections: list[SectionRecord], doc_length: int) -> None:
     """
     Capture any unmapped content before the first real section.
@@ -466,10 +494,18 @@ def _apply_preamble_handling(sections: list[SectionRecord], doc_length: int) -> 
                 if s["hierarchy"] and s["hierarchy"][0].lower().strip() in _PREAMBLE_SECTION_ALIASES
             ]
 
-            if personal_data_sections:
-                # Extend existing Personal Data section to include preamble
-                # Find the one with the earliest start
-                pd_section = min(personal_data_sections, key=lambda s: s["element_idx_start"])
+            # Find the one with the earliest start, or None if none exists.
+            pd_section = (
+                min(personal_data_sections, key=lambda s: s["element_idx_start"])
+                if personal_data_sections else None
+            )
+
+            # Only extend an existing Personal-Data-like section backwards
+            # over the preamble when it is itself the first section in
+            # document order -- a LATER one (content precedes it) must not
+            # be stretched back over those earlier sections; synthesise the
+            # preamble instead (#916).
+            if pd_section is not None and pd_section["element_idx_start"] == first_section_start:
                 if pd_section["element_idx_start"] > 0:
                     # Extend backwards to include preamble
                     pd_section["element_idx_start"] = 0
@@ -651,6 +687,11 @@ def compute_section_boundaries(mapped_hierarchy: list[MappedNode], doc_length: i
 
     # PREAMBLE HANDLING: Check for unmapped content at the beginning of the document
     _apply_preamble_handling(sections, doc_length)
+
+    # Clip every leaf to end just before the next mapped header in document
+    # order -- runs last, after the repairs and preamble handling above,
+    # since it supersedes what those mechanisms leave behind for leaves (#916).
+    _clip_leaves_to_next_header(sections)
 
     return sections
 

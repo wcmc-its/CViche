@@ -166,25 +166,7 @@ def extract_leaf_sections_with_boundaries(
             start_idx = boundary.get("element_idx_start")
             end_idx = boundary.get("element_idx_end")
             if start_idx is not None:
-                parent_sections[hierarchy_path] = {
-                    "start": start_idx,
-                    "end": end_idx,
-                    "first_child_start": None
-                }
-
-    # Find the first child start for each parent
-    for boundary in section_boundaries:
-        if not boundary.get("has_children", False):
-            hierarchy_path = boundary.get("hierarchy", [])
-            start_idx = boundary.get("element_idx_start")
-
-            # Check if this is a child of any parent
-            if len(hierarchy_path) > 1:
-                parent_path = tuple(hierarchy_path[:-1])
-                if parent_path in parent_sections:
-                    current_first = parent_sections[parent_path]["first_child_start"]
-                    if current_first is None or start_idx < current_first:
-                        parent_sections[parent_path]["first_child_start"] = start_idx
+                parent_sections[hierarchy_path] = {"start": start_idx, "end": end_idx}
 
     for boundary in section_boundaries:
         hierarchy_path = boundary.get("hierarchy", [])
@@ -199,12 +181,20 @@ def extract_leaf_sections_with_boundaries(
             # Leaf section - include as-is
             leaf_sections.append((hierarchy_path, start_idx, end_idx))
         else:
-            # Parent section with children - check for gap before first child
+            # Parent section with children - the gap before its content
+            # proper ends just before the next mapped header in document
+            # order, over ALL boundaries at any depth (not just the direct
+            # has_children==False children one level below) -- #916.
             parent_path = tuple(hierarchy_path)
             if parent_path in parent_sections:
-                first_child_start = parent_sections[parent_path]["first_child_start"]
+                next_starts = [
+                    other_start for b in section_boundaries
+                    if (other_start := b.get("element_idx_start")) is not None
+                    and other_start > start_idx
+                ]
+                first_child_start = min(next_starts) if next_starts else None
                 if first_child_start is not None and first_child_start > start_idx + 1:
-                    # There's a gap between parent header and first child
+                    # There's a gap between parent header and the next header
                     # This gap contains content that belongs to the parent section
                     # (e.g., journal articles before "Book" subsection in PUBLICATIONS)
                     gap_end = first_child_start - 1
