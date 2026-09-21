@@ -131,6 +131,23 @@ def test_build_warnings_one_unrouted_code_three_entries():
     assert w["evidence"] == []
 
 
+def test_build_warnings_renderer_declined_for_non_m1_routed_code_names_no_writer():
+    # #842 r2: a routed, non-passthrough, non-M1 code (Q2 -- Service, not
+    # the research-summary path) that reaches REASON_RENDERER_DECLINED must
+    # NOT get M1's "no research summary rendered" text -- that would
+    # misdescribe a Service-section failure as a research-summary one.
+    written = [_entry("Q2"), _entry("Q2")]
+    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+    assert len(warnings) == 1
+    w = warnings[0]
+    assert w["code"] == "Q2"
+    assert w["count"] == 2
+    assert w["reason"] == REASON_RENDERER_DECLINED
+    assert w["message"] == (
+        "Q2: 2 entries diverted to the Appendix — not placed by the section "
+        "routed for Q2 (see any section_render_failed record for that section)")
+
+
 def test_build_warnings_two_unrouted_codes_sorted_by_code():
     written = [_entry("ZZ"), _entry("M4A"), _entry("M4A")]
     warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)

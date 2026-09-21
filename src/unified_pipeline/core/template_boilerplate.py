@@ -173,6 +173,14 @@ def is_template_instruction(text: str) -> bool:
                 for c in cells
             ):
                 return True
+        elif cells:
+            # A cell nobody recognises is faculty data, and this rule's
+            # verdict is final: rules (c)/(d) below see only the joined
+            # string, so a filled row whose LABEL is a long template phrase
+            # ("Is your eligibility to work in the U.S. based on an
+            # employment visa?: | No") would otherwise drop with its answer
+            # by containment (#897).
+            return False
 
     # Rule (c): containment of a long known instruction inside the entry
     # (a template sentence left in with extra faculty text appended).

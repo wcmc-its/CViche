@@ -286,8 +286,13 @@ Still true:
 - **Check that it fired.** `gh issue view N --json state,closedByPullRequestsReferences`.
   A stale-open issue causes duplicated work: someone picks up something that
   shipped weeks ago.
-- **A partial fix does not stay open at full scope.** Retitle the issue down to
-  the precise remaining gap rather than leaving the original text standing.
+- **A partial fix does not stay open at full scope.** Add one line to the PR
+  body per issue it only partly fixes — `Narrows #N: <the residual, as a title>`
+  — and CI (`issue-narrowing.yml`) does the rest: the gate fails a PR that says
+  `Partially addresses #N` without one, and on merge the issue is retitled to it
+  with a pointer back to the PR. Nobody narrowed by hand: the 2026-09-20 sweep
+  found 47 open issues still titled at full scope whose residual lived only in a
+  merged PR's "partially addresses" paragraph (#424, #446, #457, #550, #658 ...).
 
 ## The `integration` branch
 

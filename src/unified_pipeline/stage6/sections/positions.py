@@ -46,7 +46,7 @@ from unified_pipeline.core.render_check import entry_fragments
 from ..formatting import _clear_table_data, format_date_range
 from ..normalization import _get_cleaned_institution_name
 from ..parsing import _dates_overlap_or_match, _is_table_header_entry
-from ..resolution import _get_institution_location
+from ..resolution import _get_institution_location, _location_already_in_institution
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -467,17 +467,10 @@ def _position_row_cells(entry: dict) -> tuple[CellContent, CellContent, CellCont
     # Build cell contents with mixed normal/track-change content
     title_content = [(title, False, "")]
 
-    # Check if location is already present in institution_base to avoid duplication
-    # e.g., "University of Pittsburgh, Pittsburgh, PA" shouldn't get ", Pittsburgh, PA" appended again
-    location_already_present = False
-    if location and institution_base:
-        # Check if city is already in the institution string
-        location_parts = location.split(',')
-        if location_parts:
-            city = location_parts[0].strip()
-            # Check for city name in institution (case-insensitive)
-            if city.lower() in institution_base.lower():
-                location_already_present = True
+    # "University of Pittsburgh, Pittsburgh, PA" must not gain a second
+    # ", Pittsburgh, PA"; "New York University" must still gain its
+    # ", New York, NY" (#897) -- one shared tail predicate decides.
+    location_already_present = _location_already_in_institution(location, institution_base)
 
     if location and location_is_enriched and not location_already_present:
         # Institution/dept is normal text, ", City, State" is track change
