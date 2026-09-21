@@ -84,3 +84,32 @@ def test_flag_off_keeps_the_box():
 
     assert len(gen.doc.tables) == before
     assert any(_SIGNATURE in t for t in _table_texts(gen.doc)), "box wrongly removed with flag off"
+
+
+def test_table_styling_leaves_personal_data_row0_unshaded():
+    """_apply_table_styling_to_all_tables shades row 0 of every table as a
+    header row. The PERSONAL DATA table has no header row -- its row 0 is
+    "Office address:" -- so it must be skipped (faculty feedback 2026-09-15)
+    while every other table's row 0 is still shaded."""
+    from docx.oxml.ns import qn
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._apply_table_styling_to_all_tables()
+
+    def row0_fills(table):
+        return [
+            (shd.get(qn("w:fill")) if (shd := c._tc.find(".//" + qn("w:shd"))) is not None else None)
+            for c in table.rows[0].cells
+        ]
+
+    tables = list(gen.doc.tables)  # python-docx builds fresh proxies per access; snapshot once
+    texts = _table_texts(gen.doc)
+    personal = [t for t, txt in zip(tables, texts) if _CONTENT_TABLE_MARKER in txt]
+    assert len(personal) == 1, "expected exactly one personal-data table"
+    assert row0_fills(personal[0]) == [None, None], "personal-data row 0 must stay unshaded"
+
+    others = [t for t, txt in zip(tables, texts) if _CONTENT_TABLE_MARKER not in txt and t.rows]
+    assert others, "no other tables to check shading on"
+    for t in others:
+        assert set(row0_fills(t)) == {"D9D9D9"}, "section-table header row lost its shading"
