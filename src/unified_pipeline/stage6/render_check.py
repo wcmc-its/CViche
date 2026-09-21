@@ -16,10 +16,15 @@ only until this rewrite decides what the renderer will actually see.
 
 run_doctor's lint 8 imports the render-overlap constants and `_entry_pieces`
 below from here rather than keeping its own copies (`doctor/shared.py`, #825)
--- the doctor may import the pipeline, the pipeline never imports the doctor.
-`doctor/lints/render.py` still keeps its own copies of the record-line-shape
-constants further down (UNRENDERED_MIN_RECORD_LINES and friends); that pair
-is unchanged by #825 -- see the comment above them.
+-- the doctor may import the pipeline; no stage module imports the doctor
+(quality_score.py imports two doctor leaf modules -- #820, pre-#825 -- and is
+not a stage). `doctor/lints/render.py:55,58,61` still keeps its own copies of
+the record-line-shape constants further down (UNRENDERED_MIN_RECORD_LINES,
+RECORD_DATE_LINE_MIN_CHARS, _RECORD_DATE_PREFIX_RE), and `_record_lines`/
+`_record_rendered` (`doctor/lints/render.py:413,500` vs this module's own
+`:234,254`) already differ in AST from these copies -- that pair is #825's
+ceiling until its second step, not a permanent arrangement; see the comment
+above them.
 """
 import re
 from types import MappingProxyType
@@ -167,8 +172,9 @@ def segment_already_rendered(segment_text: str, extracted_fields: dict) -> bool:
 # This module IS the shared definition of the render-overlap constants right
 # below (#825): `doctor/shared.py` imports them from here rather than keeping
 # its own copies. The "run_doctor must not become a pipeline import" rule is
-# retired in that direction only -- the doctor may import the pipeline, the
-# pipeline still never imports the doctor.
+# retired in that direction only -- the doctor may import the pipeline; no
+# stage module imports the doctor (quality_score.py imports two doctor leaf
+# modules -- #820, pre-#825 -- and is not a stage).
 
 RENDER_TOKEN_MIN_COUNT = 3
 RENDER_TOKEN_OVERLAP = 0.7
@@ -177,10 +183,12 @@ RENDER_PIECE_MIN_CHARS = 15
 RENDER_PIECE_WINDOW = 40
 
 # UNRENDERED_MIN_RECORD_LINES / RECORD_DATE_LINE_MIN_CHARS /
-# _RECORD_DATE_PREFIX_RE below are still a deliberate parallel COPY, kept in
-# sync with `doctor/lints/render.py`'s own copies by name, not by import --
-# #825's ceiling: the wider "measurement functions into one module" half of
-# that decision lands when #822 needs it, not here.
+# _RECORD_DATE_PREFIX_RE below, and `_record_lines`/`_record_rendered`
+# further down, are still a parallel COPY of `doctor/lints/render.py`'s own
+# (lines 55,58,61,413,500 there), kept in sync by name, not by import --
+# this is #825's ceiling UNTIL #825's second step, not a permanent
+# arrangement: the wider "measurement functions into one module" half of
+# that decision lands when #822 needs it.
 #
 # An entry is a fused multi-record candidate at this many record-like lines.
 # _looks_like_record only sees pipe/tab rows; employment/appointment records

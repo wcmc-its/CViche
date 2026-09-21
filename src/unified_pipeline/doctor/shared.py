@@ -18,9 +18,10 @@ from unified_pipeline.segmentation_regression import _norm, _squash
 # parallel COPIES of stage6/render_check.py's own (by-name, not by-import --
 # "run_doctor is optional tooling and must not become a pipeline import").
 # That rule is retired in this direction only (#825): the doctor may import
-# the pipeline; the pipeline never imports the doctor. Importing here instead
-# of copying is what stops the two sets drifting the way they already had
-# (#810 -- both missed the same 3b fallback). RENDER_PIECE_MIN_CHARS/WINDOW,
+# the pipeline; no stage module imports the doctor (quality_score.py imports
+# two doctor leaf modules -- #820, pre-#825 -- and is not a stage). Importing
+# here instead of copying is what stops the two sets drifting the way they
+# already had (#810 -- both missed the same 3b fallback). RENDER_PIECE_MIN_CHARS/WINDOW,
 # RENDER_TOKEN_MIN_COUNT/OVERLAP and `_entry_pieces` are used only via
 # re-export below (`lints/render.py`, `lints/extraction.py`, `run_doctor.py`
 # import them from here unchanged); `_RENDER_TOKEN_RE` is also used directly

@@ -2141,22 +2141,36 @@ def _module_level_import_bindings(
         tree: ast.Module, package: str | None) -> tuple[dict[str, str], set[str]]:
     """AST-level module bindings: name -> the fully-resolved dotted module it
     was imported from, and the set of names bound some other way (a
-    module-level assignment or def), which would shadow an import of the
-    same name."""
+    module-level assignment or def, however it is spelled or nested), which
+    would shadow an import of the same name.
+
+    An explicit stack, not `tree.body` alone (#825 verifier round 2, mutants
+    m04/m10/m11): a plain `for node in tree.body` walk only sees a bare
+    `NAME = value` / `def NAME` sitting directly at module scope, so it missed
+    an annotated assignment (`NAME: int = 3`), a tuple-unpacking assignment
+    (`A, B = 1, 2`), and any assignment nested in a module-level `if`/`try`/
+    `with`/`for`/`while` block -- all still execute at import time and still
+    shadow the import. This descends into every such block but never into a
+    `def`/`class` body (the def/class name itself is recorded as a binding;
+    what it assigns internally is a local, not a module attribute)."""
     imported: dict[str, str] = {}
     other_bindings: set[str] = set()
-    for node in tree.body:
+    stack: list[ast.AST] = list(tree.body)
+    while stack:
+        node = stack.pop()
         if isinstance(node, ast.ImportFrom):
             resolved = importlib.util.resolve_name(
                 "." * node.level + (node.module or ""), package)
             for alias in node.names:
                 imported[alias.asname or alias.name] = resolved
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    other_bindings.add(target.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        elif isinstance(node, ast.Import):
+            continue
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             other_bindings.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            other_bindings.add(node.id)
+        else:
+            stack.extend(ast.iter_child_nodes(node))
     return imported, other_bindings
 
 
@@ -2251,3 +2265,30 @@ def test_doctor_render_overlap_names_are_render_check_objects_not_copies_in_cons
     assert checked_at_least_one, (
         "none of _RENDER_OVERLAP_MODULES binds any of the six names -- "
         "the module list or the name list has drifted")
+
+
+def test_render_overlap_modules_list_matches_a_source_scan():
+    """#825 round 3, verifier note 2 (mutant m08): _RENDER_OVERLAP_MODULES is
+    a hand-kept list, so dropping a module from it silently narrows the
+    consumer guard above -- the missing module's own copy would never be
+    checked. Scan every `doctor/**/*.py` plus `run_doctor.py` for a module
+    whose AST imports one of the six names, and assert the hand list is
+    exactly that scan's result."""
+    import unified_pipeline.doctor as doctor_pkg
+    from unified_pipeline import run_doctor as run_doctor_mod
+
+    doctor_root = Path(doctor_pkg.__file__).parent
+    src_root = doctor_root.parent.parent
+    found: set[str] = set()
+    for path in (*doctor_root.rglob("*.py"), Path(run_doctor_mod.__file__)):
+        tree = ast.parse(path.read_text())
+        if not any(isinstance(n, ast.ImportFrom)
+                   and any(a.name in _RENDER_OVERLAP_NAMES for a in n.names)
+                   for n in ast.walk(tree)):
+            continue
+        parts = list(path.resolve().relative_to(src_root).with_suffix("").parts)
+        found.add(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
+
+    assert found == set(_RENDER_OVERLAP_MODULES), (
+        f"source scan found {sorted(found)}, _RENDER_OVERLAP_MODULES has "
+        f"{sorted(_RENDER_OVERLAP_MODULES)} -- update the hand list")
