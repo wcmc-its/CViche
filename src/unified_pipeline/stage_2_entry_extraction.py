@@ -1026,11 +1026,11 @@ Respond **only** with a JSON array containing the identified entries. If no entr
             recovered = recover_unclaimed_table_rows(batch_elements, claimed_row_keys)
             all_validated_entries.extend(recovered)
             if recovered:
-                print(f"    Recovered {len(recovered)} unclaimed table row(s) "
-                      f"in batch {batch_idx + 1}")
+                logger.info(f"    Recovered {len(recovered)} unclaimed table row(s) "
+                            f"in batch {batch_idx + 1} [{full_hierarchy}]")
 
         except Exception as e:
-            print(f"    ⚠ Error in batch {batch_idx + 1}: {e}")
+            logger.warning(f"    ⚠ Error in batch {batch_idx + 1}: {e} [{full_hierarchy}]")
             continue
 
     # Remove subset/duplicate entries from all batches
@@ -1135,9 +1135,14 @@ def _extract_section(
     Returns ``(section_entries_in_order, cost_info, section_assigned, lines)``
     instead of mutating run_stage_2's shared ``all_entries`` /
     ``all_assigned_indices`` / ``total_cost`` / ``total_tokens``, and instead
-    of printing -- this runs on a pool thread the orchestrator's thread-routed
-    stdout cannot see (a print here would bypass the run's progress capture
-    entirely and reach the pod's real stdout instead).
+    of printing. A print here would still reach the run's progress capture --
+    since #883 orchestrator.py's _RoutedStdout also routes by a ContextVar
+    that map_in_order's per-call copy_context() carries onto the pool
+    thread -- but not correctly: the ``[N/M] Processing:`` line must be
+    numbered by *completion*, which only the calling thread (running
+    _section_progress_printer as map_in_order's on_result) knows, and each
+    section's block must land as one atomic print so two sections finishing
+    close together cannot splice their lines together.
     """
     if cancel_check is not None:
         cancel_check()
