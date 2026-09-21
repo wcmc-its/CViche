@@ -320,6 +320,36 @@ def test_parent_with_a_child_at_its_own_start_gets_no_gap():
     assert result == [(["P", "C"], 5, 8), (["D"], 9, 9)]
 
 
+def test_two_parents_at_the_same_start_emit_exactly_one_gap():
+    # Round 2 of #916: two has_children boundaries mapped to the SAME start
+    # (P listed before Q). The round-1 `>=` rule let each same-start parent
+    # suppress the OTHER's gap, so with two parents at the same start
+    # neither emitted one and elements 6-7 (P's own content before the
+    # first real child C@8) were extracted by nobody. The earlier-listed
+    # boundary (P) now owns the tie and emits the gap; Q, listed later,
+    # emits none.
+    boundaries = [
+        _b(["P"], 5, 9, has_children=True),
+        _b(["Q"], 5, 9, has_children=True),
+        _b(["C"], 8, 8),
+        _b(["K"], 9, 9),
+    ]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P"], 6, 7), (["C"], 8, 8), (["K"], 9, 9)]
+
+
+def test_a_duplicated_parent_record_emits_one_gap():
+    # The same parent dict appears twice in section_boundaries (equal
+    # values, distinct objects) -- e.g. stage 1a mapped it twice. Identity
+    # (`is`), not equality, must distinguish "self" from "the other
+    # same-start record" so the second occurrence is suppressed by the
+    # first rather than by itself.
+    parent = _b(["P"], 5, 9, has_children=True)
+    boundaries = [parent, dict(parent), _b(["C"], 8, 8)]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P"], 6, 7), (["C"], 8, 8)]
+
+
 def test_extract_leaf_sections_first_child_start_keeps_earlier_minimum():
     """The parent's gap ends at the earliest header start after the
     parent's own start, over ALL boundaries -- whichever position that

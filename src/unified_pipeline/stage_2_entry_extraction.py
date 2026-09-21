@@ -168,7 +168,7 @@ def extract_leaf_sections_with_boundaries(
             if start_idx is not None:
                 parent_sections[hierarchy_path] = {"start": start_idx, "end": end_idx}
 
-    for boundary in section_boundaries:
+    for idx, boundary in enumerate(section_boundaries):
         hierarchy_path = boundary.get("hierarchy", [])
         start_idx = boundary.get("element_idx_start")
         end_idx = boundary.get("element_idx_end")
@@ -181,19 +181,23 @@ def extract_leaf_sections_with_boundaries(
             # Leaf section - include as-is
             leaf_sections.append((hierarchy_path, start_idx, end_idx))
         else:
-            # Parent section with children - the gap before its content
-            # proper ends just before the next mapped header in document
-            # order (`>=`, not `>`, so a same-start stage-1a artefact still
-            # counts), over ALL OTHER boundaries at any depth -- #916.
+            # Parent w/ children - gap ends just before the next STRICTLY
+            # LATER header (any boundary, any depth). A same-start boundary
+            # suppresses it only when it's a leaf, or was listed earlier --
+            # the earlier tie-owner emits it, so same-start parents don't
+            # cancel each other and drop the content between them (#916).
             parent_path = tuple(hierarchy_path)
             if parent_path in parent_sections:
+                suppressed = any(b is not boundary and b.get("element_idx_start") == start_idx
+                                  and (not b.get("has_children", False) or i < idx)
+                                  for i, b in enumerate(section_boundaries))
                 next_starts = [
                     other_start for b in section_boundaries
                     if b is not boundary and (other_start := b.get("element_idx_start")) is not None
-                    and other_start >= start_idx
+                    and other_start > start_idx
                 ]
                 first_child_start = min(next_starts) if next_starts else None
-                if first_child_start is not None and first_child_start > start_idx + 1:
+                if not suppressed and first_child_start is not None and first_child_start > start_idx + 1:
                     # There's a gap between parent header and the next header
                     # This gap contains content that belongs to the parent section
                     # (e.g., journal articles before "Book" subsection in PUBLICATIONS)
