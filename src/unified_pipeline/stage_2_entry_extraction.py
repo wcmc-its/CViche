@@ -12,18 +12,24 @@ Output: JSON with extracted entries including full text and hierarchy context
 import os
 import sys
 import json
+import logging
 import time
+from functools import partial
 from pathlib import Path
 from collections.abc import Callable
+from typing import NamedTuple
 from docx import Document
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
 from core.template_boilerplate import is_template_instruction
+
+logger = logging.getLogger(__name__)
 
 
 def get_hierarchy_path(node: dict, current_path: list[str] = None) -> list[str]:
@@ -778,15 +784,15 @@ def detect_entries_for_section(
     prompt_tokens = 0
     completion_tokens = 0
 
-    num_batches = (len(section_elements) + BATCH_SIZE - 1) // BATCH_SIZE
+    batches = make_batches(section_elements, BATCH_SIZE)
+    num_batches = len(batches)
 
-    for batch_idx in range(num_batches):
+    for batch_idx, batch_elements in enumerate(batches):
         batch_start = batch_idx * BATCH_SIZE
-        batch_end = min(batch_start + BATCH_SIZE, len(section_elements))
-        batch_elements = section_elements[batch_start:batch_end]
+        batch_end = batch_start + len(batch_elements)
 
         if num_batches > 1:
-            print(f"    Processing batch {batch_idx + 1}/{num_batches} (elements {batch_start + 1}-{batch_end} of {len(section_elements)})")
+            logger.info(f"    Processing batch {batch_idx + 1}/{num_batches} (elements {batch_start + 1}-{batch_end} of {len(section_elements)})")
 
         # Create element list for LLM (handles paragraphs, table_content, and legacy tables)
         element_list_parts = []
@@ -1062,11 +1068,183 @@ def _bound_coverage_indices(
     return all_doc_indices - integer_assigned, all_doc_indices & integer_assigned
 
 
+# I/O-bound stage (LLM round trips, not CPU); the default is sized under the
+# per-pod semaphore so one run cannot starve the others admitted alongside it
+# (#881). Knob: CVICHE_STAGE2_SECTION_WORKERS, env var or llm yaml key.
+STAGE2_SECTION_WORKERS = workers_from_config("CVICHE_STAGE2_SECTION_WORKERS")
+
+
+class _SectionResult(NamedTuple):
+    entries: list[dict]
+    cost_info: dict
+    assigned: set
+    lines: list[str]
+
+
+def _section_progress_printer(hierarchy_paths: list[list[str]]) -> Callable[[int, _SectionResult], None]:
+    """Build a map_in_order ``on_result`` callback: one atomic print per
+    finished section, numbered by completion.
+
+    map_in_order guarantees ``on_result`` fires only on the CALLING thread,
+    one call at a time -- both its serial path and its ``as_completed`` loop
+    invoke it inline, never from a pool thread -- so despite the pool
+    underneath, this closure is single-threaded: no lock, no ``nonlocal``
+    gymnastics beyond the one ``done`` counter needs as a closure variable.
+    The ``[N/M] Processing:`` line is a parsed contract -- orchestrator.py's
+    PROGRESS_PATTERNS read it into the progress bar -- so N counts sections
+    *finished*, which stays monotonic however the pool orders completions,
+    and the whole block goes out in one print so two sections' lines cannot
+    splice (#881).
+    """
+    done = 0
+
+    def on_result(index: int, result: _SectionResult) -> None:
+        nonlocal done
+        _, _, _, lines = result
+        done += 1
+        print("\n".join([
+            f"[{done}/{len(hierarchy_paths)}] Processing: {' > '.join(hierarchy_paths[index])}",
+            *lines,
+        ]))
+
+    return on_result
+
+
+def _extract_section(
+    hierarchy_path: list[str],
+    start_idx: int,
+    end_idx: int,
+    *,
+    doc_elements: list[dict],
+    header_indices: set,
+    element_index_map: dict,
+    header_info: dict[int, list[str]],
+    doc: Document,
+    document_uid: str | None,
+    cancel_check: Callable[[], None] | None,
+) -> _SectionResult:
+    """One section's body of run_stage_2's loop: detect its entries, assign
+    headers/breaks around it, and report what happened -- the per-section
+    unit map_in_order fans out over (#881).
+
+    ``cancel_check`` runs first, on whichever thread this call lands on, so a
+    cancel raised here stops map_in_order from starting any further section
+    (map_in_order cancels the queue on the first raise) instead of waiting
+    for every section already dispatched to finish.
+
+    Returns ``(section_entries_in_order, cost_info, section_assigned, lines)``
+    instead of mutating run_stage_2's shared ``all_entries`` /
+    ``all_assigned_indices`` / ``total_cost`` / ``total_tokens``, and instead
+    of printing -- this runs on a pool thread the orchestrator's thread-routed
+    stdout cannot see (a print here would bypass the run's progress capture
+    entirely and reach the pod's real stdout instead).
+    """
+    if cancel_check is not None:
+        cancel_check()
+
+    # Detect and extract entries using document structure (paragraphs + tables)
+    entries, cost_info = detect_entries_for_section(
+        hierarchy_path,
+        doc_elements,  # Now passing doc_elements instead of doc
+        start_idx,
+        end_idx + 1,  # end_idx is inclusive, so add 1 for range
+        document_uid=document_uid,
+        header_indices=header_indices,
+        element_index_map=element_index_map  # New parameter
+    )
+
+    # Track which indices are assigned to entries
+    section_assigned = set()
+    for entry in entries:
+        start_idx_entry = entry["element_idx_start"]
+        end_idx_entry = entry["element_idx_end"]
+
+        # Handle string indices (table rows like "22.2")
+        if isinstance(start_idx_entry, str) or isinstance(end_idx_entry, str):
+            # For row sub-indices, track the string as-is
+            section_assigned.add(str(start_idx_entry))
+
+            # ALSO mark the parent table index as assigned
+            # to prevent it from being added as a "break" entry
+            start_idx_str = str(start_idx_entry)
+            if "." in start_idx_str:
+                parent_idx = int(start_idx_str.split(".")[0])
+                section_assigned.add(parent_idx)
+        else:
+            # Integer range for paragraph entries
+            for idx in range(start_idx_entry, end_idx_entry + 1):
+                section_assigned.add(idx)
+
+    # Find unassigned indices in this section's range
+    section_range = set(range(start_idx, end_idx + 1))
+    unassigned_in_section = section_range - section_assigned - header_indices
+
+    # Add header entries for this section
+    section_headers = []
+    for idx in sorted(section_range & header_indices):
+        # Get text from element_index_map instead of doc.paragraphs
+        if idx in element_index_map:
+            header_text = get_element_text(element_index_map[idx])
+        else:
+            header_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
+        header_entry = {
+            "element_idx_start": idx,
+            "element_idx_end": idx,
+            "element_type": "header",
+            "confidence": 1.0,
+            "text": header_text,
+            "hierarchy": header_info.get(idx, hierarchy_path)
+        }
+        section_headers.append(header_entry)
+        section_assigned.add(idx)
+
+    # Add break entries for unassigned indices (blank lines, etc.)
+    break_entries = []
+    for idx in sorted(unassigned_in_section):
+        # Get text from element_index_map instead of doc.paragraphs
+        if idx in element_index_map:
+            para_text = get_element_text(element_index_map[idx])
+        else:
+            para_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
+        break_entry = {
+            "element_idx_start": idx,
+            "element_idx_end": idx,
+            "element_type": "break",
+            "confidence": 1.0,
+            "text": para_text,  # Usually empty, but capture if not
+            "hierarchy": hierarchy_path
+        }
+        break_entries.append(break_entry)
+        section_assigned.add(idx)
+
+    # Add hierarchy to content entries
+    for entry in entries:
+        entry["hierarchy"] = hierarchy_path
+
+    content_count = len(entries)
+    header_count = len(section_headers)
+    break_count = len(break_entries)
+
+    if content_count > 0:
+        summary = f"  ✓ Extracted {content_count} entries, {header_count} headers, {break_count} breaks (${cost_info.get('cost', 0):.4f})"
+    else:
+        summary = f"  - No content entries ({header_count} headers, {break_count} breaks)"
+
+    lines = [f"  Elements: {start_idx} to {end_idx}", summary, ""]
+
+    # Combine all entries for this section: headers -> content -> breaks,
+    # the same order the pre-#881 loop extended all_entries in.
+    section_entries_in_order = section_headers + entries + break_entries
+
+    return _SectionResult(section_entries_in_order, cost_info, section_assigned, lines)
+
+
 def run_stage_2(
     docx_path: str,
     hierarchy_json_path: str = None,
     cancel_check: Callable[[], None] | None = None,
     strip_template_instructions: bool = True,
+    workers: int = STAGE2_SECTION_WORKERS,
 ):
     """
     Main Stage 2: Extract entries from CV sections using LLM
@@ -1087,6 +1265,8 @@ def run_stage_2(
                             instruction boilerplate from the extracted entries.
                             When False, keep the instruction text so it survives
                             into the output.
+        workers: Sections extracted at once (default STAGE2_SECTION_WORKERS).
+                            1 reproduces the pre-#881 serial loop.
     """
 
     print(f"Input: {docx_path}")
@@ -1219,116 +1399,33 @@ def run_stage_2(
                             all_entries.append(gap_entry)
                             all_assigned_indices.add(gap_idx)
 
-    for i, (hierarchy_path, start_idx, end_idx) in enumerate(sections_to_process, 1):
-        # Check for cancellation before each section's LLM call so an aborted
-        # run terminates promptly rather than completing all sections first.
-        if cancel_check is not None:
-            cancel_check()
-
-        section_name = hierarchy_path[-1] if hierarchy_path else "Unknown"
-        print(f"[{i}/{len(sections_to_process)}] Processing: {' > '.join(hierarchy_path)}")
-        print(f"  Elements: {start_idx} to {end_idx}")
-
-        # Detect and extract entries using document structure (paragraphs + tables)
-        entries, cost_info = detect_entries_for_section(
-            hierarchy_path,
-            doc_elements,  # Now passing doc_elements instead of doc
-            start_idx,
-            end_idx + 1,  # end_idx is inclusive, so add 1 for range
-            document_uid=document_uid,
+    # Extract every section's entries on a thread pool, section-level grain
+    # (#881); workers=1 reproduces the pre-#881 serial loop exactly, one
+    # context, no pool. Results come back in SUBMISSION order regardless of
+    # completion order -- required so the accumulation below, and therefore
+    # the output artifact, is byte-identical to the old serial loop; the
+    # later `all_entries.sort(key=sort_key)` is stable but this must not
+    # rely on that to hide an accumulation-order bug.
+    results = map_in_order(
+        partial(
+            _extract_section,
+            doc_elements=doc_elements,
             header_indices=header_indices,
-            element_index_map=element_index_map  # New parameter
-        )
-
-        # Track costs
+            element_index_map=element_index_map,
+            header_info=header_info,
+            doc=doc,
+            document_uid=document_uid,
+            cancel_check=cancel_check,
+        ),
+        [(path, s, e) for path, s, e in sections_to_process],
+        workers,
+        on_result=_section_progress_printer([p for p, _, _ in sections_to_process]),
+    )
+    for section_entries, cost_info, section_assigned, _lines in results:
         total_cost += cost_info.get("cost", 0)
         total_tokens += cost_info.get("tokens", 0)
-
-        # Track which indices are assigned to entries
-        section_assigned = set()
-        for entry in entries:
-            start_idx_entry = entry["element_idx_start"]
-            end_idx_entry = entry["element_idx_end"]
-
-            # Handle string indices (table rows like "22.2")
-            if isinstance(start_idx_entry, str) or isinstance(end_idx_entry, str):
-                # For row sub-indices, track the string as-is
-                section_assigned.add(str(start_idx_entry))
-                all_assigned_indices.add(str(start_idx_entry))
-
-                # ALSO mark the parent table index as assigned
-                # to prevent it from being added as a "break" entry
-                start_idx_str = str(start_idx_entry)
-                if "." in start_idx_str:
-                    parent_idx = int(start_idx_str.split(".")[0])
-                    section_assigned.add(parent_idx)
-                    all_assigned_indices.add(parent_idx)
-            else:
-                # Integer range for paragraph entries
-                for idx in range(start_idx_entry, end_idx_entry + 1):
-                    section_assigned.add(idx)
-                    all_assigned_indices.add(idx)
-
-        # Find unassigned indices in this section's range
-        section_range = set(range(start_idx, end_idx + 1))
-        unassigned_in_section = section_range - section_assigned - header_indices
-
-        # Add header entries for this section
-        section_headers = []
-        for idx in sorted(section_range & header_indices):
-            # Get text from element_index_map instead of doc.paragraphs
-            if idx in element_index_map:
-                header_text = get_element_text(element_index_map[idx])
-            else:
-                header_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
-            header_entry = {
-                "element_idx_start": idx,
-                "element_idx_end": idx,
-                "element_type": "header",
-                "confidence": 1.0,
-                "text": header_text,
-                "hierarchy": header_info.get(idx, hierarchy_path)
-            }
-            section_headers.append(header_entry)
-            all_assigned_indices.add(idx)
-
-        # Add break entries for unassigned indices (blank lines, etc.)
-        break_entries = []
-        for idx in sorted(unassigned_in_section):
-            # Get text from element_index_map instead of doc.paragraphs
-            if idx in element_index_map:
-                para_text = get_element_text(element_index_map[idx])
-            else:
-                para_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
-            break_entry = {
-                "element_idx_start": idx,
-                "element_idx_end": idx,
-                "element_type": "break",
-                "confidence": 1.0,
-                "text": para_text,  # Usually empty, but capture if not
-                "hierarchy": hierarchy_path
-            }
-            break_entries.append(break_entry)
-            all_assigned_indices.add(idx)
-
-        # Add hierarchy to content entries
-        for entry in entries:
-            entry["hierarchy"] = hierarchy_path
-
-        # Combine all entries for this section
-        all_entries.extend(section_headers)
-        all_entries.extend(entries)
-        all_entries.extend(break_entries)
-
-        content_count = len(entries)
-        header_count = len(section_headers)
-        break_count = len(break_entries)
-
-        if content_count > 0:
-            print(f"  ✓ Extracted {content_count} entries, {header_count} headers, {break_count} breaks (${cost_info.get('cost', 0):.4f})")
-        else:
-            print(f"  - No content entries ({header_count} headers, {break_count} breaks)")
-        print()
+        all_assigned_indices |= section_assigned
+        all_entries.extend(section_entries)
 
     # Sort entries by element_idx_start for consistent output
     # Handle mixed int/string indices (e.g., 22 vs "22.2")
