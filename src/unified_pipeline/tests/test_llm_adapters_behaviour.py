@@ -732,18 +732,23 @@ def test_call_with_retry_client_error_non_retryable_code_raises_immediately(monk
 
 
 def test_call_with_retry_exhausts_attempts_and_raises_last_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ModelTimeoutException, not ThrottlingException: it's retryable but NOT
+    # in BEDROCK_OUTAGE_CODES (#810), so this exercises the ordinary
+    # retry_count-bounded path. ThrottlingException now gets the separate,
+    # much longer outage-budget path -- see the
+    # test_call_with_retry_outage_* tests below.
     sleeps: list[float] = []
     monkeypatch.setattr(retry.time, "sleep", lambda s: sleeps.append(s))
     attempts = {"n": 0}
 
-    def always_throttled() -> str:
+    def always_timed_out() -> str:
         attempts["n"] += 1
-        raise ClientError({"Error": {"Code": "ThrottlingException", "Message": "x"}}, "Converse")
+        raise ClientError({"Error": {"Code": "ModelTimeoutException", "Message": "x"}}, "Converse")
 
     with pytest.raises(ClientError) as exc_info:
-        retry._call_with_retry(always_throttled, retry_count=2)
+        retry._call_with_retry(always_timed_out, retry_count=2)
 
-    assert exc_info.value.response["Error"]["Code"] == "ThrottlingException"
+    assert exc_info.value.response["Error"]["Code"] == "ModelTimeoutException"
     assert attempts["n"] == 3  # retry_count + 1 total attempts
     assert len(sleeps) == 2  # a backoff between each pair of attempts, none after the last
 
@@ -789,3 +794,135 @@ def test_call_with_retry_cancel_after_backoff_stops_further_attempts(monkeypatch
 
     assert attempts["n"] == 1  # cancel fired before a second attempt started
     assert len(sleeps) == 1  # the first attempt's backoff still ran
+
+
+# ---------------------------------------------------------------------------
+# retry.py -- _call_with_retry's outage-class path (#810)
+# ---------------------------------------------------------------------------
+
+def test_call_with_retry_outage_error_keeps_retrying_past_retry_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    # ServiceUnavailableException is outage-class (BEDROCK_OUTAGE_CODES): it
+    # must NOT be bounded by retry_count=1 (which would allow only 2 total
+    # attempts on the ordinary path). random.uniform is pinned to its upper
+    # bound so each wait is exactly `base` (no jitter range to assert against).
+    clock = {"t": 0.0}
+
+    def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        clock["t"] += s
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(retry.time, "sleep", fake_sleep)
+    monkeypatch.setattr(retry.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(retry.random, "uniform", lambda lo, hi: hi)
+    monkeypatch.setenv("CVICHE_LLM_OUTAGE_BUDGET_SECONDS", "200")
+    attempts = {"n": 0}
+
+    def eventually_recovers() -> str:
+        attempts["n"] += 1
+        if attempts["n"] <= 8:
+            raise ClientError({"Error": {"Code": "ServiceUnavailableException", "Message": "down"}}, "Converse")
+        return "recovered"
+
+    result, _ = retry._call_with_retry(eventually_recovers, retry_count=1)
+
+    assert result == "recovered"
+    assert attempts["n"] == 9  # far more than retry_count(1)+1 == 2
+    # backoff doubles (1, 2, 4, 8, 16, 32) then saturates at the 60s outage cap
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+
+
+def test_call_with_retry_outage_budget_exhausted_raises_llmoutageerror(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = {"t": 0.0}
+
+    def fake_sleep(s: float) -> None:
+        clock["t"] += s
+
+    monkeypatch.setattr(retry.time, "sleep", fake_sleep)
+    monkeypatch.setattr(retry.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(retry.random, "uniform", lambda lo, hi: hi)
+    monkeypatch.setenv("CVICHE_LLM_OUTAGE_BUDGET_SECONDS", "50")
+    attempts = {"n": 0}
+    raised: list[ClientError] = []
+
+    def always_unavailable() -> str:
+        attempts["n"] += 1
+        e = ClientError({"Error": {"Code": "ServiceUnavailableException", "Message": "down"}}, "Converse")
+        raised.append(e)
+        raise e
+
+    with pytest.raises(retry.LLMOutageError) as exc_info:
+        retry._call_with_retry(always_unavailable, retry_count=1)
+
+    assert exc_info.value.__cause__ is raised[-1]
+    assert exc_info.value.seconds_waited >= 50
+    assert attempts["n"] == 7  # 1+2+4+8+16+32=63s elapsed by the 7th failure >= the 50s budget
+
+
+def test_call_with_retry_outage_honors_retry_after_capped_at_60(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(retry.time, "sleep", lambda s: sleeps.append(s))
+    attempts = {"n": 0}
+
+    def flaky() -> str:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ClientError(
+                {
+                    "Error": {"Code": "ServiceUnavailableException", "Message": "down"},
+                    "ResponseMetadata": {"HTTPHeaders": {"retry-after": "120"}},
+                },
+                "Converse",
+            )
+        return "recovered"
+
+    result, _ = retry._call_with_retry(flaky, retry_count=3)
+
+    assert result == "recovered"
+    assert sleeps == [60.0]  # the provider's 120s is capped at the 60s outage ceiling
+
+
+def test_call_with_retry_outage_cancel_check_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
+    attempts = {"n": 0}
+
+    def always_unavailable() -> str:
+        attempts["n"] += 1
+        raise ClientError({"Error": {"Code": "ServiceUnavailableException", "Message": "down"}}, "Converse")
+
+    class Cancelled(Exception):
+        pass
+
+    checks = {"n": 0}
+
+    def cancel_check() -> None:
+        checks["n"] += 1
+        raise Cancelled()
+
+    with pytest.raises(Cancelled):
+        retry._call_with_retry(always_unavailable, retry_count=3, cancel_check=cancel_check)
+
+    assert attempts["n"] == 1  # cancel fired before a second attempt started
+    assert checks["n"] == 1
+
+
+def test_call_with_retry_openai_rate_limit_error_is_outage_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    # OpenAI's RateLimitError is outage-class too (not just Bedrock's codes):
+    # it must survive past retry_count the same way.
+    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
+    attempts = {"n": 0}
+
+    def eventually_recovers() -> str:
+        attempts["n"] += 1
+        if attempts["n"] <= 3:
+            raise openai.RateLimitError(
+                "rate limited",
+                response=httpx.Response(429, request=httpx.Request("POST", "https://example.invalid")),
+                body=None,
+            )
+        return "recovered"
+
+    result, _ = retry._call_with_retry(eventually_recovers, retry_count=1)
+
+    assert result == "recovered"
+    assert attempts["n"] == 4  # more than retry_count(1)+1 == 2 would allow
