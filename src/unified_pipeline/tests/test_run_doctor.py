@@ -10,6 +10,9 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_run_doctor.py -p no:cacheprovider
 """
 
+import ast
+import importlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -2121,6 +2124,41 @@ _RENDER_OVERLAP_NAMES = (
     "RENDER_PIECE_MIN_CHARS", "RENDER_PIECE_WINDOW", "_entry_pieces",
 )
 
+# Every doctor module that binds one of the six names above (#825 round 2):
+# `shared.py` is the definition site, the other three are consumers that
+# import it. A module-level copy in ANY of these would shadow the import
+# silently -- mutant m07 (K-825 verifier round 1) proved this for
+# `lints/render.py` specifically.
+_RENDER_OVERLAP_MODULES = (
+    "unified_pipeline.doctor.shared",
+    "unified_pipeline.doctor.lints.render",
+    "unified_pipeline.doctor.lints.extraction",
+    "unified_pipeline.run_doctor",
+)
+
+
+def _module_level_import_bindings(
+        tree: ast.Module, package: str | None) -> tuple[dict[str, str], set[str]]:
+    """AST-level module bindings: name -> the fully-resolved dotted module it
+    was imported from, and the set of names bound some other way (a
+    module-level assignment or def), which would shadow an import of the
+    same name."""
+    imported: dict[str, str] = {}
+    other_bindings: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            resolved = importlib.util.resolve_name(
+                "." * node.level + (node.module or ""), package)
+            for alias in node.names:
+                imported[alias.asname or alias.name] = resolved
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    other_bindings.add(target.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            other_bindings.add(node.name)
+    return imported, other_bindings
+
 
 def test_doctor_render_overlap_names_are_render_check_objects_not_copies():
     """#825: `doctor/shared.py` imports these from `stage6/render_check.py`
@@ -2139,9 +2177,6 @@ def test_doctor_render_overlap_names_are_render_check_objects_not_copies():
     and by nothing else at module level. A reintroduced copy -- of ANY of
     the six names, int-valued or not -- fails the AST half even when the
     int cache would have hidden it from the runtime half alone."""
-    import ast
-    from pathlib import Path
-
     from unified_pipeline.doctor import shared as doctor_shared
     from unified_pipeline.stage6 import render_check
 
@@ -2153,26 +2188,66 @@ def test_doctor_render_overlap_names_are_render_check_objects_not_copies():
 
     # Static half: catches EVERY reintroduction, including the small-int
     # ones the int cache would otherwise hide from the runtime half.
-    shared_path = Path(doctor_shared.__file__)
-    tree = ast.parse(shared_path.read_text())
-    imported_from_render_check: set[str] = set()
-    other_module_bindings: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module == (
-                "unified_pipeline.stage6.render_check"):
-            for alias in node.names:
-                imported_from_render_check.add(alias.asname or alias.name)
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    other_module_bindings.add(target.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            other_module_bindings.add(node.name)
+    tree = ast.parse(Path(doctor_shared.__file__).read_text())
+    imported, other_bindings = _module_level_import_bindings(
+        tree, doctor_shared.__package__)
 
     for name in _RENDER_OVERLAP_NAMES:
-        assert name in imported_from_render_check, (
+        assert imported.get(name) == "unified_pipeline.stage6.render_check", (
             f"{name} is not imported from stage6.render_check in "
             f"doctor/shared.py's AST")
-        assert name not in other_module_bindings, (
+        assert name not in other_bindings, (
             f"{name} is ALSO bound by a module-level assignment or def in "
             f"doctor/shared.py -- that binding shadows the import")
+
+
+def test_doctor_render_overlap_names_are_render_check_objects_not_copies_in_consumers():
+    """#825 round 2 (K-825 verifier r1, finding 1): the test above guards
+    `doctor/shared.py`'s own module namespace only. `doctor/shared.py`
+    re-exports these names so `lints/render.py`, `lints/extraction.py` and
+    `run_doctor.py` can import them from it -- but any of those three could
+    instead bind a module-level copy of the same name directly, and nothing
+    would notice: each module's own attribute would just shadow whatever it
+    re-exported. Proved live: adding `RENDER_TOKEN_MIN_COUNT = 3` /
+    `RENDER_TOKEN_OVERLAP = 0.7` directly below `lints/render.py`'s `from
+    ..shared import (...)` block left `doctor/shared.py` untouched, passed
+    the test above, and passed all 371 doctor tests (mutant m07).
+
+    Same two halves as above, generalized over every module that binds any
+    of the six names: runtime `is` against `render_check`, plus an AST check
+    that each name is bound ONLY by an `ImportFrom` resolving to
+    `doctor/shared.py` or `stage6/render_check.py` -- never a module-level
+    assignment or def."""
+    from unified_pipeline.stage6 import render_check
+
+    allowed_sources = {
+        "unified_pipeline.doctor.shared",
+        "unified_pipeline.stage6.render_check",
+    }
+    checked_at_least_one = False
+    for module_name in _RENDER_OVERLAP_MODULES:
+        module = importlib.import_module(module_name)
+        names_here = [n for n in _RENDER_OVERLAP_NAMES if hasattr(module, n)]
+        if not names_here:
+            continue
+        checked_at_least_one = True
+
+        for name in names_here:
+            assert getattr(module, name) is getattr(render_check, name), (
+                f"{module_name}.{name} is a copy, not the render_check object")
+
+        tree = ast.parse(Path(module.__file__).read_text())
+        imported, other_bindings = _module_level_import_bindings(
+            tree, module.__package__)
+        for name in names_here:
+            assert name not in other_bindings, (
+                f"{module_name}.{name} is ALSO bound by a module-level "
+                f"assignment or def -- that binding would shadow the import")
+            assert imported.get(name) in allowed_sources, (
+                f"{module_name}.{name} is imported from "
+                f"{imported.get(name)!r}, not from shared.py or "
+                f"render_check.py")
+
+    assert checked_at_least_one, (
+        "none of _RENDER_OVERLAP_MODULES binds any of the six names -- "
+        "the module list or the name list has drifted")
