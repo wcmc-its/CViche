@@ -209,7 +209,11 @@ def _outage_backoff_wait(outage_retries: int, retry_after: float | None) -> floa
     _OUTAGE_BACKOFF_CAP_SECONDS in place of the 30s cap.
     """
     if retry_after is not None and retry_after >= 0:
-        return min(retry_after, _OUTAGE_BACKOFF_CAP_SECONDS)
+        # Floored at 1s: an honoured Retry-After of 0 would otherwise be a
+        # zero-second sleep -- a tight loop hammering the provider for the
+        # whole outage budget instead of backing off (verifier round 2,
+        # NOTE 3).
+        return max(1.0, min(retry_after, _OUTAGE_BACKOFF_CAP_SECONDS))
     base = min(2 ** outage_retries, _OUTAGE_BACKOFF_CAP_SECONDS)
     return base / 2 + random.uniform(0, base / 2)
 
@@ -266,12 +270,17 @@ def _call_with_retry(
     """
     # retry_count is a call-site kwarg passthrough (ultimately from
     # llm_config.yaml via get_stage_config), so a malformed value is
-    # reachable, not just theoretical. Validate the type first: "3" < 0
-    # raises TypeError immediately, and 3.5 passes a bare `< 0` check but
-    # later breaks range(retry_count + 1) with a confusing TypeError deep in
-    # the loop. A negative int would make the loop run zero times and fall
-    # through to `raise last_error` with last_error still None -- also a
-    # bare TypeError instead of the misconfiguration that caused it
+    # reachable, not just theoretical. Validate the type and range here, up
+    # front, so a bad value fails with a message pointing at the
+    # misconfiguration -- not something confusing raised later. The loop
+    # below has two paths: an outage-class error (_is_outage_error) retries
+    # on its own outage_budget-bounded schedule, uncounted against
+    # retry_count; an ordinary retryable error retries while
+    # `attempt < retry_count`, then falls through to `raise e`, re-raising
+    # the last attempt's own exception as-is. A negative retry_count would
+    # make that check false starting on the very first failure, so the
+    # misconfiguration would otherwise surface only as an ordinary-looking
+    # exception from attempt 0 instead of pointing at the bad retry_count
     # (PR #620 review).
     if isinstance(retry_count, bool) or not isinstance(retry_count, int):
         raise TypeError(f"retry_count must be an integer, got {type(retry_count).__name__}")
