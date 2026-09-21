@@ -104,6 +104,13 @@ CAT_HEALTH = "health"
 CAT_BLOOD_TYPE = "blood type"
 CAT_DEA = "DEA number"
 CAT_HOME_CONTACT = "home address / phone"
+# #833: a third party's contact data in an unlabelled Appendix-bound entry
+# (a free-form References block -- "Name, Title, Institution" / phone /
+# email, no label WITHHOLD_POLICY can key on). Not a WithholdRule row: the
+# rule needs per-CV OWNER-CONTACT context (which email/phone is the CV
+# owner's own) that a scope-only row cannot express, so it is applied in
+# `stage6/pii_pass.py` directly rather than through this table.
+CAT_THIRD_PARTY_CONTACT = "third-party contact"
 
 
 @dataclass(frozen=True)
@@ -159,6 +166,21 @@ _YEAR_VALUE = r"\d{4}"
 # match three groups of a five-group ISBN-13 (24 false hits on one CV's
 # book-chapter bibliography during the #820 corpus scan).
 _BARE_SSN_SHAPE = r"(?<![\d-])\d{3}-\d{2}-\d{4}(?![\d-])"
+
+# #833: a bare US phone value (3-3-4), every separator the corpus's
+# References-block shape actually uses -- hyphen, dot, space or a
+# parenthesised area code -- with an optional leading "+1". Guarded the
+# same way as `_BARE_SSN_SHAPE` (digit/hyphen adjacency, not `\b`). The
+# middle group's WIDTH is what keeps this distinct from an SSN: an SSN's
+# 3-2-4 shape never has three contiguous digits in the position this
+# pattern's second group requires, so `123-45-6789` still classifies as
+# CAT_SSN only, never as a phone (`test_bare_ssn_is_not_also_a_phone`).
+_BARE_PHONE_SHAPE = (
+    r"(?<![\d-])(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}(?![\d-])"
+)
+
+# #833: one conservative email shape -- the issue's own spelling.
+_BARE_EMAIL_SHAPE = r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"
 
 # The stem's lookbehind is not a plain \b: a hyphen IS a word boundary, so
 # \b let "Foreign-born – 2015" match on its "born" half (#532 round 2).
@@ -306,8 +328,9 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
 # owner's #821 decision, so no CAT_* constant: a category constant exists
 # to be shared by a policy row, a field-key rule and a comment line, and
 # neither has one); NPI -- a public identifier, render.  Third-party
-# contacts in an unlabelled References section -- a separate follow-up
-# issue, not this table.
+# contacts in an unlabelled References section -- withheld by #833's
+# value-shape rule in `stage6/pii_pass.py`, not by a row of this table (see
+# CAT_THIRD_PARTY_CONTACT above).
 
 
 # Stage-4 field KEYS that name protected data outright (the label pattern

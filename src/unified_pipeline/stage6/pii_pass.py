@@ -48,11 +48,16 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from .normalization.pii import (  # noqa: F401
+    CAT_THIRD_PARTY_CONTACT,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     WITHHOLD_POLICY,
+    PiiMatch,
     WithheldItem,
+    _BARE_EMAIL_SHAPE,
+    _BARE_PHONE_SHAPE,
     _PII_FRAGMENT_SPLIT_RE,
+    _merge_matches,
     _pii_field_key_category,
     _pii_matches,
 )
@@ -247,6 +252,116 @@ class PiiPassResult:
     withheld: list[WithheldItem] = field(default_factory=list)
 
 
+#: #833: local parts of a generic mailbox an editorial board / journal
+#: publishes ("submissions@<journal>.org"), not a person's own address --
+#: the negative control the issue names. A small, closed vocabulary rather
+#: than a word-shape guess, same reasoning as `_RENDER_SET_FIELD_LABELS`
+#: above: matched on the FULL local part, so "editorial@..." (not "editor")
+#: is not spared by accident.
+_GENERIC_MAILBOX_LOCAL_PARTS = frozenset({
+    "editor", "office", "info", "journal", "admin", "submissions",
+})
+
+_THIRD_PARTY_EMAIL_RE = re.compile(_BARE_EMAIL_SHAPE, re.X | re.I)
+_THIRD_PARTY_PHONE_RE = re.compile(_BARE_PHONE_SHAPE, re.X | re.I)
+
+#: Name tokens shorter than this (initials, "Dr", "Jr") are dropped before
+#: the owner-name-sharing check below, so they cannot cheaply satisfy it.
+_MIN_OWNER_NAME_TOKEN_LEN = 3
+_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'-]+")
+
+
+def _phone_digits(value: str) -> str:
+    return re.sub(r"\D", "", value)
+
+
+def _owner_contacts(a_entries: Sequence[dict]) -> frozenset[str]:
+    """Every email/phone the CV owner's own 'A' entries carry, from `text`
+    and `extracted_fields` alike (#833): the whole point of the rule below
+    is telling the owner's OWN contact block -- which legitimately repeats
+    inside an Appendix-bound entry, e.g. a resume-portal footer -- from a
+    third party's. Phones are digit-normalised so a formatting difference
+    ("212-555-0100" vs "(212) 555-0100") cannot defeat the comparison;
+    emails are case-folded."""
+    contacts: set[str] = set()
+    for entry in a_entries:
+        values: list[str] = [entry.get("text") or ""]
+        values.extend(v for v in (entry.get("extracted_fields") or {}).values()
+                      if isinstance(v, str))
+        for value in values:
+            contacts.update(m.group().lower()
+                            for m in _THIRD_PARTY_EMAIL_RE.finditer(value))
+            contacts.update(_phone_digits(m.group())
+                            for m in _THIRD_PARTY_PHONE_RE.finditer(value))
+    return frozenset(contacts)
+
+
+def _owner_name_tokens(a_entries: Sequence[dict]) -> frozenset[str]:
+    """Tokens of the CV owner's own name (the #833 second-email negative
+    control): `extracted_fields['name']` of the first 'A' entry that has
+    one, else the first 'A' entry's raw text -- a References-block-style
+    entry ("Name, Title, Institution") puts the owner's own name first
+    exactly the way a normal Personal Data block does."""
+    name = ""
+    for entry in a_entries:
+        candidate = (entry.get("extracted_fields") or {}).get("name")
+        if isinstance(candidate, str) and candidate.strip():
+            name = candidate
+            break
+    if not name and a_entries:
+        name = a_entries[0].get("text") or ""
+    return frozenset(tok.lower() for tok in _NAME_TOKEN_RE.findall(name)
+                     if len(tok) >= _MIN_OWNER_NAME_TOKEN_LEN)
+
+
+def _shares_owner_name(text: str, owner_name_tokens: frozenset[str]) -> bool:
+    """True when `text` carries enough of the owner's own name tokens that
+    it reads as the owner's OWN entry rather than a third party's -- at
+    least two tokens, or the one token there is when the name has only
+    one."""
+    if not owner_name_tokens:
+        return False
+    text_tokens = {tok.lower() for tok in _NAME_TOKEN_RE.findall(text)}
+    return len(owner_name_tokens & text_tokens) >= min(2, len(owner_name_tokens))
+
+
+def _third_party_contact_matches(
+    text: str, owner: frozenset[str], owner_name_tokens: frozenset[str],
+) -> list[PiiMatch]:
+    """CAT_THIRD_PARTY_CONTACT spans in an Appendix-bound entry: an email or
+    US phone shape that is not one of `owner`'s own contacts, is not a
+    generic editorial mailbox, and does not sit in an entry that also
+    carries the owner's own name.
+
+    # ponytail: the name-token overlap check is a coarse heuristic, not a
+    # name parser -- ceiling: a third party who happens to share two of the
+    # owner's name tokens (a relative, a common surname) would be wrongly
+    # spared. Wider than that when `_owner_name_tokens` had no
+    # `extracted_fields['name']` to use and fell back to the WHOLE first
+    # 'A' entry's text (#833 round 2): that fallback's tokens include the
+    # owner's institution and city words too, so a third-party reference at
+    # the SAME institution/city as the owner -- sharing two of those
+    # tokens, no name overlap at all -- would also be wrongly spared.
+    # Upgrade path: position-anchored name matching, or restrict the
+    # fallback to a leading name-shaped run, if a real CV ever shows this
+    # false negative.
+    """
+    if _shares_owner_name(text, owner_name_tokens):
+        return []
+    found: list[PiiMatch] = []
+    for m in _THIRD_PARTY_EMAIL_RE.finditer(text):
+        value = m.group()
+        local = value.split("@", 1)[0].lower()
+        if value.lower() in owner or local in _GENERIC_MAILBOX_LOCAL_PARTS:
+            continue
+        found.append(PiiMatch(m.start(), m.end(), CAT_THIRD_PARTY_CONTACT))
+    for m in _THIRD_PARTY_PHONE_RE.finditer(text):
+        if _phone_digits(m.group()) in owner:
+            continue
+        found.append(PiiMatch(m.start(), m.end(), CAT_THIRD_PARTY_CONTACT))
+    return found
+
+
 def _entry_scope(code: str, routed_codes: frozenset[str] | set[str]) -> str:
     """Which policy scope an entry with taxonomy `code` is rendered under:
     the full policy for the Personal Data block and for anything
@@ -405,6 +520,9 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
       residual renders (#821 R3 F-D).
     """
     result = PiiPassResult()
+    a_entries = entries_by_code.get(PERSONAL_DATA_CODE, [])
+    owner_contacts = _owner_contacts(a_entries)
+    owner_name_tokens = _owner_name_tokens(a_entries)
     index = -1
     for code, entries in entries_by_code.items():
         scope = _entry_scope(code, routed_codes)
@@ -413,6 +531,13 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             index += 1
             raw_text = entry.get("text", "") or ""
             matches = _pii_matches(raw_text, scope) if raw_text else []
+            # #833: an Appendix-bound, non-'A' entry also gets the
+            # value-shape third-party-contact check -- scope alone already
+            # excludes 'A' (its own rows handle it) and every routed
+            # content code (SCOPE_ALL_CODES).
+            if raw_text and code != PERSONAL_DATA_CODE and scope == SCOPE_PERSONAL_AND_APPENDIX:
+                matches = _merge_matches(list(matches) + _third_party_contact_matches(
+                    raw_text, owner_contacts, owner_name_tokens))
 
             fields = entry.get("extracted_fields") or {}
             pii_keys = [(k, _pii_field_key_category(k)) for k in fields]

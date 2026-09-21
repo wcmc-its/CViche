@@ -54,6 +54,7 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     CAT_SALARY,
     CAT_SPOUSE,
     CAT_SSN,
+    CAT_THIRD_PARTY_CONTACT,
     CAT_VETERAN,
     CAT_VISA,
     DECIDED_820,
@@ -74,6 +75,8 @@ from unified_pipeline.stage6.pii_pass import (  # noqa: E402
     WITHHELD_COMMENT_FOOTER,
     WITHHELD_COMMENT_HEADER,
     _entry_scope,
+    _owner_name_tokens,
+    _THIRD_PARTY_PHONE_RE,
     run_pii_pass,
     withheld_comment_text,
 )
@@ -424,7 +427,275 @@ def test_comment_text_carries_no_value():
 
 
 # --------------------------------------------------------------------------
-# 4. Bare-label span extension (#821 R3 F-B)
+# 4. Third-party contact in an unlabelled References block (#833)
+#
+# `WITHHOLD_POLICY` is label-driven; a free-form References block ("Name,
+# Title, Institution" / phone / email, no label) carries nothing it keys
+# on, so it needs a VALUE-SHAPE rule of its own -- applied only to entries
+# `run_pii_pass` already scopes as Appendix-bound (code not in
+# `routed_codes` and not 'A'), and only to a phone/email that is not the
+# CV owner's own (known from the 'A' entries) and not a generic mailbox.
+# --------------------------------------------------------------------------
+
+def _owner_a_entry(name, *contacts):
+    text = name + "\t" + "\t".join(contacts)
+    return {"text": text, "taxonomy_code": "A",
+            "extracted_fields": {"name": name}}
+
+
+def test_references_block_with_name_title_institution_phone_and_email_is_withheld():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "212-555-0100")
+    t = {"text": "Dr. Jordan Reviewer, Chair, Example State University\t"
+                 "555-234-8899\tjreviewer@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert t["_pii_withheld"] is True
+    assert t["text"] == "Dr. Jordan Reviewer, Chair, Example State University"
+    assert [i.category for i in result.withheld if i.entry_index == 1] == [
+        CAT_THIRD_PARTY_CONTACT, CAT_THIRD_PARTY_CONTACT]
+
+
+def test_references_block_with_only_an_email_is_withheld():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dr. Jordan Reviewer, Example State University, "
+                 "jreviewer@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+@pytest.mark.parametrize("phone", [
+    "555-234-8899", "(555) 234-8899", "555.234.8899", "555 234 8899",
+    "+1 555-234-8899",
+])
+def test_references_block_with_only_a_phone_is_withheld(phone):
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": f"Dr. Jordan Reviewer, Example State University, {phone}",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert phone not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_two_references_in_one_entry_each_get_their_own_withheld_item():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dr. Jordan Reviewer, jreviewer@example-state.edu\n"
+                 "Dr. Alex Second, asecond@example-college.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert "asecond@example-college.edu" not in t["text"]
+    assert [i.category for i in result.withheld] == [
+        CAT_THIRD_PARTY_CONTACT, CAT_THIRD_PARTY_CONTACT]
+
+
+def test_comment_names_third_party_contact():
+    text = withheld_comment_text([
+        WithheldItem(CAT_THIRD_PARTY_CONTACT, APPENDIX_SECTION_LABEL, 1)])
+    assert f" • {CAT_THIRD_PARTY_CONTACT} — 1 item, {APPENDIX_SECTION_LABEL}" in text
+
+
+# --- negative controls, each a test -----------------------------------
+
+def test_lab_website_with_no_email_or_phone_is_untouched():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Lab website: https://example-lab.example.edu/research",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == "Lab website: https://example-lab.example.edu/research"
+    assert result.withheld == []
+
+
+def test_owners_own_email_and_phone_from_a_are_untouched_in_an_appendix_entry():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "212-555-0100")
+    t = {"text": "Reprint requests to Dana Example, dana.example@wcm.example.edu, "
+                 "212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_own_contact_with_no_owner_name_in_the_entry_is_still_untouched():
+    """Exercises the owner-contact exemption on its own terms (#833 round
+    2): unlike the test above, this entry carries NO owner-name token, so
+    `_shares_owner_name` cannot short-circuit the check before the owner
+    set is even consulted -- only the owner-contact comparison itself can
+    spare it. The owner's email is deliberately NOT `dana.example@...` --
+    that local part literally spells out the owner's own name tokens, so
+    reusing it here would let `_shares_owner_name` pass by matching the
+    EMAIL's own text, making the owner-contact check itself untested (the
+    round-1 verifier's exact finding, reproduced against a name-free
+    address to confirm the check does the work alone)."""
+    a = _owner_a_entry("Dana Example", "office-contact-9142@wcm.test", "212-555-0100")
+    t = {"text": "Contact for reprints: office-contact-9142@wcm.test, 212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_phone_in_a_different_format_is_still_recognised_as_the_owners_own():
+    """`_phone_digits` normalises before comparing (#833 round 2): the same
+    phone, formatted differently in the Appendix entry than in the 'A'
+    entry, must still be spared -- no owner-name token here either, so the
+    normalisation itself is what has to do the work."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "212-555-0100")
+    t = {"text": "Contact for reprints: (212) 555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_phone_only_in_extracted_fields_is_still_recognised():
+    """The owner set is gathered from `extracted_fields` as well as `text`
+    (#833 round 2): a phone present only in the 'A' entry's structured
+    field, never in its raw text, still spares the same phone elsewhere."""
+    a = {"text": "Dana Example", "taxonomy_code": "A",
+         "extracted_fields": {"name": "Dana Example", "phone": "212-555-0100"}}
+    t = {"text": "Contact for reprints: 212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owner_name_tokens_fall_back_to_the_first_a_entry_s_whole_text():
+    """When no 'A' entry has `extracted_fields['name']`, the owner name
+    tokens fall back to the first 'A' entry's raw text (#833 round 2): a
+    References-block-style Personal Data entry ("Name, Title,
+    Institution", no separate name field) still spares the owner's own
+    second contact."""
+    a = {"text": "Dana Example, Professor, Example State University",
+         "taxonomy_code": "A", "extracted_fields": {}}
+    t = {"text": "Dana Example is also reachable at "
+                 "dana.example.alt@gmail.com for editorial correspondence",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_plus_one_country_code_is_fully_cut_not_left_dangling():
+    """The phone shape's optional `+1` prefix must be cut along with the
+    digits it introduces (#833 round 2) -- assert the exact residual, not
+    just that the digits are gone, so a mutant that cuts only the 3-3-4
+    digit run and leaves '+1' behind is caught."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dr. Jordan Reviewer, Example State University, "
+                 "+1 555-234-8899",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == "Dr. Jordan Reviewer, Example State University,"
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_owners_second_email_beside_their_own_name_is_untouched():
+    """# ponytail: the name-token heuristic ("2+ of the owner's own name
+    tokens appear in this entry") has a known ceiling -- a third party who
+    happens to share two of the owner's name tokens would be wrongly
+    spared. Upgrade path: position-anchored name matching if a real CV
+    ever shows the false negative."""
+    a = _owner_a_entry("Dana Q Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dana Q Example is also reachable at "
+                 "dana.example.alt@gmail.com for editorial correspondence",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+@pytest.mark.parametrize("local_part", [
+    "editor", "office", "info", "journal", "admin", "submissions",
+])
+def test_generic_editorial_mailbox_is_untouched(local_part):
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": f"Journal of Example Studies, Editorial Board, "
+                 f"{local_part}@example-journal.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_an_a_coded_entry_is_never_in_scope_of_this_rule():
+    """The A entry's own rows handle its contact block; the third-party
+    check never runs against code 'A' itself."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    a["text"] += "\tAlso listed: Jordan Reviewer, jreviewer@example-state.edu"
+    before = a["text"]
+    result = _run({"A": [a]})
+    assert a["text"] == before
+    assert result.withheld == []
+
+
+def test_a_routed_entry_with_a_third_party_email_is_untouched():
+    """Scope is Appendix-only: a routed content code (here F1, Licensure)
+    never runs the third-party check even when it carries someone else's
+    contact."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    f1 = {"text": "Reference: Dr. Jordan Reviewer, jreviewer@example-state.edu",
+          "taxonomy_code": "F1", "extracted_fields": {}}
+    before = f1["text"]
+    result = _run({"A": [a], "F1": [f1]})
+    assert f1["text"] == before
+    assert result.withheld == []
+
+
+def test_bare_ssn_in_an_appendix_entry_classifies_as_ssn_not_phone():
+    """#833 constraint: the phone value shape must not swallow an SSN's
+    3-2-4 run. No 'A' entries at all here -- the point is the shape
+    distinction, not owner provenance."""
+    t = {"text": "SSN: 123-45-6789", "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"T": [t]})
+    assert [i.category for i in result.withheld] == [CAT_SSN]
+    assert t["text"] == ""
+
+
+def test_third_party_phone_shape_rejects_an_ssn_shape_outright():
+    """r2 m08: the previous SSN-vs-phone test only proved `_merge_matches`
+    picks the SSN row first when BOTH policy rows match -- it never
+    checked that `_THIRD_PARTY_PHONE_RE`'s own shape rejects an SSN's
+    3-2-4 run. Direct regex assertions, not routed through the pass, so a
+    mutant that widens the phone shape's middle group (`\\d{3}` ->
+    `\\d{2,3}`) is caught even if merge precedence would otherwise hide it."""
+    assert _THIRD_PARTY_PHONE_RE.search("123-45-6789") is None
+    m = _THIRD_PARTY_PHONE_RE.search("212-555-0100")
+    assert m is not None
+    assert m.group() == "212-555-0100"
+
+
+def test_owner_name_tokens_drop_initials_and_honorifics():
+    """r2 m14: `_MIN_OWNER_NAME_TOKEN_LEN` must actually filter out short
+    tokens (initials, "Jr") before they can cheaply satisfy the
+    owner-name-sharing check. Direct assertion on `_owner_name_tokens`
+    pins the set itself; the entry-level assertion pins the consequence --
+    an Appendix entry sharing only "Jr" and an initial (never in the
+    filtered token set) with the owner is still a third party, so its
+    email is cut."""
+    a = {"text": "", "taxonomy_code": "A",
+         "extracted_fields": {"name": "J. Q. Sampleton Jr"}}
+    assert _owner_name_tokens([a]) == frozenset({"sampleton"})
+
+    t = {"text": "J. Reviewer Jr, Example State University, "
+                 "jreviewer@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+# --------------------------------------------------------------------------
+# 5. Bare-label span extension (#821 R3 F-B)
 #
 # The extension exists because a hard delimiter can sit between a label and
 # its own value, leaving the value uncut. It must reach exactly that value
