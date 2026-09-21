@@ -68,7 +68,7 @@ from ..formatting import (
 )
 from ..normalization import _get_cleaned_institution_name
 from ..parsing import _extract_year_from_text
-from ..resolution import _get_institution_location
+from ..resolution import _get_institution_location, _location_already_in_institution
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -238,17 +238,10 @@ class EducationSection:
             # Cell 0: Degree (never enriched)
             degree_content = [(degree, False, "")]
 
-            # Check if location is already present in institution to avoid duplication
-            # e.g., "University of Pittsburgh, Pittsburgh, PA" shouldn't get ", Pittsburgh, PA" appended again
-            location_already_present = False
-            if location and institution:
-                # Check if city is already in the institution string
-                location_parts = location.split(',')
-                if location_parts:
-                    city = location_parts[0].strip()
-                    # Check for city name in institution (case-insensitive)
-                    if city.lower() in institution.lower():
-                        location_already_present = True
+            # "University of Pittsburgh, Pittsburgh, PA" must not gain a second
+            # ", Pittsburgh, PA"; "New York University" must still gain its
+            # ", New York, NY" (#897) -- one shared tail predicate decides.
+            location_already_present = _location_already_in_institution(location, institution)
 
             # Cell 1: Institution + Location (location may be enriched)
             if location and location_is_enriched and not location_already_present:
