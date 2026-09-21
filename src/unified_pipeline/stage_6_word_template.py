@@ -1239,10 +1239,14 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if not table.rows:
                 continue
 
-            # Apply header row background color (first row)
-            header_row = table.rows[0]
-            for cell in header_row.cells:
-                _set_cell_background(cell, gray_color)
+            # Apply header row background color (first row). The PERSONAL DATA
+            # table is label|value rows with no header, so its first row
+            # ("Office address:") stays unshaded (faculty feedback 2026-09-15);
+            # recognised by its "Work email:" cell, the same anchor
+            # _write_personal_data_table_cells uses to find it.
+            if not any("work email:" in c.text.lower() for r in table.rows for c in r.cells):
+                for cell in table.rows[0].cells:
+                    _set_cell_background(cell, gray_color)
 
             # Apply borders to all cells
             for row in table.rows:

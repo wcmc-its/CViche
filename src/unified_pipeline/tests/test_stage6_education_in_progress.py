@@ -668,3 +668,27 @@ def test_get_institution_location_reports_enrichment_only_when_the_source_lacks_
              "extracted_fields": {"institution": institution},
              "institution_enrichment": {"city": "Crab Hollow", "state": "New York", "country_code": "US"}}
     assert _get_institution_location(entry) == ("Crab Hollow, NY", expected)
+def test_a_city_named_institution_still_gets_its_location():
+    """#897: the education cell refused to append the enriched location when
+    the city WORD appeared anywhere in the institution name, so a degree
+    from "Crab Hollow University" lost its ", Crab Hollow, NY". The shared
+    tail predicate only treats a trailing ", City[, ST]" as already present."""
+    gen = _generator()
+    gen._fill_education([{
+        "text": "B.S. | Crab Hollow University, Crab Hollow, NY | 2003-2007",
+        "taxonomy_code": "B1",
+        "extracted_fields": {
+            "degree": "B.S.",
+            "institution": "Crab Hollow University, Crab Hollow, NY",
+            "start_date": "2003-08", "end_date": "2007-05", "year": "2007",
+        },
+        "institution_enrichment": {
+            "cleaned_name": "Crab Hollow University",
+            "city": "Crab Hollow", "state": "New York", "country_code": "US",
+        },
+    }])
+    row = _first_data_row(gen)
+
+    # the name is plain text; the location is the enrichment tracked change
+    assert row.cells[1].text == "Crab Hollow University"
+    assert _cell_ins_parts(row.cells[1]) == [(", Crab Hollow, NY", "Institution Enrichment")]
