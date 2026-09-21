@@ -188,6 +188,21 @@ def test_no_entries_with_a_foreign_fallback_table_is_left_alone():
     assert gen.stats['tables_populated'] == 0
 
 
+def test_no_entries_with_a_foreign_table_after_the_heading_is_left_alone():
+    """The primary lookup is a forward paragraph scan with no table
+    identity: a template variant could put someone else's table right
+    after the memberships heading. With zero entries there is no
+    data-driven signal to catch that, so `_is_memberships_table` refuses
+    to clear a table whose second header column is not date-shaped."""
+    gen, table = _generator_with_table(header=("Organization", "Certificate #"))
+    table.add_row()
+    table.rows[1].cells[0].text = "foreign stale row"
+    gen._fill_memberships([])
+    rows = [[c.text for c in r.cells] for r in table.rows[1:]]
+    assert rows == [["foreign stale row", ""]]
+    assert gen.stats['tables_populated'] == 0
+
+
 # --- (a) no line the old newline split produced is lost ---------------------
 
 def test_multiline_entries_are_returned_unchanged():
