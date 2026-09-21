@@ -290,7 +290,8 @@ def _compensate_failed_run(run_id: str, email: str, file_path: Path) -> None:
     -- nothing else can live under it (unlike a general run_id, this one is
     never reused for another archive).
 
-    Shared by /upload and restart_run (runs.py imports this).
+    Called from _commit_run_or_compensate below, shared by /upload and
+    restart_run (runs.py imports that).
 
     # ponytail: compensation runs in-process; a crash between archive and
     # this block still orphans -- a storage-keyed sweep is the upgrade path
