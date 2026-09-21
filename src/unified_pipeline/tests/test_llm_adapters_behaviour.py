@@ -883,7 +883,24 @@ def test_call_with_retry_outage_honors_retry_after_capped_at_60(monkeypatch: pyt
 
 
 def test_call_with_retry_outage_cancel_check_propagates(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
+    # time.monotonic is faked off the recorded sleeps (unlike most tests in
+    # this file) so this exercises the OUTAGE branch's cancel_check on a
+    # short, deterministic virtual clock instead of the real one: with the
+    # real clock and the default 1800s budget, deleting the outage branch's
+    # cancel_check() call (mutant) doesn't fail this test -- it just keeps
+    # retrying for ~1800 real seconds before LLMOutageError finally raises,
+    # a CI hang rather than a failure (verifier round 1, m09).
+    clock = {"t": 0.0}
+    sleeps: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        clock["t"] += s
+
+    monkeypatch.setattr(retry.time, "sleep", fake_sleep)
+    monkeypatch.setattr(retry.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(retry.random, "uniform", lambda lo, hi: hi)
+    monkeypatch.setenv("CVICHE_LLM_OUTAGE_BUDGET_SECONDS", "10")
     attempts = {"n": 0}
 
     def always_unavailable() -> str:
@@ -904,6 +921,7 @@ def test_call_with_retry_outage_cancel_check_propagates(monkeypatch: pytest.Monk
 
     assert attempts["n"] == 1  # cancel fired before a second attempt started
     assert checks["n"] == 1
+    assert sleeps == [1.0]  # the outage-branch wait (base=1, jitter pinned to hi)
 
 
 def test_call_with_retry_openai_rate_limit_error_is_outage_class(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -926,3 +944,57 @@ def test_call_with_retry_openai_rate_limit_error_is_outage_class(monkeypatch: py
 
     assert result == "recovered"
     assert attempts["n"] == 4  # more than retry_count(1)+1 == 2 would allow
+
+
+def test_call_with_retry_openai_internal_server_error_is_outage_class(monkeypatch: pytest.MonkeyPatch) -> None:
+    # OpenAI's InternalServerError is outage-class too, alongside
+    # RateLimitError (Do-2 names both) -- only RateLimitError had a test
+    # before this (verifier round 1, m12: dropping InternalServerError from
+    # _is_outage_error survived with the suite green).
+    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
+    attempts = {"n": 0}
+
+    def eventually_recovers() -> str:
+        attempts["n"] += 1
+        if attempts["n"] <= 3:
+            raise openai.InternalServerError(
+                "internal error",
+                response=httpx.Response(500, request=httpx.Request("POST", "https://example.invalid")),
+                body=None,
+            )
+        return "recovered"
+
+    result, _ = retry._call_with_retry(eventually_recovers, retry_count=1)
+
+    assert result == "recovered"
+    assert attempts["n"] == 4  # more than retry_count(1)+1 == 2 would allow
+
+
+def test_call_with_retry_openai_rate_limit_error_honors_retry_after_capped_at_60(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The botocore half of Retry-After honoring (#637) is covered by
+    # test_call_with_retry_outage_honors_retry_after_capped_at_60 above; the
+    # OpenAI httpx-response half was not (verifier round 1, m11: forcing
+    # _retry_after_seconds's OpenAI branch to always return None survived
+    # with the suite green).
+    sleeps: list[float] = []
+    monkeypatch.setattr(retry.time, "sleep", lambda s: sleeps.append(s))
+    attempts = {"n": 0}
+
+    def flaky() -> str:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise openai.RateLimitError(
+                "rate limited",
+                response=httpx.Response(
+                    429,
+                    headers={"Retry-After": "120"},
+                    request=httpx.Request("POST", "https://example.invalid"),
+                ),
+                body=None,
+            )
+        return "recovered"
+
+    result, _ = retry._call_with_retry(flaky, retry_count=3)
+
+    assert result == "recovered"
+    assert sleeps == [60.0]  # the provider's 120s is capped at the 60s outage ceiling

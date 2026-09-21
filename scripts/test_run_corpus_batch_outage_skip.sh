@@ -36,16 +36,26 @@ mkdir -p "$input" "$results/outputs"
 : > "$input/cv_clean.docx";  : > "$results/outputs/cv_clean_wcm.docx"
 : > "$input/cv_error.docx";  : > "$results/outputs/cv_error_wcm.docx"
 : > "$input/cv_norow.docx";  : > "$results/outputs/cv_norow_wcm.docx"
+: > "$input/cv_error_then_warn.docx";  : > "$results/outputs/cv_error_then_warn_wcm.docx"
+: > "$input/cv_warn_then_error.docx";  : > "$results/outputs/cv_warn_then_error_wcm.docx"
 
 printf 'date\tsha\tcv\tworst\tERROR\tWARN\tINFO\ttop_lints\n' > "$results/doctor.tsv"
 printf '2026-01-01T00:00:00Z\tabc1234\tcv_clean\tWARN\t0\t2\t1\tsome_lint\n' >> "$results/doctor.tsv"
 printf '2026-01-01T00:00:00Z\tabc1234\tcv_error\tERROR\t1\t0\t0\tpipeline_errors_present\n' >> "$results/doctor.tsv"
 # cv_norow: no doctor.tsv row at all -- never doctored, must not be treated as done.
+# Two rows per cv, in chronological (append) order -- proves the skip rule
+# keys off the LATEST row, not the first (a first-row reading would flip
+# both of these): an old ERROR re-run that came back clean must now be
+# skipped, and a formerly-clean CV that regressed to ERROR must not be.
+printf '2026-01-01T00:00:00Z\tabc1234\tcv_error_then_warn\tERROR\t1\t0\t0\tpipeline_errors_present\n' >> "$results/doctor.tsv"
+printf '2026-01-02T00:00:00Z\tdef5678\tcv_error_then_warn\tWARN\t0\t1\t0\tsome_lint\n' >> "$results/doctor.tsv"
+printf '2026-01-01T00:00:00Z\tabc1234\tcv_warn_then_error\tWARN\t0\t1\t0\tsome_lint\n' >> "$results/doctor.tsv"
+printf '2026-01-02T00:00:00Z\tdef5678\tcv_warn_then_error\tERROR\t1\t0\t0\tpipeline_errors_present\n' >> "$results/doctor.tsv"
 
-out="$("$SCRIPT" --doctor "$input" 3 "$results" 2>&1)"
+out="$("$SCRIPT" --doctor "$input" 5 "$results" 2>&1)"
 
-echo "$out" | grep -qE '^DONE ran=2 skipped=1 ' \
-  || { echo "FAIL: expected ran=2 skipped=1 (only cv_clean skipped)"; echo "$out"; exit 1; }
+echo "$out" | grep -qE '^DONE ran=3 skipped=2 ' \
+  || { echo "FAIL: expected ran=3 skipped=2 (cv_clean, cv_error_then_warn skipped)"; echo "$out"; exit 1; }
 echo "clean doctor row (worst=WARN) is skipped                        ok"
 
 echo "$out" | grep -qF '! cv_error' \
@@ -55,6 +65,15 @@ echo "ERROR doctor row forces a re-run, not a skip                    ok"
 echo "$out" | grep -qF '! cv_norow' \
   || { echo "FAIL: expected cv_norow to be RE-RUN (no doctor row yet)"; echo "$out"; exit 1; }
 echo "no doctor row yet forces a re-run, not a skip                   ok"
+
+echo "$out" | grep -qF '! cv_error_then_warn' && { echo "FAIL: cv_error_then_warn's LATEST row is WARN -- must be skipped, not re-run"; echo "$out"; exit 1; }
+echo "$out" | grep -qE '^DONE ran=3 skipped=2 ' \
+  || { echo "FAIL: cv_error_then_warn was not counted as skipped"; echo "$out"; exit 1; }
+echo "latest-row-wins: an old ERROR followed by a clean WARN is skipped ok"
+
+echo "$out" | grep -qF '! cv_warn_then_error' \
+  || { echo "FAIL: cv_warn_then_error's LATEST row is ERROR -- must be re-run, not skipped"; echo "$out"; exit 1; }
+echo "latest-row-wins: a clean WARN followed by an ERROR is re-run      ok"
 
 # --- without --doctor: skip also requires the log to show no outage marker ---
 
