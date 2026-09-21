@@ -303,11 +303,30 @@ def test_parent_gap_stops_at_an_out_of_order_foreign_section():
     assert result == [(["P"], 1, 4), (["P", "C"], 10, 20), (["Q"], 5, 9)]
 
 
+def test_parent_with_a_child_at_its_own_start_gets_no_gap():
+    # Stage 1a mapped a parent header and a child header to the SAME
+    # paragraph, so C starts at the same element_idx as its parent P (#916).
+    # The old `other_start > start_idx` comparison made C invisible to the
+    # gap rule (a strict `>` excludes an equal start), so P got a
+    # [start+1 .. next-1] gap that duplicated C's whole leaf range. Once
+    # same-start boundaries count, first_child_start == start_idx, the
+    # `> start_idx + 1` guard fails, and no ["P"] pseudo-leaf is emitted.
+    boundaries = [
+        _b(["P"], 5, 9, has_children=True),
+        _b(["P", "C"], 5, 8),
+        _b(["D"], 9, 9),
+    ]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P", "C"], 5, 8), (["D"], 9, 9)]
+
+
 def test_extract_leaf_sections_first_child_start_keeps_earlier_minimum():
-    """Children already in document order (increasing start): once the
-    first child sets first_child_start, a LATER child with a larger start
-    must not overwrite it -- the 'or start_idx < current_first' disjunct's
-    false side."""
+    """The parent's gap ends at the earliest header start after the
+    parent's own start, over ALL boundaries -- whichever position that
+    header holds in `section_boundaries`'s list order. Here C1 (the
+    earliest-starting header after P) also happens to come first in the
+    list, so the gap ends at C1's start regardless of C2's later, larger
+    start."""
     boundaries = [
         _b(["P"], 0, 50, has_children=True),
         _b(["P", "C1"], 10, 29),

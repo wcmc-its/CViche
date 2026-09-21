@@ -863,6 +863,30 @@ def test_parent_ranges_still_cover_their_children_after_clipping():
     assert by_path[("P",)]["has_children"] is True
 
 
+def test_a_parent_header_bounds_the_preceding_leaf():
+    # P (a PARENT, has_children=True) is listed FIRST but starts at 6; L (a
+    # leaf) is listed SECOND but starts earlier, at 2 -- the out-of-order
+    # fallback gives L a pre-clip end of doc_length - 1 (11), overlapping
+    # P and C. The clip must bound L against the next start in document
+    # order REGARDLESS of has_children -- P@6, not C@8 -- so L ends at 5,
+    # not 7. A mutant that restricts the clip's bound to has_children==False
+    # sections only (#916) would let C@8 bound L instead, giving [2-7].
+    mapped = [
+        {
+            "text": "P",
+            "level": "H1",
+            "element_idx": 6,
+            "children": [
+                {"text": "C", "level": "H2", "element_idx": 8, "children": []},
+            ],
+        },
+        {"text": "L", "level": "H1", "element_idx": 2, "children": []},
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=12)
+    by_path = {tuple(s["hierarchy"]): s for s in sections}
+    assert (by_path[("L",)]["element_idx_start"], by_path[("L",)]["element_idx_end"]) == (2, 5)
+
+
 # ------------------------------------------------------------- run_stage_1b (end to end)
 
 def test_run_stage_1b_end_to_end_flat_hierarchy(tmp_path, monkeypatch):

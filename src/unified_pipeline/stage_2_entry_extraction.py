@@ -183,14 +183,14 @@ def extract_leaf_sections_with_boundaries(
         else:
             # Parent section with children - the gap before its content
             # proper ends just before the next mapped header in document
-            # order, over ALL boundaries at any depth (not just the direct
-            # has_children==False children one level below) -- #916.
+            # order (`>=`, not `>`, so a same-start stage-1a artefact still
+            # counts), over ALL OTHER boundaries at any depth -- #916.
             parent_path = tuple(hierarchy_path)
             if parent_path in parent_sections:
                 next_starts = [
                     other_start for b in section_boundaries
-                    if (other_start := b.get("element_idx_start")) is not None
-                    and other_start > start_idx
+                    if b is not boundary and (other_start := b.get("element_idx_start")) is not None
+                    and other_start >= start_idx
                 ]
                 first_child_start = min(next_starts) if next_starts else None
                 if first_child_start is not None and first_child_start > start_idx + 1:
