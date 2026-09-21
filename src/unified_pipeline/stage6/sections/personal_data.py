@@ -233,6 +233,39 @@ def _label_word_present(word: str, text: str, pii_fragments: list[str]) -> bool:
     return any(word in frag.lower() for frag in pii_fragments)
 
 
+class _VisaAnswers(NamedTuple):
+    """The faculty's answers to the template's two visa rows, or empty."""
+    eligibility: str
+    visa_type: str
+
+
+def _visa_slot_answers(entries: list[dict]) -> _VisaAnswers:
+    """Read the template's two visa rows back out of the A-coded entries.
+
+    A faculty CV already in the WCM template carries them as label|value
+    rows ("Is your eligibility to work in the U.S. based on an employment
+    visa?: | No"). Nothing consumed them before #897: the answer was dropped
+    and the slot rendered as the template's "Yes/No" placeholder, so a "No"
+    read back as unanswered. Matched by the label's two stable words; the
+    value is the cell after the first pipe. A placeholder ("Yes/No") or a
+    blank cell is treated as no answer.
+    """
+    eligibility = visa_type = ''
+    for entry in entries:
+        text = entry.get('text') or ''
+        if '|' not in text:
+            continue
+        label, value = (part.strip() for part in text.split('|', 1))
+        label = label.lower()
+        if not value or value.lower() == 'yes/no':
+            continue
+        if 'employment visa' in label:
+            eligibility = value
+        elif 'visa type' in label:
+            visa_type = value
+    return _VisaAnswers(eligibility, visa_type)
+
+
 def _withhold_home_contact(
         withheld: list[WithheldItem], home_address: str | None,
         home_phone: str | None) -> tuple[str | None, str | None]:
@@ -606,24 +639,28 @@ class PersonalDataSection:
         # Lifted out to `_write_personal_data_table_cells` (#820 R3, pure
         # move -- §3.2) so this function's own length does not carry it.
         self._write_personal_data_table_cells(
-            office_address, office_phone, work_email, home_address,
+            entries, office_address, office_phone, work_email, home_address,
             cell_phone, personal_email)
 
     def _write_personal_data_table_cells(
-            self, office_address: str | None, office_phone: str | None,
-            work_email: str | None, home_address: str | None,
-            cell_phone: str | None, personal_email: str | None) -> None:
-        """Write the six contact slots into Table 1, once `_fill_personal_data`
-        has resolved every value (entries, then the docx recovery fallback).
+            self, entries: list[dict], office_address: str | None,
+            office_phone: str | None, work_email: str | None,
+            home_address: str | None, cell_phone: str | None,
+            personal_email: str | None) -> None:
+        """Write the six contact slots and the two visa rows into Table 1,
+        once `_fill_personal_data` has resolved every contact value (entries,
+        then the docx recovery fallback).
 
         Table 1 structure: Office address, Office telephone, Work email, Home
-        address, Cell phone, Personal email -- located by its "Work email:"
-        cell rather than by index. Split out of `_fill_personal_data` as a
-        PURE move (#820 R3, §3.2): identical body, no behaviour change.
+        address, Cell phone, Personal email, the employment-visa question,
+        the visa type -- located by its "Work email:" cell rather than by
+        index. Split out of `_fill_personal_data` as a PURE move (#820 R3,
+        §3.2); the visa rows were added in #897.
         """
         personal_data_table = self._find_table_with_cell_text("Work email:")
         if personal_data_table is None:
             return
+        visa = _visa_slot_answers(entries)
         for row in personal_data_table.rows:
             cell_text = row.cells[0].text.strip().lower()
 
@@ -657,6 +694,18 @@ class PersonalDataSection:
             # Personal email
             if personal_email and 'personal email' in cell_text:
                 _set_cell_text(row.cells[1], personal_email)
+                self.stats['entries_inserted'] += 1
+
+            # The template's two visa rows (#897): the faculty's own answers,
+            # written over the "Yes/No" placeholder. The PII pass does not
+            # withhold these rows -- its visa label is start-anchored and
+            # this label starts "Is your eligibility ..." (#821 lists visa
+            # status as rendering today).
+            if visa.eligibility and 'employment visa' in cell_text:
+                _set_cell_text(row.cells[1], visa.eligibility)
+                self.stats['entries_inserted'] += 1
+            if visa.visa_type and 'visa type' in cell_text:
+                _set_cell_text(row.cells[1], visa.visa_type)
                 self.stats['entries_inserted'] += 1
 
     def _recover_contact_fields_from_docx(
