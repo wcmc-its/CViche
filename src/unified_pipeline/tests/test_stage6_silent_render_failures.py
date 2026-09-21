@@ -182,6 +182,59 @@ def test_mentoring_replaces_the_template_placeholder_tables():
     assert gen.stats['tables_populated'] == 2
 
 
+def test_mentoring_current_only_removes_the_past_placeholder_too():
+    """#845: mentees under ONLY "Current Mentees:" still get "Past
+    Mentees:"'s own placeholder removed -- removal no longer depends on
+    that heading having content of its own."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph("Current Mentees:")
+    gen.doc.add_table(rows=6, cols=2).rows[0].cells[0].text = "Name"
+    gen.doc.add_paragraph("Past Mentees:")
+    gen.doc.add_table(rows=6, cols=2).rows[0].cells[0].text = "Name"
+
+    gen._fill_mentoring({'N3A': [_mentee('N3A', 'Alice A')]})
+
+    assert [t.rows[0].cells[1].text for t in gen.doc.tables] == ['Alice A']
+    assert gen.stats['tables_populated'] == 1
+
+
+def test_mentoring_no_entries_does_not_remove_a_non_placeholder_table():
+    """Guard negative path, with no mentees at all: a table that is not a
+    pristine "Name" placeholder survives the now-unconditional removal
+    (#845) -- the guard, not the content check, is what protects it."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph("Current Mentees:")
+    foreign = gen.doc.add_table(rows=1, cols=3)
+    foreign.rows[0].cells[0].text = "Name of Committee"
+    gen.doc.add_paragraph("Past Mentees:")
+
+    gen._fill_mentoring({})
+
+    assert len(gen.doc.tables) == 1
+    assert gen.doc.tables[0].rows[0].cells[0].text == "Name of Committee"
+
+
+def test_mentoring_real_template_no_entries_removes_both_mentee_placeholders():
+    """#845, real template: with zero N1-N4 entries, N2's own placeholder
+    is removed by `_fill_training_grants` (pre-existing #529 behavior) and
+    both mentee placeholders are now ALSO removed on purpose -- three
+    tables gone, none rebuilt -- while N1's own template slot and its
+    neighbours are untouched."""
+    gen = _template_generator()
+    template_tables = len(gen.doc.tables)
+    n1_neighbours_before = _body_after(gen.doc, N1_HEADING, 2)
+
+    gen._fill_mentoring({})
+
+    assert len(gen.doc.tables) == template_tables - 3
+    assert not any(t.rows[0].cells[0].text.strip() == 'Name' for t in gen.doc.tables)
+    assert _body_after(gen.doc, N1_HEADING, 2) == n1_neighbours_before
+    assert gen.stats['tables_populated'] == 0
+    assert gen.stats['entries_inserted'] == 0
+
+
 def test_mentoring_missing_every_heading_logs_warning_with_count(caplog):
     gen = _new_generator()
     gen.doc.add_paragraph("Some Unrelated Section")
@@ -525,7 +578,9 @@ def test_n2_real_template_tables_in_order_placeholder_removed_sparse_as_line():
     as needed...") in input order with a spacer between -- heading ->
     instruction -> tables, the template's own order (#529 round 2, F1;
     was between the heading and the instruction before this fix). A
-    third, sparse entry renders as one plain line and adds no table."""
+    third, sparse entry renders as one plain line and adds no table.
+    No N3A/N3B/N4 entries here, so both mentee placeholders are also
+    removed on purpose (#845)."""
     gen = _template_generator()
     template_tables = len(gen.doc.tables)
     entries_by_code = {
@@ -555,8 +610,10 @@ def test_n2_real_template_tables_in_order_placeholder_removed_sparse_as_line():
     table_a = Table(body[instruction_idx + 1], gen.doc)
     assert [row.cells[1].text for row in table_a.rows] == [
         'National Test Institute (T32-100) (Mentor)', 'Test Training Program A', '2018-2021']
-    # One placeholder out, two grant tables in; the sparse entry built none.
-    assert len(gen.doc.tables) == template_tables - 1 + 2
+    # N2's own placeholder out, two grant tables in; the sparse entry built
+    # none; both mentee placeholders also out (no mentees at all, #845).
+    assert len(gen.doc.tables) == template_tables - 1 - 2 + 2
+    assert not any(t.rows[0].cells[0].text.strip() == 'Name' for t in gen.doc.tables)
     assert gen.stats['tables_populated'] == 2
     assert gen.stats['entries_inserted'] == 3
 
