@@ -1128,9 +1128,10 @@ def _extract_section(
     unit map_in_order fans out over (#881).
 
     ``cancel_check`` runs first, on whichever thread this call lands on, so a
-    cancel raised here stops map_in_order from starting any further section
-    (map_in_order cancels the queue on the first raise) instead of waiting
-    for every section already dispatched to finish.
+    cancelled run raises before each section's LLM call: map_in_order cancels
+    the queue on the first raise, and any section a pool thread dequeues
+    before that shutdown lands raises here too, since the orchestrator's
+    cancel is persistent. Sections already in flight finish.
 
     Returns ``(section_entries_in_order, cost_info, section_assigned, lines)``
     instead of mutating run_stage_2's shared ``all_entries`` /

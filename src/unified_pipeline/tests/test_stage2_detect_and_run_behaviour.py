@@ -990,7 +990,7 @@ def test_parallel_sections_write_the_same_artifact_as_the_serial_loop(tmp_path, 
     # equality below -- total_cost is a float sum, so an accumulation-order
     # mutant (e.g. completion order) COULD shift the last bit or two of the
     # sum, but in practice reversed(results) still passes this assertion
-    # (float addition is commutative enough here). The real guard against an
+    # (float addition is associative enough here). The real guard against an
     # accumulation-order mutant is test_tied_start_indices_keep_section_
     # submission_order; this assertion only pins that the totals are
     # order-independent in value, not that ordering is enforced.
