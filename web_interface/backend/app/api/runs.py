@@ -14,7 +14,7 @@ from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency
 from app.auth import get_current_user
-from app.api.upload import UPLOAD_DIR, create_run_archive
+from app.api.upload import UPLOAD_DIR, create_run_archive, _commit_run_or_compensate
 from app.services.run_service import check_run_access
 from app.rate_limiter import check_rate_limit
 from app.errors import not_found, bad_request
@@ -370,7 +370,7 @@ async def restart_run(
             f.write(content)
 
     try:
-        new_run_id, _, _, manifest = create_run_archive(
+        new_run_id, _, new_file_path, manifest = create_run_archive(
             content, original_run.file_type, _build_manifest, _write_local,
         )
     except Exception as e:
@@ -429,7 +429,7 @@ async def restart_run(
         )
         db.add(step)
 
-    db.commit()
+    _commit_run_or_compensate(db, new_run_id, current_user.email, new_file_path)
 
     return {"run_id": new_run_id, "message": f"New run created from {run_id}"}
 

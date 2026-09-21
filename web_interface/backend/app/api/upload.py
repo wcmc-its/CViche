@@ -30,7 +30,7 @@ from app.services.config_service import (
     MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
     get_estimated_run_cost, get_estimate_model_name,
 )
-from app.errors import bad_request
+from app.errors import bad_request, internal_error
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
 from app.services.template_warning import detect_wcm_template
@@ -283,6 +283,55 @@ def _unlink_best_effort(path: Path) -> None:
         pass
 
 
+def _compensate_failed_run(run_id: str, email: str, file_path: Path) -> None:
+    """Undo a durable archive after the row commit that should have followed
+    it failed (#802). run_id was generated fresh for this request and no row
+    ever referenced it, so deleting its whole storage namespace is safe here
+    -- nothing else can live under it (unlike a general run_id, this one is
+    never reused for another archive).
+
+    Shared by /upload and restart_run (runs.py imports this).
+
+    # ponytail: compensation runs in-process; a crash between archive and
+    # this block still orphans -- a storage-keyed sweep is the upgrade path
+    # (#802 option 2).
+    """
+    storage = get_storage()
+    try:
+        storage.delete_run(run_id)
+    except Exception:
+        logger.exception("Compensating delete_run failed for orphaned run %s", run_id)
+    try:
+        # Mirrors the exact key put_global wrote the index under.
+        storage.delete_global_prefix(f"by-submitter/{email.lower()}/{run_id}/")
+    except Exception:
+        logger.exception("Compensating delete_global_prefix failed for orphaned run %s", run_id)
+    _unlink_best_effort(file_path)
+
+
+def _commit_run_or_compensate(
+    db: Session, run_id: str, email: str, file_path: Path,
+) -> None:
+    """Commit the pending Run/Step rows, or compensate the archive and raise
+    a 5xx if the commit fails (#802). Shared by /upload and restart_run so a
+    commit failure after a successful archive is handled identically on both
+    write paths.
+    """
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Run row commit failed after a durable archive; compensating (run=%s)",
+            run_id,
+        )
+        _compensate_failed_run(run_id, email, file_path)
+        raise internal_error(
+            "We couldn't finish creating your run, so nothing was saved. "
+            "Please try again in a moment."
+        )
+
+
 @router.post("/upload", response_model=UploadResponse)
 async def upload_cv(
     file: UploadFile = File(...),
@@ -316,6 +365,15 @@ async def upload_cv(
     # Validate file type
     if not file.filename:
         raise bad_request("No filename provided")
+
+    # Bound BEFORE create_run_archive runs (#796): Run.filename is
+    # String(255) and previously failed only at db.commit(), after the
+    # durable archive was already written.
+    if len(file.filename) > Run.FILENAME_MAX_LENGTH:
+        raise bad_request(
+            f"Filename too long ({len(file.filename)} characters). "
+            f"Maximum length is {Run.FILENAME_MAX_LENGTH} characters."
+        )
 
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
@@ -464,7 +522,7 @@ async def upload_cv(
         )
         db.add(step)
 
-    db.commit()
+    _commit_run_or_compensate(db, run_id, current_user.email, file_path)
 
     return UploadResponse(
         run_id=run_id,
