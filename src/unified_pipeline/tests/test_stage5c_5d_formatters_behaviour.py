@@ -24,7 +24,11 @@ Self-contained: no DB, no network, no real LLM call, no corpus/PII data.
 """
 
 import io
+import importlib
+import inspect
 import json
+import logging
+import os
 import sys
 import threading
 import time
@@ -673,14 +677,29 @@ def test_5d_stage5d_workers_config_knob_is_read_from_env(monkeypatch):
 
 
 def test_run_stage_5d_defaults_to_the_config_knob():
-    # Pins the default itself, not just the reader: a hardcoded literal
-    # default (e.g. `workers: int = 1`) would pass every other test here
-    # (they all pass workers= explicitly) while silently dropping the
-    # CVICHE_STAGE5D_BATCH_WORKERS knob in production.
-    import inspect
-    default = inspect.signature(s5d.run_stage_5d).parameters["workers"].default
-    assert default is s5d.STAGE5D_BATCH_WORKERS
-    assert default == s5d.workers_from_config("CVICHE_STAGE5D_BATCH_WORKERS")
+    # Pins the default itself, not just the reader. An `is`/`==` check
+    # against STAGE5D_BATCH_WORKERS's own value is not enough: a hardcoded
+    # `workers: int = 4` literal would still satisfy `4 is 4` under CPython
+    # small-int caching, because the knob's real default also happens to be
+    # 4 -- verified round 1 (`4 is s5d.STAGE5D_BATCH_WORKERS` -> True). So
+    # this reloads the module with the env knob set to a value (7) nothing
+    # would coincidentally equal, and asserts run_stage_5d's default follows
+    # it -- a literal default cannot move.
+    original = os.environ.get("CVICHE_STAGE5D_BATCH_WORKERS")
+    os.environ["CVICHE_STAGE5D_BATCH_WORKERS"] = "7"
+    try:
+        importlib.reload(s5d)
+        default = inspect.signature(s5d.run_stage_5d).parameters["workers"].default
+        assert default == 7
+    finally:
+        # Restore the env var BEFORE the final reload, not after -- monkeypatch's
+        # own teardown runs after this function returns, too late to matter here.
+        if original is None:
+            os.environ.pop("CVICHE_STAGE5D_BATCH_WORKERS", None)
+        else:
+            os.environ["CVICHE_STAGE5D_BATCH_WORKERS"] = original
+        importlib.reload(s5d)
+        assert inspect.signature(s5d.run_stage_5d).parameters["workers"].default == s5d.STAGE5D_BATCH_WORKERS
 
 
 def test_5d_parallel_batches_write_the_same_artifact_as_the_serial_loop(tmp_path, monkeypatch):
@@ -923,3 +942,56 @@ def test_5d_a_swallowed_batch_leaves_it_unformatted_others_formatted_serial_and_
                 assert entry["extracted_fields"]["formatted_citation"] == f"cite {i}", (workers, i)
         assert out["stage_5d"]["formatted_count"] == len(_MANY_CITATIONS) - 1
         assert out["stage_5d"]["non_enriched_count"] == len(_MANY_CITATIONS)
+
+
+def test_5d_a_swallowed_batch_logs_the_exception_from_a_pool_thread(tmp_path, monkeypatch, caplog):
+    # #810 / round-1 finding: call_llm_formatter's `except Exception` runs
+    # inside _format_batch, which is always called with verbose=False --
+    # including under workers=4, where it can land on a pool thread. A
+    # print there is forbidden, but the failure must not vanish: this pins
+    # that logger.exception still carries the exception type and message
+    # into the run log, the way the pre-#881 print + traceback did.
+    def flaky(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        if idx == 2:
+            raise RuntimeError("simulated throttle")
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT8")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", flaky)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_5d_citation_formatter"):
+        s5d.run_stage_5d(
+            input_path, output_path=str(tmp_path / "out.json"), verbose=True, batch_size=1, workers=4
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("RuntimeError" in m and "simulated throttle" in m for m in messages), messages
+
+
+def test_5d_a_malformed_llm_response_logs_the_parse_warning_from_a_pool_thread(tmp_path, monkeypatch, caplog):
+    # Same finding, the other swallowed diagnostic: parse_llm_output's
+    # `except json.JSONDecodeError` (a batch whose brace-delimited span
+    # isn't valid JSON), also always called with verbose=False from
+    # _format_batch.
+    def garbled(**kwargs):
+        return _llm_result("{not valid json but has a brace span}")
+
+    input_data = {
+        "document_uid": "MALFORMED5D",
+        "entries": [
+            {"taxonomy_code": "S1", "text": "SOLO_ENTRY", "enrichment_status": "", "extracted_fields": {}}
+        ],
+    }
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", garbled)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_5d_citation_formatter"):
+        s5d.run_stage_5d(
+            input_path, output_path=str(tmp_path / "out.json"), verbose=True, batch_size=1, workers=4
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Could not parse LLM JSON output" in m for m in messages), messages

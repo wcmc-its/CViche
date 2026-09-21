@@ -20,6 +20,7 @@ Date: 2025-12-02
 import os
 import sys
 import json
+import logging
 import re
 from collections.abc import Callable
 from pathlib import Path
@@ -28,6 +29,8 @@ from typing import NamedTuple
 
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
+
+logger = logging.getLogger(__name__)
 
 # Paths
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5d_citation_formatted"
@@ -192,6 +195,11 @@ def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict], verbose: boo
                 if entry_id in id_to_entry:
                     id_to_formatted[entry_id] = fields
     except json.JSONDecodeError as e:
+        # Logged unconditionally (not gated by verbose): parse_llm_output is
+        # always called with verbose=False from _format_batch, which can run
+        # on a pool thread, so this is the only trace a malformed batch
+        # leaves in the run log.
+        logger.warning("Could not parse LLM JSON output: %s (response preview: %s...)", e, llm_output[:500])
         if verbose:
             print(f"  Warning: Could not parse LLM JSON output: {e}")
             # Print first 500 chars for debugging
@@ -244,6 +252,11 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
         return result_text, usage
 
     except Exception as e:
+        # Logged unconditionally (not gated by verbose): call_llm_formatter
+        # is always called with verbose=False from _format_batch, which can
+        # run on a pool thread, so this is the only trace a swallowed batch
+        # (#810) leaves in the run log.
+        logger.exception("LLM formatting failed: %s: %s", type(e).__name__, e)
         if verbose:
             import traceback
             print(f"  Warning: LLM formatting failed: {type(e).__name__}: {e}")
@@ -266,10 +279,17 @@ def _format_batch(batch: list[dict]) -> _BatchResult:
     run_stage_5d's loop, run inside map_in_order.
 
     Runs on whichever thread the call lands on for a parallel run
-    (workers > 1) -- never registered with the orchestrator's
-    thread-routed stdout -- so nothing here may print: call_llm_formatter
-    and parse_llm_output are always called with verbose=False regardless
-    of run_stage_5d's own verbose flag; run_stage_5d prints from
+    (workers > 1). Nothing here prints: call_llm_formatter and
+    parse_llm_output are always called with verbose=False regardless of
+    run_stage_5d's own verbose flag, so a swallowed batch failure (#810)
+    cannot land mid-batch on a pool thread's stdout. That failure is not
+    silenced, though -- call_llm_formatter and parse_llm_output log it
+    unconditionally via logger.exception / logger.warning, which is
+    thread-safe and reaches the run log the way the pre-#881 print did.
+    (The orchestrator's thread-routed stdout, `_RoutedStdout`, does fall
+    back to a ContextVar that map_in_order's copy_context() inherits, so a
+    pool-thread print would in fact be captured -- but this file still
+    keeps prints off pool threads, per policy.) run_stage_5d prints from
     _batch_progress_printer on the calling thread instead.
 
     ``usage`` is None exactly when the call failed (call_llm_formatter's
