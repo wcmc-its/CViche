@@ -23,8 +23,11 @@ Covers:
 Self-contained: no DB, no network, no real LLM call, no corpus/PII data.
 """
 
+import io
 import json
 import sys
+import threading
+import time
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -35,7 +38,7 @@ from unified_pipeline import stage_5c_teaching_formatter as s5c
 from unified_pipeline import stage_5d_citation_formatter as s5d
 
 
-def _llm_result(content: str, model: str = "sentinel-model") -> dict:
+def _llm_result(content: str, model: str = "sentinel-model", cost: float = 0.002) -> dict:
     return {
         "content": content,
         "prompt_tokens": 11,
@@ -43,7 +46,7 @@ def _llm_result(content: str, model: str = "sentinel-model") -> dict:
         "total_tokens": 18,
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
-        "cost": 0.002,
+        "cost": cost,
         "model": model,
     }
 
@@ -632,3 +635,291 @@ def test_run_stage_5d_processes_multiple_batches_independently(tmp_path, monkeyp
     assert out["entries"][0]["extracted_fields"]["formatted_citation"] == "citation for the first entry"
     assert out["entries"][1]["extracted_fields"]["formatted_citation"] == "citation for the second entry"
     assert out["stage_5d"]["formatted_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# stage_5d: run_stage_5d on core/batch_pool.map_in_order (#881 step 6)
+# ---------------------------------------------------------------------------
+
+_MANY_CITATIONS = [f"CITATION_MARKER_{i}" for i in range(6)]
+
+
+def _many_citations_input(document_uid: str) -> dict:
+    return {
+        "document_uid": document_uid,
+        "entries": [
+            {"taxonomy_code": "S1", "text": marker, "enrichment_status": "", "extracted_fields": {}}
+            for marker in _MANY_CITATIONS
+        ],
+    }
+
+
+def _citation_index_from_prompt(prompt: str, markers: list[str]) -> int:
+    return next(i for i, m in enumerate(markers) if m in prompt)
+
+
+def _strip_timestamp(data: dict) -> dict:
+    data = json.loads(json.dumps(data))  # deep copy
+    data.get("stage_5d", {}).pop("timestamp", None)
+    return data
+
+
+def test_5d_stage5d_workers_config_knob_is_read_from_env(monkeypatch):
+    # STAGE5D_BATCH_WORKERS itself is bound once, at import time, so it
+    # can't observe an env var set by a test -- this pins the reader it's
+    # built from instead: workers_from_config("CVICHE_STAGE5D_BATCH_WORKERS").
+    monkeypatch.setenv("CVICHE_STAGE5D_BATCH_WORKERS", "7")
+    assert s5d.workers_from_config("CVICHE_STAGE5D_BATCH_WORKERS") == 7
+
+
+def test_run_stage_5d_defaults_to_the_config_knob():
+    # Pins the default itself, not just the reader: a hardcoded literal
+    # default (e.g. `workers: int = 1`) would pass every other test here
+    # (they all pass workers= explicitly) while silently dropping the
+    # CVICHE_STAGE5D_BATCH_WORKERS knob in production.
+    import inspect
+    default = inspect.signature(s5d.run_stage_5d).parameters["workers"].default
+    assert default is s5d.STAGE5D_BATCH_WORKERS
+    assert default == s5d.workers_from_config("CVICHE_STAGE5D_BATCH_WORKERS")
+
+
+def test_5d_parallel_batches_write_the_same_artifact_as_the_serial_loop(tmp_path, monkeypatch):
+    """Batches finish in reverse-of-submission order under the pool; the
+    written artifact must not depend on that."""
+    in_flight = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+    # Order-sensitive per-batch cost: 1e16 for the first-submitted batch,
+    # 1.0 for every later one. Submitted (left-to-right) order sums to
+    # exactly 1e16 (each +1.0 rounds away at that magnitude); reversed
+    # (completion) order sums to 1.0000000000000004e16 -- a genuinely
+    # different float, not just a coincidence of these particular values
+    # (verified: sum([1e16,1,1,1,1,1]) != sum(reversed([...]))).
+    costs = {0: 1e16, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}
+
+    def slow_early_batches(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        # Later-submitted batches answer first: batch 5 sleeps least.
+        time.sleep((len(_MANY_CITATIONS) - idx) * 0.01)
+        with lock:
+            in_flight["now"] -= 1
+        return _llm_result(
+            json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}),
+            cost=costs[idx],
+        )
+
+    input_data = _many_citations_input("MANYCIT1")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", slow_early_batches)
+
+    serial_path = str(tmp_path / "serial.json")
+    s5d.run_stage_5d(input_path, output_path=serial_path, verbose=False, batch_size=1, workers=1)
+    assert in_flight["peak"] == 1  # workers=1 really is the serial loop
+
+    in_flight["peak"] = 0
+    parallel_path = str(tmp_path / "parallel.json")
+    s5d.run_stage_5d(input_path, output_path=parallel_path, verbose=False, batch_size=1, workers=4)
+    assert in_flight["peak"] > 1  # and workers=4 really overlapped
+
+    with open(serial_path, encoding="utf-8") as f:
+        serial = json.load(f)
+    with open(parallel_path, encoding="utf-8") as f:
+        parallel = json.load(f)
+
+    serial, parallel = _strip_timestamp(serial), _strip_timestamp(parallel)
+    assert serial == parallel
+    # Exact float equality: submission-order summation, not just the final
+    # entries list, must match the serial loop.
+    assert serial["stage_5d"]["total_cost"] == 1e16
+    assert parallel["stage_5d"]["total_cost"] == 1e16
+
+
+def test_5d_total_cost_equals_the_serial_sum_when_per_batch_costs_differ(tmp_path, monkeypatch):
+    costs = {0: 1e16, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}
+
+    def slow_early_batches(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        time.sleep((len(_MANY_CITATIONS) - idx) * 0.01)
+        return _llm_result(
+            json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}),
+            cost=costs[idx],
+        )
+
+    input_data = _many_citations_input("COSTSUM1")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", slow_early_batches)
+
+    out_path = str(tmp_path / "out.json")
+    s5d.run_stage_5d(input_path, output_path=out_path, verbose=False, batch_size=1, workers=4)
+
+    with open(out_path, encoding="utf-8") as f:
+        out = json.load(f)
+
+    # The only value that reproduces this exactly is left-to-right
+    # summation in SUBMISSION order (a completion-order accumulator would
+    # land on 1.0000000000000004e16 instead, since batch 0 -- the huge
+    # cost -- finishes LAST here).
+    assert out["stage_5d"]["total_cost"] == 1e16
+
+
+def test_5d_batch_progress_lines_are_monotonic_and_unspliced(tmp_path, monkeypatch, capsys):
+    def slow_early_batches(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        time.sleep((len(_MANY_CITATIONS) - idx) * 0.01)
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT2")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", slow_early_batches)
+
+    s5d.run_stage_5d(input_path, output_path=str(tmp_path / "out.json"), verbose=True, batch_size=1, workers=4)
+
+    out = capsys.readouterr().out.splitlines()
+    total = len(_MANY_CITATIONS)
+    marker = f"/{total} ("
+    progress = [line for line in out if "Processing batch" in line and marker in line]
+    # The line is never "[N/M]" bracketed (that would match orchestrator.py
+    # pattern 3) -- "Processing batch N/M (" is the exact shape checked.
+    assert len(progress) == total
+    nums = [int(line.split("Processing batch ")[1].split("/")[0]) for line in progress]
+    assert nums == list(range(1, total + 1))
+    # Each batch's block is one atomic print: "Processing batch..." then "Parsed...".
+    for i, line in enumerate(out):
+        if "Processing batch" in line and marker in line:
+            assert out[i + 1].strip().startswith("Parsed"), out[i:i + 2]
+
+
+def test_5d_batches_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):
+    from unified_pipeline.core import prompt_logger
+
+    seen = set()
+
+    def record(**kwargs):
+        seen.add(prompt_logger._current_run_id.get())
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT3")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", record)
+
+    token = prompt_logger.set_current_run_id("run-stg5d")
+    try:
+        s5d.run_stage_5d(input_path, output_path=str(tmp_path / "out.json"), verbose=False, batch_size=1, workers=4)
+    finally:
+        prompt_logger.reset_current_run_id(token)
+
+    assert seen == {"run-stg5d"}
+
+
+class _FakeRoutedStdout:
+    """Minimal stand-in for orchestrator.py's ``_RoutedStdout`` -- a dict
+    keyed by ``threading.get_ident()``. A registered thread's write lands in
+    its own capture; any other thread's write lands in ``leak`` instead.
+    Isolates the property under test: output must come from the calling
+    thread's ``on_result`` callback (via ``_batch_progress_printer``), not
+    from a print inside ``_format_batch`` itself.
+    """
+
+    def __init__(self, leak):
+        self._leak = leak
+        self._captures = {}
+
+    def register(self, ident, capture):
+        self._captures[ident] = capture
+
+    def write(self, text):
+        return self._captures.get(threading.get_ident(), self._leak).write(text)
+
+    def flush(self):
+        pass
+
+
+def test_5d_batch_progress_prints_only_from_the_calling_thread(tmp_path, monkeypatch):
+    def slow_early_batches(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        time.sleep((len(_MANY_CITATIONS) - idx) * 0.01)
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT4")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", slow_early_batches)
+
+    registered = io.StringIO()
+    leak = io.StringIO()
+    fake_stdout = _FakeRoutedStdout(leak)
+    fake_stdout.register(threading.get_ident(), registered)
+
+    real_stdout = sys.stdout
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+    try:
+        s5d.run_stage_5d(input_path, output_path=str(tmp_path / "out.json"), verbose=True, batch_size=1, workers=4)
+    finally:
+        monkeypatch.setattr(sys, "stdout", real_stdout)
+
+    assert "Processing batch" in registered.getvalue()
+    assert leak.getvalue() == ""
+
+
+def test_5d_workers_one_never_overlaps_and_workers_four_does(tmp_path, monkeypatch):
+    in_flight = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def track(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        time.sleep(0.02)
+        with lock:
+            in_flight["now"] -= 1
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT5")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", track)
+
+    s5d.run_stage_5d(input_path, output_path=str(tmp_path / "s1.json"), verbose=False, batch_size=1, workers=1)
+    assert in_flight["peak"] == 1
+
+    in_flight["peak"] = 0
+    s5d.run_stage_5d(input_path, output_path=str(tmp_path / "s4.json"), verbose=False, batch_size=1, workers=4)
+    assert in_flight["peak"] >= 2
+
+
+def test_5d_a_swallowed_batch_leaves_it_unformatted_others_formatted_serial_and_parallel(tmp_path, monkeypatch):
+    # Batch index 2 raises inside call_llm; call_llm_formatter's own
+    # `except Exception` swallows it and returns (None, None) -- unchanged
+    # by the move to the pool. Every other batch must still be formatted,
+    # for both workers=1 (true serial) and workers=4.
+    def flaky(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        if idx == 2:
+            raise RuntimeError("simulated LLM failure")
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT6")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", flaky)
+
+    for workers, out_name in [(1, "serial.json"), (4, "parallel.json")]:
+        out_path = str(tmp_path / out_name)
+        s5d.run_stage_5d(input_path, output_path=out_path, verbose=False, batch_size=1, workers=workers)
+        with open(out_path, encoding="utf-8") as f:
+            out = json.load(f)
+        for i, entry in enumerate(out["entries"]):
+            if i == 2:
+                assert "formatted_citation" not in entry["extracted_fields"], (workers, i)
+            else:
+                assert entry["extracted_fields"]["formatted_citation"] == f"cite {i}", (workers, i)
+        assert out["stage_5d"]["formatted_count"] == len(_MANY_CITATIONS) - 1
+        assert out["stage_5d"]["non_enriched_count"] == len(_MANY_CITATIONS)

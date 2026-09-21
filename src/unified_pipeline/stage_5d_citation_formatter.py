@@ -21,13 +21,22 @@ import os
 import sys
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from datetime import datetime
+from typing import NamedTuple
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 
 # Paths
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5d_citation_formatted"
+
+# I/O-bound stage (LLM round trips, not CPU); default sized under the
+# per-pod semaphore so one run cannot starve the others admitted alongside
+# it (#881 step 6). Knob: CVICHE_STAGE5D_BATCH_WORKERS, env var or llm yaml
+# key -- same resolution order and default as stages 2/3b/4.
+STAGE5D_BATCH_WORKERS = workers_from_config("CVICHE_STAGE5D_BATCH_WORKERS")
 
 # Publication codes that may need formatting
 PUBLICATION_CODES = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
@@ -242,8 +251,72 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
         return None, None
 
 
+class _BatchResult(NamedTuple):
+    """One batch's LLM call and parse -- everything run_stage_5d's
+    accumulation loop needs, computed without writing to any shared dict.
+    """
+    id_to_formatted: dict[str, dict]
+    id_to_entry: dict[str, dict]
+    usage: dict | None
+    parsed_count: int
+
+
+def _format_batch(batch: list[dict]) -> _BatchResult:
+    """Format one batch of non-enriched citations; the pure body of
+    run_stage_5d's loop, run inside map_in_order.
+
+    Runs on whichever thread the call lands on for a parallel run
+    (workers > 1) -- never registered with the orchestrator's
+    thread-routed stdout -- so nothing here may print: call_llm_formatter
+    and parse_llm_output are always called with verbose=False regardless
+    of run_stage_5d's own verbose flag; run_stage_5d prints from
+    _batch_progress_printer on the calling thread instead.
+
+    ``usage`` is None exactly when the call failed (call_llm_formatter's
+    swallowed ``except Exception`` returns ``(None, None)``, unchanged by
+    this move); that is also the signal run_stage_5d uses to skip the
+    parse/print/mutate step for the batch, matching the pre-#881
+    ``if llm_output:`` gate (usage and llm_output are always populated or
+    both None together -- call_llm_formatter never returns one without the
+    other). id_to_entry maps ids to the live entry dicts from ``batch``,
+    which is fine to build here -- build_raw_content only reads them, it
+    never writes.
+    """
+    raw_content, id_to_entry = build_raw_content(batch)
+    llm_output, usage = call_llm_formatter(raw_content, verbose=False)
+    id_to_formatted = parse_llm_output(llm_output, id_to_entry, verbose=False) if usage is not None else {}
+    return _BatchResult(id_to_formatted, id_to_entry, usage, len(id_to_formatted))
+
+
+def _batch_progress_printer(total_batches: int) -> Callable[[int, _BatchResult], None]:
+    """Build a map_in_order ``on_result`` callback: one atomic print per
+    finished batch, numbered by completion -- same shape as stage 3b's
+    ``_group_progress_printer`` / stage 2's ``_section_progress_printer``.
+
+    "Processing batch N/M (K citations)..." matches none of
+    orchestrator.py's PROGRESS_PATTERNS both before and after this change
+    (pattern 1 needs digits right after "Processing" or "Processing
+    section", not "Processing batch"; checked directly against the pattern
+    list), so there is no progress-bar contract to preserve for 5d. The
+    wording stays exactly what it was -- not the bracketed "[N/M]" form,
+    which WOULD match pattern 3 -- so this stays inert, same as dev.
+    """
+    done = 0
+
+    def on_result(index: int, result: _BatchResult) -> None:
+        nonlocal done
+        done += 1
+        lines = [f"\n  Processing batch {done}/{total_batches} ({len(result.id_to_entry)} citations)..."]
+        if result.usage is not None:
+            lines.append(f"  Parsed {result.parsed_count} formatted citations")
+        print("\n".join(lines))
+
+    return on_result
+
+
 def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1",
-                 verbose: bool = True, batch_size: int = 20) -> str:
+                 verbose: bool = True, batch_size: int = 20,
+                 workers: int = STAGE5D_BATCH_WORKERS) -> str:
     """
     Run Stage 5d: Citation Formatter for non-enriched publications.
 
@@ -253,6 +326,9 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
         model: OpenAI model for formatting
         verbose: Whether to print progress
         batch_size: Number of citations to process per LLM call
+        workers: Batches formatted at once (default STAGE5D_BATCH_WORKERS).
+            1 reproduces the pre-#881 serial loop via map_in_order's true
+            serial path.
 
     Returns:
         Path to output file
@@ -304,59 +380,53 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
     total_cost = 0.0
     observed_model = None
 
-    for batch_start in range(0, len(non_enriched), batch_size):
-        batch = non_enriched[batch_start:batch_start + batch_size]
-        batch_num = batch_start // batch_size + 1
-        total_batches = (len(non_enriched) + batch_size - 1) // batch_size
+    batches = make_batches(non_enriched, batch_size)
+    _printer = _batch_progress_printer(len(batches)) if verbose else None
 
-        if verbose:
-            print(f"\n  Processing batch {batch_num}/{total_batches} ({len(batch)} citations)...")
+    # map_in_order's RETURN VALUE is in submission order regardless of
+    # workers (its own contract); `on_result` is only for the progress
+    # line, which is allowed to print in completion order. Accumulating
+    # from `on_result` instead of this return value would silently switch
+    # to completion order under workers>1.
+    results = map_in_order(_format_batch, [(batch,) for batch in batches], workers, on_result=_printer)
 
-        # Build raw content for this batch
-        raw_content, id_to_entry = build_raw_content(batch)
-
-        # Call LLM
-        llm_output, usage = call_llm_formatter(raw_content, verbose=verbose)
-
+    # Accumulation happens ONLY here, on the calling thread, over `results`
+    # in submission order -- never inside _format_batch -- so total_cost's
+    # float summation order and which section's data wins a tied entry id
+    # stay identical to the pre-#881 serial loop.
+    for result in results:
         # Accumulate tokens + the per-batch cost from llm_result['cost'],
         # which calculate_cost() prices per-provider and per-model and
         # accounts for Bedrock prompt-cache discounts. Don't recompute
         # cost here from a hardcoded $/M-token figure.
-        if usage:
-            total_prompt_tokens += usage.get('prompt_tokens', 0)
-            total_completion_tokens += usage.get('completion_tokens', 0)
-            total_cache_read_tokens += usage.get('cache_read_tokens', 0)
-            total_cache_write_tokens += usage.get('cache_write_tokens', 0)
-            total_cost += usage.get('cost', 0.0)
-            observed_model = usage.get('model') or observed_model
+        if result.usage is not None:
+            total_prompt_tokens += result.usage.get('prompt_tokens', 0)
+            total_completion_tokens += result.usage.get('completion_tokens', 0)
+            total_cache_read_tokens += result.usage.get('cache_read_tokens', 0)
+            total_cache_write_tokens += result.usage.get('cache_write_tokens', 0)
+            total_cost += result.usage.get('cost', 0.0)
+            observed_model = result.usage.get('model') or observed_model
 
-        if llm_output:
-            # Parse LLM output
-            id_to_formatted = parse_llm_output(llm_output, id_to_entry, verbose=verbose)
+        # Update entries with formatted data
+        for entry_id, formatted_data in result.id_to_formatted.items():
+            entry = result.id_to_entry.get(entry_id)
+            if entry:
+                if 'extracted_fields' not in entry:
+                    entry['extracted_fields'] = {}
 
-            if verbose:
-                print(f"  Parsed {len(id_to_formatted)} formatted citations")
+                # Store the formatted citation
+                if 'formatted_citation' in formatted_data:
+                    entry['extracted_fields']['formatted_citation'] = formatted_data['formatted_citation']
+                    entry['extracted_fields']['formatting_source'] = 'stage_5d_llm'
+                    formatted_count += 1
 
-            # Update entries with formatted data
-            for entry_id, formatted_data in id_to_formatted.items():
-                entry = id_to_entry.get(entry_id)
-                if entry:
-                    if 'extracted_fields' not in entry:
-                        entry['extracted_fields'] = {}
-
-                    # Store the formatted citation
-                    if 'formatted_citation' in formatted_data:
-                        entry['extracted_fields']['formatted_citation'] = formatted_data['formatted_citation']
-                        entry['extracted_fields']['formatting_source'] = 'stage_5d_llm'
-                        formatted_count += 1
-
-                    # Also update individual fields if they were extracted
-                    for field in ['authors', 'title', 'journal', 'year', 'volume', 'issue', 'pages', 'doi', 'book_title']:
-                        if field in formatted_data and formatted_data[field]:
-                            # Only update if we don't already have this field or it's empty
-                            existing = entry['extracted_fields'].get(field, '')
-                            if not existing or existing == 'NONE':
-                                entry['extracted_fields'][field] = formatted_data[field]
+                # Also update individual fields if they were extracted
+                for field in ['authors', 'title', 'journal', 'year', 'volume', 'issue', 'pages', 'doi', 'book_title']:
+                    if field in formatted_data and formatted_data[field]:
+                        # Only update if we don't already have this field or it's empty
+                        existing = entry['extracted_fields'].get(field, '')
+                        if not existing or existing == 'NONE':
+                            entry['extracted_fields'][field] = formatted_data[field]
 
     # Add stage metadata
     data['stage_5d'] = {
