@@ -2114,3 +2114,65 @@ def test_magnitude_thresholds_never_suppress_a_finding():
     assert findings[0]["severity"] == "INFO"
     assert "malformed" in findings[0]["message"]
     assert findings[0]["evidence"], "evidence must survive the downgrade"
+
+
+_RENDER_OVERLAP_NAMES = (
+    "RENDER_TOKEN_MIN_COUNT", "RENDER_TOKEN_OVERLAP", "_RENDER_TOKEN_RE",
+    "RENDER_PIECE_MIN_CHARS", "RENDER_PIECE_WINDOW", "_entry_pieces",
+)
+
+
+def test_doctor_render_overlap_names_are_render_check_objects_not_copies():
+    """#825: `doctor/shared.py` imports these from `stage6/render_check.py`
+    rather than keeping parallel copies.
+
+    Runtime `is` alone is not a reliable guard here: CPython interns small
+    ints globally (-5..256), so a reintroduced `RENDER_TOKEN_MIN_COUNT = 3`
+    (or `RENDER_PIECE_MIN_CHARS = 15` / `RENDER_PIECE_WINDOW = 40`) would
+    still be `is` its render_check twin by accident of the int cache, not
+    because it was actually imported -- verified in the ticket by mutating
+    each name to a local assignment and observing `is` stay True for the
+    three small-int constants (only the float `RENDER_TOKEN_OVERLAP` and the
+    two object identities are caught by `is` alone). So this test also reads
+    `doctor/shared.py`'s own AST: every one of these names must be bound by
+    the `from unified_pipeline.stage6.render_check import (...)` statement,
+    and by nothing else at module level. A reintroduced copy -- of ANY of
+    the six names, int-valued or not -- fails the AST half even when the
+    int cache would have hidden it from the runtime half alone."""
+    import ast
+    from pathlib import Path
+
+    from unified_pipeline.doctor import shared as doctor_shared
+    from unified_pipeline.stage6 import render_check
+
+    # Runtime half: catches non-interned reintroductions (regex/function
+    # objects, and non-cached numeric literals) directly.
+    for name in _RENDER_OVERLAP_NAMES:
+        assert getattr(doctor_shared, name) is getattr(render_check, name), (
+            f"doctor.shared.{name} is a copy, not the render_check object")
+
+    # Static half: catches EVERY reintroduction, including the small-int
+    # ones the int cache would otherwise hide from the runtime half.
+    shared_path = Path(doctor_shared.__file__)
+    tree = ast.parse(shared_path.read_text())
+    imported_from_render_check: set[str] = set()
+    other_module_bindings: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom) and node.module == (
+                "unified_pipeline.stage6.render_check"):
+            for alias in node.names:
+                imported_from_render_check.add(alias.asname or alias.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    other_module_bindings.add(target.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            other_module_bindings.add(node.name)
+
+    for name in _RENDER_OVERLAP_NAMES:
+        assert name in imported_from_render_check, (
+            f"{name} is not imported from stage6.render_check in "
+            f"doctor/shared.py's AST")
+        assert name not in other_module_bindings, (
+            f"{name} is ALSO bound by a module-level assignment or def in "
+            f"doctor/shared.py -- that binding shadows the import")

@@ -14,10 +14,12 @@ helpers:
 same question: a retired taxonomy code has no render route, so entries keep it
 only until this rewrite decides what the renderer will actually see.
 
-run_doctor's lint 8 keeps deliberate parallel COPIES of the constants and
-helpers below (`doctor/shared.py`, `doctor/lints/render.py`) -- run_doctor is
-optional tooling and must not become a pipeline import, so the two sets stay
-in sync by name, not by import.
+run_doctor's lint 8 imports the render-overlap constants and `_entry_pieces`
+below from here rather than keeping its own copies (`doctor/shared.py`, #825)
+-- the doctor may import the pipeline, the pipeline never imports the doctor.
+`doctor/lints/render.py` still keeps its own copies of the record-line-shape
+constants further down (UNRENDERED_MIN_RECORD_LINES and friends); that pair
+is unchanged by #825 -- see the comment above them.
 """
 import re
 from types import MappingProxyType
@@ -161,8 +163,12 @@ def segment_already_rendered(segment_text: str, extracted_fields: dict) -> bool:
 # a fused multi-record entry. The constants and helpers below mirror
 # run_doctor's lint 8 ("unrendered_records") so the offline doctor and this
 # render-time safety net agree on what "a record line" and "rendered" mean.
-# run_doctor is optional tooling and must not become a pipeline import — keep
-# the two copies in sync by name.
+#
+# This module IS the shared definition of the render-overlap constants right
+# below (#825): `doctor/shared.py` imports them from here rather than keeping
+# its own copies. The "run_doctor must not become a pipeline import" rule is
+# retired in that direction only -- the doctor may import the pipeline, the
+# pipeline still never imports the doctor.
 
 RENDER_TOKEN_MIN_COUNT = 3
 RENDER_TOKEN_OVERLAP = 0.7
@@ -170,6 +176,12 @@ _RENDER_TOKEN_RE = re.compile(r"[a-z]{5,}")
 RENDER_PIECE_MIN_CHARS = 15
 RENDER_PIECE_WINDOW = 40
 
+# UNRENDERED_MIN_RECORD_LINES / RECORD_DATE_LINE_MIN_CHARS /
+# _RECORD_DATE_PREFIX_RE below are still a deliberate parallel COPY, kept in
+# sync with `doctor/lints/render.py`'s own copies by name, not by import --
+# #825's ceiling: the wider "measurement functions into one module" half of
+# that decision lands when #822 needs it, not here.
+#
 # An entry is a fused multi-record candidate at this many record-like lines.
 # _looks_like_record only sees pipe/tab rows; employment/appointment records
 # are date-range-prefixed comma lines ("Jun 2020-Jun 2025, Assistant

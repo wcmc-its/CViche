@@ -12,35 +12,30 @@ neither.
 import re
 from typing import TYPE_CHECKING, NamedTuple
 
-from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.segmentation_regression import _norm, _squash
+
+# The render-overlap/verbatim-piece constants and `_entry_pieces` used to be
+# parallel COPIES of stage6/render_check.py's own (by-name, not by-import --
+# "run_doctor is optional tooling and must not become a pipeline import").
+# That rule is retired in this direction only (#825): the doctor may import
+# the pipeline; the pipeline never imports the doctor. Importing here instead
+# of copying is what stops the two sets drifting the way they already had
+# (#810 -- both missed the same 3b fallback). RENDER_PIECE_MIN_CHARS/WINDOW,
+# RENDER_TOKEN_MIN_COUNT/OVERLAP and `_entry_pieces` are used only via
+# re-export below (`lints/render.py`, `lints/extraction.py`, `run_doctor.py`
+# import them from here unchanged); `_RENDER_TOKEN_RE` is also used directly
+# by `_long_word_tokens` below.
+from unified_pipeline.stage6.render_check import (  # noqa: F401
+    RENDER_PIECE_MIN_CHARS,
+    RENDER_PIECE_WINDOW,
+    RENDER_TOKEN_MIN_COUNT,
+    RENDER_TOKEN_OVERLAP,
+    _RENDER_TOKEN_RE,
+    _entry_pieces,
+)
 
 if TYPE_CHECKING:
     from docx.document import Document as DocumentType
-
-
-# Lint 5: a squashed text piece shorter than this matches by accident; a
-# longer fragment is matched by its leading window, so a reformatted tail
-# (5d trims trailing publisher details) doesn't hide a rendered line.
-RENDER_PIECE_MIN_CHARS = 15
-
-
-RENDER_PIECE_WINDOW = 40
-
-
-# Lints 3/5 fallback: stages 4-6 re-render most entries from extracted fields
-# (5c teaching / 5d citation formatters), so no verbatim piece survives; an
-# entry counts as rendered when its whole text — or any single fragment of it
-# (stage 6 renders the extracted title/institution fields and drops long
-# narratives) — has at least this many distinctive tokens and this share of
-# them appear in the output.
-RENDER_TOKEN_MIN_COUNT = 3
-
-
-RENDER_TOKEN_OVERLAP = 0.7
-
-
-_RENDER_TOKEN_RE = re.compile(r"[a-z]{5,}")
 
 
 # Separator joined between output lines in the containment haystack so a
@@ -102,17 +97,6 @@ def _haystacks(blocks: list[tuple[str, str]]) -> Haystack:
                 pieces.append(_squash(line))
                 tokens.update(_long_word_tokens(line))
     return Haystack(_LINE_SENTINEL.join(pieces), tokens)
-
-
-def _entry_pieces(text) -> list[str]:
-    """Squashed fragments of an entry long enough to be looked up in the
-    output haystack."""
-    pieces = []
-    for frag in entry_fragments(text):
-        squashed = _squash(frag)
-        if len(squashed) >= RENDER_PIECE_MIN_CHARS:
-            pieces.append(squashed[:RENDER_PIECE_WINDOW])
-    return pieces
 
 
 # ------------------------------------------------------------ docx text views
