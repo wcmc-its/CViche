@@ -18,13 +18,12 @@ run_doctor's lint 8 imports the render-overlap constants and `_entry_pieces`
 below from here rather than keeping its own copies (`doctor/shared.py`, #825)
 -- the doctor may import the pipeline; no stage module imports the doctor
 (quality_score.py imports two doctor leaf modules -- #820, pre-#825 -- and is
-not a stage). `doctor/lints/render.py:55,58,61` still keeps its own copies of
-the record-line-shape constants further down (UNRENDERED_MIN_RECORD_LINES,
-RECORD_DATE_LINE_MIN_CHARS, _RECORD_DATE_PREFIX_RE), and `_record_lines`/
-`_record_rendered` (`doctor/lints/render.py:413,500` vs this module's own
-`:234,254`) already differ in AST from these copies -- that pair is #825's
-ceiling until its second step, not a permanent arrangement; see the comment
-above them.
+not a stage). `doctor/lints/render.py` still keeps its own copies of the
+record-line-shape constants further down (UNRENDERED_MIN_RECORD_LINES,
+RECORD_DATE_LINE_MIN_CHARS, _RECORD_DATE_PREFIX_RE), and its `_record_lines`/
+`_record_rendered` already differ in AST from this module's -- that pair is
+#825's ceiling until its second step, not a permanent arrangement; see the
+comment above them.
 """
 import re
 from types import MappingProxyType
@@ -184,8 +183,8 @@ RENDER_PIECE_WINDOW = 40
 
 # UNRENDERED_MIN_RECORD_LINES / RECORD_DATE_LINE_MIN_CHARS /
 # _RECORD_DATE_PREFIX_RE below, and `_record_lines`/`_record_rendered`
-# further down, are still a parallel COPY of `doctor/lints/render.py`'s own
-# (lines 55,58,61,413,500 there), kept in sync by name, not by import --
+# further down, are still a parallel COPY of `doctor/lints/render.py`'s own,
+# kept in sync by name, not by import --
 # this is #825's ceiling UNTIL #825's second step, not a permanent
 # arrangement: the wider "measurement functions into one module" half of
 # that decision lands when #822 needs it.
