@@ -995,3 +995,60 @@ def test_5d_a_malformed_llm_response_logs_the_parse_warning_from_a_pool_thread(t
 
     messages = [record.getMessage() for record in caplog.records]
     assert any("Could not parse LLM JSON output" in m for m in messages), messages
+
+
+def test_5d_verbose_false_prints_nothing_at_workers_one_and_four(tmp_path, monkeypatch, capsys):
+    # r2 m08: `_printer = _batch_progress_printer(len(batches)) if verbose
+    # else None` guards the printer's construction, not just its call site
+    # -- dropping the `if verbose else None` guard builds the printer
+    # unconditionally and every on_result fires regardless of verbose.
+    # >=3 batches at both worker counts so the pool path is exercised too.
+    def steady(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("QUIET5D")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", steady)
+
+    for workers, out_name in [(1, "quiet_w1.json"), (4, "quiet_w4.json")]:
+        capsys.readouterr()  # drain anything from a previous iteration
+        s5d.run_stage_5d(
+            input_path, output_path=str(tmp_path / out_name), verbose=False, batch_size=1, workers=workers
+        )
+        assert capsys.readouterr().out == "", workers
+
+
+def test_5d_empty_llm_text_with_usage_prints_no_parsed_line_and_logs_nothing(tmp_path, monkeypatch, capsys, caplog):
+    # A2: dev gated the parse + "Parsed" line on `if llm_output:` (truthy),
+    # not on usage being present. call_llm_formatter can return a real,
+    # non-None usage dict alongside an EMPTY llm_output string (the model
+    # billed tokens but produced no content) -- that must print no "Parsed"
+    # line and log no "Could not parse" warning, matching dev, and the
+    # artifact must be identical whether the batch ran serially or pooled.
+    def billed_but_empty(**kwargs):
+        return _llm_result("")
+
+    input_data = _many_citations_input("EMPTYTXT5D")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", billed_but_empty)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_5d_citation_formatter"):
+        s5d.run_stage_5d(
+            input_path, output_path=str(tmp_path / "serial.json"), verbose=True, batch_size=1, workers=1
+        )
+    out = capsys.readouterr().out
+    assert "Parsed" not in out
+    assert "Processing batch" in out
+    assert not [r for r in caplog.records if "Could not parse" in r.getMessage()]
+
+    s5d.run_stage_5d(
+        input_path, output_path=str(tmp_path / "parallel.json"), verbose=False, batch_size=1, workers=4
+    )
+    with open(tmp_path / "serial.json", encoding="utf-8") as f:
+        serial = _strip_timestamp(json.load(f))
+    with open(tmp_path / "parallel.json", encoding="utf-8") as f:
+        parallel = _strip_timestamp(json.load(f))
+    assert serial == parallel
+    assert serial["stage_5d"]["formatted_count"] == 0

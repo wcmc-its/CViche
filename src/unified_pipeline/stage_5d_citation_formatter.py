@@ -271,7 +271,7 @@ class _BatchResult(NamedTuple):
     id_to_formatted: dict[str, dict]
     id_to_entry: dict[str, dict]
     usage: dict | None
-    parsed_count: int
+    parsed_count: int | None
 
 
 def _format_batch(batch: list[dict]) -> _BatchResult:
@@ -294,18 +294,28 @@ def _format_batch(batch: list[dict]) -> _BatchResult:
 
     ``usage`` is None exactly when the call failed (call_llm_formatter's
     swallowed ``except Exception`` returns ``(None, None)``, unchanged by
-    this move); that is also the signal run_stage_5d uses to skip the
-    parse/print/mutate step for the batch, matching the pre-#881
-    ``if llm_output:`` gate (usage and llm_output are always populated or
-    both None together -- call_llm_formatter never returns one without the
-    other). id_to_entry maps ids to the live entry dicts from ``batch``,
-    which is fine to build here -- build_raw_content only reads them, it
-    never writes.
+    this move); run_stage_5d's accumulation loop uses that to skip the
+    token/cost totals for the batch. Parsing is gated separately, on
+    ``llm_output`` truthiness -- matching the pre-#881 ``if llm_output:``
+    gate exactly, because ``usage`` and ``llm_output`` are NOT always
+    both-or-neither: a successful call can still return an empty
+    ``llm_output`` string alongside a real, non-None ``usage`` dict (the
+    model billed tokens but produced no content). ``parsed_count`` is
+    ``None`` in that case -- "no parse happened" is a different state from
+    "parsed and found nothing" -- so the printer only appends the "Parsed"
+    line when a parse actually ran. id_to_entry maps ids to the live entry
+    dicts from ``batch``, which is fine to build here -- build_raw_content
+    only reads them, it never writes.
     """
     raw_content, id_to_entry = build_raw_content(batch)
     llm_output, usage = call_llm_formatter(raw_content, verbose=False)
-    id_to_formatted = parse_llm_output(llm_output, id_to_entry, verbose=False) if usage is not None else {}
-    return _BatchResult(id_to_formatted, id_to_entry, usage, len(id_to_formatted))
+    if llm_output:
+        id_to_formatted = parse_llm_output(llm_output, id_to_entry, verbose=False)
+        parsed_count: int | None = len(id_to_formatted)
+    else:
+        id_to_formatted = {}
+        parsed_count = None
+    return _BatchResult(id_to_formatted, id_to_entry, usage, parsed_count)
 
 
 def _batch_progress_printer(total_batches: int) -> Callable[[int, _BatchResult], None]:
@@ -327,7 +337,7 @@ def _batch_progress_printer(total_batches: int) -> Callable[[int, _BatchResult],
         nonlocal done
         done += 1
         lines = [f"\n  Processing batch {done}/{total_batches} ({len(result.id_to_entry)} citations)..."]
-        if result.usage is not None:
+        if result.parsed_count is not None:
             lines.append(f"  Parsed {result.parsed_count} formatted citations")
         print("\n".join(lines))
 
