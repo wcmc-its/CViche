@@ -266,7 +266,13 @@ SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY = {
     "Mentoring: '%s' heading not found; %d entries rendered under MENTORING instead": 2,
 }
 
-_LOGGER_LEVELS = {"debug", "info", "warning", "error", "exception"}
+# Every level-ish method `logging.Logger` exposes, not just the five this
+# package uses today: a site added as `logger.critical(...)` or the
+# deprecated `logger.warn(...)` must be SEEN by the census so the count
+# guard below rejects it, rather than being invisible and silently
+# leaving the contract short by one.
+_LOGGER_LEVELS = {"debug", "info", "warning", "warn", "error",
+                  "exception", "critical", "fatal", "log"}
 
 
 def _sections_logger_severity_map():
