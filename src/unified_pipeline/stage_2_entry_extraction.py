@@ -1179,10 +1179,12 @@ def _extract_section(
     that guard, e.g. in ``remove_subset_delimiters``, would propagate), this
     call is uncaught here too, so it propagates out to map_in_order exactly
     like a ``cancel_check`` raise: the first exception cancels the queued
-    sections and re-raises, sections already in flight still finish, and the
-    exception then propagates out of run_stage_2's own (unguarded)
-    ``map_in_order`` call -- before the ``json.dump`` that writes stage 2's
-    output file, so no artifact is written for a run that fails this way.
+    sections and re-raises; sections already in flight still finish, since a
+    thread cannot be interrupted, so at most ``workers`` calls complete
+    after a failure (``core/batch_pool.py``'s own docstring). The exception
+    then propagates out of run_stage_2's own (unguarded) ``map_in_order``
+    call -- before the ``json.dump`` that writes stage 2's output file, so
+    no artifact is written for a run that fails this way.
 
     Returns ``(section_entries_in_order, cost_info, section_assigned, lines)``
     instead of mutating run_stage_2's shared ``all_entries`` /
