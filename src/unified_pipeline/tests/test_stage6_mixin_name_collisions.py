@@ -36,7 +36,7 @@ Run with:
 
 import ast
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import pytest
@@ -112,6 +112,21 @@ def test_the_mixin_surface_is_not_silently_empty():
 #: new `logger` call was added without a deliberate entry here. A new
 #: `logger.<level>(...)` call added anywhere under `stage6/sections/` must be
 #: added to this table on purpose, in the same commit.
+#:
+#: This dict alone is not the whole contract: two message texts each occur
+#: at TWO call sites with the same level (see
+#: `SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY` below). A dict keyed on
+#: text alone is last-write-wins, so a level flip at one of a duplicated
+#: pair's two sites is invisible if the OTHER site (same text, unflipped
+#: level) is visited later and overwrites it in the map -- verifier r1's
+#: m06 found this for `memberships.py`; round 2's m11 found the same hole
+#: for `honors.py:1009` / `memberships.py:648` (both "  Skipping header
+#: entry: '%s...'", warning) specifically, because `memberships.py` sorts
+#: after `honors.py` and its unflipped site clobbered the map entry. The
+#: test below therefore compares a `collections.Counter` of every
+#: `(text, level)` PAIR -- with multiplicity, no per-text collapsing at
+#: all -- against this table plus the multiplicity table, so flipping
+#: EITHER site of a duplicated pair changes the Counter and fails.
 SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     '\nFilling Personal Data...': 'info',
     '    Merged %s fragmented appointment row(s); propagated dates to %s role row(s)': 'info',
@@ -238,19 +253,38 @@ SECTIONS_LOGGER_NON_LITERAL_SEVERITY_CONTRACT = {
     ("research_support.py", "_print_verbose"): "debug",
 }
 
+#: Explicit multiplicity for the two message texts above that occur at TWO
+#: call sites apiece (both sites already share a level, or they would show
+#: up in `text_to_levels` below as an inconsistency): `"  Skipping header
+#: entry: '%s...'"` (honors.py:1009, memberships.py:648) and `"Mentoring:
+#: '%s' heading not found; %d entries rendered under MENTORING instead"`
+#: (mentoring.py, two guard clauses, pre-existing). Any text not listed
+#: here is assumed to occur exactly once. Still keyed on message text, not
+#: on line numbers or a running index.
+SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY = {
+    "  Skipping header entry: '%s...'": 2,
+    "Mentoring: '%s' heading not found; %d entries rendered under MENTORING instead": 2,
+}
+
 _LOGGER_LEVELS = {"debug", "info", "warning", "error", "exception"}
 
 
 def _sections_logger_severity_map():
     """AST-walk every `logger.<level>(...)` call under `stage6/sections/`.
 
-    Returns (by_message_text, by_file_and_function): the first maps a string
-    literal first-argument to its call's level; the second maps
+    Returns (text_level_records, by_file_and_function): the first is a
+    LIST (not a dict) of every literal call site's (message text, level)
+    pair, in AST-visit order, with NO deduplication -- a text used at two
+    call sites appears twice, so `Counter(text_level_records)` preserves
+    real multiplicity instead of collapsing a duplicated text to its
+    last-visited site's level (see `SECTIONS_LOGGER_SEVERITY_CONTRACT`'s
+    docstring for why a plain dict keyed on text alone missed exactly this
+    -- verifier r1 m06 and round-2 m11). The second return value maps
     (filename, enclosing function name) to level for any call whose first
     argument is not a string literal (see the non-literal table above).
     """
     sections_dir = _SRC / "unified_pipeline" / "stage6" / "sections"
-    by_text: dict[str, str] = {}
+    text_level_records: list[tuple[str, str]] = []
     by_file_function: dict[tuple[str, str], str] = {}
     for path in sorted(sections_dir.glob("*.py")):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -271,14 +305,28 @@ def _sections_logger_severity_map():
                 ):
                     first = node.args[0] if node.args else None
                     if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                        by_text[first.value] = node.func.attr
+                        text_level_records.append((first.value, node.func.attr))
                     else:
                         func_name = func_stack[-1] if func_stack else "<module>"
                         by_file_function[(path.name, func_name)] = node.func.attr
                 self.generic_visit(node)
 
         _Visitor().visit(tree)
-    return by_text, by_file_function
+    return text_level_records, by_file_function
+
+
+def _expected_severity_counter():
+    """Build the expected `Counter` of (text, level) pairs from the two
+    checked-in tables: one occurrence per text in
+    `SECTIONS_LOGGER_SEVERITY_CONTRACT`, except the texts listed in
+    `SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY`, which occur that many
+    times.
+    """
+    counter: Counter[tuple[str, str]] = Counter()
+    for text, level in SECTIONS_LOGGER_SEVERITY_CONTRACT.items():
+        multiplicity = SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY.get(text, 1)
+        counter[(text, level)] = multiplicity
+    return counter
 
 
 def test_sections_logger_severity_matches_the_563_contract_table():
@@ -287,29 +335,53 @@ def test_sections_logger_severity_matches_the_563_contract_table():
     A blanket severity sweep whose levels no test can distinguish is
     vacuous (verifier r1, m06: flipping `memberships.py`'s
     `logger.warning(...)` to `logger.info(...)` passed the entire suite).
-    This AST-walks every call site under `stage6/sections/` and compares it
-    against a checked-in table, so flipping ANY of the 50 converted sites'
-    level -- not just the handful the caplog tests happen to touch --
-    fails here.
+    A dict keyed on text alone is also not enough (round-2 m11: two call
+    sites share a text -- honors.py:1009 and memberships.py:648 -- and a
+    dict is last-write-wins, so flipping the earlier-sorted one is masked
+    by the later, unflipped one). This AST-walks every call site under
+    `stage6/sections/` as a full list (no dedup) and compares a `Counter`
+    of `(text, level)` pairs, WITH multiplicity, against the checked-in
+    tables, so flipping the level at ANY of the 117 literal call sites --
+    including either half of a duplicated-text pair -- fails here.
     """
-    by_text, by_file_function = _sections_logger_severity_map()
-    assert by_text == SECTIONS_LOGGER_SEVERITY_CONTRACT, (
-        "a logger call's message text or level under stage6/sections/ no "
-        "longer matches the #563 contract table -- a level flipped, a "
-        "message was reworded, or a new call was added without a "
+    text_level_records, by_file_function = _sections_logger_severity_map()
+    actual_counter = Counter(text_level_records)
+    expected_counter = _expected_severity_counter()
+    assert actual_counter == expected_counter, (
+        "a logger call's message text, level, or occurrence count under "
+        "stage6/sections/ no longer matches the #563 contract table -- a "
+        "level flipped (possibly at one site of a duplicated-text pair), "
+        "a message was reworded, or a new call was added without a "
         "deliberate table entry"
     )
     assert by_file_function == SECTIONS_LOGGER_NON_LITERAL_SEVERITY_CONTRACT, (
         "the non-literal logger call site(s) under stage6/sections/ changed "
         "-- update SECTIONS_LOGGER_NON_LITERAL_SEVERITY_CONTRACT deliberately"
     )
+    text_to_levels: dict[str, set[str]] = {}
+    for text, level in text_level_records:
+        text_to_levels.setdefault(text, set()).add(level)
+    inconsistent = {text: sorted(levels) for text, levels in text_to_levels.items() if len(levels) > 1}
+    assert inconsistent == {}, (
+        "the same message text is logged at two different levels at "
+        f"different call sites under stage6/sections/: {inconsistent} -- "
+        "each text must log at one consistent severity"
+    )
 
 
 def test_sections_logger_severity_contract_is_not_silently_empty():
     """Guard the guard: an empty table would make the contract test above
-    vacuously pass."""
-    by_text, by_file_function = _sections_logger_severity_map()
-    assert len(by_text) == 115, "call-site count under stage6/sections/ changed -- update the table"
+    vacuously pass. The count is the TRUE number of literal call sites
+    (117, with duplicated texts counted once per site, not once per
+    distinct text) so a newly added `logger` call in `stage6/sections/`
+    fails this guard until it is added to the contract table on purpose.
+    """
+    text_level_records, by_file_function = _sections_logger_severity_map()
+    assert len(text_level_records) == 117, (
+        "literal call-site count under stage6/sections/ changed -- update "
+        "the table (and SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY if a "
+        "text now repeats)"
+    )
     assert len(by_file_function) == 1
 
 
