@@ -1099,6 +1099,17 @@ class _SectionResult(NamedTuple):
     lines: list[str]
 
 
+class _DocumentContext(NamedTuple):
+    """The five values every _extract_section call shares across a whole
+    run_stage_2 invocation -- built once before the pool, read but never
+    written by any section (#915 review item 6)."""
+    doc_elements: list[dict]
+    header_indices: set
+    element_index_map: dict
+    header_info: dict[int, list[str]]
+    doc: Document
+
+
 def _section_progress_printer(hierarchy_paths: list[list[str]]) -> Callable[[int, _SectionResult], None]:
     """Build a map_in_order ``on_result`` callback: one atomic print per
     finished section, numbered by completion.
@@ -1138,21 +1149,23 @@ def _section_progress_printer(hierarchy_paths: list[list[str]]) -> Callable[[int
 
 
 def _extract_section(
+    context: _DocumentContext,
     hierarchy_path: list[str],
     start_idx: int,
     end_idx: int,
     *,
-    doc_elements: list[dict],
-    header_indices: set,
-    element_index_map: dict,
-    header_info: dict[int, list[str]],
-    doc: Document,
     document_uid: str | None,
     cancel_check: Callable[[], None] | None,
 ) -> _SectionResult:
     """One section's body of run_stage_2's loop: detect its entries, assign
     headers/breaks around it, and report what happened -- the per-section
     unit map_in_order fans out over (#881).
+
+    ``context`` bundles the five values (doc_elements, header_indices,
+    element_index_map, header_info, doc) that are constant for every call
+    in a given run_stage_2 invocation; only ``hierarchy_path``/``start_idx``/
+    ``end_idx`` (this section's own slice) and ``document_uid``/
+    ``cancel_check`` vary per call.
 
     ``cancel_check`` runs first, on whichever thread this call lands on, so a
     cancelled run raises before each section's LLM call: map_in_order cancels
@@ -1189,12 +1202,12 @@ def _extract_section(
     # Detect and extract entries using document structure (paragraphs + tables)
     entries, cost_info = detect_entries_for_section(
         hierarchy_path,
-        doc_elements,
+        context.doc_elements,
         start_idx,
         end_idx + 1,  # end_idx is inclusive, so add 1 for range
         document_uid=document_uid,
-        header_indices=header_indices,
-        element_index_map=element_index_map
+        header_indices=context.header_indices,
+        element_index_map=context.element_index_map
     )
 
     # Track which indices are assigned to entries
@@ -1222,19 +1235,19 @@ def _extract_section(
 
     # Find unassigned indices in this section's range
     section_range = set(range(start_idx, end_idx + 1))
-    unassigned_in_section = section_range - section_assigned - header_indices
+    unassigned_in_section = section_range - section_assigned - context.header_indices
 
     # Add header entries for this section
     section_headers = []
-    for idx in sorted(section_range & header_indices):
-        header_text = _element_text_or_fallback(idx, element_index_map, doc)
+    for idx in sorted(section_range & context.header_indices):
+        header_text = _element_text_or_fallback(idx, context.element_index_map, context.doc)
         header_entry = {
             "element_idx_start": idx,
             "element_idx_end": idx,
             "element_type": "header",
             "confidence": 1.0,
             "text": header_text,
-            "hierarchy": header_info.get(idx, hierarchy_path)
+            "hierarchy": context.header_info.get(idx, hierarchy_path)
         }
         section_headers.append(header_entry)
         section_assigned.add(idx)
@@ -1242,7 +1255,7 @@ def _extract_section(
     # Add break entries for unassigned indices (blank lines, etc.)
     break_entries = []
     for idx in sorted(unassigned_in_section):
-        para_text = _element_text_or_fallback(idx, element_index_map, doc)
+        para_text = _element_text_or_fallback(idx, context.element_index_map, context.doc)
         break_entry = {
             "element_idx_start": idx,
             "element_idx_end": idx,
@@ -1435,14 +1448,17 @@ def run_stage_2(
     # the output artifact, is byte-identical to the old serial loop; the
     # later `all_entries.sort(key=sort_key)` is stable but this must not
     # rely on that to hide an accumulation-order bug.
+    document_context = _DocumentContext(
+        doc_elements=doc_elements,
+        header_indices=header_indices,
+        element_index_map=element_index_map,
+        header_info=header_info,
+        doc=doc,
+    )
     results = map_in_order(
         partial(
             _extract_section,
-            doc_elements=doc_elements,
-            header_indices=header_indices,
-            element_index_map=element_index_map,
-            header_info=header_info,
-            doc=doc,
+            document_context,  # positional: precedes each call's own (hierarchy_path, start_idx, end_idx)
             document_uid=document_uid,
             cancel_check=cancel_check,
         ),

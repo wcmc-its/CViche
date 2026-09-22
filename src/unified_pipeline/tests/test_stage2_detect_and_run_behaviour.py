@@ -1370,13 +1370,15 @@ def test_string_row_index_never_lands_in_assigned_only_its_parent_int_does(monke
         {"element_idx_start": "1.0", "element_idx_end": "1.0", "element_type": "table_row", "confidence": 0.8},
     ]}))
 
-    result = stage2._extract_section(
-        ["Awards"], 0, 1,
+    context = stage2._DocumentContext(
         doc_elements=doc_elements,
         header_indices={0},
         element_index_map=element_index_map,
         header_info={0: ["Awards"]},
         doc=Document(),
+    )
+    result = stage2._extract_section(
+        context, ["Awards"], 0, 1,
         document_uid="TEST",
         cancel_check=None,
     )
@@ -1385,6 +1387,26 @@ def test_string_row_index_never_lands_in_assigned_only_its_parent_int_does(monke
     assert "1.0" not in result.assigned
     break_starts = {e["element_idx_start"] for e in result.entries if e["element_type"] == "break"}
     assert 1 not in break_starts  # the parent int alone kept it out of break_entries
+
+
+def test_extract_section_signature_bundles_the_five_constants_into_one_context_param():
+    """#915 review item 6: doc_elements, header_indices, element_index_map,
+    header_info, doc are constant across every call in a run_stage_2
+    invocation; pin the bundled signature shape (context first and
+    positional so map_in_order's per-call (hierarchy_path, start_idx,
+    end_idx) tuple still binds correctly via partial) rather than just
+    trusting the corpus A/B to catch a drift back to five loose params."""
+    params = list(inspect.signature(stage2._extract_section).parameters.values())
+    names = [p.name for p in params]
+    assert names == ["context", "hierarchy_path", "start_idx", "end_idx", "document_uid", "cancel_check"]
+    by_name = {p.name: p for p in params}
+    assert by_name["context"].kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert by_name["hierarchy_path"].kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+    for kw_only in ("document_uid", "cancel_check"):
+        assert by_name[kw_only].kind == inspect.Parameter.KEYWORD_ONLY
+    assert stage2._DocumentContext._fields == (
+        "doc_elements", "header_indices", "element_index_map", "header_info", "doc",
+    )
 
 
 def test_tied_start_indices_keep_section_submission_order(tmp_path, monkeypatch):
