@@ -164,10 +164,11 @@ Run as `PYTHONPATH=<arm>/src python3 scripts/render_gate.py <farm> <out>
   python-docx, hold tables, and still carry the template's six PERSONAL DATA
   label rows): no false positives across 66 real renders in any arm.
 
-What this log still cannot say is anything about production: no driver
-passes `original_doc_path`, so the `--source-dir` deltas above are corpus
-measurements of a path a live CV render does not take. That is #550's
-remaining work, not a gap in the instrument.
+Both drivers pass `original_doc_path` since #550, so the `--source-dir`
+deltas above are measurements of the path a live CV render takes. (Before
+that wiring the web driver reached it anyway -- `_copy_to_pipeline_input`
+drops the upload where stage 6's `SAMPLE_CV_DIR` guess looks -- and the
+CLI reached it only for a uid-style run from the repo root.)
 
 ## Known gaps, not fixed here
 

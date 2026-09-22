@@ -10,6 +10,9 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_run_doctor.py -p no:cacheprovider
 """
 
+import ast
+import importlib
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -2114,3 +2117,178 @@ def test_magnitude_thresholds_never_suppress_a_finding():
     assert findings[0]["severity"] == "INFO"
     assert "malformed" in findings[0]["message"]
     assert findings[0]["evidence"], "evidence must survive the downgrade"
+
+
+_RENDER_OVERLAP_NAMES = (
+    "RENDER_TOKEN_MIN_COUNT", "RENDER_TOKEN_OVERLAP", "_RENDER_TOKEN_RE",
+    "RENDER_PIECE_MIN_CHARS", "RENDER_PIECE_WINDOW", "_entry_pieces",
+)
+
+# Every doctor module that binds one of the six names above (#825 round 2):
+# `shared.py` is the definition site, the other three are consumers that
+# import it. A module-level copy in ANY of these would shadow the import
+# silently -- mutant m07 (K-825 verifier round 1) proved this for
+# `lints/render.py` specifically.
+_RENDER_OVERLAP_MODULES = (
+    "unified_pipeline.doctor.shared",
+    "unified_pipeline.doctor.lints.render",
+    "unified_pipeline.doctor.lints.extraction",
+    "unified_pipeline.run_doctor",
+)
+
+
+def _module_level_import_bindings(
+        tree: ast.Module, package: str | None) -> tuple[dict[str, str], set[str]]:
+    """AST-level module bindings: name -> the fully-resolved dotted module it
+    was imported from, and the set of names bound some other way (a
+    module-level assignment or def, however it is spelled or nested), which
+    would shadow an import of the same name.
+
+    An explicit stack, not `tree.body` alone (#825 verifier round 2, mutants
+    m04/m10/m11): a plain `for node in tree.body` walk only sees a bare
+    `NAME = value` / `def NAME` sitting directly at module scope, so it missed
+    an annotated assignment (`NAME: int = 3`), a tuple-unpacking assignment
+    (`A, B = 1, 2`), and any assignment nested in a module-level `if`/`try`/
+    `with`/`for`/`while` block -- all still execute at import time and still
+    shadow the import. This descends into every such block but never into a
+    `def`/`class` body (the def/class name itself is recorded as a binding;
+    what it assigns internally is a local, not a module attribute)."""
+    imported: dict[str, str] = {}
+    other_bindings: set[str] = set()
+    stack: list[ast.AST] = list(tree.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.ImportFrom):
+            resolved = importlib.util.resolve_name(
+                "." * node.level + (node.module or ""), package)
+            for alias in node.names:
+                imported[alias.asname or alias.name] = resolved
+        elif isinstance(node, ast.Import):
+            continue
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            other_bindings.add(node.name)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+            other_bindings.add(node.id)
+        else:
+            stack.extend(ast.iter_child_nodes(node))
+    return imported, other_bindings
+
+
+def test_doctor_render_overlap_names_are_render_check_objects_not_copies():
+    """#825: `doctor/shared.py` imports these from `stage6/render_check.py`
+    rather than keeping parallel copies.
+
+    Runtime `is` alone is not a reliable guard here: CPython interns small
+    ints globally (-5..256), so a reintroduced `RENDER_TOKEN_MIN_COUNT = 3`
+    (or `RENDER_PIECE_MIN_CHARS = 15` / `RENDER_PIECE_WINDOW = 40`) would
+    still be `is` its render_check twin by accident of the int cache, not
+    because it was actually imported -- verified in the ticket by mutating
+    each name to a local assignment and observing `is` stay True for the
+    three small-int constants (only the float `RENDER_TOKEN_OVERLAP` and the
+    two object identities are caught by `is` alone). So this test also reads
+    `doctor/shared.py`'s own AST: every one of these names must be bound by
+    the `from unified_pipeline.stage6.render_check import (...)` statement,
+    and by nothing else at module level. A reintroduced copy -- of ANY of
+    the six names, int-valued or not -- fails the AST half even when the
+    int cache would have hidden it from the runtime half alone."""
+    from unified_pipeline.doctor import shared as doctor_shared
+    from unified_pipeline.stage6 import render_check
+
+    # Runtime half: catches non-interned reintroductions (regex/function
+    # objects, and non-cached numeric literals) directly.
+    for name in _RENDER_OVERLAP_NAMES:
+        assert getattr(doctor_shared, name) is getattr(render_check, name), (
+            f"doctor.shared.{name} is a copy, not the render_check object")
+
+    # Static half: catches EVERY reintroduction, including the small-int
+    # ones the int cache would otherwise hide from the runtime half.
+    tree = ast.parse(Path(doctor_shared.__file__).read_text())
+    imported, other_bindings = _module_level_import_bindings(
+        tree, doctor_shared.__package__)
+
+    for name in _RENDER_OVERLAP_NAMES:
+        assert imported.get(name) == "unified_pipeline.stage6.render_check", (
+            f"{name} is not imported from stage6.render_check in "
+            f"doctor/shared.py's AST")
+        assert name not in other_bindings, (
+            f"{name} is ALSO bound by a module-level assignment or def in "
+            f"doctor/shared.py -- that binding shadows the import")
+
+
+def test_doctor_render_overlap_names_are_render_check_objects_not_copies_in_consumers():
+    """#825 round 2 (K-825 verifier r1, finding 1): the test above guards
+    `doctor/shared.py`'s own module namespace only. `doctor/shared.py`
+    re-exports these names so `lints/render.py`, `lints/extraction.py` and
+    `run_doctor.py` can import them from it -- but any of those three could
+    instead bind a module-level copy of the same name directly, and nothing
+    would notice: each module's own attribute would just shadow whatever it
+    re-exported. Proved live: adding `RENDER_TOKEN_MIN_COUNT = 3` /
+    `RENDER_TOKEN_OVERLAP = 0.7` directly below `lints/render.py`'s `from
+    ..shared import (...)` block left `doctor/shared.py` untouched, passed
+    the test above, and passed all 371 doctor tests (mutant m07).
+
+    Same two halves as above, generalized over every module that binds any
+    of the six names: runtime `is` against `render_check`, plus an AST check
+    that each name is bound ONLY by an `ImportFrom` resolving to
+    `doctor/shared.py` or `stage6/render_check.py` -- never a module-level
+    assignment or def."""
+    from unified_pipeline.stage6 import render_check
+
+    allowed_sources = {
+        "unified_pipeline.doctor.shared",
+        "unified_pipeline.stage6.render_check",
+    }
+    checked_at_least_one = False
+    for module_name in _RENDER_OVERLAP_MODULES:
+        module = importlib.import_module(module_name)
+        names_here = [n for n in _RENDER_OVERLAP_NAMES if hasattr(module, n)]
+        if not names_here:
+            continue
+        checked_at_least_one = True
+
+        for name in names_here:
+            assert getattr(module, name) is getattr(render_check, name), (
+                f"{module_name}.{name} is a copy, not the render_check object")
+
+        tree = ast.parse(Path(module.__file__).read_text())
+        imported, other_bindings = _module_level_import_bindings(
+            tree, module.__package__)
+        for name in names_here:
+            assert name not in other_bindings, (
+                f"{module_name}.{name} is ALSO bound by a module-level "
+                f"assignment or def -- that binding would shadow the import")
+            assert imported.get(name) in allowed_sources, (
+                f"{module_name}.{name} is imported from "
+                f"{imported.get(name)!r}, not from shared.py or "
+                f"render_check.py")
+
+    assert checked_at_least_one, (
+        "none of _RENDER_OVERLAP_MODULES binds any of the six names -- "
+        "the module list or the name list has drifted")
+
+
+def test_render_overlap_modules_list_matches_a_source_scan():
+    """#825 round 3, verifier note 2 (mutant m08): _RENDER_OVERLAP_MODULES is
+    a hand-kept list, so dropping a module from it silently narrows the
+    consumer guard above -- the missing module's own copy would never be
+    checked. Scan every `doctor/**/*.py` plus `run_doctor.py` for a module
+    whose AST imports one of the six names, and assert the hand list is
+    exactly that scan's result."""
+    import unified_pipeline.doctor as doctor_pkg
+    from unified_pipeline import run_doctor as run_doctor_mod
+
+    doctor_root = Path(doctor_pkg.__file__).parent
+    src_root = doctor_root.parent.parent
+    found: set[str] = set()
+    for path in (*doctor_root.rglob("*.py"), Path(run_doctor_mod.__file__)):
+        tree = ast.parse(path.read_text())
+        if not any(isinstance(n, ast.ImportFrom)
+                   and any(a.name in _RENDER_OVERLAP_NAMES for a in n.names)
+                   for n in ast.walk(tree)):
+            continue
+        parts = list(path.resolve().relative_to(src_root).with_suffix("").parts)
+        found.add(".".join(parts[:-1] if parts[-1] == "__init__" else parts))
+
+    assert found == set(_RENDER_OVERLAP_MODULES), (
+        f"source scan found {sorted(found)}, _RENDER_OVERLAP_MODULES has "
+        f"{sorted(_RENDER_OVERLAP_MODULES)} -- update the hand list")

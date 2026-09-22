@@ -456,6 +456,12 @@ class MentoringSection:
         Rendering only -- `_partition_mentoring_entries` has already decided
         which entry goes where. A heading the template lacks is logged with
         the count it drops; nothing returns silently.
+
+        The mentee placeholder removal below is unconditional: a heading
+        with no mentees, or a CV with no mentees at all, still gets its
+        template placeholder(s) stripped, same as every other section
+        already strips its own empty placeholder -- the delivered document
+        is a finished record, not a form (#845).
         """
         # N1/N2 have their own template anchors and no interaction with the
         # mentee partition below -- called first so a CV with ONLY N1/N2
@@ -465,6 +471,20 @@ class MentoringSection:
         self._fill_training_grants(entries_by_code.get('N2', []))
 
         partition = _partition_mentoring_entries(entries_by_code)
+        current_anchor, past_anchor = self._mentoring_anchors()
+
+        # Placeholder removal happens before the empty-partition return
+        # below, and before anything renders: `_first_table_after` scans to
+        # the next table anywhere below its heading, so once one group has
+        # rendered, the other heading's scan would find those new tables
+        # instead of the template's. Once per distinct anchor, so a shared
+        # fallback anchor (both headings missing) is not cleared twice.
+        cleared: list[BaseOxmlElement] = []
+        for anchor in (current_anchor, past_anchor):
+            if anchor is not None and not any(anchor is seen for seen in cleared):
+                self._remove_template_table_after(anchor)
+                cleared.append(anchor)
+
         if partition.is_empty:
             return
 
@@ -474,7 +494,6 @@ class MentoringSection:
             logger.info("  Moved %d mentees from Past to Current (end_date=present)",
                         partition.moved_to_current)
 
-        current_anchor, past_anchor = self._mentoring_anchors()
         if current_anchor is None and past_anchor is None:
             logger.warning(
                 "Mentoring: none of '%s', '%s' or %s found in template; "
@@ -497,20 +516,14 @@ class MentoringSection:
             if mentees or summaries
         ]
 
-        # Placeholder tables first, all of them, before anything renders:
-        # `_first_table_after` scans to the next table anywhere below its
-        # heading, so once one group has rendered, the other heading's scan
-        # would find those new tables instead of the template's. Once per
-        # anchor, for the same reason under a shared fallback anchor.
-        cleared: list[BaseOxmlElement] = []
+        # Only warn about a missing heading when there was something to
+        # render under it; the placeholder removal above already ran for
+        # every anchor regardless of content.
         for mentees, summaries, anchor, heading in groups:
             if anchor is None:
                 logger.warning(
                     "Mentoring: '%s' heading not found in template; "
                     "%d entries not rendered", heading, len(mentees) + len(summaries))
-            elif not any(anchor is seen for seen in cleared):
-                self._remove_template_table_after(anchor)
-                cleared.append(anchor)
 
         for mentees, summaries, anchor, _heading in groups:
             if anchor is not None:

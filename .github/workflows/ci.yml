@@ -78,6 +78,15 @@ jobs:
         run: python3 scripts/test_render_doctor_gates.py
       - name: Render gate integration self-test
         run: python3 scripts/test_render_gate_integration.py
+      - name: run_corpus_batch.sh self-tests
+        # Nothing else in this workflow ran these -- #810's skip-rule fix
+        # (a docx alone no longer proves a CV's run is done) needs a shell
+        # test that CI actually executes, not just one that exists locally.
+        run: |
+          for t in scripts/test_run_corpus_batch_*.sh; do
+            echo "=== $t ==="
+            bash "$t"
+          done
 
   function-size:
     # Ratchet on oversized functions (CODING_STANDARDS.md 3.2a), plus §9's
