@@ -336,14 +336,13 @@ def _pii_cut_left_a_bare_label(entry: Mapping[str, Any]) -> bool:
 # Paths - Use the official WCM template
 TEMPLATE_PATH = Path(__file__).parent.parent.parent / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
-# Local-dev only: where sample source CVs live, for the generate() fallback that
-# locates an original docx when the caller didn't pass one. No production driver
-# passes original_doc_path -- the only callers that do are
-# scripts/render_gate.py --source-dir and stage 6's own tests -- so on a live
-# run this auto-discovery is the fallback's only feed, and it finds nothing.
-# The directory itself DOES exist in the deployed image (the backend
-# Dockerfile mkdir -p's and chowns it); what is missing is its contents, which
-# no COPY brings in and .dockerignore excludes from the build context.
+# Where sample source CVs live, for the generate() fallback that locates an
+# original docx when the caller didn't pass one. Both drivers now pass
+# original_doc_path (#550), as do scripts/render_gate.py --source-dir and
+# stage 6's own tests, so this guess is only for a direct generate() call
+# without one. (The web driver's _copy_to_pipeline_input drops each upload
+# into this same directory under the run's uid, which is why the fallback
+# fired on the web path even before it was wired explicitly.)
 SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
@@ -812,9 +811,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     ) -> str | None:
         """The original document path if not already given, or None.
 
-        Every live run is: only `render_gate.py --source-dir` and stage 6's
-        own tests pass one, and `SAMPLE_CV_DIR` is an empty directory in the
-        deployed image (see the constant). Anchored on the module-relative
+        Both drivers pass one since #550, so this guess is reached only by a
+        direct generate() call without it. Anchored on the module-relative
         `SAMPLE_CV_DIR` constant plus the process CWD, instead of a stack of
         brittle '..'/.parent chains that broke silently on any restructure.
 
@@ -3421,11 +3419,11 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
             default True).
         original_doc_path: Optional path to the original Word document, for the
             personal-data fallback that recovers contact fields from it (#550).
-            Neither driver passes one today, so a live run keeps taking the
-            SAMPLE_CV_DIR auto-discovery branch in generate() and renders
-            exactly as before; scripts/render_gate.py --source-dir is what
-            supplies it, and it does so through here rather than constructing
-            its own generator, so the gate measures the production entry point.
+            Both drivers pass the resolved source path; scripts/render_gate.py
+            --source-dir supplies it the same way, through here rather than
+            by constructing its own generator, so the gate measures the
+            production entry point. Without it generate() falls back to the
+            SAMPLE_CV_DIR guess.
 
     Returns:
         Path to generated document
