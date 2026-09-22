@@ -497,6 +497,31 @@ def test_5d_format_batch_id_to_formatted_is_non_empty_when_parse_succeeds(monkey
 
 
 # ---------------------------------------------------------------------------
+# stage_5d: _batch_progress_printer -- the {} vs None distinction on the
+# wire (blind verifier on PR #918's rework: `if result.id_to_formatted is
+# not None:` mutated to `if result.id_to_formatted:` passed every test --
+# a batch that parsed and found nothing (id_to_formatted == {}) stopped
+# printing its "Parsed 0 formatted citations" line). Drives the real
+# printer built by _batch_progress_printer, not a hand-rolled copy.
+# ---------------------------------------------------------------------------
+
+def test_5d_batch_progress_printer_prints_parsed_0_when_a_parse_found_nothing(capsys):
+    printer = s5d._batch_progress_printer(1)
+    result = s5d._BatchResult(id_to_formatted={}, id_to_entry={"CIT-0001": {}}, usage=None)
+    printer(0, result)
+    out = capsys.readouterr().out
+    assert "Parsed 0 formatted citations" in out
+
+
+def test_5d_batch_progress_printer_omits_parsed_line_when_no_parse_ran(capsys):
+    printer = s5d._batch_progress_printer(1)
+    result = s5d._BatchResult(id_to_formatted=None, id_to_entry={"CIT-0001": {}}, usage=None)
+    printer(0, result)
+    out = capsys.readouterr().out
+    assert "Parsed" not in out
+
+
+# ---------------------------------------------------------------------------
 # stage_5d: run_stage_5d end to end
 # ---------------------------------------------------------------------------
 
@@ -880,7 +905,7 @@ _PROGRESS_PATTERNS_SOURCE = (
 )
 
 
-def test_5d_batch_progress_does_not_match_progress_patterns():
+def test_5d_batch_progress_does_not_match_progress_patterns(capsys):
     source = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
     start = source.index("PROGRESS_PATTERNS = [")
     end = source.index("\n]", start) + len("\n]")
@@ -897,7 +922,22 @@ def test_5d_batch_progress_does_not_match_progress_patterns():
     assert len(calls) == 4, "expected exactly 4 re.compile(...) calls in the block"
     patterns = [re.compile(p, getattr(re, flag.split(".")[1]) if flag else 0) for p, flag in calls]
 
-    line = "\n  Processing batch 3/10 (5 citations)..."
+    # Drive the REAL printer (mrj4001's point: a hand-typed literal here
+    # can't catch a future reword of the printer's own wording) so the
+    # line checked below is whatever _batch_progress_printer actually
+    # emits, not a string this test file retyped by hand.
+    printer = s5d._batch_progress_printer(10)
+    filler = s5d._BatchResult(id_to_formatted=None, id_to_entry={"CIT-0001": {}}, usage=None)
+    five_cited = s5d._BatchResult(
+        id_to_formatted=None,
+        id_to_entry={f"CIT-{i:04d}": {} for i in range(5)},
+        usage=None,
+    )
+    printer(0, filler)
+    printer(0, filler)
+    printer(0, five_cited)  # 3rd completion -> "Processing batch 3/10 (5 citations)..."
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if l.strip().startswith("Processing batch 3/10"))
     assert not any(p.search(line) for p in patterns)
 
 
@@ -1140,3 +1180,19 @@ def test_5d_empty_llm_text_with_usage_prints_no_parsed_line_and_logs_nothing(tmp
         parallel = _strip_timestamp(json.load(f))
     assert serial == parallel
     assert serial["stage_5d"]["formatted_count"] == 0
+
+    # Blind verifier on PR #918's rework: changing the accumulation gate
+    # from `if result.usage is not None:` to `if result.id_to_formatted is
+    # not None:` passed every test -- it drops a batch's cost and tokens
+    # whenever the response was billed but empty (id_to_formatted is None
+    # in exactly that case), silently undercounting a real per-run cost.
+    # _MANY_CITATIONS has 6 markers, batch_size=1 -> 6 batches, each with
+    # _llm_result("")'s usage (cost=0.002, prompt_tokens=11,
+    # completion_tokens=7): the run total must still carry all six.
+    six_batches_cost = 0.0
+    for _ in range(len(_MANY_CITATIONS)):
+        six_batches_cost += 0.002
+    assert serial["stage_5d"]["total_cost"] == six_batches_cost
+    assert serial["stage_5d"]["prompt_tokens"] == 11 * len(_MANY_CITATIONS)
+    assert serial["stage_5d"]["completion_tokens"] == 7 * len(_MANY_CITATIONS)
+    assert serial["stage_5d"]["total_tokens"] == 18 * len(_MANY_CITATIONS)
