@@ -61,6 +61,7 @@ def _generator():
     gen.doc = docx.Document()
     gen.verbose = False
     gen.stats = {"tables_populated": 0, "entries_inserted": 0}
+    gen._declined_grant_entries = []  # #839: _create_grant_table's decline path appends here
     return gen
 
 

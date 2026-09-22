@@ -34,6 +34,7 @@ import unified_pipeline.stage_3b_entry_classifier as stage_3b  # noqa: E402
 # moved every classification call site into stage3b/classify.py, so patching
 # the facade's copy would no longer intercept anything (#496).
 import unified_pipeline.stage3b.classify as stage3b_classify  # noqa: E402
+from unified_pipeline.llm.retry import LLMOutageError  # noqa: E402
 from unified_pipeline.stage_3b_entry_classifier import (  # noqa: E402
     TaxonomyContext,
     classify_entries_batch,
@@ -86,6 +87,35 @@ def test_failed_batch_falls_back_and_is_counted(monkeypatch):
     assert stats["failed_batches"] == 1
     assert stats["llm_classified"] == 0
     assert stats["fallback_entries"] == 2
+
+
+def test_llm_outage_error_reraised_not_defaulted(monkeypatch):
+    """LLMOutageError (#810) means the provider itself is down, not a
+    parse/validation failure -- classify_entries_batch must propagate it
+    (not default the batch's codes) so run_stage_3b, and the driver above
+    it, fail the run instead of continuing on entries nobody classified."""
+    def _outage(**kwargs):
+        raise LLMOutageError("provider outage exceeded budget", seconds_waited=1800.0)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _outage)
+
+    with pytest.raises(LLMOutageError):
+        classify_entries_batch(
+            _entries(["Dean's Award for Excellence, 2015"]), _context(), TAXONOMY)
+
+
+def test_plain_value_error_still_falls_back(monkeypatch):
+    """Only LLMOutageError gets the fail-the-run treatment above -- an
+    ordinary exception (a malformed response, here a bare ValueError) keeps
+    today's per-batch fallback behavior."""
+    def _value_error(**kwargs):
+        raise ValueError("malformed response")
+    monkeypatch.setattr(stage3b_classify, "call_llm", _value_error)
+
+    results, stats = classify_entries_batch(
+        _entries(["Dean's Award for Excellence, 2015"]), _context(), TAXONOMY)
+
+    assert results[0]["classification_source"] == "fallback"
+    assert stats["failed_batches"] == 1
 
 
 def test_failed_batch_logs_error_with_batch_info(monkeypatch, caplog):

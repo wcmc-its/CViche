@@ -1107,9 +1107,11 @@ def test_a_city_named_employer_still_gets_its_location():
     the city WORD was inside the employer's own name. Every "New York
     University" / "New York Presbyterian" appointment rendered without a
     location. The location is appended (as the enrichment tracked change)
-    unless the employer string already ends in it."""
+    unless the employer string already ends in it. The source states no
+    location on purpose: since #899 a source-stated location is written
+    plain, not as a tracked change, so the city is left to stage 5b here."""
     entry = _position_entry(1, "Attending Physician",
-                            "Crab Hollow University Hospital, Crab Hollow, NY",
+                            "Crab Hollow University Hospital",
                             ("PROFESSIONAL POSITIONS",), "2018-10", "current")
     entry["institution_enrichment"] = {
         "cleaned_name": "Crab Hollow University Hospital",

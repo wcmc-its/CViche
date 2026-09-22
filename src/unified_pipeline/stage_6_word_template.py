@@ -490,6 +490,21 @@ def _merge_appendix_diversion_warnings(
         written, recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
 
 
+def _log_validation_warnings(all_warnings: list[dict]) -> None:
+    """Bannered `logger.warning` echo of `generate()`'s merged section
+    failures + self-check findings, pulled out of `generate()` as a pure
+    move (#839 -- keeps the ratchet-tracked §9 oversized-function row from
+    rising) so it has its own name rather than growing that function."""
+    if not all_warnings:
+        return
+    logger.warning("!" * 60)
+    logger.warning("VALIDATION WARNINGS")
+    logger.warning("!" * 60)
+    for issue in all_warnings:
+        logger.warning(f"  ⚠ {issue['message']}")
+    logger.warning("!" * 60)
+
+
 # Personal data that must not be carried onto a WCM CV. Source CVs routinely
 # carry date/place of birth, marital status and family members' names in their
 # contact block; a WCM CV must not.
@@ -596,6 +611,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # render-warnings sidecar ahead of the self-check findings. Reset at
         # the top of generate(), declared here for typing/reuse across renders.
         self._section_failures: list[dict[str, Any]] = []
+
+        # Grant entries `_create_grant_table` declined as too sparse (#839) --
+        # appended to `unmapped_entries` at `generate()`'s Appendix fill so
+        # they still reach the Appendix and the `renderer_declined` warning
+        # instead of vanishing. Reset at the top of generate(), declared here
+        # for typing/reuse across renders.
+        self._declined_grant_entries: list[dict] = []
 
         # Taxonomy codes owned by a section that raised (#842): removed from
         # mapped_codes before the unmapped sweep so a failed section's
@@ -947,7 +969,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Reset per-render section-failure tracking (#565) -- a generator
         # instance can render more than once, and a failure from a prior
         # render must never leak into this one's sidecar.
-        self._section_failures, self._failed_section_codes = [], set()
+        self._section_failures, self._failed_section_codes, self._declined_grant_entries = [], set(), []
 
         # Load input data - each stage output is self-contained
         with open(input_path, 'r') as f:
@@ -1045,11 +1067,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
         passthrough_consumed_ids = {id(e) for e in (passthrough_result or [])}
 
-        # Add appendix for ALL unmapped content. Local mutable copy of the
-        # module-level RENDER_ROUTED_CODES: the M1 discard just below mutates
-        # it per-call, and a frozenset shared across calls/runs would make
-        # that mutation stick around for the next one (#580/#581's class of
-        # bug -- process-global state mutated per run). Also drops any code a failed section owns (#842), so its entries fall to the Appendix.
+        # Add appendix for ALL unmapped content -- declined M2A/M2B/M2C
+        # entries (#839) are appended at the fill below, not seeded here
+        # (their code IS mapped). Local mutable copy of RENDER_ROUTED_CODES:
+        # the M1 discard just below mutates it per-call, and a frozenset
+        # shared across calls/runs would make that stick around (#580/#581).
+        # Also drops any code a failed section owns (#842), so its entries fall to the Appendix.
         mapped_codes = set(RENDER_ROUTED_CODES) - self._failed_section_codes
 
         # M1 (Research Activities) entries are consumed by the Stage 4.5 research
@@ -1061,7 +1084,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         if not research_summary_rendered:
             mapped_codes.discard('M1')
 
-        unmapped_entries = []
+        unmapped_entries: list[dict] = []
 
         # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260).
         for code, entries in entries_by_code.items():
@@ -1078,9 +1101,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # _unconsumed_personal_data_batch.
 
         written_appendix_entries: list[UnmappedEntry] = []
-        if unmapped_entries:
+        if unmapped_entries or self._declined_grant_entries:
             written_appendix_entries = self._render_section(
-                'appendix', lambda: self._fill_appendix(unmapped_entries)) or []
+                'appendix', lambda: self._fill_appendix(unmapped_entries + self._declined_grant_entries)) or []
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
@@ -1128,13 +1151,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
         all_warnings = self._section_failures + validation_issues
-        if all_warnings:
-            logger.warning("!" * 60)
-            logger.warning("VALIDATION WARNINGS")
-            logger.warning("!" * 60)
-            for issue in all_warnings:
-                logger.warning(f"  ⚠ {issue['message']}")
-            logger.warning("!" * 60)
+        _log_validation_warnings(all_warnings)
 
         self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
 

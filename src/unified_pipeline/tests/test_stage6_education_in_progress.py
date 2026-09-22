@@ -672,14 +672,19 @@ def test_a_city_named_institution_still_gets_its_location():
     """#897: the education cell refused to append the enriched location when
     the city WORD appeared anywhere in the institution name, so a degree
     from "Crab Hollow University" lost its ", Crab Hollow, NY". The shared
-    tail predicate only treats a trailing ", City[, ST]" as already present."""
+    tail predicate only treats a trailing ", City[, ST]" as already present.
+
+    The source states no location here on purpose: since #899 a location the
+    source already states is written plain, not as an enrichment tracked
+    change, so this fixture must leave the city to stage 5b to remain a
+    test of the city-word guard rather than of #899's source check."""
     gen = _generator()
     gen._fill_education([{
-        "text": "B.S. | Crab Hollow University, Crab Hollow, NY | 2003-2007",
+        "text": "B.S. | Crab Hollow University | 2003-2007",
         "taxonomy_code": "B1",
         "extracted_fields": {
             "degree": "B.S.",
-            "institution": "Crab Hollow University, Crab Hollow, NY",
+            "institution": "Crab Hollow University",
             "start_date": "2003-08", "end_date": "2007-05", "year": "2007",
         },
         "institution_enrichment": {
