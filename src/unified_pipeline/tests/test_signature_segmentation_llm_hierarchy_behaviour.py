@@ -1072,3 +1072,22 @@ def test_segment_cv_with_signatures_total_headers_counts_only_header_groups(tmp_
 
     assert result["meta"]["total_paragraphs"] == 10
     assert result["meta"]["total_headers"] == 3
+
+
+@pytest.mark.parametrize("call", ["normalize", "validate"])
+def test_llm_outage_propagates_instead_of_falling_back(monkeypatch, call):
+    """A provider outage past the budget fails the run (#810); the plain-error
+    fallbacks are pinned by the llm_failure tests above."""
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    headers = [{"text": "Grants", "level": "H1", "paragraph_index": 5, "children": []}]
+
+    def outage(stage, messages, response_format=None, **kwargs):
+        raise LLMOutageError("provider down", seconds_waited=1800.0)
+
+    monkeypatch.setattr(sbs, "call_llm", outage)
+    with pytest.raises(LLMOutageError):
+        if call == "normalize":
+            sbs.normalize_hierarchy_with_llm(headers, pass_number=1)
+        else:
+            sbs.validate_headers_vs_entries(headers)

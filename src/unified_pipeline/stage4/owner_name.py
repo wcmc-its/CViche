@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from unified_pipeline.core.docx_structure_extractor import extract_owner_side_channel
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.llm.retry import RETRYABLE_ERRORS
+from unified_pipeline.llm.retry import RETRYABLE_ERRORS, LLMOutageError
 
 logger = logging.getLogger(__name__)
 
@@ -588,6 +588,8 @@ Return ONLY valid JSON, no explanation."""
 
             parsed = json.loads(response_text)
 
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
         except json.JSONDecodeError as e:
             logger.warning("Could not parse location inference response: %s", e)
             return False

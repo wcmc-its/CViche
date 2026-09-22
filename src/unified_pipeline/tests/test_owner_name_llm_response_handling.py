@@ -172,3 +172,22 @@ def test_wellformed_location_response_is_still_accepted(monkeypatch):
     assert result["inference_success"] is True
     assert result["primary_location"]["city"] == "New York"
     assert result["locations"][0]["institution"] == "Weill Cornell Medicine"
+
+
+def test_location_inference_llm_outage_propagates_instead_of_falling_back(monkeypatch):
+    """A provider outage past the budget fails the run (#810); a plain error
+    still falls back to an unsuccessful inference."""
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    def outage(**kwargs):
+        raise LLMOutageError("provider down", seconds_waited=1800.0)
+
+    monkeypatch.setattr(owner_name, "call_llm", outage)
+    with pytest.raises(LLMOutageError):
+        owner_name.infer_cv_owner_location([_POSITION_ENTRY])
+
+    def blip(**kwargs):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(owner_name, "call_llm", blip)
+    assert owner_name.infer_cv_owner_location([_POSITION_ENTRY])["inference_success"] is False

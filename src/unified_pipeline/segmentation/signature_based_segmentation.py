@@ -22,6 +22,7 @@ from docx import Document
 from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm.retry import LLMOutageError
 
 # Import locked headers for secondary confidence boost
 try:
@@ -1265,6 +1266,8 @@ No commentary."""
         print(f"  ✓ Hierarchy normalized ({len(corrected_text.splitlines())} lines)")
         return corrected_headers
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception as e:
         print(f"  ⚠️  Warning: GPT normalization failed: {e}")
         print(f"  Using original hierarchy")
@@ -1577,6 +1580,8 @@ Do NOT add extra commentary."""
 
         return deduped_headers
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception as e:
         print(f"  ⚠️  Warning: Header validation failed: {e}")
         print(f"  Using unfiltered headers")

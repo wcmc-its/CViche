@@ -306,10 +306,6 @@ def test_duplicate_entry_index_current_behavior_first_applied_reclassification_w
     assert stats["t_entries_reclassified"] == 1
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
-
-
 def test_llm_outage_propagates_instead_of_returning_entries_unchanged(monkeypatch):
     """A provider outage past the budget fails the run (#810); only other
     errors fall back to returning the entries unchanged."""
@@ -321,3 +317,7 @@ def test_llm_outage_propagates_instead_of_returning_entries_unchanged(monkeypatc
     monkeypatch.setattr(classify, "call_llm", outage)
     with pytest.raises(LLMOutageError):
         classify.validate_t_classifications([_t_entry()], _taxonomy())
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))
