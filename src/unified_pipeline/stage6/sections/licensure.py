@@ -70,6 +70,13 @@ from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+try:
+    from docx.table import Table
+except ImportError as exc:
+    raise ImportError(
+        "python-docx is required for stage 6. Install with: pip install python-docx lxml"
+    ) from exc
+
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..normalization import CAT_DEA, WithheldItem
 from ..sorting import sort_entries_reverse_chronological
@@ -403,6 +410,26 @@ def _resolve_licensure(
 #: own module docstring on the same back-edge constraint).
 _LICENSURE_SECTION_LABEL = "Licensure"
 
+# The WCM template's own licensure header row (`key_files/
+# wcm_cv_template_faculty_october_2022_final.docx`), normalized. On the
+# zero-entry path `_fill_licensure` has no data-driven signal that
+# `_find_table_after_paragraph` landed on ITS table rather than some other
+# one a template variant placed right after the same heading (#862's
+# positive-shape guard: every forward table scan needs one) -- the header
+# row is the only thing left to check.
+_LICENSURE_HEADER_CELLS = (
+    'state', 'number', 'date of issue (mm/dd/yyyy)',
+    'date of last registration (mm/dd/yyyy) – (mm/dd/yyyy)',
+)
+
+
+def _is_licensure_table(table: Table) -> bool:
+    """True when `table`'s own header row is the licensure table's."""
+    if not table.rows:
+        return False
+    cells = tuple(' '.join(c.text.split()).lower() for c in table.rows[0].cells)
+    return cells == _LICENSURE_HEADER_CELLS[:len(cells)]
+
 
 class LicensureSection:
     """Section F1 writers, mixed into `WCMTemplateGenerator`."""
@@ -416,12 +443,21 @@ class LicensureSection:
         Rendering only: `_resolve_licensure` has already resolved the stage-4
         field aliases, routed NPI/DEA and formatted the dates, so nothing
         below reads `extracted_fields`.
+
+        No entries still locates the licensure table and clears it (#862,
+        same class as #708's board-certification fix): the WCM template
+        ships a blank placeholder data row in this table, and this used to
+        return before `_clear_table_data` ever ran, so that row survived
+        into the delivered document on every CV with zero F1 entries. The
+        clear now always runs once the table is found and its header row
+        is confirmed as the licensure table's own (`_is_licensure_table`).
+        There is nothing to resolve or fill from an empty entry list, so
+        the function still returns right after -- the DEA/NPI table (a
+        separate template table `_fill_dea_npi` writes) is untouched on
+        this path, exactly as before.
         """
 
-        if not entries:
-            return
-
-        if self.verbose:
+        if self.verbose and entries:
             print(f"Filling Licensure ({len(entries)} entries)...")
 
         # Find Licensure section
@@ -435,7 +471,17 @@ class LicensureSection:
         if not table:
             return
 
+        if not entries and not _is_licensure_table(table):
+            # A forward paragraph scan, not a table-identity lookup -- on a
+            # template variant this could land on a table that only
+            # happens to sit after the same heading. With no entries there
+            # is no data-driven signal to catch that, so refuse rather
+            # than clear someone else's table (#862).
+            return
+
         _clear_table_data(table, keep_header=True)
+        if not entries:
+            return
         self.stats['tables_populated'] += 1
 
         result = _resolve_licensure(entries)
