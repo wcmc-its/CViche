@@ -502,6 +502,60 @@ def _pii_fragments(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX) -
 
 
 # ---------------------------------------------------------------------------
+# Pre-LLM value scrub (#847)
+# ---------------------------------------------------------------------------
+
+#: Digit-free, fixed placeholder for a pre-LLM value scrub: never a value
+#: shape itself, so a scrubbed text is idempotent under a second pass.
+PRE_LLM_PLACEHOLDER = "[withheld]"
+
+# Value-shape search for the two categories #847 scrubs before any LLM
+# stage reads the text. Built from the SAME building blocks the table's
+# DOB/SSN rows already match against (`_FULL_DATE_VALUE`, `_YEAR_VALUE`,
+# `_BARE_SSN_SHAPE`, `_SSN_WIDE_VALUE`) -- not a second definition of what a
+# date or an SSN looks like (module docstring, "#1.5"). Searched (not
+# matched) inside a `_pii_matches` fragment span, so the label/stem text
+# ahead of the value is skipped without re-deriving its own end offset.
+_PRE_LLM_VALUE_RE: dict[str, re.Pattern] = {
+    CAT_DATE_OF_BIRTH: re.compile(_FULL_DATE_VALUE + r"|" + _YEAR_VALUE, re.X | re.I),
+    CAT_SSN: re.compile(_BARE_SSN_SHAPE + r"|" + _SSN_WIDE_VALUE, re.X | re.I),
+}
+
+
+def redact_pre_llm_values(text: str | None) -> str:
+    """Replace the VALUE half of a date-of-birth or SSN fragment with
+    `PRE_LLM_PLACEHOLDER`, leaving the label and everything else in `text`
+    untouched -- so a downstream label-deny (stage 6) still fires on the
+    label, and no provider ever sees the value (#847). Every other
+    WITHHOLD_POLICY category (marital status, visa, ...) is out of scope
+    here; those stay render-time-only per #820/#821.
+
+    Idempotent: a value already replaced has no digits left for
+    `_PRE_LLM_VALUE_RE` to find, so a second pass is a no-op."""
+    text = str(text or "")
+    if not text:
+        return text
+    edits: list[tuple[int, int]] = []
+    for m in _pii_matches(text, scope=SCOPE_ALL_CODES):
+        value_re = _PRE_LLM_VALUE_RE.get(m.category)
+        if value_re is None:
+            continue
+        vm = value_re.search(text, m.start, m.end)
+        if vm and (not edits or vm.start() >= edits[-1][1]):
+            edits.append((vm.start(), vm.end()))
+    if not edits:
+        return text
+    out: list[str] = []
+    pos = 0
+    for start, end in edits:
+        out.append(text[pos:start])
+        out.append(PRE_LLM_PLACEHOLDER)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+# ---------------------------------------------------------------------------
 # Value provenance
 # ---------------------------------------------------------------------------
 

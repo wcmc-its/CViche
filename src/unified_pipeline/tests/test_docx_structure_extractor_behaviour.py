@@ -886,6 +886,114 @@ def test_extract_unified_elements_scans_table_rows_for_subheaders(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# extract_unified_elements -- pre-LLM DOB/SSN value scrub (#847)
+# --------------------------------------------------------------------------
+
+
+def test_extract_unified_elements_scrubs_dob_and_ssn_values(tmp_path):
+    # Positive cases, all SYNTHETIC: a colon DOB, a colonless DOB, an SSN,
+    # and a DOB label+value that sits inside a single table cell -- every
+    # one keeps its label text and only the value is replaced.
+    doc = Document()
+    doc.add_paragraph("Date of Birth: 01/02/1970")
+    doc.add_paragraph("Born on 05/06/1975 in Example City")
+    doc.add_paragraph("SSN: 123-45-6789")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Date of Birth: 03/04/1980"
+    docx_path = tmp_path / "pre_llm_scrub_positive.docx"
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+    elements = result["elements"]
+
+    texts = [e["text"] for e in elements]
+    assert texts == [
+        "Date of Birth: [withheld]",
+        "Born on [withheld] in Example City",
+        "SSN: [withheld]",
+        "Date of Birth: [withheld]",
+    ]
+    # No value digit survives in any scrubbed element.
+    for t in texts:
+        assert not any(c.isdigit() for c in t)
+
+
+def test_extract_unified_elements_pre_llm_scrub_leaves_other_text_untouched(tmp_path):
+    # Negative cases: nothing that merely LOOKS numeric or date-adjacent,
+    # without a DOB/SSN label or shape, is touched -- and element count and
+    # every non-matching element's text are unchanged.
+    doc = Document()
+    doc.add_paragraph("Publications:")
+    doc.add_paragraph("Smith J. Date: 2015. A study of examples.")
+    doc.add_paragraph("Grant number R01-CA123456 funded 1999.")
+    doc.add_paragraph("Reference number 123456789 on file.")
+    docx_path = tmp_path / "pre_llm_scrub_negative.docx"
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+    texts = [e["text"] for e in result["elements"]]
+
+    assert texts == [
+        "Publications:",
+        "Smith J. Date: 2015. A study of examples.",
+        "Grant number R01-CA123456 funded 1999.",
+        "Reference number 123456789 on file.",
+    ]
+    assert result["meta"]["num_elements"] == 4
+
+
+def test_extract_unified_elements_pre_llm_scrub_element_count_unchanged(tmp_path):
+    # Scrubbing a value must never add or remove an element -- stage 2's
+    # element indices depend on the count and order staying identical.
+    docx_path = tmp_path / "unified_fixture_for_count.docx"
+    _build_unified_fixture_docx(docx_path)
+    baseline_count = len(extract_unified_elements(str(docx_path))["elements"])
+
+    doc = Document(str(docx_path))
+    doc.add_paragraph("Date of Birth: 01/02/1970")
+    doc.add_paragraph("SSN: 123-45-6789")
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+    assert len(result["elements"]) == baseline_count + 2
+    assert [e["unified_idx"] for e in result["elements"]] == list(
+        range(len(result["elements"]))
+    )
+
+
+def test_extract_unified_elements_pre_llm_scrub_is_idempotent(tmp_path):
+    # An already-scrubbed value (e.g. a doc round-tripped through a prior
+    # run) has no digits left to find, so a second extraction is a no-op.
+    doc = Document()
+    doc.add_paragraph("Date of Birth: [withheld]")
+    docx_path = tmp_path / "already_scrubbed.docx"
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+    assert result["elements"][0]["text"] == "Date of Birth: [withheld]"
+
+
+def test_extract_text_from_docx_carries_the_pre_llm_scrub(tmp_path):
+    # Stage 1a's chunk builder reads extract_text_from_docx, which wraps
+    # extract_unified_elements -- confirm the scrub survives that wrapper,
+    # since it is one of stage 1a/1b/2's three callers (#847 scout Q1).
+    try:
+        from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
+            extract_text_from_docx,
+        )
+    except ImportError:
+        pytest.skip("chunked_chat_hierarchy_extractor not importable in this env")
+
+    doc = Document()
+    doc.add_paragraph("Date of Birth: 01/02/1970")
+    docx_path = tmp_path / "stage1a_scrub.docx"
+    doc.save(str(docx_path))
+
+    lines = extract_text_from_docx(str(docx_path))
+    assert lines == ["Date of Birth: [withheld]"]
+
+
+# --------------------------------------------------------------------------
 # extract_docx_structure
 # --------------------------------------------------------------------------
 

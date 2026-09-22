@@ -59,12 +59,14 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     DECIDED_820,
     DECIDED_821,
     DECIDED_821_PENDING,
+    PRE_LLM_PLACEHOLDER,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     WITHHOLD_POLICY,
     WithheldItem,
     _pii_fragments,
     _pii_matches,
+    redact_pre_llm_values,
 )
 from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
     _resolve_licensure,
@@ -519,3 +521,58 @@ def test_bare_label_followed_by_a_sibling_label_orphans_nothing():
              "extracted_fields": {}}
     _run({"A": [entry]})
     assert entry["_pii_orphaned_value"] is False
+
+
+# --------------------------------------------------------------------------
+# redact_pre_llm_values (#847) -- the value-only scrub applied before any
+# LLM stage reads the text, at extract_unified_elements. Reuses this same
+# WITHHOLD_POLICY table (via _pii_matches), restricted to CAT_DATE_OF_BIRTH
+# and CAT_SSN; every other category is untouched here regardless of scope.
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_replaces_ssn_value_keeps_label():
+    out = redact_pre_llm_values("SSN: 123-45-6789")
+    assert out == f"SSN: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_replaces_bare_ssn_shape_with_no_label():
+    out = redact_pre_llm_values("Contact ref 123-45-6789 on file.")
+    assert out == f"Contact ref {PRE_LLM_PLACEHOLDER} on file."
+
+
+def test_redact_pre_llm_values_replaces_dob_value_with_colon_keeps_label():
+    out = redact_pre_llm_values("Date of Birth: 01/02/1970")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_replaces_dob_value_colonless_keeps_label():
+    out = redact_pre_llm_values("Born on 01/02/1970, in Example City")
+    assert out == f"Born on {PRE_LLM_PLACEHOLDER}, in Example City"
+
+
+def test_redact_pre_llm_values_untouched_publication_date_no_dob_label():
+    text = "Smith J. Date: 2015. A study of examples."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_untouched_non_ssn_shaped_nine_digit_number():
+    text = "Reference number 123456789 on the invoice."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_untouched_grant_number_shape():
+    text = "Grant number R01-CA123456 funded 1999."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_untouched_out_of_scope_category():
+    # Marital status is in WITHHOLD_POLICY but not a pre-LLM category --
+    # only render-time (#820/#821) withholds it.
+    text = "Marital Status: Married"
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_is_idempotent():
+    once = redact_pre_llm_values("Date of Birth: 01/02/1970")
+    twice = redact_pre_llm_values(once)
+    assert once == twice == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"

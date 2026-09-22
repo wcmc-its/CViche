@@ -431,6 +431,40 @@ def test_malformed_and_out_of_bounds_delimiters_are_silently_ignored(monkeypatch
     assert cost_info["cost"] == 0.001
 
 
+def test_pre_llm_scrub_wire_dob_and_ssn_never_reach_call_llm_messages(monkeypatch, tmp_path):
+    """#847 wire test: `extract_unified_elements`'s pre-LLM scrub survives
+    into the EXACT `messages` stage 2 hands to `call_llm` -- driven from a
+    real synthetic docx through the real reader, not a hand-built element
+    dict, so nothing between the reader and the prompt can silently
+    reintroduce a raw value."""
+    from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
+
+    doc = Document()
+    doc.add_paragraph("Date of Birth: 01/02/1970")
+    doc.add_paragraph("SSN: 123-45-6789")
+    docx_path = tmp_path / "wire_test.docx"
+    doc.save(str(docx_path))
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    captured = {}
+
+    def fake(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return _llm_result({"delimiters": []})
+
+    monkeypatch.setattr(stage2, "call_llm", fake)
+    stage2.detect_entries_for_section(
+        ["S"], elements,
+        elements[0]["unified_idx"], elements[-1]["unified_idx"],
+        element_index_map=_idx_map(elements),
+    )
+
+    prompt_text = "\n".join(m["content"] for m in captured["messages"])
+    assert "01/02/1970" not in prompt_text
+    assert "123-45-6789" not in prompt_text
+    assert "[withheld]" in prompt_text
+
+
 # =============================================================== run_stage_2 (end to end)
 
 def test_run_stage_2_flat_hierarchy_sorts_headers_content_and_breaks(tmp_path, monkeypatch):

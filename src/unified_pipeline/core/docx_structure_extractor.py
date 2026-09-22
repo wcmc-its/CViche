@@ -19,6 +19,7 @@ from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
 from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
+from unified_pipeline.stage6.normalization.pii import redact_pre_llm_values
 
 
 def rgb_to_hex(rgb: RGBColor | None) -> str:
@@ -741,6 +742,28 @@ def _handle_table_row_zero(
     return new_elements, unified_idx, num_table_headers_emitted, table_rows, current_content_rows
 
 
+def _scrub_pre_llm_pii_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Replace DOB/SSN VALUES in place, in every element and table cell
+    `extract_unified_elements` built, before any LLM stage reads them
+    (#847) -- the single choke point stage 1a, 1b and stage 2 all read
+    through. Element count and order are untouched; only a value span's
+    text changes. See `redact_pre_llm_values` for what is and is not
+    replaced."""
+    for el in elements:
+        text = el.get("text")
+        if isinstance(text, str) and text:
+            el["text"] = redact_pre_llm_values(text)
+        for row in el.get("data") or []:
+            if not isinstance(row, list):
+                continue
+            for cell in row:
+                if isinstance(cell, dict):
+                    cell_text = cell.get("text")
+                    if isinstance(cell_text, str) and cell_text:
+                        cell["text"] = redact_pre_llm_values(cell_text)
+    return elements
+
+
 def extract_unified_elements(docx_path: str) -> dict[str, Any]:
     """
     Extract document elements with table-awareness for header detection.
@@ -1072,7 +1095,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
     return {
         "doc_path": str(docx_path),
-        "elements": elements,
+        "elements": _scrub_pre_llm_pii_elements(elements),
         "meta": {
             "num_elements": len(elements),
             "num_paragraphs": num_paragraphs,
