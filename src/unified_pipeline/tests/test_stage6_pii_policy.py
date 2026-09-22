@@ -520,13 +520,13 @@ def test_owners_own_email_and_phone_from_a_are_untouched_in_an_appendix_entry():
 
 def test_owners_own_contact_with_no_owner_name_in_the_entry_is_still_untouched():
     """Exercises the owner-contact exemption on its own terms (#833 round
-    2): unlike the test above, this entry carries NO owner-name token, so
-    `_shares_owner_name` cannot short-circuit the check before the owner
-    set is even consulted -- only the owner-contact comparison itself can
-    spare it. The owner's email is deliberately NOT `dana.example@...` --
-    that local part literally spells out the owner's own name tokens, so
-    reusing it here would let `_shares_owner_name` pass by matching the
-    EMAIL's own text, making the owner-contact check itself untested (the
+    2, still true post-#920's per-value rewrite): this entry carries NO
+    owner-name token anywhere -- not in its prose, not in the email's own
+    local part -- so only the owner-contact set comparison can spare it.
+    The owner's email is deliberately NOT `dana.example@...` -- that local
+    part literally spells out the owner's own name tokens, so reusing it
+    here would let the local-part check pass instead of the owner-contact
+    check, making the owner-contact comparison itself untested (the
     round-1 verifier's exact finding, reproduced against a name-free
     address to confirm the check does the work alone)."""
     a = _owner_a_entry("Dana Example", "office-contact-9142@wcm.test", "212-555-0100")
@@ -545,6 +545,22 @@ def test_owners_phone_in_a_different_format_is_still_recognised_as_the_owners_ow
     normalisation itself is what has to do the work."""
     a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "212-555-0100")
     t = {"text": "Contact for reprints: (212) 555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_phone_with_a_plus_one_country_code_matches_the_bare_10_digit_form():
+    """#920 review: `_phone_digits` used to strip only non-digits, so
+    "+1 212-555-0100" (11 digits: "12125550100") and "212-555-0100" (10
+    digits: "2125550100") normalised to two DIFFERENT strings and never
+    matched each other. Now an 11-digit result starting with "1" has that
+    leading digit stripped first, so the owner's own number is recognised
+    regardless of which format carries the country code."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "+1 212-555-0100")
+    t = {"text": "Contact for reprints: 212-555-0100",
          "taxonomy_code": "T", "extracted_fields": {}}
     before = t["text"]
     result = _run({"A": [a], "T": [t]})
@@ -571,7 +587,9 @@ def test_owner_name_tokens_fall_back_to_the_first_a_entry_s_whole_text():
     tokens fall back to the first 'A' entry's raw text (#833 round 2): a
     References-block-style Personal Data entry ("Name, Title,
     Institution", no separate name field) still spares the owner's own
-    second contact."""
+    second contact -- via the #920 per-value rule, because the second
+    email's OWN LOCAL PART ("dana.example.alt") carries the fallback
+    tokens, not because the surrounding entry prose happens to."""
     a = {"text": "Dana Example, Professor, Example State University",
          "taxonomy_code": "A", "extracted_fields": {}}
     t = {"text": "Dana Example is also reachable at "
@@ -597,20 +615,94 @@ def test_plus_one_country_code_is_fully_cut_not_left_dangling():
     assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
 
 
-def test_owners_second_email_beside_their_own_name_is_untouched():
-    """# ponytail: the name-token heuristic ("2+ of the owner's own name
-    tokens appear in this entry") has a known ceiling -- a third party who
-    happens to share two of the owner's name tokens would be wrongly
-    spared. Upgrade path: position-anchored name matching if a real CV
-    ever shows the false negative."""
+def test_owners_second_email_without_a_name_token_in_its_local_part_is_now_withheld():
+    """#920 review, the headline fix: the exemption used to be PER ENTRY --
+    2+ of the owner's own name tokens ANYWHERE in the entry's text spared
+    every value in it, so this exact shape (the owner's own name in the
+    prose, right beside a second email of theirs) was untouched under the
+    old rule for the wrong reason -- the entry-wide name check, not
+    anything about the email itself. It is now PER VALUE
+    (`_local_part_shares_owner_name`): a local part with no owner-name
+    token in it gets no exemption from the name-sharing path, only from
+    `owner` (the owner's OWN harvested contacts) -- and this second
+    address was never harvested, because it never appeared in an 'A'
+    entry. The correct, safer new behaviour is to withhold it: an
+    over-redacted second email of the owner's own costs almost nothing; a
+    real reference's contact info beside the owner's name used to leak
+    completely (see the entry-wide leak test below)."""
     a = _owner_a_entry("Dana Q Example", "dana.example@wcm.example.edu")
     t = {"text": "Dana Q Example is also reachable at "
-                 "dana.example.alt@gmail.com for editorial correspondence",
+                 "dqe.alt77@gmail.com for editorial correspondence",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "dqe.alt77@gmail.com" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_owners_second_email_whose_own_local_part_carries_a_name_token_is_untouched():
+    """The positive of the test above, isolating the per-value mechanism
+    from entry prose entirely: NOTHING in this entry's surrounding text
+    names the owner (no "Dana", no "Example" outside the address itself)
+    -- only the email's own local part ("dana.q.example") carries the
+    owner's name tokens, and that alone is enough to spare it. Proves the
+    exemption really is per-VALUE, not a residual per-entry check in
+    disguise."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Reprint requests: dana.q.example@gmail.com",
          "taxonomy_code": "T", "extracted_fields": {}}
     before = t["text"]
     result = _run({"A": [a], "T": [t]})
     assert t["text"] == before
     assert result.withheld == []
+
+
+def test_a_references_entry_sharing_the_owner_s_name_still_withholds_a_third_party_s_contact():
+    """#920 review -- THE LEAK this ticket closes. On the baseline
+    (`_shares_owner_name`, per-entry): a References entry that carries the
+    CV owner's own name anywhere in it -- a "References for <owner>"
+    heading, a letterhead line, a footer -- was spared WHOLE the moment
+    the owner's name tokens matched, so every referee's phone and email in
+    that same block rendered verbatim in the Appendix. Neither the
+    referee's email's local part ("jreviewer") nor the phone shares any
+    owner name token, and neither is one of the owner's own harvested
+    contacts, so under the #920 per-value rule both are withheld even
+    though the entry as a whole carries the owner's name. This test FAILS
+    on baseline commit 82f3744 (proven by running it, unmodified, against
+    a `git archive` of that commit -- see the PR reply)."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "References for Dana Example\n"
+                 "Dr. Jordan Reviewer, Example State University\n"
+                 "jreviewer@example-state.edu, 555-234-8899",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert "555-234-8899" not in t["text"]
+    assert [i.category for i in result.withheld] == [
+        CAT_THIRD_PARTY_CONTACT, CAT_THIRD_PARTY_CONTACT]
+
+
+@pytest.mark.xfail(
+    reason=(
+        "#920 review narrows this ceiling but does not eliminate it for "
+        "email: `_owner_name_tokens`'s no-name-field fallback still pulls "
+        "institution/city words out of the first 'A' entry's whole text, "
+        "and `_local_part_shares_owner_name` is a plain substring check, "
+        "so a third party's email whose LOCAL PART happens to spell one "
+        "of those institution/city words is still wrongly spared. Phones "
+        "are unaffected (no per-value name signal at all post-#920). "
+        "Upgrade path unchanged from the #833 docstring: restrict the "
+        "fallback to a leading name-shaped run."
+    ),
+    strict=True,
+)
+def test_email_local_part_sharing_a_fallback_institution_word_is_still_spared():
+    a = {"text": "Dana Example, Professor, Presbyterian Medical Center, New York",
+         "taxonomy_code": "A", "extracted_fields": {}}
+    t = {"text": "Dr. Jordan Reviewer, presbyterian.reviewer@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "presbyterian.reviewer@example-state.edu" not in t["text"]
+    assert result.withheld != []
 
 
 @pytest.mark.parametrize("local_part", [
@@ -627,9 +719,16 @@ def test_generic_editorial_mailbox_is_untouched(local_part):
     assert result.withheld == []
 
 
-def test_an_a_coded_entry_is_never_in_scope_of_this_rule():
-    """The A entry's own rows handle its contact block; the third-party
-    check never runs against code 'A' itself."""
+def test_an_a_coded_entrys_own_values_are_never_withheld_by_this_rule():
+    """#920 review: the explicit `code != PERSONAL_DATA_CODE` guard that
+    used to keep the third-party check off code 'A' entirely is gone --
+    the rule now runs against 'A' entries too. It is still always a
+    no-op there, but for a different, more robust reason than the old
+    per-entry name check: `_owner_contacts` harvests every email/phone
+    SHAPE out of the very same 'A' entries this rule then scans, so
+    whatever this entry carries is already a member of `owner` by
+    construction, by the time the check runs -- including a value that
+    is not really the CV owner's, as here."""
     a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
     a["text"] += "\tAlso listed: Jordan Reviewer, jreviewer@example-state.edu"
     before = a["text"]

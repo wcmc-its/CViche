@@ -175,11 +175,28 @@ _BARE_SSN_SHAPE = r"(?<![\d-])\d{3}-\d{2}-\d{4}(?![\d-])"
 # 3-2-4 shape never has three contiguous digits in the position this
 # pattern's second group requires, so `123-45-6789` still classifies as
 # CAT_SSN only, never as a phone (`test_bare_ssn_is_not_also_a_phone`).
+#
+# #920 review: every separator here is optional EXCEPT the one right
+# before the final four digits (`\d{3}[\s.-]\d{4}` has no trailing `?`,
+# unlike the three separators before it), so an unpunctuated
+# `2125550100` never matches while every punctuated style does. That is
+# DELIBERATE, not an oversight: a fully unpunctuated 10-digit run collides
+# with grant numbers, accession numbers and other bare identifiers that
+# show up in a CV, and this pattern has no label or context to tell those
+# apart from a phone number the way `WITHHOLD_POLICY`'s labelled rows can.
+# Widening to an optional final separator is a one-character change if a
+# real CV ever shows an unpunctuated phone in this exact (Appendix,
+# not-the-owner's) shape.
 _BARE_PHONE_SHAPE = (
     r"(?<![\d-])(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]\d{4}(?![\d-])"
 )
 
-# #833: one conservative email shape -- the issue's own spelling.
+# #833: one conservative email shape -- the issue's own spelling. The
+# local-part class (`[\w.+-]+`) is intentionally permissive -- it can
+# match into adjacent text with no delimiter under Unicode-aware `\w` --
+# because over-redaction is the preferred failure direction here: a
+# redaction boundary that over-matches costs a little residual text, one
+# that under-matches leaks a value.
 _BARE_EMAIL_SHAPE = r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"
 
 # The stem's lookbehind is not a plain \b: a hyphen IS a word boundary, so

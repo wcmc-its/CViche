@@ -258,12 +258,24 @@ class PiiPassResult:
 #: than a word-shape guess, same reasoning as `_RENDER_SET_FIELD_LABELS`
 #: above: matched on the FULL local part, so "editorial@..." (not "editor")
 #: is not spared by accident.
+#:
+#: No phone equivalent (a published department / front-desk line) exists
+#: here. That is deliberate, not an oversight: #833 is about a References
+#: block's PERSONAL contact data, and a generic-mailbox concept for phones
+#: was never raised against this corpus. Out of scope for this issue --
+#: add one the same way (a closed vocabulary of known front-desk numbers,
+#: not a shape guess) if a real CV ever needs it.
 _GENERIC_MAILBOX_LOCAL_PARTS = frozenset({
     "editor", "office", "info", "journal", "admin", "submissions",
 })
 
-_THIRD_PARTY_EMAIL_RE = re.compile(_BARE_EMAIL_SHAPE, re.X | re.I)
-_THIRD_PARTY_PHONE_RE = re.compile(_BARE_PHONE_SHAPE, re.X | re.I)
+#: Neither shape below has a case-sensitive literal or a literal space
+#: outside a character class, so `re.I`/`re.X` matched nothing either flag
+#: would change; dropped rather than kept as decoration, since a future
+#: edit that DID add a literal space outside `[...]` would otherwise be
+#: silently verbose-formatted away instead of erroring.
+_THIRD_PARTY_EMAIL_RE = re.compile(_BARE_EMAIL_SHAPE)
+_THIRD_PARTY_PHONE_RE = re.compile(_BARE_PHONE_SHAPE)
 
 #: Name tokens shorter than this (initials, "Dr", "Jr") are dropped before
 #: the owner-name-sharing check below, so they cannot cheaply satisfy it.
@@ -272,7 +284,15 @@ _NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'-]+")
 
 
 def _phone_digits(value: str) -> str:
-    return re.sub(r"\D", "", value)
+    """Digits only, with a US country-code `1` stripped when it produces
+    an 11-digit result (#920 review: `_phone_digits` normalised
+    "+1 212-555-0100" and "212-555-0100" to different strings, so the
+    owner-contact comparison below missed the same number in two formats
+    -- correctness only, since the old behaviour failed SAFE by
+    over-withholding the owner's own number rather than leaking anyone
+    else's)."""
+    digits = re.sub(r"\D", "", value)
+    return digits[1:] if len(digits) == 11 and digits.startswith("1") else digits
 
 
 def _owner_contacts(a_entries: Sequence[dict]) -> frozenset[str]:
@@ -298,10 +318,26 @@ def _owner_contacts(a_entries: Sequence[dict]) -> frozenset[str]:
 
 def _owner_name_tokens(a_entries: Sequence[dict]) -> frozenset[str]:
     """Tokens of the CV owner's own name (the #833 second-email negative
-    control): `extracted_fields['name']` of the first 'A' entry that has
-    one, else the first 'A' entry's raw text -- a References-block-style
-    entry ("Name, Title, Institution") puts the owner's own name first
-    exactly the way a normal Personal Data block does."""
+    control, now the #920 per-value email exemption too):
+    `extracted_fields['name']` of the first 'A' entry that has one, else
+    the first 'A' entry's raw text -- a References-block-style entry
+    ("Name, Title, Institution") puts the owner's own name first exactly
+    the way a normal Personal Data block does.
+
+    Document-order guarantee for the fallback: `a_entries` is
+    `entries_by_code['A']` as `run_pii_pass` receives it, built by
+    `stage_6_word_template.py::_group_entries_by_code`'s single
+    `for entry in entries: entries_by_code[code].append(entry)` pass, so
+    within-code order is exactly `entries`' own order. `entries` itself is
+    Stage 4's `all_entries`, EXPLICITLY sorted by
+    `(element_idx_start, element_idx_end)`
+    (`stage4/extraction.py:1037`) before Stage 6 ever sees it, and no
+    later stage (5, 5b) re-sorts it (`stage_5_pubmed_enrichment.py`,
+    `stage_5b_institution_enrichment.py` sort only glob results, never the
+    entries list). `a_entries[0]` is therefore document-order-first,
+    modulo #916's own residual (same-start duplicate headers in stage 1a,
+    OPEN) -- a defect in how `element_idx` itself is computed, not in
+    whether this list is sorted by it."""
     name = ""
     for entry in a_entries:
         candidate = (entry.get("extracted_fields") or {}).get("name")
@@ -314,45 +350,60 @@ def _owner_name_tokens(a_entries: Sequence[dict]) -> frozenset[str]:
                      if len(tok) >= _MIN_OWNER_NAME_TOKEN_LEN)
 
 
-def _shares_owner_name(text: str, owner_name_tokens: frozenset[str]) -> bool:
-    """True when `text` carries enough of the owner's own name tokens that
-    it reads as the owner's OWN entry rather than a third party's -- at
-    least two tokens, or the one token there is when the name has only
-    one."""
-    if not owner_name_tokens:
-        return False
-    text_tokens = {tok.lower() for tok in _NAME_TOKEN_RE.findall(text)}
-    return len(owner_name_tokens & text_tokens) >= min(2, len(owner_name_tokens))
+def _local_part_shares_owner_name(local: str, owner_name_tokens: frozenset[str]) -> bool:
+    """True when an email's own local part (lower-cased, no `@domain`)
+    carries one of the owner's name tokens -- `jane.doe@`, `jdoe@`,
+    `doej@` style. Matched as a plain substring of the whole local part
+    (the lazy-but-correct choice: a local part is short and already
+    delimited by `@`, so a token appearing anywhere in it -- prefix,
+    suffix, joined by a dot -- is the owner's own address in every
+    corpus shape seen; it is not anchored to a word boundary because a
+    local part has none of its own)."""
+    return any(token in local for token in owner_name_tokens)
 
 
 def _third_party_contact_matches(
     text: str, owner: frozenset[str], owner_name_tokens: frozenset[str],
 ) -> list[PiiMatch]:
     """CAT_THIRD_PARTY_CONTACT spans in an Appendix-bound entry: an email or
-    US phone shape that is not one of `owner`'s own contacts, is not a
-    generic editorial mailbox, and does not sit in an entry that also
-    carries the owner's own name.
+    US phone shape that is not one of `owner`'s own contacts and is not a
+    generic editorial mailbox -- an email is ADDITIONALLY spared when its
+    OWN local part carries one of the owner's name tokens
+    (`_local_part_shares_owner_name`).
 
-    # ponytail: the name-token overlap check is a coarse heuristic, not a
-    # name parser -- ceiling: a third party who happens to share two of the
-    # owner's name tokens (a relative, a common surname) would be wrongly
-    # spared. Wider than that when `_owner_name_tokens` had no
-    # `extracted_fields['name']` to use and fell back to the WHOLE first
-    # 'A' entry's text (#833 round 2): that fallback's tokens include the
-    # owner's institution and city words too, so a third-party reference at
-    # the SAME institution/city as the owner -- sharing two of those
-    # tokens, no name overlap at all -- would also be wrongly spared.
-    # Upgrade path: position-anchored name matching, or restrict the
-    # fallback to a leading name-shaped run, if a real CV ever shows this
-    # false negative.
+    #920 review (the PR's headline finding): the exemption used to be
+    PER ENTRY -- any value in an entry that also carried the owner's own
+    name anywhere in its text was spared whole, so a References entry with
+    a "References for <owner>" heading, letterhead line or footer leaked
+    every referee's phone and email in that same block. It is now PER
+    VALUE. A phone has no per-value name signal at all (a phone number
+    does not spell anyone's name), so a phone can only ever be spared by
+    being in `owner` -- strictly safer than the old entry-wide rule, which
+    let the owner's name spare a third party's phone too.
+
+    # ponytail: the local-part substring check is a coarse heuristic, not
+    # a name parser -- ceiling, narrowed by this per-value rewrite: an
+    # email whose local part happens to contain one of the owner's name
+    # tokens as a substring (a relative, a common surname, or -- when
+    # `_owner_name_tokens` had no `extracted_fields['name']` and fell back
+    # to the whole first 'A' entry's text -- an institution or city word
+    # that also appears in the local part) would be wrongly spared. This
+    # is now scoped to the LOCAL PART specifically rather than the whole
+    # entry, so the corpus incidence of this exact shape is 0 (a local
+    # part almost never spells out an institution or city word) and an
+    # owner's own second email whose local part carries no name token is
+    # now over-withheld -- the safe direction. Upgrade path: restrict the
+    # fallback in `_owner_name_tokens` to a leading name-shaped run, if a
+    # real CV ever shows the narrower false negative
+    # (`test_email_local_part_sharing_a_fallback_institution_word_is_still_spared_xfail`).
     """
-    if _shares_owner_name(text, owner_name_tokens):
-        return []
     found: list[PiiMatch] = []
     for m in _THIRD_PARTY_EMAIL_RE.finditer(text):
         value = m.group()
         local = value.split("@", 1)[0].lower()
-        if value.lower() in owner or local in _GENERIC_MAILBOX_LOCAL_PARTS:
+        if (value.lower() in owner
+                or local in _GENERIC_MAILBOX_LOCAL_PARTS
+                or _local_part_shares_owner_name(local, owner_name_tokens)):
             continue
         found.append(PiiMatch(m.start(), m.end(), CAT_THIRD_PARTY_CONTACT))
     for m in _THIRD_PARTY_PHONE_RE.finditer(text):
@@ -531,11 +582,20 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             index += 1
             raw_text = entry.get("text", "") or ""
             matches = _pii_matches(raw_text, scope) if raw_text else []
-            # #833: an Appendix-bound, non-'A' entry also gets the
-            # value-shape third-party-contact check -- scope alone already
-            # excludes 'A' (its own rows handle it) and every routed
-            # content code (SCOPE_ALL_CODES).
-            if raw_text and code != PERSONAL_DATA_CODE and scope == SCOPE_PERSONAL_AND_APPENDIX:
+            # #833: an Appendix-bound entry also gets the value-shape
+            # third-party-contact check -- scope already excludes every
+            # routed content code (SCOPE_ALL_CODES). #920 review: an
+            # explicit `code != PERSONAL_DATA_CODE` guard used to also
+            # exclude 'A' itself, disclosed in the original PR as a proven
+            # -equivalent mutant (every value in an 'A' entry's own text is
+            # harvested into `owner_contacts` below, from that SAME set of
+            # entries, so it is always already a member of `owner` by the
+            # time this runs against it -- removing the guard cannot
+            # change what an 'A' entry renders). Deleted rather than kept
+            # "for readability": a proven-dead branch is dead weight in a
+            # PII-withholding path, and this way the rule also covers the
+            # rare case of a second, distinct 'A' entry.
+            if raw_text and scope == SCOPE_PERSONAL_AND_APPENDIX:
                 matches = _merge_matches(list(matches) + _third_party_contact_matches(
                     raw_text, owner_contacts, owner_name_tokens))
 
