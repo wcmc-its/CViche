@@ -719,7 +719,11 @@ def test_upload_content_write_failure_after_manifest_is_fatal(client, db, seed_s
 @pytest.mark.parametrize("filename", [
     "../../../etc/evil.docx",
     "a/b\\c.docx",
-    "x" * 296 + ".docx",   # 301 chars; Run.filename is String(255) -- SQLite does not enforce it
+    # The over-length case ("x" * 296 + ".docx", 301 chars) is no longer here:
+    # #796 now rejects it with 400 before create_run_archive runs, which is
+    # covered by test_upload_rejects_filename_over_column_width_before_archive
+    # below -- exactly the "sanitization tracked in #796" flip this test used
+    # to note.
 ])
 def test_upload_traversal_filename_cannot_escape(client, db, seed_simple_mode, tmp_path, filename):
     """PR #779 review thread web_interface/backend/tests/test_upload_atomicity.py item 17
@@ -729,8 +733,7 @@ def test_upload_traversal_filename_cannot_escape(client, db, seed_simple_mode, t
     `<run_id>.<ext>`, so the client string never shapes a filesystem or
     storage path: the ONLY files created under tmp_path are the four the
     endpoint owns. The raw string is retained as a display name (response,
-    Run.filename, manifest original_filename) -- pinned here so the
-    sanitization tracked in #796 flips this assertion deliberately.
+    Run.filename, manifest original_filename).
     """
     user = _make_user(db)
     _auth(client, user)
@@ -759,14 +762,15 @@ def test_upload_traversal_filename_cannot_escape(client, db, seed_simple_mode, t
 
 # --- collision thread item 2: DB commit fails after the archive succeeded ---
 
-def test_upload_db_commit_failure_leaves_archive_but_no_run(client, db, seed_simple_mode, tmp_path):
+def test_upload_db_commit_failure_compensates_the_archive_and_creates_no_run(client, db, seed_simple_mode, tmp_path):
     """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 2
 
-    upload.py:470 `db.commit()` is unguarded: a DB fault there reaches the
-    app's catch-all handler (500 internal_error, sanitized) and leaves the
-    archive + by-submitter index in storage with NO Run or Step row -- the
-    storage-only orphan #116 tracks. This pins that current behaviour; the
-    archive-before-DB ordering is #170's requirement.
+    upload.py's `db.commit()` is now guarded (#802): a DB fault there is
+    caught, logged, and compensated -- the archive, the by-submitter index,
+    and the pod-local copy are all deleted before a 500 is returned -- rather
+    than reaching the app's catch-all handler and leaving a storage-only
+    orphan #116 used to track. The archive-before-DB ordering is still
+    #170's requirement; only what happens after a commit failure changed.
     """
     user = _make_user(db)
     _auth(client, user)
@@ -776,15 +780,167 @@ def test_upload_db_commit_failure_leaves_archive_but_no_run(client, db, seed_sim
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 500, resp.text
-    assert resp.json() == {"error": "internal_error", "message": "An unexpected error occurred."}
+    assert resp.json()["detail"] == {
+        "error": "internal_error",
+        "message": (
+            "We couldn't finish creating your run, so nothing was saved. "
+            "Please try again in a moment."
+        ),
+    }
 
     db.rollback()
     assert db.query(Run).count() == 0
     assert db.query(Step).count() == 0
-    # The durable side completed before the DB failed: archive + index persist.
-    assert storage.exists("DBFA1L", "input/manifest.json") is True
-    assert storage.exists("DBFA1L", "input/DBFA1L.docx") is True
-    assert (tmp_path / "storage" / "by-submitter" / "test@example.com" / "DBFA1L" / "manifest.json").exists()
+    # The commit failure is now compensated: nothing archived under this run
+    # id survives it, and the pod-local copy is gone too.
+    assert storage.exists("DBFA1L", "input/manifest.json") is False
+    assert storage.exists("DBFA1L", "input/DBFA1L.docx") is False
+    assert not (tmp_path / "storage" / "by-submitter" / "test@example.com" / "DBFA1L" / "manifest.json").exists()
+    assert list(upload_dir.iterdir()) == []
+
+
+def test_upload_compensates_archive_when_commit_fails(client, db, seed_simple_mode, tmp_path, caplog):
+    """#802 acceptance 1/2: a commit failure after a successful archive calls
+    the compensating delete for the orphaned run id -- delete_run and
+    delete_global_prefix for the exact by-submitter key put_global wrote --
+    and unlinks the pod-local copy, before the 5xx is returned. Both the
+    commit failure and (trivially, since it succeeds here) the compensation
+    are logged.
+    """
+    user = _make_user(db)
+    _auth(client, user)
+
+    storage = MagicMock()
+    storage.put_file_exclusive.return_value = None
+    storage.put_global.return_value = None
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.api.upload.generate_run_id", return_value="CMFAIL"))
+    patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
+
+    # Wraps the real rollback (so the session actually rolls back) while
+    # still recording the call, so we can pin BOTH that it happened and
+    # that it happened before the compensating delete_run -- not just that
+    # the two were called at all (r1 m07: deleting `db.rollback()` in
+    # `commit_run_or_compensate` left every other assertion green).
+    call_order = MagicMock()
+    with patch.object(db, "rollback", wraps=db.rollback) as rollback_mock:
+        call_order.attach_mock(rollback_mock, "rollback")
+        call_order.attach_mock(storage.delete_run, "delete_run")
+        with caplog.at_level(logging.ERROR, logger="app.api.upload"):
+            resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+        rollback_mock.assert_called_once()
+
+    call_names = [c[0] for c in call_order.mock_calls]
+    assert call_names.index("rollback") < call_names.index("delete_run"), call_order.mock_calls
+
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"]["error"] == "internal_error"
+
+    db.rollback()
+    assert db.query(Run).count() == 0
+    assert db.query(Step).count() == 0
+
+    storage.delete_run.assert_called_once_with("CMFAIL")
+    storage.delete_global_prefix.assert_called_once_with("by-submitter/test@example.com/CMFAIL/")
+    assert list(tmp_path.iterdir()) == []  # pod-local upload copy unlinked
+    assert any("commit failed" in r.getMessage() for r in caplog.records)
+
+
+def test_upload_compensation_failure_does_not_mask_commit_error(client, db, seed_simple_mode, tmp_path, caplog):
+    """#802: when the compensation's OWN storage calls also raise, the
+    response returned to the client is still the original commit-failure
+    5xx, not a compensation-failure one -- and both errors are logged,
+    instead of the second exception replacing or hiding the first."""
+    user = _make_user(db)
+    _auth(client, user)
+
+    storage = MagicMock()
+    storage.put_file_exclusive.return_value = None
+    storage.put_global.return_value = None
+    storage.delete_run.side_effect = Exception("delete_run also failed")
+    storage.delete_global_prefix.side_effect = Exception("delete_global_prefix also failed")
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.api.upload.generate_run_id", return_value="CMFAI2"))
+    patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
+    with caplog.at_level(logging.ERROR, logger="app.api.upload"):
+        resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 500, resp.text
+    assert resp.json()["detail"] == {
+        "error": "internal_error",
+        "message": (
+            "We couldn't finish creating your run, so nothing was saved. "
+            "Please try again in a moment."
+        ),
+    }
+
+    db.rollback()
+    assert db.query(Run).count() == 0
+
+    # Both compensation calls were attempted despite the first raising.
+    storage.delete_run.assert_called_once_with("CMFAI2")
+    storage.delete_global_prefix.assert_called_once_with("by-submitter/test@example.com/CMFAI2/")
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("commit failed" in m for m in messages)
+    assert any("delete_run failed" in m for m in messages)
+    assert any("delete_global_prefix failed" in m for m in messages)
+
+
+# --- #796: filename bound BEFORE the archive --------------------------------
+
+def test_upload_rejects_filename_over_column_width_before_archive(client, db, seed_simple_mode, tmp_path):
+    """#796 acceptance: a filename longer than Run.filename's column width
+    (String(255)) is rejected with 400 BEFORE create_run_archive runs -- no
+    storage write, no Run row, no pod-local file. Content validation is
+    bypassed (as the other atomicity tests do) so the 400 is provably from
+    the length guard, not a magic-byte mismatch on the dummy payload."""
+    user = _make_user(db)
+    _auth(client, user)
+
+    storage = MagicMock()
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    filename = "x" * 256 + ".docx"  # 261 chars; Run.filename is String(255)
+    resp = _run_patches(
+        patches,
+        lambda: client.post(
+            "/api/upload",
+            files={"file": (filename, b"PK\x03\x04dummy-docx-bytes", DOCX_MIME)},
+            data={"submission_type": "own_cv"},
+        ),
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["error"] == "bad_request"
+    storage.put_file_exclusive.assert_not_called()
+    assert db.query(Run).count() == 0
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_upload_accepts_filename_at_exactly_column_width(client, db, seed_simple_mode, tmp_path):
+    """Negative control for an off-by-one: exactly 255 characters (the
+    column width itself) is accepted, not rejected."""
+    user = _make_user(db)
+    _auth(client, user)
+    storage, upload_dir, patches = _real_storage_patches(tmp_path)
+
+    filename = "x" * 250 + ".docx"  # exactly 255 chars
+    assert len(filename) == 255
+    content = b"PK\x03\x04dummy-docx-bytes"
+    resp = _run_patches(
+        patches,
+        lambda: client.post(
+            "/api/upload",
+            files={"file": (filename, content, DOCX_MIME)},
+            data={"submission_type": "own_cv"},
+        ),
+    )
+
+    assert resp.status_code == 200, resp.text
+    run_id = resp.json()["run_id"]
+    assert db.get(Run, run_id).filename == filename
 
 
 # --- collision thread item 4: consent enforced at upload time ---------------
