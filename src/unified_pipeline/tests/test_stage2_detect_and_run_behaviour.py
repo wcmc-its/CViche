@@ -1292,6 +1292,44 @@ def test_assigned_indices_union_matches_the_serial_loop(tmp_path, monkeypatch):
     assert serial["coverage"]["coverage_percentage"] == pytest.approx(100.0)
 
 
+def test_string_row_index_never_lands_in_assigned_only_its_parent_int_does(monkeypatch):
+    """#915 review item 1: ``section_assigned.add(str(start_idx_entry))``
+    was inert -- ``section_assigned`` is later diffed against
+    ``section_range = set(range(...))``, which holds only ints, and
+    ``_bound_coverage_indices`` (#856) filters ``isinstance(idx, int)`` by
+    construction too, so the string form is never read by any consumer.
+    Pin the INVARIANT the string-add was removed for rather than the
+    deleted line itself: a section whose sole entry carries a "N.M"
+    table-row string index still ends up with an int-only ``assigned`` set
+    (never the "1.0" string) and the parent table index alone still keeps
+    that element out of ``unassigned_in_section`` / the break entries.
+    """
+    doc_elements = [
+        _para(0, "AWARDS"),
+        {"unified_idx": 1, "type": "table_content", "data": [["2020", "Best Paper"]]},
+    ]
+    element_index_map = _idx_map(doc_elements)
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": [
+        {"element_idx_start": "1.0", "element_idx_end": "1.0", "element_type": "table_row", "confidence": 0.8},
+    ]}))
+
+    result = stage2._extract_section(
+        ["Awards"], 0, 1,
+        doc_elements=doc_elements,
+        header_indices={0},
+        element_index_map=element_index_map,
+        header_info={0: ["Awards"]},
+        doc=Document(),
+        document_uid="TEST",
+        cancel_check=None,
+    )
+
+    assert result.assigned == {0, 1}  # header idx 0 + parent table idx 1, ints only
+    assert "1.0" not in result.assigned
+    break_starts = {e["element_idx_start"] for e in result.entries if e["element_type"] == "break"}
+    assert 1 not in break_starts  # the parent int alone kept it out of break_entries
+
+
 def test_tied_start_indices_keep_section_submission_order(tmp_path, monkeypatch):
     """A stage-1b leaf section can legitimately enclose another leaf
     section's range (corpus A/B, 21/107 real CVs: a wide catch-all leaf

@@ -1165,13 +1165,14 @@ def _extract_section(
         start_idx_entry = entry["element_idx_start"]
         end_idx_entry = entry["element_idx_end"]
 
-        # Handle string indices (table rows like "22.2")
+        # Handle string indices (table rows like "22.2"): section_assigned is
+        # later diffed against section_range = set(range(...)), which holds
+        # only ints, so only the parent table index (an int) protects
+        # anything here -- the string form itself is never read by any
+        # consumer (#856's _bound_coverage_indices filters int-only by
+        # construction too). Mark the parent table index as assigned to
+        # prevent it from being added as a "break" entry.
         if isinstance(start_idx_entry, str) or isinstance(end_idx_entry, str):
-            # For row sub-indices, track the string as-is
-            section_assigned.add(str(start_idx_entry))
-
-            # ALSO mark the parent table index as assigned
-            # to prevent it from being added as a "break" entry
             start_idx_str = str(start_idx_entry)
             if "." in start_idx_str:
                 parent_idx = int(start_idx_str.split(".")[0])
