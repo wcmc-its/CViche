@@ -128,6 +128,37 @@ def _write_hierarchy(tmp_path: Path, name: str, document_uid: str, hierarchy_wit
     return path
 
 
+# =============================================================== _element_text_or_fallback
+
+def test_element_text_or_fallback_uses_the_map_silently_when_index_is_present(caplog):
+    elements = [_para(0, "Jane Doe")]
+    text = stage2._element_text_or_fallback(0, _idx_map(elements), Document())
+    assert text == "Jane Doe"
+    assert caplog.records == []  # positive case: no warning when the index IS in the map
+
+
+def test_element_text_or_fallback_warns_and_falls_back_to_doc_paragraphs_when_index_missing(caplog):
+    # #915 item 2: measured on the 111-uid local corpus, 2/106 matched uids
+    # had a stage-1b hierarchy referencing indices past a fresh
+    # extraction's doc_length -- a real, if rare, mismatch, not dead code.
+    # Negative case: index absent from element_index_map falls back to
+    # doc.paragraphs AND logs, rather than silently returning "".
+    doc = Document()
+    doc.add_paragraph("Fallback Text")
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_2_entry_extraction"):
+        text = stage2._element_text_or_fallback(0, {}, doc)
+    assert text == "Fallback Text"
+    assert len(caplog.records) == 1
+    assert "missing from element_index_map" in caplog.records[0].message
+
+
+def test_element_text_or_fallback_returns_empty_string_past_doc_paragraphs_bounds(caplog):
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_2_entry_extraction"):
+        text = stage2._element_text_or_fallback(5, {}, Document())
+    assert text == ""
+    assert len(caplog.records) == 1
+
+
 # =============================================================== detect_entries_for_section
 
 def test_delimiters_key_merges_multiline_entry_and_uses_given_confidence(monkeypatch):

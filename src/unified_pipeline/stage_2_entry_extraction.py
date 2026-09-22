@@ -100,6 +100,24 @@ def get_element_text(element: dict) -> str:
         return element.get("text", "").strip()
 
 
+def _element_text_or_fallback(idx: int, element_index_map: dict, doc: Document) -> str:
+    """Text for a unified element index, falling back to doc.paragraphs.
+
+    element_index_map should hold every int index in [0, doc_length) by
+    construction (build_element_index_map maps every element with an int
+    unified_idx). The fallback exists for when it doesn't: measured on the
+    111-uid local corpus, 2 uids had a stage-1b hierarchy whose header
+    indices (260, 262) fell past a fresh extraction's doc_length (260) --
+    a stale-hierarchy-vs-current-extraction mismatch, not a code bug this
+    PR should paper over. Logs so a real gap surfaces instead of silently
+    producing a blank header/break entry.
+    """
+    if idx in element_index_map:
+        return get_element_text(element_index_map[idx])
+    logger.warning(f"    Index {idx} missing from element_index_map; falling back to doc.paragraphs")
+    return doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
+
+
 def split_merged_row_into_pseudo_rows(row: list) -> list:
     """
     Detect and split table rows where multiple entries were merged into one row.
@@ -1151,12 +1169,12 @@ def _extract_section(
     # Detect and extract entries using document structure (paragraphs + tables)
     entries, cost_info = detect_entries_for_section(
         hierarchy_path,
-        doc_elements,  # Now passing doc_elements instead of doc
+        doc_elements,
         start_idx,
         end_idx + 1,  # end_idx is inclusive, so add 1 for range
         document_uid=document_uid,
         header_indices=header_indices,
-        element_index_map=element_index_map  # New parameter
+        element_index_map=element_index_map
     )
 
     # Track which indices are assigned to entries
@@ -1189,11 +1207,7 @@ def _extract_section(
     # Add header entries for this section
     section_headers = []
     for idx in sorted(section_range & header_indices):
-        # Get text from element_index_map instead of doc.paragraphs
-        if idx in element_index_map:
-            header_text = get_element_text(element_index_map[idx])
-        else:
-            header_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
+        header_text = _element_text_or_fallback(idx, element_index_map, doc)
         header_entry = {
             "element_idx_start": idx,
             "element_idx_end": idx,
@@ -1208,11 +1222,7 @@ def _extract_section(
     # Add break entries for unassigned indices (blank lines, etc.)
     break_entries = []
     for idx in sorted(unassigned_in_section):
-        # Get text from element_index_map instead of doc.paragraphs
-        if idx in element_index_map:
-            para_text = get_element_text(element_index_map[idx])
-        else:
-            para_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
+        para_text = _element_text_or_fallback(idx, element_index_map, doc)
         break_entry = {
             "element_idx_start": idx,
             "element_idx_end": idx,
@@ -1355,11 +1365,7 @@ def run_stage_2(
                 parent_header_indices.add(idx)
 
     for idx in sorted(parent_header_indices):
-        # Get text from element_index_map instead of doc.paragraphs
-        if idx in element_index_map:
-            header_text = get_element_text(element_index_map[idx])
-        else:
-            header_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
+        header_text = _element_text_or_fallback(idx, element_index_map, doc)
         parent_header_entry = {
             "element_idx_start": idx,
             "element_idx_end": idx,
@@ -1390,11 +1396,7 @@ def run_stage_2(
                 if first_child_start is not None:
                     for gap_idx in range(parent_start + 1, first_child_start):
                         if gap_idx not in all_assigned_indices:
-                            # Get text from element_index_map instead of doc.paragraphs
-                            if gap_idx in element_index_map:
-                                gap_text = get_element_text(element_index_map[gap_idx])
-                            else:
-                                gap_text = doc.paragraphs[gap_idx].text.strip() if gap_idx < len(doc.paragraphs) else ""
+                            gap_text = _element_text_or_fallback(gap_idx, element_index_map, doc)
                             gap_entry = {
                                 "element_idx_start": gap_idx,
                                 "element_idx_end": gap_idx,
