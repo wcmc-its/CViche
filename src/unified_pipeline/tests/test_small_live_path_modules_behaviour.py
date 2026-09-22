@@ -361,6 +361,13 @@ def test_verbose_prints_a_warning_when_the_activities_heading_is_missing(tmp_pat
 
     assert ret is False
     assert "Could not find 'RESEARCH ACTIVITIES'" in caplog.text
+    # #563: this site is a WARNING (a handled advisory, not routine
+    # progress) -- pin the level here too, not just the message text, so a
+    # site flipped to logger.info is caught behaviourally as well as by the
+    # static contract in test_stage6_mixin_name_collisions.py.
+    warning_records = [r for r in caplog.records if "Could not find 'RESEARCH ACTIVITIES'" in r.message]
+    assert len(warning_records) == 1
+    assert warning_records[0].levelno == logging.WARNING
 
 
 def test_track_changes_disabled_renders_summary_as_a_plain_run():
