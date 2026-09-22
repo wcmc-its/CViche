@@ -351,15 +351,15 @@ def test_call_llm_retry_on_rate_limit():
 
 
 def test_call_llm_retry_exhausted():
-    """call_llm raises RateLimitError when all retries are exhausted."""
-    from unified_pipeline.llm_client import call_llm
-    from openai import RateLimitError
+    """call_llm raises APITimeoutError when all retries are exhausted.
 
-    rate_limit_error = RateLimitError(
-        "rate limited",
-        response=MagicMock(status_code=429, headers={}),
-        body=None,
-    )
+    A timeout, not a RateLimitError: since #912 a rate limit is outage-class
+    and waits out CVICHE_LLM_OUTAGE_BUDGET_SECONDS instead of retry_count.
+    """
+    from unified_pipeline.llm_client import call_llm
+    from openai import APITimeoutError
+
+    timeout_error = APITimeoutError(request=MagicMock())
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls, \
@@ -367,14 +367,14 @@ def test_call_llm_retry_exhausted():
         mock_client = MagicMock()
         # retry_count=3 means 4 total attempts (initial + 3 retries)
         mock_client.chat.completions.create.side_effect = [
-            rate_limit_error,
-            rate_limit_error,
-            rate_limit_error,
-            rate_limit_error,
+            timeout_error,
+            timeout_error,
+            timeout_error,
+            timeout_error,
         ]
         mock_openai_cls.return_value = mock_client
 
-        with pytest.raises(RateLimitError):
+        with pytest.raises(APITimeoutError):
             call_llm("stage_2", [{"role": "user", "content": "test"}])
 
     assert mock_client.chat.completions.create.call_count == 4
@@ -603,12 +603,16 @@ def test_call_llm_bedrock_retry_on_throttle():
 
 
 def test_call_llm_bedrock_retry_exhausted():
-    """call_llm raises ClientError when all Bedrock retries are exhausted."""
+    """call_llm raises ClientError when all Bedrock retries are exhausted.
+
+    ModelTimeoutException, not ThrottlingException: since #912 a throttle is
+    outage-class and waits out CVICHE_LLM_OUTAGE_BUDGET_SECONDS instead.
+    """
     from unified_pipeline.llm_client import call_llm
     from botocore.exceptions import ClientError
 
     throttle_error = ClientError(
-        {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+        {"Error": {"Code": "ModelTimeoutException", "Message": "Model timed out"}},
         "Converse",
     )
 
@@ -976,7 +980,8 @@ def test_retry_backoff_uses_equal_jitter(monkeypatch):
     sleeps = []
     monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
 
-    throttle = ClientError({"Error": {"Code": "ThrottlingException"}}, "Converse")
+    # Not ThrottlingException: outage-class since #912, on its own backoff.
+    throttle = ClientError({"Error": {"Code": "ModelTimeoutException"}}, "Converse")
 
     def always_throttled():
         raise throttle
