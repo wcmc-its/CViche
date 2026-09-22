@@ -332,9 +332,12 @@ def _owner_name_tokens(a_entries: Sequence[dict]) -> frozenset[str]:
     Stage 4's `all_entries`, EXPLICITLY sorted by
     `(element_idx_start, element_idx_end)`
     (`stage4/extraction.py:1037`) before Stage 6 ever sees it, and no
-    later stage (5, 5b) re-sorts it (`stage_5_pubmed_enrichment.py`,
+    later stage (5, 5b, 5c, 5d) re-sorts it (`stage_5_pubmed_enrichment.py`,
     `stage_5b_institution_enrichment.py` sort only glob results, never the
-    entries list). `a_entries[0]` is therefore document-order-first,
+    entries list; `stage_5c_teaching_formatter.py` and
+    `stage_5d_citation_formatter.py` group `data['entries']` by k-code with
+    a plain `dict.get`, with no `sorted(...)`/`.sort()` on the list
+    itself either). `a_entries[0]` is therefore document-order-first,
     modulo #916's own residual (same-start duplicate headers in stage 1a,
     OPEN) -- a defect in how `element_idx` itself is computed, not in
     whether this list is sorted by it."""
@@ -350,16 +353,62 @@ def _owner_name_tokens(a_entries: Sequence[dict]) -> frozenset[str]:
                      if len(tok) >= _MIN_OWNER_NAME_TOKEN_LEN)
 
 
-def _local_part_shares_owner_name(local: str, owner_name_tokens: frozenset[str]) -> bool:
-    """True when an email's own local part (lower-cased, no `@domain`)
-    carries one of the owner's name tokens -- `jane.doe@`, `jdoe@`,
-    `doej@` style. Matched as a plain substring of the whole local part
-    (the lazy-but-correct choice: a local part is short and already
-    delimited by `@`, so a token appearing anywhere in it -- prefix,
-    suffix, joined by a dot -- is the owner's own address in every
-    corpus shape seen; it is not anchored to a word boundary because a
-    local part has none of its own)."""
-    return any(token in local for token in owner_name_tokens)
+def _shares_owner_name(text: str, owner_name_tokens: frozenset[str]) -> bool:
+    """True when `text` carries enough of the owner's own name tokens that
+    it reads as the owner's OWN entry rather than a third party's -- at
+    least two tokens, or the one token there is when the name has only
+    one. Restored verbatim from the #833 baseline (82f3744) -- the #920
+    fix keeps this ENTRY-level gate as one of two conjuncts an email must
+    now satisfy (`_email_spared_by_owner_name`) rather than replacing it:
+    on its own it is per-entry (the #920 leak: a whole References block
+    sharing the owner's name spared every referee's contact in it), and on
+    its own it is also too permissive at the SEGMENT level, which is what
+    conjunct (b) below narrows."""
+    if not owner_name_tokens:
+        return False
+    text_tokens = {tok.lower() for tok in _NAME_TOKEN_RE.findall(text)}
+    return len(owner_name_tokens & text_tokens) >= min(2, len(owner_name_tokens))
+
+
+#: Splits an email local part into `.`/`_`/`-`/digit-delimited segments
+#: (#920 fix): "jane.doe77" -> ["jane", "doe", ""], "eduardo" -> ["eduardo"]
+#: (one segment, the whole string -- no delimiter to split on). Matched
+#: against `owner_name_tokens` by WHOLE-SEGMENT equality, never substring:
+#: `_local_part_shares_owner_name`, the function this fix removes, tested
+#: `token in local` -- a token anywhere in the local part, so an owner
+#: token "edu" spared `eduardo@` (the #920 review finding) and an owner
+#: token "lee" spared `kathleen@`. A local part carries the OWNER's own
+#: address in a `first.last`/`flast`/`firstl` shape, where a name token is
+#: always its own segment; a substring hit that is not also a whole
+#: segment is, by construction, some OTHER word merely containing the
+#: token as a fragment.
+_LOCAL_PART_SEGMENT_RE = re.compile(r"[^a-z]+")
+
+
+def _email_spared_by_owner_name(
+    text: str, local: str, owner_name_tokens: frozenset[str],
+) -> bool:
+    """True only when BOTH the #833 baseline's entry-level gate
+    (`_shares_owner_name`) and a per-value, whole-segment check on the
+    email's OWN local part hold (#920 fix for the blind verifier's FAIL on
+    `b0c5d9e`): `jane.doe@`, `jdoe@`, `doej@` style is the owner's own
+    address, `kathleen@`/`doeringer@`/`kimberly.jones@` are not, even
+    though each contains an owner token as a bare substring
+    (`lee`/`doe`/`kim`).
+
+    Requiring conjunct (a) as well as (b) is what makes the result a
+    SUBSET of what the #833 baseline (82f3744) itself spared by name: the
+    baseline's `_shares_owner_name` alone (conjunct (a)) is a superset of
+    every email this function spares, so no email the baseline withheld
+    can newly be spared here -- the #920 entry-wide leak
+    (`test_a_references_entry_sharing_the_owner_s_name_still_withholds_a_third_party_s_contact`)
+    stays fixed, because a referee's local part does not carry an owner
+    name segment even when the surrounding entry does carry the owner's
+    name."""
+    if not _shares_owner_name(text, owner_name_tokens):
+        return False
+    segments = _LOCAL_PART_SEGMENT_RE.split(local.lower())
+    return any(segment in owner_name_tokens for segment in segments)
 
 
 def _third_party_contact_matches(
@@ -367,35 +416,49 @@ def _third_party_contact_matches(
 ) -> list[PiiMatch]:
     """CAT_THIRD_PARTY_CONTACT spans in an Appendix-bound entry: an email or
     US phone shape that is not one of `owner`'s own contacts and is not a
-    generic editorial mailbox -- an email is ADDITIONALLY spared when its
-    OWN local part carries one of the owner's name tokens
-    (`_local_part_shares_owner_name`).
+    generic editorial mailbox -- an email is ADDITIONALLY spared when BOTH
+    the entry as a whole reads as the owner's own AND the email's OWN local
+    part carries one of the owner's name tokens as a whole segment
+    (`_email_spared_by_owner_name`).
 
-    #920 review (the PR's headline finding): the exemption used to be
-    PER ENTRY -- any value in an entry that also carried the owner's own
-    name anywhere in its text was spared whole, so a References entry with
-    a "References for <owner>" heading, letterhead line or footer leaked
-    every referee's phone and email in that same block. It is now PER
-    VALUE. A phone has no per-value name signal at all (a phone number
-    does not spell anyone's name), so a phone can only ever be spared by
-    being in `owner` -- strictly safer than the old entry-wide rule, which
-    let the owner's name spare a third party's phone too.
+    #920 review round 1 (the PR's headline finding): the exemption used to
+    be PER ENTRY ONLY -- any value in an entry that also carried the
+    owner's own name anywhere in its text was spared whole, so a
+    References entry with a "References for <owner>" heading, letterhead
+    line or footer leaked every referee's phone and email in that same
+    block. #920 review round 2 (the blocker on the round-1 fix): making the
+    check per-value by switching to a BARE SUBSTRING test on the local
+    part alone (dropping the entry-level gate entirely) went too far the
+    other way -- `_local_part_shares_owner_name`'s `any(token in local ...)`
+    spared `eduardo@` on the owner's own harvested "edu" fragment and
+    `kathleen@`/`doeringer@`/`kimberly.jones@` on "lee"/"doe"/"kim", none
+    of which the #833 baseline (82f3744) spared. The exemption now
+    requires BOTH conjuncts, so it can only ever spare a SUBSET of what the
+    baseline itself spared by name (see `_email_spared_by_owner_name`'s
+    docstring) -- the round-1 fix (a phone has no per-value name signal at
+    all, so a phone can only ever be spared by being in `owner`) is
+    unchanged.
 
-    # ponytail: the local-part substring check is a coarse heuristic, not
-    # a name parser -- ceiling, narrowed by this per-value rewrite: an
-    # email whose local part happens to contain one of the owner's name
-    # tokens as a substring (a relative, a common surname, or -- when
-    # `_owner_name_tokens` had no `extracted_fields['name']` and fell back
-    # to the whole first 'A' entry's text -- an institution or city word
-    # that also appears in the local part) would be wrongly spared. This
-    # is now scoped to the LOCAL PART specifically rather than the whole
-    # entry, so the corpus incidence of this exact shape is 0 (a local
-    # part almost never spells out an institution or city word) and an
-    # owner's own second email whose local part carries no name token is
-    # now over-withheld -- the safe direction. Upgrade path: restrict the
-    # fallback in `_owner_name_tokens` to a leading name-shaped run, if a
-    # real CV ever shows the narrower false negative
-    # (`test_email_local_part_sharing_a_fallback_institution_word_is_still_spared_xfail`).
+    # ponytail: the entry-level gate is a coarse two-token heuristic, not a
+    # name parser, and the segment gate does not know a name from any
+    # other word -- ceiling, narrowed by this two-conjunct rewrite from the
+    # round-1 per-value-only version's bare substring test: an email is
+    # now wrongly spared only when BOTH (a) its own entry already meets
+    # the baseline's two-token gate (`_shares_owner_name`) AND (b) its
+    # local part has a whole `.`/`_`/`-`/digit-delimited SEGMENT equal to
+    # an owner token -- e.g. a same-surname relative sharing the owner's
+    # entry, or, when `_owner_name_tokens` had no `extracted_fields['name']`
+    # and fell back to the whole first 'A' entry's text, a fallback token
+    # that reads as a real word purely because the fallback tokenizer has
+    # no concept of "label" or "domain fragment" (real fallback token sets
+    # measured on the local corpus: `and`, `edu`, `com`, `gmail`, `email`,
+    # `phone`, `number`, `address`, `name`, `this`, `some`, `text`, `room`,
+    # `floor`) landing as a WHOLE segment of a third party's local part
+    # rather than a substring inside a longer one. Upgrade path unchanged
+    # in kind from the #833/#920-round-1 docstrings: restrict the fallback
+    # in `_owner_name_tokens` to a leading name-shaped run, if a real CV
+    # ever shows this narrower false negative
+    # (`test_email_local_part_sharing_a_fallback_word_as_its_own_segment_is_still_spared`).
     """
     found: list[PiiMatch] = []
     for m in _THIRD_PARTY_EMAIL_RE.finditer(text):
@@ -403,7 +466,7 @@ def _third_party_contact_matches(
         local = value.split("@", 1)[0].lower()
         if (value.lower() in owner
                 or local in _GENERIC_MAILBOX_LOCAL_PARTS
-                or _local_part_shares_owner_name(local, owner_name_tokens)):
+                or _email_spared_by_owner_name(text, local, owner_name_tokens)):
             continue
         found.append(PiiMatch(m.start(), m.end(), CAT_THIRD_PARTY_CONTACT))
     for m in _THIRD_PARTY_PHONE_RE.finditer(text):
@@ -593,8 +656,12 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             # time this runs against it -- removing the guard cannot
             # change what an 'A' entry renders). Deleted rather than kept
             # "for readability": a proven-dead branch is dead weight in a
-            # PII-withholding path, and this way the rule also covers the
-            # rare case of a second, distinct 'A' entry.
+            # PII-withholding path. The equivalence is uniform across every
+            # 'A' entry, not just the first: a second, distinct 'A' entry
+            # harvests into `owner_contacts` from that same
+            # `entries_by_code[PERSONAL_DATA_CODE]` loop, so the guard's
+            # removal is a no-op there too, for the identical reason --
+            # not a new case the removal additionally "covers".
             if raw_text and scope == SCOPE_PERSONAL_AND_APPENDIX:
                 matches = _merge_matches(list(matches) + _third_party_contact_matches(
                     raw_text, owner_contacts, owner_name_tokens))

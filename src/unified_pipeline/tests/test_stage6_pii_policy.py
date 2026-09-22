@@ -622,31 +622,38 @@ def test_owners_second_email_without_a_name_token_in_its_local_part_is_now_withh
     prose, right beside a second email of theirs) was untouched under the
     old rule for the wrong reason -- the entry-wide name check, not
     anything about the email itself. It is now PER VALUE
-    (`_local_part_shares_owner_name`): a local part with no owner-name
+    (`_email_spared_by_owner_name`): a local part with no owner-name
     token in it gets no exemption from the name-sharing path, only from
     `owner` (the owner's OWN harvested contacts) -- and this second
     address was never harvested, because it never appeared in an 'A'
     entry. The correct, safer new behaviour is to withhold it: an
     over-redacted second email of the owner's own costs almost nothing; a
     real reference's contact info beside the owner's name used to leak
-    completely (see the entry-wide leak test below)."""
+    completely (see the entry-wide leak test below).
+
+    Synthetic value only: `dqe.alt77@example.org`, not the real-looking
+    `@gmail.com` domain this test carried before the #920 blocker fix
+    (verifier minor note)."""
     a = _owner_a_entry("Dana Q Example", "dana.example@wcm.example.edu")
     t = {"text": "Dana Q Example is also reachable at "
-                 "dqe.alt77@gmail.com for editorial correspondence",
+                 "dqe.alt77@example.org for editorial correspondence",
          "taxonomy_code": "T", "extracted_fields": {}}
     result = _run({"A": [a], "T": [t]})
-    assert "dqe.alt77@gmail.com" not in t["text"]
+    assert "dqe.alt77@example.org" not in t["text"]
     assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
 
 
 def test_owners_second_email_whose_own_local_part_carries_a_name_token_is_untouched():
-    """The positive of the test above, isolating the per-value mechanism
-    from entry prose entirely: NOTHING in this entry's surrounding text
-    names the owner (no "Dana", no "Example" outside the address itself)
-    -- only the email's own local part ("dana.q.example") carries the
-    owner's name tokens, and that alone is enough to spare it. Proves the
-    exemption really is per-VALUE, not a residual per-entry check in
-    disguise."""
+    """The positive of the test above: the owner-own-second-email case the
+    #920 fix must keep sparing. Nothing OUTSIDE the address itself names
+    the owner (no "Dana", no "Example" in the surrounding prose) -- the
+    entry-level gate (`_shares_owner_name`) is satisfied here only because
+    it scans the WHOLE entry text and the address's own local part
+    ("dana.q.example") tokenises to "dana" and "example" too, and the
+    SAME local part also carries those tokens as whole segments, so the
+    #920 fix's second conjunct holds as well. Both conjuncts true, by the
+    address's own shape alone -- proving the exemption still reaches this
+    case without a separate name-bearing heading or footer."""
     a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
     t = {"text": "Reprint requests: dana.q.example@gmail.com",
          "taxonomy_code": "T", "extracted_fields": {}}
@@ -665,44 +672,176 @@ def test_a_references_entry_sharing_the_owner_s_name_still_withholds_a_third_par
     that same block rendered verbatim in the Appendix. Neither the
     referee's email's local part ("jreviewer") nor the phone shares any
     owner name token, and neither is one of the owner's own harvested
-    contacts, so under the #920 per-value rule both are withheld even
-    though the entry as a whole carries the owner's name. This test FAILS
-    on baseline commit 82f3744 (proven by running it, unmodified, against
-    a `git archive` of that commit -- see the PR reply)."""
+    contacts, so under the #920 fix's two-conjunct rule (`_shares_owner_name`
+    AND a whole-segment local-part match) both are withheld even though the
+    entry as a whole satisfies the first conjunct on its own. This test
+    FAILS on baseline commit 82f3744 (proven by running it, unmodified,
+    against a `git archive` of that commit -- see the PR reply) -- and
+    would ALSO fail against the #920-round-1 fix (`b0c5d9e`) with the
+    email's local part changed to a name-token substring, since that
+    fix dropped the entry-level conjunct entirely rather than adding a
+    second one."""
     a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
     t = {"text": "References for Dana Example\n"
                  "Dr. Jordan Reviewer, Example State University\n"
-                 "jreviewer@example-state.edu, 555-234-8899",
+                 "jreviewer@example-state.edu, 212-555-0199",
          "taxonomy_code": "T", "extracted_fields": {}}
     result = _run({"A": [a], "T": [t]})
     assert "jreviewer@example-state.edu" not in t["text"]
-    assert "555-234-8899" not in t["text"]
+    assert "212-555-0199" not in t["text"]
     assert [i.category for i in result.withheld] == [
         CAT_THIRD_PARTY_CONTACT, CAT_THIRD_PARTY_CONTACT]
 
 
 @pytest.mark.xfail(
     reason=(
-        "#920 review narrows this ceiling but does not eliminate it for "
-        "email: `_owner_name_tokens`'s no-name-field fallback still pulls "
-        "institution/city words out of the first 'A' entry's whole text, "
-        "and `_local_part_shares_owner_name` is a plain substring check, "
-        "so a third party's email whose LOCAL PART happens to spell one "
-        "of those institution/city words is still wrongly spared. Phones "
-        "are unaffected (no per-value name signal at all post-#920). "
-        "Upgrade path unchanged from the #833 docstring: restrict the "
-        "fallback to a leading name-shaped run."
+        "#920 round 2 narrows the ceiling to two conjuncts but does not "
+        "eliminate it: an email is wrongly spared whenever (a) its own "
+        "entry already meets `_shares_owner_name`'s baseline two-token "
+        "gate AND (b) its local part has a whole segment equal to an "
+        "owner name token -- here 'email', harvested by "
+        "`_owner_name_tokens`'s no-name-field fallback from the WHOLE "
+        "first 'A' entry's raw text, which has no concept of 'label' or "
+        "'domain fragment'. Real fallback token sets measured on the "
+        "local corpus include `and`, `edu`, `com`, `gmail`, `email`, "
+        "`phone`, `number`, `address`, `name`, `this`, `some`, `text`, "
+        "`room`, `floor` -- any one of these landing as a THIRD PARTY's "
+        "own local-part segment, in an entry that also shares two of the "
+        "owner's fallback tokens, is spared by the same mechanism tested "
+        "here. A same-surname relative is the WITH-a-name-field analogue "
+        "(`_owner_name_tokens` need not fall back for the ceiling to "
+        "bite). Phones are unaffected (no per-value name signal at all). "
+        "Upgrade path unchanged from the #833/#920-round-1 docstrings: "
+        "restrict the fallback in `_owner_name_tokens` to a leading "
+        "name-shaped run."
     ),
     strict=True,
 )
-def test_email_local_part_sharing_a_fallback_institution_word_is_still_spared():
-    a = {"text": "Dana Example, Professor, Presbyterian Medical Center, New York",
+def test_email_local_part_sharing_a_fallback_word_as_its_own_segment_is_still_spared():
+    a = {"text": "Personal Data: Name field not provided on the source "
+                 "form. Email: dana.example@state.edu. Phone: 212-555-0100.",
          "taxonomy_code": "A", "extracted_fields": {}}
-    t = {"text": "Dr. Jordan Reviewer, presbyterian.reviewer@example-state.edu",
+    t = {"text": "Personal Data forwarded here: email.desk@example-state.edu",
          "taxonomy_code": "T", "extracted_fields": {}}
     result = _run({"A": [a], "T": [t]})
-    assert "presbyterian.reviewer@example-state.edu" not in t["text"]
+    assert "email.desk@example-state.edu" not in t["text"]
     assert result.withheld != []
+
+
+_FALLBACK_A_TEXT = (
+    "Dana Example. Name field intentionally left blank on the source "
+    "form. Email: dana@state.edu. Alternate email: dana.alt@example.com. "
+    "A Gmail account is also on file. Phone Number: 212-555-0100. Home "
+    "Address: 1 Example St, Room 204, Floor 3. This profile does not "
+    "list some fields and the text is limited. Previously affiliated "
+    "with MIT. Research area: leg biomechanics. New Haven, CT."
+)
+
+
+def _fallback_a_entry() -> dict:
+    """An 'A' entry with NO `extracted_fields['name']`, so
+    `_owner_name_tokens` falls back to tokenising this WHOLE raw text
+    (#833 round 2 / #920 blocker). Deliberately carries, as ordinary
+    prose or label/domain fragments and never as anyone's actual name,
+    every fallback token this ticket's evidence measured on the local
+    corpus (`and`, `edu`, `com`, `gmail`, `email`, `phone`, `number`,
+    `address`, `name`, `this`, `some`, `text`, `room`, `floor`) plus
+    `new`, `mit` and `leg`, each used below in a real-corpus-shaped
+    substring-vs-whole-segment counter-example. Returns a FRESH dict each
+    call -- `run_pii_pass` mutates entries in place, and this is shared
+    across parametrize cases."""
+    return {"text": _FALLBACK_A_TEXT, "taxonomy_code": "A",
+            "extracted_fields": {}}
+
+
+#: (owner 'A' entry factory, the owner's own name for a References
+#: heading, the counter-example local part, a case id). Each local part
+#: is a SUBSTRING of an owner token without being a whole
+#: `.`/`_`/`-`/digit-delimited SEGMENT of itself -- exactly the shape
+#: `_local_part_shares_owner_name`'s bare substring test wrongly spared
+#: (the #920 blocker this fix closes): 'edu' inside 'eduardo', 'new'
+#: inside 'newman', 'mit' inside the 'smith' half of 'york.smith', 'leg'
+#: inside the 'college' half of 'college.admin2', 'lee' inside
+#: 'kathleen', 'doe' inside 'doeringer', 'kim' inside the 'kimberly' half
+#: of 'kimberly.jones'.
+_SEGMENT_GATE_COUNTER_EXAMPLES = [
+    (_fallback_a_entry, "Dana Example", "eduardo", "fallback-edu"),
+    (_fallback_a_entry, "Dana Example", "newman", "fallback-new"),
+    (_fallback_a_entry, "Dana Example", "york.smith", "fallback-mit"),
+    (_fallback_a_entry, "Dana Example", "college.admin2", "fallback-leg"),
+    (lambda: _owner_a_entry("Ann Lee", "ann.lee@example.com"), "Ann Lee",
+     "kathleen", "name-lee"),
+    (lambda: _owner_a_entry("Jane Doe", "jane.doe@example.com"), "Jane Doe",
+     "doeringer", "name-doe"),
+    (lambda: _owner_a_entry("Bo Kim", "bo.kim@example.com"), "Bo Kim",
+     "kimberly.jones", "name-kim"),
+]
+
+
+@pytest.mark.parametrize(
+    "owner_a_entry, owner_name, local_part, case_id",
+    _SEGMENT_GATE_COUNTER_EXAMPLES,
+    ids=[c[3] for c in _SEGMENT_GATE_COUNTER_EXAMPLES],
+)
+@pytest.mark.parametrize(
+    "shares_name", [True, False],
+    ids=["shares-name-heading", "no-owner-name-heading"])
+def test_920_blocker_every_substring_counter_example_is_withheld(
+    owner_a_entry, owner_name, local_part, case_id, shares_name,
+):
+    """#920 blocker fix, the required regression test: every one of these
+    real-corpus-shaped local parts was WRONGLY SPARED by `b0c5d9e`'s bare
+    substring check (`_local_part_shares_owner_name`) -- a PII regression
+    against the #833 baseline (82f3744), which withheld all seven. The
+    two-conjunct fix (`_email_spared_by_owner_name`) withholds every one
+    of them whether or not the surrounding entry's HEADING also names the
+    owner (`shares_name`): when it does not, the baseline entry-level
+    gate alone already refuses to spare it (barring an incidental
+    single-token overlap from the synthetic `@example.org`/`@example.com`
+    domains sharing "example" with the fallback owner's own name -- never
+    enough on its own to reach the two-token threshold); when it does,
+    the whole-segment check on the local part is what refuses -- the SAME
+    substring-vs-segment distinction that fixes the #920 blocker."""
+    heading = (f"References for {owner_name}" if shares_name
+               else "Please see attached documentation for details")
+    t = {"text": f"{heading}\n{local_part}@example.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [owner_a_entry()], "T": [t]})
+    assert f"{local_part}@example.org" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_920_blocker_segment_match_alone_does_not_spare_without_the_entry_gate():
+    """Isolates conjunct (a) (`_shares_owner_name`) from conjunct (b): the
+    referee entry below shares only ONE of Ann Lee's two name tokens by
+    construction (no "Ann" anywhere, and the domain contributes neither),
+    so `_shares_owner_name` refuses it -- the threshold is 2 of 2 -- even
+    though the email's own local part ("lee") is an EXACT whole-segment
+    match for the other token. A mutant that drops conjunct (a) and
+    spares on the segment match alone wrongly spares this email."""
+    a = _owner_a_entry("Ann Lee", "ann.lee@example.com")
+    t = {"text": "External submission, nothing else related: lee@example.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "lee@example.org" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_920_blocker_segment_split_treats_a_digit_as_a_separator():
+    """Isolates the segment-split regex itself (`_LOCAL_PART_SEGMENT_RE`,
+    `re.split(r"[^a-z]+", ...)`, never a `.`-only split): a digit suffix
+    must split off exactly like `.`/`_`/`-` do, so "kim2" reduces to the
+    same segment "kim" a bare "kim" would. Bo Kim's own second address in
+    this shape is spared -- unlike the `kimberly.jones` counter-example
+    above, whose segments never reduce to "kim" at all -- pinning that
+    digit-splitting is not itself the leak the #920 blocker closed."""
+    a = _owner_a_entry("Bo Kim", "bo.kim@example.com")
+    t = {"text": "References for Bo Kim\nAlternate contact: kim2@example.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
 
 
 @pytest.mark.parametrize("local_part", [
