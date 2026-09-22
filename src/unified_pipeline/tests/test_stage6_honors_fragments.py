@@ -124,7 +124,7 @@ _TEMPLATE_HEADERS = ["Name of award", "Organization", "Date awarded (yyyy)"]
 
 def _honors_document(cols=3, heading="H. HONORS AND AWARDS",
                      table_before_heading=False, stale_rows=0,
-                     with_table=True, verbose=False, header_cells=None):
+                     with_table=True, verbose=False):
     """A minimal document with an H heading and its table: (generator, table).
 
     Deliberately hand-built rather than the bundled template, because the
@@ -132,10 +132,6 @@ def _honors_document(cols=3, heading="H. HONORS AND AWARDS",
     and a decoy table ahead of the heading -- none of which the real template
     can be made to have. `test_production_template_fills_its_own_honors_table`
     covers the real one.
-
-    `header_cells` overrides the template's own header row (used to build a
-    foreign-shaped table for the #862 zero-entry positive-shape guard); it
-    defaults to the honors table's own header.
     """
     gen = WCMTemplateGenerator(verbose=verbose)
     gen.doc = Document()
@@ -146,10 +142,8 @@ def _honors_document(cols=3, heading="H. HONORS AND AWARDS",
         gen.doc.add_paragraph(heading)
     if not with_table:
         return gen, None
-    if header_cells is None:
-        header_cells = _TEMPLATE_HEADERS[:cols]
     table = gen.doc.add_table(rows=1 + stale_rows, cols=cols)
-    for i, header in enumerate(header_cells):
+    for i, header in enumerate(_TEMPLATE_HEADERS[:cols]):
         table.rows[0].cells[i].text = header
     for row in range(1, 1 + stale_rows):
         table.rows[row].cells[0].text = f"stale row {row}"
@@ -554,29 +548,14 @@ def test_an_entry_with_no_text_renders_nothing_rather_than_a_blank_row():
 
 # --- empty and missing input ------------------------------------------------
 
-def test_no_entries_clears_the_placeholder_row():
-    """#862: `_fill_honors([])` now clears the table's blank placeholder
-    row instead of returning before `_clear_table_data` runs -- the WCM
-    template ships that row, and it used to survive into the delivered
-    document on every CV with zero H entries. Still does not count the
-    table as populated, since nothing was written."""
+def test_no_entries_leaves_the_table_alone():
+    """`_fill_honors([])` returns before `_clear_table_data`, so an empty
+    honors list cannot blank rows a template shipped with, and does not count
+    a table as populated."""
     rows, gen = _fill_honors_into([], stale_rows=1)
-    assert rows == []
+    assert rows == [["stale row 1", "", ""]]
     assert gen.stats['tables_populated'] == 0
     assert gen.stats['entries_inserted'] == 0
-
-
-def test_no_entries_with_a_foreign_table_is_left_alone():
-    """Positive shape guard (#862): on the zero-entry path, a table located
-    after the H heading whose header row is NOT the honors table's own is
-    left untouched rather than cleared -- a template variant could put an
-    unrelated table right after the same heading, and there is no
-    data-driven signal to catch that when there are no entries."""
-    rows, gen = _fill_honors_into(
-        [], cols=2, stale_rows=1,
-        header_cells=["Organization", "Date (yyyy-yyyy)"])
-    assert rows == [["stale row 1", ""]]
-    assert gen.stats['tables_populated'] == 0
 
 
 def test_missing_section_heading_renders_nothing():

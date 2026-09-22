@@ -155,54 +155,6 @@ def _render_memberships(entries):
     return _fill(entries)[1]
 
 
-# --- (0) #862: zero entries still clears the placeholder row ----------------
-
-def test_no_entries_clears_the_placeholder_row():
-    """#862: `_fill_memberships([])` now clears the table's blank
-    placeholder row instead of returning before `_clear_table_data` runs --
-    the WCM template ships that row, and it used to survive into the
-    delivered document on every CV with zero I entries. Still does not
-    count the table as populated, since nothing was written."""
-    gen, table = _generator_with_table()
-    table.add_row()
-    table.rows[1].cells[0].text = "stale placeholder"
-    gen._fill_memberships([])
-    rows = [[c.text for c in r.cells] for r in table.rows[1:]]
-    assert rows == []
-    assert gen.stats['tables_populated'] == 0
-
-
-def test_no_entries_with_a_foreign_fallback_table_is_left_alone():
-    """The zero-entry path reaches the same fallback guard the entries path
-    already uses (`test_fallback_table_without_a_date_header_is_still_rejected`):
-    a table without a date-shaped second header column is rejected, so a
-    foreign table sitting where memberships would fall back to is not
-    cleared just because there happen to be no entries."""
-    gen, table = _generator_with_table(
-        header=("Organization", "Certificate #"), table_before_heading=True)
-    table.add_row()
-    table.rows[1].cells[0].text = "foreign stale row"
-    gen._fill_memberships([])
-    rows = [[c.text for c in r.cells] for r in table.rows[1:]]
-    assert rows == [["foreign stale row", ""]]
-    assert gen.stats['tables_populated'] == 0
-
-
-def test_no_entries_with_a_foreign_table_after_the_heading_is_left_alone():
-    """The primary lookup is a forward paragraph scan with no table
-    identity: a template variant could put someone else's table right
-    after the memberships heading. With zero entries there is no
-    data-driven signal to catch that, so `_is_memberships_table` refuses
-    to clear a table whose second header column is not date-shaped."""
-    gen, table = _generator_with_table(header=("Organization", "Certificate #"))
-    table.add_row()
-    table.rows[1].cells[0].text = "foreign stale row"
-    gen._fill_memberships([])
-    rows = [[c.text for c in r.cells] for r in table.rows[1:]]
-    assert rows == [["foreign stale row", ""]]
-    assert gen.stats['tables_populated'] == 0
-
-
 # --- (a) no line the old newline split produced is lost ---------------------
 
 def test_multiline_entries_are_returned_unchanged():

@@ -140,23 +140,6 @@ _HONORS_TABLE_COLUMNS = 3
 # How many rows were written into a table that does not have those columns.
 _FALLBACK_SCHEMA_STAT = 'honors_fallback_table_schema'
 
-# The WCM template's own honors header row (`key_files/
-# wcm_cv_template_faculty_october_2022_final.docx`), normalized. On the
-# zero-entry path `_fill_honors` has no data-driven signal that
-# `_find_table_after_paragraph` landed on ITS table rather than some other
-# one a template variant placed right after the same heading (#862's
-# positive-shape guard: every forward table scan needs one) -- the header
-# row is the only thing left to check.
-_HONORS_HEADER_CELLS = ('name of award', 'organization', 'date awarded (yyyy)')
-
-
-def _is_honors_table(table: Table) -> bool:
-    """True when `table`'s own header row is the honors table's."""
-    if not table.rows:
-        return False
-    cells = tuple(' '.join(c.text.split()).lower() for c in table.rows[0].cells)
-    return cells == _HONORS_HEADER_CELLS[:len(cells)]
-
 # "MD" (from "Bethesda, MD") and "Bloomington" are comma segments the
 # short-proper-noun org fallback happily returns (#229) — never treat a
 # bare state abbreviation as an organization.
@@ -959,19 +942,11 @@ class HonorsSection:
         """Fill H. HONORS, AWARDS section.
 
         WCM template has table with columns: Name of award | Organization | Date awarded (yyyy)
-
-        No entries still locates the table and clears it (#862, same class
-        as #708's board-certification fix): the WCM template ships a blank
-        placeholder data row in this table, and this used to return before
-        `_clear_table_data` ever ran, so that row survived into the
-        delivered document on every CV with zero H entries. The clear now
-        always runs once the table is found and its header row is
-        confirmed as the honors table's own (`_is_honors_table`); the
-        row-writing loop below is a no-op on an empty `entries`, so no
-        separate early return is needed. `tables_populated` only counts an
-        actual write -- a cleared placeholder is not a populated table.
         """
-        if self.verbose and entries:
+        if not entries:
+            return
+
+        if self.verbose:
             print(f"Filling Honors ({len(entries)} entries)...")
 
         # Find the HONORS section
@@ -986,17 +961,8 @@ class HonorsSection:
         if not table:
             return
 
-        if not entries and not _is_honors_table(table):
-            # A forward paragraph scan, not a table-identity lookup -- on a
-            # template variant this could land on a table that only happens
-            # to sit after the same heading. With no entries there is no
-            # data-driven signal to catch that, so refuse rather than clear
-            # someone else's table (#862).
-            return
-
         _clear_table_data(table, keep_header=True)
-        if entries:
-            self.stats['tables_populated'] += 1
+        self.stats['tables_populated'] += 1
 
         # Sort by date (most recent first)
         for entry in sort_entries_reverse_chronological(entries):
