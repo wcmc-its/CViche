@@ -918,6 +918,45 @@ def test_extract_unified_elements_scrubs_dob_and_ssn_values(tmp_path):
         assert not any(c.isdigit() for c in t)
 
 
+def test_extract_unified_elements_scrubs_dob_and_ssn_in_table_cells(tmp_path):
+    # Round 2 (#847): a 3-COLUMN table, unlike the single-column table
+    # above (which the extractor EXPLODES into paragraph elements, never
+    # exercising the "data" cell loop at all -- the earlier, single-column
+    # fixture made the "skip table cells" mutant survive). This fixture
+    # asserts on `element["data"]` cell text directly, which is what
+    # stage 2 actually reads (`cell.get("text")`), plus a label-cell /
+    # value-cell pair on its own row.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).text = "Note"
+    table.cell(0, 1).text = "SSN: 123-45-6789"
+    table.cell(0, 2).text = "Other"
+    table.cell(1, 0).text = "Date of Birth:"
+    table.cell(1, 1).text = "01/02/1970"
+    table.cell(1, 2).text = "Unrelated"
+    docx_path = tmp_path / "pre_llm_scrub_table_cells.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    table_elements = [e for e in elements if e.get("data")]
+    assert table_elements, "fixture must produce at least one element with cell data"
+
+    all_cell_texts = [
+        cell.get("text", "") if isinstance(cell, dict) else str(cell)
+        for el in table_elements
+        for row in el["data"]
+        for cell in row
+    ]
+    assert "Note" in all_cell_texts
+    assert "Other" in all_cell_texts
+    assert "Unrelated" in all_cell_texts
+    assert "SSN: [withheld]" in all_cell_texts
+    assert "Date of Birth:" in all_cell_texts
+    assert "[withheld]" in all_cell_texts
+    # No raw value survives anywhere in the cell data.
+    assert not any("123-45-6789" in t or "01/02/1970" in t for t in all_cell_texts)
+
+
 def test_extract_unified_elements_pre_llm_scrub_leaves_other_text_untouched(tmp_path):
     # Negative cases: nothing that merely LOOKS numeric or date-adjacent,
     # without a DOB/SSN label or shape, is touched -- and element count and

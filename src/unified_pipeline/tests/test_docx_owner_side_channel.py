@@ -147,6 +147,30 @@ def test_footer_paragraph_is_collected(tmp_path):
     assert channel["footer_lines"] == ["Synthetic Contact Block"]
 
 
+def test_sdt_line_carrying_a_dob_is_scrubbed_before_stage4_ever_sees_it(tmp_path):
+    """#847 round 2: this side channel feeds `stage4/owner_name.py`'s LLM
+    fallback tier directly -- an sdt-wrapped Personal Data block reached
+    that prompt with the raw value before this fix."""
+    doc = Document()
+    anchor = doc.add_paragraph("after")
+    _splice_body_level_sdt(anchor, ["Date of Birth: 01/02/1970"])
+
+    channel = extract_owner_side_channel(_save(doc, tmp_path))
+
+    assert channel["sdt_lines"] == ["Date of Birth: [withheld]"]
+
+
+def test_header_line_carrying_an_ssn_is_scrubbed(tmp_path):
+    doc = Document()
+    doc.add_paragraph("body")
+    doc.sections[0].header.add_paragraph("SSN: 123-45-6789")
+
+    channel = extract_owner_side_channel(_save(doc, tmp_path))
+
+    assert channel["header_lines"] == ["SSN: [withheld]"]
+    assert not any(c.isdigit() for line in channel["header_lines"] for c in line)
+
+
 def test_first_page_only_header_is_collected_when_default_header_is_empty(tmp_path):
     """#456 round-2 verifier finding 5: 6 corpus files carry the owner name
     ONLY in the section's first-page header, with an empty (unwritten,

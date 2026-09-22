@@ -465,6 +465,41 @@ def test_pre_llm_scrub_wire_dob_and_ssn_never_reach_call_llm_messages(monkeypatc
     assert "[withheld]" in prompt_text
 
 
+def test_pre_llm_scrub_wire_dob_in_table_cells_never_reach_call_llm_messages(monkeypatch, tmp_path):
+    """#847 round 2 wire test: a DOB label in one table CELL and its value
+    in the NEXT cell of the same row -- stage 2 builds its table-row prompt
+    text by joining `elem["data"]` cells directly
+    (`" | ".join(cell.get("text") ...)`, stage_2_entry_extraction.py), so
+    the scrub must have already run per-cell, not just on the element's own
+    joined `text` field."""
+    from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
+
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Date of Birth:"
+    table.cell(0, 1).text = "01/02/1970"
+    docx_path = tmp_path / "wire_test_table.docx"
+    doc.save(str(docx_path))
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    captured = {}
+
+    def fake(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return _llm_result({"delimiters": []})
+
+    monkeypatch.setattr(stage2, "call_llm", fake)
+    stage2.detect_entries_for_section(
+        ["S"], elements,
+        elements[0]["unified_idx"], elements[-1]["unified_idx"],
+        element_index_map=_idx_map(elements),
+    )
+
+    prompt_text = "\n".join(m["content"] for m in captured["messages"])
+    assert "01/02/1970" not in prompt_text
+    assert "[withheld]" in prompt_text
+
+
 # =============================================================== run_stage_2 (end to end)
 
 def test_run_stage_2_flat_hierarchy_sorts_headers_content_and_breaks(tmp_path, monkeypatch):

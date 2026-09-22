@@ -509,17 +509,62 @@ def _pii_fragments(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX) -
 #: shape itself, so a scrubbed text is idempotent under a second pass.
 PRE_LLM_PLACEHOLDER = "[withheld]"
 
-# Value-shape search for the two categories #847 scrubs before any LLM
-# stage reads the text. Built from the SAME building blocks the table's
-# DOB/SSN rows already match against (`_FULL_DATE_VALUE`, `_YEAR_VALUE`,
-# `_BARE_SSN_SHAPE`, `_SSN_WIDE_VALUE`) -- not a second definition of what a
-# date or an SSN looks like (module docstring, "#1.5"). Searched (not
-# matched) inside a `_pii_matches` fragment span, so the label/stem text
-# ahead of the value is skipped without re-deriving its own end offset.
+# ISO (yyyy-mm-dd) and dot-separated (dd.mm.yyyy) date shapes -- #847 round
+# 2: without these, the union below fell through to `_YEAR_VALUE` and took
+# only the last 4 digits of "1970-01-02" or "12.03.1970", leaking the rest
+# of the date next to the placeholder. Listed BEFORE `_FULL_DATE_VALUE` /
+# `_YEAR_VALUE` in the union so the whole-date alternative wins at the
+# value's own start position (plain alternation tries earlier branches
+# first; there is no longest-match preference across `|`).
+_ISO_DATE_VALUE = r"\d{4}-\d{1,2}-\d{1,2}"
+_DOTTED_DATE_VALUE = r"\d{1,2}\.\d{1,2}\.\d{2,4}"
+
+# Value-shape search for the categories #847 scrubs before any LLM stage
+# reads the text. Built from the SAME building blocks the table's DOB/SSN
+# rows already match against (`_FULL_DATE_VALUE`, `_YEAR_VALUE`,
+# `_BARE_SSN_SHAPE`, `_SSN_WIDE_VALUE`) plus the two whole-date shapes
+# above -- not a second definition of what a date or an SSN looks like
+# (module docstring, "#1.5"). `CAT_BIRTH` ("Born: ...", no "on"/"in") gets
+# the same date search as `CAT_DATE_OF_BIRTH` -- round 2: pre-LLM there is
+# no taxonomy code yet to route by, so scope (which row applies to which
+# ENTRY) is not a meaningful filter here; category is.
+_PRE_LLM_DATE_RE = re.compile(
+    _ISO_DATE_VALUE + r"|" + _DOTTED_DATE_VALUE + r"|" + _FULL_DATE_VALUE + r"|" + _YEAR_VALUE,
+    re.X | re.I,
+)
 _PRE_LLM_VALUE_RE: dict[str, re.Pattern] = {
-    CAT_DATE_OF_BIRTH: re.compile(_FULL_DATE_VALUE + r"|" + _YEAR_VALUE, re.X | re.I),
+    CAT_DATE_OF_BIRTH: _PRE_LLM_DATE_RE,
+    CAT_BIRTH: _PRE_LLM_DATE_RE,
     CAT_SSN: re.compile(_BARE_SSN_SHAPE + r"|" + _SSN_WIDE_VALUE, re.X | re.I),
 }
+
+
+def _pre_llm_value_span_in_next_run(text: str, frag_end: int, value_re: re.Pattern) -> tuple[int, int] | None:
+    """When a bare label's own fragment (`_label_spans`) was cut short at a
+    hard delimiter before its value ever started -- a tab, a literal `|`,
+    or a 3+-space column gap (`_PII_FRAGMENT_SPLIT_RE`) -- look for the
+    value in the NEXT non-delimiter run of `text`, starting at `frag_end`
+    (round 2, #847: `Date of Birth:\\t01/02/1970`, three-space and
+    pipe-joined table-row variants all leaked this way).
+
+    Mirrors `stage6/pii_pass.py::_extend_bare_label_span`'s own hard stop
+    ("it never crosses a newline") rather than importing it: that function
+    computes how far to CUT a span for full deletion (label discarded with
+    it), the opposite of what a value-only scrub needs, and `pii.py`
+    importing FROM `pii_pass.py` would reverse pii_pass's existing
+    top-level `from .normalization.pii import ...` into a same-package
+    import cycle. The bound here is intentionally narrower: only as far as
+    the delimiter's OWN next run, not to the next known sibling label --
+    correct for a value shape as specific as a date or an SSN, and it
+    never has to recognise a sibling label's vocabulary to stay safe."""
+    delim = _PII_FRAGMENT_SPLIT_RE.match(text, frag_end)
+    if delim is None or "\n" in delim.group():
+        return None
+    run_start = delim.end()
+    nxt = _PII_FRAGMENT_SPLIT_RE.search(text, run_start)
+    run_end = nxt.start() if nxt else len(text)
+    vm = value_re.search(text, run_start, run_end)
+    return (vm.start(), vm.end()) if vm else None
 
 
 def redact_pre_llm_values(text: str | None) -> str:
@@ -530,19 +575,29 @@ def redact_pre_llm_values(text: str | None) -> str:
     WITHHOLD_POLICY category (marital status, visa, ...) is out of scope
     here; those stay render-time-only per #820/#821.
 
+    Matched at `SCOPE_PERSONAL_AND_APPENDIX` (the full policy) rather than
+    `SCOPE_ALL_CODES`: scope decides which row applies to which taxonomy
+    CODE at render time, and pre-LLM nothing has been classified into a
+    code yet, so filtering by scope here only dropped real DOB fragments
+    ("Born: 01/02/1970", round 2). Filtering is by CATEGORY instead
+    (`_PRE_LLM_VALUE_RE`'s keys).
+
     Idempotent: a value already replaced has no digits left for
     `_PRE_LLM_VALUE_RE` to find, so a second pass is a no-op."""
     text = str(text or "")
     if not text:
         return text
     edits: list[tuple[int, int]] = []
-    for m in _pii_matches(text, scope=SCOPE_ALL_CODES):
+    for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX):
         value_re = _PRE_LLM_VALUE_RE.get(m.category)
         if value_re is None:
             continue
         vm = value_re.search(text, m.start, m.end)
-        if vm and (not edits or vm.start() >= edits[-1][1]):
-            edits.append((vm.start(), vm.end()))
+        span = (vm.start(), vm.end()) if vm else None
+        if span is None and text[m.start:m.end].rstrip().endswith(":"):
+            span = _pre_llm_value_span_in_next_run(text, m.end, value_re)
+        if span and (not edits or span[0] >= edits[-1][1]):
+            edits.append(span)
     if not edits:
         return text
     out: list[str] = []
@@ -553,6 +608,48 @@ def redact_pre_llm_values(text: str | None) -> str:
         pos = end
     out.append(text[pos:])
     return "".join(out)
+
+
+def redact_pre_llm_value_of_category(text: str | None, category: str) -> str:
+    """Replace the FIRST value-shape match for a known pre-LLM `category` in
+    `text` with `PRE_LLM_PLACEHOLDER` -- for a value cell whose OWN text
+    carries no label at all (round 2, #847 table fix: the label is a
+    SIBLING cell, identified separately by `pre_llm_bare_label_category`).
+    A no-op if `category` isn't one of `_PRE_LLM_VALUE_RE`'s keys, or no
+    value shape is found."""
+    text = str(text or "")
+    value_re = _PRE_LLM_VALUE_RE.get(category)
+    if not text or value_re is None:
+        return text
+    vm = value_re.search(text)
+    if vm is None:
+        return text
+    return text[:vm.start()] + PRE_LLM_PLACEHOLDER + text[vm.end():]
+
+
+def pre_llm_bare_label_category(text: str | None) -> str | None:
+    """When `text` (typically ONE table cell, taken alone) is nothing but a
+    bare DOB/SSN label with no value anywhere in it -- the whole string
+    matches a label fragment, ending in `:`, and no value shape is found
+    after it -- the category it names, else None.
+
+    Round 2 (#847): a label cell and its value cell are siblings in the
+    SAME row, never a `_PII_FRAGMENT_SPLIT_RE` delimiter apart within one
+    cell's own text, so `redact_pre_llm_values`'s in-text extension (which
+    only looks inside `text`) cannot see across the cell boundary. The
+    caller (`core/docx_structure_extractor.py`) uses this to decide
+    whether to scrub the VALUE shape out of the NEXT cell in the row."""
+    text = str(text or "")
+    if not text or not text.rstrip().endswith(":"):
+        return None
+    for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX):
+        if m.category not in _PRE_LLM_VALUE_RE:
+            continue
+        if m.start == 0 and m.end == len(text):
+            value_re = _PRE_LLM_VALUE_RE[m.category]
+            if value_re.search(text, m.start, m.end) is None:
+                return m.category
+    return None
 
 
 # ---------------------------------------------------------------------------

@@ -66,6 +66,8 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     WithheldItem,
     _pii_fragments,
     _pii_matches,
+    pre_llm_bare_label_category,
+    redact_pre_llm_value_of_category,
     redact_pre_llm_values,
 )
 from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
@@ -576,3 +578,92 @@ def test_redact_pre_llm_values_is_idempotent():
     once = redact_pre_llm_values("Date of Birth: 01/02/1970")
     twice = redact_pre_llm_values(once)
     assert once == twice == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+# --------------------------------------------------------------------------
+# round 2 (#847): value after a hard delimiter, whole-date shapes, and
+# category-not-scope selection ("Born: ..." is SCOPE_PERSONAL_AND_APPENDIX,
+# not SCOPE_ALL_CODES -- scope is a render-time routing concept and there
+# is no taxonomy code yet at the point this scrub runs).
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_value_after_a_tab_is_scrubbed():
+    out = redact_pre_llm_values("Date of Birth:\t01/02/1970")
+    assert out == f"Date of Birth:\t{PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_value_after_three_plus_spaces_is_scrubbed():
+    out = redact_pre_llm_values("Date of Birth:    01/02/1970")
+    assert out == f"Date of Birth:    {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_value_after_a_pipe_is_scrubbed():
+    out = redact_pre_llm_values("Date of Birth: | 01/02/1970")
+    assert out == f"Date of Birth: | {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_never_extends_across_a_newline():
+    # The label's own line has nothing after it -- a value on the NEXT
+    # line is a different field and must not be pulled across.
+    out = redact_pre_llm_values("Date of Birth:\nSSN: 123-45-6789")
+    assert out == f"Date of Birth:\nSSN: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_iso_date_takes_the_whole_value():
+    out = redact_pre_llm_values("Date of Birth: 1970-01-02")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_dotted_date_takes_the_whole_value():
+    out = redact_pre_llm_values("Date of Birth: 12.03.1970")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_untouched_iso_date_publication_no_dob_label():
+    text = "Published 2020-05-01 in Journal X."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_born_colon_is_scrubbed_regardless_of_scope():
+    # "Born:" is CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX -- excluded by the
+    # round-1 SCOPE_ALL_CODES filter. Pre-LLM there is no taxonomy code to
+    # route by, so category alone decides.
+    out = redact_pre_llm_values("Born: 01/02/1970")
+    assert out == f"Born: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_untouched_born_with_no_colon_or_date():
+    text = "Born in New York, he later trained as a surgeon."
+    assert redact_pre_llm_values(text) == text
+
+
+# --------------------------------------------------------------------------
+# pre_llm_bare_label_category / redact_pre_llm_value_of_category -- the
+# label-cell / value-cell table fix (round 2, #847).
+# --------------------------------------------------------------------------
+
+def test_pre_llm_bare_label_category_detects_a_whole_cell_dob_label():
+    assert pre_llm_bare_label_category("Date of Birth:") == CAT_DATE_OF_BIRTH
+
+
+def test_pre_llm_bare_label_category_detects_a_whole_cell_ssn_label():
+    assert pre_llm_bare_label_category("SSN:") == CAT_SSN
+
+
+def test_pre_llm_bare_label_category_none_for_an_ordinary_cell():
+    assert pre_llm_bare_label_category("Notes") is None
+
+
+def test_pre_llm_bare_label_category_none_when_the_cell_already_has_a_value():
+    # Whole match already covers the value -- nothing "bare" about it.
+    assert pre_llm_bare_label_category("Date of Birth: 01/02/1970") is None
+
+
+def test_redact_pre_llm_value_of_category_replaces_the_value_cell():
+    out = redact_pre_llm_value_of_category("01/02/1970", CAT_DATE_OF_BIRTH)
+    assert out == PRE_LLM_PLACEHOLDER
+
+
+def test_redact_pre_llm_value_of_category_untouched_when_no_shape_matches():
+    text = "Notes"
+    assert redact_pre_llm_value_of_category(text, CAT_DATE_OF_BIRTH) == text
