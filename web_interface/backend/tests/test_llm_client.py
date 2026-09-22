@@ -977,8 +977,16 @@ def test_retry_backoff_uses_equal_jitter(monkeypatch):
     import unified_pipeline.llm_client as mod
     from botocore.exceptions import ClientError
 
+    import random
+
     sleeps = []
     monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+    # Pin the jitter a quarter of the way up [0, base/2], so a constant wait
+    # (base, or base/2) fails instead of landing on an inclusive bound.
+    monkeypatch.setattr(random, "uniform", lambda lo, hi: lo + (hi - lo) * 0.25)
+    # If the error below ever turns outage-class, fail fast instead of spinning
+    # against the real-clock 1800s outage budget with sleep mocked.
+    monkeypatch.setenv("CVICHE_LLM_OUTAGE_BUDGET_SECONDS", "0.01")
 
     # Not ThrottlingException: outage-class since #912, on its own backoff.
     throttle = ClientError({"Error": {"Code": "ModelTimeoutException"}}, "Converse")
@@ -989,10 +997,9 @@ def test_retry_backoff_uses_equal_jitter(monkeypatch):
     with pytest.raises(ClientError):
         mod._call_with_retry(always_throttled, retry_count=3)
 
-    # retry_count=3 -> sleeps before attempts 1,2,3 with exponential bases 1,2,4.
-    assert len(sleeps) == 3
-    for wait, base in zip(sleeps, (1, 2, 4)):
-        assert base / 2 <= wait <= base
+    # retry_count=3 -> sleeps before attempts 1,2,3 with exponential bases 1,2,4;
+    # each wait is base/2 + uniform(0, base/2) = 0.625 * base under the pin.
+    assert sleeps == [0.625, 1.25, 2.5]
 
 
 def test_call_semaphore_released_on_success_and_failure(monkeypatch):
