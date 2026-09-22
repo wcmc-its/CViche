@@ -142,6 +142,15 @@ AppendixLine = tuple[UnmappedEntry, str]
 # would silently create a third, undocumented reason.
 REASON_NO_RENDER_ROUTE = "no_render_route"
 REASON_RENDERER_DECLINED = "renderer_declined"
+
+# The third REASON_RENDERER_DECLINED mechanism (#839): an M2A/M2B/M2C entry
+# `_create_grant_table` declined as too sparse to table. Named here, not
+# imported from `research_support.py` (a `stage6/sections/*` peer -- see the
+# module-docstring comment above `_REASON_TEXT` for why peers pass constants
+# down instead of importing each other), so `_diversion_message` can tell it
+# apart from the M1 no-research-summary case, which the shared `_REASON_TEXT`
+# string actually describes.
+_DECLINED_GRANT_CODES = frozenset({'M2A', 'M2B', 'M2C'})
 # A record `_add_remaining_to_appendix` bulleted on behalf of
 # `_reconsider_appendix_entries` / `_recover_unrendered_records` (#531-R2
 # finding F1) -- distinct from the two reasons above because it is not
@@ -210,7 +219,7 @@ def _plural_was(count: int) -> str:
 def _diversion_message(code: str, count: int, reason: str,
                         passthrough_codes: frozenset[str]) -> str:
     """The Appendix-diversion warning's human-readable `message` (#531,
-    #531-R2, #842). Four shapes, by *reason*:
+    #531-R2, #839, #842). Five shapes, by *reason*:
 
     - REASON_RECOVERED_UNRENDERED: always names *code* twice (the code that
       classified the record, spelled out rather than left implicit, since
@@ -224,6 +233,10 @@ def _diversion_message(code: str, count: int, reason: str,
       one. Phrased passive ("refused by...") rather than "...declined
       them": the pronoun read wrong in the singular ("1 entry ... declined
       them") (#531-R3 finding r11).
+    - REASON_RENDERER_DECLINED for an M2A/M2B/M2C code (`_DECLINED_GRANT_CODES`,
+      #839): names the research-support renderer's own decline (too sparse
+      to table) -- checked BEFORE the generic branch below, which would
+      otherwise claim these too.
     - REASON_RENDERER_DECLINED for any other routed code (#842's
       failed-section discard -- checked AFTER the passthrough branch above,
       so it never fires for E/G/J, and after excluding
@@ -246,6 +259,10 @@ def _diversion_message(code: str, count: int, reason: str,
         return (f"{code}: {count} {noun} diverted to the Appendix — "
                 f"refused by the passthrough writer for {code} (source "
                 f"section label did not match)")
+    if reason == REASON_RENDERER_DECLINED and code in _DECLINED_GRANT_CODES:
+        return (f"{code}: {count} {noun} diverted to the Appendix — "
+                f"declined by the research-support renderer as too sparse "
+                f"to table")
     if reason == REASON_RENDERER_DECLINED and code != _RESEARCH_SUMMARY_CODE:
         return (f"{code}: {count} {noun} diverted to the Appendix — "
                 f"not placed by the section routed for {code} (see any "
