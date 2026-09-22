@@ -488,10 +488,17 @@ def _clip_leaves_to_next_header(sections: list[SectionRecord]) -> None:
     this function's.
 
     The trailing leaf in document order (no start strictly after it) is
-    left at whatever end `compute_bounds`'s `default_end` gave it -- the
-    document end, or a bounding ancestor's `default_end` passed down the
-    recursion. None of the three mechanisms above produce that value, so
-    this boundary case is outside what the clip needs to reach.
+    left at whatever end it already had going into this function -- usually
+    `compute_bounds`'s own `default_end` (the document end, or a bounding
+    ancestor's `default_end` passed down the recursion), but it can also be
+    `doc_length - 1` from `_repair_out_of_order_section_bounds` when that
+    inherited `default_end` precedes the leaf's own start (e.g.
+    `A@10 > [A1@50], B@20, doc=100`: A1 inherits `default_end` 19 from A;
+    19 < 50, so `_repair_out_of_order_section_bounds` reassigns A1's end to
+    `doc_length - 1` = 99; corpus incidence 0/111). Mechanism #1 above can
+    therefore reach a trailing leaf too -- but having no start after it, a
+    trailing leaf cannot overlap another leaf regardless of where its end
+    came from, so this boundary case needs no clip.
 
     Mutates `sections` in place.
     """

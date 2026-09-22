@@ -340,10 +340,15 @@ def test_two_parents_at_the_same_start_emit_exactly_one_gap():
 
 def test_a_duplicated_parent_record_emits_one_gap():
     # The same parent dict appears twice in section_boundaries (equal
-    # values, distinct objects) -- e.g. stage 1a mapped it twice. Identity
-    # (`is`), not equality, must distinguish "self" from "the other
-    # same-start record" so the second occurrence is suppressed by the
-    # first rather than by itself.
+    # values, distinct objects) -- e.g. stage 1a mapped it twice. List
+    # POSITION, not equality, must distinguish "self" from "the other
+    # same-start record": `first_index_at_start` records the index of the
+    # first boundary seen at each start, and a boundary is suppressed when
+    # its own index differs from that recorded index. Equality can't do
+    # this job -- both copies compare equal, so an equality-keyed "first
+    # one wins" check can't tell which occurrence is which; this is the
+    # only test with two distinct, equal dicts at the same start, so it is
+    # the sole killer of an equality-based regression here.
     parent = _b(["P"], 5, 9, has_children=True)
     boundaries = [parent, dict(parent), _b(["C"], 8, 8)]
     result = extract_leaf_sections_with_boundaries(boundaries, [])
