@@ -162,7 +162,7 @@ def build_raw_content(entries: list[dict]) -> tuple[str, dict[str, dict]]:
     return '\n'.join(lines), id_to_entry
 
 
-def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict], verbose: bool = True) -> dict[str, dict]:
+def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str, dict]:
     """
     Parse LLM JSON output and extract formatted citations per entry ID.
 
@@ -195,26 +195,19 @@ def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict], verbose: boo
                 if entry_id in id_to_entry:
                     id_to_formatted[entry_id] = fields
     except json.JSONDecodeError as e:
-        # Logged unconditionally (not gated by verbose): parse_llm_output is
-        # always called with verbose=False from _format_batch, which can run
-        # on a pool thread, so this is the only trace a malformed batch
-        # leaves in the run log.
+        # parse_llm_output can run on a pool thread (#881 step 6), so this
+        # log call is the only trace a malformed batch leaves in the run log.
         logger.warning("Could not parse LLM JSON output: %s (response preview: %s...)", e, llm_output[:500])
-        if verbose:
-            print(f"  Warning: Could not parse LLM JSON output: {e}")
-            # Print first 500 chars for debugging
-            print(f"  Response preview: {llm_output[:500]}...")
 
     return id_to_formatted
 
 
-def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
+def call_llm_formatter(raw_content: str) -> tuple:
     """
     Call LLM to reformat citations.
 
     Args:
         raw_content: Raw content string with entry IDs
-        verbose: Whether to print progress
 
     Returns:
         Tuple of (LLM response string, usage dict) or (None, None) if failed
@@ -222,9 +215,6 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
     try:
         prompt = CITATION_FORMATTER_PROMPT.format(raw_content=raw_content)
         messages = [{"role": "user", "content": prompt}]
-
-        if verbose:
-            print(f"  Calling LLM for citation formatting...")
 
         llm_result = call_llm(
             stage="stage_5d",
@@ -252,93 +242,56 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
         return result_text, usage
 
     except Exception as e:
-        # Logged unconditionally (not gated by verbose): call_llm_formatter
-        # is always called with verbose=False from _format_batch, which can
-        # run on a pool thread, so this is the only trace a swallowed batch
-        # (#810) leaves in the run log.
+        # call_llm_formatter can run on a pool thread (#881 step 6), so this
+        # log call is the only trace a swallowed batch (#810) leaves in the
+        # run log.
         logger.exception("LLM formatting failed: %s: %s", type(e).__name__, e)
-        if verbose:
-            import traceback
-            print(f"  Warning: LLM formatting failed: {type(e).__name__}: {e}")
-            traceback.print_exc()
         return None, None
 
 
 class _BatchResult(NamedTuple):
-    """One batch's LLM call and parse -- everything run_stage_5d's
-    accumulation loop needs, computed without writing to any shared dict.
+    """One batch's LLM call and parse, computed without writing to any
+    shared dict (#881 step 6).
+
+    id_to_formatted is None when no parse ran -- distinct from {} (parsed,
+    found nothing). usage is None only when the call itself failed; usage
+    and llm_output are NOT both-or-neither (a billed call can still return
+    empty llm_output).
     """
-    id_to_formatted: dict[str, dict]
+    id_to_formatted: dict[str, dict] | None
     id_to_entry: dict[str, dict]
     usage: dict | None
-    parsed_count: int | None
 
 
 def _format_batch(batch: list[dict]) -> _BatchResult:
-    """Format one batch of non-enriched citations; the pure body of
-    run_stage_5d's loop, run inside map_in_order.
-
-    Runs on whichever thread the call lands on for a parallel run
-    (workers > 1). Nothing here prints: call_llm_formatter and
-    parse_llm_output are always called with verbose=False regardless of
-    run_stage_5d's own verbose flag, so a swallowed batch failure (#810)
-    cannot land mid-batch on a pool thread's stdout. That failure is not
-    silenced, though -- call_llm_formatter and parse_llm_output log it
-    unconditionally via logger.exception / logger.warning, which is
-    thread-safe and reaches the run log the way the pre-#881 print did.
-    (The orchestrator's thread-routed stdout, `_RoutedStdout`, does fall
-    back to a ContextVar that map_in_order's copy_context() inherits, so a
-    pool-thread print would in fact be captured -- but this file still
-    keeps prints off pool threads, per policy.) run_stage_5d prints from
-    _batch_progress_printer on the calling thread instead.
-
-    ``usage`` is None exactly when the call failed (call_llm_formatter's
-    swallowed ``except Exception`` returns ``(None, None)``, unchanged by
-    this move); run_stage_5d's accumulation loop uses that to skip the
-    token/cost totals for the batch. Parsing is gated separately, on
-    ``llm_output`` truthiness -- matching the pre-#881 ``if llm_output:``
-    gate exactly, because ``usage`` and ``llm_output`` are NOT always
-    both-or-neither: a successful call can still return an empty
-    ``llm_output`` string alongside a real, non-None ``usage`` dict (the
-    model billed tokens but produced no content). ``parsed_count`` is
-    ``None`` in that case -- "no parse happened" is a different state from
-    "parsed and found nothing" -- so the printer only appends the "Parsed"
-    line when a parse actually ran. id_to_entry maps ids to the live entry
-    dicts from ``batch``, which is fine to build here -- build_raw_content
-    only reads them, it never writes.
+    """Pure body of run_stage_5d's loop, run inside map_in_order (#881
+    step 6). Never prints (call_llm_formatter / parse_llm_output take no
+    verbose param) so a pool thread can't interleave stdout; failures are
+    logged instead. Parsing gates on llm_output truthiness, not on usage
+    being non-None -- see _BatchResult.
     """
     raw_content, id_to_entry = build_raw_content(batch)
-    llm_output, usage = call_llm_formatter(raw_content, verbose=False)
-    if llm_output:
-        id_to_formatted = parse_llm_output(llm_output, id_to_entry, verbose=False)
-        parsed_count: int | None = len(id_to_formatted)
-    else:
-        id_to_formatted = {}
-        parsed_count = None
-    return _BatchResult(id_to_formatted, id_to_entry, usage, parsed_count)
+    llm_output, usage = call_llm_formatter(raw_content)
+    id_to_formatted = parse_llm_output(llm_output, id_to_entry) if llm_output else None
+    return _BatchResult(id_to_formatted, id_to_entry, usage)
 
 
 def _batch_progress_printer(total_batches: int) -> Callable[[int, _BatchResult], None]:
     """Build a map_in_order ``on_result`` callback: one atomic print per
-    finished batch, numbered by completion -- same shape as stage 3b's
-    ``_group_progress_printer`` / stage 2's ``_section_progress_printer``.
-
-    "Processing batch N/M (K citations)..." matches none of
-    orchestrator.py's PROGRESS_PATTERNS both before and after this change
-    (pattern 1 needs digits right after "Processing" or "Processing
-    section", not "Processing batch"; checked directly against the pattern
-    list), so there is no progress-bar contract to preserve for 5d. The
-    wording stays exactly what it was -- not the bracketed "[N/M]" form,
-    which WOULD match pattern 3 -- so this stays inert, same as dev.
+    finished batch, numbered by completion (#881 step 6). The wording
+    matches none of orchestrator.PROGRESS_PATTERNS -- see
+    test_5d_batch_progress_does_not_match_progress_patterns.
     """
     done = 0
 
-    def on_result(index: int, result: _BatchResult) -> None:
+    def on_result(_index: int, result: _BatchResult) -> None:
+        # map_in_order always passes the submission index; unused here
+        # because this callback only reports completion order.
         nonlocal done
         done += 1
         lines = [f"\n  Processing batch {done}/{total_batches} ({len(result.id_to_entry)} citations)..."]
-        if result.parsed_count is not None:
-            lines.append(f"  Parsed {result.parsed_count} formatted citations")
+        if result.id_to_formatted is not None:
+            lines.append(f"  Parsed {len(result.id_to_formatted)} formatted citations")
         print("\n".join(lines))
 
     return on_result
@@ -411,14 +364,14 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
     observed_model = None
 
     batches = make_batches(non_enriched, batch_size)
-    _printer = _batch_progress_printer(len(batches)) if verbose else None
+    printer = _batch_progress_printer(len(batches)) if verbose else None
 
     # map_in_order's RETURN VALUE is in submission order regardless of
     # workers (its own contract); `on_result` is only for the progress
     # line, which is allowed to print in completion order. Accumulating
     # from `on_result` instead of this return value would silently switch
     # to completion order under workers>1.
-    results = map_in_order(_format_batch, [(batch,) for batch in batches], workers, on_result=_printer)
+    results = map_in_order(_format_batch, [(batch,) for batch in batches], workers, on_result=printer)
 
     # Accumulation happens ONLY here, on the calling thread, over `results`
     # in submission order -- never inside _format_batch -- so total_cost's
@@ -437,8 +390,10 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
             total_cost += result.usage.get('cost', 0.0)
             observed_model = result.usage.get('model') or observed_model
 
-        # Update entries with formatted data
-        for entry_id, formatted_data in result.id_to_formatted.items():
+        # Update entries with formatted data. id_to_formatted is None when
+        # no parse ran (see _BatchResult) -- `or {}` makes that a no-op,
+        # same as the {} (parsed, found nothing) case.
+        for entry_id, formatted_data in (result.id_to_formatted or {}).items():
             entry = result.id_to_entry.get(entry_id)
             if entry:
                 if 'extracted_fields' not in entry:
