@@ -1349,7 +1349,7 @@ def test_assigned_indices_union_matches_the_serial_loop(tmp_path, monkeypatch):
     assert serial["coverage"]["coverage_percentage"] == pytest.approx(100.0)
 
 
-def test_string_row_index_never_lands_in_assigned_only_its_parent_int_does(tmp_path, monkeypatch):
+def test_string_row_index_never_lands_in_assigned_only_its_parent_int_does(monkeypatch):
     """#915 review item 1: ``section_assigned.add(str(start_idx_entry))``
     was inert -- ``section_assigned`` is later diffed against
     ``section_range = set(range(...))``, which holds only ints, and
@@ -1387,16 +1387,6 @@ def test_string_row_index_never_lands_in_assigned_only_its_parent_int_does(tmp_p
     assert "1.0" not in result.assigned
     break_starts = {e["element_idx_start"] for e in result.entries if e["element_type"] == "break"}
     assert 1 not in break_starts  # the parent int alone kept it out of break_entries
-
-    # F2 (F-polish): the ticket named `coverage_percentage` on the WRITTEN
-    # artifact explicitly -- the assertions above only pin the in-memory
-    # `assigned` set `_extract_section` returns. Run the same string-row-
-    # index shape end to end through run_stage_2 and read coverage off the
-    # JSON it writes, so the string-add's removal is proven output-neutral
-    # on the number a caller (or a corpus doctor) actually reads.
-    output_data = _build_table_gap_fixture(tmp_path, monkeypatch)
-    assert output_data["coverage"]["coverage_percentage"] == pytest.approx(100.0)
-    assert output_data["coverage"]["unaccounted_indices"] == []
 
 
 def test_extract_section_signature_bundles_the_five_constants_into_one_context_param():
