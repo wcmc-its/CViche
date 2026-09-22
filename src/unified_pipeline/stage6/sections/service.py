@@ -544,7 +544,7 @@ class ServiceSection:
             return
 
         if self.verbose:
-            print(f"Filling Service Activities ({len(q_entries)} entries)...")
+            logger.info("Filling Service Activities (%s entries)...", len(q_entries))
 
         # Reroute Q2 entries that are actually journal reviewing to Q4D.
         # Handles misclassified single-line entries ("Reviewer" role for a
@@ -557,7 +557,7 @@ class ServiceSection:
         rerouted_to_journal, actual_board_entries = _route_q2_entries(q2_entries)
 
         if rerouted_to_journal and self.verbose:
-            print(f"  Rerouted {len(rerouted_to_journal)} Q2 entries/lines to Journal Reviewing")
+            logger.info("  Rerouted %s Q2 entries/lines to Journal Reviewing", len(rerouted_to_journal))
 
         q4d_entries.extend(rerouted_to_journal)
         q2_entries = actual_board_entries
@@ -638,7 +638,7 @@ class ServiceSection:
             regional_count = len(entries_by_scope['Regional'])
             national_count = len(entries_by_scope['National'])
             intl_count = len(entries_by_scope['International'])
-            print(f"  Service on Boards: {regional_count} Regional, {national_count} National, {intl_count} International")
+            logger.info("  Service on Boards: %s Regional, %s National, %s International", regional_count, national_count, intl_count)
 
         # Fill each table with its entries
         for scope, scope_entries in entries_by_scope.items():
