@@ -528,6 +528,41 @@ def group_entries_by_hierarchy(entries: list[dict]) -> dict[str, list[dict]]:
     return groups
 
 
+def _parse_t_validation_response(content: str) -> list:
+    """Parse the T-validation LLM response into its list of reclassifications."""
+    # Handle both array and object responses
+    result = json.loads(content)
+    if isinstance(result, dict):
+        # If wrapped in an object, try to find the array
+        if "results" in result:
+            reclassifications = result["results"]
+        elif "entries" in result:
+            reclassifications = result["entries"]
+        elif "classifications" in result:
+            reclassifications = result["classifications"]
+        else:
+            # An unrecognized wrapper shape is malformed, not a puzzle to
+            # guess at: reaching for "the first dict value" made an
+            # unexpected response shape look like a valid one instead of
+            # a visible, logged failure.
+            logger.warning(
+                "Stage 3b T-validation: response object has none of "
+                "results/entries/classifications (keys=%s); treating as "
+                "no reclassifications", list(result.keys())
+            )
+            reclassifications = []
+    else:
+        reclassifications = result
+
+    if not isinstance(reclassifications, list):
+        logger.warning(
+            "Stage 3b T-validation: reclassifications was %s, not a "
+            "list; treating as none", type(reclassifications).__name__
+        )
+        reclassifications = []
+    return reclassifications
+
+
 def validate_t_classifications(
     entries: list[dict],
     taxonomy: dict
@@ -607,36 +642,7 @@ Respond with a JSON array of objects, one per entry:
         # Parse response
         content = llm_result["content"]
 
-        # Handle both array and object responses
-        result = json.loads(content)
-        if isinstance(result, dict):
-            # If wrapped in an object, try to find the array
-            if "results" in result:
-                reclassifications = result["results"]
-            elif "entries" in result:
-                reclassifications = result["entries"]
-            elif "classifications" in result:
-                reclassifications = result["classifications"]
-            else:
-                # An unrecognized wrapper shape is malformed, not a puzzle to
-                # guess at: reaching for "the first dict value" made an
-                # unexpected response shape look like a valid one instead of
-                # a visible, logged failure.
-                logger.warning(
-                    "Stage 3b T-validation: response object has none of "
-                    "results/entries/classifications (keys=%s); treating as "
-                    "no reclassifications", list(result.keys())
-                )
-                reclassifications = []
-        else:
-            reclassifications = result
-
-        if not isinstance(reclassifications, list):
-            logger.warning(
-                "Stage 3b T-validation: reclassifications was %s, not a "
-                "list; treating as none", type(reclassifications).__name__
-            )
-            reclassifications = []
+        reclassifications = _parse_t_validation_response(content)
 
         valid_codes = _valid_taxonomy_codes(taxonomy)
 
@@ -720,6 +726,8 @@ Respond with a JSON array of objects, one per entry:
 
         return updated_entries, stats
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception as exc:
         logger.exception(
             "Stage 3b T-validation failed",
@@ -920,6 +928,8 @@ Fragment at index {idx}:
 
         return entries, stats
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception as e:
         logger.exception(
             "Stage 3b fragment reconnection failed",
