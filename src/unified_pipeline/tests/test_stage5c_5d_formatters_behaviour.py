@@ -29,6 +29,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -361,7 +362,7 @@ def test_5d_parse_llm_output_well_formed_direct_json():
         "CIT-0001": {"formatted_citation": "Smith JA. Title one. J Med. 2020."},
         "CIT-0002": {"formatted_citation": "Jones MB. Title two. J Med. 2021."},
     })
-    parsed = s5d.parse_llm_output(llm_output, id_map, verbose=False)
+    parsed = s5d.parse_llm_output(llm_output, id_map)
     assert parsed["CIT-0001"]["formatted_citation"] == "Smith JA. Title one. J Med. 2020."
     assert parsed["CIT-0002"]["formatted_citation"] == "Jones MB. Title two. J Med. 2021."
 
@@ -374,7 +375,7 @@ def test_5d_parse_llm_output_filters_out_an_id_the_llm_invented():
         "CIT-0001": {"formatted_citation": "real one"},
         "CIT-9999": {"formatted_citation": "the LLM invented this id"},
     })
-    parsed = s5d.parse_llm_output(llm_output, id_map, verbose=False)
+    parsed = s5d.parse_llm_output(llm_output, id_map)
     assert "CIT-0001" in parsed
     assert "CIT-9999" not in parsed
 
@@ -382,7 +383,7 @@ def test_5d_parse_llm_output_filters_out_an_id_the_llm_invented():
 def test_5d_parse_llm_output_missing_id_is_simply_absent():
     id_map = {"CIT-0001": {}, "CIT-0002": {}}
     llm_output = json.dumps({"CIT-0001": {"formatted_citation": "only this came back"}})
-    parsed = s5d.parse_llm_output(llm_output, id_map, verbose=False)
+    parsed = s5d.parse_llm_output(llm_output, id_map)
     assert "CIT-0001" in parsed
     assert "CIT-0002" not in parsed
 
@@ -396,15 +397,14 @@ def test_5d_parse_llm_output_extracts_embedded_json_from_prose():
         + json.dumps({"CIT-0001": {"formatted_citation": "extracted from prose"}})
         + "\nHope that helps!"
     )
-    parsed = s5d.parse_llm_output(llm_output, id_map, verbose=False)
+    parsed = s5d.parse_llm_output(llm_output, id_map)
     assert parsed["CIT-0001"]["formatted_citation"] == "extracted from prose"
 
 
 def test_5d_parse_llm_output_malformed_json_returns_empty_dict():
     id_map = {"CIT-0001": {}}
-    # Has a brace-delimited span but it is not valid JSON inside. verbose=True
-    # to also exercise the warning-print branch on the way to the empty dict.
-    parsed = s5d.parse_llm_output("{not: valid, json here}", id_map, verbose=True)
+    # Has a brace-delimited span but it is not valid JSON inside.
+    parsed = s5d.parse_llm_output("{not: valid, json here}", id_map)
     assert parsed == {}
 
 
@@ -413,7 +413,7 @@ def test_5d_parse_llm_output_no_braces_at_all_returns_empty_dict():
     # fails, then re.search finds no {...} span, so parse_llm_output returns
     # empty without ever attempting a second json.loads.
     id_map = {"CIT-0001": {}}
-    parsed = s5d.parse_llm_output("Sorry, I cannot format these citations.", id_map, verbose=False)
+    parsed = s5d.parse_llm_output("Sorry, I cannot format these citations.", id_map)
     assert parsed == {}
 
 
@@ -429,12 +429,12 @@ def test_5d_parse_llm_output_embedded_json_also_filters_invented_ids():
             "CIT-4242": {"formatted_citation": "invented, must be filtered"},
         })
     )
-    parsed = s5d.parse_llm_output(llm_output, id_map, verbose=False)
+    parsed = s5d.parse_llm_output(llm_output, id_map)
     assert list(parsed.keys()) == ["CIT-0001"]
 
 
 def test_5d_parse_llm_output_empty_string_returns_empty_dict():
-    parsed = s5d.parse_llm_output("", {"CIT-0001": {}}, verbose=False)
+    parsed = s5d.parse_llm_output("", {"CIT-0001": {}})
     assert parsed == {}
 
 
@@ -444,7 +444,7 @@ def test_5d_parse_llm_output_empty_string_returns_empty_dict():
 
 def test_5d_call_llm_formatter_returns_text_and_usage_tuple(monkeypatch):
     monkeypatch.setattr(s5d, "call_llm", lambda **kw: _llm_result('{"CIT-0001": {}}'))
-    text, usage = s5d.call_llm_formatter("raw content", verbose=False)
+    text, usage = s5d.call_llm_formatter("raw content")
     assert text == '{"CIT-0001": {}}'
     assert usage["model"] == "sentinel-model"
     assert usage["total_tokens"] == 18
@@ -455,10 +455,45 @@ def test_5d_call_llm_formatter_exception_arm_returns_none_none(monkeypatch):
         raise ValueError("bad request")
 
     monkeypatch.setattr(s5d, "call_llm", _boom)
-    # verbose=True to also exercise the warning-print + traceback branch.
-    text, usage = s5d.call_llm_formatter("raw content", verbose=True)
+    text, usage = s5d.call_llm_formatter("raw content")
     assert text is None
     assert usage is None
+
+
+# ---------------------------------------------------------------------------
+# stage_5d: _format_batch / _BatchResult -- id_to_formatted's three states
+# (#918 review point #2: None = no parse ran, {} = parsed and found
+# nothing, non-empty = parsed. One field, not two.)
+# ---------------------------------------------------------------------------
+
+def test_5d_format_batch_id_to_formatted_is_none_when_the_call_raises(monkeypatch):
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: (_ for _ in ()).throw(ValueError("boom")))
+    result = s5d._format_batch([{"taxonomy_code": "S1", "text": "x"}])
+    assert result.usage is None
+    assert result.id_to_formatted is None
+
+
+def test_5d_format_batch_id_to_formatted_is_none_on_a_billed_empty_response(monkeypatch):
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: _llm_result(""))
+    result = s5d._format_batch([{"taxonomy_code": "S1", "text": "x"}])
+    assert result.usage is not None
+    assert result.id_to_formatted is None
+
+
+def test_5d_format_batch_id_to_formatted_is_empty_dict_when_parse_finds_nothing(monkeypatch):
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: _llm_result("no braces here at all"))
+    result = s5d._format_batch([{"taxonomy_code": "S1", "text": "x"}])
+    assert result.usage is not None
+    assert result.id_to_formatted == {}
+
+
+def test_5d_format_batch_id_to_formatted_is_non_empty_when_parse_succeeds(monkeypatch):
+    monkeypatch.setattr(
+        s5d, "call_llm",
+        lambda **kw: _llm_result(json.dumps({"CIT-0001": {"formatted_citation": "cite"}})),
+    )
+    result = s5d._format_batch([{"taxonomy_code": "S1", "text": "x"}])
+    assert result.id_to_formatted == {"CIT-0001": {"formatted_citation": "cite"}}
 
 
 # ---------------------------------------------------------------------------
@@ -811,6 +846,59 @@ def test_5d_batch_progress_lines_are_monotonic_and_unspliced(tmp_path, monkeypat
     for i, line in enumerate(out):
         if "Processing batch" in line and marker in line:
             assert out[i + 1].strip().startswith("Parsed"), out[i:i + 2]
+
+
+# mrj4001's point #1 on PR #918: importing
+# web_interface.backend.app.pipeline.orchestrator directly from this
+# self-contained pipeline test file is mechanically possible (verified by
+# hand) but not viable to do at module scope here -- its import
+# permanently replaces process-wide sys.stdout with `_RoutedStdout`
+# (orchestrator.py's own docstring: "Installed once, permanently, at
+# import") and pulls in sqlalchemy / app.models / app.storage, coupling
+# this DB-free pipeline test file to the backend layer for one regex
+# list. So: read the real source text instead of importing it, and pin
+# it -- if PROGRESS_PATTERNS' source ever changes, this assertion fails
+# and forces a re-check of the "Processing batch" claim below, rather
+# than a progress bar silently starting to move.
+_ORCHESTRATOR_PATH = (
+    _SRC.parent / "web_interface" / "backend" / "app" / "pipeline" / "orchestrator.py"
+)
+_PROGRESS_PATTERNS_SOURCE = (
+    "PROGRESS_PATTERNS = [\n"
+    '    # "Processing section 5 of 10" or "Processing 5/10"\n'
+    "    re.compile(r'(?:Processing|Extracting|Mapping|Classifying|Enriching)"
+    r"\s+(?:section\s+)?(\d+)\s*(?:of|/)\s*(\d+)', re.IGNORECASE)," "\n"
+    '    # "Section 5/10" or "Entry 5/10"\n'
+    "    re.compile(r'(?:Section|Entry|Item|Chunk|Node|Header|Publication|Grant|Position)"
+    r"\s*(\d+)\s*(?:of|/)\s*(\d+)', re.IGNORECASE)," "\n"
+    '    # "[5/10]" format\n'
+    r"    re.compile(r'\[(\d+)\s*/\s*(\d+)\]')," "\n"
+    '    # "5 of 10 sections" or "5 of 10 entries"\n'
+    "    re.compile(r'(\\d+)\\s+of\\s+(\\d+)\\s+(?:sections?|entries?|items?|chunks?|nodes?|"
+    "headers?|publications?|grants?|positions?)', re.IGNORECASE),\n"
+    "]"
+)
+
+
+def test_5d_batch_progress_does_not_match_progress_patterns():
+    source = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+    start = source.index("PROGRESS_PATTERNS = [")
+    end = source.index("\n]", start) + len("\n]")
+    block = source[start:end]
+    assert block == _PROGRESS_PATTERNS_SOURCE, (
+        "orchestrator.PROGRESS_PATTERNS' source changed -- re-check whether "
+        "'Processing batch N/M (K citations)...' still matches none of it, "
+        "then update the pin above"
+    )
+
+    # Compiled from the block just read (not hand-retyped): pattern + an
+    # optional trailing re.IGNORECASE flag, per re.compile(r'...', ...) call.
+    calls = re.findall(r"re\.compile\(r'((?:[^'\\]|\\.)*)'(?:,\s*(re\.[A-Z]+))?\)", block)
+    assert len(calls) == 4, "expected exactly 4 re.compile(...) calls in the block"
+    patterns = [re.compile(p, getattr(re, flag.split(".")[1]) if flag else 0) for p, flag in calls]
+
+    line = "\n  Processing batch 3/10 (5 citations)..."
+    assert not any(p.search(line) for p in patterns)
 
 
 def test_5d_batches_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):

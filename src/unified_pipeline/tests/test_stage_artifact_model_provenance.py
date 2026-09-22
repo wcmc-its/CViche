@@ -57,7 +57,7 @@ def _fake_llm_result(content="{}"):
 def test_5d_usage_carries_the_model_the_api_returned(monkeypatch):
     from unified_pipeline import stage_5d_citation_formatter as s5d
     monkeypatch.setattr(s5d, "call_llm", lambda **kw: _fake_llm_result('{"a":1}'))
-    _text, usage = s5d.call_llm_formatter("some raw content", verbose=False)
+    _text, usage = s5d.call_llm_formatter("some raw content")
     assert usage is not None, "the helper must return usage for this to work"
     assert usage.get("model") == SENTINEL, \
         "the observed model is not carried out of the call (#459)"
