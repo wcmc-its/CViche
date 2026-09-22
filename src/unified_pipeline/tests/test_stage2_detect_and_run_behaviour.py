@@ -1266,6 +1266,32 @@ def test_cancel_raised_in_one_section_starts_no_further_llm_call(tmp_path, monke
     assert started_after_cancel == 0
 
 
+def test_detect_entries_for_section_raising_propagates_and_writes_no_output(tmp_path, monkeypatch):
+    """#915 review item 5: detect_entries_for_section normally swallows an
+    LLM/JSON/network error per batch (logged, next batch continues), but a
+    bug outside that guard would raise out of it. Pin what run_stage_2 does
+    then: the exception propagates (map_in_order's own contract -- first
+    raise cancels the queue and re-raises) and, since that happens before
+    the json.dump that writes stage 2's output, no artifact exists."""
+    target_section = "SECTION 03"
+
+    def flaky_detect(hierarchy_path, *args, **kwargs):
+        if hierarchy_path == [target_section]:
+            raise RuntimeError("synthetic detect_entries_for_section failure")
+        return [], {"cost": 0, "tokens": 0}
+
+    _redirect_output_manager(monkeypatch, tmp_path)
+    docx_path = _build_many_sections_docx(tmp_path)
+    hpath = _build_many_sections_hierarchy(tmp_path, "MANY7")
+    monkeypatch.setattr(stage2, "detect_entries_for_section", flaky_detect)
+
+    with pytest.raises(RuntimeError, match="synthetic detect_entries_for_section failure"):
+        stage2.run_stage_2(str(docx_path), str(hpath), workers=4)
+
+    om = _RealOutputManager(str(docx_path), base_output_dir=tmp_path)
+    assert not om.get_stage2_path().exists()
+
+
 def test_stage2_workers_config_knob_is_read_from_env(monkeypatch):
     # STAGE2_SECTION_WORKERS itself is bound once, at import time, so it
     # can't observe an env var set by a test -- this pins the reader it's

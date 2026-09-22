@@ -1113,6 +1113,15 @@ def _section_progress_printer(hierarchy_paths: list[list[str]]) -> Callable[[int
     *finished*, which stays monotonic however the pool orders completions,
     and the whole block goes out in one print so two sections' lines cannot
     splice (#881).
+
+    ``on_result``'s two arguments are deliberately different orderings:
+    ``index`` is map_in_order's dispatch-order position into the input
+    list (so ``hierarchy_paths[index]`` always names the section that
+    actually finished, whichever order sections complete in), while
+    ``done`` is this closure's own completion counter -- it increments
+    once per call, in call order, so it is always 1, 2, 3... regardless of
+    which ``index`` each call carries. The printed ``[N/M]`` uses ``done``,
+    never ``index``.
     """
     done = 0
 
@@ -1150,6 +1159,17 @@ def _extract_section(
     the queue on the first raise, and any section a pool thread dequeues
     before that shutdown lands raises here too, since the orchestrator's
     cancel is persistent. Sections already in flight finish.
+
+    If ``detect_entries_for_section`` itself raises (it normally does not --
+    its own per-batch ``try``/``except`` swallows an LLM/JSON/network error
+    into a logged warning and moves to the next batch -- but a bug outside
+    that guard, e.g. in ``remove_subset_delimiters``, would propagate), this
+    call is uncaught here too, so it propagates out to map_in_order exactly
+    like a ``cancel_check`` raise: the first exception cancels the queued
+    sections and re-raises, sections already in flight still finish, and the
+    exception then propagates out of run_stage_2's own (unguarded)
+    ``map_in_order`` call -- before the ``json.dump`` that writes stage 2's
+    output file, so no artifact is written for a run that fails this way.
 
     Returns ``(section_entries_in_order, cost_info, section_assigned, lines)``
     instead of mutating run_stage_2's shared ``all_entries`` /
