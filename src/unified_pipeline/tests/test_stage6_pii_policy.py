@@ -792,16 +792,21 @@ def test_920_blocker_every_substring_counter_example_is_withheld(
     """#920 blocker fix, the required regression test: every one of these
     real-corpus-shaped local parts was WRONGLY SPARED by `b0c5d9e`'s bare
     substring check (`_local_part_shares_owner_name`) -- a PII regression
-    against the #833 baseline (82f3744), which withheld all seven. The
+    against the #833 baseline (82f3744), which withheld all seven in the
+    no-owner-name-heading variant (its own entry-level gate already
+    refuses when the heading does not name the owner) but SPARED them
+    per-entry in the shares-name-heading variant (the baseline's gate is
+    entry-wide, so a name-sharing heading spares every value in that
+    entry -- the #920 entry-wide leak this fix also closes). The
     two-conjunct fix (`_email_spared_by_owner_name`) withholds every one
-    of them whether or not the surrounding entry's HEADING also names the
-    owner (`shares_name`): when it does not, the baseline entry-level
-    gate alone already refuses to spare it (barring an incidental
-    single-token overlap from the synthetic `@example.org`/`@example.com`
-    domains sharing "example" with the fallback owner's own name -- never
-    enough on its own to reach the two-token threshold); when it does,
-    the whole-segment check on the local part is what refuses -- the SAME
-    substring-vs-segment distinction that fixes the #920 blocker."""
+    of them in BOTH variants: when the heading does not name the owner,
+    the baseline entry-level gate alone already refuses to spare it
+    (barring an incidental single-token overlap from the synthetic
+    `@example.org`/`@example.com` domains sharing "example" with the
+    fallback owner's own name -- never enough on its own to reach the
+    two-token threshold); when it does, the whole-segment check on the
+    local part is what refuses -- the SAME substring-vs-segment
+    distinction that fixes the #920 blocker."""
     heading = (f"References for {owner_name}" if shares_name
                else "Please see attached documentation for details")
     t = {"text": f"{heading}\n{local_part}@example.org",

@@ -454,7 +454,12 @@ def _third_party_contact_matches(
     # measured on the local corpus: `and`, `edu`, `com`, `gmail`, `email`,
     # `phone`, `number`, `address`, `name`, `this`, `some`, `text`, `room`,
     # `floor`) landing as a WHOLE segment of a third party's local part
-    # rather than a substring inside a longer one. Upgrade path unchanged
+    # rather than a substring inside a longer one. Conjunct (a) is
+    # entry-text-wide, so under the fallback an email's own local part and
+    # domain can supply both matching tokens by themselves (e.g.
+    # `email.desk@example-state.edu` matches fallback tokens `email` and
+    # `edu`), satisfying (a) with no other owner-referencing text in the
+    # entry at all -- corpus incidence today is 0. Upgrade path unchanged
     # in kind from the #833/#920-round-1 docstrings: restrict the fallback
     # in `_owner_name_tokens` to a leading name-shaped run, if a real CV
     # ever shows this narrower false negative
