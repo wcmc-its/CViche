@@ -13,6 +13,7 @@ import os
 import sys
 import json
 import time
+import bisect
 from pathlib import Path
 from collections.abc import Callable
 from docx import Document
@@ -168,6 +169,34 @@ def extract_leaf_sections_with_boundaries(
             if start_idx is not None:
                 parent_sections[hierarchy_path] = {"start": start_idx, "end": end_idx}
 
+    # Precompute, once, what the parent-gap branch below used to rescan
+    # `section_boundaries` for on every parent (#916 rework):
+    # - `starts_sorted` turns "smallest start strictly greater than X" into
+    #   a single `bisect_right` per parent instead of an O(n) filter+min.
+    # - `first_index_at_start` / `leaf_at_start` turn the same-start
+    #   suppression check into two dict lookups instead of an O(n) `any(...)`
+    #   that compared by object identity. Index comparison (position in
+    #   `section_boundaries`, via `first_index_at_start`) replaces that
+    #   identity test: a boundary is suppressed by an earlier same-start
+    #   entry when it is not the first index recorded for that start, which
+    #   also correctly tells apart two structurally-equal-but-distinct dicts
+    #   at the same start (a duplicated parent record) without relying on
+    #   `is`.
+    starts_sorted = sorted(
+        b["element_idx_start"] for b in section_boundaries
+        if b.get("element_idx_start") is not None
+    )
+    first_index_at_start: dict[int, int] = {}
+    leaf_at_start: dict[int, bool] = {}
+    for i, b in enumerate(section_boundaries):
+        s = b.get("element_idx_start")
+        if s is None:
+            continue
+        if s not in first_index_at_start:
+            first_index_at_start[s] = i
+        if not b.get("has_children", False):
+            leaf_at_start[s] = True
+
     for idx, boundary in enumerate(section_boundaries):
         hierarchy_path = boundary.get("hierarchy", [])
         start_idx = boundary.get("element_idx_start")
@@ -188,15 +217,12 @@ def extract_leaf_sections_with_boundaries(
             # cancel each other and drop the content between them (#916).
             parent_path = tuple(hierarchy_path)
             if parent_path in parent_sections:
-                suppressed = any(b is not boundary and b.get("element_idx_start") == start_idx
-                                  and (not b.get("has_children", False) or i < idx)
-                                  for i, b in enumerate(section_boundaries))
-                next_starts = [
-                    other_start for b in section_boundaries
-                    if b is not boundary and (other_start := b.get("element_idx_start")) is not None
-                    and other_start > start_idx
-                ]
-                first_child_start = min(next_starts) if next_starts else None
+                suppressed = (
+                    leaf_at_start.get(start_idx, False)
+                    or first_index_at_start[start_idx] != idx
+                )
+                next_pos = bisect.bisect_right(starts_sorted, start_idx)
+                first_child_start = starts_sorted[next_pos] if next_pos < len(starts_sorted) else None
                 if not suppressed and first_child_start is not None and first_child_start > start_idx + 1:
                     # There's a gap between parent header and the next header
                     # This gap contains content that belongs to the parent section

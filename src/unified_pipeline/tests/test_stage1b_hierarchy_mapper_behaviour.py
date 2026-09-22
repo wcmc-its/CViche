@@ -722,6 +722,26 @@ def test_compute_section_boundaries_empty_hierarchy_and_zero_doc_length():
     assert compute_section_boundaries([], doc_length=0) == []
 
 
+# --------------------------------------------------------- _next_start_lookup (#916)
+
+def test_next_start_lookup_skips_ties_and_returns_none_past_the_last_start():
+    # Shared by `_repair_out_of_order_section_bounds` and
+    # `_clip_leaves_to_next_header` (#916 review point 1): `bisect_right`
+    # must skip every section sharing a start (ties), matching the strict
+    # `>` scan it replaces, and return None once nothing starts later.
+    # `bisect_left` would wrongly return a tied start itself instead of
+    # skipping past it.
+    sections = [
+        {"element_idx_start": 5, "element_idx_end": 9, "has_children": False},
+        {"element_idx_start": 5, "element_idx_end": 9, "has_children": False},
+        {"element_idx_start": 12, "element_idx_end": 20, "has_children": False},
+    ]
+    lookup = stage1b._next_start_lookup(sections)
+    assert lookup(5) == 12
+    assert lookup(0) == 5
+    assert lookup(12) is None
+
+
 # ------------------------------------------------- _clip_leaves_to_next_header (#916)
 
 def test_out_of_order_sibling_leaf_ends_before_the_next_header():

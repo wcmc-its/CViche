@@ -17,8 +17,10 @@ Output: Hierarchy with element indices (the "fenceposts" for sections)
 
 import sys
 import json
+import bisect
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
+from collections.abc import Callable
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -372,6 +374,31 @@ def has_mapped_children(node: MappedNode) -> bool:
     return False
 
 
+def _next_start_lookup(sections: list[SectionRecord]) -> Callable[[int], int | None]:
+    """
+    Build a "smallest start strictly greater than X" lookup over `sections`,
+    from a single sort of every section's `element_idx_start`.
+
+    Shared by `_repair_out_of_order_section_bounds` and
+    `_clip_leaves_to_next_header` (#916 review): both previously rebuilt a
+    filtered `next_starts` list over the whole `sections` collection and
+    took its `min` for every section they touched, an O(n) scan per
+    section. Sorting once here and using `bisect.bisect_right` per lookup
+    turns that into a single O(n log n) pass. `bisect_right` skips past
+    every section sharing the same start, matching the strict `>`
+    comparison both call sites used before -- ties are resolved the same
+    way as today (see `_clip_leaves_to_next_header` for whether ties are
+    reachable at all).
+    """
+    ordered_starts = sorted(s["element_idx_start"] for s in sections)
+
+    def _lookup(start: int) -> int | None:
+        idx = bisect.bisect_right(ordered_starts, start)
+        return ordered_starts[idx] if idx < len(ordered_starts) else None
+
+    return _lookup
+
+
 def _repair_out_of_order_section_bounds(sections: list[SectionRecord], doc_length: int) -> None:
     """
     Fix invalid boundaries caused by out-of-order hierarchies.
@@ -384,16 +411,12 @@ def _repair_out_of_order_section_bounds(sections: list[SectionRecord], doc_lengt
 
     Mutates `sections` in place.
     """
+    next_start_after = _next_start_lookup(sections)
     for section in sections:
         if section["element_idx_end"] < section["element_idx_start"]:
-            current_start = section["element_idx_start"]
-            next_starts = [
-                s["element_idx_start"]
-                for s in sections
-                if s["element_idx_start"] > current_start
-            ]
-            if next_starts:
-                section["element_idx_end"] = min(next_starts) - 1
+            next_start = next_start_after(section["element_idx_start"])
+            if next_start is not None:
+                section["element_idx_end"] = next_start - 1
             else:
                 section["element_idx_end"] = doc_length - 1
 
@@ -441,27 +464,47 @@ def _clip_leaves_to_next_header(sections: list[SectionRecord]) -> None:
     Clip every leaf section's end to just before the next mapped section
     header in document order, whatever the tree says about siblings.
 
-    Retires three mechanisms that let leaf ranges overlap (#916): the
-    out-of-order fallback (`compute_bounds`'s `end_idx < element_idx`
-    branch and `_repair_out_of_order_section_bounds`), sibling disorder (a
-    section's end taken from the next *listed* sibling rather than the next
-    sibling in document order), and the late-Personal-Data preamble
-    extension swallowing earlier sections. Parents (`has_children == True`)
-    keep their subtree-covering ranges -- only leaves are clipped.
+    Supersedes, for LEAVES only, the effect of three mechanisms that let
+    leaf ranges overlap (#916): the out-of-order fallback (`compute_bounds`'s
+    `end_idx < element_idx` branch and `_repair_out_of_order_section_bounds`),
+    sibling disorder (a section's end taken from the next *listed* sibling
+    rather than the next sibling in document order), and the
+    late-Personal-Data preamble extension swallowing earlier sections. It
+    does not retire those mechanisms: `_repair_out_of_order_section_bounds`
+    and `_extend_ancestors_to_cover_repaired_children` still run first and
+    remain load-bearing for PARENT ranges (`has_children == True`, the #851
+    invariant "parent end >= last child end") -- this function only ever
+    rewrites records with `has_children == False`. Deleting either of those
+    two passes changes `has_children == True` records on the corpus; adding
+    this clip alone does not (verified by the stage-1b recompute in the
+    PR: 0 parent records changed on 111/111 CVs from the clip, non-zero
+    from deleting either pass -- see the mutation checks for both).
+
+    Same-start ties are reachable -- #916's named residual is 90 leaf pairs
+    on 19 CVs sharing one `element_idx_start` -- and deliberately left
+    unbounded here: `_next_start_lookup`'s `bisect_right` skips every
+    section at the same start, so neither bounds the other. Choosing a
+    label between two names mapped to one header is stage 1a's call, not
+    this function's.
+
+    The trailing leaf in document order (no start strictly after it) is
+    left at whatever end `compute_bounds`'s `default_end` gave it -- the
+    document end, or a bounding ancestor's `default_end` passed down the
+    recursion. None of the three mechanisms above produce that value, so
+    this boundary case is outside what the clip needs to reach.
 
     Mutates `sections` in place.
     """
+    next_start_after = _next_start_lookup(sections)
     for section in sections:
         if section["has_children"]:
             continue
-        current_start = section["element_idx_start"]
-        next_starts = [
-            s["element_idx_start"]
-            for s in sections
-            if s["element_idx_start"] > current_start
-        ]
-        if next_starts:
-            section["element_idx_end"] = min(section["element_idx_end"], min(next_starts) - 1)
+        next_start = next_start_after(section["element_idx_start"])
+        if next_start is not None:
+            # `min` only ever shrinks: a leaf already tighter than the next
+            # header (e.g. from `_repair_out_of_order_section_bounds`) keeps
+            # its own smaller end -- this never re-extends a range.
+            section["element_idx_end"] = min(section["element_idx_end"], next_start - 1)
 
 
 def _apply_preamble_handling(sections: list[SectionRecord], doc_length: int) -> None:
