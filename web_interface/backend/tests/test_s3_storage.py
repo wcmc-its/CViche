@@ -691,7 +691,7 @@ def test_prefix_defaults_when_omitted(monkeypatch):
 
 
 def test_prefix_empty_string_produces_keys_without_leading_slash():
-    """#791 skeptic finding: naively joining f"{prefix}/runs/..." with an
+    """#791: naively joining f"{prefix}/runs/..." with an
     empty prefix produces a key with a leading "/". Pinned choice: an empty
     prefix means "no prefix segment", so the key is plain "runs/...", not
     "/runs/...", matching what a caller who deliberately chose no-prefix
@@ -789,8 +789,7 @@ def test_client_has_bounded_connect_read_timeout_and_retries():
     assert config.retries["mode"] == "standard"
     # botocore normalizes the "standard" mode's max_attempts (a retry count)
     # into total_max_attempts (max_attempts + 1, the initial attempt
-    # included) on the built client's own config -- confirmed empirically
-    # against the installed botocore, not assumed.
+    # included) on the built client's own config.
     assert config.retries["total_max_attempts"] == 4
 
 
@@ -798,49 +797,22 @@ def test_client_has_bounded_connect_read_timeout_and_retries():
 # #792: LocalRunStorage.list_files literal-prefix parity with S3
 # ---------------------------------------------------------------------------
 
-def test_local_list_files_matches_s3_literal_prefix_semantics(tmp_path):
-    """S3's Prefix is a literal byte prefix, not a directory match: a
-    request for "input/man" returns only keys whose string starts with
-    exactly that, never a sibling directory's "input/deep/manifest.json".
-    LocalRunStorage's partial-path fallback used to glob recursively by
-    basename and returned that sibling too (#792). Covers the three cases
-    #792's acceptance criterion names: an existing-directory prefix, an
-    absent prefix, and a partial-path prefix naming no directory."""
-    from app.storage.local_storage import LocalRunStorage
-
-    local = LocalRunStorage(base_dir=str(tmp_path))
-    local.put_file("run1", "input/deep/manifest.json", b"{}")
-    local.put_file("run1", "input/manual.txt", b"x")
-    local.put_file("run1", "input/cv.docx", b"y")
-
-    # existing-directory prefix
-    assert local.list_files("run1", "input/deep/") == ["input/deep/manifest.json"]
-    # absent prefix -- no directory and no file starts with it
-    assert local.list_files("run1", "does/not/exist") == []
-    # partial-path prefix naming no directory: literal byte-prefix match,
-    # the same as S3's Prefix would return (verified against the real
-    # S3RunStorage's Prefix-filtered listing behaviour in
-    # test_list_files_prefix_filter_is_sent_to_s3 above, which sends the
-    # caller's prefix to S3 unmodified for server-side literal matching).
-    assert local.list_files("run1", "input/man") == ["input/manual.txt"]
-
-
 def test_local_and_s3_list_files_agree_on_the_same_layout(tmp_path):
-    """#792 acceptance criterion 3: the same logical layout, run through
-    both backends, must return the same key set for an existing-directory
-    prefix, an absent prefix, and a partial-path prefix -- proven directly
-    against LocalRunStorage (real filesystem) and a stubbed S3RunStorage
-    (server-side Prefix filtering simulated by the stub), not by asserting
-    against each backend's own idea of the answer separately.
-
-    "input" both names a real directory here AND is a literal prefix of a
-    top-level sibling key ("input_extra.txt") -- the case the existing-
-    directory branch used to miss (#792)."""
+    """S3's Prefix is a literal byte prefix, not a directory match (#792).
+    The same layout, run through LocalRunStorage (real filesystem) and a
+    stubbed S3RunStorage, returns the same keys for: an existing-directory
+    prefix that is also a literal prefix of a sibling key ("input" /
+    "input_extra.txt"), an absent prefix, a partial-path prefix that must
+    not pull in a sibling directory ("input/man" vs input/deep/manifest.json,
+    which the old recursive basename glob returned), and an exact-file
+    prefix. The S3 side is stubbed with the expected keys, so on S3 it proves
+    the Prefix sent and the run-prefix stripping, not the server's match."""
     from app.storage.local_storage import LocalRunStorage
 
     layout = {
         "input/cv.docx": b"cv-bytes",
         "input/deep/manifest.json": b"{}",
+        "input/manual.txt": b"x",
         "input_extra.txt": b"sibling-bytes",
         "steps/3a/output.json": b"[]",
     }
@@ -850,9 +822,12 @@ def test_local_and_s3_list_files_agree_on_the_same_layout(tmp_path):
         local.put_file("run1", key, data)
 
     cases = (
-        ("input", ["input/cv.docx", "input/deep/manifest.json", "input_extra.txt"]),
+        ("input", ["input/cv.docx", "input/deep/manifest.json", "input/manual.txt",
+                   "input_extra.txt"]),
         ("does/not/exist", []),
         ("steps/3a/", ["steps/3a/output.json"]),
+        ("input/man", ["input/manual.txt"]),
+        ("input/cv.docx", ["input/cv.docx"]),
     )
     for prefix, expected in cases:
         assert sorted(local.list_files("run1", prefix)) == sorted(expected)

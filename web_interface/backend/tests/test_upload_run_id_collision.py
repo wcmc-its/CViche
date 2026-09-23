@@ -240,7 +240,7 @@ def test_local_put_file_restores_standard_readable_mode(tmp_path):
     preserves the SOURCE's mode, not the destination's, so without an
     explicit chmod the final file would regress from the pre-#787
     path.write_bytes() default (0o644 under the standard umask) to
-    owner-only (#787 follow-up)."""
+    owner-only."""
     storage = LocalRunStorage(base_dir=str(tmp_path))
     storage.put_file("R7", "data.json", b"bytes")
     mode = (tmp_path / "R7" / "data.json").stat().st_mode & 0o777
