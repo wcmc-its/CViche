@@ -59,9 +59,11 @@ S3_MAX_ATTEMPTS = 3
 def _translate_client_error(code: str, context: str) -> StorageError | None:
     """Map a known AWS error code to the application exception it means.
 
-    One place for put_file_exclusive, get_file and exists to agree on what a
-    code means, instead of each interpreting it independently (PR #779
-    review, s3_storage.py item 8; #790). Returns None for a code this store
+    One place for put_file_exclusive and get_file to agree on what a code
+    means, instead of each interpreting it independently (PR #779 review,
+    s3_storage.py item 8; #790). exists() does not use this: HeadObject's
+    real error responses carry only a bare "404", never these modeled
+    GetObject/PutObject codes. Returns None for a code this store
     attaches no meaning to, so the caller re-raises the original ClientError
     unchanged -- an outage or permissions fault, not a storage-contract
     event.
@@ -349,10 +351,13 @@ class S3RunStorage(RunStorage):
             self._s3.head_object(Bucket=self._bucket, Key=s3_key)
             return True
         except self._s3.exceptions.ClientError as e:
-            code = e.response["Error"]["Code"]
-            if code == "404":
+            # HeadObject's real error responses carry a bare "404" for a
+            # missing key, never the modeled "NoSuchKey"/"PreconditionFailed"
+            # codes _translate_client_error interprets (those are GetObject/
+            # PutObject-with-precondition codes) -- so routing exists()
+            # through that helper was dead code (r2 verifier, mutant M4:
+            # dropping the call left the suite green). Everything else is an
+            # infrastructure fault (permissions, outage) and must propagate.
+            if e.response["Error"]["Code"] == "404":
                 return False
-            translated = _translate_client_error(code, f"s3://{self._bucket}/{s3_key}")
-            if translated is not None:
-                raise translated from e
             raise
