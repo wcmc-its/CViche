@@ -29,7 +29,6 @@ import inspect
 import json
 import logging
 import os
-import re
 import sys
 import threading
 import time
@@ -873,59 +872,11 @@ def test_5d_batch_progress_lines_are_monotonic_and_unspliced(tmp_path, monkeypat
             assert out[i + 1].strip().startswith("Parsed"), out[i:i + 2]
 
 
-# mrj4001's point #1 on PR #918: importing
-# web_interface.backend.app.pipeline.orchestrator directly from this
-# self-contained pipeline test file is mechanically possible (verified by
-# hand) but not viable to do at module scope here -- its import
-# permanently replaces process-wide sys.stdout with `_RoutedStdout`
-# (orchestrator.py's own docstring: "Installed once, permanently, at
-# import") and pulls in sqlalchemy / app.models / app.storage, coupling
-# this DB-free pipeline test file to the backend layer for one regex
-# list. So: read the real source text instead of importing it, and pin
-# it -- if PROGRESS_PATTERNS' source ever changes, this assertion fails
-# and forces a re-check of the "Processing batch" claim below, rather
-# than a progress bar silently starting to move.
-_ORCHESTRATOR_PATH = (
-    _SRC.parent / "web_interface" / "backend" / "app" / "pipeline" / "orchestrator.py"
-)
-_PROGRESS_PATTERNS_SOURCE = (
-    "PROGRESS_PATTERNS = [\n"
-    '    # "Processing section 5 of 10" or "Processing 5/10"\n'
-    "    re.compile(r'(?:Processing|Extracting|Mapping|Classifying|Enriching)"
-    r"\s+(?:section\s+)?(\d+)\s*(?:of|/)\s*(\d+)', re.IGNORECASE)," "\n"
-    '    # "Section 5/10" or "Entry 5/10"\n'
-    "    re.compile(r'(?:Section|Entry|Item|Chunk|Node|Header|Publication|Grant|Position)"
-    r"\s*(\d+)\s*(?:of|/)\s*(\d+)', re.IGNORECASE)," "\n"
-    '    # "[5/10]" format\n'
-    r"    re.compile(r'\[(\d+)\s*/\s*(\d+)\]')," "\n"
-    '    # "5 of 10 sections" or "5 of 10 entries"\n'
-    "    re.compile(r'(\\d+)\\s+of\\s+(\\d+)\\s+(?:sections?|entries?|items?|chunks?|nodes?|"
-    "headers?|publications?|grants?|positions?)', re.IGNORECASE),\n"
-    "]"
-)
-
-
-def test_5d_batch_progress_does_not_match_progress_patterns(capsys):
-    source = _ORCHESTRATOR_PATH.read_text(encoding="utf-8")
-    start = source.index("PROGRESS_PATTERNS = [")
-    end = source.index("\n]", start) + len("\n]")
-    block = source[start:end]
-    assert block == _PROGRESS_PATTERNS_SOURCE, (
-        "orchestrator.PROGRESS_PATTERNS' source changed -- re-check whether "
-        "'Processing batch N/M (K citations)...' still matches none of it, "
-        "then update the pin above"
-    )
-
-    # Compiled from the block just read (not hand-retyped): pattern + an
-    # optional trailing re.IGNORECASE flag, per re.compile(r'...', ...) call.
-    calls = re.findall(r"re\.compile\(r'((?:[^'\\]|\\.)*)'(?:,\s*(re\.[A-Z]+))?\)", block)
-    assert len(calls) == 4, "expected exactly 4 re.compile(...) calls in the block"
-    patterns = [re.compile(p, getattr(re, flag.split(".")[1]) if flag else 0) for p, flag in calls]
-
-    # Drive the REAL printer (mrj4001's point: a hand-typed literal here
-    # can't catch a future reword of the printer's own wording) so the
-    # line checked below is whatever _batch_progress_printer actually
-    # emits, not a string this test file retyped by hand.
+def test_5d_batch_progress_does_not_match_progress_patterns(capsys, progress_patterns):
+    # Drive the REAL printer (mrj4001's point #1 on PR #918: a hand-typed
+    # literal here can't catch a future reword of the printer's own
+    # wording). The patterns come from orchestrator.py's source, pinned in
+    # conftest.py's progress_patterns fixture.
     printer = s5d._batch_progress_printer(10)
     filler = s5d._BatchResult(id_to_formatted=None, id_to_entry={"CIT-0001": {}}, usage=None)
     five_cited = s5d._BatchResult(
@@ -938,7 +889,7 @@ def test_5d_batch_progress_does_not_match_progress_patterns(capsys):
     printer(0, five_cited)  # 3rd completion -> "Processing batch 3/10 (5 citations)..."
     out = capsys.readouterr().out
     line = next(l for l in out.splitlines() if l.strip().startswith("Processing batch 3/10"))
-    assert not any(p.search(line) for p in patterns)
+    assert not any(p.search(line) for p in progress_patterns)
 
 
 def test_5d_batches_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):

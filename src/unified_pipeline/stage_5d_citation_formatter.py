@@ -28,7 +28,7 @@ from datetime import datetime
 from typing import NamedTuple
 
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
+from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
 
 logger = logging.getLogger(__name__)
 
@@ -277,24 +277,18 @@ def _format_batch(batch: list[dict]) -> _BatchResult:
 
 
 def _batch_progress_printer(total_batches: int) -> Callable[[int, _BatchResult], None]:
-    """Build a map_in_order ``on_result`` callback: one atomic print per
-    finished batch, numbered by completion (#881 step 6). The wording
-    matches none of orchestrator.PROGRESS_PATTERNS -- see
+    """``Processing batch N/M (K citations)...`` then ``Parsed N`` when a
+    parse ran, via the shared make_progress_printer (#923). The wording
+    matches none of orchestrator.PROGRESS_PATTERNS -- pinned by
     test_5d_batch_progress_does_not_match_progress_patterns.
     """
-    done = 0
-
-    def on_result(_index: int, result: _BatchResult) -> None:
-        # map_in_order always passes the submission index; unused here
-        # because this callback only reports completion order.
-        nonlocal done
-        done += 1
+    def format_lines(done: int, _index: int, result: _BatchResult) -> list[str]:
         lines = [f"\n  Processing batch {done}/{total_batches} ({len(result.id_to_entry)} citations)..."]
         if result.id_to_formatted is not None:
             lines.append(f"  Parsed {len(result.id_to_formatted)} formatted citations")
-        print("\n".join(lines))
+        return lines
 
-    return on_result
+    return make_progress_printer(format_lines)
 
 
 def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1",

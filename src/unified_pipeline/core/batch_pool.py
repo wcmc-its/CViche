@@ -111,6 +111,31 @@ def map_in_order(
             raise
 
 
+def make_progress_printer(
+    format_lines: Callable[[int, int, T], list[str]],
+) -> Callable[[int, T], None]:
+    """Build a map_in_order ``on_result`` callback that prints one block per
+    finished call: ``format_lines(done, index, result)``, joined into ONE
+    ``print`` so two calls' lines cannot splice.
+
+    ``done`` counts completions (1, 2, 3... in call order), so an ``[N/M]``
+    line built from it stays monotonic however the pool orders completions;
+    ``index`` is the submission position, for looking up which input
+    finished. The closure's counter needs no lock: map_in_order fires
+    ``on_result`` only on the calling thread, one call at a time (see its
+    docstring; pinned by test_on_result_runs_on_the_calling_thread).
+    Stages 2, 3b and 5d share this (#923).
+    """
+    done = 0
+
+    def on_result(index: int, result: T) -> None:
+        nonlocal done
+        done += 1
+        print("\n".join(format_lines(done, index, result)))
+
+    return on_result
+
+
 def workers_from_config(key: str, default: int = 4) -> int:
     """The deployment knob for a stage's pool width.
 
