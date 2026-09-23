@@ -676,6 +676,33 @@ def test_get_llm_max_attempts_reads_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert retry._get_llm_max_attempts() == 6
 
 
+def test_get_llm_timeout_seconds_reads_yaml_when_env_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#267 verify r2 BLOCKING: retry.py's readers must reach the yaml
+    (ConfigMap) layer through get_llm_env_config, not a bare
+    os.environ.get -- a bare env read would silently drop the
+    CVICHE_LLM_TIMEOUT_SECONDS ConfigMap value in prod while every
+    env-only test above stayed green."""
+    monkeypatch.delenv("CVICHE_LLM_TIMEOUT_SECONDS", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    _write_llm_yaml(yaml_path, CVICHE_LLM_TIMEOUT_SECONDS="240")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    assert retry._get_llm_timeout_seconds() == 240.0
+
+
+def test_get_llm_max_attempts_reads_yaml_when_env_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#267 verify r2 BLOCKING: same as the timeout test above, for the int
+    reader (_get_llm_config_int) and CVICHE_LLM_MAX_ATTEMPTS."""
+    monkeypatch.delenv("CVICHE_LLM_MAX_ATTEMPTS", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    _write_llm_yaml(yaml_path, CVICHE_LLM_MAX_ATTEMPTS="5")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    assert retry._get_llm_max_attempts() == 5
+
+
 # ---------------------------------------------------------------------------
 # config.py -- get_llm_env_config (env -> auth_config.yaml `llm:` block ->
 # default, #267). retry.py's knob readers above call this; these tests hit
@@ -750,6 +777,19 @@ def test_get_llm_env_config_parity_with_backend_config_loader(
     assert pipeline_config.get_llm_env_config(
         "CVICHE_TEST_PARITY_KEY", "42"
     ) == backend_config_loader.get_config("llm", "CVICHE_TEST_PARITY_KEY", default="42")
+
+
+def test_auth_config_path_matches_backend_config_path() -> None:
+    """#267 verify r2 BLOCKING: the parity test above monkeypatches BOTH
+    resolvers onto the same tmp file, so it cannot see the two real,
+    unpatched paths drift apart (a moved file, a `.parent` depth change --
+    #620). Assert the actual module-level constants -- what prod uses --
+    still name the same files, real and .example."""
+    assert pipeline_config.AUTH_CONFIG_PATH.resolve() == backend_config_loader.CONFIG_PATH.resolve()
+    assert (
+        pipeline_config.AUTH_CONFIG_EXAMPLE_PATH.resolve()
+        == backend_config_loader.EXAMPLE_CONFIG_PATH.resolve()
+    )
 
 
 # ---------------------------------------------------------------------------
