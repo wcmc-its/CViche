@@ -706,6 +706,22 @@ class TestUploadValidation:
         assert response.status_code == 400
         assert "too large" in response.json()["detail"]["message"].lower()
 
+    def test_oversized_file_message_readable_under_1mb_cap(self, client, db, seed_simple_mode):
+        """A cap under 1 MB used to render as 'over 0 MB' (integer MB
+        division truncates any sub-1MB cap to 0). It must fall back to a KB
+        reading instead."""
+        self._create_auth_user(client, db)
+        docx_header = b"PK\x03\x04"
+        with patch("app.api.upload.MAX_UPLOAD_SIZE", 100):  # 100 bytes < 1 MB
+            big_content = docx_header + b"\x00" * 200
+            response = client.post(
+                "/api/upload",
+                files={"file": ("big.docx", big_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
+            )
+        message = response.json()["detail"]["message"]
+        assert "0 MB" not in message
+        assert "100 bytes" in message  # a sub-1KB cap reads out in bytes
+
     def test_estimate_oversized_file_rejected(self, client, db, seed_simple_mode):
         """#793: /estimate's size check runs through the same _read_bounded
         helper /upload uses now (previously its own `await file.read()` +
@@ -785,6 +801,26 @@ class TestUploadValidation:
         assert response.json()["text_characters"] == 4321
         extract_mock.assert_called_once()
         assert extract_mock.call_args.args[1] == ".docx"
+
+    def test_estimate_readable_but_empty_document_uses_minimum_not_fallback(self, client, db, seed_simple_mode, caplog):
+        """#793 polish (M12): a document that IS readable but has no text
+        (`_extract_text` returns `""`, not `None`) must take the
+        `max(0, 1000) == 1000` path, not the 5000 unreadable-fallback --
+        `if extracted is None` and `if not extracted` disagree exactly here,
+        since `""` is falsy but not None."""
+        self._create_auth_user(client, db)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value=""), \
+             caplog.at_level(logging.WARNING):
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("blank.docx", docx_content, "application/octet-stream")},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["text_characters"] == 1000
+        fallback_logs = [r for r in caplog.records if "fixed char-count guess" in r.getMessage()]
+        assert fallback_logs == []  # extraction succeeded -- no fallback warning
 
     def test_estimate_logs_and_falls_back_when_extraction_fails(self, client, db, seed_simple_mode, caplog):
         """#794: the bare `except Exception` that silently set

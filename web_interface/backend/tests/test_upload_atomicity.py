@@ -499,6 +499,23 @@ def test_read_bounded_aborts_without_buffering_the_whole_oversized_body():
     assert fake.total_served <= 2048 + 1024
 
 
+def test_read_bounded_pins_the_size_boundary():
+    """#793 polish (M10): a body of exactly max_size bytes is accepted (the
+    check is `total > max_size`, not `>=`); one byte over is rejected. Pins
+    the boundary itself, not just "some big body is rejected"."""
+    with patch("app.api.upload._UPLOAD_READ_CHUNK_SIZE", 4096):
+        exactly_at_cap = asyncio.run(
+            upload_module._read_bounded(_TrackedFile(b"a" * 1000), max_size=1000)
+        )
+        assert exactly_at_cap == b"a" * 1000
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                upload_module._read_bounded(_TrackedFile(b"a" * 1001), max_size=1000)
+            )
+    assert exc_info.value.status_code == 400
+
+
 def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db, seed_simple_mode, tmp_path):
     """#793 item 3: `_extract_text` and `detect_wcm_template` are dispatched
     through `run_in_threadpool`, not called synchronously inside the async
@@ -529,6 +546,40 @@ def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db,
 
     assert resp.status_code == 200, resp.text
     assert dispatched == [extract_mock, detect_mock]
+
+
+def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode):
+    """#793 polish (M6): /estimate's `_extract_text` call is off the event
+    loop too, the same as /upload's (issue text: '/estimate is off the
+    event loop, same as /upload'). A bare synchronous `_extract_text(...)`
+    call would leave the response unchanged, so this asserts
+    run_in_threadpool was the actual dispatch mechanism, not just that
+    /estimate still returns 200."""
+    user = _make_user(db)
+    _auth(client, user)
+    extract_mock = MagicMock(return_value="x" * 600)
+    real_run_in_threadpool = upload_module.run_in_threadpool
+    dispatched: list[object] = []
+
+    async def spy(func, *args, **kwargs):
+        dispatched.append(func)
+        return await real_run_in_threadpool(func, *args, **kwargs)
+
+    patches = [
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", extract_mock),
+        patch("app.api.upload.run_in_threadpool", spy),
+    ]
+    resp = _run_patches(
+        patches,
+        lambda: client.post(
+            "/api/estimate",
+            files={"file": ("cv.docx", b"PK\x03\x04dummy-docx-bytes", "application/octet-stream")},
+        ),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert dispatched == [extract_mock]
 
 
 # --- item 9: render options persisted --------------------------------------

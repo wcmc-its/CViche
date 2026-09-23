@@ -52,6 +52,12 @@ ALLOWED_UPLOAD_EXTENSIONS = (".docx",)
 # certainly a scanned image, a password-protected file, or effectively blank.
 MIN_EXTRACTED_CHARS = 500
 
+# /estimate's placeholder char count when _extract_text couldn't read the
+# document at all (#794) -- a mid-range guess so the quote shown is neither
+# suspiciously cheap nor alarmingly expensive while the real content is
+# unknown. Distinct from MIN_EXTRACTED_CHARS above, which gates /upload.
+_ESTIMATE_FALLBACK_CHAR_COUNT = 5000
+
 
 def _validate_docx_magic(content: bytes) -> bool:
     """Check if content is a ZIP archive containing Word document structure."""
@@ -123,10 +129,15 @@ async def _read_bounded(file: UploadFile, max_size: int) -> bytes:
             break
         total += len(chunk)
         if total > max_size:
-            raise bad_request(
-                f"File too large (over {max_size // (1024 * 1024)} MB). "
-                f"Maximum size is {max_size // (1024 * 1024)} MB."
+            # A plain `// (1024*1024)` reads as "over 0 MB" for any cap under
+            # 1 MB (e.g. a test's patched MAX_UPLOAD_SIZE) -- fall back to KB
+            # so the message stays readable at any cap size.
+            size_str = (
+                f"{max_size / (1024 * 1024):.1f} MB" if max_size >= 1024 * 1024
+                else f"{max_size // 1024} KB" if max_size >= 1024
+                else f"{max_size} bytes"
             )
+            raise bad_request(f"File too large (over {size_str}). Maximum size is {size_str}.")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -623,7 +634,7 @@ async def estimate_processing(
         # T-UP report for the residual gap (EstimateResponse still has no
         # field to signal it).
         logger.warning("Estimate falling back to a fixed char-count guess (filename=%s)", file.filename)
-        text_char_count = 5000
+        text_char_count = _ESTIMATE_FALLBACK_CHAR_COUNT
     else:
         text_char_count = len(extracted)
 
