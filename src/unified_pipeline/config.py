@@ -566,11 +566,25 @@ def get_llm_env_config(key: str, default: object) -> tuple[object, str]:
     try:
         with open(path) as f:
             cfg = yaml.safe_load(f) or {}
-        value = (cfg.get("llm") or {}).get(key)
+        llm_cfg = cfg.get("llm")
+        if not isinstance(llm_cfg, dict):
+            # A missing/null `llm:` block (llm_cfg is None) is the ordinary
+            # case and not worth a warning. A present-but-wrong-shaped block
+            # (e.g. `llm: "oops"`) is a misconfiguration -- log it, but still
+            # degrade to default rather than raising (parity with the
+            # backend's app.config_loader.get_config, which catches this
+            # inside its own broad except and returns default too).
+            if llm_cfg is not None:
+                logger.warning(
+                    "auth_config.yaml 'llm' section is not a mapping (got %s); ignoring it for %s",
+                    type(llm_cfg).__name__, key,
+                )
+            llm_cfg = {}
+        value = llm_cfg.get(key)
         if value:
             return value, "yaml"
     except (OSError, yaml.YAMLError):
-        logger.warning("Failed to load %s; using default for %s", path, key)
+        logger.warning("Failed to load %s; using default for %s", path, key, exc_info=True)
 
     return default, "default"
 
