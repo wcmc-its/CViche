@@ -1,8 +1,33 @@
 """SQLAlchemy database models."""
+from enum import StrEnum
+
 from sqlalchemy import Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.base_class import Base
+
+
+class RunState(StrEnum):
+    """Canonical ``runs.status`` vocabulary (CODING STANDARDS section 1.5: one
+    definition of a shared vocabulary, not a hand-written literal at each call
+    site). Named ``RunState``, not ``RunStatus`` -- ``app.schemas.RunStatus``
+    already names the pydantic response model for a run's status field, and
+    the two would collide.
+
+    Used on every line the #701 queue rework adds or changes (the flip/claim/
+    fail transitions in ``app.services.run_service``). Existing status string
+    literals elsewhere in the codebase are intentionally left as they are (no
+    drive-by conversions, CODING STANDARDS section 8.1); the remaining sweep
+    is tracked in issue #701.
+    """
+    CREATED = "created"
+    QUEUED = "queued"
+    RUNNING = "running"
+    PAUSED = "paused"
+    COMPLETE = "complete"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
 
 # ==========================
 # Authentication Models
@@ -124,6 +149,18 @@ class Run(Base):
     TERMINAL_RUN_STATUSES = frozenset({"complete", "failed", "cancelled"})
     started_at = Column(DateTime, nullable=False, server_default=func.now(), index=True)
     completed_at = Column(DateTime)
+    # When this run last entered "queued" via run_service.flip_to_queued
+    # (#701). started_at is re-stamped at the worker's claim (queued ->
+    # running), so it means "began executing" only; the admin queue view's
+    # queued-age reads this column instead. NULL = never queued (in-process
+    # dispatch, or a run that predates this column).
+    queued_at = Column(DateTime, nullable=True)
+    # The step a resumed run should start from, set by retry_step's flip and
+    # NULLed by start_run's flip (#701). The Valkey work token is a pure
+    # wake-up and no longer carries this -- a redelivered or stale token could
+    # otherwise resume an old, already-superseded step. NULL = start from the
+    # top.
+    resume_from_step = Column(Integer, nullable=True)
     # Authoritative total pipeline execution time, in whole seconds, persisted by
     # the orchestrator when a run reaches a terminal status (it already computes
     # this value and previously only emitted it over the WebSocket). Distinct from
