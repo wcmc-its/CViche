@@ -184,21 +184,16 @@ class LocalRunStorage(RunStorage):
         if not run_dir.exists():
             return []
 
-        # Glob for all files under the prefix
-        search_dir = self._safe_path(run_id, prefix) if prefix else run_dir
-        if search_dir.exists():
-            results = []
-            for path in search_dir.rglob("*"):
-                if path.is_file():
-                    results.append(str(path.relative_to(run_dir)))
-            return sorted(results)
-
-        # `prefix` names no actual directory -- it's a partial path
-        # component (e.g. "input/man"), not a directory boundary. Match it
-        # literally against the full relative key, the same as S3's Prefix
-        # (a byte prefix, not a directory match): globbing by basename
-        # instead returned "input/deep/manifest.json" for prefix
-        # "input/man", which S3's literal Prefix would not (#792).
+        # Literal byte-prefix match against the full relative key, the same
+        # as S3's Prefix -- not a directory match. An EXISTING-directory
+        # prefix used to take a separate branch that globbed only inside
+        # that directory, which misses a sibling key that merely starts with
+        # the same string (prefix "input" naming a real input/ directory
+        # still must also match a top-level "input_extra.txt"), and a
+        # partial-path prefix naming no directory used to glob by basename,
+        # which wrongly matched "input/deep/manifest.json" for prefix
+        # "input/man" (#792). One literal-prefix pass over every file
+        # handles both the same way S3 does.
         matches = []
         for path in run_dir.rglob("*"):
             if path.is_file():

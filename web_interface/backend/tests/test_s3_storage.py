@@ -823,3 +823,45 @@ def test_local_list_files_matches_s3_literal_prefix_semantics(tmp_path):
     # test_list_files_prefix_filter_is_sent_to_s3 above, which sends the
     # caller's prefix to S3 unmodified for server-side literal matching).
     assert local.list_files("run1", "input/man") == ["input/manual.txt"]
+
+
+def test_local_and_s3_list_files_agree_on_the_same_layout(tmp_path):
+    """#792 acceptance criterion 3: the same logical layout, run through
+    both backends, must return the same key set for an existing-directory
+    prefix, an absent prefix, and a partial-path prefix -- proven directly
+    against LocalRunStorage (real filesystem) and a stubbed S3RunStorage
+    (server-side Prefix filtering simulated by the stub), not by asserting
+    against each backend's own idea of the answer separately.
+
+    "input" both names a real directory here AND is a literal prefix of a
+    top-level sibling key ("input_extra.txt") -- the case the existing-
+    directory branch used to miss (#792)."""
+    from app.storage.local_storage import LocalRunStorage
+
+    layout = {
+        "input/cv.docx": b"cv-bytes",
+        "input/deep/manifest.json": b"{}",
+        "input_extra.txt": b"sibling-bytes",
+        "steps/3a/output.json": b"[]",
+    }
+
+    local = LocalRunStorage(base_dir=str(tmp_path))
+    for key, data in layout.items():
+        local.put_file("run1", key, data)
+
+    cases = (
+        ("input", ["input/cv.docx", "input/deep/manifest.json", "input_extra.txt"]),
+        ("does/not/exist", []),
+        ("steps/3a/", ["steps/3a/output.json"]),
+    )
+    for prefix, expected in cases:
+        assert sorted(local.list_files("run1", prefix)) == sorted(expected)
+
+    s3 = _storage()
+    stub = Stubber(s3._s3)
+    for prefix, expected in cases:
+        _stub_listing(stub, [RUN_PREFIX + k for k in expected], prefix=RUN_PREFIX + prefix)
+    with stub:
+        for prefix, expected in cases:
+            assert sorted(s3.list_files("run1", prefix)) == sorted(expected)
+    stub.assert_no_pending_responses()
