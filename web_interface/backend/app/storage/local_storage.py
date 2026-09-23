@@ -29,6 +29,16 @@ def _atomic_write(path: Path, data: bytes) -> None:
     a copy, and is cleaned up if the write itself fails. put_file_exclusive
     is untouched: open(path, "xb") is already atomic and its collision
     semantics (StorageKeyExists on a pre-existing key) must not change.
+
+    mkstemp() creates the temp file at 0o600 (owner-only), and os.replace()
+    preserves the SOURCE file's mode, not the destination's -- so without an
+    explicit chmod, every put_file/put_global regressed from the pre-#787
+    path.write_bytes() default (0o666 minus umask, 0o644 under the standard
+    022 umask) to owner-only. Nothing reads these files as a different OS
+    user: the backend process and every pipeline stage it invokes run as the
+    same container user (web_interface/backend/Dockerfile: USER cviche, uid
+    1000; local dev has no second user either), so restore the pre-existing
+    permissions rather than narrow them.
     """
     fd, tmp_name = tempfile.mkstemp(
         dir=path.parent, prefix=f"{path.name}.", suffix=".tmp"
@@ -36,6 +46,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
+        os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, path)
     except BaseException:
         try:
