@@ -706,6 +706,22 @@ class TestUploadValidation:
         assert response.status_code == 400
         assert "too large" in response.json()["detail"]["message"].lower()
 
+    def test_estimate_oversized_file_rejected(self, client, db, seed_simple_mode):
+        """#793: /estimate's size check runs through the same _read_bounded
+        helper /upload uses now (previously its own `await file.read()` +
+        separate size check). Mirrors test_oversized_file_rejected above for
+        /upload."""
+        self._create_auth_user(client, db)
+        docx_header = b"PK\x03\x04"
+        with patch("app.api.upload.MAX_UPLOAD_SIZE", 100):
+            big_content = docx_header + b"\x00" * 200  # 204 bytes > 100 byte limit
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("big.docx", big_content, "application/octet-stream")},
+            )
+        assert response.status_code == 400
+        assert "too large" in response.json()["detail"]["message"].lower()
+
     def test_randomized_filename_on_disk(self, client, db, seed_simple_mode, tmp_path):
         """Uploaded files are stored with randomized names, not the
         user-provided filename. Uses .docx (not the formerly-accepted .pdf,
@@ -752,6 +768,73 @@ class TestUploadValidation:
         )
         assert response.status_code == 400
         assert "does not match .docx format" in response.json()["detail"]["message"]
+
+    def test_estimate_reuses_extract_text(self, client, db, seed_simple_mode):
+        """#794: /estimate now computes text_characters from the SAME
+        _extract_text /upload uses, instead of a second inline docx walk
+        that could compute a different count for the same file."""
+        self._create_auth_user(client, db)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value="y" * 4321) as extract_mock:
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["text_characters"] == 4321
+        extract_mock.assert_called_once()
+        assert extract_mock.call_args.args[1] == ".docx"
+
+    def test_estimate_logs_and_falls_back_when_extraction_fails(self, client, db, seed_simple_mode, caplog):
+        """#794: the bare `except Exception` that silently set
+        text_char_count = 5000 is gone (§5.4) -- extraction failure
+        (`_extract_text` returning None) now logs a WARNING before falling
+        back to the same fixed guess, instead of failing open with no
+        record of it anywhere."""
+        self._create_auth_user(client, db)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value=None), \
+             caplog.at_level(logging.WARNING):
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("resume.docx", docx_content, "application/octet-stream")},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["text_characters"] == 5000
+        fallback_logs = [r for r in caplog.records if "fixed char-count guess" in r.getMessage()]
+        assert len(fallback_logs) == 1
+
+    def test_estimate_respects_rate_limit(self, client, db, seed_simple_mode):
+        """#795: /estimate is rate-limited the same way /upload is --
+        reusing check_rate_limit (/upload's own per-run quota) rather than a
+        dedicated estimate budget. A user over quota gets /upload's exact
+        429 shape and the document is never read, let alone parsed.
+
+        Residual (T-UP report): check_rate_limit counts Run rows, so this
+        only blocks a user already over their run quota -- a user under
+        quota can still call /estimate an unbounded number of times.
+        """
+        self._create_auth_user(client, db)
+        rate_limit_body = {
+            "error": "rate_limited",
+            "message": "Daily limit of 10 runs reached.",
+            "details": {
+                "limit_type": "daily", "limit": 10, "used": 10,
+                "resets_at": "2026-09-23T00:00:00-04:00",
+            },
+        }
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload.check_rate_limit", return_value=rate_limit_body), \
+             patch("app.api.upload._extract_text") as extract_mock:
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+        assert response.status_code == 429, response.text
+        assert response.json()["detail"] == rate_limit_body
+        extract_mock.assert_not_called()
 
     def test_random_bytes_rejected(self, client, db, seed_simple_mode):
         """A file with random bytes (not matching any format) is rejected."""

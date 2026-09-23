@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path
 from collections.abc import Callable
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from datetime import datetime
 from pydantic import BaseModel
@@ -99,6 +100,35 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
         return None
     finally:
         os.unlink(tmp_path)
+
+
+# Bytes read per chunk while bounding an upload body (#793): large enough that
+# a normal CV (a few hundred KB) reads in one or two chunks, small enough that
+# a request over the size cap is caught well before the whole body is buffered.
+_UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
+
+
+async def _read_bounded(file: UploadFile, max_size: int) -> bytes:
+    """Read an upload in bounded chunks, aborting once max_size is exceeded.
+
+    Unlike ``await file.read()`` followed by a size check, this never buffers
+    more than ``max_size`` plus one chunk of an oversized body before
+    rejecting it (#793).
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise bad_request(
+                f"File too large (over {max_size // (1024 * 1024)} MB). "
+                f"Maximum size is {max_size // (1024 * 1024)} MB."
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 router = APIRouter()
@@ -388,12 +418,9 @@ async def upload_cv(
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
 
-    # Read file content first for validation
-    content = await file.read()
-
-    # Check file size
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise bad_request(f"File too large ({len(content) // (1024*1024)} MB). Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.")
+    # Read file content in bounded chunks so an oversized body is never fully
+    # buffered before being rejected (#793).
+    content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
     # Validate magic bytes match claimed extension
     if file_ext == ".docx" and not _validate_docx_magic(content):
@@ -404,7 +431,7 @@ async def upload_cv(
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
     # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
-    extracted = _extract_text(content, file_ext)
+    extracted = await run_in_threadpool(_extract_text, content, file_ext)
     if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
@@ -419,7 +446,9 @@ async def upload_cv(
     # returns (False, None), so this never blocks an upload. We only warn (the UI
     # requires an acknowledgement) -- we never reject, since reformatting an
     # existing publication list is a legitimate, template-shaped use.
-    wcm_template_warning, wcm_template_match_ratio = detect_wcm_template(extracted)
+    wcm_template_warning, wcm_template_match_ratio = await run_in_threadpool(
+        detect_wcm_template, extracted
+    )
     if wcm_template_warning:
         logger.info(
             "Upload looks like a blank WCM template (user=%s, match_ratio=%s)",
@@ -539,6 +568,7 @@ async def upload_cv(
 @router.post("/estimate", response_model=EstimateResponse)
 async def estimate_processing(
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -551,9 +581,6 @@ async def estimate_processing(
 
     The file is not saved - this is just for estimation.
     """
-    import tempfile
-    import os
-
     # Validate file type
     if not file.filename:
         raise bad_request("No filename provided")
@@ -565,12 +592,17 @@ async def estimate_processing(
             "Please convert your file to .docx before uploading."
         )
 
-    # Read file content
-    content = await file.read()
+    # Rate-limited the same as /upload (#795): estimation parses a full
+    # document, the same expensive work /upload is already limited for. This
+    # reuses /upload's per-run quota rather than a dedicated estimate budget
+    # -- see the T-UP report for the residual gap that leaves open.
+    rate_limit_error = check_rate_limit(current_user, db)
+    if rate_limit_error:
+        raise HTTPException(status_code=429, detail=rate_limit_error)
 
-    # Check file size
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise bad_request(f"File too large ({len(content) // (1024*1024)} MB). Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.")
+    # Read file content in bounded chunks so an oversized body is never fully
+    # buffered before being rejected (#793).
+    content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
     # Validate magic bytes
     if file_ext == ".docx" and not _validate_docx_magic(content):
@@ -579,36 +611,21 @@ async def estimate_processing(
 
     file_size_kb = len(content) / 1024
 
-    # Extract actual text from document to estimate tokens
-    document_text = ""
-    text_char_count = 0
-
-    try:
-        if file_ext == ".docx":
-            # Extract text from Word document
-            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-
-            try:
-                from docx import Document
-                doc = Document(tmp_path)
-                # Get text from paragraphs
-                paragraphs_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
-                # Also get text from tables
-                tables_text = ""
-                for table in doc.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            if cell.text.strip():
-                                tables_text += cell.text + " "
-                document_text = paragraphs_text + "\n" + tables_text
-                text_char_count = len(document_text)
-            finally:
-                os.unlink(tmp_path)
-    except Exception as e:
-        # Fallback: very rough estimate
-        text_char_count = 5000  # Assume a typical CV has ~5000 characters
+    # Extract text through the same implementation /upload uses (#794) --
+    # this endpoint used to re-walk the docx paragraphs/tables inline, which
+    # could compute a different text_char_count for the same file. Off the
+    # event loop, same as /upload (#793).
+    extracted = await run_in_threadpool(_extract_text, content, file_ext)
+    if extracted is None:
+        # _extract_text already logged the specific read failure (§5.4) --
+        # this used to be a bare `except Exception` that set 5000 with no
+        # log line at all. The fallback value itself is unchanged; see the
+        # T-UP report for the residual gap (EstimateResponse still has no
+        # field to signal it).
+        logger.warning("Estimate falling back to a fixed char-count guess (filename=%s)", file.filename)
+        text_char_count = 5000
+    else:
+        text_char_count = len(extracted)
 
     # Ensure we have a reasonable minimum
     text_char_count = max(text_char_count, 1000)
