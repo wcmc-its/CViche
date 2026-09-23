@@ -153,6 +153,22 @@ def _extract_tool_use_input(response):
     return None
 
 
+def _extract_text_content(response: dict) -> str | None:
+    """Return the first text block's text from a Converse response's message
+    content list, or None when the list is empty or has no text block.
+
+    A guardrail intervention or other provider-side condition can return an
+    empty content list (#884); indexing content[0] directly crashes with an
+    unhandled IndexError instead of letting the caller retry or raise a
+    clear, attributable error.
+    """
+    content = response.get("output", {}).get("message", {}).get("content", [])
+    for block in content:
+        if "text" in block:
+            return block["text"]
+    return None
+
+
 def _strip_markdown_fences(text):
     """Remove a surrounding ```json … ``` or ``` … ``` block.
 
@@ -439,14 +455,28 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
             int(api_seconds * 1000),
         )
 
-    # Extract and normalize Bedrock response (text / json_object path)
-    content = response["output"]["message"]["content"][0]["text"]
+    # Extract and normalize Bedrock response (text / json_object path). A
+    # guardrail intervention or other provider condition can send back an
+    # empty content list with no text block at all (#884) -- read it through
+    # the same guarded helper the retry branch below re-reads, rather than
+    # indexing content[0] directly.
+    content = _extract_text_content(response)
     stop_reason = response.get("stopReason", "end_turn")
     finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
+    content_missing = content is None
 
-    # D-05: Validate JSON when response_format was requested
-    if not _validate_json_response(content, response_format):
-        logger.warning("Bedrock response is not valid JSON. Retrying with stronger hint...")
+    # D-05: Validate JSON when response_format was requested. An empty
+    # content list is treated the same as invalid JSON -- both need the
+    # one-shot repair retry -- regardless of whether JSON was requested,
+    # since there is no content to return either way (#884).
+    if content_missing:
+        logger.warning(
+            "Bedrock response had no text content (stopReason=%r, usage=%r). "
+            "Retrying with stronger hint...", stop_reason, usage,
+        )
+    if content_missing or not _validate_json_response(content, response_format):
+        if not content_missing:
+            logger.warning("Bedrock response is not valid JSON. Retrying with stronger hint...")
         # Retry once with stronger prompt hint
         stronger_messages = list(messages)  # shallow copy
         stronger_messages.append({
@@ -471,7 +501,22 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
         # Previously latency_ms was frozen before this branch ran, so the
         # repair call was billed but never timed.
         api_seconds += retry_api_seconds
-        content = retry_response["output"]["message"]["content"][0]["text"]
+        retry_content = _extract_text_content(retry_response)
+        retry_stop_reason = retry_response.get("stopReason", "end_turn")
+        if content_missing and retry_content is None:
+            # Neither call returned any text -- nothing to repair or return.
+            # Fail loud with both stopReasons so the caller's per-group
+            # except records a real error string instead of an IndexError
+            # with no context (#884).
+            raise RuntimeError(
+                "Bedrock Converse returned no text content on the initial "
+                f"call (stopReason={stop_reason!r}) or the retry "
+                f"(stopReason={retry_stop_reason!r})"
+            )
+        # If the retry also came back empty but the initial call had
+        # (invalid) content, keep the initial content -- let downstream
+        # handle it per D-05, same as the pre-#884 "still invalid" path.
+        content = retry_content if retry_content is not None else content
         retry_usage = retry_response["usage"]
         retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
         # Accumulate token usage from retry. No "totalTokens" key here:
@@ -485,7 +530,7 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
         }
         cache_read_tokens += retry_cache_read
         cache_write_tokens += retry_cache_write
-        stop_reason = retry_response.get("stopReason", "end_turn")
+        stop_reason = retry_stop_reason
         finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
         # If still invalid, return as-is (let downstream handle it per D-05)
 

@@ -184,6 +184,21 @@ def test_extract_tool_use_input_none_for_text_only_response() -> None:
     assert bedrock._extract_tool_use_input({}) is None
 
 
+def test_extract_text_content_finds_text_block() -> None:
+    response = {"output": {"message": {"content": [{"toolUse": {}}, {"text": "hi"}]}}}
+    assert bedrock._extract_text_content(response) == "hi"
+
+
+def test_extract_text_content_none_for_empty_or_textless_content() -> None:
+    assert bedrock._extract_text_content(
+        {"output": {"message": {"content": []}}}
+    ) is None
+    assert bedrock._extract_text_content(
+        {"output": {"message": {"content": [{"toolUse": {}}]}}}
+    ) is None
+    assert bedrock._extract_text_content({}) is None
+
+
 def test_strip_markdown_fences_json_language_tag() -> None:
     assert bedrock._strip_markdown_fences('```json\n{"a": 1}\n```') == '{"a": 1}'
 
@@ -478,6 +493,53 @@ def test_handle_bedrock_raises_when_forced_tool_did_not_fire(monkeypatch: pytest
         bedrock._handle_bedrock(
             [{"role": "user", "content": "hi"}], response_format=response_format, cfg=_bedrock_cfg()
         )
+
+
+def test_handle_bedrock_empty_content_retries_and_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # First call returns an empty content list (#884, e.g. a guardrail
+    # intervention); the retry gets real text back.
+    empty = {
+        "output": {"message": {"content": []}},
+        "stopReason": "guardrail_intervened",
+        "usage": {"inputTokens": 30, "outputTokens": 0},
+    }
+    recovered = _converse_response("hello", stop_reason="end_turn",
+                                   input_tokens=40, output_tokens=8)
+    fake = _FakeBedrockClient([empty, recovered])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}], response_format=None, cfg=_bedrock_cfg()
+    )
+
+    assert result["content"] == "hello"
+    assert result["finish_reason"] == "stop"  # from the retry's stopReason
+    assert result["prompt_tokens"] == 30 + 40
+    assert result["completion_tokens"] == 0 + 8
+    assert len(fake.calls) == 2
+
+
+def test_handle_bedrock_empty_content_on_both_calls_raises_runtime_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty_first = {
+        "output": {"message": {"content": []}},
+        "stopReason": "guardrail_intervened",
+        "usage": {"inputTokens": 30, "outputTokens": 0},
+    }
+    empty_retry = {
+        "output": {"message": {"content": []}},
+        "stopReason": "max_tokens",
+        "usage": {"inputTokens": 40, "outputTokens": 0},
+    }
+    fake = _FakeBedrockClient([empty_first, empty_retry])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(RuntimeError, match="guardrail_intervened.*max_tokens"):
+        bedrock._handle_bedrock(
+            [{"role": "user", "content": "hi"}], response_format=None, cfg=_bedrock_cfg()
+        )
+    assert len(fake.calls) == 2  # both reads guarded, no IndexError before the raise
 
 
 def test_handle_bedrock_repairs_invalid_json_on_retry(monkeypatch: pytest.MonkeyPatch) -> None:
