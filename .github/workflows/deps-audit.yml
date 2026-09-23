@@ -59,7 +59,7 @@ jobs:
       #   --no-deps -r requirements.txt                 -> 39 packages audited
       #     (12 declared; adds botocore, httpx, pydantic-core, certifi, urllib3)
       #   --no-deps -r backend/requirements.txt         -> 60 packages audited
-      #     (24 declared; adds cryptography, starlette, anyio, h11, typing_extensions)
+      #     (24 declared; adds starlette, h11, typing_extensions, urllib3, certifi)
       #   --no-deps --disable-pip -r requirements.txt   -> 12 packages audited
       # Transitive dependencies ARE covered. The remaining gap is reproducibility,
       # not coverage: the audited set is whatever pip resolves at audit time
@@ -67,7 +67,7 @@ jobs:
       #
       # THE TRAP: adding --disable-pip -- or hash-pinning these files, which
       # takes the same branch -- silently collapses coverage from 39/60 packages
-      # to the 12/23 direct pins, with no warning and a still-green run. If you
+      # to the 12/24 direct pins, with no warning and a still-green run. If you
       # hash-pin for #130, pin the fully RESOLVED set, never just these files.
       #
       # Ignored advisories are maintained in .pip-audit-ignore.txt. The pysaml2
