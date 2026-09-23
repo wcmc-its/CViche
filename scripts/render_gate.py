@@ -31,16 +31,10 @@ docx is a one-line notice in the index, not an error. Mirrors
 doctor_gate.py's --source-dir: same fail-closed non-directory check, same
 _uid_owns boundary rule (a shorter uid must not match a longer uid's file).
 
-What this flag is NOT is a reproduction of a live run. run_stage6() takes an
-original_doc_path parameter and forwards it to generate(), so this gate and
-production now go through one entry point -- but neither driver passes one
-(run_full_pipeline.py:994 and
-web_interface/backend/app/pipeline/orchestrator.py:1370-1377 both call
-run_stage6 without it), which leaves this gate and stage 6's own unit tests
-the only callers supplying a source document anywhere in the repo. So a delta
-this flag surfaces is still a delta the corpus can measure but a real CV
-render does not produce; turning the fallback on in production is #550's
-remaining work.
+With the flag this gate reproduces a live run: run_stage6() takes an
+original_doc_path parameter and forwards it to generate(), and both drivers
+pass the resolved source path the same way (#550), so a delta this flag
+surfaces is a delta a real CV render produces too.
 
 Fixes two defects found in an earlier, uncommitted version of this script
 (docs/analysis/HANDOFF-wave1-completion-2026-08-11.md, issue #584):

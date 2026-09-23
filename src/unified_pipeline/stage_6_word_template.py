@@ -336,14 +336,13 @@ def _pii_cut_left_a_bare_label(entry: Mapping[str, Any]) -> bool:
 # Paths - Use the official WCM template
 TEMPLATE_PATH = Path(__file__).parent.parent.parent / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
-# Local-dev only: where sample source CVs live, for the generate() fallback that
-# locates an original docx when the caller didn't pass one. No production driver
-# passes original_doc_path -- the only callers that do are
-# scripts/render_gate.py --source-dir and stage 6's own tests -- so on a live
-# run this auto-discovery is the fallback's only feed, and it finds nothing.
-# The directory itself DOES exist in the deployed image (the backend
-# Dockerfile mkdir -p's and chowns it); what is missing is its contents, which
-# no COPY brings in and .dockerignore excludes from the build context.
+# Where sample source CVs live, for the generate() fallback that locates an
+# original docx when the caller didn't pass one. Both drivers now pass
+# original_doc_path (#550), as do scripts/render_gate.py --source-dir and
+# stage 6's own tests, so this guess is only for a direct generate() call
+# without one. (The web driver's _copy_to_pipeline_input drops each upload
+# into this same directory under the run's uid, which is why the fallback
+# fired on the web path even before it was wired explicitly.)
 SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
@@ -491,6 +490,21 @@ def _merge_appendix_diversion_warnings(
         written, recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
 
 
+def _log_validation_warnings(all_warnings: list[dict]) -> None:
+    """Bannered `logger.warning` echo of `generate()`'s merged section
+    failures + self-check findings, pulled out of `generate()` as a pure
+    move (#839 -- keeps the ratchet-tracked §9 oversized-function row from
+    rising) so it has its own name rather than growing that function."""
+    if not all_warnings:
+        return
+    logger.warning("!" * 60)
+    logger.warning("VALIDATION WARNINGS")
+    logger.warning("!" * 60)
+    for issue in all_warnings:
+        logger.warning(f"  ⚠ {issue['message']}")
+    logger.warning("!" * 60)
+
+
 # Personal data that must not be carried onto a WCM CV. Source CVs routinely
 # carry date/place of birth, marital status and family members' names in their
 # contact block; a WCM CV must not.
@@ -597,6 +611,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # render-warnings sidecar ahead of the self-check findings. Reset at
         # the top of generate(), declared here for typing/reuse across renders.
         self._section_failures: list[dict[str, Any]] = []
+
+        # Grant entries `_create_grant_table` declined as too sparse (#839) --
+        # appended to `unmapped_entries` at `generate()`'s Appendix fill so
+        # they still reach the Appendix and the `renderer_declined` warning
+        # instead of vanishing. Reset at the top of generate(), declared here
+        # for typing/reuse across renders.
+        self._declined_grant_entries: list[dict] = []
 
         # Taxonomy codes owned by a section that raised (#842): removed from
         # mapped_codes before the unmapped sweep so a failed section's
@@ -790,9 +811,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     ) -> str | None:
         """The original document path if not already given, or None.
 
-        Every live run is: only `render_gate.py --source-dir` and stage 6's
-        own tests pass one, and `SAMPLE_CV_DIR` is an empty directory in the
-        deployed image (see the constant). Anchored on the module-relative
+        Both drivers pass one since #550, so this guess is reached only by a
+        direct generate() call without it. Anchored on the module-relative
         `SAMPLE_CV_DIR` constant plus the process CWD, instead of a stack of
         brittle '..'/.parent chains that broke silently on any restructure.
 
@@ -949,7 +969,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Reset per-render section-failure tracking (#565) -- a generator
         # instance can render more than once, and a failure from a prior
         # render must never leak into this one's sidecar.
-        self._section_failures, self._failed_section_codes = [], set()
+        self._section_failures, self._failed_section_codes, self._declined_grant_entries = [], set(), []
 
         # Load input data - each stage output is self-contained
         with open(input_path, 'r') as f:
@@ -1047,11 +1067,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
         passthrough_consumed_ids = {id(e) for e in (passthrough_result or [])}
 
-        # Add appendix for ALL unmapped content. Local mutable copy of the
-        # module-level RENDER_ROUTED_CODES: the M1 discard just below mutates
-        # it per-call, and a frozenset shared across calls/runs would make
-        # that mutation stick around for the next one (#580/#581's class of
-        # bug -- process-global state mutated per run). Also drops any code a failed section owns (#842), so its entries fall to the Appendix.
+        # Add appendix for ALL unmapped content -- declined M2A/M2B/M2C
+        # entries (#839) are appended at the fill below, not seeded here
+        # (their code IS mapped). Local mutable copy of RENDER_ROUTED_CODES:
+        # the M1 discard just below mutates it per-call, and a frozenset
+        # shared across calls/runs would make that stick around (#580/#581).
+        # Also drops any code a failed section owns (#842), so its entries fall to the Appendix.
         mapped_codes = set(RENDER_ROUTED_CODES) - self._failed_section_codes
 
         # M1 (Research Activities) entries are consumed by the Stage 4.5 research
@@ -1063,7 +1084,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         if not research_summary_rendered:
             mapped_codes.discard('M1')
 
-        unmapped_entries = []
+        unmapped_entries: list[dict] = []
 
         # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260).
         for code, entries in entries_by_code.items():
@@ -1080,9 +1101,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # _unconsumed_personal_data_batch.
 
         written_appendix_entries: list[UnmappedEntry] = []
-        if unmapped_entries:
+        if unmapped_entries or self._declined_grant_entries:
             written_appendix_entries = self._render_section(
-                'appendix', lambda: self._fill_appendix(unmapped_entries)) or []
+                'appendix', lambda: self._fill_appendix(unmapped_entries + self._declined_grant_entries)) or []
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
@@ -1130,13 +1151,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
         all_warnings = self._section_failures + validation_issues
-        if all_warnings:
-            logger.warning("!" * 60)
-            logger.warning("VALIDATION WARNINGS")
-            logger.warning("!" * 60)
-            for issue in all_warnings:
-                logger.warning(f"  ⚠ {issue['message']}")
-            logger.warning("!" * 60)
+        _log_validation_warnings(all_warnings)
 
         self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
 
@@ -3404,11 +3419,11 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
             default True).
         original_doc_path: Optional path to the original Word document, for the
             personal-data fallback that recovers contact fields from it (#550).
-            Neither driver passes one today, so a live run keeps taking the
-            SAMPLE_CV_DIR auto-discovery branch in generate() and renders
-            exactly as before; scripts/render_gate.py --source-dir is what
-            supplies it, and it does so through here rather than constructing
-            its own generator, so the gate measures the production entry point.
+            Both drivers pass the resolved source path; scripts/render_gate.py
+            --source-dir supplies it the same way, through here rather than
+            by constructing its own generator, so the gate measures the
+            production entry point. Without it generate() falls back to the
+            SAMPLE_CV_DIR guess.
 
     Returns:
         Path to generated document

@@ -112,6 +112,11 @@ class Run(Base):
 
     id = Column(String(10), primary_key=True)  # e.g., "A1B2C3"
     filename = Column(String(255), nullable=False)
+    # Single source of truth for upload.py's pre-archive length guard (#796):
+    # a filename this column can't hold must be rejected before
+    # create_run_archive runs, not at INSERT time after the archive is
+    # already durable.
+    FILENAME_MAX_LENGTH = filename.type.length
     file_type = Column(String(20), nullable=False)  # "docx" or "pdf"
     status = Column(String(20), nullable=False, index=True)  # "running", "complete", "failed", "paused"
     # Statuses a run does not transition past. Single definition (CODING

@@ -819,6 +819,8 @@ class ResearchSupportSection:
             if self.verbose:
                 text = entry.get('text', '')[:50] if entry else ''
                 print(f"  Skipping sparse grant entry: '{text}...'")
+            if isinstance(entry, dict):
+                self._declined_grant_entries.append(entry)
             return None
 
         # Get role and determine PI name

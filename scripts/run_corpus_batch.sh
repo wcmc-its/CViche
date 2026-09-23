@@ -135,10 +135,29 @@ for f in "$INPUT_DIR"/*.docx; do
   [ -e "$f" ] || continue
   [ "$ran" -ge "$COUNT" ] && break
   stem="$(basename "$f" .docx)"
-  if [ -f "$OUTDIR/${stem}_wcm.docx" ]; then skipped=$((skipped+1)); continue; fi
+  log="$LOGDIR/${stem}.log"
+  if [ -f "$OUTDIR/${stem}_wcm.docx" ]; then
+    # #810: a docx existing is no longer proof the run is done -- a run that
+    # hit the stage3b_fallback_ratio hard-fail gate (doctor ERROR) or an
+    # outage-class LLM failure still writes one, and re-invoking the batch
+    # used to treat it as finished forever.
+    if [ "$DOCTOR" = "1" ]; then
+      # Skip only on a CLEAN doctor row: the latest row for this cv whose
+      # `worst` column is not ERROR. No row yet (never doctored) or worst=
+      # ERROR both fall through to re-run.
+      worst="$(awk -F'\t' -v cv="$stem" '$3==cv{w=$4} END{print w}' "$DOCTOR_TSV" 2>/dev/null)"
+      if [ -n "$worst" ] && [ "$worst" != "ERROR" ]; then
+        skipped=$((skipped+1)); continue
+      fi
+    elif ! grep -qE 'Stage 3b batch classification failed|LLMOutageError' "$log" 2>/dev/null; then
+      # --doctor is off: keep the old docx-existence check, but only when the
+      # run's own log shows no outage-driven failure -- a log naming one
+      # means this docx is exactly the case above and must be re-run.
+      skipped=$((skipped+1)); continue
+    fi
+  fi
 
   ran=$((ran+1))
-  log="$LOGDIR/${stem}.log"
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "[$(date '+%H:%M:%S')] ($ran/$COUNT) $stem ..."
   if [ -n "$MODEL" ]; then

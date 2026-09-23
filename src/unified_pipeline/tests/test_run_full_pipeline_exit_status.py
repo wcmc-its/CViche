@@ -297,8 +297,9 @@ def _install_stubs(monkeypatch, calls, fail, stage5b_writer, stage5_path, tmp_pa
         boom_if('5d')
         return _write(_FILES['5d'])
 
-    def stage_6(*, input_path, verbose):
-        calls.record('6', input_path=input_path, verbose=verbose)
+    def stage_6(*, input_path, verbose, original_doc_path):
+        calls.record('6', input_path=input_path, verbose=verbose,
+                     original_doc_path=original_doc_path)
         boom_if('6')
         path = tmp_path / _FILES['6']
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -482,6 +483,17 @@ def test_stage_4_receives_the_resolved_cv_path(tmp_path, monkeypatch, capsys):
         "stage 4 must be handed the path resolve_cv_path_for_run produced")
 
 
+def test_stage_6_receives_the_resolved_cv_path(tmp_path, monkeypatch, capsys):
+    """#550: the personal-data fallback reopens the source .docx, and the only
+    way stage 6 learns where it is on this driver is this kwarg -- the
+    SAMPLE_CV_DIR guess inside generate() resolves for a uid-style run from
+    the repo root and for nothing else (a corpus batch on a path, a worktree)."""
+    calls = _Calls()
+    rc, _ = _run_main(tmp_path, monkeypatch, capsys, calls=calls)
+    assert rc == 0
+    assert calls.kwargs['6']['original_doc_path'] == _DOCX
+
+
 def test_a_context_whose_path_and_uid_disagree_is_rejected(tmp_path):
     """Stage 4 finds its input from Path(docx_path).stem, so the two identities
     have to agree; this fails loudly instead of extracting another CV."""
@@ -517,7 +529,8 @@ def test_every_stage_receives_the_orchestration_arguments_it_expects(
     assert calls.kwargs['5b'] == {'input_path': str(_FILES['5']), 'verbose': True}
     assert calls.kwargs['5c'] == {'input_path': str(_FILES['5b']), 'verbose': True}
     assert calls.kwargs['5d'] == {'input_path': str(_FILES['5c']), 'verbose': True}
-    assert calls.kwargs['6'] == {'input_path': str(_FILES['5d']), 'verbose': True}
+    assert calls.kwargs['6'] == {'input_path': str(_FILES['5d']), 'verbose': True,
+                                 'original_doc_path': _DOCX}
 
 
 # -- r3960726469 #6: stage order --------------------------------------------
@@ -564,7 +577,8 @@ def test_stage6_does_not_use_stale_artifact(tmp_path, monkeypatch, capsys):
     rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'5d'}, calls=calls,
                         setup=plant_stale)
     assert rc == 1, "the run had a failed stage"
-    assert calls.kwargs['6'] == {'input_path': str(_FILES['5c']), 'verbose': True}, (
+    assert calls.kwargs['6'] == {'input_path': str(_FILES['5c']), 'verbose': True,
+                                 'original_doc_path': _DOCX}, (
         "stage 6 took an input this run did not produce")
     assert "stage_5d: RuntimeError" in out
 
@@ -620,7 +634,8 @@ def test_standalone_stage_6_uses_the_exact_expected_path(tmp_path, monkeypatch, 
     rc, _ = _run_main(tmp_path, monkeypatch, capsys, calls=calls, setup=plant,
                       argv=['run_full_pipeline.py', UID, '--stage', '6'])
     assert calls.order == ['6']
-    assert calls.kwargs['6'] == {'input_path': str(_FILES['4']), 'verbose': True}
+    assert calls.kwargs['6'] == {'input_path': str(_FILES['4']), 'verbose': True,
+                                 'original_doc_path': _DOCX}
     assert rc == 0
 
 

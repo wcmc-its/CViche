@@ -104,3 +104,33 @@ def test_stage_4_receives_the_real_resolved_cv_path(monkeypatch, tmp_path, db):
     assert captured["docx_path"] != f"{o.document_uid}.docx", \
         "must not regress to the synthetic, non-existent filename"
     assert result["output_files"] == [str(tmp_path / "stage4.json")]
+
+
+def test_stage_6_receives_the_real_resolved_cv_path(monkeypatch, tmp_path, db):
+    """#550: stage 6's personal-data fallback reopens the source .docx. Until
+    now this driver passed no path and the fallback only ran because
+    `_copy_to_pipeline_input` happens to drop the upload into the same
+    directory stage 6's SAMPLE_CV_DIR auto-discovery scans, under the same
+    uid, from the same CWD. Pass it explicitly, like stages 1b/2/4 do.
+    """
+    from app.pipeline import orchestrator as orch
+    from app.models import Run
+
+    captured = {}
+
+    def fake_run_stage6(**kwargs):
+        captured.update(kwargs)
+        out = tmp_path / "out.docx"
+        out.write_bytes(b"PK")
+        return str(out)
+
+    monkeypatch.setattr(orch, "run_stage6", fake_run_stage6)
+    monkeypatch.setattr(orch, "run_doctor", lambda *a, **k: None, raising=False)
+
+    o = _orchestrator(monkeypatch, tmp_path, db, "STAGE6PATH")
+    o.stage_outputs["5d"] = str(tmp_path / "stage5d.json")
+    real_cv_path = str(tmp_path / "cv.docx")
+
+    asyncio.run(o._execute_stage_logic("6", real_cv_path))
+
+    assert captured.get("original_doc_path") == real_cv_path
