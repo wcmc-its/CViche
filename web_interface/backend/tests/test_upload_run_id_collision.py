@@ -29,7 +29,7 @@ from sqlalchemy.orm import object_session
 
 from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.storage.base import StorageKeyExists, StorageKeyNotFound
+from app.storage.base import StorageError, StorageKeyExists, StorageKeyNotFound
 from app.storage.local_storage import LocalRunStorage
 from app.api import upload as upload_module
 from app.api.upload import generate_run_id
@@ -154,6 +154,16 @@ def test_local_get_file_missing_key_raises_storagekeynotfound_not_bare_filenotfo
         storage.get_file("R1", "input/missing.txt")
 
 
+def test_storage_exceptions_are_storageerror_subclasses():
+    """base.py's exception contract (#790 acceptance criterion 3) is that a
+    caller can catch the single base StorageError instead of enumerating
+    StorageKeyExists and StorageKeyNotFound separately -- pinned directly
+    against the class hierarchy, not inferred from a raise site."""
+    assert issubclass(StorageKeyExists, StorageError)
+    assert issubclass(StorageKeyNotFound, StorageError)
+    assert issubclass(StorageKeyNotFound, FileNotFoundError)
+
+
 # --- (a2) put_file / put_global atomic-write contract (#787) ---------------
 #
 # put_file and put_global used to end in path.write_bytes(data): a process
@@ -166,6 +176,10 @@ def test_local_get_file_missing_key_raises_storagekeynotfound_not_bare_filenotfo
 
 def _boom(*_args, **_kwargs):
     raise OSError("simulated crash before rename")
+
+
+def _boom_keyboard_interrupt(*_args, **_kwargs):
+    raise KeyboardInterrupt("simulated interrupt before rename")
 
 
 def test_local_put_file_interrupted_replace_leaves_previous_content_intact(tmp_path, monkeypatch):
@@ -199,6 +213,38 @@ def test_local_put_file_interrupted_write_leaves_no_file_at_new_key(tmp_path, mo
     run_dir = tmp_path / "R2"
     leftover = os.listdir(run_dir) if run_dir.exists() else []
     assert leftover == [], f"temp file leaked: {leftover}"
+
+
+def test_local_put_file_interrupted_by_keyboardinterrupt_still_cleans_up(tmp_path, monkeypatch):
+    """_atomic_write's cleanup catches BaseException, not just Exception, so
+    a KeyboardInterrupt (or SystemExit) during the write still removes the
+    temp file instead of leaking it. The interrupted-write tests above only
+    exercise OSError, which `except Exception` alone would already catch --
+    this pins the broader clause specifically, so narrowing it to Exception
+    would fail this test rather than pass silently."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _boom_keyboard_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        storage.put_file("R6", "data.json", b"partial-bytes")
+    monkeypatch.undo()
+
+    assert storage.exists("R6", "data.json") is False
+    run_dir = tmp_path / "R6"
+    leftover = os.listdir(run_dir) if run_dir.exists() else []
+    assert leftover == [], f"temp file leaked: {leftover}"
+
+
+def test_local_put_file_restores_standard_readable_mode(tmp_path):
+    """mkstemp() creates the temp file at 0o600 (owner-only); os.replace()
+    preserves the SOURCE's mode, not the destination's, so without an
+    explicit chmod the final file would regress from the pre-#787
+    path.write_bytes() default (0o644 under the standard umask) to
+    owner-only (#787 follow-up)."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+    storage.put_file("R7", "data.json", b"bytes")
+    mode = (tmp_path / "R7" / "data.json").stat().st_mode & 0o777
+    assert mode == 0o644
 
 
 def test_local_put_global_interrupted_replace_leaves_no_temp_file(tmp_path, monkeypatch):
