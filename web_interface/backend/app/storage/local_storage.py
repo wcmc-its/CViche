@@ -149,6 +149,10 @@ class LocalRunStorage(RunStorage):
 
         Idempotent (returns 0 if absent). Refuses to delete the storage base
         itself, so an empty/degenerate key can't wipe the whole store.
+
+        Walks the tree twice -- once to count files, once in rmtree -- which
+        is fine for a run directory (tens of files); count while deleting if
+        this ever serves large trees (#792).
         """
         if path.resolve() == self._base.resolve():
             raise ValueError("refusing to delete the storage base directory")
