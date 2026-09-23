@@ -20,6 +20,7 @@ import os
 import re
 import threading
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,7 +29,7 @@ from sqlalchemy.orm import object_session
 
 from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.storage.base import StorageKeyExists
+from app.storage.base import StorageKeyExists, StorageKeyNotFound
 from app.storage.local_storage import LocalRunStorage
 from app.api import upload as upload_module
 from app.api.upload import generate_run_id
@@ -138,6 +139,21 @@ def test_local_put_file_exclusive_is_atomic_under_concurrency(tmp_path):
     assert storage.get_file("RACE01", "input/cv.docx") == winners[0]
 
 
+# --- (a1) get_file's shared exception contract (#790) -----------------------
+
+def test_local_get_file_missing_key_raises_storagekeynotfound_not_bare_filenotfound(tmp_path):
+    """LocalRunStorage is the other half of the StorageKeyNotFound contract
+    that base.py documents (the S3 half is
+    test_s3_storage.py::test_get_file_nosuchkey_raises_storagekeynotfound_not_bare_filenotfound).
+    StorageKeyNotFound subclasses FileNotFoundError, so a regression to a
+    bare FileNotFoundError here still passes any test that only checks
+    pytest.raises(FileNotFoundError) -- this one pins the specific type."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+
+    with pytest.raises(StorageKeyNotFound):
+        storage.get_file("R1", "input/missing.txt")
+
+
 # --- (a2) put_file / put_global atomic-write contract (#787) ---------------
 #
 # put_file and put_global used to end in path.write_bytes(data): a process
@@ -206,6 +222,27 @@ def test_local_put_file_leaves_no_temp_file_on_success(tmp_path):
     storage = LocalRunStorage(base_dir=str(tmp_path))
     storage.put_file("R3", "data.json", b"bytes")
     assert os.listdir(tmp_path / "R3") == ["data.json"]
+
+
+def test_local_put_file_temp_file_is_created_in_destination_directory(tmp_path, monkeypatch):
+    """The temp file mkstemp() creates must live in path.parent -- the
+    destination's own directory -- not the platform default temp dir.
+    os.replace() is only an atomic same-filesystem rename when both sides
+    share a filesystem; a store mounted on a different filesystem than the
+    default temp dir would turn every put_file into a cross-device (EXDEV)
+    error if this ever regressed to mkstemp(dir=None) (#787)."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+    real_replace = os.replace
+    seen_src_parents = []
+
+    def _spy_replace(src, dst):
+        seen_src_parents.append(Path(src).parent)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _spy_replace)
+    storage.put_file("R4", "data.json", b"bytes")
+
+    assert seen_src_parents == [tmp_path / "R4"]
 
 
 # --- (b2) key/run-id validation is a storage invariant ----------------------
