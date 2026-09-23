@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: cviche-worker
 spec:
-  replicas: 2
+  replicas: 2 # global run cap for prod -- one run per pod, no HPA (see base/worker/deployment.yaml)
   template:
     spec:
       nodeSelector:
@@ -24,6 +24,11 @@ spec:
             - name: auth-config-volume
               mountPath: /app/web_interface/backend/auth_config.yaml
               subPath: auth_config.yaml # Mounts ONLY this file without wiping out existing app files
+              # Required despite the name: app.database reads the db section
+              # at import time, and worker.main() reads the redis + s3
+              # sections (it exits 2 without them). SAML certs are NOT
+              # mounted here -- that's certs-volume on the backend patch only
+              # (#701 rework, mrj4001 review 4070646335#2).
       volumes:
         - name: auth-config-volume
           configMap:
