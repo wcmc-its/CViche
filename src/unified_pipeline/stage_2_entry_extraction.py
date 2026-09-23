@@ -14,6 +14,7 @@ import sys
 import json
 import logging
 import time
+import bisect
 from functools import partial
 from pathlib import Path
 from collections.abc import Callable
@@ -190,27 +191,37 @@ def extract_leaf_sections_with_boundaries(
             start_idx = boundary.get("element_idx_start")
             end_idx = boundary.get("element_idx_end")
             if start_idx is not None:
-                parent_sections[hierarchy_path] = {
-                    "start": start_idx,
-                    "end": end_idx,
-                    "first_child_start": None
-                }
+                parent_sections[hierarchy_path] = {"start": start_idx, "end": end_idx}
 
-    # Find the first child start for each parent
-    for boundary in section_boundaries:
-        if not boundary.get("has_children", False):
-            hierarchy_path = boundary.get("hierarchy", [])
-            start_idx = boundary.get("element_idx_start")
+    # Precompute, once, what the parent-gap branch below used to rescan
+    # `section_boundaries` for on every parent (#916 rework):
+    # - `starts_sorted` turns "smallest start strictly greater than X" into
+    #   a single `bisect_right` per parent instead of an O(n) filter+min.
+    # - `first_index_at_start` / `leaf_at_start` turn the same-start
+    #   suppression check into two dict lookups instead of an O(n) `any(...)`
+    #   that compared by object identity. Index comparison (position in
+    #   `section_boundaries`, via `first_index_at_start`) replaces that
+    #   identity test: a boundary is suppressed by an earlier same-start
+    #   entry when it is not the first index recorded for that start, which
+    #   also correctly tells apart two structurally-equal-but-distinct dicts
+    #   at the same start (a duplicated parent record) without relying on
+    #   `is`.
+    starts_sorted = sorted(
+        b["element_idx_start"] for b in section_boundaries
+        if b.get("element_idx_start") is not None
+    )
+    first_index_at_start: dict[int, int] = {}
+    leaf_at_start: dict[int, bool] = {}
+    for i, b in enumerate(section_boundaries):
+        s = b.get("element_idx_start")
+        if s is None:
+            continue
+        if s not in first_index_at_start:
+            first_index_at_start[s] = i
+        if not b.get("has_children", False):
+            leaf_at_start[s] = True
 
-            # Check if this is a child of any parent
-            if len(hierarchy_path) > 1:
-                parent_path = tuple(hierarchy_path[:-1])
-                if parent_path in parent_sections:
-                    current_first = parent_sections[parent_path]["first_child_start"]
-                    if current_first is None or start_idx < current_first:
-                        parent_sections[parent_path]["first_child_start"] = start_idx
-
-    for boundary in section_boundaries:
+    for idx, boundary in enumerate(section_boundaries):
         hierarchy_path = boundary.get("hierarchy", [])
         start_idx = boundary.get("element_idx_start")
         end_idx = boundary.get("element_idx_end")
@@ -223,12 +234,21 @@ def extract_leaf_sections_with_boundaries(
             # Leaf section - include as-is
             leaf_sections.append((hierarchy_path, start_idx, end_idx))
         else:
-            # Parent section with children - check for gap before first child
+            # Parent w/ children - gap ends just before the next STRICTLY
+            # LATER header (any boundary, any depth). A same-start boundary
+            # suppresses it only when it's a leaf, or was listed earlier --
+            # the earlier tie-owner emits it, so same-start parents don't
+            # cancel each other and drop the content between them (#916).
             parent_path = tuple(hierarchy_path)
             if parent_path in parent_sections:
-                first_child_start = parent_sections[parent_path]["first_child_start"]
-                if first_child_start is not None and first_child_start > start_idx + 1:
-                    # There's a gap between parent header and first child
+                suppressed = (
+                    leaf_at_start.get(start_idx, False)
+                    or first_index_at_start[start_idx] != idx
+                )
+                next_pos = bisect.bisect_right(starts_sorted, start_idx)
+                first_child_start = starts_sorted[next_pos] if next_pos < len(starts_sorted) else None
+                if not suppressed and first_child_start is not None and first_child_start > start_idx + 1:
+                    # There's a gap between parent header and the next header
                     # This gap contains content that belongs to the parent section
                     # (e.g., journal articles before "Book" subsection in PUBLICATIONS)
                     gap_end = first_child_start - 1
