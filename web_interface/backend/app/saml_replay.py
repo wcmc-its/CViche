@@ -29,12 +29,12 @@ below), unlike the broker/session store's own fail-open behavior:
     logs loudly (does not refuse to boot) when SAML is enabled without it.
 
 ``SamlReplayCache.check_and_record`` takes exactly one assertion ID, not a
-collection: pysaml2 7.5.5 rejects a response carrying more than one plain (or
-one encrypted) assertion before this module ever sees it (saml2int
-limitation -- see ``saml2/response.py``'s ``parse_assertion``), so a
-multi-key atomic claim would buy safety a real response can never need. See
-the ponytail comment at the call site (app/api/saml_routes.py) for the
-upgrade path if that ever changes.
+collection. pysaml2 7.5.5's ``parse_assertion`` (``saml2/response.py``,
+saml2int limitation) raises unless a response carries exactly one plain or
+exactly one encrypted assertion, and the call site in app/api/saml_routes.py
+rejects any response whose assertion_ids() still returns more than one (e.g.
+one plain plus one encrypted), so a multi-key atomic claim is never needed.
+See the ponytail comment there for the upgrade path.
 """
 import calendar
 import hashlib

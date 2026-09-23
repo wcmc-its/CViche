@@ -235,9 +235,9 @@ def _reject_replayed_assertion(authn_response) -> RedirectResponse | None:
     if len(ids) > 1:
         # ponytail: single-assertion invariant -- pysaml2 7.5.5's
         # parse_assertion (saml2/response.py, "saml2int limitation") raises
-        # InvalidAssertion before this function ever runs unless a response
-        # carries exactly one plain (or one encrypted) assertion, so this
-        # branch is dead code on every real response; a Lua
+        # InvalidAssertion unless a response carries exactly one plain OR
+        # exactly one encrypted assertion, so this branch is reached only by a
+        # mixed response (e.g. one plain plus one encrypted), which it rejects; a Lua
         # EXISTS-all-then-SET-all script (fakeredis would need the `lupa`
         # extra, not installed/pinned) is the upgrade path if
         # multi-assertion responses are ever accepted.

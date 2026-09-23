@@ -1,7 +1,7 @@
-# Tracked under issue #126. Advisories were added here only while the
-# pysaml2 -> pyopenssl -> cryptography pin knot blocked a fix (pysaml2 7.5.4
-# capped pyopenssl <24.3.0, which capped cryptography <44). pysaml2 7.5.5
-# (2026-09-17) lifted that cap, so the knot is gone and every entry that was
-# here has been removed -- see #126 for the pin bump.
+# Tracked under issue #126. The last entries here were all held by the
+# pysaml2 -> pyopenssl -> cryptography pin knot (pysaml2 7.5.4 capped
+# pyopenssl <24.3.0, which capped cryptography <44). pysaml2 7.5.5
+# (2026-09-17) lifted that cap, so every remaining entry has been removed.
+# Add an entry only with an issue number and the fix version it waits on.
 #
 # New advisories in any dep still fail the gate.
