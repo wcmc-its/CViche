@@ -438,6 +438,8 @@ class TestDnInScope:
         assert _dn_in_scope(self.CHILD, self.BASE_DN, LEVEL) is True
         assert _dn_in_scope(self.GRANDCHILD, self.BASE_DN, LEVEL) is False
         assert _dn_in_scope(self.BASE_DN, self.BASE_DN, LEVEL) is False
+        # Right depth, wrong parent: depth alone must not satisfy LEVEL.
+        assert _dn_in_scope("uid=x,ou=other,dc=weill,dc=cornell,dc=edu", self.BASE_DN, LEVEL) is False
 
     def test_subtree_scope_at_or_below(self):
         assert _dn_in_scope(self.CHILD, self.BASE_DN, SUBTREE) is True
@@ -474,11 +476,11 @@ class TestDnInScope:
         spaced = "uid=abc, ou=people, dc=weill, dc=cornell, dc=edu"
         assert _dn_in_scope(spaced, self.BASE_DN, LEVEL) is True
 
-    def test_escaped_comma_does_not_widen_subtree_match(self):
-        """A DN whose RDN value contains an escaped comma must not be read as
-        several plain components that happen to end in base_dn's characters --
-        that was a SUBTREE scope-widening false positive under the old
-        string-suffix implementation (#331)."""
+    def test_unparseable_escaped_comma_dn_is_not_in_scope(self):
+        """The old string-suffix check read this DN as ending in base_dn and
+        accepted it under SUBTREE (#331). ldap3 refuses to parse it (the
+        unescaped "=" after the escaped comma), so it now lands on the
+        malformed-DN branch and is out of scope."""
         widened = r"uid=x,ou=a\,ou=people,dc=weill,dc=cornell,dc=edu"
         assert _dn_in_scope(widened, self.BASE_DN, SUBTREE) is False
 
@@ -1506,7 +1508,7 @@ class TestValidateStartupConfigWiring:
         return engine, Session
 
     def _boot(self, yaml_cfg):
-        """Context manager-like helper: returns (app, session, exit_stack_fn)."""
+        """Boot the app against yaml_cfg; returns (app, cleanup)."""
         from app.main import app
         engine, Session = self._fresh_engine_and_sessionmaker()
         session = Session()
