@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from urllib.parse import unquote, urlparse
 from ldap3 import Server, Connection, BASE, LEVEL, SUBTREE
 from ldap3.utils.conv import escape_filter_chars
+from ldap3.utils.dn import parse_dn
 from ldap3.core.exceptions import (
     LDAPException,
     LDAPBindError,
@@ -15,6 +16,7 @@ from ldap3.core.exceptions import (
     LDAPStrongerAuthRequiredResult,
     LDAPInsufficientAccessRightsResult,
     LDAPNoSuchObjectResult,
+    LDAPInvalidDnError,
 )
 from cachetools import TTLCache
 from pydantic import SecretStr
@@ -259,20 +261,31 @@ def _dn_in_scope(user_dn: str, base_dn: str, scope) -> bool:
     LEVEL  (?one?)  -- user_dn must be a direct child of base_dn.
     SUBTREE(?sub?)  -- user_dn must be base_dn or anywhere beneath it.
 
-    DN comparison is case-insensitive per the LDAP spec.
+    Parses both DNs into RDN-component tuples with ldap3.utils.dn.parse_dn
+    (#331) rather than comparing the raw strings: a plain comma split reads an
+    escaped comma inside an RDN value as a component boundary, which both
+    misses a real child (an unescaped-looking split that doesn't land on a
+    real RDN edge) and can widen SUBTREE to match a DN that only *looks* like
+    it ends in base_dn once you split on every comma. Components are compared
+    case-insensitively per the LDAP spec; parse_dn(strip=True) also settles
+    the whitespace-after-comma variance a DN string may carry.
     """
-    u = user_dn.strip().lower()
-    b = base_dn.strip().lower()
+    try:
+        user_rdns = parse_dn(user_dn, strip=True)
+        base_rdns = parse_dn(base_dn, strip=True)
+    except LDAPInvalidDnError:
+        # Not a DN ldap3 itself can parse -- it can't be "in scope" of anything.
+        return False
+    u = tuple((rdn_type.lower(), value.lower()) for rdn_type, value, _ in user_rdns)
+    b = tuple((rdn_type.lower(), value.lower()) for rdn_type, value, _ in base_rdns)
     if scope == BASE:
         return u == b
     if scope == LEVEL:
         # direct child: strip the user's leftmost RDN, the remainder must be base.
-        # ponytail: plain comma split -- WCM user RDNs (uid=cwid) carry no escaped
-        # commas; switch to ldap3.utils.dn.parse_dn only if a value ever needs it.
-        _, sep, rest = u.partition(",")
-        return bool(sep) and rest == b
-    # SUBTREE
-    return u == b or u.endswith("," + b)
+        return len(u) == len(b) + 1 and u[1:] == b
+    # SUBTREE: base_dn's RDN sequence must be exactly the rightmost slice of
+    # user_dn's -- i.e. user_dn is base_dn or a descendant of it.
+    return len(u) >= len(b) and u[len(u) - len(b):] == b
 
 
 def _memberurl_search_filter(member_url: str, user_dn: str) -> str | None:

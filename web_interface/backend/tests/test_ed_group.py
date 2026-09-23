@@ -437,6 +437,30 @@ class TestDnInScope:
     def test_case_insensitive(self):
         assert _dn_in_scope(self.CHILD.upper(), self.BASE_DN, LEVEL) is True
 
+    def test_escaped_comma_in_rdn_value_is_one_component(self):
+        """A comma inside an RDN's value (escaped per RFC 4514) must not be
+        read as a component boundary -- the old partition(',') implementation
+        split on it and missed this direct child (#331)."""
+        child = r"cn=Smith\, John,ou=people,dc=weill,dc=cornell,dc=edu"
+        assert _dn_in_scope(child, self.BASE_DN, LEVEL) is True
+
+    def test_whitespace_after_comma_is_normalized(self):
+        spaced = "uid=abc, ou=people, dc=weill, dc=cornell, dc=edu"
+        assert _dn_in_scope(spaced, self.BASE_DN, LEVEL) is True
+
+    def test_escaped_comma_does_not_widen_subtree_match(self):
+        """A DN whose RDN value contains an escaped comma must not be read as
+        several plain components that happen to end in base_dn's characters --
+        that was a SUBTREE scope-widening false positive under the old
+        string-suffix implementation (#331)."""
+        widened = r"uid=x,ou=a\,ou=people,dc=weill,dc=cornell,dc=edu"
+        assert _dn_in_scope(widened, self.BASE_DN, SUBTREE) is False
+
+    def test_malformed_dn_is_not_in_scope(self):
+        """A DN ldap3 itself cannot parse must return False, not raise --
+        LDAPInvalidDnError must never escape into membership evaluation."""
+        assert _dn_in_scope("not a dn at all ===", self.BASE_DN, SUBTREE) is False
+
 
 class TestGroupOfURLsMembership:
     """End-to-end _ldap_check_membership tests for WCM's groupOfURLs schema.
