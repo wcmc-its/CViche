@@ -97,7 +97,7 @@ def _add_security_headers(response: JSONResponse) -> JSONResponse:
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "font-src 'self'; "
-        "connect-src 'self' ws: wss:; "
+        "connect-src 'self'; "
         "frame-ancestors 'none'"
     )
     response.headers["X-Frame-Options"] = "DENY"

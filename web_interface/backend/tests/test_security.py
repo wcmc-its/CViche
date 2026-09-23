@@ -434,12 +434,17 @@ class TestSecurityHeaders:
         assert "default-src 'self'" in csp
 
     def test_csp_allows_websockets(self, client, db, seed_simple_mode):
-        """CSP connect-src allows WebSocket protocols."""
+        """CSP connect-src covers same-origin WebSockets via 'self' alone,
+        with no bare ws:/wss: source that would permit a socket to any host
+        (#773). The frontend's own WebSocket (usePipelineRun.tsx) always
+        connects same-origin, and the backend's CSP only governs its own
+        API/JSON responses -- the SPA document's CSP is nginx's, unaffected
+        by this header."""
         response = client.get("/health")
         csp = response.headers["content-security-policy"]
-        assert "connect-src" in csp
-        assert "ws:" in csp
-        assert "wss:" in csp
+        assert "connect-src 'self'" in csp
+        assert "ws:" not in csp
+        assert "wss:" not in csp
 
     def test_csp_blocks_inline_scripts(self, client, db, seed_simple_mode):
         """CSP script-src does NOT allow unsafe-inline."""
