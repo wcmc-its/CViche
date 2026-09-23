@@ -39,9 +39,8 @@ _NOT_FOUND_CODES = frozenset({"NoSuchKey", "404"})
 # ONE synchronous upload request, so a degraded S3 multiplies whatever the
 # client's timeout is across up to 10 sequential calls before the caller sees
 # a response (#791). These values make that worst case explicit and bounded
-# instead of inheriting botocore's silently -- proposed numbers, not an SLO
-# decision: flagged here for Mahender to confirm against the actual
-# upload-endpoint budget.
+# instead of inheriting botocore's silently. They are derived from that
+# request budget, not from a measured S3 latency SLO.
 S3_CONNECT_TIMEOUT_S = 5
 S3_READ_TIMEOUT_S = 30
 S3_MAX_ATTEMPTS = 3
