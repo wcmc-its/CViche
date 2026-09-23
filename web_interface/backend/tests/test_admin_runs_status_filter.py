@@ -136,6 +136,7 @@ def test_queue_stats_with_redis_merges_stream_depth_and_pending(client, db, monk
     monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
     r = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer(), decode_responses=True)
     monkeypatch.setattr(run_queue, "_client", lambda: r)
+    monkeypatch.setattr(run_queue, "_producer_client", lambda: r)
     run_queue.ensure_group()
     run_queue.enqueue("QS_QUEUED")
     run_queue.read_one("pod-a")

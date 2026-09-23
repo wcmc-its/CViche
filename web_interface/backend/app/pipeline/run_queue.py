@@ -11,11 +11,18 @@ propagates so the producer can revert the run's status and answer 503.
 A message is a work token (``run_id`` + optional ``start_step``); the DB row
 is the truth and the worker's conditional claim (``app/worker.py``) decides
 whether a delivered token may execute. Delivery is at-least-once: an entry is
-XACKed after the run finishes (success or handled failure), so only a crash
-leaves it pending for XAUTOCLAIM to hand to another worker.
+XACKed (and XDELed -- see ``ack``) after the run finishes (success or handled
+failure), so only a crash leaves it pending for XAUTOCLAIM to hand to another
+worker.
+
+Every key this module builds carries the ``{cviche:runs}`` hash tag, so all of
+them hash to the same Valkey Cluster slot -- ElastiCache Serverless enforces
+cluster-mode slot rules, and a MULTI/EXEC (``ack``, ``dead_letter``,
+``requeue``) spanning two slots fails with CROSSSLOT.
 """
 import logging
-from datetime import datetime
+import threading
+from datetime import datetime, timezone
 
 import redis
 
@@ -23,36 +30,81 @@ from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
-STREAM = "cviche:runs:queue"
+STREAM = "{cviche:runs}"
 GROUP = "cviche-workers"
-DEAD_STREAM = "cviche:runs:dead"
-MAXLEN = 1000
+DEAD_STREAM = "{cviche:runs}:dead"
+# DEAD_STREAM has no consumer group and is inspection-only, so bounding it is
+# safe. STREAM itself is never trimmed by length: ack() below XDELs each entry
+# once it is done, so XLEN already reads as undelivered-plus-pending, not
+# unbounded history, without needing an approximate MAXLEN that would drop
+# entries no worker has ever seen (#701 run_queue#1).
+DEAD_MAXLEN = 1000
+# A short-lived guard on the already-queued re-enqueue path: without it, a
+# retry storm on one run adds an unbounded number of duplicate tokens for it
+# (#701 run_queue#5 / runs.py#5).
+REENQUEUE_GUARD_TTL_S = 30
+# Generous upper bound on how many pending (delivered, unACKed) entries
+# live_run_ids() will enumerate in one call; the live PEL is normally at most
+# a few entries, one per in-flight run.
+LIVE_RUN_IDS_PENDING_LIMIT = 10_000
 # A healthy worker holds its entry un-ACKed for the whole run (15-20 min), so
 # the reclaim threshold must exceed the longest plausible run or live runs churn.
 MIN_IDLE_MS = 45 * 60 * 1000
 BLOCK_MS = 5000
+# socket_timeout must exceed BLOCK_MS or every idle XREADGROUP would raise
+# instead of legitimately waiting out the blocking read.
+WORKER_SOCKET_TIMEOUT_S = BLOCK_MS / 1000 + 5
+# The producer client (enqueue, claim_reenqueue_slot) is called from the API
+# request path, soon to run in FastAPI's threadpool (#701 runs.py#10): a short
+# timeout means a Valkey brownout fails a /start call in about 2s instead of
+# tying up a threadpool thread for WORKER_SOCKET_TIMEOUT_S.
+PRODUCER_SOCKET_TIMEOUT_S = 2
 MAX_DELIVERIES = 3
 
-_client_instance: redis.Redis | None = None
+_client_lock = threading.Lock()
+_worker_client_instance: redis.Redis | None = None
+_producer_client_instance: redis.Redis | None = None
+_autoclaim_cursor = "0-0"
+
+
+def _build_client(socket_timeout: float) -> redis.Redis:
+    url, _ = get_config("redis", "CVICHE_REDIS_URL", default="")
+    if not url:
+        raise RuntimeError("CVICHE_REDIS_URL is not set; the run queue requires Valkey")
+    return redis.Redis.from_url(
+        url,
+        socket_timeout=socket_timeout,
+        socket_connect_timeout=2,
+        decode_responses=True,
+    )
 
 
 def _client() -> redis.Redis:
-    """One lazily-built sync client. Loud when the URL is unset."""
-    global _client_instance
-    if _client_instance is None:
-        url, _ = get_config("redis", "CVICHE_REDIS_URL", default="")
-        if not url:
-            raise RuntimeError("CVICHE_REDIS_URL is not set; the run queue requires Valkey")
-        # socket_timeout bounds every command so a hung Valkey raises instead of
-        # wedging the caller -- but XREADGROUP BLOCK legitimately waits BLOCK_MS,
-        # so the timeout must be longer than that or every idle read would raise.
-        _client_instance = redis.Redis.from_url(
-            url,
-            socket_timeout=BLOCK_MS / 1000 + 5,
-            socket_connect_timeout=2,
-            decode_responses=True,
-        )
-    return _client_instance
+    """Worker-side client: read_one/autoclaim_one/ack/dead_letter/requeue/stats."""
+    global _worker_client_instance
+    if _worker_client_instance is None:
+        with _client_lock:
+            if _worker_client_instance is None:
+                _worker_client_instance = _build_client(WORKER_SOCKET_TIMEOUT_S)
+    return _worker_client_instance
+
+
+def _producer_client() -> redis.Redis:
+    """Producer-side client: enqueue and claim_reenqueue_slot only."""
+    global _producer_client_instance
+    if _producer_client_instance is None:
+        with _client_lock:
+            if _producer_client_instance is None:
+                _producer_client_instance = _build_client(PRODUCER_SOCKET_TIMEOUT_S)
+    return _producer_client_instance
+
+
+def _reset_client() -> None:
+    """Test / config-reload hook: drop both cached clients under the lock."""
+    global _worker_client_instance, _producer_client_instance
+    with _client_lock:
+        _worker_client_instance = None
+        _producer_client_instance = None
 
 
 def ensure_group() -> None:
@@ -67,10 +119,18 @@ def ensure_group() -> None:
 
 def enqueue(run_id: str, start_step: int | None = None) -> str:
     """XADD a work token; returns the entry id. Raises on failure."""
-    fields = {"run_id": run_id, "enqueued_at": datetime.now().isoformat()}
+    fields = {"run_id": run_id, "enqueued_at": datetime.now(timezone.utc).isoformat()}
     if start_step is not None:
         fields["start_step"] = str(start_step)
-    return _client().xadd(STREAM, fields, maxlen=MAXLEN, approximate=True)
+    entry_id = _producer_client().xadd(STREAM, fields)
+    logger.info("enqueued run_id=%s entry_id=%s", run_id, entry_id)
+    return entry_id
+
+
+def claim_reenqueue_slot(run_id: str) -> bool:
+    """True at most once per REENQUEUE_GUARD_TTL_S per run_id. Guards the
+    already-queued re-enqueue path against a retry storm."""
+    return bool(_producer_client().set(f"{STREAM}:enq:{run_id}", "1", nx=True, ex=REENQUEUE_GUARD_TTL_S))
 
 
 def read_one(consumer: str) -> tuple[str, dict[str, str]] | None:
@@ -83,11 +143,25 @@ def read_one(consumer: str) -> tuple[str, dict[str, str]] | None:
 
 
 def autoclaim_one(consumer: str) -> tuple[str, dict[str, str]] | None:
-    """Take over one entry another consumer left pending past MIN_IDLE_MS."""
-    result = _client().xautoclaim(STREAM, GROUP, consumer, MIN_IDLE_MS, "0-0", count=1)
-    # redis >= 7 replies (next_id, entries, deleted_ids); older servers omit
-    # the third element. Only the entries list matters here.
-    entries = result[1]
+    """Take over one entry another consumer left pending past MIN_IDLE_MS.
+
+    Carries the scan cursor across calls (the server's own cursor, not always
+    "0-0") so a PEL larger than one COUNT is walked incrementally instead of
+    rescanned from the head every call; the server returns "0-0" again once a
+    full cycle completes. Entries reported deleted (the reply's third element:
+    trimmed or XDELed while pending) have already left the PEL -- they are not
+    XACKed, only logged, so on-call can see a run's token is gone."""
+    global _autoclaim_cursor
+    result = _client().xautoclaim(STREAM, GROUP, consumer, MIN_IDLE_MS, _autoclaim_cursor, count=1)
+    next_cursor, entries = result[0], result[1]
+    deleted = result[2] if len(result) > 2 else []
+    _autoclaim_cursor = next_cursor
+    for dead_id in deleted:
+        logger.warning(
+            "pending entry %s was trimmed or deleted from the stream while pending; "
+            "its run has no queue-side recovery left",
+            dead_id,
+        )
     if not entries:
         return None
     entry_id, fields = entries[0]
@@ -100,15 +174,82 @@ def delivery_count(entry_id: str) -> int:
     return rows[0]["times_delivered"] if rows else 0
 
 
+def exceeds_delivery_cap(deliveries: int) -> bool:
+    """True once a token has been redelivered more than MAX_DELIVERIES times --
+    the poison-job threshold the worker dead-letters on."""
+    return deliveries > MAX_DELIVERIES
+
+
 def ack(entry_id: str) -> None:
-    _client().xack(STREAM, GROUP, entry_id)
+    """XACK then XDEL in one transaction: an acked entry leaves both the PEL
+    and the stream, so XLEN reads as true backlog (undelivered + pending)."""
+    pipe = _client().pipeline(transaction=True)
+    pipe.xack(STREAM, GROUP, entry_id)
+    pipe.xdel(STREAM, entry_id)
+    pipe.execute()
 
 
 def dead_letter(entry_id: str, fields: dict[str, str]) -> None:
-    """Park an entry that keeps crashing workers where a human can XRANGE it,
-    then ACK the original so it is never redelivered."""
-    _client().xadd(DEAD_STREAM, {**fields, "original_id": entry_id}, maxlen=MAXLEN, approximate=True)
-    ack(entry_id)
+    """Atomically park a poison entry on the dead stream and remove it from the
+    live one: XADD dead + XACK + XDEL of the original in one transaction, so a
+    crash between steps can neither leave it redeliverable (which would
+    dead-letter it a second time) nor leave a duplicate in DEAD_STREAM."""
+    pipe = _client().pipeline(transaction=True)
+    pipe.xadd(DEAD_STREAM, {**fields, "original_id": entry_id}, maxlen=DEAD_MAXLEN, approximate=True)
+    pipe.xack(STREAM, GROUP, entry_id)
+    pipe.xdel(STREAM, entry_id)
+    pipe.execute()
+    logger.error("dead_lettered entry_id=%s run_id=%s", entry_id, fields.get("run_id"))
+
+
+def requeue(entry_id: str, fields: dict[str, str]) -> str:
+    """Hand an in-flight token back to the stream as a fresh, undelivered entry
+    and remove the original, in one transaction: XADD the same fields, then
+    XACK+XDEL the original. Used when shutdown is signalled between a read and
+    a claim decision, so the next worker picks it up within seconds instead of
+    waiting out MIN_IDLE_MS."""
+    pipe = _client().pipeline(transaction=True)
+    pipe.xadd(STREAM, fields)
+    pipe.xack(STREAM, GROUP, entry_id)
+    pipe.xdel(STREAM, entry_id)
+    new_entry_id, _, _ = pipe.execute()
+    logger.info("requeued entry_id=%s new_entry_id=%s run_id=%s", entry_id, new_entry_id, fields.get("run_id"))
+    return new_entry_id
+
+
+def live_run_ids() -> set[str]:
+    """run_ids with an outstanding token: never delivered (after the group's
+    last-delivered-id) or delivered but not yet ACKed. Excludes ACKed history
+    -- ``ack``'s XDEL already removes those from the stream -- so a normal
+    backlog reads as live, not as a candidate for reconciliation."""
+    r = _client()
+    try:
+        groups = r.xinfo_groups(STREAM)
+    except redis.exceptions.ResponseError as e:
+        if "no such key" not in str(e).lower():
+            raise
+        groups = []
+    group = next((g for g in groups if g["name"] == GROUP), None)
+    if group is None:
+        return set()
+
+    run_ids: set[str] = set()
+    for _, fields in r.xrange(STREAM, min=f"({group['last-delivered-id']}", max="+"):
+        if fields.get("run_id"):
+            run_ids.add(fields["run_id"])
+
+    pending_ids = [
+        row["message_id"]
+        for row in r.xpending_range(STREAM, GROUP, min="-", max="+", count=LIVE_RUN_IDS_PENDING_LIMIT)
+    ]
+    if pending_ids:
+        pipe = r.pipeline(transaction=False)
+        for message_id in pending_ids:
+            pipe.xrange(STREAM, min=message_id, max=message_id)
+        for entries in pipe.execute():
+            if entries and entries[0][1].get("run_id"):
+                run_ids.add(entries[0][1]["run_id"])
+    return run_ids
 
 
 def stats() -> dict[str, object]:

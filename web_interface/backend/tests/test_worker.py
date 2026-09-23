@@ -44,6 +44,8 @@ def wired(db, monkeypatch, tmp_path):
     """fakeredis + test DB + stub orchestrator + input file present."""
     r = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer(), decode_responses=True)
     monkeypatch.setattr(run_queue, "_client", lambda: r)
+    monkeypatch.setattr(run_queue, "_producer_client", lambda: r)
+    monkeypatch.setattr(run_queue, "_autoclaim_cursor", "0-0")
     monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
     monkeypatch.setattr(worker, "PipelineOrchestrator", StubOrchestrator)
     monkeypatch.setattr(worker, "UPLOAD_DIR", tmp_path)
