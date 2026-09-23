@@ -60,12 +60,27 @@ MIN_EXTRACTED_CHARS = 500
 _ESTIMATE_FALLBACK_CHAR_COUNT = 5000
 
 
+# Expansion bound checked before python-docx parses (#793). zipfile stops
+# inflating each entry at its declared file_size, so capping the declared
+# totals caps what a parse can expand to. The 392 local corpus CVs top out at
+# 37 entries and 7.2 MB uncompressed; a zip bomb declares gigabytes.
+_DOCX_MAX_ENTRIES = 1000
+_DOCX_MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+
+
 def _validate_docx_magic(content: bytes) -> bool:
-    """Check if content is a ZIP archive containing Word document structure."""
+    """Check if content is a ZIP archive containing Word document structure,
+    within the entry-count and uncompressed-size bounds above."""
     if content[:4] != ZIP_MAGIC:
         return False
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            entries = zf.infolist()
+            if (len(entries) > _DOCX_MAX_ENTRIES
+                    or sum(e.file_size for e in entries) > _DOCX_MAX_UNCOMPRESSED_BYTES):
+                logger.warning("Rejected docx: %d entries, %d bytes uncompressed",
+                               len(entries), sum(e.file_size for e in entries))
+                return False
             return "word/document.xml" in zf.namelist()
     except (zipfile.BadZipFile, Exception):
         return False

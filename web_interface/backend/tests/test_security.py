@@ -799,6 +799,31 @@ class TestUploadValidation:
         assert response.status_code == 400
         assert "does not match .docx format" in response.json()["detail"]["message"]
 
+    @pytest.mark.parametrize("endpoint, data", [
+        ("/api/upload", {"submission_type": "own_cv"}),
+        ("/api/estimate", None),
+    ])
+    def test_high_ratio_docx_rejected_before_parsing(self, client, db, seed_simple_mode, endpoint, data):
+        """#793: both endpoints reject a docx whose declared uncompressed
+        size exceeds the expansion cap, before python-docx reads it."""
+        import io
+        from docx import Document
+        self._create_auth_user(client, db)
+        doc = Document()
+        doc.add_paragraph("A" * 50_000)
+        buf = io.BytesIO()
+        doc.save(buf)
+        with patch("app.api.upload._DOCX_MAX_UNCOMPRESSED_BYTES", 40_000), \
+                patch("app.api.upload._extract_text") as extract:
+            response = client.post(
+                endpoint,
+                files={"file": ("cv.docx", buf.getvalue(), "application/octet-stream")},
+                data=data,
+            )
+        assert response.status_code == 400
+        assert "does not match .docx format" in response.json()["detail"]["message"]
+        extract.assert_not_called()
+
     def test_estimate_reuses_extract_text(self, client, db, seed_simple_mode):
         """#794: /estimate now computes text_characters from the SAME
         _extract_text /upload uses, instead of a second inline docx walk

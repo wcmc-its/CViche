@@ -333,6 +333,31 @@ def test_validate_docx_magic_accepts_a_real_docx():
     assert _validate_docx_magic(_docx_bytes("real content")) is True
 
 
+def test_validate_docx_magic_rejects_a_high_ratio_docx(monkeypatch):
+    """#793: expansion is bounded before python-docx parses. A docx whose
+    declared uncompressed total exceeds the cap is rejected, and one within
+    it passes (cap patched small so the fixture stays tiny)."""
+    import app.api.upload as upload
+    bomb = _docx_bytes("A" * 50_000)  # deflates to a few hundred bytes
+    monkeypatch.setattr(upload, "_DOCX_MAX_UNCOMPRESSED_BYTES", 40_000)
+    assert len(bomb) < 40_000
+    assert _validate_docx_magic(bomb) is False
+    monkeypatch.setattr(upload, "_DOCX_MAX_UNCOMPRESSED_BYTES", 10_000_000)
+    assert _validate_docx_magic(bomb) is True
+
+
+def test_validate_docx_magic_rejects_too_many_entries(monkeypatch):
+    """#793: the entry-count bound, at and past the cap."""
+    import app.api.upload as upload
+    content = _docx_bytes("hello")
+    with zipfile.ZipFile(io.BytesIO(content)) as z:
+        n = len(z.infolist())
+    monkeypatch.setattr(upload, "_DOCX_MAX_ENTRIES", n)
+    assert _validate_docx_magic(content) is True
+    monkeypatch.setattr(upload, "_DOCX_MAX_ENTRIES", n - 1)
+    assert _validate_docx_magic(content) is False
+
+
 # --- #865 review: _extract_text catches only the measured read failures ------
 
 def _zip_bytes(**members: str) -> bytes:
