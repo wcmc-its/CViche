@@ -44,6 +44,11 @@ spec:
                 - ALL
             seccompProfile:
               type: RuntimeDefault
-      # SIGTERM stops new claims; an in-flight run (15-20 min) finishes and
-      # ACKs before exit. 1800s covers that with margin (#701 §11).
-      terminationGracePeriodSeconds: 1800
+      # SIGTERM stops new claims; an in-flight run finishes and ACKs before
+      # exit. Must clear RUN_TIMEOUT_S (the worker's own run watchdog,
+      # web_interface/backend/app/worker.py, default 5400s) plus margin for
+      # the watchdog's own mark-failed/ACK/exit tail: 5400 + 300 = 5700
+      # (#701 rework, mrj4001 review). Spot-interruption and Cluster
+      # Autoscaler grace caps are a separate, still-open concern -- not sized
+      # here yet.
+      terminationGracePeriodSeconds: 5700

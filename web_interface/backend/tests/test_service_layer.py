@@ -2,6 +2,7 @@
 import os
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
+import threading
 from datetime import datetime
 
 import pytest
@@ -232,6 +233,46 @@ class TestQueueRunTransitions:
         assert row.status == "failed"
         assert row.error_message == "old error"
         assert row.queued_at is None
+
+    def test_claim_queued_is_won_by_exactly_one_of_two_racing_workers(self, tmp_path, monkeypatch):
+        """#701 worker.py point 5: this is claim_queued's own atomicity proof,
+        moved here from test_worker.py's former worker._claim (removed --
+        the worker now calls this function directly, section 1.5). Logic-layer
+        proof only: SQLite serializes writers, so this shows exactly one of
+        two concurrent conditional UPDATEs sees rowcount 1; InnoDB row locking
+        is design §17 layer 2. A file-backed DB with per-thread connections
+        (not the shared-connection StaticPool test fixture) so the two
+        threads hold separate transactions; the busy timeout makes the loser
+        wait, not raise."""
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from app.database import Base
+
+        engine = create_engine(f"sqlite:///{tmp_path}/race.db", connect_args={"timeout": 5})
+        Base.metadata.create_all(engine)
+        RaceSession = sessionmaker(bind=engine)
+        monkeypatch.setattr(run_service, "SessionLocal", RaceSession)
+        with RaceSession() as s:
+            s.add(Run(id="RACE01", filename="cv.docx", file_type="docx", status="queued"))
+            s.commit()
+        results, errors, start = [], [], threading.Barrier(2)
+
+        def race():
+            start.wait()
+            try:
+                results.append(claim_queued("RACE01").won)
+            except Exception as e:  # a thread crash must fail the test, not shrink the list
+                errors.append(e)
+
+        threads = [threading.Thread(target=race) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+        assert sorted(results) == [False, True]
+        with RaceSession() as s:
+            assert s.query(Run).filter(Run.id == "RACE01").one().status == "running"
 
     def test_revert_queued_is_a_noop_once_the_worker_has_claimed_it(self, db):
         """#701 runs.py point 1: a revert must never clobber a claim that

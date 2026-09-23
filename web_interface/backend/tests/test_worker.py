@@ -5,21 +5,26 @@ in-memory SQLite fixture, with the orchestrator stubbed.
 SQLite serializes writers, so the claim-atomicity test proves the rowcount
 LOGIC (exactly one winner of ``WHERE status='queued'``), not InnoDB row
 locking; an integration test on real MySQL is design §17 layer 2 and out of
-scope here.
+scope here. That specific race test lives in test_service_layer.py now (it
+exercises run_service.claim_queued directly, the function that replaced
+worker._claim -- see the module docstring there).
 """
 import os
 import threading
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import ClassVar
 
 import fakeredis
 import pytest
+import yaml
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 from app import worker  # noqa: E402
 from app.pipeline import run_queue  # noqa: E402
+from app.services import run_service  # noqa: E402
 from tests.conftest import TestingSessionLocal  # noqa: E402
 
 OLD = datetime(2026, 1, 1, 0, 0, 0)
@@ -47,10 +52,16 @@ def wired(db, monkeypatch, tmp_path):
     monkeypatch.setattr(run_queue, "_producer_client", lambda: r)
     monkeypatch.setattr(run_queue, "_autoclaim_cursor", "0-0")
     monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
+    # claim_queued/mark_failed (run_service) open their own short session too
+    # -- point it at the same shared test DB the `db` fixture uses.
+    monkeypatch.setattr(run_service, "SessionLocal", TestingSessionLocal)
     monkeypatch.setattr(worker, "PipelineOrchestrator", StubOrchestrator)
     monkeypatch.setattr(worker, "UPLOAD_DIR", tmp_path)
     monkeypatch.setattr(worker, "_materialize_input_if_missing", lambda *a: None)
     monkeypatch.setattr(worker, "CONSUMER", "w1")
+    # Never touch the real /tmp from a test.
+    monkeypatch.setattr(worker, "READY_FILE", tmp_path / "ready")
+    monkeypatch.setattr(worker, "HEARTBEAT_FILE", tmp_path / "heartbeat")
     StubOrchestrator.calls = []
     StubOrchestrator.on_execute = staticmethod(lambda db, run_id: None)
     worker.shutting_down.clear()
@@ -59,9 +70,10 @@ def wired(db, monkeypatch, tmp_path):
     worker.shutting_down.clear()
 
 
-def _seed(db, status="queued", run_id="WRK001"):
+def _seed(db, status="queued", run_id="WRK001", resume_from_step=None):
     from app.models import Run
-    db.add(Run(id=run_id, filename="cv.docx", file_type="docx", status=status, started_at=OLD))
+    db.add(Run(id=run_id, filename="cv.docx", file_type="docx", status=status, started_at=OLD,
+               resume_from_step=resume_from_step))
     db.commit()
 
 
@@ -99,18 +111,26 @@ def test_success_claims_resets_started_at_executes_and_acks(db, wired, tmp_path)
     assert _pending() == 0
 
 
-def test_claim_clears_the_previous_attempts_error_and_completed_at(db, wired):
+def test_claim_queued_clears_the_previous_attempts_error_and_completed_at(db, wired, tmp_path):
+    """The claim itself is run_service.claim_queued now (worker._claim was
+    removed -- section 1.5, #701 worker.py point 5); its own atomicity and
+    field-clearing tests live in test_service_layer.py. This just proves the
+    worker's handle() actually goes through it end to end."""
     from app.models import Run
     _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
     run = db.query(Run).filter(Run.id == "WRK001").one()
     run.error_message, run.completed_at = "stage 3 exploded", OLD
     db.commit()
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
+    run_queue.enqueue("WRK001")
 
-    assert worker._claim("WRK001") == (True, "running", "docx")
+    worker.handle(*run_queue.read_one("w1"))
 
     row = _row(db)
-    assert (row.error_message, row.completed_at) == (None, None)
-    assert worker._claim("WRK001") == (False, "running", "docx")
+    assert row.status == "complete"
+    assert row.error_message is None
+    assert row.completed_at is None, "the stub's terminal commit never sets it; the claim cleared the old one"
 
 
 def test_db_error_at_claim_leaves_the_entry_pending_and_the_run_queued(db, wired, tmp_path, monkeypatch):
@@ -121,7 +141,7 @@ def test_db_error_at_claim_leaves_the_entry_pending_and_the_run_queued(db, wired
 
     def db_down():
         raise RuntimeError("MySQL server has gone away")
-    monkeypatch.setattr(worker, "SessionLocal", db_down)
+    monkeypatch.setattr(run_service, "SessionLocal", db_down)
     run_queue.enqueue("WRK001")
 
     with pytest.raises(RuntimeError, match="gone away"):
@@ -132,24 +152,61 @@ def test_db_error_at_claim_leaves_the_entry_pending_and_the_run_queued(db, wired
     assert StubOrchestrator.calls == []
 
 
-def test_bad_start_step_token_is_dropped_without_a_claim(db, wired, tmp_path):
-    _seed(db)
-    (tmp_path / "WRK001.docx").write_bytes(b"PK")
-    wired.xadd(run_queue.STREAM, {"run_id": "WRK001", "start_step": "two"})
-
-    worker.handle(*run_queue.read_one("w1"))
-
-    row = _row(db)
-    assert (row.status, row.started_at) == ("queued", OLD)
+def test_missing_run_id_is_acked_without_a_claim(db, wired, caplog):
+    wired.xadd(run_queue.STREAM, {"start_step": "2"})  # no run_id field at all
+    with caplog.at_level("WARNING"):
+        worker.handle(*run_queue.read_one("w1"))
     assert StubOrchestrator.calls == []
     assert _pending() == 0
+    assert "skipped_bad_token" in caplog.text, "must be rejected as BadToken, not fall through to a failed claim"
 
 
-def test_start_step_from_the_token_reaches_execute(db, wired, tmp_path):
-    _seed(db)
+def test_run_id_with_path_traversal_is_acked_without_a_claim(db, wired, caplog):
+    wired.xadd(run_queue.STREAM, {"run_id": "../../etc/passwd"})
+    with caplog.at_level("WARNING"):
+        worker.handle(*run_queue.read_one("w1"))
+    assert StubOrchestrator.calls == []
+    assert _pending() == 0
+    assert "skipped_bad_token" in caplog.text, "must be rejected as BadToken, not fall through to a failed claim"
+
+
+def test_run_id_with_an_embedded_newline_is_acked_and_logged_escaped(db, wired, caplog):
+    """Log-injection defense: a forged run_id containing a newline must stay
+    on one log line -- BadToken fires before any DB call, and the bad-token
+    log line uses %r (which escapes the newline) rather than %s."""
+    wired.xadd(run_queue.STREAM, {"run_id": "WRK001\nFAKE forged line"})
+
+    with caplog.at_level("WARNING"):
+        worker.handle(*run_queue.read_one("w1"))
+
+    assert StubOrchestrator.calls == []
+    assert _pending() == 0
+    bad_token_lines = [ln for ln in caplog.text.splitlines() if "skipped_bad_token" in ln]
+    assert len(bad_token_lines) == 1
+    assert "FAKE forged line" in bad_token_lines[0], "escaped by %r, the value must stay on the same line"
+
+
+def test_resume_from_step_on_the_row_reaches_execute(db, wired, tmp_path):
+    """The token is a pure wake-up: the step to resume from comes off the DB
+    row (set by the flip that queued the run), not off the token."""
+    _seed(db, resume_from_step=4)
     (tmp_path / "WRK001.docx").write_bytes(b"PK")
-    run_queue.enqueue("WRK001", start_step=4)
+    run_queue.enqueue("WRK001")
+
     worker.handle(*run_queue.read_one("w1"))
+
+    assert StubOrchestrator.calls == [("WRK001", 4)]
+
+
+def test_a_legacy_tokens_start_step_field_is_ignored_in_favour_of_the_db_row(db, wired, tmp_path):
+    """A not-yet-redeployed producer may still enqueue an old-format token
+    carrying start_step; it must not override the DB's resume_from_step."""
+    _seed(db, resume_from_step=4)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    run_queue.enqueue("WRK001", start_step=99)  # old-format field, must be ignored
+
+    worker.handle(*run_queue.read_one("w1"))
+
     assert StubOrchestrator.calls == [("WRK001", 4)]
 
 
@@ -169,6 +226,27 @@ def test_failed_execution_is_acked_not_dead_lettered_and_status_is_the_orchestra
     assert (row.status, row.error_message) == ("failed", "stage 3 exploded")
     assert _pending() == 0
     assert wired.xlen(run_queue.DEAD_STREAM) == 0
+
+
+def test_a_failed_terminal_commit_is_marked_failed_before_the_ack(db, wired, tmp_path):
+    """Design case G: if the orchestrator's own terminal commit itself raises
+    (leaving the row `running`, unlike the sibling test above where the stub
+    commits `failed` before raising), the worker must not ACK a row still
+    `running` -- it fails the row itself first, right before the ACK."""
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+
+    def terminal_commit_fails(session, run_id):
+        raise RuntimeError("terminal commit failed")
+    StubOrchestrator.on_execute = staticmethod(terminal_commit_fails)
+    run_queue.enqueue("WRK001")
+
+    worker.handle(*run_queue.read_one("w1"))
+
+    row = _row(db)
+    assert row.status == "failed"
+    assert "terminal status" in row.error_message.lower()
+    assert _pending() == 0
 
 
 def test_missing_input_marks_failed_and_acks_without_executing(db, wired):
@@ -207,6 +285,7 @@ def test_reclaim_window_c_second_worker_claims_and_executes(db, wired, tmp_path,
     _seed(db)
     (tmp_path / "WRK001.docx").write_bytes(b"PK")
     monkeypatch.setattr(run_queue, "MIN_IDLE_MS", 0)
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
     run_queue.enqueue("WRK001")
     assert run_queue.read_one("A") is not None  # A dies here: no claim, no ack
 
@@ -214,7 +293,7 @@ def test_reclaim_window_c_second_worker_claims_and_executes(db, wired, tmp_path,
     assert entry is not None
     worker.handle(*entry, reclaimed=True)
 
-    assert _row(db).status == "running"  # stub leaves the claim's status
+    assert _row(db).status == "complete"
     assert StubOrchestrator.calls == [("WRK001", None)]
     assert _pending() == 0
 
@@ -234,42 +313,21 @@ def test_reclaim_window_e_db_already_running_skips_and_leaves_row_alone(db, wire
     assert _pending() == 0
 
 
-def test_claim_is_won_by_exactly_one_of_two_racing_workers(wired, monkeypatch, tmp_path):
-    """Logic-layer proof only: SQLite serializes writers, so this shows exactly
-    one of two concurrent conditional UPDATEs sees rowcount 1; InnoDB row
-    locking is design §17 layer 2. A file-backed DB with per-thread connections
-    (not the shared-connection StaticPool fixture) so the two threads hold
-    separate transactions; the busy timeout makes the loser wait, not raise."""
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
-    from app.database import Base
-    from app.models import Run
+def test_own_pel_entries_are_reclaimed_immediately_without_waiting_min_idle(db, wired, tmp_path):
+    """A3: a same-pod restart (same CONSUMER/HOSTNAME) must not wait out
+    MIN_IDLE_MS -- production default, left unmonkeypatched here on purpose,
+    unlike the reclaim-window tests above which drive autoclaim_one directly."""
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
+    run_queue.enqueue("WRK001")
+    run_queue.read_one("w1")  # delivered to this consumer, never claimed/ACKed (a crash)
 
-    engine = create_engine(f"sqlite:///{tmp_path}/race.db", connect_args={"timeout": 5})
-    Base.metadata.create_all(engine)
-    RaceSession = sessionmaker(bind=engine)
-    monkeypatch.setattr(worker, "SessionLocal", RaceSession)
-    with RaceSession() as s:
-        s.add(Run(id="WRK001", filename="cv.docx", file_type="docx", status="queued", started_at=OLD))
-        s.commit()
-    results, errors, start = [], [], threading.Barrier(2)
+    worker._reclaim_own_pending()
 
-    def race():
-        start.wait()
-        try:
-            results.append(worker._claim("WRK001")[0])
-        except Exception as e:  # a thread crash must fail the test, not shrink the list
-            errors.append(e)
-
-    threads = [threading.Thread(target=race) for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert errors == []
-    assert sorted(results) == [False, True]
-    with RaceSession() as s:
-        assert s.query(Run).filter(Run.id == "WRK001").one().status == "running"
+    assert StubOrchestrator.calls == [("WRK001", None)]
+    assert _pending() == 0
+    assert _row(db).status == "complete"
 
 
 def test_poison_cap_dead_letters_after_max_deliveries(db, wired, tmp_path, monkeypatch):
@@ -290,6 +348,56 @@ def test_poison_cap_dead_letters_after_max_deliveries(db, wired, tmp_path, monke
     row = _row(db)
     assert row.status == "failed" and "Dead-lettered" in row.error_message
     assert StubOrchestrator.calls == []
+
+
+def test_poison_cap_on_a_running_row_fails_it_and_dead_letters(db, wired, tmp_path, monkeypatch, caplog):
+    """A2: a row that is `running` when its entry reaches the delivery cap
+    (the row already won a claim, then 3+ post-claim ACK attempts failed)
+    must be failed too, not only a `queued` one -- and its still-running
+    Steps must be errored, mirroring run_service._mark_run_failed."""
+    from app.models import Step
+    _seed(db, status="running")
+    db.add(Step(run_id="WRK001", step_number=1, step_name="s1", status="running"))
+    db.commit()
+    monkeypatch.setattr(run_queue, "MIN_IDLE_MS", 0)
+    eid = run_queue.enqueue("WRK001")
+    run_queue.read_one("A")
+    for _ in range(run_queue.MAX_DELIVERIES):
+        wired.xclaim(run_queue.STREAM, run_queue.GROUP, "A", 0, [eid])
+
+    with caplog.at_level("ERROR"):
+        worker.handle(*run_queue.autoclaim_one("B"), reclaimed=True)
+
+    row = _row(db)
+    assert row.status == "failed" and "Dead-lettered" in row.error_message
+    step = db.query(Step).filter(Step.run_id == "WRK001").one()
+    assert step.status == "error"
+    assert wired.xlen(run_queue.DEAD_STREAM) == 1
+    dead_letter_lines = [ln for ln in caplog.text.splitlines() if "row_failed=" in ln]
+    assert len(dead_letter_lines) == 1
+    assert "prior_status=running" in dead_letter_lines[0]
+    assert "row_failed=True" in dead_letter_lines[0]
+
+
+def test_poison_cap_on_an_already_terminal_row_leaves_it_alone_and_logs_row_failed_false(
+    db, wired, tmp_path, monkeypatch, caplog,
+):
+    """A run that finished on its own (complete) between the last failed
+    reclaim attempt and this one must not be re-failed; the log line still
+    fires, with row_failed=False, so on-call can tell the two cases apart."""
+    _seed(db, status="complete")
+    monkeypatch.setattr(run_queue, "MIN_IDLE_MS", 0)
+    eid = run_queue.enqueue("WRK001")
+    run_queue.read_one("A")
+    for _ in range(run_queue.MAX_DELIVERIES):
+        wired.xclaim(run_queue.STREAM, run_queue.GROUP, "A", 0, [eid])
+
+    with caplog.at_level("ERROR"):
+        worker.handle(*run_queue.autoclaim_one("B"), reclaimed=True)
+
+    assert _row(db).status == "complete"
+    dead_letter_lines = [ln for ln in caplog.text.splitlines() if "row_failed=" in ln]
+    assert "row_failed=False" in dead_letter_lines[0]
 
 
 def test_loop_reclaims_with_the_delivery_count_so_the_poison_cap_fires(db, wired, tmp_path, monkeypatch):
@@ -333,7 +441,7 @@ def test_loop_survives_a_transient_error_and_leaves_the_entry_pending(db, wired,
     def flaky():
         attempts.append(1)
         raise RuntimeError("MySQL server has gone away")
-    monkeypatch.setattr(worker, "SessionLocal", flaky)
+    monkeypatch.setattr(run_service, "SessionLocal", flaky)
 
     t = threading.Thread(target=worker.loop)
     t.start()
@@ -350,6 +458,29 @@ def test_loop_survives_a_transient_error_and_leaves_the_entry_pending(db, wired,
     assert _row(db).status == "queued"
 
 
+def test_loop_reclaims_own_pending_at_startup_and_after_each_error(wired, monkeypatch):
+    """Wires _reclaim_own_pending into loop() at the right two points, without
+    depending on Valkey PEL mechanics already proved separately in
+    test_run_queue.py."""
+    calls = []
+    monkeypatch.setattr(worker, "_reclaim_own_pending", lambda: calls.append(1))
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
+    monkeypatch.setattr(worker, "RETRY_DELAY_S", 0.05)
+
+    def boom(*a, **kw):
+        raise RuntimeError("valkey blip")
+    monkeypatch.setattr(run_queue, "autoclaim_one", boom)
+
+    t = threading.Thread(target=worker.loop)
+    t.start()
+    time.sleep(0.2)
+    worker.shutting_down.set()
+    t.join(timeout=2)
+
+    assert not t.is_alive()
+    assert len(calls) >= 2, "once at startup, again after at least one loop exception"
+
+
 def test_db_error_marking_a_poison_run_failed_keeps_its_entry_out_of_the_dlq(db, wired, tmp_path, monkeypatch):
     """The DB write precedes the DLQ move, so a failed write leaves the entry
     pending for the next reclaim instead of parking it with the row still `queued`."""
@@ -364,7 +495,7 @@ def test_db_error_marking_a_poison_run_failed_keeps_its_entry_out_of_the_dlq(db,
 
     def db_down():
         raise RuntimeError("MySQL server has gone away")
-    monkeypatch.setattr(worker, "SessionLocal", db_down)
+    monkeypatch.setattr(run_service, "SessionLocal", db_down)
 
     with pytest.raises(RuntimeError, match="gone away"):
         worker.handle(*entry, reclaimed=True)
@@ -379,12 +510,14 @@ def test_delivery_at_the_cap_still_executes(db, wired, tmp_path, monkeypatch):
     _seed(db)
     (tmp_path / "WRK001.docx").write_bytes(b"PK")
     monkeypatch.setattr(run_queue, "MIN_IDLE_MS", 0)
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
     eid = run_queue.enqueue("WRK001")
     run_queue.read_one("A")
     wired.xclaim(run_queue.STREAM, run_queue.GROUP, "A", 0, [eid])  # delivery 2; autoclaim makes 3
     worker.handle(*run_queue.autoclaim_one("B"), reclaimed=True)
     assert StubOrchestrator.calls == [("WRK001", None)]
     assert wired.xlen(run_queue.DEAD_STREAM) == 0
+    assert _row(db).status == "complete"
 
 
 def test_shutdown_flag_exits_an_idle_loop_within_the_block_timeout(wired, monkeypatch):
@@ -422,14 +555,148 @@ def test_shutdown_lets_the_in_flight_run_finish_and_ack(db, wired, tmp_path, mon
     assert _pending() == 0
 
 
+def test_shutdown_between_read_and_claim_requeues_the_entry_without_claiming(db, wired, tmp_path, monkeypatch):
+    """A4: SIGTERM arriving between the blocking read and the claim decision
+    must not start a new run during drain; the token goes back to the stream
+    as a fresh entry instead of being claimed."""
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
+    eid = run_queue.enqueue("WRK001")
+
+    real_read_one = run_queue.read_one
+
+    def read_then_shutdown(consumer):
+        result = real_read_one(consumer)
+        if result:
+            worker.shutting_down.set()
+        return result
+    monkeypatch.setattr(run_queue, "read_one", read_then_shutdown)
+
+    t = threading.Thread(target=worker.loop)
+    t.start()
+    t.join(timeout=2)
+
+    assert not t.is_alive()
+    assert StubOrchestrator.calls == []
+    assert _row(db).status == "queued", "the row must never be claimed during drain"
+    remaining = wired.xrange(run_queue.STREAM)
+    assert len(remaining) == 1
+    assert remaining[0][0] != eid, "requeue must produce a NEW entry id, not reuse the drained one"
+    assert remaining[0][1]["run_id"] == "WRK001"
+
+
+def test_watchdog_fires_marks_the_run_failed_acks_and_calls_os_exit(db, wired, tmp_path, monkeypatch):
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    monkeypatch.setattr(worker, "RUN_TIMEOUT_S", 0.05)
+    exit_codes = []
+    monkeypatch.setattr(worker.os, "_exit", lambda code: exit_codes.append(code))
+
+    def hang(session, run_id):
+        time.sleep(0.3)  # longer than RUN_TIMEOUT_S -- the watchdog fires first
+    StubOrchestrator.on_execute = staticmethod(hang)
+    run_queue.enqueue("WRK001")
+
+    worker.handle(*run_queue.read_one("w1"))
+
+    assert exit_codes == [1]
+    row = _row(db)
+    assert row.status == "failed"
+    assert "exceeded" in row.error_message.lower()
+
+
+def test_watchdog_is_cancelled_when_the_run_finishes_before_the_deadline(db, wired, tmp_path, monkeypatch):
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    monkeypatch.setattr(worker, "RUN_TIMEOUT_S", 5)  # generous; must never fire in this test
+    exit_codes = []
+    monkeypatch.setattr(worker.os, "_exit", lambda code: exit_codes.append(code))
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
+    run_queue.enqueue("WRK001")
+
+    worker.handle(*run_queue.read_one("w1"))
+    time.sleep(0.05)  # let a stray, uncancelled timer fire if cancellation failed
+
+    assert exit_codes == []
+    assert _row(db).status == "complete"
+
+
+def test_heartbeat_file_is_touched_by_a_background_thread_while_a_run_is_in_flight(
+    db, wired, tmp_path, monkeypatch,
+):
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    heartbeat_path = tmp_path / "in_flight_heartbeat"
+    monkeypatch.setattr(worker, "HEARTBEAT_FILE", heartbeat_path)
+    monkeypatch.setattr(worker, "HEARTBEAT_INTERVAL_S", 0.02)
+
+    def slow(session, run_id):
+        time.sleep(0.1)
+        _set_status("complete")(session, run_id)
+    StubOrchestrator.on_execute = staticmethod(slow)
+    run_queue.enqueue("WRK001")
+
+    assert not heartbeat_path.exists()
+    worker.handle(*run_queue.read_one("w1"))
+
+    assert heartbeat_path.exists(), "the in-flight heartbeat thread must have touched it during the run"
+
+
+def test_loop_touches_the_heartbeat_file_each_iteration(wired, monkeypatch, tmp_path):
+    heartbeat_path = tmp_path / "loop_heartbeat"
+    monkeypatch.setattr(worker, "HEARTBEAT_FILE", heartbeat_path)
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 20)
+
+    t = threading.Thread(target=worker.loop)
+    t.start()
+    time.sleep(0.15)
+    worker.shutting_down.set()
+    t.join(timeout=2)
+
+    assert not t.is_alive()
+    assert heartbeat_path.exists()
+
+
 @pytest.mark.parametrize("env", [
     {"CVICHE_REDIS_URL": "", "CVICHE_STORAGE_BACKEND": "s3"},
     {"CVICHE_REDIS_URL": "redis://x", "CVICHE_STORAGE_BACKEND": "local"},
 ])
-def test_main_refuses_to_start_without_redis_and_s3(monkeypatch, env):
+def test_main_refuses_to_start_without_redis_and_s3(monkeypatch, env, tmp_path):
     for k, v in env.items():
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("CVICHE_WORKER_ALLOW_LOCAL_STORAGE", raising=False)
     monkeypatch.setattr(worker, "configure_logging", lambda: None)
     monkeypatch.setattr(run_queue, "ensure_group", lambda: pytest.fail("must not touch Valkey"))
+    ready_file = tmp_path / "ready"
+    monkeypatch.setattr(worker, "READY_FILE", ready_file)
+
     assert worker.main() == 2
+    assert not ready_file.exists(), "the ready file must never appear on the refusal path"
+
+
+def test_main_writes_the_ready_file_only_after_config_checks_and_ensure_group(monkeypatch, tmp_path):
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://x")
+    monkeypatch.setenv("CVICHE_STORAGE_BACKEND", "s3")
+    monkeypatch.setattr(worker, "configure_logging", lambda: None)
+    ready_file = tmp_path / "ready"
+    monkeypatch.setattr(worker, "READY_FILE", ready_file)
+    ensure_group_calls = []
+    monkeypatch.setattr(run_queue, "ensure_group", lambda: ensure_group_calls.append(1))
+    monkeypatch.setattr(worker, "loop", lambda: None)  # don't actually run the read loop
+
+    assert worker.main() == 0
+
+    assert ensure_group_calls == [1]
+    assert ready_file.exists()
+
+
+def test_run_timeout_stays_below_the_pod_grace_period():
+    """RUN_TIMEOUT_S plus the watchdog's own mark-failed/ACK/exit tail must
+    fit inside terminationGracePeriodSeconds, or a run the watchdog is about
+    to stop cleanly can still be SIGKILLed mid-write first."""
+    manifest_path = Path(__file__).resolve().parent.parent.parent.parent / "k8s/base/worker/deployment.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text())
+    grace_period = manifest["spec"]["template"]["spec"]["terminationGracePeriodSeconds"]
+
+    assert worker.RUN_TIMEOUT_S < grace_period

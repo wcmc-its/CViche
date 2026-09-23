@@ -130,6 +130,25 @@ def test_autoclaim_carries_its_cursor_across_calls(fake_redis, monkeypatch):
     assert run_queue._autoclaim_cursor != "0-0"
 
 
+def test_reclaim_own_pending_returns_this_consumers_pel_entries_immediately(fake_redis):
+    """#701 worker.py point 3 (A3 own-PEL reclaim): independent of
+    MIN_IDLE_MS -- a same-pod restart must not wait for the idle threshold to
+    get its own crashed-mid-run entry back."""
+    run_queue.ensure_group()
+    run_queue.enqueue("OWN1")
+    run_queue.read_one("w1")  # delivered to w1, never claimed or ACKed
+
+    entries = run_queue.reclaim_own_pending("w1")
+
+    assert [fields["run_id"] for _, fields in entries] == ["OWN1"]
+    assert run_queue.stats()["pending"] == 1, "reclaim only re-owns it -- the caller still ACKs it"
+
+
+def test_reclaim_own_pending_is_empty_for_a_consumer_with_no_pel_entries(fake_redis):
+    run_queue.ensure_group()
+    assert run_queue.reclaim_own_pending("nobody") == []
+
+
 def test_dead_letter_parks_the_entry_and_acks_the_original(fake_redis):
     run_queue.ensure_group()
     eid = run_queue.enqueue("DL1")
@@ -521,6 +540,7 @@ def test_retry_in_queue_mode_on_non_failed_run_is_400_and_keeps_steps(client, db
 
 def test_cancel_accepts_queued_and_the_worker_then_skips(client, db, fake_redis, queue_mode, as_user_with_input, monkeypatch):
     from app import worker
+    from app.services import run_service
     from tests.conftest import TestingSessionLocal
 
     user, _ = _seed(db, status="queued")
@@ -533,6 +553,10 @@ def test_cancel_accepts_queued_and_the_worker_then_skips(client, db, fake_redis,
     orchestrator = MagicMock()
     monkeypatch.setattr(worker, "PipelineOrchestrator", orchestrator)
     monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
+    # worker.handle's claim now goes through run_service.claim_queued, which
+    # opens its own session -- point it at the same shared test DB (#701
+    # worker.py point 5; the wired fixture in test_worker.py does this too).
+    monkeypatch.setattr(run_service, "SessionLocal", TestingSessionLocal)
     run_queue.ensure_group()
     worker.handle(*run_queue.read_one("w1"))
     assert orchestrator.call_count == 0

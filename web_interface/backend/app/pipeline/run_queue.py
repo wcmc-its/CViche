@@ -219,6 +219,25 @@ def autoclaim_one(consumer: str) -> tuple[str, dict[str, str]] | None:
     return entry_id, fields
 
 
+def reclaim_own_pending(consumer: str) -> list[tuple[str, dict[str, str]]]:
+    """Every entry already in ``consumer``'s own PEL, reclaimed at
+    min_idle=0 -- used at worker startup and after a loop() exception, so a
+    same-pod restart (which keeps the same CONSUMER/HOSTNAME) picks its
+    crashed-mid-run entries back up immediately instead of waiting out
+    MIN_IDLE_MS (45 min in production).
+
+    XPENDING + XCLAIM rather than a fresh XREADGROUP id="0": fakeredis does
+    not replay a consumer's own delivery history through id="0" the way real
+    Valkey/Redis does, so this is the shape both implementations agree on."""
+    rows = _client().xpending_range(
+        STREAM, GROUP, min="-", max="+", count=LIVE_RUN_IDS_PENDING_LIMIT, consumername=consumer,
+    )
+    ids = [row["message_id"] for row in rows]
+    if not ids:
+        return []
+    return list(_client().xclaim(STREAM, GROUP, consumer, min_idle_time=0, message_ids=ids))
+
+
 def delivery_count(entry_id: str) -> int:
     """How many times the group has delivered this entry (poison-job cap input)."""
     rows = _client().xpending_range(STREAM, GROUP, min=entry_id, max=entry_id, count=1)
