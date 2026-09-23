@@ -53,8 +53,13 @@ shutting_down = threading.Event()
 # measured p99/max run is 3542s (Paul, 2026-09-23), so this is ~1.5x the
 # longest run ever observed, comfortably above the per-stage 1800s ceiling
 # (CVICHE_STAGE_TIMEOUT_SECONDS) a single stage could already reach.
-RUN_TIMEOUT_S, _ = get_config("llm", "CVICHE_RUN_TIMEOUT_SECONDS", default=5400)
-RUN_TIMEOUT_S = int(RUN_TIMEOUT_S)
+#
+# Sourced from run_queue.RUN_TIMEOUT_S (N2), not read independently here: that
+# module also derives its own MIN_IDLE_MS reclaim threshold from this exact
+# value (it must exceed it, or a healthy long run gets XAUTOCLAIMed out from
+# under itself), and a second independent config read here could drift from
+# that one on a config reload race.
+RUN_TIMEOUT_S = run_queue.RUN_TIMEOUT_S
 
 # How often the in-flight heartbeat thread (see _heartbeat_while_running)
 # touches HEARTBEAT_FILE while a run is executing. Well under the liveness
@@ -132,18 +137,33 @@ def _watchdog_fire(entry_id: str, run_id: str) -> None:
     the thread -- orchestrator._get_stage_timeout_seconds), so this marks the
     row failed, ACKs so nothing waits MIN_IDLE_MS for a token this process is
     about to abandon, and exits the pod so a clean replacement starts.
-    os._exit skips finally blocks by design: the mark-failed commit and the
-    ACK above already happened, and every test here stubs os._exit."""
-    row_failed = mark_failed(
-        run_id, f"Run exceeded {RUN_TIMEOUT_S}s on the worker and was stopped",
-        from_statuses=(RunState.RUNNING,),
-    ) > 0
-    run_queue.ack(entry_id)
-    logger.error(
-        "run_timeout run_id=%s consumer=%s entry_id=%s timeout_s=%s row_failed=%s",
-        run_id, CONSUMER, entry_id, RUN_TIMEOUT_S, row_failed,
-    )
-    os._exit(1)
+
+    os._exit lives in a ``finally`` (N1): mark_failed/ack can themselves
+    raise (e.g. the DB is down), and without the ``finally`` that exception
+    would propagate out of this Timer callback and be swallowed by
+    ``threading``'s default excepthook -- the pod would then never exit, and
+    the run the watchdog just gave up on (its stage thread still wedged
+    inside this same process) would keep it running forever. os._exit still
+    skips every OTHER finally block by design (there is nothing left to run
+    after this one), and every test here stubs os._exit."""
+    try:
+        row_failed = mark_failed(
+            run_id, f"Run exceeded {RUN_TIMEOUT_S}s on the worker and was stopped",
+            from_statuses=(RunState.RUNNING,),
+        ) > 0
+        run_queue.ack(entry_id)
+        logger.error(
+            "run_timeout run_id=%s consumer=%s entry_id=%s timeout_s=%s row_failed=%s",
+            run_id, CONSUMER, entry_id, RUN_TIMEOUT_S, row_failed,
+        )
+    except Exception:
+        logger.exception(
+            "run_timeout run_id=%s consumer=%s entry_id=%s timeout_s=%s: "
+            "mark_failed/ack itself failed; exiting anyway",
+            run_id, CONSUMER, entry_id, RUN_TIMEOUT_S,
+        )
+    finally:
+        os._exit(1)
 
 
 def _heartbeat_while_running(stop: threading.Event) -> None:
@@ -232,23 +252,68 @@ def handle(entry_id: str, fields: dict[str, str], *, reclaimed: bool = False) ->
         _log("acked", run_id, entry_id)
 
 
-def _reclaim_own_pending() -> None:
-    """At worker startup, and again after any loop() exception: pick up
-    entries this consumer already owns in the PEL -- most often a same-pod
-    restart, which keeps the same CONSUMER (HOSTNAME) -- immediately instead
-    of waiting out MIN_IDLE_MS (45 min in production)."""
-    for entry_id, fields in run_queue.reclaim_own_pending(CONSUMER):
+Entry = tuple[str, dict[str, str]]
+
+
+def _process_owed(entries: list[Entry], *, context: str) -> list[Entry]:
+    """Run handle(reclaimed=True) on each already-known entry and return the
+    ones whose processing still failed, so the caller can retry exactly those
+    next iteration. Deliberately does NOT touch Redis (no XCLAIM/XAUTOCLAIM)
+    here -- entries are passed in, already fetched -- so retrying a still-down
+    DB does not itself inflate the entry's delivery count and risk a spurious
+    dead-letter purely from retrying (B1)."""
+    still_owed = []
+    for entry_id, fields in entries:
+        try:
+            handle(entry_id, fields, reclaimed=True)
+        except Exception:
+            logger.exception("worker %s: %s entry_id=%s still failing; will retry", CONSUMER, context, entry_id)
+            still_owed.append((entry_id, fields))
+    return still_owed
+
+
+def _reclaim_own_pending() -> list[Entry]:
+    """At worker startup, and again whenever nothing is already known to be
+    owed (see loop()): fetch entries this consumer already owns in the PEL
+    -- most often a same-pod restart, which keeps the same CONSUMER
+    (HOSTNAME) -- immediately instead of waiting out MIN_IDLE_MS
+    (RUN_TIMEOUT_S plus margin, N2). This is the only place that re-fetches from Redis (one
+    XCLAIM per entry); a failure processing an entry is retried directly via
+    _process_owed instead of coming back through here, so a prolonged outage
+    never re-XCLAIMs the same entry on every retry."""
+    entries = run_queue.reclaim_own_pending(CONSUMER)
+    for entry_id, _ in entries:
         logger.info("reclaiming own pending entry_id=%s consumer=%s at startup", entry_id, CONSUMER)
-        handle(entry_id, fields, reclaimed=True)
+    return _process_owed(entries, context="reclaimed")
 
 
 def loop() -> None:
+    # B1: an own-PEL entry whose processing fails here (DB/Valkey still down)
+    # must not be abandoned after one immediate retry -- left in this
+    # consumer's own PEL it would otherwise strand until MIN_IDLE_MS elapses
+    # (reconcile_queued_runs also can't see it: live_run_ids() counts a
+    # pending entry as live). `owed` keeps the specific entries that failed
+    # so every subsequent iteration retries exactly them (via _process_owed,
+    # not a fresh Redis reclaim) until they succeed; `owed is None` means "we
+    # don't know of anything, redo the Redis-side scan" -- used only when a
+    # failure left no specific entry in hand.
+    owed: list[Entry] | None
     try:
-        _reclaim_own_pending()
+        owed = _reclaim_own_pending()
     except Exception:
         logger.exception("worker %s: startup own-PEL reclaim failed", CONSUMER)
+        owed = None
     while not shutting_down.is_set():
         _touch(HEARTBEAT_FILE)
+        if owed:
+            owed = _process_owed(owed, context="pending")
+        elif owed is None:
+            try:
+                owed = _reclaim_own_pending()
+            except Exception:
+                logger.exception("worker %s: pending own-PEL reclaim failed", CONSUMER)
+                owed = None
+        entry = None
         try:
             entry = run_queue.autoclaim_one(CONSUMER)
             reclaimed = entry is not None
@@ -271,13 +336,12 @@ def loop() -> None:
             # A DB or Valkey blip must not crash-loop the pod: the entry in hand
             # is still pending (handle only ACKs after the claim decided), so
             # XAUTOCLAIM/own-PEL reclaim redeliver it; wait out the outage and
-            # read again. The reclaim attempt below is itself guarded -- it
-            # must never let a still-ongoing outage kill this loop either.
+            # read again.
             logger.exception("worker %s: loop iteration failed; retrying in %ss", CONSUMER, RETRY_DELAY_S)
-            try:
-                _reclaim_own_pending()
-            except Exception:
-                logger.exception("worker %s: post-error own-PEL reclaim failed", CONSUMER)
+            if entry is not None:
+                owed = (owed or []) + [entry]
+            elif not owed:
+                owed = None
             shutting_down.wait(RETRY_DELAY_S)
 
 

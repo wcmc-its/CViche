@@ -89,9 +89,26 @@ REENQUEUE_GUARD_TTL_S = 30
 # live_run_ids() will enumerate in one call; the live PEL is normally at most
 # a few entries, one per in-flight run.
 LIVE_RUN_IDS_PENDING_LIMIT = 10_000
-# A healthy worker holds its entry un-ACKed for the whole run (15-20 min), so
-# the reclaim threshold must exceed the longest plausible run or live runs churn.
-MIN_IDLE_MS = 45 * 60 * 1000
+# The worker's own run-watchdog timeout (app.worker.RUN_TIMEOUT_S / the
+# CVICHE_RUN_TIMEOUT_SECONDS knob). Read directly here rather than imported
+# from app.worker -- which has module-level signal-handling/threading setup
+# neither run_queue nor run_service should pull in -- so worker.py, MIN_IDLE_MS
+# below and run_service's queue-mode stale-run floor (_effective_stale_run_minutes)
+# all derive from the SAME single knob instead of each keeping its own copy of
+# its default, which could silently drift apart (CODING STANDARDS section 1.5).
+# 5400s: prod's measured p99/max run is 3542s (Paul, 2026-09-23), so this default
+# is ~1.5x the longest run ever observed.
+RUN_TIMEOUT_S_DEFAULT = 5400
+_run_timeout_s_cfg, _ = get_config("llm", "CVICHE_RUN_TIMEOUT_SECONDS", default=RUN_TIMEOUT_S_DEFAULT)
+RUN_TIMEOUT_S = int(_run_timeout_s_cfg)
+
+# A healthy worker holds its entry un-ACKed for the run's WHOLE duration -- up
+# to RUN_TIMEOUT_S, since app.worker's own run watchdog (not this reclaim) is
+# what stops a run that outlives its bound -- so the reclaim threshold must
+# exceed RUN_TIMEOUT_S itself, not just a typical run's length (15-20 min):
+# below it, XAUTOCLAIM steals a still-healthy, still-executing run's entry out
+# from under it (B1/N2). 600s of margin on top for delivery/scheduling jitter.
+MIN_IDLE_MS = (RUN_TIMEOUT_S + 600) * 1000
 BLOCK_MS = 5000
 # socket_timeout must exceed BLOCK_MS or every idle XREADGROUP would raise
 # instead of legitimately waiting out the blocking read.
@@ -116,6 +133,17 @@ class QueueStats(TypedDict):
     consumers: int
     owners: list[dict[str, object]]
     dead: int
+
+
+def is_configured() -> bool:
+    """True when CVICHE_REDIS_URL is set -- the one precondition every
+    operation in this module needs. Lets a caller check BEFORE committing any
+    state of its own (N3): unconfigured, _build_client below raises a plain
+    RuntimeError, not a redis.exceptions.RedisError, so a caller that only
+    guards against RedisError would let it escape uncaught -- after whatever
+    it already committed."""
+    url, _ = get_config("redis", "CVICHE_REDIS_URL", default="")
+    return bool(url)
 
 
 def _build_client(socket_timeout: float) -> redis.Redis:
@@ -168,11 +196,16 @@ def ensure_group() -> None:
             raise
 
 
-def enqueue(run_id: str, start_step: int | None = None) -> str:
-    """XADD a work token; returns the entry id. Raises on failure."""
+def enqueue(run_id: str) -> str:
+    """XADD a work token; returns the entry id. Raises on failure.
+
+    Pure wake-up (N5): naming only ``run_id``, no ``start_step`` -- no
+    production caller has passed one since the resume point moved onto
+    ``runs.resume_from_step`` (see the module docstring and ``WorkToken``).
+    ``WorkToken.from_entry`` still tolerates and ignores a legacy token's
+    ``start_step`` field, for a message an old, not-yet-redeployed producer
+    enqueued before this parameter was dropped."""
     fields = {"run_id": run_id, "enqueued_at": datetime.now(timezone.utc).isoformat()}
-    if start_step is not None:
-        fields["start_step"] = str(start_step)
     entry_id = _producer_client().xadd(STREAM, fields)
     logger.info("enqueued run_id=%s entry_id=%s", run_id, entry_id)
     return entry_id
@@ -224,7 +257,7 @@ def reclaim_own_pending(consumer: str) -> list[tuple[str, dict[str, str]]]:
     min_idle=0 -- used at worker startup and after a loop() exception, so a
     same-pod restart (which keeps the same CONSUMER/HOSTNAME) picks its
     crashed-mid-run entries back up immediately instead of waiting out
-    MIN_IDLE_MS (45 min in production).
+    MIN_IDLE_MS (RUN_TIMEOUT_S plus margin -- N2 -- in production).
 
     XPENDING + XCLAIM rather than a fresh XREADGROUP id="0": fakeredis does
     not replay a consumer's own delivery history through id="0" the way real

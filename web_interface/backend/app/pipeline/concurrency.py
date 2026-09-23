@@ -93,8 +93,13 @@ def dispatch_mode() -> DispatchMode:
 
     Normalises whitespace and case, and raises ``ValueError`` on anything
     else, so a typo'd ``CVICHE_DISPATCH_MODE`` (e.g. ``"queeu"``) fails loudly
-    on the next /start rather than silently running in-process forever
-    (#701 run_queue.py point 10).
+    rather than silently running in-process forever (#701 run_queue.py point
+    10). N7: this now fails BACKEND STARTUP itself, not only the next
+    /start -- ``run_service.reconcile_stale_runs`` (via
+    ``_effective_stale_run_minutes``) and ``reconcile_queued_runs`` both call
+    this during the startup lifespan's own reconcile sweep, so a typo'd value
+    stops the whole pod from ever becoming ready rather than surfacing lazily
+    on the first request that reaches it.
     """
     raw, _ = get_config("llm", "CVICHE_DISPATCH_MODE", default="in_process")
     mode = raw.strip().lower()

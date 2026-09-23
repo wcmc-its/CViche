@@ -19,7 +19,7 @@ from app.pipeline import concurrency, run_queue
 from app.auth import get_current_user
 from app.api.upload import create_run_archive, commit_run_or_compensate
 from app.services.run_service import (
-    check_run_access, UPLOAD_DIR, _materialize_input_if_missing, flip_to_queued, revert_queued,
+    check_run_access, UPLOAD_DIR, _materialize_input_if_missing, flip_to_queued, revert_queued, StepSnapshot,
 )
 from app.rate_limiter import check_rate_limit
 from app.errors import not_found, bad_request, conflict
@@ -49,7 +49,7 @@ def _run_duration_seconds(run) -> int | None:
 
 def _dispatch_queue(
     run: Run, db: Session, *, allowed_from: tuple[str, ...], start_step: int | None = None,
-    on_flip: Callable[[], None] | None = None,
+    on_flip: Callable[[], tuple[StepSnapshot, ...]] | None = None,
 ) -> JSONResponse:
     """Queue-mode dispatch (#701): ``run_service.flip_to_queued`` reads the
     row's live status under a lock and conditionally flips it to ``queued``
@@ -75,14 +75,33 @@ def _dispatch_queue(
       since the caller's own read): 409, since the client's view of the run
       was already stale.
 
-    ``on_flip``, if given, runs (and is committed) only once a fresh flip has
-    actually won -- retry_step uses it to reset the downstream Step rows,
-    which must NOT happen on a lost race: ``flip_to_queued`` commits its own
-    transaction unconditionally (win or lose), so staging those resets on
-    ``db`` before calling this would otherwise persist them even when the
-    flip never applied.
+    ``on_flip``, if given, is passed straight through to ``flip_to_queued``,
+    which runs -- and commits -- it in the SAME transaction as the flip
+    itself, only once a fresh flip has actually won (B3): retry_step uses it
+    to reset the downstream Step rows and hand back their prior state as
+    ``StepSnapshot``s, which ``revert_queued`` below restores if the XADD
+    then fails. It must NOT run on a lost race, which ``flip_to_queued``
+    itself guarantees; committing the reset here instead, in a second
+    transaction after the flip's own, left a real window open where a woken
+    worker could claim the row in between and execute against stale step
+    state -- closed by moving the reset inside flip_to_queued's transaction.
+
+    Checks ``run_queue.is_configured()`` before any of that (N3): unconfigured
+    (no ``CVICHE_REDIS_URL``), ``run_queue.enqueue`` would raise a plain
+    RuntimeError -- not a ``redis.exceptions.RedisError`` -- which escapes both
+    ``except`` clauses below uncaught, after ``flip_to_queued`` had already
+    committed the row to "queued" with no worker ever coming for it. Checking
+    first means nothing is committed at all on a misconfigured deployment.
     """
-    prior = flip_to_queued(db, run.id, allowed_from, resume_from_step=start_step)
+    if not run_queue.is_configured():
+        logger.error("Queue mode is enabled but CVICHE_REDIS_URL is not set; refusing to queue run %s", run.id)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "queue_unavailable",
+                    "message": "The run queue is unavailable right now -- please try again shortly."},
+        )
+
+    prior = flip_to_queued(db, run.id, allowed_from, resume_from_step=start_step, on_flip=on_flip)
 
     if not prior.flipped and prior.prior_status != RunState.QUEUED:
         raise conflict(f"Cannot start run in status: {prior.prior_status}")
@@ -106,10 +125,6 @@ def _dispatch_queue(
             status_code=202,
             content={"message": f"Run {run.id} already queued", "status": "queued"},
         )
-
-    if on_flip is not None:
-        on_flip()
-        db.commit()
 
     try:
         run_queue.enqueue(run.id)
@@ -581,7 +596,20 @@ def retry_step(
         Step.step_number >= step_number,
     ).all()
 
-    def _reset_downstream_steps() -> None:
+    def _reset_downstream_steps() -> tuple[StepSnapshot, ...]:
+        # B3: snapshot each step's PRIOR state before resetting it, so a
+        # failed enqueue's revert path can restore it exactly -- otherwise a
+        # step this reset to "pending" is left there with no executor coming
+        # for it, and retry_step's own `status != "error"` guard then
+        # rejects a second retry outright.
+        snapshots = tuple(
+            StepSnapshot(
+                step_id=s.id, status=s.status, error_message=s.error_message,
+                started_at=s.started_at, completed_at=s.completed_at,
+                duration_seconds=s.duration_seconds, cost=s.cost,
+            )
+            for s in downstream_steps
+        )
         for s in downstream_steps:
             s.status = "pending"
             s.error_message = None
@@ -589,13 +617,14 @@ def retry_step(
             s.completed_at = None
             s.duration_seconds = None
             s.cost = None
+        return snapshots
 
     if queue_mode:
-        # Deferred to _dispatch_queue's on_flip: flip_to_queued commits its own
-        # transaction even on a lost race (#701 runs.py point 7), so staging
-        # these resets here -- unconditionally, before the flip -- would
-        # persist them on a 409 too. on_flip runs (and is committed) only
-        # once the flip has actually won.
+        # Deferred to _dispatch_queue's on_flip, which flip_to_queued runs
+        # (and commits) inside its OWN transaction, only once the flip has
+        # actually won (#701 runs.py point 7, tightened by B3) -- staging
+        # these resets here unconditionally, before the flip, would persist
+        # them on a lost race (a 409) too.
         return _dispatch_queue(
             run, db, allowed_from=("failed",), start_step=step_number, on_flip=_reset_downstream_steps,
         )

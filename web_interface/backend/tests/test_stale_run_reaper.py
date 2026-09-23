@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 
 import fakeredis
 import pytest
+import redis
 
 import app.main as main_mod
 from app.models import Run, RunState
@@ -70,6 +71,37 @@ def test_reaper_loop_also_sweeps_queued_runs(monkeypatch):
     asyncio.run(run_briefly())
 
     assert len(queued_calls) >= 1
+
+
+# ---------------------------------------------------------------------------
+# B2: app.main._reconcile_queued_runs_at_startup -- the startup lifespan's
+# own call to reconcile_queued_runs, guarded against a Valkey outage the same
+# corrective way the periodic sweep above survives one.
+# ---------------------------------------------------------------------------
+
+class TestReconcileQueuedRunsAtStartup:
+    def test_success_returns_the_reconciler_count(self, db):
+        assert main_mod._reconcile_queued_runs_at_startup(db, lambda db: 3) == 3
+
+    def test_redis_error_is_logged_and_swallowed_not_raised(self, db, caplog):
+        def boom(db):
+            raise redis.exceptions.ConnectionError("valkey unreachable")
+
+        with caplog.at_level("ERROR"):
+            result = main_mod._reconcile_queued_runs_at_startup(db, boom)
+
+        assert result == 0
+        assert "Valkey unavailable" in caplog.text
+
+    def test_a_non_redis_error_still_propagates(self, db):
+        """Only Valkey unavailability is survived here -- a genuine DB error
+        (or anything else unexpected) must still fail startup loudly, exactly
+        like reconcile_stale_runs beside it."""
+        def boom(db):
+            raise RuntimeError("MySQL server has gone away")
+
+        with pytest.raises(RuntimeError, match="gone away"):
+            main_mod._reconcile_queued_runs_at_startup(db, boom)
 
 
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 import logging
 import math
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -30,11 +31,15 @@ DEFAULT_STALE_RUN_MINUTES = 60
 # the pod-level and DB-level backstops give the watchdog the same head start.
 QUEUE_MODE_STALE_RUN_MARGIN_MINUTES = 5
 
-# Mirrors app.worker.RUN_TIMEOUT_S's own default for CVICHE_RUN_TIMEOUT_SECONDS.
-# Duplicated here rather than imported: run_service must stay importable by the
-# backend app (and by app.worker itself) without pulling in the worker
-# module's signal-handling/threading setup.
-DEFAULT_RUN_TIMEOUT_SECONDS = 5400
+# Mirrors run_queue.RUN_TIMEOUT_S_DEFAULT (N2), the single default this value,
+# app.worker.RUN_TIMEOUT_S and run_queue.MIN_IDLE_MS all trace back to. The
+# literal is still duplicated as a plain int (rather than reading
+# run_queue.RUN_TIMEOUT_S_DEFAULT directly) only so _effective_stale_run_minutes
+# below keeps reading CVICHE_RUN_TIMEOUT_SECONDS live on every call -- a config
+# reload must be reflected immediately, and run_queue's own RUN_TIMEOUT_S is
+# fixed once at import time (module-load-time config reads elsewhere in this
+# file, and in run_queue.py, all share that same one-time-read contract).
+DEFAULT_RUN_TIMEOUT_SECONDS = run_queue.RUN_TIMEOUT_S_DEFAULT
 
 # A run still "queued" this long past its flip (#701) has almost certainly
 # lost its Valkey token (the enqueue/reconciler crash windows the #895 review
@@ -638,16 +643,35 @@ class ClaimResult:
 
 
 @dataclass(frozen=True, slots=True)
+class StepSnapshot:
+    """One Step row's state captured just before a queue-mode retry_step
+    reset it to "pending" (B3): the exact fields revert_queued needs to
+    restore it if the follow-up XADD then fails, so the run comes back
+    retryable -- an "error" step, not one stranded "pending" with no
+    executor and rejected by retry_step's own ``status != "error"`` guard."""
+    step_id: int
+    status: str
+    error_message: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    duration_seconds: int | None
+    cost: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class FlipResult:
     """Outcome of flip_to_queued: whether the flip applied, plus the exact
     pre-flip values (read under the same row lock as the flip) a caller needs
-    to undo it with revert_queued if the follow-up XADD then fails."""
+    to undo it with revert_queued if the follow-up XADD then fails.
+    ``step_snapshots`` is populated only when the caller passed
+    ``flip_to_queued`` an ``on_flip`` and the flip actually won (B3)."""
     flipped: bool
     prior_status: str
     prior_started_at: datetime | None
     prior_error_message: str | None
     prior_completed_at: datetime | None
     prior_queued_at: datetime | None
+    step_snapshots: tuple[StepSnapshot, ...] = ()
 
 
 def claim_queued(run_id: str) -> ClaimResult:
@@ -720,6 +744,7 @@ def mark_failed(run_id: str, message: str, *, from_statuses: tuple[str, ...]) ->
 
 def flip_to_queued(
     db: Session, run_id: str, allowed_from: tuple[str, ...], *, resume_from_step: int | None = None,
+    on_flip: Callable[[], tuple[StepSnapshot, ...]] | None = None,
 ) -> FlipResult:
     """Conditionally flip a run to "queued". Reads the pre-flip state under a
     row lock in the SAME transaction as the flip (``SELECT ... FOR UPDATE``),
@@ -737,6 +762,16 @@ def flip_to_queued(
     Already-"queued" is reported as ``flipped=False`` without writing the row
     -- the caller's re-enqueue path (``run_queue.claim_reenqueue_slot``)
     handles that case; this never issues a second flip for it.
+
+    ``on_flip``, if given, runs -- and is committed -- in this SAME
+    transaction, only once the flip has actually won (B3): retry_step uses it
+    to reset the downstream Step rows to "pending" and passes back their
+    prior state as ``StepSnapshot``s, attached to the returned ``FlipResult``
+    so ``revert_queued`` can restore them too if the caller's own follow-up
+    (the queue XADD) then fails. Committing the flip and the step reset
+    separately, as an earlier version of this did, left a real window open: a
+    woken worker could claim the row between the two commits and execute
+    against still-stale step state.
     """
     prior_status, prior_started_at, prior_error_message, prior_completed_at, prior_queued_at = db.execute(
         select(Run.status, Run.started_at, Run.error_message, Run.completed_at, Run.queued_at)
@@ -753,9 +788,12 @@ def flip_to_queued(
         .values(status=RunState.QUEUED, queued_at=datetime.now(), error_message=None,
                 completed_at=None, resume_from_step=resume_from_step)
     ).rowcount
+    step_snapshots: tuple[StepSnapshot, ...] = ()
+    if rowcount == 1 and on_flip is not None:
+        step_snapshots = on_flip()
     db.commit()
     return FlipResult(rowcount == 1, prior_status, prior_started_at, prior_error_message,
-                       prior_completed_at, prior_queued_at)
+                       prior_completed_at, prior_queued_at, step_snapshots=step_snapshots)
 
 
 def revert_queued(db: Session, run_id: str, prior: FlipResult) -> bool:
@@ -766,6 +804,14 @@ def revert_queued(db: Session, run_id: str, prior: FlipResult) -> bool:
     cancelled, this is a no-op and the caller should report the run's live
     status instead of a stale "reverted to prior" one.
 
+    Also restores any ``prior.step_snapshots`` (B3) -- the downstream Step
+    rows a queue-mode retry_step reset to "pending" before the flip -- to
+    their pre-reset state, in the same transaction as the Run revert. Without
+    this a failed enqueue left the run back at its prior (retryable-looking)
+    status but its failed step stuck "pending": no executor is coming for it,
+    and retry_step's own ``status != "error"`` guard then rejects a second
+    retry outright.
+
     Returns True if the revert actually applied.
     """
     rowcount = db.execute(
@@ -775,5 +821,14 @@ def revert_queued(db: Session, run_id: str, prior: FlipResult) -> bool:
                 error_message=prior.prior_error_message, completed_at=prior.prior_completed_at,
                 queued_at=prior.prior_queued_at)
     ).rowcount
+    if rowcount == 1:
+        for snap in prior.step_snapshots:
+            db.execute(
+                update(Step)
+                .where(Step.id == snap.step_id)
+                .values(status=snap.status, error_message=snap.error_message,
+                        started_at=snap.started_at, completed_at=snap.completed_at,
+                        duration_seconds=snap.duration_seconds, cost=snap.cost)
+            )
     db.commit()
     return rowcount == 1

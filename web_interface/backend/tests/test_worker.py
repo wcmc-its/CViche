@@ -100,7 +100,7 @@ def test_success_claims_resets_started_at_executes_and_acks(db, wired, tmp_path)
     _seed(db)
     (tmp_path / "WRK001.docx").write_bytes(b"PK")
     StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
-    run_queue.enqueue("WRK001", start_step=None)
+    run_queue.enqueue("WRK001")
 
     worker.handle(*run_queue.read_one("w1"))
 
@@ -200,10 +200,12 @@ def test_resume_from_step_on_the_row_reaches_execute(db, wired, tmp_path):
 
 def test_a_legacy_tokens_start_step_field_is_ignored_in_favour_of_the_db_row(db, wired, tmp_path):
     """A not-yet-redeployed producer may still enqueue an old-format token
-    carrying start_step; it must not override the DB's resume_from_step."""
+    carrying start_step (N5: enqueue() itself no longer accepts the
+    parameter, so a raw XADD stands in for that legacy producer here); it
+    must not override the DB's resume_from_step."""
     _seed(db, resume_from_step=4)
     (tmp_path / "WRK001.docx").write_bytes(b"PK")
-    run_queue.enqueue("WRK001", start_step=99)  # old-format field, must be ignored
+    wired.xadd(run_queue.STREAM, {"run_id": "WRK001", "start_step": "99"})  # old-format field, must be ignored
 
     worker.handle(*run_queue.read_one("w1"))
 
@@ -463,7 +465,7 @@ def test_loop_reclaims_own_pending_at_startup_and_after_each_error(wired, monkey
     depending on Valkey PEL mechanics already proved separately in
     test_run_queue.py."""
     calls = []
-    monkeypatch.setattr(worker, "_reclaim_own_pending", lambda: calls.append(1))
+    monkeypatch.setattr(worker, "_reclaim_own_pending", lambda: calls.append(1) or [])
     monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
     monkeypatch.setattr(worker, "RETRY_DELAY_S", 0.05)
 
@@ -479,6 +481,47 @@ def test_loop_reclaims_own_pending_at_startup_and_after_each_error(wired, monkey
 
     assert not t.is_alive()
     assert len(calls) >= 2, "once at startup, again after at least one loop exception"
+
+
+def test_reclaim_owed_flag_retries_every_iteration_until_the_db_recovers(db, wired, tmp_path, monkeypatch):
+    """B1: a same-pod restart with the DB still down must not get only one
+    immediate reclaim retry -- MIN_IDLE_MS is left at its production default
+    (unmonkeypatched) on purpose, so this can only pass via the reclaim_owed
+    flag retrying own-PEL reclaim every iteration, not via XAUTOCLAIM's own
+    idle-time reclaim."""
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
+    monkeypatch.setattr(worker, "RETRY_DELAY_S", 0.02)
+    run_queue.enqueue("WRK001")
+    run_queue.read_one("w1")  # delivered to this consumer, never claimed/ACKed (a crash)
+
+    attempts = {"n": 0}
+    real_session_local = TestingSessionLocal
+
+    def flaky_session_local():
+        attempts["n"] += 1
+        if attempts["n"] <= 2:
+            raise RuntimeError("MySQL server has gone away")
+        return real_session_local()
+    monkeypatch.setattr(run_service, "SessionLocal", flaky_session_local)
+
+    t = threading.Thread(target=worker.loop)
+    t.start()
+    try:
+        deadline = time.time() + 2
+        while _row(db).status != "complete" and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        worker.shutting_down.set()
+        t.join(timeout=2)
+
+    assert not t.is_alive()
+    assert attempts["n"] >= 3, "the DB was retried past the first 2 failures"
+    assert StubOrchestrator.calls == [("WRK001", None)]
+    assert _row(db).status == "complete"
+    assert _pending() == 0
 
 
 def test_db_error_marking_a_poison_run_failed_keeps_its_entry_out_of_the_dlq(db, wired, tmp_path, monkeypatch):
@@ -604,6 +647,46 @@ def test_watchdog_fires_marks_the_run_failed_acks_and_calls_os_exit(db, wired, t
     row = _row(db)
     assert row.status == "failed"
     assert "exceeded" in row.error_message.lower()
+
+
+def test_watchdog_still_exits_when_mark_failed_itself_raises(db, wired, monkeypatch):
+    """N1: os._exit must sit in a finally -- a DB error while marking the
+    timed-out run failed must not leave the process running forever with
+    the wedged stage thread still inside it."""
+    _seed(db)
+    run_queue.enqueue("WRK001")
+    entry_id, fields = run_queue.read_one("w1")
+
+    def db_down(*a, **kw):
+        raise RuntimeError("MySQL server has gone away")
+    monkeypatch.setattr(worker, "mark_failed", db_down)
+    exit_codes = []
+    monkeypatch.setattr(worker.os, "_exit", lambda code: exit_codes.append(code))
+
+    worker._watchdog_fire(entry_id, "WRK001")
+
+    assert exit_codes == [1], "os._exit must still run even though mark_failed raised"
+
+
+def test_watchdog_acks_before_exit_even_when_os_exit_itself_raises(db, wired, monkeypatch):
+    """N1: os._exit is the LAST statement in the finally, so mark_failed and
+    ack have already committed by the time it runs -- proven here by making
+    the os._exit stub itself raise and checking the DB/queue state left
+    behind is already correct, not by anything downstream catching and
+    masking that exception."""
+    _seed(db, status="running")
+    run_queue.enqueue("WRK001")
+    entry_id, fields = run_queue.read_one("w1")
+
+    def exit_raises(code):
+        raise SystemExit(code)
+    monkeypatch.setattr(worker.os, "_exit", exit_raises)
+
+    with pytest.raises(SystemExit):
+        worker._watchdog_fire(entry_id, "WRK001")
+
+    assert _row(db).status == "failed"
+    assert _pending() == 0
 
 
 def test_watchdog_is_cancelled_when_the_run_finishes_before_the_deadline(db, wired, tmp_path, monkeypatch):

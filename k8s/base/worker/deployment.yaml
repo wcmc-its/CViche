@@ -75,8 +75,13 @@ spec:
           # runs `find`) but GNU stat/date flags are an extra thing to keep
           # portable, and python3 is already a hard requirement of this
           # image, so this is one more interpreter fork per period, not a
-          # new dependency. periodSeconds x failureThreshold = 90s, matching
-          # the in-script staleness threshold below.
+          # new dependency. N6: 90s below is only the in-script staleness
+          # threshold a SINGLE probe run checks (heartbeat age < 90s = ok) --
+          # it is not the restart time. k8s still needs failureThreshold (3)
+          # consecutive failing probes, periodSeconds (30s) apart, before it
+          # restarts the pod, so the real wall-clock time from "process
+          # wedged" to "pod restarted" is the 90s staleness threshold PLUS
+          # failureThreshold x periodSeconds more: ~150-180s, not 90s alone.
           livenessProbe:
             exec:
               command:

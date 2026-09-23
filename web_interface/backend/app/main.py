@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import traceback
+from collections.abc import Callable
 
 
 from fastapi import FastAPI, Request, Depends, Response, status
@@ -237,6 +238,33 @@ def _guard_deployed_auth_mode(auth_mode: str | None, storage_backend: str, allow
         )
 
 
+def _reconcile_queued_runs_at_startup(db: Session, reconcile_queued_runs: Callable[[Session], int]) -> int:
+    """B2: the startup counterpart of ``reconcile_queued_runs``, guarded the
+    same corrective way the periodic sweep (``_stale_run_reaper_loop``) already
+    survives a sweep failure -- log and continue -- narrowed here to
+    ``redis.exceptions.RedisError`` specifically. Unguarded, a Valkey outage
+    during a backend restart raised out of ``reconcile_queued_runs``
+    (queue-mode only) would crash startup entirely, taking down every replica
+    at once instead of just leaving queue-mode reconciliation to the periodic
+    reaper, which retries on its own interval. Any other exception (a genuine
+    DB error, say) is deliberately left to propagate here, same as the
+    ``reconcile_stale_runs`` call beside it -- only Valkey unavailability is
+    worth surviving at this specific call site.
+
+    ``reconcile_queued_runs`` is passed in rather than imported here so a test
+    can substitute a stub without patching ``app.services.run_service``.
+    """
+    import redis
+    try:
+        return reconcile_queued_runs(db)
+    except redis.exceptions.RedisError:
+        logger.exception(
+            "Startup queued-run reconcile failed (Valkey unavailable); "
+            "continuing -- the periodic reaper will retry it"
+        )
+        return 0
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -291,7 +319,7 @@ async def lifespan(app: FastAPI):
         swept = reconcile_stale_runs(db)
         if swept:
             logger.info("♻️  Reconciled %d stale run(s) from a previous restart", swept)
-        queued_requeued = reconcile_queued_runs(db)
+        queued_requeued = _reconcile_queued_runs_at_startup(db, reconcile_queued_runs)
         if queued_requeued:
             logger.info("♻️  Requeued %d stranded queued run(s) at startup", queued_requeued)
     finally:

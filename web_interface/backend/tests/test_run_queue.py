@@ -30,6 +30,9 @@ def fake_redis(monkeypatch):
     monkeypatch.setattr(run_queue, "_client", lambda: r)
     monkeypatch.setattr(run_queue, "_producer_client", lambda: r)
     monkeypatch.setattr(run_queue, "_autoclaim_cursor", "0-0")
+    # N3's is_configured() check reads CVICHE_REDIS_URL directly (independent
+    # of the client-factory monkeypatches above), so it must see something set.
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://fake-valkey:6379/0")
     return r
 
 
@@ -49,8 +52,8 @@ def test_fakeredis_supports_every_stream_primitive_the_queue_uses(fake_redis):
     silently turn the worker tests vacuous."""
     run_queue.ensure_group()
     run_queue.ensure_group()  # BUSYGROUP tolerated
-    eid = run_queue.enqueue("CANARY", start_step=3)
-    assert run_queue.read_one("a") == (eid, {"run_id": "CANARY", "enqueued_at": _entries(fake_redis)[0]["enqueued_at"], "start_step": "3"})
+    eid = run_queue.enqueue("CANARY")
+    assert run_queue.read_one("a") == (eid, {"run_id": "CANARY", "enqueued_at": _entries(fake_redis)[0]["enqueued_at"]})
     assert run_queue.delivery_count(eid) == 1
     assert run_queue.read_one("a") is None
     fake_redis.xclaim(run_queue.STREAM, run_queue.GROUP, "b", 0, [eid])
@@ -219,11 +222,11 @@ def test_claim_reenqueue_slot_is_one_shot_per_run_within_the_ttl(fake_redis):
 
 def test_requeue_replaces_the_entry_with_an_undelivered_one(fake_redis):
     run_queue.ensure_group()
-    eid = run_queue.enqueue("RQ1", start_step=2)
+    eid = run_queue.enqueue("RQ1")
     _, fields = run_queue.read_one("a")
     new_id = run_queue.requeue(eid, fields)
     assert new_id != eid
-    assert _entries(fake_redis) == [{"run_id": "RQ1", "start_step": "2", "enqueued_at": fields["enqueued_at"]}]
+    assert _entries(fake_redis) == [{"run_id": "RQ1", "enqueued_at": fields["enqueued_at"]}]
     assert run_queue.stats()["pending"] == 0
     # the new entry is undelivered: a fresh read still sees it
     assert run_queue.read_one("b") == (new_id, fields)
@@ -314,6 +317,26 @@ def test_producer_client_uses_a_short_socket_timeout(monkeypatch):
         assert run_queue.PRODUCER_SOCKET_TIMEOUT_S < run_queue.WORKER_SOCKET_TIMEOUT_S
     finally:
         run_queue._reset_client()
+
+
+def test_min_idle_ms_exceeds_the_run_watchdog_timeout(monkeypatch):
+    """N2: a healthy worker holds its entry un-ACKed for the run's whole
+    duration -- up to RUN_TIMEOUT_S, since app.worker's own run watchdog (not
+    this reclaim threshold) is what stops a run that outlives its bound. If
+    MIN_IDLE_MS sat at or below RUN_TIMEOUT_S, XAUTOCLAIM would steal a still
+    healthy, still-executing run's entry out from under it well before the
+    watchdog ever gets a chance to fire."""
+    assert run_queue.MIN_IDLE_MS > run_queue.RUN_TIMEOUT_S * 1000
+    assert run_queue.MIN_IDLE_MS == (run_queue.RUN_TIMEOUT_S + 600) * 1000
+
+
+def test_worker_run_timeout_s_is_sourced_from_run_queue_not_read_independently():
+    """N2: app.worker.RUN_TIMEOUT_S and run_queue.MIN_IDLE_MS must trace back
+    to the exact same CVICHE_RUN_TIMEOUT_SECONDS read -- two independent
+    config reads could drift apart on a reload race, silently reopening the
+    same gap this fix closes."""
+    from app import worker
+    assert worker.RUN_TIMEOUT_S == run_queue.RUN_TIMEOUT_S
 
 
 def test_client_build_is_locked_against_concurrent_first_use(monkeypatch):
@@ -488,12 +511,21 @@ def test_start_reverts_status_and_answers_503_when_xadd_fails(client, db, monkey
 
 def test_start_does_not_turn_a_non_redis_error_into_a_503(client, db, monkeypatch, queue_mode, as_user_with_input):
     """#701 runs.py point 2: only redis.exceptions.RedisError is caught and
-    revert-and-503'd. Anything else (a bug, or run_queue._client()'s
-    RuntimeError for a missing CVICHE_REDIS_URL) is loud misconfiguration and
-    propagates -- the flip stays "queued" with no token, which the queued-run
-    reconciler is the backstop for."""
+    revert-and-503'd. Anything else (an unexpected bug in enqueue, say) is
+    loud misconfiguration and propagates -- the flip stays "queued" with no
+    token, which the queued-run reconciler is the backstop for.
+
+    The specific "CVICHE_REDIS_URL is not set" case this used to simulate is
+    now caught BEFORE the flip by run_queue.is_configured() (N3) and never
+    reaches enqueue at all -- see
+    test_start_in_queue_mode_refuses_before_flipping_when_valkey_is_unconfigured
+    -- so CVICHE_REDIS_URL is set here and an unrelated bug stands in for
+    "some other non-Redis exception", to keep proving the general principle.
+    """
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://fake-valkey:6379/0")
+
     def boom(*_a, **_k):
-        raise RuntimeError("CVICHE_REDIS_URL is not set; the run queue requires Valkey")
+        raise RuntimeError("boom: unexpected bug in enqueue")
     monkeypatch.setattr(run_queue, "enqueue", boom)
     user, _ = _seed(db, status="paused")
     as_user_with_input(user)
@@ -510,6 +542,8 @@ def test_start_reports_live_status_when_a_revert_loses_to_a_concurrent_claim(cli
     executing."""
     from sqlalchemy import update as sa_update
     from app.models import Run
+
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://fake-valkey:6379/0")
 
     def race_then_fail(run_id, *a, **k):
         # Simulate the worker's claim winning the race right after the flip,
@@ -565,6 +599,26 @@ def test_start_in_queue_mode_never_acquires_a_pod_slot(client, db, fake_redis, q
     user, _ = _seed(db)
     as_user_with_input(user)
     assert client.post("/api/run/RUNQ01/start").status_code == 202
+
+
+def test_start_in_queue_mode_refuses_before_flipping_when_valkey_is_unconfigured(
+    client, db, queue_mode, monkeypatch, as_user_with_input,
+):
+    """N3: CVICHE_REDIS_URL unset must be checked BEFORE flip_to_queued --
+    checking only inside the enqueue try/except (as the pre-N3 code did)
+    misses it entirely: _build_client's RuntimeError isn't a
+    redis.exceptions.RedisError, so it escaped uncaught AFTER the flip had
+    already committed the row "queued", stranding it with no worker ever
+    coming for it."""
+    monkeypatch.delenv("CVICHE_REDIS_URL", raising=False)
+    user, _ = _seed(db)
+    as_user_with_input(user)
+
+    resp = client.post("/api/run/RUNQ01/start")
+
+    assert resp.status_code == 503
+    assert resp.json()["detail"]["error"] == "queue_unavailable"
+    assert _status(db) == "created", "must never be flipped to queued when misconfigured"
 
 
 def test_retry_in_queue_mode_resets_steps_and_persists_resume_from_step(client, db, fake_redis, queue_mode, as_user_with_input):
@@ -647,3 +701,28 @@ def test_cancel_still_rejects_a_created_run(client, db, as_user_with_input):
     user, _ = _seed(db, status="created")
     as_user_with_input(user)
     assert client.post("/api/run/RUNQ01/cancel").status_code == 400
+
+
+def test_dispatch_routes_stay_plain_def_not_async():
+    """N4: start_run, retry_step (#701 runs.py point 10) and get_queue_stats
+    (run_queue.py point 11) must stay plain ``def``, not ``async def`` --
+    FastAPI then runs each in the threadpool, so its synchronous Valkey call
+    (XADD, or the blocking redis-py stats calls) costs a threadpool slot
+    instead of stalling the event loop for every other request on the pod."""
+    import inspect
+    from app.api.runs import start_run, retry_step
+    from app.api.admin_routes import get_queue_stats
+
+    assert not inspect.iscoroutinefunction(start_run)
+    assert not inspect.iscoroutinefunction(retry_step)
+    assert not inspect.iscoroutinefunction(get_queue_stats)
+
+
+def test_queue_stats_route_has_a_typed_response_model():
+    """N4: the admin queue-stats route must declare response_model so its
+    shape is validated and documented, not returned as an untyped dict."""
+    from app.api.admin_routes import router as admin_router, get_queue_stats
+    from app.schemas import QueueStatsResponse
+
+    route = next(r for r in admin_router.routes if r.endpoint is get_queue_stats)
+    assert route.response_model is QueueStatsResponse
