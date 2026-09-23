@@ -22,9 +22,12 @@ because these entries arrive from the classifier still carrying their "S0:"
 prefix more often than most -- an identifier line is short enough that the code
 is a visible fraction of it.
 """
+import logging
 
 from ..formatting import _set_font
 from ..normalization import _clean_inline_tabs, _strip_taxonomy_code
+
+logger = logging.getLogger(__name__)
 
 
 class ResearcherProfilesSection:
@@ -40,7 +43,7 @@ class ResearcherProfilesSection:
             return
 
         if self.verbose:
-            print(f"Filling Researcher Profiles ({len(s0_entries)} entries)...")
+            logger.info("Filling Researcher Profiles (%s entries)...", len(s0_entries))
 
         # Find "Peer-reviewed Research Articles" to insert directly above it
         peer_reviewed_idx = self._find_paragraph_with_text("Peer-reviewed Research Articles")

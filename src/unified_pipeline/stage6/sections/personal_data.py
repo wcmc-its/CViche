@@ -360,7 +360,7 @@ class PersonalDataSection:
             original_doc_path: Path to original Word document (for fallback email extraction)
         """
         if self.verbose:
-            print("\nFilling Personal Data...")
+            logger.info("\nFilling Personal Data...")
 
         # Get name from cv_owner if available
         # Priority: full_name_with_credentials > full_name
@@ -786,7 +786,7 @@ class PersonalDataSection:
                     work_email = _withhold_recovered(
                         email_match.group(0), para.text, withheld)
                     if self.verbose and work_email:
-                        print(f"  Found email from paragraph: {work_email}")
+                        logger.debug("  Found email from paragraph: %s", work_email)
                     if work_email:
                         break
 
@@ -848,7 +848,7 @@ class PersonalDataSection:
                             name = recovered_name
                             name_is_complete = True
                             if self.verbose:
-                                print(f"  Found name from table: {name}")
+                                logger.debug("  Found name from table: %s", name)
 
                 # Extract address if not yet found
                 # Note: Business address cells often contain embedded phone/fax/email
@@ -879,7 +879,7 @@ class PersonalDataSection:
                     if value and len(value) > 5:
                         office_phone = _withhold_recovered(value, row_text, withheld)
                         if self.verbose and office_phone:
-                            print(f"  Found phone from table: {office_phone}")
+                            logger.debug("  Found phone from table: %s", office_phone)
 
                 # Extract email if not yet found
                 elif field == _FIELD_WORK_EMAIL and not work_email:
@@ -888,7 +888,7 @@ class PersonalDataSection:
                         work_email = _withhold_recovered(
                             email_match.group(0), row_text, withheld)
                         if self.verbose and work_email:
-                            print(f"  Found email from table: {work_email}")
+                            logger.debug("  Found email from table: %s", work_email)
 
         return name, name_is_complete, work_email, office_phone, office_address
 
@@ -919,7 +919,7 @@ class PersonalDataSection:
                 if phone_match and not office_phone:
                     office_phone = phone_match.group(1).strip()
                     if self.verbose:
-                        print(f"  Found phone from address block: {office_phone}")
+                        logger.debug("  Found phone from address block: %s", office_phone)
                 continue
 
             # Extract email if embedded in address
@@ -929,7 +929,7 @@ class PersonalDataSection:
                 if email_match and not work_email:
                     work_email = email_match.group(0)
                     if self.verbose:
-                        print(f"  Found email from address block: {work_email}")
+                        logger.debug("  Found email from address block: %s", work_email)
                 continue
 
             # Skip fax lines
@@ -942,5 +942,5 @@ class PersonalDataSection:
 
         address = '\n'.join(address_lines)
         if self.verbose:
-            print(f"  Found address from table: {address[:50]}...")
+            logger.debug("  Found address from table: %s...", address[:50])
         return address, office_phone, work_email
