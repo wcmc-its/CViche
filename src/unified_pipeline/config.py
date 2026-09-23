@@ -565,7 +565,17 @@ def get_llm_env_config(key: str, default: object) -> tuple[object, str]:
     path = AUTH_CONFIG_PATH if AUTH_CONFIG_PATH.exists() else AUTH_CONFIG_EXAMPLE_PATH
     try:
         with open(path) as f:
-            cfg = yaml.safe_load(f) or {}
+            cfg = yaml.safe_load(f)
+        if not isinstance(cfg, dict):
+            # An empty file (None) is ordinary; a list or scalar document is a
+            # misconfiguration. Either way degrade to default, as the backend's
+            # get_config does inside its broad except.
+            if cfg is not None:
+                logger.warning(
+                    "%s is not a mapping (got %s); using default for %s",
+                    path, type(cfg).__name__, key,
+                )
+            cfg = {}
         llm_cfg = cfg.get("llm")
         if not isinstance(llm_cfg, dict):
             # A missing/null `llm:` block (llm_cfg is None) is the ordinary
