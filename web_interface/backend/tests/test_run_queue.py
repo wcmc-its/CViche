@@ -58,7 +58,9 @@ def test_fakeredis_supports_every_stream_primitive_the_queue_uses(fake_redis):
     assert fake_redis.xinfo_groups(run_queue.STREAM)[0]["name"] == run_queue.GROUP
     assert run_queue.stats()["pending"] == 1
     run_queue.ack(eid)
-    assert run_queue.stats() == {"queued": 0, "pending": 0, "consumers": [], "dead": 0}
+    assert run_queue.stats() == {
+        "stream_length": 0, "pending": 0, "lag": -1, "consumers": 2, "owners": [], "dead": 0,
+    }
 
 
 def test_every_key_the_module_builds_shares_the_cviche_runs_hash_tag():
@@ -221,6 +223,56 @@ def test_live_run_ids_covers_undelivered_and_pending_but_not_acked(fake_redis):
 
 def test_live_run_ids_is_empty_when_no_group_exists(fake_redis):
     assert run_queue.live_run_ids() == set()
+
+
+def test_stats_exposes_lag_after_enqueue_and_a_read(fake_redis):
+    run_queue.ensure_group()
+    run_queue.enqueue("LAG1")
+    run_queue.enqueue("LAG2")
+    run_queue.read_one("a")
+    body = run_queue.stats()
+    assert body["lag"] == 1
+    assert body["pending"] == 1
+
+
+def test_stats_does_not_create_the_stream_or_group(fake_redis):
+    """A GET must not create the stream/group as a side effect -- that would
+    mask 'no worker has ever started' on the very next call."""
+    assert fake_redis.exists(run_queue.STREAM) == 0
+    body = run_queue.stats()
+    assert body == {"stream_length": 0, "pending": None, "lag": None, "consumers": 0, "owners": [], "dead": 0}
+    assert fake_redis.exists(run_queue.STREAM) == 0
+
+
+def test_stats_reraises_an_unexpected_response_error(fake_redis):
+    """The guard is pinned to the 'no such key' string, not to ResponseError in
+    general -- a different server error (WRONGTYPE, say) must still surface.
+    A stub ``pipeline()`` stands in for the client's real one: patching the
+    client instance's own ``xinfo_groups`` does not reach a pipeline's queued
+    commands, which are a separate object (confirmed empirically against this
+    repo's pinned fakeredis 2.35.1 / redis-py 7.4.0)."""
+    class _BoomPipe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def xlen(self, *a, **k):
+            return self
+
+        def xinfo_groups(self, *a, **k):
+            return self
+
+        def execute(self):
+            raise redis.exceptions.ResponseError("WRONGTYPE Operation against a key holding the wrong kind of value")
+
+    fake_redis.pipeline = lambda transaction=True: _BoomPipe()
+    try:
+        with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
+            run_queue.stats()
+    finally:
+        del fake_redis.pipeline
 
 
 def test_dispatch_mode_defaults_to_in_process(monkeypatch):

@@ -23,6 +23,7 @@ cluster-mode slot rules, and a MULTI/EXEC (``ack``, ``dead_letter``,
 import logging
 import threading
 from datetime import datetime, timezone
+from typing import TypedDict
 
 import redis
 
@@ -65,6 +66,15 @@ _client_lock = threading.Lock()
 _worker_client_instance: redis.Redis | None = None
 _producer_client_instance: redis.Redis | None = None
 _autoclaim_cursor = "0-0"
+
+
+class QueueStats(TypedDict):
+    stream_length: int
+    pending: int | None
+    lag: int | None
+    consumers: int
+    owners: list[dict[str, object]]
+    dead: int
 
 
 def _build_client(socket_timeout: float) -> redis.Redis:
@@ -252,19 +262,44 @@ def live_run_ids() -> set[str]:
     return run_ids
 
 
-def stats() -> dict[str, object]:
-    """Depth and ownership for the admin endpoint. ``queued`` is XLEN, which
-    counts ACKed entries too until MAXLEN trims them; ``pending`` is the live
-    delivered-but-unACKed count."""
-    ensure_group()
+def stats() -> QueueStats:
+    """Read-only depth and ownership for the admin endpoint. Never calls
+    ensure_group(): a GET must not mask "no worker has ever started" by
+    creating the stream and group as a side effect. A missing stream or group
+    reads as pending=None/lag=None/consumers=0/owners=[]; any other
+    ResponseError still raises.
+
+    xpending() is read separately from the xlen/xinfo_groups pipeline rather
+    than folded into it: fakeredis 2.35.1 with redis-py 7.4.0 (this repo's
+    pinned test combination) raises a client-side IndexError -- not
+    ResponseError -- parsing XPENDING's reply when the group does not exist,
+    which would abort the whole pipelined read for exactly the "queue never
+    started" case this rewrite exists to report cleanly."""
     r = _client()
-    summary = r.xpending(STREAM, GROUP)
-    return {
-        "queued": r.xlen(STREAM),
-        "pending": summary["pending"],
-        "consumers": summary["consumers"],
-        "dead": r.xlen(DEAD_STREAM),
-    }
+    pipe = r.pipeline(transaction=False)
+    pipe.xlen(STREAM)
+    pipe.xinfo_groups(STREAM)
+    pipe.xlen(DEAD_STREAM)
+    try:
+        stream_length, groups, dead = pipe.execute()
+    except redis.exceptions.ResponseError as e:
+        if "no such key" not in str(e).lower():
+            raise
+        stream_length, groups, dead = r.xlen(STREAM), [], r.xlen(DEAD_STREAM)
+
+    group = next((g for g in groups if g["name"] == GROUP), None)
+    owners: list[dict[str, object]] = []
+    if group is not None:
+        owners = r.xpending(STREAM, GROUP)["consumers"] or []
+
+    return QueueStats(
+        stream_length=stream_length,
+        pending=group["pending"] if group else None,
+        lag=group.get("lag") if group else None,
+        consumers=group["consumers"] if group else 0,
+        owners=owners,
+        dead=dead,
+    )
 
 
 def dispatch_mode() -> str:
