@@ -477,12 +477,25 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
     if content_missing or not _validate_json_response(content, response_format):
         if not content_missing:
             logger.warning("Bedrock response is not valid JSON. Retrying with stronger hint...")
-        # Retry once with stronger prompt hint
+        # Retry once with stronger prompt hint. Bedrock Converse enforces
+        # strict user/assistant role alternation and raises a fatal
+        # ValidationException (not in BEDROCK_RETRYABLE_CODES) on two
+        # consecutive turns of the same role. Every call site in this
+        # codebase sends a single trailing user turn, so appending a new
+        # user turn here broke the repair path in the common case (#630).
+        # Fold the hint into the existing trailing user turn instead of
+        # adding a new one when the shape allows it; only append a fresh
+        # turn as a fallback for a shape this repair path doesn't expect
+        # (content already translated to a list, or the last turn isn't
+        # user -- e.g. a caller with a hanging assistant turn).
+        hint = ("Your previous response was not valid JSON. Please respond with "
+                "ONLY valid JSON, no markdown fencing or explanation.")
         stronger_messages = list(messages)  # shallow copy
-        stronger_messages.append({
-            "role": "user",
-            "content": "Your previous response was not valid JSON. Please respond with ONLY valid JSON, no markdown fencing or explanation.",
-        })
+        last = stronger_messages[-1] if stronger_messages else None
+        if last is not None and last["role"] == "user" and isinstance(last["content"], str):
+            stronger_messages[-1] = {**last, "content": f'{last["content"]}\n\n{hint}'}
+        else:
+            stronger_messages.append({"role": "user", "content": hint})
         # Go through _call_with_retry rather than calling _call_bedrock
         # bare: this retry is a live Bedrock request like any other, and a
         # transient throttle on it should back off instead of raising.

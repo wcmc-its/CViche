@@ -562,8 +562,38 @@ def test_handle_bedrock_repairs_invalid_json_on_retry(monkeypatch: pytest.Monkey
     assert result["prompt_tokens"] == 30 + 40  # tokens accumulated across both calls
     assert result["completion_tokens"] == 5 + 8
     assert len(fake.calls) == 2
-    repair_message = fake.calls[1]["messages"][-1]
-    assert repair_message["content"] == [{
+    # #630: the repair call must NOT append a second user turn -- Bedrock
+    # Converse rejects two consecutive same-role turns. The hint is folded
+    # into the existing (only) trailing user turn instead, so role
+    # alternation is preserved end to end.
+    repair_messages = fake.calls[1]["messages"]
+    assert [m["role"] for m in repair_messages] == ["user"]
+    assert repair_messages[-1]["content"] == [{
+        "text": "hi\n\nYour previous response was not valid JSON. Please respond with "
+                "ONLY valid JSON, no markdown fencing or explanation.",
+    }]
+
+
+def test_handle_bedrock_repair_appends_new_turn_when_last_turn_is_not_a_plain_user_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The merge-into-last-turn shortcut only applies to a trailing user turn
+    # with str content. A conversation that (unusually) ends on an assistant
+    # turn falls back to appending a fresh user turn, same as before #630.
+    first = _converse_response("not json", stop_reason="end_turn")
+    second = _converse_response('{"a": 1}', stop_reason="end_turn")
+    fake = _FakeBedrockClient([first, second])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}],
+        response_format={"type": "json_object"},
+        cfg=_bedrock_cfg(),
+    )
+
+    repair_messages = fake.calls[1]["messages"]
+    assert [m["role"] for m in repair_messages] == ["user", "assistant", "user"]
+    assert repair_messages[-1]["content"] == [{
         "text": "Your previous response was not valid JSON. Please respond with "
                 "ONLY valid JSON, no markdown fencing or explanation.",
     }]
