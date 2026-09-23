@@ -442,7 +442,11 @@ class TestSecurityHeaders:
         by this header."""
         response = client.get("/health")
         csp = response.headers["content-security-policy"]
-        assert "connect-src 'self'" in csp
+        directives = [d.strip() for d in csp.split(";")]
+        # Exact-directive match, not a substring: `connect-src 'self' *` or
+        # `connect-src 'self' https:` both contain "connect-src 'self'" as a
+        # substring but widen the policy beyond same-origin.
+        assert "connect-src 'self'" in directives
         assert "ws:" not in csp
         assert "wss:" not in csp
 

@@ -428,6 +428,11 @@ class TestDnInScope:
     def test_base_scope_requires_exact_match(self):
         assert _dn_in_scope(self.CHILD, self.CHILD, BASE) is True
         assert _dn_in_scope(self.CHILD, self.BASE_DN, BASE) is False
+        # Shares the leftmost RDN with CHILD but differs deeper -- a
+        # comparison that only checks the leftmost component (u[:1] ==
+        # b[:1]) would wrongly call this BASE-in-scope.
+        sibling_same_leftmost_rdn = "uid=paa2013,ou=other,dc=weill,dc=cornell,dc=edu"
+        assert _dn_in_scope(sibling_same_leftmost_rdn, self.CHILD, BASE) is False
 
     def test_level_scope_direct_child_only(self):
         assert _dn_in_scope(self.CHILD, self.BASE_DN, LEVEL) is True
@@ -1432,6 +1437,18 @@ class TestValidateStartupConfig:
                 self._GOOD_URL, self._GOOD_DN, "   ", self._GOOD_GROUP,
             )
 
+    def test_rejects_whitespace_only_bind_dn(self):
+        with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_DN"):
+            validate_startup_config(
+                self._GOOD_URL, "   ", self._GOOD_PASSWORD, self._GOOD_GROUP,
+            )
+
+    def test_rejects_whitespace_only_access_group(self):
+        with pytest.raises(EdConfigurationError, match="ed_access_group"):
+            validate_startup_config(
+                self._GOOD_URL, self._GOOD_DN, self._GOOD_PASSWORD, "   ",
+            )
+
     def test_rejects_missing_bind_dn(self):
         with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_DN"):
             validate_startup_config(
@@ -1561,6 +1578,61 @@ class TestValidateStartupConfigWiring:
         }})
         try:
             with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_PASSWORD"):
+                with TestClient(app):
+                    pass
+        finally:
+            cleanup()
+
+    def test_startup_refuses_when_only_ldap_url_env_is_unset(self, monkeypatch):
+        """Isolates ED_LDAP_URL: bind_dn/bind_password/access_group are all
+        valid, only the URL is missing -- catches a mutation that reads the
+        wire's ldap_url from anywhere other than the real env/yaml config
+        (e.g. hardcoding a valid placeholder), which a case that leaves every
+        field unset can't isolate."""
+        monkeypatch.delenv("ED_LDAP_URL", raising=False)
+        monkeypatch.setenv("ED_LDAP_BIND_DN", "cn=svc,dc=example,dc=org")
+        monkeypatch.setenv("ED_LDAP_BIND_PASSWORD", "test-password")
+        app, cleanup = self._boot({"ed": {
+            "enabled": True,
+            "access_group": "cn=g,ou=groups,dc=example,dc=org",
+        }})
+        try:
+            with pytest.raises(EdConfigurationError, match="Invalid ED LDAP URL"):
+                with TestClient(app):
+                    pass
+        finally:
+            cleanup()
+
+    def test_startup_refuses_when_only_bind_dn_env_is_unset(self, monkeypatch):
+        """Isolates ED_LDAP_BIND_DN: url/bind_password/access_group are all
+        valid, only bind_dn is missing -- catches a mutation that reads the
+        wire's bind_dn from anywhere other than the real env config (e.g.
+        hardcoding a valid placeholder)."""
+        monkeypatch.setenv("ED_LDAP_URL", "ldaps://ed.example.org:636")
+        monkeypatch.delenv("ED_LDAP_BIND_DN", raising=False)
+        monkeypatch.setenv("ED_LDAP_BIND_PASSWORD", "test-password")
+        app, cleanup = self._boot({"ed": {
+            "enabled": True,
+            "access_group": "cn=g,ou=groups,dc=example,dc=org",
+        }})
+        try:
+            with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_DN"):
+                with TestClient(app):
+                    pass
+        finally:
+            cleanup()
+
+    def test_startup_refuses_when_only_access_group_is_unset(self, monkeypatch):
+        """Isolates ed_access_group: url/bind_dn/bind_password are all valid,
+        only access_group is missing from the yaml config -- catches a
+        mutation that reads the wire's ed_access_group from anywhere other
+        than the real DB config (e.g. hardcoding a valid placeholder)."""
+        monkeypatch.setenv("ED_LDAP_URL", "ldaps://ed.example.org:636")
+        monkeypatch.setenv("ED_LDAP_BIND_DN", "cn=svc,dc=example,dc=org")
+        monkeypatch.setenv("ED_LDAP_BIND_PASSWORD", "test-password")
+        app, cleanup = self._boot({"ed": {"enabled": True}})
+        try:
+            with pytest.raises(EdConfigurationError, match="ed_access_group"):
                 with TestClient(app):
                     pass
         finally:
