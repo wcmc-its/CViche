@@ -1,37 +1,7 @@
-# Tracked under issue #126 - pre-existing advisories in prod build versions.
-# Remove each entry as #126 lands its fix.
+# Tracked under issue #126. Advisories were added here only while the
+# pysaml2 -> pyopenssl -> cryptography pin knot blocked a fix (pysaml2 7.5.4
+# capped pyopenssl <24.3.0, which capped cryptography <44). pysaml2 7.5.5
+# (2026-09-17) lifted that cap, so the knot is gone and every entry that was
+# here has been removed -- see #126 for the pin bump.
+#
 # New advisories in any dep still fail the gate.
-#
-# All remaining entries are the pysaml2 -> pyopenssl(<24.3.0) -> cryptography(<44)
-# pin knot: pyopenssl 24.2.1 holds cryptography below every fix version, and
-# pysaml2 7.5.4 holds pyopenssl <24.3.0. They clear only when pysaml2 moves.
-#
-# PYSEC-2026-35       cryptography 43.0.1  -> 46.0.6  (blocked: pyopenssl caps <44)
-# CVE-2024-12797      cryptography 43.0.1  -> 44.0.1  (blocked: pyopenssl caps <44)
-# CVE-2026-26007      cryptography 43.0.1  -> 46.0.5  (blocked: pyopenssl caps <44)
-# GHSA-537c-gmf6-5ccf cryptography 43.0.1  -> 48.0.1  (blocked: pyopenssl caps <44)
-# CVE-2026-27448      pyopenssl 24.2.1     (blocked: pysaml2 caps pyopenssl<24.3.0)
-# CVE-2026-27459      pyopenssl 24.2.1     (blocked: pysaml2 caps pyopenssl<24.3.0)
-# PYSEC-2026-3553     cryptography 43.0.1  -> 49.0.0  (blocked: pyopenssl caps <44)
-# PYSEC-2026-3554     cryptography 43.0.1  -> 49.0.0  (blocked: pyopenssl caps <44)
-#
-# The 2026-08-05 pair is worth a note, because both are in an API this codebase
-# does not call. Both are in cryptography's X.509 *verifier*: 3553 is exponential
-# path-building when a chain carries duplicate self-signed intermediates, 3554
-# accepts a wildcard SAN that escapes an intermediate's permittedSubtrees.
-# `x509.verification`, `PolicyBuilder`, `ClientVerifier`, `ServerVerifier` and
-# `verify_directly_issued_by` have zero occurrences under src/ and
-# web_interface/. The only `cryptography.x509` use is CertificateBuilder at
-# web_interface/backend/app/saml_client.py:69, which mints the self-signed SP
-# certificate and never validates a chain. Signature verification goes through
-# xmlsec, and pyopenssl wraps OpenSSL's own verifier rather than this one, so a
-# transitive path is unlikely -- unlikely, not disproven, which is why these are
-# ignored on the pin knot rather than on reachability.
-PYSEC-2026-35
-CVE-2024-12797
-CVE-2026-26007
-GHSA-537c-gmf6-5ccf
-CVE-2026-27448
-CVE-2026-27459
-PYSEC-2026-3553
-PYSEC-2026-3554

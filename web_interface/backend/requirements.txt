@@ -1,7 +1,10 @@
-# Exact pins captured via `pip freeze` in the python:3.14-slim build image (see
-# Dockerfile) for reproducible prod builds. Regenerate the same way when bumping:
-#   docker build -f web_interface/backend/Dockerfile -t cviche-deps --target deps .
-#   docker run --rm cviche-deps pip freeze
+# Direct pins only (#754) -- this is NOT a full `pip freeze`. Only the packages
+# imported directly by the backend are pinned here; each is verified against
+# PyPI when bumped. Transitive packages (starlette, h11, typing_extensions,
+# click, sniffio, ...) are left to resolve at install time UNLESS a specific
+# transitive has bitten us, in which case it gets its own pin with a comment
+# explaining why (see anyio and pyopenssl below). A hash-pinned, fully
+# resolved lockfile is #130's scope, not this file's.
 # Versions for packages also listed in the repo-root requirements.txt are kept
 # identical, since the Dockerfile installs both files in a single pip pass.
 fastapi==0.136.3
@@ -31,10 +34,16 @@ pymysql==1.1.1
 itsdangerous==2.2.0
 pyyaml==6.0.3
 boto3==1.43.23
-pysaml2==7.5.4
+pysaml2==7.5.5
 ldap3==2.9.1
 cachetools==7.1.4
 redis==8.0.0
 # Directly imported by app/saml_client.py (x509 / hazmat); pinned here so a
 # standalone backend install does not rely on pysaml2 pulling it transitively.
-cryptography==43.0.1
+cryptography==50.0.1
+# pysaml2 7.5.5 requires pyopenssl>=26.0.0 with no upper cap; pinned explicitly
+# (rather than left to float transitively) because only pyopenssl>=26.3.0+
+# itself requires cryptography>=49, which is what clears the pin-knot
+# advisories tracked in #126 -- an unpinned resolve could otherwise land
+# 26.0.0-26.2.0, which cap cryptography below 49 and silently reopen them.
+pyopenssl==26.4.0

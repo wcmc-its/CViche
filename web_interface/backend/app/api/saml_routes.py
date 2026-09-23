@@ -233,7 +233,7 @@ def _reject_replayed_assertion(authn_response) -> RedirectResponse | None:
     """
     ids = assertion_ids(authn_response)
     if len(ids) > 1:
-        # ponytail: single-assertion invariant -- pysaml2 7.5.4's
+        # ponytail: single-assertion invariant -- pysaml2 7.5.5's
         # parse_assertion (saml2/response.py, "saml2int limitation") raises
         # InvalidAssertion before this function ever runs unless a response
         # carries exactly one plain (or one encrypted) assertion, so this
