@@ -772,18 +772,26 @@ def test_client_has_bounded_connect_read_timeout_and_retries():
     """#791: the client must carry explicit, named timeout/retry values
     instead of inheriting boto3's own defaults, so a degraded S3 fails
     within a stated bound instead of compounding silently across the
-    upload endpoint's up-to-10 sequential put_object calls."""
-    from app.storage.s3_storage import S3_CONNECT_TIMEOUT_S, S3_MAX_ATTEMPTS, S3_READ_TIMEOUT_S
+    upload endpoint's up-to-10 sequential put_object calls.
 
+    Asserts the LITERAL numbers, not the module constants they are read
+    from: importing S3_CONNECT_TIMEOUT_S et al. and comparing the built
+    client's config back to those same constants would still pass if the
+    constants were reset to botocore's own defaults (60s/60s, no bounded
+    retries) -- exactly the regression this test exists to catch. Worst
+    case at these numbers: 5 run-id attempts x up to 2 put_object calls
+    each = 10 sequential calls, x 4 total attempts per call (the initial
+    attempt plus 3 retries), x 35s per attempt (5s connect + 30s read) =
+    up to 1,400s before the upload endpoint can no longer succeed."""
     config = _storage()._s3.meta.config
-    assert config.connect_timeout == S3_CONNECT_TIMEOUT_S
-    assert config.read_timeout == S3_READ_TIMEOUT_S
+    assert config.connect_timeout == 5
+    assert config.read_timeout == 30
     assert config.retries["mode"] == "standard"
     # botocore normalizes the "standard" mode's max_attempts (a retry count)
     # into total_max_attempts (max_attempts + 1, the initial attempt
     # included) on the built client's own config -- confirmed empirically
     # against the installed botocore, not assumed.
-    assert config.retries["total_max_attempts"] == S3_MAX_ATTEMPTS + 1
+    assert config.retries["total_max_attempts"] == 4
 
 
 # ---------------------------------------------------------------------------
