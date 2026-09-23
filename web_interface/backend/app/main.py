@@ -151,23 +151,29 @@ async def _stale_run_reaper_loop(interval_seconds: int):
     in-flight run isn't touched until it passes the stale threshold. The DB
     work runs in a thread so it never blocks the event loop, and one bad sweep
     is logged and the loop keeps going.
+
+    Each sweep also runs ``reconcile_queued_runs`` (#701 queue mode only; a
+    no-op otherwise) -- the DB-side backstop for a "queued" row whose Valkey
+    token was lost, next to the "running" backstop above.
     """
-    from app.services.run_service import reconcile_stale_runs
+    from app.services.run_service import reconcile_stale_runs, reconcile_queued_runs
     from app.database import SessionLocal
 
-    def _sweep() -> int:
+    def _sweep() -> tuple[int, int]:
         db = SessionLocal()
         try:
-            return reconcile_stale_runs(db)
+            return reconcile_stale_runs(db), reconcile_queued_runs(db)
         finally:
             db.close()
 
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            swept = await asyncio.to_thread(_sweep)
-            if swept:
-                logger.info("Periodic reaper marked %d stale run(s) failed", swept)
+            stale_failed, queued_requeued = await asyncio.to_thread(_sweep)
+            if stale_failed:
+                logger.info("Periodic reaper marked %d stale run(s) failed", stale_failed)
+            if queued_requeued:
+                logger.info("Periodic reaper requeued %d stranded queued run(s)", queued_requeued)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -248,7 +254,7 @@ async def lifespan(app: FastAPI):
         logger.info("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
     from app.config_loader import seed_system_config, get_config_value
     from app.consent import load_consent_text, check_consent_integrity
-    from app.services.run_service import reconcile_stale_runs
+    from app.services.run_service import reconcile_stale_runs, reconcile_queued_runs
     from app.database import SessionLocal
     db = SessionLocal()
     try:
@@ -285,6 +291,9 @@ async def lifespan(app: FastAPI):
         swept = reconcile_stale_runs(db)
         if swept:
             logger.info("♻️  Reconciled %d stale run(s) from a previous restart", swept)
+        queued_requeued = reconcile_queued_runs(db)
+        if queued_requeued:
+            logger.info("♻️  Requeued %d stranded queued run(s) at startup", queued_requeued)
     finally:
         db.close()
 

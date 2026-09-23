@@ -1,5 +1,6 @@
 """Run-related service functions."""
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -11,6 +12,7 @@ from app.database import SessionLocal
 from app.models import Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics
 from app.errors import not_found, forbidden
 from app.config_loader import get_config
+from app.pipeline import run_queue
 from app.storage import get_storage
 from app.services import auto_retry
 
@@ -20,6 +22,25 @@ logger = logging.getLogger(__name__)
 # orphaned by a server restart. Generous relative to the ~15-20 min a real run
 # takes, so a sibling replica's genuinely in-flight run is never swept.
 DEFAULT_STALE_RUN_MINUTES = 60
+
+# In queue mode (#701), the stale-running reaper's threshold is floored at the
+# worker's own run watchdog timeout plus this margin -- see
+# _effective_stale_run_minutes. Matches the margin k8s/base/worker/deployment.yaml
+# adds to terminationGracePeriodSeconds over the same RUN_TIMEOUT_S, so both
+# the pod-level and DB-level backstops give the watchdog the same head start.
+QUEUE_MODE_STALE_RUN_MARGIN_MINUTES = 5
+
+# Mirrors app.worker.RUN_TIMEOUT_S's own default for CVICHE_RUN_TIMEOUT_SECONDS.
+# Duplicated here rather than imported: run_service must stay importable by the
+# backend app (and by app.worker itself) without pulling in the worker
+# module's signal-handling/threading setup.
+DEFAULT_RUN_TIMEOUT_SECONDS = 5400
+
+# A run still "queued" this long past its flip (#701) has almost certainly
+# lost its Valkey token (the enqueue/reconciler crash windows the #895 review
+# found) rather than genuinely waiting behind a deep backlog. See
+# reconcile_queued_runs.
+DEFAULT_QUEUED_RECONCILE_MINUTES = 5
 
 # A run still at status="created" this many hours after upload was never started
 # (or its start failed / was abandoned) and is safe to reap along with its
@@ -130,6 +151,38 @@ def _resume_info_for_run(run: Run, db: Session):
     return last_error_type, start_step_number
 
 
+def _effective_stale_run_minutes() -> int:
+    """CVICHE_STALE_RUN_MINUTES, floored in queue mode at the run watchdog's
+    own timeout plus margin.
+
+    In queue mode a run's Valkey token stays un-ACKed for the run's whole
+    duration (Paul's ACK-semantics decision, #701 worker#3) -- the worker's own
+    watchdog (``app.worker.RUN_TIMEOUT_S``) is what fails a run that outlives
+    its bound. Without this floor, a ``CVICHE_STALE_RUN_MINUTES`` below that
+    timeout would let this DB-side reaper mark a run failed while its worker is
+    still legitimately executing it and would go on to succeed. Outside queue
+    mode the configured value is used as-is, unchanged from before #701.
+    """
+    try:
+        stale_run_minutes, _ = get_config("llm", "CVICHE_STALE_RUN_MINUTES", default=DEFAULT_STALE_RUN_MINUTES)
+        minutes = int(stale_run_minutes)
+    except (TypeError, ValueError):
+        minutes = DEFAULT_STALE_RUN_MINUTES
+
+    if run_queue.dispatch_mode() != "queue":
+        return minutes
+
+    try:
+        run_timeout_s_cfg, _ = get_config(
+            "llm", "CVICHE_RUN_TIMEOUT_SECONDS", default=DEFAULT_RUN_TIMEOUT_SECONDS
+        )
+        run_timeout_s = int(run_timeout_s_cfg)
+    except (TypeError, ValueError):
+        run_timeout_s = DEFAULT_RUN_TIMEOUT_SECONDS
+    watchdog_floor_minutes = math.ceil(run_timeout_s / 60) + QUEUE_MODE_STALE_RUN_MARGIN_MINUTES
+    return max(minutes, watchdog_floor_minutes)
+
+
 def reconcile_stale_runs(db: Session) -> int:
     """Mark orphaned "running" runs as failed. Called once at startup.
 
@@ -153,14 +206,13 @@ def reconcile_stale_runs(db: Session) -> int:
     Age-based rather than "any running run" so that, with multiple replicas, a
     sibling's genuinely in-flight run is not killed. Returns the count of runs
     marked failed (resumed runs are NOT counted -- they stay "running").
-    """
-    try:
-        #minutes = int(os.environ.get("CVICHE_STALE_RUN_MINUTES", DEFAULT_STALE_RUN_MINUTES))
-        stale_run_minutes, _ = get_config("llm","CVICHE_STALE_RUN_MINUTES",default=DEFAULT_STALE_RUN_MINUTES)
-        minutes = int(stale_run_minutes)
-    except (TypeError, ValueError):
-        minutes = DEFAULT_STALE_RUN_MINUTES
 
+    In queue mode the threshold is floored well above the run watchdog's own
+    timeout -- see ``_effective_stale_run_minutes`` -- so this reaper backstops
+    a run whose worker died without tripping its watchdog, rather than racing
+    a run that is still legitimately executing.
+    """
+    minutes = _effective_stale_run_minutes()
     cutoff = datetime.now() - timedelta(minutes=minutes)
     stale_runs = (
         db.query(Run)
@@ -203,6 +255,73 @@ def reconcile_stale_runs(db: Session) -> int:
             failed_count, minutes,
         )
     return failed_count
+
+
+def _queued_reconcile_minutes() -> int:
+    try:
+        minutes_cfg, _ = get_config(
+            "llm", "CVICHE_QUEUED_RECONCILE_MINUTES", default=DEFAULT_QUEUED_RECONCILE_MINUTES
+        )
+        return int(minutes_cfg)
+    except (TypeError, ValueError):
+        return DEFAULT_QUEUED_RECONCILE_MINUTES
+
+
+def reconcile_queued_runs(db: Session) -> int:
+    """Requeue runs stranded at status="queued" (#701 queue mode only).
+
+    A no-op outside queue mode -- safe to call unconditionally from every
+    reaper call site (the periodic loop and the startup sweep), the same way
+    ``reconcile_stale_runs`` is age-based and idempotent so multiple replicas
+    calling it on an interval never step on each other.
+
+    Covers the crash windows the #895 review found where a "queued" row's
+    Valkey token never reaches a worker: a producer dying between
+    ``flip_to_queued``'s commit and ``run_queue.enqueue`` (runs.py point 9), an
+    entry trimmed while pending (run_queue point 3), or any other silent
+    token loss. A row whose id IS in ``run_queue.live_run_ids()`` (undelivered
+    or pending, not yet ACKed) is left alone -- it has a live token and a
+    legitimately deep backlog must not be re-enqueued out from under itself.
+
+    Re-enqueuing a row that in fact still has a live token would be a harmless
+    duplicate (the worker's claim is conditional), but this still goes through
+    ``run_queue.claim_reenqueue_slot`` -- the same guard the already-queued
+    ``/start`` path uses -- so a backlog of many stranded rows, or repeated
+    sweeps, adds at most one fresh token per run per ``REENQUEUE_GUARD_TTL_S``.
+    A guard miss means another sweep or an operator's own ``/start`` already
+    requeued this run within that window, so it is skipped rather than
+    duplicated.
+
+    Returns the number of rows actually requeued.
+    """
+    if run_queue.dispatch_mode() != "queue":
+        return 0
+
+    minutes = _queued_reconcile_minutes()
+    cutoff = datetime.now() - timedelta(minutes=minutes)
+    stranded = (
+        db.query(Run)
+        .filter(Run.status == RunState.QUEUED, Run.queued_at.isnot(None), Run.queued_at < cutoff)
+        .all()
+    )
+    if not stranded:
+        return 0
+
+    live_ids = run_queue.live_run_ids()
+    requeued = 0
+    for run in stranded:
+        if run.id in live_ids or not run_queue.claim_reenqueue_slot(run.id):
+            continue
+        run_queue.enqueue(run.id)
+        requeued += 1
+        logger.warning("requeued_stranded run_id=%s queued_at=%s", run.id, run.queued_at)
+
+    if requeued:
+        logger.info(
+            "Queued-run reconciler requeued %d/%d stranded run(s) (queued_at older than %d min)",
+            requeued, len(stranded), minutes,
+        )
+    return requeued
 
 
 def queue_db_view(db: Session) -> dict[str, int | float | None]:
