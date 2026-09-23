@@ -8,6 +8,7 @@ import secrets
 import string
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 from collections.abc import Callable
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
@@ -75,7 +76,8 @@ def _validate_docx_magic(content: bytes) -> bool:
 # XMLSyntaxError; a truncated zip -> BadZipFile; not an OPC package at all ->
 # PackageNotFoundError; the tempfile round-trip -> OSError. Anything else is a
 # bug and must surface, not be swallowed (§5.4).
-_DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSyntaxError, OSError)
+_DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSyntaxError, OSError,
+                     zlib.error)
 
 
 def _extract_text(content: bytes, file_ext: str) -> str | None:

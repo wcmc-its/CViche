@@ -706,6 +706,20 @@ class TestUploadValidation:
         assert response.status_code == 400
         assert "too large" in response.json()["detail"]["message"].lower()
 
+    def test_oversized_file_message_names_the_whole_mb_cap(self, client, db, seed_simple_mode):
+        """Production caps are whole MB, and the rejection names the cap the
+        way dev always has: "Maximum size is N MB"."""
+        self._create_auth_user(client, db)
+        cap = 1024 * 1024
+        with patch("app.api.upload.MAX_UPLOAD_SIZE", cap):
+            response = client.post(
+                "/api/upload",
+                files={"file": ("big.docx", b"PK\x03\x04" + b"\x00" * cap, "application/octet-stream")},
+                data={"submission_type": "own_cv"},
+            )
+        assert response.status_code == 400
+        assert "Maximum size is 1 MB" in response.json()["detail"]["message"]
+
     def test_oversized_file_message_readable_under_1mb_cap(self, client, db, seed_simple_mode):
         """A cap under 1 MB is test-only (config_service always builds a
         whole-MB cap in production, config_service.py:28) -- so the message

@@ -355,6 +355,21 @@ _RELS = (
 )
 
 
+def _corrupt_deflate_docx() -> bytes:
+    """A docx whose zip directory is intact but whose word/document.xml
+    deflate stream is not: python-docx gets past the zip layer and zlib
+    raises while inflating the part."""
+    raw = bytearray(_docx_bytes("synthetic paragraph " * 200))
+    with zipfile.ZipFile(io.BytesIO(bytes(raw))) as z:
+        info = z.getinfo("word/document.xml")
+    name_len, extra_len = int.from_bytes(raw[info.header_offset + 26:info.header_offset + 28], "little"), \
+        int.from_bytes(raw[info.header_offset + 28:info.header_offset + 30], "little")
+    start = info.header_offset + 30 + name_len + extra_len
+    for i in range(start + 2, start + 2 + 35):
+        raw[i] ^= 0xFF
+    return bytes(raw)
+
+
 @pytest.mark.parametrize("label, content", [
     ("not a zip at all -> PackageNotFoundError", b"PK\x03\x04 but not really a zip"),
     ("truncated docx -> PackageNotFoundError", _docx_bytes("hello")[:1200]),
@@ -362,6 +377,7 @@ _RELS = (
     ("malformed document.xml -> XMLSyntaxError",
      _zip_bytes(**{"[Content_Types].xml": _CONTENT_TYPES, "_rels__.rels": _RELS,
                    "word__document.xml": "<<<not xml"})),
+    ("corrupt deflate stream in document.xml -> zlib.error", _corrupt_deflate_docx()),
 ])
 def test_extract_text_returns_none_and_logs_a_traceback_for_a_known_read_failure(label, content, caplog):
     """PR #865 review thread on upload.py's ``except Exception`` (r4034042444):
