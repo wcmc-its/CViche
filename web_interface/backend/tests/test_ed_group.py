@@ -8,6 +8,11 @@ from unittest.mock import patch, MagicMock
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, StaticPool
+from sqlalchemy.orm import sessionmaker
+
+from app.database import Base, get_db
 
 from app.ed_group_lookup import (
     check_ed_membership,
@@ -437,6 +442,21 @@ class TestDnInScope:
 
     def test_case_insensitive(self):
         assert _dn_in_scope(self.CHILD.upper(), self.BASE_DN, LEVEL) is True
+
+    def test_case_insensitive_on_base_dn_too(self):
+        """Case-folding must apply to BOTH sides of the comparison, not just
+        the user DN -- a mutation that only lowers user_rdns (or only
+        base_rdns) survives test_case_insensitive alone."""
+        assert _dn_in_scope(self.CHILD, self.BASE_DN.upper(), LEVEL) is True
+
+    def test_subtree_is_a_positional_suffix_not_a_set_membership(self):
+        """SUBTREE must check that base_dn's RDNs are the exact rightmost
+        SLICE of user_dn's, in order -- not merely that every RDN of base_dn
+        appears somewhere in user_dn (#331). A DN with the same RDN
+        components in a different position/order must not match."""
+        base = "dc=weill,dc=cornell,dc=edu"
+        reordered = "ou=x,dc=cornell,dc=weill,dc=edu"
+        assert _dn_in_scope(reordered, base, SUBTREE) is False
 
     def test_escaped_comma_in_rdn_value_is_one_component(self):
         """A comma inside an RDN's value (escaped per RFC 4514) must not be
@@ -1439,6 +1459,126 @@ class TestValidateStartupConfig:
         assert "ED_LDAP_BIND_DN" in message
         assert "ED_LDAP_BIND_PASSWORD" in message
         assert "ed_access_group" in message
+
+
+class TestValidateStartupConfigWiring:
+    """The lifespan WIRE from `if get_config_value(db, "ed_enabled")` (main.py)
+    through to validate_startup_config() actually refusing app startup (#330).
+
+    TestValidateStartupConfig above exhaustively covers the helper as a pure
+    function, but never calls through main.py's lifespan -- so a mutation that
+    drops the `ed_enabled` gate, no-ops the validate_startup_config() call, or
+    hardcodes the bind password survives every one of those tests. This class
+    boots a real TestClient(app) (running the real lifespan) against an
+    isolated in-memory DB, so those call-site mutations are caught.
+
+    Seeding SystemConfig directly is not enough: lifespan's own
+    seed_system_config() reconciles file-managed keys (including ed_enabled)
+    from YAML on every boot, so a pre-seeded DB row is overwritten before the
+    gate is even checked. `load_yaml_config` is patched instead, the same way
+    the app itself reads `ed.enabled` from a rendered auth_config.yaml.
+    """
+
+    @staticmethod
+    def _fresh_engine_and_sessionmaker():
+        engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+        )
+        Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        Base.metadata.create_all(bind=engine)
+        return engine, Session
+
+    def _boot(self, yaml_cfg):
+        """Context manager-like helper: returns (app, session, exit_stack_fn)."""
+        from app.main import app
+        engine, Session = self._fresh_engine_and_sessionmaker()
+        session = Session()
+
+        def override_get_db():
+            try:
+                yield session
+            finally:
+                pass
+
+        app.dependency_overrides[get_db] = override_get_db
+        patches = [
+            patch("app.database.SessionLocal", Session),
+            patch("app.database.engine", engine),
+            patch("app.config_loader.load_yaml_config", return_value=yaml_cfg),
+        ]
+        for p in patches:
+            p.__enter__()
+
+        def cleanup():
+            for p in reversed(patches):
+                p.__exit__(None, None, None)
+            app.dependency_overrides.clear()
+            session.close()
+
+        return app, cleanup
+
+    def test_startup_refuses_when_ed_enabled_and_ldap_unset(self, monkeypatch):
+        monkeypatch.delenv("ED_LDAP_URL", raising=False)
+        monkeypatch.delenv("ED_LDAP_BIND_DN", raising=False)
+        monkeypatch.delenv("ED_LDAP_BIND_PASSWORD", raising=False)
+        app, cleanup = self._boot({"ed": {
+            "enabled": True,
+            "access_group": "cn=g,ou=groups,dc=example,dc=org",
+        }})
+        try:
+            with pytest.raises(EdConfigurationError):
+                with TestClient(app):
+                    pass
+        finally:
+            cleanup()
+
+    def test_startup_succeeds_when_ed_enabled_and_ldap_configured(self, monkeypatch):
+        monkeypatch.setenv("ED_LDAP_URL", "ldaps://ed.example.org:636")
+        monkeypatch.setenv("ED_LDAP_BIND_DN", "cn=svc,dc=example,dc=org")
+        monkeypatch.setenv("ED_LDAP_BIND_PASSWORD", "test-password")
+        app, cleanup = self._boot({"ed": {
+            "enabled": True,
+            "access_group": "cn=g,ou=groups,dc=example,dc=org",
+        }})
+        try:
+            with TestClient(app) as c:
+                assert c.get("/health").status_code == 200
+        finally:
+            cleanup()
+
+    def test_startup_refuses_when_only_bind_password_env_is_unset(self, monkeypatch):
+        """Isolates ED_LDAP_BIND_PASSWORD: URL/bind_dn/access_group are all
+        valid, only the password is missing -- catches a mutation that reads
+        the wire's bind_password from anywhere other than the real env var
+        (e.g. hardcoding a non-empty placeholder), which the
+        all-fields-unset case above can't isolate."""
+        monkeypatch.setenv("ED_LDAP_URL", "ldaps://ed.example.org:636")
+        monkeypatch.setenv("ED_LDAP_BIND_DN", "cn=svc,dc=example,dc=org")
+        monkeypatch.delenv("ED_LDAP_BIND_PASSWORD", raising=False)
+        app, cleanup = self._boot({"ed": {
+            "enabled": True,
+            "access_group": "cn=g,ou=groups,dc=example,dc=org",
+        }})
+        try:
+            with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_PASSWORD"):
+                with TestClient(app):
+                    pass
+        finally:
+            cleanup()
+
+    def test_startup_skips_validation_when_ed_disabled(self, monkeypatch):
+        """Even with LDAP config fully unset, ed_enabled=False must not refuse
+        to start -- a deployment that doesn't use ED authorization shouldn't be
+        punished for an ED_LDAP_BIND_PASSWORD it will never read."""
+        monkeypatch.delenv("ED_LDAP_URL", raising=False)
+        monkeypatch.delenv("ED_LDAP_BIND_DN", raising=False)
+        monkeypatch.delenv("ED_LDAP_BIND_PASSWORD", raising=False)
+        app, cleanup = self._boot({"ed": {"enabled": False}})
+        try:
+            with TestClient(app) as c:
+                assert c.get("/health").status_code == 200
+        finally:
+            cleanup()
 
 
 # ---------------------------------------------------------------------------
