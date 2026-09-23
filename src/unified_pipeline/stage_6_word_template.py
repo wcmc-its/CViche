@@ -336,14 +336,13 @@ def _pii_cut_left_a_bare_label(entry: Mapping[str, Any]) -> bool:
 # Paths - Use the official WCM template
 TEMPLATE_PATH = Path(__file__).parent.parent.parent / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
-# Local-dev only: where sample source CVs live, for the generate() fallback that
-# locates an original docx when the caller didn't pass one. No production driver
-# passes original_doc_path -- the only callers that do are
-# scripts/render_gate.py --source-dir and stage 6's own tests -- so on a live
-# run this auto-discovery is the fallback's only feed, and it finds nothing.
-# The directory itself DOES exist in the deployed image (the backend
-# Dockerfile mkdir -p's and chowns it); what is missing is its contents, which
-# no COPY brings in and .dockerignore excludes from the build context.
+# Where sample source CVs live, for the generate() fallback that locates an
+# original docx when the caller didn't pass one. Both drivers now pass
+# original_doc_path (#550), as do scripts/render_gate.py --source-dir and
+# stage 6's own tests, so this guess is only for a direct generate() call
+# without one. (The web driver's _copy_to_pipeline_input drops each upload
+# into this same directory under the run's uid, which is why the fallback
+# fired on the web path even before it was wired explicitly.)
 SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
@@ -491,6 +490,21 @@ def _merge_appendix_diversion_warnings(
         written, recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
 
 
+def _log_validation_warnings(all_warnings: list[dict]) -> None:
+    """Bannered `logger.warning` echo of `generate()`'s merged section
+    failures + self-check findings, pulled out of `generate()` as a pure
+    move (#839 -- keeps the ratchet-tracked §9 oversized-function row from
+    rising) so it has its own name rather than growing that function."""
+    if not all_warnings:
+        return
+    logger.warning("!" * 60)
+    logger.warning("VALIDATION WARNINGS")
+    logger.warning("!" * 60)
+    for issue in all_warnings:
+        logger.warning(f"  ⚠ {issue['message']}")
+    logger.warning("!" * 60)
+
+
 # Personal data that must not be carried onto a WCM CV. Source CVs routinely
 # carry date/place of birth, marital status and family members' names in their
 # contact block; a WCM CV must not.
@@ -597,6 +611,19 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # render-warnings sidecar ahead of the self-check findings. Reset at
         # the top of generate(), declared here for typing/reuse across renders.
         self._section_failures: list[dict[str, Any]] = []
+
+        # Grant entries `_create_grant_table` declined as too sparse (#839) --
+        # appended to `unmapped_entries` at `generate()`'s Appendix fill so
+        # they still reach the Appendix and the `renderer_declined` warning
+        # instead of vanishing. Reset at the top of generate(), declared here
+        # for typing/reuse across renders.
+        self._declined_grant_entries: list[dict] = []
+
+        # Taxonomy codes owned by a section that raised (#842): removed from
+        # mapped_codes before the unmapped sweep so a failed section's
+        # entries fall to the Appendix instead of vanishing. Reset alongside
+        # _section_failures.
+        self._failed_section_codes: set[str] = set()
 
         # Memoizes _classify_geographic_scope's LLM calls for the life of one
         # render, keyed on (activity location, owner institutions).
@@ -784,9 +811,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     ) -> str | None:
         """The original document path if not already given, or None.
 
-        Every live run is: only `render_gate.py --source-dir` and stage 6's
-        own tests pass one, and `SAMPLE_CV_DIR` is an empty directory in the
-        deployed image (see the constant). Anchored on the module-relative
+        Both drivers pass one since #550, so this guess is reached only by a
+        direct generate() call without it. Anchored on the module-relative
         `SAMPLE_CV_DIR` constant plus the process CWD, instead of a stack of
         brittle '..'/.parent chains that broke silently on any restructure.
 
@@ -943,7 +969,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Reset per-render section-failure tracking (#565) -- a generator
         # instance can render more than once, and a failure from a prior
         # render must never leak into this one's sidecar.
-        self._section_failures = []
+        self._section_failures, self._failed_section_codes, self._declined_grant_entries = [], set(), []
 
         # Load input data - each stage output is self-contained
         with open(input_path, 'r') as f:
@@ -1004,34 +1030,34 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # only; the rest still render and the run still produces a document.
         self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path)
 
-        # (label, callable) in the SAME order as the flat dispatch this
-        # replaced -- test_stage6_section_boundary.py pins that order.
-        section_dispatch: list[tuple[str, Callable[[], Any]]] = [
-            ('researcher_profiles', lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []))),  # S0 section for ORCID, etc.
-            ('education', lambda: self._fill_education(entries_by_code.get('B1', []))),  # B1 = Academic Degrees only
-            ('other_education', lambda: self._fill_other_education(entries_by_code.get('B2', []))),  # B2 = Other Educational Experiences
-            ('postdoc_training', lambda: self._fill_postdoc_training(entries_by_code, all_entries)),
-            ('positions', lambda: self._fill_positions(entries_by_code)),
-            ('licensure', lambda: self._fill_licensure(entries_by_code.get('F1', []))),  # F1 = Licensure
-            ('board_certification', lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification
-            ('honors', lambda: self._fill_honors(entries_by_code.get('H', []))),  # H = Honors and Awards
-            ('memberships', lambda: self._fill_memberships(entries_by_code.get('I', []))),  # I = Professional Memberships
-            ('teaching', lambda: self._fill_teaching(entries_by_code)),  # K1-K5 = Teaching Activities
-            ('research_summary', lambda: self._fill_research_summary(research_summary_data)),  # Stage 4.5 output
-            ('research_support', lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
+        # (label, codes, callable), SAME order as the flat dispatch this
+        # replaced (order pinned by test_stage6_section_boundary.py); codes are dropped from mapped_codes on failure (#842).
+        section_dispatch: list[tuple[str, frozenset[str], Callable[[], Any]]] = [
+            ('researcher_profiles', frozenset({'S0'}), lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []))),  # S0 section for ORCID, etc.
+            ('education', frozenset({'B1'}), lambda: self._fill_education(entries_by_code.get('B1', []))),  # B1 = Academic Degrees only
+            ('other_education', frozenset({'B2'}), lambda: self._fill_other_education(entries_by_code.get('B2', []))),  # B2 = Other Educational Experiences
+            ('postdoc_training', frozenset({'C', 'C1', 'C2', 'C3'}), lambda: self._fill_postdoc_training(entries_by_code, all_entries)),
+            ('positions', frozenset({'D1', 'D2', 'D3'}), lambda: self._fill_positions(entries_by_code)),
+            ('licensure', frozenset({'F1'}), lambda: self._fill_licensure(entries_by_code.get('F1', []))),  # F1 = Licensure
+            ('board_certification', frozenset({'F2'}), lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification
+            ('honors', frozenset({'H'}), lambda: self._fill_honors(entries_by_code.get('H', []))),  # H = Honors and Awards
+            ('memberships', frozenset({'I'}), lambda: self._fill_memberships(entries_by_code.get('I', []))),  # I = Professional Memberships
+            ('teaching', frozenset({'K1', 'K2', 'K3', 'K4', 'K5'}), lambda: self._fill_teaching(entries_by_code)),  # K1-K5 = Teaching Activities
+            ('research_summary', frozenset({'M1'}), lambda: self._fill_research_summary(research_summary_data)),  # Stage 4.5 output
+            ('research_support', frozenset({'M2A', 'M2B', 'M2C'}), lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
             # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
-            ('patents', lambda: self._fill_patents(entries_by_code.get('M2D', []))),
-            ('mentoring', lambda: self._fill_mentoring(entries_by_code)),
-            ('clinical_practice', lambda: self._fill_clinical_practice(entries_by_code)),  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
-            ('leadership', lambda: self._fill_leadership(entries_by_code.get('O', []))),  # O = Institutional Leadership
-            ('administrative_activities', lambda: self._fill_administrative_activities(entries_by_code.get('P', []))),  # P = Administrative Committees
-            ('service', lambda: self._fill_service(entries_by_code)),  # Q1-Q4D = Service Activities
-            ('presentations', lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
-            ('bibliography', lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
+            ('patents', frozenset({'M2D'}), lambda: self._fill_patents(entries_by_code.get('M2D', []))),
+            ('mentoring', frozenset({'N1', 'N2', 'N3A', 'N3B'}), lambda: self._fill_mentoring(entries_by_code)),
+            ('clinical_practice', frozenset({'L1', 'L2', 'L3'}), lambda: self._fill_clinical_practice(entries_by_code)),  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
+            ('leadership', frozenset({'O'}), lambda: self._fill_leadership(entries_by_code.get('O', []))),  # O = Institutional Leadership
+            ('administrative_activities', frozenset({'P'}), lambda: self._fill_administrative_activities(entries_by_code.get('P', []))),  # P = Administrative Committees
+            ('service', frozenset({'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D'}), lambda: self._fill_service(entries_by_code)),  # Q1-Q4D = Service Activities
+            ('presentations', frozenset({'R'}), lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
+            ('bibliography', frozenset({'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'}), lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
         ]
         research_summary_rendered = False
-        for label, fn in section_dispatch:
-            result = self._render_section(label, fn)
+        for label, codes, fn in section_dispatch:
+            result = self._render_section(label, fn, codes)
             if label == 'research_summary':
                 research_summary_rendered = bool(result)
 
@@ -1041,12 +1067,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
         passthrough_consumed_ids = {id(e) for e in (passthrough_result or [])}
 
-        # Add appendix for ALL unmapped content. Local mutable copy of the
-        # module-level RENDER_ROUTED_CODES: the M1 discard just below mutates
-        # it per-call, and a frozenset shared across calls/runs would make
-        # that mutation stick around for the next one (#580/#581's class of
-        # bug -- process-global state mutated per run).
-        mapped_codes = set(RENDER_ROUTED_CODES)
+        # Add appendix for ALL unmapped content -- declined M2A/M2B/M2C
+        # entries (#839) are appended at the fill below, not seeded here
+        # (their code IS mapped). Local mutable copy of RENDER_ROUTED_CODES:
+        # the M1 discard just below mutates it per-call, and a frozenset
+        # shared across calls/runs would make that stick around (#580/#581).
+        # Also drops any code a failed section owns (#842), so its entries fall to the Appendix.
+        mapped_codes = set(RENDER_ROUTED_CODES) - self._failed_section_codes
 
         # M1 (Research Activities) entries are consumed by the Stage 4.5 research
         # summary. When that summary did NOT render (no Stage 4.5 output, empty
@@ -1057,7 +1084,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         if not research_summary_rendered:
             mapped_codes.discard('M1')
 
-        unmapped_entries = []
+        unmapped_entries: list[dict] = []
 
         # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260).
         for code, entries in entries_by_code.items():
@@ -1074,9 +1101,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # _unconsumed_personal_data_batch.
 
         written_appendix_entries: list[UnmappedEntry] = []
-        if unmapped_entries:
+        if unmapped_entries or self._declined_grant_entries:
             written_appendix_entries = self._render_section(
-                'appendix', lambda: self._fill_appendix(unmapped_entries)) or []
+                'appendix', lambda: self._fill_appendix(unmapped_entries + self._declined_grant_entries)) or []
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
@@ -1124,13 +1151,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
         all_warnings = self._section_failures + validation_issues
-        if all_warnings:
-            logger.warning("!" * 60)
-            logger.warning("VALIDATION WARNINGS")
-            logger.warning("!" * 60)
-            for issue in all_warnings:
-                logger.warning(f"  ⚠ {issue['message']}")
-            logger.warning("!" * 60)
+        _log_validation_warnings(all_warnings)
 
         self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
 
@@ -1153,12 +1174,19 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         return output_path
 
-    def _render_section(self, label: str, fn: Callable[[], Any]) -> Any:  # noqa: ANN401
+    def _render_section(self, label: str, fn: Callable[[], Any],
+                         codes: frozenset[str] = frozenset()) -> Any:  # noqa: ANN401
         """Call one section-dispatch entry, isolating a raise to this section
         only (#565). Returns fn()'s result on success; on any Exception it
         logs the traceback, records a severity-carrying failure onto
         ``self._section_failures`` (merged into the render-warnings sidecar
-        by generate()), and returns None so the caller can fall back.
+        by generate()), returns None so the caller can fall back, and
+        records *codes* -- the taxonomy codes this section owns -- onto
+        ``self._failed_section_codes`` so generate() discards them from
+        ``mapped_codes`` and routes them to the Appendix instead of dropping
+        them (#842). Passthrough and appendix callers pass no codes:
+        passthrough already falls through via its return-value fallback,
+        and the appendix has none to discard.
 
         Never swallows: every caught exception gets both the log line and
         the record (§5.4) -- an isolated section must fail loudly, or the
@@ -1179,6 +1207,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 "evidence": evidence,
                 "severity": "ERROR",
             })
+            self._failed_section_codes |= codes
             return None
 
     def _write_render_warnings_sidecar(self, output_path: str, document_uid: str,
@@ -1239,10 +1268,14 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if not table.rows:
                 continue
 
-            # Apply header row background color (first row)
-            header_row = table.rows[0]
-            for cell in header_row.cells:
-                _set_cell_background(cell, gray_color)
+            # Apply header row background color (first row). The PERSONAL DATA
+            # table is label|value rows with no header, so its first row
+            # ("Office address:") stays unshaded (faculty feedback 2026-09-15);
+            # recognised by its "Work email:" cell, the same anchor
+            # _write_personal_data_table_cells uses to find it.
+            if not any("work email:" in c.text.lower() for r in table.rows for c in r.cells):
+                for cell in table.rows[0].cells:
+                    _set_cell_background(cell, gray_color)
 
             # Apply borders to all cells
             for row in table.rows:
@@ -3386,11 +3419,11 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
             default True).
         original_doc_path: Optional path to the original Word document, for the
             personal-data fallback that recovers contact fields from it (#550).
-            Neither driver passes one today, so a live run keeps taking the
-            SAMPLE_CV_DIR auto-discovery branch in generate() and renders
-            exactly as before; scripts/render_gate.py --source-dir is what
-            supplies it, and it does so through here rather than constructing
-            its own generator, so the gate measures the production entry point.
+            Both drivers pass the resolved source path; scripts/render_gate.py
+            --source-dir supplies it the same way, through here rather than
+            by constructing its own generator, so the gate measures the
+            production entry point. Without it generate() falls back to the
+            SAMPLE_CV_DIR guess.
 
     Returns:
         Path to generated document

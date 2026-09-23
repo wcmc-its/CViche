@@ -55,6 +55,7 @@ from docx import Document  # noqa: E402
 from docx.oxml.ns import qn  # noqa: E402
 
 from unified_pipeline.stage6.formatting import format_date_range  # noqa: E402
+from unified_pipeline.stage6.resolution import _get_institution_location  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -619,3 +620,80 @@ class TestMalformedEducationEntries:
 
         assert row.cells[0].text == "MD"
         assert row.cells[1].text == "X, 5"
+
+
+def test_a_location_the_source_already_states_is_not_a_tracked_change():
+    """#897 item 3: stage 5b parses ", Ewing, NJ" OUT of "The College of New
+    Jersey, Ewing, NJ" and hands it back as city/state, and
+    `_get_institution_location` reported that as an enrichment -- so the cell
+    rendered the faculty's own text as a tracked insertion with an
+    "Institution Enrichment" comment. A location the source states renders
+    as plain text; only a location the source lacks is a tracked change."""
+    def degree(institution):
+        return {
+            "text": f"B.S. | {institution} | 2003-2007",
+            "taxonomy_code": "B1",
+            "extracted_fields": {"degree": "B.S.", "institution": institution,
+                                 "start_date": "2003-08", "end_date": "2007-05", "year": "2007"},
+            "institution_enrichment": {"cleaned_name": "Norvale College",
+                                       "city": "Crab Hollow", "state": "New York",
+                                       "country_code": "US"},
+        }
+
+    gen = _generator()
+    gen._fill_education([degree("Norvale College, Crab Hollow, NY")])
+    stated = _first_data_row(gen).cells[1]
+    assert stated.text == "Norvale College, Crab Hollow, NY"
+    assert _cell_ins_parts(stated) == []
+
+    gen = _generator()
+    gen._fill_education([degree("Norvale College")])
+    added = _first_data_row(gen).cells[1]
+    assert added.text == "Norvale College"
+    assert _cell_ins_parts(added) == [(", Crab Hollow, NY", "Institution Enrichment")]
+
+
+@pytest.mark.parametrize("text, institution, expected", [
+    # the source states it, abbreviated or spelt out, in the field or the text
+    ("B.S. | Norvale College, Crab Hollow, NY | 2003", "Norvale College, Crab Hollow, NY", False),
+    ("B.S. | Norvale College, Crab Hollow, New York | 2003", "Norvale College, Crab Hollow, New York", False),
+    ("Residency | Norvale College\nCrab Hollow, NY | 2011", "Norvale College", False),
+    # the source lacks it
+    ("B.S. | Norvale College | 2003", "Norvale College", True),
+    # the city inside the NAME is not the location being stated
+    ("B.S. | University of Crab Hollow | 2003", "University of Crab Hollow", True),
+])
+def test_get_institution_location_reports_enrichment_only_when_the_source_lacks_it(text, institution, expected):
+    entry = {"text": text,
+             "extracted_fields": {"institution": institution},
+             "institution_enrichment": {"city": "Crab Hollow", "state": "New York", "country_code": "US"}}
+    assert _get_institution_location(entry) == ("Crab Hollow, NY", expected)
+def test_a_city_named_institution_still_gets_its_location():
+    """#897: the education cell refused to append the enriched location when
+    the city WORD appeared anywhere in the institution name, so a degree
+    from "Crab Hollow University" lost its ", Crab Hollow, NY". The shared
+    tail predicate only treats a trailing ", City[, ST]" as already present.
+
+    The source states no location here on purpose: since #899 a location the
+    source already states is written plain, not as an enrichment tracked
+    change, so this fixture must leave the city to stage 5b to remain a
+    test of the city-word guard rather than of #899's source check."""
+    gen = _generator()
+    gen._fill_education([{
+        "text": "B.S. | Crab Hollow University | 2003-2007",
+        "taxonomy_code": "B1",
+        "extracted_fields": {
+            "degree": "B.S.",
+            "institution": "Crab Hollow University",
+            "start_date": "2003-08", "end_date": "2007-05", "year": "2007",
+        },
+        "institution_enrichment": {
+            "cleaned_name": "Crab Hollow University",
+            "city": "Crab Hollow", "state": "New York", "country_code": "US",
+        },
+    }])
+    row = _first_data_row(gen)
+
+    # the name is plain text; the location is the enrichment tracked change
+    assert row.cells[1].text == "Crab Hollow University"
+    assert _cell_ins_parts(row.cells[1]) == [(", Crab Hollow, NY", "Institution Enrichment")]

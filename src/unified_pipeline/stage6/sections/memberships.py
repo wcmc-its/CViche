@@ -317,6 +317,17 @@ def _normalize_header_cell(cell_text: str) -> str:
     return _HEADER_WHITESPACE_RE.sub(' ', str(cell_text or '')).strip().lower()
 
 
+def _is_memberships_table(table: Table) -> bool:
+    """True when `table`'s own header row is the memberships table's: at
+    least two columns with a date-shaped second header (#862's positive
+    shape guard, the same test the fallback lookup already applies)."""
+    return bool(
+        table.rows
+        and len(table.rows[0].cells) >= 2
+        and _is_date_header_cell(table.rows[0].cells[1].text)
+    )
+
+
 def _is_date_header_cell(cell_text: str) -> bool:
     """True when a header cell names a date column.
 
@@ -572,12 +583,22 @@ class MembershipsSection:
 
         Entries have fields: organization, membership_type, start_date, end_date
         Uses table with columns: Organization, Date (yyyy-yyyy)
-        """
-        if not entries:
-            return
 
-        if self.verbose:
-            print(f"Filling Memberships ({len(entries)} entries)...")
+        No entries still locates the table and clears it (#862, same class
+        as #708's board-certification fix): the WCM template ships a blank
+        placeholder data row in this table, and this used to return before
+        `_clear_table_data` ever ran, so that row survived into the
+        delivered document on every CV with zero I entries. The clear now
+        always runs once the table is found and, on the zero-entry path,
+        its header row is confirmed as the memberships table's own
+        (`_is_memberships_table`, the same shape test the fallback lookup
+        applies). The row-writing loop is a no-op on an empty `entries`,
+        so no separate early return is needed either.
+        `tables_populated` only counts an actual write -- a cleared
+        placeholder is not a populated table.
+        """
+        if self.verbose and entries:
+            logger.info("Filling Memberships (%s entries)...", len(entries))
 
         # Find the MEMBERSHIPS section
         memberships_idx = self._find_paragraph_with_text("PROFESSIONAL ORGANIZATIONS")
@@ -593,21 +614,26 @@ class MembershipsSection:
         if not table:
             # Fall back to finding table with "Organization" header
             table = self._find_table_with_cell_text("Organization")
-            if table and (
-                not table.rows
-                or len(table.rows[0].cells) < 2
-                or not _is_date_header_cell(table.rows[0].cells[1].text)
-            ):
+            if table and not _is_memberships_table(table):
                 table = None  # Wrong table
 
         if not table:
             if self.verbose:
-                print("  Warning: Could not find memberships table")
+                logger.warning("  Warning: Could not find memberships table")
+            return
+
+        if not entries and not _is_memberships_table(table):
+            # A forward paragraph scan, not a table-identity lookup -- on a
+            # template variant this could land on a table that only happens
+            # to sit after the same heading. With no entries there is no
+            # data-driven signal to catch that, so refuse rather than clear
+            # someone else's table (#862).
             return
 
         # Clear existing data rows
         _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
+        if entries:
+            self.stats['tables_populated'] += 1
 
         # Sort by date (most recent first)
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -619,7 +645,7 @@ class MembershipsSection:
             # Skip table header entries
             if _is_table_header_entry(original_text, ['organization', 'membership', 'society', 'date', 'member']):
                 if self.verbose:
-                    print(f"  Skipping header entry: '{original_text[:50]}...'")
+                    logger.warning("  Skipping header entry: '%s...'", original_text[:50])
                 continue
 
             # Check if this entry contains multiple memberships (newline- or,

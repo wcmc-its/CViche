@@ -19,6 +19,7 @@ import logging
 from dataclasses import dataclass
 from typing import TypedDict
 
+from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
 from .io import _safe_float
@@ -180,6 +181,36 @@ def _build_taxonomy_ref_for_batch(
     return all_suggested_codes, taxonomy_ref
 
 
+def _index_classifications_by_position(classifications: list[dict], batch_start: int) -> dict[int, dict]:
+    """Build an index -> raw-classification-object lookup for one batch's
+    LLM response (pulled out of _classify_one_batch as a pure move, #810).
+
+    Runs OUTSIDE _classify_one_batch's try/except, so anything raised here
+    escapes classify_entries_batch and run_stage_3b entirely: the
+    orchestrator fails the whole web run, while the CLI prints "Warning:
+    Stage N failed" and lets every later stage run on unclassified entries.
+    The response is requested as a bare json_object with no schema, so an
+    object without "index" (KeyError) or a non-dict element (TypeError) is a
+    real possibility. Skip those loudly instead -- they fall back to the
+    default code, which is what a missing classification already does
+    (#521).
+    """
+    class_by_idx = {}
+    malformed = 0
+    for c in classifications:
+        if isinstance(c, dict) and "index" in c:
+            class_by_idx[c["index"]] = c
+        else:
+            malformed += 1
+    if malformed:
+        logger.warning(
+            "Stage 3b: skipped %d malformed classification object(s) in the "
+            "batch at offset %d; those entries fall back to the default code",
+            malformed, batch_start
+        )
+    return class_by_idx
+
+
 def _classify_one_batch(
     batch_entries: list[dict],
     batch_start: int,
@@ -284,6 +315,13 @@ Return ONLY valid JSON with the classifications array."""
         stats.cost = llm_result["cost"]
         stats.observed_model = llm_result.get("model")
 
+    except LLMOutageError:
+        # A provider outage (#810) is not a batch-level parse/validation
+        # failure -- it means every remaining call is likely to fail the same
+        # way, so defaulting this batch's codes and continuing would spend
+        # stages 4-6 on entries nobody actually classified. Fail the run
+        # instead (unlike the generic except below).
+        raise
     except Exception:
         # Every entry in this batch falls back to the default code below;
         # the caller aggregates failed_batches and fails the run if NO
@@ -299,30 +337,9 @@ Return ONLY valid JSON with the classifications array."""
         )
         classifications = []
 
-    # Build index lookup for classifications.
-    #
-    # This runs OUTSIDE the try/except above, so anything raised here
-    # escapes classify_entries_batch and run_stage_3b entirely: the
-    # orchestrator fails the whole web run, while the CLI prints
-    # "Warning: Stage N failed" and lets every later stage run on
-    # unclassified entries. The response is requested as a bare
-    # json_object with no schema, so an object without "index" (KeyError)
-    # or a non-dict element (TypeError) is a real possibility. Skip those
-    # loudly instead -- they fall back to the default code below, which is
-    # what a missing classification already does (#521).
-    class_by_idx = {}
-    malformed = 0
-    for c in classifications:
-        if isinstance(c, dict) and "index" in c:
-            class_by_idx[c["index"]] = c
-        else:
-            malformed += 1
-    if malformed:
-        logger.warning(
-            "Stage 3b: skipped %d malformed classification object(s) in the "
-            "batch at offset %d; those entries fall back to the default code",
-            malformed, batch_start
-        )
+    # Build index lookup for classifications (runs OUTSIDE the try/except
+    # above -- see _index_classifications_by_position's docstring for why).
+    class_by_idx = _index_classifications_by_position(classifications, batch_start)
 
     # Map results back to entries
     results = []

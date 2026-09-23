@@ -873,8 +873,6 @@ def score_duplicate_ratio(outputs_dir: Path) -> tuple[float, str, None]:
 
     edata, edata_reason = _load_first(outputs_dir, "*_entries.json")
     coverage_pct = (edata or {}).get("coverage", {}).get("coverage_percentage") if edata else None
-    if coverage_pct is not None and coverage_pct > 130:
-        fraction = clamp(fraction + 0.1)
 
     entries_note = f"; {_missing_or_unreadable_detail('entries.json', edata_reason)}" if edata_reason else ""
     detail = (

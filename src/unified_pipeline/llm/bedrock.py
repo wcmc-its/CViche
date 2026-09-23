@@ -395,6 +395,7 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
                               enable_prompt_caching=cfg["enable_prompt_caching"],
                               **cfg["extra_kwargs"]),
         retry_count=cfg["retry_count"],
+        cancel_check=cfg.get("cancel_check"),
     )
 
     usage = response["usage"]
@@ -448,6 +449,7 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
                                   enable_prompt_caching=cfg["enable_prompt_caching"],
                                   **cfg["extra_kwargs"]),
             retry_count=cfg["retry_count"],
+            cancel_check=cfg.get("cancel_check"),
         )
         # This repair call is a second live Bedrock request, so its API time
         # belongs in latency_ms -- as its tokens already do just below.

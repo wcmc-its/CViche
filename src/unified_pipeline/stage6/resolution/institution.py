@@ -13,6 +13,47 @@ value is rendered as a tracked change and an extracted one is not.
 import re
 
 
+def _location_stated_in_source(entry: dict, *candidates: str) -> bool:
+    """True when the source CV already states one of `candidates` as its own
+    segment (delimited by a comma, newline, pipe or the string ends) inside
+    the raw institution field or the entry text.
+
+    Stage 5b returns a city/state for "The College of New Jersey, Ewing, NJ"
+    by parsing it OUT of the source, and `_get_institution_location` reported
+    that as an enrichment, so the renderers wrote ", Ewing, NJ" back as a
+    tracked insertion -- the faculty saw their own text flagged as a pipeline
+    addition (#897 item 3). A location the source states is not a change.
+    Segment-anchored so "Tokyo" is not found inside "University of Tokyo".
+    """
+    fields = entry.get('extracted_fields') or {}
+    source = f"{fields.get('institution') or ''}\n{entry.get('text') or ''}"
+    for candidate in candidates:
+        if candidate and re.search(
+                r'(?:^|[,\n|])\s*' + re.escape(candidate) + r'\s*(?:$|[,\n|])',
+                source, re.IGNORECASE):
+            return True
+    return False
+def _location_already_in_institution(location: str, institution: str) -> bool:
+    """True when the institution string already carries the location as a
+    comma-led tail: "Massachusetts General Hospital, Boston, MA" or
+    "Columbia University, New York" against "Boston, MA" / "New York, NY".
+
+    Matched as a TAIL (", City" then optionally ", State" then end of string),
+    not as the bare city word anywhere in the name. The word match dropped the
+    location from every institution whose name contains its city -- New York
+    University, New York Presbyterian, Boston Children's -- which is most WCM
+    faculty CVs (#897). The three renderers that append a location all consult
+    this one predicate, so the rule cannot drift between them.
+    """
+    if not (location and institution):
+        return False
+    city = location.split(',')[0].strip()
+    if not city:
+        return False
+    tail = r',\s*' + re.escape(city) + r'(?:\s*,\s*[A-Za-z][A-Za-z .]*)?\s*$'
+    return bool(re.search(tail, institution, re.IGNORECASE))
+
+
 def _get_institution_location(entry: dict) -> tuple[str, bool]:
     """Get formatted location string from institution enrichment data.
 
@@ -94,14 +135,25 @@ def _get_institution_location(entry: dict) -> tuple[str, bool]:
                     'Wisconsin': 'WI', 'Wyoming': 'WY', 'District of Columbia': 'DC'
                 }
                 state_abbrev = state_abbrevs.get(state, state)
-                return (f"{city}, {state_abbrev}", True)  # True = from enrichment
+                location = f"{city}, {state_abbrev}"
+                # "Ewing, New Jersey" in the source is the same statement as
+                # the rendered "Ewing, NJ"; a non-US "Crewe, Cheshire" is not
+                # the same as the rendered "Crewe, United Kingdom", so only
+                # the US branch gets the spelt-out form as a second candidate.
+                as_stated = (location, f"{city}, {state}")
             else:
                 # For non-US, include country
                 country = enrichment.get('country', '')
                 location = f"{city}, {country}" if country else f"{city}, {state}"
-                return (location, True)  # True = from enrichment
+                as_stated = (location,)
         elif city:
-            return (city, True)  # True = from enrichment
+            location, as_stated = city, (city,)
+        else:
+            location, as_stated = '', ()
+        if location:
+            # An enrichment only if the source did not already say it --
+            # stage 5b parses an embedded location out rather than adding one.
+            return (location, not _location_stated_in_source(entry, *as_stated))
 
     # Fall back to extracted_fields.location (not from enrichment)
     fields = entry.get('extracted_fields') or {}

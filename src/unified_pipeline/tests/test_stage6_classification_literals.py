@@ -1171,3 +1171,28 @@ def test_template_without_the_section_does_not_normalize_entries():
     })
 
     assert gen.stats['tables_populated'] == 0
+
+
+def test_normalize_keeps_the_location_of_a_city_named_institution():
+    """#897: `_normalize_training_entry` blanked `location` whenever the city
+    WORD was inside the institution name, so every residency at "New York
+    University School of Medicine" rendered without ", New York, NY". Only a
+    trailing ", City[, ST]" on the institution string counts as present."""
+    enrichment = {"cleaned_name": "Crab Hollow University School of Medicine",
+                  "city": "Crab Hollow", "state": "New York", "country_code": "US"}
+    kept = _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Residency", "specialty": "Pediatrics",
+                              "institution": "Crab Hollow University School of Medicine"},
+         "institution_enrichment": enrichment}, "C")
+    assert kept.institution == "Crab Hollow University School of Medicine"
+    assert kept.location == "Crab Hollow, NY"
+
+    # the de-duplication the check was written for still holds when 5b
+    # returned no cleaned name and the raw field carries the location
+    dup = _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Residency",
+                              "institution": "Norvale General Hospital, Crab Hollow, NY"},
+         "institution_enrichment": {"city": "Crab Hollow", "state": "New York",
+                                    "country_code": "US"}}, "C")
+    assert dup.institution == "Norvale General Hospital, Crab Hollow, NY"
+    assert dup.location == ""

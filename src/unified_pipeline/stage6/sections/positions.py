@@ -46,7 +46,7 @@ from unified_pipeline.core.render_check import entry_fragments
 from ..formatting import _clear_table_data, format_date_range
 from ..normalization import _get_cleaned_institution_name
 from ..parsing import _dates_overlap_or_match, _is_table_header_entry
-from ..resolution import _get_institution_location
+from ..resolution import _get_institution_location, _location_already_in_institution
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -467,17 +467,10 @@ def _position_row_cells(entry: dict) -> tuple[CellContent, CellContent, CellCont
     # Build cell contents with mixed normal/track-change content
     title_content = [(title, False, "")]
 
-    # Check if location is already present in institution_base to avoid duplication
-    # e.g., "University of Pittsburgh, Pittsburgh, PA" shouldn't get ", Pittsburgh, PA" appended again
-    location_already_present = False
-    if location and institution_base:
-        # Check if city is already in the institution string
-        location_parts = location.split(',')
-        if location_parts:
-            city = location_parts[0].strip()
-            # Check for city name in institution (case-insensitive)
-            if city.lower() in institution_base.lower():
-                location_already_present = True
+    # "University of Pittsburgh, Pittsburgh, PA" must not gain a second
+    # ", Pittsburgh, PA"; "New York University" must still gain its
+    # ", New York, NY" (#897) -- one shared tail predicate decides.
+    location_already_present = _location_already_in_institution(location, institution_base)
 
     if location and location_is_enriched and not location_already_present:
         # Institution/dept is normal text, ", City, State" is track change
@@ -783,13 +776,13 @@ class PositionsSection:
                          "had inherited its employer from a parent row", unmatched_employer)
         if not dropped:
             if verbose and merged:
-                print(f"    Merged dates into {merged} fragmented appointment rows")
+                logger.info("    Merged dates into %s fragmented appointment rows", merged)
             return entries
 
         result = [e for k, e in enumerate(ordered) if k not in dropped]
         if verbose:
-            print(f"    Merged {len(dropped)} fragmented appointment row(s); "
-                  f"propagated dates to {merged} role row(s)")
+            logger.info("    Merged %s fragmented appointment row(s); "
+                        "propagated dates to %s role row(s)", len(dropped), merged)
         return result
 
     def _fill_positions(self, entries_by_code: dict[str, list[dict]]) -> None:
@@ -818,13 +811,13 @@ class PositionsSection:
 
         total_positions = len(d1_entries) + len(d2_entries) + len(d3_entries)
         if self.verbose:
-            print(f"Filling Positions ({total_positions} entries)...")
+            logger.info("Filling Positions (%s entries)...", total_positions)
             if d1_entries:
-                print(f"  D1 Academic: {len(d1_entries)} entries")
+                logger.info("  D1 Academic: %s entries", len(d1_entries))
             if d2_entries:
-                print(f"  D2 Hospital: {len(d2_entries)} entries")
+                logger.info("  D2 Hospital: %s entries", len(d2_entries))
             if d3_entries:
-                print(f"  D3 Other: {len(d3_entries)} entries")
+                logger.info("  D3 Other: %s entries", len(d3_entries))
 
         # Fill Academic Appointments table (D1)
         acad_idx = self._find_paragraph_with_text("Academic Appointments")

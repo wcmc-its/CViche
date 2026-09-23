@@ -12,18 +12,25 @@ Output: JSON with extracted entries including full text and hierarchy context
 import os
 import sys
 import json
+import logging
 import time
+import bisect
+from functools import partial
 from pathlib import Path
 from collections.abc import Callable
+from typing import NamedTuple
 from docx import Document
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
 from core.template_boilerplate import is_template_instruction
+
+logger = logging.getLogger(__name__)
 
 
 def get_hierarchy_path(node: dict, current_path: list[str] = None) -> list[str]:
@@ -92,6 +99,24 @@ def get_element_text(element: dict) -> str:
         return "\n".join(row_texts)
     else:
         return element.get("text", "").strip()
+
+
+def _element_text_or_fallback(idx: int, element_index_map: dict, doc: Document) -> str:
+    """Text for a unified element index, falling back to doc.paragraphs.
+
+    element_index_map should hold every int index in [0, doc_length) by
+    construction (build_element_index_map maps every element with an int
+    unified_idx). The fallback exists for when it doesn't: measured on the
+    111-uid local corpus, 2 uids had a stage-1b hierarchy whose header
+    indices (260, 262) fell past a fresh extraction's doc_length (260) --
+    a stale-hierarchy-vs-current-extraction mismatch, not a code bug this
+    PR should paper over. Logs so a real gap surfaces instead of silently
+    producing a blank header/break entry.
+    """
+    if idx in element_index_map:
+        return get_element_text(element_index_map[idx])
+    logger.warning(f"    Index {idx} missing from element_index_map; falling back to doc.paragraphs")
+    return doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
 
 
 def split_merged_row_into_pseudo_rows(row: list) -> list:
@@ -166,27 +191,37 @@ def extract_leaf_sections_with_boundaries(
             start_idx = boundary.get("element_idx_start")
             end_idx = boundary.get("element_idx_end")
             if start_idx is not None:
-                parent_sections[hierarchy_path] = {
-                    "start": start_idx,
-                    "end": end_idx,
-                    "first_child_start": None
-                }
+                parent_sections[hierarchy_path] = {"start": start_idx, "end": end_idx}
 
-    # Find the first child start for each parent
-    for boundary in section_boundaries:
-        if not boundary.get("has_children", False):
-            hierarchy_path = boundary.get("hierarchy", [])
-            start_idx = boundary.get("element_idx_start")
+    # Precompute, once, what the parent-gap branch below used to rescan
+    # `section_boundaries` for on every parent (#916 rework):
+    # - `starts_sorted` turns "smallest start strictly greater than X" into
+    #   a single `bisect_right` per parent instead of an O(n) filter+min.
+    # - `first_index_at_start` / `leaf_at_start` turn the same-start
+    #   suppression check into two dict lookups instead of an O(n) `any(...)`
+    #   that compared by object identity. Index comparison (position in
+    #   `section_boundaries`, via `first_index_at_start`) replaces that
+    #   identity test: a boundary is suppressed by an earlier same-start
+    #   entry when it is not the first index recorded for that start, which
+    #   also correctly tells apart two structurally-equal-but-distinct dicts
+    #   at the same start (a duplicated parent record) without relying on
+    #   `is`.
+    starts_sorted = sorted(
+        b["element_idx_start"] for b in section_boundaries
+        if b.get("element_idx_start") is not None
+    )
+    first_index_at_start: dict[int, int] = {}
+    leaf_at_start: dict[int, bool] = {}
+    for i, b in enumerate(section_boundaries):
+        s = b.get("element_idx_start")
+        if s is None:
+            continue
+        if s not in first_index_at_start:
+            first_index_at_start[s] = i
+        if not b.get("has_children", False):
+            leaf_at_start[s] = True
 
-            # Check if this is a child of any parent
-            if len(hierarchy_path) > 1:
-                parent_path = tuple(hierarchy_path[:-1])
-                if parent_path in parent_sections:
-                    current_first = parent_sections[parent_path]["first_child_start"]
-                    if current_first is None or start_idx < current_first:
-                        parent_sections[parent_path]["first_child_start"] = start_idx
-
-    for boundary in section_boundaries:
+    for idx, boundary in enumerate(section_boundaries):
         hierarchy_path = boundary.get("hierarchy", [])
         start_idx = boundary.get("element_idx_start")
         end_idx = boundary.get("element_idx_end")
@@ -199,12 +234,21 @@ def extract_leaf_sections_with_boundaries(
             # Leaf section - include as-is
             leaf_sections.append((hierarchy_path, start_idx, end_idx))
         else:
-            # Parent section with children - check for gap before first child
+            # Parent w/ children - gap ends just before the next STRICTLY
+            # LATER header (any boundary, any depth). A same-start boundary
+            # suppresses it only when it's a leaf, or was listed earlier --
+            # the earlier tie-owner emits it, so same-start parents don't
+            # cancel each other and drop the content between them (#916).
             parent_path = tuple(hierarchy_path)
             if parent_path in parent_sections:
-                first_child_start = parent_sections[parent_path]["first_child_start"]
-                if first_child_start is not None and first_child_start > start_idx + 1:
-                    # There's a gap between parent header and first child
+                suppressed = (
+                    leaf_at_start.get(start_idx, False)
+                    or first_index_at_start[start_idx] != idx
+                )
+                next_pos = bisect.bisect_right(starts_sorted, start_idx)
+                first_child_start = starts_sorted[next_pos] if next_pos < len(starts_sorted) else None
+                if not suppressed and first_child_start is not None and first_child_start > start_idx + 1:
+                    # There's a gap between parent header and the next header
                     # This gap contains content that belongs to the parent section
                     # (e.g., journal articles before "Book" subsection in PUBLICATIONS)
                     gap_end = first_child_start - 1
@@ -778,15 +822,15 @@ def detect_entries_for_section(
     prompt_tokens = 0
     completion_tokens = 0
 
-    num_batches = (len(section_elements) + BATCH_SIZE - 1) // BATCH_SIZE
+    batches = make_batches(section_elements, BATCH_SIZE)
+    num_batches = len(batches)
 
-    for batch_idx in range(num_batches):
+    for batch_idx, batch_elements in enumerate(batches):
         batch_start = batch_idx * BATCH_SIZE
-        batch_end = min(batch_start + BATCH_SIZE, len(section_elements))
-        batch_elements = section_elements[batch_start:batch_end]
+        batch_end = batch_start + len(batch_elements)
 
         if num_batches > 1:
-            print(f"    Processing batch {batch_idx + 1}/{num_batches} (elements {batch_start + 1}-{batch_end} of {len(section_elements)})")
+            logger.info(f"    Processing batch {batch_idx + 1}/{num_batches} (elements {batch_start + 1}-{batch_end} of {len(section_elements)})")
 
         # Create element list for LLM (handles paragraphs, table_content, and legacy tables)
         element_list_parts = []
@@ -1020,11 +1064,11 @@ Respond **only** with a JSON array containing the identified entries. If no entr
             recovered = recover_unclaimed_table_rows(batch_elements, claimed_row_keys)
             all_validated_entries.extend(recovered)
             if recovered:
-                print(f"    Recovered {len(recovered)} unclaimed table row(s) "
-                      f"in batch {batch_idx + 1}")
+                logger.info(f"    Recovered {len(recovered)} unclaimed table row(s) "
+                            f"in batch {batch_idx + 1} [{full_hierarchy}]")
 
         except Exception as e:
-            print(f"    ⚠ Error in batch {batch_idx + 1}: {e}")
+            logger.warning(f"    ⚠ Error in batch {batch_idx + 1}: {e} [{full_hierarchy}]")
             continue
 
     # Remove subset/duplicate entries from all batches
@@ -1062,11 +1106,217 @@ def _bound_coverage_indices(
     return all_doc_indices - integer_assigned, all_doc_indices & integer_assigned
 
 
+# I/O-bound stage (LLM round trips, not CPU); the default is sized under the
+# per-pod semaphore so one run cannot starve the others admitted alongside it
+# (#881). Knob: CVICHE_STAGE2_SECTION_WORKERS, env var or llm yaml key.
+STAGE2_SECTION_WORKERS = workers_from_config("CVICHE_STAGE2_SECTION_WORKERS")
+
+
+class _SectionResult(NamedTuple):
+    entries: list[dict]
+    cost_info: dict
+    assigned: set
+    lines: list[str]
+
+
+class _DocumentContext(NamedTuple):
+    """The five values every _extract_section call shares across a whole
+    run_stage_2 invocation -- built once before the pool, read but never
+    written by any section (#915 review item 6)."""
+    doc_elements: list[dict]
+    header_indices: set
+    element_index_map: dict
+    header_info: dict[int, list[str]]
+    doc: Document
+
+
+def _section_progress_printer(hierarchy_paths: list[list[str]]) -> Callable[[int, _SectionResult], None]:
+    """Build a map_in_order ``on_result`` callback: one atomic print per
+    finished section, numbered by completion.
+
+    map_in_order guarantees ``on_result`` fires only on the CALLING thread,
+    one call at a time -- both its serial path and its ``as_completed`` loop
+    invoke it inline, never from a pool thread -- so despite the pool
+    underneath, this closure is single-threaded: no lock, no ``nonlocal``
+    gymnastics beyond the one ``done`` counter needs as a closure variable.
+    The ``[N/M] Processing:`` line is a parsed contract -- orchestrator.py's
+    PROGRESS_PATTERNS read it into the progress bar -- so N counts sections
+    *finished*, which stays monotonic however the pool orders completions,
+    and the whole block goes out in one print so two sections' lines cannot
+    splice (#881).
+
+    ``on_result``'s two arguments are deliberately different orderings:
+    ``index`` is map_in_order's dispatch-order position into the input
+    list (so ``hierarchy_paths[index]`` always names the section that
+    actually finished, whichever order sections complete in), while
+    ``done`` is this closure's own completion counter -- it increments
+    once per call, in call order, so it is always 1, 2, 3... regardless of
+    which ``index`` each call carries. The printed ``[N/M]`` uses ``done``,
+    never ``index``.
+    """
+    done = 0
+
+    def on_result(index: int, result: _SectionResult) -> None:
+        nonlocal done
+        _, _, _, lines = result
+        done += 1
+        print("\n".join([
+            f"[{done}/{len(hierarchy_paths)}] Processing: {' > '.join(hierarchy_paths[index])}",
+            *lines,
+        ]))
+
+    return on_result
+
+
+def _extract_section(
+    context: _DocumentContext,
+    hierarchy_path: list[str],
+    start_idx: int,
+    end_idx: int,
+    *,
+    document_uid: str | None,
+    cancel_check: Callable[[], None] | None,
+) -> _SectionResult:
+    """One section's body of run_stage_2's loop: detect its entries, assign
+    headers/breaks around it, and report what happened -- the per-section
+    unit map_in_order fans out over (#881).
+
+    ``context`` bundles the five values (doc_elements, header_indices,
+    element_index_map, header_info, doc) that are constant for every call
+    in a given run_stage_2 invocation; only ``hierarchy_path``/``start_idx``/
+    ``end_idx`` (this section's own slice) and ``document_uid``/
+    ``cancel_check`` vary per call.
+
+    ``cancel_check`` runs first, on whichever thread this call lands on, so a
+    cancelled run raises before each section's LLM call: map_in_order cancels
+    the queue on the first raise, and any section a pool thread dequeues
+    before that shutdown lands raises here too, since the orchestrator's
+    cancel is persistent. Sections already in flight finish.
+
+    If ``detect_entries_for_section`` itself raises (it normally does not --
+    its own per-batch ``try``/``except`` swallows an LLM/JSON/network error
+    into a logged warning and moves to the next batch -- but a bug outside
+    that guard, e.g. in ``remove_subset_delimiters``, would propagate), this
+    call is uncaught here too, so it propagates out to map_in_order exactly
+    like a ``cancel_check`` raise: the first exception cancels the queued
+    sections and re-raises; sections already in flight still finish, since a
+    thread cannot be interrupted, so at most ``workers`` calls complete
+    after a failure (``core/batch_pool.py``'s own docstring). The exception
+    then propagates out of run_stage_2's own (unguarded) ``map_in_order``
+    call -- before the ``json.dump`` that writes stage 2's output file, so
+    no artifact is written for a run that fails this way.
+
+    Returns ``(section_entries_in_order, cost_info, section_assigned, lines)``
+    instead of mutating run_stage_2's shared ``all_entries`` /
+    ``all_assigned_indices`` / ``total_cost`` / ``total_tokens``, and instead
+    of printing. A print here would still reach the run's progress capture --
+    since #883 orchestrator.py's _RoutedStdout also routes by a ContextVar
+    that map_in_order's per-call copy_context() carries onto the pool
+    thread -- but not correctly: the ``[N/M] Processing:`` line must be
+    numbered by *completion*, which only the calling thread (running
+    _section_progress_printer as map_in_order's on_result) knows, and each
+    section's block must land as one atomic print so two sections finishing
+    close together cannot splice their lines together.
+    """
+    if cancel_check is not None:
+        cancel_check()
+
+    # Detect and extract entries using document structure (paragraphs + tables)
+    entries, cost_info = detect_entries_for_section(
+        hierarchy_path,
+        context.doc_elements,
+        start_idx,
+        end_idx + 1,  # end_idx is inclusive, so add 1 for range
+        document_uid=document_uid,
+        header_indices=context.header_indices,
+        element_index_map=context.element_index_map
+    )
+
+    # Track which indices are assigned to entries
+    section_assigned = set()
+    for entry in entries:
+        start_idx_entry = entry["element_idx_start"]
+        end_idx_entry = entry["element_idx_end"]
+
+        # Handle string indices (table rows like "22.2"): section_assigned is
+        # later diffed against section_range = set(range(...)), which holds
+        # only ints, so only the parent table index (an int) protects
+        # anything here -- the string form itself is never read by any
+        # consumer (#856's _bound_coverage_indices filters int-only by
+        # construction too). Mark the parent table index as assigned to
+        # prevent it from being added as a "break" entry.
+        if isinstance(start_idx_entry, str) or isinstance(end_idx_entry, str):
+            start_idx_str = str(start_idx_entry)
+            if "." in start_idx_str:
+                parent_idx = int(start_idx_str.split(".")[0])
+                section_assigned.add(parent_idx)
+        else:
+            # Integer range for paragraph entries
+            for idx in range(start_idx_entry, end_idx_entry + 1):
+                section_assigned.add(idx)
+
+    # Find unassigned indices in this section's range
+    section_range = set(range(start_idx, end_idx + 1))
+    unassigned_in_section = section_range - section_assigned - context.header_indices
+
+    # Add header entries for this section
+    section_headers = []
+    for idx in sorted(section_range & context.header_indices):
+        header_text = _element_text_or_fallback(idx, context.element_index_map, context.doc)
+        header_entry = {
+            "element_idx_start": idx,
+            "element_idx_end": idx,
+            "element_type": "header",
+            "confidence": 1.0,
+            "text": header_text,
+            "hierarchy": context.header_info.get(idx, hierarchy_path)
+        }
+        section_headers.append(header_entry)
+        section_assigned.add(idx)
+
+    # Add break entries for unassigned indices (blank lines, etc.)
+    break_entries = []
+    for idx in sorted(unassigned_in_section):
+        para_text = _element_text_or_fallback(idx, context.element_index_map, context.doc)
+        break_entry = {
+            "element_idx_start": idx,
+            "element_idx_end": idx,
+            "element_type": "break",
+            "confidence": 1.0,
+            "text": para_text,  # Usually empty, but capture if not
+            "hierarchy": hierarchy_path
+        }
+        break_entries.append(break_entry)
+        section_assigned.add(idx)
+
+    # Add hierarchy to content entries
+    for entry in entries:
+        entry["hierarchy"] = hierarchy_path
+
+    content_count = len(entries)
+    header_count = len(section_headers)
+    break_count = len(break_entries)
+
+    if content_count > 0:
+        summary = f"  ✓ Extracted {content_count} entries, {header_count} headers, {break_count} breaks (${cost_info.get('cost', 0):.4f})"
+    else:
+        summary = f"  - No content entries ({header_count} headers, {break_count} breaks)"
+
+    lines = [f"  Elements: {start_idx} to {end_idx}", summary, ""]
+
+    # Combine all entries for this section: headers -> content -> breaks,
+    # the same order the pre-#881 loop extended all_entries in.
+    section_entries_in_order = section_headers + entries + break_entries
+
+    return _SectionResult(section_entries_in_order, cost_info, section_assigned, lines)
+
+
 def run_stage_2(
     docx_path: str,
     hierarchy_json_path: str = None,
     cancel_check: Callable[[], None] | None = None,
     strip_template_instructions: bool = True,
+    workers: int = STAGE2_SECTION_WORKERS,
 ):
     """
     Main Stage 2: Extract entries from CV sections using LLM
@@ -1087,6 +1337,8 @@ def run_stage_2(
                             instruction boilerplate from the extracted entries.
                             When False, keep the instruction text so it survives
                             into the output.
+        workers: Sections extracted at once (default STAGE2_SECTION_WORKERS).
+                            1 reproduces the pre-#881 serial loop.
     """
 
     print(f"Input: {docx_path}")
@@ -1152,8 +1404,8 @@ def run_stage_2(
     total_cost = 0.0
     total_tokens = 0
     document_uid = hierarchy_data.get("document_uid")
-    # Use the number of paragraph indices (not total elements) for coverage calculation
-    doc_length = doc_structure['meta']['num_paragraphs'] + doc_structure['meta']['num_empty']
+    # Index space is the unified element stream, tables included (#870).
+    doc_length = len(doc_elements)
 
     # Track all assigned indices for coverage analysis
     all_assigned_indices = set()
@@ -1168,11 +1420,7 @@ def run_stage_2(
                 parent_header_indices.add(idx)
 
     for idx in sorted(parent_header_indices):
-        # Get text from element_index_map instead of doc.paragraphs
-        if idx in element_index_map:
-            header_text = get_element_text(element_index_map[idx])
-        else:
-            header_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
+        header_text = _element_text_or_fallback(idx, element_index_map, doc)
         parent_header_entry = {
             "element_idx_start": idx,
             "element_idx_end": idx,
@@ -1203,11 +1451,7 @@ def run_stage_2(
                 if first_child_start is not None:
                     for gap_idx in range(parent_start + 1, first_child_start):
                         if gap_idx not in all_assigned_indices:
-                            # Get text from element_index_map instead of doc.paragraphs
-                            if gap_idx in element_index_map:
-                                gap_text = get_element_text(element_index_map[gap_idx])
-                            else:
-                                gap_text = doc.paragraphs[gap_idx].text.strip() if gap_idx < len(doc.paragraphs) else ""
+                            gap_text = _element_text_or_fallback(gap_idx, element_index_map, doc)
                             gap_entry = {
                                 "element_idx_start": gap_idx,
                                 "element_idx_end": gap_idx,
@@ -1219,116 +1463,36 @@ def run_stage_2(
                             all_entries.append(gap_entry)
                             all_assigned_indices.add(gap_idx)
 
-    for i, (hierarchy_path, start_idx, end_idx) in enumerate(sections_to_process, 1):
-        # Check for cancellation before each section's LLM call so an aborted
-        # run terminates promptly rather than completing all sections first.
-        if cancel_check is not None:
-            cancel_check()
-
-        section_name = hierarchy_path[-1] if hierarchy_path else "Unknown"
-        print(f"[{i}/{len(sections_to_process)}] Processing: {' > '.join(hierarchy_path)}")
-        print(f"  Elements: {start_idx} to {end_idx}")
-
-        # Detect and extract entries using document structure (paragraphs + tables)
-        entries, cost_info = detect_entries_for_section(
-            hierarchy_path,
-            doc_elements,  # Now passing doc_elements instead of doc
-            start_idx,
-            end_idx + 1,  # end_idx is inclusive, so add 1 for range
+    # Extract every section's entries on a thread pool, section-level grain
+    # (#881); workers=1 reproduces the pre-#881 serial loop exactly, one
+    # context, no pool. Results come back in SUBMISSION order regardless of
+    # completion order -- required so the accumulation below, and therefore
+    # the output artifact, is byte-identical to the old serial loop; the
+    # later `all_entries.sort(key=sort_key)` is stable but this must not
+    # rely on that to hide an accumulation-order bug.
+    document_context = _DocumentContext(
+        doc_elements=doc_elements,
+        header_indices=header_indices,
+        element_index_map=element_index_map,
+        header_info=header_info,
+        doc=doc,
+    )
+    results = map_in_order(
+        partial(
+            _extract_section,
+            document_context,  # positional: precedes each call's own (hierarchy_path, start_idx, end_idx)
             document_uid=document_uid,
-            header_indices=header_indices,
-            element_index_map=element_index_map  # New parameter
-        )
-
-        # Track costs
+            cancel_check=cancel_check,
+        ),
+        [(path, s, e) for path, s, e in sections_to_process],
+        workers,
+        on_result=_section_progress_printer([p for p, _, _ in sections_to_process]),
+    )
+    for section_entries, cost_info, section_assigned, _lines in results:
         total_cost += cost_info.get("cost", 0)
         total_tokens += cost_info.get("tokens", 0)
-
-        # Track which indices are assigned to entries
-        section_assigned = set()
-        for entry in entries:
-            start_idx_entry = entry["element_idx_start"]
-            end_idx_entry = entry["element_idx_end"]
-
-            # Handle string indices (table rows like "22.2")
-            if isinstance(start_idx_entry, str) or isinstance(end_idx_entry, str):
-                # For row sub-indices, track the string as-is
-                section_assigned.add(str(start_idx_entry))
-                all_assigned_indices.add(str(start_idx_entry))
-
-                # ALSO mark the parent table index as assigned
-                # to prevent it from being added as a "break" entry
-                start_idx_str = str(start_idx_entry)
-                if "." in start_idx_str:
-                    parent_idx = int(start_idx_str.split(".")[0])
-                    section_assigned.add(parent_idx)
-                    all_assigned_indices.add(parent_idx)
-            else:
-                # Integer range for paragraph entries
-                for idx in range(start_idx_entry, end_idx_entry + 1):
-                    section_assigned.add(idx)
-                    all_assigned_indices.add(idx)
-
-        # Find unassigned indices in this section's range
-        section_range = set(range(start_idx, end_idx + 1))
-        unassigned_in_section = section_range - section_assigned - header_indices
-
-        # Add header entries for this section
-        section_headers = []
-        for idx in sorted(section_range & header_indices):
-            # Get text from element_index_map instead of doc.paragraphs
-            if idx in element_index_map:
-                header_text = get_element_text(element_index_map[idx])
-            else:
-                header_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
-            header_entry = {
-                "element_idx_start": idx,
-                "element_idx_end": idx,
-                "element_type": "header",
-                "confidence": 1.0,
-                "text": header_text,
-                "hierarchy": header_info.get(idx, hierarchy_path)
-            }
-            section_headers.append(header_entry)
-            all_assigned_indices.add(idx)
-
-        # Add break entries for unassigned indices (blank lines, etc.)
-        break_entries = []
-        for idx in sorted(unassigned_in_section):
-            # Get text from element_index_map instead of doc.paragraphs
-            if idx in element_index_map:
-                para_text = get_element_text(element_index_map[idx])
-            else:
-                para_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
-            break_entry = {
-                "element_idx_start": idx,
-                "element_idx_end": idx,
-                "element_type": "break",
-                "confidence": 1.0,
-                "text": para_text,  # Usually empty, but capture if not
-                "hierarchy": hierarchy_path
-            }
-            break_entries.append(break_entry)
-            all_assigned_indices.add(idx)
-
-        # Add hierarchy to content entries
-        for entry in entries:
-            entry["hierarchy"] = hierarchy_path
-
-        # Combine all entries for this section
-        all_entries.extend(section_headers)
-        all_entries.extend(entries)
-        all_entries.extend(break_entries)
-
-        content_count = len(entries)
-        header_count = len(section_headers)
-        break_count = len(break_entries)
-
-        if content_count > 0:
-            print(f"  ✓ Extracted {content_count} entries, {header_count} headers, {break_count} breaks (${cost_info.get('cost', 0):.4f})")
-        else:
-            print(f"  - No content entries ({header_count} headers, {break_count} breaks)")
-        print()
+        all_assigned_indices |= section_assigned
+        all_entries.extend(section_entries)
 
     # Sort entries by element_idx_start for consistent output
     # Handle mixed int/string indices (e.g., 22 vs "22.2")

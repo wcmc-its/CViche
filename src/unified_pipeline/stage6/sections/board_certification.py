@@ -177,6 +177,24 @@ def _is_fused_certification(fields: dict, cert_numbers: list[str]) -> bool:
     return len(_BOARD_WORD_RE.findall(board)) > 1
 
 
+def _board_cell_text(fields: dict) -> str:
+    """The "Full Name of Board" cell for one entry's structured fields:
+    the board, then the certification named beside it.
+
+    A faculty CV writes "American Board of Pediatrics, Certification in
+    General Pediatrics" and "American Board of Pediatrics, Certification in
+    Pediatric Emergency Medicine" as two rows; stage 4 splits that into
+    `certifying_board` + `specialty`, and rendering the board alone made the
+    two rows read identically (faculty feedback 2026-09-15, #897). The
+    specialty is appended unless the board string already contains it.
+    """
+    board = str(fields.get('certifying_board') or '').strip()
+    specialty = str(fields.get('specialty') or '').strip()
+    if specialty and specialty.casefold() not in board.casefold():
+        return f"{board}, {specialty}" if board else specialty
+    return board
+
+
 def _format_certification_date_str(fields: dict) -> str:
     """Build the F2 "yyyy-yyyy" (or "yyyy-Present") date string for one
     entry's structured fields.
@@ -418,7 +436,7 @@ class BoardCertificationSection:
         an actual write -- a cleared placeholder is not a populated table.
         """
         if self.verbose and entries:
-            print(f"Filling Board Certification ({len(entries)} entries)...")
+            logger.info("Filling Board Certification (%s entries)...", len(entries))
 
         # Find Board Certification section - need to find the subsection header,
         # not the main "LICENSURE, BOARD CERTIFICATION" section header
@@ -475,7 +493,7 @@ class BoardCertificationSection:
                 else:
                     # Single certification - format dates as yyyy-yyyy per WCM template
                     date_str = _format_certification_date_str(fields)
-                    self._add_board_cert_row(table, certifying_board, certificate_number, date_str)
+                    self._add_board_cert_row(table, _board_cell_text(fields), certificate_number, date_str)
             else:
                 # No structured fields - try to parse from text
                 self._parse_and_add_multiple_certifications(table, original_text, entry)
@@ -517,7 +535,7 @@ class BoardCertificationSection:
                 reason, structured_board, structured_cert,
             )
             self._add_board_cert_row(
-                table, structured_board, structured_cert,
+                table, _board_cell_text(fields), structured_cert,
                 _format_certification_date_str(fields),
             )
 

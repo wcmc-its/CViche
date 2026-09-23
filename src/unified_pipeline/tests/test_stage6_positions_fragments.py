@@ -66,6 +66,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.oxml.ns import qn  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
 from unified_pipeline.stage6.sections.positions import (  # noqa: E402
@@ -1098,3 +1099,32 @@ def test_a_blank_parent_still_yields_its_recovered_children():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_a_city_named_employer_still_gets_its_location():
+    """#897: stage 5b hands back `cleaned_name` (location stripped) plus the
+    city/state; the row builder then refused to append the location because
+    the city WORD was inside the employer's own name. Every "New York
+    University" / "New York Presbyterian" appointment rendered without a
+    location. The location is appended (as the enrichment tracked change)
+    unless the employer string already ends in it. The source states no
+    location on purpose: since #899 a source-stated location is written
+    plain, not as a tracked change, so the city is left to stage 5b here."""
+    entry = _position_entry(1, "Attending Physician",
+                            "Crab Hollow University Hospital",
+                            ("PROFESSIONAL POSITIONS",), "2018-10", "current")
+    entry["institution_enrichment"] = {
+        "cleaned_name": "Crab Hollow University Hospital",
+        "city": "Crab Hollow", "state": "New York", "country_code": "US",
+    }
+
+    gen, table = _positions_generator(TABLE_ANCHORS["D2"])
+    gen._fill_positions({"D2": [entry]})
+    cell = table.rows[1].cells[1]
+
+    # the name is plain text; the location is the enrichment tracked change,
+    # which `cell.text` cannot see (it reads direct `w:r` children only)
+    assert cell.text == "Crab Hollow University Hospital"
+    inserted = "".join(t.text or "" for p in cell.paragraphs
+                       for ins in p._p.findall(qn("w:ins")) for t in ins.iter(qn("w:t")))
+    assert inserted == ", Crab Hollow, NY"

@@ -26,27 +26,22 @@ almost nothing about a CV's contact block is structured. The work is in order:
 This is the only section writer that reads the source document directly, which
 is why `Document` and `Path` are imported here and nowhere else in this package.
 
-Step 3 still does not run on a live CV, but the reason has moved, so read this
-paragraph rather than remembering it. `run_stage6()` now DOES take an
-`original_doc_path` parameter and forwards it
-(`stage_6_word_template.py:2921-2972`); what no longer happens is any driver
-passing one -- `run_full_pipeline.py:994` and
-`web_interface/backend/app/pipeline/orchestrator.py:1370-1377` both call
-`run_stage6` without it. So the callers that supply a source document anywhere
-in the repo are `scripts/render_gate.py --source-dir` and this package's own
-tests, and the `SAMPLE_CV_DIR` auto-discovery those drivers fall through to
-(`stage_6_word_template.py:711-727`) resolves for no farm uid in a fresh
-worktree and finds an empty directory in the deployed image. Of the two scans
-that can fill an empty `work_email` slot, only the all-entries JSON scan is
-live, because it needs no source document. Step 3's table and paragraph scans
-are measurable by the render gate and unreachable in production until a driver
-supplies the path.
+Step 3 runs on a live CV because both drivers hand `run_stage6()` the resolved
+source path (`run_full_pipeline.py` `_stage_6`, `orchestrator.py` stage `'6'`;
+#550), as do `scripts/render_gate.py --source-dir` and this package's tests.
+Before that wiring the web path reached step 3 only by coincidence -- the
+orchestrator's `_copy_to_pipeline_input` drops each upload into the same
+directory `generate()`'s `SAMPLE_CV_DIR` guess scans, under the same uid --
+and the CLI reached it only for a uid-style run from the repo root, never for
+a corpus batch on a path or from a worktree.
 
-Three copies of the previous version of this paragraph asserted "the server
-always passes original_doc_path". All three were false, and #550 was
-originally diagnosed off them. If this one goes stale again, the two others
-are `stage_6_word_template.py`'s SAMPLE_CV_DIR constant and its `generate()`
-fallback.
+Earlier versions of this paragraph were wrong twice: "the server always passes
+original_doc_path" (false until #550's wiring), then "unreachable in
+production until a driver supplies the path" (false for the web path, see
+above). If it goes stale again, the other copies are
+`stage_6_word_template.py`'s SAMPLE_CV_DIR constant, `run_stage6()`'s
+docstring, `scripts/render_gate.py`'s module docstring and
+`docs/guides/render-doctor-gates.md`.
 
 5. There is no step 5 any more, and that is the point. Steps 2, the
    all-entries email scan and 3 all store into the SAME three slot names --
@@ -233,6 +228,39 @@ def _label_word_present(word: str, text: str, pii_fragments: list[str]) -> bool:
     return any(word in frag.lower() for frag in pii_fragments)
 
 
+class _VisaAnswers(NamedTuple):
+    """The faculty's answers to the template's two visa rows, or empty."""
+    eligibility: str
+    visa_type: str
+
+
+def _visa_slot_answers(entries: list[dict]) -> _VisaAnswers:
+    """Read the template's two visa rows back out of the A-coded entries.
+
+    A faculty CV already in the WCM template carries them as label|value
+    rows ("Is your eligibility to work in the U.S. based on an employment
+    visa?: | No"). Nothing consumed them before #897: the answer was dropped
+    and the slot rendered as the template's "Yes/No" placeholder, so a "No"
+    read back as unanswered. Matched by the label's two stable words; the
+    value is the cell after the first pipe. A placeholder ("Yes/No") or a
+    blank cell is treated as no answer.
+    """
+    eligibility = visa_type = ''
+    for entry in entries:
+        text = entry.get('text') or ''
+        if '|' not in text:
+            continue
+        label, value = (part.strip() for part in text.split('|', 1))
+        label = label.lower()
+        if not value or value.lower() == 'yes/no':
+            continue
+        if 'employment visa' in label:
+            eligibility = value
+        elif 'visa type' in label:
+            visa_type = value
+    return _VisaAnswers(eligibility, visa_type)
+
+
 def _withhold_home_contact(
         withheld: list[WithheldItem], home_address: str | None,
         home_phone: str | None) -> tuple[str | None, str | None]:
@@ -332,7 +360,7 @@ class PersonalDataSection:
             original_doc_path: Path to original Word document (for fallback email extraction)
         """
         if self.verbose:
-            print("\nFilling Personal Data...")
+            logger.info("\nFilling Personal Data...")
 
         # Get name from cv_owner if available
         # Priority: full_name_with_credentials > full_name
@@ -606,24 +634,28 @@ class PersonalDataSection:
         # Lifted out to `_write_personal_data_table_cells` (#820 R3, pure
         # move -- §3.2) so this function's own length does not carry it.
         self._write_personal_data_table_cells(
-            office_address, office_phone, work_email, home_address,
+            entries, office_address, office_phone, work_email, home_address,
             cell_phone, personal_email)
 
     def _write_personal_data_table_cells(
-            self, office_address: str | None, office_phone: str | None,
-            work_email: str | None, home_address: str | None,
-            cell_phone: str | None, personal_email: str | None) -> None:
-        """Write the six contact slots into Table 1, once `_fill_personal_data`
-        has resolved every value (entries, then the docx recovery fallback).
+            self, entries: list[dict], office_address: str | None,
+            office_phone: str | None, work_email: str | None,
+            home_address: str | None, cell_phone: str | None,
+            personal_email: str | None) -> None:
+        """Write the six contact slots and the two visa rows into Table 1,
+        once `_fill_personal_data` has resolved every contact value (entries,
+        then the docx recovery fallback).
 
         Table 1 structure: Office address, Office telephone, Work email, Home
-        address, Cell phone, Personal email -- located by its "Work email:"
-        cell rather than by index. Split out of `_fill_personal_data` as a
-        PURE move (#820 R3, §3.2): identical body, no behaviour change.
+        address, Cell phone, Personal email, the employment-visa question,
+        the visa type -- located by its "Work email:" cell rather than by
+        index. Split out of `_fill_personal_data` as a PURE move (#820 R3,
+        §3.2); the visa rows were added in #897.
         """
         personal_data_table = self._find_table_with_cell_text("Work email:")
         if personal_data_table is None:
             return
+        visa = _visa_slot_answers(entries)
         for row in personal_data_table.rows:
             cell_text = row.cells[0].text.strip().lower()
 
@@ -657,6 +689,18 @@ class PersonalDataSection:
             # Personal email
             if personal_email and 'personal email' in cell_text:
                 _set_cell_text(row.cells[1], personal_email)
+                self.stats['entries_inserted'] += 1
+
+            # The template's two visa rows (#897): the faculty's own answers,
+            # written over the "Yes/No" placeholder. The PII pass does not
+            # withhold these rows -- its visa label is start-anchored and
+            # this label starts "Is your eligibility ..." (#821 lists visa
+            # status as rendering today).
+            if visa.eligibility and 'employment visa' in cell_text:
+                _set_cell_text(row.cells[1], visa.eligibility)
+                self.stats['entries_inserted'] += 1
+            if visa.visa_type and 'visa type' in cell_text:
+                _set_cell_text(row.cells[1], visa.visa_type)
                 self.stats['entries_inserted'] += 1
 
     def _recover_contact_fields_from_docx(
@@ -742,7 +786,7 @@ class PersonalDataSection:
                     work_email = _withhold_recovered(
                         email_match.group(0), para.text, withheld)
                     if self.verbose and work_email:
-                        print(f"  Found email from paragraph: {work_email}")
+                        logger.debug("  Found email from paragraph: %s", work_email)
                     if work_email:
                         break
 
@@ -804,7 +848,7 @@ class PersonalDataSection:
                             name = recovered_name
                             name_is_complete = True
                             if self.verbose:
-                                print(f"  Found name from table: {name}")
+                                logger.debug("  Found name from table: %s", name)
 
                 # Extract address if not yet found
                 # Note: Business address cells often contain embedded phone/fax/email
@@ -835,7 +879,7 @@ class PersonalDataSection:
                     if value and len(value) > 5:
                         office_phone = _withhold_recovered(value, row_text, withheld)
                         if self.verbose and office_phone:
-                            print(f"  Found phone from table: {office_phone}")
+                            logger.debug("  Found phone from table: %s", office_phone)
 
                 # Extract email if not yet found
                 elif field == _FIELD_WORK_EMAIL and not work_email:
@@ -844,7 +888,7 @@ class PersonalDataSection:
                         work_email = _withhold_recovered(
                             email_match.group(0), row_text, withheld)
                         if self.verbose and work_email:
-                            print(f"  Found email from table: {work_email}")
+                            logger.debug("  Found email from table: %s", work_email)
 
         return name, name_is_complete, work_email, office_phone, office_address
 
@@ -875,7 +919,7 @@ class PersonalDataSection:
                 if phone_match and not office_phone:
                     office_phone = phone_match.group(1).strip()
                     if self.verbose:
-                        print(f"  Found phone from address block: {office_phone}")
+                        logger.debug("  Found phone from address block: %s", office_phone)
                 continue
 
             # Extract email if embedded in address
@@ -885,7 +929,7 @@ class PersonalDataSection:
                 if email_match and not work_email:
                     work_email = email_match.group(0)
                     if self.verbose:
-                        print(f"  Found email from address block: {work_email}")
+                        logger.debug("  Found email from address block: %s", work_email)
                 continue
 
             # Skip fax lines
@@ -898,5 +942,5 @@ class PersonalDataSection:
 
         address = '\n'.join(address_lines)
         if self.verbose:
-            print(f"  Found address from table: {address[:50]}...")
+            logger.debug("  Found address from table: %s...", address[:50])
         return address, office_phone, work_email
