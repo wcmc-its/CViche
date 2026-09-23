@@ -278,8 +278,17 @@ def _call_bedrock(model, messages, temperature, response_format=None,
         Bedrock Converse response dict
 
     Raises:
+        ValueError: max_tokens was given but is not a positive int.
         botocore.exceptions.ClientError: On non-retryable Bedrock errors
     """
+    # Reject an invalid max_tokens here rather than letting it reach Bedrock
+    # as-is: the API rejects it server-side too, but as an opaque
+    # ParamValidationError deep in the boto3 call instead of a clear,
+    # attributable error at the call site (#631).
+    if max_tokens is not None and (
+        isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0
+    ):
+        raise ValueError(f"Bedrock max_tokens must be a positive int, got {max_tokens!r}")
     client = _get_bedrock_client()
     tool_config = _schema_tool_config(response_format)
     system_prompts, converse_messages = _translate_messages(

@@ -343,6 +343,21 @@ def test_call_bedrock_preserves_explicit_max_tokens(monkeypatch: pytest.MonkeyPa
     assert fake.calls[0]["inferenceConfig"]["maxTokens"] == 500
 
 
+@pytest.mark.parametrize("bad_max_tokens", [-5, 0, True, False, 1.5, "16000"])
+def test_call_bedrock_rejects_invalid_max_tokens(
+    monkeypatch: pytest.MonkeyPatch, bad_max_tokens: object,
+) -> None:
+    fake = _FakeBedrockClient([_converse_response("hi")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(ValueError, match="max_tokens"):
+        bedrock._call_bedrock(
+            BEDROCK_MODEL, [{"role": "user", "content": "hi"}], 0.1,
+            response_format=None, max_tokens=bad_max_tokens, enable_prompt_caching=False,
+        )
+    assert fake.calls == []  # rejected before the client is ever called
+
+
 def test_call_bedrock_enable_prompt_caching_appends_cache_point(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeBedrockClient([_converse_response("hi")])
     monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
