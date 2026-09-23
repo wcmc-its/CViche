@@ -294,11 +294,6 @@ def test_stats_reraises_an_unexpected_response_error(fake_redis):
         del fake_redis.pipeline
 
 
-def test_dispatch_mode_defaults_to_in_process(monkeypatch):
-    monkeypatch.delenv("CVICHE_DISPATCH_MODE", raising=False)
-    assert run_queue.dispatch_mode() == "in_process"
-
-
 def test_client_is_loud_when_redis_url_is_unset(monkeypatch):
     monkeypatch.delenv("CVICHE_REDIS_URL", raising=False)
     run_queue._reset_client()
@@ -454,7 +449,9 @@ def test_start_in_queue_mode_flips_to_queued_and_enqueues_once(client, db, fake_
     assert resp.json() == {"message": "Run RUNQ01 queued", "status": "queued"}
     assert order == ["commit", "enqueue"]
     assert _status(db) == "queued"
-    assert _row(db).started_at > SEEDED_AT, "queued age in the admin view counts from the flip"
+    assert _row(db).queued_at is not None, "queued age in the admin view counts from the flip"
+    assert _row(db).started_at == SEEDED_AT, "started_at means 'began executing'; only the worker's claim sets it"
+    assert _row(db).resume_from_step is None, "a fresh start clears any resume point a prior retry left"
     assert [e["run_id"] for e in _entries(fake_redis)] == ["RUNQ01"]
     assert "start_step" not in _entries(fake_redis)[0]
 
@@ -479,7 +476,7 @@ def test_start_in_process_mode_is_untouched(client, db, monkeypatch, as_user_wit
 
 def test_start_reverts_status_and_answers_503_when_xadd_fails(client, db, monkeypatch, queue_mode, as_user_with_input):
     def boom(*_a, **_k):
-        raise ConnectionError("valkey down")
+        raise redis.exceptions.ConnectionError("valkey down")
     monkeypatch.setattr(run_queue, "enqueue", boom)
     user, _ = _seed(db, status="paused")
     as_user_with_input(user)
@@ -487,6 +484,47 @@ def test_start_reverts_status_and_answers_503_when_xadd_fails(client, db, monkey
     assert resp.status_code == 503
     assert resp.json()["detail"]["error"] == "queue_unavailable"
     assert (_status(db), _row(db).started_at) == ("paused", SEEDED_AT)
+
+
+def test_start_does_not_turn_a_non_redis_error_into_a_503(client, db, monkeypatch, queue_mode, as_user_with_input):
+    """#701 runs.py point 2: only redis.exceptions.RedisError is caught and
+    revert-and-503'd. Anything else (a bug, or run_queue._client()'s
+    RuntimeError for a missing CVICHE_REDIS_URL) is loud misconfiguration and
+    propagates -- the flip stays "queued" with no token, which the queued-run
+    reconciler is the backstop for."""
+    def boom(*_a, **_k):
+        raise RuntimeError("CVICHE_REDIS_URL is not set; the run queue requires Valkey")
+    monkeypatch.setattr(run_queue, "enqueue", boom)
+    user, _ = _seed(db, status="paused")
+    as_user_with_input(user)
+    resp = client.post("/api/run/RUNQ01/start")
+    assert resp.status_code == 500
+    assert _status(db) == "queued", "the flip is not reverted for a non-Redis error"
+
+
+def test_start_reports_live_status_when_a_revert_loses_to_a_concurrent_claim(client, db, monkeypatch, queue_mode, as_user_with_input):
+    """#701 runs.py point 1: a failed XADD's revert is guarded WHERE
+    status='queued'. If the worker's claim (queued->running) landed in
+    between, the revert matches no row -- report the live status (202), not
+    a stale 503 that tells the caller to retry a run that is already
+    executing."""
+    from sqlalchemy import update as sa_update
+    from app.models import Run
+
+    def race_then_fail(run_id, *a, **k):
+        # Simulate the worker's claim winning the race right after the flip,
+        # then the producer's own XADD failing.
+        db.execute(sa_update(Run).where(Run.id == run_id).values(status="running"))
+        db.commit()
+        raise redis.exceptions.ConnectionError("valkey down")
+
+    monkeypatch.setattr(run_queue, "enqueue", race_then_fail)
+    user, _ = _seed(db, status="paused")
+    as_user_with_input(user)
+    resp = client.post("/api/run/RUNQ01/start")
+    assert resp.status_code == 202, resp.text
+    assert resp.json()["status"] == "running"
+    assert _status(db) == "running", "the guarded revert must not clobber the worker's claim"
 
 
 def test_start_on_already_queued_run_re_enqueues_without_flip(client, db, fake_redis, queue_mode, as_user_with_input):
@@ -497,6 +535,19 @@ def test_start_on_already_queued_run_re_enqueues_without_flip(client, db, fake_r
     assert resp.status_code == 202
     assert _status(db) == "queued"
     assert [e["run_id"] for e in _entries(fake_redis)] == ["RUNQ01", "RUNQ01"]
+
+
+def test_start_on_already_queued_run_is_guarded_against_a_re_enqueue_storm(client, db, fake_redis, queue_mode, as_user_with_input):
+    """#701 runs.py point 5: a second /start on an already-queued run within
+    REENQUEUE_GUARD_TTL_S of the first does not add another token."""
+    user, _ = _seed(db, status="queued")
+    as_user_with_input(user)
+
+    first = client.post("/api/run/RUNQ01/start")
+    second = client.post("/api/run/RUNQ01/start")
+
+    assert (first.status_code, second.status_code) == (202, 202)
+    assert len(_entries(fake_redis)) == 1, "the guard must limit the storm to one fresh token"
 
 
 def test_start_on_terminal_run_is_still_400_in_queue_mode(client, db, fake_redis, queue_mode, as_user_with_input):
@@ -516,26 +567,53 @@ def test_start_in_queue_mode_never_acquires_a_pod_slot(client, db, fake_redis, q
     assert client.post("/api/run/RUNQ01/start").status_code == 202
 
 
-def test_retry_in_queue_mode_resets_steps_and_enqueues_with_start_step(client, db, fake_redis, queue_mode, as_user_with_input):
+def test_retry_in_queue_mode_resets_steps_and_persists_resume_from_step(client, db, fake_redis, queue_mode, as_user_with_input):
+    """#701 runs.py point 3: the token is a pure wake-up (run_id only) --
+    the resume point is persisted on the row by the flip, not carried on the
+    Valkey message, so a redelivered or stale token can't replay an old
+    step."""
     from app.models import Step
     user, _ = _seed(db, status="failed")
     as_user_with_input(user)
     resp = client.post("/api/run/RUNQ01/retry/2")
     assert resp.status_code == 202, resp.text
     assert _status(db) == "queued"
-    assert _row(db).started_at > SEEDED_AT
-    assert _entries(fake_redis)[0]["start_step"] == "2"
+    assert _row(db).queued_at is not None
+    assert _row(db).started_at == SEEDED_AT, "started_at means 'began executing'; the flip doesn't touch it"
+    assert _row(db).resume_from_step == 2
+    assert "start_step" not in _entries(fake_redis)[0]
     assert {s.step_number: s.status for s in db.query(Step).all()} == {1: "complete", 2: "pending", 3: "pending"}
 
 
-def test_retry_in_queue_mode_on_non_failed_run_is_400_and_keeps_steps(client, db, fake_redis, queue_mode, as_user_with_input):
+def test_retry_in_queue_mode_on_non_failed_run_is_409_and_keeps_steps(client, db, fake_redis, queue_mode, as_user_with_input):
+    """#701 runs.py point 8: a flip that loses because the run's live status
+    wasn't in allowed_from ("failed") is a conflict, not a bad request -- the
+    caller's view of the run was simply stale."""
     from app.models import Step
     user, _ = _seed(db, status="cancelled")
     as_user_with_input(user)
-    assert client.post("/api/run/RUNQ01/retry/2").status_code == 400
+    assert client.post("/api/run/RUNQ01/retry/2").status_code == 409
     assert _status(db) == "cancelled"
     assert _entries(fake_redis) == []
     assert db.query(Step).filter(Step.step_number == 2).one().status == "error"
+
+
+def test_start_on_a_retry_queued_run_keeps_its_resume_step(client, db, fake_redis, queue_mode, as_user_with_input):
+    """#701 runs.py point 3: /start on a run a retry already queued (the
+    already-queued branch, no fresh flip) must not touch resume_from_step --
+    only a winning flip ever writes it, and start_run's flip nulls it."""
+    from sqlalchemy import update as sa_update
+    from app.models import Run
+
+    user, _ = _seed(db, status="queued")
+    db.execute(sa_update(Run).where(Run.id == "RUNQ01").values(resume_from_step=2))
+    db.commit()
+    as_user_with_input(user)
+
+    resp = client.post("/api/run/RUNQ01/start")
+
+    assert resp.status_code == 202
+    assert _row(db).resume_from_step == 2
 
 
 def test_cancel_accepts_queued_and_the_worker_then_skips(client, db, fake_redis, queue_mode, as_user_with_input, monkeypatch):

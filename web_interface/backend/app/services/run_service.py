@@ -12,7 +12,7 @@ from app.database import SessionLocal
 from app.models import Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics
 from app.errors import not_found, forbidden
 from app.config_loader import get_config
-from app.pipeline import run_queue
+from app.pipeline import concurrency, run_queue
 from app.storage import get_storage
 from app.services import auto_retry
 
@@ -169,7 +169,7 @@ def _effective_stale_run_minutes() -> int:
     except (TypeError, ValueError):
         minutes = DEFAULT_STALE_RUN_MINUTES
 
-    if run_queue.dispatch_mode() != "queue":
+    if concurrency.dispatch_mode() != "queue":
         return minutes
 
     try:
@@ -294,7 +294,7 @@ def reconcile_queued_runs(db: Session) -> int:
 
     Returns the number of rows actually requeued.
     """
-    if run_queue.dispatch_mode() != "queue":
+    if concurrency.dispatch_mode() != "queue":
         return 0
 
     minutes = _queued_reconcile_minutes()
@@ -327,20 +327,31 @@ def reconcile_queued_runs(db: Session) -> int:
 def queue_db_view(db: Session) -> dict[str, int | float | None]:
     """DB side of the run-queue stats (#701): how many runs are queued/running
     and the age of the oldest of each.
+
+    Queued age is measured from ``queued_at``, not ``started_at``: since the
+    routes rework, ``flip_to_queued`` stamps ``queued_at`` and leaves
+    ``started_at`` alone, and ``claim_queued`` re-stamps ``started_at`` only
+    once a worker actually claims the run (mrj4001 review, runs.py point 6 --
+    ``started_at`` means "began executing"). Running age still comes from
+    ``started_at``, which is exactly when a "running" row entered that status.
     """
     from sqlalchemy import func
 
-    # started_at is re-stamped at the queued flip and again at the worker's
-    # claim, so it is the age since the row entered its current status.
     now = datetime.now()
-    view: dict[str, int | float | None] = {}
-    for status in ("queued", "running"):
-        count, oldest = db.query(func.count(Run.id), func.min(Run.started_at)).filter(
-            Run.status == status
-        ).one()
-        view[status] = count
-        view[f"oldest_{status}_age_s"] = (now - oldest).total_seconds() if oldest else None
-    return view
+
+    queued_count, oldest_queued = db.query(func.count(Run.id), func.min(Run.queued_at)).filter(
+        Run.status == RunState.QUEUED
+    ).one()
+    running_count, oldest_running = db.query(func.count(Run.id), func.min(Run.started_at)).filter(
+        Run.status == RunState.RUNNING
+    ).one()
+
+    return {
+        "queued": queued_count,
+        "oldest_queued_age_s": (now - oldest_queued).total_seconds() if oldest_queued else None,
+        "running": running_count,
+        "oldest_running_age_s": (now - oldest_running).total_seconds() if oldest_running else None,
+    }
 
 
 def reap_orphaned_created_runs(

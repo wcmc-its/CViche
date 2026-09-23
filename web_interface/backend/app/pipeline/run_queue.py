@@ -360,9 +360,3 @@ def stats() -> QueueStats:
         owners=owners,
         dead=dead,
     )
-
-
-def dispatch_mode() -> str:
-    """``in_process`` (today's BackgroundTask) or ``queue``; lives beside the
-    other run-control knobs in the ``llm`` config section."""
-    return get_config("llm", "CVICHE_DISPATCH_MODE", default="in_process")[0]

@@ -24,12 +24,14 @@ from app.schemas import (
     AdminConfigUpdate,
     AdminUserUpdate,
     QualityScoreResult,
+    QueueDbView,
+    QueueStatsResponse,
 )
 from app.services.admin_service import get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import get_cached_score, compute_and_cache_score
 from app.services.run_service import reap_orphaned_created_runs, queue_db_view
 from app.config_loader import get_config as read_config  # a route below is named get_config
-from app.pipeline import run_queue
+from app.pipeline import concurrency, run_queue
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -277,26 +279,48 @@ async def reap_orphan_runs(
 # ---------------------------------------------------------------------------
 # GET /api/admin/queue/stats
 # ---------------------------------------------------------------------------
-@router.get("/admin/queue/stats")
-async def get_queue_stats(
+@router.get("/admin/queue/stats", response_model=QueueStatsResponse)
+def get_queue_stats(
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
-) -> dict:
+) -> QueueStatsResponse:
     """Run-queue depth and ownership (Valkey) beside the DB view of queued and
-    running runs (#701). A queued row much older than the stream's pending set
-    is the "stranded without a message" signal; /start re-enqueues it.
+    running runs (#701). ``enabled`` reflects ``dispatch_mode() == "queue"``,
+    not merely whether ``CVICHE_REDIS_URL`` is set -- that URL is shared with
+    the event broker, the idle-session store, the login throttle and SAML
+    replay, so in_process mode can still see it configured.
+
+    A queued row older than ``CVICHE_QUEUED_RECONCILE_MINUTES`` while stream
+    ``lag`` and ``pending`` are both 0 has lost its Valkey token; the
+    queued-run reconciler (``run_service.reconcile_queued_runs``) requeues it
+    on its next sweep, and the user's own /start does the same sooner. ``lag``
+    also counts stale tokens -- an idempotent re-enqueue of an
+    already-queued run, or a run cancelled while queued whose token nothing
+    has claimed yet -- so a non-zero lag does not by itself rule stranding
+    out.
+
+    Plain ``def``: both ``queue_db_view`` (sync Session) and ``run_queue``'s
+    Valkey calls (sync redis-py) are blocking, so FastAPI runs this in the
+    threadpool instead of stalling the event loop (#701 admin_routes.py
+    point 1 / run_queue.py point 11).
     """
-    db_view = queue_db_view(db)
+    db_view = QueueDbView(**queue_db_view(db))
+    if concurrency.dispatch_mode() != "queue":
+        return QueueStatsResponse(enabled=False, db=db_view)
+
     url, _ = read_config("redis", "CVICHE_REDIS_URL", default="")
     if not url:
-        return {"enabled": False, "db": db_view}
+        return QueueStatsResponse(enabled=True, db=db_view, error="valkey_not_configured")
     try:
-        return {"enabled": True, **run_queue.stats(), "db": db_view}
+        stats = run_queue.stats()
     except redis.exceptions.RedisError as e:
         # The endpoint that diagnoses a stuck queue must still answer when
-        # Valkey itself is the problem.
-        logger.warning("Queue stats unavailable: %s", e)
-        return {"enabled": True, "error": str(e), "db": db_view}
+        # Valkey itself is the problem. The exception's own text can carry a
+        # host:port (e.g. "Error 111 connecting to valkey:6379") -- that goes
+        # only to the log, never the response.
+        logger.warning("Queue stats unavailable: %s: %s", type(e).__name__, e)
+        return QueueStatsResponse(enabled=True, db=db_view, error="valkey_unavailable")
+    return QueueStatsResponse(enabled=True, db=db_view, **stats)
 
 
 # ---------------------------------------------------------------------------

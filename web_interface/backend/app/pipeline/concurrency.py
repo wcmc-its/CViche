@@ -22,9 +22,20 @@ docs/proposals/issue-4-redis-broker.md and concurrency-and-load-readiness.md).
 import logging
 import os
 import threading
+from typing import Literal
+
 from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)
+
+# The two run-dispatch strategies (#701): today's per-pod BackgroundTask, or
+# handing the run to a Valkey-backed queue worker. Lives here, not in
+# run_queue.py (mrj4001 review, run_queue.py point 10): this is routing
+# policy that gates start_run/retry_step admission the same way
+# get_max_concurrent_runs does, and both knobs are read from the same "llm"
+# config section.
+DispatchMode = Literal["in_process", "queue"]
+_VALID_DISPATCH_MODES: tuple[DispatchMode, ...] = ("in_process", "queue")
 
 # Concurrent full-pipeline runs allowed on a single pod. Conservative default
 # for the 1 vCPU / 1 GiB prod pod: pipelines are LLM-I/O-bound so a little
@@ -75,3 +86,20 @@ def active_count() -> int:
     """Current number of executing runs on this pod (for diagnostics)."""
     with _lock:
         return _active_runs
+
+
+def dispatch_mode() -> DispatchMode:
+    """``in_process`` (today's BackgroundTask) or ``queue``.
+
+    Normalises whitespace and case, and raises ``ValueError`` on anything
+    else, so a typo'd ``CVICHE_DISPATCH_MODE`` (e.g. ``"queeu"``) fails loudly
+    on the next /start rather than silently running in-process forever
+    (#701 run_queue.py point 10).
+    """
+    raw, _ = get_config("llm", "CVICHE_DISPATCH_MODE", default="in_process")
+    mode = raw.strip().lower()
+    if mode not in _VALID_DISPATCH_MODES:
+        raise ValueError(
+            f"CVICHE_DISPATCH_MODE={raw!r} is not one of {_VALID_DISPATCH_MODES}"
+        )
+    return mode

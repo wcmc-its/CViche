@@ -429,6 +429,33 @@ class AdminRunsResponse(BaseModel):
     limit: int
 
 
+class QueueDbView(BaseModel):
+    """DB side of the run-queue stats (#701): counts and ages by status,
+    matching ``run_service.queue_db_view``'s keys."""
+    queued: int
+    running: int
+    oldest_queued_age_s: float | None = None
+    oldest_running_age_s: float | None = None
+
+
+class QueueStatsResponse(BaseModel):
+    """Run-queue depth and ownership (Valkey), beside the DB view, for the
+    admin dashboard (#701). ``enabled`` is ``dispatch_mode() == "queue"``,
+    independent of whether ``CVICHE_REDIS_URL`` happens to be set (other
+    features share that same URL). ``error`` is a stable code
+    (``valkey_unavailable`` / ``valkey_not_configured``) -- never raw
+    exception text, which can carry a host:port."""
+    enabled: bool
+    db: QueueDbView
+    error: str | None = None
+    stream_length: int | None = None
+    pending: int | None = None
+    lag: int | None = None
+    consumers: int | None = None
+    owners: list[dict] = []
+    dead: int | None = None
+
+
 class AdminConfigResponse(BaseModel):
     """Current system configuration."""
     allowed_users: list[str] = []

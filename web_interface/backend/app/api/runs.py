@@ -2,24 +2,27 @@
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime
+import redis
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
-from sqlalchemy import update
 from sqlalchemy.orm import Session, selectinload
 from pathlib import Path
 
 from app.database import get_db
-from app.models import Run, Step, User
+from app.models import Run, RunState, Step, User
 from app.schemas import RunStatus, RunSummary, StepSummary, PaginatedRuns
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency, run_queue
 from app.auth import get_current_user
 from app.api.upload import create_run_archive, commit_run_or_compensate
-from app.services.run_service import check_run_access, UPLOAD_DIR, _materialize_input_if_missing
+from app.services.run_service import (
+    check_run_access, UPLOAD_DIR, _materialize_input_if_missing, flip_to_queued, revert_queued,
+)
 from app.rate_limiter import check_rate_limit
-from app.errors import not_found, bad_request
+from app.errors import not_found, bad_request, conflict
 from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
@@ -46,34 +49,78 @@ def _run_duration_seconds(run) -> int | None:
 
 def _dispatch_queue(
     run: Run, db: Session, *, allowed_from: tuple[str, ...], start_step: int | None = None,
+    on_flip: Callable[[], None] | None = None,
 ) -> JSONResponse:
-    """Queue-mode dispatch (#701): conditional flip to ``queued`` (rowcount-checked,
-    so two concurrent requests cannot both flip), commit, then XADD. A run that
-    is already ``queued`` is re-enqueued without a flip -- the idempotent path
-    that also recovers a run stranded ``queued`` with no message. A failed XADD
-    reverts the flip and answers 503 so no run sits ``queued`` unobserved.
+    """Queue-mode dispatch (#701): ``run_service.flip_to_queued`` reads the
+    row's live status under a lock and conditionally flips it to ``queued``
+    in one transaction (so two concurrent requests can't both flip), then
+    this XADDs a wake-up token. Three outcomes once the flip returns:
+
+    * Won the flip: XADD the token. A failed XADD (Valkey down) calls the
+      guarded ``run_service.revert_queued`` (``WHERE status='queued'``), so a
+      claim or cancel that landed in between can never be clobbered. If the
+      revert itself matches no row -- the run was already claimed or
+      cancelled -- this answers 202 with the run's live status rather than a
+      misleading 503 "try again". A process death between the flip's own
+      commit and this XADD leaves the row "queued" with no token at all;
+      ``run_service.reconcile_queued_runs`` (the periodic reaper, queue mode
+      only) is the backstop that re-enqueues it, and the already-queued
+      branch below recovers it sooner if the user retries first.
+    * Already queued (no flip attempted): idempotent re-enqueue, guarded by
+      ``run_queue.claim_reenqueue_slot`` so a retry storm on one run adds at
+      most one fresh token per ``REENQUEUE_GUARD_TTL_S`` -- a guard miss just
+      answers 202 without another XADD.
+    * Lost race (the row was neither "queued" nor in ``allowed_from`` by the
+      time the locked read ran -- claimed, cancelled, or started elsewhere
+      since the caller's own read): 409, since the client's view of the run
+      was already stale.
+
+    ``on_flip``, if given, runs (and is committed) only once a fresh flip has
+    actually won -- retry_step uses it to reset the downstream Step rows,
+    which must NOT happen on a lost race: ``flip_to_queued`` commits its own
+    transaction unconditionally (win or lose), so staging those resets on
+    ``db`` before calling this would otherwise persist them even when the
+    flip never applied.
     """
-    prior, prior_started_at = run.status, run.started_at
-    # started_at is re-stamped here so the admin view's queued age is the age
-    # since this flip (design §14), not the upload or the previous attempt.
-    flipped = prior != "queued" and db.execute(
-        update(Run).where(Run.id == run.id, Run.status.in_(allowed_from))
-        .values(status="queued", started_at=datetime.now())
-    ).rowcount == 1
-    if flipped:
+    prior = flip_to_queued(db, run.id, allowed_from, resume_from_step=start_step)
+
+    if not prior.flipped and prior.prior_status != RunState.QUEUED:
+        raise conflict(f"Cannot start run in status: {prior.prior_status}")
+
+    if not prior.flipped:
+        if not run_queue.claim_reenqueue_slot(run.id):
+            return JSONResponse(
+                status_code=202,
+                content={"message": f"Run {run.id} already queued", "status": "queued"},
+            )
+        try:
+            run_queue.enqueue(run.id)
+        except redis.exceptions.RedisError as e:
+            logger.exception("Re-enqueue failed for already-queued run %s", run.id)
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "queue_unavailable",
+                        "message": "The run queue is unavailable right now -- please try again shortly."},
+            ) from e
+        return JSONResponse(
+            status_code=202,
+            content={"message": f"Run {run.id} already queued", "status": "queued"},
+        )
+
+    if on_flip is not None:
+        on_flip()
         db.commit()
-    else:
-        db.rollback()
-        db.refresh(run)
-        if run.status != "queued":
-            raise bad_request(f"Cannot start run in status: {run.status}")
+
     try:
-        run_queue.enqueue(run.id, start_step)
-    except Exception as e:
-        if flipped:
-            run.status, run.started_at = prior, prior_started_at
-            db.commit()
-        logger.error("Enqueue failed for run %s; status reverted to %s: %s", run.id, prior, e)
+        run_queue.enqueue(run.id)
+    except redis.exceptions.RedisError as e:
+        logger.exception("Enqueue failed for run %s; reverting the flip", run.id)
+        if not revert_queued(db, run.id, prior):
+            db.refresh(run)
+            return JSONResponse(
+                status_code=202,
+                content={"message": f"Run {run.id} {run.status}", "status": run.status},
+            )
         raise HTTPException(
             status_code=503,
             detail={"error": "queue_unavailable",
@@ -187,17 +234,24 @@ async def get_run_status(
 
 
 @router.post("/run/{run_id}/start")
-async def start_run(
+def start_run(
     run_id: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Start executing a pipeline run."""
+    """Start executing a pipeline run.
+
+    Plain ``def``, not ``async def`` (#701 run_queue.py point 11 /
+    runs.py point 10): the body has no ``await`` and, in queue mode, calls
+    the synchronous Valkey XADD. FastAPI runs a plain ``def`` route in its
+    threadpool, so a Valkey brownout costs a threadpool slot instead of
+    stalling the event loop for every other request on this pod.
+    """
 
     run = check_run_access(run_id, current_user, db)
 
-    queue_mode = run_queue.dispatch_mode() == "queue"
+    queue_mode = concurrency.dispatch_mode() == "queue"
     if run.status not in ["created", "paused"] and not (queue_mode and run.status == "queued"):
         raise bad_request(f"Cannot start run in status: {run.status}")
 
@@ -448,7 +502,7 @@ async def restart_run(
 
 
 @router.post("/run/{run_id}/retry/{step_number}")
-async def retry_step(
+def retry_step(
     run_id: str,
     step_number: int,
     background_tasks: BackgroundTasks,
@@ -465,6 +519,9 @@ async def retry_step(
     pod's filesystem. If the pod recycled since the original run those are gone
     and the resumed stage will fail -- at which point the user falls back to
     "Restart with this file".
+
+    Plain ``def`` (#701 run_queue.py point 11 / runs.py point 10): see
+    start_run's docstring.
     """
 
     run = check_run_access(run_id, current_user, db)
@@ -486,7 +543,7 @@ async def retry_step(
     if not file_path.exists():
         raise not_found("Uploaded file no longer available — please upload again.")
 
-    queue_mode = run_queue.dispatch_mode() == "queue"
+    queue_mode = concurrency.dispatch_mode() == "queue"
 
     # Admission control: a retry resumes a full pipeline and consumes the same
     # per-pod resource as a fresh start, so gate it the same way. Acquire before
@@ -523,18 +580,27 @@ async def retry_step(
         Step.run_id == run_id,
         Step.step_number >= step_number,
     ).all()
-    for s in downstream_steps:
-        s.status = "pending"
-        s.error_message = None
-        s.started_at = None
-        s.completed_at = None
-        s.duration_seconds = None
-        s.cost = None
+
+    def _reset_downstream_steps() -> None:
+        for s in downstream_steps:
+            s.status = "pending"
+            s.error_message = None
+            s.started_at = None
+            s.completed_at = None
+            s.duration_seconds = None
+            s.cost = None
 
     if queue_mode:
-        # The step resets above commit with the flip (or roll back with a lost one).
-        return _dispatch_queue(run, db, allowed_from=("failed",), start_step=step_number)
+        # Deferred to _dispatch_queue's on_flip: flip_to_queued commits its own
+        # transaction even on a lost race (#701 runs.py point 7), so staging
+        # these resets here -- unconditionally, before the flip -- would
+        # persist them on a 409 too. on_flip runs (and is committed) only
+        # once the flip has actually won.
+        return _dispatch_queue(
+            run, db, allowed_from=("failed",), start_step=step_number, on_flip=_reset_downstream_steps,
+        )
 
+    _reset_downstream_steps()
     run.status = "running"
     run.error_message = None
     run.completed_at = None
