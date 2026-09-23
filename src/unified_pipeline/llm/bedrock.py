@@ -486,13 +486,16 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
         # Fold the hint into the existing trailing user turn instead of
         # adding a new one when the shape allows it; only append a fresh
         # turn as a fallback for a shape this repair path doesn't expect
-        # (content already translated to a list, or the last turn isn't
-        # user -- e.g. a caller with a hanging assistant turn).
+        # (the last turn isn't user -- e.g. a caller with a hanging
+        # assistant turn). Content is always a str by this point:
+        # _translate_messages already raised NotImplementedError on the
+        # first call for any list (multimodal) content, so a stronger
+        # isinstance(last["content"], str) check here can never be False.
         hint = ("Your previous response was not valid JSON. Please respond with "
                 "ONLY valid JSON, no markdown fencing or explanation.")
         stronger_messages = list(messages)  # shallow copy
         last = stronger_messages[-1] if stronger_messages else None
-        if last is not None and last["role"] == "user" and isinstance(last["content"], str):
+        if last is not None and last["role"] == "user":
             stronger_messages[-1] = {**last, "content": f'{last["content"]}\n\n{hint}'}
         else:
             stronger_messages.append({"role": "user", "content": hint})
