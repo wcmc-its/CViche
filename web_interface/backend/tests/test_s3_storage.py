@@ -701,6 +701,73 @@ def test_prefix_empty_string_produces_keys_without_leading_slash():
     assert storage._s3_key("run1", "", allow_empty=True) == "runs/run1/"
 
 
+def test_delete_run_uses_key_prefix_when_store_prefix_is_empty():
+    """#791: delete_run's listing/delete prefix must route through
+    _key_prefix(), not raw self._prefix directly -- a no-prefix store must
+    query "runs/run1/", not "/runs/run1/" (which would list nothing and
+    silently delete 0 objects instead of the run's own artifacts)."""
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    stub = Stubber(storage._s3)
+    key = "runs/run1/input/cv.docx"
+    _stub_listing(stub, [key], prefix="runs/run1/")
+    stub.add_response(
+        "delete_objects",
+        {"Deleted": [{"Key": key}]},
+        expected_params=_delete_params([key]),
+    )
+    with stub:
+        assert storage.delete_run("run1") == 1
+    stub.assert_no_pending_responses()
+
+
+def test_delete_global_prefix_uses_key_prefix_when_store_prefix_is_empty():
+    """#791: delete_global_prefix must route through _key_prefix(), not raw
+    self._prefix directly -- a no-prefix store must query the caller's
+    prefix verbatim ("by-submitter/..."), not "/by-submitter/..."."""
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    stub = Stubber(storage._s3)
+    key = "by-submitter/e@x.edu/R1/manifest.json"
+    _stub_listing(stub, [key], prefix="by-submitter/e@x.edu/R1/")
+    stub.add_response(
+        "delete_objects",
+        {"Deleted": [{"Key": key}]},
+        expected_params=_delete_params([key]),
+    )
+    with stub:
+        assert storage.delete_global_prefix("by-submitter/e@x.edu/R1/") == 1
+    stub.assert_no_pending_responses()
+
+
+def test_put_global_writes_without_leading_slash_when_store_prefix_is_empty():
+    """#791: put_global must route through _key_prefix(), not raw
+    self._prefix directly -- a no-prefix store must write "manifest.json",
+    not "/manifest.json"."""
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "put_object",
+        {},
+        expected_params={"Bucket": "test-bucket", "Key": "manifest.json", "Body": b"data"},
+    )
+    with stub:
+        storage.put_global("manifest.json", b"data")
+    stub.assert_no_pending_responses()
+
+
+def test_list_files_strips_run_prefix_when_store_prefix_is_empty():
+    """#791: list_files must strip the SAME run-level prefix it queried
+    with, via _key_prefix() -- not raw self._prefix directly, which for a
+    no-prefix store would build "/runs/run1/" (leading slash), fail to
+    match the returned "runs/run1/..." keys, and silently fall through to
+    the else branch, returning the full key instead of the relative one."""
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    stub = Stubber(storage._s3)
+    _stub_listing(stub, ["runs/run1/input/cv.docx"], prefix="runs/run1/")
+    with stub:
+        assert storage.list_files("run1") == ["input/cv.docx"]
+    stub.assert_no_pending_responses()
+
+
 def test_client_has_bounded_connect_read_timeout_and_retries():
     """#791: the client must carry explicit, named timeout/retry values
     instead of inheriting boto3's own defaults, so a degraded S3 fails
