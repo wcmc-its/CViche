@@ -22,13 +22,13 @@ from datetime import datetime
 
 from sqlalchemy import select, update
 
-from app.api.runs import UPLOAD_DIR, _materialize_input_if_missing
 from app.config_loader import get_config
 from app.database import SessionLocal
 from app.logging_config import configure_logging
 from app.models import Run
 from app.pipeline import run_queue
 from app.pipeline.orchestrator import PipelineOrchestrator
+from app.services.run_service import UPLOAD_DIR, _materialize_input_if_missing
 
 logger = logging.getLogger(__name__)
 

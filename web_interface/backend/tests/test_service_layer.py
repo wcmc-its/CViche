@@ -2,6 +2,8 @@
 import os
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
+from datetime import datetime
+
 import pytest
 from fastapi import HTTPException
 
@@ -13,7 +15,9 @@ from app.services.config_service import (
     get_cost_per_1k_tokens, get_estimated_run_cost,
 )
 from app.errors import not_found, bad_request, forbidden, validation_error
-from app.models import Run, User
+from app.models import Run, Step, User
+from app.services import run_service
+from app.services.run_service import ClaimResult, claim_queued, mark_failed, flip_to_queued, revert_queued
 
 
 class TestCheckRunAccess:
@@ -99,6 +103,149 @@ class TestCheckRunAccess:
 
         result = check_run_access("ABC123", admin, db)
         assert result.id == "ABC123"
+
+
+SEEDED_QUEUE_AT = datetime(2026, 1, 1, 0, 0, 0)
+
+
+class TestQueueRunTransitions:
+    """#701: claim_queued / mark_failed / flip_to_queued / revert_queued --
+    the named DB-state transitions shared by the queue producer
+    (app/api/runs.py's _dispatch_queue), the queue worker and the queued-run
+    reconciler, replacing each hand-writing its own conditional UPDATE with
+    inline status literals (CODING STANDARDS section 1.5)."""
+
+    @pytest.fixture(autouse=True)
+    def _own_session_talks_to_test_db(self, monkeypatch):
+        # claim_queued/mark_failed open their own short session (mirroring the
+        # pre-existing worker._claim/_mark_failed pattern this replaces), so it
+        # must be pointed at the shared in-memory test DB -- the same fix
+        # test_worker.py's `wired` fixture applies for worker.SessionLocal.
+        from tests.conftest import TestingSessionLocal
+        monkeypatch.setattr(run_service, "SessionLocal", TestingSessionLocal)
+
+    def _seed_run(self, db, **overrides):
+        defaults = dict(id="QRT001", filename="cv.docx", file_type="docx",
+                         status="queued", resume_from_step=None)
+        defaults.update(overrides)
+        run = Run(**defaults)
+        db.add(run)
+        db.commit()
+        return run
+
+    def _reload(self, db, run_id="QRT001"):
+        db.expire_all()
+        return db.query(Run).filter(Run.id == run_id).one()
+
+    # --- claim_queued ---
+
+    def test_claim_queued_wins_and_returns_resume_from_step(self, db):
+        self._seed_run(db, resume_from_step=3)
+        result = claim_queued("QRT001")
+        assert result == ClaimResult(won=True, status="running", file_type="docx", resume_from_step=3)
+        assert self._reload(db).status == "running"
+
+    def test_claim_queued_loses_when_not_queued(self, db):
+        self._seed_run(db, status="running")
+        result = claim_queued("QRT001")
+        assert result.won is False
+        assert result.status == "running"
+
+    def test_claim_queued_reports_none_for_an_unknown_run(self, db):
+        result = claim_queued("NOSUCH")
+        assert result == ClaimResult(won=False, status=None, file_type=None, resume_from_step=None)
+
+    def test_claim_queued_clears_stale_error_and_completed_fields(self, db):
+        """A run being re-claimed can still carry a previous attempt's
+        error_message/completed_at; the claim clears both."""
+        self._seed_run(db, error_message="boom", completed_at=SEEDED_QUEUE_AT)
+        claim_queued("QRT001")
+        row = self._reload(db)
+        assert row.error_message is None
+        assert row.completed_at is None
+
+    # --- mark_failed ---
+
+    def test_mark_failed_transitions_and_errors_running_steps(self, db):
+        self._seed_run(db, status="running")
+        db.add(Step(run_id="QRT001", step_number=1, step_name="s1", status="running"))
+        db.add(Step(run_id="QRT001", step_number=2, step_name="s2", status="complete"))
+        db.commit()
+
+        rowcount = mark_failed("QRT001", "worker crashed", from_statuses=("running",))
+
+        assert rowcount == 1
+        row = self._reload(db)
+        assert row.status == "failed"
+        assert row.error_message == "worker crashed"
+        assert row.completed_at is not None
+        steps = {s.step_number: s.status for s in db.query(Step).filter(Step.run_id == "QRT001").all()}
+        assert steps == {1: "error", 2: "complete"}, "only the still-running step is touched"
+
+    def test_mark_failed_is_a_noop_when_status_does_not_match(self, db):
+        self._seed_run(db, status="complete")
+        rowcount = mark_failed("QRT001", "too late", from_statuses=("running", "queued"))
+        assert rowcount == 0
+        assert self._reload(db).status == "complete"
+
+    # --- flip_to_queued / revert_queued ---
+
+    def test_flip_to_queued_sets_queued_at_and_resume_from_step(self, db):
+        self._seed_run(db, status="failed", started_at=SEEDED_QUEUE_AT, resume_from_step=None)
+        result = flip_to_queued(db, "QRT001", ("failed",), resume_from_step=5)
+        assert result.flipped is True
+        assert result.prior_status == "failed"
+        row = self._reload(db)
+        assert row.status == "queued"
+        assert row.resume_from_step == 5
+        assert row.queued_at is not None
+        assert row.started_at == SEEDED_QUEUE_AT, "started_at is untouched by the flip -- only the claim re-stamps it"
+
+    def test_flip_to_queued_nulls_resume_from_step_for_a_fresh_start(self, db):
+        self._seed_run(db, status="created", resume_from_step=7)
+        flip_to_queued(db, "QRT001", ("created", "paused"), resume_from_step=None)
+        assert self._reload(db).resume_from_step is None
+
+    def test_flip_to_queued_reports_already_queued_without_writing(self, db):
+        self._seed_run(db, status="queued", resume_from_step=9)
+        result = flip_to_queued(db, "QRT001", ("created", "paused"), resume_from_step=1)
+        assert result.flipped is False
+        assert result.prior_status == "queued"
+        assert self._reload(db).resume_from_step == 9, "already-queued must not be overwritten by a second flip"
+
+    def test_flip_to_queued_does_not_flip_a_disallowed_status(self, db):
+        self._seed_run(db, status="running")
+        result = flip_to_queued(db, "QRT001", ("created", "paused"))
+        assert result.flipped is False
+        assert result.prior_status == "running"
+        assert self._reload(db).status == "running"
+
+    def test_revert_queued_restores_prior_state(self, db):
+        self._seed_run(db, status="failed", error_message="old error", started_at=SEEDED_QUEUE_AT)
+        flip = flip_to_queued(db, "QRT001", ("failed",), resume_from_step=2)
+        assert flip.flipped is True
+
+        applied = revert_queued(db, "QRT001", flip)
+
+        assert applied is True
+        row = self._reload(db)
+        assert row.status == "failed"
+        assert row.error_message == "old error"
+        assert row.queued_at is None
+
+    def test_revert_queued_is_a_noop_once_the_worker_has_claimed_it(self, db):
+        """#701 runs.py point 1: a revert must never clobber a claim that
+        landed between the flip and the revert -- the follow-up XADD can time
+        out client-side after the server already applied it (probed)."""
+        self._seed_run(db, status="failed")
+        flip = flip_to_queued(db, "QRT001", ("failed",))
+        assert flip.flipped is True
+        claim_queued("QRT001")  # the worker wins the claim: queued -> running
+
+        applied = revert_queued(db, "QRT001", flip)
+
+        assert applied is False
+        assert self._reload(db).status == "running", "the worker's claim must survive the revert"
 
 
 class TestProvisionUser:

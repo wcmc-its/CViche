@@ -330,6 +330,50 @@ def test_client_build_is_locked_against_concurrent_first_use(monkeypatch):
         run_queue._reset_client()
 
 
+# --- WorkToken (#701 runs.py point 3: pure wake-up) -------------------------
+
+def test_work_token_from_entry_accepts_a_well_formed_run_id():
+    token = run_queue.WorkToken.from_entry("1-1", {"run_id": "ABC123"})
+    assert token.entry_id == "1-1"
+    assert token.run_id == "ABC123"
+
+
+def test_work_token_from_entry_ignores_a_legacy_start_step_field():
+    """An old-format entry (enqueued by a not-yet-redeployed producer) still
+    wakes the worker: start_step rides along but is not part of WorkToken --
+    the DB's resume_from_step is the only source of the resume point now."""
+    token = run_queue.WorkToken.from_entry("1-1", {"run_id": "ABC123", "start_step": "3"})
+    assert token == run_queue.WorkToken(entry_id="1-1", run_id="ABC123")
+    assert not hasattr(token, "start_step")
+
+
+@pytest.mark.parametrize("fields", [
+    {},
+    {"run_id": ""},
+    {"run_id": "../../etc/passwd"},
+    {"run_id": "has a space"},
+    {"run_id": "a" * 65},  # one past RUN_ID_RE's 64-char cap
+])
+def test_work_token_from_entry_rejects_a_malformed_run_id(fields):
+    with pytest.raises(run_queue.BadToken) as exc:
+        run_queue.WorkToken.from_entry("1-1", fields)
+    assert exc.value.entry_id == "1-1"
+    assert exc.value.fields == fields
+
+
+def test_work_token_is_frozen():
+    token = run_queue.WorkToken.from_entry("1-1", {"run_id": "ABC123"})
+    with pytest.raises(AttributeError):
+        token.run_id = "OTHER1"
+
+
+def test_work_token_run_id_pattern_is_artifact_service_s_single_definition():
+    """CODING STANDARDS section 1.5: one definition of "what a run_id may
+    look like", reused rather than a second pattern hand-written here."""
+    from app.services.artifact_service import RUN_ID_RE
+    assert run_queue.RUN_ID_RE is RUN_ID_RE
+
+
 # --- API producers ---------------------------------------------------------
 
 def _seed(db, status="created", run_id="RUNQ01"):

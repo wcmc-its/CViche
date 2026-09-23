@@ -163,7 +163,7 @@ def download_input_file(
     """Download the ORIGINAL uploaded CV, named as the user uploaded it.
 
     The source is retained in durable storage at input/<run_id>.<ext> because
-    restart/retry re-materialize it (see runs._materialize_input_if_missing),
+    restart/retry re-materialize it (see run_service._materialize_input_if_missing),
     but it was only ever read internally — there was no way to get the original
     file back out. Same owner-or-admin gate as the outputs download.
     """

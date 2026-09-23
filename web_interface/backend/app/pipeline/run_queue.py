@@ -8,12 +8,15 @@ jobs whenever Valkey is down, the opposite of its purpose. Every operation
 here is required and loud: no URL raises at first use, and a failed XADD
 propagates so the producer can revert the run's status and answer 503.
 
-A message is a work token (``run_id`` + optional ``start_step``); the DB row
-is the truth and the worker's conditional claim (``app/worker.py``) decides
-whether a delivered token may execute. Delivery is at-least-once: an entry is
-XACKed (and XDELed -- see ``ack``) after the run finishes (success or handled
-failure), so only a crash leaves it pending for XAUTOCLAIM to hand to another
-worker.
+A message is a work token: a pure wake-up naming only ``run_id`` (see
+``WorkToken`` below -- an earlier version also carried ``start_step``, but a
+redelivered or stale token could then replay an old, already-superseded step;
+``runs.resume_from_step``, set by the flip that queued the run, is the only
+source of the resume point now). The DB row is the truth and the worker's
+conditional claim (``app/worker.py``) decides whether a delivered token may
+execute. Delivery is at-least-once: an entry is XACKed (and XDELed -- see
+``ack``) after the run finishes (success or handled failure), so only a crash
+leaves it pending for XAUTOCLAIM to hand to another worker.
 
 Every key this module builds carries the ``{cviche:runs}`` hash tag, so all of
 them hash to the same Valkey Cluster slot -- ElastiCache Serverless enforces
@@ -22,14 +25,52 @@ cluster-mode slot rules, and a MULTI/EXEC (``ack``, ``dead_letter``,
 """
 import logging
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TypedDict
 
 import redis
 
 from app.config_loader import get_config
+from app.services.artifact_service import RUN_ID_RE
 
 logger = logging.getLogger(__name__)
+
+
+class BadToken(Exception):
+    """Raised by ``WorkToken.from_entry`` for a malformed queue entry: a
+    missing, empty, or wrong-shape ``run_id``. The caller (``worker.handle``)
+    ACKs it without a DB claim -- an entry that names no valid run_id names no
+    run to skip."""
+
+    def __init__(self, entry_id: str, fields: dict[str, str]) -> None:
+        self.entry_id = entry_id
+        self.fields = fields
+        super().__init__(f"bad work token entry_id={entry_id!r} fields={fields!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class WorkToken:
+    """A validated wake-up: which run to execute next. Pure wake-up by design
+    (mrj4001 review, runs.py point 3) -- see the module docstring for why
+    ``start_step`` does not live here."""
+    entry_id: str
+    run_id: str
+
+    @classmethod
+    def from_entry(cls, entry_id: str, fields: dict[str, str]) -> WorkToken:
+        """Validate one XREADGROUP/XAUTOCLAIM entry into a WorkToken, or raise
+        BadToken. ``run_id`` must match ``artifact_service.RUN_ID_RE`` -- the
+        same shape the HTTP layer already requires for a path segment (one
+        definition of "what a run_id may look like", CODING STANDARDS section
+        1.5), reused rather than a second pattern defined here. An
+        old-format entry's ``start_step`` field, if present, is ignored
+        rather than rejected, so a message enqueued by a not-yet-redeployed
+        producer still wakes the worker correctly."""
+        run_id = fields.get("run_id", "")
+        if not run_id or not RUN_ID_RE.match(run_id):
+            raise BadToken(entry_id, fields)
+        return cls(entry_id=entry_id, run_id=run_id)
 
 STREAM = "{cviche:runs}"
 GROUP = "cviche-workers"

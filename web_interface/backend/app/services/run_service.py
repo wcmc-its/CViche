@@ -1,10 +1,14 @@
 """Run-related service functions."""
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
-from app.models import Run, Step, User, Log, LLMUsage, Feedback, RunMetrics
+from app.database import SessionLocal
+from app.models import Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics
 from app.errors import not_found, forbidden
 from app.config_loader import get_config
 from app.storage import get_storage
@@ -22,6 +26,48 @@ DEFAULT_STALE_RUN_MINUTES = 60
 # storage. Generous so a just-uploaded run that is about to be started is never
 # swept.
 DEFAULT_ORPHAN_REAP_HOURS = 24
+
+# Where an upload's pod-local copy lives. Owned here (services/), not
+# app/api/upload.py, so the worker process (#701) can resolve a run's input
+# file without importing anything under app.api -- app.api.runs pulls in
+# fastapi, app.auth and app.rate_limiter, none of which a queue worker should
+# ever need. app.api.upload imports this constant rather than defining its
+# own (CODING STANDARDS section 1.5: one definition of a shared path).
+UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> None:
+    """Re-fetch a run's original upload from durable storage if the pod-local
+    copy is gone (e.g. after a pod recycle), so start/restart/retry survive.
+    No-op if the local file already exists or storage has no copy -- the caller
+    keeps its own missing-file handling.
+    """
+    if dest.exists():
+        return
+    try:
+        data = get_storage().get_file(run_id, f"input/{run_id}.{file_type}")
+    except FileNotFoundError as e:
+        # The run genuinely has no durable copy (e.g. a legacy run predating the
+        # S3 archive). Expected; the caller keeps its own missing-file handling.
+        logger.info("No durable input copy for run %s (%s); using local only", run_id, e)
+        return
+    except Exception as e:
+        # Anything other than a missing object (S3 AccessDenied, KMS, network)
+        # means durable storage is reachable-but-failing. Surface it at WARNING
+        # so a real outage isn't silently misread as "file simply not there".
+        logger.warning(
+            "Durable input lookup FAILED for run %s (%s); using local copy only. "
+            "May indicate an S3/IAM/KMS problem rather than a missing object.",
+            run_id, e,
+        )
+        return
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        logger.info("Re-materialized input for run %s from storage (%d bytes)", run_id, len(data))
+    except Exception as e:
+        logger.warning("Failed to write re-materialized input for run %s: %s", run_id, e)
 
 
 def _mark_run_failed(run: Run, db: Session, now: datetime) -> None:
@@ -391,11 +437,9 @@ def _schedule_auto_retry(run: Run, db: Session, start_step_number: int) -> None:
     (delay the relaunch by auto_retry_backoff_seconds()) so a persistently
     failing run cannot tight-loop.
     """
-    # Resolve the original upload path the same way runs.py start/retry do. Done
-    # via lazy import to avoid a circular import with app.api.runs at module load.
+    # Resolve the original upload path the same way runs.py start/retry do.
+    # Both now live in this module (#701), so no lazy/circular import is needed.
     try:
-        from app.api.runs import _materialize_input_if_missing, UPLOAD_DIR
-
         file_path = UPLOAD_DIR / f"{run.id}.{run.file_type}"
         _materialize_input_if_missing(run.id, run.file_type, file_path)
     except Exception:
@@ -435,3 +479,171 @@ def check_run_access(run_id: str, current_user: User, db: Session, *, eager=()) 
     if current_user.role != "admin" and run.user_id != current_user.id:
         raise forbidden("Access denied")
     return run
+
+
+# ============================================================
+# Queue-mode run transitions (#701)
+#
+# Named DB-state transitions shared by the queue producer (app/api/runs.py's
+# _dispatch_queue), the queue worker (app/worker.py) and the queued-run
+# reconciler, in place of each hand-writing its own conditional UPDATE with
+# inline status literals (CODING STANDARDS section 1.5: one definition of a
+# shared vocabulary). None of these commit a caller-supplied Session's
+# unrelated pending changes for it -- claim_queued and mark_failed open and
+# close their own short session (mirroring the pre-existing worker._claim /
+# worker._mark_failed they replace), while flip_to_queued and revert_queued
+# take the request's Session so they share its transaction with the route's
+# other reads.
+# ============================================================
+
+@dataclass(frozen=True, slots=True)
+class ClaimResult:
+    """Outcome of claim_queued: whether this call won the conditional claim,
+    and the row's state right after -- populated whether the claim was won or
+    lost, so a losing caller can still log what it saw."""
+    won: bool
+    status: str | None
+    file_type: str | None
+    resume_from_step: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class FlipResult:
+    """Outcome of flip_to_queued: whether the flip applied, plus the exact
+    pre-flip values (read under the same row lock as the flip) a caller needs
+    to undo it with revert_queued if the follow-up XADD then fails."""
+    flipped: bool
+    prior_status: str
+    prior_started_at: datetime | None
+    prior_error_message: str | None
+    prior_completed_at: datetime | None
+    prior_queued_at: datetime | None
+
+
+def claim_queued(run_id: str) -> ClaimResult:
+    """The one conditional UPDATE that decides a queue worker's ownership of a
+    run: queued -> running. Own short session, committed at once so no lock
+    spans the run itself -- mirrors the worker's pre-existing ``_claim``,
+    moved here so the worker no longer needs its own DB-transition code next
+    to the reconciler's and the routes' (section 1.5).
+
+    Returns ``resume_from_step`` off the row as it stands right after the
+    attempt, so the caller resumes from the DB's recorded step rather than
+    from anything carried on the Valkey token itself: the token is a pure
+    wake-up now, so a redelivered or stale one can no longer replay an old
+    start_step (mrj4001 review, runs.py point 3).
+    """
+    db = SessionLocal()
+    try:
+        won = db.execute(
+            update(Run)
+            .where(Run.id == run_id, Run.status == RunState.QUEUED)
+            .values(status=RunState.RUNNING, started_at=datetime.now(),
+                    error_message=None, completed_at=None)
+        ).rowcount == 1
+        db.commit()
+        row = db.execute(
+            select(Run.status, Run.file_type, Run.resume_from_step).where(Run.id == run_id)
+        ).one_or_none()
+        return ClaimResult(
+            won=won,
+            status=row[0] if row else None,
+            file_type=row[1] if row else None,
+            resume_from_step=row[2] if row else None,
+        )
+    finally:
+        db.close()
+
+
+def mark_failed(run_id: str, message: str, *, from_statuses: tuple[str, ...]) -> int:
+    """Named failed-transition for the queue worker (dead-letter, run
+    watchdog) and the queued-run reconciler, replacing worker.py's own
+    hand-written UPDATE (section 1.5). Own short session, matching
+    claim_queued.
+
+    Also errors out any Step rows still "running" for this run -- the same
+    cleanup ``_mark_run_failed`` (the startup reaper's ORM path, above) does
+    for an orphaned run -- so a dead-lettered or watchdog-killed run never
+    leaves a phantom "running" step in the UI. Returns the Run UPDATE's
+    rowcount, so a caller can tell a lost race (0: something else already
+    moved the row) from a real transition (1).
+    """
+    db = SessionLocal()
+    try:
+        now = datetime.now()
+        rowcount = db.execute(
+            update(Run)
+            .where(Run.id == run_id, Run.status.in_(from_statuses))
+            .values(status=RunState.FAILED, error_message=message, completed_at=now)
+        ).rowcount
+        if rowcount:
+            db.execute(
+                update(Step)
+                .where(Step.run_id == run_id, Step.status == "running")
+                .values(status="error", completed_at=now)
+            )
+        db.commit()
+        return rowcount
+    finally:
+        db.close()
+
+
+def flip_to_queued(
+    db: Session, run_id: str, allowed_from: tuple[str, ...], *, resume_from_step: int | None = None,
+) -> FlipResult:
+    """Conditionally flip a run to "queued". Reads the pre-flip state under a
+    row lock in the SAME transaction as the flip (``SELECT ... FOR UPDATE``),
+    not from an ORM row loaded earlier in the request -- a read from earlier
+    can describe a row the UPDATE no longer matches if it changed in between
+    (mrj4001 review, runs.py point 4). No ``RETURNING``: MariaDB's UPDATE does
+    not support it (probed against the mysql/mariadb SQLAlchemy dialects --
+    ``update_returning`` is False for both), so the locked read is a separate
+    statement rather than ``.returning()``.
+
+    ``resume_from_step`` is written unconditionally, including ``None`` --
+    retry_step passes the step to resume from; start_run passes ``None`` so a
+    fresh start always clears a stale resume point left by an earlier retry.
+
+    Already-"queued" is reported as ``flipped=False`` without writing the row
+    -- the caller's re-enqueue path (``run_queue.claim_reenqueue_slot``)
+    handles that case; this never issues a second flip for it.
+    """
+    prior_status, prior_started_at, prior_error_message, prior_completed_at, prior_queued_at = db.execute(
+        select(Run.status, Run.started_at, Run.error_message, Run.completed_at, Run.queued_at)
+        .where(Run.id == run_id)
+        .with_for_update()
+    ).one()
+    if prior_status == RunState.QUEUED:
+        db.commit()  # release the row lock; nothing to flip
+        return FlipResult(False, prior_status, prior_started_at, prior_error_message,
+                           prior_completed_at, prior_queued_at)
+    rowcount = db.execute(
+        update(Run)
+        .where(Run.id == run_id, Run.status.in_(allowed_from))
+        .values(status=RunState.QUEUED, queued_at=datetime.now(), error_message=None,
+                completed_at=None, resume_from_step=resume_from_step)
+    ).rowcount
+    db.commit()
+    return FlipResult(rowcount == 1, prior_status, prior_started_at, prior_error_message,
+                       prior_completed_at, prior_queued_at)
+
+
+def revert_queued(db: Session, run_id: str, prior: FlipResult) -> bool:
+    """Undo a flip_to_queued when the follow-up XADD then failed. Guarded
+    ``WHERE status='queued'`` (mrj4001 review, runs.py point 1) so a revert
+    can never clobber a claim or cancel that landed between the flip and this
+    call: if the worker already won queued->running, or the run was
+    cancelled, this is a no-op and the caller should report the run's live
+    status instead of a stale "reverted to prior" one.
+
+    Returns True if the revert actually applied.
+    """
+    rowcount = db.execute(
+        update(Run)
+        .where(Run.id == run_id, Run.status == RunState.QUEUED)
+        .values(status=prior.prior_status, started_at=prior.prior_started_at,
+                error_message=prior.prior_error_message, completed_at=prior.prior_completed_at,
+                queued_at=prior.prior_queued_at)
+    ).rowcount
+    db.commit()
+    return rowcount == 1

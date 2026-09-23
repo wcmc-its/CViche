@@ -16,8 +16,8 @@ from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency, run_queue
 from app.auth import get_current_user
-from app.api.upload import UPLOAD_DIR, create_run_archive, commit_run_or_compensate
-from app.services.run_service import check_run_access
+from app.api.upload import create_run_archive, commit_run_or_compensate
+from app.services.run_service import check_run_access, UPLOAD_DIR, _materialize_input_if_missing
 from app.rate_limiter import check_rate_limit
 from app.errors import not_found, bad_request
 from app.storage import get_storage
@@ -42,39 +42,6 @@ def _run_duration_seconds(run) -> int | None:
         # Use datetime.now() to match server_default=func.now() (local time).
         return max(0, int((datetime.now() - run.started_at).total_seconds()))
     return None
-
-
-def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> None:
-    """Re-fetch a run's original upload from durable storage if the pod-local
-    copy is gone (e.g. after a pod recycle), so start/restart/retry survive.
-    No-op if the local file already exists or storage has no copy — the caller
-    keeps its own missing-file handling.
-    """
-    if dest.exists():
-        return
-    try:
-        data = get_storage().get_file(run_id, f"input/{run_id}.{file_type}")
-    except FileNotFoundError as e:
-        # The run genuinely has no durable copy (e.g. a legacy run predating the
-        # S3 archive). Expected; the caller keeps its own missing-file handling.
-        logger.info("No durable input copy for run %s (%s); using local only", run_id, e)
-        return
-    except Exception as e:
-        # Anything other than a missing object (S3 AccessDenied, KMS, network)
-        # means durable storage is reachable-but-failing. Surface it at WARNING
-        # so a real outage isn't silently misread as "file simply not there".
-        logger.warning(
-            "Durable input lookup FAILED for run %s (%s); using local copy only. "
-            "May indicate an S3/IAM/KMS problem rather than a missing object.",
-            run_id, e,
-        )
-        return
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
-        logger.info("Re-materialized input for run %s from storage (%d bytes)", run_id, len(data))
-    except Exception as e:
-        logger.warning("Failed to write re-materialized input for run %s: %s", run_id, e)
 
 
 def _dispatch_queue(

@@ -33,6 +33,7 @@ from app.services.config_service import (
 from app.errors import bad_request, internal_error
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
+from app.services.run_service import UPLOAD_DIR
 from app.services.template_warning import detect_wcm_template
 
 logger = logging.getLogger(__name__)
@@ -116,10 +117,6 @@ class EstimateResponse(BaseModel):
     filename: str
     file_size_kb: float
     pricing_model: str
-
-# Upload directory
-UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
