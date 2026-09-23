@@ -707,9 +707,10 @@ class TestUploadValidation:
         assert "too large" in response.json()["detail"]["message"].lower()
 
     def test_oversized_file_message_readable_under_1mb_cap(self, client, db, seed_simple_mode):
-        """A cap under 1 MB used to render as 'over 0 MB' (integer MB
-        division truncates any sub-1MB cap to 0). It must fall back to a KB
-        reading instead."""
+        """A cap under 1 MB is test-only (config_service always builds a
+        whole-MB cap in production, config_service.py:28) -- so the message
+        need only stay a readable "too large" rejection at any patched cap,
+        not render a KB/bytes breakdown that production code never reaches."""
         self._create_auth_user(client, db)
         docx_header = b"PK\x03\x04"
         with patch("app.api.upload.MAX_UPLOAD_SIZE", 100):  # 100 bytes < 1 MB
@@ -718,9 +719,8 @@ class TestUploadValidation:
                 "/api/upload",
                 files={"file": ("big.docx", big_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
             )
-        message = response.json()["detail"]["message"]
-        assert "0 MB" not in message
-        assert "100 bytes" in message  # a sub-1KB cap reads out in bytes
+        assert response.status_code == 400
+        assert "too large" in response.json()["detail"]["message"].lower()
 
     def test_estimate_oversized_file_rejected(self, client, db, seed_simple_mode):
         """#793: /estimate's size check runs through the same _read_bounded
@@ -827,7 +827,9 @@ class TestUploadValidation:
         text_char_count = 5000 is gone (§5.4) -- extraction failure
         (`_extract_text` returning None) now logs a WARNING before falling
         back to the same fixed guess, instead of failing open with no
-        record of it anywhere."""
+        record of it anywhere. CODING_STANDARDS §4.7: the warning does NOT
+        carry the raw filename (CV filenames usually carry the owner's
+        name) -- the request id already ties it back to the request."""
         self._create_auth_user(client, db)
         docx_content = b"PK\x03\x04dummy-docx-bytes"
         with patch("app.api.upload._validate_docx_magic", return_value=True), \
@@ -841,6 +843,7 @@ class TestUploadValidation:
         assert response.json()["text_characters"] == 5000
         fallback_logs = [r for r in caplog.records if "fixed char-count guess" in r.getMessage()]
         assert len(fallback_logs) == 1
+        assert "resume.docx" not in fallback_logs[0].getMessage()
 
     def test_estimate_respects_rate_limit(self, client, db, seed_simple_mode):
         """#795: /estimate is rate-limited the same way /upload is --

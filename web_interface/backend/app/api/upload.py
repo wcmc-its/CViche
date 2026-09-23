@@ -129,15 +129,11 @@ async def _read_bounded(file: UploadFile, max_size: int) -> bytes:
             break
         total += len(chunk)
         if total > max_size:
-            # A plain `// (1024*1024)` reads as "over 0 MB" for any cap under
-            # 1 MB (e.g. a test's patched MAX_UPLOAD_SIZE) -- fall back to KB
-            # so the message stays readable at any cap size.
-            size_str = (
-                f"{max_size / (1024 * 1024):.1f} MB" if max_size >= 1024 * 1024
-                else f"{max_size // 1024} KB" if max_size >= 1024
-                else f"{max_size} bytes"
-            )
-            raise bad_request(f"File too large (over {size_str}). Maximum size is {size_str}.")
+            # Production caps are always a whole number of MB (config_service
+            # builds MAX_UPLOAD_SIZE as int(CVICHE_MAX_UPLOAD_MB)*1024*1024),
+            # so the cap is always printed in whole MB -- no KB/bytes
+            # fallback for a sub-1MB cap, which only a test ever patches in.
+            raise bad_request(f"File too large. Maximum size is {max_size // (1024 * 1024)} MB.")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -632,8 +628,10 @@ async def estimate_processing(
         # this used to be a bare `except Exception` that set 5000 with no
         # log line at all. The fallback value itself is unchanged; see the
         # T-UP report for the residual gap (EstimateResponse still has no
-        # field to signal it).
-        logger.warning("Estimate falling back to a fixed char-count guess (filename=%s)", file.filename)
+        # field to signal it). No filename here (CODING_STANDARDS §4.7): CV
+        # filenames usually carry the owner's name, and every log line
+        # already carries the request id via RequestIDFilter.
+        logger.warning("Estimate falling back to a fixed char-count guess")
         text_char_count = _ESTIMATE_FALLBACK_CHAR_COUNT
     else:
         text_char_count = len(extracted)
