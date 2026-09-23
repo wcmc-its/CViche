@@ -4,7 +4,27 @@ import re
 from abc import ABC, abstractmethod
 
 
-class StorageKeyExists(Exception):
+class StorageError(Exception):
+    """Base for storage-layer faults a `RunStorage` caller may catch.
+
+    Added per PR #779 review (base.py item 6, #790): before this, the only
+    defined exception was StorageKeyExists, and every other fault was either
+    a bare builtin (get_file's FileNotFoundError) or a backend-specific type
+    (botocore ClientError, OSError) leaking straight through the interface.
+    """
+
+
+class StorageKeyNotFound(StorageError, FileNotFoundError):
+    """The requested object does not exist.
+
+    Subclasses FileNotFoundError (not just StorageError) so the callers that
+    already catch FileNotFoundError today -- app/api/upload.py,
+    app/api/runs.py, app/api/steps.py, app/services/run_service.py -- keep
+    matching it unchanged; #790's acceptance criterion 3.
+    """
+
+
+class StorageKeyExists(StorageError):
     """Raised by put_file_exclusive when the target key already has an object.
 
     Signals a run-id collision to the caller so it can regenerate the id and
@@ -199,7 +219,8 @@ class RunStorage(ABC):
             File contents as bytes.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
+            StorageKeyNotFound: If the file does not exist (subclasses
+                FileNotFoundError; catching either works, #790).
         """
         ...
 

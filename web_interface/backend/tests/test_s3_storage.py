@@ -1,7 +1,11 @@
 """S3RunStorage.get_file error mapping.
 
-A genuinely-absent object (NoSuchKey / 404 / NoSuchBucket) must raise
-FileNotFoundError so callers treat it as an expected miss and fall back. A 403
+A genuinely-absent object (NoSuchKey / 404) must raise StorageKeyNotFound
+(which subclasses FileNotFoundError, so callers that catch FileNotFoundError
+keep working) so callers treat it as an expected miss and fall back.
+NoSuchBucket must NOT be treated as a missing object -- a missing or
+misconfigured bucket is an infrastructure fault, and converting it to
+FileNotFoundError would hide an outage as a user-facing 404 (#790). A 403
 AccessDenied must PROPAGATE -- it is a real IAM/KMS fault, not a missing file,
 and masking it as "missing" would hide an outage (and is also what a missing
 key looks like without s3:ListBucket -- that wants an IAM fix, not a code one).
@@ -16,7 +20,7 @@ from botocore.stub import Stubber
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 
-from app.storage.base import StorageKeyExists
+from app.storage.base import StorageKeyExists, StorageKeyNotFound
 from app.storage.s3_storage import S3RunStorage, StorageDeleteError
 
 
@@ -54,6 +58,43 @@ def test_get_file_accessdenied_propagates():
     stub.add_client_error("get_object", service_error_code="AccessDenied", http_status_code=403)
     with stub, pytest.raises(ClientError):
         storage.get_file("run1", "input/cv.docx")
+
+
+def test_get_file_nosuchbucket_does_not_become_filenotfound():
+    """#790: a missing/misconfigured bucket is an infrastructure fault, not
+    a missing artifact. Before this fix, NoSuchBucket was in the same
+    not-found tuple as NoSuchKey/404 and got reported as FileNotFoundError,
+    which every caller (app/api/steps.py, app/api/runs.py) turns into a
+    user-facing 404 instead of logging an outage."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("get_object", service_error_code="NoSuchBucket", http_status_code=404)
+    with stub, pytest.raises(ClientError) as ei:
+        storage.get_file("run1", "input/cv.docx")
+    assert not isinstance(ei.value, FileNotFoundError)
+
+
+def test_get_file_nosuchkey_raises_storagekeynotfound_not_bare_filenotfound():
+    """#790 acceptance criterion 3: the concrete exception is
+    StorageKeyNotFound (a FileNotFoundError subclass), not a bare
+    FileNotFoundError -- callers that want to distinguish a storage-contract
+    miss from an unrelated FileNotFoundError elsewhere in the call stack
+    can now do so."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("get_object", service_error_code="NoSuchKey", http_status_code=404)
+    with stub, pytest.raises(StorageKeyNotFound):
+        storage.get_file("run1", "input/cv.docx")
+
+
+def test_exists_nosuchbucket_propagates_not_false():
+    """#790, the exists() half: a NoSuchBucket-shaped ClientError must not
+    be swallowed into a plain False the way a genuine 404 is."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("head_object", service_error_code="NoSuchBucket", http_status_code=404)
+    with stub, pytest.raises(ClientError):
+        storage.exists("run1", "input/cv.docx")
 
 
 def test_put_file_exclusive_sends_if_none_match_and_maps_412(monkeypatch):
@@ -626,3 +667,84 @@ def test_aws_region_takes_precedence_over_default_region(monkeypatch):
     monkeypatch.setenv("AWS_REGION", "us-west-2")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
     assert _storage()._s3.meta.region_name == "us-west-2"
+
+
+# ---------------------------------------------------------------------------
+# #791: explicit prefix handling and bounded timeouts/retries
+# ---------------------------------------------------------------------------
+
+def test_prefix_empty_string_is_preserved_not_replaced_by_default(monkeypatch):
+    """prefix="" is a real, distinct choice (an explicit no-prefix store) and
+    must not be silently replaced by CVICHE_S3_PREFIX's default -- unlike
+    self._bucket, which deliberately keeps `or` for the #109 guard."""
+    monkeypatch.setenv("CVICHE_S3_PREFIX", "should-not-be-used")
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    assert storage._prefix == ""
+
+
+def test_prefix_defaults_when_omitted(monkeypatch):
+    """prefix=None (the default, distinct from "") still resolves from
+    CVICHE_S3_PREFIX -- only an explicit "" is preserved as empty."""
+    monkeypatch.setenv("CVICHE_S3_PREFIX", "cviche-env-value")
+    storage = S3RunStorage(bucket="test-bucket")
+    assert storage._prefix == "cviche-env-value"
+
+
+def test_prefix_empty_string_produces_keys_without_leading_slash():
+    """#791 skeptic finding: naively joining f"{prefix}/runs/..." with an
+    empty prefix produces a key with a leading "/". Pinned choice: an empty
+    prefix means "no prefix segment", so the key is plain "runs/...", not
+    "/runs/...", matching what a caller who deliberately chose no-prefix
+    would expect."""
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    assert storage._s3_key("run1", "input/cv.docx") == "runs/run1/input/cv.docx"
+    assert storage._s3_key("run1", "", allow_empty=True) == "runs/run1/"
+
+
+def test_client_has_bounded_connect_read_timeout_and_retries():
+    """#791: the client must carry explicit, named timeout/retry values
+    instead of inheriting boto3's own defaults, so a degraded S3 fails
+    within a stated bound instead of compounding silently across the
+    upload endpoint's up-to-10 sequential put_object calls."""
+    from app.storage.s3_storage import S3_CONNECT_TIMEOUT_S, S3_MAX_ATTEMPTS, S3_READ_TIMEOUT_S
+
+    config = _storage()._s3.meta.config
+    assert config.connect_timeout == S3_CONNECT_TIMEOUT_S
+    assert config.read_timeout == S3_READ_TIMEOUT_S
+    assert config.retries["mode"] == "standard"
+    # botocore normalizes the "standard" mode's max_attempts (a retry count)
+    # into total_max_attempts (max_attempts + 1, the initial attempt
+    # included) on the built client's own config -- confirmed empirically
+    # against the installed botocore, not assumed.
+    assert config.retries["total_max_attempts"] == S3_MAX_ATTEMPTS + 1
+
+
+# ---------------------------------------------------------------------------
+# #792: LocalRunStorage.list_files literal-prefix parity with S3
+# ---------------------------------------------------------------------------
+
+def test_local_list_files_matches_s3_literal_prefix_semantics(tmp_path):
+    """S3's Prefix is a literal byte prefix, not a directory match: a
+    request for "input/man" returns only keys whose string starts with
+    exactly that, never a sibling directory's "input/deep/manifest.json".
+    LocalRunStorage's partial-path fallback used to glob recursively by
+    basename and returned that sibling too (#792). Covers the three cases
+    #792's acceptance criterion names: an existing-directory prefix, an
+    absent prefix, and a partial-path prefix naming no directory."""
+    from app.storage.local_storage import LocalRunStorage
+
+    local = LocalRunStorage(base_dir=str(tmp_path))
+    local.put_file("run1", "input/deep/manifest.json", b"{}")
+    local.put_file("run1", "input/manual.txt", b"x")
+    local.put_file("run1", "input/cv.docx", b"y")
+
+    # existing-directory prefix
+    assert local.list_files("run1", "input/deep/") == ["input/deep/manifest.json"]
+    # absent prefix -- no directory and no file starts with it
+    assert local.list_files("run1", "does/not/exist") == []
+    # partial-path prefix naming no directory: literal byte-prefix match,
+    # the same as S3's Prefix would return (verified against the real
+    # S3RunStorage's Prefix-filtered listing behaviour in
+    # test_list_files_prefix_filter_is_sent_to_s3 above, which sends the
+    # caller's prefix to S3 unmodified for server-side literal matching).
+    assert local.list_files("run1", "input/man") == ["input/manual.txt"]

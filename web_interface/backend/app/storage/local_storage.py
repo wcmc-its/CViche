@@ -6,15 +6,43 @@ Used in development. Reads/writes to a configurable base directory
 
 import os
 import shutil
+import tempfile
 from pathlib import Path
 
 from app.storage.base import (
     RunStorage,
     StorageKeyExists,
+    StorageKeyNotFound,
     validate_key,
     validate_run_id,
     validate_run_key,
 )
+
+
+def _atomic_write(path: Path, data: bytes) -> None:
+    """Write `data` to `path` via a temp file in the same directory + os.replace.
+
+    put_file/put_global used to end in path.write_bytes(data): a process
+    interrupted mid-write left a truncated file readable under the final
+    key, which a later read consumed as if it were complete (#787). The temp
+    file lives in path.parent so os.replace is a same-filesystem rename, not
+    a copy, and is cleaned up if the write itself fails. put_file_exclusive
+    is untouched: open(path, "xb") is already atomic and its collision
+    semantics (StorageKeyExists on a pre-existing key) must not change.
+    """
+    fd, tmp_name = tempfile.mkstemp(
+        dir=path.parent, prefix=f"{path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 class LocalRunStorage(RunStorage):
@@ -88,7 +116,7 @@ class LocalRunStorage(RunStorage):
     def put_file(self, run_id: str, key: str, data: bytes) -> None:
         path = self._resolve(run_id, key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        _atomic_write(path, data)
 
     def put_file_exclusive(self, run_id: str, key: str, data: bytes) -> None:
         path = self._resolve(run_id, key)
@@ -103,7 +131,7 @@ class LocalRunStorage(RunStorage):
         validate_key(key)
         path = self._safe_path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        _atomic_write(path, data)
 
     def _delete_tree(self, path: Path) -> int:
         """Recursively delete a directory tree, returning the file count removed.
@@ -136,7 +164,7 @@ class LocalRunStorage(RunStorage):
     def get_file(self, run_id: str, key: str) -> bytes:
         path = self._resolve(run_id, key)
         if not path.exists():
-            raise FileNotFoundError(f"No such file: {run_id}/{key}")
+            raise StorageKeyNotFound(f"No such file: {run_id}/{key}")
         return path.read_bytes()
 
     def list_files(self, run_id: str, prefix: str = "") -> list[str]:
@@ -147,24 +175,26 @@ class LocalRunStorage(RunStorage):
 
         # Glob for all files under the prefix
         search_dir = self._safe_path(run_id, prefix) if prefix else run_dir
-        if not search_dir.exists():
-            # prefix might be a partial path — glob from parent
-            parent = search_dir.parent
-            if not parent.exists():
-                return []
-            pattern = search_dir.name + "*"
-            matches = []
-            for path in parent.rglob(pattern):
+        if search_dir.exists():
+            results = []
+            for path in search_dir.rglob("*"):
                 if path.is_file():
-                    # Return key relative to run_dir
-                    matches.append(str(path.relative_to(run_dir)))
-            return sorted(matches)
+                    results.append(str(path.relative_to(run_dir)))
+            return sorted(results)
 
-        results = []
-        for path in search_dir.rglob("*"):
+        # `prefix` names no actual directory -- it's a partial path
+        # component (e.g. "input/man"), not a directory boundary. Match it
+        # literally against the full relative key, the same as S3's Prefix
+        # (a byte prefix, not a directory match): globbing by basename
+        # instead returned "input/deep/manifest.json" for prefix
+        # "input/man", which S3's literal Prefix would not (#792).
+        matches = []
+        for path in run_dir.rglob("*"):
             if path.is_file():
-                results.append(str(path.relative_to(run_dir)))
-        return sorted(results)
+                rel = str(path.relative_to(run_dir))
+                if rel.startswith(prefix):
+                    matches.append(rel)
+        return sorted(matches)
 
     def get_download_url(
         self,

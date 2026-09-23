@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
 import re
 import threading
 from datetime import datetime
@@ -135,6 +136,76 @@ def test_local_put_file_exclusive_is_atomic_under_concurrency(tmp_path):
     assert losers == _RACING_WRITERS - 1
     # And the stored bytes are the winner's, whole -- not a mix of two writers.
     assert storage.get_file("RACE01", "input/cv.docx") == winners[0]
+
+
+# --- (a2) put_file / put_global atomic-write contract (#787) ---------------
+#
+# put_file and put_global used to end in path.write_bytes(data): a process
+# interrupted mid-write left a truncated file readable under the final key,
+# which a later read consumed as if it were complete. The fix writes to a
+# temp file in the same directory and os.replace()s it into place.
+# put_file_exclusive is untouched -- its exclusive-create semantics
+# (test_local_put_file_exclusive_raises_on_second_write above) are already
+# atomic and out of scope here.
+
+def _boom(*_args, **_kwargs):
+    raise OSError("simulated crash before rename")
+
+
+def test_local_put_file_interrupted_replace_leaves_previous_content_intact(tmp_path, monkeypatch):
+    """A crash between the temp-file write and the rename must not corrupt
+    the previously-stored artifact, and must not leave the temp file
+    behind."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+    storage.put_file("R1", "data.json", b"original-complete-bytes")
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _boom)
+    with pytest.raises(OSError):
+        storage.put_file("R1", "data.json", b"new-bytes-that-must-never-land")
+    monkeypatch.undo()
+
+    assert storage.get_file("R1", "data.json") == b"original-complete-bytes"
+    leftover = [n for n in os.listdir(tmp_path / "R1") if n != "data.json"]
+    assert leftover == [], f"temp file leaked: {leftover}"
+
+
+def test_local_put_file_interrupted_write_leaves_no_file_at_new_key(tmp_path, monkeypatch):
+    """Same interruption, but the key never existed before: the destination
+    must stay absent, not hold a partial write."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _boom)
+    with pytest.raises(OSError):
+        storage.put_file("R2", "data.json", b"partial-bytes")
+    monkeypatch.undo()
+
+    assert storage.exists("R2", "data.json") is False
+    run_dir = tmp_path / "R2"
+    leftover = os.listdir(run_dir) if run_dir.exists() else []
+    assert leftover == [], f"temp file leaked: {leftover}"
+
+
+def test_local_put_global_interrupted_replace_leaves_no_temp_file(tmp_path, monkeypatch):
+    """put_global goes through the same _atomic_write helper as put_file;
+    pin it independently since it writes outside the run namespace."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _boom)
+    with pytest.raises(OSError):
+        storage.put_global("by-submitter/e@x.edu/R1/manifest.json", b"partial")
+    monkeypatch.undo()
+
+    target_dir = tmp_path / "by-submitter" / "e@x.edu" / "R1"
+    leftover = os.listdir(target_dir) if target_dir.exists() else []
+    assert leftover == [], f"temp file leaked: {leftover}"
+
+
+def test_local_put_file_leaves_no_temp_file_on_success(tmp_path):
+    """The success path cleans up after itself: only the final key exists,
+    never a stray temp file beside it."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+    storage.put_file("R3", "data.json", b"bytes")
+    assert os.listdir(tmp_path / "R3") == ["data.json"]
 
 
 # --- (b2) key/run-id validation is a storage invariant ----------------------
