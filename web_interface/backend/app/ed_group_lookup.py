@@ -559,6 +559,37 @@ def _query_ed(cwid: str, access_group: str, admin_group: str,
 # Public API
 # ---------------------------------------------------------------------------
 
+def validate_startup_config(ldap_url: str, bind_dn: str, bind_password: str,
+                            access_group: str) -> None:
+    """Validate the ED config an authorization decision needs, at startup.
+
+    Every field required to reach `_bind` is checked today only per-request
+    (saml_routes.py, auth.py both build an LDAPConfig from the same env/DB
+    reads and let a bad one surface as the first login's bind failure), and
+    ED_LDAP_BIND_PASSWORD is not checked anywhere -- an empty password reaches
+    ldap3 and only then maps to EdConfigurationError (#330). Call this from
+    main.py's lifespan, gated on ed_enabled, so a misconfigured deployment
+    fails at boot instead of on the first SAML login.
+
+    Raises EdConfigurationError naming every missing/invalid field at once
+    (not just the first found) so an operator fixes the whole deployment in
+    one pass, instead of one field per restart.
+    """
+    problems = []
+    try:
+        _validate_ldap_url(ldap_url)
+    except EdConfigurationError as exc:
+        problems.append(str(exc))
+    if not bind_dn or not bind_dn.strip():
+        problems.append("ED_LDAP_BIND_DN is not set")
+    if not bind_password or not bind_password.strip():
+        problems.append("ED_LDAP_BIND_PASSWORD is not set")
+    if not access_group or not access_group.strip():
+        problems.append("ed_access_group is not set")
+    if problems:
+        raise EdConfigurationError("; ".join(problems))
+
+
 def check_ed_membership(cwid: str, access_group: str, admin_group: str,
                         cfg: LDAPConfig, *,
                         use_cache: bool = True) -> MembershipResult:

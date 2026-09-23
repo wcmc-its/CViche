@@ -27,6 +27,7 @@ from app.ed_group_lookup import (
     _user_matches_memberurl,
     _dn_in_scope,
     _validate_ldap_url,
+    validate_startup_config,
     _group_cache,
     _stale_cache,
     _MAX_MEMBERURL_SEARCHES,
@@ -1382,6 +1383,62 @@ class TestLdapUrlValidation:
         with pytest.raises(EdUnavailableError):
             check_ed_membership("badurl01", ACCESS_GROUP, ADMIN_GROUP, cfg=cfg)
         mock_server.assert_not_called()
+
+
+class TestValidateStartupConfig:
+    """validate_startup_config fails a deployment at boot on a misconfigured
+    ED, instead of on the first SAML login (#330)."""
+
+    _GOOD_URL = "ldaps://ed.weill.cornell.edu:636"
+    _GOOD_DN = "cn=svc-cviche,ou=ServiceAccounts,dc=weill,dc=cornell,dc=edu"
+    _GOOD_PASSWORD = "test-password"  # synthetic test literal, not a real credential
+    _GOOD_GROUP = "cn=cviche-access,ou=Groups,dc=weill,dc=cornell,dc=edu"
+
+    def test_accepts_a_complete_config(self):
+        validate_startup_config(
+            self._GOOD_URL, self._GOOD_DN, self._GOOD_PASSWORD, self._GOOD_GROUP,
+        )  # must not raise
+
+    def test_rejects_empty_bind_password(self):
+        """The one field no call site ever checked (#330's residual gap)."""
+        with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_PASSWORD"):
+            validate_startup_config(
+                self._GOOD_URL, self._GOOD_DN, "", self._GOOD_GROUP,
+            )
+
+    def test_rejects_whitespace_only_bind_password(self):
+        with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_PASSWORD"):
+            validate_startup_config(
+                self._GOOD_URL, self._GOOD_DN, "   ", self._GOOD_GROUP,
+            )
+
+    def test_rejects_missing_bind_dn(self):
+        with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_DN"):
+            validate_startup_config(
+                self._GOOD_URL, "", self._GOOD_PASSWORD, self._GOOD_GROUP,
+            )
+
+    def test_rejects_missing_access_group(self):
+        with pytest.raises(EdConfigurationError, match="ed_access_group"):
+            validate_startup_config(
+                self._GOOD_URL, self._GOOD_DN, self._GOOD_PASSWORD, "",
+            )
+
+    def test_rejects_bad_ldap_url(self):
+        with pytest.raises(EdConfigurationError, match="Invalid ED LDAP URL"):
+            validate_startup_config(
+                "http://ed.weill.cornell.edu", self._GOOD_DN, self._GOOD_PASSWORD,
+                self._GOOD_GROUP,
+            )
+
+    def test_reports_every_missing_field_at_once(self):
+        """One restart should surface every problem, not one field per boot."""
+        with pytest.raises(EdConfigurationError) as excinfo:
+            validate_startup_config("", "", "", "")
+        message = str(excinfo.value)
+        assert "ED_LDAP_BIND_DN" in message
+        assert "ED_LDAP_BIND_PASSWORD" in message
+        assert "ed_access_group" in message
 
 
 # ---------------------------------------------------------------------------
