@@ -25,6 +25,7 @@ Run with:
 """
 
 import json
+import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -540,6 +541,62 @@ def test_handle_bedrock_empty_content_on_both_calls_raises_runtime_error(
             [{"role": "user", "content": "hi"}], response_format=None, cfg=_bedrock_cfg()
         )
     assert len(fake.calls) == 2  # both reads guarded, no IndexError before the raise
+
+
+def test_handle_bedrock_empty_content_logs_stop_reason_and_usage(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # #884 requires logging stopReason + usage when content comes back
+    # empty -- once the retry succeeds, this log is the only record of why
+    # it fired.
+    empty = {
+        "output": {"message": {"content": []}},
+        "stopReason": "guardrail_intervened",
+        "usage": {"inputTokens": 30, "outputTokens": 0},
+    }
+    recovered = _converse_response("hello", stop_reason="end_turn")
+    fake = _FakeBedrockClient([empty, recovered])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"):
+        bedrock._handle_bedrock(
+            [{"role": "user", "content": "hi"}], response_format=None, cfg=_bedrock_cfg()
+        )
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "guardrail_intervened" in msg and "'inputTokens': 30" in msg
+        for msg in warnings
+    )
+
+
+def test_handle_bedrock_invalid_then_empty_retry_keeps_initial_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # First call returns invalid JSON (triggers the repair retry); the
+    # repair retry itself comes back with an empty content list. #884's
+    # fallback (`content = retry_content if retry_content is not None else
+    # content`) must keep the first call's (invalid) content instead of
+    # returning None -- every json_object caller's json.loads(content)
+    # needs a string, not None.
+    first = _converse_response("not json", stop_reason="end_turn")
+    empty_retry = {
+        "output": {"message": {"content": []}},
+        "stopReason": "max_tokens",
+        "usage": {"inputTokens": 40, "outputTokens": 0},
+    }
+    fake = _FakeBedrockClient([first, empty_retry])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}],
+        response_format={"type": "json_object"},
+        cfg=_bedrock_cfg(),
+    )
+
+    assert result["content"] == "not json"  # kept, not None
+    assert result["finish_reason"] == "length"  # retry's stopReason (max_tokens)
+    assert len(fake.calls) == 2
 
 
 def test_handle_bedrock_repairs_invalid_json_on_retry(monkeypatch: pytest.MonkeyPatch) -> None:
