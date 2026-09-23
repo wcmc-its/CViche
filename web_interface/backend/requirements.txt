@@ -1,10 +1,25 @@
-# Direct pins only (#754) -- this is NOT a full `pip freeze`. Only the packages
-# imported directly by the backend are pinned here; each is verified against
-# PyPI when bumped. Transitive packages (starlette, h11, typing_extensions,
-# click, sniffio, ...) are left to resolve at install time UNLESS a specific
-# transitive has bitten us, in which case it gets its own pin with a comment
-# explaining why (see anyio and pyopenssl below). A hash-pinned, fully
-# resolved lockfile is #130's scope, not this file's.
+# Direct pins only (#754) -- this is NOT a full `pip freeze`. Most of these
+# are imported directly under app/ (fastapi, uvicorn, sqlalchemy, pydantic,
+# pysaml2, ...) or reachable at runtime through orchestrator.py's imports of
+# unified_pipeline stage modules (tiktoken, via
+# segmentation/chunked_chat_hierarchy_extractor.py). A few are pinned though
+# nothing imports them by name: python-multipart (FastAPI needs it to parse
+# the multipart uploads app/api/upload.py declares with `File(...)`), alembic
+# (migrations; run as a CLI from the backend directory -- see Dockerfile --
+# never imported in app/ code), and websockets (uvicorn is pinned bare, not
+# as `uvicorn[standard]`, so a websocket protocol implementation has to be
+# pinned separately for the app's websocket endpoints to work). pdf2image and
+# pdfplumber are NOT reachable from any code path as of this writing (grepped
+# repo-wide) -- they mirror requirements.txt's pins for the PDF ingestion
+# TECHNICAL_README.md documents, which the pipeline does not yet implement;
+# left in rather than pulled here so a #754 pass doesn't also make a scope
+# call about that gap. Other transitive packages (starlette, h11,
+# typing_extensions, click, sniffio, ...) are left to resolve at install time
+# UNLESS a specific transitive has bitten us, in which case it gets its own
+# pin with a comment explaining why (see anyio and pyopenssl below). A
+# hash-pinned, fully resolved lockfile is #130's scope, not this file's; the
+# 2026-09-09 decision on #754 to instead regenerate this file as a full `pip
+# freeze` from the Docker deps stage is still open and not done here.
 # Versions for packages also listed in the repo-root requirements.txt are kept
 # identical, since the Dockerfile installs both files in a single pip pass.
 fastapi==0.136.3
