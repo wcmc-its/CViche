@@ -231,7 +231,7 @@ def _guard_deployed_auth_mode(auth_mode: str | None, storage_backend: str, allow
         )
 
 
-def _validate_ed_startup(db) -> None:
+def _validate_ed_startup(db: Session) -> None:
     """Fail fast on a misconfigured ED at boot rather than on the first SAML
     login (#330). Gated on ed_enabled -- a deployment that doesn't use ED
     authorization at all shouldn't be refused for an unset
