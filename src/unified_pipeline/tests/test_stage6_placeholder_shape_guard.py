@@ -357,11 +357,11 @@ def test_real_template_one_entry_leaves_n2_and_mentee_placeholders_in_place():
     assert after.count('Name') == 2
 
 
-def test_real_template_l3_content_with_no_grants_or_mentees_leaves_both_mentee_placeholders_intact():
-    """Ticket D-836-R2, TASK 2 item 3: the combined real-template proof --
-    #836's guards (research_support, mentoring) plus #841's clinical_practice
-    guard, run in `generate()`'s own order, on a document with zero grants
-    and zero mentees but one L3 entry.
+def test_real_template_l3_content_with_no_grants_or_mentees_removes_both_mentee_placeholders():
+    """Ticket D-836-R2, TASK 2 item 3 (updated for #845): the combined
+    real-template proof -- #836's guards (research_support, mentoring) plus
+    #841's clinical_practice guard, run in `generate()`'s own order, on a
+    document with zero grants and zero mentees but one L3 entry.
 
     Before #836 the Past/Pending funding steps would have eaten N2's
     placeholder and one mentee placeholder; before #841 L3 would then have
@@ -369,10 +369,10 @@ def test_real_template_l3_content_with_no_grants_or_mentees_leaves_both_mentee_p
     `_clinical_header_match` -- it contains "funding" -- so on #836 alone
     the corpus population is exactly clinical L3/L2/L1 content with no
     grants and no current mentees). With both fixes, N2's placeholder stops
-    the funding cascade, both mentee tables never get built (there are no
-    mentee entries at all in this fixture) so both survive as pristine
-    6-row placeholders, and the L3 entry falls back to a bullet under
-    Clinical Leadership -- never written into either mentee table.
+    the funding cascade and the L3 entry falls back to a bullet under
+    Clinical Leadership -- never written into either mentee table. #845
+    then removes both mentee placeholders on purpose (there are no mentee
+    entries at all in this fixture): a finished document is not a form.
     """
     gen = _real_template_generator()
 
@@ -392,13 +392,7 @@ def test_real_template_l3_content_with_no_grants_or_mentees_leaves_both_mentee_p
     assert gen.stats['tables_populated'] == 0
 
     name_tables = [t for t in gen.doc.tables if t.rows[0].cells[0].text.strip() == 'Name']
-    assert len(name_tables) == 2
-    for t in name_tables:
-        assert len(t.rows) == 6
-        # Vertical label/value layout -- column 0 is the field LABEL on
-        # every row ("Name", "Site/Position", ...), column 1 is the VALUE.
-        # Pristine placeholder: every value cell is still empty.
-        assert all(row.cells[1].text.strip() == '' for row in t.rows)
+    assert len(name_tables) == 0
 
     leadership_idx = gen._find_paragraph_with_text('Clinical Leadership')
     assert leadership_idx is not None

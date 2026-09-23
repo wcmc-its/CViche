@@ -873,7 +873,13 @@ def _stage_6(ctx: PipelineContext) -> StageResult:
     if not input_path:
         return _skipped('6', _requirement_label(STAGE_INPUT_PREFERENCE['6']))
 
-    output_path = run_stage6(input_path=input_path, verbose=True)
+    # #550: the personal-data fallback reopens the source .docx; hand it the
+    # resolved path instead of leaving stage 6 to guess from SAMPLE_CV_DIR
+    # (which only resolves for a uid-style run from the repo root). A
+    # standalone --stage 6 rerun without the .docx on disk is still fine:
+    # the fallback checks is_file() and skips.
+    output_path = run_stage6(input_path=input_path, verbose=True,
+                             original_doc_path=str(ctx.cv_path))
     logger.info("")
     logger.info("Stage 6 Complete")
     logger.info("  Output: %s", output_path)

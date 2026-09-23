@@ -169,4 +169,52 @@ def test_restart_denied_to_non_owner_creates_nothing(db, tmp_path):
     storage.put_file_exclusive.assert_not_called()
     storage.put_global.assert_not_called()
     assert db.query(Run).count() == runs_before
-    assert list(upload_dir.iterdir()) == []
+
+
+def test_restart_compensates_archive_when_commit_fails(db, tmp_path, caplog):
+    """#802 mirror for restart: a commit failure after a successful archive is
+    compensated the same way /upload's is -- delete_run and
+    delete_global_prefix for the NEW run id's storage namespace, and the
+    pod-local copy unlinked -- before the 5xx is raised, and no child Run
+    row survives.
+    """
+    import logging
+
+    from app.api import runs as runs_api
+    from app.models import Run
+
+    user, original = _make_original(db)
+
+    storage = MagicMock()
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+
+    with patch.object(runs_api, "check_run_access", return_value=original), \
+         patch.object(runs_api, "check_rate_limit", return_value=None), \
+         patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
+         patch.object(runs_api, "get_storage", return_value=storage), \
+         patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
+         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
+         patch("app.api.upload.get_storage", return_value=storage), \
+         patch("app.api.upload.generate_run_id", return_value="RSTFAI"), \
+         patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch.object(db, "commit", side_effect=RuntimeError("db down")), \
+         caplog.at_level(logging.ERROR, logger="app.api.upload"):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(
+                runs_api.restart_run(run_id="ORIGAR", db=db, current_user=user)
+            )
+
+    assert exc.value.status_code == 500
+    assert exc.value.detail["error"] == "internal_error"
+
+    db.rollback()
+    assert db.query(Run).filter(Run.id == "RSTFAI").first() is None
+
+    storage.delete_run.assert_called_once_with("RSTFAI")
+    storage.delete_global_prefix.assert_called_once_with(
+        f"by-submitter/{user.email.lower()}/RSTFAI/"
+    )
+    assert list(upload_dir.iterdir()) == []  # pod-local copy unlinked
+    assert any("commit failed" in r.getMessage() for r in caplog.records)
