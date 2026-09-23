@@ -413,6 +413,71 @@ def _finalize_bedrock_result(content, usage, cache_read_tokens, cache_write_toke
     }
 
 
+def _finalize_schema_tool_response(response: dict, usage: dict, cache_read_tokens: int,
+                                   cache_write_tokens: int, model: str,
+                                   api_seconds: float) -> dict:
+    """#46 json_schema path: the forced tool's structured `input` IS the
+    answer. Re-serialize it so every caller's json.loads(content) keeps
+    working, and skip the text-validation/fence-strip of the text path
+    (structured tool output is guaranteed valid JSON). Returns before the
+    JSON-repair branch, so there is only the one dispatch to account for."""
+    stop_reason = response.get("stopReason")
+    tool_input = _extract_tool_use_input(response)
+    if stop_reason != "tool_use" or tool_input is None:
+        # Forced tool call that didn't fire => schema not enforced.
+        # Fail loud rather than silently parsing free text.
+        raise RuntimeError(
+            f"Bedrock forced json_schema tool call did not fire "
+            f"(stopReason={stop_reason!r}, tool_input="
+            f"{'present' if tool_input is not None else 'missing'})"
+        )
+    return _finalize_bedrock_result(
+        json.dumps(tool_input), usage, cache_read_tokens, cache_write_tokens,
+        STOP_REASON_MAP.get(stop_reason, stop_reason), model,
+        int(api_seconds * 1000),
+    )
+
+
+def _call_bedrock_json_repair(messages: list, response_format: dict | None,
+                              cfg: dict) -> tuple[dict, float]:
+    """Re-send the request once with a stronger JSON hint; return the raw
+    Converse response and its API seconds.
+
+    Bedrock Converse enforces strict user/assistant role alternation and
+    raises a fatal ValidationException (not in BEDROCK_RETRYABLE_CODES) on
+    two consecutive turns of the same role. Every call site in this codebase
+    sends a single trailing user turn, so appending a new user turn broke the
+    repair path in the common case (#630). The hint is folded into the
+    existing trailing user turn instead; a fresh turn is appended only for a
+    shape this path doesn't expect (the last turn isn't user -- e.g. a caller
+    with a hanging assistant turn). Content is always a str here:
+    _translate_messages already raised NotImplementedError on the first call
+    for any list (multimodal) content.
+
+    Goes through _call_with_retry rather than calling _call_bedrock bare:
+    this retry is a live Bedrock request like any other, and a transient
+    throttle on it should back off instead of raising. _call_with_retry
+    acquires _llm_call_semaphore itself, so the call stays bounded without
+    nesting the acquire.
+    """
+    hint = ("Your previous response was not valid JSON. Please respond with "
+            "ONLY valid JSON, no markdown fencing or explanation.")
+    stronger_messages = list(messages)  # shallow copy
+    last = stronger_messages[-1] if stronger_messages else None
+    if last is not None and last["role"] == "user":
+        stronger_messages[-1] = {**last, "content": f'{last["content"]}\n\n{hint}'}
+    else:
+        stronger_messages.append({"role": "user", "content": hint})
+    return _call_with_retry(
+        lambda: _call_bedrock(cfg["model"], stronger_messages, cfg["temperature"],
+                              response_format, cfg["max_tokens"],
+                              enable_prompt_caching=cfg["enable_prompt_caching"],
+                              **cfg["extra_kwargs"]),
+        retry_count=cfg["retry_count"],
+        cancel_check=cfg.get("cancel_check"),
+    )
+
+
 def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
     """Dispatch one Bedrock call and normalize the response.
 
@@ -433,27 +498,8 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
     cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
 
     if _schema_tool_config(response_format) is not None:
-        # #46 json_schema path: the forced tool's structured `input` IS the
-        # answer. Re-serialize it so every caller's json.loads(content)
-        # keeps working, and skip the text-validation/fence-strip below
-        # (structured tool output is guaranteed valid JSON).
-        stop_reason = response.get("stopReason")
-        tool_input = _extract_tool_use_input(response)
-        if stop_reason != "tool_use" or tool_input is None:
-            # Forced tool call that didn't fire => schema not enforced.
-            # Fail loud rather than silently parsing free text.
-            raise RuntimeError(
-                f"Bedrock forced json_schema tool call did not fire "
-                f"(stopReason={stop_reason!r}, tool_input="
-                f"{'present' if tool_input is not None else 'missing'})"
-            )
-        # Returns before the JSON-repair branch, so there is only the one
-        # dispatch to account for.
-        return _finalize_bedrock_result(
-            json.dumps(tool_input), usage, cache_read_tokens, cache_write_tokens,
-            STOP_REASON_MAP.get(stop_reason, stop_reason), model,
-            int(api_seconds * 1000),
-        )
+        return _finalize_schema_tool_response(
+            response, usage, cache_read_tokens, cache_write_tokens, model, api_seconds)
 
     # Extract and normalize Bedrock response (text / json_object path). A
     # guardrail intervention or other provider condition can send back an
@@ -477,41 +523,8 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
     if content_missing or not _validate_json_response(content, response_format):
         if not content_missing:
             logger.warning("Bedrock response is not valid JSON. Retrying with stronger hint...")
-        # Retry once with stronger prompt hint. Bedrock Converse enforces
-        # strict user/assistant role alternation and raises a fatal
-        # ValidationException (not in BEDROCK_RETRYABLE_CODES) on two
-        # consecutive turns of the same role. Every call site in this
-        # codebase sends a single trailing user turn, so appending a new
-        # user turn here broke the repair path in the common case (#630).
-        # Fold the hint into the existing trailing user turn instead of
-        # adding a new one when the shape allows it; only append a fresh
-        # turn as a fallback for a shape this repair path doesn't expect
-        # (the last turn isn't user -- e.g. a caller with a hanging
-        # assistant turn). Content is always a str by this point:
-        # _translate_messages already raised NotImplementedError on the
-        # first call for any list (multimodal) content, so a stronger
-        # isinstance(last["content"], str) check here can never be False.
-        hint = ("Your previous response was not valid JSON. Please respond with "
-                "ONLY valid JSON, no markdown fencing or explanation.")
-        stronger_messages = list(messages)  # shallow copy
-        last = stronger_messages[-1] if stronger_messages else None
-        if last is not None and last["role"] == "user":
-            stronger_messages[-1] = {**last, "content": f'{last["content"]}\n\n{hint}'}
-        else:
-            stronger_messages.append({"role": "user", "content": hint})
-        # Go through _call_with_retry rather than calling _call_bedrock
-        # bare: this retry is a live Bedrock request like any other, and a
-        # transient throttle on it should back off instead of raising.
-        # _call_with_retry acquires _llm_call_semaphore itself, so this
-        # call stays bounded without nesting the acquire.
-        retry_response, retry_api_seconds = _call_with_retry(
-            lambda: _call_bedrock(model, stronger_messages, cfg["temperature"],
-                                  response_format, cfg["max_tokens"],
-                                  enable_prompt_caching=cfg["enable_prompt_caching"],
-                                  **cfg["extra_kwargs"]),
-            retry_count=cfg["retry_count"],
-            cancel_check=cfg.get("cancel_check"),
-        )
+        retry_response, retry_api_seconds = _call_bedrock_json_repair(
+            messages, response_format, cfg)
         # This repair call is a second live Bedrock request, so its API time
         # belongs in latency_ms -- as its tokens already do just below.
         # Previously latency_ms was frozen before this branch ran, so the

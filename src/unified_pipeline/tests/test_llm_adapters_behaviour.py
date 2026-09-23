@@ -631,11 +631,11 @@ def test_handle_bedrock_repairs_invalid_json_on_retry(monkeypatch: pytest.Monkey
     }]
 
 
-def test_handle_bedrock_repair_appends_new_turn_when_last_turn_is_not_a_plain_user_turn(
+def test_handle_bedrock_repair_appends_new_turn_when_last_turn_is_not_user(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The merge-into-last-turn shortcut only applies to a trailing user turn
-    # with str content. A conversation that (unusually) ends on an assistant
+    # The merge-into-last-turn shortcut only applies to a trailing user
+    # turn. A conversation that (unusually) ends on an assistant
     # turn falls back to appending a fresh user turn, same as before #630.
     first = _converse_response("not json", stop_reason="end_turn")
     second = _converse_response('{"a": 1}', stop_reason="end_turn")
