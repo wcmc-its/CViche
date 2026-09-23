@@ -433,13 +433,12 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 5.4 bare swallows (`except Exception: pass`) | falling | 3 | ratchet |
 | 5.4 blind `except Exception` (BLE001) | falling | 98 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
-| 7.1 print() in library code (T201) | falling | 834 | ratchet |
+| 7.1 print() in library code (T201) | falling | 784 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
 | 8.3 typing syntax (UP*, RUF013) | falling | 224 | ratchet |
 | 8.3 missing annotations (ANN*, RUF012) | falling | 550 | ratchet |
 
 <!-- check_standards:auto:end -->
-
 
 
 

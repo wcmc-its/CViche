@@ -436,7 +436,7 @@ class BoardCertificationSection:
         an actual write -- a cleared placeholder is not a populated table.
         """
         if self.verbose and entries:
-            print(f"Filling Board Certification ({len(entries)} entries)...")
+            logger.info("Filling Board Certification (%s entries)...", len(entries))
 
         # Find Board Certification section - need to find the subsection header,
         # not the main "LICENSURE, BOARD CERTIFICATION" section header

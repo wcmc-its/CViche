@@ -972,7 +972,7 @@ class HonorsSection:
         actual write -- a cleared placeholder is not a populated table.
         """
         if self.verbose and entries:
-            print(f"Filling Honors ({len(entries)} entries)...")
+            logger.info("Filling Honors (%s entries)...", len(entries))
 
         # Find the HONORS section
         honors_idx = self._find_paragraph_with_text("HONORS")
@@ -1006,7 +1006,7 @@ class HonorsSection:
             # Common patterns: "Name of award\tOrganization\tDate awarded" or similar
             if _is_honors_header_entry(original_text):
                 if self.verbose:
-                    print(f"  Skipping header entry: '{original_text[:50]}...'")
+                    logger.warning("  Skipping header entry: '%s...'", original_text[:50])
                 continue
 
             for record in parse_honor_entry(entry):

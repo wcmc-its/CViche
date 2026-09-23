@@ -68,6 +68,7 @@ Run with:
 
 import contextlib
 import io
+import logging
 import sys
 from pathlib import Path
 
@@ -1009,18 +1010,18 @@ def test_a_long_raw_entry_is_capped_not_spilled():
 
 # --- verbose mode -----------------------------------------------------------
 
-def test_verbose_mode_reports_the_entry_count_and_each_skipped_header():
-    """The two `print()`s in `_fill_honors`. Neither is read by
-    `orchestrator.py`'s progress regexes nor by `run_corpus_batch.sh`'s
-    summary greps, so neither is a parsed contract -- but both are pinned here
-    so that rewording one is a test failure rather than a silent change."""
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
+def test_verbose_mode_reports_the_entry_count_and_each_skipped_header(caplog):
+    """The two log calls (#563: converted from `print()`) in `_fill_honors`.
+    Neither is read by `orchestrator.py`'s progress regexes nor by
+    `run_corpus_batch.sh`'s summary greps, so neither is a parsed contract --
+    but both are pinned here so that rewording one is a test failure rather
+    than a silent change."""
+    with caplog.at_level(logging.INFO):
         gen, _ = _honors_document(verbose=True)
         gen._fill_honors([
             _ORG_ENTRY,
             _raw("Name of award | Organization | Date awarded")])
-    out = buf.getvalue()
+    out = caplog.text
     assert "Filling Honors (2 entries)..." in out
     assert ("Skipping header entry: 'Name of award | Organization | "
             "Date awarded") in out
