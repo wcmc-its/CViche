@@ -22,13 +22,19 @@ from unified_pipeline.llm.retry import (
 
 logger = logging.getLogger(__name__)
 
-# Bedrock stopReason -> OpenAI finish_reason mapping
+# Bedrock stopReason -> OpenAI finish_reason mapping. Bedrock's Converse API
+# documents 9 stopReason values (#628); malformed_model_output and
+# malformed_tool_use are deliberately left unmapped (pass through raw) --
+# normalizing them needs a decision (reviewer suggested "error", outside the
+# OpenAI finish_reason vocabulary every caller expects) that hasn't been made.
 STOP_REASON_MAP = {
     "end_turn": "stop",
     "max_tokens": "length",
     "stop_sequence": "stop",
     "tool_use": "tool_calls",
-    "guard_intervened": "content_filter",
+    "guardrail_intervened": "content_filter",  # was "guard_intervened" -- never matched (#628)
+    "content_filtered": "content_filter",
+    "model_context_window_exceeded": "length",
 }
 
 # Hard ceiling for any Bedrock call that reaches _call_bedrock without an

@@ -398,6 +398,30 @@ def test_handle_bedrock_text_path_maps_finish_reason_and_tokens(monkeypatch: pyt
     assert len(fake.calls) == 1  # valid text, no JSON requested -> no repair call
 
 
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_finish_reason"),
+    [
+        ("guardrail_intervened", "content_filter"),  # was "guard_intervened" -- never matched (#628)
+        ("content_filtered", "content_filter"),
+        ("model_context_window_exceeded", "length"),
+        ("malformed_model_output", "malformed_model_output"),  # unmapped -- needs a decision (#628)
+        ("malformed_tool_use", "malformed_tool_use"),  # unmapped -- needs a decision (#628)
+    ],
+)
+def test_handle_bedrock_stop_reason_map_covers_documented_values(
+    monkeypatch: pytest.MonkeyPatch, stop_reason: str, expected_finish_reason: str,
+) -> None:
+    canned = _converse_response("hello", stop_reason=stop_reason)
+    fake = _FakeBedrockClient([canned])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}], response_format=None, cfg=_bedrock_cfg()
+    )
+
+    assert result["finish_reason"] == expected_finish_reason
+
+
 def test_handle_bedrock_schema_tool_path_returns_serialized_tool_input(monkeypatch: pytest.MonkeyPatch) -> None:
     canned = {
         "output": {"message": {"content": [
