@@ -730,6 +730,36 @@ def test_handle_openai_different_finish_reason_and_length(monkeypatch: pytest.Mo
     assert result["content"] == "truncated output"
 
 
+def test_handle_openai_none_content_on_tool_call_finish_passes_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # content=None is a legitimate OpenAI response shape on a tool-call
+    # finish (#635), not an error -- it must not raise or be coerced.
+    response = _openai_response(None, finish_reason="tool_calls",
+                                prompt_tokens=12, completion_tokens=3)
+    fake = _FakeOpenAIClient(response)
+    monkeypatch.setattr(openai_mod, "_get_openai_client", lambda: fake)
+
+    result = openai_mod._handle_openai(
+        [{"role": "user", "content": "hi"}], response_format=None, cfg=_openai_cfg()
+    )
+
+    assert result["content"] is None
+    assert result["finish_reason"] == "tool_calls"
+
+
+def test_handle_openai_raises_on_empty_choices(monkeypatch: pytest.MonkeyPatch) -> None:
+    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=0, total_tokens=1)
+    response = SimpleNamespace(choices=[], usage=usage)
+    fake = _FakeOpenAIClient(response)
+    monkeypatch.setattr(openai_mod, "_get_openai_client", lambda: fake)
+
+    with pytest.raises(RuntimeError, match="no choices"):
+        openai_mod._handle_openai(
+            [{"role": "user", "content": "hi"}], response_format=None, cfg=_openai_cfg()
+        )
+
+
 # ---------------------------------------------------------------------------
 # retry.py -- llm_config.yaml knob readers
 # ---------------------------------------------------------------------------

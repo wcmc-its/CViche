@@ -76,9 +76,20 @@ def _handle_openai(messages: list, response_format, cfg: dict) -> dict:
         cancel_check=cfg.get("cancel_check"),
     )
 
+    if not response.choices:
+        # An empty choices list has no message to read at all -- fail loud
+        # with a real, attributable error (same shape as the Bedrock #884
+        # guard) instead of the raw IndexError response.choices[0] raises.
+        raise RuntimeError(
+            f"OpenAI chat completion returned no choices (model={cfg['model']!r})"
+        )
+    choice = response.choices[0]
+
     usage = response.usage
     return {
-        "content": response.choices[0].message.content,
+        # None is a legitimate content value on a tool-call finish (#635),
+        # not an error -- pass it through rather than guarding it away.
+        "content": choice.message.content,
         "prompt_tokens": usage.prompt_tokens,
         "completion_tokens": usage.completion_tokens,
         "total_tokens": usage.total_tokens,
@@ -92,6 +103,6 @@ def _handle_openai(messages: list, response_format, cfg: dict) -> dict:
         ),
         "model": cfg["model"],
         "provider": "openai",
-        "finish_reason": response.choices[0].finish_reason,
+        "finish_reason": choice.finish_reason,
         "latency_ms": int(api_seconds * 1000),
     }
