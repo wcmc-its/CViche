@@ -221,7 +221,7 @@ def _real_prompt_logs_listing() -> set[str]:
 
 @pytest.fixture(scope="session", autouse=True)
 def _guard_real_prompt_logs_untouched():
-    """Fail the session if the real (PII) prompt_logs directory grew.
+    """Fail the session if the real (PII) prompt_logs directory changed.
 
     A regression guard for #776: some tests drive LLM-stub calls through
     prompt_logger, which writes wherever PROMPT_LOG_DIR points. This session
@@ -229,16 +229,25 @@ def _guard_real_prompt_logs_untouched():
     was imported, so under a passing suite this snapshot never changes; if a
     future test (or a change to prompt_logger's default) writes into the
     real directory anyway, this fails loudly instead of silently growing the
-    checkout's transcript store.
+    checkout's transcript store. It also fails on any file disappearing --
+    a test teardown once rmtree'd a real prompt_logs directory outright, and
+    that is the worse PII failure of the two.
     """
     before = _real_prompt_logs_listing()
     yield
     after = _real_prompt_logs_listing()
     added = after - before
+    removed = before - after
     assert not added, (
         f"backend test suite wrote {len(added)} file(s) into the real "
         f"{_REAL_PROMPT_LOGS_DIR} (the PII transcript store) instead of the "
         f"session's PROMPT_LOG_DIR tempdir: {sorted(added)[:10]}"
+    )
+    assert not removed, (
+        f"backend test suite deleted {len(removed)} file(s) from the real "
+        f"{_REAL_PROMPT_LOGS_DIR} (the PII transcript store) -- a broader "
+        f"cleanup than the one seeded file a test intended to remove: "
+        f"{sorted(removed)[:10]}"
     )
 
 
