@@ -79,6 +79,64 @@ SENIOR_AUTHOR_BONUS = 0.1  # Bonus for senior/first author on pubs
 # Taxonomy code groups (see docs/CODING_STANDARDS.md §8.2)
 GRANT_TAXONOMY_PREFIX = 'M2'  # M2A/M2B/M2C/M2D -- all grant/funding entries
 PUBLICATION_TAXONOMY_CODES = ('S1', 'S2', 'S7', 'S8')  # publication-like codes that need a title
+CURRENT_TAXONOMY_CODES = ('M2A', 'N3A')  # sections that are current by definition (active funding, current mentees)
+RESEARCH_ACTIVITIES_CODE = 'M1'  # an undated M1 narrative is the owner's present research statement
+
+# Recency (#946 item 6). An entry's recency score is 1.0 when it is ongoing and
+# falls linearly to 0 over RECENCY_WINDOW_YEARS; RECENCY_WEIGHT scales it into
+# both the within-section ranking and the cross-section context order, so
+# current work outranks a decade-old first-author paper.
+RECENCY_WEIGHT = 0.4
+RECENCY_WINDOW_YEARS = 20
+DATE_FIELDS = ('year', 'start_date', 'end_date', 'date')
+YEAR_PATTERN = re.compile(r'\b(?:19|20)\d{2}\b')
+ONGOING_PATTERN = re.compile(r'^\s*(?:present|current|ongoing|now)\b', re.IGNORECASE)
+OPEN_RANGE_PATTERN = re.compile(r'\b(?:19|20)\d{2}\s*[-–—]+\s*(?:present|current|ongoing|now)\b', re.IGNORECASE)
+CURRENT_CONTEXT_TAG = '[CURRENT]'
+
+# Generation-prompt requirements (#946 item 6), named so tests pin them.
+CURRENT_WORK_REQUIREMENT = (
+    f"Open with the researcher's CURRENT research and ongoing projects (entries tagged {CURRENT_CONTEXT_TAG} "
+    "and the most recent years); mention older work only briefly, as background, after the current work"
+)
+NEUTRAL_REFERENCE_REQUIREMENT = (
+    "Refer to the researcher by name or with gender-neutral phrasing (e.g. \"this research program\", \"this work\"); "
+    "never use gendered pronouns (he/she/his/her/him) and never infer gender from the name"
+)
+
+
+def latest_entry_year(entry: dict) -> int | None:
+    """Latest four-digit year in the entry's date fields, else in its text."""
+    fields = entry.get('extracted_fields') or {}
+    years = [int(y) for name in DATE_FIELDS for y in YEAR_PATTERN.findall(str(fields.get(name) or ''))]
+    if not years:
+        years = [int(y) for y in YEAR_PATTERN.findall(entry.get('text') or '')]
+    return max(years) if years else None
+
+
+def is_current_entry(entry: dict, taxonomy_code: str) -> bool:
+    """True for an ongoing entry: a current-by-definition section, an
+    undated M1 narrative, an end_date of 'present'/'current'/'ongoing', or an
+    open 'YYYY-present' range in the text (M1 project lines carry their dates
+    only there)."""
+    if taxonomy_code in CURRENT_TAXONOMY_CODES:
+        return True
+    if taxonomy_code == RESEARCH_ACTIVITIES_CODE and latest_entry_year(entry) is None:
+        return True
+    fields = entry.get('extracted_fields') or {}
+    if ONGOING_PATTERN.match(str(fields.get('end_date') or '')):
+        return True
+    return bool(OPEN_RANGE_PATTERN.search(entry.get('text') or ''))
+
+
+def score_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> float:
+    """0.0-1.0: 1.0 if ongoing, else linear decay over RECENCY_WINDOW_YEARS; undated scores 0."""
+    if is_current_entry(entry, taxonomy_code):
+        return 1.0
+    year = latest_entry_year(entry)
+    if year is None:
+        return 0.0
+    return min(max(1 - (current_year - year) / RECENCY_WINDOW_YEARS, 0.0), 1.0)
 
 
 def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = '') -> float:
@@ -122,44 +180,32 @@ def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = 
     return 0.0
 
 
-def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: str = '', limit: int = None) -> list[dict]:
+def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: str = '', limit: int = None,
+                       current_year: int | None = None) -> list[dict]:
     """
     Prioritize and limit entries for a taxonomy code.
 
     Prioritization:
+    - Recency (ongoing first, then most recent)
     - Senior author / PI role
-    - Recency (most recent first)
     - Has substantive content
     """
     if not entries:
         return []
+    if current_year is None:
+        current_year = datetime.now().year
 
     # Score each entry
     scored_entries = []
     for entry in entries:
-        fields = entry.get('extracted_fields', {})
-
-        # Base score from seniority
         seniority_score = score_entry_seniority(entry, taxonomy_code, cv_owner_name)
-
-        # Recency score (try to extract year)
-        year = None
-        for year_field in ['year', 'start_date', 'end_date', 'date']:
-            year_val = fields.get(year_field, '')
-            if year_val:
-                year_match = re.search(r'(19|20)\d{2}', str(year_val))
-                if year_match:
-                    year = int(year_match.group(0))
-                    break
-
-        recency_score = (year - 2000) / 25 if year and year >= 2000 else 0  # 0-1 scale
+        recency_score = score_entry_recency(entry, taxonomy_code, current_year)
 
         # Content quality score (has substantive text)
         text_len = len(entry.get('text', ''))
         content_score = min(text_len / 500, 1.0)  # Cap at 1.0
 
-        # Combined score
-        total_score = seniority_score + (recency_score * 0.3) + (content_score * 0.1)
+        total_score = seniority_score + (recency_score * RECENCY_WEIGHT) + (content_score * 0.1)
         scored_entries.append((total_score, entry))
 
     # Sort by score descending
@@ -172,12 +218,18 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: s
     return [entry for _, entry in scored_entries[:limit]]
 
 
-def gather_context_entries(entries_by_code: dict[str, list[dict]], cv_owner_name: str = '') -> list[tuple[str, dict, float]]:
+def gather_context_entries(entries_by_code: dict[str, list[dict]], cv_owner_name: str = '',
+                           current_year: int | None = None) -> list[tuple[str, dict, float]]:
     """
     Gather and weight entries from all sections for summary generation.
 
+    An entry's weight is its section weight + seniority bonus + scaled recency,
+    so ongoing work sorts ahead of older work from a higher-tier section.
+
     Returns list of (taxonomy_code, entry, weight) tuples, sorted by weight.
     """
+    if current_year is None:
+        current_year = datetime.now().year
     weighted_entries = []
 
     for code, entries in entries_by_code.items():
@@ -188,12 +240,12 @@ def gather_context_entries(entries_by_code: dict[str, list[dict]], cv_owner_name
             continue
 
         # Prioritize and limit entries
-        prioritized = prioritize_entries(entries, code, cv_owner_name)
+        prioritized = prioritize_entries(entries, code, cv_owner_name, current_year=current_year)
 
         for entry in prioritized:
-            # Add seniority bonus to weight
             seniority_bonus = score_entry_seniority(entry, code, cv_owner_name)
-            final_weight = base_weight + seniority_bonus
+            recency_bonus = score_entry_recency(entry, code, current_year) * RECENCY_WEIGHT
+            final_weight = base_weight + seniority_bonus + recency_bonus
 
             weighted_entries.append((code, entry, final_weight))
 
@@ -290,6 +342,8 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float]], max_to
 
     for code, entry, weight in valid_entries:
         formatted = format_entry_for_context(code, entry)
+        if is_current_entry(entry, code):
+            formatted = f"{CURRENT_CONTEXT_TAG} {formatted}"
 
         if total_chars + len(formatted) > max_chars:
             break
@@ -384,12 +438,14 @@ REQUIREMENTS:
 - Mention key funding sources and roles (PI vs Co-I)
 - Highlight impact (clinical translation, policy, mentorship outcomes if relevant)
 - Write in third person
+- {CURRENT_WORK_REQUIREMENT}
+- {NEUTRAL_REFERENCE_REQUIREMENT}
 - Do NOT list publications or include citations
 - Do NOT include education or job titles
 - Be specific about research areas, not generic
 - Keep it concise - prioritize quality over comprehensiveness
 
-CV CONTEXT (ranked by relevance):
+CV CONTEXT (ranked by relevance; ongoing entries tagged {CURRENT_CONTEXT_TAG}):
 {context}
 
 Generate only the research summary paragraph (150-200 words max), no additional text or formatting."""

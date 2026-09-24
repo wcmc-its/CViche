@@ -29,14 +29,21 @@ if str(_SRC) not in sys.path:
 
 import unified_pipeline.stage_4_5_research_summary as stage_4_5  # noqa: E402
 from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
+    CURRENT_CONTEXT_TAG,
+    CURRENT_WORK_REQUIREMENT,
+    NEUTRAL_REFERENCE_REQUIREMENT,
     PI_BONUS,
+    RECENCY_WEIGHT,
     SENIOR_AUTHOR_BONUS,
     build_context_string,
     format_entry_for_context,
     gather_context_entries,
+    is_current_entry,
     is_valid_entry,
+    latest_entry_year,
     prioritize_entries,
     run_stage_4_5,
+    score_entry_recency,
     score_entry_seniority,
 )
 
@@ -158,7 +165,8 @@ def test_prioritize_entries_orders_by_combined_score_and_applies_limit():
         {"text": "Mid grant", "extracted_fields": {"pi_role": "", "year": "2015"}},
     ]
 
-    result = prioritize_entries(entries, "M2A", limit=2)
+    # M2B, not M2A: M2A is current by definition, which would flatten recency.
+    result = prioritize_entries(entries, "M2B", limit=2, current_year=2026)
 
     assert len(result) == 2
     assert result[0]["text"].startswith("New PI grant")
@@ -187,6 +195,84 @@ def test_prioritize_entries_default_limit_for_unlisted_code():
     assert len(result) == 5
 
 
+def test_prioritize_entries_ongoing_entry_outranks_older_senior_entry():
+    """#946 item 6: an ongoing Co-I grant must beat a PI grant that ended a
+    decade ago. Under the old 0.3 weight on start-year-only recency the PI
+    bonus won; recency now leads."""
+    entries = [
+        {"text": "Old PI grant", "extracted_fields": {"pi_role": "PI", "start_date": "2010", "end_date": "2014"}},
+        {"text": "Ongoing co-I grant", "extracted_fields": {"role": "Co-Investigator",
+                                                             "start_date": "2012", "end_date": "present"}},
+    ]
+    result = prioritize_entries(entries, "M2B", limit=1, current_year=2026)
+    assert [e["text"] for e in result] == ["Ongoing co-I grant"]
+
+
+def test_prioritize_entries_ranks_by_latest_year_not_start_year():
+    """A 2004-2024 range is recent work; the old code read only the first
+    date field it found (start_date 2004) and ranked it below a 2016 entry."""
+    entries = [
+        {"text": "Single 2016", "extracted_fields": {"start_date": "2016"}},
+        {"text": "Long range", "extracted_fields": {"start_date": "2004", "end_date": "2024"}},
+    ]
+    result = prioritize_entries(entries, "O", limit=1, current_year=2026)
+    assert [e["text"] for e in result] == ["Long range"]
+
+
+# --- recency helpers --------------------------------------------------------------
+
+def test_latest_entry_year_takes_max_over_date_fields():
+    entry = {"extracted_fields": {"start_date": "2004", "end_date": "2019"}, "text": "text 2030"}
+    assert latest_entry_year(entry) == 2019
+
+
+def test_latest_entry_year_falls_back_to_text_when_fields_undated():
+    entry = {"extracted_fields": {"narrative": "x"}, "text": "Project A, 2021-2023. Aims 2022."}
+    assert latest_entry_year(entry) == 2023
+
+
+def test_latest_entry_year_none_when_no_year_anywhere():
+    assert latest_entry_year({"extracted_fields": {}, "text": "no dates"}) is None
+
+
+@pytest.mark.parametrize("code, fields, text, expected", [
+    ("M2A", {}, "active grant", True),                       # current by definition
+    ("N3A", {}, "current mentee", True),                     # current by definition
+    ("M2B", {"end_date": "Present"}, "x", True),             # ongoing end_date
+    ("K1", {"end_date": "ongoing"}, "x", True),
+    ("M1", {"narrative": "x"}, "Project 2025-present: aims", True),   # open range in text
+    ("M1", {"narrative": "x"}, "Project 2025 \u2013 Current", True),
+    ("M2B", {"end_date": "2022"}, "x", False),
+    ("M2B", {"end_date": "2019, not current"}, "x", False),  # a trailing word is not an ongoing end_date
+    ("M1", {}, "Presented findings in 2019", False),         # 'present' inside a word is not a range
+    ("M1", {"narrative": "x"}, "Studies airway immunology", True),    # undated M1 = present research statement
+    ("M1", {"narrative": "x"}, "Studied airway immunology, 2010-2015", False),  # dated, closed M1
+    ("K1", {}, "Undated teaching", False),                   # undated is current only for M1
+    ("S1", {"year": "2024"}, "A paper on the present state", False),  # bare 'present' is not a range
+])
+def test_is_current_entry(code, fields, text, expected):
+    assert is_current_entry({"extracted_fields": fields, "text": text}, code) is expected
+
+
+def test_score_entry_recency_current_entry_scores_one():
+    entry = {"extracted_fields": {"start_date": "1995", "end_date": "present"}, "text": "x"}
+    assert score_entry_recency(entry, "O", current_year=2026) == 1.0
+
+
+def test_score_entry_recency_decays_linearly_and_clamps():
+    def rec(year):
+        return score_entry_recency({"extracted_fields": {"year": str(year)}, "text": "x"}, "S1", 2026)
+    assert rec(2026) == 1.0
+    assert rec(2016) == pytest.approx(0.5)
+    assert rec(2006) == 0.0
+    assert rec(1990) == 0.0          # clamped at 0, never negative
+    assert rec(2030) == 1.0          # future-dated (in press) clamps at 1
+
+
+def test_score_entry_recency_undated_scores_zero():
+    assert score_entry_recency({"extracted_fields": {}, "text": "x"}, "S1", 2026) == 0.0
+
+
 # --- gather_context_entries -----------------------------------------------------
 
 def test_gather_context_entries_skips_low_value_sections_and_keeps_boundary():
@@ -209,15 +295,49 @@ def test_gather_context_entries_skips_low_value_sections_and_keeps_boundary():
 
 
 def test_gather_context_entries_adds_seniority_bonus_to_weight():
-    """A PI grant's weight in the returned tuple must be base_weight (M2A:
-    -0.25) + PI_BONUS, not the bare base weight."""
+    """A PI grant's weight in the returned tuple must be base_weight (M2B:
+    -0.25) + PI_BONUS, not the bare base weight. The grant is undated, so its
+    recency bonus is 0 and the sum isolates the seniority term."""
     entries_by_code = {
-        "M2A": [{"text": "R01 study", "extracted_fields": {"pi_role": "Principal Investigator"}}],
+        "M2B": [{"text": "R01 study", "extracted_fields": {"pi_role": "Principal Investigator"}}],
     }
-    result = gather_context_entries(entries_by_code)
+    result = gather_context_entries(entries_by_code, current_year=2026)
     assert len(result) == 1
     _code, _entry, weight = result[0]
-    assert weight == stage_4_5.SECTION_WEIGHTS["M2A"] + PI_BONUS
+    assert weight == stage_4_5.SECTION_WEIGHTS["M2B"] + PI_BONUS
+
+
+def test_gather_context_entries_adds_recency_bonus_to_weight():
+    """An ongoing entry's weight is base + RECENCY_WEIGHT (x1.0)."""
+    entries_by_code = {"O": [{"text": "Chair", "extracted_fields": {"start_date": "2020", "end_date": "present"}}]}
+    (_code, _entry, weight), = gather_context_entries(entries_by_code, current_year=2026)
+    assert weight == pytest.approx(stage_4_5.SECTION_WEIGHTS["O"] + RECENCY_WEIGHT)
+
+
+def test_gather_context_entries_passes_current_year_to_section_selection():
+    """current_year must reach prioritize_entries' per-section cut, not only
+    the final weight. At current_year=2045 all six 2020-2025 entries are past
+    the 20-year window (recency 0), so text length decides and the shortest
+    (2025) entry is cut; at the wall-clock year it would be the 2020 one."""
+    entries = [{"text": "x" * (100 - 10 * i), "extracted_fields": {"year": str(2020 + i)}} for i in range(6)]
+    result = gather_context_entries({"O": entries}, current_year=2045)
+    years = sorted(e["extracted_fields"]["year"] for _c, e, _w in result)
+    assert years == ["2020", "2021", "2022", "2023", "2024"]
+
+
+def test_gather_context_entries_current_project_leads_old_first_author_paper():
+    """#946 item 6 shape: a 2016 first-author paper (S1 + SENIOR_AUTHOR_BONUS)
+    used to sort ahead of the owner's current research project (M1, dated only
+    in its text). The current project must now come first, and a recent
+    paper must beat the old one."""
+    old_paper = {"text": "Old paper", "extracted_fields": {
+        "title": "T", "authors": "Jane Doe, Roe R", "target_name": "Jane Doe", "year": "2016"}}
+    recent_paper = {"text": "Recent paper", "extracted_fields": {
+        "title": "T", "authors": "Roe R, Poe P, Moe M", "target_name": "Jane Doe", "year": "2024"}}
+    project = {"text": "Current project 2025-present: aims", "extracted_fields": {"narrative": "x"}}
+    result = gather_context_entries({"S1": [old_paper, recent_paper], "M1": [project]},
+                                    cv_owner_name="Jane Doe", current_year=2026)
+    assert [e["text"] for _c, e, _w in result] == ["Current project 2025-present: aims", "Recent paper", "Old paper"]
 
 
 # --- is_valid_entry -------------------------------------------------------------
@@ -338,6 +458,13 @@ def test_build_context_string_includes_every_entry_that_fits():
     assert result == "[X] " + "A" * 10 + "\n[X] " + "B" * 10
 
 
+def test_build_context_string_tags_current_entries():
+    current = ("K1", {"extracted_fields": {"end_date": "present"}, "text": "Teaching"}, -0.1)
+    past = ("K1", {"extracted_fields": {"end_date": "2019"}, "text": "Old teaching"}, -0.2)
+    result = build_context_string([current, past], max_tokens=100)
+    assert result == f"{CURRENT_CONTEXT_TAG} [K1] Teaching\n[K1] Old teaching"
+
+
 # --- score_existing_m1 (call_llm stubbed) -----------------------------------------
 
 def test_score_existing_m1_parses_valid_json_response(monkeypatch):
@@ -419,6 +546,30 @@ def test_generate_research_summary_returns_stripped_text_and_usage(monkeypatch):
     assert text == "Generated summary text about research."
     assert usage["prompt_tokens"] == 20
     assert usage["cost"] == 0.02
+
+
+def test_generate_research_summary_prompt_requires_current_work_first_and_neutral_reference(monkeypatch):
+    """#946 item 6: the generation prompt must (a) tell the model to open with
+    current work and keep older work brief, and (b) forbid gendered pronouns
+    inferred from the owner's name."""
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured["prompt"] = kwargs["messages"][0]["content"]
+        return {"content": "x", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    stage_4_5.generate_research_summary("[CURRENT] [RESEARCH] ctx", "Jane Doe")
+
+    prompt = captured["prompt"]
+    assert f"- {CURRENT_WORK_REQUIREMENT}" in prompt
+    assert f"- {NEUTRAL_REFERENCE_REQUIREMENT}" in prompt
+    assert "Open with the researcher's CURRENT research" in CURRENT_WORK_REQUIREMENT
+    assert "older work only briefly" in CURRENT_WORK_REQUIREMENT
+    assert CURRENT_CONTEXT_TAG in CURRENT_WORK_REQUIREMENT
+    assert "never use gendered pronouns" in NEUTRAL_REFERENCE_REQUIREMENT
+    assert "never infer gender from the name" in NEUTRAL_REFERENCE_REQUIREMENT
+    assert f"ongoing entries tagged {CURRENT_CONTEXT_TAG}" in prompt
 
 
 # --- run_stage_4_5 end-to-end (call_llm stubbed) ----------------------------------
