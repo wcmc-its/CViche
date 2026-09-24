@@ -45,6 +45,8 @@ from core.validators.wcm_table_corrector import apply_wcm_table_corrections
 from core.validators.prose_mentee_corrector import apply_prose_mentee_corrections
 from core.validators.template_scaffold import apply_template_scaffold_corrections
 from core.validators.block_coherence_corrector import apply_block_coherence_corrections
+from core.validators.appointment_funding_corrector import apply_appointment_funding_corrections
+from core.validators.event_volunteer_corrector import apply_event_volunteer_corrections
 
 # Every name below is re-exported from this module by being imported here: it
 # is the public import surface of stage 3b, pinned by
@@ -159,6 +161,24 @@ def _classify_group(
     return classified, stats, lines
 
 
+def _resolve_stage_input(stage_label: str, given: str | None, default: Path) -> Path:
+    """The given input path, else the stage's default artifact path; raise if it does not exist."""
+    path = default if given is None else Path(given)
+    if not path.exists():
+        raise FileNotFoundError(f"{stage_label} output not found: {path}")
+    return path
+
+
+def _person_name_from_uid(document_uid: str) -> str | None:
+    """Owner name for structural-header name matching, from a uid like "2071_LastName_FirstName_CV"."""
+    name_parts = document_uid.split('_')
+    if len(name_parts) < 3:
+        return None
+    # Skip the numeric prefix and CV/vita/resume suffixes.
+    name_parts_clean = [p for p in name_parts if not p.isdigit() and p.lower() not in ('cv', 'vita', 'resume')]
+    return ' '.join(name_parts_clean)
+
+
 def run_stage_3b(
     document_uid: str,
     stage_2_path: str | None = None,
@@ -193,23 +213,10 @@ def run_stage_3b(
 
     base_dir = Path(__file__).parent / "outputs"
 
-    # Find Stage 2 input
-    if stage_2_path is None:
-        stage_2_path = base_dir / "stage_2_entry_extraction" / f"{document_uid}_entries.json"
-    else:
-        stage_2_path = Path(stage_2_path)
-
-    if not stage_2_path.exists():
-        raise FileNotFoundError(f"Stage 2 output not found: {stage_2_path}")
-
-    # Find Stage 3a input
-    if stage_3a_path is None:
-        stage_3a_path = base_dir / "stage_3a_header_mappings" / f"{document_uid}_header_taxonomy.json"
-    else:
-        stage_3a_path = Path(stage_3a_path)
-
-    if not stage_3a_path.exists():
-        raise FileNotFoundError(f"Stage 3a output not found: {stage_3a_path}")
+    stage_2_path = _resolve_stage_input(
+        "Stage 2", stage_2_path, base_dir / "stage_2_entry_extraction" / f"{document_uid}_entries.json")
+    stage_3a_path = _resolve_stage_input(
+        "Stage 3a", stage_3a_path, base_dir / "stage_3a_header_mappings" / f"{document_uid}_header_taxonomy.json")
 
     print(f"Stage 2 entries: {stage_2_path}")
     print(f"Stage 3a mappings: {stage_3a_path}")
@@ -381,15 +388,7 @@ def run_stage_3b(
     post_correction_stats = {}
 
     # 1. Structural header corrections (CV title, page numbers, etc. → T)
-    # Extract person name from document_uid for name-matching
-    # Format: "2071_LastName_FirstName_CV" or similar
-    name_parts = document_uid.split('_')
-    if len(name_parts) >= 3:
-        # Try to extract name (skip numeric prefix)
-        name_parts_clean = [p for p in name_parts if not p.isdigit() and p.lower() not in ('cv', 'vita', 'resume')]
-        person_name = ' '.join(name_parts_clean)
-    else:
-        person_name = None
+    person_name = _person_name_from_uid(document_uid)
 
     print()
     print("1. Structural header corrections...")
@@ -444,6 +443,13 @@ def run_stage_3b(
             print(f"     - {corr['from']} → {corr['to']}: {corr['position_match'][:40]}...")
     else:
         print("   ✓ No grant-to-position corrections needed")
+
+    # 4b. (#946 item 5) M2 under an appointments heading with no funding evidence → T.
+    #     BEFORE step 5, which rewrites only M2 codes and so cannot route it back.
+    all_classified, appointment_funding_stats = apply_appointment_funding_corrections(all_classified)
+    post_correction_stats['appointment_funding'] = appointment_funding_stats
+    logger.info("Stage 3b: %d appointment row(s) without funding evidence M2 -> T",
+                appointment_funding_stats['corrections_applied'])
 
     # 5. Grant status corrections (date-based M2A/M2B/M2C override)
     print()
@@ -526,6 +532,13 @@ def run_stage_3b(
             print(f"     - P → B2: {corr['reason'][:60]}...")
     else:
         print("   ✓ No training/compliance corrections needed")
+
+    # 9b. (#946 item 4) Extramural event medical volunteering P → T. After every
+    #     corrector that can produce P (2: D → P, 7: O → P).
+    all_classified, event_volunteer_stats = apply_event_volunteer_corrections(all_classified)
+    post_correction_stats['event_volunteer'] = event_volunteer_stats
+    logger.info("Stage 3b: %d event medical-volunteer row(s) P -> T",
+                event_volunteer_stats['corrections_applied'])
 
     # 10. Invited talk corrections (S8 → R for invited conference talks)
     print()
@@ -630,6 +643,8 @@ def run_stage_3b(
         committee_stats['corrections_made'] +
         reasoning_stats['corrections_made'] +
         grant_stats['corrections_applied'] +
+        appointment_funding_stats['corrections_applied'] +
+        event_volunteer_stats['corrections_applied'] +
         teaching_stats['corrections_applied'] +
         leadership_stats['corrections_applied'] +
         adjunct_stats['corrections_applied'] +
