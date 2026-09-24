@@ -7,7 +7,10 @@ Every case here was named by the reviewer and is either UNCOVERED or PARTIAL
 per the coverage audit -- see the case-to-test table in the PR reply. Cases
 already covered in test_stage3b_classify.py (two identical entries, T vs M2
 preference, same non-M2 classification, three duplicates, short text
-exclusion, different-first-100-chars near-duplicates) are NOT repeated here.
+exclusion, duplicates with different openings) are NOT repeated here.
+
+The #945 section below pins the rule itself: only text that is identical
+once case, punctuation and whitespace are ignored is a duplicate.
 
 `_dup_entry`'s default `code="S1"` puts the SAME taxonomy code on both sides
 of every pair unless a test overrides it -- that default is what makes
@@ -29,15 +32,19 @@ if str(_SRC) not in sys.path:
 
 import unified_pipeline.stage3b.classify as classify  # noqa: E402
 
-# A pair of already-normalized (lowercase, single-spaced, no punctuation)
-# texts whose SequenceMatcher ratio sits just under the default 0.9
-# threshold. Computed once so the "just below" and "exactly at" tests share
-# one fixed, known ratio instead of each guessing at a boundary value.
+# Two sibling records that share a long template and differ by ONE word.
+# Their SequenceMatcher ratio sits just under 0.9; the old rule flagged any
+# pair at >= 0.9, so pairs a hair more similar than this one were dropped
+# (#945). Kept to prove a near-threshold pair is still not flagged.
 _NEAR_THRESHOLD_TEXT_A = "a randomized trial of a new asthma intervention for children"
 _NEAR_THRESHOLD_TEXT_B = "a randomized trial of a new asthma intervention for adults"
 _NEAR_THRESHOLD_RATIO = SequenceMatcher(
     None, _NEAR_THRESHOLD_TEXT_A, _NEAR_THRESHOLD_TEXT_B
 ).ratio()
+
+# The #945 bar for what the old 0.9 similarity rule used to call a
+# duplicate -- only used to prove a test pair WOULD have been dropped.
+_OLD_SIMILARITY_THRESHOLD = 0.9
 
 
 def _dup_entry(text, code="S1"):
@@ -148,29 +155,93 @@ def test_same_non_m2_code_on_both_sides_marks_the_second_entry_duplicate():
 
 
 # ---------------------------------------------------------------------------
-# Similarity threshold boundary (detect_duplicates's `sim >= similarity_threshold` check)
+# Sibling records are NOT duplicates (#945): only key-identical text is
 # ---------------------------------------------------------------------------
 
-def test_similarity_just_below_default_threshold_is_not_flagged():
-    """_NEAR_THRESHOLD_TEXT_A/B's ratio is a known value under the default
-    0.9 threshold -- not merely dissimilar text, an actual near-boundary
-    ratio -- so this exercises the `>=` cutoff itself, not just "unrelated
-    text doesn't match"."""
-    assert _NEAR_THRESHOLD_RATIO < 0.9
+def _old_rule_similarity(a, b):
+    """The normalized SequenceMatcher ratio the pre-#945 rule compared
+    against 0.9 -- lowercase, whitespace collapsed, punctuation stripped."""
+    def norm(t):
+        return " ".join("".join(c for c in t.lower() if c.isalnum() or c.isspace()).split())
+    return SequenceMatcher(None, norm(a), norm(b)).ratio()
+
+
+def test_near_threshold_one_word_difference_is_not_flagged():
+    assert _NEAR_THRESHOLD_RATIO < _OLD_SIMILARITY_THRESHOLD
 
     entries = [_dup_entry(_NEAR_THRESHOLD_TEXT_A), _dup_entry(_NEAR_THRESHOLD_TEXT_B)]
     _, pairs = classify.detect_duplicates(entries)
     assert pairs == []
 
 
-def test_similarity_exactly_at_threshold_is_flagged():
-    """Same pair as the "just below" test above, but with
-    similarity_threshold set to the pair's own computed ratio: sim ==
-    threshold must still count as a match, proving detect_duplicates's
-    `sim >= similarity_threshold` comparison is `>=` and not strict `>`."""
-    entries = [_dup_entry(_NEAR_THRESHOLD_TEXT_A), _dup_entry(_NEAR_THRESHOLD_TEXT_B)]
-    _, pairs = classify.detect_duplicates(entries, similarity_threshold=_NEAR_THRESHOLD_RATIO)
+@pytest.mark.parametrize(
+    "text_a, text_b",
+    [
+        # One distinguishing word, identical years -- the workshop shape.
+        (
+            "2017-2021   Instructor, Medical Student Airway Workshop, Springfield, IL",
+            "2017-2021   Instructor, Medical Student Suture Workshop, Springfield, IL",
+        ),
+        # Only the year differs -- a recurring award or annual course.
+        (
+            "Annual Regional Teaching Excellence Award for Clinical Faculty, 2019",
+            "Annual Regional Teaching Excellence Award for Clinical Faculty, 2020",
+        ),
+        # A word AND the year differ -- the Junior/Senior award shape.
+        (
+            "2019   Best Junior Resident Team Player Award, Recipient",
+            "2020   Best Senior Resident Team Player Award, Recipient",
+        ),
+        # Same article title, different publication date.
+        (
+            "Doe A. Case Series: Wrist Injuries. Example EM Pearls. Published January 27, 2024.",
+            "Doe A. Case Series: Wrist Injuries. Example EM Pearls. Published May 25, 2024.",
+        ),
+    ],
+    ids=["one-word", "year-only", "word-and-year", "same-title-different-date"],
+)
+def test_sibling_records_above_the_old_threshold_are_not_flagged(text_a, text_b):
+    """Each pair clears the old 0.9 similarity bar -- asserted, so the test
+    proves the pair WOULD have been dropped before #945 -- yet is two
+    distinct records. Neither may be marked duplicate: stage 4 filters a
+    duplicate out before extraction, so a false flag is a silent loss."""
+    assert _old_rule_similarity(text_a, text_b) >= _OLD_SIMILARITY_THRESHOLD
+
+    updated, pairs = classify.detect_duplicates([_dup_entry(text_a), _dup_entry(text_b)])
+    assert pairs == []
+    assert not any(e.get("is_duplicate") for e in updated)
+
+
+def test_token_split_by_spacing_is_still_a_duplicate():
+    """"2014-present" and "2014 - present" differ only in spacing around the
+    punctuation, but stripping punctuation leaves them as one token vs two
+    ("2014present" vs "2014  present"). The key drops whitespace as well as
+    punctuation, so the pair still matches."""
+    entries = [
+        _dup_entry("Associate Professor of Medicine, 2014-present"),
+        _dup_entry("Associate Professor of Medicine, 2014 - present"),
+    ]
+    updated, pairs = classify.detect_duplicates(entries)
     assert len(pairs) == 1
+    assert pairs[0]["similarity"] == 1.0  # artifact shape kept; always 1.0 now
+    assert updated[1]["is_duplicate"] is True
+
+
+def test_sibling_near_an_exact_pair_leaves_one_copy_of_the_pair():
+    """A sibling record followed by two identical copies of its neighbour.
+    Under the old similarity rule the sibling "matched" BOTH copies, so both
+    were marked duplicate and every copy of that record was lost. Now the
+    sibling is untouched and exactly one copy of the identical pair
+    survives."""
+    sibling = "2017-2021   Instructor, Medical Student Suture Workshop, Springfield, IL"
+    copy = "2017-2021   Instructor, Medical Student Airway Workshop, Springfield, IL"
+    updated, pairs = classify.detect_duplicates(
+        [_dup_entry(sibling), _dup_entry(copy), _dup_entry(copy)]
+    )
+    assert [(p["entry1_idx"], p["entry2_idx"]) for p in pairs] == [(1, 2)]
+    assert "is_duplicate" not in updated[0]
+    assert "is_duplicate" not in updated[1]
+    assert updated[2]["is_duplicate"] is True
 
 
 # ---------------------------------------------------------------------------
