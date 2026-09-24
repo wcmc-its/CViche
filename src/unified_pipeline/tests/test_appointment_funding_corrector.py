@@ -74,6 +74,18 @@ def test_m2_under_a_funding_heading_is_untouched():
     "Research study\t2018-2020\t$250,000",
     "R01 HL000000\t2014-2019",
     "Funded by the State\t2011-2013",
+    # Each FUNDING_EVIDENCE alternative as the only evidence on the row.
+    "Visiting scholar position awarded by the department\t2014",
+    "Research scholar\t2014\tsupported by two grants",
+    "Visiting scientist\t2014\tsponsored position",
+    "Visiting scientist\t2014\tsponsors: Example Institute",
+    "Visiting scientist\t2014\tsponsor: Example Institute",
+    "Research associate\t2014\tExample Awards Program",
+    "Research associate\t2014\tfunds from Example Institute",
+    "Contract # 4471\t2019-2021",
+    "Award No. 4471\t2019-2021",
+    "Project # 4471\t2019-2021",
+    "Contract No 4471\t2019-2021",
 ])
 def test_funding_evidence_keeps_m2(text):
     assert has_funding_evidence(text)
@@ -108,4 +120,17 @@ def test_apply_counts_and_details():
     out, stats = apply_appointment_funding_corrections(entries)
     assert [e["taxonomy_code"] for e in out] == ["T", "M2B"]
     assert stats["corrections_applied"] == 1
-    assert stats["correction_details"][0]["element_idx"] == 3
+    detail = stats["correction_details"][0]
+    assert detail["element_idx"] == 3
+    assert detail["correction"] == out[0]["appointment_funding_correction"]
+    assert detail["text_preview"] == _APPLICANT[:100]
+
+
+def test_none_text_and_hierarchy_are_tolerated():
+    """A row with no text under a positions heading has no evidence -> T; no hierarchy -> untouched."""
+    out, stats = apply_appointment_funding_corrections([
+        {"text": None, "taxonomy_code": "M2B", "hierarchy": ["ACADEMIC APPOINTMENTS"]},
+        {"text": _APPLICANT, "taxonomy_code": "M2B", "hierarchy": None},
+    ])
+    assert [e["taxonomy_code"] for e in out] == ["T", "M2B"]
+    assert stats["correction_details"][0]["text_preview"] == ""

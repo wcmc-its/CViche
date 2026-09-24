@@ -659,6 +659,8 @@ _946_MAPPINGS = [
      "taxonomy_options": [{"code": "D1", "confidence": 0.9}], "children": []},
     {"title": "PROFESSIONAL DEVELOPMENT AND LEADERSHIP EXPERIENCES",
      "taxonomy_options": [{"code": "P", "confidence": 0.9}], "children": []},
+    {"title": "HOSPITAL APPOINTMENTS",
+     "taxonomy_options": [{"code": "D2", "confidence": 0.9}], "children": []},
 ]
 _946_ENTRIES = [
     {"element_type": "text", "hierarchy": ["ACADEMIC APPOINTMENTS"],
@@ -667,6 +669,10 @@ _946_ENTRIES = [
      "text": "2019   Riverside 50 Miler\tMedical Volunteer"},
     {"element_type": "text", "hierarchy": ["PROFESSIONAL DEVELOPMENT AND LEADERSHIP EXPERIENCES"],
      "text": "2019-2021  City Marathon Medical Committee\tMember"},
+    # Coded D2 by the LLM; step 2 (committee vs position) makes it P, so only
+    # a step 9b that runs AFTER step 2 can see it.
+    {"element_type": "text", "hierarchy": ["HOSPITAL APPOINTMENTS"],
+     "text": "2019   Hospital Marathon Medical Committee Member, Medical Volunteer"},
 ]
 
 
@@ -675,6 +681,8 @@ def _946_llm(**kwargs):
     prompt = json.dumps(kwargs.get("messages"))
     if "Applicant for Instructor" in prompt:
         return _ok_response([0], code="M2C")
+    if "Hospital Marathon" in prompt:
+        return _ok_response([0], code="D2")
     return _ok_response([0, 1], code="P")
 
 
@@ -693,6 +701,7 @@ def test_946_correctors_run_in_the_stage_3b_pass(monkeypatch, tmp_path):
     output = json.loads(Path(result["output_path"]).read_text())
     by_text = {e["text"].split()[1]: e for e in output["entries"]}
     applicant, volunteer, committee = by_text["Applicant"], by_text["Riverside"], by_text["City"]
+    via_committee = by_text["Hospital"]
 
     assert applicant["taxonomy_code"] == "T"
     assert applicant["original_taxonomy_code"] == "M2C"
@@ -700,10 +709,13 @@ def test_946_correctors_run_in_the_stage_3b_pass(monkeypatch, tmp_path):
     assert volunteer["taxonomy_code"] == "T"
     assert volunteer["original_taxonomy_code"] == "P"
     assert committee["taxonomy_code"] == "P"
+    # D2 -> P (step 2) -> T (step 9b): pins 9b after the committee corrector.
+    assert via_committee["taxonomy_code"] == "T"
+    assert via_committee["event_volunteer_correction"]["from"] == "P"
 
     corrections = output["meta"]["stats"]["post_classification_corrections"]
     assert corrections["appointment_funding"]["corrections_applied"] == 1
-    assert corrections["event_volunteer"]["corrections_applied"] == 1
+    assert corrections["event_volunteer"]["corrections_applied"] == 2
 
 
 # --- run_stage_3b: helpers carved out of it (#946, function-size offset) --------
@@ -725,6 +737,8 @@ def test_stage_input_defaults_only_when_no_path_is_given(tmp_path):
 @pytest.mark.parametrize("uid, expected", [
     ("9999_Doe_Jane_CV", "Doe Jane"),
     ("2071_Roe_Richard_Vita", "Roe Richard"),
+    ("Doe_Jane_CV", "Doe Jane"),        # three parts is enough
+    ("2071_Roe_Richard_Resume", "Roe Richard"),
     ("Doe_Jane", None),
 ])
 def test_person_name_from_uid(uid, expected):

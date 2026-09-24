@@ -43,7 +43,9 @@ FUNDING_CODE_PREFIX = 'M2'
 # "PI:" and Investigator).
 FUNDING_EVIDENCE = re.compile(
     r'\b(?:awards?|awarded|grants?|sponsor(?:ed|s)?|agency|fund(?:ed|s)?)\b'
-    r'|\b(?:Co-?|M|Multiple\s+|Dual-?\s*)?PI\b'
+    # \bPI\b already matches Co-PI, Multiple PI and Dual-PI (the hyphen or
+    # space is a word boundary); only MPI needs its own prefix.
+    r'|\bM?PI\b'
     r'|\bCo-?I\b'
     r'|\b(?:Project|Award|Contract)\s*(?:#|No\.?|Number)',
     re.IGNORECASE,
@@ -94,7 +96,7 @@ def apply_appointment_funding_corrections(entries: list[dict]) -> tuple[list[dic
     details = [
         {
             'element_idx': entry.get('element_idx_start'),
-            'text_preview': entry.get('text', '')[:100],
+            'text_preview': (entry.get('text') or '')[:100],
             'correction': entry['appointment_funding_correction'],
         }
         for entry in corrected

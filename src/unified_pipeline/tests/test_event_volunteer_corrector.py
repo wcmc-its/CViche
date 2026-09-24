@@ -42,6 +42,31 @@ def test_event_medical_volunteer_p_goes_to_appendix(text):
     assert out["event_volunteer_correction"]["to"] == "T"
 
 
+@pytest.mark.parametrize("event", [
+    "City Marathon", "Harbor Marathons", "Valley 100 Miler", "County Triathlon", "Lake Triathlons",
+    "Coastal Ironman", "Hill Race", "Charity Races", "River Regatta", "Spring Cycling Classic",
+    "Open Tournament", "Junior Tournaments", "Harbor Cup", "Summer Games", "State Championship",
+    "Masters Championships", "Special Olympics",
+])
+def test_each_event_word_triggers(event):
+    """Every EVENT_WORDS alternative is load-bearing on its own."""
+    assert correct_event_volunteer(_entry(f"2018   {event}\tMedical Volunteer"))["taxonomy_code"] == "T"
+
+
+@pytest.mark.parametrize("role", [
+    "Medical Volunteer", "Volunteer Physician", "Volunteer Medical Staff", "Medical Coverage",
+])
+def test_each_volunteer_role_triggers(role):
+    """Every MEDICAL_VOLUNTEER_ROLE alternative is load-bearing on its own."""
+    assert correct_event_volunteer(_entry(f"2018   Harbor Cup\t{role}"))["taxonomy_code"] == "T"
+
+
+def test_none_text_is_left_alone():
+    out, stats = apply_event_volunteer_corrections([{"text": None, "taxonomy_code": "P"}])
+    assert out[0]["taxonomy_code"] == "P"
+    assert stats["corrections_applied"] == 0
+
+
 @pytest.mark.parametrize("text", [
     # A committee seat at an event is a committee, not a volunteer role (#946: out of scope).
     "2019-2021  City Marathon Medical Committee, Springfield, IL\tMember",
@@ -80,4 +105,12 @@ def test_apply_counts_and_details():
     assert [e["taxonomy_code"] for e in out] == ["T", "P"]
     assert stats["corrections_applied"] == 1
     assert stats["correction_details"][0]["element_idx"] == 7
-    assert stats["correction_details"][0]["correction"]["to"] == "T"
+    detail = stats["correction_details"][0]
+    assert detail["correction"] == out[0]["event_volunteer_correction"]
+    assert detail["text_preview"] == "2021 Riverside 50 Miler\tMedical Volunteer"
+
+
+def test_text_preview_is_capped_at_100_chars():
+    long_text = "2021 Riverside 50 Miler\tMedical Volunteer " + "x" * 200
+    _, stats = apply_event_volunteer_corrections([_entry(long_text)])
+    assert stats["correction_details"][0]["text_preview"] == long_text[:100]

@@ -79,7 +79,7 @@ def apply_event_volunteer_corrections(entries: list[dict]) -> tuple[list[dict], 
     details = [
         {
             'element_idx': entry.get('element_idx_start'),
-            'text_preview': entry.get('text', '')[:100],
+            'text_preview': (entry.get('text') or '')[:100],
             'correction': entry['event_volunteer_correction'],
         }
         for entry in corrected
