@@ -288,6 +288,39 @@ class TestQueueRunTransitions:
         assert applied is False
         assert self._reload(db).status == "running", "the worker's claim must survive the revert"
 
+    def test_flip_to_queued_runs_on_flip_before_its_single_commit(self, db):
+        """B3: on_flip must run inside the SAME transaction as the flip --
+        called before flip_to_queued's one db.commit(), not committed
+        separately. A mutant that does commit -> on_flip -> a second commit
+        still ends up in the same final DB state, so every other test here
+        (which only asserts end state) passes it too; only counting commits
+        and recording whether on_flip had already run at each commit catches
+        it."""
+        self._seed_run(db, status="failed")
+
+        commit_count = 0
+        on_flip_seen_at_commit = []
+        flip_called = {"value": False}
+        real_commit = db.commit
+
+        def counting_commit():
+            nonlocal commit_count
+            commit_count += 1
+            on_flip_seen_at_commit.append(flip_called["value"])
+            return real_commit()
+
+        def on_flip():
+            flip_called["value"] = True
+            return ()
+
+        db.commit = counting_commit
+
+        result = flip_to_queued(db, "QRT001", ("failed",), on_flip=on_flip)
+
+        assert result.flipped is True
+        assert commit_count == 1, "flip_to_queued must commit exactly once"
+        assert on_flip_seen_at_commit == [True], "on_flip must run before the single commit"
+
 
 class TestProvisionUser:
     """ARCH-03: provision_user handles both create and update."""

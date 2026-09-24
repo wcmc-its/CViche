@@ -10,6 +10,7 @@ same way the "running" reaper is unit-tested in test_release_guards.py rather
 than through the lifespan.
 """
 import asyncio
+import types
 from datetime import datetime, timedelta
 
 import fakeredis
@@ -102,6 +103,63 @@ class TestReconcileQueuedRunsAtStartup:
 
         with pytest.raises(RuntimeError, match="gone away"):
             main_mod._reconcile_queued_runs_at_startup(db, boom)
+
+
+class TestLifespanStartupSweepCallSite:
+    """B2 call-site regression: the tests above pin
+    ``_reconcile_queued_runs_at_startup`` in isolation, but nothing yet
+    exercises whether ``app.main.lifespan`` actually calls it -- a mutant
+    reverting the lifespan's startup sweep to the unguarded
+    ``reconcile_queued_runs(db)`` passes every one of them (and the whole
+    suite) because the call site itself is untested. This drives the real
+    lifespan end-to-end with ``reconcile_queued_runs`` raising a Valkey
+    ``ConnectionError`` and asserts startup still completes -- it would raise
+    out of the mutant's unguarded call instead."""
+
+    def test_startup_sweep_survives_reconcile_queued_runs_redis_error(self, monkeypatch):
+        from tests.conftest import TestingSessionLocal
+        from app.pipeline.event_emitter import event_emitter
+
+        # Real init_db()/DB work is exercised elsewhere; here only the guard
+        # call site matters, so point the lifespan's own SessionLocal at the
+        # already-created in-memory test DB and skip the real init_db() (it
+        # would otherwise try to create tables against the real configured
+        # engine).
+        monkeypatch.setattr(main_mod, "init_db", lambda: None)
+        monkeypatch.setattr("app.database.SessionLocal", TestingSessionLocal)
+
+        calls = []
+
+        def boom(db):
+            calls.append(1)
+            raise redis.exceptions.ConnectionError("valkey unreachable")
+
+        monkeypatch.setattr(run_service, "reconcile_queued_runs", boom)
+        monkeypatch.setattr(run_service, "reconcile_stale_runs", lambda db: 0)
+
+        # Other startup dependencies stubbed so this test isolates the B2
+        # call site rather than the broker/pub-sub wiring (which is not
+        # guarded and would otherwise depend on the environment's
+        # CVICHE_REDIS_URL -- see the corrected _reconcile_queued_runs_at_startup
+        # docstring: the pod does NOT survive a Valkey outage overall, only
+        # this one sweep does).
+        monkeypatch.delenv("CVICHE_REDIS_URL", raising=False)
+
+        async def noop():
+            return None
+
+        monkeypatch.setattr(event_emitter, "startup", noop)
+        monkeypatch.setattr(event_emitter, "shutdown", noop)
+
+        fake_app = types.SimpleNamespace(state=types.SimpleNamespace())
+
+        async def drive():
+            async with main_mod.lifespan(fake_app):
+                pass
+
+        asyncio.run(drive())  # must not raise -- the guard must have caught it
+
+        assert calls, "reconcile_queued_runs was never reached by the lifespan"
 
 
 # ---------------------------------------------------------------------------

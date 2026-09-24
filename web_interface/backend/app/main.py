@@ -244,12 +244,20 @@ def _reconcile_queued_runs_at_startup(db: Session, reconcile_queued_runs: Callab
     survives a sweep failure -- log and continue -- narrowed here to
     ``redis.exceptions.RedisError`` specifically. Unguarded, a Valkey outage
     during a backend restart raised out of ``reconcile_queued_runs``
-    (queue-mode only) would crash startup entirely, taking down every replica
-    at once instead of just leaving queue-mode reconciliation to the periodic
-    reaper, which retries on its own interval. Any other exception (a genuine
-    DB error, say) is deliberately left to propagate here, same as the
-    ``reconcile_stale_runs`` call beside it -- only Valkey unavailability is
-    worth surviving at this specific call site.
+    (queue-mode only) would crash *this sweep* out of startup, taking down
+    every replica at once instead of just leaving queue-mode reconciliation to
+    the periodic reaper, which retries on its own interval. Any other
+    exception (a genuine DB error, say) is deliberately left to propagate
+    here, same as the ``reconcile_stale_runs`` call beside it -- only Valkey
+    unavailability is worth surviving at this specific call site.
+
+    This guards ONLY this one sweep, not backend startup's dependency on
+    Valkey as a whole: ``lifespan`` still hard-depends on Valkey a few lines
+    below, unguarded, via the pre-existing pub/sub broker
+    (``event_emitter.startup()`` -> ``psubscribe`` on the same
+    ``CVICHE_REDIS_URL``, when the broker is enabled). Do not read this
+    function as making the pod resilient to a Valkey outage overall -- it
+    isn't; a Valkey outage still fails startup at that later call.
 
     ``reconcile_queued_runs`` is passed in rather than imported here so a test
     can substitute a stub without patching ``app.services.run_service``.
