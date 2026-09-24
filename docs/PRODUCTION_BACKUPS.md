@@ -101,7 +101,7 @@ Expected output: `Retention: 30`, `PITR: <target>`, `DeletionProtection: true`, 
 
 6. **Promote.** Two strategies:
 
-   - **Cut over (fastest):** Update the production deployment's `CVICHE_DATABASE_URL` to point at the restore instance, roll a new deployment. The old instance stays around as a frozen archive. Renames are cheap (`aws rds modify-db-instance --db-instance-identifier ... --new-db-instance-identifier cviche-old --apply-immediately`, then rename the restore to `cviche`).
+   - **Cut over (fastest):** Update `DB_HOST` to point at the restore instance's endpoint and roll a new deployment. `DB_HOST` is not in the `cviche-secrets` Secret — it's written into the `db:` section of the `auth_config.yaml` ConfigMap that `buildspec.yaml`'s `pre_build` phase generates from pipeline env vars (`app/config_loader.py:get_config` reads it from there as a yaml fallback when the env var itself is unset), so the fastest path is a pipeline re-run with the new `DB_HOST` value rather than an in-place Secret edit. The old instance stays around as a frozen archive. Renames are cheap (`aws rds modify-db-instance --db-instance-identifier ... --new-db-instance-identifier cviche-old --apply-immediately`, then rename the restore to `cviche` — which keeps `DB_HOST` unchanged and avoids the ConfigMap regeneration entirely).
    - **Copy-back (safer):** Dump from the restore instance, import into a fresh prod (or use `mysqldump | mysql` for table-level recovery). Slower but lets you keep the live instance unchanged.
 
 7. **Delete the temporary restore** once the issue is resolved (skip if you cut over):

@@ -34,7 +34,7 @@ const nodes = {
   bedrock: { x: 1200, y: 120, w: 220, h: 80, kind: "aws", title: "AWS Bedrock",
              sub: ["Claude Sonnet 4.6 / Haiku 4.5", "via IRSA role"] },
   db: { x: 1200, y: 232, w: 220, h: 64, kind: "data", title: "MariaDB",
-        sub: ["CVICHE_DATABASE_URL"] },
+        sub: ["DB_HOST / DB_PORT / DB_NAME / DB_USER"] },
   s3: { x: 1200, y: 360, w: 220, h: 64, kind: "data", title: "Amazon S3",
         sub: ["cviche/runs/{id}/…"] },
 };
