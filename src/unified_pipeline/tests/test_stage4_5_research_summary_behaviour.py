@@ -219,6 +219,39 @@ def test_prioritize_entries_ranks_by_latest_year_not_start_year():
     assert [e["text"] for e in result] == ["Long range"]
 
 
+def test_prioritize_entries_recency_weight_beats_content_length():
+    """Pins RECENCY_WEIGHT's size in the within-section cut. A 2012 entry
+    (recency 0.3 at 2026) with no text beats an undated 500-char entry
+    (content 0.1) only when the weight is above 1/3: 0.3 x 0.4 = 0.12 > 0.1,
+    but the old 0.3 weight gave 0.09 < 0.1."""
+    entries = [
+        {"text": "u" * 500, "extracted_fields": {}},
+        {"text": "", "extracted_fields": {"year": "2012"}},
+    ]
+    result = prioritize_entries(entries, "O", limit=1, current_year=2026)
+    assert result[0]["extracted_fields"] == {"year": "2012"}
+
+
+def test_prioritize_and_gather_default_to_wall_clock_year(monkeypatch):
+    """run_stage_4_5 relies on the default year. At a wall clock of 2045 a
+    2025 entry is past the window, so text length decides the cut."""
+    monkeypatch.setattr(stage_4_5, "datetime", _FrozenDatetime)
+    entries = [
+        {"text": "long" * 20, "extracted_fields": {"year": "2006"}},
+        {"text": "s", "extracted_fields": {"year": "2025"}},
+    ]
+    assert [e["text"] for e in prioritize_entries(entries, "O", limit=1)] == ["long" * 20]
+    (_c, _e, weight), = gather_context_entries({"O": [entries[1]]})
+    assert weight == pytest.approx(stage_4_5.SECTION_WEIGHTS["O"])
+
+
+def test_build_context_string_defaults_to_wall_clock_year(monkeypatch):
+    monkeypatch.setattr(stage_4_5, "datetime", _FrozenDatetime)
+    grant = ("M2A", {"extracted_fields": {"title": "R01", "end_date": "2030"}, "text": "Grant"}, -0.1)
+    assert not build_context_string([grant], max_tokens=100).startswith(CURRENT_CONTEXT_TAG)
+    assert build_context_string([grant], max_tokens=100, current_year=2026).startswith(CURRENT_CONTEXT_TAG)
+
+
 # --- recency helpers --------------------------------------------------------------
 
 def test_latest_entry_year_takes_max_over_date_fields():
@@ -229,6 +262,17 @@ def test_latest_entry_year_takes_max_over_date_fields():
 def test_latest_entry_year_falls_back_to_text_when_fields_undated():
     entry = {"extracted_fields": {"narrative": "x"}, "text": "Project A, 2021-2023. Aims 2022."}
     assert latest_entry_year(entry) == 2023
+
+
+def test_latest_entry_year_reads_date_field_and_twentieth_century_years():
+    assert latest_entry_year({"extracted_fields": {"date": "2019"}, "text": "2030"}) == 2019
+    assert latest_entry_year({"extracted_fields": {"year": "1998"}, "text": "x"}) == 1998
+
+
+@pytest.mark.parametrize("text", ["Award 12019 and 2010", "Award 20195 and 2010"])
+def test_latest_entry_year_ignores_digits_inside_longer_numbers(text):
+    """A grant or ID number that contains a year-like run is not a year."""
+    assert latest_entry_year({"extracted_fields": {}, "text": text}) == 2010
 
 
 def test_latest_entry_year_none_when_no_year_anywhere():
@@ -251,7 +295,42 @@ def test_latest_entry_year_none_when_no_year_anywhere():
     ("S1", {"year": "2024"}, "A paper on the present state", False),  # bare 'present' is not a range
 ])
 def test_is_current_entry(code, fields, text, expected):
-    assert is_current_entry({"extracted_fields": fields, "text": text}, code) is expected
+    assert is_current_entry({"extracted_fields": fields, "text": text}, code, current_year=2026) is expected
+
+
+@pytest.mark.parametrize("code, fields, text, expected", [
+    ("M2A", {"start_date": "2021-07-01", "end_date": "2024-06-30"}, "ended grant", False),  # end_date passed
+    ("M2A", {"start_date": "2022", "end_date": "2026"}, "ends this year", True),              # boundary: not yet past
+    ("M2A", {"start_date": "2013"}, "start date only", True),     # no end_date: no evidence it ended
+    ("N3A", {"end_date": "2020"}, "mentee who finished", False),
+    ("K1", {"end_date": "Now"}, "x", True),                       # 'now' is an ongoing end_date
+    ("K1", {"end_date": "Presentation 2019"}, "x", False),       # ongoing word must end at a boundary
+])
+def test_is_current_entry_current_by_definition_codes_honour_end_date(code, fields, text, expected):
+    """Verifier finding on #946 item 6: every M2A counted as current, so a
+    grant that ended in 2024 still got the tag and recency 1.0."""
+    assert is_current_entry({"extracted_fields": fields, "text": text}, code, current_year=2026) is expected
+
+
+def _frozen_datetime(year):
+    """A stand-in for stage_4_5.datetime whose now() is 1 January of `year`,
+    so the wall-clock default is testable."""
+    class _Frozen:
+        @staticmethod
+        def now():
+            from datetime import datetime as real
+            return real(year, 1, 1)
+    return _Frozen
+
+
+_FrozenDatetime = _frozen_datetime(2045)
+
+
+def test_is_current_entry_defaults_to_wall_clock_year(monkeypatch):
+    monkeypatch.setattr(stage_4_5, "datetime", _FrozenDatetime)
+    grant = {"extracted_fields": {"end_date": "2030"}, "text": "x"}
+    assert is_current_entry(grant, "M2A") is False
+    assert is_current_entry(grant, "M2A", current_year=2026) is True
 
 
 def test_score_entry_recency_current_entry_scores_one():
@@ -267,6 +346,15 @@ def test_score_entry_recency_decays_linearly_and_clamps():
     assert rec(2006) == 0.0
     assert rec(1990) == 0.0          # clamped at 0, never negative
     assert rec(2030) == 1.0          # future-dated (in press) clamps at 1
+
+
+def test_score_entry_recency_judges_end_date_against_its_own_year(monkeypatch):
+    """The ended-grant check must use the caller's current_year, not the
+    wall clock (frozen at 2020 here): at 2040 a grant that ended in 2030
+    scores by decay, although at the wall-clock year it would be current."""
+    monkeypatch.setattr(stage_4_5, "datetime", _frozen_datetime(2020))
+    grant = {"extracted_fields": {"end_date": "2030"}, "text": "x"}
+    assert score_entry_recency(grant, "M2A", current_year=2040) == pytest.approx(0.5)
 
 
 def test_score_entry_recency_undated_scores_zero():

@@ -79,7 +79,8 @@ SENIOR_AUTHOR_BONUS = 0.1  # Bonus for senior/first author on pubs
 # Taxonomy code groups (see docs/CODING_STANDARDS.md §8.2)
 GRANT_TAXONOMY_PREFIX = 'M2'  # M2A/M2B/M2C/M2D -- all grant/funding entries
 PUBLICATION_TAXONOMY_CODES = ('S1', 'S2', 'S7', 'S8')  # publication-like codes that need a title
-CURRENT_TAXONOMY_CODES = ('M2A', 'N3A')  # sections that are current by definition (active funding, current mentees)
+# Current by definition (active funding, current mentees) unless the entry's end_date has passed.
+CURRENT_TAXONOMY_CODES = ('M2A', 'N3A')
 RESEARCH_ACTIVITIES_CODE = 'M1'  # an undated M1 narrative is the owner's present research statement
 
 # Recency (#946 item 6). An entry's recency score is 1.0 when it is ongoing and
@@ -114,13 +115,25 @@ def latest_entry_year(entry: dict) -> int | None:
     return max(years) if years else None
 
 
-def is_current_entry(entry: dict, taxonomy_code: str) -> bool:
-    """True for an ongoing entry: a current-by-definition section, an
-    undated M1 narrative, an end_date of 'present'/'current'/'ongoing', or an
-    open 'YYYY-present' range in the text (M1 project lines carry their dates
-    only there)."""
+def resolve_current_year(current_year: int | None) -> int:
+    """The given year, or the wall-clock year when None (production's default)."""
+    return datetime.now().year if current_year is None else current_year
+
+
+def ended_before(entry: dict, current_year: int) -> bool:
+    """True when the entry's end_date names a year earlier than current_year."""
+    fields = entry.get('extracted_fields') or {}
+    end_years = [int(y) for y in YEAR_PATTERN.findall(str(fields.get('end_date') or ''))]
+    return bool(end_years) and max(end_years) < current_year
+
+
+def is_current_entry(entry: dict, taxonomy_code: str, current_year: int | None = None) -> bool:
+    """True for an ongoing entry: a current-by-definition section whose
+    end_date has not passed, an undated M1 narrative, an end_date of
+    'present'/'current'/'ongoing', or an open 'YYYY-present' range in the text
+    (M1 project lines carry their dates only there)."""
     if taxonomy_code in CURRENT_TAXONOMY_CODES:
-        return True
+        return not ended_before(entry, resolve_current_year(current_year))
     if taxonomy_code == RESEARCH_ACTIVITIES_CODE and latest_entry_year(entry) is None:
         return True
     fields = entry.get('extracted_fields') or {}
@@ -131,7 +144,7 @@ def is_current_entry(entry: dict, taxonomy_code: str) -> bool:
 
 def score_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> float:
     """0.0-1.0: 1.0 if ongoing, else linear decay over RECENCY_WINDOW_YEARS; undated scores 0."""
-    if is_current_entry(entry, taxonomy_code):
+    if is_current_entry(entry, taxonomy_code, current_year):
         return 1.0
     year = latest_entry_year(entry)
     if year is None:
@@ -192,8 +205,7 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: s
     """
     if not entries:
         return []
-    if current_year is None:
-        current_year = datetime.now().year
+    current_year = resolve_current_year(current_year)
 
     # Score each entry
     scored_entries = []
@@ -228,8 +240,7 @@ def gather_context_entries(entries_by_code: dict[str, list[dict]], cv_owner_name
 
     Returns list of (taxonomy_code, entry, weight) tuples, sorted by weight.
     """
-    if current_year is None:
-        current_year = datetime.now().year
+    current_year = resolve_current_year(current_year)
     weighted_entries = []
 
     for code, entries in entries_by_code.items():
@@ -318,7 +329,8 @@ def format_entry_for_context(code: str, entry: dict) -> str:
         return f"[{code}] {text}"
 
 
-def build_context_string(weighted_entries: list[tuple[str, dict, float]], max_tokens: int = 4000) -> str:
+def build_context_string(weighted_entries: list[tuple[str, dict, float]], max_tokens: int = 4000,
+                         current_year: int | None = None) -> str:
     """
     Build context string from weighted entries, respecting token limit.
 
@@ -329,6 +341,7 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float]], max_to
     Rough estimate: 1 token ≈ 4 characters
     """
     max_chars = max_tokens * 4
+    current_year = resolve_current_year(current_year)
     context_parts = []
     total_chars = 0
 
@@ -342,7 +355,7 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float]], max_to
 
     for code, entry, weight in valid_entries:
         formatted = format_entry_for_context(code, entry)
-        if is_current_entry(entry, code):
+        if is_current_entry(entry, code, current_year):
             formatted = f"{CURRENT_CONTEXT_TAG} {formatted}"
 
         if total_chars + len(formatted) > max_chars:
