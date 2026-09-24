@@ -487,13 +487,13 @@ def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
     that length lands in the same WCM section; otherwise the heading does not
     say which section it means, and the classifier's own code stands. Before
     #946 `max(key=len)` took whichever tied code stage 3b's set happened to
-    list first ("Book Chapters" -> ['S3', 'S4'] -> Books). Sorted, so the
-    result never depends on `expected_codes` order."""
+    list first ("Book Chapters" -> ['S3', 'S4'] -> Books). `min()` of the
+    tied codes, so the result never depends on `expected_codes` order."""
     longest = max(len(code) for code in expected_codes)
-    candidates = sorted({code for code in expected_codes if len(code) == longest})
+    candidates = [code for code in expected_codes if len(code) == longest]
     if len({TAXONOMY_TO_SECTION.get(code) for code in candidates}) > 1:
         return None
-    return candidates[0]
+    return min(candidates)
 
 
 def _merge_appendix_diversion_warnings(
