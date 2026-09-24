@@ -235,19 +235,33 @@ def _label_word_present(word: str, text: str, pii_fragments: list[str]) -> bool:
 # home_phone, which #821 withholds -- the owner's own Cell phone row stayed
 # empty. Single letters count only in the two shapes that make them a label,
 # "(c)" or "c:"/"c." -- a bare "c" or "m" is too often an initial, a suite or
-# a unit to route on. Only cell and home are recognised here: cell because it
+# a unit to route on, and even "m:"/"c." is not a label straight after a word
+# ("room m:", "building c."), so a single letter must not follow a letter or
+# a word and one space. A combined "cell/home" label is a cell label, as it
+# was before #946. Only cell and home are recognised here: cell because it
 # is the row the block heading was hiding, home because a number labelled
 # "(h)" must stay withheld even inside a block that also says "cell".
 _CELL_LABEL_BEFORE_NUMBER = (
-    r'(?:\([cm]\):?|\b[cm][:.]'
-    r'|\b(?:cell(?:ular)?|mobile|mob)\b(?:\s*(?:phone|tel|no))?\.?:?)'
+    r'(?:\([cm]\):?|(?<![a-z])(?<![a-z] )[cm][:.]'
+    r'|\b(?:cell(?:ular)?|mobile|mob)\b(?:\s*/\s*(?:home|work|office))?'
+    r'(?:\s*(?:phone|tel|no))?\.?:?)'
 )
 _HOME_LABEL_BEFORE_NUMBER = (
-    r'(?:\(h\):?|\bh[:.]|\bhome\b(?:\s*(?:phone|telephone|tel|no))?\.?:?)'
+    r'(?:\(h\):?|(?<![a-z])(?<![a-z] )h[:.]'
+    r'|\bhome\b(?:\s*(?:phone|telephone|tel|no))?\.?:?)'
 )
 _LABELLED_NUMBER_RE = re.compile(
     rf'(?:(?P<cell>{_CELL_LABEL_BEFORE_NUMBER})|(?P<home>{_HOME_LABEL_BEFORE_NUMBER}))'
     rf'\s*(?P<number>{_PHONE_NUMBER_PATTERN})',
+    re.IGNORECASE,
+)
+# A cell label written AFTER the number, "212-555-0100 (cell)". It outranks a
+# home label before the number, as the block-level 'cell' word did before
+# #946. Words only, and never when another number follows: in
+# "(o) 212-555-0100 (c) 917-555-0101" the "(c)" labels the number after it.
+_CELL_LABEL_AFTER_NUMBER_RE = re.compile(
+    rf'(?P<number>{_PHONE_NUMBER_PATTERN})\s*\((?:cell(?:ular)?|mobile)\)'
+    r'(?!\s*[+(]?\d)',
     re.IGNORECASE,
 )
 _PHONE_LABEL_CELL = 'cell'
@@ -271,13 +285,22 @@ def _nearest_phone_label(phone: object, text: str) -> str | None:
     digits = re.sub(r'\D', '', str(phone))
     if len(digits) < _MIN_PHONE_DIGITS_TO_PAIR:
         return None
+    if any(_is_same_number(match.group('number'), digits)
+           for match in _CELL_LABEL_AFTER_NUMBER_RE.finditer(text)):
+        return _PHONE_LABEL_CELL
     for match in _LABELLED_NUMBER_RE.finditer(text):
-        found = re.sub(r'\D', '', match.group('number'))
-        if (len(found) >= _MIN_PHONE_DIGITS_TO_PAIR
-                and abs(len(found) - len(digits)) <= _MAX_COUNTRY_CODE_DIGITS
-                and (found.endswith(digits) or digits.endswith(found))):
+        if _is_same_number(match.group('number'), digits):
             return _PHONE_LABEL_CELL if match.group('cell') else _PHONE_LABEL_HOME
     return None
+
+
+def _is_same_number(number: str, digits: str) -> bool:
+    """Whether `number` found in the text is the extracted `digits`, once a
+    country prefix on either side is ignored."""
+    found = re.sub(r'\D', '', number)
+    return (len(found) >= _MIN_PHONE_DIGITS_TO_PAIR
+            and abs(len(found) - len(digits)) <= _MAX_COUNTRY_CODE_DIGITS
+            and (found.endswith(digits) or digits.endswith(found)))
 
 
 def _cell_and_home_signals(phone: object, text: str,
@@ -310,26 +333,62 @@ _CONSUMER_EMAIL_DOMAINS = frozenset({
 _WORK_EMAIL_LABEL_WORDS = ('work', 'office', 'business', 'institution')
 # Where the label that owns an email can start: the entry's own separators.
 _EMAIL_LABEL_BOUNDARY_RE = re.compile(r'[\t\n;|]')
+# A work label written after the address, "jdoe@gmail.com (work)". Only a
+# parenthetical right after it: ", Office: ..." after an address is the next
+# field's label, not this one's.
+_WORK_LABEL_AFTER_EMAIL_RE = re.compile(
+    r'\s*\((?:' + '|'.join(_WORK_EMAIL_LABEL_WORDS) + r')\b')
+# The stage-4 fields an email is read from, in precedence order. A
+# `work_email` key outranks the domain rule. A `personal_email` key does not:
+# stage 4 reads it off the block heading, the same mistake as #946's -- the
+# corpus has an institutional .edu address keyed `personal_email` because it
+# sits in a Home block.
+_FIELD_PERSONAL_EMAIL = 'personal_email'
+_EMAIL_FIELD_KEYS = ('email', 'primary_email', 'institutional_email',
+                     _FIELD_WORK_EMAIL, _FIELD_PERSONAL_EMAIL)
 
 
-def _is_personal_email(email: object, text: str) -> bool:
-    """Whether an extracted email belongs in the Personal email row.
+def _is_personal_email(email: object, text: str, field_key: str | None) -> bool:
+    """Whether an email belongs in the Personal email row.
 
-    `text` is the entry's lowercased text. The word "personal" anywhere in it
-    still decides, as before; otherwise a consumer-domain address does,
-    unless a work word labels it in the text between the previous separator
-    and the address itself (#946)."""
+    `text` is the entry's lowercased text and `field_key` the stage-4 field
+    the email came from (None for one found in the text). A `work_email` key
+    decides. Otherwise the word "personal" anywhere in the text still
+    decides, as before; otherwise a consumer-domain address does, unless a
+    work word labels it (#946)."""
+    if field_key == _FIELD_WORK_EMAIL:
+        return False
     if 'personal' in text:
         return True
     address = str(email).strip().lower()
     if address.rsplit('@', 1)[-1] not in _CONSUMER_EMAIL_DOMAINS:
         return False
+    return not _work_label_owns_email(address, text)
+
+
+def _work_label_owns_email(address: str, text: str) -> bool:
+    """Whether a work word labels `address`: in the text between the
+    previous separator and the address, or in a parenthetical right after
+    it. An address missing from the text is judged on the whole text."""
     at = text.find(address)
-    label_zone = text if at < 0 else text[:at]
-    boundaries = list(_EMAIL_LABEL_BOUNDARY_RE.finditer(label_zone))
-    if at >= 0 and boundaries:
-        label_zone = label_zone[boundaries[-1].end():]
-    return not any(word in label_zone for word in _WORK_EMAIL_LABEL_WORDS)
+    if at < 0:
+        return any(word in text for word in _WORK_EMAIL_LABEL_WORDS)
+    before = text[:at]
+    boundaries = list(_EMAIL_LABEL_BOUNDARY_RE.finditer(before))
+    if boundaries:
+        before = before[boundaries[-1].end():]
+    return (any(word in before for word in _WORK_EMAIL_LABEL_WORDS)
+            or _WORK_LABEL_AFTER_EMAIL_RE.match(text, at + len(address)) is not None)
+
+
+def _route_email(email: str, text: str, field_key: str | None,
+                 work_email: str | None,
+                 personal_email: str | None) -> tuple[str | None, str | None]:
+    """(work_email, personal_email) once `email` is offered to its row. A
+    row that is already filled keeps its first value."""
+    if _is_personal_email(email, text, field_key):
+        return work_email, personal_email or email
+    return work_email or email, personal_email
 
 
 class _VisaAnswers(NamedTuple):
@@ -534,11 +593,8 @@ class PersonalDataSection:
             # Determine type based on original text labels
             extracted_phone = fields.get('phone')
             extracted_address = fields.get('address')
-            extracted_email = (fields.get('email') or
-                              fields.get('primary_email') or
-                              fields.get('institutional_email') or
-                              fields.get('work_email') or
-                              fields.get('personal_email'))
+            email_key = next((key for key in _EMAIL_FIELD_KEYS if fields.get(key)), None)
+            extracted_email = fields.get(email_key) if email_key else None
 
             if pii_fragments:
                 if _from_pii_fragment(extracted_phone, pii_fragments):
@@ -623,18 +679,16 @@ class PersonalDataSection:
 
             # Classify email by type
             if extracted_email:
-                if _is_personal_email(extracted_email, text):
-                    if not personal_email:
-                        personal_email = extracted_email
-                elif not work_email:
-                    work_email = extracted_email
+                work_email, personal_email = _route_email(
+                    extracted_email, text, email_key, work_email, personal_email)
 
             # Also check entry text for email pattern (fallback)
             if not work_email and not personal_email:
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', entry.get('text', ''))
                 if email_match and not _from_pii_fragment(email_match.group(0),
                                                           pii_fragments):
-                    work_email = email_match.group(0)
+                    work_email, personal_email = _route_email(
+                        email_match.group(0), text, None, work_email, personal_email)
 
             # home_phone is deliberately absent from this tuple: it is written
             # and never read (the template has no home-phone row), so an entry
