@@ -558,3 +558,58 @@ def test_q2_list_role_and_organization_survive_router_and_render_end_to_end(tmp_
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# #946: a start-only Q2/Q3 row is one year unless the source leaves it open.
+# The entry's own text reaches `format_date_range` from both fillers; Q1 and
+# Q4D are not point-in-time codes and keep reading a start-only row as
+# ongoing.
+# ---------------------------------------------------------------------------
+
+def _with_text(entry, text):
+    entry["text"] = text
+    return entry
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("2019\tMember, Fictional Board Delta", "2019"),
+    ("2019-\tMember, Fictional Board Delta", "2019-Present"),
+])
+def test_q2_start_only_row_reads_its_own_source_text(text, expected):
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_service_boards([_with_text(_entry(
+        "Q2", committee_name="Fictional Board Delta", role="Member",
+        start_date="2019", end_date=""), text)])
+    rows = list(_rows_containing(gen.doc, "Fictional Board Delta"))
+    assert len(rows) == 1
+    assert rows[0][3] == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("2019 Fictional Agency Three study section", "2019"),
+    ("Fictional Agency Three study section (2019-", "2019-Present"),
+])
+def test_q3_start_only_row_reads_its_own_source_text_end_to_end(tmp_path, text, expected):
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _with_text(_entry("Q3", agency="Fictional Agency Three",
+                          start_date="2019", end_date=""), text),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Agency Three"))
+    assert len(rows) == 1
+    assert rows[0][2] == expected
+
+
+def test_q1_start_only_row_keeps_present_end_to_end(tmp_path):
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q1", organization="Fictional Society Four", role="President",
+               start_date="2019", end_date=""),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Society Four"))
+    assert len(rows) == 1
+    assert rows[0][-1] == "2019-Present"

@@ -394,3 +394,38 @@ class TestThreeLineBurstFallsBackWhenReparseYieldsNothing:
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
+
+
+class TestStartOnlyRowIsOneYear:
+    """#946: P is a point-in-time code. A committee or event row with a start
+    and no end renders the bare year, unless the end date or the source text
+    says the row is still open."""
+
+    def _entry(self, text, **fields):
+        return {"text": text, "taxonomy_code": "P",
+                "extracted_fields": {"committee_name": "Fictional Event Coverage",
+                                     "role": "Medical Volunteer", **fields}}
+
+    def test_start_only_renders_the_bare_year(self):
+        rows = _rows(self._entry("2021 Fictional Event Coverage\tMedical Volunteer",
+                                 start_date="2021", end_date=""))
+        assert rows == [("Fictional Event Coverage", "Medical Volunteer", "2021")]
+
+    def test_an_open_dash_in_the_source_keeps_present(self):
+        rows = _rows(self._entry("2021-\tFictional Event Coverage\tMedical Volunteer",
+                                 start_date="2021", end_date=""))
+        assert rows == [("Fictional Event Coverage", "Medical Volunteer", "2021-Present")]
+
+    def test_a_present_end_date_keeps_present(self):
+        rows = _rows(self._entry("2021 Fictional Event Coverage\tMedical Volunteer",
+                                 start_date="2021", end_date="present"))
+        assert rows == [("Fictional Event Coverage", "Medical Volunteer", "2021-Present")]
+
+    def test_a_multi_committee_record_reads_the_entry_text(self):
+        entry = {"text": "2018 Committee One\n2020- Committee Two", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": [
+                     {"committee_name": "Committee One", "role": "Member", "start_date": "2018"},
+                     {"committee_name": "Committee Two", "role": "Member", "start_date": "2020"},
+                 ]}}
+        assert _rows(entry) == [("Committee One", "Member", "2018"),
+                                ("Committee Two", "Member", "2020-Present")]
