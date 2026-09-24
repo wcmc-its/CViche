@@ -17,6 +17,7 @@ describes the flattened-table shapes it handles. O's own job is folding the
 parsed role titles back into the activity text, because its table has no role
 column for them.
 """
+import logging
 from typing import List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
@@ -24,6 +25,8 @@ from ..normalization import _committee_cell_text
 from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
+
+logger = logging.getLogger(__name__)
 
 # Canonical Section O header, verbatim from
 # key_files/wcm_cv_template_faculty_october_2022_final.docx paragraph 156.
@@ -67,7 +70,7 @@ class LeadershipSection:
             return
 
         if self.verbose:
-            print(f"Filling Institutional Leadership ({len(entries)} entries)...")
+            logger.info("Filling Institutional Leadership (%s entries)...", len(entries))
 
         # Find Leadership section by exact canonical header (#625 review) --
         # fail closed rather than risk binding to a near-miss heading. See
