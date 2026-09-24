@@ -50,7 +50,7 @@ def _get_cleaned_institution_name(
     if not isinstance(enrichment, Mapping):
         # A non-Mapping (list, str, ...) shouldn't reach here, but stage 5b
         # is an LLM output and one malformed run is enough (#743). Treat it
-        # like no enrichment rather than aborting the render.
+        # like no enrichment rather than failing the section.
         logger.warning(
             "institution_enrichment is %s, not a mapping; treating as absent",
             type(enrichment).__name__)

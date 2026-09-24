@@ -703,8 +703,8 @@ def test_propagation_survives_a_non_mapping_enrichment(malformed_enrichment, cap
     back as a list, a string, or another non-mapping instead of a dict. The
     parent-to-subentry carry used to call `dict(last_enrichment)` on whatever
     the parent held, which raises on a non-mapping (`ValueError` for a
-    single-character list, `TypeError` for an int) and aborts the whole
-    render. It must instead treat the malformed value like no enrichment and
+    single-character list, `TypeError` for an int) and fails the
+    Positions section, which `_render_section` then sends to the Appendix. It must instead treat the malformed value like no enrichment and
     keep propagating the institution name."""
     parent = _position_entry(1, "Chief of Service", "Lincoln Hospital",
                              ["Hospital Appointments"], "2001", "2004")
