@@ -76,7 +76,7 @@ def test_m2_under_a_funding_heading_is_untouched():
     "Funded by the State\t2011-2013",
     # Each FUNDING_EVIDENCE alternative as the only evidence on the row.
     "Visiting scholar position awarded by the department\t2014",
-    "Research scholar\t2014\tsupported by two grants",
+    "Research scholar\t2014\tsupported by a grant",
     "Visiting scientist\t2014\tsponsored position",
     "Visiting scientist\t2014\tsponsors: Example Institute",
     "Visiting scientist\t2014\tsponsor: Example Institute",
@@ -124,6 +124,12 @@ def test_apply_counts_and_details():
     assert detail["element_idx"] == 3
     assert detail["correction"] == out[0]["appointment_funding_correction"]
     assert detail["text_preview"] == _APPLICANT[:100]
+
+
+def test_text_preview_is_capped_at_100_chars():
+    long_text = _APPLICANT + " " + "x" * 200
+    _, stats = apply_appointment_funding_corrections([_entry(long_text)])
+    assert stats["correction_details"][0]["text_preview"] == long_text[:100]
 
 
 def test_none_text_and_hierarchy_are_tolerated():

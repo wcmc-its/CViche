@@ -47,7 +47,8 @@ FUNDING_EVIDENCE = re.compile(
     # space is a word boundary); only MPI needs its own prefix.
     r'|\bM?PI\b'
     r'|\bCo-?I\b'
-    r'|\b(?:Project|Award|Contract)\s*(?:#|No\.?|Number)',
+    # "Award No." is already caught by the awards? word above.
+    r'|\b(?:Project|Contract)\s*(?:#|No\.?|Number)',
     re.IGNORECASE,
 )
 

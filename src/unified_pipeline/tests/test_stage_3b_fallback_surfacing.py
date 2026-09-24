@@ -661,6 +661,8 @@ _946_MAPPINGS = [
      "taxonomy_options": [{"code": "P", "confidence": 0.9}], "children": []},
     {"title": "HOSPITAL APPOINTMENTS",
      "taxonomy_options": [{"code": "D2", "confidence": 0.9}], "children": []},
+    {"title": "LEADERSHIP ROLES",
+     "taxonomy_options": [{"code": "O", "confidence": 0.9}], "children": []},
 ]
 _946_ENTRIES = [
     {"element_type": "text", "hierarchy": ["ACADEMIC APPOINTMENTS"],
@@ -673,6 +675,10 @@ _946_ENTRIES = [
     # a step 9b that runs AFTER step 2 can see it.
     {"element_type": "text", "hierarchy": ["HOSPITAL APPOINTMENTS"],
      "text": "2019   Hospital Marathon Medical Committee Member, Medical Volunteer"},
+    # Coded O by the LLM; step 7 (leadership level) makes it P ("Coordinator"),
+    # so only a step 9b that runs AFTER step 7 can see it.
+    {"element_type": "text", "hierarchy": ["LEADERSHIP ROLES"],
+     "text": "2018   Lakeside Triathlon Medical Volunteer Coordinator"},
 ]
 
 
@@ -683,6 +689,8 @@ def _946_llm(**kwargs):
         return _ok_response([0], code="M2C")
     if "Hospital Marathon" in prompt:
         return _ok_response([0], code="D2")
+    if "Lakeside Triathlon" in prompt:
+        return _ok_response([0], code="O")
     return _ok_response([0, 1], code="P")
 
 
@@ -701,7 +709,7 @@ def test_946_correctors_run_in_the_stage_3b_pass(monkeypatch, tmp_path):
     output = json.loads(Path(result["output_path"]).read_text())
     by_text = {e["text"].split()[1]: e for e in output["entries"]}
     applicant, volunteer, committee = by_text["Applicant"], by_text["Riverside"], by_text["City"]
-    via_committee = by_text["Hospital"]
+    via_committee, via_leadership = by_text["Hospital"], by_text["Lakeside"]
 
     assert applicant["taxonomy_code"] == "T"
     assert applicant["original_taxonomy_code"] == "M2C"
@@ -712,10 +720,13 @@ def test_946_correctors_run_in_the_stage_3b_pass(monkeypatch, tmp_path):
     # D2 -> P (step 2) -> T (step 9b): pins 9b after the committee corrector.
     assert via_committee["taxonomy_code"] == "T"
     assert via_committee["event_volunteer_correction"]["from"] == "P"
+    # O -> P (step 7) -> T (step 9b): pins 9b after the leadership-level corrector.
+    assert via_leadership["taxonomy_code"] == "T"
+    assert via_leadership["leadership_level_correction"]["to"] == "P"
 
     corrections = output["meta"]["stats"]["post_classification_corrections"]
     assert corrections["appointment_funding"]["corrections_applied"] == 1
-    assert corrections["event_volunteer"]["corrections_applied"] == 2
+    assert corrections["event_volunteer"]["corrections_applied"] == 3
 
 
 # --- run_stage_3b: helpers carved out of it (#946, function-size offset) --------
