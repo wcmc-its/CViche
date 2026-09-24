@@ -6,8 +6,12 @@ position entry, and the trailing organization segment an award name duplicates
 from its own Organization cell. Neither has anything to say about how a value
 is rendered.
 """
+import logging
 import re
+from collections.abc import Mapping
 from typing import TypedDict
+
+logger = logging.getLogger(__name__)
 
 
 class InstitutionEnrichment(TypedDict, total=False):
@@ -43,6 +47,14 @@ def _get_cleaned_institution_name(
     `official_name`.
     """
     enrichment = entry.get('institution_enrichment') or {}
+    if not isinstance(enrichment, Mapping):
+        # A non-Mapping (list, str, ...) shouldn't reach here, but stage 5b
+        # is an LLM output and one malformed run is enough (#743). Treat it
+        # like no enrichment rather than aborting the render.
+        logger.warning(
+            "institution_enrichment is %s, not a mapping; treating as absent",
+            type(enrichment).__name__)
+        enrichment = {}
     cleaned = enrichment.get('cleaned_name', '')
     if cleaned:
         return cleaned

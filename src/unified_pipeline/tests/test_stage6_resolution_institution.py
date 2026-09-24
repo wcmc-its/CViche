@@ -21,7 +21,10 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.resolution import _location_already_in_institution  # noqa: E402
+from unified_pipeline.stage6.resolution import (  # noqa: E402
+    _get_institution_location,
+    _location_already_in_institution,
+)
 
 
 @pytest.mark.parametrize("location, institution", [
@@ -56,3 +59,13 @@ def test_trailing_location_is_detected(location, institution):
 ])
 def test_degenerate_inputs_are_false(location, institution):
     assert _location_already_in_institution(location, institution) is False
+
+
+@pytest.mark.parametrize("enrichment", [["a"], "abc"])
+def test_non_mapping_enrichment_falls_back_to_no_enrichment(enrichment):
+    """#743: a list- or str-valued institution_enrichment (a malformed
+    stage-5b LLM output) used to raise AttributeError on `.get`, which
+    aborts the whole orchestrator run. It must fall back to the
+    extracted_fields.location result instead, not from enrichment."""
+    entry = {"institution_enrichment": enrichment, "extracted_fields": {}}
+    assert _get_institution_location(entry) == ("", False)
