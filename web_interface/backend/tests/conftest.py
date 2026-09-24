@@ -1,8 +1,21 @@
 import os
+import tempfile
+
+# Must run before any module that imports unified_pipeline.core.prompt_logger
+# (directly or via app.pipeline.orchestrator / app.main): that module reads
+# PROMPT_LOG_DIR from the environment and mkdir's it at IMPORT time
+# (src/unified_pipeline/core/prompt_logger.py:39-40), defaulting to the real
+# checkout's src/unified_pipeline/prompt_logs -- the PII transcript store
+# (#776). A session-scoped tempdir here, set before the first import,
+# redirects every test's LLM-stub log writes away from that directory.
+_PROMPT_LOG_TMPDIR = tempfile.TemporaryDirectory(prefix="cviche-test-prompt-logs-")
+os.environ["PROMPT_LOG_DIR"] = _PROMPT_LOG_TMPDIR.name
+
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 import pytest
 import json
+from pathlib import Path
 from unittest.mock import patch
 from sqlalchemy import create_engine, StaticPool
 from sqlalchemy.orm import sessionmaker
@@ -10,6 +23,12 @@ from fastapi.testclient import TestClient
 
 from app.database import Base, get_db
 from app.models import SystemConfig
+
+# Real (non-test) prompt_logs directory this checkout's pipeline writes to,
+# computed the same way prompt_logger.py computes its own default. This
+# guard checks the actual PII store regardless of what PROMPT_LOG_DIR the
+# test session redirected writes to above.
+_REAL_PROMPT_LOGS_DIR = Path(__file__).parent.parent.parent.parent / "src" / "unified_pipeline" / "prompt_logs"
 
 # In-memory SQLite for tests -- StaticPool ensures all connections share one DB
 engine = create_engine(
@@ -187,3 +206,44 @@ def mock_saml_identity_no_mail():
 def pytest_configure(config):
     """Register custom pytest markers."""
     config.addinivalue_line("markers", "e2e: end-to-end tests requiring OPENAI_API_KEY (deselected by default)")
+
+
+def _real_prompt_logs_listing() -> set[str]:
+    """Relative paths under the real prompt_logs dir, or an empty set if it
+    doesn't exist. Never lists file contents -- those are PII transcripts."""
+    if not _REAL_PROMPT_LOGS_DIR.is_dir():
+        return set()
+    return {
+        str(p.relative_to(_REAL_PROMPT_LOGS_DIR))
+        for p in _REAL_PROMPT_LOGS_DIR.rglob("*")
+    }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_real_prompt_logs_untouched():
+    """Fail the session if the real (PII) prompt_logs directory grew.
+
+    A regression guard for #776: some tests drive LLM-stub calls through
+    prompt_logger, which writes wherever PROMPT_LOG_DIR points. This session
+    already redirected PROMPT_LOG_DIR to a tempdir before any pipeline module
+    was imported, so under a passing suite this snapshot never changes; if a
+    future test (or a change to prompt_logger's default) writes into the
+    real directory anyway, this fails loudly instead of silently growing the
+    checkout's transcript store.
+    """
+    before = _real_prompt_logs_listing()
+    yield
+    after = _real_prompt_logs_listing()
+    added = after - before
+    assert not added, (
+        f"backend test suite wrote {len(added)} file(s) into the real "
+        f"{_REAL_PROMPT_LOGS_DIR} (the PII transcript store) instead of the "
+        f"session's PROMPT_LOG_DIR tempdir: {sorted(added)[:10]}"
+    )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_prompt_log_tmpdir():
+    """Remove the session's PROMPT_LOG_DIR tempdir once the suite finishes."""
+    yield
+    _PROMPT_LOG_TMPDIR.cleanup()
