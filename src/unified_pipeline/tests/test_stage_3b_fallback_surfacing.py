@@ -728,6 +728,14 @@ def test_946_correctors_run_in_the_stage_3b_pass(monkeypatch, tmp_path):
     assert corrections["appointment_funding"]["corrections_applied"] == 1
     assert corrections["event_volunteer"]["corrections_applied"] == 3
 
+    # Both counts are part of the run's total.
+    made = sum(corrections[k]["corrections_made"] for k in ("structural", "committee", "reasoning"))
+    applied = sum(corrections[k]["corrections_applied"] for k in (
+        "grant_status", "appointment_funding", "event_volunteer", "teaching_leadership",
+        "leadership_level", "adjunct_position", "position_reconcile", "training_compliance",
+        "invited_talk"))
+    assert output["meta"]["stats"]["total_post_corrections"] == made + applied
+
 
 # --- run_stage_3b: helpers carved out of it (#946, function-size offset) --------
 
