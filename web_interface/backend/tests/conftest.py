@@ -3,10 +3,9 @@ import tempfile
 
 # Must run before any module that imports unified_pipeline.core.prompt_logger
 # (directly or via app.pipeline.orchestrator / app.main): that module reads
-# PROMPT_LOG_DIR from the environment and mkdir's it at IMPORT time
-# (src/unified_pipeline/core/prompt_logger.py:39-40), defaulting to the real
-# checkout's src/unified_pipeline/prompt_logs -- the PII transcript store
-# (#776). A session-scoped tempdir here, set before the first import,
+# PROMPT_LOG_DIR from the environment and mkdir's it at IMPORT time, defaulting
+# to the checkout's src/unified_pipeline/prompt_logs -- the PII transcript
+# store (#776). A session-scoped tempdir here, set before the first import,
 # redirects every test's LLM-stub log writes away from that directory.
 _PROMPT_LOG_TMPDIR = tempfile.TemporaryDirectory(prefix="cviche-test-prompt-logs-")
 os.environ["PROMPT_LOG_DIR"] = _PROMPT_LOG_TMPDIR.name
@@ -24,11 +23,9 @@ from fastapi.testclient import TestClient
 from app.database import Base, get_db
 from app.models import SystemConfig
 
-# Real (non-test) prompt_logs directory this checkout's pipeline writes to,
-# computed the same way prompt_logger.py computes its own default. This
-# guard checks the actual PII store regardless of what PROMPT_LOG_DIR the
-# test session redirected writes to above.
-_REAL_PROMPT_LOGS_DIR = Path(__file__).parent.parent.parent.parent / "src" / "unified_pipeline" / "prompt_logs"
+# The real prompt_logs dir: prompt_logger's _DEFAULT_PROMPT_LOG_DIR, which
+# can't be imported here because unified_pipeline isn't on sys.path yet.
+_REAL_PROMPT_LOGS_DIR = Path(__file__).parents[3] / "src" / "unified_pipeline" / "prompt_logs"
 
 # In-memory SQLite for tests -- StaticPool ensures all connections share one DB
 engine = create_engine(
@@ -249,10 +246,3 @@ def _guard_real_prompt_logs_untouched():
         f"cleanup than the one seeded file a test intended to remove: "
         f"{sorted(removed)[:10]}"
     )
-
-
-@pytest.fixture(scope="session", autouse=True)
-def _cleanup_prompt_log_tmpdir():
-    """Remove the session's PROMPT_LOG_DIR tempdir once the suite finishes."""
-    yield
-    _PROMPT_LOG_TMPDIR.cleanup()
