@@ -34,7 +34,6 @@ FastAPI backend for the CViche web interface.
 ### Runs
 - `GET /api/run/{run_id}/status` - Get run status and all steps
 - `POST /api/run/{run_id}/start` - Start pipeline execution
-- `POST /api/run/{run_id}/pause` - Pause execution
 - `POST /api/run/{run_id}/retry/{step_number}` - Retry a failed step
 
 ### Steps
