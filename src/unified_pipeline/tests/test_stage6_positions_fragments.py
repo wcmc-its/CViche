@@ -1174,6 +1174,7 @@ def _dates_by_title(rows):
     ("Associate Professor (Professor from 2020)", PROFESSOR_RANK),
     ("Core Faculty", None),
     ("Named Professorship Holder", None),
+    ("Instructorship Program Director", None),
     ("", None),
 ])
 def test_academic_rank_reads_the_ladder_rung(title, rank):

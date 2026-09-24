@@ -504,6 +504,10 @@ def test_other_codes_still_read_a_start_only_record_as_ongoing(code):
     "11/2021- Member, Quality Committee",        # month/year form
     "2021 -\tMember, Quality Committee",         # spaced dash, nothing after it
     "2021 –\nMember, Quality Committee",         # spaced en dash at line end
+    "2021– Member, Quality Committee",           # en dash touching the year
+    "2021— Member, Quality Committee",           # em dash touching the year
+    "Quality Committee (2021 -)",                # spaced dash closed by a paren
+    "2021 -  \tMember, Quality Committee",       # spaces between dash and tab
     "Member, Quality Committee, 2021-present",   # stated in words
 ])
 def test_point_in_time_keeps_present_when_the_source_leaves_the_year_open(source_text):
