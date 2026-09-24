@@ -264,22 +264,12 @@ async def cancel_run(
     current_user: User = Depends(get_current_user),
 ):
     """Cancel a running pipeline."""
-    from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
-
     run = check_run_access(run_id, current_user, db)
 
     if run.status != "running":
         raise bad_request(f"Cannot cancel run in status: {run.status}")
 
-    # Signal cancellation to orchestrator
-    orchestrator_cancel(run_id)
-
-    # Update run status
-    run.status = "cancelled"
-    run.error_message = "Cancelled by user"
-    from datetime import datetime
-    run.completed_at = datetime.now()
-    db.commit()
+    _cancel_run_record(db, run)
 
     return {"message": f"Run {run_id} cancelled", "status": "cancelled"}
 
@@ -413,7 +403,31 @@ async def restart_run(
 
     commit_run_or_compensate(db, new_run_id, current_user.email, new_file_path)
 
+    # #181: restart replaces a still-running original rather than forking a
+    # second copy that keeps spending alongside the new run. Done last, after
+    # the child is committed, so a failed restart (429/404/502 above) leaves
+    # the original running. Refresh first: the orchestrator may have finished
+    # it since check_run_access() read it.
+    db.refresh(original_run)
+    if original_run.status == "running":
+        _cancel_run_record(db, original_run)
+
     return {"run_id": new_run_id, "message": f"New run created from {run_id}"}
+
+
+def _cancel_run_record(db: Session, run: Run) -> None:
+    """Signal the orchestrator to stop `run` and mark it cancelled.
+
+    Shared by cancel_run and restart_run (#181); each caller checks that
+    the run is still running first.
+    """
+    from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
+
+    orchestrator_cancel(run.id)
+    run.status = "cancelled"
+    run.error_message = "Cancelled by user"
+    run.completed_at = datetime.now()
+    db.commit()
 
 
 @router.post("/run/{run_id}/retry/{step_number}")

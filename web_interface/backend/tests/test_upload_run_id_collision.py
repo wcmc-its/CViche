@@ -1029,3 +1029,62 @@ def test_duplicate_restart_creates_independent_children(db, tmp_path):
     db.refresh(original)
     assert _snapshot_run(original) == before
     assert sorted(p.name for p in upload_dir.iterdir()) == ["CHILD1.docx", "CHILD2.docx", "ORIGD1.docx"]
+
+
+# --- (i) #181: restart replaces a still-running original --------------------
+
+
+def test_restart_cancels_a_running_original(db, tmp_path):
+    """#181: "Restart with file" on a still-running original must replace it,
+    not fork a second copy that keeps burning Bedrock spend alongside the
+    new one. Cancellation happens only after the child is fully created (see
+    test_restart_does_not_cancel_original_when_restart_fails for the reverse)."""
+    user = _make_user(db, email="running-restart@example.com")
+    original = _make_original(db, user, "ORIGR1", status="running")
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "ORIGR1.docx").write_bytes(b"PK\x03\x04 fake-running-original")
+
+    orchestrator_cancel = MagicMock()
+    with _restart_env(
+        original, storage, upload_dir,
+        extra=[patch("app.pipeline.orchestrator.cancel_run", orchestrator_cancel)],
+    ) as runs_api:
+        result = _restart(runs_api, "ORIGR1", db, user)
+
+    assert result["run_id"] != "ORIGR1"
+    # Without this signal the original's pipeline keeps running every stage.
+    orchestrator_cancel.assert_called_once_with("ORIGR1")
+    db.refresh(original)
+    assert original.status == "cancelled"
+    assert original.error_message == "Cancelled by user"
+    assert original.completed_at is not None
+    # The child itself is untouched by the cancel of its parent.
+    child = db.get(Run, result["run_id"])
+    assert child.status == "created"
+
+
+def test_restart_does_not_cancel_original_when_restart_fails(db, tmp_path):
+    """#181 regression guard: a restart that fails (missing file, here) must
+    leave a running original alone. Cancelling the original before the
+    child is known to exist would strand the user with neither run -- see
+    the 404 branch of restart_run, which raises before create_run_archive."""
+    user = _make_user(db, email="running-restart-fails@example.com")
+    original = _make_original(db, user, "ORIGR2", status="running")
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))  # empty
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()  # no ORIGR2.docx anywhere -> 404
+
+    with _restart_env(original, storage, upload_dir) as runs_api:
+        with pytest.raises(HTTPException) as exc:
+            _restart(runs_api, "ORIGR2", db, user)
+
+    assert exc.value.status_code == 404
+    db.refresh(original)
+    assert original.status == "running"
+    assert original.error_message is None
+    assert original.completed_at is None
+    assert [r.id for r in db.query(Run).all()] == ["ORIGR2"]
