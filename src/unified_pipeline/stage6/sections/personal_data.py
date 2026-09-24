@@ -228,6 +228,110 @@ def _label_word_present(word: str, text: str, pii_fragments: list[str]) -> bool:
     return any(word in frag.lower() for frag in pii_fragments)
 
 
+# #946: the label written IMMEDIATELY before a phone number, which outranks
+# the block heading the number sits under. The block-level tests below read
+# only whole words ('cell', 'mobile', 'home') anywhere in the entry, so a
+# "HOME ADDRESS" block carrying "(c) 212.555.0100" routed its cell number to
+# home_phone, which #821 withholds -- the owner's own Cell phone row stayed
+# empty. Single letters count only in the two shapes that make them a label,
+# "(c)" or "c:"/"c." -- a bare "c" or "m" is too often an initial, a suite or
+# a unit to route on. Only cell and home are recognised here: cell because it
+# is the row the block heading was hiding, home because a number labelled
+# "(h)" must stay withheld even inside a block that also says "cell".
+_CELL_LABEL_BEFORE_NUMBER = (
+    r'(?:\([cm]\):?|\b[cm][:.]'
+    r'|\b(?:cell(?:ular)?|mobile|mob)\b(?:\s*(?:phone|tel|no))?\.?:?)'
+)
+_HOME_LABEL_BEFORE_NUMBER = (
+    r'(?:\(h\):?|\bh[:.]|\bhome\b(?:\s*(?:phone|telephone|tel|no))?\.?:?)'
+)
+_LABELLED_NUMBER_RE = re.compile(
+    rf'(?:(?P<cell>{_CELL_LABEL_BEFORE_NUMBER})|(?P<home>{_HOME_LABEL_BEFORE_NUMBER}))'
+    rf'\s*(?P<number>{_PHONE_NUMBER_PATTERN})',
+    re.IGNORECASE,
+)
+_PHONE_LABEL_CELL = 'cell'
+_PHONE_LABEL_HOME = 'home'
+# A number found in the text is the extracted one when the two digit strings
+# agree once a country prefix (at most three digits, ITU E.164) is ignored.
+# Below the minimum the suffix test could pair two unrelated short numbers;
+# without the prefix bound a value holding two numbers would pair with the
+# second one it ends in.
+_MIN_PHONE_DIGITS_TO_PAIR = 7
+_MAX_COUNTRY_CODE_DIGITS = 3
+
+
+def _nearest_phone_label(phone: object, text: str) -> str | None:
+    """`_PHONE_LABEL_CELL` or `_PHONE_LABEL_HOME` when that label sits
+    immediately before `phone`'s number in `text`, else None.
+
+    None means "no label at the number", not "not a cell": the caller then
+    falls back to the block-level words. A phone value holding several
+    numbers pairs with no single number in the text and returns None."""
+    digits = re.sub(r'\D', '', str(phone))
+    if len(digits) < _MIN_PHONE_DIGITS_TO_PAIR:
+        return None
+    for match in _LABELLED_NUMBER_RE.finditer(text):
+        found = re.sub(r'\D', '', match.group('number'))
+        if (len(found) >= _MIN_PHONE_DIGITS_TO_PAIR
+                and abs(len(found) - len(digits)) <= _MAX_COUNTRY_CODE_DIGITS
+                and (found.endswith(digits) or digits.endswith(found))):
+            return _PHONE_LABEL_CELL if match.group('cell') else _PHONE_LABEL_HOME
+    return None
+
+
+def _cell_and_home_signals(phone: object, text: str,
+                           pii_fragments: list[str]) -> tuple[bool, bool]:
+    """(is cell, is home) for one extracted phone -- the label nearest the
+    number when there is one (#946), else the entry's block-level words."""
+    nearest = _nearest_phone_label(phone, text)
+    if nearest is not None:
+        return nearest == _PHONE_LABEL_CELL, nearest == _PHONE_LABEL_HOME
+    return (('cell' in text or 'mobile' in text),
+            _label_word_present('home', text, pii_fragments))
+
+
+# #946: consumer mail domains. An address at one of these is the owner's
+# personal email whatever block it sits in, unless the label right before it
+# says it is a work address -- the only thing that routed to Personal email
+# before was the literal word "personal", so a Gmail address in a HOME
+# ADDRESS block rendered as the owner's Work email. #821 decided personal
+# email RENDERS, so this moves a value between two rendered rows and
+# withholds nothing. Exact domains, not a prefix match: "outlook.office365"
+# style tenant domains and a university's own "mail." hosts are institutional.
+_CONSUMER_EMAIL_DOMAINS = frozenset({
+    'gmail.com', 'googlemail.com',
+    'yahoo.com', 'ymail.com', 'yahoo.co.uk',
+    'hotmail.com', 'hotmail.co.uk', 'outlook.com', 'live.com', 'msn.com',
+    'icloud.com', 'me.com', 'mac.com',
+    'aol.com', 'protonmail.com', 'proton.me',
+    'comcast.net', 'verizon.net', 'att.net',
+})
+_WORK_EMAIL_LABEL_WORDS = ('work', 'office', 'business', 'institution')
+# Where the label that owns an email can start: the entry's own separators.
+_EMAIL_LABEL_BOUNDARY_RE = re.compile(r'[\t\n;|]')
+
+
+def _is_personal_email(email: object, text: str) -> bool:
+    """Whether an extracted email belongs in the Personal email row.
+
+    `text` is the entry's lowercased text. The word "personal" anywhere in it
+    still decides, as before; otherwise a consumer-domain address does,
+    unless a work word labels it in the text between the previous separator
+    and the address itself (#946)."""
+    if 'personal' in text:
+        return True
+    address = str(email).strip().lower()
+    if address.rsplit('@', 1)[-1] not in _CONSUMER_EMAIL_DOMAINS:
+        return False
+    at = text.find(address)
+    label_zone = text if at < 0 else text[:at]
+    boundaries = list(_EMAIL_LABEL_BOUNDARY_RE.finditer(label_zone))
+    if at >= 0 and boundaries:
+        label_zone = label_zone[boundaries[-1].end():]
+    return not any(word in label_zone for word in _WORK_EMAIL_LABEL_WORDS)
+
+
 class _VisaAnswers(NamedTuple):
     """The faculty's answers to the template's two visa rows, or empty."""
     eligibility: str
@@ -448,9 +552,8 @@ class PersonalDataSection:
             # Handle case where multiple phones are in one entry (e.g., "Mobile: X  Work: Y")
             if extracted_phone:
                 # Check if text contains multiple phone type labels
-                has_mobile = 'cell' in text or 'mobile' in text
+                has_mobile, has_home = _cell_and_home_signals(extracted_phone, text, pii_fragments)
                 has_work = 'office' in text or 'work' in text
-                has_home = _label_word_present('home', text, pii_fragments)
 
                 if _labels_its_own_phone_slots(extracted_phone):
                     # A structured phone names its own halves, so trust those
@@ -520,7 +623,7 @@ class PersonalDataSection:
 
             # Classify email by type
             if extracted_email:
-                if 'personal' in text:
+                if _is_personal_email(extracted_email, text):
                     if not personal_email:
                         personal_email = extracted_email
                 elif not work_email:

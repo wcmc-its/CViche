@@ -605,6 +605,113 @@ def test_a_structured_address_naming_both_slots_fills_both_rows(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# #946 item 1: the label nearest the number outranks the block heading, and
+# a consumer-domain email is the owner's personal email.
+# --------------------------------------------------------------------------
+
+def _home_block(number_label, email="jdoe.cvtest@gmail.com"):
+    """A HOME ADDRESS block in the tab-joined shape stage 2 emits for a
+    one-row source table: heading, two address lines, a labelled number and
+    an email -- the run ZA1VOV shape, synthesized."""
+    return _a(f"HOME ADDRESS\t10 Elm Street Apt 2\tRye, NY 10580\t"
+              f"{number_label} 212.555.0142\t{email}",
+              {"phone": "212.555.0142", "personal_email": email,
+               "address": "10 Elm Street Apt 2, Rye, NY 10580"})
+
+
+@pytest.mark.parametrize("label", ["(c)", "c:", "c.", "cell.", "mob", "(m)", "m:",
+                                   "(C)", "Mobile:"])
+def test_a_cell_label_at_the_number_beats_a_home_block_heading(tmp_path, label):
+    """Every number here sits in a HOME ADDRESS block and routed to
+    home_phone, where #821 withholds it -- the owner's labelled cell phone
+    never reached the Cell phone row. The home address itself is still
+    withheld."""
+    rows, gen = _render(tmp_path, entries=[_home_block(label)])
+
+    assert rows.get("cell phone:") == "212.555.0142", label
+    assert rows.get("office telephone:", "") == ""
+    assert rows.get("home address:", "") == ""
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
+
+
+@pytest.mark.parametrize("label", ["(h)", "h:", "Home phone:", ""])
+def test_a_home_labelled_or_unlabelled_number_in_a_home_block_stays_withheld(
+        tmp_path, label):
+    """#821 still applies to a number the owner labelled home, and to one
+    carrying no label of its own inside a home block."""
+    rows, gen = _render(tmp_path, entries=[_home_block(label)])
+
+    assert rows.get("cell phone:", "") == ""
+    assert rows.get("office telephone:", "") == ""
+    assert "212.555.0142" not in " ".join(rows.values())
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
+
+
+def test_a_home_label_at_the_number_beats_a_cell_word_elsewhere_in_the_entry(tmp_path):
+    """The nearest label decides in the other direction too: 'Cell' naming
+    a DIFFERENT number must not pull an "(h)" number into the Cell row."""
+    rows, gen = _render(tmp_path, entries=[
+        _a("Contact\tCell: 917-555-0100\t(h) 212-555-0142", {"phone": "212-555-0142"}),
+    ])
+
+    assert rows.get("cell phone:", "") == ""
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
+
+
+def test_a_consumer_email_in_a_home_block_renders_as_the_personal_email(tmp_path):
+    rows, _gen = _render(tmp_path, entries=[_home_block("(c)")])
+
+    assert rows.get("personal email:") == "jdoe.cvtest@gmail.com"
+    assert rows.get("work email:", "") == "", (
+        "the consumer address rendered as the owner's Work email too")
+
+
+def test_a_consumer_email_labelled_as_work_stays_in_the_work_row(tmp_path):
+    rows, _gen = _render(tmp_path, entries=[
+        _a("Contact\tWork email: jdoe.cvtest@gmail.com",
+           {"email": "jdoe.cvtest@gmail.com"}),
+    ])
+
+    assert rows.get("work email:") == "jdoe.cvtest@gmail.com"
+    assert rows.get("personal email:", "") == ""
+
+
+def test_a_work_word_in_another_segment_does_not_label_a_consumer_email(tmp_path):
+    """Only the label between the previous separator and the address owns
+    it: an Office address earlier in the same block is not a work label."""
+    rows, _gen = _render(tmp_path, entries=[
+        _a("Office: 1300 York Avenue\tjdoe.cvtest@gmail.com",
+           {"email": "jdoe.cvtest@gmail.com"}),
+    ])
+
+    assert rows.get("personal email:") == "jdoe.cvtest@gmail.com"
+
+
+def test_an_institutional_email_in_a_home_block_stays_in_the_work_row(tmp_path):
+    rows, _gen = _render(tmp_path, entries=[
+        _home_block("(c)", email="jdo9999@med.cornell.edu"),
+    ])
+
+    assert rows.get("work email:") == "jdo9999@med.cornell.edu"
+    assert rows.get("personal email:", "") == ""
+
+
+@pytest.mark.parametrize("phone, text, expected", [
+    ("212.555.0142", "home\t(c) 212.555.0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "(c) +1 212 555 0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212.555.0142", "cell 917.555.0100\th: 212.555.0142",
+     personal_data_module._PHONE_LABEL_HOME),
+    ("212.555.0142", "home address\t212.555.0142", None),
+    ("212.555.0142", "(c) 917.555.0100", None),
+    # a short extracted value must not pair with a longer number it ends
+    ("0142", "(c) 555-0142", None),
+    ("212.555.0142; 917.555.0100", "(c) 212.555.0142; (h) 917.555.0100", None),
+])
+def test_nearest_phone_label_pairs_only_the_extracted_number(phone, text, expected):
+    assert personal_data_module._nearest_phone_label(phone, text) == expected
+
+
+# --------------------------------------------------------------------------
 # name precedence.
 # --------------------------------------------------------------------------
 
