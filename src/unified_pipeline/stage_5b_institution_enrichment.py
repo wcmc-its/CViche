@@ -146,6 +146,63 @@ def enrich_entry_with_result(entry: dict, result: dict) -> dict:
     return entry
 
 
+def _raise_or_warn_on_batch_failures(
+    document_uid: str, llm_batches: int, failed_batches: int,
+    institutions_unresolved: int, entries_enriched: int,
+) -> None:
+    """Surface batch-level LLM lookup failures on the run (#700).
+
+    A batch-level LLM failure used to be logged and swallowed, leaving a
+    normal-looking artifact with those institutions silently unenriched.
+    Mirrors stage 3b's total-failure guard (stage_3b_entry_classifier.py):
+    if nothing was enriched -- every batch failed and no entry got its
+    enrichment any other way (cache or an earlier run) -- refuse to emit an
+    artifact that looks complete. Any other failure stays non-fatal but
+    must be visible per-run.
+    """
+    if llm_batches > 0 and failed_batches == llm_batches and entries_enriched == 0:
+        raise RuntimeError(
+            f"Stage 5b produced zero successful institution lookups across "
+            f"{llm_batches} batches ({institutions_unresolved} institutions "
+            f"unresolved) for {document_uid}. Refusing to emit a normal-looking "
+            f"artifact with no institutions enriched; see batch errors above."
+        )
+
+    if failed_batches > 0:
+        msg = (
+            f"{failed_batches} of {llm_batches} institution lookup batches failed; "
+            f"{institutions_unresolved} institutions unresolved"
+        )
+        logger.warning("Stage 5b (%s): %s", document_uid, msg)
+
+
+def _build_institution_enrichment_stats(
+    entries: list, institution_entries: int, cached_count: int, uncached_count: int,
+    llm_calls: int, llm_batches: int, failed_batches: int, institutions_unresolved: int,
+    total_cost: float, observed_model: str | None, model: str,
+) -> dict:
+    """Count enriched entries and assemble ``institution_enrichment_stats``
+    (pure move out of run_stage5b, plus the #700 failed-batch fields)."""
+    enriched_count = sum(
+        1 for entry in entries
+        if entry.get('taxonomy_code', '') in INSTITUTION_CODES
+        and entry.get('institution_enrichment')
+    )
+    return {
+        'entries_processed': institution_entries,
+        'entries_enriched': enriched_count,
+        'cache_hits': cached_count,
+        'llm_lookups': uncached_count,
+        'llm_calls': llm_calls,
+        'llm_batches': llm_batches,
+        'failed_batches': failed_batches,
+        'institutions_unresolved': institutions_unresolved,
+        'cost': total_cost,
+        'model': observed_model or model,
+        'timestamp': datetime.now().isoformat()
+    }
+
+
 def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                 model: str = "gpt-5.1", refresh_cache: bool = False) -> str:
     """
@@ -321,6 +378,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     total_cost = 0.0
     observed_model = None
     llm_calls = 0
+    llm_batches = failed_batches = institutions_unresolved = 0
 
     if uncached_count > 0:
         # Build batches
@@ -334,8 +392,10 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                 batch.append((inst_id, info['institution_name'], info['context'], cache_key, info))
             batches.append(batch)
 
+        llm_batches = len(batches)
+
         if verbose:
-            logger.info("LLM batches: %d (batch size: %d)", len(batches), BATCH_SIZE)
+            logger.info("LLM batches: %d (batch size: %d)", llm_batches, BATCH_SIZE)
 
         for batch_idx, batch in enumerate(batches):
             # Prepare for LLM call
@@ -353,6 +413,8 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
 
             # None means the LLM call itself failed — don't cache anything
             if results is None:
+                failed_batches += 1
+                institutions_unresolved += len(batch)
                 if verbose:
                     logger.info("Batch failed — skipping cache writes for %d institutions", len(batch))
                 continue
@@ -389,31 +451,24 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     # Save cache
     save_institution_cache()
 
-    # Count enriched entries
-    enriched_count = sum(
-        1 for entry in entries
-        if entry.get('taxonomy_code', '') in INSTITUTION_CODES
-        and entry.get('institution_enrichment')
+    stats = _build_institution_enrichment_stats(
+        entries, institution_entries, cached_count, uncached_count, llm_calls,
+        llm_batches, failed_batches, institutions_unresolved, total_cost,
+        observed_model, model,
     )
 
+    _raise_or_warn_on_batch_failures(
+        document_uid, llm_batches, failed_batches, institutions_unresolved, stats['entries_enriched'])
+
     if verbose:
-        logger.info("Institutions enriched: %d/%d", enriched_count, institution_entries)
+        logger.info("Institutions enriched: %d/%d", stats['entries_enriched'], institution_entries)
         logger.info("LLM calls: %d", llm_calls)
         logger.info("Total cost: $%.4f", total_cost)
 
     # Prepare output
     data['entries'] = entries
     data['stage'] = '5b'
-    data['institution_enrichment_stats'] = {
-        'entries_processed': institution_entries,
-        'entries_enriched': enriched_count,
-        'cache_hits': cached_count,
-        'llm_lookups': uncached_count,
-        'llm_calls': llm_calls,
-        'cost': total_cost,
-        'model': observed_model or model,
-        'timestamp': datetime.now().isoformat()
-    }
+    data['institution_enrichment_stats'] = stats
 
     # Determine output path
     if output_path is None:
