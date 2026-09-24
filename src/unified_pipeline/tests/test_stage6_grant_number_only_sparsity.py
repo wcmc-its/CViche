@@ -43,6 +43,7 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage6_grant_number_only_sparsity.py -p no:cacheprovider
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -163,7 +164,7 @@ def test_none_extracted_fields_does_not_raise_through_the_section_filler():
     gen._fill_research_support(entries_by_code)
 
 
-def test_verbose_reclassification_message_exercises_the_title_read(capsys):
+def test_verbose_reclassification_message_exercises_the_title_read(caplog):
     # reclassify_past_m2a_grants' message line --
     # (entry.get('extracted_fields') or {}).get('title') -- is emitted only when the
     # generator is verbose, so the test above (gen.verbose = False) never executes it
@@ -190,6 +191,6 @@ def test_verbose_reclassification_message_exercises_the_title_read(capsys):
         "M2C": [],
     }
 
-    gen._fill_research_support(entries_by_code)  # must not raise
-    out = capsys.readouterr().out
-    assert "Reclassified to M2B: 'Old Project" in out
+    with caplog.at_level(logging.DEBUG):
+        gen._fill_research_support(entries_by_code)  # must not raise
+    assert "Reclassified to M2B: 'Old Project" in caplog.text

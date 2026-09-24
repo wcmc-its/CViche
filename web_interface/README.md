@@ -159,7 +159,6 @@ web_interface/
 ### Runs
 - `GET /api/run/{run_id}/status` - Get run status
 - `POST /api/run/{run_id}/start` - Start pipeline
-- `POST /api/run/{run_id}/pause` - Pause execution
 - `POST /api/run/{run_id}/retry/{step_number}` - Retry failed step
 
 ### Steps

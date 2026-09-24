@@ -135,7 +135,7 @@ class EducationSection:
         - Years extracted from raw text when not in extracted_fields
         """
         if self.verbose:
-            print(f"Filling Education ({len(entries)} entries)...")
+            logger.info("Filling Education (%s entries)...", len(entries))
 
         edu_idx = self._find_paragraph_with_text("EDUCATION")
         if edu_idx is None:
