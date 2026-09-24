@@ -72,8 +72,10 @@ from collections.abc import Sequence
 from typing import TypedDict
 
 from ...core.template_boilerplate import (
+    is_near_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
+    is_unanswered_prompt,
 )
 from ..formatting import _set_font
 from ..normalization import _clean_inline_tabs
@@ -101,12 +103,16 @@ DROP_TEMPLATE_INSTRUCTION = "template-instruction"
 DROP_SOURCE_BOILERPLATE = "source-boilerplate"
 DROP_RENDERS_EMPTY = "renders-empty"
 DROP_COLUMN_HEADER = "column-header"
+DROP_NEAR_TEMPLATE_INSTRUCTION = "near-template-instruction"
+DROP_UNANSWERED_PROMPT = "unanswered-prompt"
 DROP_REASONS = (
     DROP_BLANK,
     DROP_TEMPLATE_INSTRUCTION,
     DROP_SOURCE_BOILERPLATE,
     DROP_RENDERS_EMPTY,
     DROP_COLUMN_HEADER,
+    DROP_NEAR_TEMPLATE_INSTRUCTION,
+    DROP_UNANSWERED_PROMPT,
 )
 
 
@@ -395,6 +401,10 @@ def _appendix_drop_reason(text: str, rendered: str) -> str | None:
         return DROP_RENDERS_EMPTY
     if _is_column_header_row(text):
         return DROP_COLUMN_HEADER
+    if is_near_template_instruction(text):
+        return DROP_NEAR_TEMPLATE_INSTRUCTION
+    if is_unanswered_prompt(text):
+        return DROP_UNANSWERED_PROMPT
     return None
 
 
