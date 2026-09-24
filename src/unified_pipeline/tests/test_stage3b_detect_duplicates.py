@@ -227,6 +227,21 @@ def test_token_split_by_spacing_is_still_a_duplicate():
     assert updated[1]["is_duplicate"] is True
 
 
+def test_non_ascii_letter_difference_is_not_a_duplicate():
+    """Two records that differ only by one non-ASCII letter (a different
+    accented vowel in a surname) are two records. The key keeps every
+    Unicode word character, so the letters stay in and the keys differ; a
+    key built from ASCII [a-z0-9] only would drop both letters and collapse
+    the pair into a false duplicate."""
+    entries = [
+        _dup_entry("Keynote lecture, Nordic Example Society, hosted by Dr. Hölm, 2019"),
+        _dup_entry("Keynote lecture, Nordic Example Society, hosted by Dr. Hålm, 2019"),
+    ]
+    updated, pairs = classify.detect_duplicates(entries)
+    assert pairs == []
+    assert not any(e.get("is_duplicate") for e in updated)
+
+
 def test_sibling_near_an_exact_pair_leaves_one_copy_of_the_pair():
     """A sibling record followed by two identical copies of its neighbour.
     Under the old similarity rule the sibling "matched" BOTH copies, so both
