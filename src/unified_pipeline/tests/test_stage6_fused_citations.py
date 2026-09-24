@@ -98,6 +98,22 @@ def test_control_character_inside_one_citation_is_not_split():
     assert out == [solo]
 
 
+def test_bare_cr_separated_block_still_splits():
+    # A fused block whose two citations are separated only by a bare \r (no
+    # following \n) must still split into two entries: \r is a real line
+    # break the normalization handles explicitly, not one of the control
+    # characters #742 excludes.
+    fused = _pub(
+        "Alpha B. First study. Journal One; 2025; Nowhere, ZZ.\r"
+        "Delta E. Second study. Journal Two; 2024; Elsewhere, YY."
+    )
+    out = split_fused_citation_entries([fused])
+    assert _citations(out) == [
+        "Alpha B. First study. Journal One; 2025; Nowhere, ZZ.",
+        "Delta E. Second study. Journal Two; 2024; Elsewhere, YY.",
+    ]
+
+
 def test_non_str_formatted_citation_does_not_raise():
     # Stage 4 stores raw LLM JSON and does not guarantee formatted_citation is
     # a string; a dict/list/int must be treated as absent, not crash .splitlines().

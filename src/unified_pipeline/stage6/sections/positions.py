@@ -33,6 +33,7 @@ reached only from this module.
 """
 import logging
 import re
+from collections.abc import Mapping
 
 try:
     from docx.table import Table
@@ -566,7 +567,17 @@ class PositionsSection:
             entry[INHERITED_INSTITUTION_KEY] = parent.get('element_idx_start')
             # Also propagate enrichment if available
             if last_enrichment and not entry.get('institution_enrichment'):
-                entry['institution_enrichment'] = dict(last_enrichment)
+                if isinstance(last_enrichment, Mapping):
+                    entry['institution_enrichment'] = dict(last_enrichment)
+                else:
+                    # A non-Mapping (list, str, ...) shouldn't reach here, but
+                    # stage 5b is an LLM output and one malformed run is
+                    # enough (#743). Treat it like no enrichment to inherit
+                    # rather than aborting the render.
+                    logger.warning(
+                        "institution_enrichment is %s, not a mapping; "
+                        "treating as absent for propagation",
+                        type(last_enrichment).__name__)
             propagated += 1
         if verbose and propagated > 0:
             logger.info("Propagated institution to %d sub-entries", propagated)
