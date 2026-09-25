@@ -4,7 +4,7 @@ The SP is configured with ``want_assertions_signed=True`` (app/saml_client.py).
 Every other SAML test in this suite MOCKS ``parse_authn_request_response``, so
 none of them actually exercise pysaml2's signature verification -- which is the
 one thing an "auth bypass" would exploit. This test closes that gap by driving
-REAL pysaml2 7.5.4 + xmlsec1 end to end:
+REAL pysaml2 7.5.5 + xmlsec1 end to end:
 
   1. a genuinely signed assertion is ACCEPTED,
   2. a tampered-after-signing assertion is REJECTED,

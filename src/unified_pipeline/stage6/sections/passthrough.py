@@ -402,11 +402,11 @@ class PassthroughSection:
 
         if target_idx is None:
             if self.verbose:
-                print("  Passthrough: Could not find Employment Status section")
+                logger.warning("  Passthrough: Could not find Employment Status section")
             return []
 
         if self.verbose:
-            print(f"  Passthrough: Filling Employment Status ({len(matching_entries)} entries)")
+            logger.info("  Passthrough: Filling Employment Status (%s entries)", len(matching_entries))
 
         # Route each entry to the template row its OWN label names. The first
         # 'employer' paragraph must not win for every entry -- that files a
@@ -491,7 +491,7 @@ class PassthroughSection:
 
         if section_idx is None:
             if self.verbose:
-                print("  Passthrough: Could not find Hospital Affiliation section")
+                logger.warning("  Passthrough: Could not find Hospital Affiliation section")
             return []
 
         # Find table after the section
@@ -505,7 +505,7 @@ class PassthroughSection:
             if 'hospital' not in first_cell and 'affiliation' not in first_cell and 'primary' not in first_cell:
                 # Wrong table - don't modify
                 if self.verbose:
-                    print(f"  Passthrough: Skipping non-affiliation table (first cell: '{first_cell[:30]}')")
+                    logger.warning("  Passthrough: Skipping non-affiliation table (first cell: '%s')", first_cell[:30])
                 table = None
 
             if table:

@@ -19,6 +19,11 @@ from docx.oxml.text.paragraph import CT_P
 from docx.oxml.table import CT_Tbl
 from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
+from unified_pipeline.stage6.normalization.pii import (
+    pre_llm_bare_label_category,
+    redact_pre_llm_value_of_category,
+    redact_pre_llm_values,
+)
 
 
 def rgb_to_hex(rgb: RGBColor | None) -> str:
@@ -741,6 +746,49 @@ def _handle_table_row_zero(
     return new_elements, unified_idx, num_table_headers_emitted, table_rows, current_content_rows
 
 
+def _scrub_pre_llm_pii_row(row: list[Any]) -> None:
+    """Round 2 (#847): a table row split into a label cell ("Date of
+    Birth:") and a separate value cell ("01/02/1970") has no
+    `_PII_FRAGMENT_SPLIT_RE` delimiter between them for
+    `redact_pre_llm_values` to extend across -- they are different cells,
+    not the same string. After every cell's OWN text is scrubbed in place,
+    walk the row once more: a cell that is nothing but a bare DOB/SSN label
+    has its value, if any, scrubbed out of the NEXT cell in the same row."""
+    for i, cell in enumerate(row):
+        if not isinstance(cell, dict):
+            continue
+        category = pre_llm_bare_label_category(cell.get("text"))
+        if category is None or i + 1 >= len(row):
+            continue
+        nxt = row[i + 1]
+        if isinstance(nxt, dict) and isinstance(nxt.get("text"), str):
+            nxt["text"] = redact_pre_llm_value_of_category(nxt["text"], category)
+
+
+def _scrub_pre_llm_pii_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Replace DOB/SSN VALUES in place, in every element and table cell
+    `extract_unified_elements` built, before any LLM stage reads them
+    (#847) -- the single choke point stage 1a, 1b and stage 2 all read
+    through. Element count and order are untouched; only a value span's
+    text changes. See `redact_pre_llm_values` for what is and is not
+    replaced, and `_scrub_pre_llm_pii_row` for the label-cell/value-cell
+    case a single string's own scrub cannot see."""
+    for el in elements:
+        text = el.get("text")
+        if isinstance(text, str) and text:
+            el["text"] = redact_pre_llm_values(text)
+        for row in el.get("data") or []:
+            if not isinstance(row, list):
+                continue
+            for cell in row:
+                if isinstance(cell, dict):
+                    cell_text = cell.get("text")
+                    if isinstance(cell_text, str) and cell_text:
+                        cell["text"] = redact_pre_llm_values(cell_text)
+            _scrub_pre_llm_pii_row(row)
+    return elements
+
+
 def extract_unified_elements(docx_path: str) -> dict[str, Any]:
     """
     Extract document elements with table-awareness for header detection.
@@ -1072,7 +1120,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
     return {
         "doc_path": str(docx_path),
-        "elements": elements,
+        "elements": _scrub_pre_llm_pii_elements(elements),
         "meta": {
             "num_elements": len(elements),
             "num_paragraphs": num_paragraphs,
@@ -1327,7 +1375,14 @@ def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
     header_lines = _header_footer_paragraph_lines(header_containers)
     footer_lines = _header_footer_paragraph_lines(footer_containers)
 
-    return OwnerSideChannel(sdt_lines=sdt_lines, header_lines=header_lines, footer_lines=footer_lines)
+    # #847 round 2: this side channel feeds stage4/owner_name.py's LLM
+    # fallback tier directly (`_run_owner_name_llm`) -- an sdt-wrapped or
+    # letterhead Personal Data block reached that prompt unscrubbed.
+    return OwnerSideChannel(
+        sdt_lines=[redact_pre_llm_values(t) for t in sdt_lines],
+        header_lines=[redact_pre_llm_values(t) for t in header_lines],
+        footer_lines=[redact_pre_llm_values(t) for t in footer_lines],
+    )
 
 
 def normalize_style_name(style_name: str) -> dict[str, Any]:

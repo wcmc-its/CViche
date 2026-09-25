@@ -386,9 +386,16 @@ class AdminUser(BaseModel):
 
 
 class AdminUserUpdate(BaseModel):
-    """Request body for updating a user via admin."""
-    role: str | None = None  # "user" or "admin"
-    status: str | None = None  # "active" or "disabled"
+    """Request body for updating a user via admin.
+
+    role/status are constrained to their valid sets so an out-of-set value
+    (e.g. role="viewer") 422s here instead of reaching the last-admin /
+    last-active-admin guards in admin_routes.update_user, which compare
+    against the literal strings "user"/"admin" and "active"/"disabled" and
+    silently no-op the guard for anything else (#409).
+    """
+    role: Literal["user", "admin"] | None = None
+    status: Literal["active", "disabled"] | None = None
     daily_limit: int | None = None  # 0 = reset to system default
     monthly_limit: int | None = None  # 0 = reset to system default
 

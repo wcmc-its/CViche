@@ -26,6 +26,7 @@ The floor is 50 characters rather than a word count because the failure it
 catches is a stub -- an empty string, a header echo, a refusal -- not a short
 but real summary.
 """
+import logging
 
 try:
     from docx.shared import Pt
@@ -33,6 +34,8 @@ except ImportError as exc:
     raise ImportError(
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
+
+logger = logging.getLogger(__name__)
 
 
 class ResearchSummarySection:
@@ -57,7 +60,7 @@ class ResearchSummarySection:
         """
         if not research_summary_data:
             if self.verbose:
-                print("Skipping Research Summary section (no Stage 4.5 output)")
+                logger.warning("Skipping Research Summary section (no Stage 4.5 output)")
             return False
 
         # Extract summary from Stage 4.5 structure
@@ -66,21 +69,21 @@ class ResearchSummarySection:
 
         if not summary_text or len(summary_text.strip()) < 50:
             if self.verbose:
-                print("Skipping Research Summary section (no substantive content)")
+                logger.warning("Skipping Research Summary section (no substantive content)")
             return False
 
         word_count = summary_info.get('word_count', len(summary_text.split()))
         generation_method = summary_info.get('generation_method', 'unknown')
 
         if self.verbose:
-            print(f"Filling Research Summary ({word_count} words, {generation_method})...")
+            logger.info("Filling Research Summary (%s words, %s)...", word_count, generation_method)
 
         # Find RESEARCH ACTIVITIES section (M1) to insert under. The finder
         # lowercases both sides, so casing of the needle carries no information.
         activities_idx = self._find_paragraph_with_text("RESEARCH ACTIVITIES")
         if activities_idx is None:
             if self.verbose:
-                print("  Warning: Could not find 'RESEARCH ACTIVITIES' section")
+                logger.warning("  Warning: Could not find 'RESEARCH ACTIVITIES' section")
             return False
 
         # Get the paragraph element to insert after
