@@ -1069,7 +1069,6 @@ The web interface visualizes 9 processing steps:
 |--------|----------|-------------|
 | GET | `/api/run/{run_id}/status` | Get run status and progress |
 | POST | `/api/run/{run_id}/start` | Start pipeline execution |
-| POST | `/api/run/{run_id}/pause` | Pause execution |
 | POST | `/api/run/{run_id}/retry/{step_number}` | Retry failed step |
 
 **Steps**:

@@ -23,9 +23,12 @@ and the `start_date` fallback; a literal "None" in the year column is worse than
 a blank one. A title-less entry falls back to its first 150 characters of raw
 text.
 """
+import logging
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..sorting import sort_entries_reverse_chronological
+
+logger = logging.getLogger(__name__)
 
 
 class PresentationsSection:
@@ -43,7 +46,7 @@ class PresentationsSection:
             return
 
         if self.verbose:
-            print(f"Filling Invited Presentations ({len(entries)} entries)...")
+            logger.info("Filling Invited Presentations (%s entries)...", len(entries))
 
         # Find Presentations section
         section_idx = self._find_paragraph_with_text("INVITATIONS TO SPEAK")
@@ -92,7 +95,7 @@ class PresentationsSection:
             regional_count = len(entries_by_scope['Regional'])
             national_count = len(entries_by_scope['National'])
             intl_count = len(entries_by_scope['International'])
-            print(f"  Presentations: {regional_count} Regional, {national_count} National, {intl_count} International")
+            logger.info("  Presentations: %s Regional, %s National, %s International", regional_count, national_count, intl_count)
 
         # Fill each table with its entries
         for scope, scope_entries in entries_by_scope.items():

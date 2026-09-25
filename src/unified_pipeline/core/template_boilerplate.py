@@ -17,6 +17,7 @@ headers are deliberately kept OUT of the drop set: dropping a genuine section
 header could disturb downstream structure.
 """
 
+import difflib
 import json
 import re
 from pathlib import Path
@@ -199,6 +200,65 @@ def is_template_instruction(text: str) -> bool:
                 return True
 
     return False
+
+
+# Near-match of a long instruction (#829). Faculty fill in whichever template
+# revision they were sent, and an older revision's directive paragraph differs
+# from the tracked Oct-2022 file by a comma or a word ("Please include
+# title/audience/dates ..." is 417 chars and one comma off), which rules (a)-(d)
+# miss because they are all exact-substring tests. Measured on the S3 pilot
+# corpus (126 runs, 38 distinct CVs): at 0.93 on pipe-free lines, 16 appendix
+# lines in 4 CVs match and no non-T entry does. At 0.90, or with '|' rows
+# allowed, it also matched filled "label | answer" rows ("... employment
+# visa?: | No") -- real answers, so both limits are load-bearing.
+_NEAR_MATCH_MIN_RATIO = 0.93
+
+# A prompt's answer that says there is nothing to report (#885). Alone, or as
+# the answer cell of a known label ("Primary Hospital Affiliation: | N/A"),
+# the line carries no CV content.
+_UNANSWERED = frozenset({"n/a", "na", "not applicable", "none", "listed above"})
+
+
+def is_near_template_instruction(text: str) -> bool:
+    """True if *text* is a long template instruction in slightly different
+    wording -- another template revision's copy of the same paragraph.
+
+    Pipe-free text of at least _CONTAINMENT_MIN_LEN normalized chars only;
+    see _NEAR_MATCH_MIN_RATIO for why both limits hold. A protected term is
+    never matched, as in `is_template_instruction`.
+    """
+    if not text or "|" in text:
+        return False
+    normalized = _normalize(text)
+    if len(normalized) < _CONTAINMENT_MIN_LEN or normalized in _PROTECTED:
+        return False
+    for known in _INSTRUCTION_SET:
+        # The two cheap upper bounds reject almost every candidate (a short
+        # label, a paragraph of a different length) before ratio() runs.
+        matcher = difflib.SequenceMatcher(None, normalized, known, autojunk=False)
+        if (matcher.real_quick_ratio() >= _NEAR_MATCH_MIN_RATIO
+                and matcher.quick_ratio() >= _NEAR_MATCH_MIN_RATIO
+                and matcher.ratio() >= _NEAR_MATCH_MIN_RATIO):
+            return True
+    return False
+
+
+def is_unanswered_prompt(text: str) -> bool:
+    """True if *text* says only that a prompt has nothing to report: "N/A",
+    "Not Applicable |  |", or a known template label whose answer cell is
+    one of those ("Primary Hospital Affiliation: | N/A").
+
+    At least one cell must be an _UNANSWERED value; every other non-empty
+    cell must be a known template label. A cell nobody recognises is
+    faculty data, and keeps the line.
+    """
+    if not text:
+        return False
+    cells = [c for c in (_normalize(c) for c in text.split("|")) if c]
+    if not any(c in _UNANSWERED for c in cells):
+        return False
+    return all(c in _UNANSWERED or c in _INSTRUCTION_SET or c in _PROTECTED
+               for c in cells)
 
 
 def filter_template_instructions(texts: list[str]) -> list[str]:
