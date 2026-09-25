@@ -435,8 +435,8 @@ def test_handle_bedrock_text_path_maps_finish_reason_and_tokens(monkeypatch: pyt
         ("guardrail_intervened", "content_filter"),  # was "guard_intervened" -- never matched (#628)
         ("content_filtered", "content_filter"),
         ("model_context_window_exceeded", "length"),
-        ("malformed_model_output", "malformed_model_output"),  # unmapped -- needs a decision (#628)
-        ("malformed_tool_use", "malformed_tool_use"),  # unmapped -- needs a decision (#628)
+        ("malformed_model_output", "error"),  # decided on #628
+        ("malformed_tool_use", "error"),
     ],
 )
 def test_handle_bedrock_stop_reason_map_covers_documented_values(
@@ -490,7 +490,7 @@ def test_handle_bedrock_raises_when_forced_tool_did_not_fire(monkeypatch: pytest
         "type": "json_schema",
         "json_schema": {"name": "extract", "schema": {"type": "object"}},
     }
-    with pytest.raises(RuntimeError, match="did not fire"):
+    with pytest.raises(bedrock.BedrockToolCallDidNotFireError, match="did not fire"):
         bedrock._handle_bedrock(
             [{"role": "user", "content": "hi"}], response_format=response_format, cfg=_bedrock_cfg()
         )
@@ -520,7 +520,13 @@ def test_handle_bedrock_empty_content_retries_and_succeeds(monkeypatch: pytest.M
     assert len(fake.calls) == 2
 
 
-def test_handle_bedrock_empty_content_on_both_calls_raises_runtime_error(
+def test_bedrock_failure_types_stay_runtime_errors() -> None:
+    # Existing `except RuntimeError` handlers must keep catching both.
+    assert issubclass(bedrock.BedrockToolCallDidNotFireError, RuntimeError)
+    assert issubclass(bedrock.BedrockEmptyResponseError, RuntimeError)
+
+
+def test_handle_bedrock_empty_content_on_both_calls_raises_empty_response_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     empty_first = {
@@ -536,7 +542,7 @@ def test_handle_bedrock_empty_content_on_both_calls_raises_runtime_error(
     fake = _FakeBedrockClient([empty_first, empty_retry])
     monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
 
-    with pytest.raises(RuntimeError, match="guardrail_intervened.*max_tokens"):
+    with pytest.raises(bedrock.BedrockEmptyResponseError, match="guardrail_intervened.*max_tokens"):
         bedrock._handle_bedrock(
             [{"role": "user", "content": "hi"}], response_format=None, cfg=_bedrock_cfg()
         )
@@ -607,12 +613,16 @@ def test_handle_bedrock_repairs_invalid_json_on_retry(monkeypatch: pytest.Monkey
     fake = _FakeBedrockClient([first, second])
     monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
 
+    turn = {"role": "user", "content": "hi"}
+    messages = [turn]
     result = bedrock._handle_bedrock(
-        [{"role": "user", "content": "hi"}],
+        messages,
         response_format={"type": "json_object"},
         cfg=_bedrock_cfg(),
     )
 
+    # The repair works on copies: the caller's list and turn are untouched.
+    assert messages == [{"role": "user", "content": "hi"}] and messages[0] is turn
     # Only the repair route produces valid JSON here (the first call's raw
     # content was "not json").
     assert json.loads(result["content"]) == {"a": 1}

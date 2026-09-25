@@ -22,11 +22,10 @@ from unified_pipeline.llm.retry import (
 
 logger = logging.getLogger(__name__)
 
-# Bedrock stopReason -> OpenAI finish_reason mapping. Bedrock's Converse API
-# documents 9 stopReason values (#628); malformed_model_output and
-# malformed_tool_use are deliberately left unmapped (pass through raw) --
-# normalizing them needs a decision (reviewer suggested "error", outside the
-# OpenAI finish_reason vocabulary every caller expects) that hasn't been made.
+# Bedrock stopReason -> OpenAI finish_reason mapping, covering all 9 values
+# Bedrock's Converse API documents (#628). The two malformed_* reasons map to
+# "error", which is outside OpenAI's vocabulary; that is safe because nothing
+# branches on finish_reason -- it is only logged and stored (decided on #628).
 STOP_REASON_MAP = {
     "end_turn": "stop",
     "max_tokens": "length",
@@ -35,7 +34,19 @@ STOP_REASON_MAP = {
     "guardrail_intervened": "content_filter",  # was "guard_intervened" -- never matched (#628)
     "content_filtered": "content_filter",
     "model_context_window_exceeded": "length",
+    "malformed_model_output": "error",
+    "malformed_tool_use": "error",
 }
+
+
+class BedrockToolCallDidNotFireError(RuntimeError):
+    """A forced json_schema tool call did not fire: the schema was not
+    enforced, so the response cannot be trusted as structured output."""
+
+
+class BedrockEmptyResponseError(RuntimeError):
+    """Neither the initial call nor the JSON-repair retry returned any text
+    content (#884), so there is nothing to repair or return."""
 
 # Hard ceiling for any Bedrock call that reaches _call_bedrock without an
 # explicit max_tokens. When `maxTokens` is omitted, Bedrock applies the MODEL's
@@ -426,7 +437,7 @@ def _finalize_schema_tool_response(response: dict, usage: dict, cache_read_token
     if stop_reason != "tool_use" or tool_input is None:
         # Forced tool call that didn't fire => schema not enforced.
         # Fail loud rather than silently parsing free text.
-        raise RuntimeError(
+        raise BedrockToolCallDidNotFireError(
             f"Bedrock forced json_schema tool call did not fire "
             f"(stopReason={stop_reason!r}, tool_input="
             f"{'present' if tool_input is not None else 'missing'})"
@@ -450,7 +461,10 @@ def _call_bedrock_json_repair(messages: list, response_format: dict | None,
     repair path in the common case (#630). The hint is folded into the
     existing trailing user turn instead; a fresh turn is appended only for a
     shape this path doesn't expect (the last turn isn't user -- e.g. a caller
-    with a hanging assistant turn). Content is always a str here:
+    with a hanging assistant turn). `messages` and its dicts are never
+    mutated: the repair works on a shallow copy of the list, and the replaced
+    trailing turn is a new dict built with {**last, ...}. A caller holding
+    `messages` still sees the original request, not the repair attempt. Content is always a str here:
     _translate_messages already raised NotImplementedError on the first call
     for any list (multimodal) content.
 
@@ -537,7 +551,7 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
             # Fail loud with both stopReasons so the caller's per-group
             # except records a real error string instead of an IndexError
             # with no context (#884).
-            raise RuntimeError(
+            raise BedrockEmptyResponseError(
                 "Bedrock Converse returned no text content on the initial "
                 f"call (stopReason={stop_reason!r}) or the retry "
                 f"(stopReason={retry_stop_reason!r})"
