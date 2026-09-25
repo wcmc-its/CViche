@@ -458,7 +458,7 @@ class LicensureSection:
         """
 
         if self.verbose and entries:
-            print(f"Filling Licensure ({len(entries)} entries)...")
+            logger.info("Filling Licensure (%s entries)...", len(entries))
 
         # Find Licensure section
         section_idx = self._find_paragraph_with_text("Licensure")

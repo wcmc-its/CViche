@@ -47,8 +47,13 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage2_detect_and_run_behaviour.py -p no:cacheprovider
 """
 
+import inspect
+import io
 import json
+import logging
 import sys
+import threading
+import time
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -121,6 +126,37 @@ def _write_hierarchy(tmp_path: Path, name: str, document_uid: str, hierarchy_wit
         "section_boundaries": section_boundaries,
     }))
     return path
+
+
+# =============================================================== _element_text_or_fallback
+
+def test_element_text_or_fallback_uses_the_map_silently_when_index_is_present(caplog):
+    elements = [_para(0, "Jane Doe")]
+    text = stage2._element_text_or_fallback(0, _idx_map(elements), Document())
+    assert text == "Jane Doe"
+    assert caplog.records == []  # positive case: no warning when the index IS in the map
+
+
+def test_element_text_or_fallback_warns_and_falls_back_to_doc_paragraphs_when_index_missing(caplog):
+    # #915 item 2: measured on the 111-uid local corpus, 2/106 matched uids
+    # had a stage-1b hierarchy referencing indices past a fresh
+    # extraction's doc_length -- a real, if rare, mismatch, not dead code.
+    # Negative case: index absent from element_index_map falls back to
+    # doc.paragraphs AND logs, rather than silently returning "".
+    doc = Document()
+    doc.add_paragraph("Fallback Text")
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_2_entry_extraction"):
+        text = stage2._element_text_or_fallback(0, {}, doc)
+    assert text == "Fallback Text"
+    assert len(caplog.records) == 1
+    assert "missing from element_index_map" in caplog.records[0].message
+
+
+def test_element_text_or_fallback_returns_empty_string_past_doc_paragraphs_bounds(caplog):
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_2_entry_extraction"):
+        text = stage2._element_text_or_fallback(5, {}, Document())
+    assert text == ""
+    assert len(caplog.records) == 1
 
 
 # =============================================================== detect_entries_for_section
@@ -651,8 +687,13 @@ def test_run_stage_2_cancel_check_raises_mid_run_and_no_output_is_written(tmp_pa
         if state["n"] == 2:  # allow the first section (Personal Data) through
             raise _Cancelled("stop")
 
+    # #881 made run_stage_2's default `workers` > 1 (sections run on a pool);
+    # this test pins the exact pre-#881 serial call count, so it needs
+    # workers=1 explicitly -- the concurrent cancel behavior itself is
+    # covered by test_cancel_raised_in_one_section_starts_no_further_llm_call
+    # below.
     with pytest.raises(_Cancelled):
-        stage2.run_stage_2(str(docx_path), str(hpath), cancel_check=cancel_check)
+        stage2.run_stage_2(str(docx_path), str(hpath), cancel_check=cancel_check, workers=1)
 
     assert state["n"] == 2
     assert len(calls) == 1  # only Personal Data's section actually ran
@@ -976,3 +1017,541 @@ def test_run_stage_2_doc_length_is_unified_element_count_and_flags_trailing_para
     old_doc_length = 3
     assert 3 not in set(range(old_doc_length))
     assert not any(e["element_idx_start"] == 3 for e in output_data["entries"])
+
+
+# ================================================ run_stage_2: section pool (#881)
+#
+# run_stage_2 now extracts each section's entries on a thread pool
+# (map_in_order, core/batch_pool.py) instead of one after another -- same
+# shape as stage 3b's group pool (_classify_group / _group_progress_printer /
+# run_stage_3b's map_in_order call). A synthetic doc with several sibling
+# top-level sections (plus the "Personal Data" preamble) gives map_in_order
+# real width to fan out over.
+
+_MANY_SECTIONS = [f"SECTION {i:02d}" for i in range(8)]
+
+
+def _build_many_sections_docx(tmp_path: Path) -> Path:
+    doc = Document()
+    doc.add_paragraph("Jane Researcher")
+    for name in _MANY_SECTIONS:
+        doc.add_paragraph(name)
+        doc.add_paragraph(f"Entry text for {name}")
+    docx_path = tmp_path / "many_sections.docx"
+    doc.save(docx_path)
+    return docx_path
+
+
+def _build_many_sections_hierarchy(tmp_path: Path, document_uid: str) -> Path:
+    hierarchy_with_indices = []
+    section_boundaries = []
+    for i, name in enumerate(_MANY_SECTIONS):
+        header_idx = 1 + 2 * i
+        hierarchy_with_indices.append(
+            {"text": name, "level": "H1", "element_idx": header_idx, "children": []}
+        )
+        section_boundaries.append({
+            "hierarchy": [name],
+            "element_idx_start": header_idx,
+            "element_idx_end": header_idx + 1,
+            "has_children": False,
+        })
+    return _write_hierarchy(
+        tmp_path, "many_sections_h.json", document_uid, hierarchy_with_indices, section_boundaries
+    )
+
+
+_MANY_SECTION_KEYS = ["Personal Data", *_MANY_SECTIONS]
+
+
+def _section_key_from_prompt(prompt: str, keys: list[str]) -> str:
+    """Same routing rule as _route_call_llm: the EXACT `CV Section Header`
+    prompt line, never a raw substring search of the whole prompt."""
+    header_line = next(line for line in prompt.splitlines() if "CV Section Header" in line)
+    return next(k for k in keys if f"`{k}`" in header_line)
+
+
+def _many_section_delimiters(key: str) -> list[dict]:
+    if key == "Personal Data":
+        return [{"element_idx_start": 0, "element_idx_end": 0, "element_type": "paragraph", "confidence": 0.9}]
+    i = _MANY_SECTIONS.index(key)
+    header_idx = 1 + 2 * i
+    return [{
+        "element_idx_start": header_idx + 1, "element_idx_end": header_idx + 1,
+        "element_type": "paragraph", "confidence": 0.9,
+    }]
+
+
+def test_parallel_sections_write_the_same_artifact_as_the_serial_loop(tmp_path, monkeypatch):
+    """Sections finish in reverse order under the pool; the artifact must not."""
+    in_flight = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+    # Distinct per-section cost: belt-and-braces on top of the full-artifact
+    # equality below -- total_cost is a float sum, so an accumulation-order
+    # mutant (e.g. completion order) COULD shift the last bit or two of the
+    # sum, but in practice reversed(results) still passes this assertion
+    # (float addition is associative enough here). The real guard against an
+    # accumulation-order mutant is test_tied_start_indices_keep_section_
+    # submission_order; this assertion only pins that the totals are
+    # order-independent in value, not that ordering is enforced.
+    costs = {key: round(0.1 * (i + 1), 4) for i, key in enumerate(_MANY_SECTION_KEYS)}
+
+    def slow_early_sections(**kwargs):
+        prompt = kwargs["messages"][1]["content"]
+        key = _section_key_from_prompt(prompt, _MANY_SECTION_KEYS)
+        idx = _MANY_SECTION_KEYS.index(key)
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        # Later sections answer first: SECTION 07 sleeps least.
+        time.sleep((len(_MANY_SECTION_KEYS) - idx) * 0.005)
+        with lock:
+            in_flight["now"] -= 1
+        return _llm_result({"delimiters": _many_section_delimiters(key)}, cost=costs[key])
+
+    _redirect_output_manager(monkeypatch, tmp_path)
+    docx_path = _build_many_sections_docx(tmp_path)
+    hpath = _build_many_sections_hierarchy(tmp_path, "MANY1")
+    monkeypatch.setattr(stage2, "call_llm", slow_early_sections)
+
+    serial, _ = stage2.run_stage_2(str(docx_path), str(hpath), workers=1)
+    assert in_flight["peak"] == 1  # workers=1 really is the serial loop
+
+    parallel, _ = stage2.run_stage_2(str(docx_path), str(hpath), workers=4)
+    assert in_flight["peak"] > 1  # and workers=4 really overlapped
+
+    # No generated_at/datetime.now field exists in stage 2's output to strip
+    # before comparing -- pin that so a future field addition is noticed here.
+    src = inspect.getsource(stage2)
+    assert "generated_at" not in src
+    assert "datetime.now" not in src
+
+    assert serial == parallel
+    # Exact float equality: sum order (not just the final entries list) must
+    # match the serial loop too.
+    assert serial["total_cost"] == parallel["total_cost"]
+
+
+def test_section_progress_lines_are_monotonic_and_unspliced(tmp_path, monkeypatch, capsys):
+    def slow_early_sections(**kwargs):
+        prompt = kwargs["messages"][1]["content"]
+        key = _section_key_from_prompt(prompt, _MANY_SECTION_KEYS)
+        idx = _MANY_SECTION_KEYS.index(key)
+        time.sleep((len(_MANY_SECTION_KEYS) - idx) * 0.005)
+        return _llm_result({"delimiters": _many_section_delimiters(key)})
+
+    _redirect_output_manager(monkeypatch, tmp_path)
+    docx_path = _build_many_sections_docx(tmp_path)
+    hpath = _build_many_sections_hierarchy(tmp_path, "MANY2")
+    monkeypatch.setattr(stage2, "call_llm", slow_early_sections)
+
+    stage2.run_stage_2(str(docx_path), str(hpath), workers=4)
+
+    out = capsys.readouterr().out.splitlines()
+    total = len(_MANY_SECTION_KEYS)
+    marker = f"/{total}]"
+    progress = [line for line in out if line.startswith("[") and marker in line]
+    # orchestrator.py's PROGRESS_PATTERNS read "[N/M]"; N must never go backwards.
+    assert [int(line[1:line.index("/")]) for line in progress] == list(range(1, total + 1))
+    # Each section's block is one atomic print: Processing -> Elements -> summary -> blank.
+    for i, line in enumerate(out):
+        if line.startswith("[") and marker in line:
+            assert out[i + 1].strip().startswith("Elements:"), out[i:i + 4]
+            assert out[i + 2].strip().startswith(("✓ Extracted", "- No content")), out[i:i + 4]
+            assert out[i + 3] == "", out[i:i + 4]
+
+
+def test_sections_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):
+    from unified_pipeline.core import prompt_logger
+
+    seen = set()
+
+    def record(**kwargs):
+        seen.add(prompt_logger._current_run_id.get())
+        prompt = kwargs["messages"][1]["content"]
+        key = _section_key_from_prompt(prompt, _MANY_SECTION_KEYS)
+        return _llm_result({"delimiters": _many_section_delimiters(key)})
+
+    _redirect_output_manager(monkeypatch, tmp_path)
+    docx_path = _build_many_sections_docx(tmp_path)
+    hpath = _build_many_sections_hierarchy(tmp_path, "MANY3")
+    monkeypatch.setattr(stage2, "call_llm", record)
+
+    token = prompt_logger.set_current_run_id("run-stage2")
+    try:
+        stage2.run_stage_2(str(docx_path), str(hpath), workers=4)
+    finally:
+        prompt_logger.reset_current_run_id(token)
+
+    assert seen == {"run-stage2"}
+
+
+class _FakeRoutedStdout:
+    """Minimal stand-in for orchestrator.py's ``_RoutedStdout`` -- a dict
+    keyed by ``threading.get_ident()``. A registered thread's write lands in
+    its own capture; any other thread's write lands in ``leak`` instead. The
+    real ``_RoutedStdout`` would not actually lose an unregistered thread's
+    write (since #883 it falls back to the ``_capture_var`` ContextVar that
+    ``map_in_order`` copies onto every pool thread) -- this fake omits that
+    fallback on purpose, to isolate the property this test actually checks:
+    output must come from the calling thread's ``on_result`` callback, not
+    from a print inside ``_extract_section`` itself.
+    """
+
+    def __init__(self, leak):
+        self._leak = leak
+        self._captures = {}
+
+    def register(self, ident, capture):
+        self._captures[ident] = capture
+
+    def write(self, text):
+        return self._captures.get(threading.get_ident(), self._leak).write(text)
+
+    def flush(self):
+        pass
+
+
+def test_section_progress_prints_only_from_the_calling_thread(tmp_path, monkeypatch):
+    """LEAD defect shape: a print from inside _extract_section would run on
+    map_in_order's pool thread instead of the calling thread's on_result
+    callback. That would not literally lose the output -- since #883 the
+    real _RoutedStdout falls back to a ContextVar map_in_order copies onto
+    each pool thread -- but it would break two other guarantees: the
+    "[N/M]" number is assigned by completion order on the calling thread
+    (on_result), and each section's block (Processing/Elements/summary/
+    blank) must go out as one atomic print so concurrent sections' blocks
+    cannot splice together. Install a fake routed stdout that only
+    registers the main (calling) thread and run a real thread pool
+    (workers=4): every "[N/M]" line must land in the registered capture,
+    and none may leak.
+    """
+    def slow_early_sections(**kwargs):
+        prompt = kwargs["messages"][1]["content"]
+        key = _section_key_from_prompt(prompt, _MANY_SECTION_KEYS)
+        idx = _MANY_SECTION_KEYS.index(key)
+        time.sleep((len(_MANY_SECTION_KEYS) - idx) * 0.005)
+        return _llm_result({"delimiters": _many_section_delimiters(key)})
+
+    _redirect_output_manager(monkeypatch, tmp_path)
+    docx_path = _build_many_sections_docx(tmp_path)
+    hpath = _build_many_sections_hierarchy(tmp_path, "MANY4")
+    monkeypatch.setattr(stage2, "call_llm", slow_early_sections)
+
+    registered = io.StringIO()
+    leak = io.StringIO()
+    fake_stdout = _FakeRoutedStdout(leak)
+    fake_stdout.register(threading.get_ident(), registered)
+
+    real_stdout = sys.stdout
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+    try:
+        stage2.run_stage_2(str(docx_path), str(hpath), workers=4)
+    finally:
+        monkeypatch.setattr(sys, "stdout", real_stdout)
+
+    total = len(_MANY_SECTION_KEYS)
+    marker = f"/{total}]"
+
+    def progress_lines(text):
+        return [line for line in text.splitlines() if line.startswith("[") and marker in line]
+
+    registered_progress = progress_lines(registered.getvalue())
+    leak_progress = progress_lines(leak.getvalue())
+    assert [int(line[1:line.index("/")]) for line in registered_progress] == list(range(1, total + 1))
+    assert leak_progress == []
+    # Not just the "[N/M]" shape: nothing at all -- a mutant that prints the
+    # section body (not just the progress line) from the pool thread must
+    # fail this test too, not just the narrower progress-line check above.
+    assert leak.getvalue() == ""
+
+
+def test_workers_one_never_overlaps_and_workers_four_does(tmp_path, monkeypatch):
+    in_flight = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def track(**kwargs):
+        prompt = kwargs["messages"][1]["content"]
+        key = _section_key_from_prompt(prompt, _MANY_SECTION_KEYS)
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        time.sleep(0.01)
+        with lock:
+            in_flight["now"] -= 1
+        return _llm_result({"delimiters": _many_section_delimiters(key)})
+
+    _redirect_output_manager(monkeypatch, tmp_path)
+    docx_path = _build_many_sections_docx(tmp_path)
+    hpath = _build_many_sections_hierarchy(tmp_path, "MANY5")
+    monkeypatch.setattr(stage2, "call_llm", track)
+
+    stage2.run_stage_2(str(docx_path), str(hpath), workers=1)
+    assert in_flight["peak"] == 1
+
+    in_flight["peak"] = 0
+    stage2.run_stage_2(str(docx_path), str(hpath), workers=4)
+    assert in_flight["peak"] >= 2
+
+
+def test_cancel_raised_in_one_section_starts_no_further_llm_call(tmp_path, monkeypatch):
+    workers, cancel_after = 4, 3
+    checks = 0
+    cancelled = threading.Event()
+    started_after_cancel = 0
+    lock = threading.Lock()
+
+    class _Cancelled(Exception):
+        pass
+
+    def cancel_check():
+        nonlocal checks
+        with lock:
+            checks += 1
+            if checks > cancel_after:
+                cancelled.set()
+                raise _Cancelled("stop")
+
+    def llm(**kwargs):
+        nonlocal started_after_cancel
+        # cancel_check gates every task before its LLM call, so once it has
+        # raised no further section reaches call_llm. In-flight ones finish.
+        if cancelled.is_set():
+            with lock:
+                started_after_cancel += 1
+        time.sleep(0.01)
+        prompt = kwargs["messages"][1]["content"]
+        key = _section_key_from_prompt(prompt, _MANY_SECTION_KEYS)
+        return _llm_result({"delimiters": _many_section_delimiters(key)})
+
+    _redirect_output_manager(monkeypatch, tmp_path)
+    docx_path = _build_many_sections_docx(tmp_path)
+    hpath = _build_many_sections_hierarchy(tmp_path, "MANY6")
+    monkeypatch.setattr(stage2, "call_llm", llm)
+
+    with pytest.raises(_Cancelled):
+        stage2.run_stage_2(str(docx_path), str(hpath), cancel_check=cancel_check, workers=workers)
+
+    assert started_after_cancel == 0
+
+
+def test_detect_entries_for_section_raising_propagates_and_writes_no_output(tmp_path, monkeypatch):
+    """#915 review item 5: detect_entries_for_section normally swallows an
+    LLM/JSON/network error per batch (logged, next batch continues), but a
+    bug outside that guard would raise out of it. Pin what run_stage_2 does
+    then: the exception propagates (map_in_order's own contract -- first
+    raise cancels the queue and re-raises) and, since that happens before
+    the json.dump that writes stage 2's output, no artifact exists."""
+    target_section = "SECTION 03"
+
+    def flaky_detect(hierarchy_path, *args, **kwargs):
+        if hierarchy_path == [target_section]:
+            raise RuntimeError("synthetic detect_entries_for_section failure")
+        return [], {"cost": 0, "tokens": 0}
+
+    _redirect_output_manager(monkeypatch, tmp_path)
+    docx_path = _build_many_sections_docx(tmp_path)
+    hpath = _build_many_sections_hierarchy(tmp_path, "MANY7")
+    monkeypatch.setattr(stage2, "detect_entries_for_section", flaky_detect)
+
+    with pytest.raises(RuntimeError, match="synthetic detect_entries_for_section failure"):
+        stage2.run_stage_2(str(docx_path), str(hpath), workers=4)
+
+    om = _RealOutputManager(str(docx_path), base_output_dir=tmp_path)
+    assert not om.get_stage2_path().exists()
+
+
+def test_stage2_workers_config_knob_is_read_from_env(monkeypatch):
+    # STAGE2_SECTION_WORKERS itself is bound once, at import time, so it
+    # can't observe an env var set by a test -- this pins the reader it's
+    # built from instead: workers_from_config("CVICHE_STAGE2_SECTION_WORKERS").
+    monkeypatch.setenv("CVICHE_STAGE2_SECTION_WORKERS", "7")
+    assert stage2.workers_from_config("CVICHE_STAGE2_SECTION_WORKERS") == 7
+
+
+def test_run_stage_2_defaults_to_the_config_knob():
+    # Pins the default itself, not just the reader: a hardcoded literal
+    # default (e.g. `workers: int = 1`) would pass every other test here
+    # (they all pass workers= explicitly) while silently dropping the
+    # CVICHE_STAGE2_SECTION_WORKERS knob in production.
+    default = inspect.signature(stage2.run_stage_2).parameters["workers"].default
+    assert default is stage2.STAGE2_SECTION_WORKERS
+    assert default == stage2.workers_from_config("CVICHE_STAGE2_SECTION_WORKERS")
+
+
+def test_assigned_indices_union_matches_the_serial_loop(tmp_path, monkeypatch):
+    # Table row fixture (parent-table int path): a claimed "N.M" string
+    # sub-index plus its recovered sibling, so section_assigned's string +
+    # parent-int bookkeeping is exercised, not just plain integer ranges.
+    _redirect_output_manager(monkeypatch, tmp_path)
+
+    doc = Document()
+    doc.add_paragraph("Jane Doe")
+    doc.add_paragraph("AWARDS")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "2020"
+    table.cell(0, 1).text = "Best Paper"
+    table.cell(1, 0).text = "2021"
+    table.cell(1, 1).text = "Rising Star"
+    doc.add_paragraph("Committee reviewer, NIH study section, 2022")
+    docx_path = tmp_path / "tbl_union.docx"
+    doc.save(docx_path)
+
+    hpath = _write_hierarchy(
+        tmp_path, "tbl_union_h.json", "TBLUNION",
+        hierarchy_with_indices=[{"text": "Awards", "level": "H1", "element_idx": 1, "children": []}],
+        section_boundaries=[{"hierarchy": ["Awards"], "element_idx_start": 1, "element_idx_end": 3, "has_children": False}],
+    )
+    _route_call_llm(monkeypatch, {
+        "Personal Data": [{"element_idx_start": 0, "element_idx_end": 0, "element_type": "paragraph", "confidence": 0.9}],
+        "Awards": [
+            {"element_idx_start": "2.1", "element_idx_end": "2.1", "element_type": "table_row", "confidence": 0.8},
+            {"element_idx_start": 3, "element_idx_end": 3, "element_type": "paragraph", "confidence": 0.9},
+        ],
+    })
+
+    serial, _ = stage2.run_stage_2(str(docx_path), str(hpath), workers=1)
+    parallel, _ = stage2.run_stage_2(str(docx_path), str(hpath), workers=4)
+
+    assert serial["coverage"] == parallel["coverage"]
+    assert serial["coverage"]["unaccounted_indices"] == []
+    assert serial["coverage"]["coverage_percentage"] == pytest.approx(100.0)
+
+
+def test_string_row_index_never_lands_in_assigned_only_its_parent_int_does(monkeypatch):
+    """#915 review item 1: ``section_assigned.add(str(start_idx_entry))``
+    was inert -- ``section_assigned`` is later diffed against
+    ``section_range = set(range(...))``, which holds only ints, and
+    ``_bound_coverage_indices`` (#856) filters ``isinstance(idx, int)`` by
+    construction too, so the string form is never read by any consumer.
+    Pin the INVARIANT the string-add was removed for rather than the
+    deleted line itself: a section whose sole entry carries a "N.M"
+    table-row string index still ends up with an int-only ``assigned`` set
+    (never the "1.0" string) and the parent table index alone still keeps
+    that element out of ``unassigned_in_section`` / the break entries.
+    """
+    doc_elements = [
+        _para(0, "AWARDS"),
+        {"unified_idx": 1, "type": "table_content", "data": [["2020", "Best Paper"]]},
+    ]
+    element_index_map = _idx_map(doc_elements)
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": [
+        {"element_idx_start": "1.0", "element_idx_end": "1.0", "element_type": "table_row", "confidence": 0.8},
+    ]}))
+
+    context = stage2._DocumentContext(
+        doc_elements=doc_elements,
+        header_indices={0},
+        element_index_map=element_index_map,
+        header_info={0: ["Awards"]},
+        doc=Document(),
+    )
+    result = stage2._extract_section(
+        context, ["Awards"], 0, 1,
+        document_uid="TEST",
+        cancel_check=None,
+    )
+
+    assert result.assigned == {0, 1}  # header idx 0 + parent table idx 1, ints only
+    assert "1.0" not in result.assigned
+    break_starts = {e["element_idx_start"] for e in result.entries if e["element_type"] == "break"}
+    assert 1 not in break_starts  # the parent int alone kept it out of break_entries
+
+
+def test_extract_section_signature_bundles_the_five_constants_into_one_context_param():
+    """#915 review item 6: doc_elements, header_indices, element_index_map,
+    header_info, doc are constant across every call in a run_stage_2
+    invocation; pin the bundled signature shape (context first and
+    positional so map_in_order's per-call (hierarchy_path, start_idx,
+    end_idx) tuple still binds correctly via partial) rather than just
+    trusting the corpus A/B to catch a drift back to five loose params."""
+    params = list(inspect.signature(stage2._extract_section).parameters.values())
+    names = [p.name for p in params]
+    assert names == ["context", "hierarchy_path", "start_idx", "end_idx", "document_uid", "cancel_check"]
+    by_name = {p.name: p for p in params}
+    assert by_name["context"].kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+    assert by_name["hierarchy_path"].kind == inspect.Parameter.POSITIONAL_OR_KEYWORD
+    for kw_only in ("document_uid", "cancel_check"):
+        assert by_name[kw_only].kind == inspect.Parameter.KEYWORD_ONLY
+    assert stage2._DocumentContext._fields == (
+        "doc_elements", "header_indices", "element_index_map", "header_info", "doc",
+    )
+
+
+def test_tied_start_indices_keep_section_submission_order(tmp_path, monkeypatch):
+    """A stage-1b leaf section can legitimately enclose another leaf
+    section's range (corpus A/B, 21/107 real CVs: a wide catch-all leaf
+    alongside a narrower nested leaf sharing an element index). Both
+    sections then independently call the LLM over the shared index and can
+    each independently claim it as a same-type content entry -- the text
+    comes from the shared element_index_map, so it is identical either way
+    -- and filter_extraction_noise's (element_type, text, idx) dedup then
+    keeps only the FIRST of the two survivors in `all_entries`. Because the
+    later `all_entries.sort(key=sort_key)` is stable, "first" means
+    accumulation order, not LLM-completion order -- this pins that
+    accumulation stays SUBMISSION order (the earlier `reversed(results)`
+    mutant flips which section's hierarchy the tied entry carries) even
+    when the later-submitted section's call finishes first.
+    """
+    doc = Document()
+    for text in ["Jane Researcher", "CURRENT POSITION", "Professor of Chemistry"]:
+        doc.add_paragraph(text)
+    docx_path = tmp_path / "tie.docx"
+    doc.save(docx_path)
+
+    hpath = _write_hierarchy(
+        tmp_path, "tie_h.json", "TIE1",
+        hierarchy_with_indices=[{"text": "Current Position", "level": "H1", "element_idx": 1, "children": []}],
+        section_boundaries=[
+            # Wide leaf enclosing the narrower leaf below -- element 2 is in
+            # BOTH ranges. Order here fixes submission order: Personal Data
+            # is section index 0, Current Position is section index 1.
+            {"hierarchy": ["Personal Data"], "element_idx_start": 0, "element_idx_end": 2, "has_children": False},
+            {"hierarchy": ["Current Position"], "element_idx_start": 1, "element_idx_end": 2, "has_children": False},
+        ],
+    )
+
+    submission_order = {"Personal Data": 0, "Current Position": 1}
+
+    def slow_first_submitted_finishes_last(**kwargs):
+        prompt = kwargs["messages"][1]["content"]
+        key = _section_key_from_prompt(prompt, list(submission_order))
+        # Personal Data (submitted first) sleeps longest, so under
+        # workers=4 Current Position (submitted second) completes first --
+        # completion order is the exact reverse of submission order.
+        time.sleep((len(submission_order) - submission_order[key]) * 0.02)
+        return _llm_result({"delimiters": [
+            {"element_idx_start": 2, "element_idx_end": 2, "element_type": "paragraph", "confidence": 0.9},
+        ]})
+
+    _redirect_output_manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(stage2, "call_llm", slow_first_submitted_finishes_last)
+
+    serial, _ = stage2.run_stage_2(str(docx_path), str(hpath), workers=1)
+    parallel, _ = stage2.run_stage_2(str(docx_path), str(hpath), workers=4)
+
+    assert serial == parallel
+
+    tied = [e for e in parallel["entries"] if e["element_idx_start"] == 2]
+    assert len(tied) == 1  # filter_extraction_noise collapsed the duplicate claim
+    assert tied[0]["hierarchy"] == ["Personal Data"]  # first-SUBMITTED section wins
+
+
+def test_batch_progress_goes_to_the_logger_not_stdout(monkeypatch, caplog, capsys):
+    # 120 elements / BATCH_SIZE=50 -> 3 batches, so "Processing batch" fires.
+    elements = [_para(i, f"Line {i}") for i in range(120)]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": []}))
+
+    with caplog.at_level(logging.INFO, logger=stage2.logger.name):
+        stage2.detect_entries_for_section(
+            ["Big Section"], elements, 0, 120,
+            document_uid="BATCHLOG", header_indices=set(), element_index_map=_idx_map(elements),
+        )
+
+    messages = [r.message for r in caplog.records]
+    assert any("Processing batch 1/3" in m for m in messages)
+    assert any("Processing batch 2/3" in m for m in messages)
+    assert any("Processing batch 3/3" in m for m in messages)
+
+    out = capsys.readouterr().out
+    assert "Processing batch" not in out

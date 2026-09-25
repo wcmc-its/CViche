@@ -48,9 +48,11 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     APPENDIX_MAX_CHARS,
     DROP_BLANK,
     DROP_COLUMN_HEADER,
+    DROP_NEAR_TEMPLATE_INSTRUCTION,
     DROP_RENDERS_EMPTY,
     DROP_SOURCE_BOILERPLATE,
     DROP_TEMPLATE_INSTRUCTION,
+    DROP_UNANSWERED_PROMPT,
     _appendix_drop_reason,
     _describe_dropped,
     _filter_unmapped_entries,
@@ -211,6 +213,12 @@ def test_documented_false_positive_class_is_pinned(entry):
     ("|  |  |", DROP_RENDERS_EMPTY),
     (HEADER_ROW, DROP_COLUMN_HEADER),
     ("NAME:", DROP_COLUMN_HEADER),
+    ("Please list activities at WCM and affiliates, NYP, and previously employed "
+     "institutions, including division or department positions, directorships, "
+     "deanships, chairmanships on major institutional committees.",
+     DROP_NEAR_TEMPLATE_INSTRUCTION),
+    ("N/A", DROP_UNANSWERED_PROMPT),
+    ("Not Applicable |  |  |", DROP_UNANSWERED_PROMPT),
 ])
 def test_drop_reason_names_the_check_that_fired(text, reason):
     assert _appendix_drop_reason(text, _clean_inline_tabs(text)) == reason
@@ -220,6 +228,8 @@ def test_drop_reason_names_the_check_that_fired(text, reason):
     "Reviewed manuscripts for the Journal of Clinical Oncology on an ad hoc basis.",
     "2019 | Assistant Professor | Weill Cornell Medicine",
     "Chair, Admissions Committee",
+    "Is your eligibility to work in the U.S. based on an employment visa?: | No",
+    "Grant pending | N/A",
 ])
 def test_genuine_content_has_no_drop_reason(text):
     assert _appendix_drop_reason(text, _clean_inline_tabs(text)) is None

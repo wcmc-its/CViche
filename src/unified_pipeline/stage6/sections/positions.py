@@ -776,13 +776,13 @@ class PositionsSection:
                          "had inherited its employer from a parent row", unmatched_employer)
         if not dropped:
             if verbose and merged:
-                print(f"    Merged dates into {merged} fragmented appointment rows")
+                logger.info("    Merged dates into %s fragmented appointment rows", merged)
             return entries
 
         result = [e for k, e in enumerate(ordered) if k not in dropped]
         if verbose:
-            print(f"    Merged {len(dropped)} fragmented appointment row(s); "
-                  f"propagated dates to {merged} role row(s)")
+            logger.info("    Merged %s fragmented appointment row(s); "
+                        "propagated dates to %s role row(s)", len(dropped), merged)
         return result
 
     def _fill_positions(self, entries_by_code: dict[str, list[dict]]) -> None:
@@ -811,13 +811,13 @@ class PositionsSection:
 
         total_positions = len(d1_entries) + len(d2_entries) + len(d3_entries)
         if self.verbose:
-            print(f"Filling Positions ({total_positions} entries)...")
+            logger.info("Filling Positions (%s entries)...", total_positions)
             if d1_entries:
-                print(f"  D1 Academic: {len(d1_entries)} entries")
+                logger.info("  D1 Academic: %s entries", len(d1_entries))
             if d2_entries:
-                print(f"  D2 Hospital: {len(d2_entries)} entries")
+                logger.info("  D2 Hospital: %s entries", len(d2_entries))
             if d3_entries:
-                print(f"  D3 Other: {len(d3_entries)} entries")
+                logger.info("  D3 Other: %s entries", len(d3_entries))
 
         # Fill Academic Appointments table (D1)
         acad_idx = self._find_paragraph_with_text("Academic Appointments")
