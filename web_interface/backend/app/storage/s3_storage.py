@@ -36,23 +36,15 @@ _NOT_FOUND_CODES = frozenset({"NoSuchKey", "404"})
 # are effectively unbounded relative to the request budget that actually
 # matters: create_run_archive (app/api/upload.py) issues up to 2 put_object
 # calls per run-id attempt for up to _RUN_ID_ATTEMPTS=5 attempts, all inside
-# ONE synchronous upload request, so a degraded S3 multiplies whatever the
-# client's timeout is across up to 10 sequential calls before the caller sees
-# a response (#791). These values make that worst case explicit and bounded
-# instead of inheriting botocore's silently. They are derived from that
-# request budget, not from a measured S3 latency SLO.
-S3_CONNECT_TIMEOUT_S = 5
-S3_READ_TIMEOUT_S = 30
-S3_MAX_ATTEMPTS = 3
-# botocore's retries.max_attempts is a RETRY count, not a total: passing
-# S3_MAX_ATTEMPTS here yields total_max_attempts == S3_MAX_ATTEMPTS + 1 (the
-# initial attempt plus S3_MAX_ATTEMPTS retries) -- confirmed by reading back
-# the built client's own config (tests/test_s3_storage.py, the
-# total_max_attempts assertion). Worst case with the values above: 10
-# sequential put_object calls (5 run-id attempts x up to 2 puts each) x up to
-# (S3_MAX_ATTEMPTS + 1) total attempts per call x (S3_CONNECT_TIMEOUT_S +
-# S3_READ_TIMEOUT_S) per attempt = up to ~1,400s before the request can no
-# longer succeed. Bounded, not fast.
+# ONE synchronous upload request (#791). Worst case at these values: 10
+# sequential calls x 3 total attempts x (3s + 10s) = ~390s, under the ALB's
+# 500s idle timeout, so the client sees an error rather than a dropped
+# connection. Values decided on #791.
+S3_CONNECT_TIMEOUT_S = 3
+S3_READ_TIMEOUT_S = 10
+# Total attempts per call, the initial one included (botocore's
+# `total_max_attempts`; its `max_attempts` would count retries only).
+S3_TOTAL_ATTEMPTS = 3
 
 
 def _translate_client_error(code: str, context: str) -> StorageError | None:
@@ -150,7 +142,7 @@ class S3RunStorage(RunStorage):
                 signature_version="s3v4",
                 connect_timeout=S3_CONNECT_TIMEOUT_S,
                 read_timeout=S3_READ_TIMEOUT_S,
-                retries={"mode": "standard", "max_attempts": S3_MAX_ATTEMPTS},
+                retries={"mode": "standard", "total_max_attempts": S3_TOTAL_ATTEMPTS},
             ),
         )
 

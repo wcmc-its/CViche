@@ -4,6 +4,7 @@ Used in development. Reads/writes to a configurable base directory
 (default: web_interface/uploads/).
 """
 
+import logging
 import os
 import shutil
 import tempfile
@@ -17,6 +18,8 @@ from app.storage.base import (
     validate_run_id,
     validate_run_key,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -49,10 +52,16 @@ def _atomic_write(path: Path, data: bytes) -> None:
         os.chmod(tmp_name, 0o644)
         os.replace(tmp_name, path)
     except BaseException:
+        # BaseException, not Exception: clean up the temp file even on Ctrl-C
+        # or task cancellation, then re-raise.
         try:
             os.unlink(tmp_name)
         except FileNotFoundError:
             pass
+        except OSError as cleanup_err:
+            # Log rather than raise, so a failed cleanup never replaces the
+            # original error as the one that propagates.
+            logger.warning("failed to clean up temp file %s: %s", tmp_name, cleanup_err)
         raise
 
 

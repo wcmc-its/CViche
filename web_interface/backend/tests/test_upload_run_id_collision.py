@@ -235,6 +235,23 @@ def test_local_put_file_interrupted_by_keyboardinterrupt_still_cleans_up(tmp_pat
     assert leftover == [], f"temp file leaked: {leftover}"
 
 
+def test_local_put_file_failed_cleanup_keeps_the_original_error(tmp_path, monkeypatch, caplog):
+    """If removing the temp file also fails, the write's own error still
+    propagates and the cleanup failure is logged, not raised in its place."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+
+    def _unlink_denied(*_args, **_kwargs):
+        raise PermissionError("simulated cleanup failure")
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _boom)
+    monkeypatch.setattr("app.storage.local_storage.os.unlink", _unlink_denied)
+    with caplog.at_level("WARNING", logger="app.storage.local_storage"):
+        with pytest.raises(OSError, match="simulated crash before rename"):
+            storage.put_file("R7", "data.json", b"partial-bytes")
+
+    assert any("failed to clean up temp file" in r.getMessage() for r in caplog.records)
+
+
 def test_local_put_file_restores_standard_readable_mode(tmp_path):
     """mkstemp() creates the temp file at 0o600 (owner-only); os.replace()
     preserves the SOURCE's mode, not the destination's, so without an
