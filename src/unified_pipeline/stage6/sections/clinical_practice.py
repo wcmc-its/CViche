@@ -282,7 +282,7 @@ class ClinicalPracticeSection:
             return
 
         if self.verbose:
-            print(f"Filling Clinical Practice ({len(l1_entries)} L1, {len(l2_entries)} L2, {len(l3_entries)} L3)...")
+            logger.info("Filling Clinical Practice (%s L1, %s L2, %s L3)...", len(l1_entries), len(l2_entries), len(l3_entries))
 
         self._fill_clinical_practice_l1(l1_entries)
         self._fill_clinical_practice_l2(l2_entries)
@@ -330,7 +330,7 @@ class ClinicalPracticeSection:
                 header_match = _clinical_header_match(table.rows[0].cells)
                 if header_match is False:
                     if self.verbose:
-                        print(f"  Skipping table (appears to be grant table, not clinical practice)")
+                        logger.warning("  Skipping table (appears to be grant table, not clinical practice)")
                 elif header_match is True:
                     table_is_valid = True
 
@@ -381,7 +381,7 @@ class ClinicalPracticeSection:
             else:
                 # No valid table found - insert as bullet points after section header
                 if self.verbose:
-                    print(f"  No Clinical Practice table found, inserting as bullet points")
+                    logger.warning("  No Clinical Practice table found, inserting as bullet points")
                 bullet_count = 0
                 for entry in sorted_entries:
                     original_text = entry.get('text', '').strip()
@@ -437,7 +437,7 @@ class ClinicalPracticeSection:
                 header_match = _clinical_header_match(table.rows[0].cells)
                 if header_match is False:
                     if self.verbose:
-                        print(f"  Skipping table (appears to be grant table, not clinical innovations)")
+                        logger.warning("  Skipping table (appears to be grant table, not clinical innovations)")
                 elif header_match is True:
                     table_is_valid = True
 
@@ -478,7 +478,7 @@ class ClinicalPracticeSection:
             else:
                 # No valid table found — insert as bullet points
                 if self.verbose:
-                    print(f"  No Clinical Innovations table found, inserting as bullet points")
+                    logger.warning("  No Clinical Innovations table found, inserting as bullet points")
                 bullet_count = 0
                 for entry in sorted_entries:
                     original_text = entry.get('text', '').strip()
@@ -522,7 +522,7 @@ class ClinicalPracticeSection:
                 header_match = _clinical_header_match(table.rows[0].cells)
                 if header_match is False:
                     if self.verbose:
-                        print(f"  Skipping table (appears to be grant table, not clinical leadership)")
+                        logger.warning("  Skipping table (appears to be grant table, not clinical leadership)")
                 elif header_match is True:
                     table_is_valid = True
 
@@ -564,7 +564,7 @@ class ClinicalPracticeSection:
             else:
                 # No valid table found — insert as bullet points
                 if self.verbose:
-                    print(f"  No Clinical Leadership table found, inserting as bullet points")
+                    logger.warning("  No Clinical Leadership table found, inserting as bullet points")
                 bullet_count = 0
                 for entry in sorted_entries:
                     fields = entry.get('extracted_fields', {}) or {}

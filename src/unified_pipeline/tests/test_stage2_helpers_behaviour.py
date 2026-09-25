@@ -275,11 +275,93 @@ def test_extract_leaf_sections_child_of_unregistered_parent_treated_as_plain_lea
     assert result == [(["PARENT", "Child"], 5, 10)]
 
 
+def test_parent_gap_ends_at_the_next_header_in_document_order():
+    # S1 reproducer 3 (#916): P > N > G, P > D. N starts at 1, so P's gap
+    # (start_idx + 1 = 1) is not > next header start (1) -- no ["P"]
+    # pseudo-leaf. N's own gap likewise collapses (next header G at 2 is
+    # not > N's start_idx + 1 = 2). Only the true leaves G and D survive.
+    boundaries = [
+        _b(["P"], 0, 9, has_children=True),
+        _b(["P", "N"], 1, 4, has_children=True),
+        _b(["P", "N", "G"], 2, 3),
+        _b(["P", "D"], 8, 9),
+    ]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P", "N", "G"], 2, 3), (["P", "D"], 8, 9)]
+
+
+def test_parent_gap_stops_at_an_out_of_order_foreign_section():
+    # P has_children and starts at 0; its own mapped child C starts at 10,
+    # but a foreign section Q (unrelated hierarchy) sits at 5 -- the gap
+    # must stop before Q, not run all the way to C.
+    boundaries = [
+        _b(["P"], 0, 20, has_children=True),
+        _b(["P", "C"], 10, 20),
+        _b(["Q"], 5, 9),
+    ]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P"], 1, 4), (["P", "C"], 10, 20), (["Q"], 5, 9)]
+
+
+def test_parent_with_a_child_at_its_own_start_gets_no_gap():
+    # Stage 1a mapped a parent header and a child header to the SAME
+    # paragraph, so C starts at the same element_idx as its parent P (#916).
+    # The old `other_start > start_idx` comparison made C invisible to the
+    # gap rule (a strict `>` excludes an equal start), so P got a
+    # [start+1 .. next-1] gap that duplicated C's whole leaf range. Once
+    # same-start boundaries count, first_child_start == start_idx, the
+    # `> start_idx + 1` guard fails, and no ["P"] pseudo-leaf is emitted.
+    boundaries = [
+        _b(["P"], 5, 9, has_children=True),
+        _b(["P", "C"], 5, 8),
+        _b(["D"], 9, 9),
+    ]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P", "C"], 5, 8), (["D"], 9, 9)]
+
+
+def test_two_parents_at_the_same_start_emit_exactly_one_gap():
+    # Round 2 of #916: two has_children boundaries mapped to the SAME start
+    # (P listed before Q). The round-1 `>=` rule let each same-start parent
+    # suppress the OTHER's gap, so with two parents at the same start
+    # neither emitted one and elements 6-7 (P's own content before the
+    # first real child C@8) were extracted by nobody. The earlier-listed
+    # boundary (P) now owns the tie and emits the gap; Q, listed later,
+    # emits none.
+    boundaries = [
+        _b(["P"], 5, 9, has_children=True),
+        _b(["Q"], 5, 9, has_children=True),
+        _b(["C"], 8, 8),
+        _b(["K"], 9, 9),
+    ]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P"], 6, 7), (["C"], 8, 8), (["K"], 9, 9)]
+
+
+def test_a_duplicated_parent_record_emits_one_gap():
+    # The same parent dict appears twice in section_boundaries (equal
+    # values, distinct objects) -- e.g. stage 1a mapped it twice. List
+    # POSITION, not equality, must distinguish "self" from "the other
+    # same-start record": `first_index_at_start` records the index of the
+    # first boundary seen at each start, and a boundary is suppressed when
+    # its own index differs from that recorded index. Equality can't do
+    # this job -- both copies compare equal, so an equality-keyed "first
+    # one wins" check can't tell which occurrence is which; this is the
+    # only test with two distinct, equal dicts at the same start, so it is
+    # the sole killer of an equality-based regression here.
+    parent = _b(["P"], 5, 9, has_children=True)
+    boundaries = [parent, dict(parent), _b(["C"], 8, 8)]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P"], 6, 7), (["C"], 8, 8)]
+
+
 def test_extract_leaf_sections_first_child_start_keeps_earlier_minimum():
-    """Children already in document order (increasing start): once the
-    first child sets first_child_start, a LATER child with a larger start
-    must not overwrite it -- the 'or start_idx < current_first' disjunct's
-    false side."""
+    """The parent's gap ends at the earliest header start after the
+    parent's own start, over ALL boundaries -- whichever position that
+    header holds in `section_boundaries`'s list order. Here C1 (the
+    earliest-starting header after P) also happens to come first in the
+    list, so the gap ends at C1's start regardless of C2's later, larger
+    start."""
     boundaries = [
         _b(["P"], 0, 50, has_children=True),
         _b(["P", "C1"], 10, 29),
