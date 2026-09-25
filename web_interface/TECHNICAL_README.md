@@ -437,7 +437,6 @@ Full Swagger documentation is available at `http://localhost:8000/docs` when the
 | `GET` | `/api/runs?offset=0&limit=20` | Yes | Paginated list of runs for the current user, most recent first. |
 | `GET` | `/api/run/{run_id}/status` | Yes | Run status with all step details (status, duration, cost, output files). |
 | `POST` | `/api/run/{run_id}/start` | Yes | Start pipeline execution for a created run. |
-| `POST` | `/api/run/{run_id}/pause` | Yes | Pause a running pipeline. |
 | `POST` | `/api/run/{run_id}/cancel` | Yes | Cancel a running pipeline. |
 | `POST` | `/api/run/{run_id}/restart` | Yes | Create a new run using the same uploaded file. Inherits submission type. |
 | `POST` | `/api/run/{run_id}/retry/{step_number}` | Yes | Retry a failed step. |

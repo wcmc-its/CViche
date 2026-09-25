@@ -54,17 +54,22 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     CAT_SALARY,
     CAT_SPOUSE,
     CAT_SSN,
+    CAT_THIRD_PARTY_CONTACT,
     CAT_VETERAN,
     CAT_VISA,
     DECIDED_820,
     DECIDED_821,
     DECIDED_821_PENDING,
+    PRE_LLM_PLACEHOLDER,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     WITHHOLD_POLICY,
     WithheldItem,
     _pii_fragments,
     _pii_matches,
+    pre_llm_bare_label_category,
+    redact_pre_llm_value_of_category,
+    redact_pre_llm_values,
 )
 from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
     _resolve_licensure,
@@ -74,6 +79,8 @@ from unified_pipeline.stage6.pii_pass import (  # noqa: E402
     WITHHELD_COMMENT_FOOTER,
     WITHHELD_COMMENT_HEADER,
     _entry_scope,
+    _owner_name_tokens,
+    _THIRD_PARTY_PHONE_RE,
     run_pii_pass,
     withheld_comment_text,
 )
@@ -424,7 +431,518 @@ def test_comment_text_carries_no_value():
 
 
 # --------------------------------------------------------------------------
-# 4. Bare-label span extension (#821 R3 F-B)
+# 4. Third-party contact in an unlabelled References block (#833)
+#
+# `WITHHOLD_POLICY` is label-driven; a free-form References block ("Name,
+# Title, Institution" / phone / email, no label) carries nothing it keys
+# on, so it needs a VALUE-SHAPE rule of its own -- applied only to entries
+# `run_pii_pass` already scopes as Appendix-bound (code not in
+# `routed_codes` and not 'A'), and only to a phone/email that is not the
+# CV owner's own (known from the 'A' entries) and not a generic mailbox.
+# --------------------------------------------------------------------------
+
+def _owner_a_entry(name, *contacts):
+    text = name + "\t" + "\t".join(contacts)
+    return {"text": text, "taxonomy_code": "A",
+            "extracted_fields": {"name": name}}
+
+
+def test_references_block_with_name_title_institution_phone_and_email_is_withheld():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "212-555-0100")
+    t = {"text": "Dr. Jordan Reviewer, Chair, Example State University\t"
+                 "555-234-8899\tjreviewer@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert t["_pii_withheld"] is True
+    assert t["text"] == "Dr. Jordan Reviewer, Chair, Example State University"
+    assert [i.category for i in result.withheld if i.entry_index == 1] == [
+        CAT_THIRD_PARTY_CONTACT, CAT_THIRD_PARTY_CONTACT]
+
+
+def test_references_block_with_only_an_email_is_withheld():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dr. Jordan Reviewer, Example State University, "
+                 "jreviewer@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+@pytest.mark.parametrize("phone", [
+    "555-234-8899", "(555) 234-8899", "555.234.8899", "555 234 8899",
+    "+1 555-234-8899",
+])
+def test_references_block_with_only_a_phone_is_withheld(phone):
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": f"Dr. Jordan Reviewer, Example State University, {phone}",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert phone not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_two_references_in_one_entry_each_get_their_own_withheld_item():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dr. Jordan Reviewer, jreviewer@example-state.edu\n"
+                 "Dr. Alex Second, asecond@example-college.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert "asecond@example-college.edu" not in t["text"]
+    assert [i.category for i in result.withheld] == [
+        CAT_THIRD_PARTY_CONTACT, CAT_THIRD_PARTY_CONTACT]
+
+
+def test_comment_names_third_party_contact():
+    text = withheld_comment_text([
+        WithheldItem(CAT_THIRD_PARTY_CONTACT, APPENDIX_SECTION_LABEL, 1)])
+    assert f" • {CAT_THIRD_PARTY_CONTACT} — 1 item, {APPENDIX_SECTION_LABEL}" in text
+
+
+# --- negative controls, each a test -----------------------------------
+
+def test_lab_website_with_no_email_or_phone_is_untouched():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Lab website: https://example-lab.example.edu/research",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == "Lab website: https://example-lab.example.edu/research"
+    assert result.withheld == []
+
+
+def test_owners_own_email_and_phone_from_a_are_untouched_in_an_appendix_entry():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "212-555-0100")
+    t = {"text": "Reprint requests to Dana Example, dana.example@wcm.example.edu, "
+                 "212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_own_contact_with_no_owner_name_in_the_entry_is_still_untouched():
+    """Exercises the owner-contact exemption on its own terms (#833 round
+    2, still true post-#920's per-value rewrite): this entry carries NO
+    owner-name token anywhere -- not in its prose, not in the email's own
+    local part -- so only the owner-contact set comparison can spare it.
+    The owner's email is deliberately NOT `dana.example@...` -- that local
+    part literally spells out the owner's own name tokens, so reusing it
+    here would let the local-part check pass instead of the owner-contact
+    check, making the owner-contact comparison itself untested (the
+    round-1 verifier's exact finding, reproduced against a name-free
+    address to confirm the check does the work alone)."""
+    a = _owner_a_entry("Dana Example", "office-contact-9142@wcm.test", "212-555-0100")
+    t = {"text": "Contact for reprints: office-contact-9142@wcm.test, 212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_phone_in_a_different_format_is_still_recognised_as_the_owners_own():
+    """`_phone_digits` normalises before comparing (#833 round 2): the same
+    phone, formatted differently in the Appendix entry than in the 'A'
+    entry, must still be spared -- no owner-name token here either, so the
+    normalisation itself is what has to do the work."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "212-555-0100")
+    t = {"text": "Contact for reprints: (212) 555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_phone_with_a_plus_one_country_code_matches_the_bare_10_digit_form():
+    """#920 review: `_phone_digits` used to strip only non-digits, so
+    "+1 212-555-0100" (11 digits: "12125550100") and "212-555-0100" (10
+    digits: "2125550100") normalised to two DIFFERENT strings and never
+    matched each other. Now an 11-digit result starting with "1" has that
+    leading digit stripped first, so the owner's own number is recognised
+    regardless of which format carries the country code."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "+1 212-555-0100")
+    t = {"text": "Contact for reprints: 212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_phone_only_in_extracted_fields_is_still_recognised():
+    """The owner set is gathered from `extracted_fields` as well as `text`
+    (#833 round 2): a phone present only in the 'A' entry's structured
+    field, never in its raw text, still spares the same phone elsewhere."""
+    a = {"text": "Dana Example", "taxonomy_code": "A",
+         "extracted_fields": {"name": "Dana Example", "phone": "212-555-0100"}}
+    t = {"text": "Contact for reprints: 212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owner_name_tokens_fall_back_to_the_first_a_entry_s_whole_text():
+    """When no 'A' entry has `extracted_fields['name']`, the owner name
+    tokens fall back to the first 'A' entry's raw text (#833 round 2): a
+    References-block-style Personal Data entry ("Name, Title,
+    Institution", no separate name field) still spares the owner's own
+    second contact -- via the #920 per-value rule, because the second
+    email's OWN LOCAL PART ("dana.example.alt") carries the fallback
+    tokens, not because the surrounding entry prose happens to."""
+    a = {"text": "Dana Example, Professor, Example State University",
+         "taxonomy_code": "A", "extracted_fields": {}}
+    t = {"text": "Dana Example is also reachable at "
+                 "dana.example.alt@gmail.com for editorial correspondence",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_plus_one_country_code_is_fully_cut_not_left_dangling():
+    """The phone shape's optional `+1` prefix must be cut along with the
+    digits it introduces (#833 round 2) -- assert the exact residual, not
+    just that the digits are gone, so a mutant that cuts only the 3-3-4
+    digit run and leaves '+1' behind is caught."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dr. Jordan Reviewer, Example State University, "
+                 "+1 555-234-8899",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == "Dr. Jordan Reviewer, Example State University,"
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_owners_second_email_without_a_name_token_in_its_local_part_is_now_withheld():
+    """#920 review, the headline fix: the exemption used to be PER ENTRY --
+    2+ of the owner's own name tokens ANYWHERE in the entry's text spared
+    every value in it, so this exact shape (the owner's own name in the
+    prose, right beside a second email of theirs) was untouched under the
+    old rule for the wrong reason -- the entry-wide name check, not
+    anything about the email itself. It is now PER VALUE
+    (`_email_spared_by_owner_name`): a local part with no owner-name
+    token in it gets no exemption from the name-sharing path, only from
+    `owner` (the owner's OWN harvested contacts) -- and this second
+    address was never harvested, because it never appeared in an 'A'
+    entry. The correct, safer new behaviour is to withhold it: an
+    over-redacted second email of the owner's own costs almost nothing; a
+    real reference's contact info beside the owner's name used to leak
+    completely (see the entry-wide leak test below).
+
+    Synthetic value only: `dqe.alt77@example.org`, not the real-looking
+    `@gmail.com` domain this test carried before the #920 blocker fix
+    (verifier minor note)."""
+    a = _owner_a_entry("Dana Q Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dana Q Example is also reachable at "
+                 "dqe.alt77@example.org for editorial correspondence",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "dqe.alt77@example.org" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_owners_second_email_whose_own_local_part_carries_a_name_token_is_untouched():
+    """The positive of the test above: the owner-own-second-email case the
+    #920 fix must keep sparing. Nothing OUTSIDE the address itself names
+    the owner (no "Dana", no "Example" in the surrounding prose) -- the
+    entry-level gate (`_shares_owner_name`) is satisfied here only because
+    it scans the WHOLE entry text and the address's own local part
+    ("dana.q.example") tokenises to "dana" and "example" too, and the
+    SAME local part also carries those tokens as whole segments, so the
+    #920 fix's second conjunct holds as well. Both conjuncts true, by the
+    address's own shape alone -- proving the exemption still reaches this
+    case without a separate name-bearing heading or footer."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Reprint requests: dana.q.example@gmail.com",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_a_references_entry_sharing_the_owner_s_name_still_withholds_a_third_party_s_contact():
+    """#920 review -- THE LEAK this ticket closes. On the baseline
+    (`_shares_owner_name`, per-entry): a References entry that carries the
+    CV owner's own name anywhere in it -- a "References for <owner>"
+    heading, a letterhead line, a footer -- was spared WHOLE the moment
+    the owner's name tokens matched, so every referee's phone and email in
+    that same block rendered verbatim in the Appendix. Neither the
+    referee's email's local part ("jreviewer") nor the phone shares any
+    owner name token, and neither is one of the owner's own harvested
+    contacts, so under the #920 fix's two-conjunct rule (`_shares_owner_name`
+    AND a whole-segment local-part match) both are withheld even though the
+    entry as a whole satisfies the first conjunct on its own. This test
+    FAILS on baseline commit 82f3744 (proven by running it, unmodified,
+    against a `git archive` of that commit -- see the PR reply) -- and
+    would ALSO fail against the #920-round-1 fix (`b0c5d9e`) with the
+    email's local part changed to a name-token substring, since that
+    fix dropped the entry-level conjunct entirely rather than adding a
+    second one."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "References for Dana Example\n"
+                 "Dr. Jordan Reviewer, Example State University\n"
+                 "jreviewer@example-state.edu, 212-555-0199",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert "212-555-0199" not in t["text"]
+    assert [i.category for i in result.withheld] == [
+        CAT_THIRD_PARTY_CONTACT, CAT_THIRD_PARTY_CONTACT]
+
+
+@pytest.mark.xfail(
+    reason=(
+        "#920 round 2 narrows the ceiling to two conjuncts but does not "
+        "eliminate it: an email is wrongly spared whenever (a) its own "
+        "entry already meets `_shares_owner_name`'s baseline two-token "
+        "gate AND (b) its local part has a whole segment equal to an "
+        "owner name token -- here 'email', harvested by "
+        "`_owner_name_tokens`'s no-name-field fallback from the WHOLE "
+        "first 'A' entry's raw text, which has no concept of 'label' or "
+        "'domain fragment'. Real fallback token sets measured on the "
+        "local corpus include `and`, `edu`, `com`, `gmail`, `email`, "
+        "`phone`, `number`, `address`, `name`, `this`, `some`, `text`, "
+        "`room`, `floor` -- any one of these landing as a THIRD PARTY's "
+        "own local-part segment, in an entry that also shares two of the "
+        "owner's fallback tokens, is spared by the same mechanism tested "
+        "here. A same-surname relative is the WITH-a-name-field analogue "
+        "(`_owner_name_tokens` need not fall back for the ceiling to "
+        "bite). Phones are unaffected (no per-value name signal at all). "
+        "Upgrade path unchanged from the #833/#920-round-1 docstrings: "
+        "restrict the fallback in `_owner_name_tokens` to a leading "
+        "name-shaped run."
+    ),
+    strict=True,
+)
+def test_email_local_part_sharing_a_fallback_word_as_its_own_segment_is_still_spared():
+    a = {"text": "Personal Data: Name field not provided on the source "
+                 "form. Email: dana.example@state.edu. Phone: 212-555-0100.",
+         "taxonomy_code": "A", "extracted_fields": {}}
+    t = {"text": "Personal Data forwarded here: email.desk@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "email.desk@example-state.edu" not in t["text"]
+    assert result.withheld != []
+
+
+_FALLBACK_A_TEXT = (
+    "Dana Example. Name field intentionally left blank on the source "
+    "form. Email: dana@state.edu. Alternate email: dana.alt@example.com. "
+    "A Gmail account is also on file. Phone Number: 212-555-0100. Home "
+    "Address: 1 Example St, Room 204, Floor 3. This profile does not "
+    "list some fields and the text is limited. Previously affiliated "
+    "with MIT. Research area: leg biomechanics. New Haven, CT."
+)
+
+
+def _fallback_a_entry() -> dict:
+    """An 'A' entry with NO `extracted_fields['name']`, so
+    `_owner_name_tokens` falls back to tokenising this WHOLE raw text
+    (#833 round 2 / #920 blocker). Deliberately carries, as ordinary
+    prose or label/domain fragments and never as anyone's actual name,
+    every fallback token this ticket's evidence measured on the local
+    corpus (`and`, `edu`, `com`, `gmail`, `email`, `phone`, `number`,
+    `address`, `name`, `this`, `some`, `text`, `room`, `floor`) plus
+    `new`, `mit` and `leg`, each used below in a real-corpus-shaped
+    substring-vs-whole-segment counter-example. Returns a FRESH dict each
+    call -- `run_pii_pass` mutates entries in place, and this is shared
+    across parametrize cases."""
+    return {"text": _FALLBACK_A_TEXT, "taxonomy_code": "A",
+            "extracted_fields": {}}
+
+
+#: (owner 'A' entry factory, the owner's own name for a References
+#: heading, the counter-example local part, a case id). Each local part
+#: is a SUBSTRING of an owner token without being a whole
+#: `.`/`_`/`-`/digit-delimited SEGMENT of itself -- exactly the shape
+#: `_local_part_shares_owner_name`'s bare substring test wrongly spared
+#: (the #920 blocker this fix closes): 'edu' inside 'eduardo', 'new'
+#: inside 'newman', 'mit' inside the 'smith' half of 'york.smith', 'leg'
+#: inside the 'college' half of 'college.admin2', 'lee' inside
+#: 'kathleen', 'doe' inside 'doeringer', 'kim' inside the 'kimberly' half
+#: of 'kimberly.jones'.
+_SEGMENT_GATE_COUNTER_EXAMPLES = [
+    (_fallback_a_entry, "Dana Example", "eduardo", "fallback-edu"),
+    (_fallback_a_entry, "Dana Example", "newman", "fallback-new"),
+    (_fallback_a_entry, "Dana Example", "york.smith", "fallback-mit"),
+    (_fallback_a_entry, "Dana Example", "college.admin2", "fallback-leg"),
+    (lambda: _owner_a_entry("Ann Lee", "ann.lee@example.com"), "Ann Lee",
+     "kathleen", "name-lee"),
+    (lambda: _owner_a_entry("Jane Doe", "jane.doe@example.com"), "Jane Doe",
+     "doeringer", "name-doe"),
+    (lambda: _owner_a_entry("Bo Kim", "bo.kim@example.com"), "Bo Kim",
+     "kimberly.jones", "name-kim"),
+]
+
+
+@pytest.mark.parametrize(
+    "owner_a_entry, owner_name, local_part, case_id",
+    _SEGMENT_GATE_COUNTER_EXAMPLES,
+    ids=[c[3] for c in _SEGMENT_GATE_COUNTER_EXAMPLES],
+)
+@pytest.mark.parametrize(
+    "shares_name", [True, False],
+    ids=["shares-name-heading", "no-owner-name-heading"])
+def test_920_blocker_every_substring_counter_example_is_withheld(
+    owner_a_entry, owner_name, local_part, case_id, shares_name,
+):
+    """#920 blocker fix, the required regression test: every one of these
+    real-corpus-shaped local parts was WRONGLY SPARED by `b0c5d9e`'s bare
+    substring check (`_local_part_shares_owner_name`) -- a PII regression
+    against the #833 baseline (82f3744), which withheld all seven in the
+    no-owner-name-heading variant (its own entry-level gate already
+    refuses when the heading does not name the owner) but SPARED them
+    per-entry in the shares-name-heading variant (the baseline's gate is
+    entry-wide, so a name-sharing heading spares every value in that
+    entry -- the #920 entry-wide leak this fix also closes). The
+    two-conjunct fix (`_email_spared_by_owner_name`) withholds every one
+    of them in BOTH variants: when the heading does not name the owner,
+    the baseline entry-level gate alone already refuses to spare it
+    (barring an incidental single-token overlap from the synthetic
+    `@example.org`/`@example.com` domains sharing "example" with the
+    fallback owner's own name -- never enough on its own to reach the
+    two-token threshold); when it does, the whole-segment check on the
+    local part is what refuses -- the SAME substring-vs-segment
+    distinction that fixes the #920 blocker."""
+    heading = (f"References for {owner_name}" if shares_name
+               else "Please see attached documentation for details")
+    t = {"text": f"{heading}\n{local_part}@example.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [owner_a_entry()], "T": [t]})
+    assert f"{local_part}@example.org" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_920_blocker_segment_match_alone_does_not_spare_without_the_entry_gate():
+    """Isolates conjunct (a) (`_shares_owner_name`) from conjunct (b): the
+    referee entry below shares only ONE of Ann Lee's two name tokens by
+    construction (no "Ann" anywhere, and the domain contributes neither),
+    so `_shares_owner_name` refuses it -- the threshold is 2 of 2 -- even
+    though the email's own local part ("lee") is an EXACT whole-segment
+    match for the other token. A mutant that drops conjunct (a) and
+    spares on the segment match alone wrongly spares this email."""
+    a = _owner_a_entry("Ann Lee", "ann.lee@example.com")
+    t = {"text": "External submission, nothing else related: lee@example.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "lee@example.org" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_920_blocker_segment_split_treats_a_digit_as_a_separator():
+    """Isolates the segment-split regex itself (`_LOCAL_PART_SEGMENT_RE`,
+    `re.split(r"[^a-z]+", ...)`, never a `.`-only split): a digit suffix
+    must split off exactly like `.`/`_`/`-` do, so "kim2" reduces to the
+    same segment "kim" a bare "kim" would. Bo Kim's own second address in
+    this shape is spared -- unlike the `kimberly.jones` counter-example
+    above, whose segments never reduce to "kim" at all -- pinning that
+    digit-splitting is not itself the leak the #920 blocker closed."""
+    a = _owner_a_entry("Bo Kim", "bo.kim@example.com")
+    t = {"text": "References for Bo Kim\nAlternate contact: kim2@example.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+@pytest.mark.parametrize("local_part", [
+    "editor", "office", "info", "journal", "admin", "submissions",
+])
+def test_generic_editorial_mailbox_is_untouched(local_part):
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": f"Journal of Example Studies, Editorial Board, "
+                 f"{local_part}@example-journal.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_an_a_coded_entrys_own_values_are_never_withheld_by_this_rule():
+    """#920 review: the explicit `code != PERSONAL_DATA_CODE` guard that
+    used to keep the third-party check off code 'A' entirely is gone --
+    the rule now runs against 'A' entries too. It is still always a
+    no-op there, but for a different, more robust reason than the old
+    per-entry name check: `_owner_contacts` harvests every email/phone
+    SHAPE out of the very same 'A' entries this rule then scans, so
+    whatever this entry carries is already a member of `owner` by
+    construction, by the time the check runs -- including a value that
+    is not really the CV owner's, as here."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    a["text"] += "\tAlso listed: Jordan Reviewer, jreviewer@example-state.edu"
+    before = a["text"]
+    result = _run({"A": [a]})
+    assert a["text"] == before
+    assert result.withheld == []
+
+
+def test_a_routed_entry_with_a_third_party_email_is_untouched():
+    """Scope is Appendix-only: a routed content code (here F1, Licensure)
+    never runs the third-party check even when it carries someone else's
+    contact."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    f1 = {"text": "Reference: Dr. Jordan Reviewer, jreviewer@example-state.edu",
+          "taxonomy_code": "F1", "extracted_fields": {}}
+    before = f1["text"]
+    result = _run({"A": [a], "F1": [f1]})
+    assert f1["text"] == before
+    assert result.withheld == []
+
+
+def test_bare_ssn_in_an_appendix_entry_classifies_as_ssn_not_phone():
+    """#833 constraint: the phone value shape must not swallow an SSN's
+    3-2-4 run. No 'A' entries at all here -- the point is the shape
+    distinction, not owner provenance."""
+    t = {"text": "SSN: 123-45-6789", "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"T": [t]})
+    assert [i.category for i in result.withheld] == [CAT_SSN]
+    assert t["text"] == ""
+
+
+def test_third_party_phone_shape_rejects_an_ssn_shape_outright():
+    """r2 m08: the previous SSN-vs-phone test only proved `_merge_matches`
+    picks the SSN row first when BOTH policy rows match -- it never
+    checked that `_THIRD_PARTY_PHONE_RE`'s own shape rejects an SSN's
+    3-2-4 run. Direct regex assertions, not routed through the pass, so a
+    mutant that widens the phone shape's middle group (`\\d{3}` ->
+    `\\d{2,3}`) is caught even if merge precedence would otherwise hide it."""
+    assert _THIRD_PARTY_PHONE_RE.search("123-45-6789") is None
+    m = _THIRD_PARTY_PHONE_RE.search("212-555-0100")
+    assert m is not None
+    assert m.group() == "212-555-0100"
+
+
+def test_owner_name_tokens_drop_initials_and_honorifics():
+    """r2 m14: `_MIN_OWNER_NAME_TOKEN_LEN` must actually filter out short
+    tokens (initials, "Jr") before they can cheaply satisfy the
+    owner-name-sharing check. Direct assertion on `_owner_name_tokens`
+    pins the set itself; the entry-level assertion pins the consequence --
+    an Appendix entry sharing only "Jr" and an initial (never in the
+    filtered token set) with the owner is still a third party, so its
+    email is cut."""
+    a = {"text": "", "taxonomy_code": "A",
+         "extracted_fields": {"name": "J. Q. Sampleton Jr"}}
+    assert _owner_name_tokens([a]) == frozenset({"sampleton"})
+
+    t = {"text": "J. Reviewer Jr, Example State University, "
+                 "jreviewer@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+# --------------------------------------------------------------------------
+# 5. Bare-label span extension (#821 R3 F-B)
 #
 # The extension exists because a hard delimiter can sit between a label and
 # its own value, leaving the value uncut. It must reach exactly that value
@@ -519,3 +1037,147 @@ def test_bare_label_followed_by_a_sibling_label_orphans_nothing():
              "extracted_fields": {}}
     _run({"A": [entry]})
     assert entry["_pii_orphaned_value"] is False
+
+
+# --------------------------------------------------------------------------
+# redact_pre_llm_values (#847) -- the value-only scrub applied before any
+# LLM stage reads the text, at extract_unified_elements. Reuses this same
+# WITHHOLD_POLICY table (via _pii_matches), restricted to CAT_DATE_OF_BIRTH
+# and CAT_SSN; every other category is untouched here regardless of scope.
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_replaces_ssn_value_keeps_label():
+    out = redact_pre_llm_values("SSN: 123-45-6789")
+    assert out == f"SSN: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_replaces_bare_ssn_shape_with_no_label():
+    out = redact_pre_llm_values("Contact ref 123-45-6789 on file.")
+    assert out == f"Contact ref {PRE_LLM_PLACEHOLDER} on file."
+
+
+def test_redact_pre_llm_values_replaces_dob_value_with_colon_keeps_label():
+    out = redact_pre_llm_values("Date of Birth: 01/02/1970")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_replaces_dob_value_colonless_keeps_label():
+    out = redact_pre_llm_values("Born on 01/02/1970, in Example City")
+    assert out == f"Born on {PRE_LLM_PLACEHOLDER}, in Example City"
+
+
+def test_redact_pre_llm_values_untouched_publication_date_no_dob_label():
+    text = "Smith J. Date: 2015. A study of examples."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_untouched_non_ssn_shaped_nine_digit_number():
+    text = "Reference number 123456789 on the invoice."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_untouched_grant_number_shape():
+    text = "Grant number R01-CA123456 funded 1999."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_untouched_out_of_scope_category():
+    # Marital status is in WITHHOLD_POLICY but not a pre-LLM category --
+    # only render-time (#820/#821) withholds it.
+    text = "Marital Status: Married"
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_is_idempotent():
+    once = redact_pre_llm_values("Date of Birth: 01/02/1970")
+    twice = redact_pre_llm_values(once)
+    assert once == twice == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+# --------------------------------------------------------------------------
+# round 2 (#847): value after a hard delimiter, whole-date shapes, and
+# category-not-scope selection ("Born: ..." is SCOPE_PERSONAL_AND_APPENDIX,
+# not SCOPE_ALL_CODES -- scope is a render-time routing concept and there
+# is no taxonomy code yet at the point this scrub runs).
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_value_after_a_tab_is_scrubbed():
+    out = redact_pre_llm_values("Date of Birth:\t01/02/1970")
+    assert out == f"Date of Birth:\t{PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_value_after_three_plus_spaces_is_scrubbed():
+    out = redact_pre_llm_values("Date of Birth:    01/02/1970")
+    assert out == f"Date of Birth:    {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_value_after_a_pipe_is_scrubbed():
+    out = redact_pre_llm_values("Date of Birth: | 01/02/1970")
+    assert out == f"Date of Birth: | {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_never_extends_across_a_newline():
+    # The label's own line has nothing after it -- a value on the NEXT
+    # line is a different field and must not be pulled across.
+    out = redact_pre_llm_values("Date of Birth:\nSSN: 123-45-6789")
+    assert out == f"Date of Birth:\nSSN: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_iso_date_takes_the_whole_value():
+    out = redact_pre_llm_values("Date of Birth: 1970-01-02")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_dotted_date_takes_the_whole_value():
+    out = redact_pre_llm_values("Date of Birth: 12.03.1970")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_untouched_iso_date_publication_no_dob_label():
+    text = "Published 2020-05-01 in Journal X."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_born_colon_is_scrubbed_regardless_of_scope():
+    # "Born:" is CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX -- excluded by the
+    # round-1 SCOPE_ALL_CODES filter. Pre-LLM there is no taxonomy code to
+    # route by, so category alone decides.
+    out = redact_pre_llm_values("Born: 01/02/1970")
+    assert out == f"Born: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_untouched_born_with_no_colon_or_date():
+    text = "Born in New York, he later trained as a surgeon."
+    assert redact_pre_llm_values(text) == text
+
+
+# --------------------------------------------------------------------------
+# pre_llm_bare_label_category / redact_pre_llm_value_of_category -- the
+# label-cell / value-cell table fix (round 2, #847).
+# --------------------------------------------------------------------------
+
+def test_pre_llm_bare_label_category_detects_a_whole_cell_dob_label():
+    assert pre_llm_bare_label_category("Date of Birth:") == CAT_DATE_OF_BIRTH
+
+
+def test_pre_llm_bare_label_category_detects_a_whole_cell_ssn_label():
+    assert pre_llm_bare_label_category("SSN:") == CAT_SSN
+
+
+def test_pre_llm_bare_label_category_none_for_an_ordinary_cell():
+    assert pre_llm_bare_label_category("Notes") is None
+
+
+def test_pre_llm_bare_label_category_none_when_the_cell_already_has_a_value():
+    # Whole match already covers the value -- nothing "bare" about it.
+    assert pre_llm_bare_label_category("Date of Birth: 01/02/1970") is None
+
+
+def test_redact_pre_llm_value_of_category_replaces_the_value_cell():
+    out = redact_pre_llm_value_of_category("01/02/1970", CAT_DATE_OF_BIRTH)
+    assert out == PRE_LLM_PLACEHOLDER
+
+
+def test_redact_pre_llm_value_of_category_untouched_when_no_shape_matches():
+    text = "Notes"
+    assert redact_pre_llm_value_of_category(text, CAT_DATE_OF_BIRTH) == text
