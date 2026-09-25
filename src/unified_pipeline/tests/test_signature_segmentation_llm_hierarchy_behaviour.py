@@ -21,6 +21,7 @@ CLI block (argparse-free but exit()-driven) at the bottom of the module.
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -220,7 +221,7 @@ def test_normalize_hierarchy_with_llm_happy_path_nests_children(monkeypatch):
     assert captured["messages"][1]["content"] == "[H1] Education\n[H1] PhD Program"
 
 
-def test_normalize_hierarchy_with_llm_llm_failure_falls_back_to_original(monkeypatch):
+def test_normalize_hierarchy_with_llm_llm_failure_falls_back_to_original(monkeypatch, caplog):
     headers = [{"text": "Grants", "level": "H1", "paragraph_index": 5, "children": []}]
 
     def raising_call_llm(stage, messages, response_format=None, **kwargs):
@@ -228,10 +229,31 @@ def test_normalize_hierarchy_with_llm_llm_failure_falls_back_to_original(monkeyp
 
     monkeypatch.setattr(sbs, "call_llm", raising_call_llm)
 
-    result = sbs.normalize_hierarchy_with_llm(headers, pass_number=1)
+    with caplog.at_level(logging.INFO, logger=sbs.__name__):
+        result = sbs.normalize_hierarchy_with_llm(headers, pass_number=1)
 
     assert result is headers
     assert result == [{"text": "Grants", "level": "H1", "paragraph_index": 5, "children": []}]
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in errors] == ["GPT normalization failed; using original hierarchy"]
+    assert errors[0].exc_info is not None
+
+
+def test_normalize_hierarchy_with_llm_keeps_cv_text_out_of_info_logs(monkeypatch, caplog):
+    """The hierarchy sent to and returned by the LLM is CV text: debug only,
+    never at the INFO level production logs at."""
+    headers = [{"text": "Zyxwv Qutsr Fellowship", "level": "H1", "paragraph_index": 1, "children": []}]
+
+    def fake_call_llm(stage, messages, response_format=None, **kwargs):
+        return {"content": "[H1] Zyxwv Qutsr Fellowship\n", "total_tokens": 3, "cost": 0.0}
+
+    monkeypatch.setattr(sbs, "call_llm", fake_call_llm)
+
+    with caplog.at_level(logging.INFO, logger=sbs.__name__):
+        sbs.normalize_hierarchy_with_llm(headers, pass_number=1)
+
+    assert caplog.records
+    assert not any("Zyxwv" in r.getMessage() for r in caplog.records)
 
 
 def test_normalize_hierarchy_with_llm_pass_number_changes_system_prompt(monkeypatch):
@@ -415,7 +437,7 @@ def test_parse_normalized_hierarchy_blank_lines_deep_indent_and_fuzzy_colon_matc
 
 # ============================================================ validate_headers_vs_entries
 
-def test_validate_headers_vs_entries_drops_high_entry_likelihood(monkeypatch):
+def test_validate_headers_vs_entries_drops_high_entry_likelihood(monkeypatch, caplog):
     headers = [
         {"text": "EDUCATION", "level": "H1", "children": [
             {"text": "PhD in Biology, State U, 2010", "level": "H2", "children": []},
@@ -439,10 +461,14 @@ def test_validate_headers_vs_entries_drops_high_entry_likelihood(monkeypatch):
 
     monkeypatch.setattr(sbs, "call_llm", fake_call_llm)
 
-    result = sbs.validate_headers_vs_entries(headers)
+    with caplog.at_level(logging.INFO, logger=sbs.__name__):
+        result = sbs.validate_headers_vs_entries(headers)
 
     assert [h["text"] for h in result] == ["EDUCATION"]
     assert result[0]["children"] == []
+    # The dropped lines are entries (CV content): named at debug only.
+    assert any("2 entries filtered out" in r.getMessage() for r in caplog.records)
+    assert not any("Jane Smith" in r.getMessage() for r in caplog.records)
 
 
 def test_validate_headers_vs_entries_keeps_rescued_headers_without_sending_them(monkeypatch):
@@ -484,7 +510,7 @@ def test_validate_headers_vs_entries_empty_input_short_circuits(monkeypatch):
     assert calls == []
 
 
-def test_validate_headers_vs_entries_llm_failure_returns_unfiltered_headers(monkeypatch):
+def test_validate_headers_vs_entries_llm_failure_returns_unfiltered_headers(monkeypatch, caplog):
     headers = [{"text": "SERVICE", "level": "H1", "children": []}]
 
     def raising_call_llm(stage, messages, response_format=None, **kwargs):
@@ -492,9 +518,13 @@ def test_validate_headers_vs_entries_llm_failure_returns_unfiltered_headers(monk
 
     monkeypatch.setattr(sbs, "call_llm", raising_call_llm)
 
-    result = sbs.validate_headers_vs_entries(headers)
+    with caplog.at_level(logging.INFO, logger=sbs.__name__):
+        result = sbs.validate_headers_vs_entries(headers)
 
     assert result is headers
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in errors] == ["Header validation failed; using unfiltered headers"]
+    assert errors[0].exc_info is not None
 
 
 def test_validate_headers_vs_entries_rescued_header_with_children_recurses(monkeypatch):
