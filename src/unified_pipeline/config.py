@@ -460,7 +460,7 @@ def _load_yaml_config() -> dict:
         return _cached_config
 
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             _cached_config = yaml.safe_load(f) or {}
     except Exception as e:
         logger.warning(f"Failed to load llm_config.yaml: {e}. Using defaults.")
@@ -564,7 +564,7 @@ def get_llm_env_config(key: str, default: object) -> tuple[object, str]:
 
     path = AUTH_CONFIG_PATH if AUTH_CONFIG_PATH.exists() else AUTH_CONFIG_EXAMPLE_PATH
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             cfg = yaml.safe_load(f)
         if not isinstance(cfg, dict):
             # An empty file (None) is ordinary; a list or scalar document is a
