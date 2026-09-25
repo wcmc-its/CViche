@@ -313,14 +313,12 @@ def _real_template_generator():
 
 def test_fill_bibliography_sanitises_control_character_in_enriched_entry():
     gen = _real_template_generator()
-    # `formatted_citation` uses \x1f, not \x0b: \x0b is one of the handful of
-    # codepoints `str.splitlines()` treats as a line break (so is \x0c), and
-    # `split_fused_citation_entries` (normalization/records.py:63) calls
-    # `.splitlines()` on this exact field upstream of the writers this test
-    # targets -- a \x0b here would fuse-split the entry into two before the
-    # sanitiser is ever reached, which is a different (untouched) code path.
-    # `text` (the original, track-change-deletion side) is never
-    # `.splitlines()`-ed, so it keeps \x0b as specified.
+    # `formatted_citation` uses \x1f, not \x0b: since #742,
+    # `split_fused_citation_entries` (normalization/records.py:63) splits
+    # this exact field on real line breaks only (\r\n, \r, \n), so \x0b no
+    # longer fuse-splits the entry -- this test is only about the sanitiser,
+    # not that upstream split. `text` (the original, track-change-deletion
+    # side) is never split at all, so it keeps \x0b as specified.
     formatted_citation = "Doe J\x1f, Smith A. A study. Journal. 2024;10(2):100-110."
     original_text = "Doe J. A stu\x0bdy (original). Journal. 2024;10(2):100-110."
     entry = {
