@@ -484,10 +484,27 @@ class TestDnInScope:
         widened = r"uid=x,ou=a\,ou=people,dc=weill,dc=cornell,dc=edu"
         assert _dn_in_scope(widened, self.BASE_DN, SUBTREE) is False
 
-    def test_malformed_dn_is_not_in_scope(self):
-        """A DN ldap3 itself cannot parse must return False, not raise --
-        LDAPInvalidDnError must never escape into membership evaluation."""
-        assert _dn_in_scope("not a dn at all ===", self.BASE_DN, SUBTREE) is False
+    def test_malformed_user_dn_is_not_in_scope_and_warns_without_the_dn(self, caplog):
+        """A user DN ldap3 cannot parse returns False (fail-closed), never
+        raises, and logs a warning that leaves the DN itself out."""
+        with caplog.at_level("WARNING", logger="app.ed_group_lookup"):
+            assert _dn_in_scope("not a dn at all ===", self.BASE_DN, SUBTREE) is False
+        assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+            ("WARNING", "user DN does not parse; treating as not in scope")]
+
+    def test_malformed_base_dn_is_not_in_scope_and_logs_an_error(self, caplog):
+        """A memberURL base that won't parse is a broken group definition:
+        still not in scope, but logged at ERROR and named, unlike a bad user DN."""
+        with caplog.at_level("WARNING", logger="app.ed_group_lookup"):
+            assert _dn_in_scope(self.CHILD, "=bad base", SUBTREE) is False
+        assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+            ("ERROR", "memberURL base DN '=bad base' does not parse; treating as not in scope")]
+
+    def test_escaped_trailing_space_is_not_in_scope(self):
+        """parse_dn(strip=True) rejects a value ending in an escaped space,
+        which lands on the fail-closed side rather than widening scope."""
+        assert _dn_in_scope(r"uid=x\ ,ou=people,dc=weill,dc=cornell,dc=edu",
+                            self.BASE_DN, SUBTREE) is False
 
 
 class TestGroupOfURLsMembership:

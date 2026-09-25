@@ -268,13 +268,28 @@ def _dn_in_scope(user_dn: str, base_dn: str, scope) -> bool:
     real RDN edge) and can widen SUBTREE to match a DN that only *looks* like
     it ends in base_dn once you split on every comma. Components are compared
     case-insensitively per the LDAP spec; parse_dn(strip=True) also settles
-    the whitespace-after-comma variance a DN string may carry.
+    the whitespace-after-comma variance a DN string may carry. strip=True
+    does change what parses: it also rejects a value ending in an escaped
+    space (`ou=p\\ `), which strip=False accepts. That can only turn such a
+    DN into "not in scope", the fail-closed side.
+
+    Fail-closed: a DN that won't parse is "not in scope" (False), and the
+    caller chain treats False as deny, not as "skip this check":
+    _memberurl_search_filter returns None, _user_matches_memberurl returns
+    False, and that memberURL grants no membership.
     """
     try:
-        user_rdns = parse_dn(user_dn, strip=True)
         base_rdns = parse_dn(base_dn, strip=True)
     except LDAPInvalidDnError:
-        # Not a DN ldap3 itself can parse -- it can't be "in scope" of anything.
+        # base_dn comes from the group's memberURL in the directory: a
+        # malformed group definition, not user input.
+        logger.error("memberURL base DN %r does not parse; treating as not in scope", base_dn)
+        return False
+    try:
+        user_rdns = parse_dn(user_dn, strip=True)
+    except LDAPInvalidDnError:
+        # Untrusted input. The DN itself (it carries the CWID) stays out of the log.
+        logger.warning("user DN does not parse; treating as not in scope")
         return False
     u = tuple((rdn_type.lower(), value.lower()) for rdn_type, value, _ in user_rdns)
     b = tuple((rdn_type.lower(), value.lower()) for rdn_type, value, _ in base_rdns)
