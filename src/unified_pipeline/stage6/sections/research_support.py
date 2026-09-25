@@ -272,7 +272,7 @@ def _print_verbose(messages: list[str], verbose: bool) -> None:
     """
     if verbose:
         for message in messages:
-            print(message)
+            logger.debug(message)
 
 
 def copy_entries_for_render(entries: list[dict]) -> list[dict]:
@@ -671,7 +671,7 @@ class ResearchSupportSection:
 
         total_grants = sum(len(entries) for _, _, entries in categories)
         if self.verbose:
-            print(f"Filling Research Support ({total_grants} grants)...")
+            logger.info("Filling Research Support (%s grants)...", total_grants)
 
         # Process each category - find the corresponding section in the template
         for code, section_header, entries in categories:
@@ -679,7 +679,7 @@ class ResearchSupportSection:
             section_idx = self._find_paragraph_with_text(section_header)
             if section_idx is None:
                 if self.verbose:
-                    print(f"  Warning: Could not find section header '{section_header}'")
+                    logger.warning("  Warning: Could not find section header '%s'", section_header)
                 continue
 
             # Remove the existing template table after this section, if it is
@@ -700,7 +700,7 @@ class ResearchSupportSection:
             sorted_entries = sort_entries_reverse_chronological(entries)
 
             if self.verbose:
-                print(f"  {code}: {len(entries)} grants -> '{section_header}'")
+                logger.info("  %s: %s grants -> '%s'", code, len(entries), section_header)
 
             # Create a table for each grant with spacing between them
             # Track the last inserted element (as actual XML element reference)
@@ -818,7 +818,7 @@ class ResearchSupportSection:
             # This is likely a header like "Funding: National Cancer Institute" - skip it
             if self.verbose:
                 text = entry.get('text', '')[:50] if entry else ''
-                print(f"  Skipping sparse grant entry: '{text}...'")
+                logger.warning("  Skipping sparse grant entry: '%s...'", text)
             if isinstance(entry, dict):
                 self._declined_grant_entries.append(entry)
             return None
