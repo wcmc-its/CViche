@@ -37,6 +37,7 @@ every entry into plain rows before it clears or writes a single Word table
 row, so an exception partway through parsing leaves the existing table
 content untouched instead of half-rewritten.
 """
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -47,6 +48,8 @@ from ..normalization import _committee_cell_text
 from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
+
+logger = logging.getLogger(__name__)
 
 
 class _AdminActivityEntry(TypedDict, total=False):
@@ -170,7 +173,7 @@ class AdministrativeActivitiesSection:
             return
 
         if self.verbose:
-            print(f"Filling Administrative Activities ({len(entries)} entries)...")
+            logger.info("Filling Administrative Activities (%s entries)...", len(entries))
 
         # Find Administrative section
         section_idx = self._find_paragraph_with_text("INSTITUTIONAL ADMINISTRATIVE")

@@ -190,6 +190,7 @@ async def start_run(
 
     run = check_run_access(run_id, current_user, db)
 
+    # "paused" rows predate the pause endpoint's removal (#115); /start stays their recovery path.
     if run.status not in ["created", "paused"]:
         raise bad_request(f"Cannot start run in status: {run.status}")
 
@@ -254,25 +255,6 @@ async def start_run(
     background_tasks.add_task(run_pipeline)
 
     return {"message": f"Pipeline started for run {run_id}", "status": "running"}
-
-
-@router.post("/run/{run_id}/pause")
-async def pause_run(
-    run_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Pause a running pipeline."""
-
-    run = check_run_access(run_id, current_user, db)
-
-    if run.status != "running":
-        raise bad_request(f"Cannot pause run in status: {run.status}")
-
-    run.status = "paused"
-    db.commit()
-
-    return {"message": f"Run {run_id} paused", "status": "paused"}
 
 
 @router.post("/run/{run_id}/cancel")

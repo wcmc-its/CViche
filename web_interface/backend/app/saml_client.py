@@ -245,7 +245,7 @@ def extract_user_attrs(identity: dict) -> dict:
 
     return {
         "cwid": cwid,
-        "email": mail.strip().lower() if mail else None,
+        "email": (mail.strip().lower() or None) if mail else None,
         "display_name": (display_name or eppn or mail or cwid).strip(),
         "eppn": eppn,
     }
