@@ -205,10 +205,11 @@ def test_entry_missing_text_key_still_renders_an_empty_bulleted_paragraph():
     assert gen.stats["entries_inserted"] == 1
 
 
-def test_verbose_prints_the_entry_count(capsys):
+def test_verbose_prints_the_entry_count(caplog):
     gen = _s6_generator(verbose=True)
-    gen._fill_researcher_profiles([{"text": "one"}, {"text": "two"}])
-    assert "Filling Researcher Profiles (2 entries)..." in capsys.readouterr().out
+    with caplog.at_level(logging.INFO):
+        gen._fill_researcher_profiles([{"text": "one"}, {"text": "two"}])
+    assert "Filling Researcher Profiles (2 entries)..." in caplog.text
 
 
 def test_falls_back_to_bibliography_heading_when_peer_reviewed_is_absent(tmp_path):
@@ -324,7 +325,7 @@ def test_summary_renders_as_a_tracked_insertion_under_research_activities():
     assert gen.stats["track_changes_added"] == 1
 
 
-def test_verbose_prints_a_status_line_for_each_early_exit_and_the_success_path(capsys):
+def test_verbose_prints_a_status_line_for_each_early_exit_and_the_success_path(caplog):
     """verbose=True is the CLI-visible progress-reporting path (`run_full_pipeline.py`
     prints Warning: Stage N failed around a driver that reads none of this --
     but the section writers' own progress lines are only reachable this way).
@@ -332,19 +333,22 @@ def test_verbose_prints_a_status_line_for_each_early_exit_and_the_success_path(c
     branch actually produces, so a message alone (with the wrong return)
     would not satisfy this."""
     verbose_gen = _s6_generator(verbose=True)
-    assert verbose_gen._fill_research_summary(None) is False
-    assert "Skipping Research Summary section (no Stage 4.5 output)" in capsys.readouterr().out
+    with caplog.at_level(logging.INFO):
+        assert verbose_gen._fill_research_summary(None) is False
+        assert "Skipping Research Summary section (no Stage 4.5 output)" in caplog.text
+        caplog.clear()
 
-    assert verbose_gen._fill_research_summary({"research_summary": {"text": "short"}}) is False
-    assert "Skipping Research Summary section (no substantive content)" in capsys.readouterr().out
+        assert verbose_gen._fill_research_summary({"research_summary": {"text": "short"}}) is False
+        assert "Skipping Research Summary section (no substantive content)" in caplog.text
+        caplog.clear()
 
-    assert verbose_gen._fill_research_summary(
-        {"research_summary": {"text": _LONG_SUMMARY, "word_count": 7, "generation_method": "llm_generated"}}
-    ) is True
-    assert "Filling Research Summary (7 words, llm_generated)..." in capsys.readouterr().out
+        assert verbose_gen._fill_research_summary(
+            {"research_summary": {"text": _LONG_SUMMARY, "word_count": 7, "generation_method": "llm_generated"}}
+        ) is True
+        assert "Filling Research Summary (7 words, llm_generated)..." in caplog.text
 
 
-def test_verbose_prints_a_warning_when_the_activities_heading_is_missing(tmp_path, capsys):
+def test_verbose_prints_a_warning_when_the_activities_heading_is_missing(tmp_path, caplog):
     gen = WCMTemplateGenerator(verbose=True)
     doc = Document()
     doc.add_paragraph("Nothing relevant to any anchor heading in this document")
@@ -352,10 +356,18 @@ def test_verbose_prints_a_warning_when_the_activities_heading_is_missing(tmp_pat
     doc.save(saved)
     gen.doc = Document(saved)
 
-    ret = gen._fill_research_summary({"research_summary": {"text": _LONG_SUMMARY}})
+    with caplog.at_level(logging.INFO):
+        ret = gen._fill_research_summary({"research_summary": {"text": _LONG_SUMMARY}})
 
     assert ret is False
-    assert "Could not find 'RESEARCH ACTIVITIES'" in capsys.readouterr().out
+    assert "Could not find 'RESEARCH ACTIVITIES'" in caplog.text
+    # #563: this site is a WARNING (a handled advisory, not routine
+    # progress) -- pin the level here too, not just the message text, so a
+    # site flipped to logger.info is caught behaviourally as well as by the
+    # static contract in test_stage6_mixin_name_collisions.py.
+    warning_records = [r for r in caplog.records if "Could not find 'RESEARCH ACTIVITIES'" in r.message]
+    assert len(warning_records) == 1
+    assert warning_records[0].levelno == logging.WARNING
 
 
 def test_track_changes_disabled_renders_summary_as_a_plain_run():

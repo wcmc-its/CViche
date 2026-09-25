@@ -598,7 +598,7 @@ class MembershipsSection:
         placeholder is not a populated table.
         """
         if self.verbose and entries:
-            print(f"Filling Memberships ({len(entries)} entries)...")
+            logger.info("Filling Memberships (%s entries)...", len(entries))
 
         # Find the MEMBERSHIPS section
         memberships_idx = self._find_paragraph_with_text("PROFESSIONAL ORGANIZATIONS")
@@ -619,7 +619,7 @@ class MembershipsSection:
 
         if not table:
             if self.verbose:
-                print("  Warning: Could not find memberships table")
+                logger.warning("  Warning: Could not find memberships table")
             return
 
         if not entries and not _is_memberships_table(table):
@@ -645,7 +645,7 @@ class MembershipsSection:
             # Skip table header entries
             if _is_table_header_entry(original_text, ['organization', 'membership', 'society', 'date', 'member']):
                 if self.verbose:
-                    print(f"  Skipping header entry: '{original_text[:50]}...'")
+                    logger.warning("  Skipping header entry: '%s...'", original_text[:50])
                 continue
 
             # Check if this entry contains multiple memberships (newline- or,
