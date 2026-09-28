@@ -1091,6 +1091,32 @@ def test_cancel_run_record_does_not_signal_orchestrator_if_commit_fails(db):
     orchestrator_cancel.assert_not_called()
 
 
+def test_cancel_run_endpoint_marks_and_signals(db):
+    """cancel_run (POST /run/{id}/cancel) must actually delegate to
+    _cancel_run_record -- the handler's own return dict hardcodes
+    status="cancelled" regardless, so this kills the mutant that deletes
+    the _cancel_run_record(db, run) call from cancel_run by checking the
+    DB row and the orchestrator signal, not just the response body."""
+    from app.api import runs as runs_api
+
+    user = _make_user(db, email="cancel-endpoint@example.com")
+    run = _make_original(db, user, "CANCELOK1", status="running")
+
+    orchestrator_cancel = MagicMock()
+    with patch.object(runs_api, "check_run_access", return_value=run), \
+            patch("app.pipeline.orchestrator.cancel_run", orchestrator_cancel):
+        result = asyncio.run(
+            runs_api.cancel_run(run_id="CANCELOK1", db=db, current_user=user)
+        )
+
+    assert result["status"] == "cancelled"
+    orchestrator_cancel.assert_called_once_with("CANCELOK1")
+    db.refresh(run)
+    assert run.status == "cancelled"
+    assert run.error_message == "Cancelled by user"
+    assert run.completed_at is not None
+
+
 def test_restart_does_not_cancel_original_when_restart_fails(db, tmp_path):
     """#181 regression guard: a restart that fails (missing file, here) must
     leave a running original alone. Cancelling the original before the
