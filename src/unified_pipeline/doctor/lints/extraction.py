@@ -515,7 +515,7 @@ def lint_invented_records(stage4: dict,
                     f"entry {e.get('element_idx_start')} ({code}): every "
                     f"extracted field value is a known WCM template label, "
                     f"rendered as if it were a real record (#829)",
-                    [f"{k}: {v}" for k, v in fields.items() if v][:5]))
+                    [f"{k}: {v}" for k, v in fields.items() if v]))
         if code == INVENTED_RECORD_LICENSURE_CODE:
             text = str(e.get("text", ""))
             if is_template_instruction(text) or is_near_template_instruction(text):
