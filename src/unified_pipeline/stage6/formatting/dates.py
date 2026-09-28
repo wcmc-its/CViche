@@ -19,7 +19,7 @@ direction is one-way and must stay so.
 from types import MappingProxyType
 import re
 
-from ..parsing.dates import _parse_date_components
+from ..parsing.dates import _parse_date_components, _year_of_impossible_month
 
 # Taxonomy codes whose entries are single occasions, so a record with a start
 # date and no end date happened in that year -- it is not still going on
@@ -136,6 +136,11 @@ def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool
     required_format = DATE_FORMATS.get(taxonomy_code, 'yyyy')
 
     year, month, day = _parse_date_components(date_str)
+
+    # An impossible month ("13/2024") is not data: render the year it states
+    # and nothing else, never the fragment and never an invented month (#543).
+    if not year:
+        year = _year_of_impossible_month(date_str)
 
     # If we couldn't parse it, return as-is
     if not year:

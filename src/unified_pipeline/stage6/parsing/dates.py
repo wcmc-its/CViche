@@ -123,6 +123,44 @@ def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int |
     return (None, None, None)
 
 
+# Calendar months, for `_year_of_impossible_month` below.
+FIRST_MONTH = 1
+LAST_MONTH = 12
+
+# (pattern, year group, month group) for every date shape that states a
+# four-digit year next to a month number -- the shapes `_parse_date_components`
+# rejects outright when that month is impossible. Same patterns, same order.
+_MONTH_AND_YEAR_SHAPES = (
+    (re.compile(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})'), 1, 2),
+    (re.compile(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})'), 3, 1),
+    (re.compile(r'(\d{4})[-/](\d{1,2})'), 1, 2),
+    (re.compile(r'(\d{1,2})[-/](\d{4})'), 2, 1),
+)
+
+
+def _year_of_impossible_month(date_str: str) -> int | None:
+    """The stated year of a date whose month is not 1-12 ("13/2024",
+    "2024-99-99", "2024-00-00"), else None.
+
+    `_parse_date_components` drops such a date whole, because nothing about
+    the month can be trusted. The year is a separate stated fact and does not
+    depend on it, so a renderer that would otherwise print the fragment
+    verbatim can print the year alone (#543: never fabricate a component,
+    never show the invalid one as if it were data). A two-digit-year shape
+    ("13/05/17") is not covered: with no four-digit year, nothing here is
+    stated unambiguously.
+    """
+    s = str(date_str or '').strip()
+    for pattern, year_group, month_group in _MONTH_AND_YEAR_SHAPES:
+        m = pattern.fullmatch(s)
+        if m:
+            month = int(m.group(month_group))
+            if FIRST_MONTH <= month <= LAST_MONTH:
+                return None
+            return int(m.group(year_group))
+    return None
+
+
 def _validate_full_date(year: int, month: int, day: int) -> tuple[int | None, int | None, int | None]:
     """Calendar-check a full y/m/d triple parsed off a complete-date pattern.
 

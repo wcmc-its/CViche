@@ -578,3 +578,44 @@ def test_point_in_time_unreadable_start_renders_as_written():
 def test_an_unreadable_year_is_never_searched_for():
     from unified_pipeline.stage6.formatting.dates import _source_leaves_year_open
     assert _source_leaves_year_open("None- Committee", None) is False
+
+
+# --- #543: an impossible month renders as the year alone, never verbatim ----
+
+@pytest.mark.parametrize("date_str", [
+    "13/2024", "99/2024", "00/2024", "2024-13", "2024-13-01", "2024-99-99",
+    "2024-00-00", "13/05/2024",
+])
+@pytest.mark.parametrize("code", ["B1", "C", "F1", "H"])
+def test_impossible_month_renders_the_year_alone(date_str, code):
+    assert format_date_for_section(date_str, code) == "2024"
+
+
+@pytest.mark.parametrize("date_str", ["13/05/17", "2024-invalid", "TBD", "n/a"])
+def test_no_stated_year_still_passes_through(date_str):
+    assert format_date_for_section(date_str, "B1") == date_str
+
+
+def test_impossible_month_does_not_change_valid_dates():
+    assert format_date_for_section("2024-01-15", "B1") == "01/2024"
+    assert format_date_for_section("2024-02-31", "F1") == "02/2024"
+
+
+def test_impossible_month_is_still_unreadable_to_the_parser():
+    # Sorting and overlap keep treating the date as unknown; only rendering
+    # falls back to the year.
+    assert _parse_date_components("13/2024") == (None, None, None)
+
+
+@pytest.mark.parametrize("date_str", [
+    "13/2024 and 05/2025", "13/2024-05/2025", "2024-13-01 to 2024-13-05",
+])
+def test_a_list_or_range_with_an_impossible_month_is_left_as_written(date_str):
+    # Not one date, so no single year can be lifted out of it.
+    assert format_date_for_section(date_str, "B1") == date_str
+
+
+@pytest.mark.parametrize("date_str", ["01/2024", "12/2024", "2024-06-15"])
+def test_year_of_impossible_month_is_none_for_a_valid_month(date_str):
+    from unified_pipeline.stage6.parsing.dates import _year_of_impossible_month
+    assert _year_of_impossible_month(date_str) is None
