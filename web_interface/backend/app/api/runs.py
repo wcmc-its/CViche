@@ -426,6 +426,9 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     orchestrator_cancel(run.id)
     run.status = "cancelled"
     run.error_message = "Cancelled by user"
+    # Naive, matching started_at and every other completed_at write (see
+    # schemas.py's TZDateTime docstring); an aware value here would raise on
+    # (run.completed_at - run.started_at) in runs.py/websocket.py/admin_routes.py.
     run.completed_at = datetime.now()
     db.commit()
 
