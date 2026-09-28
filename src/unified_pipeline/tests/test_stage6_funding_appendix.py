@@ -262,29 +262,34 @@ def test_all_noise_batch_creates_no_appendix():
     assert not any("T. APPENDIX" in p.text for p in gen.doc.paragraphs)
 
 
+
+
 # -------------------------------------------------------------- A5IZ6Q (#420)
 #
 # Wire tests, real generate() against the bundled WCM template: a stage-2
 # structurally-recovered table row (#420's `recover_unclaimed_table_rows`)
-# that duplicates content its own parent grant entry already carries must
-# not ALSO land in the Appendix once the parent renders in the body.
-# Synthetic reproduction of the A5IZ6Q incident shape -- one fused M2B grant
-# entry plus single-field `recovered_row` siblings sharing its `parent_idx`,
-# each one line of the SAME fused text the model's delimiter already
-# captured whole.
+# that duplicates content already RENDERED must not also land in the
+# Appendix. Synthetic reproduction of the A5IZ6Q incident shape -- one fused
+# M2B grant entry plus single-field `recovered_row` siblings, each one line
+# of the same fused text the model's delimiter already captured whole.
+#
+# Round 3 (simplify, LEAD directive): `recovered_row_already_rendered`
+# (`stage6/dedup.py`) drops a recovered row only when every non-trivial
+# value cell of its own raw text is already printed somewhere in the
+# document's rendered body -- normalized (casefold, whitespace-collapsed,
+# word-boundary matched), and never scoped to a specific parent entry.
+# Earlier rounds' parent-block scoping is gone: it was itself a source of
+# content loss (two grants sharing a value could resolve to the same
+# block -- see the shared-agency test below), and the simpler rule can only
+# ever KEEP more content, never drop content that isn't visible elsewhere.
 
 _RECOVERY_GRANT_TEXT = (
     "Award Source: | Fictional Research Foundation\n"
     "Project title: | Synthetic Tools for Data Curation\n"
     "Annual direct costs: | $15,000.00\n"
     "Duration of support: | 00/2021-00/2022\n"
-    # Tab-joined, not " | " -- mirrors A5IZ6Q's own shape, where this last
-    # multi-cell line came from a different extraction path than the rows
-    # above it, and exercises the cell-separator normalization in
-    # recovered_row_duplicates_parent (the recovered row below still uses
-    # " | ", recover_unclaimed_table_rows' own convention).
-    "Name of Principal Investigator: | A. Researcher\t"
-    "Your percent (%) effort:\t1%"
+    "Name of Principal Investigator: | A. Researcher\n"
+    "Your percent (%) effort: | 1%"
 )
 
 _RECOVERY_OWNER_ENTRY = {"text": "Name: A. Researcher", "taxonomy_code": "A",
@@ -308,13 +313,12 @@ _RECOVERY_GRANT_ENTRY = {
 }
 
 
-def _recovered_row(suffix: str, text: str, parent_idx: int = 300) -> dict:
-    # `parent_idx=302` (the span's own END, not its start) exercises
-    # find_recovered_row_parent's fallback -- A5IZ6Q's own second residual:
-    # some LYRASIS rows keyed parent_idx to 244, an index with no entry of
-    # its own, inside the grant's 242-244 table span.
+def _recovered_row(suffix: str, text: str) -> dict:
+    # `parent_idx` is carried here only because real stage-2 output always
+    # sets it (#420) -- `recovered_row_already_rendered` reads no such
+    # field; the value is never resolved back to a parent entry any more.
     return {"text": text, "taxonomy_code": "T", "recovered_row": True,
-            "parent_idx": parent_idx, "element_idx_start": f"300.{suffix}",
+            "parent_idx": 300, "element_idx_start": f"300.{suffix}",
             "extracted_fields": {}, "hierarchy": ["Past Funding"]}
 
 
@@ -326,17 +330,23 @@ def _all_text(doc: Document) -> str:
     return "\n".join(lines)
 
 
-def test_recovered_row_duplicate_of_rendered_grant_not_repeated_in_appendix(tmp_path):
+def test_recovered_rows_dropped_when_their_values_already_rendered(tmp_path):
+    """Five of the grant's six recovered rows are verbatim duplicates of a
+    VALUE the grant's own table renders unchanged and must not repeat in the
+    Appendix. The sixth (Duration) carries a raw "00/2021-00/2022" value
+    that stage 6 reformats to "2021-2022" on the way to the render slot --
+    this function does no date parsing (LEAD directive: normalized
+    casefold/whitespace-collapse/word-boundary matching only), so that one
+    value is never confirmed and the row stays. Disclosed trade-off, not a
+    bug: duplication, never loss (see recovered_row_already_rendered's
+    docstring)."""
     entries = [_RECOVERY_OWNER_ENTRY, _RECOVERY_GRANT_ENTRY,
                _recovered_row("0", "Award Source: | Fictional Research Foundation"),
                _recovered_row("1", "Project title: | Synthetic Tools for Data Curation"),
                _recovered_row("2", "Annual direct costs: | $15,000.00"),
                _recovered_row("3", "Duration of support: | 00/2021-00/2022"),
                _recovered_row("4", "Name of Principal Investigator: | A. Researcher"),
-               # parent_idx=302 is the grant entry's element_idx_END, not its
-               # start -- only find_recovered_row_parent's span fallback
-               # resolves this one back to the grant.
-               _recovered_row("5", "Your percent (%) effort: | 1%", parent_idx=302)]
+               _recovered_row("5", "Your percent (%) effort: | 1%")]
 
     gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
     gen._reconsider_appendix_entries = lambda: []
@@ -350,19 +360,28 @@ def test_recovered_row_duplicate_of_rendered_grant_not_repeated_in_appendix(tmp_
 
     # The grant rendered in the body...
     assert "Fictional Research Foundation" in full_text
-    # ...and appears exactly once: the six recovered rows -- every one of
-    # them a verbatim line of the fused entry that already rendered -- must
-    # not repeat it in the Appendix.
+    # ...and every field the grant table actually renders unchanged appears
+    # exactly once: the five matching recovered rows did not repeat it.
     assert full_text.count("Fictional Research Foundation") == 1
+    assert full_text.count("Synthetic Tools for Data Curation") == 1
+    assert full_text.count("$15,000.00") == 1
+    assert full_text.count("A. Researcher") == 1
     assert full_text.count("Your percent (%) effort") == 1
-    assert "T. APPENDIX" not in full_text
+    # The Duration row's raw "00/2021-00/2022" never renders verbatim (the
+    # grant table shows the reformatted "2021-2022"), so it stays -- one
+    # duplicate line, not zero, and the Appendix exists because of it.
+    assert "T. APPENDIX" in full_text
+    assert "Duration of support: — 00/2021-00/2022" in full_text
+    # Confirms the trailing boundary too: the reformatted value never shows
+    # the raw one's leading "00/" anywhere.
+    assert full_text.count("00/2021-00/2022") == 1
 
 
-def test_recovered_row_not_contained_in_parent_still_reaches_appendix(tmp_path):
-    """The negative case: a recovered row whose content the parent's own
-    text does NOT carry (a row the model's delimiter genuinely skipped --
-    #420's backstop exists for exactly this) must still surface. Only a
-    row PROVABLY duplicating its parent is suppressed."""
+def test_recovered_row_with_unrendered_value_still_reaches_appendix(tmp_path):
+    """The negative case: a recovered row whose value is not printed ANYWHERE
+    in the rendered document (a row the model's delimiter genuinely
+    skipped -- #420's backstop exists for exactly this) must still
+    surface."""
     missed_row = _recovered_row(
         "5", "Non-financial support: | Conference travel support")
     entries = [_RECOVERY_OWNER_ENTRY, _RECOVERY_GRANT_ENTRY, missed_row]
@@ -380,47 +399,21 @@ def test_recovered_row_not_contained_in_parent_still_reaches_appendix(tmp_path):
     assert "Conference travel support" in full_text
 
 
-def test_recovered_row_with_missing_parent_still_reaches_appendix(tmp_path):
-    """A recovered row whose `parent_idx` resolves to no surviving entry
-    (the parent itself was dropped or never existed) must not be silently
-    swallowed -- there is nothing to prove it duplicates."""
-    orphan_row = {"text": "Non-financial support: | Conference travel support",
-                  "taxonomy_code": "T", "recovered_row": True,
-                  "parent_idx": 999, "element_idx_start": "999.0",
-                  "extracted_fields": {}, "hierarchy": ["Past Funding"]}
-    entries = [_RECOVERY_OWNER_ENTRY, orphan_row]
-
-    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
-    gen._reconsider_appendix_entries = lambda: []
-    data = {"document_uid": "T420C", "entries": entries}
-    input_path = tmp_path / "in.json"
-    output_path = tmp_path / "out.docx"
-    input_path.write_text(json.dumps(data))
-    gen.generate(str(input_path), str(output_path), research_summary_path=None)
-
-    full_text = _all_text(Document(str(output_path)))
-    assert "T. APPENDIX" in full_text
-    assert "Conference travel support" in full_text
-
-
-def test_recovered_row_contained_in_parent_but_field_not_rendered_still_reaches_appendix(tmp_path):
-    """The exact gap a blind review of the original A5IZ6Q fix caught: a
-    recovered row can be a VERBATIM substring of its parent's raw stage-2
-    text -- `recovered_row_duplicates_parent`'s whole signal -- while the
-    field it carries never reaches a render slot at all. Stage 6's grant
-    table is fixed-slot (CLAUDE.md "Stage 6 drops unnamed fields") and only
-    folds `grant_number` into the Award Source cell when the entry's
-    `extracted_fields` actually carries it. Here the parent's raw text has a
-    grant-number line -- `recover_unclaimed_table_rows` captured it into the
-    fused blob -- but `extracted_fields` does not, so no renderer ever sees
-    it. Dropping the recovered row on raw-text containment alone would be
-    the exact content loss the drop exists to avoid; it must still reach the
-    Appendix."""
+def test_recovered_row_whose_field_never_reached_a_render_slot_still_reaches_appendix(tmp_path):
+    """The gap a blind review of the original A5IZ6Q fix caught, still live
+    under the round-3 rule: a recovered row's raw text can echo the fused
+    parent's own text while the field it carries never reaches a render
+    slot at all. Stage 6's grant table is fixed-slot (CLAUDE.md "Stage 6
+    drops unnamed fields") and has no grant-number row at all unless
+    extracted_fields carries one. Here the parent's raw text has a
+    grant-number line but extracted_fields does not, so no renderer ever
+    prints it -- the value is not confirmed anywhere and the row must still
+    reach the Appendix."""
     grant_text = (
         "Award Source: | Fictional Research Foundation\n"
         "Project title: | Synthetic Tools for Data Curation\n"
         "Grant number: | R01-ZZ98765\n"
-        "Duration of support: | 00/2021-00/2022"
+        "Duration of support: | 2021-2022"
     )
     grant_entry = {
         "text": grant_text,
@@ -457,32 +450,28 @@ def test_recovered_row_contained_in_parent_but_field_not_rendered_still_reaches_
     assert "Fictional Research Foundation" in full_text
 
 
-# ---------------------------------------------------- A5IZ6Q round 2 (blind review)
+# ---------------------------------------------- shared-agency cross-vouching
 #
-# The blind review of round 1 found two more gaps, both in
-# `recovered_row_content_rendered` (stage6/dedup.py): it searched the WHOLE
-# rendered document rather than the parent's own render (cross-entry
-# vouching), and it matched a squashed value as a plain substring rather than
-# a whole token/cell (so a short numeric value like "5%" could match inside
-# an unrelated "25%"). Both wire tests below run the real `generate()`.
+# The exact repro that sank round 2's parent-block scoping (`_parent_rendered_block`
+# picked the FIRST rendered block carrying ANY one of a parent's identifying
+# values -- a shared agency resolved two different grants to the SAME
+# block, so a grant whose own table rendered nothing for a field could still
+# lose its recovered row to a same-agency sibling's render). Round 3 removes
+# scoping entirely; these tests prove the removal does not reopen the loss.
 
-def test_recovered_row_from_one_grant_not_vouched_by_a_different_grants_render(tmp_path):
-    """The exact round-2 repro: two M2B grants, A and B. A's own
-    extracted_fields carry dates and percent_effort and render normally. B's
-    RAW text also carries a duration line and a percent-effort line -- so
-    `recover_unclaimed_table_rows` splits them out as B's own recovered
-    rows -- but B's `extracted_fields` carry only title and agency, so B's
-    OWN grant table never renders either value (label only, blank cell).
-
-    The pre-round-2 code searched the whole document for B's rows' values:
-    it found A's rendered "2019-2020" (a token match against B's duration
-    row) and A's rendered "25%" (a squashed-substring match against B's own
-    "5%" -- '5%' is literally contained in '25%') and wrongly concluded both
-    of B's rows had already rendered. Neither actually reached the document
-    anywhere: B's own table has blank cells for both fields. Both recovered
-    rows must survive to the Appendix."""
+def test_shared_agency_grant_with_unrendered_recovered_rows_stays_in_appendix(tmp_path):
+    """Two M2B grants share an agency ('National Institutes of Health').
+    Grant A's own extracted_fields carry dates and percent_effort and render
+    normally. Grant B's RAW text also carries a duration line and a
+    percent-effort line -- so recover_unclaimed_table_rows splits them out
+    as B's own recovered rows -- but B's extracted_fields carry only title
+    and agency, so B's OWN grant table renders neither value (label only,
+    blank cell). B's duration row never verbatim-matches (stage 6 reformats
+    the date), and B's effort row ('5%') must not cross-match A's rendered
+    '25%' merely because they share a digit. Both of B's rows must survive
+    to the Appendix."""
     grant_a = {
-        "text": ("Award Source: | Aurora Foundation\n"
+        "text": ("Award Source: | National Institutes of Health\n"
                  "Project title: | Alpha Sequencing Initiative\n"
                  "Duration of support: | 00/2019-00/2020\n"
                  "Your percent (%) effort: | 25%"),
@@ -491,14 +480,14 @@ def test_recovered_row_from_one_grant_not_vouched_by_a_different_grants_render(t
         "element_idx_end": 600,
         "extracted_fields": {
             "title": "Alpha Sequencing Initiative",
-            "agency": "Aurora Foundation",
+            "agency": "National Institutes of Health",
             "start_date": "2019",
             "end_date": "2020",
             "percent_effort": "25%",
         },
     }
     grant_b = {
-        "text": ("Award Source: | Borealis Institute\n"
+        "text": ("Award Source: | National Institutes of Health\n"
                  "Project title: | Beta Imaging Cohort\n"
                  "Duration of support: | 00/2019-00/2020\n"
                  "Your percent (%) effort: | 5%"),
@@ -507,7 +496,7 @@ def test_recovered_row_from_one_grant_not_vouched_by_a_different_grants_render(t
         "element_idx_end": 700,
         "extracted_fields": {
             "title": "Beta Imaging Cohort",
-            "agency": "Borealis Institute",
+            "agency": "National Institutes of Health",
             # No start_date/end_date/percent_effort: B's own table renders
             # neither value, even though the raw text above (and B's own
             # recovered-row siblings below) carries them verbatim.
@@ -532,33 +521,37 @@ def test_recovered_row_from_one_grant_not_vouched_by_a_different_grants_render(t
     gen.generate(str(input_path), str(output_path), research_summary_path=None)
 
     full_text = _all_text(Document(str(output_path)))
-    # Both grants rendered in the body.
+    # Both grants rendered in the body, under the same agency.
     assert "Alpha Sequencing Initiative" in full_text
     assert "Beta Imaging Cohort" in full_text
+    assert full_text.count("National Institutes of Health") == 2
     # B's own recovered rows were NOT dropped -- they reached the Appendix
     # (_clean_inline_tabs rejoins the raw " | " cell separator as " — " for
-    # display), proving they were never actually found rendered anywhere.
+    # display), proving neither was found rendered anywhere.
     assert "T. APPENDIX" in full_text
     assert "Duration of support: — 00/2019-00/2020" in full_text
-    assert "Your percent (%) effort: — 5%" in full_text
+    # And the word-boundary half of the same repro: B's "5%" appears only
+    # once, as its own Appendix bullet -- never merged with A's unrelated
+    # "25%" cell (a plain, non-boundary substring check would have read A's
+    # rendered "25%" as confirming B's "5%" and dropped this row).
+    assert full_text.count("Your percent (%) effort: — 5%") == 1
 
 
-def test_recovered_row_value_coincidentally_matching_parent_render_still_gated_by_raw_text(tmp_path):
-    """The parent-scoping gate (`recovered_row_duplicates_parent`) stays
-    necessary even after round 2 scopes `recovered_row_content_rendered` to
-    one block: it is the ONLY check confirming the row's raw text actually
-    came from THIS parent, rather than merely resolving (via `parent_idx`)
-    to an entry whose own render happens to carry a matching value by
-    coincidence. Here `grant_entry`'s raw stage-2 text never mentions percent
-    effort at all, so the row below is not a genuine A5IZ6Q duplicate of
-    it -- but `grant_entry`'s `extracted_fields` legitimately carries
-    percent_effort "5%", which DOES render in its own table. A row dropped
-    on content-match alone (skipping the raw-text gate) would lose content
-    that was never proven to be this parent's own duplicate."""
+def test_recovered_row_dropped_when_confirmed_only_by_a_different_records_render(tmp_path):
+    """Round 3's accepted trade-off, at the wire level. Removing per-parent
+    scoping means a drop no longer asks WHICH record printed a value, only
+    whether it is already in the rendered document. Here grant_entry's own
+    raw text never mentions percent effort at all -- recover_unclaimed_table_rows
+    never produced the row below from this grant -- but grant_entry's
+    extracted_fields legitimately carry percent_effort '5%', which DOES
+    render in its own table. The recovered row's value is therefore
+    confirmed, wherever it came from, and the row is dropped: the value is
+    genuinely visible in the document, which is the only guarantee this
+    drop makes."""
     grant_entry = {
         "text": ("Award Source: | Fictional Research Foundation\n"
                  "Project title: | Synthetic Tools for Data Curation\n"
-                 "Duration of support: | 00/2021-00/2022"),
+                 "Duration of support: | 2021-2022"),
         "taxonomy_code": "M2B",
         "element_idx_start": 500,
         "element_idx_end": 500,
@@ -571,11 +564,11 @@ def test_recovered_row_value_coincidentally_matching_parent_render_still_gated_b
                                      # never mentions percent effort at all
         },
     }
-    mismatched_row = {"text": "Your percent (%) effort: | 5%",
-                      "taxonomy_code": "T", "recovered_row": True,
-                      "parent_idx": 500, "element_idx_start": "500.0",
-                      "extracted_fields": {}, "hierarchy": ["Past Funding"]}
-    entries = [_RECOVERY_OWNER_ENTRY, grant_entry, mismatched_row]
+    row = {"text": "Your percent (%) effort: | 5%",
+           "taxonomy_code": "T", "recovered_row": True,
+           "parent_idx": 500, "element_idx_start": "500.0",
+           "extracted_fields": {}, "hierarchy": ["Past Funding"]}
+    entries = [_RECOVERY_OWNER_ENTRY, grant_entry, row]
 
     gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
     gen._reconsider_appendix_entries = lambda: []
@@ -586,10 +579,9 @@ def test_recovered_row_value_coincidentally_matching_parent_render_still_gated_b
     gen.generate(str(input_path), str(output_path), research_summary_path=None)
 
     full_text = _all_text(Document(str(output_path)))
-    assert "T. APPENDIX" in full_text
-    # The value rendered once from the grant table's own row-join ("_all_text"
-    # joins each table row's cells with " | ")...
+    # The value rendered once, from the grant table's own row...
     assert full_text.count("Your percent (%) effort: | 5%") == 1
-    # ...and the row was NOT dropped: it also reached the Appendix bullet
-    # (_clean_inline_tabs rejoins " | " as " — " for display there).
-    assert full_text.count("Your percent (%) effort: — 5%") == 1
+    # ...and the recovered row was dropped: no Appendix duplicate, no
+    # Appendix section at all (this is the only unmapped entry in the run).
+    assert "T. APPENDIX" not in full_text
+    assert "Your percent (%) effort: — 5%" not in full_text

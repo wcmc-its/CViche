@@ -22,9 +22,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     deduplicate_entries,
-    find_recovered_row_parent,
-    recovered_row_content_rendered,
-    recovered_row_duplicates_parent,
+    recovered_row_already_rendered,
 )
 
 
@@ -205,321 +203,201 @@ def test_distinct_committee_memberships_mentioned_in_passing_kept():
     assert result == [prior_term, current_term]
 
 
-# --------------------------------------- recovered-row/parent duplicates (A5IZ6Q)
-#
-# `recover_unclaimed_table_rows` (stage 2, #420) emits one entry per table row
-# no delimiter claimed, independently of whatever delimiter DID claim the
-# surrounding table. A wide table-level delimiter spanning several element
-# indices (a whole grant's label/value block) and the individual rows inside
-# it can both survive as separate entries: the fused parent classifies into a
-# render-routed code (e.g. M2B) and renders structurally, while each
-# single-field recovered row is too sparse to classify as anything but T and
-# is otherwise a verbatim duplicate of content the reader already saw.
-# `deduplicate_entries` above never sees the pair -- parent and row land in
-# different taxonomy-code groups, and dedup only ever compares within one.
 
-def test_recovered_row_duplicate_of_parent_detected():
-    parent = {"text": "Award Source: | Fictional Research Foundation\n"
-                      "Project title: | Synthetic Tools for Data Curation\n"
-                      "Duration of support: | 00/2021-00/2022"}
+# ---------------------------------------- recovered-row appendix drop (A5IZ6Q)
+#
+# `recover_unclaimed_table_rows` (stage 2, #420) emits one entry per table
+# row no delimiter claimed, independently of whatever delimiter DID claim
+# the surrounding table. A wide table-level delimiter spanning several
+# element indices (a whole grant's label/value block) and the individual
+# rows inside it can both survive as separate entries: the fused parent
+# classifies into a render-routed code (e.g. M2B) and renders structurally,
+# while each single-field recovered row is too sparse to classify as
+# anything but T and is otherwise a verbatim duplicate of content the reader
+# already saw. `deduplicate_entries` above never sees the pair -- parent and
+# row land in different taxonomy-code groups, and dedup only compares within
+# one.
+#
+# Round 3 (simplify, LEAD directive): earlier rounds scoped the drop to one
+# specific parent entry, first by raw-text containment then by resolving
+# that same parent's own rendered block. Both were removed after a shared
+# value (an agency common to two grants) was shown to resolve two different
+# parents to the same block, which could drop a row whose OWN content never
+# rendered. `recovered_row_already_rendered` is provenance-blind: it checks
+# only whether the row's own value is already printed anywhere in the
+# document's rendered body -- never which entry printed it.
+
+def test_recovered_row_dropped_when_its_value_is_already_rendered():
     row = {"text": "Award Source: | Fictional Research Foundation",
-           "recovered_row": True, "parent_idx": 100}
-    assert recovered_row_duplicates_parent(row, parent)
+           "recovered_row": True}
+    rendered = ["Award Source:", "Fictional Research Foundation"]
+    assert recovered_row_already_rendered(row, rendered)
 
 
-def test_recovered_row_not_contained_in_parent_not_flagged():
-    # The row the model's delimiter genuinely skipped -- not present in the
-    # parent's own text at all -- must go through the normal path unchanged.
-    parent = {"text": "Award Source: | Fictional Research Foundation\n"
-                      "Project title: | Synthetic Tools for Data Curation"}
-    row = {"text": "Non-financial support: | Conference travel",
-           "recovered_row": True, "parent_idx": 100}
-    assert not recovered_row_duplicates_parent(row, parent)
+def test_recovered_row_kept_when_its_value_is_not_rendered_anywhere():
+    row = {"text": "Non-financial support: | Conference travel support",
+           "recovered_row": True}
+    rendered = ["Award Source:", "Fictional Research Foundation"]
+    assert not recovered_row_already_rendered(row, rendered)
 
 
-def test_non_recovered_row_never_flagged_even_if_contained():
-    # Only the stage-2 backstop's own output carries `recovered_row` -- an
-    # ordinary model-attested entry that happens to be a text subset of
-    # another must go through the normal Jaccard/containment dedup instead,
-    # not this parent-linked shortcut.
-    parent = {"text": "Award Source: | Fictional Research Foundation\n"
-                      "Project title: | Synthetic Tools for Data Curation"}
+def test_non_recovered_row_never_dropped_even_when_its_text_is_rendered():
+    # Only stage 2's structural backstop sets `recovered_row` -- an ordinary
+    # model-attested entry goes through deduplicate_entries's own
+    # Jaccard/containment path above, never this one.
     row = {"text": "Award Source: | Fictional Research Foundation"}
-    assert not recovered_row_duplicates_parent(row, parent)
+    rendered = ["Award Source:", "Fictional Research Foundation"]
+    assert not recovered_row_already_rendered(row, rendered)
 
 
-def test_recovered_row_with_no_resolvable_parent_not_flagged():
-    # parent_idx pointed nowhere (lookup miss) -- caller passes None. Content
-    # loss risk is on the "flag it" side, not this one, so the safe default
-    # is to leave the row in the normal appendix/recovery path.
-    row = {"text": "Award Source: | Fictional Research Foundation",
-           "recovered_row": True, "parent_idx": 999}
-    assert not recovered_row_duplicates_parent(row, None)
+def test_recovered_row_label_cell_excluded_from_confirmation():
+    # Only the VALUE half of "Label: | Value" may confirm a drop -- the
+    # label is always excluded. A grant table writes every row's label
+    # unconditionally, value or not (CLAUDE.md "Stage 6 drops unnamed
+    # fields" is the adjacent failure mode: a fixed-slot renderer still
+    # writes the label even when the value cell is blank), so treating the
+    # label as a value cell would let a blank-value row read as "confirmed"
+    # merely because its label text is everywhere in the document.
+    row = {"text": "Non-financial support: | ", "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["Non-financial support:"])
 
 
-def test_recovered_row_reformatted_whitespace_still_matches():
-    # _squash normalizes whitespace/case -- a recovered row's line-splitting
-    # must not be defeated by incidental spacing differences from the parent.
-    parent = {"text": "Duration of support: |   00/2021-00/2022  \n"
-                      "Name of Principal Investigator: | A. Researcher"}
-    row = {"text": "duration of support: | 00/2021-00/2022",
-           "recovered_row": True, "parent_idx": 100}
-    assert recovered_row_duplicates_parent(row, parent)
+def test_recovered_row_all_blank_value_cells_never_confirmed():
+    row = {"text": "Non-financial support: |  | ", "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["anything at all"])
 
 
-def test_recovered_row_pipe_vs_tab_separator_still_matches():
-    # A5IZ6Q's second cell-boundary gap: recover_unclaimed_table_rows always
-    # renders a recovered row's own text with " | " between label and value,
-    # but the fused parent's multi-cell line for the SAME cell can instead
-    # be tab-joined (stage_2_entry_extraction.py's "\t".join(full_text_parts))
-    # -- a plain _squash containment check misses this, since '|' isn't
-    # whitespace and survives squashing on the row's side only.
-    parent = {"text": "Name of Principal Investigator: | A. Researcher\t"
-                      "Your role*\toversight\tYour percent (%) effort:\t1%"}
-    row = {"text": "Your percent (%) effort: | 1%",
-           "recovered_row": True, "parent_idx": 100}
-    assert recovered_row_duplicates_parent(row, parent)
+def test_recovered_row_no_separator_falls_back_to_whole_text_as_the_value():
+    # A row with no separator at all is malformed --
+    # recover_unclaimed_table_rows always emits label|value -- but there is
+    # no label to split off, so the whole text is the one value cell.
+    row = {"text": "StandaloneValue2024", "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["StandaloneValue2024"])
+    assert not recovered_row_already_rendered(row, ["nothing relevant here"])
 
 
-# ------------------------------ recovered_row_content_rendered (blind review)
+# ------------------------------------------- multi-cell rows (>2 columns)
 #
-# `recovered_row_duplicates_parent` above only scopes a candidate to its
-# parent's raw stage-2 text -- it is not proof the row's content reached a
-# render slot, because stage 6's section renderers are fixed-slot and drop
-# any field they do not name. A blind review of the original A5IZ6Q fix
-# caught callers treating scoping alone as sufficient; this is the second,
-# mandatory gate that closes it.
+# `recover_unclaimed_table_rows` joins the WHOLE physical table row with
+# " | ", regardless of column count -- a 3-column row (Label, StartDate,
+# EndDate) survives as one string with TWO separators in it. Each half is
+# its own value cell and is checked independently.
+
+def test_recovered_row_multi_cell_value_all_cells_confirmed_drops_the_row():
+    row = {"text": "Duration of support: | 2021 | 2022", "recovered_row": True}
+    assert recovered_row_already_rendered(
+        row, ["Duration of support:", "2021", "2022"])
+
+
+def test_recovered_row_multi_cell_value_one_unconfirmed_cell_keeps_the_row():
+    row = {"text": "Duration of support: | 2021 | 2022", "recovered_row": True}
+    # "2022" never rendered anywhere -- the row must stay even though "2021"
+    # did; joining the two cells back into "2021 | 2022" before searching
+    # would never match a real render either (nothing renders a raw " | "),
+    # so cells are checked separately rather than rejoined.
+    assert not recovered_row_already_rendered(row, ["Duration of support:", "2021"])
+
+
+# --------------------------------------------- normalization (§ LEAD item 1)
 #
-# Round 2 (blind review): the round-1 version of this gate took a flat
-# `rendered_lines` list -- the WHOLE document -- so an entirely unrelated
-# entry's rendered line could vouch for a row it had nothing to do with.
-# `recovered_row_content_rendered` now also takes `parent` and is scoped, via
-# `_parent_rendered_block`, to a single rendered BLOCK (one paragraph, or one
-# top-level table): a list of `rendered_blocks`, of which every test below
-# supplies exactly one unless the test says otherwise. `_PARENT` is a fixture
-# with one identifying field (agency) long enough to anchor
-# `_parent_rendered_block` to that block; every block below carries that same
-# agency text as its anchor line unless a test is specifically about the
-# no-anchor/wrong-block case.
+# "normalized: casefold, collapsed whitespace, word-boundary match on both
+# sides" -- each clause has its own test.
 
-_PARENT = {"extracted_fields": {"agency": "Fictional Research Foundation"}}
-_ANCHOR_LINE = "Fictional Research Foundation"
+def test_recovered_row_value_matches_case_insensitively():
+    row = {"text": "Award Source: | fictional research foundation",
+           "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["FICTIONAL RESEARCH FOUNDATION"])
 
 
-def test_recovered_row_content_rendered_verbatim_value_match():
-    row = {"text": "Award Source: | Fictional Research Foundation"}
-    block = ["Award Source:", "Fictional Research Foundation"]
-    assert recovered_row_content_rendered(row, _PARENT, [block])
+def test_recovered_row_value_matches_despite_irregular_whitespace():
+    row = {"text": "Award Source: |  Fictional   Research Foundation ",
+           "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["Fictional Research Foundation"])
 
 
-def test_recovered_row_content_rendered_label_alone_does_not_count():
-    # The label renders on every grant row whether or not the value does
-    # (_create_grant_table writes all 8 labels unconditionally) -- matching
-    # the label text alone would vouch for a value that never rendered.
-    row = {"text": "Non-financial support: | Conference travel fund"}
-    block = [_ANCHOR_LINE, "Non-financial support:"]  # value cell blank
-    assert not recovered_row_content_rendered(row, _PARENT, [block])
+def test_recovered_row_value_not_glued_across_a_rendered_line_join():
+    # Every rendered line is joined into one string before searching it.
+    # Collapsing whitespace (never squashing it away entirely) keeps a real
+    # word boundary at that join: "...Foundation" ending one line and
+    # "1%..." starting the next must not satisfy a value like "foundation1"
+    # that never existed as contiguous rendered text.
+    row = {"text": "Label: | foundation1", "recovered_row": True}
+    assert not recovered_row_already_rendered(
+        row, ["...Fictional Research Foundation", "1% effort..."])
 
 
-def test_recovered_row_content_rendered_reformatted_date_still_matches():
-    # Stage 6 reformats a bare-year duration ("00/2021-00/2022" ->
-    # "2021-2022") -- a verbatim match would miss this even though the
-    # content did render, so every distinguishing (>=4 char) token must be
-    # checked, together, within the SAME rendered line.
-    row = {"text": "Duration of support: | 00/2021-00/2022"}
-    block = [_ANCHOR_LINE, "Duration of support:", "2021-2022"]
-    assert recovered_row_content_rendered(row, _PARENT, [block])
+def test_recovered_row_value_not_matched_inside_a_longer_trailing_run():
+    # '2021' must not match the leading digits of '20215' -- the boundary
+    # has to hold at the TRAILING edge of the value, not just the leading
+    # one (a mutant dropping only the trailing lookahead survived earlier
+    # rounds' coverage).
+    row = {"text": "Duration of support: | 2021", "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["20215"])
 
 
-def test_recovered_row_content_rendered_short_value_not_verifiable():
-    # A bare grant identifier the renderer never received (no matching
-    # extracted_fields key) has no verbatim match and no token long enough
-    # to check -- this must read as NOT confirmed, never as "assume
-    # rendered": that direction of error is exactly the content loss this
-    # check exists to prevent.
-    row = {"text": "Grant number: | R01-ZZ98765"}
-    block = ["Award Source:", _ANCHOR_LINE]
-    assert not recovered_row_content_rendered(row, _PARENT, [block])
+def test_recovered_row_value_not_matched_inside_a_longer_leading_run():
+    # '2021' must not match the trailing digits of '12021' -- the LEADING
+    # edge of the value.
+    row = {"text": "Duration of support: | 2021", "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["12021"])
 
 
-def test_recovered_row_content_rendered_scattered_tokens_do_not_count():
-    # Both distinguishing tokens exist in the block, but never together on
-    # the same rendered line -- a coincidental combination must not count as
-    # this row's own value having rendered.
-    row = {"text": "Duration of support: | 00/2021-00/2022"}
-    block = [_ANCHOR_LINE, "Duration of support:", "2021-Present",
-             "unrelated 2022 entry"]
-    assert not recovered_row_content_rendered(row, _PARENT, [block])
+def test_recovered_row_currency_value_matches_with_trailing_boundary():
+    row = {"text": "Annual direct costs: | $15,000.00", "recovered_row": True}
+    assert recovered_row_already_rendered(
+        row, ["Annual direct costs:", "$15,000.00"])
+    assert not recovered_row_already_rendered(
+        row, ["$15,000.005"])
 
 
-def test_recovered_row_content_rendered_empty_value_not_confirmed():
-    row = {"text": "Non-financial support: | "}
-    block = ["Non-financial support:", _ANCHOR_LINE]
-    assert not recovered_row_content_rendered(row, _PARENT, [block])
-
-
-# ---------------------------------------------------- parent-scoping (round 2)
+# ------------------------------------------ shared-agency cross-vouching
 #
-# The core round-2 finding: a value must be confirmed against the PARENT's
-# OWN rendered block, never the whole document. These fixtures put the
-# matching text in a DIFFERENT block from the one the parent's own
-# identifying fields resolve to.
+# The exact repro that sank round 2's parent-block scoping: two grants share
+# an agency. Grant A's own render legitimately carries dates/effort; grant
+# B's recovered rows must stay when B's OWN value is not printed anywhere,
+# and a shared digit run (A's "25%" vs B's "5%") must not cross-match.
 
-def test_recovered_row_content_rendered_ignores_a_different_entrys_block():
-    # The exact A5IZ6Q round-2 shape: grant A's own rendered block legitimately
-    # carries a percent-effort value; grant B's recovered row must be checked
-    # against grant B's OWN block only, never A's, even though A's block is
-    # right there in `rendered_blocks`.
-    parent_b = {"extracted_fields": {"agency": "Borealis Institute",
-                                     "title": "Beta Imaging Cohort"}}
-    row = {"text": "Your percent (%) effort: | 5%"}
-    block_a = ["Aurora Foundation", "Alpha Sequencing Initiative",
-               "Your percent (%) effort:", "25%"]
-    block_b = ["Borealis Institute", "Beta Imaging Cohort",
-               "Your percent (%) effort:", ""]  # B's own value cell is blank
-    assert not recovered_row_content_rendered(row, parent_b, [block_a, block_b])
+def test_shared_agency_grant_with_unrendered_value_is_not_vouched_for():
+    rendered = [
+        "National Institutes of Health", "Alpha Sequencing Initiative",
+        "Duration of support:", "2019-2020",
+        "Your percent (%) effort:", "25%",
+        "National Institutes of Health", "Beta Imaging Cohort",
+        "Duration of support:", "",
+        "Your percent (%) effort:", "",
+    ]
+    row_effort_b = {"text": "Your percent (%) effort: | 5%", "recovered_row": True}
+    assert not recovered_row_already_rendered(row_effort_b, rendered)
 
 
-def test_recovered_row_content_rendered_no_anchor_never_falls_back_to_whole_document():
-    # A parent with no identifying field long enough to anchor a block (a
-    # declined grant that never rendered, or extracted_fields with nothing
-    # but generic/short values) must resolve to NO block -- never silently
-    # widen the search back to the whole document, which is the round-2 bug.
-    parent = {"extracted_fields": {"status": "Pending"}}  # too generic/short
-    row = {"text": "Award Source: | Fictional Research Foundation"}
-    block = ["Award Source:", "Fictional Research Foundation"]  # value IS here
-    assert not recovered_row_content_rendered(row, parent, [block])
+def test_five_percent_does_not_match_inside_twenty_five_percent():
+    row = {"text": "Your percent (%) effort: | 5%", "recovered_row": True}
+    assert not recovered_row_already_rendered(
+        row, ["Your percent (%) effort:", "25%"])
 
 
-def test_recovered_row_content_rendered_whole_value_not_matched_inside_longer_number():
-    # Round 2's second finding: a plain squashed-substring check matches '5%'
-    # inside '25%'. The match must be token-aligned even WITHIN the correctly
-    # scoped block.
-    row = {"text": "Your percent (%) effort: | 5%"}
-    block = [_ANCHOR_LINE, "Your percent (%) effort:", "25%"]
-    assert not recovered_row_content_rendered(row, _PARENT, [block])
-
-
-# ------------------------------------------------- mutation guards (round 2)
+# -------------------------------------------------- accepted trade-off
 #
-# Each fixture below is designed so the specific mutant named in its comment
-# flips the assertion -- not just any change to the function under test.
+# Removing per-parent scoping means a match is accepted regardless of WHICH
+# record actually printed it -- documented in `recovered_row_already_rendered`'s
+# own docstring as the deliberate trade for a simpler, unconditionally
+# content-safe rule. The one direction this is allowed to be wrong in is
+# duplication, never loss: a value stage 6 reformats on the way to a render
+# slot (a raw "00/2021" cell rendered as "2021") will not verbatim-match, so
+# the row correctly stays rather than being wrongly dropped.
 
-def test_recovered_row_content_rendered_three_char_run_is_not_a_qualifying_token():
-    # Kills: _VALUE_TOKEN_RE widened to {3,}. Under the real {4,} regex, the
-    # 3-char fragment "xyz" is never extracted, so only the qualifying
-    # "2024" token is checked and it matches. Under a {3,} mutant, "xyz"
-    # would ALSO be required on the same line and isn't there, flipping this
-    # to False.
-    row = {"text": "Label: | xyz 2024"}
-    block = [_ANCHOR_LINE, "2024"]
-    assert recovered_row_content_rendered(row, _PARENT, [block])
-
-
-def test_recovered_row_content_rendered_value_uses_full_remainder_after_first_separator():
-    # Kills: _recovered_row_value's maxsplit=1 dropped. The row's raw text
-    # carries a SECOND separator inside the value itself -- with
-    # maxsplit=1, the value is everything after the FIRST separator
-    # ("xyz | UniqueToken2024"), so the qualifying token survives. Splitting
-    # on every separator instead would truncate the value to "xyz" (3 chars,
-    # no qualifying token at all), which can never match anything.
-    row = {"text": "Label: | xyz | UniqueToken2024"}
-    block = [_ANCHOR_LINE, "uniquetoken2024"]
-    assert recovered_row_content_rendered(row, _PARENT, [block])
+def test_recovered_row_value_confirmed_by_an_unrelated_records_render():
+    # By design (see the module docstring): this never asks WHICH record
+    # rendered a value, only whether it is already visible in the document.
+    row = {"text": "Your percent (%) effort: | 25%", "recovered_row": True}
+    rendered = ["A completely different grant", "Your percent (%) effort:", "25%"]
+    assert recovered_row_already_rendered(row, rendered)
 
 
-def test_recovered_row_content_rendered_no_separator_falls_back_to_whole_text():
-    # Kills: _recovered_row_value's no-separator fallback changed to ''. A
-    # recovered row's text is documented as always "Label: | Value", but the
-    # fallback exists for a malformed row with no separator at all -- it
-    # must return the WHOLE text as the value, not silently blank it out.
-    row = {"text": "StandaloneValue2024"}
-    block = [_ANCHOR_LINE, "StandaloneValue2024"]
-    assert recovered_row_content_rendered(row, _PARENT, [block])
-
-
-def test_recovered_row_content_rendered_no_qualifying_token_never_matches_any_line():
-    # Kills: `bool(tokens) and` dropped from the token-fallback return.
-    # "5%" has no verbatim match anywhere in the block AND extracts zero
-    # >=4-char tokens -- `all(token in line for token in [])` is vacuously
-    # True for every line, so a broken guard would confirm this against ANY
-    # non-empty line, not just one that actually carries the value.
-    row = {"text": "Your percent (%) effort: | 5%"}
-    block = [_ANCHOR_LINE, "Unrelated content here"]
-    assert not recovered_row_content_rendered(row, _PARENT, [block])
-
-
-def test_recovered_row_content_rendered_token_extraction_is_case_folded():
-    # Kills: `.lower()` dropped before `_VALUE_TOKEN_RE.findall`. The
-    # renderer's reformatted value is "ab2024" (case-normalized, prefix
-    # stripped -- the same shape as the date-reformatting case above). With
-    # `.lower()`, the value's "AB2024" segment folds into one 6-char token
-    # "ab2024" that matches. Without it, the token regex (lowercase-only)
-    # can only see the digit tail "2024" -- 4 chars, still long enough to
-    # extract -- but it sits glued to the letters in "ab2024" with no
-    # separator, so the token-aligned boundary check correctly refuses to
-    # match it mid-token, flipping this to False.
-    row = {"text": "Label: | 00/AB2024"}
-    block = [_ANCHOR_LINE, "ab2024"]
-    assert recovered_row_content_rendered(row, _PARENT, [block])
-
-
-# ---------------------------------------- find_recovered_row_parent (A5IZ6Q)
-#
-# A5IZ6Q's own second residual: some of the LYRASIS grant's recovered rows
-# keyed `parent_idx` to 244, an index with NO entry of its own -- the grant's
-# whole label/value block is one table entry spanning element_idx_start 242
-# to element_idx_end 244, and a row recovered from anywhere in that range
-# carries whichever index it structurally sits at, not necessarily 242.
-
-def test_find_parent_direct_hit():
-    parent = {"element_idx_start": 242, "element_idx_end": 244, "text": "..."}
-    by_idx = {"242": parent}
-    assert find_recovered_row_parent(242, by_idx, [parent]) is parent
-
-
-def test_find_parent_direct_hit_preferred_over_a_wider_span():
-    # Kills: the direct `entries_by_element_idx` hit dropped from
-    # find_recovered_row_parent, falling straight through to the span loop.
-    # test_find_parent_direct_hit above can't catch that mutant: its own
-    # single candidate is ALSO the span covering 242, so removing the direct
-    # hit still finds the same object via the span fallback. Here a parent_idx
-    # that is BOTH a direct hit AND numerically inside a different, wider
-    # span must resolve to the direct entry -- the span fallback exists only
-    # for indices with no entry of their own.
-    direct_entry = {"element_idx_start": 242, "element_idx_end": 242, "text": "direct"}
-    wide_span_entry = {"element_idx_start": 200, "element_idx_end": 300, "text": "wide"}
-    by_idx = {"242": direct_entry, "200": wide_span_entry}
-    found = find_recovered_row_parent(242, by_idx, [wide_span_entry])
-    assert found is direct_entry
-
-
-def test_find_parent_falls_back_to_containing_span():
-    parent = {"element_idx_start": 242, "element_idx_end": 244, "text": "..."}
-    by_idx = {"242": parent}
-    # 244 has no entry of its own -- only the span entry [242, 244] covers it.
-    assert find_recovered_row_parent(244, by_idx, [parent]) is parent
-
-
-def test_find_parent_outside_every_span_is_none():
-    parent = {"element_idx_start": 242, "element_idx_end": 244, "text": "..."}
-    assert find_recovered_row_parent(500, {"242": parent}, [parent]) is None
-
-
-def test_find_parent_non_numeric_idx_is_none():
-    parent = {"element_idx_start": 242, "element_idx_end": 244, "text": "..."}
-    assert find_recovered_row_parent("table_5", {}, [parent]) is None
-
-
-def test_find_parent_span_fallback_still_gated_by_containment():
-    # The span fallback only WIDENS which entry gets compared against --
-    # recovered_row_duplicates_parent's verbatim check is the real gate, so a
-    # row that merely falls in the same numeric range but isn't actually in
-    # the parent's text is still left alone.
-    parent = {"element_idx_start": 242, "element_idx_end": 244,
-             "text": "Award Source: | Fictional Research Foundation"}
-    row = {"text": "Non-financial support: | Conference travel",
-           "recovered_row": True, "parent_idx": 244}
-    found = find_recovered_row_parent(244, {"242": parent}, [parent])
-    assert found is parent
-    assert not recovered_row_duplicates_parent(row, found)
+def test_recovered_row_reformatted_date_value_is_not_confirmed_and_stays():
+    # Stage 6 reformats "00/2021-00/2022" to "2021-2022" -- this function
+    # does no date parsing, so the row stays (extra duplication, never lost
+    # content) rather than being dropped on a value that never rendered
+    # verbatim.
+    row = {"text": "Duration of support: | 00/2021-00/2022", "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["Duration of support:", "2021-2022"])

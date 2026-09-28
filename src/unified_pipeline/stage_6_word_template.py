@@ -136,9 +136,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
     _entry_title_words,
     _significant_words,
     deduplicate_entries,
-    find_recovered_row_parent,
-    recovered_row_content_rendered,
-    recovered_row_duplicates_parent,
+    recovered_row_already_rendered,
 )
 from unified_pipeline.stage6.render_check import (  # noqa: F401
     RECORD_DATE_LINE_MIN_CHARS,
@@ -995,11 +993,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             section_names=TAXONOMY_TO_SECTION)
 
     def _drop_recovered_row_duplicates(
-        self, entries: list[dict[str, Any]], all_entries: list[dict[str, Any]]
+        self, entries: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         """Filter a structurally recovered table row (#420) out of `entries`
-        when it duplicates content the parent it was split from (A5IZ6Q)
-        ALREADY RENDERED.
+        when every non-trivial value cell of its own raw text is already
+        printed somewhere in the document ALREADY rendered (A5IZ6Q).
 
         Split out of `generate()` (#3.2a) purely so the lookup this needs
         doesn't grow that function further -- the filtering itself is new
@@ -1010,53 +1008,29 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         whatever delimiter DID claim the surrounding table -- so a wide,
         multi-row table delimiter (one grant's whole label/value block) and
         the individual rows inside it can both survive as separate entries
-        under different taxonomy codes. See `recovered_row_duplicates_parent`
-        for why the ordinary per-code dedup and `segment_already_rendered`
-        both miss this, and `find_recovered_row_parent` for why a row's
-        `parent_idx` sometimes needs the containing span, not just a direct
-        `element_idx_start` hit.
+        under different taxonomy codes, and each single-field recovered row
+        is otherwise a verbatim duplicate of content the reader already saw.
+        `deduplicate_entries` never sees the pair (parent and row land in
+        different taxonomy-code groups) and `segment_already_rendered` is
+        tuned for a segment against its OWN entry's `extracted_fields`, not
+        an unrelated entry's raw text -- see `recovered_row_already_rendered`
+        (`stage6/dedup.py`) for the actual check.
 
-        A row is dropped only when BOTH gates pass: `recovered_row_duplicates_parent`
-        scopes the candidate to a row whose text is a verbatim substring of
-        THIS parent's raw stage-2 text (not a coincidental match against
-        some other entry), and `recovered_row_content_rendered` then confirms
-        the row's own VALUE actually reached the document this call's caller
-        already rendered -- the mapped sections, including the grant tables,
-        run before this in `generate()`. The raw-text scoping check alone is
-        NOT proof of rendering (a blind review of the original A5IZ6Q fix
-        caught this: the parent's fused text can carry a field, like
-        `grant_number` or `non_financial_support`, that never reached its
-        `extracted_fields` and so never reached a render slot -- stage 6's
-        section renderers are fixed-slot and drop any field they do not
-        name, CLAUDE.md "Stage 6 drops unnamed fields").
-
-        Round 2 (blind review): `recovered_row_content_rendered` now also
-        takes `parent` and searches only THAT parent's own rendered block
-        (`_rendered_output_blocks`, not the flat `_rendered_output_lines`) --
-        the original version searched the whole document, which let an
-        entirely unrelated entry's rendered line vouch for a row it had
-        nothing to do with (two grants under the same code, one entry's
-        rendered percent-effort or duration cell confirming a DIFFERENT
-        entry's recovered row). `parent` is resolved once here and passed to
-        both gates rather than re-resolved inside each, so there is exactly
-        one lookup to get wrong, not two that could silently diverge.
-        Requiring both gates -- same parent's raw text AND that same
-        parent's own rendered block -- keeps this drop scoped to one entry
-        throughout, not merely non-lossy against the document as a whole.
+        Round 3 (simplify, per-parent scoping removed): earlier rounds first
+        scoped a row to the one parent entry its raw text came from, then
+        confirmed that SAME parent's own rendered block. Content loss was
+        still reachable through it -- two grants sharing an agency could
+        resolve to the same rendered block, so a grant whose own table
+        rendered nothing for a field could still lose its recovered row to
+        a same-agency sibling's render. `recovered_row_already_rendered` is
+        provenance-blind by design: it asks only whether the row's own value
+        is printed anywhere in the document already rendered (never the
+        Appendix, not yet written), which is the actual guarantee this drop
+        needs and cannot lose content the reader hasn't already seen it.
         """
-        entries_by_element_idx = {str(e.get('element_idx_start')): e for e in all_entries}
-        span_entries = [e for e in all_entries
-                        if e.get('element_idx_start') != e.get('element_idx_end')]
-        rendered_blocks = self._rendered_output_blocks()
-        kept: list[dict[str, Any]] = []
-        for e in entries:
-            parent = find_recovered_row_parent(
-                e.get('parent_idx'), entries_by_element_idx, span_entries)
-            if (recovered_row_duplicates_parent(e, parent)
-                    and recovered_row_content_rendered(e, parent, rendered_blocks)):
-                continue
-            kept.append(e)
-        return kept
+        rendered_lines = self._rendered_output_lines()
+        return [e for e in entries
+                if not recovered_row_already_rendered(e, rendered_lines)]
 
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None) -> str:
@@ -1196,7 +1170,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         for code, entries in entries_by_code.items():
             if code not in mapped_codes:
                 unmapped_entries.extend(e for e in entries if id(e) not in consumed_ids)
-        unmapped_entries = self._drop_recovered_row_duplicates(unmapped_entries, all_entries)  # #420/A5IZ6Q
+        unmapped_entries = self._drop_recovered_row_duplicates(unmapped_entries)  # #420/A5IZ6Q
 
         # A stays in mapped_codes, but NOT because its entries are all consumed
         # -- that was the old assumption here and the corpus refutes it (145 of
@@ -2651,53 +2625,7 @@ Now analyze the text above:"""
 
         return [code for _, code, _ in remaining]
 
-    def _rendered_output_blocks(self) -> list[list[str]]:
-        """Every rendered text line of the in-memory document, grouped one
-        block per paragraph or per TOP-LEVEL table (a nested table's lines
-        join its containing top-level table's block, mirroring
-        `walk_table`'s own recursion) instead of one flat list.
-
-        `_rendered_output_lines` below is a thin flatten of this and is
-        unchanged in what it returns -- this split exists only so
-        `_drop_recovered_row_duplicates` (#A5IZ6Q round 2) can scope a
-        lookup to ONE entry's own rendered table rather than the whole
-        document; see `recovered_row_content_rendered`'s docstring
-        (stage6/dedup.py) for the cross-entry vouching bug that scoping
-        closes. Same two render-time divergences from run_doctor's
-        read_docx_blocks (which walks only top-level tables, cell by cell)
-        as before: nested tables are recursed into, and each table row is
-        ALSO emitted with its cells joined as one line, so a record
-        rendered as a structured row (title / dates / institution cells)
-        keeps its tokens together the way one source line does."""
-        blocks: list[list[str]] = []
-
-        def block_lines(text: str) -> list[str]:
-            return [ln for ln in str(text or '').split('\n') if ln.strip()]
-
-        def walk_table(tbl, out: list[str]):
-            for row in tbl.rows:
-                cell_texts = []
-                for cell in row.cells:
-                    if cell.text.strip():
-                        cell_texts.append(cell.text)
-                        out.extend(block_lines(cell.text))
-                    for nested in cell.tables:
-                        walk_table(nested, out)
-                if len(cell_texts) > 1:
-                    out.append(' | '.join(' '.join(t.split()) for t in cell_texts))
-
-        for para in self.doc.paragraphs:
-            lines = block_lines(para.text)
-            if lines:
-                blocks.append(lines)
-        for tbl in self.doc.tables:
-            out: list[str] = []
-            walk_table(tbl, out)
-            if out:
-                blocks.append(out)
-        return blocks
-
-    def _rendered_output_lines(self) -> List[str]:
+    def _rendered_output_lines(self) -> list[str]:
         """Every rendered text line of the in-memory document: body paragraphs
         plus table cells. Two render-time divergences from run_doctor's
         read_docx_blocks (which walks only top-level tables, cell by cell):
@@ -2708,7 +2636,30 @@ Now analyze the text above:"""
         matches — fewer false "absent" verdicts, never more; the offline
         doctor may still WARN on rows this pass correctly judged rendered
         (reconciling lint 8's semantics is PR #223 scope)."""
-        return [line for block in self._rendered_output_blocks() for line in block]
+        lines: list[str] = []
+
+        def add(text: str) -> None:
+            for ln in str(text or '').split('\n'):
+                if ln.strip():
+                    lines.append(ln)
+
+        def walk_table(tbl: Table) -> None:
+            for row in tbl.rows:
+                cell_texts = []
+                for cell in row.cells:
+                    if cell.text.strip():
+                        cell_texts.append(cell.text)
+                        add(cell.text)
+                    for nested in cell.tables:
+                        walk_table(nested)
+                if len(cell_texts) > 1:
+                    add(' | '.join(' '.join(t.split()) for t in cell_texts))
+
+        for para in self.doc.paragraphs:
+            add(para.text)
+        for tbl in self.doc.tables:
+            walk_table(tbl)
+        return lines
 
     def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]]) -> list[str]:
         """Post-render safety net (#221): re-emit record lines the structured
