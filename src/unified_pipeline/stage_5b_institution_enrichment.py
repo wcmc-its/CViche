@@ -182,7 +182,19 @@ def _build_institution_enrichment_stats(
     total_cost: float, observed_model: str | None, model: str,
 ) -> dict:
     """Count enriched entries and assemble ``institution_enrichment_stats``
-    (pure move out of run_stage5b, plus the #700 failed-batch fields)."""
+    (pure move out of run_stage5b, plus the #700 failed-batch fields).
+
+    ``entry.get('institution_enrichment')`` is a presence check, not a
+    ``{}``-vs-``None`` distinction: the only writer of this key,
+    ``enrich_entry_with_result``, always assigns a 7-key dict (it always
+    includes ``'source': 'llm'``), so the key is either absent (never
+    attempted -- falsy) or a non-empty, truthy dict (attempted). ``{}`` is
+    never written by any code path on this branch -- see
+    test_institution_enrichment_stats_empty_dict_not_counted_as_enriched,
+    which pins that an explicit ``{}`` (a shape this function has never been
+    asked to produce) is treated the same as absent, matching the falsy
+    check below.
+    """
     enriched_count = sum(
         1 for entry in entries
         if entry.get('taxonomy_code', '') in INSTITUTION_CODES
@@ -199,8 +211,39 @@ def _build_institution_enrichment_stats(
         'institutions_unresolved': institutions_unresolved,
         'cost': total_cost,
         'model': observed_model or model,
+        # Naive on purpose: every sibling stats dict (stage_5c, stage_5d,
+        # core/validators/calibration_logger.py) writes this same field with
+        # a naive datetime.now(), nothing reads institution_enrichment_stats
+        # 'timestamp' back for comparison, and MariaDB DATETIME columns here
+        # are naive -- an aware value here would be the one mixed type among
+        # otherwise-naive stage stats blobs. See #700 review point 3.
         'timestamp': datetime.now().isoformat()
     }
+
+
+def _finalize_stage5b_enrichment(
+    document_uid: str, entries: list, institution_entries: int, cached_count: int,
+    uncached_count: int, llm_calls: int, llm_batches: int, failed_batches: int,
+    institutions_unresolved: int, total_cost: float, observed_model: str | None, model: str,
+) -> dict:
+    """Single entry point for #700 finalization: compute
+    ``institution_enrichment_stats`` once, then run the batch-failure guard
+    against the value this same call just computed. Call this instead of
+    ``_build_institution_enrichment_stats``/``_raise_or_warn_on_batch_failures``
+    directly -- with two separate calls, a caller could pass the guard a
+    different ``entries_enriched`` than what stats actually derived, letting
+    the #700 fatal guard misfire or fail to fire (#941 review point 1).
+    """
+    stats = _build_institution_enrichment_stats(
+        entries, institution_entries, cached_count, uncached_count, llm_calls,
+        llm_batches, failed_batches, institutions_unresolved, total_cost,
+        observed_model, model,
+    )
+    _raise_or_warn_on_batch_failures(
+        document_uid, llm_batches, failed_batches, institutions_unresolved,
+        stats['entries_enriched'],
+    )
+    return stats
 
 
 def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
@@ -451,14 +494,11 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     # Save cache
     save_institution_cache()
 
-    stats = _build_institution_enrichment_stats(
-        entries, institution_entries, cached_count, uncached_count, llm_calls,
+    stats = _finalize_stage5b_enrichment(
+        document_uid, entries, institution_entries, cached_count, uncached_count, llm_calls,
         llm_batches, failed_batches, institutions_unresolved, total_cost,
         observed_model, model,
     )
-
-    _raise_or_warn_on_batch_failures(
-        document_uid, llm_batches, failed_batches, institutions_unresolved, stats['entries_enriched'])
 
     if verbose:
         logger.info("Institutions enriched: %d/%d", stats['entries_enriched'], institution_entries)

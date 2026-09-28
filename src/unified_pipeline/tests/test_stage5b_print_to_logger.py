@@ -379,3 +379,32 @@ def test_run_stage5b_all_batches_succeed_stats_are_zero(monkeypatch, tmp_path):
     assert stats["llm_batches"] == 1
     assert stats["failed_batches"] == 0
     assert stats["institutions_unresolved"] == 0
+
+
+def test_institution_enrichment_stats_empty_dict_not_counted_as_enriched():
+    """#941 review point 2: is `institution_enrichment: {}` (a lookup that
+    ran and found nothing) distinct from None/absent (never attempted)?
+
+    Finding on this branch: no. The only writer of this key,
+    enrich_entry_with_result (stage_5b_institution_enrichment.py), always
+    assigns a 7-key dict that includes 'source': 'llm', so it is always
+    truthy -- {} is never actually produced by any code path here. But
+    _build_institution_enrichment_stats's falsy check doesn't know that, so
+    pin its behavior explicitly: {} and None/absent all count the same
+    (unenriched), in case a future writer ever does produce {}."""
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+
+    entries = [
+        {"taxonomy_code": "B1", "institution_enrichment": {}},
+        {"taxonomy_code": "B1", "institution_enrichment": None},
+        {"taxonomy_code": "B1"},
+        {"taxonomy_code": "B1", "institution_enrichment": {"source": "llm"}},
+    ]
+
+    stats = s5b._build_institution_enrichment_stats(
+        entries, institution_entries=4, cached_count=0, uncached_count=0,
+        llm_calls=0, llm_batches=0, failed_batches=0, institutions_unresolved=0,
+        total_cost=0.0, observed_model=None, model="gpt-5.1",
+    )
+
+    assert stats["entries_enriched"] == 1
