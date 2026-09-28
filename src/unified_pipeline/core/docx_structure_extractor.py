@@ -661,12 +661,12 @@ def _handle_table_row_zero(
     which case it is left for the per-row walk to recover as content
     instead. Also seeds `current_content_rows` with any text found after the
     header line in the same cell (e.g. "K. EXTRAMURAL...\\nAssociation of
-    Pediatric...").
+    Pediatric...") and, per #886, with row 0's OTHER cells when they carry a
+    genuine value the header text does not otherwise account for (e.g. a
+    one-row "Graduate Research Assistant" | "Aug 2019-May 2022" table).
 
     Pure move out of `extract_unified_elements` (#811 round 3, finding 2) --
-    behaviour unchanged. Caller only calls this once it has confirmed
-    `first_cell_text` looks like a header, so the form-label check below
-    does not need to re-test that.
+    behaviour unchanged except for the #886 addition noted above.
 
     Deliberately NOT reusing the header-left/content-right escape
     (`is_header_left_content_right_row`) here: routing a non-colon row 0
@@ -674,10 +674,10 @@ def _handle_table_row_zero(
     `\\n\\n`-embedded-header splitter, which builds single-cell synthetic
     rows and silently drops row 0's OTHER cells (found on a web206-shaped
     row: a non-colon, confidence-0.5 header like "Senior research fellow"
-    whose row 1 date range vanished when misrouted this way). A row 0
-    header-left/content-right layout (e.g. "CURRENT POSITION" | <address>)
-    is out of this ticket's scope and keeps today's existing table-level
-    header behavior.
+    whose row 1 date range vanished when misrouted this way). #886 recovers
+    row 0's other cells directly, below, via `split_merged_cells_in_row`
+    (the same primitive the per-row walk uses for an ordinary content row),
+    never by routing row 0 through that walk.
 
     Returns:
         (new_elements, unified_idx, num_table_headers_emitted, table_rows,
@@ -730,6 +730,7 @@ def _handle_table_row_zero(
     # This captures cases where a header line is followed by actual content
     # in the same cell (e.g., "K. EXTRAMURAL...\nAssociation of Pediatric...")
     # Only applies when row 0 was actually emitted as the table header above.
+    row0_other_cells_recovered = False
     if not row0_is_form_label and len(lines) > 1:
         remaining_content = '\n'.join(lines[1:]).strip()
         # Only treat as content if there's substantial text (multiple lines or >50 chars)
@@ -740,9 +741,25 @@ def _handle_table_row_zero(
                 # Create a modified row with the remaining content in cell 0
                 modified_row = [{"text": remaining_content}] + row_0[1:]
                 current_content_rows.append(modified_row)
+                row0_other_cells_recovered = True
             else:
                 # Single-cell row - just use the remaining content
                 current_content_rows.append([{"text": remaining_content}])
+
+    # #886: a one-row "Role | date-range" table (e.g. "Graduate Research
+    # Assistant" | "Aug 2019-May 2022") has a single-line, header-only cell
+    # 0 -- the branch above never fires -- yet row 0's OTHER cell(s) still
+    # carry a genuine, distinct value that the header text alone does not
+    # capture. Recover it the same way the per-row walk recovers a
+    # header-left/content-right row at index >= 1 (`split_merged_cells_in_row`
+    # on the row as-is), guarded by the same `row_has_nonblank_value_cells`
+    # predicate that already distinguishes a real value from a blank or
+    # gridSpan-duplicated trailing cell -- so a genuine header-only row 0
+    # (blank or duplicate trailing cells) is untouched. Skipped when the
+    # branch above already recovered row 0's other cells, to avoid emitting
+    # the same value twice.
+    if not row0_is_form_label and not row0_other_cells_recovered and row_has_nonblank_value_cells(row_0):
+        current_content_rows.extend(split_merged_cells_in_row(row_0))
 
     return new_elements, unified_idx, num_table_headers_emitted, table_rows, current_content_rows
 
