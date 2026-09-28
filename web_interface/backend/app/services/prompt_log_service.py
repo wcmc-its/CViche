@@ -93,7 +93,7 @@ _PROMPT_LOG_FILENAME_RE = re.compile(
 # both, but the short-circuit returned the "non-LLM stage" message before
 # the file walker ran. Keep only stages with zero LLM activity here.
 STAGES_WITHOUT_PROMPT_LOGS = {
-    '1a': "Stage 1a (Hierarchy Extraction) uses direct OpenAI API calls without prompt logging.",
+    '1a': "Stage 1a (Hierarchy Extraction) does not have prompt logging wired up.",
     '1b': "Stage 1b (Hierarchy Mapping) is a non-LLM stage - no prompts are used.",
     '5': "Stage 5 (PubMed Enrichment) is a non-LLM stage - uses PubMed API.",
 }

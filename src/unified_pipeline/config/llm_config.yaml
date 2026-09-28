@@ -4,7 +4,7 @@
 # block -> per-stage `stages:` overrides -> CVICHE_LLM_PROVIDER / CVICHE_LLM_MODEL
 # environment variables. Env vars override the `default` block only -- never an
 # explicit per-stage override. If this file is absent, the pipeline falls back
-# to openai / gpt-4o-mini.
+# to bedrock / us.anthropic.claude-sonnet-4-6 (config.py's DEFAULT_MODEL).
 #
 # See docs/LLM_MODELS.md for the model strategy, the Bedrock model-access
 # steps, and how to verify the inference-profile ID for your region.
@@ -18,9 +18,9 @@ default:
   temperature: 0
   retry_count: 3
   # Separate outage-scale budget (#810): a provider outage (ThrottlingException /
-  # ServiceUnavailableException / OpenAI RateLimitError, InternalServerError) pauses
-  # up to CVICHE_LLM_OUTAGE_BUDGET_SECONDS (env var; default 1800s/30min) before
-  # _call_with_retry gives up -- it does not count against retry_count above.
+  # ServiceUnavailableException) pauses up to CVICHE_LLM_OUTAGE_BUDGET_SECONDS
+  # (env var; default 1800s/30min) before _call_with_retry gives up -- it does
+  # not count against retry_count above.
   # Global output ceiling for any call that does not pass an explicit
   # max_tokens=. Without it, Bedrock applies the MODEL's own default ceiling
   # (~64,000 tokens for these Claude models), so a misbehaving prompt can run

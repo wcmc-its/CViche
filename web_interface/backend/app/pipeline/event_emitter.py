@@ -19,7 +19,13 @@ import uuid
 from fastapi import WebSocket
 from datetime import datetime
 
-from app.pipeline.redis_broker import EVENTS_PATTERN
+from app.pipeline.redis_broker import EVENTS_CHANNEL
+
+# How long one get_message() waits before looping; well under redis-py 8's 5s
+# default socket_timeout, which is what killed the blocking listen() (#960).
+SUBSCRIBER_POLL_SECONDS = 1.0
+# Pause before resubscribing after an error, so a down Valkey isn't hammered.
+SUBSCRIBER_RETRY_SECONDS = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -86,13 +92,13 @@ class EventEmitter:
         return self._broker is not None and self._broker.enabled
 
     async def startup(self) -> None:
-        """Start the subscriber loop when the broker is enabled. A single
-        pattern subscription covers every run's event channel for this worker."""
+        """Start the subscriber loop when the broker is enabled. One channel
+        carries every run's events; see EVENTS_CHANNEL for why not a pattern."""
         if not self._enabled:
             return
         client = await self._broker.async_client()
         self._pubsub = client.pubsub()
-        await self._pubsub.psubscribe(EVENTS_PATTERN)
+        await self._pubsub.subscribe(EVENTS_CHANNEL)
         self._subscriber_task = asyncio.create_task(self._subscribe_loop())
 
     async def shutdown(self) -> None:
@@ -103,6 +109,9 @@ class EventEmitter:
             except asyncio.CancelledError:
                 pass
             self._subscriber_task = None
+        await self._close_pubsub()
+
+    async def _close_pubsub(self) -> None:
         if self._pubsub is not None:
             try:
                 await self._pubsub.aclose()
@@ -111,24 +120,29 @@ class EventEmitter:
             self._pubsub = None
 
     async def _subscribe_loop(self) -> None:
-        """Receive published events and fan them out to local sockets."""
-        try:
-            async for message in self._pubsub.listen():
-                if message.get("type") != "pmessage":
-                    continue
-                channel = message["channel"]
-                if isinstance(channel, bytes):
-                    channel = channel.decode()
-                # channel == cviche:run:{run_id}:events
-                run_id = channel.split(":")[2]
-                data = message["data"]
-                if isinstance(data, bytes):
-                    data = data.decode()
-                await self._deliver_local(run_id, data)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.warning("subscriber loop error", exc_info=True)
+        """Receive published events and fan them out to local sockets.
+
+        Polls with a short timeout instead of a blocking listen(): redis-py 8
+        defaults socket_timeout to 5s, so an idle listen() raised TimeoutError
+        after 5s on prod (#960). And an error never ends the loop -- it drops
+        the subscription and resubscribes, since nothing else would restart it
+        and every brokered event depends on it."""
+        while True:
+            try:
+                if self._pubsub is None:
+                    self._pubsub = (await self._broker.async_client()).pubsub()
+                    await self._pubsub.subscribe(EVENTS_CHANNEL)
+                message = await self._pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=SUBSCRIBER_POLL_SECONDS)
+                if message is not None:
+                    envelope = json.loads(message["data"])
+                    await self._deliver_local(envelope["run_id"], json.dumps(envelope["event"]))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("subscriber loop error; resubscribing", exc_info=True)
+                await self._close_pubsub()
+                await asyncio.sleep(SUBSCRIBER_RETRY_SECONDS)
 
     async def _send_one(self, websocket: WebSocket, message: str, *,
                         is_terminal: bool) -> bool:
@@ -260,7 +274,7 @@ class EventEmitter:
                                 input_tokens_total: int = 0, output_tokens_total: int = 0,
                                 cache_read_tokens_delta: int = 0, cache_write_tokens_delta: int = 0,
                                 cache_read_tokens_total: int = 0, cache_write_tokens_total: int = 0,
-                                provider: str = "openai"):
+                                provider: str = "bedrock"):
         """Emit real-time cost updates as LLM calls complete.
 
         Cache token fields carry the Bedrock prompt-caching split (input
