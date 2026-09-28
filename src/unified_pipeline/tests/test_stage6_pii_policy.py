@@ -800,7 +800,7 @@ def test_email_local_part_sharing_a_fallback_word_as_its_own_segment_is_still_sp
 _FALLBACK_A_TEXT = (
     "Dana Example. Name field intentionally left blank on the source "
     "form. Email: dana@state.edu. Alternate email: dana.alt@example.com. "
-    "A Gmail account is also on file. Phone Number: 212-555-0100. Home "
+    "A Gmail account is also on file. Phone Number: 212-555-0100. Mailing "
     "Address: 1 Example St, Room 204, Floor 3. This profile does not "
     "list some fields and the text is limited. Previously affiliated "
     "with MIT. Research area: leg biomechanics. New Haven, CT."
@@ -1496,3 +1496,38 @@ def test_explicit_dob_label_with_a_whole_date_is_caught_after_any_prefix(text, e
 def test_explicit_dob_label_narrowing_stays_refused_without_all_three_conditions(text):
     assert redact_pre_llm_values(text) == text
     assert not _denied(text, CONTENT)
+
+
+# --------------------------------------------------------------------------
+# #849: a policy label one plain space after another field's value
+#
+# The stop is the KNOWN-label vocabulary (`_KNOWN_FIELD_LABEL_RE`), never a
+# guess at where a value ends (#821 R4). All values synthetic.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, kept, gone", [
+    ("Citizenship: US Date of Birth: March 1971", "Citizenship: US", "March 1971"),
+    ("Citizenship: US Social Security Number: 900 12 3456", "Citizenship: US", "900 12 3456"),
+    ("Citizenship: US Born: 03/04/1971", "Citizenship: US", "03/04/1971"),
+    ("Citizenship: US Place of Birth: Springfield", "Citizenship: US", "Springfield"),
+    ("Nationality: Dual Citizen Marital Status: Married", "Nationality: Dual Citizen", "Married"),
+    ("Date of Birth: 03/04/1971 Marital Status: Married", "", "Married"),
+])
+def test_849_policy_label_after_a_known_field_value_is_withheld(text, kept, gone):
+    assert _pii_fragments(text)
+    entries = {"A": [{"text": text, "taxonomy_code": "A", "extracted_fields": {}}]}
+    result = _run(entries)
+    residual = entries["A"][0]["text"]
+    assert gone not in residual
+    assert kept in residual
+    assert result.withheld
+
+
+@pytest.mark.parametrize("text", [
+    "Gave a talk on Date of Birth: a history of the census",  # no known label before it
+    "Citizenship: US Member of the Social Security Number society",  # label words, no colon
+    "Note: gave a talk on Date of Birth: a history",           # a colon, but not a KNOWN label
+    "Citizenship: US Appointed 2005",                       # no policy label at all
+])
+def test_849_prose_containing_a_label_word_is_not_cut(text):
+    assert _pii_fragments(text) == []
