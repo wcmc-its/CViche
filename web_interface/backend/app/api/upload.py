@@ -180,7 +180,7 @@ class _EstimatePerUserWindow:
         max_calls: int,
         window_seconds: int,
         clock: Callable[[], float] = time.monotonic,
-    ):
+    ) -> None:
         self._max_calls = max_calls
         self._window_seconds = window_seconds
         self._clock = clock
