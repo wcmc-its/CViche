@@ -101,7 +101,7 @@ def test_published_event_delivered_to_local_socket_via_subscriber():
     ws = FakeWS()
 
     async def scenario():
-        await emitter.startup()              # async subscriber loop (psubscribe)
+        await emitter.startup()              # async subscriber loop
         await emitter.connect("RUN1", ws)
         await emitter.emit("RUN1", {"event": "LOG", "message": "via-redis"})
         for _ in range(100):                 # let the subscriber loop deliver
@@ -114,6 +114,37 @@ def test_published_event_delivered_to_local_socket_via_subscriber():
     asyncio.run(scenario())
     assert len(ws.sent) == 1
     assert "via-redis" in ws.sent[0]
+
+
+def test_delivery_works_when_server_rejects_psubscribe(monkeypatch):
+    """Prod Valkey (ElastiCache Serverless) answers PSUBSCRIBE with "unknown
+    command". fakeredis accepts it, which is how #960 shipped with this suite
+    green -- so make the fake reject it the same way and prove delivery works."""
+    import redis.asyncio.client
+    from redis.exceptions import ResponseError
+
+    async def rejected(self, *args, **kwargs):
+        raise ResponseError("unknown command 'psubscribe'")
+
+    monkeypatch.setattr(redis.asyncio.client.PubSub, "psubscribe", rejected)
+    broker, _ = _fakeredis_broker()
+    emitter = EventEmitter(broker)
+    ws = FakeWS()
+
+    async def scenario():
+        await emitter.startup()
+        await emitter.connect("RUN1", ws)
+        await emitter.emit("RUN1", {"event": "LOG", "message": "no-pattern"})
+        for _ in range(100):
+            if ws.sent:
+                break
+            await asyncio.sleep(0.01)
+        await emitter.shutdown()
+        await broker.shutdown()
+
+    asyncio.run(scenario())
+    assert len(ws.sent) == 1
+    assert "no-pattern" in ws.sent[0]
 
 
 def test_subscriber_only_delivers_to_matching_run():
