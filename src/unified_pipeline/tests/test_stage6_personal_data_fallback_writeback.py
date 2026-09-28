@@ -605,6 +605,247 @@ def test_a_structured_address_naming_both_slots_fills_both_rows(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# #946 item 1: the label nearest the number outranks the block heading, and
+# a consumer-domain email is the owner's personal email.
+# --------------------------------------------------------------------------
+
+def _home_block(number_label, email="jdoe.cvtest@gmail.com", email_key="personal_email"):
+    """A HOME ADDRESS block in the tab-joined shape stage 2 emits for a
+    one-row source table: heading, two address lines, a labelled number and
+    an email -- the run ZA1VOV shape, synthesized."""
+    return _a(f"HOME ADDRESS\t10 Elm Street Apt 2\tRye, NY 10580\t"
+              f"{number_label} 212.555.0142\t{email}",
+              {"phone": "212.555.0142", email_key: email,
+               "address": "10 Elm Street Apt 2, Rye, NY 10580"})
+
+
+@pytest.mark.parametrize("label", ["(c)", "c:", "c.", "cell.", "mob", "(m)", "m:",
+                                   "(C)", "Mobile:"])
+def test_a_cell_label_at_the_number_beats_a_home_block_heading(tmp_path, label):
+    """Every number here sits in a HOME ADDRESS block and routed to
+    home_phone, where #821 withholds it -- the owner's labelled cell phone
+    never reached the Cell phone row. The home address itself is still
+    withheld."""
+    rows, gen = _render(tmp_path, entries=[_home_block(label)])
+
+    assert rows.get("cell phone:") == "212.555.0142", label
+    assert rows.get("office telephone:", "") == ""
+    assert rows.get("home address:", "") == ""
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
+
+
+@pytest.mark.parametrize("label", ["(h)", "h:", "Home phone:", ""])
+def test_a_home_labelled_or_unlabelled_number_in_a_home_block_stays_withheld(
+        tmp_path, label):
+    """#821 still applies to a number the owner labelled home, and to one
+    carrying no label of its own inside a home block."""
+    rows, gen = _render(tmp_path, entries=[_home_block(label)])
+
+    assert rows.get("cell phone:", "") == ""
+    assert rows.get("office telephone:", "") == ""
+    assert "212.555.0142" not in " ".join(rows.values())
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
+
+
+def test_a_home_label_at_the_number_beats_a_cell_word_elsewhere_in_the_entry(tmp_path):
+    """The nearest label decides in the other direction too: 'Cell' naming
+    a DIFFERENT number must not pull an "(h)" number into the Cell row."""
+    rows, gen = _render(tmp_path, entries=[
+        _a("Contact\tCell: 917-555-0100\t(h) 212-555-0142", {"phone": "212-555-0142"}),
+    ])
+
+    assert rows.get("cell phone:", "") == ""
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
+
+
+# One row per email-routing edge case, rendered end to end: the row the
+# address lands in, and that the other email row stays empty.
+_WORK, _PERSONAL = "work email:", "personal email:"
+_GMAIL, _WCM = "jdoe.cvtest@gmail.com", "zzz9999@med.cornell.edu"
+
+
+@pytest.mark.parametrize("entry, row, address", [
+    # a consumer address in a HOME ADDRESS block is the personal email
+    pytest.param(_home_block("(c)"), _PERSONAL, _GMAIL, id="consumer-in-home-block"),
+    # ... unless its own label calls it work
+    pytest.param(_a(f"Contact\tWork email: {_GMAIL}", {"email": _GMAIL}),
+                 _WORK, _GMAIL, id="consumer-labelled-work"),
+    # only the label between the previous separator and the address owns it
+    pytest.param(_a(f"Office: 1300 York Avenue\t{_GMAIL}", {"email": _GMAIL}),
+                 _PERSONAL, _GMAIL, id="work-word-in-another-segment"),
+    # an institutional address in a home block stays work
+    pytest.param(_home_block("(c)", email=_WCM, email_key="email"),
+                 _WORK, _WCM, id="institutional-in-home-block"),
+    # a stage-4 work_email key outranks the consumer domain
+    pytest.param(_a(f"Contact\t{_GMAIL}", {"work_email": _GMAIL}),
+                 _WORK, _GMAIL, id="work-email-key"),
+    # no stage-4 email field: the per-entry text fallback finds it, and it
+    # routed straight to Work email before whatever labelled it
+    pytest.param(_a(f"Office Phone: 212-555-0100\t\t\tHome Email: {_GMAIL}",
+                    {"phone": "212-555-0100"}),
+                 _PERSONAL, _GMAIL, id="text-fallback-home-email"),
+])
+def test_an_email_renders_in_the_row_its_domain_key_and_label_choose(
+        tmp_path, entry, row, address):
+    rows, _gen = _render(tmp_path, entries=[entry])
+
+    other = _PERSONAL if row == _WORK else _WORK
+    assert rows.get(row) == address
+    assert rows.get(other, "") == "", f"the address rendered in {other!r} too"
+
+
+@pytest.mark.parametrize("phone, text, expected", [
+    ("212.555.0142", "home\t(c) 212.555.0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "(c) +1 212 555 0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212.555.0142", "cell 917.555.0100\th: 212.555.0142",
+     personal_data_module._PHONE_LABEL_HOME),
+    ("212.555.0142", "home address\t212.555.0142", None),
+    ("212.555.0142", "(c) 917.555.0100", None),
+    # a short extracted value must not pair with a longer number it ends
+    ("0142", "(c) 555-0142", None),
+    ("212.555.0142; 917.555.0100", "(c) 212.555.0142; (h) 917.555.0100", None),
+    # a country code on the extracted value, none in the text
+    ("+1 212-555-0142", "(c) 212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "(c)212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "cell 917-555-0100\thome: 212-555-0142",
+     personal_data_module._PHONE_LABEL_HOME),
+    ("212-555-0142", "cell 917-555-0100\thome phone: 212-555-0142",
+     personal_data_module._PHONE_LABEL_HOME),
+    ("212-555-0142", "cell 917-555-0100\thome telephone: 212-555-0142",
+     personal_data_module._PHONE_LABEL_HOME),
+    # a cell label written after the number, or combined with home
+    ("212-555-0142", "home 212-555-0142 (cell)", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "home phone: 212-555-0142 (mobile)",
+     personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "cell/home: 212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "mobile/home phone: 212-555-0142",
+     personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "home/cell: 212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    # a "(cell)" followed by another number labels that number, not this one
+    ("212-555-0142", "(o) 212-555-0142 (cell) 917-555-0100", None),
+    # a "(cell)" after a DIFFERENT number does not label this one
+    ("212-555-0142", "(h) 212-555-0142; 917-555-0100 (cell)",
+     personal_data_module._PHONE_LABEL_HOME),
+    # a lone letter after a word, or inside one, is not a label
+    ("212-555-0142", "room m: 212-555-0142", None),
+    ("212-555-0142", "building c. 212-555-0142", None),
+    ("212-555-0142", "abc: 212-555-0142", None),
+    ("212-555-0142", "room h: 212-555-0142", None),
+    ("212-555-0142", "office\tm. 212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    # a tab or a column separator between the label and the number
+    ("212-555-0142", "home\tcell:\t212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "home | (c) 212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "cell: 917-555-0100 | h: 212-555-0142",
+     personal_data_module._PHONE_LABEL_HOME),
+    ("212-555-0142", "home; mobile no. 212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    # trailing parenthetical labels: only cell words, and a tab after is fine
+    ("212-555-0142", "home 212-555-0142 (cellular)", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "home 212-555-0142 (mobile)\tjdoe@gmail.com",
+     personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "contact 212-555-0142 (c)", None),
+    ("212-555-0142", "contact 212-555-0142 (home)", None),
+    # a dict holding two numbers pairs with neither
+    ({"cell": "212-555-0142", "office": "917-555-0100"}, "(c) 212-555-0142", None),
+])
+def test_nearest_phone_label_pairs_only_the_extracted_number(phone, text, expected):
+    parsed = personal_data_module._PhoneNumber.parse(phone)
+    assert personal_data_module._nearest_phone_label(parsed, text) == expected
+
+
+@pytest.mark.parametrize("left, right, expected", [
+    ("212.555.0142", "(212) 555-0142", True),
+    ("+1 212 555 0142", "212-555-0142", True),
+    ("+44 20 7946 0958", "020 7946 0958", False),
+    ("20 7946 0958", "+44 20 7946 0958", True),
+    # below the seven-digit minimum nothing pairs, even an exact match
+    ("55-0142", "55-0142", False),
+    ("555-0142", "555-0142", True),
+    # ... on either side: a six-digit tail of a seven-digit number
+    ("555-0142", "55-0142", False),
+    # a longer prefix than a country code is a different number
+    ("212-555-0142; 917-555-0100", "917-555-0100", False),
+])
+def test_phone_number_pairs_across_spellings_and_country_prefixes(left, right, expected):
+    phone = personal_data_module._PhoneNumber.parse
+    assert phone(left).is_same_number(phone(right)) is expected
+    assert phone(right).is_same_number(phone(left)) is expected
+
+
+def test_the_first_stage4_email_key_decides_the_row(tmp_path):
+    """`email` precedes `personal_email`: the institutional address is the
+    one read, and it goes to Work."""
+    rows, _gen = _render(tmp_path, entries=[
+        _a("Contact\tzzz9999@med.cornell.edu",
+           {"email": "zzz9999@med.cornell.edu", "personal_email": "jdoe.cvtest@gmail.com"}),
+    ])
+
+    assert rows.get("work email:") == "zzz9999@med.cornell.edu"
+    assert rows.get("personal email:", "") == ""
+
+
+@pytest.mark.parametrize("email, work, personal, expected", [
+    ("jdoe2.cvtest@gmail.com", None, "jdoe.cvtest@gmail.com", (None, "jdoe.cvtest@gmail.com")),
+    ("zzz9998@med.cornell.edu", "zzz9999@med.cornell.edu", None,
+     ("zzz9999@med.cornell.edu", None)),
+])
+def test_route_email_keeps_a_row_first_value(email, work, personal, expected):
+    assert personal_data_module._route_email(email, "contact", None, work, personal) == expected
+
+
+# Spelled out rather than read from the module, so dropping a domain from
+# _CONSUMER_EMAIL_DOMAINS fails here.
+_CONSUMER_DOMAINS = [
+    "gmail.com", "googlemail.com", "yahoo.com", "ymail.com", "yahoo.co.uk",
+    "hotmail.com", "hotmail.co.uk", "outlook.com", "live.com", "msn.com",
+    "icloud.com", "me.com", "mac.com", "aol.com", "protonmail.com", "proton.me",
+    "comcast.net", "verizon.net", "att.net",
+]
+
+
+@pytest.mark.parametrize("domain", _CONSUMER_DOMAINS)
+def test_each_consumer_domain_is_a_personal_email(domain):
+    assert personal_data_module._is_personal_email(
+        personal_data_module._EmailAddress.parse(f"jdoe@{domain}"), "contact", None)
+
+
+@pytest.mark.parametrize("email, text, field_key, expected", [
+    ("zzz9999@med.cornell.edu", "contact\tzzz9999@med.cornell.edu", None, False),
+    # a work_email key decides; a personal_email key does not outrank the domain
+    ("jdoe.cvtest@gmail.com", "contact", "work_email", False),
+    ("jdoe.cvtest@gmail.com", "personal: x", "work_email", False),
+    ("zzz9999@med.cornell.edu", "home\tzzz9999@med.cornell.edu", "personal_email", False),
+    ("jdoe.cvtest@gmail.com", "contact", "email", True),
+    # the address is matched case- and space-insensitively
+    (" JDoe.CVTest@Gmail.com ", "contact\tjdoe.cvtest@gmail.com", None, True),
+    (" JDoe.CVTest@Gmail.com ", "work email: jdoe.cvtest@gmail.com", None, False),
+    # every work word labels it
+    ("jdoe.cvtest@gmail.com", "work email: jdoe.cvtest@gmail.com", None, False),
+    ("jdoe.cvtest@gmail.com", "office email: jdoe.cvtest@gmail.com", None, False),
+    ("jdoe.cvtest@gmail.com", "business email: jdoe.cvtest@gmail.com", None, False),
+    ("jdoe.cvtest@gmail.com", "institution: jdoe.cvtest@gmail.com", None, False),
+    # ... written after the address too, but only as its own parenthetical
+    ("jdoe.cvtest@gmail.com", "jdoe.cvtest@gmail.com (work)", None, False),
+    ("jdoe.cvtest@gmail.com", "jdoe.cvtest@gmail.com, office: 1300 york ave", None, True),
+    # every separator ends the label zone of the field before it
+    ("jdoe.cvtest@gmail.com", "office: 1300 york ave\tjdoe.cvtest@gmail.com", None, True),
+    ("jdoe.cvtest@gmail.com", "office: 1300 york ave\njdoe.cvtest@gmail.com", None, True),
+    ("jdoe.cvtest@gmail.com", "office: 1300 york ave; jdoe.cvtest@gmail.com", None, True),
+    ("jdoe.cvtest@gmail.com", "office: 1300 york ave | jdoe.cvtest@gmail.com", None, True),
+    # ... the LAST separator before the address, not the first
+    ("jdoe.cvtest@gmail.com", "contact\toffice: 1300 york ave\tjdoe.cvtest@gmail.com",
+     None, True),
+    # a parenthetical further along labels something else
+    ("jdoe.cvtest@gmail.com", "jdoe.cvtest@gmail.com\tfax (office) 212-555-0199", None, True),
+    # an address not found in the text is judged on the whole text
+    ("jdoe.cvtest@gmail.com", "work email: jdoe.cvtest at gmail", None, False),
+])
+def test_is_personal_email_reads_the_key_the_domain_and_the_label(
+        email, text, field_key, expected):
+    parsed = personal_data_module._EmailAddress.parse(email)
+    assert personal_data_module._is_personal_email(parsed, text, field_key) is expected
+
+
+# --------------------------------------------------------------------------
 # name precedence.
 # --------------------------------------------------------------------------
 
