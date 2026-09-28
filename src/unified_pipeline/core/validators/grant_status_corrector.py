@@ -34,6 +34,9 @@ _PENDING_STATUS_TEXT_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A year that starts a range: the single-year fallback must not read it (#981).
+_UNREAD_RANGE_RE = re.compile(r'\b(?:19|20)\d{2}\s*[-–—]')
+
 
 def extract_year_range(text: str) -> tuple[int, int] | None:
     """
@@ -41,7 +44,7 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
 
     Patterns handled:
     - "2019-2021" or "2019–2021" or "2019—2021"
-    - "2019-present" or "2019-Present"
+    - "2019-present" or "2019-Present", "04/08/2021 – date"
     - "2019-2021" (4-digit years)
     - "2019-21" (2-digit end year)
     - "01/2019-12/2021" (MM/YYYY format)
@@ -71,10 +74,16 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
         end = 2000 + end_suffix if end_suffix < 50 else 1900 + end_suffix
         return start, end
 
-    # Pattern 3: YYYY-present
-    match = re.search(r'\b(19\d{2}|20\d{2})\s*[-–—]\s*present\b', text_lower)
+    # Pattern 3: an open end, "2019-present" or "04/08/2021 – date" (#981)
+    match = re.search(r'\b(19\d{2}|20\d{2})\s*[-–—]\s*(?:present|date)\b', text_lower)
     if match:
         return int(match.group(1)), CURRENT_YEAR + 1  # Still active
+
+    # A year followed by a range dash is a range none of the patterns above
+    # could read ("2022-03/312027", "2019 - Dec 2021"). Its start year is not
+    # its end, so no single-year guess (#981).
+    if _UNREAD_RANGE_RE.search(text):
+        return None
 
     # Pattern 4: Just a single year (assume single year grant)
     # Only if it looks like a grant context

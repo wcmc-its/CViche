@@ -48,7 +48,16 @@ def _grant(code, text, *hierarchy):
     ('Example Grant with no dates at all', None),
     # Two digits after a hyphen that are a month or day, not a year (#981).
     ('03/01/2024-\n12/31/28 Example Grant', None),
-    ('03/01/2024-12/31/28 Example Grant $50,000', (2024, 2024)),
+    # A range none of the patterns reads is no range at all: its start year is
+    # not a single-year grant (#981; web46's typo, the two-digit-year end above).
+    ('03/01/2024-12/31/28 Example Grant $50,000', None),
+    ('04/01/2022-03/312027 Example Grant $1,000,000', None),
+    ('2019 - Dec 2021 Example Grant $50,000', None),
+    # An open end written "– date" is still running (#981; web36's contracts).
+    ('04/08/2021 – date  Example Contract  Award: $2,638,299', (2021, TEST_YEAR + 1)),
+    ('2019-Date Example Grant', (2019, TEST_YEAR + 1)),
+    # "date" as a word after the dash only, not "update" or "dated".
+    ('2019-dated memo $50,000', None),
 ])
 def test_extract_year_range(text, expected):
     assert extract_year_range(text) == expected
@@ -58,6 +67,23 @@ def test_a_current_grant_with_a_split_date_range_is_not_filed_as_past():
     """web207: "03/01/2024-<newline>12/31/2028" read as 2024-2012 forced M2B."""
     entry = _grant('M2A', '03/01/2024-\n12/31/2028 | R01 Example Grant',
                    'Grants and Contracts Received')
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2A'
+
+
+def test_an_open_ended_contract_written_to_date_stays_current():
+    """web36: "04/08/2021 – date" with an award amount read as the single year
+    2021 and forced M2B; the contract is still running."""
+    entry = _grant('M2A', '04/08/2021 – date  Example Contract  Award: $2,638,299',
+                   'Grants and Salary Support')
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2A'
+
+
+def test_a_range_with_a_typo_is_not_read_as_its_start_year():
+    """web46: "04/01/2022-03/312027" fell through to the single-year guess, 2022."""
+    entry = _grant('M2A', '04/01/2022-03/312027 Example Grant $1,000,000',
+                   'Research Support', 'Present')
 
     assert correct_grant_status(entry)['taxonomy_code'] == 'M2A'
 
