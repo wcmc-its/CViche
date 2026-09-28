@@ -136,6 +136,37 @@ def _extract_year_from_text(text: str) -> str | None:
     return None
 
 
+# Words a column header may carry besides its section's keywords: "Name of
+# award", "Date awarded (yyyy)", "Year | Committee Name". They are column-label
+# vocabulary, not content: a cell made ONLY of keywords and these is a header,
+# and a cell with any other word ("Best Teaching Award") is not.
+_HEADER_FILLER_WORDS = frozenset({
+    'name', 'of', 'the', 'and', 'or', 'awarded', 'received', 'issued', 'yyyy',
+    'mm', 'yy', 'dd', 'mm/yy', 'mm/yyyy', 'title', 'position', 'role', 'type',
+    'location', 'activity', 'committee', 'journal', 'service', 'served',
+    'period', 'years', 'year', 'current', 'last', 'known', 'degree', 'amount',
+    'nature', 'in', 'to', 'from', 'present', 'supervised', 'attended',
+    'obtained', 'specialization', 'department', 'mentor', 'training',
+    'student', 'dissertation', 'essay', 'project', 'course', 'description',
+    'person', 'month', 'body'})
+
+
+def _is_header_cell(cell: str, header_keywords: list[str]) -> bool:
+    """Is every word of this cell a header keyword or a header filler word?
+
+    A cell holding a year is a date value, which a header row names but never
+    carries.
+    """
+    if re.search(r'\b\d{4}\b', cell):
+        return False
+    words = re.findall(r"[a-z/]+", cell.replace('(s)', 's'))
+    if not words:
+        return False
+    vocabulary = _HEADER_FILLER_WORDS | {kw.lower() for kw in header_keywords}
+    return all(w in vocabulary or (w.endswith('s') and w[:-1] in vocabulary)
+               for w in words)
+
+
 def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int = 2) -> bool:
     """Detect if an entry is actually a table header that was mistakenly extracted as data.
 
@@ -190,20 +221,15 @@ def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int
         if keyword_count >= threshold and pattern_matches >= 1:
             return True
 
-        # Also check for tab/pipe-separated header-only content
-        if ('\t' in text or '|' in text):
-            parts = re.split(r'[\t|]', text_lower)
-            # If all parts are short and most match header keywords, it's a header
-            if all(len(p.strip()) < 30 for p in parts if p.strip()):
-                parts_matching = sum(
-                    1 for p in parts
-                    # Same trailing optional "s" as the keyword-count path
-                    # above, so a plural column header ("Dates") still
-                    # matches keyword "date".
-                    if any(re.search(rf'\b{re.escape(kw.lower())}s?\b', p) for kw in header_keywords)
-                )
-                if parts_matching >= len(parts) * 0.5:
-                    return True
+        # Also check for tab/pipe-separated header-only content. A header row
+        # is a header only on POSITIVE evidence: every cell is made of header
+        # words (a section keyword or a filler word such as "name of"). One
+        # cell with any other word ("Best Teaching Award", "Purdue University")
+        # or a year is content, so the entry is data (#756).
+        if '\t' in text or '|' in text:
+            cells = [c for c in re.split(r'[\t|]', text_lower) if c.strip()]
+            if cells and all(_is_header_cell(c, header_keywords) for c in cells):
+                return True
 
     return False
 
