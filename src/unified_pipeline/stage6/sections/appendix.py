@@ -75,6 +75,7 @@ from ...core.template_boilerplate import (
     is_near_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
+    is_template_label_line,
     is_unanswered_prompt,
 )
 from ..formatting import _set_font
@@ -105,6 +106,7 @@ DROP_RENDERS_EMPTY = "renders-empty"
 DROP_COLUMN_HEADER = "column-header"
 DROP_NEAR_TEMPLATE_INSTRUCTION = "near-template-instruction"
 DROP_UNANSWERED_PROMPT = "unanswered-prompt"
+DROP_TEMPLATE_LABEL = "template-label"
 DROP_REASONS = (
     DROP_BLANK,
     DROP_TEMPLATE_INSTRUCTION,
@@ -113,6 +115,7 @@ DROP_REASONS = (
     DROP_COLUMN_HEADER,
     DROP_NEAR_TEMPLATE_INSTRUCTION,
     DROP_UNANSWERED_PROMPT,
+    DROP_TEMPLATE_LABEL,
 )
 
 
@@ -405,6 +408,8 @@ def _appendix_drop_reason(text: str, rendered: str) -> str | None:
         return DROP_NEAR_TEMPLATE_INSTRUCTION
     if is_unanswered_prompt(text):
         return DROP_UNANSWERED_PROMPT
+    if is_template_label_line(text):
+        return DROP_TEMPLATE_LABEL
     return None
 
 
