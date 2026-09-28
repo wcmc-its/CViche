@@ -230,11 +230,25 @@ list one reply at a time. The rule is `CODING_STANDARDS.md` §6.9.
 single reviewer. This is a change from older notes that describe Mahender as a
 gate; he still reviews, but he is not a blocker.
 
-Two rules that did not change:
+Two rules:
 
-1. **Only merge when the human asks for it.** Merge rights are not standing
-   permission to merge your own work.
-2. **CI must be actually green**, not "green locally". `ci.yml` runs on PRs to
+1. **Merge your own high-confidence PRs yourself (changed 2026-09-28, at
+   Mahender's request).** Before that date the rule was "only merge when the
+   human asks". A PR is high-confidence when all of these hold:
+   - It is yours. A PR you have handed to Mahender (assigned to `mrj4001`) is
+     his to merge.
+   - CI is actually green (rule 2).
+   - Every review comment is answered, and nothing on the PR or its issue is
+     waiting on a decision.
+   - The description carries the evidence for the gate its kind of change
+     requires (`CODING_STANDARDS.md` §6.3). For a stage-6 change, that includes
+     the render gate.
+   - It is based on `origin/dev`, not stacked, and it merges without conflicts.
+
+   If any of these fails, or the PR itself names a judgement call, ask before
+   merging. After the merge, check that every `Closes #N` fired (see below).
+2. **CI must be actually green**, not "green locally". A job that failed with
+   zero steps (an Actions billing or outage failure) is not green. `ci.yml` runs on PRs to
    `dev` and `main`: `backend-tests`, `pipeline-tests`, `frontend-typecheck`,
    `type-check`. `deps-audit.yml` runs only when a requirements file changes.
 
