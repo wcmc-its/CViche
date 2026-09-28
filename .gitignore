@@ -58,8 +58,10 @@ web_interface/docker-compose.override.yml
 **/scratch/
 
 # Templates
-key_files/
+key_files/*
 !key_files/wcm_cv_template_faculty_october_2022_final.docx
+!key_files/wcm_cv_template_for_website_2020.docx
+!key_files/curriculum_vitae_format_2012.docx
 
 # Archive
 archive/

@@ -166,8 +166,10 @@ NEAR_MATCHES = [
     # an extra comma, plus the faculty member's "N/A" answer appended
     "Include year(s), leadership role, and description of activity/program, i.e., "
     "director/head of service/clinic or procedure area.: N/A",
-    # "YES or NO" answered "N/A": 0.934, just over the threshold
-    "Have you passed the examination for foreign medical school graduates? N/A",
+    # the 2022 label without "as teacher": 0.933, just over the threshold. (The
+    # fixture here used to be "Have you passed the examination ...? N/A",
+    # which the 2020 revision now matches exactly -- #829.)
+    "Continuing education and professional education (role and scope of activity)",
 ]
 
 
@@ -229,6 +231,49 @@ def test_an_unanswered_prompt_is_detected(text):
 ])
 def test_an_answered_or_unrecognised_line_is_not_unanswered(text):
     assert not is_unanswered_prompt(text)
+
+
+# --- #829: the phrase set covers every tracked template revision ---
+
+def test_the_committed_phrase_set_is_what_the_generator_produces(tmp_path, monkeypatch):
+    """template_boilerplate_phrases.json is generated, never hand-edited:
+    regenerating it from key_files/ must reproduce the committed file."""
+    import importlib.util
+    import json
+    root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(
+        "gen_template_boilerplate", root / "scripts" / "gen_template_boilerplate.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    out = tmp_path / "phrases.json"
+    monkeypatch.setattr(gen, "OUTPUT_PATH", out)
+    gen.main()
+    committed = root / "src" / "unified_pipeline" / "core" / "template_boilerplate_phrases.json"
+    assert json.loads(out.read_text()) == json.loads(committed.read_text())
+
+
+@pytest.mark.parametrize("text", [
+    # 2020 revision only: its licensure note (not in the 2022 file at all)
+    "Licensure: Every physician appointed to the Hospital staff, except interns, "
+    "and aliens in the US via non-immigrant visas, must have a New York State "
+    "license or a temporary certificate in lieu of the license.",
+    # 2012 revision only
+    "(Every doctor appointed to the Hospital staff, except interns and aliens in "
+    "the US via non-immigrant visas, must have a New York State license or a "
+    "temporary certificate in lieu of the license.)",
+])
+def test_older_revisions_instructions_are_boilerplate(text):
+    assert is_template_instruction(text)
+
+
+@pytest.mark.parametrize("header", [
+    "B. EDUCATIONAL BACKGROUND",               # 2012
+    "PROFESSIONAL POSITIONS AND EMPLOYMENT",   # 2012 and 2020
+    "LICENSURE, BOARD CERTIFICATION, MALPRACTICE",
+])
+def test_older_revisions_section_headers_are_never_dropped(header):
+    assert not is_template_instruction(header)
+    assert not is_near_template_instruction(header)
 
 
 def test_layer1_integration_filter():
