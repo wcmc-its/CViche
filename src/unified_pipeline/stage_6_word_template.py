@@ -1102,9 +1102,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if primary:
                 logger.info(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
-        # Original-document discovery and the Stage 4.5 research-summary load
-        # are lifted out to their own helpers (#820 R3, pure moves -- §3.2):
-        # identical bodies, no behaviour change.
+        # Original-document discovery and the Stage 4.5 research-summary load are
+        # lifted out to their own helpers (#820 R3, pure moves -- §3.2): identical bodies, no behaviour change.
         original_doc_path = self._resolve_original_doc_path(
             document_uid, original_doc_path)
         research_summary_data = self._load_research_summary_data(
