@@ -544,6 +544,12 @@ def test_is_invented_record_false_below_the_min_values_floor():
     # (the G/Institutional-Affiliation shape: a single unfilled prompt label
     # legitimately echoes back with a blank companion cell).
     assert not _is_invented_record({"affiliation_type": _BOARD_LABEL})
+    # Isolate the count guard from the length guard: "Board / Organization
+    # Name" alone is exactly 25 chars (== _MIN_EXACT_LEN), long enough on
+    # its own to pass the length floor, so this fails ONLY on value count.
+    long_single_label = "Board / Organization Name"
+    assert len(long_single_label) == _MIN_EXACT_LEN
+    assert not _is_invented_record({"granting_body": long_single_label})
 
 
 def test_is_invented_record_false_below_the_combined_length_floor():
