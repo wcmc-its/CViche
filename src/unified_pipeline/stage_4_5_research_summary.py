@@ -115,15 +115,23 @@ def latest_entry_year(entry: dict, current_year: int) -> int | None:
     token, taking a range's END year ("Project A, 2021-2023" -> 2023, a
     2004-2024 range is recent work, not 2004 (#947 round 3)), not the max of
     every year mentioned (a later aside, such as a renewal year, must not
-    make an old entry look recent). A token (bare year or range end) after
-    current_year is a typo or forward-looking projection and is skipped,
-    capped at current_year, in favour of the next token in the text."""
+    make an old entry look recent). A range straddling current_year (start
+    <= current_year < end, e.g. "Project 2022-2028" at current_year=2026) is
+    an entry still in progress and is capped at current_year, not skipped in
+    favour of a later token. A bare year after current_year, or a range
+    whose START is after current_year, is a typo or forward-looking
+    projection and is skipped in favour of the next token in the text."""
     fields = entry.get('extracted_fields') or {}
     field_years = [int(y) for name in DATE_FIELDS for y in YEAR_PATTERN.findall(str(fields.get(name) or ''))]
     if field_years:
         return max(field_years)
     for start, end in LEADING_YEAR_OR_RANGE_PATTERN.findall(entry.get('text') or ''):
-        candidate = int(end) if end else int(start)
+        if end:
+            start_year, end_year = int(start), int(end)
+            if start_year > current_year:
+                continue
+            return min(end_year, current_year)
+        candidate = int(start)
         if candidate <= current_year:
             return candidate
     return None

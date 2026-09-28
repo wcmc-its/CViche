@@ -306,10 +306,19 @@ def test_latest_entry_year_reads_date_field_and_twentieth_century_years():
     assert latest_entry_year({"extracted_fields": {"year": "1998"}, "text": "x"}, current_year=2026) == 1998
 
 
-@pytest.mark.parametrize("text", ["Award 12019 and 2010", "Award 20195 and 2010"])
-def test_latest_entry_year_ignores_digits_inside_longer_numbers(text):
-    """A grant or ID number that contains a year-like run is not a year."""
-    assert latest_entry_year({"extracted_fields": {}, "text": text}, current_year=2026) == 2010
+@pytest.mark.parametrize("text, expected", [
+    ("Award 12019 and 2010", 2010),
+    ("Award 20195 and 2010", 2010),
+    ("Project 2022-2028", 2026),
+    ("Project 2022-2028, pilot 2015", 2026),
+])
+def test_latest_entry_year_ignores_digits_inside_longer_numbers(text, expected):
+    """A grant or ID number that contains a year-like run is not a year.
+    #947 round 4: a leading range straddling current_year (start <=
+    current_year < end) is an entry still in progress -- it is capped at
+    current_year, not skipped in favour of a later incidental year
+    ("pilot 2015" must not win over the still-open 2022-2028 range)."""
+    assert latest_entry_year({"extracted_fields": {}, "text": text}, current_year=2026) == expected
 
 
 def test_latest_entry_year_none_when_no_year_anywhere():
