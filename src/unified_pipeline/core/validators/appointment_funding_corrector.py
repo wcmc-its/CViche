@@ -41,12 +41,13 @@ from .hierarchy_mismatch_flagger import (
 from .taxonomy_codes import APPENDIX_CODE
 
 
-# One of these alone is funding evidence. Acronyms and roles are matched
+# One of these alone is funding evidence. Funders that are also common
+# employers (CDC, DOD, VA) are left out: an appointment there is not a grant. Acronyms and roles are matched
 # case-sensitively ((?-i:...)): lower-case "pi" or "coi" is not a role.
 FUNDING_SHAPED = re.compile(
     r'\$\s?[\d,]+'
     r'|(?-i:\b[RPUKFT]\d{2}\b)'
-    r'|(?-i:\b(?:NIH|NSF|NCI|NHLBI|NINDS|NIMH|NIA|NIDDK|NIAID|AHRQ|PCORI|HRSA|CDC|DOD)\b)'
+    r'|(?-i:\b(?:NIH|NSF|NCI|NHLBI|NINDS|NIMH|NIA|NIDDK|NIAID|AHRQ|PCORI|HRSA)\b)'
     r'|\b(?:grant|award|project|contract)s?\s*(?:#|No\b\.?|Number\b)'
     # \bPI\b also matches Co-PI, Multiple PI and Dual-PI.
     r'|(?-i:\bM?PI\b|\bCo-?I\b)'

@@ -86,6 +86,14 @@ def test_none_text_is_left_alone():
     "2018   Marathon Working Group\tMedical Volunteer",
     "2018   Harbor Cup Steering Panel\tMedical Volunteer",
     "2018   Olympics Board\tMedical Volunteer",
+    # Each institutional-body word alone.
+    "2018   Marathon Committees\tMedical Volunteer",
+    "2018   Marathon Council\tMedical Volunteer",
+    "2018   Marathon Panel\tMedical Volunteer",
+    "2018   Marathon Advisory\tMedical Volunteer",
+    "2018   Marathon Steering\tMedical Volunteer",
+    # "coverage for" must be whole words.
+    "2019   Medical coverage format, State Games",
 ])
 def test_rows_missing_either_signal_stay_p(text):
     out = correct_event_volunteer(_entry(text))
@@ -99,8 +107,9 @@ def test_only_p_is_reviewed():
     assert out["taxonomy_code"] == "Q2"
 
 
-def test_board_certified_is_not_an_institutional_body():
-    text = "2018   Harbor Cup\tMedical Volunteer (board certified EM physician)"
+@pytest.mark.parametrize("certified", ["board certified", "Board-certified", "board - certified"])
+def test_board_certified_is_not_an_institutional_body(certified):
+    text = f"2018   Harbor Cup\tMedical Volunteer ({certified} EM physician)"
     assert correct_event_volunteer(_entry(text))["taxonomy_code"] == "T"
 
 

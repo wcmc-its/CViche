@@ -72,6 +72,10 @@ def test_m2_under_a_funding_heading_is_untouched():
     "Career development\t2016-2021\tK23",
     "Outcomes study\t2012-2014\tNIH",
     "Comparative effectiveness study\t2019-2022\tPCORI",
+    "Materials study\t2019-2022\tNSF",
+    "Quality study\t2019-2022\tAHRQ",
+    "Contracts No. 4471\t2019-2021",
+    "Multicenter trial\t2016-2020\t10% indirect cost",
     "Project Number 12345\t2024-2029",
     "Project # 4471\t2019-2021",
     "Contract No 4471\t2019-2021",
@@ -91,6 +95,8 @@ def test_m2_under_a_funding_heading_is_untouched():
     "Visiting scientist\t2014\tsponsored by the agency",
     "Research scholar\t2014\tfunded; investigator",
     "Research associate\t2014\tsponsorship from the Example Awards Program",
+    "Visiting scholar\t2014\tawarded by the agency",
+    "Research scholar\t2014\tgrant funding",
 ])
 def test_funding_evidence_keeps_m2(text):
     assert has_funding_evidence(text)
@@ -118,6 +124,12 @@ def test_funding_evidence_keeps_m2(text):
     "Visiting scientist, nih campus\t2012",
     # A number word must be the whole word.
     "Contract Notice reviewer\t2012",
+    "Project Numbering lead\t2012",
+    # Lower-case mechanism-shaped tokens are not NIH mechanisms.
+    "Research fellow, p53 lab\t2012",
+    # Funders that are also employers.
+    "EIS Officer, CDC\t2012",
+    "Staff physician, DOD\t2012",
 ])
 def test_no_funding_evidence(text):
     assert not has_funding_evidence(text)
@@ -137,7 +149,7 @@ def test_funding_codes(code):
     assert not is_position_code(code)
 
 
-@pytest.mark.parametrize("code", ["O", "P", "L3", "T", "Q2", "N3"])
+@pytest.mark.parametrize("code", ["O", "P", "L3", "T", "Q2", "N3", "M1"])
 def test_other_codes_are_neither(code):
     assert not is_position_code(code)
     assert not is_funding_code(code)

@@ -52,7 +52,7 @@ EVENT_WORDS = re.compile(
 # volunteering. The same bodies as committee_position_corrector's
 # COMMITTEE_KEYWORDS, so a row step 2 turns into P is never recoded here.
 INSTITUTIONAL_BODY = re.compile(
-    r'\b(?:committees?|boards?(?!\s+certified)|councils?|working\s*groups?'
+    r'\b(?:committees?|boards?(?![\s-]+certified)|councils?|working\s*groups?'
     r'|task\s*forces?|panels?|advisory|steering)\b',
     re.IGNORECASE,
 )
