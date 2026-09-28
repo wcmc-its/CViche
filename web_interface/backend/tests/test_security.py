@@ -624,13 +624,13 @@ class TestDocsGating:
 class TestUploadValidation:
     """SEC-04: Upload validation by magic bytes, size limit, and filename sanitization."""
 
-    def _create_auth_user(self, client, db):
+    def _create_auth_user(self, client, db, email="test@example.com"):
         """Create a user with consent and set auth cookie."""
         from app.models import User
         from app.auth import create_session_cookie, COOKIE_NAME
 
         user = User(
-            email="test@example.com",
+            email=email,
             display_name="Test User",
             role="user",
             consent_version="1.0",
@@ -942,7 +942,15 @@ class TestUploadValidation:
                     files={"file": ("cv.docx", docx_content, "application/octet-stream")},
                 )
         assert over_response.status_code == 429, over_response.text
-        assert over_response.json()["detail"]["error"] == "rate_limited"
+        detail = over_response.json()["detail"]
+        # Same {error, message, details} shape check_rate_limit's callers
+        # return (#795) -- not just the error code, so a caller relying on
+        # `message` or `details` for display sees the fields it expects.
+        assert set(detail) == {"error", "message", "details"}
+        assert detail["error"] == "rate_limited"
+        assert isinstance(detail["message"], str) and detail["message"]
+        assert set(detail["details"]) == {"limit_type", "limit", "window_seconds"}
+        assert detail["details"]["limit_type"] == "estimate"
         read_mock.assert_not_called()
         magic_mock.assert_not_called()
         extract_mock.assert_not_called()
@@ -969,6 +977,37 @@ class TestUploadValidation:
         assert limiter.allow(user_id=1) is True
         assert limiter.allow(user_id=1) is False
         assert limiter.allow(user_id=2) is True  # a different user is unaffected
+
+    def test_estimate_per_user_budget_is_per_user_through_endpoint(self, client, db, seed_simple_mode):
+        """#795: the per-user check above proves the helper's own keying, but
+        not that the endpoint passes the right user id through. Two real
+        authenticated users against a shared, small-budget limiter: user A
+        spends their whole budget, and user B -- a distinct user id -- still
+        gets a 200, not a 429, on the pod they share."""
+        from app.api import upload as upload_module
+        self._create_auth_user(client, db, email="user-a@example.com")
+        small_limiter = upload_module._EstimatePerUserWindow(max_calls=1, window_seconds=300)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload._estimate_rate_limiter", small_limiter), \
+             patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value="x" * 2000):
+            first_a = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+            assert first_a.status_code == 200, first_a.text
+            second_a = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+            assert second_a.status_code == 429, second_a.text
+
+            self._create_auth_user(client, db, email="user-b@example.com")
+            first_b = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+        assert first_b.status_code == 200, first_b.text
 
     def test_random_bytes_rejected(self, client, db, seed_simple_mode):
         """A file with random bytes (not matching any format) is rejected."""
