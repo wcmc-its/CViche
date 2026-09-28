@@ -135,7 +135,7 @@ docs/architecture/*.png
 # as intentionally empty/placeholder content and stay tracked, so the overlays
 # render from a clean checkout / CI (issue #108); buildspec.yaml overwrites them
 # with real values at deploy time. This ignore only blocks *rendered* secrets
-# (session secret, OpenAI key, SAML SP key/cert) from being re-added once a local
+# (session secret, SAML SP key/cert) from being re-added once a local
 # build has populated them.
 k8s/overlays/*/db.env
 k8s/overlays/*/auth_config.yaml
