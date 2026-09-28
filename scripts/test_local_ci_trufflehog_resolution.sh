@@ -7,7 +7,13 @@
 # interface (a name on PATH) failed even with that name resolvable via
 # PATH. Rework round 3 added coverage for the script's other two preflight
 # guards (node 20 not found; not run from inside a git repo), which this
-# file's original six cases never exercised.
+# file's original six cases never exercised. Rework round 4 added two more
+# cases that the round-3 cases still let two mutants survive on: a `node`
+# file that exists but isn't executable (round 3's node20-missing case only
+# tried an empty directory, so it never exercised the `-x` bit itself), and
+# a TRUFFLEHOG set to a shell builtin name (`command -v` resolves a builtin
+# to a non-empty string that isn't an executable file, which the round-3
+# cases never produced).
 #
 #   scripts/test_local_ci_trufflehog_resolution.sh
 #
@@ -148,6 +154,16 @@ check_passes_preflight unset-on-path PATH="$fake_th_dir:$PATH" TRUFFLEHOG=
 # A name that resolves nowhere must still fail, with the documented message.
 check_fails_preflight not-found PATH=/usr/bin:/bin TRUFFLEHOG=definitely-not-a-real-binary
 
+# A shell builtin name also resolves via `command -v` (verified: `command -v
+# cd` prints `cd`), but the result isn't an executable FILE -- `[ -x "$TH" ]`
+# on a bare word like "cd" tests for a file literally named `cd` in the
+# current directory, which doesn't exist here. Preflight must still reject
+# it with the documented message. Catches a mutant that drops the
+# `[ ! -x "$TH" ]` half of the guard (`if [ -z "$TH" ] || [ ! -x "$TH" ];
+# then` -> `if [ -z "$TH" ]; then`), since a resolved-but-non-executable
+# builtin name would then sail past preflight.
+check_fails_preflight builtin-name PATH=/usr/bin:/bin TRUFFLEHOG=cd
+
 # PATH has no trufflehog at all, but an executable sits at the documented
 # fallback location ($LOCAL_CI_DIR/tools/trufflehog) -- preflight must still
 # pass. Catches a mutant that disables the fallback branch outright.
@@ -197,6 +213,18 @@ check_fails_on_missing_node20() {
 empty_node20_dir="$tmp/no-node20"
 mkdir -p "$empty_node20_dir"
 check_fails_on_missing_node20 node20-missing "$empty_node20_dir" PATH=/usr/bin:/bin TRUFFLEHOG=
+
+# NODE20_BIN pointing at a directory whose `node` file EXISTS but is not
+# executable (touched, never chmod +x) -- preflight must still fail. The
+# empty-directory case above only proves the guard reacts to a missing
+# path; it never exercises the executable-bit test itself, so a mutant
+# that weakens `[ ! -x "$NODE20/node" ]` to `[ ! -e "$NODE20/node" ]`
+# would pass it unnoticed. This case's `node` file exists, so only the
+# real `-x` check (not a mutated `-e` check) can still reject it.
+non_exec_node20_dir="$tmp/non-exec-node20"
+mkdir -p "$non_exec_node20_dir"
+touch "$non_exec_node20_dir/node"
+check_fails_on_missing_node20 node20-not-executable "$non_exec_node20_dir" PATH=/usr/bin:/bin TRUFFLEHOG=
 
 # check_fails_outside_git_repo: runs a COPY of local_ci.sh from a directory
 # that is not inside any git repo (not just a different repo) -- the
