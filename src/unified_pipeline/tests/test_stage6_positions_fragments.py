@@ -1191,6 +1191,7 @@ def _dates_by_title(rows):
     ("Asst. Professor of Medicine", ASSISTANT_PROFESSOR_RANK),
     ("Adjunct Associate Professor", ASSOCIATE_PROFESSOR_RANK),
     ("Assoc Professor of Pediatrics", ASSOCIATE_PROFESSOR_RANK),
+    ("Professor", PROFESSOR_RANK),
     ("Professor of Medicine", PROFESSOR_RANK),
     ("Professor and Chair", PROFESSOR_RANK),
     ("Assistant Clinical Professor", ASSISTANT_PROFESSOR_RANK),
