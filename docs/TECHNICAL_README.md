@@ -672,7 +672,7 @@ All functions are fully typed with TypeScript interfaces from `web_interface/fro
 
 **Core Dependencies**:
 ```
-openai>=1.0.0          # OpenAI API client
+boto3                  # AWS Bedrock client (CViche is Bedrock-only)
 python-docx>=0.8.11    # Word document processing
 pdfplumber             # PDF parsing
 pdf2image              # PDF to image conversion
@@ -719,7 +719,7 @@ lucide-react           # Icon library
 
 | Service | Required | Purpose | Cost |
 |---------|----------|---------|------|
-| OpenAI API | Yes | LLM processing | Pay-per-token |
+| AWS Bedrock | Yes | LLM processing (CViche is Bedrock-only) | Pay-per-token |
 | NCBI E-utilities | No | PubMed enrichment | Free (with API key: 10 req/s) |
 
 ### Environment Variables
@@ -728,15 +728,14 @@ lucide-react           # Icon library
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | OpenAI API key for LLM processing. Used by all stages that make LLM calls. |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | AWS credentials for Bedrock (omit if using an IAM role instead). Used by all stages that make LLM calls. |
 
-#### Optional - OpenAI Configuration
+#### Optional - Bedrock Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `OPENAI_API_KEY_WORK` | Legacy alias for `OPENAI_API_KEY`. Supported as fallback. | None |
-| `CV_HIERARCHY_ASSISTANT_ID` | OpenAI Assistants API ID for CV hierarchy processing. Required only if using Assistants API mode. | None |
-| `CV_DIRECT_FILE_ASSISTANT_ID` | OpenAI Assistants API ID for direct file processing. Required only if using Assistants API mode. | None |
+| `AWS_DEFAULT_REGION` | AWS region for Bedrock. | `us-east-1` |
+| `CVICHE_LLM_PROVIDER` / `CVICHE_LLM_MODEL` | Override the provider/model from `llm_config.yaml`'s `default:` block (never a per-stage override). `bedrock` is the only supported provider value. | from `llm_config.yaml` |
 
 #### Optional - External Services
 
@@ -755,8 +754,10 @@ lucide-react           # Icon library
 #### Example `.env` File
 
 ```bash
-# Required
-OPENAI_API_KEY=sk-...
+# Required (or use an IAM role instead)
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=us-east-1
 
 # Optional - improves PubMed rate limits
 NCBI_API_KEY=...
@@ -764,9 +765,8 @@ NCBI_API_KEY=...
 # Optional - for debugging LLM calls
 PROMPT_LOG_DIR=./prompt_logs
 
-# Optional - for Assistants API mode
-# CV_HIERARCHY_ASSISTANT_ID=asst_...
-# CV_DIRECT_FILE_ASSISTANT_ID=asst_...
+# Optional - override the model from llm_config.yaml's default: block
+# CVICHE_LLM_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0
 ```
 
 ---
@@ -790,14 +790,15 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 ### 3. Install Dependencies
 
 ```bash
-pip install openai python-docx pdfplumber pdf2image requests
-pip install numpy scipy rapidfuzz regex PyYAML rich jinja2
+pip install -r requirements.txt
 ```
 
 ### 4. Set Environment Variables
 
 ```bash
-export OPENAI_API_KEY="sk-your-key-here"
+export AWS_ACCESS_KEY_ID="your-key"
+export AWS_SECRET_ACCESS_KEY="your-secret"
+export AWS_DEFAULT_REGION="us-east-1"
 # Optional:
 export NCBI_API_KEY="your-ncbi-key"
 ```
@@ -873,8 +874,7 @@ from unified_pipeline.stage_2_entry_extraction import run_stage_2
 
 # Stage 1a: Segmentation
 hierarchy, stats = get_cv_hierarchy_chunked(
-    cv_path='data/sample_cvs/word/cv.docx',
-    model='gpt-4o-mini'
+    cv_path='data/sample_cvs/word/cv.docx'
 )
 
 # Stage 2: Entry Extraction
@@ -989,7 +989,7 @@ web_interface/
 **Prerequisites**:
 - Python 3.14 (matches the backend image, `python:3.14-slim`)
 - Node.js 18+ and npm
-- OpenAI API key
+- AWS Bedrock credentials (CViche is Bedrock-only)
 
 **Backend Setup**:
 ```bash
@@ -998,7 +998,7 @@ pip install -r requirements.txt
 
 # Create .env file
 cp .env.example .env
-# Edit .env and add: OPENAI_API_KEY=sk-...
+# Edit .env and add AWS credentials (or leave unset to use an IAM role)
 ```
 
 **Frontend Setup**:
@@ -1095,7 +1095,7 @@ The database (SQLite in development, MariaDB in production) is the operational s
 | `runs` | One row per pipeline job: short id (e.g. `A1B2C3`), filename, file_type (docx/pdf), status (running/complete/failed/paused), started/completed timestamps, total cost and token totals (input/output), owning user, submission type, display toggles (track-changes, pipeline comments), error message |
 | `steps` | Per-step execution within a run: step_number (1–12), stage_id (`1a`, `3b`, `4.5`, `5c`…), status, timing, duration, cost, input/output file paths, error type (llm_timeout, token_limit, parse_error, invalid_response, api_error, file_error, unknown) |
 | `logs` | Pipeline log messages: run, step, timestamp, level (INFO/WARNING/ERROR), message text |
-| `llm_usage` | Every LLM call: run, step, model and model_version, provider (openai/bedrock), prompt/completion/total tokens, cost, latency_ms, temperature, finish_reason (stop/length/content_filter), retry_count, SHA-256 hash of prompt template |
+| `llm_usage` | Every LLM call: run, step, model and model_version, provider (always `bedrock` now; historical rows from before #953 carry `openai`), prompt/completion/total tokens, cost, latency_ms, temperature, finish_reason (stop/length/content_filter), retry_count, SHA-256 hash of prompt template |
 
 **Outputs & quality**
 
@@ -1133,7 +1133,7 @@ The database (SQLite in development, MariaDB in production) is the operational s
 **Backend won't start**:
 - Check port availability: `lsof -i :5002` (local dev) or `lsof -i :8000` (Docker)
 - Verify Python dependencies: `pip install -r requirements.txt`
-- Ensure `OPENAI_API_KEY` is set in the environment
+- Ensure AWS credentials for Bedrock are set in the environment (or an IAM role is available)
 - Ensure `CVICHE_SESSION_SECRET` is set (warning logged if missing, sessions will not survive restarts)
 
 **Frontend won't start**:
@@ -1165,13 +1165,15 @@ ENABLE_SUBSECTION_CATEGORIZATION = True
 USE_TAXONOMY_MAPPING = True          # Use LLM mappings
 ```
 
-### Model Pricing (per 1M tokens)
+### Model Pricing (per 1M tokens, Bedrock)
 
 | Model | Input | Output |
 |-------|-------|--------|
-| gpt-4o-mini | $0.15 | $0.60 |
-| gpt-4o | $2.50 | $10.00 |
-| gpt-5.1 | Varies | Varies |
+| Claude Sonnet 4.6 (default, all stages except 3b) | $3.00 | $15.00 |
+| Claude Haiku 4.5 (stage 3b) | $1.00 | $5.00 |
+| Claude Opus 4.7 | $15.00 | $75.00 |
+
+Full pricing table, including older Claude generations and non-Anthropic Bedrock models, is in `src/unified_pipeline/config.py`'s `PRICING` dict.
 
 ---
 
@@ -1243,18 +1245,18 @@ USE_TAXONOMY_MAPPING = True          # Use LLM mappings
 
 ## External API Integrations
 
-### OpenAI API
+### AWS Bedrock
 
-**Purpose**: All LLM processing (segmentation, classification, extraction)
+**Purpose**: All LLM processing (segmentation, classification, extraction). CViche is Bedrock-only -- all LLM traffic stays in AWS Bedrock.
 
 **Authentication**:
 ```python
-# Uses default client initialization
-client = OpenAI()  # Reads OPENAI_API_KEY from environment
+# Uses the boto3 default credential chain (env vars, ~/.aws/credentials, or an IAM role)
+client = boto3.client("bedrock-runtime", region_name=...)
 ```
 
 **Cost Management**:
-- Use `gpt-4o-mini` for cost-sensitive operations
+- Use a smaller model (e.g. Claude Haiku 4.5) for cost-sensitive stages via `llm_config.yaml`'s `stages:` overrides
 - Batch entries by taxonomy code to reduce API calls
 - Minimal extraction mode for non-critical codes
 
@@ -1288,7 +1290,7 @@ client = OpenAI()  # Reads OPENAI_API_KEY from environment
 
 ### Cost Optimization Strategies
 
-1. **Use gpt-4o-mini** for all stages (default)
+1. **Use Claude Haiku 4.5** for cost-sensitive stages (stage 3b already defaults to it)
 2. **Minimal extraction** for non-publication codes
 3. **Batch processing** groups entries by code
 4. **Skip enrichment** if not needed (run stages 1-4 only)
@@ -1386,7 +1388,7 @@ Prompt logs saved to `src/unified_pipeline/prompt_logs/` with request/response d
 
 **Troubleshooting**:
 1. Check environment variables are set
-2. Verify OpenAI API key is valid
+2. Verify AWS credentials are valid and Bedrock model access is enabled
 3. Run `python src/unified_pipeline/config.py` to validate setup
 4. Check prompt logs for LLM errors
 

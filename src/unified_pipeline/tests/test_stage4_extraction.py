@@ -27,9 +27,8 @@ import threading
 import time
 from pathlib import Path
 
-import httpx
 import pytest
-from openai import APITimeoutError
+from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -355,9 +354,19 @@ def _one_recovery_entry() -> list[dict]:
     }]
 
 
-def test_attempt_llm_recovery_timeout_sets_llm_timeout_error(monkeypatch):
+@pytest.mark.parametrize("timeout_error", [
+    ReadTimeoutError(endpoint_url="https://bedrock.example.invalid"),
+    ConnectTimeoutError(endpoint_url="https://bedrock.example.invalid"),
+], ids=["read_timeout", "connect_timeout"])
+def test_attempt_llm_recovery_timeout_sets_llm_timeout_error(monkeypatch, timeout_error):
+    # #953: a Bedrock call that times out after botocore's own internal
+    # retries are exhausted raises botocore.exceptions.ReadTimeoutError or
+    # ConnectTimeoutError directly (neither is a botocore.exceptions.ClientError,
+    # so _call_with_retry never catches/retries it -- it propagates straight
+    # here). The old `except openai.APITimeoutError` here was dead on the
+    # live Bedrock path; this pins the exception Bedrock actually raises.
     def boom(**kwargs):
-        raise APITimeoutError(request=httpx.Request("POST", "https://example.invalid"))
+        raise timeout_error
 
     monkeypatch.setattr(extraction, "call_llm", boom)
 
@@ -447,6 +456,31 @@ def test_extract_fields_batch_real_implementation_drops_malformed_item(monkeypat
     assert by_text["hello world"]["extracted_fields"]["note"] == "hello world"
     assert by_text["second entry text here"]["extracted_fields"]["note"] == "second entry text here"
     assert "dropped one malformed LLM entry" in caplog.text
+
+
+@pytest.mark.parametrize("timeout_error", [
+    ReadTimeoutError(endpoint_url="https://bedrock.example.invalid"),
+    ConnectTimeoutError(endpoint_url="https://bedrock.example.invalid"),
+], ids=["read_timeout", "connect_timeout"])
+def test_extract_fields_batch_timeout_sets_extraction_error(monkeypatch, timeout_error):
+    # #953: same botocore-timeout coverage as
+    # test_attempt_llm_recovery_timeout_sets_llm_timeout_error, for the
+    # extraction (not recovery) call site's own `except` branch.
+    entries = [
+        {"text": "hello world", "taxonomy_code": "A1", "element_idx_start": 0, "element_idx_end": 0},
+    ]
+
+    def boom(**kwargs):
+        raise timeout_error
+
+    monkeypatch.setattr(extraction, "call_llm", boom)
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    assert result["success"] is False
+    assert len(result["entries"]) == 1
+    assert result["entries"][0]["extraction_error"] == extraction.LLM_TIMEOUT
+    assert result["entries"][0]["extraction_success"] is False
 
 
 def test_extract_fields_batch_cancels_between_taxonomy_groups(monkeypatch):

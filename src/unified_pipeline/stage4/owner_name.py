@@ -109,9 +109,8 @@ def _run_owner_name_llm(content_lines: list[str]) -> dict[str, str] | None:
     # e.g. a null-valued field, which a plain dict.get(key, '').strip() would
     # raise AttributeError on instead of degrading to fallback_from_uid()),
     # and the LLM client's own documented failure types (RETRYABLE_ERRORS --
-    # openai's RateLimitError/APITimeoutError/APIConnectionError/
-    # InternalServerError plus botocore's ClientError for Bedrock, raised by
-    # call_llm once its own internal retries are exhausted). A bare `except
+    # botocore's ClientError for Bedrock, raised by call_llm once its own
+    # internal retries are exhausted). A bare `except
     # Exception` here would also swallow a real bug (a future TypeError in
     # this file, or inside call_llm) and misreport it as an ordinary LLM
     # hiccup, silently falling back to a fabricated surname instead of

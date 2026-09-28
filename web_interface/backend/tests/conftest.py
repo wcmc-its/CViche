@@ -213,7 +213,7 @@ def mock_saml_identity_no_mail():
 
 def pytest_configure(config):
     """Register custom pytest markers."""
-    config.addinivalue_line("markers", "e2e: end-to-end tests requiring OPENAI_API_KEY (deselected by default)")
+    config.addinivalue_line("markers", "e2e: end-to-end tests requiring live AWS Bedrock credentials (deselected by default)")
 
 
 def _real_prompt_logs_listing() -> set[str]:

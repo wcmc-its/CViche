@@ -331,7 +331,7 @@ Fix defects in this order (highest impact per effort first):
 
 ### 3.3 Regex vs LLM: Choosing the Right Fix Approach
 
-A core design decision for every fix is whether to solve it with deterministic code (regex, string parsing, heuristics) or with an LLM call. LLM inference is cheap — a gpt-4.1-mini call to parse a single entry costs fractions of a cent — so the decision should be driven by brittleness, not cost.
+A core design decision for every fix is whether to solve it with deterministic code (regex, string parsing, heuristics) or with an LLM call. LLM inference is cheap — a Claude Haiku 4.5 call to parse a single entry costs fractions of a cent — so the decision should be driven by brittleness, not cost.
 
 #### When to Use Regex/Heuristics
 
