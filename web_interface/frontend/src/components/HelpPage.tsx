@@ -233,7 +233,7 @@ export default function HelpPage() {
                 <p>
                   Your uploaded CV is stored on a secure WCM server and is only accessible to you and CViche
                   administrators. However, the text of the CV is sent to a third-party AI service for processing
-                  (Anthropic&apos;s Claude on Amazon Bedrock -- CViche is Bedrock-only, so LLM traffic stays in AWS Bedrock).
+                  (Anthropic&apos;s Claude on Amazon Bedrock; CViche is Bedrock-only, so LLM traffic stays in AWS Bedrock).
                   CViche attempts to withhold highly sensitive personal details such as date of birth or Social
                   Security number, but you should not include anything you would not want these systems to see. By
                   using CViche, you acknowledge that your CV content will be processed by a third-party AI service. If
