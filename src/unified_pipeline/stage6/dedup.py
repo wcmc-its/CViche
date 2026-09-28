@@ -127,6 +127,50 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     return len(_record_lines(dropped_entry.get('text', ''))) >= UNRENDERED_MIN_RECORD_LINES
 
 
+def recovered_row_duplicates_parent(entry: dict, parent: dict | None) -> bool:
+    """True when a stage-2 structurally-recovered table row is a verbatim
+    duplicate of its own parent entry's text (A5IZ6Q).
+
+    `recover_unclaimed_table_rows` (stage_2_entry_extraction.py) emits one
+    entry per table row no delimiter claimed, INDEPENDENTLY of whichever
+    delimiter DID end up claiming the surrounding table -- so a wide,
+    multi-row table delimiter (one grant's whole label/value block, spanning
+    several element indices) and the very rows inside it can both survive as
+    separate final entries, carrying the SAME content under two different
+    taxonomy codes: the fused parent is confidently classified into a
+    render-routed code (e.g. M2B) and renders structurally, while each
+    single-field recovered row ("Award Source: | ...") is too sparse to
+    classify as anything but the T catch-all and is otherwise headed
+    straight for the Appendix as its own numbered line -- a duplicate of
+    content the reader already saw in the body. `parent_idx` (set on every
+    recovered row) is the link back to the entry it was split from.
+
+    This is deliberately narrower than `_drop_is_safe`'s Jaccard/containment
+    dedup above: that pass only ever compares entries WITHIN one taxonomy-code
+    group, so a parent and its recovered rows -- classified into two
+    different codes -- are never even compared. `segment_already_rendered`
+    (render_check.py) doesn't cover this either: it checks a segment against
+    the SAME entry's own `extracted_fields`, keyed on a short, fixed field
+    list (`_IDENTIFYING_FIELDS`) that excludes most of a grant's row labels
+    (PI name, dates, cost, effort) and requires a 15-character value -- too
+    narrow to recognize most recovered rows (a bare "LYRASIS"-length agency
+    name never clears that floor) even when reused across entries.
+
+    Verbatim containment against the parent's own raw text sidesteps both
+    gaps: it needs no field list, no length floor, and no rendered-document
+    lookup, because a recovered row's every field comes from the SAME table
+    cell text the parent's fused entry already carries. A row NOT contained
+    in its parent (one the model's delimiter genuinely skipped, the case
+    `recover_unclaimed_table_rows` exists for) returns False and is left to
+    the normal appendix/recovery path -- callers must not treat False as
+    proof the row is missing, only as "not this parent's own duplicate".
+    """
+    if not entry.get('recovered_row') or parent is None:
+        return False
+    row_text = _squash(entry.get('text', ''))
+    return bool(row_text) and row_text in _squash(parent.get('text', ''))
+
+
 def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         require_date_overlap: bool = False,
                         decisions: list[dict] | None = None) -> list[dict]:

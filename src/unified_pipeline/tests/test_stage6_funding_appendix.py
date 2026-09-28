@@ -13,6 +13,7 @@ Self-contained: no DB, no LLM calls. The appendix test loads the bundled WCM
 template like test_stage6_strip_instruction_box.py does.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -259,3 +260,128 @@ def test_all_noise_batch_creates_no_appendix():
 
     assert len(gen.doc.paragraphs) == before
     assert not any("T. APPENDIX" in p.text for p in gen.doc.paragraphs)
+
+
+# -------------------------------------------------------------- A5IZ6Q (#420)
+#
+# Wire tests, real generate() against the bundled WCM template: a stage-2
+# structurally-recovered table row (#420's `recover_unclaimed_table_rows`)
+# that duplicates content its own parent grant entry already carries must
+# not ALSO land in the Appendix once the parent renders in the body.
+# Synthetic reproduction of the A5IZ6Q incident shape -- one fused M2B grant
+# entry plus single-field `recovered_row` siblings sharing its `parent_idx`,
+# each one line of the SAME fused text the model's delimiter already
+# captured whole.
+
+_RECOVERY_GRANT_TEXT = (
+    "Award Source: | Fictional Research Foundation\n"
+    "Project title: | Synthetic Tools for Data Curation\n"
+    "Annual direct costs: | $15,000.00\n"
+    "Duration of support: | 00/2021-00/2022\n"
+    "Name of Principal Investigator: | A. Researcher"
+)
+
+_RECOVERY_OWNER_ENTRY = {"text": "Name: A. Researcher", "taxonomy_code": "A",
+                         "extracted_fields": {}, "element_idx_start": 0}
+
+_RECOVERY_GRANT_ENTRY = {
+    "text": _RECOVERY_GRANT_TEXT,
+    "taxonomy_code": "M2B",
+    "element_idx_start": 300,
+    "element_idx_end": 302,
+    "extracted_fields": {
+        "title": "Synthetic Tools for Data Curation",
+        "agency": "Fictional Research Foundation",
+        "pi_name": "A. Researcher",
+        "pi_role": "PI",
+        "start_date": "2021",
+        "end_date": "2022",
+        "total_funding": "$15,000.00",
+    },
+}
+
+
+def _recovered_row(suffix: str, text: str) -> dict:
+    return {"text": text, "taxonomy_code": "T", "recovered_row": True,
+            "parent_idx": 300, "element_idx_start": f"300.{suffix}",
+            "extracted_fields": {}, "hierarchy": ["Past Funding"]}
+
+
+def _all_text(doc: Document) -> str:
+    lines = [p.text for p in doc.paragraphs]
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            lines.append(" | ".join(c.text for c in row.cells))
+    return "\n".join(lines)
+
+
+def test_recovered_row_duplicate_of_rendered_grant_not_repeated_in_appendix(tmp_path):
+    entries = [_RECOVERY_OWNER_ENTRY, _RECOVERY_GRANT_ENTRY,
+               _recovered_row("0", "Award Source: | Fictional Research Foundation"),
+               _recovered_row("1", "Project title: | Synthetic Tools for Data Curation"),
+               _recovered_row("2", "Annual direct costs: | $15,000.00"),
+               _recovered_row("3", "Duration of support: | 00/2021-00/2022"),
+               _recovered_row("4", "Name of Principal Investigator: | A. Researcher")]
+
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: []
+    data = {"document_uid": "T420A", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+
+    full_text = _all_text(Document(str(output_path)))
+
+    # The grant rendered in the body...
+    assert "Fictional Research Foundation" in full_text
+    # ...and appears exactly once: the five recovered rows -- every one of
+    # them a verbatim line of the fused entry that already rendered -- must
+    # not repeat it in the Appendix.
+    assert full_text.count("Fictional Research Foundation") == 1
+    assert "T. APPENDIX" not in full_text
+
+
+def test_recovered_row_not_contained_in_parent_still_reaches_appendix(tmp_path):
+    """The negative case: a recovered row whose content the parent's own
+    text does NOT carry (a row the model's delimiter genuinely skipped --
+    #420's backstop exists for exactly this) must still surface. Only a
+    row PROVABLY duplicating its parent is suppressed."""
+    missed_row = _recovered_row(
+        "5", "Non-financial support: | Conference travel support")
+    entries = [_RECOVERY_OWNER_ENTRY, _RECOVERY_GRANT_ENTRY, missed_row]
+
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: []
+    data = {"document_uid": "T420B", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+
+    full_text = _all_text(Document(str(output_path)))
+    assert "T. APPENDIX" in full_text
+    assert "Conference travel support" in full_text
+
+
+def test_recovered_row_with_missing_parent_still_reaches_appendix(tmp_path):
+    """A recovered row whose `parent_idx` resolves to no surviving entry
+    (the parent itself was dropped or never existed) must not be silently
+    swallowed -- there is nothing to prove it duplicates."""
+    orphan_row = {"text": "Non-financial support: | Conference travel support",
+                  "taxonomy_code": "T", "recovered_row": True,
+                  "parent_idx": 999, "element_idx_start": "999.0",
+                  "extracted_fields": {}, "hierarchy": ["Past Funding"]}
+    entries = [_RECOVERY_OWNER_ENTRY, orphan_row]
+
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: []
+    data = {"document_uid": "T420C", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+
+    full_text = _all_text(Document(str(output_path)))
+    assert "T. APPENDIX" in full_text
+    assert "Conference travel support" in full_text

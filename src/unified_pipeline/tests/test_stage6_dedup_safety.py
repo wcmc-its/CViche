@@ -20,7 +20,10 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage_6_word_template import deduplicate_entries  # noqa: E402
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    deduplicate_entries,
+    recovered_row_duplicates_parent,
+)
 
 
 def _texts(entries):
@@ -198,3 +201,65 @@ def test_distinct_committee_memberships_mentioned_in_passing_kept():
                             "in 2018."}
     result = deduplicate_entries([prior_term, current_term])
     assert result == [prior_term, current_term]
+
+
+# --------------------------------------- recovered-row/parent duplicates (A5IZ6Q)
+#
+# `recover_unclaimed_table_rows` (stage 2, #420) emits one entry per table row
+# no delimiter claimed, independently of whatever delimiter DID claim the
+# surrounding table. A wide table-level delimiter spanning several element
+# indices (a whole grant's label/value block) and the individual rows inside
+# it can both survive as separate entries: the fused parent classifies into a
+# render-routed code (e.g. M2B) and renders structurally, while each
+# single-field recovered row is too sparse to classify as anything but T and
+# is otherwise a verbatim duplicate of content the reader already saw.
+# `deduplicate_entries` above never sees the pair -- parent and row land in
+# different taxonomy-code groups, and dedup only ever compares within one.
+
+def test_recovered_row_duplicate_of_parent_detected():
+    parent = {"text": "Award Source: | Fictional Research Foundation\n"
+                      "Project title: | Synthetic Tools for Data Curation\n"
+                      "Duration of support: | 00/2021-00/2022"}
+    row = {"text": "Award Source: | Fictional Research Foundation",
+           "recovered_row": True, "parent_idx": 100}
+    assert recovered_row_duplicates_parent(row, parent)
+
+
+def test_recovered_row_not_contained_in_parent_not_flagged():
+    # The row the model's delimiter genuinely skipped -- not present in the
+    # parent's own text at all -- must go through the normal path unchanged.
+    parent = {"text": "Award Source: | Fictional Research Foundation\n"
+                      "Project title: | Synthetic Tools for Data Curation"}
+    row = {"text": "Non-financial support: | Conference travel",
+           "recovered_row": True, "parent_idx": 100}
+    assert not recovered_row_duplicates_parent(row, parent)
+
+
+def test_non_recovered_row_never_flagged_even_if_contained():
+    # Only the stage-2 backstop's own output carries `recovered_row` -- an
+    # ordinary model-attested entry that happens to be a text subset of
+    # another must go through the normal Jaccard/containment dedup instead,
+    # not this parent-linked shortcut.
+    parent = {"text": "Award Source: | Fictional Research Foundation\n"
+                      "Project title: | Synthetic Tools for Data Curation"}
+    row = {"text": "Award Source: | Fictional Research Foundation"}
+    assert not recovered_row_duplicates_parent(row, parent)
+
+
+def test_recovered_row_with_no_resolvable_parent_not_flagged():
+    # parent_idx pointed nowhere (lookup miss) -- caller passes None. Content
+    # loss risk is on the "flag it" side, not this one, so the safe default
+    # is to leave the row in the normal appendix/recovery path.
+    row = {"text": "Award Source: | Fictional Research Foundation",
+           "recovered_row": True, "parent_idx": 999}
+    assert not recovered_row_duplicates_parent(row, None)
+
+
+def test_recovered_row_reformatted_whitespace_still_matches():
+    # _squash normalizes whitespace/case -- a recovered row's line-splitting
+    # must not be defeated by incidental spacing differences from the parent.
+    parent = {"text": "Duration of support: |   00/2021-00/2022  \n"
+                      "Name of Principal Investigator: | A. Researcher"}
+    row = {"text": "duration of support: | 00/2021-00/2022",
+           "recovered_row": True, "parent_idx": 100}
+    assert recovered_row_duplicates_parent(row, parent)
