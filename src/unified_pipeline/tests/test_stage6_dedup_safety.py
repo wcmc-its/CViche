@@ -298,6 +298,57 @@ def test_recovered_row_multi_cell_value_one_unconfirmed_cell_keeps_the_row():
     assert not recovered_row_already_rendered(row, ["Duration of support:", "2021"])
 
 
+# ------------------------------------------------- tab-separated fallback path
+#
+# `recover_unclaimed_table_rows` renders " | " when it joins a physical
+# table row's cells, but a bare "\t" on its non-table fallback path --
+# `_CELL_SEPARATOR_RE` must split on both, not just "|".
+
+def test_recovered_row_tab_separated_value_matches():
+    row = {"text": "Award Source:\tFictional Research Foundation",
+           "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["Fictional Research Foundation"])
+
+
+def test_recovered_row_tab_separated_unrendered_value_stays():
+    row = {"text": "Award Source:\tFictional Research Foundation",
+           "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["something unrelated"])
+
+
+# ------------------------------------- trivial cell beside a confirmed cell
+#
+# `_is_trivial_value_cell` (dedup.py) filters a blank OR punctuation-only
+# cell OUT before confirmation is checked, so it can never itself supply
+# evidence -- but symmetrically it must never BLOCK a drop a sibling
+# non-trivial cell already confirms either.
+
+def test_recovered_row_punctuation_only_cell_does_not_block_a_drop():
+    row = {"text": "Non-financial support: | -- | Fictional Research Foundation",
+           "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["Fictional Research Foundation"])
+
+
+def test_recovered_row_blank_cell_does_not_block_a_drop():
+    row = {"text": "Non-financial support: |  | Fictional Research Foundation",
+           "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["Fictional Research Foundation"])
+
+
+# ------------------------------------- non-alphanumeric edge of the value
+#
+# A leading non-alphanumeric character (a currency symbol) needs no LEADING
+# boundary: '$' itself can never be part of the digit run that would create
+# a false partial-number match the way an adjacent alnum char could, so a
+# raw "$15,000.00" is still confirmed by a render that prefixes it with a
+# currency code -- the boundary only has to hold on the alnum-adjacent
+# trailing edge (already covered above).
+
+def test_recovered_row_currency_value_matches_with_a_prefixed_currency_code():
+    row = {"text": "Annual direct costs: | $15,000.00", "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["US$15,000.00"])
+
+
 # --------------------------------------------- normalization (§ LEAD item 1)
 #
 # "normalized: casefold, collapsed whitespace, word-boundary match on both
