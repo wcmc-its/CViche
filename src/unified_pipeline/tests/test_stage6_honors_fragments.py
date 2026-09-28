@@ -334,6 +334,23 @@ def test_three_column_pipe_form_accepts_a_month_and_year_date_cell():
     assert rows == [["Best Teaching Award", "Purdue University", "2020"]]
 
 
+def test_three_column_pipe_form_reads_a_two_digit_year_date_cell():
+    """#867: the raw fallback path rendered a two-digit-year date cell
+    verbatim ("10/30/17" stayed "10/30/17") instead of as the year, because
+    the year normaliser only recognised a four-digit year."""
+    rows = _render_honors(
+        [_raw("Best Paper Award | Some Society | 10/30/17")])
+    assert rows == [["Best Paper Award", "Some Society", "2017"]]
+
+
+def test_three_column_pipe_form_reads_a_two_digit_year_before_the_pivot():
+    """The other side of the century pivot: a two-digit year above the pivot
+    reads as 19xx rather than 20xx."""
+    rows = _render_honors(
+        [_raw("Lifetime Achievement Award | Some Society | 10/30/99")])
+    assert rows == [["Lifetime Achievement Award", "Some Society", "1999"]]
+
+
 def test_two_column_pipe_form_reads_the_second_cell_as_the_date():
     """`Award | Year`, the two-column form, still means award and date."""
     assert _honor_columns("Best Teaching Award | 2020") == HonorRecord(

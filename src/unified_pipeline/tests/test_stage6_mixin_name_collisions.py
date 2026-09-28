@@ -222,6 +222,7 @@ SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     'Postdoctoral Training: section heading not found in template; %d entries not rendered': 'warning',
     'Postdoctoral Training: table not found after section heading; %d entries not rendered': 'warning',
     'Propagated institution to %d sub-entries': 'info',
+    'institution_enrichment is %s, not a mapping; treating as absent for propagation': 'warning',
     'Service on Boards: no %s or National table found; %d %s entries not rendered': 'warning',
     'Service on Boards: no Regional/National/International table found in template; %d entries not rendered': 'warning',
     'Service on Boards: section not found in template; %d entries not rendered': 'warning',
@@ -347,7 +348,7 @@ def test_sections_logger_severity_matches_the_563_contract_table():
     by the later, unflipped one). This AST-walks every call site under
     `stage6/sections/` as a full list (no dedup) and compares a `Counter`
     of `(text, level)` pairs, WITH multiplicity, against the checked-in
-    tables, so flipping the level at ANY of the 117 literal call sites --
+    tables, so flipping the level at ANY of the 118 literal call sites --
     including either half of a duplicated-text pair -- fails here.
     """
     text_level_records, by_file_function = _sections_logger_severity_map()
@@ -378,12 +379,12 @@ def test_sections_logger_severity_matches_the_563_contract_table():
 def test_sections_logger_severity_contract_is_not_silently_empty():
     """Guard the guard: an empty table would make the contract test above
     vacuously pass. The count is the TRUE number of literal call sites
-    (117, with duplicated texts counted once per site, not once per
+    (118, with duplicated texts counted once per site, not once per
     distinct text) so a newly added `logger` call in `stage6/sections/`
     fails this guard until it is added to the contract table on purpose.
     """
     text_level_records, by_file_function = _sections_logger_severity_map()
-    assert len(text_level_records) == 117, (
+    assert len(text_level_records) == 118, (
         "literal call-site count under stage6/sections/ changed -- update "
         "the table (and SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY if a "
         "text now repeats)"

@@ -1,7 +1,25 @@
-# Exact pins captured via `pip freeze` in the python:3.14-slim build image (see
-# Dockerfile) for reproducible prod builds. Regenerate the same way when bumping:
-#   docker build -f web_interface/backend/Dockerfile -t cviche-deps --target deps .
-#   docker run --rm cviche-deps pip freeze
+# Direct pins only (#754) -- this is NOT a full `pip freeze`. Most of these
+# are imported directly under app/ (fastapi, uvicorn, sqlalchemy, pydantic,
+# pysaml2, ...) or reachable at runtime through orchestrator.py's imports of
+# unified_pipeline stage modules (tiktoken, via
+# segmentation/chunked_chat_hierarchy_extractor.py). A few are pinned though
+# nothing imports them by name: python-multipart (FastAPI needs it to parse
+# the multipart uploads app/api/upload.py declares with `File(...)`), alembic
+# (migrations; run as a CLI from the backend directory -- see Dockerfile --
+# never imported in app/ code), and websockets (uvicorn is pinned bare, not
+# as `uvicorn[standard]`, so a websocket protocol implementation has to be
+# pinned separately for the app's websocket endpoints to work). pdf2image and
+# pdfplumber are NOT reachable from any code path as of this writing (grepped
+# repo-wide) -- they mirror requirements.txt's pins for the PDF ingestion
+# TECHNICAL_README.md documents, which the pipeline does not yet implement;
+# left in rather than pulled here so a #754 pass doesn't also make a scope
+# call about that gap. Other transitive packages (starlette, h11,
+# typing_extensions, click, sniffio, ...) are left to resolve at install time
+# UNLESS a specific transitive has bitten us, in which case it gets its own
+# pin with a comment explaining why (see anyio and pyopenssl below). A
+# hash-pinned, fully resolved lockfile is #130's scope, not this file's; the
+# 2026-09-09 decision on #754 to instead regenerate this file as a full `pip
+# freeze` from the Docker deps stage is still open and not done here.
 # Versions for packages also listed in the repo-root requirements.txt are kept
 # identical, since the Dockerfile installs both files in a single pip pass.
 fastapi==0.136.3
@@ -31,10 +49,17 @@ pymysql==1.1.1
 itsdangerous==2.2.0
 pyyaml==6.0.3
 boto3==1.43.23
-pysaml2==7.5.4
+pysaml2==7.5.5
 ldap3==2.9.1
 cachetools==7.1.4
 redis==8.0.0
 # Directly imported by app/saml_client.py (x509 / hazmat); pinned here so a
 # standalone backend install does not rely on pysaml2 pulling it transitively.
-cryptography==43.0.1
+cryptography==50.0.1
+# pysaml2 7.5.5 requires pyopenssl>=26.0.0 with no upper cap, so this pin is
+# not load-bearing on its own: cryptography==50.0.1 above already forces
+# pyopenssl>=26.4.0 (26.3.0 requires cryptography<50; 26.2.0 and earlier 26.x
+# require cryptography<49). Pinned explicitly anyway, alongside cryptography,
+# so the resolved version is visible in this file rather than only implied by
+# another package's transitive constraint.
+pyopenssl==26.4.0
