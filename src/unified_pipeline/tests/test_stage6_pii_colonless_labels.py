@@ -156,6 +156,20 @@ def test_hyphen_compound_stem_is_not_denied():
         assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
 
 
+def test_colonless_dotted_date_is_now_caught():
+    """#847 residual round 3: `_FULL_DATE_VALUE` only accepted `/`/`-`
+    separators, so a colonless dotted date ("Born 12.03.1970",
+    "DOB - 12.03.1970") matched no value shape at all and the whole
+    colonless row silently failed to fire -- at render time, not only in
+    the pre-LLM scrub."""
+    for now_caught in [
+        "Born 12.03.1970",
+        "DOB - 12.03.1970",
+        "Date of Birth\t12.03.1970",
+    ]:
+        assert _pii_fragments(now_caught), f"missed {now_caught!r}"
+
+
 def test_single_space_separator_is_now_caught_for_shaped_values():
     """#820 (comment) closes #532's disclosed gap: a single space IS now
     accepted, but only ahead of a value shaped distinctively enough not to

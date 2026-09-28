@@ -20,6 +20,7 @@ from docx.oxml.table import CT_Tbl
 from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
 from unified_pipeline.stage6.normalization.pii import (
+    PRE_LLM_PLACEHOLDER,
     pre_llm_bare_label_category,
     redact_pre_llm_value_of_category,
     redact_pre_llm_values,
@@ -746,6 +747,28 @@ def _handle_table_row_zero(
     return new_elements, unified_idx, num_table_headers_emitted, table_rows, current_content_rows
 
 
+def _flatten_table_content_text(rows: list[Any]) -> str:
+    """The SAME join `extract_unified_elements` uses, at all three call
+    sites, to build a table_content/table element's `text` field from its
+    `data` rows at construction time: cells joined by " | " within a row,
+    rows joined by "\\n". Used to REBUILD `text` after the pre-LLM scrub
+    mutates cells inside `data` in place, so `text` (what
+    `extract_text_from_docx` and `get_element_text`'s `table_content`
+    branch read) and `data` (what `get_element_text`'s legacy `table`
+    branch and every cell-level consumer read) never disagree (#847
+    residual round 4: a below-cell/next-paragraph scrub touched only one
+    of the two, so the value still reached an LLM reader through
+    whichever field it left alone)."""
+    return "\n".join(
+        " | ".join(
+            cell.get("text", "") if isinstance(cell, dict) else str(cell)
+            for cell in row
+        )
+        for row in rows
+        if isinstance(row, list)
+    )
+
+
 def _scrub_pre_llm_pii_row(row: list[Any]) -> None:
     """Round 2 (#847): a table row split into a label cell ("Date of
     Birth:") and a separate value cell ("01/02/1970") has no
@@ -765,27 +788,137 @@ def _scrub_pre_llm_pii_row(row: list[Any]) -> None:
             nxt["text"] = redact_pre_llm_value_of_category(nxt["text"], category)
 
 
+def _row_already_resolved(row: list[Any], col_idx: int) -> bool:
+    """True if some OTHER cell in `row` already carries
+    `PRE_LLM_PLACEHOLDER` -- meaning this row's own same-row scrub
+    (`_scrub_pre_llm_pii_row`, or a value sitting in the label's own cell)
+    already found and withheld a value beside the label, so the row BELOW
+    is an unrelated field, not this label's value (#847 residual round 4:
+    a "Date of Birth:" | "01/02/1970" row directly above an "Appointed
+    2001" | ... row must not touch "2001" -- the DOB was already resolved
+    same-row)."""
+    for idx, cell in enumerate(row):
+        if idx == col_idx or not isinstance(cell, dict):
+            continue
+        cell_text = cell.get("text")
+        if isinstance(cell_text, str) and PRE_LLM_PLACEHOLDER in cell_text:
+            return True
+    return False
+
+
+def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
+    """Round 3 (#847 residual): a two-row FORM table -- a label cell
+    ("Date of Birth") with its value directly below it in the SAME COLUMN
+    of the next row, not the next cell of the same row -- has no
+    `_PII_FRAGMENT_SPLIT_RE` delimiter and no same-row neighbour for
+    `_scrub_pre_llm_pii_row` to see. After every cell's own text is
+    scrubbed and every same-row label/value pair is handled, walk row
+    pairs: a cell that is nothing but a bare DOB/SSN label, with no value
+    ALREADY resolved beside it in its own row (`_row_already_resolved`),
+    has its value, if any, scrubbed out of the cell directly BELOW it
+    (same column index) in the next row. `cross_boundary=True`: a cell one
+    row down is a lower-confidence position than the same row, so its
+    value must open that cell and be a whole date -- "Appointed
+    07/01/2005" or "Date of Appointment: 07/01/2005" below a blank "Date
+    of Birth:" keeps its date, and so does a bare year."""
+    for row_idx in range(len(rows) - 1):
+        row, next_row = rows[row_idx], rows[row_idx + 1]
+        if not isinstance(row, list) or not isinstance(next_row, list):
+            continue
+        for col_idx, cell in enumerate(row):
+            if not isinstance(cell, dict) or col_idx >= len(next_row):
+                continue
+            category = pre_llm_bare_label_category(cell.get("text"))
+            if category is None or _row_already_resolved(row, col_idx):
+                continue
+            below = next_row[col_idx]
+            if isinstance(below, dict) and isinstance(below.get("text"), str):
+                below["text"] = redact_pre_llm_value_of_category(
+                    below["text"], category, cross_boundary=True
+                )
+
+
+def _scrub_pre_llm_value_of_category_in_element(el: dict[str, Any], category: str) -> None:
+    """Replace the value for `category` that OPENS `el`, wherever `el` keeps
+    its text: a plain paragraph's own `text`, or -- for a table element --
+    its first cell, with `text` (the pre-flattened join built at
+    construction time) rebuilt afterwards from `data`
+    (`_flatten_table_content_text`) so the two fields never disagree.
+    `cross_boundary=True`: the next element is a lower-confidence position
+    than the same cell or row, so only a whole date that opens it counts --
+    "Date of Appointment: 07/01/2005", "Appointed Assistant Professor
+    07/01/2005" and "1990-1994 BA, Example College" after a blank "Date of
+    Birth:" are left alone, and so is every later cell of a table."""
+    data = el.get("data")
+    if data:
+        first_row = data[0] if isinstance(data[0], list) else []
+        first = first_row[0] if first_row else None
+        if isinstance(first, dict) and isinstance(first.get("text"), str) and first["text"]:
+            first["text"] = redact_pre_llm_value_of_category(
+                first["text"], category, cross_boundary=True
+            )
+            el["text"] = _flatten_table_content_text(data)
+        return
+    text = el.get("text")
+    if isinstance(text, str) and text:
+        el["text"] = redact_pre_llm_value_of_category(text, category, cross_boundary=True)
+
+
+def _scrub_pre_llm_pii_next_element(elements: list[dict[str, Any]]) -> None:
+    """Round 3 (#847 residual): a label-only PARAGRAPH ("Date of Birth:")
+    with its value in the NEXT element of the unified stream -- a separate
+    paragraph or table, not the same string `redact_pre_llm_values`'s
+    in-text extension can search within. After every element's own text
+    is scrubbed, walk the stream once more: an element whose whole text is
+    nothing but a bare DOB/SSN label has its value, if any, scrubbed out
+    of the very next element (see `_scrub_pre_llm_value_of_category_in_element`
+    for a table next-element, whose value can be in `data`, not `text`)."""
+    for idx in range(len(elements) - 1):
+        text = elements[idx].get("text")
+        if not isinstance(text, str):
+            continue
+        category = pre_llm_bare_label_category(text)
+        if category is None:
+            continue
+        _scrub_pre_llm_value_of_category_in_element(elements[idx + 1], category)
+
+
 def _scrub_pre_llm_pii_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Replace DOB/SSN VALUES in place, in every element and table cell
     `extract_unified_elements` built, before any LLM stage reads them
     (#847) -- the single choke point stage 1a, 1b and stage 2 all read
     through. Element count and order are untouched; only a value span's
     text changes. See `redact_pre_llm_values` for what is and is not
-    replaced, and `_scrub_pre_llm_pii_row` for the label-cell/value-cell
-    case a single string's own scrub cannot see."""
+    replaced, `_scrub_pre_llm_pii_row` for the same-row label-cell/
+    value-cell case, `_scrub_pre_llm_pii_column` for the value directly
+    below a label in a two-row form table, and
+    `_scrub_pre_llm_pii_next_element` for a label-only paragraph whose
+    value is the following paragraph or table.
+
+    A table element's `data` (per-cell) is the source of truth once any
+    cell-level scrub runs on it: `text` (the pre-flattened join built at
+    construction time) is REBUILT from `data` afterwards
+    (`_flatten_table_content_text`), never scrubbed independently, so the
+    two can no longer drift apart (#847 residual round 4)."""
     for el in elements:
-        text = el.get("text")
-        if isinstance(text, str) and text:
-            el["text"] = redact_pre_llm_values(text)
-        for row in el.get("data") or []:
-            if not isinstance(row, list):
-                continue
-            for cell in row:
-                if isinstance(cell, dict):
-                    cell_text = cell.get("text")
-                    if isinstance(cell_text, str) and cell_text:
-                        cell["text"] = redact_pre_llm_values(cell_text)
-            _scrub_pre_llm_pii_row(row)
+        data = el.get("data") or []
+        if data:
+            for row in data:
+                if not isinstance(row, list):
+                    continue
+                for cell in row:
+                    if isinstance(cell, dict):
+                        cell_text = cell.get("text")
+                        if isinstance(cell_text, str) and cell_text:
+                            cell["text"] = redact_pre_llm_values(cell_text)
+                _scrub_pre_llm_pii_row(row)
+            _scrub_pre_llm_pii_column(data)
+            el["text"] = _flatten_table_content_text(data)
+        else:
+            text = el.get("text")
+            if isinstance(text, str) and text:
+                el["text"] = redact_pre_llm_values(text)
+    _scrub_pre_llm_pii_next_element(elements)
     return elements
 
 
