@@ -266,6 +266,20 @@ def test_recovered_row_reformatted_whitespace_still_matches():
     assert recovered_row_duplicates_parent(row, parent)
 
 
+def test_recovered_row_pipe_vs_tab_separator_still_matches():
+    # A5IZ6Q's second cell-boundary gap: recover_unclaimed_table_rows always
+    # renders a recovered row's own text with " | " between label and value,
+    # but the fused parent's multi-cell line for the SAME cell can instead
+    # be tab-joined (stage_2_entry_extraction.py's "\t".join(full_text_parts))
+    # -- a plain _squash containment check misses this, since '|' isn't
+    # whitespace and survives squashing on the row's side only.
+    parent = {"text": "Name of Principal Investigator: | A. Researcher\t"
+                      "Your role*\toversight\tYour percent (%) effort:\t1%"}
+    row = {"text": "Your percent (%) effort: | 1%",
+           "recovered_row": True, "parent_idx": 100}
+    assert recovered_row_duplicates_parent(row, parent)
+
+
 # ---------------------------------------- find_recovered_row_parent (A5IZ6Q)
 #
 # A5IZ6Q's own second residual: some of the LYRASIS grant's recovered rows

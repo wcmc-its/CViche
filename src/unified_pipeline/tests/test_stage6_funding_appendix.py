@@ -278,8 +278,13 @@ _RECOVERY_GRANT_TEXT = (
     "Project title: | Synthetic Tools for Data Curation\n"
     "Annual direct costs: | $15,000.00\n"
     "Duration of support: | 00/2021-00/2022\n"
-    "Name of Principal Investigator: | A. Researcher\n"
-    "Your percent (%) effort: | 1%"
+    # Tab-joined, not " | " -- mirrors A5IZ6Q's own shape, where this last
+    # multi-cell line came from a different extraction path than the rows
+    # above it, and exercises the cell-separator normalization in
+    # recovered_row_duplicates_parent (the recovered row below still uses
+    # " | ", recover_unclaimed_table_rows' own convention).
+    "Name of Principal Investigator: | A. Researcher\t"
+    "Your percent (%) effort:\t1%"
 )
 
 _RECOVERY_OWNER_ENTRY = {"text": "Name: A. Researcher", "taxonomy_code": "A",

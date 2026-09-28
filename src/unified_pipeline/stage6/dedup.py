@@ -17,6 +17,16 @@ from .normalization import _squash
 from .parsing import _dates_overlap_or_match
 from .render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines
 
+# A table row's cell separator, as this codebase's raw-text extraction
+# renders it -- " | " in the convention `recover_unclaimed_table_rows`
+# itself uses for a recovered row's own text, but a tab where a multi-cell
+# line is instead built by joining `full_text_parts` with "\t"
+# (stage_2_entry_extraction.py). `recovered_row_duplicates_parent` strips
+# both before comparing so the SAME cell boundary matches regardless of
+# which convention produced it (A5IZ6Q: "Your percent (%) effort: | 1%" vs
+# the parent's own "...effort:\t1%" for the identical source cell).
+_CELL_SEPARATOR_RE = re.compile(r'[|\t]')
+
 
 _STOP_WORDS = frozenset({
     'a', 'an', 'and', 'as', 'at', 'be', 'by', 'for', 'from', 'i', 'in',
@@ -159,16 +169,22 @@ def recovered_row_duplicates_parent(entry: dict, parent: dict | None) -> bool:
     Verbatim containment against the parent's own raw text sidesteps both
     gaps: it needs no field list, no length floor, and no rendered-document
     lookup, because a recovered row's every field comes from the SAME table
-    cell text the parent's fused entry already carries. A row NOT contained
-    in its parent (one the model's delimiter genuinely skipped, the case
+    cell text the parent's fused entry already carries. Comparing after
+    `_CELL_SEPARATOR_RE` strips both cell-separator conventions (on top of
+    `_squash`'s own whitespace stripping) means this only ever WIDENS a
+    match relative to plain `_squash`: removing a shared character from both
+    sides cannot turn a true containment into a false one, so every case the
+    narrower comparison already caught still matches. A row NOT contained in
+    its parent (one the model's delimiter genuinely skipped, the case
     `recover_unclaimed_table_rows` exists for) returns False and is left to
     the normal appendix/recovery path -- callers must not treat False as
     proof the row is missing, only as "not this parent's own duplicate".
     """
     if not entry.get('recovered_row') or parent is None:
         return False
-    row_text = _squash(entry.get('text', ''))
-    return bool(row_text) and row_text in _squash(parent.get('text', ''))
+    row_text = _squash(_CELL_SEPARATOR_RE.sub('', entry.get('text', '') or ''))
+    parent_text = _squash(_CELL_SEPARATOR_RE.sub('', parent.get('text', '') or ''))
+    return bool(row_text) and row_text in parent_text
 
 
 def _as_float(value: int | float | str | None) -> float | None:
