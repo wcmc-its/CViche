@@ -856,7 +856,7 @@ def _build_org_around_keyword(txt: str) -> str:
     return org.strip('.,; ')
 
 
-def _extract_organization_from_award(text: str) -> str:
+def _organization_candidate(text: str) -> str:
     """Extract organization name from award/honor text using institutional keyword patterns.
 
     Uses a multi-strategy approach:
@@ -909,6 +909,45 @@ def _extract_organization_from_award(text: str) -> str:
         return org
 
     return ''
+
+
+# The award-name words that end an award's own name. An organization equal
+# to the award name minus one of these is the award, not its grantor (#887).
+_AWARD_NAME_TAIL_RE = re.compile(
+    r'\s+(?:Award|Prize|Fellowship|Scholarship|List|Fellow)\s*$',
+    re.IGNORECASE)
+
+# A role a person holds, never the last word of an institution's name.
+_ORG_ROLE_WORDS = frozenset(['representative', 'fellow', 'member'])
+
+
+def _is_fabricated_organization(org: str, text: str) -> bool:
+    """Is `org` the award's own name (or part of a role), not a grantor?
+
+    Strategies 3/4 of `_organization_candidate` anchor on `College` /
+    `University` and build outward, so an award named after a college
+    ("College of Education 2015 Outstanding Thesis Award") became its own
+    organization (#887). Three tells, each independent: the candidate is the
+    whole award name minus its trailing award word; it carries a digit (a
+    year belongs to the date column); it ends in a role word.
+    """
+    stripped = text.strip().rstrip('.,;')
+    if _AWARD_NAME_TAIL_RE.sub('', stripped).strip().lower() == org.lower() \
+            and _AWARD_NAME_TAIL_RE.search(stripped):
+        return True
+    if any(ch.isdigit() for ch in org):
+        return True
+    return org.split()[-1].lower().strip('.,;') in _ORG_ROLE_WORDS
+
+
+def _extract_organization_from_award(text: str) -> str:
+    """The organization `_organization_candidate` finds in the award text,
+    unless it is a fragment of the award name itself (#887), in which case
+    an empty cell is the honest render."""
+    org = _organization_candidate(text)
+    if org and _is_fabricated_organization(org, text):
+        return ''
+    return org
 
 
 class HonorsSection:

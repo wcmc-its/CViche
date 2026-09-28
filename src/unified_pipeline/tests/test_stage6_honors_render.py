@@ -116,3 +116,44 @@ def test_split_award_year_shapes():
         "Venue Day, Bethesda", "2025")
     assert gen._split_award_year("No year here at all") == (
         "No year here at all", "")
+
+
+def test_org_not_fabricated_from_the_award_name_itself():
+    """#887: with no granting body in the text, an award named after a
+    college or university must not become its own organization."""
+    gen = WCMTemplateGenerator(verbose=False)
+    # the award name minus its trailing award word (no digit, no role word:
+    # only the equals-the-award-name guard can catch this one)
+    assert gen._extract_organization_from_award(
+        "College of Education Outstanding Thesis Award") == ""
+    # a digit in the built organization (a year is the date column's)
+    assert gen._extract_organization_from_award(
+        "2016 College of Education 2015 Outstanding Thesis Award") == ""
+    assert gen._extract_organization_from_award(
+        "College of Education 2015 Outstanding Thesis Award") == ""
+    # a role word ends the built organization
+    assert gen._extract_organization_from_award(
+        "University of Western Ontario Representative, "
+        "Ontario Undergraduate Student Alliance") == ""
+
+
+def test_org_extraction_still_finds_a_real_grantor_after_887_guards():
+    gen = WCMTemplateGenerator(verbose=False)
+    # a grantor that is a PREFIX of the award name (not the whole name)
+    assert gen._extract_organization_from_award(
+        "Society of Fictional Medicine Mentoring Award") == \
+        "Society of Fictional Medicine"
+    assert gen._extract_organization_from_award(
+        "Best Talk Award, Made-up University") == "Made-up University"
+
+
+def test_single_award_with_no_granting_body_renders_empty_org_887():
+    entry = {"taxonomy_code": "H",
+             "text": "College of Education 2015 Outstanding Thesis Award",
+             "extracted_fields": {
+                 "award_name": "College of Education 2015 Outstanding "
+                               "Thesis Award",
+                 "granting_body": None, "date": "2016"}}
+    rows = _render_honors([entry])
+    assert rows == [["College of Education 2015 Outstanding Thesis Award",
+                     "", "2016"]]
