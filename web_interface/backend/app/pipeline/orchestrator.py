@@ -360,7 +360,7 @@ class PipelineOrchestrator:
                           input_tokens_delta: int = 0, output_tokens_delta: int = 0,
                           cache_read_tokens_delta: int = 0,
                           cache_write_tokens_delta: int = 0,
-                          provider: str = "openai"):
+                          provider: str = "bedrock"):
         """Update run costs in real-time and emit cost update event.
 
         cache_read_tokens_delta / cache_write_tokens_delta are subsets of

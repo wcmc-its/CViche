@@ -253,7 +253,7 @@ class EventEmitter:
                                 input_tokens_total: int = 0, output_tokens_total: int = 0,
                                 cache_read_tokens_delta: int = 0, cache_write_tokens_delta: int = 0,
                                 cache_read_tokens_total: int = 0, cache_write_tokens_total: int = 0,
-                                provider: str = "openai"):
+                                provider: str = "bedrock"):
         """Emit real-time cost updates as LLM calls complete.
 
         Cache token fields carry the Bedrock prompt-caching split (input
