@@ -20,6 +20,10 @@ from unified_pipeline.core.validators.appointment_funding_corrector import (  # 
     has_funding_evidence,
     is_positions_heading,
 )
+from unified_pipeline.core.validators.hierarchy_mismatch_flagger import (  # noqa: E402
+    is_funding_code,
+    is_position_code,
+)
 
 _APPLICANT = "2020-21  Applicant for Instructor of Medicine\tExample State University School of Medicine"
 
@@ -62,30 +66,31 @@ def test_m2_under_a_funding_heading_is_untouched():
 
 
 @pytest.mark.parametrize("text", [
-    "Seed Grant, Example Institute\t2010-2011\tRole: PI",
-    "Early Career Award, Example Foundation\t2012",
-    "Industry Sponsored Research\t2015-2019\tRole: MPI",
-    "Role: Co-I\tMulticenter trial\t2016-2020",
-    "Multicenter aneurysm trial\t2015-2019\tRole: MPI",
-    "Thrombectomy registry\t2020-2023\tRole: Dual-PI",
-    "Outcomes study\t2012-2014\tRole: PI",
-    "Project Number 12345\t2024-2029",
-    "Example agency contract\t2019-2021",
+    # Each FUNDING_SHAPED alternative as the only evidence on the row.
     "Research study\t2018-2020\t$250,000",
     "R01 HL000000\t2014-2019",
-    "Funded by the State\t2011-2013",
-    # Each FUNDING_EVIDENCE alternative as the only evidence on the row.
-    "Visiting scholar position awarded by the department\t2014",
-    "Research scholar\t2014\tsupported by a grant",
-    "Visiting scientist\t2014\tsponsored position",
-    "Visiting scientist\t2014\tsponsors: Example Institute",
-    "Visiting scientist\t2014\tsponsor: Example Institute",
-    "Research associate\t2014\tExample Awards Program",
-    "Research associate\t2014\tfunds from Example Institute",
-    "Contract # 4471\t2019-2021",
-    "Award No. 4471\t2019-2021",
+    "Career development\t2016-2021\tK23",
+    "Outcomes study\t2012-2014\tNIH",
+    "Comparative effectiveness study\t2019-2022\tPCORI",
+    "Project Number 12345\t2024-2029",
     "Project # 4471\t2019-2021",
     "Contract No 4471\t2019-2021",
+    "Contract # 4471\t2019-2021",
+    "Award No. 4471\t2019-2021",
+    "Grant #4471\t2019-2021",
+    "Outcomes study\t2012-2014\tRole: PI",
+    "Multicenter aneurysm trial\t2015-2019\tRole: MPI",
+    "Thrombectomy registry\t2020-2023\tRole: Dual-PI",
+    "Multicenter trial\t2016-2020\tRole: Co-I",
+    "Multicenter trial\t2016-2020\tRole: CoI",
+    "Multicenter trial\t2016-2020\tPrincipal Investigator",
+    "Multicenter trial\t2016-2020\tCo-Investigator",
+    "Multicenter trial\t2016-2020\t10% direct costs",
+    # Two distinct funding words.
+    "Early Career Award, Example Foundation\t2012\tgrant",
+    "Visiting scientist\t2014\tsponsored by the agency",
+    "Research scholar\t2014\tfunded; investigator",
+    "Research associate\t2014\tsponsorship from the Example Awards Program",
 ])
 def test_funding_evidence_keeps_m2(text):
     assert has_funding_evidence(text)
@@ -98,9 +103,44 @@ def test_funding_evidence_keeps_m2(text):
     _APPLICANT,
     "2009-2014  Research project on tendon healing",
     "2018-present  Core Faculty, Emergency Medicine Residency",
+    # One funding word is ordinary appointment prose, not evidence.
+    "Assistant Professor\t2015\tfunded by departmental start-up",
+    "Visiting Fellow\t2014\tSponsored by Dr. Lee",
+    "Research Administrator, Grants and Contracts Office\t2016",
+    "Liaison, Example agency\t2019-2021",
+    "Research associate\t2014\tExample Awards Program",
+    "Research Investigator\t2018-2020",
+    # The same word twice is still one word.
+    "Grants Manager, Grant Office\t2012",
+    # Lower-case acronyms and roles are not roles or funders.
+    "Lab manager, pi lab\t2012",
+    "Staff, coi disclosure office\t2012",
+    "Visiting scientist, nih campus\t2012",
+    # A number word must be the whole word.
+    "Contract Notice reviewer\t2012",
 ])
 def test_no_funding_evidence(text):
     assert not has_funding_evidence(text)
+
+
+@pytest.mark.parametrize("code", ["D", "D1", "D2", "D3"])
+def test_position_codes(code):
+    """Pins the flagger's position family that is_positions_heading relies on."""
+    assert is_position_code(code)
+    assert not is_funding_code(code)
+
+
+@pytest.mark.parametrize("code", ["M2", "M2A", "M2B", "M2C", "M2D"])
+def test_funding_codes(code):
+    """Pins the flagger's funding family; M2D (patents) shares the M2 section."""
+    assert is_funding_code(code)
+    assert not is_position_code(code)
+
+
+@pytest.mark.parametrize("code", ["O", "P", "L3", "T", "Q2", "N3"])
+def test_other_codes_are_neither(code):
+    assert not is_position_code(code)
+    assert not is_funding_code(code)
 
 
 def test_non_grant_codes_are_untouched():
@@ -140,3 +180,18 @@ def test_none_text_and_hierarchy_are_tolerated():
     ])
     assert [e["taxonomy_code"] for e in out] == ["T", "M2B"]
     assert stats["correction_details"][0]["text_preview"] == ""
+
+
+def test_first_original_code_is_kept():
+    """An entry an earlier corrector already recoded keeps its true original code."""
+    entry = _entry(_APPLICANT, code="M2B")
+    entry["original_taxonomy_code"] = "M2C"
+    assert correct_appointment_funding(entry)["original_taxonomy_code"] == "M2C"
+
+
+def test_an_earlier_pass_is_not_recounted():
+    """A row that already carries the correction key from a previous pass is not a new correction."""
+    earlier, _ = apply_appointment_funding_corrections([_entry(_APPLICANT)])
+    out, stats = apply_appointment_funding_corrections(earlier)
+    assert out[0]["taxonomy_code"] == "T"
+    assert stats["corrections_applied"] == 0
