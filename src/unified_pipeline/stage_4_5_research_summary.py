@@ -97,7 +97,7 @@ YEAR_PATTERN = re.compile(r'\b(?:19|20)\d{2}\b')
 # ("2024 - Present", "to present"), or "Currently Working" (8 occurrences in
 # the local stage-4 farm). Anchored at the start so a trailing qualifier
 # ("2019, not current") does not count, and at the end so trailing text after
-# the open word ("2019 - present, renewed 2024") does not count either (#947).
+# the open word ("2019 - present, renewed 2024") does not count either.
 ONGOING_PATTERN = re.compile(
     r'(?:^|[-–—]|\bto)\s*\b(?:present|current|ongoing|now|currently\s+working)\b\s*$', re.IGNORECASE)
 OPEN_RANGE_PATTERN = re.compile(r'\b(?:19|20)\d{2}\s*[-–—]+\s*(?:present|current|ongoing|now)\b', re.IGNORECASE)
@@ -112,8 +112,7 @@ _UNCOMPUTED = object()  # sentinel: is_current_entry() should compute latest_ent
 def latest_entry_year(entry: dict, current_year: int) -> int | None:
     """Latest year across the entry's date fields (trusted, so not capped);
     else the entry's own date from its free text -- the first year-or-range
-    token, taking a range's END year ("Project A, 2021-2023" -> 2023, a
-    2004-2024 range is recent work, not 2004 (#947 round 3)), not the max of
+    token, taking a range's END year ("Project A, 2021-2023" -> 2023), not the max of
     every year mentioned (a later aside, such as a renewal year, must not
     make an old entry look recent). A range straddling current_year (start
     <= current_year < end, e.g. "Project 2022-2028" at current_year=2026) is
@@ -145,9 +144,7 @@ def resolve_current_year(current_year: int | None) -> int:
 def ended_before(entry: dict, current_year: int) -> bool:
     """True when the entry's end_date names a year earlier than current_year.
     An end_date matching ONGOING_PATTERN ("2024 - Present") has not ended,
-    whatever year it names: is_current_entry's CURRENT_TAXONOMY_CODES branch
-    returns ``not ended_before(...)`` before ONGOING_PATTERN is ever checked,
-    so without this an open-ended M2A/N3A read as ended (#947 round 3)."""
+    whatever year it names, so an open-ended M2A/N3A stays current."""
     fields = entry.get('extracted_fields') or {}
     end_date = str(fields.get('end_date') or '')
     if ONGOING_PATTERN.search(end_date):
@@ -164,7 +161,7 @@ def is_current_entry(entry: dict, taxonomy_code: str, current_year: int, latest_
 
     `latest_year`, when given, is the caller's already-computed
     latest_entry_year(entry, current_year), so the M1 undated check does not
-    compute it a second time (#947)."""
+    compute it a second time."""
     if taxonomy_code in CURRENT_TAXONOMY_CODES:
         return not ended_before(entry, current_year)
     if taxonomy_code == RESEARCH_ACTIVITIES_CODE:
@@ -181,9 +178,7 @@ def is_current_entry(entry: dict, taxonomy_code: str, current_year: int, latest_
 
 @dataclass(frozen=True)
 class EntryRecency:
-    """One entry's recency facts, computed once (#947: is_current_entry's
-    undated-M1 branch and the decay formula each called latest_entry_year
-    separately for the same entry)."""
+    """One entry's recency facts, computed once and shared by ranking and tagging."""
     is_current: bool
     latest_year: int | None
     score: float
@@ -260,8 +255,7 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: in
 
     `recency_by_id`, keyed by id(entry), supplies an entry's already-computed
     EntryRecency so this function does not call compute_entry_recency a
-    second time for an entry the caller (gather_context_entries) already
-    scored (#947 review: recency was computed up to 3x per entry).
+    second time for an entry the caller (gather_context_entries) already scored.
     """
     if not entries:
         return []
@@ -301,8 +295,7 @@ def gather_context_entries(entries_by_code: dict[str, list[dict]], current_year:
 
     Each entry's EntryRecency is computed once here and carried through as
     the 4th tuple element, so both prioritize_entries' cut and
-    build_context_string's [CURRENT] tag reuse it instead of recomputing
-    (#947 review).
+    build_context_string's [CURRENT] tag reuse it instead of recomputing.
 
     Returns list of (taxonomy_code, entry, weight, recency) tuples, sorted by weight.
     """
@@ -407,11 +400,7 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRec
     2. Sorted in descending order by weight (most relevant first)
 
     Each entry's EntryRecency (4th tuple element) is gather_context_entries'
-    already-computed value; the [CURRENT] tag reads its `is_current` field
-    instead of calling is_current_entry again (#947 review). Unlike
-    prioritize_entries/gather_context_entries/is_current_entry, this function
-    never resolves a year itself, so it takes no current_year parameter
-    (#947 round 3: the earlier "signature parity" parameter was unused).
+    already-computed value; the [CURRENT] tag reads its `is_current` field.
 
     Rough estimate: 1 token ≈ 4 characters
     """
@@ -575,9 +564,7 @@ Generate only the research summary paragraph (150-200 words max), no additional 
 
 def _resolve_stage_4_5_input_file(input_path: str) -> Path:
     """input_path as a literal path, or else the first *_fields.json-shaped
-    match for it under a stage 4/5/5b output directory (#947 round 3: carved
-    out of run_stage_4_5 to hold its line count down after restoring the
-    cache-pricing comment below)."""
+    match for it under a stage 4/5/5b output directory."""
     input_file = Path(input_path)
     if not input_file.exists():
         for stage_dir in ['stage_5b_institution_enrichment', 'stage_5_enrichment', 'stage_4_field_extraction']:
@@ -608,7 +595,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
     with open(input_file, 'r') as f:
         data = json.load(f)
 
-    current_year = resolve_current_year(None)  # #947: resolved once, reused for the whole run
+    current_year = resolve_current_year(None)  # resolved once, reused for the whole run
     document_uid = data.get('document_uid', input_file.stem)
     cv_owner = data.get('cv_owner') or {}
     cv_owner_name = f"{cv_owner.get('first_name', '')} {cv_owner.get('last_name', '')}".strip()

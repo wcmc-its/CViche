@@ -191,11 +191,11 @@ def test_prioritize_entries_empty_list_returns_empty():
     lambda: is_current_entry({"text": "x", "extracted_fields": {}}, "M2A"),
 ])
 def test_current_year_is_a_required_argument(call):
-    """#947 review: current_year must be required, not left to a per-function
+    """current_year must be required, not left to a per-function
     default -- a caller that omits it is a bug, not a silently-resolved wall
     clock. Guards against a regression that reintroduces `= None` here.
     build_context_string is not in this list: it takes no current_year
-    parameter at all (#947 round 3 -- it never resolved a year itself, so
+    parameter at all (it never resolved a year itself, so
     the earlier "signature parity" parameter was unused)."""
     with pytest.raises(TypeError):
         call()
@@ -257,7 +257,7 @@ def test_prioritize_entries_recency_weight_beats_content_length():
 
 # #947: current_year is now required on prioritize_entries / gather_context_entries /
 # is_current_entry -- there is no more per-function wall-clock default to test.
-# build_context_string takes no current_year at all (#947 round 3): it never
+# build_context_string takes no current_year at all: it never
 # resolved a year itself. Only run_stage_4_5 still resolves the wall clock, and
 # only once, at the top of the run; that is covered by
 # test_run_stage_4_5_resolves_current_year_once below, near the other
@@ -273,7 +273,7 @@ def test_latest_entry_year_takes_max_over_date_fields():
 
 
 def test_latest_entry_year_leading_range_reads_the_end_year_not_the_start():
-    """#947 round 3: a 2004-2024 range is recent work -- the leading range's
+    """a 2004-2024 range is recent work -- the leading range's
     END year is the entry's own date, not its start. The old code read only
     the first 4-digit number in the text (2021), which is the range's start."""
     entry = {"extracted_fields": {"narrative": "x"}, "text": "Project A, 2021-2023. Aims 2022."}
@@ -281,7 +281,7 @@ def test_latest_entry_year_leading_range_reads_the_end_year_not_the_start():
 
 
 def test_latest_entry_year_ignores_a_later_aside_past_the_leading_range():
-    """#947 review: the max over every year mentioned in free text let a
+    """the max over every year mentioned in free text let a
     later aside (a renewal year, "replicated in 2023") inflate an old entry.
     Unlike the leading range's own end, a later separate mention -- even one
     naming a bigger year -- is not the entry's own date and must be ignored."""
@@ -315,7 +315,7 @@ def test_latest_entry_year_reads_date_field_and_twentieth_century_years():
 ])
 def test_latest_entry_year_ignores_digits_inside_longer_numbers(text, expected):
     """A grant or ID number that contains a year-like run is not a year.
-    #947 round 4: a leading range straddling current_year (start <=
+    a leading range straddling current_year (start <=
     current_year < end) is an entry still in progress -- it is capped at
     current_year, not skipped in favour of a later incidental year
     ("pilot 2015" must not win over the still-open 2022-2028 range)."""
@@ -352,7 +352,7 @@ def test_is_current_entry(code, fields, text, expected):
     ("N3A", {"end_date": "2020"}, "mentee who finished", False),
     ("K1", {"end_date": "Now"}, "x", True),                       # 'now' is an ongoing end_date
     ("K1", {"end_date": "Presentation 2019"}, "x", False),       # ongoing word must end at a boundary
-    # #947 round 3: is_current_entry's CURRENT_TAXONOMY_CODES branch returned
+    # is_current_entry's CURRENT_TAXONOMY_CODES branch returned
     # `not ended_before(...)` before ONGOING_PATTERN was ever checked, so an
     # open "YYYY - Present" end_date on M2A/N3A named a year and read as ended.
     ("M2A", {"end_date": "2024 - Present"}, "x", True),
@@ -385,18 +385,18 @@ def _frozen_datetime(year):
     ("2025-Present", True),
     ("2024 - Present", True),      # #947: a spaced dash range must match too
     ("to present", True),
-    ("Currently Working", True),   # #947 round 3: 8 occurrences in the local stage-4 farm
+    ("Currently Working", True),   # 8 occurrences in the local stage-4 farm
     ("currently working", True),
     ("2022", False),
     ("2019, not current", False),  # a trailing mention is not an ongoing end_date
     ("Presentation 2019", False),  # the ongoing word must end at a boundary
-    # #947 round 3: trailing text after the open word needs the end anchor
+    # trailing text after the open word needs the end anchor
     # ($) to reject -- without it, "present" alone (preceded by the dash)
     # would already satisfy the pattern regardless of what follows.
     ("2019 - present, renewed 2024", False),
 ])
 def test_ongoing_end_date_shapes(end_date, expected):
-    """#947 review: document exactly which end_date strings count as
+    """document exactly which end_date strings count as
     ongoing. Uses K1 (neither current-by-definition nor M1) to isolate
     ONGOING_PATTERN from the other is_current_entry branches."""
     entry = {"extracted_fields": {"end_date": end_date}, "text": "x"}
@@ -440,7 +440,7 @@ def test_score_entry_recency_undated_scores_zero():
 
 
 def test_open_range_in_text_only_makes_m1_current_not_other_codes():
-    """#947 review: OPEN_RANGE_PATTERN ran for every code, so a publication
+    """OPEN_RANGE_PATTERN ran for every code, so a publication
     abstract mentioning "2005-present" was wrongly tagged current and scored
     1.0. Only M1 (whose project lines carry their dates in the text) checks
     it; the same text on S1 must not."""
@@ -451,7 +451,7 @@ def test_open_range_in_text_only_makes_m1_current_not_other_codes():
 
 
 def test_compute_entry_recency_agrees_with_is_current_entry_and_score_entry_recency():
-    """#947 review: latest_entry_year was computed twice per entry (once
+    """latest_entry_year was computed twice per entry (once
     inside is_current_entry's undated-M1 branch, again inside
     score_entry_recency's decay calc). compute_entry_recency computes it
     once and its fields must match what the two separate functions return."""
@@ -471,7 +471,7 @@ def test_compute_entry_recency_agrees_with_is_current_entry_and_score_entry_rece
 
 
 def test_compute_entry_recency_dated_closed_m1_entry_is_not_current():
-    """#947 review: the undated-M1 test above never exercises compute_entry_recency's
+    """the undated-M1 test above never exercises compute_entry_recency's
     M1 wire when the entry IS dated. A mutant changing compute_entry_recency's
     `is_current_entry(entry, taxonomy_code, current_year, latest_year=year)` call to
     pass `latest_year=None` instead makes is_current_entry recompute nothing, see
@@ -553,7 +553,7 @@ def test_gather_context_entries_current_project_leads_old_first_author_paper():
 
 
 def test_gather_context_entries_weight_and_tag_use_given_current_year_not_2026():
-    """#947 review: a mutant hardcoding current_year=2026 inside gather's own
+    """a mutant hardcoding current_year=2026 inside gather's own
     recency computation (rather than threading through the current_year
     parameter) left the suite green, because every other direct
     gather_context_entries test in this file also happens to use 2026. A
@@ -567,7 +567,7 @@ def test_gather_context_entries_weight_and_tag_use_given_current_year_not_2026()
 
 
 def test_gather_and_build_compute_recency_exactly_once_per_entry(monkeypatch):
-    """#947 review: recency was computed up to 3x per entry -- once inside
+    """recency was computed up to 3x per entry -- once inside
     prioritize_entries' own scoring loop, again inside gather_context_entries'
     final-weight loop, and a third time inside build_context_string's
     [CURRENT] tag check (which, for an M1 entry, recomputes latest_entry_year
@@ -738,7 +738,7 @@ def test_build_context_string_tags_current_entries():
 
 
 def test_build_context_string_tag_follows_recency_computed_at_a_year_other_than_2026():
-    """#947 review: the [CURRENT] tag must come from each entry's own
+    """the [CURRENT] tag must come from each entry's own
     already-computed EntryRecency (gather's 4th tuple element), exercised at
     current_year=2040 so a regression that only happens to tag correctly at
     2026 (every other direct build_context_string test's year) cannot hide."""
@@ -865,7 +865,7 @@ def test_generate_research_summary_prompt_requires_current_work_first_and_neutra
 
 
 def test_current_context_tag_appears_in_current_work_requirement():
-    """#947 review: CURRENT_WORK_REQUIREMENT and CURRENT_CONTEXT_TAG live in
+    """CURRENT_WORK_REQUIREMENT and CURRENT_CONTEXT_TAG live in
     two different places in the module now (prompt text next to the
     generation prompt, the tag itself next to the recency constants); this
     pins that they can't drift apart -- no call_llm stub needed."""
@@ -1047,14 +1047,14 @@ def test_run_stage_4_5_raises_file_not_found_for_missing_input(monkeypatch, tmp_
 
 
 def test_run_stage_4_5_resolves_current_year_once_from_wall_clock(monkeypatch, tmp_path):
-    """#947 review: current_year must be required and resolved once at the
+    """current_year must be required and resolved once at the
     top of the run, not left to each function's own default. Frozen at 2030,
     a grant that ended in 2028 is not current -- proving resolve_current_year
     actually ran and its result (not the real wall-clock year) reached
     is_current_entry via gather/build. end_date 2028 is chosen so the two
     candidate years disagree: at the real wall clock the grant would still
     be current (not ended), at the frozen 2030 it is not -- an end_date
-    before both years (e.g. 2025) cannot tell them apart (#947 review)."""
+    before both years (e.g. 2025) cannot tell them apart."""
     monkeypatch.setattr(stage_4_5, "datetime", _frozen_datetime(2030))
     captured = {}
 
