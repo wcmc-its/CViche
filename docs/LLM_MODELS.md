@@ -73,7 +73,7 @@ All LLM calls go through `call_llm(stage="...", ...)` in `src/unified_pipeline/l
 1. Hardcoded defaults (`bedrock` / `us.anthropic.claude-sonnet-4-6`).
 2. The `default` block in `llm_config.yaml`.
 3. A per-stage override under `stages:` in `llm_config.yaml`.
-4. The `CVICHE_LLM_PROVIDER` / `CVICHE_LLM_MODEL` environment variables — these override the `default` block **only**, never an explicit per-stage override.
+4. The `CVICHE_LLM_PROVIDER` / `CVICHE_LLM_MODEL` environment variables — these override the `default` block **only**, never an explicit per-stage override. `bedrock` is the only supported value for `CVICHE_LLM_PROVIDER`.
 
 > **Operational caveat — check your deployment environment.** Because env vars override the YAML `default`, a `CVICHE_LLM_MODEL` set in a deployment (Docker, EKS, a `.env` file) silently wins over this repo's `llm_config.yaml`. If a stale `CVICHE_LLM_MODEL` points at a Claude 3-era model, that is what runs regardless of this file. **Verify those env vars** point at `us.anthropic.claude-sonnet-4-6` (or are unset) when rolling this out.
 

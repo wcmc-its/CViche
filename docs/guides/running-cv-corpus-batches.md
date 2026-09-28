@@ -129,7 +129,7 @@ PYTHONPATH=src python3 scripts/score_one.py src/unified_pipeline/outputs <cv> \
 ```
 
 Run the next group later with the same command — already-done CVs are skipped automatically.
-To run a specific model: pass it as the 4th arg (e.g. `gpt-5.1`, or a Bedrock model id).
+To run a specific model: pass it as the 4th arg (a Bedrock model id, e.g. `us.anthropic.claude-haiku-4-5-20251001-v1:0`).
 
 ### Running the doctor alongside the batch
 
