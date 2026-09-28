@@ -250,6 +250,43 @@ def test_format_date_for_section_outputs(date_str, code, expected):
     assert format_date_for_section(date_str, code) == expected
 
 
+# --- calendar-invalid month renders the year alone (#543) -------------------
+#
+# Owner decision 2026-09-01: never fabricate a date component and never render
+# the invalid fragment verbatim. Year-only form chosen (no placeholder).
+
+@pytest.mark.parametrize("date_str, code, expected", [
+    ("13/2024", "B1", "2024"),          # the issue's case
+    ("13/2024", "C", "2024"),           # mm/yy code: year alone, not "13/24"
+    ("99/2024", "M2A", "2024"),
+    ("2024-13-01", "B1", "2024"),
+    ("2024-99-99", "F1", "2024"),
+    ("00/2024", "B1", "2024"),          # month 00
+    ("2024-00-00", "B1", "2024"),
+    ("2024-00-15", "M2A", "2024"),
+    ("13/05/2020", "F1", "2020"),       # invalid month in a m/d/yyyy shape
+    # Unchanged: valid dates, calendar-invalid day (month kept), non-dates.
+    # A two-part YYYY-NN is ambiguous with an academic-year range: left as
+    # written, never collapsed to its first year.
+    ("2014-15", "H", "2014-15"),
+    ("2019/20", "B1", "2019/20"),
+    ("2024-13", "H", "2024-13"),
+    ("12/2024", "B1", "12/2024"),
+    ("2024-02-31", "B1", "02/2024"),
+    ("TBD", "B1", "TBD"),
+    ("n/a", "C", "n/a"),
+    ("2024-invalid", "B1", "2024-invalid"),
+    ("13/2024 to 2025", "B1", "13/2024 to 2025"),  # a range in one field is not a date
+    ("13/05/17", "C", "13/05/17"),      # two-digit year: no trustworthy year
+])
+def test_format_date_for_section_invalid_month_renders_year_only(date_str, code, expected):
+    assert format_date_for_section(date_str, code) == expected
+
+
+def test_format_date_range_invalid_month_endpoint_renders_year_only():
+    assert format_date_range("08/2020", "13/2024", "B1") == "08/2020-2024"
+
+
 # --- _dates_overlap_or_match: granularity-honest comparison (#553) ---------
 #
 # The rule under test: parse each boundary to (year, month-or-None) and never

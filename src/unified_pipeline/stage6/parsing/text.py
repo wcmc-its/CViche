@@ -299,6 +299,39 @@ def _is_structural_label(entry: dict) -> bool:
     return False
 
 
+# A pipe-free membership part that is not an organization even though it is
+# neither a type nor a range: a bare year or month-year, and the column-header
+# / filler / role words a flattened table leaves behind. This is the positive
+# form of what a `len(line) > 5` cutoff used to reject by accident (#758) --
+# the same cutoff also dropped real acronym organizations (AMA, NIH, ASCO).
+_BARE_DATE_PART_RE = re.compile(
+    r'^\(?(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+)?'
+    r'\d{1,4}(?:/\d{1,4})?\)?[.,;]?$',
+    re.IGNORECASE,
+)
+_NON_ORGANIZATION_WORDS = frozenset({
+    'date', 'dates', 'year', 'years', 'role', 'roles', 'title', 'type', 'name',
+    'organization', 'organizations', 'society', 'societies', 'position',
+    'present', 'current', 'ongoing', 'to', 'none', 'yes', 'no', 'n/a', 'na',
+    'chair', 'co-chair', 'board', 'other',
+})
+
+
+def _looks_like_organization(part: str) -> bool:
+    """True when a pipe-free membership part reads as an organization name.
+
+    Needs a run of two letters (so "-", "2005", "(1)" fail), must not be a bare
+    year / month-year, and must not be one of the column-header or filler words
+    a flattened table leaves as its own line. "AMA", "NIH" and "IEEE" pass.
+    """
+    stripped = part.strip()
+    if not re.search(r'[^\W\d_]{2}', stripped):
+        return False
+    if _BARE_DATE_PART_RE.match(stripped):
+        return False
+    return stripped.lower().rstrip(':.') not in _NON_ORGANIZATION_WORDS
+
+
 def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]]:
     """Parse multiple memberships from merged entry lines.
 
@@ -341,7 +374,7 @@ def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]
                 membership_types.append(line)
             elif date_pattern.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
                 dates.append(line)
-            elif len(line) > 5:  # Likely organization name
+            elif _looks_like_organization(line):
                 organizations.append(line)
 
     # Match up memberships - pair organizations with types and dates

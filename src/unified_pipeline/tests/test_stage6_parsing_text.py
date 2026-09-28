@@ -85,6 +85,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _extract_name_from_uid,
     _is_structural_label,
     _is_table_header_entry,
+    _parse_multi_membership_entry,
 )
 
 
@@ -321,3 +322,31 @@ def test_a_year_beside_header_words_makes_the_cell_data():
 
 def test_an_entry_of_only_delimiters_is_not_a_header():
     assert _is_table_header_entry(" | | ", _HONORS_KW) is False
+
+
+# --- #758: short acronym organizations on the pipe-free path ----------------
+
+def test_short_acronym_organizations_are_kept_on_the_pipe_free_path():
+    # `_entry_parts` hands this parser parts with the pipes already removed, so
+    # every part takes the no-pipe branch. AMA/NIH/ASCO/IEEE are real
+    # organizations of five characters or fewer and used to be dropped by a
+    # `len(line) > 5` cutoff.
+    parts = ["Member", "AMA", "2010-present",
+             "Fellow", "ASCO", "2015-present",
+             "Member", "IEEE", "2018-present"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "AMA", "2010-present"),
+        ("Fellow", "ASCO", "2015-present"),
+        ("Member", "IEEE", "2018-present"),
+    ]
+
+
+@pytest.mark.parametrize("junk", [
+    "2005", "(2005)", "May 2005", "3/2010", "-", "--", "7",
+    "Dates", "Role", "Title", "Present", "N/A", "Chair", "Board", "Yes",
+])
+def test_non_organization_parts_are_still_rejected_on_the_pipe_free_path(junk):
+    # What the length cutoff was (accidentally) guarding against, now rejected
+    # by shape: bare years / month-years, punctuation, column-header and filler
+    # words. None of them may become an organization.
+    assert _parse_multi_membership_entry(["Member", junk, "2010-present"]) == []
