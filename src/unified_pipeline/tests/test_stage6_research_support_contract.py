@@ -915,6 +915,8 @@ def test_a_goal_identical_to_the_title_is_not_rendered_twice():
     # test covering this shape).
     ('Map the pollinator corridors of the Example Valley and survey nesting sites',
      'Map the pollinator corridors of the Example Valley and survey nesting sites'),
+    # A strict substring of the title is not a repeat either (`goals in title`).
+    ('Map the pollinator corridors', 'Map the pollinator corridors'),
 ])
 def test_a_goal_that_differs_from_the_title_still_renders(goals, expected):
     """Only an exact (normalized) match is suppressed -- a goal that extends or
@@ -925,6 +927,21 @@ def test_a_goal_that_differs_from_the_title_still_renders(goals, expected):
               'start_date': '01/2019'}
     cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
     assert cells['Major project goals:'] == expected
+
+
+def test_null_goal_and_title_fields_do_not_crash_the_goals_row():
+    """stage 4 can emit a key with a null value; `fields.get(k, '')` then
+    returns None, so the guard must not call .strip() on it.
+    """
+    no_goal = {'title': 'Map the pollinator corridors of the Example Valley',
+               'narrative': None, 'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(no_goal, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+    no_title = {'text': None, 'agency': 'Example Fund', 'start_date': '01/2019',
+                'major_goals': 'Survey nesting sites across the valley'}
+    cells = _cells(_generator()._create_grant_table(no_title, 'M2A'))
+    assert cells['Major project goals:'] == 'Survey nesting sites across the valley'
 
 
 def test_a_goal_repeating_a_whitespace_padded_title_is_still_suppressed():
