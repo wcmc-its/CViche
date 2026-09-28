@@ -142,10 +142,13 @@ def _validate_full_date(year: int, month: int, day: int) -> tuple[int | None, in
 # Read only after `_parse_date_components` has refused the string, to tell a
 # calendar-invalid date ("13/2024") from text that was never a date ("TBD").
 # A two-part YYYY-NN is deliberately NOT here: "2014-15" is an academic-year
-# range, and reading its "15" as a month would collapse it to "2014".
+# range, and reading its "15" as a month would collapse it to "2014". Nor is
+# a hyphenated NN-YYYY: "98-2002" is a two-digit-start year range, so the
+# two-part month form takes only a slash ("13/2024").
 _NUMERIC_DATE_WITH_YEAR = (
     re.compile(r'(\d{4})[-/]\d{1,2}[-/]\d{1,2}'),
-    re.compile(r'\d{1,2}[-/](?:\d{1,2}[-/])?(\d{4})'),
+    re.compile(r'\d{1,2}[-/]\d{1,2}[-/](\d{4})'),
+    re.compile(r'\d{1,2}/(\d{4})'),
 )
 
 
