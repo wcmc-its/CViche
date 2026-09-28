@@ -278,7 +278,8 @@ _RECOVERY_GRANT_TEXT = (
     "Project title: | Synthetic Tools for Data Curation\n"
     "Annual direct costs: | $15,000.00\n"
     "Duration of support: | 00/2021-00/2022\n"
-    "Name of Principal Investigator: | A. Researcher"
+    "Name of Principal Investigator: | A. Researcher\n"
+    "Your percent (%) effort: | 1%"
 )
 
 _RECOVERY_OWNER_ENTRY = {"text": "Name: A. Researcher", "taxonomy_code": "A",
@@ -297,13 +298,18 @@ _RECOVERY_GRANT_ENTRY = {
         "start_date": "2021",
         "end_date": "2022",
         "total_funding": "$15,000.00",
+        "percent_effort": "1%",
     },
 }
 
 
-def _recovered_row(suffix: str, text: str) -> dict:
+def _recovered_row(suffix: str, text: str, parent_idx: int = 300) -> dict:
+    # `parent_idx=302` (the span's own END, not its start) exercises
+    # find_recovered_row_parent's fallback -- A5IZ6Q's own second residual:
+    # some LYRASIS rows keyed parent_idx to 244, an index with no entry of
+    # its own, inside the grant's 242-244 table span.
     return {"text": text, "taxonomy_code": "T", "recovered_row": True,
-            "parent_idx": 300, "element_idx_start": f"300.{suffix}",
+            "parent_idx": parent_idx, "element_idx_start": f"300.{suffix}",
             "extracted_fields": {}, "hierarchy": ["Past Funding"]}
 
 
@@ -321,7 +327,11 @@ def test_recovered_row_duplicate_of_rendered_grant_not_repeated_in_appendix(tmp_
                _recovered_row("1", "Project title: | Synthetic Tools for Data Curation"),
                _recovered_row("2", "Annual direct costs: | $15,000.00"),
                _recovered_row("3", "Duration of support: | 00/2021-00/2022"),
-               _recovered_row("4", "Name of Principal Investigator: | A. Researcher")]
+               _recovered_row("4", "Name of Principal Investigator: | A. Researcher"),
+               # parent_idx=302 is the grant entry's element_idx_END, not its
+               # start -- only find_recovered_row_parent's span fallback
+               # resolves this one back to the grant.
+               _recovered_row("5", "Your percent (%) effort: | 1%", parent_idx=302)]
 
     gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
     gen._reconsider_appendix_entries = lambda: []
@@ -335,10 +345,11 @@ def test_recovered_row_duplicate_of_rendered_grant_not_repeated_in_appendix(tmp_
 
     # The grant rendered in the body...
     assert "Fictional Research Foundation" in full_text
-    # ...and appears exactly once: the five recovered rows -- every one of
+    # ...and appears exactly once: the six recovered rows -- every one of
     # them a verbatim line of the fused entry that already rendered -- must
     # not repeat it in the Appendix.
     assert full_text.count("Fictional Research Foundation") == 1
+    assert full_text.count("Your percent (%) effort") == 1
     assert "T. APPENDIX" not in full_text
 
 

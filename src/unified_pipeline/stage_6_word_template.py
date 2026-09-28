@@ -136,6 +136,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
     _entry_title_words,
     _significant_words,
     deduplicate_entries,
+    find_recovered_row_parent,
     recovered_row_duplicates_parent,
 )
 from unified_pipeline.stage6.render_check import (  # noqa: F401
@@ -992,6 +993,37 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             entries_by_code, routed_codes=RENDER_ROUTED_CODES,
             section_names=TAXONOMY_TO_SECTION)
 
+    def _drop_recovered_row_duplicates(
+        self, entries: list[dict[str, Any]], all_entries: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Filter a structurally recovered table row (#420) out of `entries`
+        when it verbatim-duplicates the parent it was split from (A5IZ6Q).
+
+        Split out of `generate()` (#3.2a) purely so the lookup this needs
+        doesn't grow that function further -- the filtering itself is new
+        with this method, not a relocation.
+
+        `recover_unclaimed_table_rows` (stage_2_entry_extraction.py) emits
+        one entry per table row no delimiter claimed, independently of
+        whatever delimiter DID claim the surrounding table -- so a wide,
+        multi-row table delimiter (one grant's whole label/value block) and
+        the individual rows inside it can both survive as separate entries
+        under different taxonomy codes. See `recovered_row_duplicates_parent`
+        for why the ordinary per-code dedup and `segment_already_rendered`
+        both miss this, and `find_recovered_row_parent` for why a row's
+        `parent_idx` sometimes needs the containing span, not just a direct
+        `element_idx_start` hit.
+        """
+        entries_by_element_idx = {str(e.get('element_idx_start')): e for e in all_entries}
+        span_entries = [e for e in all_entries
+                        if e.get('element_idx_start') != e.get('element_idx_end')]
+        return [
+            e for e in entries
+            if not recovered_row_duplicates_parent(
+                e, find_recovered_row_parent(
+                    e.get('parent_idx'), entries_by_element_idx, span_entries))
+        ]
+
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None) -> str:
         """
@@ -1064,12 +1096,6 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Flatten all entries for fallback searches
         all_entries = [entry for entries in entries_by_code.values() for entry in entries]
 
-        # element_idx_start -> entry, so a recovered table row (#420) can find
-        # the structural parent `parent_idx` points at (A5IZ6Q: see
-        # `recovered_row_duplicates_parent`'s docstring for why this cross-code
-        # lookup is needed at all).
-        entries_by_element_idx = {str(e.get('element_idx_start')): e for e in all_entries}
-
         # Fill each section. _fill_personal_data is FATAL and stays outside
         # the boundary below by deliberate judgement call (#565): a document
         # with no owner on it is worse than a failed run, so its raise still
@@ -1134,19 +1160,17 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         unmapped_entries: list[dict] = []
 
         # Collect ALL entries not in mapped codes, excluding passthrough-consumed
-        # ones (#294, #260), claimed goals rows (#958), and a structurally
-        # recovered table row (#420) that is a verbatim duplicate of the
-        # parent entry it was split from (A5IZ6Q) -- the parent's own render,
-        # in the body or (via its own record-line recovery, if it comes to
-        # that) the Appendix, already carries this row's content.
+        # ones (#294, #260) and claimed goals rows (#958).
         for code, entries in entries_by_code.items():
             if code not in mapped_codes:
-                unmapped_entries.extend(
-                    e for e in entries
-                    if id(e) not in consumed_ids
-                    and not recovered_row_duplicates_parent(
-                        e, entries_by_element_idx.get(str(e.get('parent_idx'))))
-                )
+                unmapped_entries.extend(e for e in entries if id(e) not in consumed_ids)
+
+        # A structurally recovered table row (#420) that is a verbatim
+        # duplicate of the parent entry it was split from (A5IZ6Q) must not
+        # ALSO land in the Appendix as its own line -- the parent's own
+        # render, in the body or (via its own record-line recovery, if it
+        # comes to that) the Appendix, already carries this row's content.
+        unmapped_entries = self._drop_recovered_row_duplicates(unmapped_entries, all_entries)
 
         # A stays in mapped_codes, but NOT because its entries are all consumed
         # -- that was the old assumption here and the corpus refutes it (145 of

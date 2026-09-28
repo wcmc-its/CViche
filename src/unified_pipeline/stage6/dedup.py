@@ -171,6 +171,49 @@ def recovered_row_duplicates_parent(entry: dict, parent: dict | None) -> bool:
     return bool(row_text) and row_text in _squash(parent.get('text', ''))
 
 
+def _as_float(value: int | float | str | None) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def find_recovered_row_parent(parent_idx: int | float | str | None,
+                              entries_by_element_idx: dict,
+                              span_entries: list[dict]) -> dict | None:
+    """Resolve a recovered row's `parent_idx` to the entry it was split from.
+
+    Most recovered rows key `parent_idx` to an entry's own
+    `element_idx_start` -- a direct hit against `entries_by_element_idx`.
+    But the delimiter a row was carved out of can itself span several
+    element indices (A5IZ6Q: one grant's whole label/value block runs
+    `element_idx_start` 242 to `element_idx_end` 244 as ONE table entry),
+    and a row recovered from anywhere in that range carries whichever index
+    it structurally sits at as `parent_idx` -- 244, say -- even though no
+    entry's OWN `element_idx_start` is 244; 242 (the table entry) is the one
+    that actually carries this row's text. A direct-hit miss falls back to
+    the first already-computed `span_entries` (callers pass the entries
+    whose start/end differ, i.e. genuinely multi-index spans) whose
+    [start, end] range contains `parent_idx` numerically. This only ever
+    widens which entry `recovered_row_duplicates_parent` gets to compare
+    against -- the verbatim-containment check there is the actual gate, so
+    a wrong guess here just fails that check instead of suppressing
+    anything unsafely.
+    """
+    direct = entries_by_element_idx.get(str(parent_idx))
+    if direct is not None:
+        return direct
+    idx_num = _as_float(parent_idx)
+    if idx_num is None:
+        return None
+    for candidate in span_entries:
+        start = _as_float(candidate.get('element_idx_start'))
+        end = _as_float(candidate.get('element_idx_end'))
+        if start is not None and end is not None and start <= idx_num <= end:
+            return candidate
+    return None
+
+
 def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         require_date_overlap: bool = False,
                         decisions: list[dict] | None = None) -> list[dict]:

@@ -22,6 +22,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     deduplicate_entries,
+    find_recovered_row_parent,
     recovered_row_duplicates_parent,
 )
 
@@ -263,3 +264,48 @@ def test_recovered_row_reformatted_whitespace_still_matches():
     row = {"text": "duration of support: | 00/2021-00/2022",
            "recovered_row": True, "parent_idx": 100}
     assert recovered_row_duplicates_parent(row, parent)
+
+
+# ---------------------------------------- find_recovered_row_parent (A5IZ6Q)
+#
+# A5IZ6Q's own second residual: some of the LYRASIS grant's recovered rows
+# keyed `parent_idx` to 244, an index with NO entry of its own -- the grant's
+# whole label/value block is one table entry spanning element_idx_start 242
+# to element_idx_end 244, and a row recovered from anywhere in that range
+# carries whichever index it structurally sits at, not necessarily 242.
+
+def test_find_parent_direct_hit():
+    parent = {"element_idx_start": 242, "element_idx_end": 244, "text": "..."}
+    by_idx = {"242": parent}
+    assert find_recovered_row_parent(242, by_idx, [parent]) is parent
+
+
+def test_find_parent_falls_back_to_containing_span():
+    parent = {"element_idx_start": 242, "element_idx_end": 244, "text": "..."}
+    by_idx = {"242": parent}
+    # 244 has no entry of its own -- only the span entry [242, 244] covers it.
+    assert find_recovered_row_parent(244, by_idx, [parent]) is parent
+
+
+def test_find_parent_outside_every_span_is_none():
+    parent = {"element_idx_start": 242, "element_idx_end": 244, "text": "..."}
+    assert find_recovered_row_parent(500, {"242": parent}, [parent]) is None
+
+
+def test_find_parent_non_numeric_idx_is_none():
+    parent = {"element_idx_start": 242, "element_idx_end": 244, "text": "..."}
+    assert find_recovered_row_parent("table_5", {}, [parent]) is None
+
+
+def test_find_parent_span_fallback_still_gated_by_containment():
+    # The span fallback only WIDENS which entry gets compared against --
+    # recovered_row_duplicates_parent's verbatim check is the real gate, so a
+    # row that merely falls in the same numeric range but isn't actually in
+    # the parent's text is still left alone.
+    parent = {"element_idx_start": 242, "element_idx_end": 244,
+             "text": "Award Source: | Fictional Research Foundation"}
+    row = {"text": "Non-financial support: | Conference travel",
+           "recovered_row": True, "parent_idx": 244}
+    found = find_recovered_row_parent(244, {"242": parent}, [parent])
+    assert found is parent
+    assert not recovered_row_duplicates_parent(row, found)
