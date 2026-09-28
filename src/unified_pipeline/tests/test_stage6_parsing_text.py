@@ -85,7 +85,6 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _extract_name_from_uid,
     _is_structural_label,
     _is_table_header_entry,
-    _parse_multi_membership_entry,
 )
 
 
@@ -273,17 +272,3 @@ def test_pipe_separated_columns_still_ignore_substring_inside_a_longer_word():
     # immediately before "date" within that word either way.
     text = "Candidates|Update"
     assert _is_table_header_entry(text, ["date"]) is False
-
-
-# --- #758: short organizations on the pipe-free (blind-split) path ---------
-
-def test_short_pipe_free_organizations_are_kept():
-    parts = ["Member", "ASCO", "2010-present", "Fellow", "AMA", "2015-present"]
-    assert _parse_multi_membership_entry(parts) == [
-        ("Member", "ASCO", "2010-present"),
-        ("Fellow", "AMA", "2015-present"),
-    ]
-
-
-def test_single_stray_character_is_still_not_an_organization():
-    assert _parse_multi_membership_entry(["Member", "x", "2010-present"]) == []

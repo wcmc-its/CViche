@@ -27,11 +27,6 @@ logger = logging.getLogger(__name__)
 # `.replace('CV_', '')` would also eat "CV_" occurring mid-string in a name
 # part, which `removeprefix` cannot do.
 _UID_PREFIX = 'CV_'
-# Shortest pipe-free part `_parse_multi_membership_entry` keeps as an
-# organization (#758). Three-letter acronyms ("AMA", "ACP") and four-letter ones
-# ("ASCO") are real organizations; only a lone stray character is noise. The
-# '|' branch above it has never had a length floor, so this matches it.
-_MIN_ORGANIZATION_CHARS = 2
 
 
 def _extract_name_from_uid(uid: str) -> str:
@@ -320,7 +315,7 @@ def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]
                 membership_types.append(line)
             elif date_pattern.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
                 dates.append(line)
-            elif len(line) >= _MIN_ORGANIZATION_CHARS:  # Likely organization name
+            elif len(line) > 5:  # Likely organization name
                 organizations.append(line)
 
     # Match up memberships - pair organizations with types and dates

@@ -676,7 +676,14 @@ class MembershipsSection:
             #    entries on 1FRABQ and others) crosses the >2 threshold but
             #    must still resolve to one membership, not be misread as
             #    several.
-            memberships = _parse_multi_membership_entry(parts) if len(parts) > 2 else []
+            #
+            # The entry is parsed from `lines` (its original text), not from
+            # `parts` (#758): `_parse_multi_membership_entry` reads '|'
+            # itself, with no length floor, whereas its pipe-free branch drops
+            # a part of five characters or fewer -- so handing it the
+            # already-split parts lost organizations like "ASCO" or "AMA". An
+            # already-multi-line entry has `parts` IS `lines`, so it is untouched.
+            memberships = _parse_multi_membership_entry(lines) if len(parts) > 2 else []
             if len(memberships) > 1 or (memberships and len(lines) > 2):
                 for mem_type, org, dates in memberships:
                     # `_add_table_row` owns stats['entries_inserted'] -- do not

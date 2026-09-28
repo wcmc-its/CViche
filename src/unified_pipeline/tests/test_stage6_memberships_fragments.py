@@ -1009,5 +1009,47 @@ def test_short_organization_names_fused_into_one_blind_line_render_three_rows():
     assert [r[1] for r in rows] == ["2010-Present", "2015-Present", "2020-Present"]
 
 
+def test_two_character_organization_in_a_blind_line_is_kept():
+    """#758: the '|' branch has no length floor, so even a two-character
+    organization survives on the blind path (pins the floor's absence)."""
+    entry = {
+        "text": ("Member | AB | 2010-present | "
+                 "Fellow | AMA | 2015-present | "
+                 "Board Member | ACP | 2020-present"),
+        "extracted_fields": {"organization": "AB"},
+    }
+    rows = _render_memberships([entry])
+    assert [r[0] for r in rows] == ["Member, AB", "Fellow, AMA", "Board Member, ACP"]
+
+
+def test_stray_state_code_line_does_not_shift_later_rows_on_a_multiline_entry():
+    """#758 review: a pipe-free 'NY' line on an already-multi-line entry is not
+    an organization; it must not push ACP's type and date onto the wrong row."""
+    entry = {
+        "text": ("Member | American Medical Association | 2010-present\n"
+                 "NY\n"
+                 "Fellow | American College of Physicians | 2015-present"),
+        "extracted_fields": {"organization": "American Medical Association"},
+    }
+    rows = _render_memberships([entry])
+    assert [list(r) for r in rows] == [
+        ["Member, American Medical Association", "2010-Present"],
+        ["Fellow, American College of Physicians", "2015-Present"],
+    ]
+
+
+def test_bare_year_line_does_not_become_an_organization_on_a_multiline_entry():
+    """#758 review: a lone '2010' line between two pipe-free records."""
+    entry = {
+        "text": ("Member\nAmerican Society of Hematology\n2010\n"
+                 "Fellow\nAmerican College of Physicians\n2015-present"),
+        "extracted_fields": {"organization": "American Society of Hematology"},
+    }
+    rows = _render_memberships([entry])
+    assert not any("2010" in r[0] for r in rows)
+    assert not any(r[0].startswith("Fellow, 2010") for r in rows)
+    assert any(r[0] == "Fellow, American College of Physicians" for r in rows)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
