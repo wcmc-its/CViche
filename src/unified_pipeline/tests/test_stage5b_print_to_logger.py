@@ -174,9 +174,11 @@ def test_run_stage5b_quiet_mode_logs_nothing(monkeypatch, caplog, capsys, tmp_pa
 # from a run where every batch actually succeeded. These tests pin: failed
 # batches and unresolved institutions are counted and written to the stats
 # dict, a partial failure is logged as a warning (not silently absorbed), and
-# a run whose every batch fails raises instead of emitting a normal-looking
-# artifact with zero institutions enriched -- mirroring stage 3b's "zero LLM
-# classifications" guard (stage_3b_entry_classifier.py).
+# a run whose every batch fails AND enriched nothing raises instead of
+# emitting a normal-looking artifact with zero institutions enriched. Unlike
+# stage 3b's total-failure guard, a batch that succeeds but resolves no
+# match is not itself a failure here (a legitimate negative, cached as
+# None) -- zero enriched alone does not trip this guard.
 
 def _institution_entries(n, code="B1"):
     return [
@@ -382,8 +384,8 @@ def test_run_stage5b_all_batches_succeed_stats_are_zero(monkeypatch, tmp_path):
 
 
 def test_institution_enrichment_stats_empty_dict_not_counted_as_enriched():
-    """#941 review point 2: is `institution_enrichment: {}` (a lookup that
-    ran and found nothing) distinct from None/absent (never attempted)?
+    """Is `institution_enrichment: {}` (a lookup that ran and found
+    nothing) distinct from None/absent (never attempted)?
 
     Finding on this branch: no. The only writer of this key,
     enrich_entry_with_result (stage_5b_institution_enrichment.py), always
