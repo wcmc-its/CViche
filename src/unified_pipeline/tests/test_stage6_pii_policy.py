@@ -423,6 +423,52 @@ def test_pass_records_one_item_per_fragment_and_per_key():
         CAT_DATE_OF_BIRTH, CAT_PLACE_OF_BIRTH, CAT_DATE_OF_BIRTH]
 
 
+_O1_HONOR = {
+    # web26 (#892): the stage-4 record a field-first renderer prints from.
+    "award_name": "Extraordinary Ability in Sciences, O-1 Visa",
+    "granting_body": "U.S. Citizen & Immigration Service (USCIS)",
+    "date": "2019",
+}
+
+
+def test_892_pass_drops_a_pii_value_under_a_non_pii_key_and_counts_it_once():
+    """The text carries the same visa phrase, so the notice is recorded
+    once (from text), not a second time for the field."""
+    entry = {"text": "2019 Extraordinary Ability in Sciences, O-1 Visa | USCIS",
+             "taxonomy_code": "H", "extracted_fields": dict(_O1_HONOR)}
+    result = _run({"H": [entry]})
+    assert "award_name" not in entry["extracted_fields"]
+    assert "O-1" not in str(entry["extracted_fields"])
+    assert "O-1" not in entry["text"]
+    assert entry["_pii_withheld"] is True
+    assert result.withheld == [WithheldItem(CAT_VISA, "Honors", 0)]
+
+
+def test_892_field_value_alone_triggers_the_pass_and_is_recorded():
+    """No match in `text`: the field value is the only place the visa is."""
+    entry = {"text": "Award", "taxonomy_code": "H",
+             "extracted_fields": dict(_O1_HONOR)}
+    result = _run({"H": [entry]})
+    assert "award_name" not in entry["extracted_fields"]
+    assert entry["_pii_withheld"] is True
+    assert entry["_pii_dropped_fields"] == ["award_name"]
+    assert result.withheld == [WithheldItem(CAT_VISA, "Honors", 0)]
+
+
+def test_892_non_pii_field_values_are_untouched():
+    """Negative control: same shape, nothing protected -- the entry is left
+    completely alone (same dict, no bookkeeping keys)."""
+    fields = {"award_name": "Distinguished Teaching Award",
+              "granting_body": "Example University", "date": "2019"}
+    entry = {"text": "2019 Distinguished Teaching Award | Example University",
+             "taxonomy_code": "H", "extracted_fields": fields}
+    before = {**entry, "extracted_fields": dict(fields)}
+    result = _run({"H": [entry]})
+    assert entry == before
+    assert entry["extracted_fields"] is fields
+    assert result.withheld == []
+
+
 # --------------------------------------------------------------------------
 # 3. The comment text
 # --------------------------------------------------------------------------

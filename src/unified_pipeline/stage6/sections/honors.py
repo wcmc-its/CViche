@@ -1030,6 +1030,12 @@ class HonorsSection:
                     logger.warning("  Skipping header entry: '%s...'", original_text[:50])
                 continue
 
+            if 'award_name' in entry.get('_pii_dropped_fields', ()):
+                # #892: the PII pass dropped this entry's award name (an
+                # O-1 visa). What is left -- a cut-text remnant, the
+                # immigration service as organization, the year -- still
+                # describes the withheld item, so no row renders.
+                continue
             for record in parse_honor_entry(entry):
                 if not (record.award or record.organization or record.date):
                     # An entry with no text and no extracted fields has
