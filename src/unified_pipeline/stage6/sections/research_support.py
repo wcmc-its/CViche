@@ -198,19 +198,44 @@ PERCENT_EFFORT_PRECISION = Decimal('0.01')
 # never reclassified as completed however the year parses.
 OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
 
-# The goals phrase in a grant's own text or in a goals row of its own (#958):
-# the WCM label "(Optional - The major goals of this project are): | <goal>",
-# the plain "The major goals of this project are:<tab><goal>", and the prose
-# "The major goals of this project are to <goal>". `sep` -- a colon, pipe,
-# closing paren or tab after "are" -- is what makes the phrase a label rather
-# than the start of the sentence. `rest` stops at the line end: a table-form
-# grant carries one source row per line.
+# The goals phrase in a grant's own text or in a goals row of its own (#958),
+# and four measured wording variants (#829): the WCM label "(Optional - The
+# major goals of this project are): | <goal>", the plain "The major goals of
+# this project are:<tab><goal>", the prose "The major goals of this project
+# are to <goal>", singular "The major goal of this project is" (YME2VA),
+# "...of this program are" (YME2VA), the bare "Major Goals:" / "Major Goals
+# of (the) Project:" label with no project/program noun before the separator
+# at all (BYFQBG), and A5IZ6Q's typo "The major gals of this project:" --
+# plural only; the pattern below deliberately does not also accept the
+# singular "gal", since no run has shown that typo. `proj` is the "of
+# (this|the) project/program [are|is]" anchor. `sep` -- a colon, pipe, closing
+# paren or tab -- is what makes the phrase a label rather than (with `proj`
+# present) the start of the sentence; `rest` stops at the line end, since a
+# table-form grant carries one source row per line. A bare label needs `sep`
+# to read as a label at all -- checked in `parse_major_goals`, not here,
+# because Python's `re` cannot express "`sep` required only when `proj` is
+# absent" with one named group shared across alternatives. Without that
+# check, a stray "major goal(s)" with neither anchor would swallow the rest
+# of its line as if it were a whole-sentence claim.
+#
+# `_MAJOR_GOALS_ANCHOR_PATTERN` is factored out, rather than inlined twice,
+# because `parse_major_goals` needs a *second*, shorter regex built from the
+# same leading text: one that matches only the "major goal(s)" keyword itself,
+# with none of the trailing groups below. Scanning occurrences of that short
+# anchor (instead of `MAJOR_GOALS_LABEL_RE` itself) is what lets it walk past
+# an unanchored "major goal(s)" mention to find a real, later label on the
+# *same* line -- with the full pattern's own greedy `rest` group, a skipped,
+# unanchored match's span already swallows the remainder of the line,
+# including any real label in it, so nothing would be left to find.
+_MAJOR_GOALS_ANCHOR_PATTERN = r'(?:the\s+)?major\s+(?:goals?|gals)\b'
 MAJOR_GOALS_LABEL_RE = re.compile(
-    r'(?:the\s+)?major\s+goals\s+of\s+this\s+project\s+are'
-    r'(?P<sep>[ \t]*[:|)\t][ \t:|)]*)?'
-    r'(?P<rest>[^\n]*)',
+    _MAJOR_GOALS_ANCHOR_PATTERN
+    + r'(?P<proj>\s+of\s+(?:this\s+|the\s+)?(?:project|program)(?:\s+(?:are|is))?)?'
+    + r'(?P<sep>[ \t]*[:|)\t][ \t:|)]*)?'
+    + r'(?P<rest>[^\n]*)',
     re.IGNORECASE,
 )
+_MAJOR_GOALS_ANCHOR_RE = re.compile(_MAJOR_GOALS_ANCHOR_PATTERN, re.IGNORECASE)
 # A paragraph-form grant tab-separates its fields, and the one observed after a
 # goal is the role ("...prognosis.<tab>Role: PI"). Any other tab stays in the
 # goal: a wrapped source line is tab-joined as well.
@@ -497,13 +522,37 @@ def parse_major_goals(text: str | None) -> str | None:
     """The faculty member's own goal text after a goals label, verbatim (#958).
 
     Two shapes carry it. A label -- `MAJOR_GOALS_LABEL_RE` with a separator
-    after "are" -- is followed by the goal, which is returned without the label.
-    Without a separator the phrase opens the faculty member's own sentence
-    ("The major goals of this project are to ..."), and the whole sentence is
-    the goal. Either way only surrounding whitespace is stripped. An empty label
-    is no goal: None, so no row renders.
+    (`sep`) after the anchor -- is followed by the goal, which is returned
+    without the label. Without a separator the phrase must still carry the "of
+    (this|the) project/program [are|is]" anchor (`proj`): it opens the faculty
+    member's own sentence ("The major goals of this project are to ..."), and
+    the whole sentence is the goal. A match with neither `proj` nor `sep` --
+    some other use of "major goal(s)" with no project/program noun and no
+    separator -- is not a label at all, so it is left as grant content rather
+    than treated as an unbounded whole-sentence claim.
+
+    That "leave it as grant content" choice is per-match, not per-text: a
+    single `.search()` would stop at the first "major goal(s)" mention even
+    when it is the unanchored kind and a real, anchored label follows later in
+    the same text -- on the same line or a later one -- silently dropping the
+    real label. So this walks every occurrence of the bare "major goal(s)"
+    anchor (`_MAJOR_GOALS_ANCHOR_RE`, not `MAJOR_GOALS_LABEL_RE` itself: its
+    greedy `rest` group would swallow a same-line label into the very
+    unanchored match being skipped) and, at each one, tries the full label
+    pattern anchored to that position (`.match(text, pos)`), taking the first
+    that is actually anchored (`proj` or `sep`). An unanchored mention is
+    skipped rather than treated as the answer. Either way only surrounding
+    whitespace is stripped. An empty label is no goal either: None, so no row
+    renders.
     """
-    match = MAJOR_GOALS_LABEL_RE.search(text or '')
+    text = text or ''
+    match = next(
+        (candidate for candidate in (
+            MAJOR_GOALS_LABEL_RE.match(text, anchor.start())
+            for anchor in _MAJOR_GOALS_ANCHOR_RE.finditer(text)
+        ) if candidate and (candidate['proj'] or candidate['sep'])),
+        None,
+    )
     if match is None or not match['rest'].strip():
         return None
     goal = match['rest'] if match['sep'] else match.group(0)
@@ -966,8 +1015,10 @@ class ResearchSupportSection:
         ]
 
         # Add optional major goals if present (check major_goals, description, or narrative)
-        goals = fields.get('major_goals') or fields.get('description', '') or fields.get('narrative', '')
-        if goals and len(goals.strip()) > 10:  # Only if substantive
+        goals = fields.get('major_goals') or fields.get('description') or fields.get('narrative') or ''
+        # Same-text guard as title/agency/funding above -- same fact via two paths (#829, BYFQBG#82).
+        goal_repeats_title = goals.strip().lower() == (title or '').strip().lower()
+        if len(goals.strip()) > 10 and not goal_repeats_title:  # Only if substantive
             rows.append(('Major project goals:', goals))
 
         # Create a new table with 2 columns

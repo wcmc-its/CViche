@@ -888,6 +888,91 @@ def test_major_goals_precedence_is_goals_then_description_then_narrative():
         == 'A narrative here'
 
 
+def test_a_goal_identical_to_the_title_is_not_rendered_twice():
+    """A goal that is (normalized) the same text already rendered as the title
+    is not a second fact -- it is the title read twice, once by the title
+    fallback chain and once by the goals label (#829 corpus scan, BYFQBG#82:
+    stage 4 put the goal text straight into `title`, and the same entry's own
+    "Major Goals:" label parsed to the identical string, so the block rendered
+    it twice). Comparing case-insensitively and whitespace-stripped, matching
+    the title/agency and title/funding duplicate checks above.
+    """
+    fields = {'title': 'Map the pollinator corridors of the Example Valley',
+              'major_goals': '  MAP THE POLLINATOR CORRIDORS OF THE EXAMPLE VALLEY  ',
+              'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+
+@pytest.mark.parametrize('goals, expected', [
+    # Differs from the title outright.
+    ('Map the pollinator corridors and survey nesting sites',
+     'Map the pollinator corridors and survey nesting sites'),
+    # Extends the title: the title is a literal prefix, plus more text. A
+    # containment check (`title in goals`) would wrongly read this as a
+    # repeat of the title rather than the equality check the guard is meant
+    # to be (round-4 review: a mutant swapping `==` for `in` survived with no
+    # test covering this shape).
+    ('Map the pollinator corridors of the Example Valley and survey nesting sites',
+     'Map the pollinator corridors of the Example Valley and survey nesting sites'),
+    # A strict substring of the title is not a repeat either (`goals in title`).
+    ('Map the pollinator corridors', 'Map the pollinator corridors'),
+])
+def test_a_goal_that_differs_from_the_title_still_renders(goals, expected):
+    """Only an exact (normalized) match is suppressed -- a goal that extends or
+    differs from the title is still new information and still renders.
+    """
+    fields = {'title': 'Map the pollinator corridors of the Example Valley',
+              'major_goals': goals,
+              'start_date': '01/2019'}
+    cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
+    assert cells['Major project goals:'] == expected
+
+
+def test_null_goal_and_title_fields_do_not_crash_the_goals_row():
+    """stage 4 can emit a key with a null value; `fields.get(k, '')` then
+    returns None, so the guard must not call .strip() on it.
+    """
+    no_goal = {'title': 'Map the pollinator corridors of the Example Valley',
+               'narrative': None, 'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(no_goal, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+    no_title = {'text': None, 'agency': 'Example Fund', 'start_date': '01/2019',
+                'major_goals': 'Survey nesting sites across the valley'}
+    cells = _cells(_generator()._create_grant_table(no_title, 'M2A'))
+    assert cells['Major project goals:'] == 'Survey nesting sites across the valley'
+
+
+def test_a_goal_repeating_a_whitespace_padded_title_is_still_suppressed():
+    """The guard strips both sides before comparing. `title` can carry
+    surrounding whitespace (nothing upstream of `_create_grant_table` trims
+    it when the raw field has no `|` for `_deduplicate_repeated_content` to
+    act on) -- dropping `.strip()` on the title side alone left every test
+    green (round-4 review).
+    """
+    fields = {'title': '  Map the pollinator corridors of the Example Valley  ',
+              'major_goals': 'MAP THE POLLINATOR CORRIDORS OF THE EXAMPLE VALLEY',
+              'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+
+def test_the_goal_repeat_guard_compares_the_rendered_title_not_the_raw_field():
+    """The guard's `title` is the computed value -- deduplicated, with the
+    trial_title/study_title/text fallback chain already applied -- that is
+    actually rendered as 'Project title:', not the raw `fields.get('title')`.
+    A grant whose title comes only from a fallback field has no `'title'` key
+    at all, so comparing against the raw field would never suppress a repeat
+    here (round-4 review: this mutant also left every test green).
+    """
+    fields = {'trial_title': 'Map the pollinator corridors of the Example Valley',
+              'major_goals': 'MAP THE POLLINATOR CORRIDORS OF THE EXAMPLE VALLEY',
+              'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+
 # --- #958: major goals from the source text -------------------------------------
 
 _GOAL = 'Map the pollinator corridors of the Example Valley'
@@ -915,6 +1000,45 @@ _GOAL = 'Map the pollinator corridors of the Example Valley'
      'Survey the valley; oversaw\tfield work'),
     # The goal ends with its line.
     (f'The major goals of this project are: {_GOAL}\nAnnual direct costs: | $5,000', _GOAL),
+    # Measured wording variants (#829).
+    # A bare label -- no "of (this|the) project/program" noun at all -- still
+    # needs its separator to read as a label.
+    (f'Major Goals: {_GOAL}', _GOAL),
+    (f'Major Goals of Project: {_GOAL}', _GOAL),
+    (f'Major Goals of the Project: {_GOAL}', _GOAL),
+    # Singular "goal ... is", and "program" in place of "project" -- both keep
+    # the sentence-form fallback the plural "goals ... are" case already has.
+    ('Example Study\tThe major goal of this project is to map the pollinator corridors.',
+     'The major goal of this project is to map the pollinator corridors.'),
+    ('Example Study\tThe major goals of this program are to map the pollinator corridors.',
+     'The major goals of this program are to map the pollinator corridors.'),
+    # Singular "goal ... is" with an explicit separator -- the goal alone, not
+    # the whole label sentence. "are" and "is" are both live alternatives in
+    # `proj`; the plural cases above only exercise "are" before a separator,
+    # and the "is" sentence-form case above never reaches `proj` for "is" at
+    # all (it flows straight into `rest` whether or not `proj` matches it).
+    (f'The major goal of this project is: {_GOAL}', _GOAL),
+    (f'The major goals of this program is: {_GOAL}', _GOAL),
+    # The "gals" typo (A5IZ6Q) with an explicit separator -- the goal only,
+    # not the misspelled label.
+    (f'Example Grant\tThe major gals of this project: {_GOAL}', _GOAL),
+    # A stray, unanchored "major goal(s)" mention earlier in the text must not
+    # shadow a real, anchored label that follows it (regression: `.search()`
+    # stopped at the first mention and returned None here, dropping the real
+    # label further down) -- on its own line, and on the *same* line, where a
+    # naive fix (skip the unanchored match, `finditer` for the next one) still
+    # fails: the unanchored match's own greedy `rest` group has already
+    # swallowed the real label as part of the span being skipped.
+    (f'Our major goals include improving efficiencies.\n'
+     f'The major goals of this project are: {_GOAL}', _GOAL),
+    (f'Major goals and aims. The major goals of this project are: {_GOAL}', _GOAL),
+    # Two *anchored* labels in one text -- the first wins, matching dev's own
+    # `.search()` semantics (which also stops at the first match). Nothing
+    # above exercises two anchored labels together, so a selection bug that
+    # picks the last one instead of the first (round-4 review) left every
+    # test green.
+    (f'The major goals of this project are: {_GOAL}\n'
+     f'Major Goals: A later, different goal entirely', _GOAL),
 ])
 def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     assert parse_major_goals(text) == expected
@@ -927,6 +1051,17 @@ def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     'Award Source: | Example Fund\nProject title: | Example Study',
     '',
     None,
+    # A bare label with an empty value is still no goal.
+    'Major Goals:',
+    'Major Goals of Project:',
+    # "Major goal(s)" with neither the "of (this|the) project/program" anchor
+    # nor an explicit separator is grant content, not a label -- otherwise it
+    # would be read as an unbounded whole-sentence claim.
+    'Our major goals include improving efficiencies across the department.',
+    'The committee highlighted major goals for the coming year during the review.',
+    # A5IZ6Q's measured typo is the plural "gals"; the singular "gal" is not a
+    # measured variant, so the anchor deliberately does not accept it.
+    f'The major gal of this project is: {_GOAL}',
 ])
 def test_an_empty_or_absent_goals_label_is_no_goal(text):
     """An empty label renders nothing -- and never borrows the next line."""
@@ -950,6 +1085,26 @@ def test_a_stage4_goal_is_not_replaced_by_the_text():
     fill_major_goals_from_text([grant])
 
     assert grant['extracted_fields']['major_goals'] == 'Goal as stage 4 extracted it'
+
+
+def test_a_goal_parsed_from_the_grants_own_text_that_repeats_its_title_does_not_double_render():
+    """End-to-end shape of BYFQBG#82 (#829 blocking item 1): stage 4 set `title`
+    to the goal text itself, `major_goals` was left empty, and the same entry's
+    raw text carries a "Major Goals:" label after the role -- so
+    `fill_major_goals_from_text` parses that label into `major_goals` with the
+    identical string. Rendering must not show the goal a second time under
+    "Major project goals:" once it already appears as "Project title:".
+    """
+    grant = _entry('M2B', text=f'Role: PI\nMajor Goals: {_GOAL}',
+                   title=_GOAL, agency='Example Fund', start_date='01/2019')
+
+    fill_major_goals_from_text([grant])
+    assert grant['extracted_fields']['major_goals'] == _GOAL  # parsed, as #958 promises
+
+    table = _generator()._create_grant_table(grant['extracted_fields'], 'M2B')
+    cells = _cells(table)
+    assert cells['Project title:'] == _GOAL
+    assert 'Major project goals:' not in [label for label, _ in _rows(table)]
 
 
 def _grant(start, end, text='grant', **fields):
