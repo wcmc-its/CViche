@@ -1198,6 +1198,30 @@ def test_redact_pre_llm_values_dotted_date_takes_the_whole_value():
     assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
 
 
+# #847: an ordinal day ("1st", "22nd") matched no full-date shape, so only the
+# year was withheld and the month and day reached the LLM (run 6TJNBQ).
+@pytest.mark.parametrize("value", [
+    "April 1st, 1990", "April 22nd, 1990", "Apr 3rd 1990", "April 4th, 1990",
+    "1st April 1990", "21st of April, 1990",
+])
+def test_redact_pre_llm_values_ordinal_day_takes_the_whole_value(value):
+    out = redact_pre_llm_values(f"Date of Birth: {value}")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_value_of_category_ordinal_day_in_a_value_cell():
+    # The "Birth date:" | "May 2nd, 1985" table-row shape from 6TJNBQ.
+    for cross_boundary in (False, True):
+        out = redact_pre_llm_value_of_category(
+            "April 1st, 1990", CAT_DATE_OF_BIRTH, cross_boundary=cross_boundary)
+        assert out == PRE_LLM_PLACEHOLDER
+
+
+def test_redact_pre_llm_values_untouched_ordinal_date_with_no_dob_label():
+    text = "Presented at the 1st Annual Meeting, April 2nd, 2019."
+    assert redact_pre_llm_values(text) == text
+
+
 def test_redact_pre_llm_values_untouched_iso_date_publication_no_dob_label():
     text = "Published 2020-05-01 in Journal X."
     assert redact_pre_llm_values(text) == text

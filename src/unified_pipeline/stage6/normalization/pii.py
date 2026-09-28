@@ -147,10 +147,14 @@ _MONTH_NAMES = (
 # bare year, so the single-space separator below cannot turn "the clinic,
 # born 1970, ..." into a false positive. #820 adds the day-month-year order
 # ("2 January 1970") to the month-day-year order #532 already had.
+# #847: the day may carry an ordinal suffix ("April 1st, 1970", "21st of
+# April 1970"); without it only the year matched and the month and day
+# reached the LLM (run 6TJNBQ).
+_ORDINAL_DAY = r"\d{1,2}(?:st|nd|rd|th)?"
 _FULL_DATE_VALUE = (
     r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
-    r"|" + _MONTH_NAMES + r"\s+\d{1,2},?\s*\d{4}"
-    r"|\d{1,2}\s+" + _MONTH_NAMES + r",?\s*\d{4})"
+    r"|" + _MONTH_NAMES + r"\s+" + _ORDINAL_DAY + r",?\s*\d{4}"
+    r"|" + _ORDINAL_DAY + r"\s+(?:of\s+)?" + _MONTH_NAMES + r",?\s*\d{4})"
 )
 
 # ISO (yyyy-mm-dd) and dot-separated (dd.mm.yyyy) date shapes -- #847
