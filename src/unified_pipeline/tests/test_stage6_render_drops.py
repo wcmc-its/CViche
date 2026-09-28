@@ -149,6 +149,9 @@ def test_same_family_skipped_when_expected_codes_span_sections() -> None:
     entry = _mismatched("Q3", ["P", "Q2", "O"], "Committees")
     assert _group(entry) == {"Q3": [entry["text"]]}
     assert "taxonomy_code_original" not in entry
+    # Two sections are already too many.
+    two = _mismatched("Q3", ["P", "Q2"], "Committees")
+    assert _group(two) == {"Q3": [two["text"]]}
 
 
 def test_cross_family_low_confidence_rule_is_unchanged() -> None:
@@ -160,9 +163,14 @@ def test_cross_family_low_confidence_rule_is_unchanged() -> None:
     assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(high, "H") == "H"
 
 
+_WARNED_PAIRS = [("D3", "D1"), ("K1", "K4"), ("K4", "K1"), ("K5", "K4"),
+                 ("Q1", "Q2"), ("Q2", "Q3"), ("S1", "S8"), ("S2", "S1")]
+
+
 def test_taxonomy_warned_pairs_are_never_rerouted() -> None:
     # One-section heading, so only the warned-pair rule can stop each one.
-    for assigned, target in sorted(_TAXONOMY_WARNED_CONFUSIONS):
+    assert sorted(_TAXONOMY_WARNED_CONFUSIONS) == sorted(_WARNED_PAIRS)
+    for assigned, target in _WARNED_PAIRS:
         entry = _mismatched(assigned, [target], "Heading")
         assert _group(entry) == {assigned: [entry["text"]]}, (assigned, target)
         assert "taxonomy_code_original" not in entry
