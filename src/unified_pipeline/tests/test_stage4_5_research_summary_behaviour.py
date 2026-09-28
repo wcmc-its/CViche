@@ -32,10 +32,12 @@ from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
     CURRENT_CONTEXT_TAG,
     CURRENT_WORK_REQUIREMENT,
     NEUTRAL_REFERENCE_REQUIREMENT,
+    ONGOING_PATTERN,
     PI_BONUS,
     RECENCY_WEIGHT,
     SENIOR_AUTHOR_BONUS,
     build_context_string,
+    compute_entry_recency,
     format_entry_for_context,
     gather_context_entries,
     is_current_entry,
@@ -175,7 +177,21 @@ def test_prioritize_entries_orders_by_combined_score_and_applies_limit():
 
 
 def test_prioritize_entries_empty_list_returns_empty():
-    assert prioritize_entries([], "M2A") == []
+    assert prioritize_entries([], "M2A", current_year=2026) == []
+
+
+@pytest.mark.parametrize("call", [
+    lambda: prioritize_entries([{"text": "x", "extracted_fields": {}}], "M2A"),
+    lambda: gather_context_entries({"M2A": [{"text": "x", "extracted_fields": {}}]}),
+    lambda: build_context_string([("M2A", {"text": "x", "extracted_fields": {}}, 0.0)]),
+    lambda: is_current_entry({"text": "x", "extracted_fields": {}}, "M2A"),
+])
+def test_current_year_is_a_required_argument(call):
+    """#947 review: current_year must be required, not left to a per-function
+    default -- a caller that omits it is a bug, not a silently-resolved wall
+    clock. Guards against a regression that reintroduces `= None` here."""
+    with pytest.raises(TypeError):
+        call()
 
 
 def test_prioritize_entries_uses_taxonomy_default_limit_when_unspecified():
@@ -183,7 +199,7 @@ def test_prioritize_entries_uses_taxonomy_default_limit_when_unspecified():
     explicit ``limit`` must return all 10 (proves the taxonomy-keyed default
     is actually consulted, not some other constant)."""
     entries = [{"text": str(i), "extracted_fields": {"year": str(2000 + i)}} for i in range(10)]
-    result = prioritize_entries(entries, "H")
+    result = prioritize_entries(entries, "H", current_year=2026)
     assert len(result) == 10
 
 
@@ -191,7 +207,7 @@ def test_prioritize_entries_default_limit_for_unlisted_code():
     """A code absent from ENTRY_LIMITS falls back to ENTRY_LIMITS['default']
     == 5, not to "no limit"."""
     entries = [{"text": str(i), "extracted_fields": {}} for i in range(8)]
-    result = prioritize_entries(entries, "Q1")
+    result = prioritize_entries(entries, "Q1", current_year=2026)
     assert len(result) == 5
 
 
@@ -232,51 +248,54 @@ def test_prioritize_entries_recency_weight_beats_content_length():
     assert result[0]["extracted_fields"] == {"year": "2012"}
 
 
-def test_prioritize_and_gather_default_to_wall_clock_year(monkeypatch):
-    """run_stage_4_5 relies on the default year. At a wall clock of 2045 a
-    2025 entry is past the window, so text length decides the cut."""
-    monkeypatch.setattr(stage_4_5, "datetime", _FrozenDatetime)
-    entries = [
-        {"text": "long" * 20, "extracted_fields": {"year": "2006"}},
-        {"text": "s", "extracted_fields": {"year": "2025"}},
-    ]
-    assert [e["text"] for e in prioritize_entries(entries, "O", limit=1)] == ["long" * 20]
-    (_c, _e, weight), = gather_context_entries({"O": [entries[1]]})
-    assert weight == pytest.approx(stage_4_5.SECTION_WEIGHTS["O"])
-
-
-def test_build_context_string_defaults_to_wall_clock_year(monkeypatch):
-    monkeypatch.setattr(stage_4_5, "datetime", _FrozenDatetime)
-    grant = ("M2A", {"extracted_fields": {"title": "R01", "end_date": "2030"}, "text": "Grant"}, -0.1)
-    assert not build_context_string([grant], max_tokens=100).startswith(CURRENT_CONTEXT_TAG)
-    assert build_context_string([grant], max_tokens=100, current_year=2026).startswith(CURRENT_CONTEXT_TAG)
+# #947: current_year is now required on prioritize_entries / gather_context_entries /
+# build_context_string / is_current_entry -- there is no more per-function wall-clock
+# default to test. Only run_stage_4_5 still resolves the wall clock, and only once, at
+# the top of the run; that is covered by test_run_stage_4_5_resolves_current_year_once
+# below, near the other run_stage_4_5 end-to-end tests.
 
 
 # --- recency helpers --------------------------------------------------------------
 
 def test_latest_entry_year_takes_max_over_date_fields():
+    """Structured DATE_FIELDS are trusted (unlike free text): still the max."""
     entry = {"extracted_fields": {"start_date": "2004", "end_date": "2019"}, "text": "text 2030"}
-    assert latest_entry_year(entry) == 2019
+    assert latest_entry_year(entry, current_year=2026) == 2019
 
 
-def test_latest_entry_year_falls_back_to_text_when_fields_undated():
+def test_latest_entry_year_falls_back_to_text_first_year_not_max():
+    """#947 review: the max over every year mentioned in free text let a
+    later aside (a renewal year, "replicated in 2023") inflate an old entry.
+    The first year in the text is the entry's own (start) date."""
     entry = {"extracted_fields": {"narrative": "x"}, "text": "Project A, 2021-2023. Aims 2022."}
-    assert latest_entry_year(entry) == 2023
+    assert latest_entry_year(entry, current_year=2026) == 2021
+
+
+def test_latest_entry_year_text_fallback_ignores_years_after_current_year():
+    """#947: a typo or forward-looking projection in the text must not count
+    -- 2030 is dropped and the first remaining year (2019) is used."""
+    entry = {"extracted_fields": {}, "text": "2019 draft; projected renewal in 2030."}
+    assert latest_entry_year(entry, current_year=2026) == 2019
+
+
+def test_latest_entry_year_text_fallback_all_years_after_current_year_is_none():
+    entry = {"extracted_fields": {}, "text": "Projected extension in 2030."}
+    assert latest_entry_year(entry, current_year=2026) is None
 
 
 def test_latest_entry_year_reads_date_field_and_twentieth_century_years():
-    assert latest_entry_year({"extracted_fields": {"date": "2019"}, "text": "2030"}) == 2019
-    assert latest_entry_year({"extracted_fields": {"year": "1998"}, "text": "x"}) == 1998
+    assert latest_entry_year({"extracted_fields": {"date": "2019"}, "text": "2030"}, current_year=2026) == 2019
+    assert latest_entry_year({"extracted_fields": {"year": "1998"}, "text": "x"}, current_year=2026) == 1998
 
 
 @pytest.mark.parametrize("text", ["Award 12019 and 2010", "Award 20195 and 2010"])
 def test_latest_entry_year_ignores_digits_inside_longer_numbers(text):
     """A grant or ID number that contains a year-like run is not a year."""
-    assert latest_entry_year({"extracted_fields": {}, "text": text}) == 2010
+    assert latest_entry_year({"extracted_fields": {}, "text": text}, current_year=2026) == 2010
 
 
 def test_latest_entry_year_none_when_no_year_anywhere():
-    assert latest_entry_year({"extracted_fields": {}, "text": "no dates"}) is None
+    assert latest_entry_year({"extracted_fields": {}, "text": "no dates"}, current_year=2026) is None
 
 
 @pytest.mark.parametrize("code, fields, text, expected", [
@@ -326,11 +345,32 @@ def _frozen_datetime(year):
 _FrozenDatetime = _frozen_datetime(2045)
 
 
-def test_is_current_entry_defaults_to_wall_clock_year(monkeypatch):
-    monkeypatch.setattr(stage_4_5, "datetime", _FrozenDatetime)
-    grant = {"extracted_fields": {"end_date": "2030"}, "text": "x"}
-    assert is_current_entry(grant, "M2A") is False
-    assert is_current_entry(grant, "M2A", current_year=2026) is True
+@pytest.mark.parametrize("end_date, expected", [
+    ("Present", True),
+    ("present", True),
+    ("Ongoing", True),
+    ("ongoing", True),
+    ("current", True),
+    ("now", True),
+    ("2025-Present", True),
+    ("2024 - Present", True),      # #947: a spaced dash range must match too
+    ("to present", True),
+    ("2022", False),
+    ("2019, not current", False),  # a trailing mention is not an ongoing end_date
+    ("Presentation 2019", False),  # the ongoing word must end at a boundary
+])
+def test_ongoing_end_date_shapes(end_date, expected):
+    """#947 review: document exactly which end_date strings count as
+    ongoing. Uses K1 (neither current-by-definition nor M1) to isolate
+    ONGOING_PATTERN from the other is_current_entry branches."""
+    entry = {"extracted_fields": {"end_date": end_date}, "text": "x"}
+    assert is_current_entry(entry, "K1", current_year=2026) is expected
+
+
+def test_ongoing_pattern_matches_spaced_dash_range_directly():
+    """Pins the regex fix itself, independent of is_current_entry's branching."""
+    assert ONGOING_PATTERN.search("2024 - Present")
+    assert not ONGOING_PATTERN.search("2019, not current")
 
 
 def test_score_entry_recency_current_entry_scores_one():
@@ -361,6 +401,37 @@ def test_score_entry_recency_undated_scores_zero():
     assert score_entry_recency({"extracted_fields": {}, "text": "x"}, "S1", 2026) == 0.0
 
 
+def test_open_range_in_text_only_makes_m1_current_not_other_codes():
+    """#947 review: OPEN_RANGE_PATTERN ran for every code, so a publication
+    abstract mentioning "2005-present" was wrongly tagged current and scored
+    1.0. Only M1 (whose project lines carry their dates in the text) checks
+    it; the same text on S1 must not."""
+    entry = {"extracted_fields": {"year": "2005"}, "text": "Ongoing since 2005-present in this field."}
+    assert is_current_entry(entry, "M1", current_year=2026) is True
+    assert is_current_entry(entry, "S1", current_year=2026) is False
+    assert score_entry_recency(entry, "S1", 2026) != 1.0
+
+
+def test_compute_entry_recency_agrees_with_is_current_entry_and_score_entry_recency():
+    """#947 review: latest_entry_year was computed twice per entry (once
+    inside is_current_entry's undated-M1 branch, again inside
+    score_entry_recency's decay calc). compute_entry_recency computes it
+    once and its fields must match what the two separate functions return."""
+    entry = {"extracted_fields": {"narrative": "x"}, "text": "Studies airway immunology"}  # undated M1
+    recency = compute_entry_recency(entry, "M1", 2026)
+    assert recency.is_current is True
+    assert recency.latest_year is None
+    assert recency.score == 1.0
+    assert recency.is_current == is_current_entry(entry, "M1", current_year=2026)
+    assert recency.score == score_entry_recency(entry, "M1", 2026)
+
+    dated = {"extracted_fields": {"year": "2016"}, "text": "x"}
+    dated_recency = compute_entry_recency(dated, "S1", 2026)
+    assert dated_recency.latest_year == 2016
+    assert dated_recency.is_current is False
+    assert dated_recency.score == pytest.approx(0.5)
+
+
 # --- gather_context_entries -----------------------------------------------------
 
 def test_gather_context_entries_skips_low_value_sections_and_keeps_boundary():
@@ -376,7 +447,7 @@ def test_gather_context_entries_skips_low_value_sections_and_keeps_boundary():
         "S2": [{"text": "review", "extracted_fields": {}}],
     }
 
-    result = gather_context_entries(entries_by_code)
+    result = gather_context_entries(entries_by_code, current_year=2026)
 
     codes = [code for code, _entry, _weight in result]
     assert codes == ["M1", "S2"]
@@ -503,14 +574,14 @@ def test_build_context_string_filters_invalid_entries():
     """An entry that fails is_valid_entry (blank text) contributes nothing,
     even though it is well-formed enough to reach build_context_string."""
     entry = ("H", {"extracted_fields": {}, "text": ""}, -0.1)
-    assert build_context_string([entry], max_tokens=100) == ""
+    assert build_context_string([entry], current_year=2026, max_tokens=100) == ""
 
 
 def test_build_context_string_drops_entry_that_exceeds_the_char_budget():
     """max_tokens=3 -> max_chars=12; the formatted entry is 14 chars, so it
     must not be included and the result is empty (not truncated text)."""
     entry = ("X", {"extracted_fields": {}, "text": "A" * 10}, -0.1)
-    assert build_context_string([entry], max_tokens=3) == ""
+    assert build_context_string([entry], current_year=2026, max_tokens=3) == ""
 
 
 def test_build_context_string_stops_before_the_entry_that_would_overflow():
@@ -523,7 +594,7 @@ def test_build_context_string_stops_before_the_entry_that_would_overflow():
     admitted -- this is the exact boundary that distinguishes the two."""
     e1 = ("X", {"extracted_fields": {}, "text": "A" * 10}, -0.1)
     e2 = ("X", {"extracted_fields": {}, "text": "B" * 10}, -0.2)
-    result = build_context_string([e1, e2], max_tokens=7)
+    result = build_context_string([e1, e2], current_year=2026, max_tokens=7)
     assert result == "[X] " + "A" * 10
 
 
@@ -535,21 +606,21 @@ def test_build_context_string_admits_entry_that_exactly_fills_the_budget():
     off-by-one there would wrongly break on this exact-fill boundary and
     return an empty string instead."""
     entry = ("X", {"extracted_fields": {}, "text": "A" * 12}, -0.1)
-    result = build_context_string([entry], max_tokens=4)
+    result = build_context_string([entry], current_year=2026, max_tokens=4)
     assert result == "[X] " + "A" * 12
 
 
 def test_build_context_string_includes_every_entry_that_fits():
     e1 = ("X", {"extracted_fields": {}, "text": "A" * 10}, -0.1)
     e2 = ("X", {"extracted_fields": {}, "text": "B" * 10}, -0.2)
-    result = build_context_string([e1, e2], max_tokens=8)
+    result = build_context_string([e1, e2], current_year=2026, max_tokens=8)
     assert result == "[X] " + "A" * 10 + "\n[X] " + "B" * 10
 
 
 def test_build_context_string_tags_current_entries():
     current = ("K1", {"extracted_fields": {"end_date": "present"}, "text": "Teaching"}, -0.1)
     past = ("K1", {"extracted_fields": {"end_date": "2019"}, "text": "Old teaching"}, -0.2)
-    result = build_context_string([current, past], max_tokens=100)
+    result = build_context_string([current, past], current_year=2026, max_tokens=100)
     assert result == f"{CURRENT_CONTEXT_TAG} [K1] Teaching\n[K1] Old teaching"
 
 
@@ -658,6 +729,14 @@ def test_generate_research_summary_prompt_requires_current_work_first_and_neutra
     assert "never use gendered pronouns" in NEUTRAL_REFERENCE_REQUIREMENT
     assert "never infer gender from the name" in NEUTRAL_REFERENCE_REQUIREMENT
     assert f"ongoing entries tagged {CURRENT_CONTEXT_TAG}" in prompt
+
+
+def test_current_context_tag_appears_in_current_work_requirement():
+    """#947 review: CURRENT_WORK_REQUIREMENT and CURRENT_CONTEXT_TAG live in
+    two different places in the module now (prompt text next to the
+    generation prompt, the tag itself next to the recency constants); this
+    pins that they can't drift apart -- no call_llm stub needed."""
+    assert CURRENT_CONTEXT_TAG in CURRENT_WORK_REQUIREMENT
 
 
 # --- run_stage_4_5 end-to-end (call_llm stubbed) ----------------------------------
@@ -832,3 +911,33 @@ def test_run_stage_4_5_raises_file_not_found_for_missing_input(monkeypatch, tmp_
 
     assert raised is True
     assert not missing_output.exists()
+
+
+def test_run_stage_4_5_resolves_current_year_once_from_wall_clock(monkeypatch, tmp_path):
+    """#947 review: current_year must be required and resolved once at the
+    top of the run, not left to each function's own default. Frozen at 2030,
+    a grant that ended in 2025 is not current -- proving resolve_current_year
+    actually ran and its result reached is_current_entry via gather/build."""
+    monkeypatch.setattr(stage_4_5, "datetime", _frozen_datetime(2030))
+    captured = {}
+
+    def fake_call_llm(*, messages, max_tokens, **_kwargs):
+        if max_tokens == 200:
+            raise AssertionError("no M1 content -- scoring must not run")
+        captured["prompt"] = messages[0]["content"]
+        return {"content": "Summary.", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    inp = _write_fields_json(
+        tmp_path, "TEST05",
+        [{"taxonomy_code": "M2A", "text": "Grant", "extracted_fields": {"title": "R01", "end_date": "2025"}}],
+        cv_owner={"first_name": "Jane", "last_name": "Doe"},
+    )
+    outp = tmp_path / "out.json"
+
+    run_stage_4_5(str(inp), str(outp), verbose=False)
+
+    # CURRENT_WORK_REQUIREMENT's own boilerplate always mentions the tag;
+    # check the CV CONTEXT entry itself is not tagged.
+    assert f"{CURRENT_CONTEXT_TAG} [GRANT-M2A]" not in captured["prompt"]
+    assert "[GRANT-M2A]" in captured["prompt"]

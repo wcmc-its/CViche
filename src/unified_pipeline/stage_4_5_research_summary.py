@@ -15,6 +15,7 @@ import argparse
 import json
 import re
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 
@@ -91,28 +92,29 @@ RECENCY_WEIGHT = 0.4
 RECENCY_WINDOW_YEARS = 20
 DATE_FIELDS = ('year', 'start_date', 'end_date', 'date')
 YEAR_PATTERN = re.compile(r'\b(?:19|20)\d{2}\b')
-ONGOING_PATTERN = re.compile(r'^\s*(?:present|current|ongoing|now)\b', re.IGNORECASE)
+# Matches an end_date value that names no date of its own, only that the
+# entry is ongoing: the whole value ("Present"), or a range's open end
+# ("2024 - Present", "to present"). Anchored at both ends so a trailing
+# qualifier ("2019, not current") does not count (#947).
+ONGOING_PATTERN = re.compile(r'(?:^|[-–—]|\bto)\s*\b(?:present|current|ongoing|now)\b\s*$', re.IGNORECASE)
 OPEN_RANGE_PATTERN = re.compile(r'\b(?:19|20)\d{2}\s*[-–—]+\s*(?:present|current|ongoing|now)\b', re.IGNORECASE)
 CURRENT_CONTEXT_TAG = '[CURRENT]'
 
-# Generation-prompt requirements (#946 item 6), named so tests pin them.
-CURRENT_WORK_REQUIREMENT = (
-    f"Open with the researcher's CURRENT research and ongoing projects (entries tagged {CURRENT_CONTEXT_TAG} "
-    "and the most recent years); mention older work only briefly, as background, after the current work"
-)
-NEUTRAL_REFERENCE_REQUIREMENT = (
-    "Refer to the researcher by name or with gender-neutral phrasing (e.g. \"this research program\", \"this work\"); "
-    "never use gendered pronouns (he/she/his/her/him) and never infer gender from the name"
-)
+_UNCOMPUTED = object()  # sentinel: is_current_entry() should compute latest_entry_year itself
 
 
-def latest_entry_year(entry: dict) -> int | None:
-    """Latest four-digit year in the entry's date fields, else in its text."""
+def latest_entry_year(entry: dict, current_year: int) -> int | None:
+    """Latest year across the entry's date fields (trusted, so not capped);
+    else the first year mentioned in its free text -- the entry's own date,
+    not the max of every year mentioned (a later aside, such as a renewal
+    year, must not make an old entry look recent) -- ignoring any text-only
+    year after current_year (a typo or a forward-looking projection) (#947)."""
     fields = entry.get('extracted_fields') or {}
-    years = [int(y) for name in DATE_FIELDS for y in YEAR_PATTERN.findall(str(fields.get(name) or ''))]
-    if not years:
-        years = [int(y) for y in YEAR_PATTERN.findall(entry.get('text') or '')]
-    return max(years) if years else None
+    field_years = [int(y) for name in DATE_FIELDS for y in YEAR_PATTERN.findall(str(fields.get(name) or ''))]
+    if field_years:
+        return max(field_years)
+    text_years = [int(y) for y in YEAR_PATTERN.findall(entry.get('text') or '') if int(y) <= current_year]
+    return text_years[0] if text_years else None
 
 
 def resolve_current_year(current_year: int | None) -> int:
@@ -127,29 +129,55 @@ def ended_before(entry: dict, current_year: int) -> bool:
     return bool(end_years) and max(end_years) < current_year
 
 
-def is_current_entry(entry: dict, taxonomy_code: str, current_year: int | None = None) -> bool:
+def is_current_entry(entry: dict, taxonomy_code: str, current_year: int, latest_year: int | None = _UNCOMPUTED) -> bool:
     """True for an ongoing entry: a current-by-definition section whose
     end_date has not passed, an undated M1 narrative, an end_date of
-    'present'/'current'/'ongoing', or an open 'YYYY-present' range in the text
-    (M1 project lines carry their dates only there)."""
+    'present'/'current'/'ongoing', or (M1 only -- M1 project lines carry
+    their dates only in the text) an open 'YYYY-present' range in the text.
+
+    `latest_year`, when given, is the caller's already-computed
+    latest_entry_year(entry, current_year), so the M1 undated check does not
+    compute it a second time (#947)."""
     if taxonomy_code in CURRENT_TAXONOMY_CODES:
-        return not ended_before(entry, resolve_current_year(current_year))
-    if taxonomy_code == RESEARCH_ACTIVITIES_CODE and latest_entry_year(entry) is None:
-        return True
+        return not ended_before(entry, current_year)
+    if taxonomy_code == RESEARCH_ACTIVITIES_CODE:
+        year = latest_entry_year(entry, current_year) if latest_year is _UNCOMPUTED else latest_year
+        if year is None:
+            return True
     fields = entry.get('extracted_fields') or {}
-    if ONGOING_PATTERN.match(str(fields.get('end_date') or '')):
+    if ONGOING_PATTERN.search(str(fields.get('end_date') or '')):
         return True
-    return bool(OPEN_RANGE_PATTERN.search(entry.get('text') or ''))
+    if taxonomy_code == RESEARCH_ACTIVITIES_CODE:
+        return bool(OPEN_RANGE_PATTERN.search(entry.get('text') or ''))
+    return False
+
+
+@dataclass(frozen=True)
+class EntryRecency:
+    """One entry's recency facts, computed once (#947: is_current_entry's
+    undated-M1 branch and the decay formula each called latest_entry_year
+    separately for the same entry)."""
+    is_current: bool
+    latest_year: int | None
+    score: float
+
+
+def compute_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> EntryRecency:
+    """The entry's is_current/latest_year/score, sharing one latest_entry_year call."""
+    year = latest_entry_year(entry, current_year)
+    current = is_current_entry(entry, taxonomy_code, current_year, latest_year=year)
+    if current:
+        score = 1.0
+    elif year is None:
+        score = 0.0
+    else:
+        score = min(max(1 - (current_year - year) / RECENCY_WINDOW_YEARS, 0.0), 1.0)
+    return EntryRecency(is_current=current, latest_year=year, score=score)
 
 
 def score_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> float:
     """0.0-1.0: 1.0 if ongoing, else linear decay over RECENCY_WINDOW_YEARS; undated scores 0."""
-    if is_current_entry(entry, taxonomy_code, current_year):
-        return 1.0
-    year = latest_entry_year(entry)
-    if year is None:
-        return 0.0
-    return min(max(1 - (current_year - year) / RECENCY_WINDOW_YEARS, 0.0), 1.0)
+    return compute_entry_recency(entry, taxonomy_code, current_year).score
 
 
 def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = '') -> float:
@@ -193,8 +221,8 @@ def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = 
     return 0.0
 
 
-def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: str = '', limit: int = None,
-                       current_year: int | None = None) -> list[dict]:
+def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: int, cv_owner_name: str = '',
+                       limit: int = None) -> list[dict]:
     """
     Prioritize and limit entries for a taxonomy code.
 
@@ -205,7 +233,6 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: s
     """
     if not entries:
         return []
-    current_year = resolve_current_year(current_year)
 
     # Score each entry
     scored_entries = []
@@ -230,8 +257,8 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: s
     return [entry for _, entry in scored_entries[:limit]]
 
 
-def gather_context_entries(entries_by_code: dict[str, list[dict]], cv_owner_name: str = '',
-                           current_year: int | None = None) -> list[tuple[str, dict, float]]:
+def gather_context_entries(entries_by_code: dict[str, list[dict]], current_year: int,
+                           cv_owner_name: str = '') -> list[tuple[str, dict, float]]:
     """
     Gather and weight entries from all sections for summary generation.
 
@@ -240,7 +267,6 @@ def gather_context_entries(entries_by_code: dict[str, list[dict]], cv_owner_name
 
     Returns list of (taxonomy_code, entry, weight) tuples, sorted by weight.
     """
-    current_year = resolve_current_year(current_year)
     weighted_entries = []
 
     for code, entries in entries_by_code.items():
@@ -251,7 +277,7 @@ def gather_context_entries(entries_by_code: dict[str, list[dict]], cv_owner_name
             continue
 
         # Prioritize and limit entries
-        prioritized = prioritize_entries(entries, code, cv_owner_name, current_year=current_year)
+        prioritized = prioritize_entries(entries, code, current_year, cv_owner_name=cv_owner_name)
 
         for entry in prioritized:
             seniority_bonus = score_entry_seniority(entry, code, cv_owner_name)
@@ -329,8 +355,8 @@ def format_entry_for_context(code: str, entry: dict) -> str:
         return f"[{code}] {text}"
 
 
-def build_context_string(weighted_entries: list[tuple[str, dict, float]], max_tokens: int = 4000,
-                         current_year: int | None = None) -> str:
+def build_context_string(weighted_entries: list[tuple[str, dict, float]], current_year: int,
+                         max_tokens: int = 4000) -> str:
     """
     Build context string from weighted entries, respecting token limit.
 
@@ -341,7 +367,6 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float]], max_to
     Rough estimate: 1 token ≈ 4 characters
     """
     max_chars = max_tokens * 4
-    current_year = resolve_current_year(current_year)
     context_parts = []
     total_chars = 0
 
@@ -437,6 +462,19 @@ Respond with JSON only:
         return 0.0, "Failed to parse response", usage
 
 
+# Generation-prompt requirements (#946 item 6), named so tests pin them. Kept next to
+# generate_research_summary rather than the recency constants above: these are prompt
+# content, not recency logic, and NEUTRAL_REFERENCE_REQUIREMENT has nothing to do with dates.
+CURRENT_WORK_REQUIREMENT = (
+    f"Open with the researcher's CURRENT research and ongoing projects (entries tagged {CURRENT_CONTEXT_TAG} "
+    "and the most recent years); mention older work only briefly, as background, after the current work"
+)
+NEUTRAL_REFERENCE_REQUIREMENT = (
+    "Refer to the researcher by name or with gender-neutral phrasing (e.g. \"this research program\", \"this work\"); "
+    "never use gendered pronouns (he/she/his/her/him) and never infer gender from the name"
+)
+
+
 def generate_research_summary(context: str, cv_owner_name: str) -> tuple[str, dict]:
     """
     Generate a biosketch-style research summary from CV context.
@@ -515,6 +553,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
     with open(input_file, 'r') as f:
         data = json.load(f)
 
+    current_year = resolve_current_year(None)  # #947: resolved once, reused for the whole run
     document_uid = data.get('document_uid', input_file.stem)
     cv_owner = data.get('cv_owner') or {}
     cv_owner_name = f"{cv_owner.get('first_name', '')} {cv_owner.get('last_name', '')}".strip()
@@ -594,7 +633,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
             print(f"\nGenerating research summary from CV context...")
 
         # Gather weighted context
-        weighted_entries = gather_context_entries(entries_by_code, cv_owner_name)
+        weighted_entries = gather_context_entries(entries_by_code, current_year, cv_owner_name=cv_owner_name)
 
         if verbose:
             print(f"  Context entries: {len(weighted_entries)}")
@@ -604,7 +643,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
                 print(f"    [{code}] (w={weight:.2f}) {text_preview}...")
 
         # Build context string
-        context = build_context_string(weighted_entries)
+        context = build_context_string(weighted_entries, current_year)
 
         # Track what was used
         context_entries_used = len(weighted_entries)
@@ -629,10 +668,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
             print(f"\nGenerated summary ({len(research_summary)} chars):")
             print(f"  {research_summary[:200]}...")
 
-    # total_cost was accumulated from llm_result['cost'] on each call above,
-    # which calculate_cost() prices per-provider and per-model (and accounts
-    # for Bedrock prompt-cache reads at 0.1x and writes at 1.25x). Don't
-    # recompute it here from a hardcoded $/M-token figure.
+    # total_cost already reflects calculate_cost()'s per-provider/per-model pricing; don't recompute it here.
 
     # Build standalone output (not modifying upstream data)
     word_count = len(research_summary.split())
