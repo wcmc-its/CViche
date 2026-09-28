@@ -1,23 +1,21 @@
-"""Behaviour coverage for the Bedrock and OpenAI provider adapters and the
-shared retry infrastructure (#704), split out of llm_client.py by #496:
+"""Behaviour coverage for the Bedrock provider adapter and the shared retry
+infrastructure (#704), split out of llm_client.py by #496:
 
     unified_pipeline/llm/bedrock.py  -- Converse API translation, schema
         enforcement (#46), markdown-fence stripping, JSON-repair retry.
-    unified_pipeline/llm/openai.py   -- raw chat.completions call + response
-        normalization.
     unified_pipeline/llm/retry.py    -- exponential backoff / retry
         classification, and the llm_config.yaml tuning knobs.
 
-No network, ever. Both providers' real SDK clients are never constructed:
-``_get_bedrock_client`` / ``_get_openai_client`` are monkeypatched to return
-a small fake object that records the kwargs it was called with and returns a
-canned response shaped like the real Converse API / ChatCompletion SDK
-return value (read from the source, not guessed). ``call_llm`` (the
-llm_client.py facade) is never imported or invoked here -- these tests go
-straight at the provider-adapter functions it dispatches to. ``time.sleep``
-is monkeypatched to a no-op recorder wherever a retry path might sleep;
-``time.monotonic`` is left untouched (asyncio.run() depends on it elsewhere
-in the pipeline -- swapping it globally breaks unrelated duration math).
+No network, ever. Bedrock's real SDK client is never constructed:
+``_get_bedrock_client`` is monkeypatched to return a small fake object that
+records the kwargs it was called with and returns a canned response shaped
+like the real Converse API return value (read from the source, not
+guessed). ``call_llm`` (the llm_client.py facade) is never imported or
+invoked here -- these tests go straight at the provider-adapter functions it
+dispatches to. ``time.sleep`` is monkeypatched to a no-op recorder wherever a
+retry path might sleep; ``time.monotonic`` is left untouched (asyncio.run()
+depends on it elsewhere in the pipeline -- swapping it globally breaks
+unrelated duration math).
 
 Run with:
 
@@ -29,10 +27,7 @@ import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from types import SimpleNamespace
 
-import httpx
-import openai
 import pytest
 from botocore.exceptions import ClientError
 
@@ -41,11 +36,9 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.llm.bedrock as bedrock  # noqa: E402
-import unified_pipeline.llm.openai as openai_mod  # noqa: E402
 import unified_pipeline.llm.retry as retry  # noqa: E402
 
 BEDROCK_MODEL = "anthropic.claude-haiku-4-5"
-OPENAI_MODEL = "gpt-4o-mini"
 
 
 # ---------------------------------------------------------------------------
@@ -66,39 +59,12 @@ class _FakeBedrockClient:
         return self._responses.pop(0)
 
 
-class _FakeCompletions:
-    def __init__(self, response: object) -> None:
-        self._response = response
-        self.calls: list[dict] = []
-
-    def create(self, **kwargs: object) -> object:
-        self.calls.append(kwargs)
-        return self._response
-
-
-class _FakeOpenAIClient:
-    def __init__(self, response: object) -> None:
-        self.chat = SimpleNamespace(completions=_FakeCompletions(response))
-
-
 def _bedrock_cfg(**overrides: object) -> dict:
     cfg = {
         "model": BEDROCK_MODEL,
         "temperature": 0.2,
         "max_tokens": None,
         "enable_prompt_caching": False,
-        "extra_kwargs": {},
-        "retry_count": 0,
-    }
-    cfg.update(overrides)
-    return cfg
-
-
-def _openai_cfg(**overrides: object) -> dict:
-    cfg = {
-        "model": OPENAI_MODEL,
-        "temperature": 0.2,
-        "max_tokens": None,
         "extra_kwargs": {},
         "retry_count": 0,
     }
@@ -682,152 +648,6 @@ def test_handle_bedrock_strips_fence_without_triggering_repair(monkeypatch: pyte
 
 
 # ---------------------------------------------------------------------------
-# openai.py -- _call_openai (request construction against a fake client)
-# ---------------------------------------------------------------------------
-
-def test_call_openai_minimal_call_omits_optional_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    sentinel_response = object()
-    fake = _FakeOpenAIClient(sentinel_response)
-    monkeypatch.setattr(openai_mod, "_get_openai_client", lambda: fake)
-
-    result = openai_mod._call_openai(OPENAI_MODEL, [{"role": "user", "content": "hi"}], 0.3)
-
-    assert result is sentinel_response
-    sent = fake.chat.completions.calls[0]
-    assert sent == {"model": OPENAI_MODEL, "messages": [{"role": "user", "content": "hi"}], "temperature": 0.3}
-    assert "response_format" not in sent
-    assert "max_completion_tokens" not in sent
-
-
-def test_call_openai_includes_response_format_and_max_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = _FakeOpenAIClient(object())
-    monkeypatch.setattr(openai_mod, "_get_openai_client", lambda: fake)
-
-    openai_mod._call_openai(
-        OPENAI_MODEL, [{"role": "user", "content": "hi"}], 0.5,
-        response_format={"type": "json_object"}, max_tokens=200,
-    )
-
-    sent = fake.chat.completions.calls[0]
-    assert sent["response_format"] == {"type": "json_object"}
-    assert sent["max_completion_tokens"] == 200
-
-
-def test_call_openai_filters_handled_kwargs_but_passes_through_others(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = _FakeOpenAIClient(object())
-    monkeypatch.setattr(openai_mod, "_get_openai_client", lambda: fake)
-
-    openai_mod._call_openai(
-        OPENAI_MODEL, [{"role": "user", "content": "hi"}], 0.5,
-        stage="5c", retry_count=2, provider="openai",  # must be filtered
-        top_p=0.9,  # must pass through
-        seed=None,  # None values are filtered regardless of key
-    )
-
-    sent = fake.chat.completions.calls[0]
-    assert "stage" not in sent
-    assert "retry_count" not in sent
-    assert "provider" not in sent
-    assert "seed" not in sent
-    assert sent["top_p"] == 0.9
-
-
-# ---------------------------------------------------------------------------
-# openai.py -- _handle_openai (dispatch + normalization)
-# ---------------------------------------------------------------------------
-
-def _openai_response(content: str, *, finish_reason: str = "stop",
-                     prompt_tokens: int = 40, completion_tokens: int = 10) -> SimpleNamespace:
-    usage = SimpleNamespace(
-        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-    )
-    choice = SimpleNamespace(message=SimpleNamespace(content=content), finish_reason=finish_reason)
-    return SimpleNamespace(choices=[choice], usage=usage)
-
-
-def test_handle_openai_normalizes_response_and_zeroes_cache_fields(monkeypatch: pytest.MonkeyPatch) -> None:
-    response = _openai_response('{"a": 1}', finish_reason="stop",
-                                prompt_tokens=40, completion_tokens=10)
-    fake = _FakeOpenAIClient(response)
-    monkeypatch.setattr(openai_mod, "_get_openai_client", lambda: fake)
-
-    result = openai_mod._handle_openai(
-        [{"role": "user", "content": "hi"}], response_format=None, cfg=_openai_cfg()
-    )
-
-    assert result["content"] == '{"a": 1}'
-    assert result["prompt_tokens"] == 40
-    assert result["completion_tokens"] == 10
-    assert result["total_tokens"] == 50
-    assert result["cache_read_tokens"] == 0  # OpenAI has no prompt-cache accounting
-    assert result["cache_write_tokens"] == 0
-    assert result["provider"] == "openai"
-    assert result["finish_reason"] == "stop"
-    assert result["model"] == OPENAI_MODEL
-    assert result["cost"] > 0
-    assert isinstance(result["latency_ms"], int)
-
-
-def test_handle_openai_wires_response_format_into_the_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    response = _openai_response('{"a": 1}')
-    fake = _FakeOpenAIClient(response)
-    monkeypatch.setattr(openai_mod, "_get_openai_client", lambda: fake)
-
-    openai_mod._handle_openai(
-        [{"role": "user", "content": "hi"}],
-        response_format={"type": "json_object"},
-        cfg=_openai_cfg(),
-    )
-
-    assert fake.chat.completions.calls[0]["response_format"] == {"type": "json_object"}
-
-
-def test_handle_openai_different_finish_reason_and_length(monkeypatch: pytest.MonkeyPatch) -> None:
-    response = _openai_response("truncated output", finish_reason="length",
-                                prompt_tokens=5, completion_tokens=2)
-    fake = _FakeOpenAIClient(response)
-    monkeypatch.setattr(openai_mod, "_get_openai_client", lambda: fake)
-
-    result = openai_mod._handle_openai(
-        [{"role": "user", "content": "hi"}], response_format=None, cfg=_openai_cfg()
-    )
-
-    assert result["finish_reason"] == "length"
-    assert result["content"] == "truncated output"
-
-
-def test_handle_openai_none_content_on_tool_call_finish_passes_through(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # content=None is a legitimate OpenAI response shape on a tool-call
-    # finish (#635), not an error -- it must not raise or be coerced.
-    response = _openai_response(None, finish_reason="tool_calls",
-                                prompt_tokens=12, completion_tokens=3)
-    fake = _FakeOpenAIClient(response)
-    monkeypatch.setattr(openai_mod, "_get_openai_client", lambda: fake)
-
-    result = openai_mod._handle_openai(
-        [{"role": "user", "content": "hi"}], response_format=None, cfg=_openai_cfg()
-    )
-
-    assert result["content"] is None
-    assert result["finish_reason"] == "tool_calls"
-
-
-def test_handle_openai_raises_on_empty_choices(monkeypatch: pytest.MonkeyPatch) -> None:
-    usage = SimpleNamespace(prompt_tokens=1, completion_tokens=0, total_tokens=1)
-    response = SimpleNamespace(choices=[], usage=usage)
-    fake = _FakeOpenAIClient(response)
-    monkeypatch.setattr(openai_mod, "_get_openai_client", lambda: fake)
-
-    with pytest.raises(RuntimeError, match="no choices"):
-        openai_mod._handle_openai(
-            [{"role": "user", "content": "hi"}], response_format=None, cfg=_openai_cfg()
-        )
-
-
-# ---------------------------------------------------------------------------
 # retry.py -- llm_config.yaml knob readers
 # ---------------------------------------------------------------------------
 
@@ -908,7 +728,10 @@ def test_call_with_retry_success_first_try_never_sleeps(monkeypatch: pytest.Monk
     assert api_seconds >= 0
 
 
-def test_call_with_retry_retries_generic_retryable_error_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_call_with_retry_retries_non_outage_client_error_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # InternalServerException is retryable but NOT in BEDROCK_OUTAGE_CODES, so
+    # this exercises the ordinary retry_count-bounded path (distinct from the
+    # ThrottlingException/ServiceUnavailableException outage-class tests below).
     sleeps: list[float] = []
     monkeypatch.setattr(retry.time, "sleep", lambda s: sleeps.append(s))
     attempts = {"n": 0}
@@ -916,7 +739,7 @@ def test_call_with_retry_retries_generic_retryable_error_then_succeeds(monkeypat
     def flaky() -> str:
         attempts["n"] += 1
         if attempts["n"] == 1:
-            raise openai.APIConnectionError(request=httpx.Request("POST", "https://example.invalid"))
+            raise ClientError({"Error": {"Code": "InternalServerException", "Message": "x"}}, "Converse")
         return "recovered"
 
     result, _ = retry._call_with_retry(flaky, retry_count=2)
@@ -1007,7 +830,7 @@ def test_call_with_retry_cancel_after_backoff_stops_further_attempts(monkeypatch
 
     def flaky() -> str:
         attempts["n"] += 1
-        raise openai.APIConnectionError(request=httpx.Request("POST", "https://example.invalid"))
+        raise ClientError({"Error": {"Code": "InternalServerException", "Message": "x"}}, "Converse")
 
     class Cancelled(Exception):
         pass
@@ -1033,48 +856,27 @@ def _bedrock_outage_error(code: str) -> ClientError:
     return ClientError({"Error": {"Code": code, "Message": "down"}}, "Converse")
 
 
-def _openai_rate_limit_error() -> openai.RateLimitError:
-    return openai.RateLimitError(
-        "rate limited",
-        response=httpx.Response(429, request=httpx.Request("POST", "https://example.invalid")),
-        body=None,
-    )
-
-
-def _openai_internal_server_error() -> openai.InternalServerError:
-    return openai.InternalServerError(
-        "internal error",
-        response=httpx.Response(500, request=httpx.Request("POST", "https://example.invalid")),
-        body=None,
-    )
-
-
 @pytest.mark.parametrize(
     "make_error",
     [
         lambda: _bedrock_outage_error("ServiceUnavailableException"),
         lambda: _bedrock_outage_error("ThrottlingException"),
-        _openai_rate_limit_error,
-        _openai_internal_server_error,
     ],
     ids=[
         "bedrock_service_unavailable",
         "bedrock_throttling",
-        "openai_rate_limit",
-        "openai_internal_server_error",
     ],
 )
 def test_call_with_retry_outage_error_keeps_retrying_past_retry_count(
     monkeypatch: pytest.MonkeyPatch, make_error: Callable[[], Exception]
 ) -> None:
     # Every outage-class error -- both Bedrock codes named in
-    # BEDROCK_OUTAGE_CODES and both OpenAI exception classes _is_outage_error
-    # recognizes -- must NOT be bounded by retry_count=1 (which would allow
-    # only 2 total attempts on the ordinary path). Verifier round 2 (m13):
-    # dropping "ThrottlingException" from BEDROCK_OUTAGE_CODES survived with
-    # the suite green because only ServiceUnavailableException had a test
-    # here; this parametrization covers all four outage classes so no one
-    # code/class can be silently dropped again.
+    # BEDROCK_OUTAGE_CODES -- must NOT be bounded by retry_count=1 (which
+    # would allow only 2 total attempts on the ordinary path). Verifier
+    # round 2 (m13): dropping "ThrottlingException" from BEDROCK_OUTAGE_CODES
+    # survived with the suite green because only ServiceUnavailableException
+    # had a test here; this parametrization covers both outage codes so
+    # neither can be silently dropped again.
     monkeypatch.setattr(retry.time, "sleep", lambda s: None)
     attempts = {"n": 0}
 
@@ -1280,78 +1082,3 @@ def test_call_with_retry_outage_cancel_check_propagates(monkeypatch: pytest.Monk
     assert checks["n"] == 1
     assert sleeps == [1.0]  # the outage-branch wait (base=1, jitter pinned to hi)
 
-
-def test_call_with_retry_openai_rate_limit_error_is_outage_class(monkeypatch: pytest.MonkeyPatch) -> None:
-    # OpenAI's RateLimitError is outage-class too (not just Bedrock's codes):
-    # it must survive past retry_count the same way.
-    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
-    attempts = {"n": 0}
-
-    def eventually_recovers() -> str:
-        attempts["n"] += 1
-        if attempts["n"] <= 3:
-            raise openai.RateLimitError(
-                "rate limited",
-                response=httpx.Response(429, request=httpx.Request("POST", "https://example.invalid")),
-                body=None,
-            )
-        return "recovered"
-
-    result, _ = retry._call_with_retry(eventually_recovers, retry_count=1)
-
-    assert result == "recovered"
-    assert attempts["n"] == 4  # more than retry_count(1)+1 == 2 would allow
-
-
-def test_call_with_retry_openai_internal_server_error_is_outage_class(monkeypatch: pytest.MonkeyPatch) -> None:
-    # OpenAI's InternalServerError is outage-class too, alongside
-    # RateLimitError (Do-2 names both) -- only RateLimitError had a test
-    # before this (verifier round 1, m12: dropping InternalServerError from
-    # _is_outage_error survived with the suite green).
-    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
-    attempts = {"n": 0}
-
-    def eventually_recovers() -> str:
-        attempts["n"] += 1
-        if attempts["n"] <= 3:
-            raise openai.InternalServerError(
-                "internal error",
-                response=httpx.Response(500, request=httpx.Request("POST", "https://example.invalid")),
-                body=None,
-            )
-        return "recovered"
-
-    result, _ = retry._call_with_retry(eventually_recovers, retry_count=1)
-
-    assert result == "recovered"
-    assert attempts["n"] == 4  # more than retry_count(1)+1 == 2 would allow
-
-
-def test_call_with_retry_openai_rate_limit_error_honors_retry_after_capped_at_60(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The botocore half of Retry-After honoring (#637) is covered by
-    # test_call_with_retry_outage_honors_retry_after_capped_at_60 above; the
-    # OpenAI httpx-response half was not (verifier round 1, m11: forcing
-    # _retry_after_seconds's OpenAI branch to always return None survived
-    # with the suite green).
-    sleeps: list[float] = []
-    monkeypatch.setattr(retry.time, "sleep", lambda s: sleeps.append(s))
-    attempts = {"n": 0}
-
-    def flaky() -> str:
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            raise openai.RateLimitError(
-                "rate limited",
-                response=httpx.Response(
-                    429,
-                    headers={"Retry-After": "120"},
-                    request=httpx.Request("POST", "https://example.invalid"),
-                ),
-                body=None,
-            )
-        return "recovered"
-
-    result, _ = retry._call_with_retry(flaky, retry_count=3)
-
-    assert result == "recovered"
-    assert sleeps == [60.0]  # the provider's 120s is capped at the 60s outage ceiling

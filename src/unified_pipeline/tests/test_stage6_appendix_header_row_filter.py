@@ -52,6 +52,7 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     DROP_RENDERS_EMPTY,
     DROP_SOURCE_BOILERPLATE,
     DROP_TEMPLATE_INSTRUCTION,
+    DROP_TEMPLATE_LABEL,
     DROP_UNANSWERED_PROMPT,
     _appendix_drop_reason,
     _describe_dropped,
@@ -219,6 +220,8 @@ def test_documented_false_positive_class_is_pinned(entry):
      DROP_NEAR_TEMPLATE_INSTRUCTION),
     ("N/A", DROP_UNANSWERED_PROMPT),
     ("Not Applicable |  |  |", DROP_UNANSWERED_PROMPT),
+    ("Signature:", DROP_TEMPLATE_LABEL),
+    ("Site/Position |", DROP_TEMPLATE_LABEL),
 ])
 def test_drop_reason_names_the_check_that_fired(text, reason):
     assert _appendix_drop_reason(text, _clean_inline_tabs(text)) == reason
@@ -230,6 +233,7 @@ def test_drop_reason_names_the_check_that_fired(text, reason):
     "Chair, Admissions Committee",
     "Is your eligibility to work in the U.S. based on an employment visa?: | No",
     "Grant pending | N/A",
+    "Your role*\toversight",
 ])
 def test_genuine_content_has_no_drop_reason(text):
     assert _appendix_drop_reason(text, _clean_inline_tabs(text)) is None

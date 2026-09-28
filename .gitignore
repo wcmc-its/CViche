@@ -58,8 +58,10 @@ web_interface/docker-compose.override.yml
 **/scratch/
 
 # Templates
-key_files/
+key_files/*
 !key_files/wcm_cv_template_faculty_october_2022_final.docx
+!key_files/wcm_cv_template_for_website_2020.docx
+!key_files/curriculum_vitae_format_2012.docx
 
 # Archive
 archive/
@@ -133,7 +135,7 @@ docs/architecture/*.png
 # as intentionally empty/placeholder content and stay tracked, so the overlays
 # render from a clean checkout / CI (issue #108); buildspec.yaml overwrites them
 # with real values at deploy time. This ignore only blocks *rendered* secrets
-# (session secret, OpenAI key, SAML SP key/cert) from being re-added once a local
+# (session secret, SAML SP key/cert) from being re-added once a local
 # build has populated them.
 k8s/overlays/*/db.env
 k8s/overlays/*/auth_config.yaml

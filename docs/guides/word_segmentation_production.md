@@ -13,7 +13,7 @@
 
 **Before**: The original segmenter tried to send entire CV in single API call
 - Large CVs (>170KB) would send **85,456 tokens** in one request
-- OpenAI rate limit: **30,000 TPM**
+- Per-model rate limits made a single giant request unreliable
 - Result: **429 Rate Limit Error** - Pipeline BLOCKED
 
 **After**: The chunked approach (`src/unified_pipeline/segmentation/chunked_chat_hierarchy_extractor.py`) uses three-pass chunking
@@ -265,14 +265,14 @@ For production batches, spot-check every 10th CV:
 
 ## Troubleshooting
 
-### Error: "OpenAI quota exceeded"
+### Error: Bedrock throttling / access denied
 
-**Cause**: API key has no remaining quota
-**Solution**: Add credits to OpenAI account or use different API key
+**Cause**: AWS account has no remaining Bedrock quota, or model access is not enabled for the configured model/region
+**Solution**: Check Bedrock model access in the AWS console, or use different AWS credentials
 
 ```python
-# The pipeline uses the standard OpenAI client:
-client = OpenAI()  # Uses OPENAI_API_KEY env variable
+# The pipeline uses the standard call_llm() facade, backed by boto3's bedrock-runtime client:
+result = call_llm(stage="stage_1a", messages=messages)
 ```
 
 ### Error: "Module not found"
@@ -335,8 +335,8 @@ Stage 1a output feeds directly into the subsequent stages:
 
 ### Pre-Deployment
 
-- [ ] OpenAI API key configured (`OPENAI_API_KEY` env variable)
-- [ ] API quota sufficient for batch size (calculate: num_cvs × $0.15)
+- [ ] AWS Bedrock credentials configured (env vars, `~/.aws/credentials`, or an IAM role)
+- [ ] Bedrock quota/throughput sufficient for batch size (calculate: num_cvs × $0.15)
 - [ ] Test on 3-5 sample CVs from corpus
 - [ ] Validate output quality vs. manual gold standards
 - [ ] Set up output directory structure

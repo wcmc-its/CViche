@@ -34,7 +34,7 @@ A modern web interface for CViche with real-time progress tracking, cost monitor
 
 - Python 3.14 (matches the backend image, `python:3.14-slim`)
 - Node.js 18+ and npm
-- OpenAI API key
+- AWS Bedrock credentials (CViche is Bedrock-only)
 
 ### Setup
 
@@ -48,7 +48,7 @@ A modern web interface for CViche with real-time progress tracking, cost monitor
    cd backend
    pip install -r requirements.txt
    cp .env.example .env
-   # Edit .env and add your OPENAI_API_KEY
+   # Edit .env and add AWS credentials (or leave unset to use an IAM role)
    ```
 
 3. **Frontend setup:**
@@ -224,7 +224,7 @@ The SQLite database (`backend/cviche.db`) contains:
 ### Backend won't start
 - Check if port 8000 is available
 - Verify Python dependencies are installed
-- Ensure OPENAI_API_KEY is set in .env
+- Ensure AWS credentials for Bedrock are set in .env (or an IAM role is available)
 
 ### Frontend won't start
 - Check if port 3000 is available

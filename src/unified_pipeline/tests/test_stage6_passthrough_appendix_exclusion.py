@@ -244,3 +244,39 @@ def test_n1_n2_entries_render_and_do_not_duplicate_into_the_appendix(tmp_path):
         "N2 entry duplicated into the Appendix -- #529 regression")
     assert _appendix_diversion_count(sidecar, "N1") == 0
     assert _appendix_diversion_count(sidecar, "N2") == 0
+
+
+def _grant_table_cells(doc) -> list[str]:
+    """Every value cell of the rendered grant tables (their first label is Award Source)."""
+    return [row.cells[1].text for tb in doc.tables
+            if tb.rows and tb.rows[0].cells[0].text.startswith("Award Source:")
+            for row in tb.rows]
+
+
+def test_claimed_goals_row_renders_in_its_grant_and_leaves_the_appendix(tmp_path):
+    """#958: a T goals row inside a grant's source-element range is the grant's
+    goal. `_fill_research_support` reports it, and `generate()` must keep it out
+    of the Appendix by identity, like a passthrough-consumed entry. A goals row
+    inside no grant's range is not claimed and still reaches the Appendix."""
+    entries = [
+        _OWNER_ENTRY,
+        {"text": "Award Source: | Example Fund\nProject title: | Example Corridor Study",
+         "taxonomy_code": "M2B", "element_idx_start": 10, "element_idx_end": 12,
+         "extracted_fields": {"agency": "Example Fund", "title": "Example Corridor Study",
+                              "start_date": "01/2019", "end_date": "12/2020"}},
+        {"text": "The major goals of this project are: | DISTINCTIVE_CLAIMED_GOAL",
+         "taxonomy_code": "T", "element_type": "table_row", "recovered_row": True,
+         "parent_idx": 12, "element_idx_start": "12.1", "extracted_fields": {}},
+        {"text": "The major goals of this project are: | DISTINCTIVE_UNCLAIMED_GOAL",
+         "taxonomy_code": "T", "element_type": "table_row", "recovered_row": True,
+         "parent_idx": 40, "element_idx_start": "40.1", "extracted_fields": {}},
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    appendix = _appendix_text(doc)
+
+    assert "DISTINCTIVE_CLAIMED_GOAL" in _grant_table_cells(doc)
+    assert "DISTINCTIVE_CLAIMED_GOAL" not in appendix, (
+        "claimed goals row duplicated into the Appendix -- #958 regression")
+    assert "DISTINCTIVE_UNCLAIMED_GOAL" in appendix
+    assert "DISTINCTIVE_UNCLAIMED_GOAL" not in "\n".join(_grant_table_cells(doc))
+    assert _appendix_diversion_count(sidecar, "T") == 1

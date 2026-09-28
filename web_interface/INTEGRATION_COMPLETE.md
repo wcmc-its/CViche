@@ -33,7 +33,7 @@ I've successfully integrated the **CViche pipeline code** into the web interface
 - **Uses**: `map_cv_sections()` function
 - **What it does**:
   - Maps segmented sections to WCM taxonomy
-  - Uses GPT-4o-mini with Structured Outputs
+  - Uses Claude via AWS Bedrock with forced tool-use schemas
   - Provides confidence scores for quality control
   - Handles ambiguity with semantic understanding
 - **Outputs**: `CV_{run_id}_classified.json` with mapped sections
@@ -78,8 +78,8 @@ I've successfully integrated the **CViche pipeline code** into the web interface
 
 ### **NOW WORKING:**
 1. ✅ **Real CV segmentation** - your proven, production-ready code
-2. ✅ **Real taxonomy mapping** - GPT-4o-mini with Structured Outputs
-3. ✅ **Actual LLM calls** - using your OpenAI API key
+2. ✅ **Real taxonomy mapping** - Claude via AWS Bedrock with forced tool-use schemas
+3. ✅ **Actual LLM calls** - using your AWS Bedrock credentials
 4. ✅ **Real output files** - properly formatted JSON
 5. ✅ **Web interface** - watch it process in real-time!
 
@@ -164,7 +164,7 @@ Approach: word-chunked-hierarchical
 **Step 4 logs** (real output):
 ```
 Loading segmented CV...
-Mapping sections to WCM taxonomy using GPT-4o-mini...
+Mapping sections to WCM taxonomy using Claude via AWS Bedrock...
 Mapped 15 sections
 Average confidence: 0.87
 ```
@@ -342,24 +342,23 @@ python3 -c "from pathlib import Path; print(Path.cwd().parent.parent)"
 # Should output: /Users/.../CV parsing - AI project
 ```
 
-### OpenAI API Key Missing
-If you see `ValueError: OpenAI API key not found`:
+### AWS Bedrock Credentials Missing
+CViche is Bedrock-only now (#953). If Bedrock calls fail with a credentials/access error:
 ```bash
 # Check your environment
-echo $OPENAI_API_KEY
-echo $OPENAI_API_KEY
+echo $AWS_ACCESS_KEY_ID
 
 # Or set in backend/.env
 cd backend
 cp .env.example .env
-# Edit .env and add your key
+# Edit .env and add AWS credentials (or leave unset to use an IAM role)
 ```
 
 ### Segmentation Fails
 If Step 1 fails:
 - Check file path is correct
 - Verify file is .docx or .pdf
-- Check OpenAI API key is valid
+- Check AWS Bedrock credentials are valid and model access is enabled
 - Look at backend logs for detailed error
 
 ---
@@ -388,7 +387,7 @@ If Step 1 fails:
 1. **Upload real CVs** and watch them get segmented
 2. **See actual taxonomy mapping** with confidence scores
 3. **Download real JSON outputs** with structured data
-4. **Monitor actual costs** based on GPT-4o-mini usage
+4. **Monitor actual costs** based on Bedrock usage
 5. **View real-time logs** from your production pipeline
 6. **Test with your 120 Word CVs** from `data/sample_cvs/word/`
 

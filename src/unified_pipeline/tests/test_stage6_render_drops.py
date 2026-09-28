@@ -6,6 +6,8 @@ ones from those artifacts.
 
 #261 - PZ69YW: aggregate mentee counts and outcome narrative.
 #262 - 9TUVGW: a short but titled clinical-trial row.
+#946 - ZA1VOV: submitted chapters rerouted from "In review" to "Books:" by the
+       hierarchy-mismatch correction (synthetic fixtures below, no CV values).
 """
 
 # The three predicates below moved to stage6/parsing/records.py in the #398
@@ -16,6 +18,7 @@ from unified_pipeline.stage6.parsing import (
     _is_mentoring_outcome,
     _is_orphan_fragment,
 )
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
 
 
 # --- #262: the orphan-fragment guard must not discard titled entries -----------
@@ -70,6 +73,70 @@ def test_n4_outcome_detected_before_and_after_mismatch_rewrite():
     assert _is_mentoring_outcome({"taxonomy_code": "N3A", "taxonomy_code_original": "N4"})
     assert not _is_mentoring_outcome({"taxonomy_code": "N3A"})
     assert not _is_mentoring_outcome({"taxonomy_code": "N3B", "taxonomy_code_original": "N3A"})
+
+
+# --- #946 item 3: hierarchy-mismatch reroute (`_correct_mismatch_if_needed`) ---
+# Synthetic entries shaped like stage 3b's `hierarchy_mismatch_detail`. Driven
+# through `_group_entries_by_code`, the grouping `generate()` renders from, so
+# a test fails if the correction stops reaching the groups, not just the helper.
+
+def _mismatched(code: str, expected: list[str], heading: str,
+                confidence: float = 0.95) -> dict:
+    return {"text": f"Doe J. A synthetic {code} entry.", "taxonomy_code": code,
+            "taxonomy_confidence": confidence, "hierarchy_mismatch_flag": True,
+            "hierarchy_mismatch_detail": {"hierarchy": [heading], "assigned_code": code,
+                                          "expected_codes": expected}}
+
+
+def _group(*entries: dict) -> dict[str, list[str]]:
+    gen = WCMTemplateGenerator(verbose=False)
+    return {code: [e["text"] for e in group]
+            for code, group in gen._group_entries_by_code(list(entries)).items()}
+
+
+def test_submitted_chapter_under_book_chapters_stays_in_review() -> None:
+    # ZA1VOV's shape: S7 "(Submitted, In editing)" under "Book Chapters",
+    # expected ['S3', 'S4']. Status beats heading -- never Books.
+    entry = _mismatched("S7", ["S3", "S4"], "Book Chapters")
+    assert _group(entry) == {"S7": [entry["text"]]}
+    assert entry["taxonomy_code"] == "S7"
+    assert "taxonomy_code_original" not in entry
+
+
+def test_s7_is_not_rerouted_even_to_a_single_unambiguous_section() -> None:
+    # One longest expected code, same family: rerouted before #946.
+    entry = _mismatched("S7", ["S", "S8"], "Abstracts")
+    assert _group(entry) == {"S7": [entry["text"]]}
+
+
+def test_expected_codes_tied_across_sections_skip_the_reroute_in_any_order() -> None:
+    # S3 (books) and S4 (book_chapters) tie at length 2: the heading does
+    # not say which, so the classifier's S1 stands -- whatever order stage 3b
+    # listed them in (it is a set, so either order reaches stage 6).
+    for expected in (["S3", "S4"], ["S4", "S3"]):
+        entry = _mismatched("S1", expected, "Books and Book Chapters")
+        assert _group(entry) == {"S1": [entry["text"]]}, expected
+        assert "taxonomy_code_original" not in entry
+
+
+def test_tie_within_one_section_still_reroutes_deterministically() -> None:
+    # K1 and K2 both render under 'teaching', so the tie is harmless: the
+    # reroute still happens, and to the same code in either order.
+    for expected in (["K1", "K2"], ["K2", "K1"]):
+        entry = _mismatched("K4", expected, "Teaching")
+        assert _group(entry) == {"K1": [entry["text"]]}, expected
+        assert entry["taxonomy_code_original"] == "K4"
+
+
+def test_a_single_most_specific_expected_code_still_reroutes() -> None:
+    # Unchanged behaviour: one longest code -> same-family reroute applies.
+    entry = _mismatched("Q3", ["P", "Q2", "O"], "Committees")
+    assert _group(entry) == {"Q2": [entry["text"]]}
+    # ...and cross-family still needs low confidence.
+    low = _mismatched("H", ["P", "Q2", "O"], "Committees", confidence=0.5)
+    high = _mismatched("H", ["P", "Q2", "O"], "Committees", confidence=0.9)
+    assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(low, "H") == "Q2"
+    assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(high, "H") == "H"
 
 
 if __name__ == "__main__":

@@ -50,9 +50,12 @@ from unified_pipeline.stage6.sections import research_support  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     UnsupportedRebucketTargetError,
     apply_effort_to_grants,
+    claim_goal_rows,
+    fill_major_goals_from_text,
     filter_role_effort_headers,
     match_effort_for_title,
     normalize_percent_effort,
+    parse_major_goals,
     rebucket_grants_by_status,
     reclassify_past_m2a_grants,
     resolve_pi_name,
@@ -883,6 +886,193 @@ def test_major_goals_precedence_is_goals_then_description_then_narrative():
     del fields['description']
     assert _cells(_generator()._create_grant_table(fields, 'M2A'))['Major project goals:'] \
         == 'A narrative here'
+
+
+# --- #958: major goals from the source text -------------------------------------
+
+_GOAL = 'Map the pollinator corridors of the Example Valley'
+
+
+@pytest.mark.parametrize('text, expected', [
+    # The plain label, tab-separated, as the last line of a table-form grant.
+    (f'Award Source: | Example Fund\nThe major goals of this project are:\t{_GOAL}', _GOAL),
+    # The WCM template's own label, in a goals row of its own.
+    (f'(Optional - The major goals of this project are): | {_GOAL}', _GOAL),
+    (f'(Optional - The major goals of this project are:) | {_GOAL}', _GOAL),
+    (f'The major goals of this project are: | {_GOAL}', _GOAL),
+    (f'The major goals of this project are | {_GOAL}', _GOAL),
+    (f'The major goals of this project are\t{_GOAL}', _GOAL),
+    (f'THE MAJOR GOALS OF THIS PROJECT ARE: {_GOAL}', _GOAL),
+    # No separator: the phrase opens the faculty member's sentence, kept whole.
+    ('Example Study\tThe major goals of this project are to map the corridors.',
+     'The major goals of this project are to map the corridors.'),
+    # ...and a paragraph-form grant's next field, the role, is not the goal.
+    ('The major goals of this project are to map the corridors.\tRole: PI',
+     'The major goals of this project are to map the corridors.'),
+    (f'The major goals of this project are: {_GOAL}\tYour role: Co-PI', _GOAL),
+    # Any other tab is a wrapped source line and stays, verbatim.
+    ('The major goals of this project are:  Survey the valley; oversaw\tfield work  ',
+     'Survey the valley; oversaw\tfield work'),
+    # The goal ends with its line.
+    (f'The major goals of this project are: {_GOAL}\nAnnual direct costs: | $5,000', _GOAL),
+])
+def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
+    assert parse_major_goals(text) == expected
+
+
+@pytest.mark.parametrize('text', [
+    'The major goals of this project are: |',
+    '(Optional - The major goals of this project are):',
+    'The major goals of this project are\nAward Source: | Example Fund',
+    'Award Source: | Example Fund\nProject title: | Example Study',
+    '',
+    None,
+])
+def test_an_empty_or_absent_goals_label_is_no_goal(text):
+    """An empty label renders nothing -- and never borrows the next line."""
+    assert parse_major_goals(text) is None
+
+
+def test_a_grant_gains_the_goal_stated_in_its_own_text():
+    grant = _entry('M2B', text=f'Award Source: | Example Fund\n'
+                               f'The major goals of this project are:\t{_GOAL}',
+                   title='Example Corridor Study', agency='Example Fund')
+
+    fill_major_goals_from_text([grant])
+
+    assert grant['extracted_fields']['major_goals'] == _GOAL
+
+
+def test_a_stage4_goal_is_not_replaced_by_the_text():
+    grant = _entry('M2B', text=f'The major goals of this project are: {_GOAL}',
+                   major_goals='Goal as stage 4 extracted it')
+
+    fill_major_goals_from_text([grant])
+
+    assert grant['extracted_fields']['major_goals'] == 'Goal as stage 4 extracted it'
+
+
+def _grant(start, end, text='grant', **fields):
+    entry = _entry('M2B', text=text, title='Example Corridor Study',
+                   agency='Example Fund', start_date='01/2019', **fields)
+    entry.update(element_idx_start=start, element_idx_end=end)
+    return entry
+
+
+def _goal_row(parent_idx, goal=_GOAL):
+    return {'text': f'The major goals of this project are: | {goal}'.rstrip(),
+            'taxonomy_code': 'T', 'element_type': 'table_row', 'recovered_row': True,
+            'parent_idx': parent_idx, 'extracted_fields': {}}
+
+
+@pytest.mark.parametrize('parent_idx', [236, 237, 238])
+def test_a_goals_row_inside_the_grant_range_is_claimed_by_that_grant(parent_idx):
+    """Both range ends included: the real rows hang off the grant's LAST element."""
+    grant, row = _grant(236, 238), _goal_row(parent_idx)
+    submitted = dict(row)
+
+    claimed = claim_goal_rows([grant], [row])
+
+    assert claimed == [(row, grant)]
+    assert grant['extracted_fields']['major_goals'] == _GOAL
+    assert row == submitted
+
+
+@pytest.mark.parametrize('parent_idx', [235, 239])
+def test_a_goals_row_outside_every_grant_range_is_left_alone(parent_idx):
+    grant = _grant(236, 238)
+
+    assert claim_goal_rows([grant], [_goal_row(parent_idx)]) == []
+    assert 'major_goals' not in grant['extracted_fields']
+
+
+def test_a_goals_row_inside_two_grant_ranges_is_ambiguous_and_left_alone():
+    first, second = _grant(236, 238), _grant(238, 240)
+
+    assert claim_goal_rows([first, second], [_goal_row(238)]) == []
+    assert 'major_goals' not in first['extracted_fields']
+
+
+def test_a_goals_row_does_not_replace_a_different_goal_the_grant_already_has():
+    grant = _grant(236, 238, major_goals='A different stated goal')
+
+    assert claim_goal_rows([grant], [_goal_row(238)]) == []
+    assert grant['extracted_fields']['major_goals'] == 'A different stated goal'
+
+
+def test_a_goals_row_repeating_the_grant_own_goal_is_claimed():
+    """A5IZ6Q's shape: the grant's text already carries the row's goal."""
+    grant = _grant(236, 238, text=f'The major goals of this project are:\t{_GOAL}')
+    row = _goal_row(238)
+    fill_major_goals_from_text([grant])
+
+    assert claim_goal_rows([grant], [row]) == [(row, grant)]
+
+
+def test_an_empty_goals_row_is_not_claimed():
+    grant = _grant(236, 238)
+
+    assert claim_goal_rows([grant], [_goal_row(238, goal='')]) == []
+    assert 'major_goals' not in grant['extracted_fields']
+
+
+def test_a_goals_line_with_no_parent_table_is_not_claimed():
+    row = _goal_row(238)
+    del row['parent_idx']
+
+    assert claim_goal_rows([_grant(236, 238)], [row]) == []
+
+
+@pytest.mark.parametrize('start, end', [(None, 240), (236, None), ('236', '238')])
+def test_a_grant_without_an_integer_element_range_claims_nothing(start, end):
+    assert claim_goal_rows([_grant(start, end)], [_goal_row(238)]) == []
+
+
+def test_section_fill_renders_the_claimed_goal_and_returns_the_row():
+    grant, row = _grant(236, 238), _goal_row(238)
+    t_entries = [row]
+
+    gen = _sectioned_generator()
+    claimed = gen._fill_research_support({'M2B': [grant], 'T': t_entries},
+                                         current_year=TEST_YEAR)
+
+    assert claimed == [row] and claimed[0] is row
+    assert _cells(_tables_under(gen, COMPLETED)[0])['Major project goals:'] == _GOAL
+    assert 'major_goals' not in grant['extracted_fields']
+
+
+@pytest.mark.parametrize('code, header', [
+    ('M2A', CURRENT), ('M2B', COMPLETED), ('M2C', PENDING)])
+def test_section_fill_renders_the_goal_from_the_grant_own_text(code, header):
+    grant = _grant(236, 238, text=f'The major goals of this project are:\t{_GOAL}')
+    grant['taxonomy_code'] = code
+
+    gen = _sectioned_generator()
+    claimed = gen._fill_research_support({code: [grant]}, current_year=TEST_YEAR)
+
+    assert claimed == []
+    assert _cells(_tables_under(gen, header)[0])['Major project goals:'] == _GOAL
+
+
+def test_a_row_claimed_by_a_declined_grant_is_not_returned():
+    """A grant too sparse to render took no goal with it: the row stays Appendix."""
+    sparse = _entry('M2B', text='x')
+    sparse.update(element_idx_start=236, element_idx_end=238)
+
+    gen = _sectioned_generator()
+    claimed = gen._fill_research_support({'M2B': [sparse], 'T': [_goal_row(238)]},
+                                         current_year=TEST_YEAR)
+
+    assert claimed == []
+    assert gen._declined_grant_entries
+
+
+def test_a_row_claimed_by_a_grant_under_a_missing_header_is_not_returned():
+    gen = _generator()  # no funding headers: nothing renders
+    claimed = gen._fill_research_support({'M2B': [_grant(236, 238)], 'T': [_goal_row(238)]},
+                                         current_year=TEST_YEAR)
+
+    assert claimed == []
 
 
 # --- item 18: grant duration ----------------------------------------------------

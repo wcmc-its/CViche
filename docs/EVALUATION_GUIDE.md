@@ -331,7 +331,7 @@ Fix defects in this order (highest impact per effort first):
 
 ### 3.3 Regex vs LLM: Choosing the Right Fix Approach
 
-A core design decision for every fix is whether to solve it with deterministic code (regex, string parsing, heuristics) or with an LLM call. LLM inference is cheap — a gpt-4.1-mini call to parse a single entry costs fractions of a cent — so the decision should be driven by brittleness, not cost.
+A core design decision for every fix is whether to solve it with deterministic code (regex, string parsing, heuristics) or with an LLM call. LLM inference is cheap — a Claude Haiku 4.5 call to parse a single entry costs fractions of a cent — so the decision should be driven by brittleness, not cost.
 
 #### When to Use Regex/Heuristics
 
@@ -378,7 +378,7 @@ if not granting_body:
 
 #### Cost Reference
 
-For perspective on LLM costs in this pipeline (preferred model: gpt-5.1):
+For perspective on LLM costs in this pipeline (illustrative OpenAI-era figures; current per-model rates are in `docs/LLM_MODELS.md`):
 
 | Model | Typical call | Cost per entry | 100 entries |
 |-------|-------------|---------------|-------------|
@@ -386,7 +386,7 @@ For perspective on LLM costs in this pipeline (preferred model: gpt-5.1):
 | gpt-5.1-nano | Simple classification | ~$0.0002 | ~$0.02 |
 | gpt-5.1 | Complex reasoning | ~$0.005 | ~$0.50 |
 
-A full CV with ~200 entries processed through all stages typically costs $0.05-$0.15 total. Adding a targeted LLM call for a specific section (e.g., 12 honors entries) adds negligible cost. The pipeline uses **gpt-5.1** as its default model.
+A full CV with ~200 entries processed through all stages typically costs $0.05-$0.15 total. Adding a targeted LLM call for a specific section (e.g., 12 honors entries) adds negligible cost. Models are configured per stage in `src/unified_pipeline/config/llm_config.yaml` (see `docs/LLM_MODELS.md`).
 
 #### When Refactoring Regex to LLM
 
