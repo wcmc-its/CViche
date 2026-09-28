@@ -1,0 +1,197 @@
+"""Issue #981: stage 3b's grant status corrector reads date ranges and headings correctly.
+
+Synthetic rows only. Run with:
+
+    python3 -m pytest src/unified_pipeline/tests/test_grant_status_corrector.py -p no:cacheprovider
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+_SRC = Path(__file__).resolve().parents[2]
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from unified_pipeline.core.validators import grant_status_corrector  # noqa: E402
+from unified_pipeline.core.validators.grant_status_corrector import (  # noqa: E402
+    apply_grant_status_corrections,
+    correct_grant_status,
+    extract_year_range,
+)
+
+TEST_YEAR = 2026
+
+
+@pytest.fixture(autouse=True)
+def _pinned_year(monkeypatch):
+    """The corrector compares against a module-level year read at import."""
+    monkeypatch.setattr(grant_status_corrector, 'CURRENT_YEAR', TEST_YEAR)
+
+
+def _grant(code, text, *hierarchy):
+    return {'taxonomy_code': code, 'text': text, 'hierarchy': list(hierarchy)}
+
+
+@pytest.mark.parametrize('text, expected', [
+    # The #981 shapes: the end date's month read as a two-digit year.
+    ('03/01/2024-\n12/31/2028 | R01 Example Grant', (2024, 2028)),
+    ('12/01/2019–11/30/2021 Example Grant', (2019, 2021)),
+    ('6/1/2022-5/31/2025 (NCE) Role: Co-Investigator', (2022, 2025)),
+    # The shapes that already worked.
+    ('2019-2021 Example Grant', (2019, 2021)),
+    ('01/2019-12/2021 Example Grant', (2019, 2021)),
+    ('2019-21 Example Grant', (2019, 2021)),
+    ('2019 - present Example Grant', (2019, TEST_YEAR + 1)),
+    ('Example Grant $50,000 awarded 2020', (2020, 2020)),
+    ('Example Grant with no dates at all', None),
+    # Two digits after a hyphen that are a month or day, not a year (#981).
+    ('03/01/2024-\n12/31/28 Example Grant', None),
+    ('03/01/2024-12/31/28 Example Grant $50,000', (2024, 2024)),
+])
+def test_extract_year_range(text, expected):
+    assert extract_year_range(text) == expected
+
+
+def test_a_current_grant_with_a_split_date_range_is_not_filed_as_past():
+    """web207: "03/01/2024-<newline>12/31/2028" read as 2024-2012 forced M2B."""
+    entry = _grant('M2A', '03/01/2024-\n12/31/2028 | R01 Example Grant',
+                   'Grants and Contracts Received')
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2A'
+
+
+def test_a_completed_grant_coded_current_still_moves_to_completed():
+    """The rule the range fix must not weaken: an ended range is Past."""
+    entry = _grant('M2A', '12/01/2019-11/30/2021 | R01 Example Grant', 'Grants')
+
+    corrected = correct_grant_status(entry)
+
+    assert corrected['taxonomy_code'] == 'M2B'
+    assert corrected['status_correction']['from'] == 'M2A'
+
+
+def test_a_completed_grant_coded_completed_with_a_running_range_becomes_current():
+    entry = _grant('M2B', '06/01/2019-03/31/2027 | R35 Example Grant', 'Grants')
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2A'
+
+
+@pytest.mark.parametrize('heading', [
+    ['NOT FUNDED'],
+    ['GRANT SUPPORT', 'Non-funded applications'],
+    ['Pending applications'],
+    ['GRANTS', 'GRANT APPLICATIONS IN REVIEW'],
+    ['Grants', 'Declined'],
+    ['Grants', 'Withdrawn'],
+])
+def test_a_pending_application_with_ended_dates_stays_pending(heading):
+    """Dates under a pending heading are the proposed period, not an award's."""
+    entry = _grant('M2C', '2019-2021 Example Application', *heading)
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2C'
+
+
+@pytest.mark.parametrize('heading', [
+    ['NOT FUNDED'],
+    ['Pending applications'],
+    ['Grants', 'Submitted'],
+    ['Grants', 'Unfunded'],
+    ['Grants', 'Declined'],
+    ['Grants', 'Withdrawn'],
+    ['Grants', 'Under review'],
+    ['GRANTS', 'GRANT APPLICATIONS AWAITING FINAL ADMINISTRATIVE APPROVAL'],
+])
+def test_each_pending_heading_word_shields_a_grant_from_date_rules(heading):
+    """An M2A whose range ended would flip to M2B on dates alone; not under these."""
+    entry = _grant('M2A', '2019-2021 Example Application', *heading)
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2A'
+
+
+def test_a_pending_application_with_a_dollar_amount_stays_pending():
+    """A requested budget in a pending section is not evidence of an award."""
+    entry = _grant('M2C', 'Example Application $250,000', 'Pending applications')
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2C'
+
+
+def test_a_pending_application_with_running_dates_and_an_amount_is_not_promoted():
+    entry = _grant('M2C', '2026-2029 Example Application $250,000', 'Pending applications')
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2C'
+
+
+def test_a_grant_coded_current_or_completed_under_a_pending_heading_is_left_alone():
+    """Only stage 6's heading rule may move it; a proposed period decides nothing."""
+    running = _grant('M2B', '2026-2029 Example Application', 'GRANT APPLICATIONS IN REVIEW')
+    ended = _grant('M2A', '2019-2021 Example Application', 'Pending')
+
+    assert correct_grant_status(running)['taxonomy_code'] == 'M2B'
+    assert correct_grant_status(ended)['taxonomy_code'] == 'M2A'
+
+
+def test_an_m2c_under_a_funded_heading_with_ended_dates_still_becomes_completed():
+    """2015_W: "GRANT FUNDING: > Funded" grants the LLM coded M2C, one ended
+    2023. No pending word, so dev's Rule 1 holds."""
+    entry = _grant('M2C', '01/01/2022-05/31/2023 Example Award',
+                   'GRANT SUPPORT', 'GRANT FUNDING:', 'Funded')
+
+    corrected = correct_grant_status(entry)
+
+    assert corrected['taxonomy_code'] == 'M2B'
+    assert corrected['status_correction']['from'] == 'M2C'
+
+
+@pytest.mark.parametrize('text', [
+    '*Title: Example\n*Status of Support: Pending\n09/2022 - 08/2027 $3,258,091',
+    'Example Application\nStatus: Under review\n2026-2029 $250,000',
+    'Example Application\nStatus: In review\n2026-2029 $250,000',
+    'Example Application\nStatus: Not funded\n2019-2021',
+    'Example Application\nStatus: Non-funded\n2019-2021',
+    'Example Application\nStatus: Unfunded\n2019-2021',
+    'Example Application\nStatus: Submitted\n2026-2029 $250,000',
+    'Example Application\nStatus: Awaiting\n2026-2029 $250,000',
+    'Example Application\nStatus: Declined\n2019-2021',
+    'Example Application\nSTATUS: WITHDRAWN\n2019-2021',
+])
+def test_an_explicit_pending_status_line_shields_a_grant_under_a_silent_heading(text):
+    """web30: a pending application the extractor filed under "Refereed
+    articles" must not be promoted to Current on its proposed dates."""
+    entry = _grant('M2C', text, 'Refereed articles')
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2C'
+
+
+@pytest.mark.parametrize('text', [
+    'Example Grant\nStatus: Active\n2019-2021',
+    'Example Grant\nStatus: Pendingx\n2019-2021',
+    'Example Grant\nSubstatus: Pending\n2019-2021',
+    'Example Grant\nStatus Pending\n2019-2021',
+])
+def test_a_status_line_that_is_not_pending_shields_nothing(text):
+    entry = _grant('M2A', text, 'Grants')
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2B'
+
+
+def test_a_heading_word_must_be_a_whole_word():
+    """"Impending" is not "pending": the heading guard does not fire."""
+    entry = _grant('M2A', '2019-2021 Example Grant', 'Impending Renewals')
+
+    assert correct_grant_status(entry)['taxonomy_code'] == 'M2B'
+
+
+def test_apply_grant_status_corrections_counts_only_real_changes():
+    entries = [
+        _grant('M2C', '2019-2021 Example Application', 'NOT FUNDED'),
+        _grant('M2A', '12/01/2019-11/30/2021 Example Grant', 'Grants'),
+        {'taxonomy_code': 'A', 'text': 'not a grant', 'hierarchy': []},
+    ]
+
+    corrected, stats = apply_grant_status_corrections(entries)
+
+    assert [e['taxonomy_code'] for e in corrected] == ['M2C', 'M2B', 'A']
+    assert stats['total_grants'] == 2
+    assert stats['corrections_applied'] == 1

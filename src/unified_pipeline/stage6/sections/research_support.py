@@ -62,6 +62,8 @@ from ..formatting import (
 )
 from ..normalization import (
     _deduplicate_repeated_content,
+    grant_heading_is_past,
+    grant_heading_rebucket_target,
     grant_status_rebucket_target,
 )
 from ..resolution import _get_cv_owner_name
@@ -429,6 +431,16 @@ def apply_effort_to_grants(entries: list[dict], effort_lookup: dict[str, str]) -
     return messages
 
 
+def explicit_status_target(entry: dict) -> tuple[str | None, str | None]:
+    """The bucket a grant's own words put it in: its status field, or, when
+    stage 4 left no status, the heading the CV filed it under (#981)."""
+    fields = cast(GrantFields, entry.get('extracted_fields') or {})
+    status = fields.get('status')
+    if status:
+        return grant_status_rebucket_target(status)
+    return grant_heading_rebucket_target(entry.get('hierarchy') or [])
+
+
 def rebucket_grants_by_status(
     m2a_entries: list[dict], m2b_entries: list[dict], m2c_entries: list[dict]
 ) -> tuple[list[dict], list[dict], list[dict], list[str]]:
@@ -452,7 +464,7 @@ def rebucket_grants_by_status(
     for source_code, source_list in (('M2A', current), ('M2B', completed)):
         for position, entry in enumerate(list(source_list)):
             fields = cast(GrantFields, entry.get('extracted_fields') or {})
-            target, note = grant_status_rebucket_target(fields.get('status'))
+            target, note = explicit_status_target(entry)
             if not target or target == source_code:
                 continue
             title = str(fields.get('title') or 'Unknown')
@@ -515,6 +527,48 @@ def reclassify_past_m2a_grants(
         title = (entry.get('extracted_fields') or {}).get('title') or 'Unknown'
         messages.append(f"  Reclassified to M2B: '{title[:40]}...' (ended {end_year})")
 
+    return current, completed, messages
+
+
+def promote_open_ended_m2b_grants(
+    m2a_entries: list[dict], m2b_entries: list[dict], current_year: int
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Move M2B grants that are still running into M2A, with a note (#981).
+
+    The mirror of `reclassify_past_m2a_grants`: an end date of 'present' or a
+    year >= `current_year` is a current grant, however stage 3b coded it. A
+    grant with no end date is left alone -- nothing says it is running -- and so
+    is one whose own status or heading names its bucket
+    (`explicit_status_target`) or a heading that files it as past, which beats
+    date inference. Returns
+    (M2A, M2B, verbose lines); the inputs are left as they were.
+    """
+    current = list(m2a_entries)
+    completed = list(m2b_entries)
+    messages: list[str] = []
+    for entry in list(completed):
+        fields = cast(GrantFields, entry.get('extracted_fields') or {})
+        end_date = str(fields.get('end_date') or '').strip()
+        if not end_date or 'reclassification_note' in entry:
+            continue
+        if explicit_status_target(entry)[0] or grant_heading_is_past(
+                entry.get('hierarchy') or []):
+            continue
+        year_match = re.search(r'(\d{4})', end_date)
+        if end_date.lower() in OPEN_ENDED_END_DATES:
+            running = True
+        else:
+            running = bool(year_match) and int(year_match.group(1)) >= current_year
+        if not running:
+            continue
+        completed.remove(entry)
+        entry['reclassification_note'] = (
+            f"Reclassified from Completed (M2B) to Current (M2A): end date "
+            f"{end_date} is not before {current_year}"
+        )
+        current.append(entry)
+        title = fields.get('title') or 'Unknown'
+        messages.append(f"  Reclassified to M2A: '{title[:40]}...' (ends {end_date})")
     return current, completed, messages
 
 
@@ -798,6 +852,10 @@ class ResearchSupportSection:
         _print_verbose(messages, self.verbose)
 
         m2a_entries, m2b_entries, messages = reclassify_past_m2a_grants(
+            m2a_entries, m2b_entries, current_year)
+        _print_verbose(messages, self.verbose)
+
+        m2a_entries, m2b_entries, messages = promote_open_ended_m2b_grants(
             m2a_entries, m2b_entries, current_year)
         _print_verbose(messages, self.verbose)
 

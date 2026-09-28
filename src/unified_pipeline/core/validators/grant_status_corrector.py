@@ -17,6 +17,23 @@ from datetime import datetime
 # Current year for comparison
 CURRENT_YEAR = datetime.now().year
 
+# A hierarchy heading that says the grant is an application, not an award
+# (#981). Whole words: "Grants Pending Review" matches, "Impending" does not.
+# Under such a heading a date range is the proposed project period, so it says
+# nothing about whether the grant ended or is running.
+_PENDING_HEADING_RE = re.compile(
+    r'\b(?:pending|submitted|awaiting|(?:under|in)\s+review|(?:not|non)[\s-]?funded'
+    r'|unfunded|declined|withdrawn)\b'
+)
+# The same words as an explicit status line in the entry's own text ("Status
+# of Support: Pending"), for a grant whose heading is silent because the
+# extractor filed it under an unrelated one (#981).
+_PENDING_STATUS_TEXT_RE = re.compile(
+    r'\bstatus(?:\s+of\s+support)?\s*:\s*(?:pending|submitted|awaiting'
+    r'|(?:under|in)\s+review|(?:not|non)[\s-]?funded|unfunded|declined|withdrawn)\b',
+    re.IGNORECASE,
+)
+
 
 def extract_year_range(text: str) -> tuple[int, int] | None:
     """
@@ -35,13 +52,19 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
     """
     text_lower = text.lower()
 
-    # Pattern 1: YYYY-YYYY or YYYY–YYYY (full years)
-    match = re.search(r'\b(19\d{2}|20\d{2})\s*[-–—]\s*(19\d{2}|20\d{2})\b', text)
+    # Pattern 1: a range of full years, each end optionally a full date or a
+    # MM/YYYY month: "2019-2021", "01/2019-12/2021", "03/01/2024-\n12/31/2028".
+    # Tried before the two-digit-year pattern below, which would read the end
+    # date's month in "2024-\n12/31/2028" as the year 2012 (#981).
+    match = re.search(
+        r'\b(19\d{2}|20\d{2})\s*[-–—]\s*'
+        r'(?:\d{1,2}/){0,2}(19\d{2}|20\d{2})\b', text)
     if match:
         return int(match.group(1)), int(match.group(2))
 
-    # Pattern 2: YYYY-YY (abbreviated end year)
-    match = re.search(r'\b(20\d{2})\s*[-–—]\s*(\d{2})\b', text)
+    # Pattern 2: YYYY-YY (abbreviated end year). Not when the two digits are the
+    # month or day of a date: "2024-12/31/2028" is not "2024-2012".
+    match = re.search(r'\b(20\d{2})\s*[-–—]\s*(\d{2})\b(?!/)', text)
     if match:
         start = int(match.group(1))
         end_suffix = int(match.group(2))
@@ -53,12 +76,7 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
     if match:
         return int(match.group(1)), CURRENT_YEAR + 1  # Still active
 
-    # Pattern 4: MM/YYYY-MM/YYYY
-    match = re.search(r'\b\d{1,2}/(19\d{2}|20\d{2})\s*[-–—]\s*\d{1,2}/(19\d{2}|20\d{2})\b', text)
-    if match:
-        return int(match.group(1)), int(match.group(2))
-
-    # Pattern 5: Just a single year (assume single year grant)
+    # Pattern 4: Just a single year (assume single year grant)
     # Only if it looks like a grant context
     if re.search(r'\$[\d,]+', text):  # Has dollar amount
         match = re.search(r'\b(20\d{2})\b', text)
@@ -86,8 +104,11 @@ def correct_grant_status(entry: dict) -> dict:
     Rules:
     1. If end year < current year → M2B (completed)
     2. If end year >= current year and has "present" or ongoing → M2A (active)
-    3. If no dates but has dollar amount in "non-funded" section → likely M2B
-    4. If classified as M2C but dates show it ended → M2B
+
+    A grant under a pending / not-funded heading, or whose text carries a
+    "Status: Pending"-style line, is left alone whatever its code: its dates are
+    a proposed project period, and a dollar amount there is a requested budget,
+    not an award (#981).
 
     Args:
         entry: Classified entry dict with 'taxonomy_code', 'text', 'hierarchy'
@@ -102,6 +123,9 @@ def correct_grant_status(entry: dict) -> dict:
 
     # Only process grant codes
     if not is_grant_code(code):
+        return entry
+
+    if _PENDING_HEADING_RE.search(hierarchy_str) or _PENDING_STATUS_TEXT_RE.search(text):
         return entry
 
     # Extract date range
@@ -133,19 +157,6 @@ def correct_grant_status(entry: dict) -> dict:
                         correction_reason = f"Date range {start_year}-{end_year} is current/future; corrected M2B to M2A (active, not completed)"
                     else:
                         correction_reason = f"Date range {start_year}-{end_year} is ongoing with funding; corrected to M2A (active)"
-
-    else:
-        # No date range found - check for other signals
-
-        # Rule 3: In "pending" or "submitted" section but has dollar amount → likely funded
-        if code == 'M2C':
-            pending_indicators = ['pending', 'submitted', 'under review', 'non-funded', 'unfunded']
-            in_pending_section = any(ind in hierarchy_str for ind in pending_indicators)
-
-            if in_pending_section and has_amount:
-                # Has dollar amount in "pending" section - suspicious, may actually be funded
-                code = 'M2B'
-                correction_reason = "Has funding amount in 'pending' section; likely completed grant misclassified"
 
     # Apply correction if changed
     if code != original_code:
