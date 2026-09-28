@@ -186,16 +186,10 @@ def _build_institution_enrichment_stats(
     """Count enriched entries and assemble ``institution_enrichment_stats``
     (pure move out of run_stage5b, plus the #700 failed-batch fields).
 
-    ``entry.get('institution_enrichment')`` is a presence check, not a
-    ``{}``-vs-``None`` distinction: the only writer of this key,
-    ``enrich_entry_with_result``, always assigns a 7-key dict (it always
-    includes ``'source': 'llm'``), so the key is either absent (never
-    attempted -- falsy) or a non-empty, truthy dict (attempted). ``{}`` is
-    never written by any code path on this branch -- see
-    test_institution_enrichment_stats_empty_dict_not_counted_as_enriched,
-    which pins that an explicit ``{}`` (a shape this function has never been
-    asked to produce) is treated the same as absent, matching the falsy
-    check below.
+    ``entry.get('institution_enrichment')`` is a presence check. No code
+    writes ``{}``: in 5b, ``enrich_entry_with_result`` always assigns a
+    7-key dict, and stage 6's positions.py only copies an existing truthy
+    mapping (after 5b has counted). An explicit ``{}`` counts as absent.
     """
     enriched_count = sum(
         1 for entry in entries

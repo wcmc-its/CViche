@@ -384,16 +384,9 @@ def test_run_stage5b_all_batches_succeed_stats_are_zero(monkeypatch, tmp_path):
 
 
 def test_institution_enrichment_stats_empty_dict_not_counted_as_enriched():
-    """Is `institution_enrichment: {}` (a lookup that ran and found
-    nothing) distinct from None/absent (never attempted)?
-
-    Finding on this branch: no. The only writer of this key,
-    enrich_entry_with_result (stage_5b_institution_enrichment.py), always
-    assigns a 7-key dict that includes 'source': 'llm', so it is always
-    truthy -- {} is never actually produced by any code path here. But
-    _build_institution_enrichment_stats's falsy check doesn't know that, so
-    pin its behavior explicitly: {} and None/absent all count the same
-    (unenriched), in case a future writer ever does produce {}."""
+    """No code writes `institution_enrichment: {}` today (5b always writes a
+    7-key dict; stage 6 positions.py only copies a truthy mapping). Pin that
+    {} and None/absent both count as unenriched, in case a writer ever does."""
     from unified_pipeline import stage_5b_institution_enrichment as s5b
 
     entries = [
