@@ -37,8 +37,13 @@ heading with nothing to fill.
 G writes into a table, but only after checking that it is the right one.
 `_find_table_after_paragraph` returns whatever table comes next in the document,
 so the first cell is tested for "hospital", "affiliation" or "primary" before
-anything is cleared; a template whose affiliation section has no table falls
+anything is written; a template whose affiliation section has no table falls
 back to bullets under the header instead of writing into a stranger's table.
+The table's own label rows (Primary Hospital, Other Hospital, Other
+Institutional) are kept: an entry fills the row its own label names, and
+anything else goes under Other Institutional -- never under Primary Hospital,
+where a free-form line would read as the faculty member's primary hospital.
+G also accepts a G-coded entry under a heading no other section claims (#891).
 
 J writes into a table too, and the table is fixed-row (Teaching, Clinical,
 Administrative, Research, Total) -- it is never cleared and never grown, only
@@ -60,7 +65,9 @@ import logging
 import re
 from typing import NamedTuple
 
-from ..formatting import _clear_table_data, _set_font
+from docx.table import Table, _Cell
+
+from ..formatting import _set_font
 from ..normalization import _squash
 
 logger = logging.getLogger(__name__)
@@ -101,6 +108,61 @@ def _employment_row_key(label: str) -> str | None:
         if all(keyword in squashed for keyword in keywords):
             return row_key
     return None
+
+
+def _is_employment_status_heading(hierarchy_str: str) -> bool:
+    """Whether `hierarchy_str` (upper-cased, space-joined source hierarchy)
+    names the Employment Status section -- `_fill_employment_status`'s own
+    candidate test, factored out so `_fill_hospital_affiliation`'s
+    heading-conflict check (#891) can recognize the same section without a
+    second, driftable copy of what "Employment Status" means
+    (CODING_STANDARDS 1.5).
+    """
+    return 'EMPLOYMENT STATUS' in hierarchy_str or (
+        'EMPLOYMENT' in hierarchy_str and 'H.' in hierarchy_str
+    )
+
+
+# --- G. Institutional/Hospital Affiliation (#891) -----------------------
+
+# The G template table's label rows, recognized like E's (`_employment_row_key`):
+# every keyword must appear in the _squash()ed label, and the first match in
+# dict order wins, so "Primary Hospital Affiliation" is taken by the primary
+# row before the bare 'hospital' test of the row after it. The same classifier
+# runs on the template's row labels and on an entry's own "Label:", which must
+# itself be affiliation-shaped (end in "Affiliation(s)"): "Chair, Hospital
+# Ethics Committee: 2012-present" names no row and is written whole.
+_AFFILIATION_ROW_KEYWORDS: dict[str, tuple[str, ...]] = {
+    'primary hospital': ('primary', 'hospital'),
+    'other hospital': ('hospital',),
+    'other institutional': ('institution',),
+}
+
+# Where an entry goes when its own label names no template row (free-form
+# text, or an unknown label): never the Primary Hospital row.
+_AFFILIATION_CATCH_ALL_ROW = 'other institutional'
+
+
+def _affiliation_row_key(label: str) -> str | None:
+    """Which G template row a label belongs to, or None."""
+    squashed = _squash(label).rstrip(':s')
+    if not squashed.endswith('affiliation'):
+        return None
+    for row_key, keywords in _AFFILIATION_ROW_KEYWORDS.items():
+        if all(keyword in squashed for keyword in keywords):
+            return row_key
+    return None
+
+
+def _append_cell_paragraph(cell: _Cell, text: str) -> None:
+    """Write `text` into `cell` as its own paragraph: into the cell's empty
+    template paragraph when the cell holds nothing yet, else a new paragraph
+    after the value already there. Empty `text` writes nothing."""
+    if not text:
+        return
+    first = cell.paragraphs[0]
+    para = first if not cell.text.strip() else cell.add_paragraph(style=first.style)
+    _set_font(para.add_run(text))
 
 
 # --- J. Percent Effort (#260) ------------------------------------------
@@ -373,9 +435,7 @@ class PassthroughSection:
             hierarchy_str = ' '.join(hierarchy).upper()
 
             # Match entries specifically from Employment Status section
-            if 'EMPLOYMENT STATUS' in hierarchy_str or (
-                'EMPLOYMENT' in hierarchy_str and 'H.' in hierarchy_str
-            ):
+            if _is_employment_status_heading(hierarchy_str):
                 text = entry.get('text', '').strip()
                 # Accept "Label: Value" format entries
                 if text and ':' in text:
@@ -463,6 +523,23 @@ class PassthroughSection:
 
         Looks for dedicated hospital affiliation entries or extracts from D2 positions.
 
+        A candidate is selected by an affiliation-shaped heading (as before),
+        OR by `taxonomy_code == 'G'` when the heading is not one a DIFFERENT
+        passthrough section (Employment Status, Percent Effort) claims for
+        itself (#891, the #808 "Phase 2" that PR deferred) -- refusing only
+        on that positive conflict is what reaches a G entry filed under
+        "Institutional" alone, "Past appointments", or a block whose own
+        header was lost to segmentation, none of which a heading allow-list
+        can name in advance. It also reaches a stage-3b misclassification
+        the same way (a licensure-status line coded G); nothing here judges
+        the classifier's call, same as the un-widened match never did.
+
+        This does not reopen #807: `generate()` runs `_dedup_grouped_entries`
+        on the G group before this method sees `all_entries`, so two G
+        entries with the same content never both reach it. The widened match
+        changes which heading the one survivor may carry, not how many
+        survive.
+
         Returns the entries actually written (#294): every entry that matches
         the section's hierarchy gets a row or a bullet UNLESS the section or
         its table cannot be located at all, in which case nothing is written
@@ -474,8 +551,17 @@ class PassthroughSection:
             hierarchy = entry.get('hierarchy', [])
             hierarchy_str = ' '.join(hierarchy).upper()
 
-            if ('AFFILIATION' in hierarchy_str and 'HOSPITAL' in hierarchy_str) or \
-               ('INSTITUTIONAL' in hierarchy_str and 'AFFILIATION' in hierarchy_str):
+            is_affiliation_heading = (
+                ('AFFILIATION' in hierarchy_str and 'HOSPITAL' in hierarchy_str) or
+                ('INSTITUTIONAL' in hierarchy_str and 'AFFILIATION' in hierarchy_str)
+            )
+            is_unclaimed_g_code = (
+                entry.get('taxonomy_code') == 'G'
+                and not _is_employment_status_heading(hierarchy_str)
+                and _PERCENT_EFFORT_HIERARCHY_KEYWORD not in hierarchy_str
+            )
+
+            if is_affiliation_heading or is_unclaimed_g_code:
                 text = entry.get('text', '').strip()
                 if text and len(text) > 5:
                     matching_entries.append(entry)
@@ -509,37 +595,9 @@ class PassthroughSection:
                 table = None
 
             if table:
-                # Clear existing table data and fill with matched entries
-                _clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
-
                 for entry in matching_entries:
-                    text = entry.get('text', '').strip()
-                    fields = entry.get('extracted_fields', {}) or {}
-
-                    # Try to extract structured content
-                    if ':' in text:
-                        # Parse "Label: Value" format
-                        parts = text.split(':', 1)
-                        label = parts[0].strip()
-                        value = parts[1].strip() if len(parts) > 1 else ''
-
-                        # Add as row: [Label, Value]
-                        row = table.add_row()
-                        row.cells[0].text = label
-                        if len(row.cells) > 1:
-                            row.cells[1].text = value
-                    else:
-                        # Add as single-cell row
-                        row = table.add_row()
-                        row.cells[0].text = text
-
-                    # Apply font formatting
-                    for cell in row.cells:
-                        for para in cell.paragraphs:
-                            for run in para.runs:
-                                _set_font(run)
-
+                    self._write_affiliation_entry(table, entry)
                     self.stats['entries_inserted'] += 1
                     consumed.append(entry)
             else:
@@ -551,6 +609,31 @@ class PassthroughSection:
                         self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0), list_level=0)
                         consumed.append(entry)
         return consumed
+
+    def _write_affiliation_entry(self, table: Table, entry: dict) -> None:
+        """Write one G entry into the affiliation table, keeping its label rows.
+
+        A "Label: value" entry whose label names a template row fills that
+        row's value cell; anything else goes into the Other Institutional
+        value cell. Each lands as its own paragraph. Only a table with no
+        Other Institutional value cell gets a new row, holding the whole text.
+        """
+        text = entry.get('text', '').strip()
+        label, sep, value = text.partition(':')
+        value_cells = {}
+        for row in table.rows:
+            cells = row.cells
+            row_key = _affiliation_row_key(cells[0].text)
+            # A merged or one-column row has no value cell of its own.
+            if row_key is not None and cells[-1]._tc is not cells[0]._tc:
+                value_cells.setdefault(row_key, cells[-1])
+        entry_key = _affiliation_row_key(label) if sep else None
+        if entry_key in value_cells:
+            _append_cell_paragraph(value_cells[entry_key], value.strip())
+        elif _AFFILIATION_CATCH_ALL_ROW in value_cells:
+            _append_cell_paragraph(value_cells[_AFFILIATION_CATCH_ALL_ROW], text)
+        else:
+            _append_cell_paragraph(table.add_row().cells[0], text)
 
     def _fill_percent_effort(self, all_entries: list[dict]) -> list[dict]:
         """Fill J. PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES (#260).
