@@ -363,8 +363,8 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 <span>
                   {ATTESTATIONS[submissionType].text}{' '}
                   <span className="block text-xs text-gray-500 mt-1">
-                    The text of the CV is sent to a third-party AI service (Anthropic&apos;s Claude on Amazon
-                    Bedrock; CViche is Bedrock-only, so LLM traffic stays in AWS Bedrock). CViche attempts to withhold highly
+                    The text of the CV is sent to a third-party AI service (currently Anthropic&apos;s Claude on Amazon
+                    Bedrock; the provider may change, for example to OpenAI). CViche attempts to withhold highly
                     sensitive personal details such as date of birth or Social Security number, but you should not
                     include anything you would not want these systems to see.
                   </span>
