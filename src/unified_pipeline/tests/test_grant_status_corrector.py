@@ -52,7 +52,10 @@ def _grant(code, text, *hierarchy):
     # not a single-year grant (#981; web46's typo, the two-digit-year end above).
     ('03/01/2024-12/31/28 Example Grant $50,000', None),
     ('04/01/2022-03/312027 Example Grant $1,000,000', None),
-    ('2019 - Dec 2021 Example Grant $50,000', None),
+    # A month-name end is read, not left to the single-year guess (web210).
+    ('Mar 2022-Apr 2023 | Example Grant | $50,000', (2022, 2023)),
+    ('2019 - Sept. 2021 Example Grant', (2019, 2021)),
+    ('Oct 2014 - Oct 2025 Example Grant $50,000', (2014, 2025)),
     # An open end written "– date" is still running (#981; web36's contracts).
     ('04/08/2021 – date  Example Contract  Award: $2,638,299', (2021, TEST_YEAR + 1)),
     ('2019-Date Example Grant', (2019, TEST_YEAR + 1)),

@@ -47,7 +47,7 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
     - "2019-present" or "2019-Present", "04/08/2021 – date"
     - "2019-2021" (4-digit years)
     - "2019-21" (2-digit end year)
-    - "01/2019-12/2021" (MM/YYYY format)
+    - "01/2019-12/2021" (MM/YYYY format), "Mar 2022-Apr 2023"
 
     Returns:
         (start_year, end_year) or None if no range found.
@@ -55,13 +55,14 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
     """
     text_lower = text.lower()
 
-    # Pattern 1: a range of full years, each end optionally a full date or a
-    # MM/YYYY month: "2019-2021", "01/2019-12/2021", "03/01/2024-\n12/31/2028".
-    # Tried before the two-digit-year pattern below, which would read the end
-    # date's month in "2024-\n12/31/2028" as the year 2012 (#981).
+    # Pattern 1: a range of full years, each end optionally a full date, a
+    # MM/YYYY month or a month name: "2019-2021", "01/2019-12/2021",
+    # "03/01/2024-\n12/31/2028", "Mar 2022-Apr 2023". Tried before the
+    # two-digit-year pattern below, which would read the end date's month in
+    # "2024-\n12/31/2028" as the year 2012 (#981).
     match = re.search(
         r'\b(19\d{2}|20\d{2})\s*[-–—]\s*'
-        r'(?:\d{1,2}/){0,2}(19\d{2}|20\d{2})\b', text)
+        r'(?:\d{1,2}/){0,2}(?:[A-Za-z]{3,9}\.?\s*)?(19\d{2}|20\d{2})\b', text)
     if match:
         return int(match.group(1)), int(match.group(2))
 
