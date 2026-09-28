@@ -181,7 +181,7 @@ def _raise_or_warn_on_batch_failures(
 def _build_institution_enrichment_stats(
     entries: list, institution_entries: int, cached_count: int, uncached_count: int,
     llm_calls: int, llm_batches: int, failed_batches: int, institutions_unresolved: int,
-    total_cost: float, observed_model: str | None, model: str,
+    total_cost: float, observed_model: str | None,
 ) -> dict:
     """Count enriched entries and assemble ``institution_enrichment_stats``
     (pure move out of run_stage5b, plus the #700 failed-batch fields).
@@ -206,7 +206,7 @@ def _build_institution_enrichment_stats(
         'failed_batches': failed_batches,
         'institutions_unresolved': institutions_unresolved,
         'cost': total_cost,
-        'model': observed_model or model,
+        'model': observed_model,
         # Naive on purpose: every sibling stats dict (stage_5c, stage_5d,
         # calibration_logger) writes naive datetime.now().isoformat() and
         # nothing reads it back -- stay consistent across stage JSON.
@@ -217,7 +217,7 @@ def _build_institution_enrichment_stats(
 def _finalize_stage5b_enrichment(
     document_uid: str, entries: list, institution_entries: int, cached_count: int,
     uncached_count: int, llm_calls: int, llm_batches: int, failed_batches: int,
-    institutions_unresolved: int, total_cost: float, observed_model: str | None, model: str,
+    institutions_unresolved: int, total_cost: float, observed_model: str | None,
 ) -> dict:
     """Single entry point for #700 finalization: compute
     ``institution_enrichment_stats`` once, then run the batch-failure guard
@@ -230,7 +230,7 @@ def _finalize_stage5b_enrichment(
     stats = _build_institution_enrichment_stats(
         entries, institution_entries, cached_count, uncached_count, llm_calls,
         llm_batches, failed_batches, institutions_unresolved, total_cost,
-        observed_model, model,
+        observed_model,
     )
     _raise_or_warn_on_batch_failures(
         document_uid, llm_batches, failed_batches, institutions_unresolved,
@@ -240,7 +240,7 @@ def _finalize_stage5b_enrichment(
 
 
 def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
-                model: str = "gpt-5.1", refresh_cache: bool = False) -> str:
+                refresh_cache: bool = False) -> str:
     """
     Run Stage 5b: Institution Enrichment via LLM.
 
@@ -248,7 +248,6 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         input_path: Path to Stage 5 (or Stage 4) JSON
         output_path: Optional output path
         verbose: Print progress
-        model: LLM model to use for institution resolution
         refresh_cache: If True, ignore existing cache and re-lookup all institutions
 
     Returns:
@@ -266,7 +265,6 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         logger.info("%s", '=' * 60)
         logger.info("Stage 5b: Institution Enrichment (LLM) - %s", document_uid)
         logger.info("%s", '=' * 60)
-        logger.info("Model: %s", model)
 
     # Load cv_owner_location from Stage 4 if not in input
     if not cv_owner_location or not cv_owner_location.get('inference_success'):
@@ -440,7 +438,6 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
             results, cost, call_model = lookup_institutions_llm(
                 llm_batch,
                 cv_owner_location,
-                model=model,
                 verbose=verbose
             )
             total_cost += cost
@@ -490,7 +487,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     stats = _finalize_stage5b_enrichment(
         document_uid, entries, institution_entries, cached_count, uncached_count, llm_calls,
         llm_batches, failed_batches, institutions_unresolved, total_cost,
-        observed_model, model,
+        observed_model,
     )
 
     if verbose:
@@ -525,7 +522,6 @@ def main():
     parser.add_argument('input', help='Stage 5 enriched JSON file or document UID')
     parser.add_argument('--output', '-o', help='Output JSON path')
     parser.add_argument('--quiet', '-q', action='store_true', help='Suppress progress output')
-    parser.add_argument('--model', '-m', default='gpt-5.1', help='LLM model (default: gpt-5.1)')
     parser.add_argument('--refresh-cache', action='store_true',
                         help='Ignore existing cache and re-lookup all institutions via LLM')
 
@@ -551,7 +547,6 @@ def main():
     output_path = run_stage5b(
         input_path, args.output,
         verbose=not args.quiet,
-        model=args.model,
         refresh_cache=args.refresh_cache
     )
     logger.info("Generated: %s", output_path)

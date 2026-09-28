@@ -198,6 +198,24 @@ PERCENT_EFFORT_PRECISION = Decimal('0.01')
 # never reclassified as completed however the year parses.
 OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
 
+# The goals phrase in a grant's own text or in a goals row of its own (#958):
+# the WCM label "(Optional - The major goals of this project are): | <goal>",
+# the plain "The major goals of this project are:<tab><goal>", and the prose
+# "The major goals of this project are to <goal>". `sep` -- a colon, pipe,
+# closing paren or tab after "are" -- is what makes the phrase a label rather
+# than the start of the sentence. `rest` stops at the line end: a table-form
+# grant carries one source row per line.
+MAJOR_GOALS_LABEL_RE = re.compile(
+    r'(?:the\s+)?major\s+goals\s+of\s+this\s+project\s+are'
+    r'(?P<sep>[ \t]*[:|)\t][ \t:|)]*)?'
+    r'(?P<rest>[^\n]*)',
+    re.IGNORECASE,
+)
+# A paragraph-form grant tab-separates its fields, and the one observed after a
+# goal is the role ("...prognosis.<tab>Role: PI"). Any other tab stays in the
+# goal: a wrapped source line is tab-joined as well.
+MAJOR_GOALS_VALUE_END_RE = re.compile(r'\t(?=(?:your\s+)?role\b)', re.IGNORECASE)
+
 
 class UnsupportedRebucketTargetError(ValueError):
     """A status rule asked for a funding bucket this section cannot render into.
@@ -475,6 +493,75 @@ def reclassify_past_m2a_grants(
     return current, completed, messages
 
 
+def parse_major_goals(text: str | None) -> str | None:
+    """The faculty member's own goal text after a goals label, verbatim (#958).
+
+    Two shapes carry it. A label -- `MAJOR_GOALS_LABEL_RE` with a separator
+    after "are" -- is followed by the goal, which is returned without the label.
+    Without a separator the phrase opens the faculty member's own sentence
+    ("The major goals of this project are to ..."), and the whole sentence is
+    the goal. Either way only surrounding whitespace is stripped. An empty label
+    is no goal: None, so no row renders.
+    """
+    match = MAJOR_GOALS_LABEL_RE.search(text or '')
+    if match is None or not match['rest'].strip():
+        return None
+    goal = match['rest'] if match['sep'] else match.group(0)
+    return MAJOR_GOALS_VALUE_END_RE.split(goal, maxsplit=1)[0].strip()
+
+
+def fill_major_goals_from_text(entries: list[dict]) -> None:
+    """Give a grant the goal written in its own text when stage 4 left none (#958).
+
+    Stage 4 never extracts `major_goals` for M2 records, so a goal stated inside
+    the grant entry reached no row. Writes land on this section's copies of the
+    records (`copy_entries_for_render`), never on the caller's.
+    """
+    for entry in entries:
+        fields = cast(GrantFields, entry.get('extracted_fields') or {})
+        if not fields.get('major_goals'):
+            fields['major_goals'] = parse_major_goals(entry.get('text'))
+
+
+def _spans_element(entry: dict, element_idx: int) -> bool:
+    """True when `element_idx` lies inside the entry's own source-element range."""
+    start, end = entry.get('element_idx_start'), entry.get('element_idx_end')
+    return isinstance(start, int) and isinstance(end, int) and start <= element_idx <= end
+
+
+def claim_goal_rows(grants: list[dict], rows: list[dict]) -> list[tuple[dict, dict]]:
+    """Attach each goals-row entry to the one grant whose source table holds it (#958).
+
+    When the goals row sits in a table of its own, stage 2 emits it as a
+    separate `table_row` entry whose `parent_idx` is a source element inside the
+    grant's own `element_idx_start..element_idx_end` range, and 3b classifies it
+    T, so it went to the Appendix. The signal is that range, not proximity: a
+    row inside no grant's range, or inside two (ambiguous), is left alone, and
+    so is one whose goal differs from a goal the grant already carries -- the
+    row is then still the only place that text appears.
+
+    Returns (row, grant) pairs. The grant's copied fields gain `major_goals`; the
+    row itself is not touched. The caller decides which rows actually left the
+    Appendix, because only a grant that rendered took its goal with it.
+    """
+    claimed: list[tuple[dict, dict]] = []
+    for row in rows:
+        goal = parse_major_goals(row.get('text'))
+        parent_idx = row.get('parent_idx')
+        if goal is None or not isinstance(parent_idx, int):
+            continue
+        owners = [grant for grant in grants if _spans_element(grant, parent_idx)]
+        if len(owners) != 1:
+            continue
+        fields = cast(GrantFields, owners[0].get('extracted_fields') or {})
+        existing = fields.get('major_goals')
+        if existing and existing != goal:
+            continue
+        fields['major_goals'] = goal
+        claimed.append((row, owners[0]))
+    return claimed
+
+
 def resolve_pi_name(
     fields: GrantFields, raw_text: str, role: str | None, owner_name: str
 ) -> str | None:
@@ -598,7 +685,7 @@ class ResearchSupportSection:
         cv_owner: dict | None = None,
         document_uid: str = '',
         current_year: int | None = None,
-    ) -> None:
+    ) -> list[dict]:
         """Fill research support section with individual tables per grant.
 
         Creates a table for each grant with the WCM data model:
@@ -632,6 +719,11 @@ class ResearchSupportSection:
             document_uid: run-scoped document id, used to resolve the owner.
             current_year: the year "current funding" is judged against. Defaults
                 to the system clock; pass it to make a boundary reproducible.
+
+        Returns:
+            The T-coded goals-row entries (#958) whose goal now renders inside a
+            grant table -- the caller's own dicts, by identity, for `generate()`
+            to keep out of the Appendix.
         """
         # Get CV owner name for auto-filling PI when role is Principal Investigator
         owner_name = _get_cv_owner_name(cv_owner, document_uid)
@@ -659,6 +751,11 @@ class ResearchSupportSection:
         m2a_entries, m2b_entries, messages = reclassify_past_m2a_grants(
             m2a_entries, m2b_entries, current_year)
         _print_verbose(messages, self.verbose)
+
+        grants = m2a_entries + m2b_entries + m2c_entries
+        fill_major_goals_from_text(grants)
+        claimed_goal_rows = claim_goal_rows(grants, entries_by_code.get('T', []))
+        rendered_grant_ids: set[int] = set()
 
         # Map taxonomy codes to WCM template section headers
         # These must match the exact text in the official WCM template
@@ -712,6 +809,7 @@ class ResearchSupportSection:
                 # Create grant table - pass the element to insert after and owner name
                 grant_table = self._create_grant_table(fields, code, entry, insert_after_element=last_element, owner_name=owner_name)
                 if grant_table:
+                    rendered_grant_ids.add(id(entry))
                     self.stats['tables_populated'] += 1
                     self.stats['entries_inserted'] += 1
 
@@ -724,6 +822,10 @@ class ResearchSupportSection:
                         spacing_para = self._add_spacing_paragraph(after_element=grant_table._tbl)
                         if spacing_para is not None:
                             last_element = spacing_para
+
+        # A goals row leaves the Appendix only with a grant that rendered: a
+        # declined grant, or one under a header the template lacks, took nothing.
+        return [row for row, grant in claimed_goal_rows if id(grant) in rendered_grant_ids]
 
     def _create_grant_table(
         self,

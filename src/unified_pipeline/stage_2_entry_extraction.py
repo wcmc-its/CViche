@@ -28,7 +28,7 @@ from unified_pipeline.llm_client import call_llm
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
-from core.template_boilerplate import is_template_instruction
+from core.template_boilerplate import is_near_template_instruction, is_template_instruction
 
 logger = logging.getLogger(__name__)
 
@@ -1311,6 +1311,29 @@ def _extract_section(
     return _SectionResult(section_entries_in_order, cost_info, section_assigned, lines)
 
 
+def _drop_template_instructions(entries: list[dict]) -> list[dict]:
+    """Drop WCM-template instruction boilerplate (Layer 1, primary filter).
+
+    Faculty leave the blank template's instruction scaffolding in their CVs;
+    those blocks get parsed as entries and pollute downstream output. The
+    detector is precision-biased (never drops real CV content). Section
+    headers are intentionally NOT dropped here.
+
+    The near-match catches another template revision's rewording of a long
+    instruction; left in, the licensure note ("...must have a New York State
+    license...") was classified as a license and rendered one the faculty
+    member does not hold (#829).
+    """
+    kept = [
+        e for e in entries
+        if not (is_template_instruction(e.get("text", ""))
+                or is_near_template_instruction(e.get("text", "")))
+    ]
+    if len(kept) != len(entries):
+        print(f"Filtered {len(entries) - len(kept)} WCM-template instruction entries")
+    return kept
+
+
 def run_stage_2(
     docx_path: str,
     hierarchy_json_path: str = None,
@@ -1521,21 +1544,10 @@ def run_stage_2(
     # doc_length's own index space (see _bound_coverage_indices -- #856).
     unaccounted_indices, covered_doc_indices = _bound_coverage_indices(all_assigned_indices, doc_length)
 
-    # Drop WCM-template instruction boilerplate (Layer 1, primary filter).
-    # Faculty leave the blank template's instruction scaffolding in their CVs;
-    # those blocks get parsed as entries and pollute downstream output. The
-    # detector is precision-biased (never drops real CV content). Section
-    # headers are intentionally NOT dropped here. Gated on the user's choice:
-    # when strip_template_instructions is False, the instruction text is kept.
+    # Gated on the user's choice: when strip_template_instructions is False,
+    # the instruction text is kept.
     if strip_template_instructions:
-        _pre_filter_count = len(all_entries)
-        all_entries = [
-            e for e in all_entries
-            if not is_template_instruction(e.get("text", ""))
-        ]
-        _filtered_count = _pre_filter_count - len(all_entries)
-        if _filtered_count:
-            print(f"Filtered {_filtered_count} WCM-template instruction entries")
+        all_entries = _drop_template_instructions(all_entries)
 
     # Drop empty content entries and exact duplicates (#211). Unconditional:
     # unlike the instruction filter above, this never removes real content.

@@ -207,11 +207,13 @@ python3 -c "from pathlib import Path; print(Path.cwd().parent.parent)"
 # Should show: /Users/.../CViche
 ```
 
-### OpenAI API key missing
+### AWS Bedrock credentials missing
 ```bash
-echo $OPENAI_API_KEY
-# If empty, set it:
-export OPENAI_API_KEY="your-key-here"
+echo $AWS_ACCESS_KEY_ID
+# If empty, set it (or use an IAM role):
+export AWS_ACCESS_KEY_ID="your-key"
+export AWS_SECRET_ACCESS_KEY="your-secret"
+export AWS_DEFAULT_REGION="us-east-1"
 ```
 
 ---

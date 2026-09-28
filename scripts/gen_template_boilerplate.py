@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
-"""Generate template_boilerplate_phrases.json from the WCM faculty CV template.
+"""Generate template_boilerplate_phrases.json from every WCM faculty CV template
+revision in `TEMPLATES`.
 
-Reads the tracked WCM CV template DOCX, walks the document body in order
+Faculty build their CVs on whichever revision they were sent, so a phrase in
+ANY revision is boilerplate (#829). For each tracked template DOCX this walks
+the document body in order
 (paragraphs AND table cells, since most field labels live in tables), normalizes
 each text block, and categorizes blocks into:
 
@@ -30,8 +33,7 @@ from docx.table import Table
 from docx.text.paragraph import Paragraph
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-TEMPLATE_FILENAME = "wcm_cv_template_faculty_october_2022_final.docx"
-TEMPLATE_PATH = REPO_ROOT / "key_files" / TEMPLATE_FILENAME
+KEY_FILES = REPO_ROOT / "key_files"
 OUTPUT_PATH = (
     REPO_ROOT
     / "src"
@@ -64,6 +66,45 @@ WCM_SECTION_HEADERS = [
     "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES",
     "INVITATIONS TO SPEAK/PRESENT",
     "BIBLIOGRAPHY",
+]
+
+# The same, for the older revisions (#829). A CV built on one of them carries
+# these as its real section headers, so they must be protected too.
+WCM_2020_SECTION_HEADERS = [
+    "GENERAL INFORMATION",
+    "EDUCATIONAL BACKGROUND",
+    "LICENSURE, BOARD CERTIFICATION, MALPRACTICE",
+    "PROFESSIONAL POSITIONS AND EMPLOYMENT",
+    "INSTITUTIONAL/HOSPITAL AFFILIATION",
+    "PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES",
+    "INSTITUTIONAL RESPONSIBILITIES",
+    "RESEARCH SUPPORT",
+    "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES",
+    "PROFESSIONAL MEMBERSHIPS",
+    "HONORS AND AWARDS",
+    "BIBLIOGRAPHY",
+]
+WCM_2012_SECTION_HEADERS = [
+    "A. GENERAL INFORMATION",
+    "B. EDUCATIONAL BACKGROUND",
+    "PROFESSIONAL POSITIONS AND EMPLOYMENT",
+    "LICENSURE, BOARD CERTIFICATION, MALPRACTICE",
+    "F. HONORS AND AWARDS",
+    "G. INSTITUTIONAL/HOSPITAL AFFILIATION",
+    "H. EMPLOYMENT STATUS",
+    "I. CURRENT AND PAST INSTITUTIONAL RESPONSIBILITIES AND",
+    "PERCENT EFFORT",
+    "K. EXTRAMURAL PROFESSIONAL RESPONSIBILITIES",
+    "L. BIBLIOGRAPHY",
+]
+
+# Every tracked revision, newest first: (file under key_files/, its section
+# headers). The 2012 file is the circulated .doc converted to .docx (macOS
+# `textutil -convert docx`), since python-docx cannot read .doc.
+TEMPLATES = [
+    ("wcm_cv_template_faculty_october_2022_final.docx", WCM_SECTION_HEADERS),
+    ("wcm_cv_template_for_website_2020.docx", WCM_2020_SECTION_HEADERS),
+    ("curriculum_vitae_format_2012.docx", WCM_2012_SECTION_HEADERS),
 ]
 
 
@@ -121,39 +162,36 @@ def _is_section_header(normalized: str, section_set_norm: set) -> bool:
 
 
 def main():
-    if not TEMPLATE_PATH.exists():
-        raise SystemExit(f"Template not found: {TEMPLATE_PATH}")
+    section_set_norm = {
+        _normalize(h) for _, headers in TEMPLATES for h in headers
+    }
 
-    doc = Document(str(TEMPLATE_PATH))
-
-    blocks = []
-    _collect_blocks(doc, blocks)
-
-    total_blocks = len(blocks)
-
-    section_set_norm = {_normalize(h) for h in WCM_SECTION_HEADERS}
-
-    # Normalize and dedupe while preserving document order.
+    # Normalize and dedupe across all revisions, preserving order: newest
+    # template first, so each older one only appends what it adds.
     seen = set()
     instructions = []
     section_headers = []
-    for raw in blocks:
-        norm = _normalize(raw)
-        if not norm:
-            continue
-        if norm in seen:
-            continue
-        seen.add(norm)
-
-        if _is_section_header(norm, section_set_norm):
-            section_headers.append(norm)
-        else:
-            instructions.append(norm)
-
-    unique_count = len(seen)
+    for filename, _ in TEMPLATES:
+        path = KEY_FILES / filename
+        if not path.exists():
+            raise SystemExit(f"Template not found: {path}")
+        blocks = []
+        _collect_blocks(Document(str(path)), blocks)
+        added = 0
+        for raw in blocks:
+            norm = _normalize(raw)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            added += 1
+            if _is_section_header(norm, section_set_norm):
+                section_headers.append(norm)
+            else:
+                instructions.append(norm)
+        print(f"{filename}: {len(blocks)} blocks, {added} new")
 
     output = {
-        "source": TEMPLATE_FILENAME,
+        "source": [filename for filename, _ in TEMPLATES],
         "instructions": instructions,
         "section_headers": section_headers,
     }
@@ -163,16 +201,8 @@ def main():
         json.dump(output, f, indent=2, ensure_ascii=False)
         f.write("\n")
 
-    print("=" * 70)
-    print("Template boilerplate extraction complete")
-    print("=" * 70)
-    print(f"Source template:      {TEMPLATE_FILENAME}")
-    print(f"Total blocks:         {total_blocks}")
-    print(f"Unique blocks:        {unique_count}")
-    print(f"  instructions:       {len(instructions)}")
-    print(f"  section_headers:    {len(section_headers)}")
+    print(f"instructions: {len(instructions)}, section_headers: {len(section_headers)}")
     print(f"Wrote: {OUTPUT_PATH}")
-    print("=" * 70)
 
 
 if __name__ == "__main__":

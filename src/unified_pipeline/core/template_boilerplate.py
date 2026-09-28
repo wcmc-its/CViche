@@ -261,6 +261,28 @@ def is_unanswered_prompt(text: str) -> bool:
                for c in cells)
 
 
+# A line's pieces for `is_template_label_line`: its table cells, and the
+# tab- or newline-separated parts inside them.
+_LABEL_PIECE_SPLIT_RE = re.compile(r"[|\t\n]")
+
+
+def is_template_label_line(text: str) -> bool:
+    """True if every non-empty piece of *text* is a known template label.
+
+    FOR THE APPENDIX ONLY. `is_template_instruction` refuses short labels
+    ("Signature:", "If no license:", "Site/Position |") so a faculty member's
+    own one-word line ("Teaching") is never dropped before classification.
+    A line on its way to the Appendix has already been judged non-content,
+    and one made of nothing but template labels -- an unfilled field, a
+    column-header row -- carries nothing to show there, so the length floor
+    does not apply. Any piece that is not a known label ("Your role* |
+    oversight") keeps the line (#829).
+    """
+    pieces = [p for p in (_normalize(x) for x in _LABEL_PIECE_SPLIT_RE.split(text or ""))
+              if p]
+    return bool(pieces) and all(p in _INSTRUCTION_SET or p in _PROTECTED for p in pieces)
+
+
 def filter_template_instructions(texts: list[str]) -> list[str]:
     """Convenience: return only the texts that are NOT template instructions."""
     return [t for t in texts if not is_template_instruction(t)]

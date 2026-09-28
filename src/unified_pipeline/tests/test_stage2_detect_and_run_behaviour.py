@@ -654,6 +654,43 @@ def test_run_stage_2_strip_template_instructions_false_keeps_instruction_entry(t
     assert output_data["total_entries"] == 3
 
 
+def test_run_stage_2_drops_an_older_template_revision_s_reworded_instruction(tmp_path, monkeypatch):
+    """#829: a faculty copy of another template revision words the licensure
+    note "...to the NYP Hospital staff..." where the tracked 2020 template
+    says "...to the Hospital staff...". Kept, it was classified F1 and stage
+    4 read "New York State" out of it as a license the faculty member does
+    not hold. The near-match drops it; the real licence row beside it stays."""
+    _redirect_output_manager(monkeypatch, tmp_path)
+
+    note = ("Licensure: Every physician appointed to the NYP Hospital staff, except "
+            "interns, and aliens in the US via non-immigrant visas, must have a New "
+            "York State license or a temporary certificate in lieu of the license.")
+    doc = Document()
+    for text in ["Jane Doe", "LICENSURE", note, "Fictional State Medical License 12345"]:
+        doc.add_paragraph(text)
+    docx_path = tmp_path / "lic.docx"
+    doc.save(docx_path)
+
+    hpath = _write_hierarchy(
+        tmp_path, "lic_h.json", "LIC1",
+        hierarchy_with_indices=[{"text": "Licensure", "level": "H1", "element_idx": 1, "children": []}],
+        section_boundaries=[{"hierarchy": ["Licensure"], "element_idx_start": 1, "element_idx_end": 3, "has_children": False}],
+    )
+    _route_call_llm(monkeypatch, {
+        "Personal Data": [{"element_idx_start": 0, "element_idx_end": 0, "element_type": "paragraph", "confidence": 0.9}],
+        "Licensure": [
+            {"element_idx_start": 2, "element_idx_end": 2, "element_type": "paragraph", "confidence": 0.85},
+            {"element_idx_start": 3, "element_idx_end": 3, "element_type": "paragraph", "confidence": 0.85},
+        ],
+    })
+
+    output_data, _ = stage2.run_stage_2(str(docx_path), str(hpath))
+
+    texts = [e["text"] for e in output_data["entries"]]
+    assert note not in texts
+    assert "Fictional State Medical License 12345" in texts
+
+
 def test_run_stage_2_cancel_check_raises_mid_run_and_no_output_is_written(tmp_path, monkeypatch):
     _redirect_output_manager(monkeypatch, tmp_path)
 

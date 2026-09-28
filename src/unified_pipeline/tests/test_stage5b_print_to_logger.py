@@ -399,7 +399,7 @@ def test_institution_enrichment_stats_empty_dict_not_counted_as_enriched():
     stats = s5b._build_institution_enrichment_stats(
         entries, institution_entries=4, cached_count=0, uncached_count=0,
         llm_calls=0, llm_batches=0, failed_batches=0, institutions_unresolved=0,
-        total_cost=0.0, observed_model=None, model="gpt-5.1",
+        total_cost=0.0, observed_model=None,
     )
 
     assert stats["entries_enriched"] == 1
