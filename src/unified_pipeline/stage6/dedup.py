@@ -8,16 +8,15 @@ constants' comments carry the accuracy history (#227, #208, C0ZGFW, 2Q1_ZQ)
 and are the spec.
 
 Depends one level down on `render_check` (`_record_lines` and its
-fused-multi-record threshold) because "is this a fused blob" and "is this
-value substantial enough to anchor a search" are both questions
-`segment_already_rendered` already answers the same way.
-Nothing here may import `stage_6_word_template`.
+fused-multi-record threshold) because "is this a fused blob" is the same
+question both answer. Nothing here may import `stage_6_word_template`.
 """
 import re
 
 from .normalization import _squash
 from .parsing import _dates_overlap_or_match
 from .render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines
+
 
 _STOP_WORDS = frozenset({
     'a', 'an', 'and', 'as', 'at', 'be', 'by', 'for', 'from', 'i', 'in',
@@ -50,7 +49,7 @@ def _entry_title_words(entry: dict) -> set:
         title = text.split('\t')[0]
     else:
         # Try to find quoted title (common for presentations)
-        quoted = re.findall(r'["“](.+?)["”]', text)
+        quoted = re.findall(r'["\u201c](.+?)["\u201d]', text)
         if quoted:
             title = ' '.join(quoted)
         else:
