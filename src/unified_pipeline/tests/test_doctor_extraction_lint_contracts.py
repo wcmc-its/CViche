@@ -564,6 +564,28 @@ def test_is_invented_record_false_below_the_combined_length_floor():
     assert not _is_invented_record({"activity": "Total", "percent_effort": "100%"})
 
 
+def test_is_invented_record_true_at_the_exact_combined_length_floor():
+    # "Organization" (12 chars) and "Bibliography" (12 chars) are each their
+    # own registered template label -- raw lengths sum to 24, and the "|"
+    # the code joins them with brings the combined length to exactly 25
+    # (== _MIN_EXACT_LEN), the boundary the `<` comparison must accept.
+    # A `<` -> `<=` mutant on the length check, or a join separator swapped
+    # from "|" to "" (which drops this to 24), each flip this to False.
+    a, b = "Organization", "Bibliography"
+    assert len(a) + len(b) == 24
+    assert len(f"{a}|{b}") == _MIN_EXACT_LEN
+    assert _is_invented_record({"field_one": a, "field_two": b})
+
+
+def test_is_invented_record_false_one_char_below_the_combined_length_floor():
+    # Same two-label shape, one char short of the floor: "Organization"
+    # (12) and "Institution" (11) join to exactly 24 chars, isolating the
+    # `<` boundary from the other side.
+    a, b = "Organization", "Institution"
+    assert len(f"{a}|{b}") == _MIN_EXACT_LEN - 1
+    assert not _is_invented_record({"field_one": a, "field_two": b})
+
+
 def test_is_invented_record_false_on_a_mixed_real_and_label_record():
     # Isolates the `all(...)` guard itself (not just the two floors above):
     # one real value plus one template label clears both the value-count
@@ -615,6 +637,15 @@ def test_lint_invented_records_warns_on_a_rendered_header_record():
     assert finding["severity"] == "WARN"
     assert "F2" in finding["message"] and "7" in finding["message"]
     assert "#829" in finding["message"]
+    # The evidence is the populated field values, not just the finding's
+    # key set -- an `[]` in place of the list comprehension would still
+    # pass every assertion above (#829's own contract test only checks
+    # keys), silently dropping what a reviewer sees. The two None-valued
+    # fields (`year_certified`, `recertification_date`) contribute nothing.
+    assert finding["evidence"] == [
+        "certifying_board: Full Name of Board",
+        "certificate_number: Certificate #",
+    ]
 
 
 def test_lint_invented_records_silent_when_the_header_record_never_rendered():
@@ -673,6 +704,11 @@ def test_lint_invented_records_warns_on_an_f1_entry_matching_a_known_instruction
     assert findings[0]["lint"] == "invented_records"
     assert findings[0]["severity"] == "WARN"
     assert "F1" in findings[0]["message"] and "#829" in findings[0]["message"]
+    # The evidence is the source text itself (truncated), not just the
+    # message -- an `[]` in place of `[text[:120]]` would still pass every
+    # assertion above. `known_instruction` is 207 chars, so this also pins
+    # the truncation, not just that evidence is non-empty.
+    assert findings[0]["evidence"] == [known_instruction[:120]]
 
 
 def test_lint_invented_records_warns_on_an_f1_entry_matching_via_the_pipe_split_path_only():
