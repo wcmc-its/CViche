@@ -147,6 +147,50 @@ def test_delivery_works_when_server_rejects_psubscribe(monkeypatch):
     assert "no-pattern" in ws.sent[0]
 
 
+def test_subscriber_survives_a_read_timeout(monkeypatch):
+    """redis-py 8 defaults socket_timeout to 5s, so on prod an idle read raised
+    TimeoutError and the subscriber loop exited for good -- every later event
+    was lost until the pod restarted (#960). One failed read must not end
+    delivery: the next event still reaches the socket."""
+    import redis.asyncio.client
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+
+    real_parse = redis.asyncio.client.PubSub.parse_response
+    fault = {"armed": False}
+
+    async def flaky_parse(self, *args, **kwargs):
+        if fault["armed"]:
+            fault["armed"] = False
+            raise RedisTimeoutError("Timeout reading from valkey:6379")
+        return await real_parse(self, *args, **kwargs)
+
+    monkeypatch.setattr(redis.asyncio.client.PubSub, "parse_response", flaky_parse)
+    monkeypatch.setattr("app.pipeline.event_emitter.SUBSCRIBER_RETRY_SECONDS", 0.01)
+    broker, _ = _fakeredis_broker()
+    emitter = EventEmitter(broker)
+    ws = FakeWS()
+
+    async def scenario():
+        await emitter.startup()
+        await emitter.connect("RUN1", ws)
+        fault["armed"] = True                # the loop's next read times out
+        for _ in range(100):
+            if not fault["armed"]:
+                break
+            await asyncio.sleep(0.01)
+        for _ in range(200):                 # resubscribed; keep emitting until one lands
+            await emitter.emit("RUN1", {"event": "LOG", "message": "after-timeout"})
+            await asyncio.sleep(0.02)
+            if ws.sent:
+                break
+        await emitter.shutdown()
+        await broker.shutdown()
+
+    asyncio.run(scenario())
+    assert fault["armed"] is False, "the injected timeout never fired"
+    assert ws.sent and "after-timeout" in ws.sent[0]
+
+
 def test_subscriber_only_delivers_to_matching_run():
     """A socket for RUN1 must not receive RUN2's events."""
     broker, _ = _fakeredis_broker()
