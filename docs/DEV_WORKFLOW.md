@@ -269,6 +269,17 @@ Two rules:
 
    First used on #955 (2026-09-28).
 
+   `scripts/local_ci.sh <pr-head-sha> <label>` runs this recipe for you: it
+   test-merges `<pr-head-sha>` onto a freshly fetched `origin/dev` in its own
+   worktree, then runs every `ci.yml` job with the same commands and pinned
+   tool versions (Python 3.14, ruff 0.16.6, node 20, TruffleHog 3.97.4),
+   writing one log per job plus a `summary.txt` under
+   `${LOCAL_CI_DIR:-${TMPDIR:-/tmp}/cviche-local-ci}/ci-<label>/`. Set
+   `TRUFFLEHOG` and/or `NODE20_BIN` first if those tools aren't at the
+   script's built-in defaults — it fails fast with a clear error if it can't
+   find them. Post that `summary.txt` on the PR, naming the tested head SHA,
+   before merging.
+
 ### Before merging a *batch* of PRs, test them together
 
 Each PR's CI tests it against `dev` alone — never against its siblings. "All

@@ -87,6 +87,8 @@ jobs:
             echo "=== $t ==="
             bash "$t"
           done
+      - name: local_ci.sh TRUFFLEHOG resolution self-test
+        run: bash scripts/test_local_ci_trufflehog_resolution.sh
 
   function-size:
     # Ratchet on oversized functions (CODING_STANDARDS.md 3.2a), plus §9's
