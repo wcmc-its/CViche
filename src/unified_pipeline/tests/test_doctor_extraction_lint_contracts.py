@@ -27,6 +27,10 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.core.template_boilerplate import (  # noqa: E402
+    is_near_template_instruction,
+    is_template_instruction,
+)
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     DEDUP_SAFE_CONTAINMENT,
@@ -560,6 +564,20 @@ def test_is_invented_record_false_below_the_combined_length_floor():
     assert not _is_invented_record({"activity": "Total", "percent_effort": "100%"})
 
 
+def test_is_invented_record_false_on_a_mixed_real_and_label_record():
+    # Isolates the `all(...)` guard itself (not just the two floors above):
+    # one real value plus one template label clears both the value-count
+    # floor (2) and the combined-length floor (>= 25, here 49) but must
+    # stay False -- `any(...)` in place of `all(...)` would wrongly call
+    # this fabricated, and nothing else in this file rebuilds a
+    # certifying_board/certificate_number pair with one side real (#829).
+    mixed = {"certifying_board": "American Board of Internal Medicine",
+             "certificate_number": _CERT_NUMBER_LABEL}
+    assert len(mixed) >= INVENTED_RECORD_MIN_VALUES
+    assert len("|".join(mixed.values())) >= _MIN_EXACT_LEN
+    assert not _is_invented_record(mixed)
+
+
 def test_is_invented_record_false_with_no_values_at_all():
     assert not _is_invented_record({"a": None, "b": ""})
 
@@ -655,6 +673,30 @@ def test_lint_invented_records_warns_on_an_f1_entry_matching_a_known_instruction
     assert findings[0]["lint"] == "invented_records"
     assert findings[0]["severity"] == "WARN"
     assert "F1" in findings[0]["message"] and "#829" in findings[0]["message"]
+
+
+def test_lint_invented_records_warns_on_an_f1_entry_matching_via_the_pipe_split_path_only():
+    # A table-row-shaped F1 text ("... | ") reaches `is_template_instruction`
+    # via its pipe-split rule (b), not the whole-string exact match in rule
+    # (a) -- the trailing "|" survives normalization, so the joined string
+    # never equals the known instruction verbatim. `is_near_template_instruction`
+    # refuses any text containing "|" outright, so this exercises the exact
+    # branch (`is_template_instruction(...)`) with the near-match branch
+    # provably False, isolating the `or` in `lint_invented_records` from the
+    # near-match test above (#829).
+    known_instruction = ("Licensure: Every physician appointed to the "
+                         "Hospital staff, except interns, and aliens in "
+                         "the US via non-immigrant visas, must have a New "
+                         "York State license or a temporary certificate in "
+                         "lieu of the license.")
+    text = f"{known_instruction} | "
+    assert is_template_instruction(text)
+    assert not is_near_template_instruction(text)
+    entry = _invented_licensure_entry(text=text)
+    findings = lint_invented_records({"entries": [entry]}, [])
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "invented_records"
+    assert "F1" in findings[0]["message"]
 
 
 def test_lint_invented_records_warns_on_an_f1_entry_near_matching_a_known_instruction():
