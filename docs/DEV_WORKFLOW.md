@@ -249,8 +249,25 @@ Two rules:
    merging. After the merge, check that every `Closes #N` fired (see below).
 2. **CI must be actually green**, not "green locally". A job that failed with
    zero steps (an Actions billing or outage failure) is not green. `ci.yml` runs on PRs to
-   `dev` and `main`: `backend-tests`, `pipeline-tests`, `frontend-typecheck`,
-   `type-check`. `deps-audit.yml` runs only when a requirements file changes.
+   `dev` and `main`: `backend-tests`, `pipeline-tests`, `function-size`,
+   `frontend-typecheck`, `type-check`, `secret-scan`. `issue-narrowing.yml`
+   adds `gate`. `deps-audit.yml` runs only when a requirements file changes.
+
+   **When Actions can't start jobs** (billing, or a GitHub outage), a local run
+   of every job counts as green, provided all of the following hold:
+   - The run is against the PR head merged onto current `origin/dev`.
+   - Each job runs exactly what `ci.yml` runs, on the same Python and the same
+     tool pins (ruff, TruffleHog), with the backend suite in CI's env vars.
+   - `check_standards.py` runs on a depth-1 clone, as CI does.
+   - A job is skipped only when its whole path is untouched (for example, no
+     `web_interface/frontend` change means no `frontend-typecheck`), and the
+     skip is stated.
+   - The results table is posted as a PR comment, naming the tested head SHA,
+     *before* the merge.
+   - The merge uses `gh pr merge --match-head-commit <that SHA>`, so a push
+     after the run can't sneak in.
+
+   First used on #955 (2026-09-28).
 
 ### Before merging a *batch* of PRs, test them together
 
