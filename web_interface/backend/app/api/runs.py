@@ -436,9 +436,11 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     """
     run.status = "cancelled"
     run.error_message = "Cancelled by user"
-    # Naive, matching started_at and every other completed_at write (see
-    # schemas.py's TZDateTime docstring); an aware value here would raise on
-    # (run.completed_at - run.started_at) in runs.py/websocket.py/admin_routes.py.
+    # Naive, matching every other Run timestamp write (orchestrator.py,
+    # run_service.py, upload.py): pymysql drops tzinfo on write, so an aware
+    # value would round-trip as naive UTC and get mislabelled with the
+    # server's LOCAL offset by schemas.py's _iso_with_offset -- wrong by
+    # that offset (timestamp and duration both) on a non-UTC host.
     run.completed_at = datetime.now()
     db.commit()
 
