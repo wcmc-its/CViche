@@ -93,28 +93,40 @@ RECENCY_WINDOW_YEARS = 20
 DATE_FIELDS = ('year', 'start_date', 'end_date', 'date')
 YEAR_PATTERN = re.compile(r'\b(?:19|20)\d{2}\b')
 # Matches an end_date value that names no date of its own, only that the
-# entry is ongoing: the whole value ("Present"), or a range's open end
-# ("2024 - Present", "to present"). Anchored at both ends so a trailing
-# qualifier ("2019, not current") does not count (#947).
-ONGOING_PATTERN = re.compile(r'(?:^|[-–—]|\bto)\s*\b(?:present|current|ongoing|now)\b\s*$', re.IGNORECASE)
+# entry is ongoing: the whole value ("Present"), a range's open end
+# ("2024 - Present", "to present"), or "Currently Working" (8 occurrences in
+# the local stage-4 farm). Anchored at the start so a trailing qualifier
+# ("2019, not current") does not count, and at the end so trailing text after
+# the open word ("2019 - present, renewed 2024") does not count either (#947).
+ONGOING_PATTERN = re.compile(
+    r'(?:^|[-–—]|\bto)\s*\b(?:present|current|ongoing|now|currently\s+working)\b\s*$', re.IGNORECASE)
 OPEN_RANGE_PATTERN = re.compile(r'\b(?:19|20)\d{2}\s*[-–—]+\s*(?:present|current|ongoing|now)\b', re.IGNORECASE)
 CURRENT_CONTEXT_TAG = '[CURRENT]'
+# A leading "YYYY" or "YYYY-YYYY" token in free text, for latest_entry_year's
+# text fallback: group 2 is empty when there is no range.
+LEADING_YEAR_OR_RANGE_PATTERN = re.compile(r'\b((?:19|20)\d{2})\b(?:\s*[-–—]+\s*\b((?:19|20)\d{2})\b)?')
 
 _UNCOMPUTED = object()  # sentinel: is_current_entry() should compute latest_entry_year itself
 
 
 def latest_entry_year(entry: dict, current_year: int) -> int | None:
     """Latest year across the entry's date fields (trusted, so not capped);
-    else the first year mentioned in its free text -- the entry's own date,
-    not the max of every year mentioned (a later aside, such as a renewal
-    year, must not make an old entry look recent) -- ignoring any text-only
-    year after current_year (a typo or a forward-looking projection) (#947)."""
+    else the entry's own date from its free text -- the first year-or-range
+    token, taking a range's END year ("Project A, 2021-2023" -> 2023, a
+    2004-2024 range is recent work, not 2004 (#947 round 3)), not the max of
+    every year mentioned (a later aside, such as a renewal year, must not
+    make an old entry look recent). A token (bare year or range end) after
+    current_year is a typo or forward-looking projection and is skipped,
+    capped at current_year, in favour of the next token in the text."""
     fields = entry.get('extracted_fields') or {}
     field_years = [int(y) for name in DATE_FIELDS for y in YEAR_PATTERN.findall(str(fields.get(name) or ''))]
     if field_years:
         return max(field_years)
-    text_years = [int(y) for y in YEAR_PATTERN.findall(entry.get('text') or '') if int(y) <= current_year]
-    return text_years[0] if text_years else None
+    for start, end in LEADING_YEAR_OR_RANGE_PATTERN.findall(entry.get('text') or ''):
+        candidate = int(end) if end else int(start)
+        if candidate <= current_year:
+            return candidate
+    return None
 
 
 def resolve_current_year(current_year: int | None) -> int:
@@ -123,9 +135,16 @@ def resolve_current_year(current_year: int | None) -> int:
 
 
 def ended_before(entry: dict, current_year: int) -> bool:
-    """True when the entry's end_date names a year earlier than current_year."""
+    """True when the entry's end_date names a year earlier than current_year.
+    An end_date matching ONGOING_PATTERN ("2024 - Present") has not ended,
+    whatever year it names: is_current_entry's CURRENT_TAXONOMY_CODES branch
+    returns ``not ended_before(...)`` before ONGOING_PATTERN is ever checked,
+    so without this an open-ended M2A/N3A read as ended (#947 round 3)."""
     fields = entry.get('extracted_fields') or {}
-    end_years = [int(y) for y in YEAR_PATTERN.findall(str(fields.get('end_date') or ''))]
+    end_date = str(fields.get('end_date') or '')
+    if ONGOING_PATTERN.search(end_date):
+        return False
+    end_years = [int(y) for y in YEAR_PATTERN.findall(end_date)]
     return bool(end_years) and max(end_years) < current_year
 
 
@@ -370,7 +389,7 @@ def format_entry_for_context(code: str, entry: dict) -> str:
         return f"[{code}] {text}"
 
 
-def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRecency]], current_year: int,
+def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRecency]],
                          max_tokens: int = 4000) -> str:
     """
     Build context string from weighted entries, respecting token limit.
@@ -381,9 +400,10 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRec
 
     Each entry's EntryRecency (4th tuple element) is gather_context_entries'
     already-computed value; the [CURRENT] tag reads its `is_current` field
-    instead of calling is_current_entry again (#947 review). current_year
-    stays a required parameter for signature parity with the other pipeline
-    entry points (#947 review point (c)).
+    instead of calling is_current_entry again (#947 review). Unlike
+    prioritize_entries/gather_context_entries/is_current_entry, this function
+    never resolves a year itself, so it takes no current_year parameter
+    (#947 round 3: the earlier "signature parity" parameter was unused).
 
     Rough estimate: 1 token ≈ 4 characters
     """
@@ -545,6 +565,23 @@ Generate only the research summary paragraph (150-200 words max), no additional 
     return result_text, usage
 
 
+def _resolve_stage_4_5_input_file(input_path: str) -> Path:
+    """input_path as a literal path, or else the first *_fields.json-shaped
+    match for it under a stage 4/5/5b output directory (#947 round 3: carved
+    out of run_stage_4_5 to hold its line count down after restoring the
+    cache-pricing comment below)."""
+    input_file = Path(input_path)
+    if not input_file.exists():
+        for stage_dir in ['stage_5b_institution_enrichment', 'stage_5_enrichment', 'stage_4_field_extraction']:
+            candidates = list((Path(__file__).parent / "outputs" / stage_dir).glob(f"*{input_path}*.json"))
+            if candidates:
+                input_file = candidates[0]
+                break
+    if not input_file.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    return input_file
+
+
 def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True) -> str:
     """
     Run Stage 4.5: Research Summary Generation.
@@ -557,18 +594,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
     Returns:
         Path to output JSON file
     """
-    # Resolve input path
-    input_file = Path(input_path)
-    if not input_file.exists():
-        # Try to find in stage directories
-        for stage_dir in ['stage_5b_institution_enrichment', 'stage_5_enrichment', 'stage_4_field_extraction']:
-            candidates = list((Path(__file__).parent / "outputs" / stage_dir).glob(f"*{input_path}*.json"))
-            if candidates:
-                input_file = candidates[0]
-                break
-
-    if not input_file.exists():
-        raise FileNotFoundError(f"Input file not found: {input_path}")
+    input_file = _resolve_stage_4_5_input_file(input_path)
 
     # Load data
     with open(input_file, 'r') as f:
@@ -664,7 +690,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
                 print(f"    [{code}] (w={weight:.2f}) {text_preview}...")
 
         # Build context string
-        context = build_context_string(weighted_entries, current_year)
+        context = build_context_string(weighted_entries)
 
         # Track what was used
         context_entries_used = len(weighted_entries)
@@ -689,7 +715,10 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
             print(f"\nGenerated summary ({len(research_summary)} chars):")
             print(f"  {research_summary[:200]}...")
 
-    # total_cost already reflects calculate_cost()'s per-provider/per-model pricing; don't recompute it here.
+    # total_cost was accumulated from llm_result['cost'] on each call above,
+    # which calculate_cost() prices per-provider and per-model (and accounts
+    # for Bedrock prompt-cache reads at 0.1x and writes at 1.25x). Don't
+    # recompute it here from a hardcoded $/M-token figure.
 
     # Build standalone output (not modifying upstream data)
     word_count = len(research_summary.split())
