@@ -60,7 +60,11 @@ def _grant(code, text, *hierarchy):
     ('04/08/2021 – date  Example Contract  Award: $2,638,299', (2021, TEST_YEAR + 1)),
     ('2019-Date Example Grant', (2019, TEST_YEAR + 1)),
     # "date" as a word after the dash only, not "update" or "dated".
-    ('2019-dated memo $50,000', None),
+    ('2019-dated memo $50,000', (2019, 2019)),
+    # An end year running into the next label is still the end (XLYVYA).
+    ('07/01/2021 - 06/30/2026Total costs: $2,000,000', (2021, 2026)),
+    # A year inside a hyphenated award number is not an unread range.
+    ('Award Number: HSCNO-2020-LIFT-001, $31,504', (2020, 2020)),
 ])
 def test_extract_year_range(text, expected):
     assert extract_year_range(text) == expected

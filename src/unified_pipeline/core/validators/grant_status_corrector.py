@@ -35,7 +35,8 @@ _PENDING_STATUS_TEXT_RE = re.compile(
 )
 
 # A year that starts a range: the single-year fallback must not read it (#981).
-_UNREAD_RANGE_RE = re.compile(r'\b(?:19|20)\d{2}\s*[-–—]')
+# A letter right after the dash is an identifier ("HSCNO-2020-LIFT-001"), not a range.
+_UNREAD_RANGE_RE = re.compile(r'\b(?:19|20)\d{2}\s*[-–—](?![A-Za-z])')
 
 
 def extract_year_range(text: str) -> tuple[int, int] | None:
@@ -57,12 +58,13 @@ def extract_year_range(text: str) -> tuple[int, int] | None:
 
     # Pattern 1: a range of full years, each end optionally a full date, a
     # MM/YYYY month or a month name: "2019-2021", "01/2019-12/2021",
-    # "03/01/2024-\n12/31/2028", "Mar 2022-Apr 2023". Tried before the
+    # "03/01/2024-\n12/31/2028", "Mar 2022-Apr 2023". The end year may run
+    # into the next label ("06/30/2026Total costs"). Tried before the
     # two-digit-year pattern below, which would read the end date's month in
     # "2024-\n12/31/2028" as the year 2012 (#981).
     match = re.search(
         r'\b(19\d{2}|20\d{2})\s*[-–—]\s*'
-        r'(?:\d{1,2}/){0,2}(?:[A-Za-z]{3,9}\.?\s*)?(19\d{2}|20\d{2})\b', text)
+        r'(?:\d{1,2}/){0,2}(?:[A-Za-z]{3,9}\.?\s*)?(19\d{2}|20\d{2})(?!\d)', text)
     if match:
         return int(match.group(1)), int(match.group(2))
 
