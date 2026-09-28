@@ -11,7 +11,16 @@ services:
     depends_on: !reset null
     environment:
       # Production overrides (set via .env or deployment pipeline)
-      CVICHE_DATABASE_URL: "${CVICHE_DATABASE_URL}"
+      # Managed MariaDB over RDS IAM auth. Every DB key is overridden here:
+      # compose merges environment: key by key, so any key left out would
+      # inherit the base file's local-dev value (db / root / dev password).
+      DB_HOST: "${DB_HOST:?set DB_HOST}"
+      DB_PORT: "${DB_PORT:-3306}"
+      DB_NAME: "${DB_NAME:?set DB_NAME}"
+      DB_USER: "${DB_USER:?set DB_USER}"
+      MIGRATE_USER: "${MIGRATE_USER:?set MIGRATE_USER}"
+      DB_AUTH_MODE: "iam"
+      DB_PASSWORD: ""
       CVICHE_SESSION_SECRET: "${CVICHE_SESSION_SECRET}"
       CVICHE_SECURE_COOKIES: "true"
       CVICHE_ALLOWED_ORIGINS: "${CVICHE_ALLOWED_ORIGINS}"

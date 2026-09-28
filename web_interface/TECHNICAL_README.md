@@ -189,11 +189,7 @@ CViche uses MariaDB with the `utf8mb4` character set. Create the database:
 mysql -u root -e "CREATE DATABASE IF NOT EXISTS cviche CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 ```
 
-For production, use a managed MariaDB instance and set `CVICHE_DATABASE_URL` accordingly:
-
-```
-mysql+pymysql://cviche_user:PASSWORD@mariadb-host:3306/cviche
-```
+For production, use a managed MariaDB instance and set `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER` accordingly (`app/database.py` via `app/database_factory.py:create_cviche_engine`; defaults to RDS IAM auth, no password needed). See [docs/PRODUCTION_SECRETS.md](../docs/PRODUCTION_SECRETS.md) for provisioning patterns.
 
 For backup configuration, snapshot retention, point-in-time recovery, and the restore runbook, see [docs/PRODUCTION_BACKUPS.md](../docs/PRODUCTION_BACKUPS.md). That doc also covers S3 versioning and the (currently fragile) prompt-log persistence story.
 
@@ -661,7 +657,7 @@ web_interface/
 **Fix:**
 1. Verify MariaDB is running: `mysql -u root -e "SELECT 1"`
 2. Verify the database exists: `mysql -u root -e "SHOW DATABASES LIKE 'cviche'"`
-3. Check `CVICHE_DATABASE_URL` is correct. The format is: `mysql+pymysql://user:password@host:port/database`
+3. Check `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER` are correct (there is no connection-string form; `app/database.py` reads these four individually).
 4. In Docker, ensure the `db` service is healthy before the backend starts (docker-compose handles this via `depends_on` with health check).
 
 ### Alembic migration fails

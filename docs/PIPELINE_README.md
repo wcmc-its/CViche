@@ -128,7 +128,7 @@ Word Document (.docx)
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 1a: Hierarchy Extraction     │  LLM (gpt-5.1)
+│  Stage 1a: Hierarchy Extraction     │  LLM
 │  Extract section headers & structure │
 │  Two-pass normalization prompts     │
 └─────────────────────────────────────┘
@@ -143,7 +143,7 @@ Word Document (.docx)
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 2: Entry Extraction          │  No LLM
+│  Stage 2: Entry Extraction          │  LLM
 │  Extract all entries with 100%      │
 │  coverage of document indices       │
 │  Entry types: paragraph, table,     │
@@ -152,21 +152,21 @@ Word Document (.docx)
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 3a: Header Taxonomy Mapping  │  LLM (gpt-5.1)
+│  Stage 3a: Header Taxonomy Mapping  │  LLM
 │  Map CV section headers to taxonomy │
 │  codes with confidence weights      │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 3b: Entry Classification     │  LLM (gpt-5.1)
+│  Stage 3b: Entry Classification     │  LLM
 │  Classify entries using header      │
 │  taxonomy context from Stage 3a     │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 4: Field Extraction          │  LLM (gpt-5.1 / gpt-4o-mini)
+│  Stage 4: Field Extraction          │  LLM
 │  Extract structured fields from     │
 │  classified entries (authors, dates,│
 │  titles, grant numbers, etc.)       │
@@ -174,7 +174,7 @@ Word Document (.docx)
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 4.5: Research Summary        │  LLM (gpt-5.1)
+│  Stage 4.5: Research Summary        │  LLM
 │  Generate biosketch-style M1        │
 │  research summary statement         │
 └─────────────────────────────────────┘
@@ -295,22 +295,20 @@ CV parsing - AI project/
 ```bash
 cd "CV parsing - AI project"
 
-python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE] [--model MODEL]
+python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE]
 
 # Example - run full pipeline:
 python3 run_full_pipeline.py 2071_Zuschlag_Cv
 
 # Or with full path:
 python3 run_full_pipeline.py 'data/sample_cvs/word/2071_Zuschlag_Cv.docx'
-
-# With specific model:
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --model gpt-4o
 ```
 
 **Arguments:**
 - `cv_path_or_uid`: Path to Word document OR just the document UID (if UID only, looks in `data/sample_cvs/word/`)
 - `--stage`: Run ONLY this stage: `1a`, `1b`, `2`, `3a`, `3b`, `3`, `4`, `4.5`, `5`, `5b`, or `6` (omit for full pipeline)
-- `--model`: OpenAI model to use (default: `gpt-5.1`)
+
+There is no `--model` flag: each stage's model comes from `src/unified_pipeline/config/llm_config.yaml` — see [Model Selection](#model-selection).
 
 ### Single Stage Runs
 
@@ -1082,12 +1080,9 @@ See `core/validators/README.md` for the full guide. Quick steps:
 ## Configuration
 
 ### Model Selection
-All LLM calls use `gpt-5.1`. Model is configured directly in each stage script (no central config file):
-- `signature_based_segmentation.py` (Stage 1a) — `model='gpt-5.1'`
-- `stage_3_taxonomy_mapper.py` (Stage 3) — `model='gpt-5.1'`
-- `header_validator.py` — `model='gpt-5.1'`
+Models are configured per stage in `src/unified_pipeline/config/llm_config.yaml`, not in the stage scripts: every `call_llm(stage=...)` resolves its model there (default block, then `stages:` overrides, then the `CVICHE_LLM_MODEL` env var for non-pinned stages). Today every stage runs Claude Sonnet 4.6 on Bedrock except stage 3b (Claude Haiku 4.5). See `docs/LLM_MODELS.md` for the strategy and how to change a stage's model.
 
-Note: Stage 1b and Stage 2 are deterministic (NO LLM calls).
+Note: Stage 1b is deterministic (no LLM calls).
 
 ### Environment Variables
 | Variable | Required | Purpose |

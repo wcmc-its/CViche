@@ -39,9 +39,7 @@ Most of the time is spent on Stage 3b (entry classification), which sends each s
 <details>
 <summary><strong>How much does it cost per CV?</strong></summary>
 
-Approximately **$0.15 - $0.40 per CV** using GPT-5.1 (the default model), depending on CV length. The largest cost driver is Stage 3b (entry classification), which accounts for roughly 70% of the total.
-
-You can reduce costs by using a smaller model via `--model gpt-4.1-mini`, though this may reduce classification accuracy for ambiguous entries.
+Each run's actual cost is recorded on the run and shown in the admin dashboard. Per-token rates for the configured models, and the safe places to drop to a cheaper model, are in [LLM_MODELS.md](LLM_MODELS.md#cost).
 
 </details>
 
@@ -50,10 +48,10 @@ You can reduce costs by using a smaller model via `--model gpt-4.1-mini`, though
 
 CViche supports two LLM providers:
 
-- **OpenAI** (default): Any model available through the OpenAI API. The default is `gpt-5.1`.
-- **AWS Bedrock**: Claude (Anthropic), Llama (Meta), and Mistral models via the Converse API.
+- **AWS Bedrock** (default): Claude models via the Converse API. Every stage runs Claude Sonnet 4.6 except stage 3b, which runs Claude Haiku 4.5.
+- **OpenAI**: any model available through the OpenAI API.
 
-Set the provider in `config.yaml` (`provider: openai` or `provider: bedrock`). Different stages may benefit from different model tiers -- this can be configured per-stage in `config.yaml`. The segmentation and classification stages benefit most from larger models, while the formatting stages (5c, 5d) work well with smaller models.
+Provider and model are set per stage in `src/unified_pipeline/config/llm_config.yaml` (a `default` block plus `stages:` overrides). See [LLM_MODELS.md](LLM_MODELS.md) for how to change a stage's model.
 
 </details>
 

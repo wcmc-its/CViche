@@ -43,7 +43,7 @@ The repository contains several generations of pipeline code. **Only one pipelin
 
 ## Model assignment
 
-Every live stage runs **Claude Sonnet 4.6**. There are no per-stage overrides — the whole pipeline inherits the `default` block in `llm_config.yaml`.
+Every live stage runs **Claude Sonnet 4.6** (the `default` block in `llm_config.yaml`) except `stage_3b`, which a `stages:` override puts on **Claude Haiku 4.5** — a gold eval found it more accurate than Sonnet on that stage at ~2.9× lower cost (rationale in the YAML comment above the override).
 
 **Rationale.** The decision was to err toward the more capable model:
 
@@ -77,7 +77,9 @@ All LLM calls go through `call_llm(stage="...", ...)` in `src/unified_pipeline/l
 
 > **Operational caveat — check your deployment environment.** Because env vars override the YAML `default`, a `CVICHE_LLM_MODEL` set in a deployment (Docker, EKS, a `.env` file) silently wins over this repo's `llm_config.yaml`. If a stale `CVICHE_LLM_MODEL` points at a Claude 3-era model, that is what runs regardless of this file. **Verify those env vars** point at `us.anthropic.claude-sonnet-4-6` (or are unset) when rolling this out.
 
-The `model` argument still threaded through some `stage_4` functions is **vestigial** — `call_llm` ignores it; `llm_config.yaml` is the single source of truth. The orchestrator no longer carries a `self.model` field.
+`llm_config.yaml` is the single source of truth. No stage function takes a `model` argument and no CLI takes `--model` — the last inert ones (5b, 5c, 5d, the candidate surfacer) were removed in #954; the orchestrator carries no `self.model` field. Stage artifacts record the model that actually served the call (`null` if none did).
+
+**To change a stage's model:** add or edit its entry under `stages:` in `llm_config.yaml` (the file ships in the image, so this needs a rebuild and a deploy). To change every non-overridden stage without a rebuild, set `CVICHE_LLM_MODEL` in the environment. For a corpus A/B, `scripts/run_corpus_batch.sh`'s 4th argument sets `CVICHE_LLM_MODEL` for that batch. Add any new model to `PRICING` in `config.py` (see [Cost](#cost)).
 
 ## Bedrock setup
 

@@ -61,7 +61,12 @@ def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
         fields = pub.get('extracted_fields') or {}
         fc = fields.get('formatted_citation')
         fc = fc if isinstance(fc, str) else ''
-        lines = [ln.strip() for ln in fc.splitlines() if ln.strip()]
+        # str.splitlines() also breaks on \x0b, \x0c, \x1c-\x1e, \x85, U+2028
+        # and U+2029, so a stray control character inside one LLM-written
+        # citation (#552's input class) silently became two numbered entries
+        # (#742). Split on real line breaks only.
+        normalized = fc.replace('\r\n', '\n').replace('\r', '\n')
+        lines = [ln.strip() for ln in normalized.split('\n') if ln.strip()]
         if fields.get('formatting_source') == 'stage_5d_llm' and len(lines) >= 2:
             for i, line in enumerate(lines):
                 clone = dict(pub)

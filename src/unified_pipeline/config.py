@@ -57,11 +57,9 @@ WEB_OUTPUT_BASE = PROJECT_ROOT / "web_interface" / "outputs"
 # LLM Settings
 # ============================================================================
 
-# Model selection
+# Model selection is per stage in config/llm_config.yaml (get_stage_config).
+# DEFAULT_MODEL is only calculate_cost()'s pricing fallback.
 DEFAULT_MODEL = "gpt-4o-mini"
-SEGMENTATION_MODEL = "gpt-4o-mini"
-TAXONOMY_MODEL = "gpt-4o-mini"
-PARSING_MODEL = "gpt-4o-mini"
 
 # LLM API pricing (per 1M tokens) -- nested by provider
 PRICING = {

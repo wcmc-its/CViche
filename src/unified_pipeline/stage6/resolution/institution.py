@@ -10,7 +10,11 @@ Neither renders anything. They return the value a section writer should use --
 plus, in the first case, whether it came from enrichment, because an enriched
 value is rendered as a tracked change and an extracted one is not.
 """
+import logging
 import re
+from collections.abc import Mapping
+
+logger = logging.getLogger(__name__)
 
 
 def _location_stated_in_source(entry: dict, *candidates: str) -> bool:
@@ -111,6 +115,14 @@ def _get_institution_location(entry: dict) -> tuple[str, bool]:
 
     # Check for institution enrichment data (from Stage 5b)
     enrichment = entry.get('institution_enrichment') or {}
+    if not isinstance(enrichment, Mapping):
+        # A non-Mapping (list, str, ...) shouldn't reach here, but stage 5b
+        # is an LLM output and one malformed run is enough (#743). Treat it
+        # like no enrichment rather than failing the section.
+        logger.warning(
+            "institution_enrichment is %s, not a mapping; treating as absent",
+            type(enrichment).__name__)
+        enrichment = {}
     if enrichment:
         city = enrichment.get('city', '')
         state = enrichment.get('state', '')

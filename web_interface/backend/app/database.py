@@ -9,10 +9,9 @@ from app.base_class import Base
 from app.database_factory import create_cviche_engine
 from app.config_loader import get_config
 
-# Read DATABASE_URL from environment; default to SQLite for local dev.
-# The default is an absolute path anchored at the backend directory so it is
-# stable regardless of the process working directory (the pipeline
-# orchestrator pins cwd to the repo root while runs execute).
+# Read DB_HOST/DB_PORT/DB_NAME/DB_USER via get_config (env, then the
+# auth_config.yaml yaml fallback). There is no SQLite path: create_cviche_engine
+# raises if any of these four is missing, in local dev or production alike.
 
 db_user, source = get_config("db", "DB_USER", default="")
 

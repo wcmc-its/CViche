@@ -36,7 +36,8 @@ phases:
        # .github/workflows/deps-audit.yml, which runs this identical gate in CI.
        - pip install "pip-audit==2.10.1"
        # Audit pinned dependencies for known vulnerabilities
-       # Ignore list is maintained in .pip-audit-ignore.txt (tracked in #126)
+       # Ignore list is maintained in .pip-audit-ignore.txt. The pysaml2 pin-knot
+       # advisories tracked in #126 were removed once pysaml2 7.5.5 shipped.
        - |
          IGNORE_FLAGS=$(grep -v '^#' .pip-audit-ignore.txt | grep -v '^$' | sed 's/^/--ignore-vuln /' | tr '\n' ' ')
          for req in \
