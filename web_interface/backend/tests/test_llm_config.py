@@ -223,14 +223,21 @@ def test_calculate_cost_unknown_model_fallback():
 
 
 def test_bedrock_region_prefix_is_stripped():
-    """A us./eu. inference-profile prefix resolves to the bare PRICING key."""
+    """A us./eu. inference-profile prefix resolves to the bare PRICING key.
+
+    Uses the dated Haiku 4.5 id (whose price differs from the Sonnet-4.6
+    fallback the unknown-model branch would otherwise return) so a broken
+    prefix-strip actually fails this test instead of coincidentally landing
+    on the same number.
+    """
     cost = calculate_cost(
         1_000_000, 1_000_000,
-        model="us.anthropic.claude-sonnet-4-6", provider="bedrock",
+        model="us.anthropic.claude-haiku-4-5-20251001-v1:0", provider="bedrock",
     )
-    # Sonnet 4.6: 3.000 + 15.000 = 18.000, via the same direct-match branch
-    # as DEFAULT_MODEL (not the unknown-model fallback).
-    assert cost == pytest.approx(18.000)
+    # Haiku 4.5: 1.000 + 5.000 = 6.000, via the region-prefix-stripped match
+    # -- not the Sonnet-4.6 DEFAULT_MODEL fallback (18.000), which the
+    # previous version of this test could not distinguish from a real fix.
+    assert cost == pytest.approx(6.000)
 
 
 def test_dated_haiku_4_5_id_prices_as_haiku_not_fallback():
