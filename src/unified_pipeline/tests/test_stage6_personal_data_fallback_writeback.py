@@ -658,42 +658,40 @@ def test_a_home_label_at_the_number_beats_a_cell_word_elsewhere_in_the_entry(tmp
     assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
 
 
-def test_a_consumer_email_in_a_home_block_renders_as_the_personal_email(tmp_path):
-    rows, _gen = _render(tmp_path, entries=[_home_block("(c)")])
-
-    assert rows.get("personal email:") == "jdoe.cvtest@gmail.com"
-    assert rows.get("work email:", "") == "", (
-        "the consumer address rendered as the owner's Work email too")
+# One row per email-routing edge case, rendered end to end: the row the
+# address lands in, and that the other email row stays empty.
+_WORK, _PERSONAL = "work email:", "personal email:"
+_GMAIL, _WCM = "jdoe.cvtest@gmail.com", "zzz9999@med.cornell.edu"
 
 
-def test_a_consumer_email_labelled_as_work_stays_in_the_work_row(tmp_path):
-    rows, _gen = _render(tmp_path, entries=[
-        _a("Contact\tWork email: jdoe.cvtest@gmail.com",
-           {"email": "jdoe.cvtest@gmail.com"}),
-    ])
+@pytest.mark.parametrize("entry, row, address", [
+    # a consumer address in a HOME ADDRESS block is the personal email
+    pytest.param(_home_block("(c)"), _PERSONAL, _GMAIL, id="consumer-in-home-block"),
+    # ... unless its own label calls it work
+    pytest.param(_a(f"Contact\tWork email: {_GMAIL}", {"email": _GMAIL}),
+                 _WORK, _GMAIL, id="consumer-labelled-work"),
+    # only the label between the previous separator and the address owns it
+    pytest.param(_a(f"Office: 1300 York Avenue\t{_GMAIL}", {"email": _GMAIL}),
+                 _PERSONAL, _GMAIL, id="work-word-in-another-segment"),
+    # an institutional address in a home block stays work
+    pytest.param(_home_block("(c)", email=_WCM, email_key="email"),
+                 _WORK, _WCM, id="institutional-in-home-block"),
+    # a stage-4 work_email key outranks the consumer domain
+    pytest.param(_a(f"Contact\t{_GMAIL}", {"work_email": _GMAIL}),
+                 _WORK, _GMAIL, id="work-email-key"),
+    # no stage-4 email field: the per-entry text fallback finds it, and it
+    # routed straight to Work email before whatever labelled it
+    pytest.param(_a(f"Office Phone: 212-555-0100\t\t\tHome Email: {_GMAIL}",
+                    {"phone": "212-555-0100"}),
+                 _PERSONAL, _GMAIL, id="text-fallback-home-email"),
+])
+def test_an_email_renders_in_the_row_its_domain_key_and_label_choose(
+        tmp_path, entry, row, address):
+    rows, _gen = _render(tmp_path, entries=[entry])
 
-    assert rows.get("work email:") == "jdoe.cvtest@gmail.com"
-    assert rows.get("personal email:", "") == ""
-
-
-def test_a_work_word_in_another_segment_does_not_label_a_consumer_email(tmp_path):
-    """Only the label between the previous separator and the address owns
-    it: an Office address earlier in the same block is not a work label."""
-    rows, _gen = _render(tmp_path, entries=[
-        _a("Office: 1300 York Avenue\tjdoe.cvtest@gmail.com",
-           {"email": "jdoe.cvtest@gmail.com"}),
-    ])
-
-    assert rows.get("personal email:") == "jdoe.cvtest@gmail.com"
-
-
-def test_an_institutional_email_in_a_home_block_stays_in_the_work_row(tmp_path):
-    rows, _gen = _render(tmp_path, entries=[
-        _home_block("(c)", email="zzz9999@med.cornell.edu", email_key="email"),
-    ])
-
-    assert rows.get("work email:") == "zzz9999@med.cornell.edu"
-    assert rows.get("personal email:", "") == ""
+    other = _PERSONAL if row == _WORK else _WORK
+    assert rows.get(row) == address
+    assert rows.get(other, "") == "", f"the address rendered in {other!r} too"
 
 
 @pytest.mark.parametrize("phone, text, expected", [
@@ -734,21 +732,43 @@ def test_an_institutional_email_in_a_home_block_stays_in_the_work_row(tmp_path):
     ("212-555-0142", "abc: 212-555-0142", None),
     ("212-555-0142", "room h: 212-555-0142", None),
     ("212-555-0142", "office\tm. 212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    # a tab or a column separator between the label and the number
+    ("212-555-0142", "home\tcell:\t212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "home | (c) 212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "cell: 917-555-0100 | h: 212-555-0142",
+     personal_data_module._PHONE_LABEL_HOME),
+    ("212-555-0142", "home; mobile no. 212-555-0142", personal_data_module._PHONE_LABEL_CELL),
+    # trailing parenthetical labels: only cell words, and a tab after is fine
+    ("212-555-0142", "home 212-555-0142 (cellular)", personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "home 212-555-0142 (mobile)\tjdoe@gmail.com",
+     personal_data_module._PHONE_LABEL_CELL),
+    ("212-555-0142", "contact 212-555-0142 (c)", None),
+    ("212-555-0142", "contact 212-555-0142 (home)", None),
+    # a dict holding two numbers pairs with neither
+    ({"cell": "212-555-0142", "office": "917-555-0100"}, "(c) 212-555-0142", None),
 ])
 def test_nearest_phone_label_pairs_only_the_extracted_number(phone, text, expected):
-    assert personal_data_module._nearest_phone_label(phone, text) == expected
+    parsed = personal_data_module._PhoneNumber.parse(phone)
+    assert personal_data_module._nearest_phone_label(parsed, text) == expected
 
 
-def test_a_home_email_found_only_by_the_text_fallback_renders_as_personal(tmp_path):
-    """No stage-4 email field, so the per-entry regex finds the address --
-    it routed straight to Work email before, whatever labelled it."""
-    rows, _gen = _render(tmp_path, entries=[
-        _a("Office Phone: 212-555-0100\t\t\tHome Email: jdoe.cvtest@gmail.com",
-           {"phone": "212-555-0100"}),
-    ])
-
-    assert rows.get("personal email:") == "jdoe.cvtest@gmail.com"
-    assert rows.get("work email:", "") == ""
+@pytest.mark.parametrize("left, right, expected", [
+    ("212.555.0142", "(212) 555-0142", True),
+    ("+1 212 555 0142", "212-555-0142", True),
+    ("+44 20 7946 0958", "020 7946 0958", False),
+    ("20 7946 0958", "+44 20 7946 0958", True),
+    # below the seven-digit minimum nothing pairs, even an exact match
+    ("55-0142", "55-0142", False),
+    ("555-0142", "555-0142", True),
+    # ... on either side: a six-digit tail of a seven-digit number
+    ("555-0142", "55-0142", False),
+    # a longer prefix than a country code is a different number
+    ("212-555-0142; 917-555-0100", "917-555-0100", False),
+])
+def test_phone_number_pairs_across_spellings_and_country_prefixes(left, right, expected):
+    phone = personal_data_module._PhoneNumber.parse
+    assert phone(left).is_same_number(phone(right)) is expected
+    assert phone(right).is_same_number(phone(left)) is expected
 
 
 def test_the_first_stage4_email_key_decides_the_row(tmp_path):
@@ -772,15 +792,6 @@ def test_route_email_keeps_a_row_first_value(email, work, personal, expected):
     assert personal_data_module._route_email(email, "contact", None, work, personal) == expected
 
 
-def test_a_stage4_work_email_key_outranks_a_consumer_domain(tmp_path):
-    rows, _gen = _render(tmp_path, entries=[
-        _a("Contact\tjdoe.cvtest@gmail.com", {"work_email": "jdoe.cvtest@gmail.com"}),
-    ])
-
-    assert rows.get("work email:") == "jdoe.cvtest@gmail.com"
-    assert rows.get("personal email:", "") == ""
-
-
 # Spelled out rather than read from the module, so dropping a domain from
 # _CONSUMER_EMAIL_DOMAINS fails here.
 _CONSUMER_DOMAINS = [
@@ -793,7 +804,8 @@ _CONSUMER_DOMAINS = [
 
 @pytest.mark.parametrize("domain", _CONSUMER_DOMAINS)
 def test_each_consumer_domain_is_a_personal_email(domain):
-    assert personal_data_module._is_personal_email(f"jdoe@{domain}", "contact", None)
+    assert personal_data_module._is_personal_email(
+        personal_data_module._EmailAddress.parse(f"jdoe@{domain}"), "contact", None)
 
 
 @pytest.mark.parametrize("email, text, field_key, expected", [
@@ -829,7 +841,8 @@ def test_each_consumer_domain_is_a_personal_email(domain):
 ])
 def test_is_personal_email_reads_the_key_the_domain_and_the_label(
         email, text, field_key, expected):
-    assert personal_data_module._is_personal_email(email, text, field_key) is expected
+    parsed = personal_data_module._EmailAddress.parse(email)
+    assert personal_data_module._is_personal_email(parsed, text, field_key) is expected
 
 
 # --------------------------------------------------------------------------
