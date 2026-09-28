@@ -918,8 +918,9 @@ class TestUploadValidation:
         """#795: a per-pod, in-memory, per-user counter caps /estimate calls
         on its own, even for a user nowhere near their check_rate_limit run
         quota. The call that exceeds it gets check_rate_limit's 429 shape,
-        and neither the magic-byte check nor _extract_text ever runs --
-        the budget is spent before the body is even read."""
+        and the body is never read (_read_bounded) or parsed (_extract_text,
+        _validate_docx_magic) -- the budget is spent before either runs."""
+        from unittest.mock import AsyncMock
         from app.api import upload as upload_module
         self._create_auth_user(client, db)
         docx_content = b"PK\x03\x04dummy-docx-bytes"
@@ -935,12 +936,14 @@ class TestUploadValidation:
                 assert ok_response.status_code == 200, ok_response.text
             magic_mock.reset_mock()
             extract_mock.reset_mock()
-            over_response = client.post(
-                "/api/estimate",
-                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
-            )
+            with patch("app.api.upload._read_bounded", new_callable=AsyncMock) as read_mock:
+                over_response = client.post(
+                    "/api/estimate",
+                    files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+                )
         assert over_response.status_code == 429, over_response.text
         assert over_response.json()["detail"]["error"] == "rate_limited"
+        read_mock.assert_not_called()
         magic_mock.assert_not_called()
         extract_mock.assert_not_called()
 
