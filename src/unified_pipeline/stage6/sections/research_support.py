@@ -1016,7 +1016,9 @@ class ResearchSupportSection:
 
         # Add optional major goals if present (check major_goals, description, or narrative)
         goals = fields.get('major_goals') or fields.get('description', '') or fields.get('narrative', '')
-        if goals and len(goals.strip()) > 10:  # Only if substantive
+        # Same-text guard as title/agency/funding above -- same fact via two paths (#829, BYFQBG#82).
+        goal_repeats_title = bool(goals) and bool(title) and goals.strip().lower() == title.strip().lower()
+        if goals and len(goals.strip()) > 10 and not goal_repeats_title:  # Only if substantive
             rows.append(('Major project goals:', goals))
 
         # Create a new table with 2 columns

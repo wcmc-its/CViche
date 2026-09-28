@@ -888,6 +888,34 @@ def test_major_goals_precedence_is_goals_then_description_then_narrative():
         == 'A narrative here'
 
 
+def test_a_goal_identical_to_the_title_is_not_rendered_twice():
+    """A goal that is (normalized) the same text already rendered as the title
+    is not a second fact -- it is the title read twice, once by the title
+    fallback chain and once by the goals label (#829 corpus scan, BYFQBG#82:
+    stage 4 put the goal text straight into `title`, and the same entry's own
+    "Major Goals:" label parsed to the identical string, so the block rendered
+    it twice). Comparing case-insensitively and whitespace-stripped, matching
+    the title/agency and title/funding duplicate checks above.
+    """
+    fields = {'title': 'Map the pollinator corridors of the Example Valley',
+              'major_goals': '  MAP THE POLLINATOR CORRIDORS OF THE EXAMPLE VALLEY  ',
+              'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+
+def test_a_goal_that_differs_from_the_title_still_renders():
+    """Only an exact (normalized) match is suppressed -- a goal that extends or
+    differs from the title is still new information and still renders.
+    """
+    fields = {'title': 'Map the pollinator corridors of the Example Valley',
+              'major_goals': 'Map the pollinator corridors and survey nesting sites',
+              'start_date': '01/2019'}
+    cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
+    assert cells['Major project goals:'] == \
+        'Map the pollinator corridors and survey nesting sites'
+
+
 # --- #958: major goals from the source text -------------------------------------
 
 _GOAL = 'Map the pollinator corridors of the Example Valley'
@@ -993,6 +1021,26 @@ def test_a_stage4_goal_is_not_replaced_by_the_text():
     fill_major_goals_from_text([grant])
 
     assert grant['extracted_fields']['major_goals'] == 'Goal as stage 4 extracted it'
+
+
+def test_a_goal_parsed_from_the_grants_own_text_that_repeats_its_title_does_not_double_render():
+    """End-to-end shape of BYFQBG#82 (#829 blocking item 1): stage 4 set `title`
+    to the goal text itself, `major_goals` was left empty, and the same entry's
+    raw text carries a "Major Goals:" label after the role -- so
+    `fill_major_goals_from_text` parses that label into `major_goals` with the
+    identical string. Rendering must not show the goal a second time under
+    "Major project goals:" once it already appears as "Project title:".
+    """
+    grant = _entry('M2B', text=f'Role: PI\nMajor Goals: {_GOAL}',
+                   title=_GOAL, agency='Example Fund', start_date='01/2019')
+
+    fill_major_goals_from_text([grant])
+    assert grant['extracted_fields']['major_goals'] == _GOAL  # parsed, as #958 promises
+
+    table = _generator()._create_grant_table(grant['extracted_fields'], 'M2B')
+    cells = _cells(table)
+    assert cells['Project title:'] == _GOAL
+    assert 'Major project goals:' not in [label for label, _ in _rows(table)]
 
 
 def _grant(start, end, text='grant', **fields):
