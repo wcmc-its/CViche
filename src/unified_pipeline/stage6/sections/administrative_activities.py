@@ -228,7 +228,8 @@ class AdministrativeActivitiesSection:
                 for rec in record_list:
                     record = _CommitteeRecord.from_raw(rec, name_fallback=True)
                     dates = format_date_range(
-                        record.start_date, record.end_date, taxonomy_code) or ''
+                        record.start_date, record.end_date, taxonomy_code,
+                        original_text) or ''
                     if record.activity:
                         rows.append((record.activity, record.role, dates))
                 continue
@@ -243,7 +244,8 @@ class AdministrativeActivitiesSection:
             # look at what extraction produced, not at the fallback's
             # rewrite.
             extracted_activity = activity
-            dates = format_date_range(record.start_date, record.end_date, taxonomy_code) or ''
+            dates = format_date_range(record.start_date, record.end_date, taxonomy_code,
+                                      original_text) or ''
 
             # #660 item 1: extraction alone already produced a complete
             # activity+dates record for this entry. Capture that BEFORE any
