@@ -230,13 +230,44 @@ list one reply at a time. The rule is `CODING_STANDARDS.md` §6.9.
 single reviewer. This is a change from older notes that describe Mahender as a
 gate; he still reviews, but he is not a blocker.
 
-Two rules that did not change:
+Two rules:
 
-1. **Only merge when the human asks for it.** Merge rights are not standing
-   permission to merge your own work.
-2. **CI must be actually green**, not "green locally". `ci.yml` runs on PRs to
-   `dev` and `main`: `backend-tests`, `pipeline-tests`, `frontend-typecheck`,
-   `type-check`. `deps-audit.yml` runs only when a requirements file changes.
+1. **Merge your own high-confidence PRs yourself (changed 2026-09-28, at
+   Mahender's request).** Before that date the rule was "only merge when the
+   human asks". A PR is high-confidence when all of these hold:
+   - It is yours. A PR you have handed to Mahender (assigned to `mrj4001`) is
+     his to merge.
+   - CI is actually green (rule 2).
+   - Every review comment is answered, and nothing on the PR or its issue is
+     waiting on a decision.
+   - The description carries the evidence for the gate its kind of change
+     requires (`CODING_STANDARDS.md` §6.3). For a stage-6 change, that includes
+     the render gate.
+   - It is based on `origin/dev`, not stacked, and it merges without conflicts.
+
+   If any of these fails, or the PR itself names a judgement call, ask before
+   merging. After the merge, check that every `Closes #N` fired (see below).
+2. **CI must be actually green**, not "green locally". A job that failed with
+   zero steps (an Actions billing or outage failure) is not green. `ci.yml` runs on PRs to
+   `dev` and `main`: `backend-tests`, `pipeline-tests`, `function-size`,
+   `frontend-typecheck`, `type-check`, `secret-scan`. `issue-narrowing.yml`
+   adds `gate`. `deps-audit.yml` runs only when a requirements file changes.
+
+   **When Actions can't start jobs** (billing, or a GitHub outage), a local run
+   of every job counts as green, provided all of the following hold:
+   - The run is against the PR head merged onto current `origin/dev`.
+   - Each job runs exactly what `ci.yml` runs, on the same Python and the same
+     tool pins (ruff, TruffleHog), with the backend suite in CI's env vars.
+   - `check_standards.py` runs on a depth-1 clone, as CI does.
+   - A job is skipped only when its whole path is untouched (for example, no
+     `web_interface/frontend` change means no `frontend-typecheck`), and the
+     skip is stated.
+   - The results table is posted as a PR comment, naming the tested head SHA,
+     *before* the merge.
+   - The merge uses `gh pr merge --match-head-commit <that SHA>`, so a push
+     after the run can't sneak in.
+
+   First used on #955 (2026-09-28).
 
 ### Before merging a *batch* of PRs, test them together
 
