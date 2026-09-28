@@ -224,7 +224,12 @@ def _is_structural_label(entry: dict) -> bool:
     """
     text = (entry.get('text', '') or '').strip()
     if not text:
-        return True
+        # Blank raw text is a label only when stage 5c has nothing to say
+        # either; an entry with real formatted_text is content (#757). The
+        # hierarchy and all-caps checks below need raw text, so return here.
+        fields = entry.get('extracted_fields')
+        formatted = fields.get('formatted_text') if isinstance(fields, dict) else None
+        return not (isinstance(formatted, str) and formatted.strip())
 
     text_lower = text.lower()
     hierarchy = entry.get('hierarchy', []) or []
