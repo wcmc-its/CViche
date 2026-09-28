@@ -914,6 +914,59 @@ class TestUploadValidation:
         assert response.json()["detail"] == rate_limit_body
         extract_mock.assert_not_called()
 
+    def test_estimate_per_user_budget_blocks_before_parsing(self, client, db, seed_simple_mode):
+        """#795: a per-pod, in-memory, per-user counter caps /estimate calls
+        on its own, even for a user nowhere near their check_rate_limit run
+        quota. The call that exceeds it gets check_rate_limit's 429 shape,
+        and neither the magic-byte check nor _extract_text ever runs --
+        the budget is spent before the body is even read."""
+        from app.api import upload as upload_module
+        self._create_auth_user(client, db)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        small_limiter = upload_module._EstimatePerUserWindow(max_calls=2, window_seconds=300)
+        with patch("app.api.upload._estimate_rate_limiter", small_limiter), \
+             patch("app.api.upload._validate_docx_magic", return_value=True) as magic_mock, \
+             patch("app.api.upload._extract_text", return_value="x" * 2000) as extract_mock:
+            for _ in range(2):
+                ok_response = client.post(
+                    "/api/estimate",
+                    files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+                )
+                assert ok_response.status_code == 200, ok_response.text
+            magic_mock.reset_mock()
+            extract_mock.reset_mock()
+            over_response = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+        assert over_response.status_code == 429, over_response.text
+        assert over_response.json()["detail"]["error"] == "rate_limited"
+        magic_mock.assert_not_called()
+        extract_mock.assert_not_called()
+
+    def test_estimate_per_user_budget_resets_after_window(self):
+        """The window genuinely resets rather than banning a user permanently
+        once tripped. Uses an injected clock so the test controls elapsed
+        time directly instead of sleeping or patching the real clock."""
+        from app.api.upload import _EstimatePerUserWindow
+        now = [0.0]
+        limiter = _EstimatePerUserWindow(max_calls=1, window_seconds=300, clock=lambda: now[0])
+        assert limiter.allow(user_id=1) is True
+        assert limiter.allow(user_id=1) is False  # still inside the window
+        now[0] = 299.9
+        assert limiter.allow(user_id=1) is False  # not yet elapsed
+        now[0] = 300.0
+        assert limiter.allow(user_id=1) is True  # window elapsed -- fresh budget
+
+    def test_estimate_per_user_budget_is_per_user(self):
+        """One user hitting their budget must not affect another user's --
+        the window dict is keyed by user id, not shared globally."""
+        from app.api.upload import _EstimatePerUserWindow
+        limiter = _EstimatePerUserWindow(max_calls=1, window_seconds=300)
+        assert limiter.allow(user_id=1) is True
+        assert limiter.allow(user_id=1) is False
+        assert limiter.allow(user_id=2) is True  # a different user is unaffected
+
     def test_random_bytes_rejected(self, client, db, seed_simple_mode):
         """A file with random bytes (not matching any format) is rejected."""
         self._create_auth_user(client, db)
