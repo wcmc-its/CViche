@@ -42,17 +42,30 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 _COSTS_ROW = 'Annual direct costs:'
+_TOTAL_ROW = 'Total award:'
 
 
-def _costs_cell(**fields):
-    """Render one grant table and return its "Annual direct costs:" value."""
+def _costs_row(**fields):
+    """Render one grant table and return its costs row as (label, value).
+
+    The costs row is the third of the eight; its label is "Annual direct
+    costs:" unless only a total award amount is present (#982).
+    """
     gen = WCMTemplateGenerator.__new__(WCMTemplateGenerator)
     gen.doc = docx.Document()
     gen.verbose = False
     fields.setdefault('title', 'Lysyl oxidase and pressure overload')
     fields.setdefault('agency', 'NIH')
     table = gen._create_grant_table(fields, 'M2B')
-    return {row.cells[0].text: row.cells[1].text for row in table.rows}[_COSTS_ROW]
+    costs = table.rows[2]
+    return costs.cells[0].text, costs.cells[1].text
+
+
+def _costs_cell(**fields):
+    """The costs row's value, asserting it sits under the "Annual" label."""
+    label, value = _costs_row(**fields)
+    assert label == _COSTS_ROW
+    return value
 
 
 @pytest.mark.parametrize('zero', [0, 0.0])
@@ -64,12 +77,13 @@ def test_zero_annual_direct_costs_renders_and_does_not_fall_through(zero):
 
 def test_none_annual_direct_costs_falls_back_to_total_funding():
     """An explicitly-null field is absent, not zero -- the fallback must
-    survive the fix."""
-    assert _costs_cell(annual_direct_costs=None, total_funding='250000') == '$250,000'
+    survive the fix, under the total label (#982)."""
+    assert _costs_row(annual_direct_costs=None, total_funding='250000') \
+        == (_TOTAL_ROW, '$250,000')
 
 
 def test_absent_annual_direct_costs_falls_back_to_total_funding():
-    assert _costs_cell(total_funding='250000') == '$250,000'
+    assert _costs_row(total_funding='250000') == (_TOTAL_ROW, '$250,000')
 
 
 def test_both_absent_renders_an_empty_cell():
@@ -79,7 +93,8 @@ def test_both_absent_renders_an_empty_cell():
 def test_blank_annual_direct_costs_falls_back_to_total_funding():
     """Blank string, the shape stage 4 actually emits for a field it looked for
     and did not find."""
-    assert _costs_cell(annual_direct_costs='   ', total_funding='250000') == '$250,000'
+    assert _costs_row(annual_direct_costs='   ', total_funding='250000') \
+        == (_TOTAL_ROW, '$250,000')
 
 
 def test_present_annual_direct_costs_still_wins_over_total_funding():

@@ -137,8 +137,11 @@ class GrantFields(TypedDict, total=False):
     funding_source: str | None
     sponsor: str | None
     annual_direct_costs: str | int | float | None
+    # What the stage-4 M2 schema actually emits for a yearly amount
+    # (`stage4/schemas.py`: "annual_funding": "Annual/yearly direct costs");
+    # `annual_direct_costs` above is the older spelling, kept as the first read.
+    annual_funding: str | int | float | None
     total_funding: str | int | float | None
-    co_investigators: str | None
     pi_name: str | None
     principal_investigator: str | None
     date: str | None
@@ -611,20 +614,115 @@ def claim_goal_rows(grants: list[dict], rows: list[dict]) -> list[tuple[dict, di
     return claimed
 
 
+# A grant's own text often names its PI, and `co_investigators` (which resolve_pi_name
+# no longer reads) sometimes held exactly that name. These are the shapes the
+# corpus carries, tried in this order, first hit wins:
+#
+#   "PI: Lee", "(PI Park)", "[PI Dr. Ann B. Cole, ..."
+#   "Principal Investigator: Sam Ortiz", "Principal Investigators: A & B"
+#   "Nguyen (PI)", "Lee & Park (MPI)", "Dr. Ana Cruz (Principal Investigator)"
+#   "M. Silva, Principal Investigator", "Rosa Diaz, PI"
+#   "[PIs Dr. Ann Cole, Dr. Ben Hale, et al.]" (comma-separated names)
+#
+# Every shape wants a capitalised name, which is what keeps "PI: 75%",
+# "Subcontract-PI: $103,886" and "PI: smith" from matching. "Co-PI:" and
+# "Subcontract-PI:" are refused by the lookbehind (a hyphen or word character
+# before the "PI"): they name someone who is not the grant's PI. The separator
+# after a colon is spaces only, so a tab-delimited "PI:\t<next cell>" does not
+# read the next cell as a name. A name is a capitalised, digit-free token plus up
+# to PI_NAME_MAX_EXTRA_TOKENS more ("Dr." counts as a token), all on one line and
+# starting at a word boundary; two names may join with "&" or "and". A name that
+# would run past the token limit ("PI Kim Tu Thi Tran" at four tokens) does not
+# match at all rather than truncating to a wrong name. The "Name, Principal
+# Investigator" shape needs at least two tokens, so "Institute of Chicago,
+# Principal Investigator" (the owner's own role) does not read "Chicago" as a PI.
+PI_NAME_MAX_EXTRA_TOKENS = 3
+_PI_NAME_TOKEN = r"[A-Z](?:[^\W\d_]|[.'\u2019-])*"
+_PI_NAME_END = r"(?![\w'\u2019-]| +[A-Z])"
+
+
+def _pi_name(min_extra_tokens: int) -> str:
+    """A name pattern: `min_extra_tokens`..PI_NAME_MAX_EXTRA_TOKENS tokens after the first."""
+    return (
+        r"(?<![\w-])" + _PI_NAME_TOKEN
+        + r"(?: +" + _PI_NAME_TOKEN + r"){%d,%d}" % (min_extra_tokens, PI_NAME_MAX_EXTRA_TOKENS)
+        + _PI_NAME_END
+    )
+
+
+_PI_NAMES = _pi_name(0) + r"(?: +(?:&|and) +" + _pi_name(0) + r")*"
+PI_LABEL_PATTERNS = (
+    re.compile(r"(?:(?<![-\w])PI: *|[(\[]PI +)(" + _PI_NAMES + r")"),
+    re.compile(r"(?<![-\w])Principal Investigators?: *(" + _PI_NAMES + r")"),
+    re.compile(r"(" + _PI_NAMES + r") +\((?:PI|MPI|Principal Investigator)\)"),
+    re.compile(r"(" + _pi_name(1) + r"), (?:Principal Investigator|PI)\b"),
+    re.compile(r"[(\[]PIs +(" + _pi_name(0) + r"(?:, +" + _pi_name(0) + r")*)"),
+)
+_NAME_JOINER_RE = re.compile(r" (?:&|and) ")
+_NAME_WORD_RE = re.compile(r"[^\W\d_]{3,}(?:-[^\W\d_]+)*")
+
+
+def _pi_name_from_label(raw_text: str) -> str:
+    """The PI a grant's own text names, or '' when it names none."""
+    for pattern in PI_LABEL_PATTERNS:
+        match = pattern.search(raw_text or '')
+        if match:
+            return match.group(1).strip()
+    return ''
+
+
+def _surname_parts(name: str) -> frozenset[str]:
+    """The casefolded parts of the surname in "First M. Last".
+
+    A hyphenated surname contributes each part ("Rivera-Ortiz" gives both), so
+    "Ana Rivera" still reads as the owner "Ana Rivera-Ortiz". Any comma means a
+    list of names ("[PIs Lee, Park]"): no label pattern captures "Last, First",
+    and `_get_cv_owner_name` builds "First Last", so a comma never marks a
+    surname. Empty for a list or no name.
+    """
+    if ',' in name:
+        return frozenset()
+    words = _NAME_WORD_RE.findall(name)
+    return frozenset(words[-1].casefold().split('-')) if words else frozenset()
+
+
+def _is_cv_owner(pi_name: str, owner_name: str) -> bool:
+    """True when `pi_name` is one person whose surname is the CV owner's surname.
+
+    "Lee (PI)" names the CV owner "Ann Lee" by surname; the owner's full name is
+    the better cell, and it is what the owner auto-fill rendered before the label
+    was read. Surname only: a shared first name ("PI: Ann Smith" on Ann Lee's
+    CV) or a given name that is another person's surname ("PI: Mark Hale" on
+    Tom Mark Lee's CV) is someone else. A joined pair ("Lee & Park") or a list
+    ("Lee, Park") is never replaced, since dropping the other name would lose a
+    PI.
+    """
+    if not owner_name or _NAME_JOINER_RE.search(pi_name):
+        return False
+    return bool(_surname_parts(pi_name) & _surname_parts(owner_name))
+
+
 def resolve_pi_name(
     fields: GrantFields, raw_text: str, role: str | None, owner_name: str
 ) -> str | None:
     """Resolve the principal investigator for one grant.
 
-    Extracted field first, then the trailing cell of a pipe-delimited source row,
-    then the CV owner when the role says they are the PI. Text in, text out: no
-    docx, so the parser's heuristics are testable on their own (review thread
-    3932312407 item 5).
+    Extracted field first, then a PI the source text names (`PI_LABEL_PATTERNS`),
+    then the trailing cell of a pipe-delimited source row, then the CV owner when the
+    role says they are the PI. Text in, text out: no docx, so the parser's
+    heuristics are testable on their own (review thread 3932312407 item 5).
 
-    Returns None, not '', when the record carries `co_investigators` as a JSON
-    null and nothing else resolves -- the `or` chain hands the null straight
-    back. The caller renders a falsy PI as an empty cell either way, so the
-    annotation is what changed here, not the behaviour.
+    `co_investigators` is deliberately not a source. It lists the people who
+    worked on the grant alongside the PI, and on a CV that is usually the CV
+    owner: reading it here rendered the owner as "Name of Principal
+    Investigator" on a grant whose own text said "PI: <someone else>" (#982).
+    The label parse is what fills that cell instead, and it runs before the
+    owner auto-fill so a named PI is never overwritten by the owner.
+
+    Returns None, not '', when the record carries `pi_name` or
+    `principal_investigator` as a JSON null and nothing else resolves -- the
+    `or` chain hands the null straight back. The caller renders a falsy PI as an
+    empty cell either way.
 
     `role` is `str | None` for the same reason, on the way in. The caller reads
     it as `fields.get('pi_role') or fields.get('role', '')`
@@ -639,7 +737,12 @@ def resolve_pi_name(
     times, never null -- but `pi_role` is null on 81 of them, which is what
     puts the read on the `role` branch at all.
     """
-    pi_name = fields.get('pi_name') or fields.get('principal_investigator', '') or fields.get('co_investigators', '')
+    pi_name = fields.get('pi_name') or fields.get('principal_investigator', '')
+
+    if not pi_name:
+        pi_name = _pi_name_from_label(raw_text)
+        if pi_name and _is_cv_owner(pi_name, owner_name):
+            pi_name = owner_name
 
     # Parse PI name from raw text if not in extracted fields
     # Common format: "Agency | Amount | Dates | PI Name"
@@ -707,22 +810,50 @@ def _looks_like_funding_placeholder(table: Table) -> bool:
     return header_cells[0].text.strip().lower().startswith(_FUNDING_PLACEHOLDER_LABEL_PREFIX)
 
 
-def _format_grant_costs(
-    annual_direct_costs: str | int | float | None, total_funding: str | int | float | None
-) -> str:
-    """The "Annual direct costs:" cell, as currency.
+# The costs row of the WCM grant block. The template's own label is "Annual
+# direct costs:"; a total award amount gets its own label instead, because a
+# total under "Annual" states a false fact (#982).
+ANNUAL_COSTS_LABEL = 'Annual direct costs:'
+TOTAL_AWARD_LABEL = 'Total award:'
 
-    `or` on the raw value treated a real $0 as missing (round-2 review of #481,
-    point 4): the fallback is decided on what annual_direct_costs *renders*, so
-    0 wins and only a value that renders nothing (None, blank, non-amount)
-    falls through. Both arguments are `_create_grant_table`'s locals rather
-    than fresh `fields` reads, so a duplicate-of-title blanking made before the
-    call is what renders here too.
+
+def _first_rendering_amount(fields: GrantFields) -> str | int | float:
+    """The yearly amount, from `annual_direct_costs` then `annual_funding`.
+
+    Decided on what each value *renders*, not on its truthiness, so a real $0
+    in the first key wins over the second (round-2 review of #481, point 4) and
+    a blank or non-amount value falls through to it.
     """
-    costs_formatted = _format_currency(annual_direct_costs)
-    if not costs_formatted:
-        costs_formatted = _format_currency(total_funding)
-    return costs_formatted
+    annual_direct_costs = fields.get('annual_direct_costs')
+    if _format_currency(annual_direct_costs):
+        return cast(str | int | float, annual_direct_costs)
+    annual_funding = fields.get('annual_funding')
+    if _format_currency(annual_funding):
+        return cast(str | int | float, annual_funding)
+    return ''
+
+
+def _format_grant_costs(
+    annual_costs: str | int | float | None, total_funding: str | int | float | None
+) -> list[tuple[str, str]]:
+    """The costs rows as (label, currency text) pairs.
+
+    `annual_costs` goes under "Annual direct costs:" whenever it renders. A
+    `total_funding` that renders goes under "Total award:", never under
+    "Annual": alone it is the only costs row, and beside a different yearly
+    amount it is a second row, so neither figure is dropped. With neither, the
+    template's own label and an empty cell. Both arguments are
+    `_create_grant_table`'s locals rather than fresh `fields` reads, so a
+    duplicate-of-title blanking made before the call is what renders here too.
+    """
+    annual_formatted = _format_currency(annual_costs)
+    total_formatted = _format_currency(total_funding)
+    rows = []
+    if annual_formatted or not total_formatted:
+        rows.append((ANNUAL_COSTS_LABEL, annual_formatted))
+    if total_formatted and total_formatted != annual_formatted:
+        rows.append((TOTAL_AWARD_LABEL, total_formatted))
+    return rows
 
 
 class ResearchSupportSection:
@@ -923,11 +1054,12 @@ class ResearchSupportSection:
         agency = fields.get('agency') or fields.get('funding_source', '') or fields.get('sponsor', '')
         # The two funding keys are read twice, in opposite precedence: the
         # duplicate-content check below wants total_funding first, the rendered
-        # "Annual direct costs" row wants annual_direct_costs first. Both reads
+        # costs row wants the yearly amount first (`annual_direct_costs`, else
+        # `annual_funding`, the key stage 4 emits). Both reads
         # go through these locals, so clearing a duplicate below no longer has to
         # write '' back into the caller's `fields` to make the second read agree
         # (review thread 3932312407 item 1).
-        annual_direct_costs = fields.get('annual_direct_costs', '')
+        annual_direct_costs = _first_rendering_amount(fields)
         total_funding = fields.get('total_funding', '') or annual_direct_costs
 
         # Detect and fix cross-field duplication where the same content appears in multiple fields
@@ -945,7 +1077,7 @@ class ResearchSupportSection:
         if title and agency and title.strip().lower() == agency.strip().lower():
             # Agency and title are identical - keep as title only, clear agency
             agency = ''
-        if title and total_funding and title.strip().lower() == total_funding.strip().lower():
+        if title and total_funding and title.strip().lower() == str(total_funding).strip().lower():
             # Funding is same as title - clear funding
             total_funding = ''
             annual_direct_costs = ''
@@ -990,7 +1122,7 @@ class ResearchSupportSection:
         raw_text = entry.get('text', '') if entry else ''
         pi_name = resolve_pi_name(fields, raw_text, role, owner_name)
 
-        costs_formatted = _format_grant_costs(annual_direct_costs, total_funding)
+        cost_rows = _format_grant_costs(annual_direct_costs, total_funding)
 
         # Carry the grant/award identifier in Award Source. The WCM template has no
         # grant-number row -- its block is exactly these 8 rows plus optional goals --
@@ -1006,7 +1138,7 @@ class ResearchSupportSection:
         rows = [
             ('Award Source:', agency),
             ('Project title:', title),
-            ('Annual direct costs:', costs_formatted),
+            *cost_rows,
             ('Non-financial support:', fields.get('non_financial_support', '')),
             ('Duration of support:', self._format_grant_duration(fields, code)),
             ('Name of Principal Investigator:', pi_name),

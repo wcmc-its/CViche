@@ -59,6 +59,7 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     rebucket_grants_by_status,
     reclassify_past_m2a_grants,
     resolve_pi_name,
+    _is_cv_owner,
 )
 from unified_pipeline.stage6.normalization import grant_status_rebucket_target  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -421,6 +422,181 @@ def test_pi_name_is_not_extracted_from_a_rejected_trailing_cell(raw, reason):
     assert resolve_pi_name({}, raw, '', '') == '', reason
 
 
+# --- #982: PI resolution -- no co_investigators fallback, a "PI:" label first ---
+
+def test_co_investigators_never_fills_the_pi_cell():
+    """web207: `co_investigators` held the CV owner and rendered as the PI (#982)."""
+    fields = {'co_investigators': 'Tanaka, CoI'}
+    assert resolve_pi_name(fields, '', 'Co-Investigator', 'Ada Testowner') == ''
+
+
+def test_pi_label_in_the_source_text_fills_the_pi_before_the_owner_auto_fill():
+    """A named PI wins over the owner even when the role says the owner is a PI."""
+    raw = 'PI: Holloway | $329,925 | 5% Tanaka, CoI'
+    assert resolve_pi_name({}, raw, 'Principal Investigator', 'Ada Testowner') == 'Holloway'
+
+
+@pytest.mark.parametrize('raw, expected', [
+    ('P30CA047904 Cancer Center Support Grant (PI: Keller) | NCI', 'Keller'),
+    ('PI:Moss', 'Moss'),
+    ('PI: R Voss', 'R Voss'),
+    ('PI: De Luca', 'De Luca'),
+    ('(PI: Dr. Min Wu, Department of Radiation Oncology, UMB)', 'Dr. Min Wu'),
+    ('Sponsor: Tanaka\nPI: Bradley\nRole: Co-I', 'Bradley'),
+    # "(PI Name)" and "[PI Name" without a colon
+    ('Quadrangle Seminar Fund (PI Paul Reyes), 2003', 'Paul Reyes'),
+    ('(PI Lan Mai Thu Pham, CONVERGE trainee graduate)', 'Lan Mai Thu Pham'),
+    ('$3,000,000 / [PI Dr. Ann B. Cole, Co-Is Dr. Omar Haddad]', 'Dr. Ann B. Cole'),
+    ('Ellison Foundation (PI Lee and Park)', 'Lee and Park'),
+    # "Principal Investigator(s): Name(s)"
+    ('Role: Postdoctoral Fellow\tPrincipal Investigator: Sam Ortiz\tTitle: X', 'Sam Ortiz'),
+    ('Principal Investigators: Ann Cole & Beth Hale\tFunding agency: A',
+     'Ann Cole & Beth Hale'),
+    # "Name (PI)", "Names (MPI)", "Name (Principal Investigator)"
+    ('National Cancer Institute (R01)\tNguyen (PI)\t07/01/25', 'Nguyen'),
+    ('NIA (R21)\tLee & Park (MPI)\t12/01/24', 'Lee & Park'),
+    ('Collaborating with Dr. Ana Cruz (Principal Investigator) and others', 'Dr. Ana Cruz'),
+    ('1R21EB002742-01 Srinivasan (PI)  9/1/03 - 8/31/05', 'Srinivasan'),
+    ('R21EB002742-01 Srinivasan (PI)  9/1/03 - 8/31/05', 'Srinivasan'),
+    # "Name, Principal Investigator" / "Name, PI"
+    ('$144,301. M. Silva, Principal Investigator, A Byrne, Co-Investigator.', 'M. Silva'),
+    ('Rosa Diaz, PI.   Co-investigators: Ivan T. Roth', 'Rosa Diaz'),
+    # "[PIs A, B, ...]"
+    ('$1,350,000 [PIs Dr. Ann Cole, Dr. Ben Hale, et al.]',
+     'Dr. Ann Cole, Dr. Ben Hale'),
+])
+def test_pi_label_name_shapes(raw, expected):
+    assert resolve_pi_name({}, raw, '', '') == expected
+
+
+@pytest.mark.parametrize('raw, reason', [
+    ('Co-PI: Eric Stone', 'a Co-PI is not the PI'),
+    ('Subcontract-PI: $103,886 (direct costs)', 'an amount, not a name'),
+    ('06/01/2021-05/31/2026 PI: 75%\tNIAID', 'an effort figure, not a name'),
+    ('PI:\tHart Role on Grant:', 'a tab ends the field: the next cell is not the name'),
+    ('PI: smith', 'a lower-case word is not a name'),
+    ('(PI Lan Mai Thu Pham Vo Ha)', 'a name past the token limit is not truncated to a wrong one'),
+    ('(PI: Jones R01 renewal)', 'an award-number token after a surname is not part of a name'),
+    ('Rehabilitation Institute of Chicago, Principal Investigator.',
+     '"Name, Principal Investigator" needs two tokens: Chicago is the owner\'s place'),
+    ('1P20CA086278-01A1Frost (PI)', 'an award number glued to a name is not a name'),
+    ('Manual Therapy grant (co-principal investigator) Smith', 'no PI label at all'),
+])
+def test_pi_label_that_is_not_a_pi_name_is_left_alone(raw, reason):
+    assert resolve_pi_name({}, raw, '', '') == '', reason
+
+
+def test_a_pi_label_naming_the_cv_owner_by_surname_renders_the_owner_full_name():
+    """"Srinivasan (PI)" on Srinivasan's own CV is the owner, so the cell keeps the
+    owner's full name, as the owner auto-fill rendered it before the label was read."""
+    assert resolve_pi_name({}, 'Duke (PI: Srinivasan) 2017', 'PI', 'Priya Srinivasan') \
+        == 'Priya Srinivasan'
+    assert resolve_pi_name({}, 'Duke (PI: Someone Else) 2017', 'PI', 'Priya Srinivasan') \
+        == 'Someone Else'
+
+
+@pytest.mark.parametrize('raw, owner', [
+    ('PI: Nora Smith', 'Nora M. Quinn'),
+    ('PI: Mark Anderson', 'Andrew Mark Jones'),
+])
+def test_a_pi_sharing_only_a_given_name_with_the_cv_owner_is_not_the_owner(raw, owner):
+    """A shared first or middle name is not the owner: the named PI is kept."""
+    assert resolve_pi_name({}, raw, '', owner) == raw[len('PI: '):]
+
+
+@pytest.mark.parametrize('raw', ['PI: Quinn', 'PI: Quinn, Nora', 'PI: Nora Quinn'])
+def test_a_pi_with_the_cv_owners_surname_is_the_owner(raw):
+    assert resolve_pi_name({}, raw, '', 'Nora M. Quinn') == 'Nora M. Quinn'
+
+
+@pytest.mark.parametrize('name, owner, expected', [
+    ('Quinn, Nora', 'Nora M. Quinn', False),
+    ('Quinn, Holloway', 'Nora M. Quinn', False),
+    ('Nora Quinn', 'Nora M. Quinn', True),
+    ('Dr. Nora Quinn, Dr. Ann Lee', 'Nora M. Quinn', False),
+    ('Quinn', '', False),
+    ('Al Li', 'Bo Ng', False),
+    ('Ana Rivera', 'Ana Rivera-Ortiz', True),
+    ('Rivera AO', 'Ana Rivera-Ortiz', True),
+    ('Ana Ortiz', 'Ana Rivera-Ortiz', True),
+    ('Ana Smith', 'Ana Rivera-Ortiz', False),
+    ('Lee & Park', 'Amy Park', False),
+])
+def test_is_cv_owner_matches_one_surname_and_never_a_list(name, owner, expected):
+    assert _is_cv_owner(name, owner) is expected
+
+
+@pytest.mark.parametrize('raw', ['Harvard (PIs Quinn, Holloway) 2019', '[PIs Nora Quinn, Bo Li]'])
+def test_a_pi_list_naming_the_cv_owner_keeps_every_pi(raw):
+    """A "PIs" list that includes the owner is not collapsed to the owner: that
+    would drop the other PI, the loss #982 is about."""
+    assert resolve_pi_name({}, raw, '', 'Nora M. Quinn') == raw.split('PIs ')[1].rstrip(']').split(')')[0]
+
+
+def test_an_and_joined_pair_naming_the_cv_owner_keeps_both_pis():
+    assert resolve_pi_name({}, 'Ellison Foundation (PI Lee and Park)', '', 'Amy Park') == 'Lee and Park'
+
+
+@pytest.mark.parametrize('raw, expected', [
+    ("PI: Mary O'Brien", "Mary O'Brien"),
+    ('PI: Mary O\u2019Brien', 'Mary O\u2019Brien'),
+    ('PI: Ana Rivera-Ortiz', 'Ana Rivera-Ortiz'),
+])
+def test_pi_name_tokens_keep_apostrophes_and_hyphens(raw, expected):
+    assert resolve_pi_name({}, raw, '', '') == expected
+
+
+def test_a_hyphenated_pi_label_naming_the_cv_owner_renders_the_owner():
+    assert resolve_pi_name({}, 'PI: Ana Rivera', '', 'Ana Rivera-Ortiz') == 'Ana Rivera-Ortiz'
+
+
+def test_a_name_glued_to_an_award_number_by_a_hyphen_is_not_a_name():
+    assert resolve_pi_name({}, 'R01-Frost (PI)', '', '') == ''
+
+
+def test_pi_name_token_limit_is_exactly_three_extra_tokens():
+    """Four extra tokens is over the limit and is skipped, not truncated."""
+    assert resolve_pi_name({}, '(PI Ann Bo Cy Di)', '', '') == 'Ann Bo Cy Di'
+    assert resolve_pi_name({}, '(PI Ann Bo Cy Di Ed)', '', '') == ''
+
+
+def test_a_joined_pair_naming_the_cv_owner_is_not_collapsed_to_the_owner():
+    assert resolve_pi_name({}, 'NIA\tLee & Park (MPI)', '', 'Amy Lee') == 'Lee & Park'
+
+
+def test_an_explicit_pi_label_beats_a_name_suffix_shape():
+    """Shapes are tried in order: "PI: <name>" outranks "<name>, Principal Investigator"."""
+    raw = 'Ada Lovelace, Principal Investigator; renewal (PI: Grace Hopper)'
+    assert resolve_pi_name({}, raw, '', '') == 'Grace Hopper'
+
+
+def test_a_null_source_text_resolves_to_no_pi_rather_than_raising():
+    """`entry['text']` can be a JSON null; the label parse must not hand it to `re`."""
+    assert resolve_pi_name({}, None, '', 'Ada Testowner') == ''
+
+
+def test_extracted_pi_name_beats_the_pi_label():
+    assert resolve_pi_name({'pi_name': 'Jane Smith'}, 'PI: Someone Else', '', '') == 'Jane Smith'
+
+
+def test_pi_label_beats_the_pipe_row_trailing_cell():
+    raw = 'NIH | $100,000 | 2019-2021 | Jane Smith (PI: Ada Lovelace)'
+    assert resolve_pi_name({}, raw, '', '') == 'Ada Lovelace'
+
+
+def test_a_grant_whose_text_names_another_pi_does_not_render_the_owner():
+    """The rendered wire: co-investigator owner, `PI: <other>` in the text."""
+    gen = _generator()
+    table = gen._create_grant_table(
+        {'title': 'Structure-specific nuclease study', 'agency': 'NIH',
+         'co_investigators': 'Tanaka, CoI', 'annual_funding': '329925'},
+        'M2A', entry={'text': 'PI: Holloway | $329,925 | 5% Tanaka, CoI'},
+        owner_name='Mia Tanaka')
+    cells = _cells(table)
+    assert cells['Name of Principal Investigator:'] == 'Holloway'
+    assert cells['Annual direct costs:'] == '$329,925'
+
+
 # --- item 8: percent-effort extraction, parsed and applied ----------------------
 
 def test_role_effort_header_is_parsed_into_the_effort_lookup():
@@ -736,16 +912,83 @@ def test_agency_precedence_is_agency_then_funding_source_then_sponsor():
 
 # --- item 14: funding fallback --------------------------------------------------
 
-@pytest.mark.parametrize('field', ['annual_direct_costs', 'total_funding'])
+@pytest.mark.parametrize('field', ['annual_direct_costs', 'annual_funding'])
 def test_annual_direct_costs_fallbacks(field):
-    """Either funding key alone fills the "Annual direct costs:" row.
+    """Either yearly key alone fills the "Annual direct costs:" row.
 
-    Untested before, and the two keys are read twice in opposite precedence
-    inside the renderer (review thread 3932451691 item 14).
+    `annual_funding` is the key the stage-4 M2 schema actually emits, and it
+    was never read, so 16 corpus records rendered an empty Annual cell (#982).
     """
     fields = {'title': 'Funded Cohort Study', field: '100000', 'start_date': '01/2019'}
     cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
     assert cells['Annual direct costs:'] == '$100,000'
+    assert 'Total award:' not in cells
+
+
+def test_total_funding_alone_is_labelled_total_award_not_annual():
+    """A total with no yearly figure is a total: it never sits under "Annual".
+
+    web36's "Institutional Award: $2,638,299" used to render as Annual direct
+    costs (#982). The row keeps its slot, so the block is still eight rows.
+    """
+    fields = {'title': 'Funded Cohort Study', 'total_funding': '2638299',
+              'start_date': '01/2019'}
+    table = _generator()._create_grant_table(fields, 'M2A')
+    cells = _cells(table)
+    assert cells['Total award:'] == '$2,638,299'
+    assert 'Annual direct costs:' not in cells
+    assert len(table.rows) == 8
+
+
+def test_annual_and_total_both_render_as_two_rows_and_neither_is_dropped():
+    """web207 R01CA284633: annual $329,925 under Annual, the $1,649,625 total under
+    its own label directly after it -- the old render showed the total (mislabelled)
+    and dropped the annual figure, so dropping the total now would just swap the loss."""
+    fields = {'title': 'Funded Cohort Study', 'annual_funding': '329925',
+              'total_funding': '1649625', 'start_date': '01/2019'}
+    table = _generator()._create_grant_table(fields, 'M2A')
+    rows = _rows(table)
+    costs_at = [label for label, _ in rows].index('Annual direct costs:')
+    assert rows[costs_at] == ('Annual direct costs:', '$329,925')
+    assert rows[costs_at + 1] == ('Total award:', '$1,649,625')
+    assert len(rows) == 9
+
+
+def test_a_total_equal_to_the_annual_amount_is_one_row():
+    """The same figure twice is one fact; `total_funding` falling back to the
+    yearly amount must not manufacture a Total award row."""
+    fields = {'title': 'Funded Cohort Study', 'annual_funding': '100000',
+              'total_funding': '100000', 'start_date': '01/2019'}
+    table = _generator()._create_grant_table(fields, 'M2A')
+    assert len(table.rows) == 8
+    assert 'Total award:' not in _cells(table)
+
+
+def test_annual_direct_costs_beats_annual_funding_and_blank_falls_through_to_it():
+    """The older key is read first; a blank one does not shadow `annual_funding`."""
+    both = {'title': 'Funded Cohort Study', 'annual_direct_costs': '100000',
+            'annual_funding': '200000', 'start_date': '01/2019'}
+    assert _cells(_generator()._create_grant_table(both, 'M2A'))['Annual direct costs:'] \
+        == '$100,000'
+    blank = dict(both, annual_direct_costs='  ')
+    assert _cells(_generator()._create_grant_table(blank, 'M2A'))['Annual direct costs:'] \
+        == '$200,000'
+
+
+def test_numeric_annual_funding_without_a_total_does_not_crash():
+    """The title-duplicate check compares `total_funding`, which falls back to the
+    yearly amount, so a JSON number there reached `.strip()` once the yearly key
+    was read at all (#982)."""
+    fields = {'title': 'Funded Cohort Study', 'annual_funding': 329925,
+              'start_date': '01/2019'}
+    cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
+    assert cells['Annual direct costs:'] == '$329,925'
+
+
+def test_no_amount_at_all_keeps_the_annual_label_with_an_empty_cell():
+    fields = {'title': 'Funded Cohort Study', 'start_date': '01/2019'}
+    cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
+    assert cells['Annual direct costs:'] == ''
 
 
 def test_annual_direct_costs_wins_when_both_funding_keys_are_present():
