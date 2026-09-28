@@ -735,7 +735,6 @@ lucide-react           # Icon library
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `OPENAI_API_KEY_WORK` | Legacy alias for `OPENAI_API_KEY`. Supported as fallback. | None |
-| `SEGMENTATION_MODEL` | Override the default segmentation model for Stage 1b. | `gpt-4.1-mini` |
 | `CV_HIERARCHY_ASSISTANT_ID` | OpenAI Assistants API ID for CV hierarchy processing. Required only if using Assistants API mode. | None |
 | `CV_DIRECT_FILE_ASSISTANT_ID` | OpenAI Assistants API ID for direct file processing. Required only if using Assistants API mode. | None |
 
@@ -764,9 +763,6 @@ NCBI_API_KEY=...
 
 # Optional - for debugging LLM calls
 PROMPT_LOG_DIR=./prompt_logs
-
-# Optional - override default model
-# SEGMENTATION_MODEL=gpt-4.1
 
 # Optional - for Assistants API mode
 # CV_HIERARCHY_ASSISTANT_ID=asst_...
@@ -1158,11 +1154,8 @@ The database (SQLite in development, MariaDB in production) is the operational s
 ### Central Configuration (`src/unified_pipeline/config.py`)
 
 ```python
-# LLM Settings
-DEFAULT_MODEL = "gpt-4o-mini"
-SEGMENTATION_MODEL = "gpt-4o-mini"
-TAXONOMY_MODEL = "gpt-4o-mini"
-PARSING_MODEL = "gpt-4o-mini"
+# LLM model selection is NOT here: it is per stage in
+# config/llm_config.yaml (default + stages: blocks, CVICHE_LLM_MODEL env).
 
 # Feature Flags
 USE_LEGACY_HANDLERS = True           # Professional WCM formatting
