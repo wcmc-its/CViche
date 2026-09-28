@@ -23,6 +23,7 @@ Run with:
 """
 
 import json
+import logging
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -148,6 +149,21 @@ def test_extract_tool_use_input_none_for_text_only_response() -> None:
     response = {"output": {"message": {"content": [{"text": "just text"}]}}}
     assert bedrock._extract_tool_use_input(response) is None
     assert bedrock._extract_tool_use_input({}) is None
+
+
+def test_extract_text_content_finds_text_block() -> None:
+    response = {"output": {"message": {"content": [{"toolUse": {}}, {"text": "hi"}]}}}
+    assert bedrock._extract_text_content(response) == "hi"
+
+
+def test_extract_text_content_none_for_empty_or_textless_content() -> None:
+    assert bedrock._extract_text_content(
+        {"output": {"message": {"content": []}}}
+    ) is None
+    assert bedrock._extract_text_content(
+        {"output": {"message": {"content": [{"toolUse": {}}]}}}
+    ) is None
+    assert bedrock._extract_text_content({}) is None
 
 
 def test_strip_markdown_fences_json_language_tag() -> None:
@@ -309,6 +325,21 @@ def test_call_bedrock_preserves_explicit_max_tokens(monkeypatch: pytest.MonkeyPa
     assert fake.calls[0]["inferenceConfig"]["maxTokens"] == 500
 
 
+@pytest.mark.parametrize("bad_max_tokens", [-5, 0, True, False, 1.5, "16000"])
+def test_call_bedrock_rejects_invalid_max_tokens(
+    monkeypatch: pytest.MonkeyPatch, bad_max_tokens: object,
+) -> None:
+    fake = _FakeBedrockClient([_converse_response("hi")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(ValueError, match="max_tokens"):
+        bedrock._call_bedrock(
+            BEDROCK_MODEL, [{"role": "user", "content": "hi"}], 0.1,
+            response_format=None, max_tokens=bad_max_tokens, enable_prompt_caching=False,
+        )
+    assert fake.calls == []  # rejected before the client is ever called
+
+
 def test_call_bedrock_enable_prompt_caching_appends_cache_point(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeBedrockClient([_converse_response("hi")])
     monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
@@ -364,6 +395,30 @@ def test_handle_bedrock_text_path_maps_finish_reason_and_tokens(monkeypatch: pyt
     assert len(fake.calls) == 1  # valid text, no JSON requested -> no repair call
 
 
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_finish_reason"),
+    [
+        ("guardrail_intervened", "content_filter"),  # was "guard_intervened" -- never matched (#628)
+        ("content_filtered", "content_filter"),
+        ("model_context_window_exceeded", "length"),
+        ("malformed_model_output", "error"),  # decided on #628
+        ("malformed_tool_use", "error"),
+    ],
+)
+def test_handle_bedrock_stop_reason_map_covers_documented_values(
+    monkeypatch: pytest.MonkeyPatch, stop_reason: str, expected_finish_reason: str,
+) -> None:
+    canned = _converse_response("hello", stop_reason=stop_reason)
+    fake = _FakeBedrockClient([canned])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}], response_format=None, cfg=_bedrock_cfg()
+    )
+
+    assert result["finish_reason"] == expected_finish_reason
+
+
 def test_handle_bedrock_schema_tool_path_returns_serialized_tool_input(monkeypatch: pytest.MonkeyPatch) -> None:
     canned = {
         "output": {"message": {"content": [
@@ -401,10 +456,119 @@ def test_handle_bedrock_raises_when_forced_tool_did_not_fire(monkeypatch: pytest
         "type": "json_schema",
         "json_schema": {"name": "extract", "schema": {"type": "object"}},
     }
-    with pytest.raises(RuntimeError, match="did not fire"):
+    with pytest.raises(bedrock.BedrockToolCallDidNotFireError, match="did not fire"):
         bedrock._handle_bedrock(
             [{"role": "user", "content": "hi"}], response_format=response_format, cfg=_bedrock_cfg()
         )
+
+
+def test_handle_bedrock_empty_content_retries_and_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    # First call returns an empty content list (#884, e.g. a guardrail
+    # intervention); the retry gets real text back.
+    empty = {
+        "output": {"message": {"content": []}},
+        "stopReason": "guardrail_intervened",
+        "usage": {"inputTokens": 30, "outputTokens": 0},
+    }
+    recovered = _converse_response("hello", stop_reason="end_turn",
+                                   input_tokens=40, output_tokens=8)
+    fake = _FakeBedrockClient([empty, recovered])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}], response_format=None, cfg=_bedrock_cfg()
+    )
+
+    assert result["content"] == "hello"
+    assert result["finish_reason"] == "stop"  # from the retry's stopReason
+    assert result["prompt_tokens"] == 30 + 40
+    assert result["completion_tokens"] == 0 + 8
+    assert len(fake.calls) == 2
+
+
+def test_bedrock_failure_types_stay_runtime_errors() -> None:
+    # Existing `except RuntimeError` handlers must keep catching both.
+    assert issubclass(bedrock.BedrockToolCallDidNotFireError, RuntimeError)
+    assert issubclass(bedrock.BedrockEmptyResponseError, RuntimeError)
+
+
+def test_handle_bedrock_empty_content_on_both_calls_raises_empty_response_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    empty_first = {
+        "output": {"message": {"content": []}},
+        "stopReason": "guardrail_intervened",
+        "usage": {"inputTokens": 30, "outputTokens": 0},
+    }
+    empty_retry = {
+        "output": {"message": {"content": []}},
+        "stopReason": "max_tokens",
+        "usage": {"inputTokens": 40, "outputTokens": 0},
+    }
+    fake = _FakeBedrockClient([empty_first, empty_retry])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockEmptyResponseError, match="guardrail_intervened.*max_tokens"):
+        bedrock._handle_bedrock(
+            [{"role": "user", "content": "hi"}], response_format=None, cfg=_bedrock_cfg()
+        )
+    assert len(fake.calls) == 2  # both reads guarded, no IndexError before the raise
+
+
+def test_handle_bedrock_empty_content_logs_stop_reason_and_usage(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # #884 requires logging stopReason + usage when content comes back
+    # empty -- once the retry succeeds, this log is the only record of why
+    # it fired.
+    empty = {
+        "output": {"message": {"content": []}},
+        "stopReason": "guardrail_intervened",
+        "usage": {"inputTokens": 30, "outputTokens": 0},
+    }
+    recovered = _converse_response("hello", stop_reason="end_turn")
+    fake = _FakeBedrockClient([empty, recovered])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"):
+        bedrock._handle_bedrock(
+            [{"role": "user", "content": "hi"}], response_format=None, cfg=_bedrock_cfg()
+        )
+
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "guardrail_intervened" in msg and "'inputTokens': 30" in msg
+        for msg in warnings
+    )
+
+
+def test_handle_bedrock_invalid_then_empty_retry_keeps_initial_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # First call returns invalid JSON (triggers the repair retry); the
+    # repair retry itself comes back with an empty content list. #884's
+    # fallback (`content = retry_content if retry_content is not None else
+    # content`) must keep the first call's (invalid) content instead of
+    # returning None -- every json_object caller's json.loads(content)
+    # needs a string, not None.
+    first = _converse_response("not json", stop_reason="end_turn")
+    empty_retry = {
+        "output": {"message": {"content": []}},
+        "stopReason": "max_tokens",
+        "usage": {"inputTokens": 40, "outputTokens": 0},
+    }
+    fake = _FakeBedrockClient([first, empty_retry])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}],
+        response_format={"type": "json_object"},
+        cfg=_bedrock_cfg(),
+    )
+
+    assert result["content"] == "not json"  # kept, not None
+    assert result["finish_reason"] == "length"  # retry's stopReason (max_tokens)
+    assert len(fake.calls) == 2
 
 
 def test_handle_bedrock_repairs_invalid_json_on_retry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -415,20 +579,54 @@ def test_handle_bedrock_repairs_invalid_json_on_retry(monkeypatch: pytest.Monkey
     fake = _FakeBedrockClient([first, second])
     monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
 
+    turn = {"role": "user", "content": "hi"}
+    messages = [turn]
     result = bedrock._handle_bedrock(
-        [{"role": "user", "content": "hi"}],
+        messages,
         response_format={"type": "json_object"},
         cfg=_bedrock_cfg(),
     )
 
+    # The repair works on copies: the caller's list and turn are untouched.
+    assert messages == [{"role": "user", "content": "hi"}] and messages[0] is turn
     # Only the repair route produces valid JSON here (the first call's raw
     # content was "not json").
     assert json.loads(result["content"]) == {"a": 1}
     assert result["prompt_tokens"] == 30 + 40  # tokens accumulated across both calls
     assert result["completion_tokens"] == 5 + 8
     assert len(fake.calls) == 2
-    repair_message = fake.calls[1]["messages"][-1]
-    assert repair_message["content"] == [{
+    # #630: the repair call must NOT append a second user turn -- Bedrock
+    # Converse rejects two consecutive same-role turns. The hint is folded
+    # into the existing (only) trailing user turn instead, so role
+    # alternation is preserved end to end.
+    repair_messages = fake.calls[1]["messages"]
+    assert [m["role"] for m in repair_messages] == ["user"]
+    assert repair_messages[-1]["content"] == [{
+        "text": "hi\n\nYour previous response was not valid JSON. Please respond with "
+                "ONLY valid JSON, no markdown fencing or explanation.",
+    }]
+
+
+def test_handle_bedrock_repair_appends_new_turn_when_last_turn_is_not_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The merge-into-last-turn shortcut only applies to a trailing user
+    # turn. A conversation that (unusually) ends on an assistant
+    # turn falls back to appending a fresh user turn, same as before #630.
+    first = _converse_response("not json", stop_reason="end_turn")
+    second = _converse_response('{"a": 1}', stop_reason="end_turn")
+    fake = _FakeBedrockClient([first, second])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}],
+        response_format={"type": "json_object"},
+        cfg=_bedrock_cfg(),
+    )
+
+    repair_messages = fake.calls[1]["messages"]
+    assert [m["role"] for m in repair_messages] == ["user", "assistant", "user"]
+    assert repair_messages[-1]["content"] == [{
         "text": "Your previous response was not valid JSON. Please respond with "
                 "ONLY valid JSON, no markdown fencing or explanation.",
     }]
