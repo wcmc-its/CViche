@@ -1531,3 +1531,18 @@ def test_849_policy_label_after_a_known_field_value_is_withheld(text, kept, gone
 ])
 def test_849_prose_containing_a_label_word_is_not_cut(text):
     assert _pii_fragments(text) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Citizenship: US Language: Spanish",                        # "age:" inside Language
+    "Office Address: 1300 York Ave Webpage: www.example.org",   # "age:" inside Webpage
+    "Citizenship: US Idea: a new clinic",                       # "dea:" inside Idea
+    "Phone: 555-0100 Pre-Marital Status: survey",               # hyphen before the label
+    "Phone: 555-0100 O'Visa: none",                             # apostrophe before the label
+])
+def test_849_policy_label_inside_a_word_after_a_known_field_is_not_cut(text):
+    """The known-field path accepts a policy label only at a word start;
+    it used to match "age:" inside "Language:" and render "Langu"."""
+    entries = {"A": [{"text": text, "taxonomy_code": "A", "extracted_fields": {}}]}
+    _run(entries)
+    assert entries["A"][0]["text"] == text

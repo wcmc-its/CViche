@@ -613,13 +613,22 @@ def _explicit_dob_label(text: str, m: re.Match) -> bool:
             and _WHOLE_DATE_AFTER_LABEL_RE.match(text, m.end()) is not None)
 
 
+#: A policy label opens at a word start: no letter, digit, apostrophe or
+#: hyphen right before it -- the same guard `_KNOWN_FIELD_LABEL_RE` leads
+#: with. Without it "Language:" matched its tail "age:" and rendered as
+#: "Langu" once a known field sat earlier on the line.
+_LABEL_WORD_START_RE = re.compile(r"(?<![\w'’-])")
+
+
 def _after_known_field(text: str, frag_start: int, label_start: int) -> bool:
-    """True when a KNOWN field label (`_KNOWN_FIELD_LABEL_RE`) opens
-    earlier in the same fragment: a policy label after another field's
-    value ("Citizenship: US Date of Birth: ...") starts that field's
-    successor, wherever the value ends (#849). A vocabulary, never a guess
-    at where a value stops -- #821 R4."""
-    return _KNOWN_FIELD_LABEL_RE.search(text, frag_start, label_start) is not None
+    """True when the policy label at `label_start` starts a word and a
+    KNOWN field label (`_KNOWN_FIELD_LABEL_RE`) opens earlier in the same
+    fragment: a policy label after another field's value ("Citizenship: US
+    Date of Birth: ...") starts that field's successor, wherever the value
+    ends (#849). A vocabulary, never a guess at where a value stops --
+    #821 R4."""
+    return (_LABEL_WORD_START_RE.match(text, label_start) is not None
+            and _KNOWN_FIELD_LABEL_RE.search(text, frag_start, label_start) is not None)
 
 
 def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) -> list[tuple[int, int]]:
