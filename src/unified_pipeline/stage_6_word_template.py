@@ -479,6 +479,16 @@ _DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1'})
 # under "Book Chapters" rendered under "Books").
 _STATUS_ROUTED_CODES = frozenset({'S7'})
 
+# (assigned, target) same-family pairs a hierarchy mismatch never reroutes:
+# the target code's own `common_confusions` in core/taxonomy_v7.json names
+# exactly this mistake ("CME ... misclassified as K1 instead of K4" on K1), so
+# the heading is the weaker signal there (#946 item 3). A taxonomy fact; the
+# test file pins each pair to its taxonomy_v7 text.
+_TAXONOMY_WARNED_CONFUSIONS = frozenset({
+    ('D3', 'D1'), ('K1', 'K4'), ('K4', 'K1'), ('K5', 'K4'),
+    ('Q1', 'Q2'), ('Q2', 'Q3'), ('S1', 'S8'), ('S2', 'S1'),
+})
+
 
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
     """The one code a hierarchy mismatch should reroute to, or None to skip.
@@ -693,8 +703,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         """Correct taxonomy code routing when hierarchy mismatch flag indicates a likely misclassification.
 
         Conservative correction rules:
-        - Same-family reroutes (e.g., K5→K1): always applied since the LLM got the family
-          right but the sub-type wrong, and the CV's section structure is a better judge.
+        - Same-family reroutes (e.g., K3→K1): applied only when every expected
+          code renders in one WCM section, and the pair is not one the
+          taxonomy warns about (`_TAXONOMY_WARNED_CONFUSIONS`). A heading that
+          names codes in several sections ("Committees" -> P, Q2, O) does not
+          say which one it means, and the longest-code pick only favoured the
+          two-character code (#946 item 3: 200 corpus reroutes, most wrong).
         - Cross-family reroutes (e.g., C→K1): only applied when the LLM's confidence
           was low (< 0.7), since the content analysis may have been uncertain.
         - Never: a status-routed code (`_STATUS_ROUTED_CODES`, S7), or a
@@ -726,6 +740,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         confidence = entry.get('taxonomy_confidence', 1.0)
 
         if assigned_family == expected_family:
+            if ((assigned_code, best_expected) in _TAXONOMY_WARNED_CONFUSIONS
+                    or len({TAXONOMY_TO_SECTION.get(code) for code in expected_codes}) > 1):
+                return assigned_code
             if self.verbose:
                 logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
                       f"(same family, hierarchy-guided) [{entry.get('text', '')[:60]}...]")
