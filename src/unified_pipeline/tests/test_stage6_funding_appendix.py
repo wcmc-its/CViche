@@ -401,3 +401,57 @@ def test_recovered_row_with_missing_parent_still_reaches_appendix(tmp_path):
     full_text = _all_text(Document(str(output_path)))
     assert "T. APPENDIX" in full_text
     assert "Conference travel support" in full_text
+
+
+def test_recovered_row_contained_in_parent_but_field_not_rendered_still_reaches_appendix(tmp_path):
+    """The exact gap a blind review of the original A5IZ6Q fix caught: a
+    recovered row can be a VERBATIM substring of its parent's raw stage-2
+    text -- `recovered_row_duplicates_parent`'s whole signal -- while the
+    field it carries never reaches a render slot at all. Stage 6's grant
+    table is fixed-slot (CLAUDE.md "Stage 6 drops unnamed fields") and only
+    folds `grant_number` into the Award Source cell when the entry's
+    `extracted_fields` actually carries it. Here the parent's raw text has a
+    grant-number line -- `recover_unclaimed_table_rows` captured it into the
+    fused blob -- but `extracted_fields` does not, so no renderer ever sees
+    it. Dropping the recovered row on raw-text containment alone would be
+    the exact content loss the drop exists to avoid; it must still reach the
+    Appendix."""
+    grant_text = (
+        "Award Source: | Fictional Research Foundation\n"
+        "Project title: | Synthetic Tools for Data Curation\n"
+        "Grant number: | R01-ZZ98765\n"
+        "Duration of support: | 00/2021-00/2022"
+    )
+    grant_entry = {
+        "text": grant_text,
+        "taxonomy_code": "M2B",
+        "element_idx_start": 400,
+        "element_idx_end": 400,
+        "extracted_fields": {
+            "title": "Synthetic Tools for Data Curation",
+            "agency": "Fictional Research Foundation",
+            "start_date": "2021",
+            "end_date": "2022",
+            # No grant_number key -- the renderer never receives it, even
+            # though the raw text above carries the exact same line.
+        },
+    }
+    row = {"text": "Grant number: | R01-ZZ98765", "taxonomy_code": "T",
+           "recovered_row": True, "parent_idx": 400,
+           "element_idx_start": "400.0", "extracted_fields": {},
+           "hierarchy": ["Past Funding"]}
+    entries = [_RECOVERY_OWNER_ENTRY, grant_entry, row]
+
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: []
+    data = {"document_uid": "T420D", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+
+    full_text = _all_text(Document(str(output_path)))
+    assert "T. APPENDIX" in full_text
+    assert "R01-ZZ98765" in full_text
+    # The grant itself still rendered, and did not gain a grant-number cell.
+    assert "Fictional Research Foundation" in full_text

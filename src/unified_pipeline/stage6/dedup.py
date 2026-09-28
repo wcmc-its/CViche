@@ -167,24 +167,110 @@ def recovered_row_duplicates_parent(entry: dict, parent: dict | None) -> bool:
     name never clears that floor) even when reused across entries.
 
     Verbatim containment against the parent's own raw text sidesteps both
-    gaps: it needs no field list, no length floor, and no rendered-document
-    lookup, because a recovered row's every field comes from the SAME table
-    cell text the parent's fused entry already carries. Comparing after
-    `_CELL_SEPARATOR_RE` strips both cell-separator conventions (on top of
-    `_squash`'s own whitespace stripping) means this only ever WIDENS a
-    match relative to plain `_squash`: removing a shared character from both
-    sides cannot turn a true containment into a false one, so every case the
-    narrower comparison already caught still matches. A row NOT contained in
-    its parent (one the model's delimiter genuinely skipped, the case
-    `recover_unclaimed_table_rows` exists for) returns False and is left to
-    the normal appendix/recovery path -- callers must not treat False as
-    proof the row is missing, only as "not this parent's own duplicate".
+    gaps: it needs no field list and no length floor, because a recovered
+    row's every field comes from the SAME table cell text the parent's fused
+    entry already carries. Comparing after `_CELL_SEPARATOR_RE` strips both
+    cell-separator conventions (on top of `_squash`'s own whitespace
+    stripping) means this only ever WIDENS a match relative to plain
+    `_squash`: removing a shared character from both sides cannot turn a true
+    containment into a false one, so every case the narrower comparison
+    already caught still matches. A row NOT contained in its parent (one the
+    model's delimiter genuinely skipped, the case `recover_unclaimed_table_rows`
+    exists for) returns False and is left to the normal appendix/recovery
+    path -- callers must not treat False as proof the row is missing, only as
+    "not this parent's own duplicate".
+
+    This is a SCOPING check, not a rendered-proof: True says only "this row
+    is a candidate duplicate of THIS parent's captured text", never "this
+    row's content reached the rendered document" -- a blind review of the
+    A5IZ6Q fix caught callers that treated it as both (reproduced: adding a
+    'Grant number: | ...' line to a fused M2B entry's raw text, with no
+    matching `extracted_fields['grant_number']`, made this return True for
+    the matching recovered row even though `_create_grant_table`
+    (stage6/sections/research_support.py) never renders a field it never
+    receives -- stage 6's fixed-slot renderers drop any field they do not
+    name, CLAUDE.md "Stage 6 drops unnamed fields"). A caller that drops a
+    row on this signal alone can drop content that renders nowhere.
+    `recovered_row_content_rendered`, below, is the second, mandatory gate:
+    only a row that is BOTH a scoping match here AND confirmed present in
+    the already-rendered document may be dropped.
     """
     if not entry.get('recovered_row') or parent is None:
         return False
     row_text = _squash(_CELL_SEPARATOR_RE.sub('', entry.get('text', '') or ''))
     parent_text = _squash(_CELL_SEPARATOR_RE.sub('', parent.get('text', '') or ''))
     return bool(row_text) and row_text in parent_text
+
+
+# A recovered row's VALUE token, for `recovered_row_content_rendered` below.
+# Digit-inclusive, unlike render_check.py's alpha-only `_RENDER_TOKEN_RE`:
+# a recovered row's distinguishing content is often a bare year or amount
+# ("00/2021-00/2022"), not prose, and stage 6 reformats dates on the way to
+# the grant table ("2021-2022") so a verbatim match alone would miss a row
+# that DID render.
+_VALUE_TOKEN_RE = re.compile(r'[a-z0-9]{4,}')
+
+
+def _recovered_row_value(text: str) -> str:
+    """The VALUE half of a recovered row's single 'Label: | Value' pair
+    (`recover_unclaimed_table_rows`'s own shape -- one field per recovered
+    row, never more).
+
+    Deliberately not the label. A section's rendered table writes every row
+    label unconditionally and leaves only the value cell blank when the
+    field has nothing to show (`_create_grant_table`,
+    stage6/sections/research_support.py: all 8 grant rows' labels are always
+    written) -- so a label alone always finds itself in the rendered
+    document, whether or not this row's actual content did.
+    """
+    parts = _CELL_SEPARATOR_RE.split(text or '', maxsplit=1)
+    return (parts[1] if len(parts) > 1 else (text or '')).strip()
+
+
+def recovered_row_content_rendered(entry: dict, rendered_lines: list[str]) -> bool:
+    """True when a recovered row's own VALUE -- never its label, and never
+    the parent's raw stage-2 text -- is verifiably present in the ALREADY
+    RENDERED document.
+
+    The second, mandatory half of the A5IZ6Q drop (see
+    `recovered_row_duplicates_parent`'s docstring for the gap this closes):
+    `recover_unclaimed_table_rows` (stage_2_entry_extraction.py) splits a
+    table row out of the fused parent's raw JSON text independently of
+    whether ANY renderer ever reads the matching `extracted_fields` key, so
+    the row's words sitting in the parent's `text` is not proof they reached
+    a render slot -- stage 6's section renderers are fixed-slot and drop any
+    field they do not name (CLAUDE.md "Stage 6 drops unnamed fields"), and a
+    field can be captured into the parent's raw text while never reaching
+    its `extracted_fields` at all.
+
+    `rendered_lines` is `_rendered_output_lines()` (stage_6_word_template.py),
+    called AFTER every mapped section -- including the grant tables -- has
+    rendered and BEFORE this row would be dropped, so it already reflects
+    whatever the parent actually wrote.
+
+    Matched two ways, both scoped to a SINGLE rendered line so an unrelated
+    line elsewhere that merely shares one token (a year) can't vouch alone:
+    verbatim, after whitespace-free squashing (an agency, title, PI name or
+    percent-effort value reaches its cell unchanged); or, when stage 6
+    reformats the value (a date range: "00/2021-00/2022" renders
+    "2021-2022"), every >=4-character alnum token the value carries, all
+    inside that one line. A value with no verbatim match and no qualifying
+    token is NOT confirmed -- this returns False, never a guess, because a
+    false positive here is exactly the content loss this check exists to
+    prevent (reproduced: a bare grant identifier or a value the parent's
+    `extracted_fields` never carried, like `non_financial_support` here,
+    clears neither check and correctly returns False).
+    """
+    value = _recovered_row_value(entry.get('text', '') or '')
+    squashed_value = _squash(value)
+    if not squashed_value:
+        return False
+    squashed_lines = [_squash(line) for line in rendered_lines]
+    if any(squashed_value in line for line in squashed_lines):
+        return True
+    tokens = _VALUE_TOKEN_RE.findall(value.lower())
+    return bool(tokens) and any(
+        all(token in line for token in tokens) for line in squashed_lines)
 
 
 def _as_float(value: int | float | str | None) -> float | None:

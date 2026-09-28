@@ -23,6 +23,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     deduplicate_entries,
     find_recovered_row_parent,
+    recovered_row_content_rendered,
     recovered_row_duplicates_parent,
 )
 
@@ -278,6 +279,66 @@ def test_recovered_row_pipe_vs_tab_separator_still_matches():
     row = {"text": "Your percent (%) effort: | 1%",
            "recovered_row": True, "parent_idx": 100}
     assert recovered_row_duplicates_parent(row, parent)
+
+
+# ------------------------------ recovered_row_content_rendered (blind review)
+#
+# `recovered_row_duplicates_parent` above only scopes a candidate to its
+# parent's raw stage-2 text -- it is not proof the row's content reached a
+# render slot, because stage 6's section renderers are fixed-slot and drop
+# any field they do not name. A blind review of the original A5IZ6Q fix
+# caught callers treating scoping alone as sufficient; this is the second,
+# mandatory gate that closes it.
+
+def test_recovered_row_content_rendered_verbatim_value_match():
+    row = {"text": "Award Source: | Fictional Research Foundation"}
+    rendered = ["Award Source:", "Fictional Research Foundation"]
+    assert recovered_row_content_rendered(row, rendered)
+
+
+def test_recovered_row_content_rendered_label_alone_does_not_count():
+    # The label renders on every grant row whether or not the value does
+    # (_create_grant_table writes all 8 labels unconditionally) -- matching
+    # the label text alone would vouch for a value that never rendered.
+    row = {"text": "Non-financial support: | Conference travel fund"}
+    rendered = ["Non-financial support:"]  # label only -- value cell blank
+    assert not recovered_row_content_rendered(row, rendered)
+
+
+def test_recovered_row_content_rendered_reformatted_date_still_matches():
+    # Stage 6 reformats a bare-year duration ("00/2021-00/2022" ->
+    # "2021-2022") -- a verbatim match would miss this even though the
+    # content did render, so every distinguishing (>=4 char) token must be
+    # checked, together, within the SAME rendered line.
+    row = {"text": "Duration of support: | 00/2021-00/2022"}
+    rendered = ["Duration of support:", "2021-2022"]
+    assert recovered_row_content_rendered(row, rendered)
+
+
+def test_recovered_row_content_rendered_short_value_not_verifiable():
+    # A bare grant identifier the renderer never received (no matching
+    # extracted_fields key) has no verbatim match and no token long enough
+    # to check -- this must read as NOT confirmed, never as "assume
+    # rendered": that direction of error is exactly the content loss this
+    # check exists to prevent.
+    row = {"text": "Grant number: | R01-ZZ98765"}
+    rendered = ["Award Source:", "Fictional Research Foundation"]
+    assert not recovered_row_content_rendered(row, rendered)
+
+
+def test_recovered_row_content_rendered_scattered_tokens_do_not_count():
+    # Both distinguishing tokens exist in the document, but never together
+    # on the same rendered line -- a coincidental combination must not
+    # count as this row's own value having rendered.
+    row = {"text": "Duration of support: | 00/2021-00/2022"}
+    rendered = ["Duration of support:", "2021-Present", "unrelated 2022 entry"]
+    assert not recovered_row_content_rendered(row, rendered)
+
+
+def test_recovered_row_content_rendered_empty_value_not_confirmed():
+    row = {"text": "Non-financial support: | "}
+    rendered = ["Non-financial support:", "Fictional Research Foundation"]
+    assert not recovered_row_content_rendered(row, rendered)
 
 
 # ---------------------------------------- find_recovered_row_parent (A5IZ6Q)

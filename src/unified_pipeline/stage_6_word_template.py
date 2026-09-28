@@ -137,6 +137,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
     _significant_words,
     deduplicate_entries,
     find_recovered_row_parent,
+    recovered_row_content_rendered,
     recovered_row_duplicates_parent,
 )
 from unified_pipeline.stage6.render_check import (  # noqa: F401
@@ -997,7 +998,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self, entries: list[dict[str, Any]], all_entries: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
         """Filter a structurally recovered table row (#420) out of `entries`
-        when it verbatim-duplicates the parent it was split from (A5IZ6Q).
+        when it duplicates content the parent it was split from (A5IZ6Q)
+        ALREADY RENDERED.
 
         Split out of `generate()` (#3.2a) purely so the lookup this needs
         doesn't grow that function further -- the filtering itself is new
@@ -1013,15 +1015,34 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         both miss this, and `find_recovered_row_parent` for why a row's
         `parent_idx` sometimes needs the containing span, not just a direct
         `element_idx_start` hit.
+
+        A row is dropped only when BOTH gates pass: `recovered_row_duplicates_parent`
+        scopes the candidate to a row whose text is a verbatim substring of
+        THIS parent's raw stage-2 text (not a coincidental match against
+        some other entry), and `recovered_row_content_rendered` then confirms
+        the row's own VALUE actually reached the document this call's caller
+        already rendered -- the mapped sections, including the grant tables,
+        run before this in `generate()`. The raw-text scoping check alone is
+        NOT proof of rendering (a blind review of the original A5IZ6Q fix
+        caught this: the parent's fused text can carry a field, like
+        `grant_number` or `non_financial_support`, that never reached its
+        `extracted_fields` and so never reached a render slot -- stage 6's
+        section renderers are fixed-slot and drop any field they do not
+        name, CLAUDE.md "Stage 6 drops unnamed fields"). Requiring both
+        keeps this drop scoped to the same parent AND provably non-lossy.
         """
         entries_by_element_idx = {str(e.get('element_idx_start')): e for e in all_entries}
         span_entries = [e for e in all_entries
                         if e.get('element_idx_start') != e.get('element_idx_end')]
+        rendered_lines = self._rendered_output_lines()
         return [
             e for e in entries
-            if not recovered_row_duplicates_parent(
-                e, find_recovered_row_parent(
-                    e.get('parent_idx'), entries_by_element_idx, span_entries))
+            if not (
+                recovered_row_duplicates_parent(
+                    e, find_recovered_row_parent(
+                        e.get('parent_idx'), entries_by_element_idx, span_entries))
+                and recovered_row_content_rendered(e, rendered_lines)
+            )
         ]
 
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
@@ -1067,9 +1088,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if primary:
                 logger.info(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
-        # Original-document discovery and the Stage 4.5 research-summary load
-        # are lifted out to their own helpers (#820 R3, pure moves -- §3.2):
-        # identical bodies, no behaviour change.
+        # Original-document discovery and the Stage 4.5 research-summary load are
+        # lifted out to their own helpers (#820 R3, pure moves -- §3.2): identical bodies, no behaviour change.
         original_doc_path = self._resolve_original_doc_path(
             document_uid, original_doc_path)
         research_summary_data = self._load_research_summary_data(
@@ -1159,18 +1179,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         unmapped_entries: list[dict] = []
 
-        # Collect ALL entries not in mapped codes, excluding passthrough-consumed
-        # ones (#294, #260) and claimed goals rows (#958).
+        # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260) and claimed goals rows (#958).
         for code, entries in entries_by_code.items():
             if code not in mapped_codes:
                 unmapped_entries.extend(e for e in entries if id(e) not in consumed_ids)
-
-        # A structurally recovered table row (#420) that is a verbatim
-        # duplicate of the parent entry it was split from (A5IZ6Q) must not
-        # ALSO land in the Appendix as its own line -- the parent's own
-        # render, in the body or (via its own record-line recovery, if it
-        # comes to that) the Appendix, already carries this row's content.
-        unmapped_entries = self._drop_recovered_row_duplicates(unmapped_entries, all_entries)
+        unmapped_entries = self._drop_recovered_row_duplicates(unmapped_entries, all_entries)  # #420/A5IZ6Q
 
         # A stays in mapped_codes, but NOT because its entries are all consumed
         # -- that was the old assumption here and the corpus refutes it (145 of
