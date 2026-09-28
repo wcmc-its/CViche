@@ -23,6 +23,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.core.template_boilerplate import (  # noqa: E402
     is_near_template_instruction,
     is_template_instruction,
+    is_template_label_line,
     is_unanswered_prompt,
     filter_template_instructions,
 )
@@ -274,6 +275,34 @@ def test_older_revisions_instructions_are_boilerplate(text):
 def test_older_revisions_section_headers_are_never_dropped(header):
     assert not is_template_instruction(header)
     assert not is_near_template_instruction(header)
+# --- #829: a line of nothing but template labels (Appendix only) ---
+
+@pytest.mark.parametrize("text", [
+    "Signature:",                        # short: below is_template_instruction's floor
+    "If no license:",
+    "Site/Position |",
+    "Research |  |",                     # an unfilled effort-table row
+    "Duration of support:\n(mm/yyyy-mm/yyyy) |",   # label split over two lines
+    "DEA number: (optional)\t\nNPI number: (optional)\t",
+    "Signature:\tIf no license:",        # two labels on one line, tab-separated
+    # a section header alone (protected, and in no instruction phrase)
+    "CLINICAL PRACTICE, INNOVATION, and LEADERSHIP",
+])
+def test_a_line_of_only_template_labels(text):
+    assert not is_template_instruction(text)  # the gap: too short for the floor
+    assert is_template_label_line(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Your role*\toversight",             # one real piece keeps the line
+    "Site/Position | Fictional Assistant Director, Imaginary Library",
+    "Signature: Jane Q. Fictional",
+    "Worked with the fictional outreach team",
+    "",
+    " |  | ",
+])
+def test_a_line_with_any_real_piece_is_not_label_only(text):
+    assert not is_template_label_line(text)
 
 
 def test_layer1_integration_filter():
