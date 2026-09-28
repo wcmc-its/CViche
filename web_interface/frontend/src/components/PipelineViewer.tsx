@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, XCircle, AlertCircle, CheckCircle2, Download, LifeBuoy } from 'lucide-react'
 import { getRunDataJson, cancelRun, restartRun, retryStep, startRun } from '../api/runs'
 import { runRoutes } from '../api/routes'
-import { formatCost } from '../utils'
+import { formatCost, runningStepCost } from '../utils'
 import { usePipelineRun } from '../hooks/usePipelineRun'
 
 import PipelineHeader from './PipelineHeader'
@@ -406,7 +406,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                   <span className="hidden md:inline">·</span>
                   <span>Duration: <strong>{currentStepData.status === 'running' && stepStartTimes[currentStep] ? `${Math.floor((Date.now() - stepStartTimes[currentStep]) / 1000)}s` : currentStepData.duration_seconds ? `${currentStepData.duration_seconds}s` : '—'}</strong></span>
                   <span className="hidden md:inline">·</span>
-                  <span>Cost: <strong>{currentStepData.status === 'running' ? formatCost((runStatus.total_cost || 0) - (stepStartCosts[currentStep] || 0), 3) : formatCost(currentStepData.cost, 3)}</strong></span>
+                  <span>Cost: <strong>{currentStepData.status === 'running' ? formatCost(runningStepCost(runStatus.total_cost, stepStartCosts[currentStep]), 3) : formatCost(currentStepData.cost, 3)}</strong></span>
                 </div>
 
                 {currentStepData.status === 'running' && stepProgress[currentStep] && stepProgress[currentStep].total > 0 && (
