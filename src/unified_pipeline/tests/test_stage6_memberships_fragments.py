@@ -586,11 +586,8 @@ def test_three_memberships_fused_into_one_blind_line_render_three_rows():
     """The same three groups with every newline gone -- the shape this fix
     exists for, and the one where the count could silently cap at two.
 
-    The organization names are long here on purpose:
-    `_parse_multi_membership_entry` only accepts a pipe-free part as an
-    organization when it is over five characters, and `_entry_parts` hands it
-    parts with the pipes already removed, so "Org A" would be dropped on this
-    path even though the multi-line form above keeps it."""
+    Long organization names here; the short-acronym blind form is the next
+    test (#758)."""
     entry = {
         "text": ("Member | State Medical Society | 2010-present | "
                  "Fellow | National Surgical Association | 2015-present | "
@@ -604,6 +601,20 @@ def test_three_memberships_fused_into_one_blind_line_render_three_rows():
         "Fellow, National Surgical Association",
         "Board Member, American Board of Pediatrics",
     ]
+    assert [r[1] for r in rows] == ["2010-Present", "2015-Present", "2020-Present"]
+
+
+def test_three_memberships_with_short_acronym_orgs_on_one_blind_line():
+    """#758: the blind form of the reviewer's three-group example with
+    organizations of five characters or fewer, all of which used to be dropped."""
+    entry = {
+        "text": ("Member | AMA | 2010-present | "
+                 "Fellow | ASCO | 2015-present | "
+                 "Board Member | NIH | 2020-present"),
+        "extracted_fields": {"organization": "AMA"},
+    }
+    rows = _render_memberships([entry])
+    assert [r[0] for r in rows] == ["Member, AMA", "Fellow, ASCO", "Board Member, NIH"]
     assert [r[1] for r in rows] == ["2010-Present", "2015-Present", "2020-Present"]
 
 
