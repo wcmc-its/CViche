@@ -64,6 +64,14 @@ Lints, ranked by the severity of the failure class they catch:
                           position within the same output section — the
                           ONE-block shape duplicate_passages cannot see by
                           construction (#446)
+14b. invented_records     a rendered stage-4 record built entirely from the
+                          WCM template's own field labels rather than real
+                          content (the F2 board-certification header row
+                          rendered as a certification), plus an F1 entry
+                          whose source text is a known template instruction
+                          rather than a real licence — the failure class
+                          #959 fixed one instance of, generalized to every
+                          taxonomy code (A5IZ6Q, #829)
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -163,6 +171,8 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
 from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     DEDUP_SAFE_CONTAINMENT,
+    INVENTED_RECORD_LICENSURE_CODE,
+    INVENTED_RECORD_MIN_VALUES,
     UNDER_EXTRACTION_MAX_PCT,
     UNDER_EXTRACTION_MIN_CHARS,
     UNDER_EXTRACTION_MIN_RECORDS,
@@ -174,9 +184,13 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     _entry_rendered,
     _entry_status,
     _funding_haystacks,
+    _is_invented_record,
+    _nonempty_field_values,
+    _rendered_row_value_sets,
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
+    lint_invented_records,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
     unrouted_code_counts,
@@ -303,6 +317,7 @@ KNOWN_LINTS = (
     "duplicate_passages",
     "duplicate_records",
     "protected_data_in_output",
+    "invented_records",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -352,6 +367,13 @@ LINT_PREVALENCE = {
     # one uid of 40 with no stage-6 output at all (1/40 = 0.025).
     "no_output": 0.025,
     "protected_data_in_output": 0.006,
+    # Measured over the 152 local corpus artifact sets available at
+    # introduction (farm, batch-3, batch-4, plus the A5IZ6Q incident this
+    # lint was written for): 0 organic corpus fires, 2/2 on A5IZ6Q itself.
+    # Same "zero observed rarity class" floor as pipeline_errors_present and
+    # stage3b_fallback_ratio above -- explicit here rather than left to
+    # lint_surprise's absent-key default (which is also 0.001).
+    "invented_records": 0.001,
 }
 
 
@@ -793,6 +815,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),
     LintSpec("duplicate_records", lint_duplicate_records, ("blocks",)),
     LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",)),
+    LintSpec("invented_records", lint_invented_records, ("stage_4", "table_rows")),
 )
 
 
