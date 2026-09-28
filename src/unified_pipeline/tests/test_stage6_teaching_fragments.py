@@ -35,17 +35,10 @@ bullet (review thread 3927100368, item 4). 0 farm K entries reach this branch
 with either text present, so the positive control is synthetic (§6.5 hole,
 disclosed in the PR body).
 
-This branch turns out to be unreachable through `_insert_teaching_entry` as
-written, for a reason that has nothing to do with #476:
-`_is_structural_label(entry)` (parsing/text.py, unrelated, pre-existing)
-returns True -- and the function returns immediately -- whenever
-`entry.get('text', '')` is falsy, which is exactly the condition the
-`elif formatted_text:` branch needs to be reached at all. The positive and
-negative controls below patch `_is_structural_label` out for the tests that
-need to exercise the branch itself, which is the honest way to pin what the
-changed line does without either fabricating a reachable-looking fixture or
-silently declining to test it the way the other four sections' positive
-controls are tested end to end.
+This branch was unreachable through `_insert_teaching_entry` until #757:
+`_is_structural_label(entry)` returned True for any blank raw text, dropping
+the entry before reconstruction. The controls below still patch it out; they
+pin what the changed line does independent of that gate.
 
 Run with:
 
@@ -772,19 +765,16 @@ def test_whitespace_only_original_text_uses_the_formatted_text():
     is zero lines, not one -- it must not be mistaken for a multi-item entry
     and must not suppress the formatted text.
 
-    At the render it never gets that far: `_is_structural_label` (parsing, not
-    this section, and unrelated to #476) returns True for any entry whose text
-    strips to empty, so the entry is dropped before reconstruction. Both
-    halves are asserted because they disagree, and a reader of the helper test
-    alone would predict the wrong page. 0 of the 722 K entries in the local
-    corpus have whitespace-only text.
+    At the render the entry is kept too (#757): `_is_structural_label` no
+    longer drops a blank-text entry that carries formatted_text, so the
+    formatted text is reconstructed onto the page.
     """
     assert _teaching_entry_lines({"formatted_text": "Grand rounds"}, "  \n  ") == \
         ["Grand rounds"]
 
     gen = _generator("Didactic teaching", "SENTINEL-END")
     gen._fill_teaching({"K1": [_entry("K1", "  \n  ", formatted_text="Grand rounds")]})
-    assert _visible(gen) == ["Didactic teaching", "SENTINEL-END"]
+    assert _visible(gen) == ["Didactic teaching", "Grand rounds", "SENTINEL-END"]
 
 
 if __name__ == "__main__":

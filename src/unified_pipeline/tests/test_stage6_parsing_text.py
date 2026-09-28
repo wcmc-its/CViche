@@ -197,6 +197,30 @@ def test_all_caps_content_with_an_empty_extracted_fields_dict_is_not_a_structura
     assert _is_structural_label(entry) is False
 
 
+# --- #757: blank raw text with stage-5c formatted_text is content ----------
+
+def test_blank_text_with_formatted_text_is_not_a_structural_label():
+    entry = {"text": "  \n ", "extracted_fields": {"formatted_text": "Grand rounds"}}
+    assert _is_structural_label(entry) is False
+
+
+def test_blank_text_without_formatted_text_is_still_a_structural_label():
+    assert _is_structural_label({"text": ""}) is True
+    assert _is_structural_label({"text": "  ", "extracted_fields": {}}) is True
+    assert _is_structural_label(
+        {"text": "", "extracted_fields": {"formatted_text": "   "}}) is True
+    assert _is_structural_label(
+        {"text": "", "extracted_fields": {"formatted_text": None}}) is True
+
+
+def test_blank_text_with_formatted_text_and_a_blank_hierarchy_label_is_kept():
+    # A blank hierarchy label must not re-trigger the "text equals its own
+    # hierarchy label" check ('' == '') for an entry that has formatted_text.
+    entry = {"text": "", "hierarchy": [""],
+             "extracted_fields": {"formatted_text": "Grand rounds"}}
+    assert _is_structural_label(entry) is False
+
+
 # --- item 4: header-keyword matching must be token-boundary, not substring -
 
 def test_keyword_count_path_ignores_substring_matches():
