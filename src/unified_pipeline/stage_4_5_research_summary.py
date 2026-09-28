@@ -222,7 +222,7 @@ def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = 
 
 
 def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: int, cv_owner_name: str = '',
-                       limit: int = None) -> list[dict]:
+                       limit: int = None, recency_by_id: dict[int, EntryRecency] | None = None) -> list[dict]:
     """
     Prioritize and limit entries for a taxonomy code.
 
@@ -230,6 +230,11 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: in
     - Recency (ongoing first, then most recent)
     - Senior author / PI role
     - Has substantive content
+
+    `recency_by_id`, keyed by id(entry), supplies an entry's already-computed
+    EntryRecency so this function does not call compute_entry_recency a
+    second time for an entry the caller (gather_context_entries) already
+    scored (#947 review: recency was computed up to 3x per entry).
     """
     if not entries:
         return []
@@ -238,13 +243,15 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: in
     scored_entries = []
     for entry in entries:
         seniority_score = score_entry_seniority(entry, taxonomy_code, cv_owner_name)
-        recency_score = score_entry_recency(entry, taxonomy_code, current_year)
+        recency = (recency_by_id or {}).get(id(entry))
+        if recency is None:
+            recency = compute_entry_recency(entry, taxonomy_code, current_year)
 
         # Content quality score (has substantive text)
         text_len = len(entry.get('text', ''))
         content_score = min(text_len / 500, 1.0)  # Cap at 1.0
 
-        total_score = seniority_score + (recency_score * RECENCY_WEIGHT) + (content_score * 0.1)
+        total_score = seniority_score + (recency.score * RECENCY_WEIGHT) + (content_score * 0.1)
         scored_entries.append((total_score, entry))
 
     # Sort by score descending
@@ -258,14 +265,19 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: in
 
 
 def gather_context_entries(entries_by_code: dict[str, list[dict]], current_year: int,
-                           cv_owner_name: str = '') -> list[tuple[str, dict, float]]:
+                           cv_owner_name: str = '') -> list[tuple[str, dict, float, EntryRecency]]:
     """
     Gather and weight entries from all sections for summary generation.
 
     An entry's weight is its section weight + seniority bonus + scaled recency,
     so ongoing work sorts ahead of older work from a higher-tier section.
 
-    Returns list of (taxonomy_code, entry, weight) tuples, sorted by weight.
+    Each entry's EntryRecency is computed once here and carried through as
+    the 4th tuple element, so both prioritize_entries' cut and
+    build_context_string's [CURRENT] tag reuse it instead of recomputing
+    (#947 review).
+
+    Returns list of (taxonomy_code, entry, weight, recency) tuples, sorted by weight.
     """
     weighted_entries = []
 
@@ -276,15 +288,18 @@ def gather_context_entries(entries_by_code: dict[str, list[dict]], current_year:
         if base_weight <= -0.85:
             continue
 
+        recency_by_id = {id(entry): compute_entry_recency(entry, code, current_year) for entry in entries}
+
         # Prioritize and limit entries
-        prioritized = prioritize_entries(entries, code, current_year, cv_owner_name=cv_owner_name)
+        prioritized = prioritize_entries(entries, code, current_year, cv_owner_name=cv_owner_name,
+                                          recency_by_id=recency_by_id)
 
         for entry in prioritized:
             seniority_bonus = score_entry_seniority(entry, code, cv_owner_name)
-            recency_bonus = score_entry_recency(entry, code, current_year) * RECENCY_WEIGHT
-            final_weight = base_weight + seniority_bonus + recency_bonus
+            recency = recency_by_id[id(entry)]
+            final_weight = base_weight + seniority_bonus + (recency.score * RECENCY_WEIGHT)
 
-            weighted_entries.append((code, entry, final_weight))
+            weighted_entries.append((code, entry, final_weight, recency))
 
     # Sort by weight (higher = more important, closer to 0)
     weighted_entries.sort(key=lambda x: x[2], reverse=True)
@@ -355,7 +370,7 @@ def format_entry_for_context(code: str, entry: dict) -> str:
         return f"[{code}] {text}"
 
 
-def build_context_string(weighted_entries: list[tuple[str, dict, float]], current_year: int,
+def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRecency]], current_year: int,
                          max_tokens: int = 4000) -> str:
     """
     Build context string from weighted entries, respecting token limit.
@@ -363,6 +378,12 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float]], curren
     Entries are:
     1. Filtered to remove invalid/empty entries
     2. Sorted in descending order by weight (most relevant first)
+
+    Each entry's EntryRecency (4th tuple element) is gather_context_entries'
+    already-computed value; the [CURRENT] tag reads its `is_current` field
+    instead of calling is_current_entry again (#947 review). current_year
+    stays a required parameter for signature parity with the other pipeline
+    entry points (#947 review point (c)).
 
     Rough estimate: 1 token ≈ 4 characters
     """
@@ -372,15 +393,15 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float]], curren
 
     # Filter and sort: already sorted by gather_context_entries, but ensure descending order
     # (higher weight = more relevant, closer to 0)
-    valid_entries = [(code, entry, weight) for code, entry, weight in weighted_entries
+    valid_entries = [(code, entry, weight, recency) for code, entry, weight, recency in weighted_entries
                      if is_valid_entry(code, entry)]
 
     # Sort by weight descending (higher/closer to 0 = more relevant)
     valid_entries.sort(key=lambda x: x[2], reverse=True)
 
-    for code, entry, weight in valid_entries:
+    for code, entry, weight, recency in valid_entries:
         formatted = format_entry_for_context(code, entry)
-        if is_current_entry(entry, code, current_year):
+        if recency.is_current:
             formatted = f"{CURRENT_CONTEXT_TAG} {formatted}"
 
         if total_chars + len(formatted) > max_chars:
@@ -638,7 +659,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
         if verbose:
             print(f"  Context entries: {len(weighted_entries)}")
             # Show top entries by weight
-            for code, entry, weight in weighted_entries[:5]:
+            for code, entry, weight, _recency in weighted_entries[:5]:
                 text_preview = entry.get('text', '')[:50]
                 print(f"    [{code}] (w={weight:.2f}) {text_preview}...")
 
@@ -647,7 +668,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
 
         # Track what was used
         context_entries_used = len(weighted_entries)
-        top_codes_used = list(dict.fromkeys([code for code, _, _ in weighted_entries[:20]]))
+        top_codes_used = list(dict.fromkeys([code for code, _, _, _ in weighted_entries[:20]]))
 
         if verbose:
             print(f"  Context length: {len(context)} chars")
