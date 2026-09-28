@@ -272,3 +272,68 @@ def test_pipe_separated_columns_still_ignore_substring_inside_a_longer_word():
     # immediately before "date" within that word either way.
     text = "Candidates|Update"
     assert _is_table_header_entry(text, ["date"]) is False
+
+
+# --- #756: a short pipe-joined DATA entry is not a header row ---------------
+
+_HONORS_KW = ["award", "honor", "organization", "date", "year", "granting"]
+
+
+@pytest.mark.parametrize("text", [
+    "Best Teaching Award | 2020",
+    "Best Teaching Award | Purdue University",
+    "Award A | 2024 | Award B | 2023 | Award C | 2022",
+    "  Award A   |   2024   |   Award B   |   2023",
+    "2020\tAward A | Award B | 2019",
+])
+def test_short_pipe_joined_data_entry_is_not_a_header(text):
+    assert _is_table_header_entry(text, _HONORS_KW) is False
+
+
+@pytest.mark.parametrize("text", [
+    "Name of award | Organization | Date awarded",
+    "Name of award\tOrganization\tDate awarded",
+    "Honor | Granting body | Year",
+    "Award | Organization | Date awarded (yyyy)",
+    "Award | Organization | Date(s)",
+])
+def test_real_pipe_joined_header_row_is_still_a_header(text):
+    assert _is_table_header_entry(text, _HONORS_KW) is True
+
+
+def test_a_parenthetical_value_is_not_a_format_hint():
+    assert _is_table_header_entry("Award (2020) | Purdue University", _HONORS_KW) is False
+
+
+def test_other_sections_keywords_do_not_collide_on_data_either():
+    assert _is_table_header_entry(
+        "American Medical Society | Fellow, 2019",
+        ["organization", "membership", "society", "date", "member"]) is False
+    assert _is_table_header_entry(
+        "Organization | Membership | Date",
+        ["organization", "membership", "society", "date", "member"]) is True
+
+
+_POSITION_KW = ["title", "institution", "organization", "dates", "city", "state",
+                "position"]
+
+
+def test_positions_keywords_collide_on_data_the_same_way_and_no_longer_do():
+    assert _is_table_header_entry(
+        "Chair, Organization Committee | 2020", _POSITION_KW) is False
+    assert _is_table_header_entry(
+        "Title | Institution | Dates | City | State", _POSITION_KW) is True
+
+
+@pytest.mark.parametrize("text", [
+    "The | Purdue University",        # filler-only cell carries no keyword
+    "Best Teaching Award |",          # an empty cell is not a label
+    "Award University | 2020",        # only the listed filler words are tolerated
+])
+def test_a_cell_needs_a_keyword_and_only_listed_filler_to_be_a_label(text):
+    assert _is_table_header_entry(text, _HONORS_KW) is False
+
+
+def test_a_format_hint_after_the_keyword_still_makes_a_label_cell():
+    assert _is_table_header_entry(
+        "Date (yyyy) | Purdue University", _HONORS_KW) is True

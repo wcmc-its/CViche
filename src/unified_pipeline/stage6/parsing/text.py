@@ -136,6 +136,35 @@ def _extract_year_from_text(text: str) -> str | None:
     return None
 
 
+# Words a column-header cell may carry besides the section's keyword. A cell
+# that holds anything else ("Best Teaching Award", "Purdue University") is a
+# data value that merely mentions a keyword, not a column label (#756).
+_HEADER_LABEL_FILLER_WORDS = frozenset({
+    'name', 'of', 'the', 'and', 'or', 'by', 'body', 'awarded', 'received',
+    'issued', 'granted'})
+# A format hint such as "(yyyy)" or the "(s)" of "Date(s)"; a parenthetical
+# carrying a digit ("Award (2020)") is a value, not a hint.
+_FORMAT_HINT_RE = re.compile(r'\([^)\d]*\)')
+
+
+def _is_header_label_cell(cell: str, header_keywords: list[str]) -> bool:
+    """Is this cell a column label: a header keyword plus only label filler?
+
+    Matches a keyword the same way the keyword-count path does (whole word,
+    optional trailing "s"), then requires every remaining word to be filler
+    or a parenthetical format hint such as "(yyyy)". "Name of award" and
+    "Date awarded (yyyy)" pass; "Best Teaching Award" does not.
+    """
+    cell = cell.lower()
+    matched = False
+    for kw in header_keywords:
+        cell, n = re.subn(rf'\b{re.escape(kw.lower())}s?\b', ' ', cell)
+        matched = matched or n > 0
+    cell = _FORMAT_HINT_RE.sub(' ', cell)
+    return matched and all(w in _HEADER_LABEL_FILLER_WORDS
+                           for w in re.findall(r'[a-z0-9]+', cell))
+
+
 def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int = 2) -> bool:
     """Detect if an entry is actually a table header that was mistakenly extracted as data.
 
@@ -197,10 +226,7 @@ def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int
             if all(len(p.strip()) < 30 for p in parts if p.strip()):
                 parts_matching = sum(
                     1 for p in parts
-                    # Same trailing optional "s" as the keyword-count path
-                    # above, so a plural column header ("Dates") still
-                    # matches keyword "date".
-                    if any(re.search(rf'\b{re.escape(kw.lower())}s?\b', p) for kw in header_keywords)
+                    if _is_header_label_cell(p, header_keywords)
                 )
                 if parts_matching >= len(parts) * 0.5:
                     return True
