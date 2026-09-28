@@ -147,7 +147,7 @@ def enrich_entry_with_result(entry: dict, result: dict) -> dict:
 
 
 def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
-                model: str = "gpt-5.1", refresh_cache: bool = False) -> str:
+                refresh_cache: bool = False) -> str:
     """
     Run Stage 5b: Institution Enrichment via LLM.
 
@@ -155,7 +155,6 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         input_path: Path to Stage 5 (or Stage 4) JSON
         output_path: Optional output path
         verbose: Print progress
-        model: LLM model to use for institution resolution
         refresh_cache: If True, ignore existing cache and re-lookup all institutions
 
     Returns:
@@ -173,7 +172,6 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         logger.info("%s", '=' * 60)
         logger.info("Stage 5b: Institution Enrichment (LLM) - %s", document_uid)
         logger.info("%s", '=' * 60)
-        logger.info("Model: %s", model)
 
     # Load cv_owner_location from Stage 4 if not in input
     if not cv_owner_location or not cv_owner_location.get('inference_success'):
@@ -344,7 +342,6 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
             results, cost, call_model = lookup_institutions_llm(
                 llm_batch,
                 cv_owner_location,
-                model=model,
                 verbose=verbose
             )
             total_cost += cost
@@ -411,7 +408,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         'llm_lookups': uncached_count,
         'llm_calls': llm_calls,
         'cost': total_cost,
-        'model': observed_model or model,
+        'model': observed_model,
         'timestamp': datetime.now().isoformat()
     }
 
@@ -437,7 +434,6 @@ def main():
     parser.add_argument('input', help='Stage 5 enriched JSON file or document UID')
     parser.add_argument('--output', '-o', help='Output JSON path')
     parser.add_argument('--quiet', '-q', action='store_true', help='Suppress progress output')
-    parser.add_argument('--model', '-m', default='gpt-5.1', help='LLM model (default: gpt-5.1)')
     parser.add_argument('--refresh-cache', action='store_true',
                         help='Ignore existing cache and re-lookup all institutions via LLM')
 
@@ -463,7 +459,6 @@ def main():
     output_path = run_stage5b(
         input_path, args.output,
         verbose=not args.quiet,
-        model=args.model,
         refresh_cache=args.refresh_cache
     )
     logger.info("Generated: %s", output_path)
