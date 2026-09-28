@@ -585,3 +585,78 @@ def test_recovered_row_dropped_when_confirmed_only_by_a_different_records_render
     # Appendix section at all (this is the only unmapped entry in the run).
     assert "T. APPENDIX" not in full_text
     assert "Your percent (%) effort: — 5%" not in full_text
+
+
+# ---------------------------------------------- instruction-box vouching (round 4)
+#
+# `_drop_recovered_row_duplicates` runs before `_remove_instruction_box`
+# (generate() strips the box only after every content-search fill has run --
+# see that call site's comment), so its "already rendered" haystack would,
+# without the round-4 fix, briefly still include the box's own prompt text --
+# which literally reads "...enter 'Not Applicable' or 'N/A'"... "'Local'
+# refers to the home institution"... "please record 04/2022". A recovered
+# row whose real value happens to equal one of those fragments would be
+# vouched for by the box, dropped here, and then the box itself deleted
+# before save: the value would appear nowhere in the output. These use the
+# REAL bundled template (not a synthetic fixture) because the bug is in what
+# that specific template's box text contains.
+
+def test_recovered_row_not_falsely_confirmed_by_the_instruction_box_date_example(tmp_path):
+    """'04/2022' is the box's own worked example of the mm/yyyy date format.
+    A recovered row whose real value is literally '04/2022' must not be
+    dropped merely because the box happens to contain that string."""
+    missed_row = _recovered_row("5", "Duration of support: | 04/2022")
+    entries = [_RECOVERY_OWNER_ENTRY, _RECOVERY_GRANT_ENTRY, missed_row]
+
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: []
+    data = {"document_uid": "T959A", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+
+    full_text = _all_text(Document(str(output_path)))
+    # The box itself is gone (strip_template_instructions defaults on)...
+    assert "delete this instruction box" not in full_text.lower()
+    # ...and the recovered row's real value still made it into the output.
+    assert "T. APPENDIX" in full_text
+    assert "Duration of support: — 04/2022" in full_text
+
+
+def test_recovered_row_not_falsely_confirmed_by_the_instruction_box_local_example(tmp_path):
+    """'Local' is the box's own definition text ("'Local' refers to the home
+    institution"). Same failure mode as the date example above, with a
+    non-numeric value."""
+    missed_row = _recovered_row("5", "Geographic scope: | Local")
+    entries = [_RECOVERY_OWNER_ENTRY, _RECOVERY_GRANT_ENTRY, missed_row]
+
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: []
+    data = {"document_uid": "T959B", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+
+    full_text = _all_text(Document(str(output_path)))
+    assert "delete this instruction box" not in full_text.lower()
+    assert "T. APPENDIX" in full_text
+    assert "Geographic scope: — Local" in full_text
+
+
+def test_rendered_output_lines_excludes_instruction_box_only_when_asked():
+    """Unit-level pin on the flag itself: `_recover_unrendered_records`'s
+    call (the pre-existing, out-of-scope one) must keep seeing the box's
+    text by default, while a caller that opts in does not."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+
+    default_lines = gen._rendered_output_lines()
+    excluded_lines = gen._rendered_output_lines(exclude_instruction_box=True)
+
+    box_phrase = "when preparing the wcm cv template"
+    assert any(box_phrase in ln.lower() for ln in default_lines)
+    assert not any(box_phrase in ln.lower() for ln in excluded_lines)
+    # Real content (the personal-data table) is unaffected either way.
+    assert any("work email" in ln.lower() for ln in excluded_lines)

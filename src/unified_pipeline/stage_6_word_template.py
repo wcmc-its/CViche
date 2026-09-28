@@ -808,6 +808,20 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     # uniquely identifies the box and nothing else.
     _INSTRUCTION_BOX_SIGNATURE = "when preparing the wcm cv template"
 
+    def _is_instruction_box_table(self, tbl: Table) -> bool:
+        """True when `tbl` is the WCM template's gray "instruction box" —
+        matched by its distinctive header text rather than by index, so a
+        real content table is never mistaken for it.
+
+        Shared by `_remove_instruction_box` (deletes it) and
+        `_rendered_output_lines` (round 4, A5IZ6Q: can be asked to skip it
+        entirely rather than reading its boilerplate as rendered content).
+        """
+        text = " ".join(
+            cell.text for row in tbl.rows for cell in row.cells
+        ).lower()
+        return self._INSTRUCTION_BOX_SIGNATURE in text
+
     def _remove_instruction_box(self) -> None:
         """Remove the leading gray "instruction box" table(s) from self.doc.
 
@@ -820,10 +834,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         """
         removed = 0
         for tbl in list(self.doc.tables):
-            text = " ".join(
-                cell.text for row in tbl.rows for cell in row.cells
-            ).lower()
-            if self._INSTRUCTION_BOX_SIGNATURE in text:
+            if self._is_instruction_box_table(tbl):
                 tbl._element.getparent().remove(tbl._element)
                 removed += 1
         if removed and self.verbose:
@@ -1027,8 +1038,24 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         is printed anywhere in the document already rendered (never the
         Appendix, not yet written), which is the actual guarantee this drop
         needs and cannot lose content the reader hasn't already seen it.
+
+        Round 4 (content-loss fix): this call excludes the WCM template's own
+        gray instruction box from that "already rendered" haystack, which
+        `generate()` deletes only much later (after every content-search fill
+        has run -- see `_remove_instruction_box`'s call site). Before this
+        fix, a recovered row whose value happened to match the box's own
+        prompt text (it literally reads "...enter 'Not Applicable' or
+        'N/A'"... "'Local' refers to..." ... "04/2022") was vouched for by
+        the box, dropped here, and then the box itself was deleted before
+        save -- the value then appeared nowhere in the output. Excluding the
+        box can only ever make this drop MORE conservative (fewer false
+        "already rendered" verdicts), never less, so it cannot itself cause
+        content loss. `_recover_unrendered_records` (the other
+        `_rendered_output_lines` caller, below) does not opt into this
+        exclusion: its own box-text-vouching exposure predates this branch
+        entirely and is unaudited, out-of-scope blast radius for this fix.
         """
-        rendered_lines = self._rendered_output_lines()
+        rendered_lines = self._rendered_output_lines(exclude_instruction_box=True)
         return [e for e in entries
                 if not recovered_row_already_rendered(e, rendered_lines)]
 
@@ -1075,8 +1102,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if primary:
                 logger.info(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
-        # Original-document discovery and the Stage 4.5 research-summary load are
-        # lifted out to their own helpers (#820 R3, pure moves -- §3.2): identical bodies, no behaviour change.
+        # Original-document discovery and the Stage 4.5 research-summary load
+        # are lifted out to their own helpers (#820 R3, pure moves -- §3.2):
+        # identical bodies, no behaviour change.
         original_doc_path = self._resolve_original_doc_path(
             document_uid, original_doc_path)
         research_summary_data = self._load_research_summary_data(
@@ -2625,7 +2653,7 @@ Now analyze the text above:"""
 
         return [code for _, code, _ in remaining]
 
-    def _rendered_output_lines(self) -> list[str]:
+    def _rendered_output_lines(self, *, exclude_instruction_box: bool = False) -> list[str]:
         """Every rendered text line of the in-memory document: body paragraphs
         plus table cells. Two render-time divergences from run_doctor's
         read_docx_blocks (which walks only top-level tables, cell by cell):
@@ -2635,7 +2663,24 @@ Now analyze the text above:"""
         together the way one source line does. Extra lines only ever ADD
         matches — fewer false "absent" verdicts, never more; the offline
         doctor may still WARN on rows this pass correctly judged rendered
-        (reconciling lint 8's semantics is PR #223 scope)."""
+        (reconciling lint 8's semantics is PR #223 scope).
+
+        `exclude_instruction_box`: skip any table `_is_instruction_box_table`
+        identifies, rather than reading its boilerplate as rendered content.
+        Callers that run before `_remove_instruction_box` (generate() strips
+        the box only after every content-search-based fill, so its own text
+        is still in `self.doc` at that point -- see that call site's
+        comment) and then treat "already rendered" as license to DROP
+        content must opt in, or the box's own prompt text (e.g. "...enter
+        'Not Applicable' or 'N/A'"..."'Local' refers to..."..."04/2022") can
+        vouch for a real value that merely happens to match it, the value
+        gets dropped, and the box is then deleted before save -- the value
+        then appears nowhere in the output (round 4, A5IZ6Q). Default off:
+        a caller that only ADDS content on an "unrendered" verdict
+        (`_recover_unrendered_records`) loses nothing by leaving box text in
+        the haystack, and changing that caller's matching behaviour is a
+        separate, unaudited concern outside this flag's purpose.
+        """
         lines: list[str] = []
 
         def add(text: str) -> None:
@@ -2658,6 +2703,8 @@ Now analyze the text above:"""
         for para in self.doc.paragraphs:
             add(para.text)
         for tbl in self.doc.tables:
+            if exclude_instruction_box and self._is_instruction_box_table(tbl):
+                continue
             walk_table(tbl)
         return lines
 
