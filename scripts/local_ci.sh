@@ -33,10 +33,7 @@ if [ ! -x "$NODE20/node" ]; then
   exit 1
 fi
 
-TH="${TRUFFLEHOG:-}"
-if [ -z "$TH" ] && command -v trufflehog >/dev/null 2>&1; then
-  TH="$(command -v trufflehog)"
-fi
+TH="$(command -v "${TRUFFLEHOG:-trufflehog}" 2>/dev/null || true)"
 if [ -z "$TH" ] && [ -x "$S/tools/trufflehog" ]; then
   TH="$S/tools/trufflehog"
 fi
@@ -73,6 +70,7 @@ run pipeline-tests python -m pytest src/unified_pipeline/tests/ -q -p no:cachepr
 run pipeline:render-doctor-gates python3 scripts/test_render_doctor_gates.py
 run pipeline:render-gate-integ python3 scripts/test_render_gate_integration.py
 run pipeline:corpus-batch-sh bash -c 'for t in scripts/test_run_corpus_batch_*.sh; do echo "=== $t"; bash "$t" || exit 1; done'
+run pipeline:local-ci-selftest bash scripts/test_local_ci_trufflehog_resolution.sh
 # function-size: CI checks out depth 1, where check_standards' local-only
 # "commits behind" probe returns None -- run it on a .git-less copy.
 FS=$S/ci-$LABEL-fs; rm -rf "$FS"; rsync -a --exclude .git "$WT/" "$FS/"
