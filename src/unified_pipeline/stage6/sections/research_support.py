@@ -198,15 +198,27 @@ PERCENT_EFFORT_PRECISION = Decimal('0.01')
 # never reclassified as completed however the year parses.
 OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
 
-# The goals phrase in a grant's own text or in a goals row of its own (#958):
-# the WCM label "(Optional - The major goals of this project are): | <goal>",
-# the plain "The major goals of this project are:<tab><goal>", and the prose
-# "The major goals of this project are to <goal>". `sep` -- a colon, pipe,
-# closing paren or tab after "are" -- is what makes the phrase a label rather
-# than the start of the sentence. `rest` stops at the line end: a table-form
-# grant carries one source row per line.
+# The goals phrase in a grant's own text or in a goals row of its own (#958),
+# and four measured wording variants (docs/analysis/HANDOFF-a5iz6q-next-steps-
+# 2026-09-28.md #3): the WCM label "(Optional - The major goals of this
+# project are): | <goal>", the plain "The major goals of this project
+# are:<tab><goal>", the prose "The major goals of this project are to <goal>",
+# singular "The major goal of this project is" (YME2VA), "...of this program
+# are" (YME2VA), the bare "Major Goals:" / "Major Goals of (the) Project:"
+# label with no project/program noun before the separator at all (BYFQBG),
+# and A5IZ6Q's typo "The major gals of this project:". `proj` is the "of
+# (this|the) project/program [are|is]" anchor. `sep` -- a colon, pipe, closing
+# paren or tab -- is what makes the phrase a label rather than (with `proj`
+# present) the start of the sentence; `rest` stops at the line end, since a
+# table-form grant carries one source row per line. A bare label needs `sep`
+# to read as a label at all -- checked in `parse_major_goals`, not here,
+# because Python's `re` cannot express "`sep` required only when `proj` is
+# absent" with one named group shared across alternatives. Without that
+# check, a stray "major goal(s)" with neither anchor would swallow the rest
+# of its line as if it were a whole-sentence claim.
 MAJOR_GOALS_LABEL_RE = re.compile(
-    r'(?:the\s+)?major\s+goals\s+of\s+this\s+project\s+are'
+    r'(?:the\s+)?major\s+(?:goals?|gals?)\b'
+    r'(?P<proj>\s+of\s+(?:this\s+|the\s+)?(?:project|program)(?:\s+(?:are|is))?)?'
     r'(?P<sep>[ \t]*[:|)\t][ \t:|)]*)?'
     r'(?P<rest>[^\n]*)',
     re.IGNORECASE,
@@ -497,14 +509,19 @@ def parse_major_goals(text: str | None) -> str | None:
     """The faculty member's own goal text after a goals label, verbatim (#958).
 
     Two shapes carry it. A label -- `MAJOR_GOALS_LABEL_RE` with a separator
-    after "are" -- is followed by the goal, which is returned without the label.
-    Without a separator the phrase opens the faculty member's own sentence
-    ("The major goals of this project are to ..."), and the whole sentence is
-    the goal. Either way only surrounding whitespace is stripped. An empty label
-    is no goal: None, so no row renders.
+    (`sep`) after the anchor -- is followed by the goal, which is returned
+    without the label. Without a separator the phrase must still carry the "of
+    (this|the) project/program [are|is]" anchor (`proj`): it opens the faculty
+    member's own sentence ("The major goals of this project are to ..."), and
+    the whole sentence is the goal. A match with neither `proj` nor `sep` --
+    some other use of "major goal(s)" with no project/program noun and no
+    separator -- is not a label at all, so it is left as grant content rather
+    than treated as an unbounded whole-sentence claim. Either way only
+    surrounding whitespace is stripped. An empty label is no goal either:
+    None, so no row renders.
     """
     match = MAJOR_GOALS_LABEL_RE.search(text or '')
-    if match is None or not match['rest'].strip():
+    if match is None or not match['rest'].strip() or not (match['proj'] or match['sep']):
         return None
     goal = match['rest'] if match['sep'] else match.group(0)
     return MAJOR_GOALS_VALUE_END_RE.split(goal, maxsplit=1)[0].strip()

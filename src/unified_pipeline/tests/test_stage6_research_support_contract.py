@@ -915,6 +915,21 @@ _GOAL = 'Map the pollinator corridors of the Example Valley'
      'Survey the valley; oversaw\tfield work'),
     # The goal ends with its line.
     (f'The major goals of this project are: {_GOAL}\nAnnual direct costs: | $5,000', _GOAL),
+    # Measured wording variants (HANDOFF-a5iz6q-next-steps-2026-09-28.md #3).
+    # A bare label -- no "of (this|the) project/program" noun at all -- still
+    # needs its separator to read as a label.
+    (f'Major Goals: {_GOAL}', _GOAL),
+    (f'Major Goals of Project: {_GOAL}', _GOAL),
+    (f'Major Goals of the Project: {_GOAL}', _GOAL),
+    # Singular "goal ... is", and "program" in place of "project" -- both keep
+    # the sentence-form fallback the plural "goals ... are" case already has.
+    ('Example Study\tThe major goal of this project is to map the pollinator corridors.',
+     'The major goal of this project is to map the pollinator corridors.'),
+    ('Example Study\tThe major goals of this program are to map the pollinator corridors.',
+     'The major goals of this program are to map the pollinator corridors.'),
+    # The "gals" typo (A5IZ6Q) with an explicit separator -- the goal only,
+    # not the misspelled label.
+    (f'Example Grant\tThe major gals of this project: {_GOAL}', _GOAL),
 ])
 def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     assert parse_major_goals(text) == expected
@@ -927,6 +942,14 @@ def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     'Award Source: | Example Fund\nProject title: | Example Study',
     '',
     None,
+    # A bare label with an empty value is still no goal.
+    'Major Goals:',
+    'Major Goals of Project:',
+    # "Major goal(s)" with neither the "of (this|the) project/program" anchor
+    # nor an explicit separator is grant content, not a label -- otherwise it
+    # would be read as an unbounded whole-sentence claim.
+    'Our major goals include improving efficiencies across the department.',
+    'The committee highlighted major goals for the coming year during the review.',
 ])
 def test_an_empty_or_absent_goals_label_is_no_goal(text):
     """An empty label renders nothing -- and never borrows the next line."""
