@@ -814,7 +814,7 @@ def test_protected_class_labels_deny_only_the_colon_form():
 # home address followed on the same run by a sibling field had its
 # city/state -- or, for an address with no digits, nearly all of it --
 # left in the residual and rendered into the Appendix. The stop is now a
-# VOCABULARY (`pii_pass.py::_KNOWN_FIELD_LABEL_RE`, built from
+# VOCABULARY (`normalization/pii.py::_KNOWN_FIELD_LABEL_RE`, built from
 # `WITHHOLD_POLICY`'s label rows plus `_RENDER_SET_FIELD_LABELS`), so it
 # can only stop where a field is actually NAMED, and a run with no known
 # label in it is cut whole.

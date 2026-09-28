@@ -406,6 +406,97 @@ def _pii_field_key_category(key: str) -> str | None:
     return None
 
 
+#: Field labels this pipeline RENDERS, curated from the code that already
+#: recognises each one -- the second half of `_KNOWN_FIELD_LABEL_RE`'s
+#: vocabulary (the first half is `WITHHOLD_POLICY`'s own label rows).
+#: Verbose-mode alternatives, case-insensitive, no colon (the shared
+#: `\s*:` terminator is appended once, the way `pii.py::_label_pattern`
+#: appends it for a policy row).
+#:
+#: Every entry names a field some renderer or classifier looks for by
+#: name; nothing here is a guess about English word shape. Source per
+#: entry (all on this branch):
+#:
+#: - the six PERSONAL DATA table rows `_write_personal_data_table_cells`
+#:   matches by their own cell text -- 'office address'
+#:   (`sections/personal_data.py:631`), 'office telephone' (`:637`),
+#:   'work email' (`:642`), 'home address' (`:647`), 'cell phone'
+#:   (`:653`), 'personal email' (`:658`). 'home address' also arrives via
+#:   `WITHHOLD_POLICY`'s own home-contact row, which is fine: the
+#:   vocabulary is a union.
+#: - `_classify_contact_label`'s label words -- `_EMAIL_LABEL_WORDS`
+#:   ('e-mail', 'email') `:158`, `_PHONE_LABEL_WORDS` ('phone',
+#:   'telephone') `:159`, `_ADDRESS_LABEL_WORDS` ('address', 'business')
+#:   `:163`, `_PERSON_NAME_LABELS` ('name', 'full name', 'legal name',
+#:   'candidate name', 'applicant name') `:169-172`.
+#: - the phone-type words the entry classifier reads out of the raw text:
+#:   'cell', 'mobile' (`personal_data.py:423`).
+#: - 'fax' -- consumed and deliberately dropped by
+#:   `_parse_address_block` (`personal_data.py:892`) and by
+#:   `normalization/fields.py:174-177`.
+#: - 'citizenship', 'nationality' and 'personal email' -- the #821
+#:   "render" defaults, listed as NOT in the table at
+#:   `normalization/pii.py:304-305`.
+#: - 'npi' -- the same list's public identifier (`pii.py:306`), detected
+#:   by `sections/licensure.py:86` `_NPI_LABEL_RE`.
+#: - 'orcid' -- section S0's own identifier
+#:   (`sections/researcher_profiles.py:1-3`, `sections/__init__.py:29`).
+#: - 'website', 'home page', 'homepage', 'contact' -- the contact nouns
+#:   `core/validators/contact_section.py:90-92` `CONTACT_NOUNS` lists.
+#:
+#: Adding a field is one row. A label NOT here is not leaked: the run is
+#: cut whole (see `_extend_bare_label_span`), so the cost of a gap is a
+#: lost sibling field, never a rendered protected value.
+_RENDER_SET_FIELD_LABELS: tuple[str, ...] = (
+    r"office \s* address",
+    r"office \s* (?: telephone | phone )",
+    r"work \s* e-? \s* mail",
+    r"personal \s* e-? \s* mail",
+    r"cell (?: \s* phone )?",
+    r"mobile (?: \s* phone )?",
+    r"e-? \s* mail (?: \s* address )?",
+    r"telephone",
+    r"phone",
+    r"address",
+    r"business",
+    r"name",
+    r"(?: full | legal | candidate | applicant ) \s* name",
+    r"fax",
+    r"citizenship",
+    r"nationality",
+    r"npi",
+    r"orcid",
+    r"website",
+    r"home \s* page | homepage",
+    r"contact",
+)
+
+#: The ONLY thing a bare-label extension may stop at part-way through a
+#: whitespace run (#821 R4 F-1): a label this codebase actually knows, at
+#: a word start, optionally behind a list marker.
+#:
+#: Built from `WITHHOLD_POLICY`'s label rows PLUS
+#: `_RENDER_SET_FIELD_LABELS`, the same way `pii.py::_PII_LABEL_RE` is
+#: built from those rows -- one source, so the vocabulary cannot drift
+#: from the policy when a row is added.
+#:
+#: The leading `(?<![\w'’-])` is what makes it a FIELD NAME rather than a
+#: substring: without it "MyCitizenship:" inside a value stops the cut and
+#: everything before it renders.
+_KNOWN_FIELD_LABEL_RE = re.compile(
+    r"(?<![\w'’-])"
+    r"(?:(?:[•·*–—-]|\d{1,3}[.)])[ \t]*)?"
+    r"(?:"
+    + "|".join(
+        [r"(?:" + str(rule.label) + r")"
+         for rule in WITHHOLD_POLICY if rule.label is not None]
+        + [r"(?:" + label + r")" for label in _RENDER_SET_FIELD_LABELS]
+    )
+    + r")\s*:",
+    re.X | re.I,
+)
+
+
 # ---------------------------------------------------------------------------
 # The match engine
 # ---------------------------------------------------------------------------
@@ -522,11 +613,22 @@ def _explicit_dob_label(text: str, m: re.Match) -> bool:
             and _WHOLE_DATE_AFTER_LABEL_RE.match(text, m.end()) is not None)
 
 
+def _after_known_field(text: str, frag_start: int, label_start: int) -> bool:
+    """True when a KNOWN field label (`_KNOWN_FIELD_LABEL_RE`) opens
+    earlier in the same fragment: a policy label after another field's
+    value ("Citizenship: US Date of Birth: ...") starts that field's
+    successor, wherever the value ends (#849). A vocabulary, never a guess
+    at where a value stops -- #821 R4."""
+    return _KNOWN_FIELD_LABEL_RE.search(text, frag_start, label_start) is not None
+
+
 def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) -> list[tuple[int, int]]:
     """(start, end) of every fragment `pattern` opens in `text`: from the
     opener's own start to the next hard delimiter (or end of string), kept
     only where `_boundary_ok` accepts the text since the previous delimiter,
-    or the opener is an explicit DOB label with a whole date after it."""
+    the opener follows a known field label in the same fragment
+    (`_after_known_field`), or it is an explicit DOB label with a whole date
+    after it."""
     spans = []
     for m in pattern.finditer(text):
         start = m.start()
@@ -534,6 +636,7 @@ def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) ->
         for d in _PII_FRAGMENT_SPLIT_RE.finditer(text, 0, start):
             prev_delim_end = d.end()
         if not (_boundary_ok(text[prev_delim_end:start])
+                or _after_known_field(text, prev_delim_end, start)
                 or (category == CAT_DATE_OF_BIRTH and _explicit_dob_label(text, m))):
             continue
         nxt = _PII_FRAGMENT_SPLIT_RE.search(text, start)
