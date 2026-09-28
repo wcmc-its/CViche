@@ -601,6 +601,20 @@ def _cut_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
     return stripped.strip()
 
 
+def _pii_field_value_hits(fields: Mapping, scope: str) -> dict[str, list[str]]:
+    """Field key -> the PII categories its string VALUE matches at `scope`
+    (#892): a field-first renderer prints the value whatever key it sits
+    under ("award_name": "... O-1 Visa"), so the key-name check alone
+    leaves it on the page beside a notice saying it was withheld."""
+    hits: dict[str, list[str]] = {}
+    for key, value in fields.items():
+        if isinstance(value, str) and value:
+            categories = [m.category for m in _pii_matches(value, scope)]
+            if categories:
+                hits[key] = categories
+    return hits
+
+
 def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
                  routed_codes: frozenset[str] | set[str],
                  section_names: Mapping[str, str]) -> PiiPassResult:
@@ -675,7 +689,12 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             pii_keys = [(k, _pii_field_key_category(k)) for k in fields]
             pii_keys = [(k, c) for k, c in pii_keys if c is not None]
 
-            if not matches and not pii_keys:
+            pii_key_names = {k for k, _ in pii_keys}
+            value_hits = {
+                k: cats for k, cats in _pii_field_value_hits(fields, scope).items()
+                if k not in pii_key_names}
+
+            if not matches and not pii_keys and not value_hits:
                 continue
 
             # Extend a bare-label match (`_extend_bare_label_span`) to pull
@@ -699,6 +718,18 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             for key, category in pii_keys:
                 del fields[key]
                 result.withheld.append(WithheldItem(category, section, index))
+            # #892: a PII value under a non-PII key is dropped like a
+            # PII-keyed field. The same item already recorded from `text`
+            # (the entry's raw text usually carries the very same phrase)
+            # is not counted twice.
+            noticed = {m.category for m in matches}
+            for key, categories in value_hits.items():
+                del fields[key]
+                for category in categories:
+                    if category not in noticed:
+                        noticed.add(category)
+                        result.withheld.append(
+                            WithheldItem(category, section, index))
 
     return result
 

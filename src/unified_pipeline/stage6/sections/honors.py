@@ -992,6 +992,11 @@ class HonorsSection:
                 continue
 
             for record in parse_honor_entry(entry):
+                if entry.get('_pii_withheld') and not record.award:
+                    # #892: the PII pass withheld this entry's award (its
+                    # name field or its text); the organization and date
+                    # left over describe the withheld item, not an honor.
+                    continue
                 if not (record.award or record.organization or record.date):
                     # An entry with no text and no extracted fields has
                     # nothing to render; an empty row is not the honest
