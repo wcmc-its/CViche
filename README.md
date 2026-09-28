@@ -356,11 +356,10 @@ python3 run_full_pipeline.py sample_vasquez_cv
 # Run a single stage
 python3 run_full_pipeline.py sample_vasquez_cv --stage 3b
 
-# Specify LLM model (OpenAI)
-python3 run_full_pipeline.py sample_vasquez_cv --model gpt-4.1
-
-# Use AWS Bedrock (set provider in config.yaml to "bedrock")
-python3 run_full_pipeline.py sample_vasquez_cv
+# Models are not a CLI argument: each stage's model comes from
+# src/unified_pipeline/config/llm_config.yaml (see docs/LLM_MODELS.md).
+# Override every non-pinned stage for one run:
+CVICHE_LLM_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0 python3 run_full_pipeline.py sample_vasquez_cv
 ```
 
 Stage outputs are written to `src/unified_pipeline/outputs/stage_*/`, with each stage producing a JSON file named by the document UID.

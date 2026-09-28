@@ -826,8 +826,7 @@ python3 run_full_pipeline.py 2097_Upton_Cv --stage 2
 python3 run_full_pipeline.py 2097_Upton_Cv --stage 3a
 python3 run_full_pipeline.py 2097_Upton_Cv --stage 4
 
-# Run with different model
-python3 run_full_pipeline.py 2097_Upton_Cv --model gpt-4o-mini
+# Models come from src/unified_pipeline/config/llm_config.yaml, not a flag (docs/LLM_MODELS.md)
 ```
 
 ### Stage Options
