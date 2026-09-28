@@ -393,7 +393,11 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 <dl className="space-y-2 text-sm">
                   <div className="flex justify-between">
                     <dt className="text-gray-600">Document content:</dt>
-                    <dd className="font-medium">{estimate.text_characters.toLocaleString()} chars (~{estimate.document_tokens.toLocaleString()} tokens)</dd>
+                    <dd className="font-medium">
+                      {estimate.text_characters_is_guess
+                        ? 'Unknown'
+                        : `${estimate.text_characters.toLocaleString()} chars (~${estimate.document_tokens.toLocaleString()} tokens)`}
+                    </dd>
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-gray-600">Pipeline steps:</dt>
@@ -415,6 +419,11 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 <p className="text-xs text-gray-500 mt-3">
                   Cost estimated for {estimate.pricing_model}.
                 </p>
+                {estimate.text_characters_is_guess && (
+                  <p className="text-xs text-amber-700 mt-1">
+                    We couldn't read this document's text, so the time and cost above are a rough guess, not based on its length.
+                  </p>
+                )}
               </section>
             )}
 

@@ -9,4 +9,5 @@ export interface Estimate {
   filename: string
   file_size_kb: number
   pricing_model: string
+  text_characters_is_guess: boolean
 }

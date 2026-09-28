@@ -858,6 +858,7 @@ class TestUploadValidation:
             )
         assert response.status_code == 200, response.text
         assert response.json()["text_characters"] == 1000
+        assert response.json()["text_characters_is_guess"] is False
         fallback_logs = [r for r in caplog.records if "fixed char-count guess" in r.getMessage()]
         assert fallback_logs == []  # extraction succeeded -- no fallback warning
 
@@ -883,6 +884,34 @@ class TestUploadValidation:
         fallback_logs = [r for r in caplog.records if "fixed char-count guess" in r.getMessage()]
         assert len(fallback_logs) == 1
         assert "resume.docx" not in fallback_logs[0].getMessage()
+
+    @pytest.mark.parametrize("extracted", [None, "z" * 60_000])
+    def test_upload_and_estimate_size_one_file_the_same(self, client, db, seed_simple_mode, tmp_path, extracted):
+        """#794: one file through /estimate and /upload yields one char count --
+        the quoted time max IS the run's stall-watchdog duration, and an
+        unreadable file is flagged as a guess rather than quoted as measured.
+        /upload's fallback used to be a size heuristic (len(content)//30000),
+        so the two disagreed exactly when extraction failed."""
+        from app.models import Run
+        self._create_auth_user(client, db)
+        content = b"PK\x03\x04" + b"\x00" * 200_000
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path), \
+             patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value=extracted), \
+             patch("app.api.upload.detect_wcm_template", return_value=(False, None)), \
+             patch("app.api.upload.get_storage", return_value=MagicMock()):
+            est = client.post("/api/estimate", files={"file": ("cv.docx", content, "application/octet-stream")})
+            up = client.post(
+                "/api/upload",
+                files={"file": ("cv.docx", content, "application/octet-stream")},
+                data={"submission_type": "own_cv"},
+            )
+        assert est.status_code == 200, est.text
+        assert up.status_code == 200, up.text
+        body = est.json()
+        assert body["text_characters_is_guess"] is (extracted is None)
+        run = db.query(Run).filter(Run.id == up.json()["run_id"]).one()
+        assert run.estimated_duration_seconds == body["estimated_time_seconds_max"]
 
     def test_estimate_respects_rate_limit(self, client, db, seed_simple_mode):
         """#795: /estimate is rate-limited the same way /upload is --

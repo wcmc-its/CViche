@@ -61,6 +61,18 @@ MIN_EXTRACTED_CHARS = 500
 # suspiciously cheap nor alarmingly expensive while the real content is
 # unknown. Distinct from MIN_EXTRACTED_CHARS above, which gates /upload.
 _ESTIMATE_FALLBACK_CHAR_COUNT = 5000
+# Floor on the char count an estimate is sized from: a readable-but-blank
+# document still costs a run's fixed per-stage overhead.
+_ESTIMATE_MIN_CHAR_COUNT = 1000
+
+
+def _estimate_char_count(extracted: str | None) -> int:
+    """The char count both /estimate's quote and /upload's stall-watchdog
+    duration are sized from, so one file gets one number (#794). ``None``
+    (unreadable) takes the fixed fallback; /estimate flags that to the user."""
+    if extracted is None:
+        return _ESTIMATE_FALLBACK_CHAR_COUNT
+    return max(len(extracted), _ESTIMATE_MIN_CHAR_COUNT)
 
 
 # Expansion bound checked before python-docx parses (#793). zipfile stops
@@ -250,6 +262,9 @@ class EstimateResponse(BaseModel):
     filename: str
     file_size_kb: float
     pricing_model: str
+    # True when the document's text couldn't be read and text_characters is
+    # the fixed fallback guess, not a measurement (#794).
+    text_characters_is_guess: bool = False
 
 # Upload directory
 UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
@@ -623,10 +638,8 @@ async def upload_cv(
     # Input-scaled wall-clock estimate, stored so the client stall watchdog can
     # scale its "taking longer than expected" threshold to this CV instead of a
     # fixed constant (large CVs were false-positiving as "may be stuck"). Same
-    # helper as /estimate. extracted is None only when text extraction couldn't
-    # run; fall back to a size-based char estimate then.
-    est_char_count = len(extracted) if extracted else max(1, len(content) // 30000) * 2000
-    _, estimated_duration_seconds = estimate_run_seconds(est_char_count)
+    # helper and char count as /estimate.
+    _, estimated_duration_seconds = estimate_run_seconds(_estimate_char_count(extracted))
 
     # Create run record. Persist the user's output-rendering choices (issue
     # #153) as the truthy ints the Stage 6 generator reads at render time.
@@ -729,20 +742,12 @@ async def estimate_processing(
     # event loop, same as /upload (#793).
     extracted = await run_in_threadpool(_extract_text, content, file_ext)
     if extracted is None:
-        # _extract_text already logged the specific read failure (§5.4) --
-        # this used to be a bare `except Exception` that set 5000 with no
-        # log line at all. The fallback value itself is unchanged; see the
-        # T-UP report for the residual gap (EstimateResponse still has no
-        # field to signal it). No filename here (CODING_STANDARDS §4.7): CV
-        # filenames usually carry the owner's name, and every log line
-        # already carries the request id via RequestIDFilter.
+        # _extract_text already logged the specific read failure (§5.4). No
+        # filename here (CODING_STANDARDS §4.7): CV filenames usually carry
+        # the owner's name, and every log line already carries the request id
+        # via RequestIDFilter.
         logger.warning("Estimate falling back to a fixed char-count guess")
-        text_char_count = _ESTIMATE_FALLBACK_CHAR_COUNT
-    else:
-        text_char_count = len(extracted)
-
-    # Ensure we have a reasonable minimum
-    text_char_count = max(text_char_count, 1000)
+    text_char_count = _estimate_char_count(extracted)
 
     # Estimate tokens (roughly 4 characters per token for English text)
     estimated_tokens = text_char_count // 4
@@ -775,4 +780,5 @@ async def estimate_processing(
         filename=file.filename,
         file_size_kb=round(file_size_kb, 1),
         pricing_model=get_estimate_model_name(),
+        text_characters_is_guess=extracted is None,
     )
