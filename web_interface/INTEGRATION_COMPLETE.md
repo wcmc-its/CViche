@@ -342,24 +342,23 @@ python3 -c "from pathlib import Path; print(Path.cwd().parent.parent)"
 # Should output: /Users/.../CV parsing - AI project
 ```
 
-### OpenAI API Key Missing
-If you see `ValueError: OpenAI API key not found`:
+### AWS Bedrock Credentials Missing
+CViche is Bedrock-only now (#953). If Bedrock calls fail with a credentials/access error:
 ```bash
 # Check your environment
-echo $OPENAI_API_KEY
-echo $OPENAI_API_KEY
+echo $AWS_ACCESS_KEY_ID
 
 # Or set in backend/.env
 cd backend
 cp .env.example .env
-# Edit .env and add your key
+# Edit .env and add AWS credentials (or leave unset to use an IAM role)
 ```
 
 ### Segmentation Fails
 If Step 1 fails:
 - Check file path is correct
 - Verify file is .docx or .pdf
-- Check OpenAI API key is valid
+- Check AWS Bedrock credentials are valid and model access is enabled
 - Look at backend logs for detailed error
 
 ---
