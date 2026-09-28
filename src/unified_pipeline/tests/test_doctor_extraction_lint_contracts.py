@@ -669,6 +669,23 @@ def test_lint_invented_records_skips_taxonomy_code_t():
     assert lint_invented_records({"entries": [entry]}, [[_HEADER_ROW, _INVENTED_CERT_ROW]]) == []
 
 
+def test_lint_invented_records_handles_extracted_fields_none_without_raising():
+    # Stage 4 can write extracted_fields: null for an entry field extraction
+    # skipped outright (not just individual field values of None, the shape
+    # test_lint_invented_records_silent_on_single_label_affiliation_prompt
+    # covers below). `lint_invented_records`'s own read is
+    # `e.get("extracted_fields") or {}`, not `e.get("extracted_fields", {})`
+    # -- the latter returns None (the key IS present) rather than {} when the
+    # value itself is None, and passing that None into `_is_invented_record`
+    # would raise AttributeError on `.values()`, which `_run_lint` in
+    # run_doctor.py turns into a doctor ERROR finding instead of the correct
+    # silent skip.
+    entry = {"taxonomy_code": "F2", "element_type": "table_row",
+            "element_idx_start": 5, "text": "unextracted row",
+            "extracted_fields": None}
+    assert lint_invented_records({"entries": [entry]}, []) == []
+
+
 def test_lint_invented_records_silent_on_single_label_affiliation_prompt():
     # The G/Institutional-Affiliation shape: one unfilled prompt label
     # rendered with a blank companion cell is the template's own intentional
