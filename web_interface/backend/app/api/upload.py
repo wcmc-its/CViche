@@ -8,9 +8,11 @@ import secrets
 import string
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 from collections.abc import Callable
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from datetime import datetime
 from pydantic import BaseModel
@@ -51,13 +53,34 @@ ALLOWED_UPLOAD_EXTENSIONS = (".docx",)
 # certainly a scanned image, a password-protected file, or effectively blank.
 MIN_EXTRACTED_CHARS = 500
 
+# /estimate's placeholder char count when _extract_text couldn't read the
+# document at all (#794) -- a mid-range guess so the quote shown is neither
+# suspiciously cheap nor alarmingly expensive while the real content is
+# unknown. Distinct from MIN_EXTRACTED_CHARS above, which gates /upload.
+_ESTIMATE_FALLBACK_CHAR_COUNT = 5000
+
+
+# Expansion bound checked before python-docx parses (#793). zipfile stops
+# inflating each entry at its declared file_size, so capping the declared
+# totals caps what a parse can expand to. The 392 local corpus CVs top out at
+# 37 entries and 7.2 MB uncompressed; a zip bomb declares gigabytes.
+_DOCX_MAX_ENTRIES = 1000
+_DOCX_MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+
 
 def _validate_docx_magic(content: bytes) -> bool:
-    """Check if content is a ZIP archive containing Word document structure."""
+    """Check if content is a ZIP archive containing Word document structure,
+    within the entry-count and uncompressed-size bounds above."""
     if content[:4] != ZIP_MAGIC:
         return False
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            entries = zf.infolist()
+            if (len(entries) > _DOCX_MAX_ENTRIES
+                    or sum(e.file_size for e in entries) > _DOCX_MAX_UNCOMPRESSED_BYTES):
+                logger.warning("Rejected docx: %d entries, %d bytes uncompressed",
+                               len(entries), sum(e.file_size for e in entries))
+                return False
             return "word/document.xml" in zf.namelist()
     except (zipfile.BadZipFile, Exception):
         return False
@@ -68,7 +91,8 @@ def _validate_docx_magic(content: bytes) -> bool:
 # XMLSyntaxError; a truncated zip -> BadZipFile; not an OPC package at all ->
 # PackageNotFoundError; the tempfile round-trip -> OSError. Anything else is a
 # bug and must surface, not be swallowed (§5.4).
-_DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSyntaxError, OSError)
+_DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSyntaxError, OSError,
+                     zlib.error)
 
 
 def _extract_text(content: bytes, file_ext: str) -> str | None:
@@ -99,6 +123,36 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
         return None
     finally:
         os.unlink(tmp_path)
+
+
+# Bytes read per chunk while bounding an upload body (#793): large enough that
+# a normal CV (a few hundred KB) reads in one or two chunks, small enough that
+# a request over the size cap is caught well before the whole body is buffered.
+_UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
+
+
+async def _read_bounded(file: UploadFile, max_size: int) -> bytes:
+    """Read an upload in bounded chunks, aborting once max_size is exceeded.
+
+    Unlike ``await file.read()`` followed by a size check, this never buffers
+    more than ``max_size`` plus one chunk of an oversized body before
+    rejecting it (#793).
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            # Production caps are always a whole number of MB (config_service
+            # builds MAX_UPLOAD_SIZE as int(CVICHE_MAX_UPLOAD_MB)*1024*1024),
+            # so the cap is always printed in whole MB -- no KB/bytes
+            # fallback for a sub-1MB cap, which only a test ever patches in.
+            raise bad_request(f"File too large. Maximum size is {max_size // (1024 * 1024)} MB.")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 router = APIRouter()
@@ -388,12 +442,9 @@ async def upload_cv(
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
 
-    # Read file content first for validation
-    content = await file.read()
-
-    # Check file size
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise bad_request(f"File too large ({len(content) // (1024*1024)} MB). Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.")
+    # Read file content in bounded chunks so an oversized body is never fully
+    # buffered before being rejected (#793).
+    content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
     # Validate magic bytes match claimed extension
     if file_ext == ".docx" and not _validate_docx_magic(content):
@@ -404,7 +455,7 @@ async def upload_cv(
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
     # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
-    extracted = _extract_text(content, file_ext)
+    extracted = await run_in_threadpool(_extract_text, content, file_ext)
     if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
@@ -419,7 +470,9 @@ async def upload_cv(
     # returns (False, None), so this never blocks an upload. We only warn (the UI
     # requires an acknowledgement) -- we never reject, since reformatting an
     # existing publication list is a legitimate, template-shaped use.
-    wcm_template_warning, wcm_template_match_ratio = detect_wcm_template(extracted)
+    wcm_template_warning, wcm_template_match_ratio = await run_in_threadpool(
+        detect_wcm_template, extracted
+    )
     if wcm_template_warning:
         logger.info(
             "Upload looks like a blank WCM template (user=%s, match_ratio=%s)",
@@ -539,6 +592,7 @@ async def upload_cv(
 @router.post("/estimate", response_model=EstimateResponse)
 async def estimate_processing(
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -551,9 +605,6 @@ async def estimate_processing(
 
     The file is not saved - this is just for estimation.
     """
-    import tempfile
-    import os
-
     # Validate file type
     if not file.filename:
         raise bad_request("No filename provided")
@@ -565,12 +616,17 @@ async def estimate_processing(
             "Please convert your file to .docx before uploading."
         )
 
-    # Read file content
-    content = await file.read()
+    # Rate-limited the same as /upload (#795): estimation parses a full
+    # document, the same expensive work /upload is already limited for. This
+    # reuses /upload's per-run quota rather than a dedicated estimate budget
+    # -- see the T-UP report for the residual gap that leaves open.
+    rate_limit_error = check_rate_limit(current_user, db)
+    if rate_limit_error:
+        raise HTTPException(status_code=429, detail=rate_limit_error)
 
-    # Check file size
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise bad_request(f"File too large ({len(content) // (1024*1024)} MB). Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.")
+    # Read file content in bounded chunks so an oversized body is never fully
+    # buffered before being rejected (#793).
+    content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
     # Validate magic bytes
     if file_ext == ".docx" and not _validate_docx_magic(content):
@@ -579,36 +635,23 @@ async def estimate_processing(
 
     file_size_kb = len(content) / 1024
 
-    # Extract actual text from document to estimate tokens
-    document_text = ""
-    text_char_count = 0
-
-    try:
-        if file_ext == ".docx":
-            # Extract text from Word document
-            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-
-            try:
-                from docx import Document
-                doc = Document(tmp_path)
-                # Get text from paragraphs
-                paragraphs_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
-                # Also get text from tables
-                tables_text = ""
-                for table in doc.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            if cell.text.strip():
-                                tables_text += cell.text + " "
-                document_text = paragraphs_text + "\n" + tables_text
-                text_char_count = len(document_text)
-            finally:
-                os.unlink(tmp_path)
-    except Exception as e:
-        # Fallback: very rough estimate
-        text_char_count = 5000  # Assume a typical CV has ~5000 characters
+    # Extract text through the same implementation /upload uses (#794) --
+    # this endpoint used to re-walk the docx paragraphs/tables inline, which
+    # could compute a different text_char_count for the same file. Off the
+    # event loop, same as /upload (#793).
+    extracted = await run_in_threadpool(_extract_text, content, file_ext)
+    if extracted is None:
+        # _extract_text already logged the specific read failure (§5.4) --
+        # this used to be a bare `except Exception` that set 5000 with no
+        # log line at all. The fallback value itself is unchanged; see the
+        # T-UP report for the residual gap (EstimateResponse still has no
+        # field to signal it). No filename here (CODING_STANDARDS §4.7): CV
+        # filenames usually carry the owner's name, and every log line
+        # already carries the request id via RequestIDFilter.
+        logger.warning("Estimate falling back to a fixed char-count guess")
+        text_char_count = _ESTIMATE_FALLBACK_CHAR_COUNT
+    else:
+        text_char_count = len(extracted)
 
     # Ensure we have a reasonable minimum
     text_char_count = max(text_char_count, 1000)
