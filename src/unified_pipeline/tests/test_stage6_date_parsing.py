@@ -583,7 +583,7 @@ def test_an_unreadable_year_is_never_searched_for():
 # --- #543: an impossible month renders as the year alone, never verbatim ----
 
 @pytest.mark.parametrize("date_str", [
-    "13/2024", "99/2024", "00/2024", "2024-13", "2024-13-01", "2024-99-99",
+    "13/2024", "99/2024", "00/2024", "2024-13-01", "2024-99-99",
     "2024-00-00", "13/05/2024",
 ])
 @pytest.mark.parametrize("code", ["B1", "C", "F1", "H"])
@@ -617,5 +617,24 @@ def test_a_list_or_range_with_an_impossible_month_is_left_as_written(date_str):
 
 @pytest.mark.parametrize("date_str", ["01/2024", "12/2024", "2024-06-15"])
 def test_year_of_impossible_month_is_none_for_a_valid_month(date_str):
+    from unified_pipeline.stage6.parsing.dates import _year_of_impossible_month
+    assert _year_of_impossible_month(date_str) is None
+
+
+@pytest.mark.parametrize("date_str", [
+    "2014-15", "2019-20", "2020/21", "2012-13", "2024-13", "2024-00",
+])
+@pytest.mark.parametrize("code", ["B1", "C", "F1", "H"])
+def test_an_academic_year_range_still_renders_as_written(date_str, code):
+    # YYYY-YY is ambiguous with YYYY-MM, so it is never cut to its start year.
+    assert format_date_for_section(date_str, code) == date_str
+
+
+def test_an_academic_year_range_as_an_end_date_keeps_its_end_year():
+    assert format_date_range("2010", "2014-15", "H") == "2010-2014-15"
+
+
+@pytest.mark.parametrize("date_str", ["2014-15", "2019-20", "2020/21", "2012-13"])
+def test_year_of_impossible_month_ignores_a_two_digit_year_range(date_str):
     from unified_pipeline.stage6.parsing.dates import _year_of_impossible_month
     assert _year_of_impossible_month(date_str) is None

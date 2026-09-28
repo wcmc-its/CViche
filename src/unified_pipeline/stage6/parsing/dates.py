@@ -129,11 +129,13 @@ LAST_MONTH = 12
 
 # (pattern, year group, month group) for every date shape that states a
 # four-digit year next to a month number -- the shapes `_parse_date_components`
-# rejects outright when that month is impossible. Same patterns, same order.
+# rejects outright when that month is impossible. Same patterns, same order,
+# except that YYYY-NN / YYYY/NN is deliberately left out: "2014-15" or
+# "2019-20" is an academic-year range far more often than year 2014, month 15,
+# and cutting it to its start year would drop the end year.
 _MONTH_AND_YEAR_SHAPES = (
     (re.compile(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})'), 1, 2),
     (re.compile(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})'), 3, 1),
-    (re.compile(r'(\d{4})[-/](\d{1,2})'), 1, 2),
     (re.compile(r'(\d{1,2})[-/](\d{4})'), 2, 1),
 )
 
