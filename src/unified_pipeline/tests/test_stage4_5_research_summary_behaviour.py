@@ -311,6 +311,7 @@ def test_latest_entry_year_reads_date_field_and_twentieth_century_years():
     ("Award 20195 and 2010", 2010),
     ("Project 2022-2028", 2026),
     ("Project 2022-2028, pilot 2015", 2026),
+    ("Project 2030-2032, pilot 2015", 2015),
 ])
 def test_latest_entry_year_ignores_digits_inside_longer_numbers(text, expected):
     """A grant or ID number that contains a year-like run is not a year.
