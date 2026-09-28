@@ -37,6 +37,7 @@ os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from app.api.runs import _run_duration_seconds
+from app.pipeline.orchestrator import GENERIC_FAILURE_MESSAGE
 
 
 def _run(**kw):
@@ -152,7 +153,7 @@ def test_execute_persists_duration_on_failure(monkeypatch, tmp_path, db):
     row = db.query(Run).filter(Run.id == "EXEC_FAIL").first()
     assert row.status == "failed"
     assert row.completed_at is not None
-    assert row.error_message == "stage blew up"
+    assert row.error_message == GENERIC_FAILURE_MESSAGE
     # Duration was recorded from the time-to-failure delta (>= 0, here exactly 17).
     assert row.total_duration_seconds is not None
     assert row.total_duration_seconds >= 0
@@ -194,7 +195,7 @@ def test_execute_failure_before_start_leaves_duration_none(monkeypatch, tmp_path
     row = db.query(Run).filter(Run.id == "EXEC_EARLY").first()
     assert row.status == "failed"
     assert row.completed_at is not None
-    assert row.error_message == "boom before start"
+    assert row.error_message == GENERIC_FAILURE_MESSAGE
     # The guard at line 504 was respected: no wall-clock was forced in here.
     assert row.total_duration_seconds is None
 

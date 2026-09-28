@@ -10,6 +10,7 @@ Covers:
   - websocket._terminal_event_for_run (replay terminal status on reconnect)   [E4]
   - PipelineOrchestrator per-stage timeout -> surfaced error                  [E3]
   - llm_client / orchestrator timeout config env parsing                      [E3]
+  - orchestrator.user_facing_error: run.error_message never carries str(exc) [#592]
 """
 import asyncio
 import json
@@ -181,3 +182,69 @@ def test_execute_step_timeout_surfaces_error(monkeypatch, tmp_path):
     assert fake_step.status == "error"
     assert o.failed_step_number == 6
     emitter.emit_step_error.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# #592: run.error_message is a fixed user-facing message, never str(exc)
+# ---------------------------------------------------------------------------
+
+_LEAKY = "boto3 ClientError: /app/src/unified_pipeline/x.py RequestId=abc123"
+
+
+def test_user_facing_error_generic_failure_hides_exception_text():
+    from app.pipeline.orchestrator import GENERIC_FAILURE_MESSAGE, user_facing_error
+
+    msg = user_facing_error(RuntimeError(_LEAKY), resuming=False)
+    assert msg == GENERIC_FAILURE_MESSAGE
+    assert "abc123" not in msg and "/app/" not in msg
+
+
+def test_user_facing_error_llm_outage_found_through_the_chain():
+    """A stage that wraps LLMOutageError (raise X from outage) still reads as
+    an outage, so the user is told to wait rather than that the CV is bad."""
+    from app.pipeline.orchestrator import LLM_OUTAGE_MESSAGE, user_facing_error
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    try:
+        try:
+            raise LLMOutageError(_LEAKY, seconds_waited=31.0)
+        except LLMOutageError as outage:
+            raise RuntimeError("stage 4 failed") from outage
+    except RuntimeError as wrapped:
+        assert user_facing_error(wrapped, resuming=False) == LLM_OUTAGE_MESSAGE
+
+
+def test_user_facing_error_stage_timeout():
+    from app.pipeline.orchestrator import STAGE_TIMEOUT_MESSAGE, user_facing_error
+
+    exc = TimeoutError("Stage 4 (Field Extraction) timed out after 1800s")
+    assert user_facing_error(exc, resuming=False) == STAGE_TIMEOUT_MESSAGE
+
+
+def test_user_facing_error_missing_input_only_special_on_resume():
+    from app.pipeline.orchestrator import (
+        GENERIC_FAILURE_MESSAGE,
+        RESUME_INPUT_MISSING_MESSAGE,
+        user_facing_error,
+    )
+
+    exc = FileNotFoundError("[Errno 2] No such file or directory: '/x/y.json'")
+    assert user_facing_error(exc, resuming=True) == RESUME_INPUT_MISSING_MESSAGE
+    assert user_facing_error(exc, resuming=False) == GENERIC_FAILURE_MESSAGE
+
+
+def test_user_facing_error_messages_name_real_buttons():
+    """Every message's quoted action must be a button PipelineViewer renders."""
+    from app.pipeline import orchestrator as orch
+
+    viewer = (
+        Path(__file__).parents[2] / "frontend" / "src" / "components" / "PipelineViewer.tsx"
+    ).read_text()
+    for msg in (
+        orch.RESUME_INPUT_MISSING_MESSAGE,
+        orch.LLM_OUTAGE_MESSAGE,
+        orch.STAGE_TIMEOUT_MESSAGE,
+        orch.GENERIC_FAILURE_MESSAGE,
+    ):
+        for label in msg.split('"')[1::2]:
+            assert label in viewer, f"{label!r} is not a PipelineViewer button"
