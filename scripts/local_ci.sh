@@ -33,6 +33,10 @@ if [ ! -x "$NODE20/node" ]; then
   exit 1
 fi
 
+# Precedence: an explicit TRUFFLEHOG (or the default bare name `trufflehog`)
+# resolved via PATH wins whenever it resolves at all -- the
+# $LOCAL_CI_DIR/tools/trufflehog fallback is only consulted when that lookup
+# comes back empty, never the other way around.
 TH="$(command -v "${TRUFFLEHOG:-trufflehog}" 2>/dev/null || true)"
 if [ -z "$TH" ] && [ -x "$S/tools/trufflehog" ]; then
   TH="$S/tools/trufflehog"
@@ -41,6 +45,7 @@ if [ -z "$TH" ] || [ ! -x "$TH" ]; then
   echo "local_ci.sh: trufflehog not found. Set TRUFFLEHOG=/path/to/trufflehog, put it on PATH, or place it at $S/tools/trufflehog (ci.yml pins v3.97.4)." >&2
   exit 1
 fi
+echo "local_ci.sh: using trufflehog at $TH" >&2
 
 git -C "$REPO" fetch -q origin
 DEV=$(git -C "$REPO" rev-parse origin/dev)
