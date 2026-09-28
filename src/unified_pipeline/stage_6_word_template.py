@@ -1028,22 +1028,35 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         `grant_number` or `non_financial_support`, that never reached its
         `extracted_fields` and so never reached a render slot -- stage 6's
         section renderers are fixed-slot and drop any field they do not
-        name, CLAUDE.md "Stage 6 drops unnamed fields"). Requiring both
-        keeps this drop scoped to the same parent AND provably non-lossy.
+        name, CLAUDE.md "Stage 6 drops unnamed fields").
+
+        Round 2 (blind review): `recovered_row_content_rendered` now also
+        takes `parent` and searches only THAT parent's own rendered block
+        (`_rendered_output_blocks`, not the flat `_rendered_output_lines`) --
+        the original version searched the whole document, which let an
+        entirely unrelated entry's rendered line vouch for a row it had
+        nothing to do with (two grants under the same code, one entry's
+        rendered percent-effort or duration cell confirming a DIFFERENT
+        entry's recovered row). `parent` is resolved once here and passed to
+        both gates rather than re-resolved inside each, so there is exactly
+        one lookup to get wrong, not two that could silently diverge.
+        Requiring both gates -- same parent's raw text AND that same
+        parent's own rendered block -- keeps this drop scoped to one entry
+        throughout, not merely non-lossy against the document as a whole.
         """
         entries_by_element_idx = {str(e.get('element_idx_start')): e for e in all_entries}
         span_entries = [e for e in all_entries
                         if e.get('element_idx_start') != e.get('element_idx_end')]
-        rendered_lines = self._rendered_output_lines()
-        return [
-            e for e in entries
-            if not (
-                recovered_row_duplicates_parent(
-                    e, find_recovered_row_parent(
-                        e.get('parent_idx'), entries_by_element_idx, span_entries))
-                and recovered_row_content_rendered(e, rendered_lines)
-            )
-        ]
+        rendered_blocks = self._rendered_output_blocks()
+        kept: list[dict[str, Any]] = []
+        for e in entries:
+            parent = find_recovered_row_parent(
+                e.get('parent_idx'), entries_by_element_idx, span_entries)
+            if (recovered_row_duplicates_parent(e, parent)
+                    and recovered_row_content_rendered(e, parent, rendered_blocks)):
+                continue
+            kept.append(e)
+        return kept
 
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None) -> str:
@@ -2638,6 +2651,52 @@ Now analyze the text above:"""
 
         return [code for _, code, _ in remaining]
 
+    def _rendered_output_blocks(self) -> list[list[str]]:
+        """Every rendered text line of the in-memory document, grouped one
+        block per paragraph or per TOP-LEVEL table (a nested table's lines
+        join its containing top-level table's block, mirroring
+        `walk_table`'s own recursion) instead of one flat list.
+
+        `_rendered_output_lines` below is a thin flatten of this and is
+        unchanged in what it returns -- this split exists only so
+        `_drop_recovered_row_duplicates` (#A5IZ6Q round 2) can scope a
+        lookup to ONE entry's own rendered table rather than the whole
+        document; see `recovered_row_content_rendered`'s docstring
+        (stage6/dedup.py) for the cross-entry vouching bug that scoping
+        closes. Same two render-time divergences from run_doctor's
+        read_docx_blocks (which walks only top-level tables, cell by cell)
+        as before: nested tables are recursed into, and each table row is
+        ALSO emitted with its cells joined as one line, so a record
+        rendered as a structured row (title / dates / institution cells)
+        keeps its tokens together the way one source line does."""
+        blocks: list[list[str]] = []
+
+        def block_lines(text: str) -> list[str]:
+            return [ln for ln in str(text or '').split('\n') if ln.strip()]
+
+        def walk_table(tbl, out: list[str]):
+            for row in tbl.rows:
+                cell_texts = []
+                for cell in row.cells:
+                    if cell.text.strip():
+                        cell_texts.append(cell.text)
+                        out.extend(block_lines(cell.text))
+                    for nested in cell.tables:
+                        walk_table(nested, out)
+                if len(cell_texts) > 1:
+                    out.append(' | '.join(' '.join(t.split()) for t in cell_texts))
+
+        for para in self.doc.paragraphs:
+            lines = block_lines(para.text)
+            if lines:
+                blocks.append(lines)
+        for tbl in self.doc.tables:
+            out: list[str] = []
+            walk_table(tbl, out)
+            if out:
+                blocks.append(out)
+        return blocks
+
     def _rendered_output_lines(self) -> List[str]:
         """Every rendered text line of the in-memory document: body paragraphs
         plus table cells. Two render-time divergences from run_doctor's
@@ -2649,30 +2708,7 @@ Now analyze the text above:"""
         matches — fewer false "absent" verdicts, never more; the offline
         doctor may still WARN on rows this pass correctly judged rendered
         (reconciling lint 8's semantics is PR #223 scope)."""
-        lines: List[str] = []
-
-        def add(text: str):
-            for ln in str(text or '').split('\n'):
-                if ln.strip():
-                    lines.append(ln)
-
-        def walk_table(tbl):
-            for row in tbl.rows:
-                cell_texts = []
-                for cell in row.cells:
-                    if cell.text.strip():
-                        cell_texts.append(cell.text)
-                        add(cell.text)
-                    for nested in cell.tables:
-                        walk_table(nested)
-                if len(cell_texts) > 1:
-                    add(' | '.join(' '.join(t.split()) for t in cell_texts))
-
-        for para in self.doc.paragraphs:
-            add(para.text)
-        for tbl in self.doc.tables:
-            walk_table(tbl)
-        return lines
+        return [line for block in self._rendered_output_blocks() for line in block]
 
     def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]]) -> list[str]:
         """Post-render safety net (#221): re-emit record lines the structured

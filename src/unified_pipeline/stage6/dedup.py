@@ -8,14 +8,22 @@ constants' comments carry the accuracy history (#227, #208, C0ZGFW, 2Q1_ZQ)
 and are the spec.
 
 Depends one level down on `render_check` (`_record_lines` and its
-fused-multi-record threshold) because "is this a fused blob" is the same
-question both answer. Nothing here may import `stage_6_word_template`.
+fused-multi-record threshold, plus `_IDENTIFYING_FIELDS`/`_value_is_datelike`
+for `recovered_row_content_rendered`'s parent-scoping below) because "is this
+a fused blob" and "is this value substantial enough to anchor a search" are
+both questions `segment_already_rendered` already answers the same way.
+Nothing here may import `stage_6_word_template`.
 """
 import re
 
 from .normalization import _squash
 from .parsing import _dates_overlap_or_match
-from .render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines
+from .render_check import (
+    UNRENDERED_MIN_RECORD_LINES,
+    _IDENTIFYING_FIELDS,
+    _record_lines,
+    _value_is_datelike,
+)
 
 # A table row's cell separator, as this codebase's raw-text extraction
 # renders it -- " | " in the convention `recover_unclaimed_table_rows`
@@ -222,15 +230,138 @@ def _recovered_row_value(text: str) -> str:
     stage6/sections/research_support.py: all 8 grant rows' labels are always
     written) -- so a label alone always finds itself in the rendered
     document, whether or not this row's actual content did.
+
+    `maxsplit=1`: `recover_unclaimed_table_rows` emits exactly one separator
+    (label, then value), but a value that itself contains the separator
+    character ("Duration of support: | 00/2021 | 00/2022", two cells folded
+    into the row's raw text) must not be truncated at the FIRST occurrence
+    inside the value -- splitting on every occurrence would silently drop
+    everything after the value's own first separator.
     """
     parts = _CELL_SEPARATOR_RE.split(text or '', maxsplit=1)
     return (parts[1] if len(parts) > 1 else (text or '')).strip()
 
 
-def recovered_row_content_rendered(entry: dict, rendered_lines: list[str]) -> bool:
+def _value_contained_in_line(value: str, line: str) -> bool:
+    """Whitespace-insensitive containment of `value` in `line`, but a match
+    may not begin or end in the middle of an unrelated token: an
+    alphanumeric edge of the squashed `value` may not sit against another
+    alphanumeric character in the squashed `line`.
+
+    This is the fix for the round-2 defect a plain `squashed_value in line`
+    substring check has: '5%' is a literal substring of '25%' (and '2021' of
+    '12021'), so a $5 grant's percent-effort value would wrongly read as
+    confirmed by a DIFFERENT grant's '25%' cell. Same shape as
+    `normalization/pii.py`'s `_pii_containment_pattern` (a value must not be
+    denied, there, or confirmed, here, because its characters merely run
+    through the middle of an unrelated longer value) -- kept as its own
+    small copy rather than imported: that one decides whether a value is
+    PROTECTED personal data, a data-governance question; this one decides
+    whether a value RENDERED, a content-loss question, and the two must stay
+    free to diverge (module docstring: nothing here may import
+    `stage_6_word_template`, and pulling in the PII gate's helper for an
+    unrelated purpose would blur exactly the boundary that keeps this module
+    testable in isolation).
+
+    No minimum length and no non-empty requirement beyond `value` itself --
+    callers that need a length floor apply it themselves, since the floor
+    differs by caller (`recovered_row_content_rendered`'s VALUE has none
+    -- see `test_recovered_row_content_rendered_short_value_not_verifiable`;
+    `_parent_identifying_values` below requires >=15 chars, the same floor
+    `segment_already_rendered` uses for the same reason: a short value
+    cannot anchor a search to one specific block without risking a
+    coincidental hit in an unrelated one).
+    """
+    squashed_value = _squash(value)
+    if not squashed_value:
+        return False
+    squashed_line = _squash(line)
+    body = re.escape(squashed_value)
+    lead = r'(?<![a-z0-9])' if squashed_value[0].isalnum() else ''
+    trail = r'(?![a-z0-9])' if squashed_value[-1].isalnum() else ''
+    return re.search(lead + body + trail, squashed_line) is not None
+
+
+# The floor `_parent_identifying_values` requires of a field value before
+# trusting it to anchor a search to ONE rendered block -- mirrors
+# `segment_already_rendered`'s (render_check.py) inline 15-character floor
+# for the identical reason, named here because this module's own new code
+# reads it more than once (CODING_STANDARDS.md 8.2, named constants over
+# inline literals; the sibling inline literal in render_check.py is
+# untouched -- this PR doesn't touch that function, so extracting its
+# constant too would be a drive-by rewrite of code the PR has no other
+# reason to change).
+_PARENT_ANCHOR_MIN_CHARS = 15
+
+
+def _parent_identifying_values(parent: dict | None) -> list[str]:
+    """The parent entry's own field values substantial enough to identify
+    WHICH of the document's many rendered blocks is this specific parent's
+    own render -- the same `_IDENTIFYING_FIELDS` list and the same
+    date-like exclusion `segment_already_rendered` (render_check.py) uses to
+    decide a value can vouch for a record, applied here to locate a block
+    instead of to confirm one. A value below the floor, or one carrying no
+    identifying prose (`_value_is_datelike` -- a bare date range or grant
+    number is shared across a fused entry's sibling records and identifies
+    no ONE of them), is never used to pick a block: `_parent_rendered_block`
+    must return None rather than gamble a wrong block on a weak anchor.
+    """
+    fields = (parent or {}).get('extracted_fields') or {}
+    values = []
+    for key in _IDENTIFYING_FIELDS:
+        v = fields.get(key)
+        if not isinstance(v, str):
+            continue
+        v = v.strip()
+        if len(v) >= _PARENT_ANCHOR_MIN_CHARS and not _value_is_datelike(v):
+            values.append(v)
+    return values
+
+
+def _parent_rendered_block(parent: dict | None,
+                           rendered_blocks: list[list[str]]) -> list[str] | None:
+    """The ONE rendered block (one paragraph, or one top-level table
+    including any tables nested in it -- `_rendered_output_blocks`,
+    stage_6_word_template.py) that carries this parent's own identifying
+    content, or None when no block does.
+
+    This is the scoping `recovered_row_content_rendered` was missing
+    (round-2 finding): searching `rendered_blocks` flattened into one list
+    of lines -- the whole document -- let an entirely UNRELATED entry's
+    rendered line vouch for a recovered row it has nothing to do with,
+    merely because some value happened to coincide (reproduced: two M2B
+    grants, A and B; A's own rendered row confirmed B's recovered
+    percent-effort and duration rows as "rendered" even though B's own
+    grant table never wrote either value). Restricting the search to the
+    ONE block this parent's OWN identifying fields resolve to closes that:
+    a sibling entry's block is never even inspected.
+
+    None (not "search everything") is the correct answer when no block
+    anchors to this parent at all -- the parent itself may not have
+    rendered (a declined grant, `_create_grant_table` returning None for a
+    too-sparse entry), and falling back to a document-wide search in that
+    case would reopen the exact bug this closes. Ambiguity is a named,
+    narrower residual, not eliminated: two distinct parents sharing
+    identical title/agency text could still resolve to each other's block.
+    That is a real but far narrower failure mode than "any line in the
+    document" -- unlike the round-2 bug, it requires the SAME identifying
+    text on two different records, not merely a coincidental token.
+    """
+    anchors = _parent_identifying_values(parent)
+    if not anchors:
+        return None
+    for block in rendered_blocks:
+        if any(_value_contained_in_line(anchor, line)
+               for anchor in anchors for line in block):
+            return block
+    return None
+
+
+def recovered_row_content_rendered(entry: dict, parent: dict | None,
+                                   rendered_blocks: list[list[str]]) -> bool:
     """True when a recovered row's own VALUE -- never its label, and never
     the parent's raw stage-2 text -- is verifiably present in the ALREADY
-    RENDERED document.
+    RENDERED document, SCOPED to the parent's own rendered block.
 
     The second, mandatory half of the A5IZ6Q drop (see
     `recovered_row_duplicates_parent`'s docstring for the gap this closes):
@@ -243,34 +374,56 @@ def recovered_row_content_rendered(entry: dict, rendered_lines: list[str]) -> bo
     field can be captured into the parent's raw text while never reaching
     its `extracted_fields` at all.
 
-    `rendered_lines` is `_rendered_output_lines()` (stage_6_word_template.py),
+    Round 2 (blind review): the original version searched EVERY rendered
+    line in the whole document, not just this parent's own. That let a
+    sibling entry under the same taxonomy code vouch for a row it never
+    produced -- a distinct cross-entry duplication bug the caller's raw-text
+    scoping gate (`recovered_row_duplicates_parent`) does not catch, because
+    that gate only checks the row against the PARENT `find_recovered_row_parent`
+    resolved, and says nothing about which document-wide lines
+    `recovered_row_content_rendered` itself may then search. `parent` is now
+    a required argument for exactly that reason: `_parent_rendered_block`
+    resolves it to the one block that is THIS parent's own render (its own
+    table or paragraph), via the same `extracted_fields` values the caller
+    already has, and everything below only ever looks inside that block.
+    `rendered_blocks` is `_rendered_output_blocks()` (stage_6_word_template.py),
     called AFTER every mapped section -- including the grant tables -- has
     rendered and BEFORE this row would be dropped, so it already reflects
     whatever the parent actually wrote.
 
-    Matched two ways, both scoped to a SINGLE rendered line so an unrelated
-    line elsewhere that merely shares one token (a year) can't vouch alone:
-    verbatim, after whitespace-free squashing (an agency, title, PI name or
-    percent-effort value reaches its cell unchanged); or, when stage 6
-    reformats the value (a date range: "00/2021-00/2022" renders
-    "2021-2022"), every >=4-character alnum token the value carries, all
-    inside that one line. A value with no verbatim match and no qualifying
-    token is NOT confirmed -- this returns False, never a guess, because a
-    false positive here is exactly the content loss this check exists to
-    prevent (reproduced: a bare grant identifier or a value the parent's
-    `extracted_fields` never carried, like `non_financial_support` here,
-    clears neither check and correctly returns False).
+    Within that one block, matched two ways, both scoped to a SINGLE
+    rendered line and both token-aligned (`_value_contained_in_line`, not a
+    plain squashed substring -- round 2's second finding: '5%' is a literal
+    substring of '25%', so a value-only check without a token boundary could
+    still cross-match within the CORRECT block, e.g. two grants that happen
+    to render in the same block after a future layout change, or simply two
+    percent-effort values that happen to share a digit run): verbatim, after
+    whitespace-free squashing (an agency, title, PI name or percent-effort
+    value reaches its cell unchanged); or, when stage 6 reformats the value
+    (a date range: "00/2021-00/2022" renders "2021-2022"), every
+    >=4-character alnum token the value carries, each checked with the same
+    token-aligned containment, all inside that one line. A value with no
+    verbatim match and no qualifying token is NOT confirmed -- this returns
+    False, never a guess, because a false positive here is exactly the
+    content loss this check exists to prevent (reproduced: a bare grant
+    identifier or a value the parent's `extracted_fields` never carried,
+    like `non_financial_support` here, clears neither check and correctly
+    returns False). `parent` resolving to no block at all (None) is the same
+    "not confirmed" answer, for the same reason -- see
+    `_parent_rendered_block`.
     """
     value = _recovered_row_value(entry.get('text', '') or '')
-    squashed_value = _squash(value)
-    if not squashed_value:
+    if not _squash(value):
         return False
-    squashed_lines = [_squash(line) for line in rendered_lines]
-    if any(squashed_value in line for line in squashed_lines):
+    block = _parent_rendered_block(parent, rendered_blocks)
+    if block is None:
+        return False
+    if any(_value_contained_in_line(value, line) for line in block):
         return True
     tokens = _VALUE_TOKEN_RE.findall(value.lower())
     return bool(tokens) and any(
-        all(token in line for token in tokens) for line in squashed_lines)
+        all(_value_contained_in_line(token, line) for token in tokens)
+        for line in block)
 
 
 def _as_float(value: int | float | str | None) -> float | None:

@@ -455,3 +455,141 @@ def test_recovered_row_contained_in_parent_but_field_not_rendered_still_reaches_
     assert "R01-ZZ98765" in full_text
     # The grant itself still rendered, and did not gain a grant-number cell.
     assert "Fictional Research Foundation" in full_text
+
+
+# ---------------------------------------------------- A5IZ6Q round 2 (blind review)
+#
+# The blind review of round 1 found two more gaps, both in
+# `recovered_row_content_rendered` (stage6/dedup.py): it searched the WHOLE
+# rendered document rather than the parent's own render (cross-entry
+# vouching), and it matched a squashed value as a plain substring rather than
+# a whole token/cell (so a short numeric value like "5%" could match inside
+# an unrelated "25%"). Both wire tests below run the real `generate()`.
+
+def test_recovered_row_from_one_grant_not_vouched_by_a_different_grants_render(tmp_path):
+    """The exact round-2 repro: two M2B grants, A and B. A's own
+    extracted_fields carry dates and percent_effort and render normally. B's
+    RAW text also carries a duration line and a percent-effort line -- so
+    `recover_unclaimed_table_rows` splits them out as B's own recovered
+    rows -- but B's `extracted_fields` carry only title and agency, so B's
+    OWN grant table never renders either value (label only, blank cell).
+
+    The pre-round-2 code searched the whole document for B's rows' values:
+    it found A's rendered "2019-2020" (a token match against B's duration
+    row) and A's rendered "25%" (a squashed-substring match against B's own
+    "5%" -- '5%' is literally contained in '25%') and wrongly concluded both
+    of B's rows had already rendered. Neither actually reached the document
+    anywhere: B's own table has blank cells for both fields. Both recovered
+    rows must survive to the Appendix."""
+    grant_a = {
+        "text": ("Award Source: | Aurora Foundation\n"
+                 "Project title: | Alpha Sequencing Initiative\n"
+                 "Duration of support: | 00/2019-00/2020\n"
+                 "Your percent (%) effort: | 25%"),
+        "taxonomy_code": "M2B",
+        "element_idx_start": 600,
+        "element_idx_end": 600,
+        "extracted_fields": {
+            "title": "Alpha Sequencing Initiative",
+            "agency": "Aurora Foundation",
+            "start_date": "2019",
+            "end_date": "2020",
+            "percent_effort": "25%",
+        },
+    }
+    grant_b = {
+        "text": ("Award Source: | Borealis Institute\n"
+                 "Project title: | Beta Imaging Cohort\n"
+                 "Duration of support: | 00/2019-00/2020\n"
+                 "Your percent (%) effort: | 5%"),
+        "taxonomy_code": "M2B",
+        "element_idx_start": 700,
+        "element_idx_end": 700,
+        "extracted_fields": {
+            "title": "Beta Imaging Cohort",
+            "agency": "Borealis Institute",
+            # No start_date/end_date/percent_effort: B's own table renders
+            # neither value, even though the raw text above (and B's own
+            # recovered-row siblings below) carries them verbatim.
+        },
+    }
+    row_b_duration = {"text": "Duration of support: | 00/2019-00/2020",
+                      "taxonomy_code": "T", "recovered_row": True,
+                      "parent_idx": 700, "element_idx_start": "700.0",
+                      "extracted_fields": {}, "hierarchy": ["Past Funding"]}
+    row_b_effort = {"text": "Your percent (%) effort: | 5%",
+                    "taxonomy_code": "T", "recovered_row": True,
+                    "parent_idx": 700, "element_idx_start": "700.1",
+                    "extracted_fields": {}, "hierarchy": ["Past Funding"]}
+    entries = [_RECOVERY_OWNER_ENTRY, grant_a, grant_b, row_b_duration, row_b_effort]
+
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: []
+    data = {"document_uid": "T946A", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+
+    full_text = _all_text(Document(str(output_path)))
+    # Both grants rendered in the body.
+    assert "Alpha Sequencing Initiative" in full_text
+    assert "Beta Imaging Cohort" in full_text
+    # B's own recovered rows were NOT dropped -- they reached the Appendix
+    # (_clean_inline_tabs rejoins the raw " | " cell separator as " — " for
+    # display), proving they were never actually found rendered anywhere.
+    assert "T. APPENDIX" in full_text
+    assert "Duration of support: — 00/2019-00/2020" in full_text
+    assert "Your percent (%) effort: — 5%" in full_text
+
+
+def test_recovered_row_value_coincidentally_matching_parent_render_still_gated_by_raw_text(tmp_path):
+    """The parent-scoping gate (`recovered_row_duplicates_parent`) stays
+    necessary even after round 2 scopes `recovered_row_content_rendered` to
+    one block: it is the ONLY check confirming the row's raw text actually
+    came from THIS parent, rather than merely resolving (via `parent_idx`)
+    to an entry whose own render happens to carry a matching value by
+    coincidence. Here `grant_entry`'s raw stage-2 text never mentions percent
+    effort at all, so the row below is not a genuine A5IZ6Q duplicate of
+    it -- but `grant_entry`'s `extracted_fields` legitimately carries
+    percent_effort "5%", which DOES render in its own table. A row dropped
+    on content-match alone (skipping the raw-text gate) would lose content
+    that was never proven to be this parent's own duplicate."""
+    grant_entry = {
+        "text": ("Award Source: | Fictional Research Foundation\n"
+                 "Project title: | Synthetic Tools for Data Curation\n"
+                 "Duration of support: | 00/2021-00/2022"),
+        "taxonomy_code": "M2B",
+        "element_idx_start": 500,
+        "element_idx_end": 500,
+        "extracted_fields": {
+            "title": "Synthetic Tools for Data Curation",
+            "agency": "Fictional Research Foundation",
+            "start_date": "2021",
+            "end_date": "2022",
+            "percent_effort": "5%",  # renders even though the raw text above
+                                     # never mentions percent effort at all
+        },
+    }
+    mismatched_row = {"text": "Your percent (%) effort: | 5%",
+                      "taxonomy_code": "T", "recovered_row": True,
+                      "parent_idx": 500, "element_idx_start": "500.0",
+                      "extracted_fields": {}, "hierarchy": ["Past Funding"]}
+    entries = [_RECOVERY_OWNER_ENTRY, grant_entry, mismatched_row]
+
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: []
+    data = {"document_uid": "T946B", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+
+    full_text = _all_text(Document(str(output_path)))
+    assert "T. APPENDIX" in full_text
+    # The value rendered once from the grant table's own row-join ("_all_text"
+    # joins each table row's cells with " | ")...
+    assert full_text.count("Your percent (%) effort: | 5%") == 1
+    # ...and the row was NOT dropped: it also reached the Appendix bullet
+    # (_clean_inline_tabs rejoins " | " as " — " for display there).
+    assert full_text.count("Your percent (%) effort: — 5%") == 1
