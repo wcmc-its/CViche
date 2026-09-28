@@ -915,7 +915,7 @@ _GOAL = 'Map the pollinator corridors of the Example Valley'
      'Survey the valley; oversaw\tfield work'),
     # The goal ends with its line.
     (f'The major goals of this project are: {_GOAL}\nAnnual direct costs: | $5,000', _GOAL),
-    # Measured wording variants (HANDOFF-a5iz6q-next-steps-2026-09-28.md #3).
+    # Measured wording variants (#829).
     # A bare label -- no "of (this|the) project/program" noun at all -- still
     # needs its separator to read as a label.
     (f'Major Goals: {_GOAL}', _GOAL),
@@ -967,6 +967,9 @@ def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     # would be read as an unbounded whole-sentence claim.
     'Our major goals include improving efficiencies across the department.',
     'The committee highlighted major goals for the coming year during the review.',
+    # A5IZ6Q's measured typo is the plural "gals"; the singular "gal" is not a
+    # measured variant, so the anchor deliberately does not accept it.
+    f'The major gal of this project is: {_GOAL}',
 ])
 def test_an_empty_or_absent_goals_label_is_no_goal(text):
     """An empty label renders nothing -- and never borrows the next line."""

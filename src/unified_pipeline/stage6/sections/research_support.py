@@ -199,14 +199,15 @@ PERCENT_EFFORT_PRECISION = Decimal('0.01')
 OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
 
 # The goals phrase in a grant's own text or in a goals row of its own (#958),
-# and four measured wording variants (docs/analysis/HANDOFF-a5iz6q-next-steps-
-# 2026-09-28.md #3): the WCM label "(Optional - The major goals of this
-# project are): | <goal>", the plain "The major goals of this project
-# are:<tab><goal>", the prose "The major goals of this project are to <goal>",
-# singular "The major goal of this project is" (YME2VA), "...of this program
-# are" (YME2VA), the bare "Major Goals:" / "Major Goals of (the) Project:"
-# label with no project/program noun before the separator at all (BYFQBG),
-# and A5IZ6Q's typo "The major gals of this project:". `proj` is the "of
+# and four measured wording variants (#829): the WCM label "(Optional - The
+# major goals of this project are): | <goal>", the plain "The major goals of
+# this project are:<tab><goal>", the prose "The major goals of this project
+# are to <goal>", singular "The major goal of this project is" (YME2VA),
+# "...of this program are" (YME2VA), the bare "Major Goals:" / "Major Goals
+# of (the) Project:" label with no project/program noun before the separator
+# at all (BYFQBG), and A5IZ6Q's typo "The major gals of this project:" --
+# plural only; the pattern below deliberately does not also accept the
+# singular "gal", since no run has shown that typo. `proj` is the "of
 # (this|the) project/program [are|is]" anchor. `sep` -- a colon, pipe, closing
 # paren or tab -- is what makes the phrase a label rather than (with `proj`
 # present) the start of the sentence; `rest` stops at the line end, since a
@@ -226,7 +227,7 @@ OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
 # *same* line -- with the full pattern's own greedy `rest` group, a skipped,
 # unanchored match's span already swallows the remainder of the line,
 # including any real label in it, so nothing would be left to find.
-_MAJOR_GOALS_ANCHOR_PATTERN = r'(?:the\s+)?major\s+(?:goals?|gals?)\b'
+_MAJOR_GOALS_ANCHOR_PATTERN = r'(?:the\s+)?major\s+(?:goals?|gals)\b'
 MAJOR_GOALS_LABEL_RE = re.compile(
     _MAJOR_GOALS_ANCHOR_PATTERN
     + r'(?P<proj>\s+of\s+(?:this\s+|the\s+)?(?:project|program)(?:\s+(?:are|is))?)?'
