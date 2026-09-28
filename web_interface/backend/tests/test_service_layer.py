@@ -1,6 +1,12 @@
 """Tests for the service layer (ARCH-01 through ARCH-06 regression)."""
 import os
+import sys
+from pathlib import Path
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
+# get_estimated_run_cost imports unified_pipeline lazily and silently falls back
+# to a flat per-token rate when it can't; put src/ on the path so the cost tests
+# exercise the real model whether this file runs alone or in the full suite.
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 import pytest
 from fastapi import HTTPException
@@ -246,13 +252,25 @@ class TestConfigService:
         # Rate is derived from the model configured in llm_config.yaml.
         assert get_cost_per_1k_tokens() > 0
 
-    def test_run_cost_brackets_calibration_run(self):
-        # Calibration run (2026-03-28): 56,372 doc chars / 123 entries cost
-        # ~$0.99 on Sonnet 4.6. The estimate band must bracket that. Pins the
-        # entry-classification cost model so the constants can't silently drift.
-        cost_min, cost_max = get_estimated_run_cost(56372)
-        assert cost_min < 0.99 < cost_max
-        assert cost_min < cost_max
+    # (char count as /estimate computes it, actual USD) for every run measured
+    # for #538: 20 corpus CVs run 2026-09-17 at c7daa91 (sum of per-stage
+    # costs recorded in the stage JSONs), web runs 976WPY and A5IZ6Q
+    # (September), and AVFPHW / YME2VA from the issue's own table.
+    _MEASURED_RUN_COSTS = (
+        (5278, 0.55), (5653, 0.54), (6748, 0.56), (9135, 0.68),
+        (15595, 0.97), (16033, 1.01), (22092, 0.94), (23027, 0.77),
+        (27644, 1.11), (28728, 1.26), (34462, 1.68), (35032, 1.42),
+        (36721, 1.89), (37263, 1.70), (41844, 1.82), (42858, 1.97),
+        (58757, 2.57), (106058, 3.07), (123211, 4.74), (131574, 4.15),
+        (140151, 4.93), (168421, 6.41), (198639, 6.80), (338634, 13.17),
+    )
+
+    @pytest.mark.parametrize("chars,actual", _MEASURED_RUN_COSTS)
+    def test_run_cost_range_brackets_measured_actual(self, chars, actual):
+        # #538: the quoted maximum was below the actual on all 24 of these.
+        # Pins the cost-model constants so they can't drift back under them.
+        cost_min, cost_max = get_estimated_run_cost(chars)
+        assert cost_min <= actual <= cost_max
 
     def test_run_cost_scales_with_entry_density(self):
         # Cost must rise with document size (more entries -> more stage 3b
