@@ -216,13 +216,25 @@ OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
 # absent" with one named group shared across alternatives. Without that
 # check, a stray "major goal(s)" with neither anchor would swallow the rest
 # of its line as if it were a whole-sentence claim.
+#
+# `_MAJOR_GOALS_ANCHOR_PATTERN` is factored out, rather than inlined twice,
+# because `parse_major_goals` needs a *second*, shorter regex built from the
+# same leading text: one that matches only the "major goal(s)" keyword itself,
+# with none of the trailing groups below. Scanning occurrences of that short
+# anchor (instead of `MAJOR_GOALS_LABEL_RE` itself) is what lets it walk past
+# an unanchored "major goal(s)" mention to find a real, later label on the
+# *same* line -- with the full pattern's own greedy `rest` group, a skipped,
+# unanchored match's span already swallows the remainder of the line,
+# including any real label in it, so nothing would be left to find.
+_MAJOR_GOALS_ANCHOR_PATTERN = r'(?:the\s+)?major\s+(?:goals?|gals?)\b'
 MAJOR_GOALS_LABEL_RE = re.compile(
-    r'(?:the\s+)?major\s+(?:goals?|gals?)\b'
-    r'(?P<proj>\s+of\s+(?:this\s+|the\s+)?(?:project|program)(?:\s+(?:are|is))?)?'
-    r'(?P<sep>[ \t]*[:|)\t][ \t:|)]*)?'
-    r'(?P<rest>[^\n]*)',
+    _MAJOR_GOALS_ANCHOR_PATTERN
+    + r'(?P<proj>\s+of\s+(?:this\s+|the\s+)?(?:project|program)(?:\s+(?:are|is))?)?'
+    + r'(?P<sep>[ \t]*[:|)\t][ \t:|)]*)?'
+    + r'(?P<rest>[^\n]*)',
     re.IGNORECASE,
 )
+_MAJOR_GOALS_ANCHOR_RE = re.compile(_MAJOR_GOALS_ANCHOR_PATTERN, re.IGNORECASE)
 # A paragraph-form grant tab-separates its fields, and the one observed after a
 # goal is the role ("...prognosis.<tab>Role: PI"). Any other tab stays in the
 # goal: a wrapped source line is tab-joined as well.
@@ -516,12 +528,31 @@ def parse_major_goals(text: str | None) -> str | None:
     the whole sentence is the goal. A match with neither `proj` nor `sep` --
     some other use of "major goal(s)" with no project/program noun and no
     separator -- is not a label at all, so it is left as grant content rather
-    than treated as an unbounded whole-sentence claim. Either way only
-    surrounding whitespace is stripped. An empty label is no goal either:
-    None, so no row renders.
+    than treated as an unbounded whole-sentence claim.
+
+    That "leave it as grant content" choice is per-match, not per-text: a
+    single `.search()` would stop at the first "major goal(s)" mention even
+    when it is the unanchored kind and a real, anchored label follows later in
+    the same text -- on the same line or a later one -- silently dropping the
+    real label. So this walks every occurrence of the bare "major goal(s)"
+    anchor (`_MAJOR_GOALS_ANCHOR_RE`, not `MAJOR_GOALS_LABEL_RE` itself: its
+    greedy `rest` group would swallow a same-line label into the very
+    unanchored match being skipped) and, at each one, tries the full label
+    pattern anchored to that position (`.match(text, pos)`), taking the first
+    that is actually anchored (`proj` or `sep`). An unanchored mention is
+    skipped rather than treated as the answer. Either way only surrounding
+    whitespace is stripped. An empty label is no goal either: None, so no row
+    renders.
     """
-    match = MAJOR_GOALS_LABEL_RE.search(text or '')
-    if match is None or not match['rest'].strip() or not (match['proj'] or match['sep']):
+    text = text or ''
+    match = next(
+        (candidate for candidate in (
+            MAJOR_GOALS_LABEL_RE.match(text, anchor.start())
+            for anchor in _MAJOR_GOALS_ANCHOR_RE.finditer(text)
+        ) if candidate and (candidate['proj'] or candidate['sep'])),
+        None,
+    )
+    if match is None or not match['rest'].strip():
         return None
     goal = match['rest'] if match['sep'] else match.group(0)
     return MAJOR_GOALS_VALUE_END_RE.split(goal, maxsplit=1)[0].strip()

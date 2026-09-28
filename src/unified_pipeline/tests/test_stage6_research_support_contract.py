@@ -927,9 +927,26 @@ _GOAL = 'Map the pollinator corridors of the Example Valley'
      'The major goal of this project is to map the pollinator corridors.'),
     ('Example Study\tThe major goals of this program are to map the pollinator corridors.',
      'The major goals of this program are to map the pollinator corridors.'),
+    # Singular "goal ... is" with an explicit separator -- the goal alone, not
+    # the whole label sentence. "are" and "is" are both live alternatives in
+    # `proj`; the plural cases above only exercise "are" before a separator,
+    # and the "is" sentence-form case above never reaches `proj` for "is" at
+    # all (it flows straight into `rest` whether or not `proj` matches it).
+    (f'The major goal of this project is: {_GOAL}', _GOAL),
+    (f'The major goals of this program is: {_GOAL}', _GOAL),
     # The "gals" typo (A5IZ6Q) with an explicit separator -- the goal only,
     # not the misspelled label.
     (f'Example Grant\tThe major gals of this project: {_GOAL}', _GOAL),
+    # A stray, unanchored "major goal(s)" mention earlier in the text must not
+    # shadow a real, anchored label that follows it (regression: `.search()`
+    # stopped at the first mention and returned None here, dropping the real
+    # label further down) -- on its own line, and on the *same* line, where a
+    # naive fix (skip the unanchored match, `finditer` for the next one) still
+    # fails: the unanchored match's own greedy `rest` group has already
+    # swallowed the real label as part of the span being skipped.
+    (f'Our major goals include improving efficiencies.\n'
+     f'The major goals of this project are: {_GOAL}', _GOAL),
+    (f'Major goals and aims. The major goals of this project are: {_GOAL}', _GOAL),
 ])
 def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     assert parse_major_goals(text) == expected
