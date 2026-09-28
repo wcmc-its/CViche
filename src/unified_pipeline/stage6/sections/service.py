@@ -479,7 +479,8 @@ def _journal_name_cell_text(value: object, taxonomy_code: str) -> str:
     return _cell_text(value)
 
 
-def _service_boards_dates_text(fields: dict, taxonomy_code: str) -> str:
+def _service_boards_dates_text(fields: dict, taxonomy_code: str,
+                               source_text: str = '') -> str:
     """Coerce `start_date`/`end_date` before `format_date_range` for a
     Service on Boards (Q2) row.
 
@@ -488,10 +489,13 @@ def _service_boards_dates_text(fields: dict, taxonomy_code: str) -> str:
     into the dates cell instead of crashing. Coerce before the `or ''` so a
     falsy coerced result (`None`/`[]` -> `''`) still collapses the same way
     the original code did (a pure move of `_fill_service_boards`'s round-2
-    prelude, round 3, verify-D-812-R2 finding 2 -- no formula changed)."""
+    prelude, round 3, verify-D-812-R2 finding 2 -- no formula changed).
+
+    `source_text` is the entry's text, which `format_date_range` reads to
+    tell a bare year from an open "2020-" range on a start-only row (#946)."""
     start_date = _cell_text(fields.get('start_date') or '')
     end_date = _cell_text(fields.get('end_date') or '')
-    return format_date_range(start_date, end_date, taxonomy_code) or ''
+    return format_date_range(start_date, end_date, taxonomy_code, source_text) or ''
 
 
 def _other_service_organization_text(fields: dict, taxonomy_code: str) -> str:
@@ -513,14 +517,15 @@ def _other_service_organization_text(fields: dict, taxonomy_code: str) -> str:
     return _journal_name_cell_text(fields.get('journal_name', ''), taxonomy_code)
 
 
-def _other_service_dates_text(fields: dict, taxonomy_code: str) -> str:
+def _other_service_dates_text(fields: dict, taxonomy_code: str,
+                              source_text: str = '') -> str:
     """Coerce `start_date`/`end_date` before `format_date_range` for an
     Other Service row (#812 round 2; see `_service_boards_dates_text` above
-    for the defect this guards -- a pure move, round 3, verify-D-812-R2
-    finding 2, no formula changed)."""
+    for the defect this guards and for `source_text` -- a pure move, round 3,
+    verify-D-812-R2 finding 2, no formula changed)."""
     start_date = _cell_text(fields.get('start_date', ''))
     end_date = _cell_text(fields.get('end_date', ''))
-    return format_date_range(start_date, end_date, taxonomy_code)
+    return format_date_range(start_date, end_date, taxonomy_code, source_text)
 
 
 class ServiceSection:
@@ -683,7 +688,8 @@ class ServiceSection:
                 if not committee:
                     committee = organization
                     organization = ''
-                dates = _service_boards_dates_text(fields, taxonomy_code)
+                dates = _service_boards_dates_text(fields, taxonomy_code,
+                                                   entry.get('text', ''))
 
                 # If we don't have structured fields, parse from raw text
                 if not committee:
@@ -1084,7 +1090,8 @@ class ServiceSection:
                         elif _squash(panel_name) not in _squash(organization):
                             organization = f"{organization} - {panel_name}"
 
-                    dates = _other_service_dates_text(fields, taxonomy_code)
+                    dates = _other_service_dates_text(fields, taxonomy_code,
+                                                      entry.get('text', ''))
 
                     # For Q4B/Q4C entries, try to parse role from raw text if missing
                     if not role and taxonomy_code in EDITORIAL_BOARD_CODES:
