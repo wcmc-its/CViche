@@ -303,6 +303,30 @@ def test_dash_preceded_boundary_stays_refused_for_other_categories():
     assert not _denied("Research interests - Marital Status: Single", A)
 
 
+@pytest.mark.parametrize("text,withheld", [
+    ("Citizenship: US Marital Status: Single", "Marital Status: Single"),
+    ("Citizenship: US Passport: X1234567", "Passport: X1234567"),
+    ("Nationality: French Spouse: Jane", "Spouse: Jane"),
+    ("Citizenship: US Date of Birth: 1970", "Date of Birth: 1970"),
+    ("Office Phone: 555-0100 Citizenship: US Marital Status: Single",
+     "Marital Status: Single"),
+    ("Note Citizenship: US Marital Status: Single", "Marital Status: Single"),
+])
+def test_label_one_plain_space_after_a_field_value_is_withheld(text, withheld):
+    """#849: a policy label following a completed known `label: value` pair
+    on the same line is the next field. The earlier value still renders."""
+    spans = [text[m.start:m.end] for m in _pii_matches(text, _entry_scope(CONTENT, RENDER_ROUTED_CODES))]
+    assert spans == [withheld]
+
+
+def test_label_after_a_non_field_prefix_stays_refused():
+    """#849 is the known-field vocabulary, not a word-shape guess: prose
+    before the label, or an unknown label ahead of it, is still refused."""
+    assert not _denied("Research interests - Marital Status: Single", A)
+    assert not _denied("Sponsor: NIH Marital Status: Single", A)
+    assert not _denied("MyCitizenship: US Marital Status: Single", A)
+
+
 def test_semicolon_is_a_hard_fragment_boundary():
     """M07: without `;` in the split set the label after it is not
     fragment-initial and the fragment before it would swallow it."""
@@ -882,7 +906,11 @@ def test_920_blocker_every_substring_counter_example_is_withheld(
          "taxonomy_code": "T", "extracted_fields": {}}
     result = _run({"A": [owner_a_entry()], "T": [t]})
     assert f"{local_part}@example.org" not in t["text"]
-    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+    # #849: the fallback owner's "Phone Number: ... Home Address: ..." line
+    # now also withholds its home address (a label one plain space after
+    # another field's value); this test asks only about the referee email.
+    assert [i.category for i in result.withheld
+            if i.category != CAT_HOME_CONTACT] == [CAT_THIRD_PARTY_CONTACT]
 
 
 def test_920_blocker_segment_match_alone_does_not_spare_without_the_entry_gate():

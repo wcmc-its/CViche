@@ -495,6 +495,18 @@ def _boundary_ok(prefix_since_last_delim: str) -> bool:
             or bool(_LIST_MARKER_RE.match(stripped)))
 
 
+def _follows_field_value(prefix_since_last_delim: str) -> bool:
+    """True when the text since the last hard delimiter already holds a
+    completed `<known field label>: <value>` pair (#849): a policy label one
+    plain space after another field's value ("Citizenship: US Marital
+    Status: Single") is the next field, not a mid-sentence mention. The test
+    is the known-field vocabulary, never a guess at where a value ends
+    (#821 R4). The vocabulary lives in `stage6/pii_pass.py`, which imports
+    this module, so it is imported at call time."""
+    from ..pii_pass import _KNOWN_FIELD_LABEL_RE
+    return _KNOWN_FIELD_LABEL_RE.search(prefix_since_last_delim) is not None
+
+
 # #847 residual: an explicit DOB label, its colon, then a WHOLE date right
 # after it is a DOB whatever text precedes the label -- "Jane Doe DOB:
 # 1/12/45", "Name: Jane Doe, MD Birth Date:  01/12/1945" -- so the boundary
@@ -526,14 +538,16 @@ def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) ->
     """(start, end) of every fragment `pattern` opens in `text`: from the
     opener's own start to the next hard delimiter (or end of string), kept
     only where `_boundary_ok` accepts the text since the previous delimiter,
-    or the opener is an explicit DOB label with a whole date after it."""
+    that text already holds a known `label: value` pair
+    (`_follows_field_value`), or the opener is an explicit DOB label with a whole date after it."""
     spans = []
     for m in pattern.finditer(text):
         start = m.start()
         prev_delim_end = 0
         for d in _PII_FRAGMENT_SPLIT_RE.finditer(text, 0, start):
             prev_delim_end = d.end()
-        if not (_boundary_ok(text[prev_delim_end:start])
+        prefix = text[prev_delim_end:start]
+        if not (_boundary_ok(prefix) or _follows_field_value(prefix)
                 or (category == CAT_DATE_OF_BIRTH and _explicit_dob_label(text, m))):
             continue
         nxt = _PII_FRAGMENT_SPLIT_RE.search(text, start)
