@@ -335,5 +335,66 @@ def test_a_cell_needs_a_keyword_and_only_listed_filler_to_be_a_label(text):
 
 
 def test_a_format_hint_after_the_keyword_still_makes_a_label_cell():
+    # The hint is stripped before the filler check, so the cell is a label; the
+    # other cell is what decides the row (see the value-cell tests below).
+    assert _is_table_header_entry("Year (yyyy) | Honor", _HONORS_KW) is True
+
+
+_MEMBERSHIP_KW = ["organization", "membership", "society", "date", "member"]
+
+
+@pytest.mark.parametrize("text", [
+    "Member | American Heart Association",
+    "Member\tAmerican Heart Association",
+    "Member | Society for Neuroscience",
+    "Member | 2019",
+    "Society Member | 2019-present",
+    "Member | Society | 2019",
+])
+def test_a_bare_role_cell_beside_a_value_is_membership_data_not_a_header(text):
+    """A row whose one label cell sits beside an organization name or a date
+    value is data: a header names a date column but never carries a date."""
+    assert _is_table_header_entry(text, _MEMBERSHIP_KW) is False
+
+
+@pytest.mark.parametrize("text", [
+    "Organization | Date",
+    "Society | Date",
+    "Member | Society",
+    "Membership | Organization | Dates",
+    "Member | Since",
+    "Society | Year",
+])
+def test_two_column_membership_header_rows_are_still_headers(text):
+    assert _is_table_header_entry(text, _MEMBERSHIP_KW) is True
+
+
+def test_a_single_label_cell_needs_single_word_companions_to_be_a_header():
     assert _is_table_header_entry(
-        "Date (yyyy) | Purdue University", _HONORS_KW) is True
+        "Date (yyyy) | Purdue University", _HONORS_KW) is False
+
+
+def test_two_label_cells_keep_the_row_a_header_beside_a_multi_word_cell():
+    assert _is_table_header_entry(
+        "Award | Year | Contact person", _HONORS_KW) is True
+
+
+def test_a_digit_in_a_non_label_cell_makes_the_row_data():
+    assert _is_table_header_entry("Award | Year | 2020", _HONORS_KW) is False
+
+
+def test_a_filler_word_alone_makes_a_label_only_with_a_keyword():
+    # Each filler word is pinned on the pipe path (the keyword-count path
+    # would otherwise classify "Name of award" by itself): keyword "date"
+    # has no header pattern that matches these cells.
+    for filler in ["name", "of", "the", "and", "or", "by", "body", "awarded",
+                   "received", "issued", "granted"]:
+        assert _is_table_header_entry(
+            f"Honor {filler} | Year", ["honor", "year"]) is True, filler
+
+
+def test_a_keyword_is_a_whole_word_inside_a_label_cell():
+    # Without the word boundary "Theaward" would strip to a keyword plus the
+    # filler word "the" and read as a label cell.
+    assert _is_table_header_entry("Theaward | Theaward", ["award"]) is False
+    assert _is_table_header_entry("Award | Award", ["award"]) is True

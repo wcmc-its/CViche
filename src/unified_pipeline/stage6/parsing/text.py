@@ -165,6 +165,20 @@ def _is_header_label_cell(cell: str, header_keywords: list[str]) -> bool:
                            for w in re.findall(r'[a-z0-9]+', cell))
 
 
+def _cells_are_column_names(others: list[str], label_count: int) -> bool:
+    """May the cells that are not keyword labels still be column names?
+
+    A header row names a date column but never carries a date, so a digit in
+    any other cell makes the row data ("Member | 2019"). One label cell beside
+    an organization name ("Member | American Heart Association") is data too:
+    beside a lone label only a one-word column name ("Member | Since") stays a
+    header. Two or more label cells carry the row on their own (#756).
+    """
+    if any(re.search(r'\d', c) for c in others):
+        return False
+    return label_count >= 2 or all(re.fullmatch(r'[^\W\d_]+', c) for c in others)
+
+
 def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int = 2) -> bool:
     """Detect if an entry is actually a table header that was mistakenly extracted as data.
 
@@ -224,11 +238,11 @@ def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int
             parts = re.split(r'[\t|]', text_lower)
             # If all parts are short and most match header keywords, it's a header
             if all(len(p.strip()) < 30 for p in parts if p.strip()):
-                parts_matching = sum(
-                    1 for p in parts
-                    if _is_header_label_cell(p, header_keywords)
-                )
-                if parts_matching >= len(parts) * 0.5:
+                labels = [_is_header_label_cell(p, header_keywords) for p in parts]
+                values = [p.strip() for p, is_label in zip(parts, labels)
+                          if p.strip() and not is_label]
+                if (sum(labels) >= len(parts) * 0.5
+                        and _cells_are_column_names(values, sum(labels))):
                     return True
 
     return False
