@@ -367,13 +367,21 @@ LINT_PREVALENCE = {
     # one uid of 40 with no stage-6 output at all (1/40 = 0.025).
     "no_output": 0.025,
     "protected_data_in_output": 0.006,
-    # Measured over the 152 local corpus artifact sets available at
-    # introduction (farm, batch-3, batch-4, plus the A5IZ6Q incident this
-    # lint was written for): 0 organic corpus fires, 2/2 on A5IZ6Q itself.
-    # Same "zero observed rarity class" floor as pipeline_errors_present and
-    # stage3b_fallback_ratio above -- explicit here rather than left to
-    # lint_surprise's absent-key default (which is also 0.001).
-    "invented_records": 0.001,
+    # Re-measured over 278 unique local stage-4 artifact sets (the rg_farm,
+    # batch-3, batch-4, the local _autopsy stage_4 set at
+    # data/sample_cvs/word/web_harvest/_batch_runs/_autopsy_artifacts/stage_4,
+    # src/unified_pipeline/outputs, and the A5IZ6Q incident this lint was
+    # written for; 149 of the 278 have a locally retained rendered docx):
+    # NOT the zero-observed rarity class the original introducing commit
+    # claimed. 3 of 278 uids fire (3/278 = 0.011) -- A5IZ6Q itself, plus two
+    # organic corpus hits, 976WPY and IO4DEA, each the same fabricated "New
+    # York State" F1 record as A5IZ6Q's, built from the identical unfilled
+    # licensure-instruction paragraph (part (b) of lint_invented_records).
+    # All three are true positives -- the corpus fire count is 0.011, not
+    # pipeline_errors_present/stage3b_fallback_ratio's true zero-observed
+    # 0.001 floor; this row now carries its own measured value rather than
+    # borrowing theirs.
+    "invented_records": 0.011,
 }
 
 

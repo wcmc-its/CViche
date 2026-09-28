@@ -414,9 +414,18 @@ def lint_dedup_drops(report: Dict) -> List[Dict]:
 # the same distinctiveness floor `is_template_instruction`'s own exact-match
 # rule uses, for the same reason (a short generic label collides with real
 # content; a longer, more specific one essentially never does). Measured
-# over the 152 local corpus artifact sets available (farm, batch-3, batch-4,
-# plus A5IZ6Q): both guards together fire on exactly the two A5IZ6Q records
-# below and nothing else.
+# over 278 unique local stage-4 artifact sets (the rg_farm, batch-3,
+# batch-4, the local _autopsy stage_4 set, src/unified_pipeline/outputs,
+# and A5IZ6Q -- corpus paths listed with run_doctor.py's LINT_PREVALENCE
+# comment; 149 of the 278 have a locally retained rendered docx, needed to
+# evaluate this guard's render-match requirement): zero false positives,
+# but the lint is not a one-incident-only detector -- it fires on 3 uids /
+# 4 records total, not on A5IZ6Q alone. A5IZ6Q supplies both of the shapes
+# below (its own F2 header row here, plus its F1 licensure record via part
+# (b)); 976WPY (entry 48) and IO4DEA (entry 208) are two further, organic
+# part-(b) hits, each the identical fabricated "New York State" F1 record
+# built from the same unfilled licensure-instruction paragraph as A5IZ6Q's
+# -- the same #829 misread recurring verbatim on two more CVs.
 INVENTED_RECORD_MIN_VALUES = 2
 
 
