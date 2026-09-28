@@ -568,6 +568,18 @@ def test_two_part_entry_is_level_0_title_and_level_1_detail():
     assert levels == {"Title": 0, "detail": 1}
 
 
+def test_four_part_entry_keeps_every_detail_at_level_1():
+    """web24/web40 carry 4+ part entries; only the title is level 0."""
+    scratch = _scratch_document()
+    scratch.gen._insert_multiline_as_bullets(
+        scratch.insert_idx, "Staff Radiologist\tMusculoskeletal\t14,000 studies\t500 procedures",
+        entry=None, add_blank_before=False)
+
+    paras = scratch.gen.doc.paragraphs
+    levels = {p.text: _ilvl(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
+    assert levels == {"Staff Radiologist": 0, "Musculoskeletal": 1, "14,000 studies": 1, "500 procedures": 1}
+
+
 def test_single_part_entry_stays_level_0():
     scratch = _scratch_document()
     scratch.gen._insert_multiline_as_bullets(
