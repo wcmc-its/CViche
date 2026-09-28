@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Regression test for local_ci.sh's TRUFFLEHOG resolution (rework round 1
-# on the CI-outage stand-in script, #829 context): the header documents
-# TRUFFLEHOG as "path to (or name on PATH of) the trufflehog binary", but
-# the preflight check used to test `[ -x "$TRUFFLEHOG" ]` directly on the
-# raw value, which never resolves a bare name through PATH -- so the
-# documented interface (a name on PATH) failed even with that name
-# resolvable via PATH.
+# Regression test for local_ci.sh's preflight checks (rework round 1 on the
+# CI-outage stand-in script, #829 context): the header documents TRUFFLEHOG
+# as "path to (or name on PATH of) the trufflehog binary", but the
+# preflight check used to test `[ -x "$TRUFFLEHOG" ]` directly on the raw
+# value, which never resolves a bare name through PATH -- so the documented
+# interface (a name on PATH) failed even with that name resolvable via
+# PATH. Rework round 3 added coverage for the script's other two preflight
+# guards (node 20 not found; not run from inside a git repo), which this
+# file's original six cases never exercised.
 #
 #   scripts/test_local_ci_trufflehog_resolution.sh
 #
@@ -165,9 +167,68 @@ cp "$fake_th_dir/trufflehog" "$tmp/ci-out-$both_present_case/tools/trufflehog"
 chmod +x "$tmp/ci-out-$both_present_case/tools/trufflehog"
 check_prefers_path_over_fallback "$both_present_case" PATH="$fake_th_dir:$PATH" TRUFFLEHOG=trufflehog
 
+# check_fails_on_missing_node20 <case-label> <node20-dir> <env-assignment...>:
+# like check_fails_preflight, but for the node-20 guard, which runs before
+# the TRUFFLEHOG check -- TRUFFLEHOG's value is irrelevant here since the
+# script must never reach that check.
+check_fails_on_missing_node20() {
+  local case=$1; shift
+  local node20_dir=$1; shift
+  local out rc=0
+  if out="$(env HOME="$fakehome" NODE20_BIN="$node20_dir" LOCAL_CI_DIR="$tmp/ci-out-$case" "$@" \
+    bash "$repo/scripts/local_ci.sh" "$BAD_SHA" "$case" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qF "node 20 not found"; then
+    echo "$case: preflight correctly rejects missing node 20        ok"
+  else
+    echo "FAIL ($case): expected the documented 'node 20 not found' error (rc=1); got rc=$rc"
+    echo "$out"
+    fail=1
+  fi
+}
+
+# NODE20_BIN pointing at a directory with no executable `node` -- preflight
+# must fail before ever reaching the TRUFFLEHOG check. Catches a mutant
+# that disables the node-20 guard (`if [ ! -x "$NODE20/node" ]; then` ->
+# `if false; then`).
+empty_node20_dir="$tmp/no-node20"
+mkdir -p "$empty_node20_dir"
+check_fails_on_missing_node20 node20-missing "$empty_node20_dir" PATH=/usr/bin:/bin TRUFFLEHOG=
+
+# check_fails_outside_git_repo: runs a COPY of local_ci.sh from a directory
+# that is not inside any git repo (not just a different repo) -- the
+# not-inside-a-git-repo guard is the very first thing the script checks, so
+# NODE20_BIN/TRUFFLEHOG are never reached and don't matter here. Catches
+# mutants on that guard: `if [ -z "$REPO" ]; then` -> `if false; then`, and
+# its `exit 1` -> `exit 0`.
+check_fails_outside_git_repo() {
+  local case=not-a-git-repo
+  local nogit_dir="$tmp/nogit"
+  mkdir -p "$nogit_dir/scripts"
+  cp "$repo/scripts/local_ci.sh" "$nogit_dir/scripts/local_ci.sh"
+  local out rc=0
+  if out="$(env HOME="$fakehome" LOCAL_CI_DIR="$tmp/ci-out-$case" PATH=/usr/bin:/bin \
+    bash "$nogit_dir/scripts/local_ci.sh" "$BAD_SHA" "$case" 2>&1)"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -qF "not inside a git repo"; then
+    echo "$case: preflight correctly rejects a non-git checkout     ok"
+  else
+    echo "FAIL ($case): expected the documented 'not inside a git repo' error (rc=1); got rc=$rc"
+    echo "$out"
+    fail=1
+  fi
+}
+check_fails_outside_git_repo
+
 if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
 echo
-echo "all local_ci.sh TRUFFLEHOG resolution checks passed"
+echo "all local_ci.sh preflight checks passed"
