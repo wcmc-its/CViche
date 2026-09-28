@@ -236,8 +236,9 @@ export default function HelpPage() {
                   administrators. However, the text of the CV is sent to a third-party AI service for processing:
                   Anthropic&apos;s Claude, running on Amazon Bedrock. AWS states that Bedrock does not share CV text or
                   AI output with Anthropic or any other model provider, and does not use it to train models.
-                  CViche attempts to withhold highly sensitive personal details such as date of birth or Social
-                  Security number, but you should not include anything you would not want these systems to see. By
+                  Before the text is sent, CViche removes the dates of birth and Social Security numbers it
+                  recognizes. It can miss some formats, so you should not include anything you would not want these
+                  systems to see. By
                   using CViche, you acknowledge that your CV content will be processed by a third-party AI service. If
                   this is not acceptable, please do not use the service.
                 </p>
