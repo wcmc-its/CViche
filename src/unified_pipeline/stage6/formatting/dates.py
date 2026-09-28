@@ -19,7 +19,7 @@ direction is one-way and must stay so.
 from types import MappingProxyType
 import re
 
-from ..parsing.dates import _parse_date_components
+from ..parsing.dates import _parse_date_components, _year_of_calendar_invalid_date
 
 # Taxonomy codes whose entries are single occasions, so a record with a start
 # date and no end date happened in that year -- it is not still going on
@@ -137,7 +137,13 @@ def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool
 
     year, month, day = _parse_date_components(date_str)
 
-    # If we couldn't parse it, return as-is
+    # A numeric date with an impossible month renders its year alone -- never
+    # the invalid fragment as if it were data, never a guessed month (#543,
+    # owner decision 2026-09-01).
+    # No month survives, so the format falls through to its year-only branch.
+    if not year:
+        year = _year_of_calendar_invalid_date(date_str)
+    # Not a date at all ("TBD", "n/a"): return as-is
     if not year:
         return date_str
     year = str(year)
