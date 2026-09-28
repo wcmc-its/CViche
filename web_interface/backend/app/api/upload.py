@@ -186,9 +186,9 @@ class _EstimatePerUserWindow:
         self._clock = clock
         # user_id -> (window_start, count_in_window)
         self._windows: dict[int, tuple[float, int]] = {}
-        # FastAPI may run a sync path of this call on its threadpool (real
-        # OS threads, not just concurrent coroutines), so the read-modify-
-        # write below is guarded rather than assumed single-threaded.
+        # estimate_processing is async, so today allow() runs on the event
+        # loop; the lock keeps the read-modify-write safe if it is ever
+        # called from a threadpool.
         self._lock = threading.Lock()
 
     def allow(self, user_id: int) -> bool:
@@ -225,7 +225,7 @@ def _check_estimate_rate_limit(user_id: int) -> dict | None:
         "error": "rate_limited",
         "message": (
             f"Estimate limit of {ESTIMATE_RATE_LIMIT_MAX} calls per "
-            f"{ESTIMATE_RATE_LIMIT_WINDOW_SECONDS // 60} minutes reached."
+            f"{ESTIMATE_RATE_LIMIT_WINDOW_SECONDS} seconds reached."
         ),
         "details": {
             "limit_type": "estimate",
