@@ -363,6 +363,8 @@ async def get_runs(
                 has_feedback=run.id in feedback_run_ids,
                 quality_score=score.get("totalScore") if score else None,
                 quality_band=score.get("band") if score else None,
+                quality_data_complete=score.get("data_complete") if score else None,
+                quality_missing_evidence=(score.get("missing_evidence") or []) if score else [],
             )
         )
 
@@ -403,6 +405,8 @@ def compute_run_score(
         band=result.get("band", ""),
         dimensionScores=result.get("dimensionScores", []),
         flags=result.get("flags", []),
+        data_complete=result.get("data_complete"),
+        missing_evidence=result.get("missing_evidence", []),
     )
 
 
