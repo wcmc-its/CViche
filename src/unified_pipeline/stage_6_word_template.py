@@ -1080,17 +1080,15 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('presentations', frozenset({'R'}), lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
             ('bibliography', frozenset({'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'}), lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
         ]
-        research_summary_rendered = False
-        for label, codes, fn in section_dispatch:
-            result = self._render_section(label, fn, codes)
-            if label == 'research_summary':
-                research_summary_rendered = bool(result)
+        # In dispatch order; research_support returns the T goals rows it placed in a grant table (#958).
+        section_results = {label: self._render_section(label, fn, codes) for label, codes, fn in section_dispatch}
+        research_summary_rendered = bool(section_results['research_summary'])
 
         # Fill passthrough sections (Employment Status, Institutional Affiliation,
         # Percent Effort) -- copied from source CV when it matches WCM (#294, #260).
         passthrough_result = self._render_section(
             'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
-        passthrough_consumed_ids = {id(e) for e in (passthrough_result or [])}
+        consumed_ids = {id(e) for e in (passthrough_result or []) + (section_results['research_support'] or [])}
 
         # Add appendix for ALL unmapped content -- declined M2A/M2B/M2C
         # entries (#839) are appended at the fill below, not seeded here
@@ -1111,10 +1109,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         unmapped_entries: list[dict] = []
 
-        # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260).
+        # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260) and claimed goals rows (#958).
         for code, entries in entries_by_code.items():
             if code not in mapped_codes:
-                unmapped_entries.extend(e for e in entries if id(e) not in passthrough_consumed_ids)
+                unmapped_entries.extend(e for e in entries if id(e) not in consumed_ids)
 
         # A stays in mapped_codes, but NOT because its entries are all consumed
         # -- that was the old assumption here and the corpus refutes it (145 of

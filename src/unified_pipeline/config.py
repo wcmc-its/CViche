@@ -58,25 +58,13 @@ WEB_OUTPUT_BASE = PROJECT_ROOT / "web_interface" / "outputs"
 # ============================================================================
 
 # Model selection is per stage in config/llm_config.yaml (get_stage_config).
-# DEFAULT_MODEL is only calculate_cost()'s pricing fallback.
-DEFAULT_MODEL = "gpt-4o-mini"
+# DEFAULT_MODEL is only calculate_cost()'s pricing fallback, used when that
+# YAML is absent/malformed (get_stage_config layer 1) or a caller omits
+# `model` (calculate_cost, _model_io_rates).
+DEFAULT_MODEL = "us.anthropic.claude-sonnet-4-6"
 
 # LLM API pricing (per 1M tokens) -- nested by provider
 PRICING = {
-    "openai": {
-        "gpt-4o-mini": {
-            "input": 0.150,   # per 1M tokens
-            "output": 0.600,
-        },
-        "gpt-4o": {
-            "input": 2.50,
-            "output": 10.00,
-        },
-        "gpt-5.1": {
-            "input": 2.50,
-            "output": 10.00,
-        },
-    },
     "bedrock": {
         # Anthropic Claude models -- per 1M tokens, identical to the direct
         # Anthropic API. Keyed by the BARE model ID; calculate_cost() strips
@@ -149,9 +137,6 @@ PRICING = {
         },
     },
 }
-
-# Backward compatibility: flat dict for existing pipeline code
-PRICING_FLAT = PRICING["openai"]
 
 # ============================================================================
 # Pipeline Features (Best of Both Worlds)
@@ -228,7 +213,7 @@ CACHE_WRITE_PRICE_MULTIPLIER = 1.25  # cache writes cost 1.25x input
 
 
 def calculate_cost(prompt_tokens: int, completion_tokens: int,
-                   model: str = None, provider: str = "openai",
+                   model: str = None, provider: str = "bedrock",
                    cache_read_tokens: int = 0,
                    cache_write_tokens: int = 0) -> float:
     """
@@ -242,7 +227,7 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
         model: Model name/ID (default: DEFAULT_MODEL). Bedrock region
             inference-profile prefixes (us./eu./apac./global.) are stripped
             before the PRICING lookup.
-        provider: LLM provider name (default: "openai")
+        provider: LLM provider name (default: "bedrock")
         cache_read_tokens: Input tokens served from prompt cache, billed at
             0.1x the input rate. 0 when caching is off or unsupported.
         cache_write_tokens: Input tokens written to prompt cache on this
@@ -254,7 +239,7 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
     """
     model = model or DEFAULT_MODEL
 
-    provider_pricing = PRICING.get(provider, PRICING.get("openai", {}))
+    provider_pricing = PRICING.get(provider, PRICING.get("bedrock", {}))
 
     # Resolve the pricing key: exact match first, then region-prefix-stripped.
     lookup = model if model in provider_pricing else _normalize_model_id(model)
@@ -264,11 +249,11 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
             _warned_missing_pricing.add(model)
             logger.warning(
                 "No PRICING entry for model %r (provider %r); falling back to "
-                "gpt-4o-mini pricing -- reported cost will be inaccurate. Add "
-                "the model to PRICING in config.py.", model, provider,
+                "the Bedrock default model's pricing -- reported cost will be "
+                "inaccurate. Add the model to PRICING in config.py.", model, provider,
             )
-        provider_pricing = PRICING.get("openai", {})
-        lookup = "gpt-4o-mini"
+        provider_pricing = PRICING.get("bedrock", {})
+        lookup = _normalize_model_id(DEFAULT_MODEL)
 
     if lookup not in provider_pricing:
         return 0.0
@@ -291,10 +276,15 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
 # to the currently-configured model, so the estimate tracks llm_config.yaml.
 
 # Historically observed cost per 1,000 *document* tokens for a full 12-stage
-# run, measured when the dominant (highest call volume) stage ran on the
-# anchor model below. Recalibrate from real run-cost data as runs accumulate.
-COST_ESTIMATE_ANCHOR_RATE = 0.075
-COST_ESTIMATE_ANCHOR_MODEL = ("openai", "gpt-4o")
+# run, originally measured when the dominant (highest call volume) stage ran
+# on openai/gpt-4o (rate 0.075 at that anchor). #953 (Bedrock-only) re-anchors
+# this to the Bedrock default model instead of remeasuring: the rate below is
+# 0.075 rescaled by blended(anthropic.claude-sonnet-4-6) / blended(gpt-4o) =
+# 0.075 * (5.4 / 4.0) = 0.10125, so estimate_cost_per_1k_doc_tokens() returns
+# the same value for the default config as it did before the re-anchor.
+# Recalibrate from real run-cost data as runs accumulate.
+COST_ESTIMATE_ANCHOR_RATE = 0.10125
+COST_ESTIMATE_ANCHOR_MODEL = ("bedrock", "anthropic.claude-sonnet-4-6")
 # Fraction of pipeline LLM tokens that are input (prompts/schemas dominate).
 COST_ESTIMATE_INPUT_SHARE = 0.8
 
@@ -373,10 +363,11 @@ COST_ESTIMATE_OTHER_STAGES_OUTPUT_SHARE = 0.05   # non-3b output tokens / non-3b
 
 
 def _model_io_rates(provider: str, model: str) -> tuple:
-    """(input, output) USD per 1M tokens for a model, with gpt-4o-mini fallback."""
-    provider_pricing = PRICING.get(provider, PRICING.get("openai", {}))
+    """(input, output) USD per 1M tokens for a model, with the Bedrock default
+    model's pricing as fallback."""
+    provider_pricing = PRICING.get(provider, PRICING.get("bedrock", {}))
     lookup = model if model in provider_pricing else _normalize_model_id(model)
-    pricing = provider_pricing.get(lookup) or PRICING["openai"]["gpt-4o-mini"]
+    pricing = provider_pricing.get(lookup) or PRICING["bedrock"][_normalize_model_id(DEFAULT_MODEL)]
     return pricing["input"], pricing["output"]
 
 
@@ -472,7 +463,7 @@ def get_stage_config(stage: str) -> dict:
     Resolve LLM config for a pipeline stage.
 
     Resolution order (later overrides earlier):
-    1. Hardcoded defaults (openai / gpt-4o-mini / temperature 0)
+    1. Hardcoded defaults (bedrock / DEFAULT_MODEL / temperature 0)
     2. YAML default block
     3. YAML stage-specific overrides
     4. CVICHE_LLM_PROVIDER / CVICHE_LLM_MODEL env vars (only for keys
@@ -488,14 +479,14 @@ def get_stage_config(stage: str) -> dict:
 
     # Layer 1: hardcoded defaults
     effective = {
-        "provider": "openai",
-        "model": "gpt-4o-mini",
+        "provider": "bedrock",
+        "model": DEFAULT_MODEL,
         "temperature": 0,
         "max_tokens": None,
         "retry_count": 3,
-        # Bedrock-only knob; ignored by the OpenAI path. Default false so the
-        # request is byte-identical to pre-caching behavior when the YAML is
-        # absent. The shipping llm_config.yaml sets it to true.
+        # Default false so the request is byte-identical to pre-caching
+        # behavior when the YAML is absent. The shipping llm_config.yaml
+        # sets it to true.
         "enable_prompt_caching": False,
     }
 

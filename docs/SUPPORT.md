@@ -46,12 +46,9 @@ Each run's actual cost is recorded on the run and shown in the admin dashboard. 
 <details>
 <summary><strong>What LLM models are supported?</strong></summary>
 
-CViche supports two LLM providers:
+CViche is **Bedrock-only** -- all LLM traffic stays in AWS Bedrock. Supported model families include Claude (Anthropic), Llama (Meta), and Mistral, via the Converse API; the default is Claude Sonnet 4.6.
 
-- **AWS Bedrock** (default): Claude models via the Converse API. Every stage runs Claude Sonnet 4.6 except stage 3b, which runs Claude Haiku 4.5.
-- **OpenAI**: any model available through the OpenAI API.
-
-Provider and model are set per stage in `src/unified_pipeline/config/llm_config.yaml` (a `default` block plus `stages:` overrides). See [LLM_MODELS.md](LLM_MODELS.md) for how to change a stage's model.
+Every stage runs Claude Sonnet 4.6 by default except stage 3b, which runs Claude Haiku 4.5. Model selection lives in `src/unified_pipeline/config/llm_config.yaml` (a `default` block plus `stages:` overrides) -- different stages may benefit from different model tiers, with segmentation/classification benefiting most from larger models and formatting stages (5c, 5d) working well with smaller ones. See [LLM_MODELS.md](LLM_MODELS.md) for how to change a stage's model.
 
 </details>
 
@@ -60,17 +57,19 @@ Provider and model are set per stage in `src/unified_pipeline/config/llm_config.
 ### Setup & Configuration
 
 <details>
-<summary><strong>I get "OpenAI API key not found" -- what do I do?</strong></summary>
+<summary><strong>I get a Bedrock access/credentials error -- what do I do?</strong></summary>
 
-Set the `OPENAI_API_KEY` environment variable:
+Set AWS credentials so the boto3 default credential chain can find them:
 
 ```bash
-export OPENAI_API_KEY=your-key-here
+export AWS_ACCESS_KEY_ID=your-key
+export AWS_SECRET_ACCESS_KEY=your-secret
+export AWS_DEFAULT_REGION=us-east-1
 ```
 
-Get an API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). You need a funded OpenAI account with API access (this is separate from a ChatGPT subscription).
+(Or use `~/.aws/credentials`, or an IAM instance/pod role -- no static keys needed there.) You also need Bedrock model access enabled for the configured model in that AWS account/region -- see [docs/LLM_MODELS.md](LLM_MODELS.md#bedrock-setup).
 
-To make it persistent, add the export line to your `~/.zshrc` or `~/.bashrc`.
+To make env vars persistent, add the export lines to your `~/.zshrc` or `~/.bashrc`.
 
 </details>
 
@@ -120,7 +119,9 @@ The fastest path is Docker:
 
 ```bash
 cd web_interface
-export OPENAI_API_KEY=your-key-here
+export AWS_ACCESS_KEY_ID=your-key
+export AWS_SECRET_ACCESS_KEY=your-secret
+export AWS_DEFAULT_REGION=us-east-1
 docker compose up --build
 ```
 
@@ -178,11 +179,11 @@ Stage 3b classifies every entry in the CV individually, grouped by section. A CV
 <details>
 <summary><strong>The pipeline hangs or times out</strong></summary>
 
-This is usually an API rate limit or timeout. Check:
+This is usually a Bedrock throttle or timeout. Check:
 
-1. Your API key has sufficient quota and funds (OpenAI) or your AWS account has Bedrock model access enabled (Bedrock)
+1. Your AWS account has Bedrock model access enabled for the configured model, in the configured region
 2. You're not hitting per-minute token limits
-3. Your network can reach the API endpoint (`api.openai.com` for OpenAI, or the Bedrock endpoint for your configured AWS region)
+3. Your network can reach the Bedrock endpoint for your configured AWS region
 
 If a specific stage fails, you can re-run just that stage with `--stage` rather than restarting the entire pipeline.
 
@@ -221,7 +222,7 @@ Non-matched publications are still included in the output -- they're formatted b
 Common issues:
 
 - **Port conflict**: Another process is using port 3000, 3306, or 8000. Check with `lsof -i :3000`.
-- **Missing API key**: The backend requires `OPENAI_API_KEY` to be set in your host shell before running `docker compose`.
+- **Missing AWS credentials**: The backend requires AWS credentials (for Bedrock) to be set in your host shell before running `docker compose`.
 - **Docker not running**: Ensure Docker Desktop (or Docker Engine) is running.
 - **First build is slow**: The initial `docker compose up --build` downloads base images and installs dependencies. Subsequent starts are faster.
 

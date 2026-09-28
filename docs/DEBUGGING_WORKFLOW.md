@@ -301,10 +301,12 @@ Edit `src/unified_pipeline/config/field_schemas_v1.1.json`:
 
 ### Option B: Use a cheaper model for testing
 
+`process_cv`'s `model` argument is unused -- the model is resolved from `src/unified_pipeline/config/llm_config.yaml`, not this call. Override it for one run instead:
+
 ```bash
-python3 -c "
+CVICHE_LLM_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0 python3 -c "
 from src.unified_pipeline.stage_4_field_extractor import process_cv
-result = process_cv('YOUR_UID.docx', model='gpt-4o-mini')  # 10-50x cheaper than gpt-4
+result = process_cv('YOUR_UID.docx')
 "
 ```
 
@@ -406,7 +408,7 @@ for para in doc.paragraphs:
 2. **Identify issues** in the Word output
 3. **Inspect Stage 4 JSON** to determine if data is correct
 4. **If data correct but output wrong** → Fix Stage 6 (free, unlimited iterations)
-5. **If data wrong** → Fix Stage 4 schema, test with `gpt-4o-mini` (~$0.002-0.005)
+5. **If data wrong** → Fix Stage 4 schema, test with `CVICHE_LLM_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0` (~$0.002-0.005)
 6. **Once fix works** → Run on full model for production
 
 **Goal**: Do 90% of debugging in Stage 6 (free) before touching expensive LLM stages.
