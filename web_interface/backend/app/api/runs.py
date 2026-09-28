@@ -416,14 +416,24 @@ async def restart_run(
 
 
 def _cancel_run_record(db: Session, run: Run) -> None:
-    """Signal the orchestrator to stop `run` and mark it cancelled.
+    """Mark `run` cancelled, then signal the orchestrator to stop it.
 
     Shared by cancel_run and restart_run (#181); each caller checks that
     the run is still running first.
-    """
-    from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
 
-    orchestrator_cancel(run.id)
+    Commit BEFORE signalling, not after: db.commit() can raise (see
+    commit_run_or_compensate's #802 handling above), while orchestrator_cancel
+    cannot -- cancel_run's set.add can't raise, and RedisBroker.request_cancel
+    wraps its body in try/except (redis_broker.py, "best-effort"). Signalling
+    first would leave a window where the pipeline is told to stop but the row
+    never reflects it if the commit then raises: check_cancelled's
+    CancelledException handler does not touch the DB (orchestrator.py,
+    "status already updated by API endpoint"), so the row would stay
+    "running" until reconcile_stale_runs sweeps it up to an hour later with a
+    misleading "server restarted" message. Committing first means a commit
+    failure here leaves the run running with nothing told to stop it --
+    consistent, and the caller's exception surfaces normally.
+    """
     run.status = "cancelled"
     run.error_message = "Cancelled by user"
     # Naive, matching started_at and every other completed_at write (see
@@ -431,6 +441,10 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     # (run.completed_at - run.started_at) in runs.py/websocket.py/admin_routes.py.
     run.completed_at = datetime.now()
     db.commit()
+
+    from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
+
+    orchestrator_cancel(run.id)
 
 
 @router.post("/run/{run_id}/retry/{step_number}")

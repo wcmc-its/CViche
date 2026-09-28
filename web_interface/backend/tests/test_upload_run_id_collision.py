@@ -1066,6 +1066,31 @@ def test_restart_cancels_a_running_original(db, tmp_path):
     assert child.status == "created"
 
 
+def test_cancel_run_record_does_not_signal_orchestrator_if_commit_fails(db):
+    """PR #942 review comment 4106923776: db.commit() can raise (#802's
+    commit_run_or_compensate establishes the same is true on the sibling
+    write path), so it must run BEFORE the orchestrator signal, not after --
+    otherwise a commit failure would leave the pipeline told to stop while
+    the row still reads "running" (CancelledException's handler does not
+    touch the DB; see orchestrator.py's "status already updated by API
+    endpoint"), stranding the run until reconcile_stale_runs sweeps it up an
+    hour later. orchestrator_cancel itself can't raise (cancel_run's
+    set.add, and RedisBroker.request_cancel's own try/except), so a raised
+    commit is the only failure this ordering needs to guard against."""
+    from app.api import runs as runs_api
+
+    user = _make_user(db, email="commit-fails-on-cancel@example.com")
+    run = _make_original(db, user, "CANCELFAIL1", status="running")
+
+    orchestrator_cancel = MagicMock()
+    with patch("app.pipeline.orchestrator.cancel_run", orchestrator_cancel), \
+            patch.object(db, "commit", side_effect=RuntimeError("db down")):
+        with pytest.raises(RuntimeError):
+            runs_api._cancel_run_record(db, run)
+
+    orchestrator_cancel.assert_not_called()
+
+
 def test_restart_does_not_cancel_original_when_restart_fails(db, tmp_path):
     """#181 regression guard: a restart that fails (missing file, here) must
     leave a running original alone. Cancelling the original before the
