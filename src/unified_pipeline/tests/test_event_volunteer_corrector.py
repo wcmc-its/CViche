@@ -32,7 +32,7 @@ def _entry(text, code="P"):
     "2017-2019   City Marathon, Springfield, IL   Medical Volunteer, Course Tent",
     "2017   Open Golf Tournament, Springfield, IL\tMedical Volunteer",
     "2016   Volunteer physician, State Special Games",
-    "2015   Medical coverage, County Triathlon",
+    "2015   Medical coverage for the County Triathlon",
 ])
 def test_event_medical_volunteer_p_goes_to_appendix(text):
     out = correct_event_volunteer(_entry(text))
@@ -54,7 +54,8 @@ def test_each_event_word_triggers(event):
 
 
 @pytest.mark.parametrize("role", [
-    "Medical Volunteer", "Volunteer Physician", "Volunteer Medical Staff", "Medical Coverage",
+    "Medical Volunteer", "Volunteer Physician", "Volunteer Medical Staff",
+    "Medical Coverage for", "Medical coverage at",
 ])
 def test_each_volunteer_role_triggers(role):
     """Every MEDICAL_VOLUNTEER_ROLE alternative is load-bearing on its own."""
@@ -76,6 +77,15 @@ def test_none_text_is_left_alone():
     "Race around the Table, Facilitator\t9/2019",
     # A medical-volunteer role with no event.
     "2020   Medical Volunteer, Community Free Clinic",
+    # Medical coverage that is insurance or a call schedule, not volunteering.
+    "2019   Medical coverage, State Games employee benefits",
+    # An event word inside an institutional body is internal service.
+    "2018   Student Games Planning Committee\tMedical Volunteer",
+    "2018   Cycling Safety Task Force\tMedical Volunteer",
+    "2018   Hospital Race Advisory Council\tMedical Volunteer",
+    "2018   Marathon Working Group\tMedical Volunteer",
+    "2018   Harbor Cup Steering Panel\tMedical Volunteer",
+    "2018   Olympics Board\tMedical Volunteer",
 ])
 def test_rows_missing_either_signal_stay_p(text):
     out = correct_event_volunteer(_entry(text))
@@ -87,6 +97,11 @@ def test_only_p_is_reviewed():
     """A Q2 (external service) event row is not this corrector's decision."""
     out = correct_event_volunteer(_entry("2016 Volunteer medical staff, State Special Games", code="Q2"))
     assert out["taxonomy_code"] == "Q2"
+
+
+def test_board_certified_is_not_an_institutional_body():
+    text = "2018   Harbor Cup\tMedical Volunteer (board certified EM physician)"
+    assert correct_event_volunteer(_entry(text))["taxonomy_code"] == "T"
 
 
 def test_input_entry_is_not_mutated():
@@ -114,3 +129,18 @@ def test_text_preview_is_capped_at_100_chars():
     long_text = "2021 Riverside 50 Miler\tMedical Volunteer " + "x" * 200
     _, stats = apply_event_volunteer_corrections([_entry(long_text)])
     assert stats["correction_details"][0]["text_preview"] == long_text[:100]
+
+
+def test_first_original_code_is_kept():
+    """An entry an earlier corrector already recoded (O -> P) keeps its true original code."""
+    entry = _entry("2021 Riverside 50 Miler\tMedical Volunteer")
+    entry["original_taxonomy_code"] = "O"
+    assert correct_event_volunteer(entry)["original_taxonomy_code"] == "O"
+
+
+def test_an_earlier_pass_is_not_recounted():
+    """A row that already carries the correction key from a previous pass is not a new correction."""
+    earlier, _ = apply_event_volunteer_corrections([_entry("2021 Riverside 50 Miler\tMedical Volunteer")])
+    out, stats = apply_event_volunteer_corrections(earlier)
+    assert out[0]["taxonomy_code"] == "T"
+    assert stats["corrections_applied"] == 0

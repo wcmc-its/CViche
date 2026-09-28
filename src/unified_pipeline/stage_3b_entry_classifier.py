@@ -169,9 +169,9 @@ def _resolve_stage_input(stage_label: str, given: str | None, default: Path) -> 
     return path
 
 
-def _person_name_from_uid(document_uid: str) -> str | None:
+def _person_name_from_uid(document_uid: str | None) -> str | None:
     """Owner name for structural-header name matching, from a uid like "2071_LastName_FirstName_CV"."""
-    name_parts = document_uid.split('_')
+    name_parts = (document_uid or "").split('_')
     if len(name_parts) < 3:
         return None
     # Skip the numeric prefix and CV/vita/resume suffixes.

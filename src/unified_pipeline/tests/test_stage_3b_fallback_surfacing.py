@@ -671,8 +671,9 @@ _946_ENTRIES = [
      "text": "2019   Riverside 50 Miler\tMedical Volunteer"},
     {"element_type": "text", "hierarchy": ["PROFESSIONAL DEVELOPMENT AND LEADERSHIP EXPERIENCES"],
      "text": "2019-2021  City Marathon Medical Committee\tMember"},
-    # Coded D2 by the LLM; step 2 (committee vs position) makes it P, so only
-    # a step 9b that runs AFTER step 2 can see it.
+    # Coded D2 by the LLM; step 2 (committee vs position) makes it P. Step 2
+    # only produces P from a committee word, which step 9b's institutional-body
+    # guard also sees, so the row stays P.
     {"element_type": "text", "hierarchy": ["HOSPITAL APPOINTMENTS"],
      "text": "2019   Hospital Marathon Medical Committee Member, Medical Volunteer"},
     # Coded O by the LLM; step 7 (leadership level) makes it P ("Coordinator"),
@@ -717,16 +718,16 @@ def test_946_correctors_run_in_the_stage_3b_pass(monkeypatch, tmp_path):
     assert volunteer["taxonomy_code"] == "T"
     assert volunteer["original_taxonomy_code"] == "P"
     assert committee["taxonomy_code"] == "P"
-    # D2 -> P (step 2) -> T (step 9b): pins 9b after the committee corrector.
-    assert via_committee["taxonomy_code"] == "T"
-    assert via_committee["event_volunteer_correction"]["from"] == "P"
+    # D2 -> P (step 2), then step 9b leaves a committee row alone.
+    assert via_committee["taxonomy_code"] == "P"
+    assert "event_volunteer_correction" not in via_committee
     # O -> P (step 7) -> T (step 9b): pins 9b after the leadership-level corrector.
     assert via_leadership["taxonomy_code"] == "T"
     assert via_leadership["leadership_level_correction"]["to"] == "P"
 
     corrections = output["meta"]["stats"]["post_classification_corrections"]
     assert corrections["appointment_funding"]["corrections_applied"] == 1
-    assert corrections["event_volunteer"]["corrections_applied"] == 3
+    assert corrections["event_volunteer"]["corrections_applied"] == 2
 
     # Both counts are part of the run's total.
     made = sum(corrections[k]["corrections_made"] for k in ("structural", "committee", "reasoning"))
@@ -735,6 +736,39 @@ def test_946_correctors_run_in_the_stage_3b_pass(monkeypatch, tmp_path):
         "leadership_level", "adjunct_position", "position_reconcile", "training_compliance",
         "invited_talk"))
     assert output["meta"]["stats"]["total_post_corrections"] == made + applied
+
+
+_CORRECTOR_ORDER = (
+    "apply_committee_corrections",           # step 2: can produce P
+    "apply_grant_position_corrections",      # step 4: real positions leave M2 first
+    "apply_appointment_funding_corrections",  # step 4b
+    "apply_grant_status_corrections",        # step 5: rewrites M2 codes only
+    "apply_leadership_level_corrections",    # step 7: can produce P
+    "apply_event_volunteer_corrections",     # step 9b
+)
+
+
+def test_946_correctors_run_in_their_documented_order(monkeypatch, tmp_path):
+    """Step 4b runs after step 4 and before step 5; step 9b after steps 2 and 7.
+    A reorder fails here instead of silently reintroducing #946."""
+    calls = []
+    for name in _CORRECTOR_ORDER:
+        real = getattr(stage_3b, name)
+
+        def recording(entries, *args, _name=name, _real=real, **kwargs):
+            calls.append(_name)
+            return _real(entries, *args, **kwargs)
+
+        monkeypatch.setattr(stage_3b, name, recording)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _946_llm)
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, _946_ENTRIES, _946_MAPPINGS)
+
+    stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV", stage_2_path=str(stage_2), stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    assert calls == list(_CORRECTOR_ORDER)
 
 
 # --- run_stage_3b: helpers carved out of it (#946, function-size offset) --------
@@ -759,6 +793,7 @@ def test_stage_input_defaults_only_when_no_path_is_given(tmp_path):
     ("Doe_Jane_CV", "Doe Jane"),        # three parts is enough
     ("2071_Roe_Richard_Resume", "Roe Richard"),
     ("Doe_Jane", None),
+    (None, None),
 ])
 def test_person_name_from_uid(uid, expected):
     assert stage_3b._person_name_from_uid(uid) == expected
