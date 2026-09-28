@@ -278,6 +278,12 @@ def test_format_date_for_section_outputs(date_str, code, expected):
     ("2024-invalid", "B1", "2024-invalid"),
     ("13/2024 to 2025", "B1", "13/2024 to 2025"),  # a range in one field is not a date
     ("13/05/17", "C", "13/05/17"),      # two-digit year: no trustworthy year
+    # A hyphenated NN-YYYY is a two-digit-start year range, not month 98:
+    # left as written, never cut to its end year.
+    ("98-2002", "B1", "98-2002"),
+    ("85-1990", "H", "85-1990"),
+    ("15-2016", "C", "15-2016"),
+    ("00-2005", "F1", "00-2005"),
 ])
 def test_format_date_for_section_invalid_month_renders_year_only(date_str, code, expected):
     assert format_date_for_section(date_str, code) == expected
@@ -285,6 +291,10 @@ def test_format_date_for_section_invalid_month_renders_year_only(date_str, code,
 
 def test_format_date_range_invalid_month_endpoint_renders_year_only():
     assert format_date_range("08/2020", "13/2024", "B1") == "08/2020-2024"
+
+
+def test_format_date_range_keeps_a_two_digit_start_year_range():
+    assert format_date_range("97-2001", "Present", "B1") == "97-2001-Present"
 
 
 # --- _dates_overlap_or_match: granularity-honest comparison (#553) ---------
