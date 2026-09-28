@@ -365,9 +365,9 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                   <span className="block text-xs text-gray-500 mt-1">
                     The text of the CV is sent to a third-party AI service: Anthropic&apos;s Claude, running on Amazon
                     Bedrock. AWS states that Bedrock does not share CV text or AI output with Anthropic or any other
-                    model provider, and does not use it to train models. CViche attempts to withhold highly
-                    sensitive personal details such as date of birth or Social Security number, but you should not
-                    include anything you would not want these systems to see.
+                    model provider, and does not use it to train models. Before the text is sent, CViche removes the
+                    dates of birth and Social Security numbers it recognizes. It can miss some formats, so you should
+                    not include anything you would not want these systems to see.
                   </span>
                   <span className="block text-xs text-gray-500 mt-1">
                     The original CV, intermediate outputs, and final output are retained to improve CViche and test
