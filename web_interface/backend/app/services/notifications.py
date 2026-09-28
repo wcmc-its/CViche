@@ -308,6 +308,10 @@ class ScoreSummary(TypedDict, total=False):
 
     totalScore: float
     band: str
+    # quality_score.score_run's evidence inventory (#745). Absent on a cache
+    # written before #724 added it -- read as "unknown", never as incomplete.
+    data_complete: bool
+    missing_evidence: list[str]
 
 
 class DoctorFinding(TypedDict, total=False):
@@ -390,6 +394,24 @@ def _doctor_text(doctor: DoctorSummary | None) -> str | None:
         return None
 
 
+def _score_text(score: ScoreSummary | None) -> str:
+    """The card's Quality score value: "87 (GREEN (ship))", or "n/a".
+
+    A score computed with a scored artifact missing or unreadable says so
+    (#745), so a reader does not take it for a measured result. Only the
+    count goes on the card, never the missing_evidence strings: an
+    "ambiguous" entry names the matched files, and those are CV filenames.
+    """
+    if not score or score.get("totalScore") is None:
+        return "n/a"
+    text = f"{score.get('totalScore')} ({score.get('band') or 'n/a'})"
+    if score.get("data_complete") is False:
+        missing = score.get("missing_evidence")
+        count = len(missing) if isinstance(missing, list) else 0
+        text += f" — incomplete: {count} file(s) missing or unreadable" if count else " — incomplete"
+    return text
+
+
 def build_teams_payload(
     facts: RunFacts,
     score: ScoreSummary | None = None,
@@ -410,12 +432,7 @@ def build_teams_payload(
     run_id = _card_text(facts.id, _FACT_MAX_CHARS)
     filename = _card_text(facts.filename, _FACT_MAX_CHARS)
 
-    if score:
-        total = score.get("totalScore")
-        band = score.get("band") or "n/a"
-        score_text = f"{total} ({band})" if total is not None else "n/a"
-    else:
-        score_text = "n/a"
+    score_text = _score_text(score)
 
     total_cost = facts.total_cost
     cost_text = f"${total_cost:.4f}" if isinstance(total_cost, (int, float)) else "n/a"

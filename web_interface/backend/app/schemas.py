@@ -413,6 +413,10 @@ class AdminRunEntry(BaseModel):
     has_feedback: bool = False
     quality_score: int | None = None      # advisory 0-100, None if not computed
     quality_band: str | None = None       # "GREEN (ship)" / "YELLOW ..." / "RED ..."
+    # False when the score was computed with a scored artifact missing or
+    # unreadable (#745); None when not computed or cached before the field existed.
+    quality_data_complete: bool | None = None
+    quality_missing_evidence: list[str] = []
 
     class Config:
         from_attributes = True
@@ -425,6 +429,11 @@ class QualityScoreResult(BaseModel):
     band: str
     dimensionScores: list[dict] = []
     flags: list[str] = []
+    # quality_score.score_run's evidence inventory (#745): data_complete is
+    # False when any scored artifact was missing or unreadable, and
+    # missing_evidence names each one. None only for a pre-#724 result.
+    data_complete: bool | None = None
+    missing_evidence: list[str] = []
 
 
 class AdminRunsResponse(BaseModel):

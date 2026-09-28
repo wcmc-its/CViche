@@ -219,9 +219,9 @@ def missing_evidence(outputs_dir: Path) -> list[str]:
     carry: every dimension still scores a missing artifact the way it did
     before (0.5 for a docx, 1.0 for a JSON), so a run with absent evidence
     can look like a precisely measured bad run. score_run exposes this list
-    as ``missing_evidence`` and its emptiness as ``data_complete``; turning
-    it into a typed scoring_confidence field on the API schema, the Teams
-    card, and the frontend types is #745.
+    as ``missing_evidence`` and its emptiness as ``data_complete``, and
+    both are carried as typed fields to the admin API schema, the Teams
+    card, and the admin runs view (#745).
 
     Loads each artifact once more, the way every dimension does (fields.json
     and classified.json are each already read by two dimensions, the docx by
