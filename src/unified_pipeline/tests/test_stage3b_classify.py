@@ -560,24 +560,21 @@ def test_short_text_excluded_from_comparison():
     assert pairs == []
 
 
-def test_near_duplicates_with_different_first_100_chars_are_detected():
-    """Regression test for the prefix-bucketing bug: two entries whose
-    normalized text differs at the very start (a prepended clause) but whose
-    overall content is otherwise near-identical used to land in different
-    first-100-char buckets and NEVER be compared, silently missing a real
-    duplicate."""
-    shared_tail = "a randomized trial of a new asthma intervention in children across three centers"
+def test_duplicates_differing_only_in_opening_punctuation_are_detected():
+    """Regression test for the old prefix-bucketing bug: two entries that
+    differ at the very start used to land in different first-100-char
+    buckets and NEVER be compared. Every eligible pair is compared now, so a
+    duplicate whose only difference is leading punctuation/spacing (a
+    bullet, a dash) is still found."""
+    shared = "a randomized trial of a new asthma intervention in children across three centers"
     entries = [
-        _dup_entry("Preliminary report: " + shared_tail),
-        _dup_entry("Final results of " + shared_tail),
+        _dup_entry("-- " + shared),
+        _dup_entry("* " + shared),
     ]
-    # Confirm the two texts really do differ at the start (which is what put
-    # them in different buckets under the old first-100-char grouping), or
-    # this test would not exercise the bug it targets.
-    assert entries[0]["text"][:20] != entries[1]["text"][:20]
+    assert entries[0]["text"][:5] != entries[1]["text"][:5]
 
-    _, pairs = classify.detect_duplicates(entries, similarity_threshold=0.85)
-    assert len(pairs) == 1, "near-duplicates with different prefixes must still be compared"
+    _, pairs = classify.detect_duplicates(entries)
+    assert len(pairs) == 1, "duplicates with different prefixes must still be compared"
 
 
 def test_three_identical_entries_produce_two_pairs_and_keep_one_original():

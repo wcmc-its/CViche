@@ -161,6 +161,46 @@ def test_calendar_non_leap_year_day_degrades_to_month():
     assert _parse_date_components("2023-02-29") == (2023, 2, None)
 
 
+# --- #867: mm/dd/yy, a two-digit year, with a century pivot at 30 ----------
+
+@pytest.mark.parametrize("date_str, expected", [
+    ("10/30/17", (2017, 10, 30)),
+    ("01/01/00", (2000, 1, 1)),
+    ("01/01/30", (2030, 1, 1)),     # the pivot itself -> 20xx
+    ("01/01/31", (1931, 1, 1)),     # just above -> 19xx
+    ("10/30/99", (1999, 10, 30)),
+    ("10-30-17", (2017, 10, 30)),
+])
+def test_two_digit_year_reads_through_the_pivot(date_str, expected):
+    assert _parse_date_components(date_str) == expected
+
+
+def test_two_digit_year_reaches_format_date_for_section_as_a_year():
+    # The actual #867 symptom: the honors taxonomy code renders 'yyyy' only.
+    assert format_date_for_section("10/30/17", "H") == "2017"
+    assert format_date_for_section("10/30/99", "H") == "1999"
+
+
+def test_four_digit_year_mm_dd_is_unaffected_by_the_two_digit_pattern():
+    # The pre-existing MM/DD/YYYY pattern must still win for a 4-digit year.
+    assert _parse_date_components("10/30/2017") == (2017, 10, 30)
+
+
+@pytest.mark.parametrize("date_str", [
+    "07/09-08/10",     # a range, not a single mm/dd/yy date
+    "10/17",            # bare mm/yy: no day, too ambiguous to guess at
+    "10/30/170",        # a 3-digit trailing group is not a 2-digit year
+])
+def test_two_digit_year_pattern_does_not_swallow_other_shapes(date_str):
+    assert _parse_date_components(date_str) == (None, None, None)
+
+
+def test_two_digit_year_with_an_impossible_month_is_unreadable():
+    # Read as mm/dd/yy only, like the four-digit mm/dd/yyyy shape: no guess
+    # at dd/mm when the first number can't be a month.
+    assert _parse_date_components("13/05/17") == (None, None, None)
+
+
 def test_both_functions_use_the_shared_parser():
     # format_date_for_section (rendering), extract_sort_date (sorting), and
     # _parse_date_components itself must all agree on what a string yields --

@@ -15,7 +15,7 @@ import json
 import logging
 from typing import Any, Callable, NotRequired, TypedDict
 
-from openai import APITimeoutError
+from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
@@ -434,7 +434,7 @@ def attempt_llm_recovery(
 
         return {"entries": recovered_entries, "cost": cost, "tokens": tokens}
 
-    except APITimeoutError:
+    except (ReadTimeoutError, ConnectTimeoutError):
         logger.exception("Stage 4 recovery LLM call timed out for taxonomy %s", taxonomy_code)
         return {
             "entries": [{**entry, "llm_recovery_error": LLM_TIMEOUT} for entry in entries],
@@ -771,7 +771,7 @@ def extract_fields_batch(
                         "extraction_error": "No matching extraction in LLM response"
                     })
 
-        except APITimeoutError:
+        except (ReadTimeoutError, ConnectTimeoutError):
             logger.exception("Stage 4 extraction LLM call timed out for code %s", code)
             failed_groups += 1
             for entry in code_entries:

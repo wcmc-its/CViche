@@ -42,7 +42,7 @@ The CViche web app is a browser-based interface that wraps the same 12-stage CV 
 
 | Environment | Backend | Frontend | Database |
 |-------------|---------|----------|----------|
-| **Local dev** (no Docker) | 5002 | 3001 (Vite) | SQLite file |
+| **Local dev** (no Docker) | 5002 | 3001 (Vite) | MariaDB (`DB_HOST` etc.) |
 | **Docker Compose** | 8000 | 3000 | MariaDB 11 (container) |
 | **Production** | 8000 (4 workers) | 80 (nginx) | Managed MariaDB |
 
@@ -120,8 +120,7 @@ Applied in order (outermost first):
 
 ### Database
 
-- **Dev:** SQLite (file-based, zero-config)
-- **Production:** MariaDB via `CVICHE_DATABASE_URL`
+- **Dev and production:** MariaDB via `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER` (RDS IAM auth by default; local docker-compose uses `DB_AUTH_MODE=password` against the compose `db` service — see `app/database_factory.py:create_cviche_engine`). There is no SQLite path: `app/database.py` raises if any of the four is missing.
 - **ORM:** SQLAlchemy with Alembic migrations
 - **Models:** User, Run, Step, Log, LLMUsage, Consent, Feedback, SystemConfig, RunMetrics
 

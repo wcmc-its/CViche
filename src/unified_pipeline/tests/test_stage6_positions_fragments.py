@@ -56,6 +56,7 @@ Run with:
 """
 
 import copy
+import logging
 import sys
 from pathlib import Path
 
@@ -694,6 +695,30 @@ def test_institution_propagation_stops_at_unrelated_entries():
     assert _institution_of(sibling) == "Lincoln Hospital"
     assert _institution_of(unrelated) == ""
     assert _institution_of(after) == ""
+
+
+@pytest.mark.parametrize("malformed_enrichment", [["a"], "abc", 7])
+def test_propagation_survives_a_non_mapping_enrichment(malformed_enrichment, caplog):
+    """#743: stage 5b is an LLM output, and `institution_enrichment` can come
+    back as a list, a string, or another non-mapping instead of a dict. The
+    parent-to-subentry carry used to call `dict(last_enrichment)` on whatever
+    the parent held, which raises on a non-mapping (`ValueError` for a
+    single-character list, `TypeError` for an int) and fails the
+    Positions section, which `_render_section` then sends to the Appendix. It must instead treat the malformed value like no enrichment and
+    keep propagating the institution name."""
+    parent = _position_entry(1, "Chief of Service", "Lincoln Hospital",
+                             ["Hospital Appointments"], "2001", "2004")
+    parent["institution_enrichment"] = malformed_enrichment
+    sub_entry = _position_entry(2, "Attending Physician", "",
+                                ["Hospital Appointments"])
+
+    with caplog.at_level(logging.WARNING):
+        WCMTemplateGenerator._propagate_institution_to_subentries(
+            [parent, sub_entry])
+
+    assert _institution_of(sub_entry) == "Lincoln Hospital"
+    assert "institution_enrichment" not in sub_entry
+    assert "not a mapping" in caplog.text
 
 
 def test_raw_text_employer_candidate_must_name_an_employer():

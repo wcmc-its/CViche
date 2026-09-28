@@ -156,7 +156,6 @@ def _build_owner_context(cv_owner_location: dict | None) -> str:
 def lookup_institutions_llm(
     batch: list[tuple[str, str, str]],
     cv_owner_location: dict | None,
-    model: str = "gpt-5.1",
     verbose: bool = False
 ) -> tuple[dict[str, dict] | None, float, str | None]:
     """
@@ -165,12 +164,6 @@ def lookup_institutions_llm(
     Args:
         batch: List of (inst_id, institution_name, context_string) tuples
         cv_owner_location: CV owner location dict for disambiguation
-        model: Inert default (#459) -- NOT passed to call_llm(). The model
-            actually used is centrally configured per stage in
-            config/llm_config.yaml and reported back as the third return
-            value; a caller-selected value here would silently fight that
-            config, which is exactly what #459 stopped artifacts from doing.
-            Kept only as the fallback label when a batch is skipped/cached.
         verbose: Print progress
 
     Returns:

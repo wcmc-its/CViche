@@ -55,24 +55,27 @@ jobs:
       # guarded by `if self._disable_pip:`, and we never pass that flag. So
       # pip-audit builds a venv, pip-installs the requirements file (which
       # resolves the whole tree) and audits every resolved distribution.
-      # Measured with the pinned pip-audit==2.10.1:
-      #   --no-deps -r requirements.txt                 -> 39 packages audited
-      #     (12 declared; adds botocore, httpx, pydantic-core, certifi, urllib3)
-      #   --no-deps -r backend/requirements.txt         -> 60 packages audited
-      #     (23 declared; adds pyopenssl, cryptography, starlette, anyio, h11)
-      #   --no-deps --disable-pip -r requirements.txt   -> 12 packages audited
+      # Measured with the pinned pip-audit==2.10.1 (re-measured after #953
+      # dropped openai, which pulled in httpx as a transitive dep -- it no
+      # longer appears in either resolved set below):
+      #   --no-deps -r requirements.txt                 -> 30 packages audited
+      #     (11 declared; adds botocore, pydantic-core, certifi, urllib3)
+      #   --no-deps -r backend/requirements.txt         -> 53 packages audited
+      #     (23 declared; adds starlette, h11, typing_extensions, urllib3, certifi)
+      #   --no-deps --disable-pip -r requirements.txt   -> 11 packages audited
       # Transitive dependencies ARE covered. The remaining gap is reproducibility,
       # not coverage: the audited set is whatever pip resolves at audit time
       # rather than a hash-pinned set (#130, prerequisite #754).
       #
       # THE TRAP: adding --disable-pip -- or hash-pinning these files, which
       # takes the same branch -- silently collapses coverage from 39/60 packages
-      # to the 12/23 direct pins, with no warning and a still-green run. If you
+      # to the 12/24 direct pins, with no warning and a still-green run. If you
       # hash-pin for #130, pin the fully RESOLVED set, never just these files.
       #
-      # Ignored advisories are maintained in .pip-audit-ignore.txt (tracked in #126).
-      # Both this workflow and buildspec.yaml reference that file so the ignore
-      # list stays in sync. Remove each entry from that file as #126 lands its fix.
+      # Ignored advisories are maintained in .pip-audit-ignore.txt. The pysaml2
+      # pin-knot advisories tracked in #126 were removed from it when pysaml2
+      # 7.5.5 lifted the pyopenssl/cryptography cap. Both this workflow and
+      # buildspec.yaml reference that file so the ignore list stays in sync.
       # New advisories in any dep still fail this gate.
       - name: Audit pinned dependencies for known vulnerabilities
         run: |

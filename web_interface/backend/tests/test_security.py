@@ -624,13 +624,13 @@ class TestDocsGating:
 class TestUploadValidation:
     """SEC-04: Upload validation by magic bytes, size limit, and filename sanitization."""
 
-    def _create_auth_user(self, client, db):
+    def _create_auth_user(self, client, db, email="test@example.com"):
         """Create a user with consent and set auth cookie."""
         from app.models import User
         from app.auth import create_session_cookie, COOKIE_NAME
 
         user = User(
-            email="test@example.com",
+            email=email,
             display_name="Test User",
             role="user",
             consent_version="1.0",
@@ -706,6 +706,52 @@ class TestUploadValidation:
         assert response.status_code == 400
         assert "too large" in response.json()["detail"]["message"].lower()
 
+    def test_oversized_file_message_names_the_whole_mb_cap(self, client, db, seed_simple_mode):
+        """Production caps are whole MB, and the rejection names the cap the
+        way dev always has: "Maximum size is N MB"."""
+        self._create_auth_user(client, db)
+        cap = 1024 * 1024
+        with patch("app.api.upload.MAX_UPLOAD_SIZE", cap):
+            response = client.post(
+                "/api/upload",
+                files={"file": ("big.docx", b"PK\x03\x04" + b"\x00" * cap, "application/octet-stream")},
+                data={"submission_type": "own_cv"},
+            )
+        assert response.status_code == 400
+        assert "Maximum size is 1 MB" in response.json()["detail"]["message"]
+
+    def test_oversized_file_message_readable_under_1mb_cap(self, client, db, seed_simple_mode):
+        """A cap under 1 MB is test-only (config_service always builds a
+        whole-MB cap in production, config_service.py:28) -- so the message
+        need only stay a readable "too large" rejection at any patched cap,
+        not render a KB/bytes breakdown that production code never reaches."""
+        self._create_auth_user(client, db)
+        docx_header = b"PK\x03\x04"
+        with patch("app.api.upload.MAX_UPLOAD_SIZE", 100):  # 100 bytes < 1 MB
+            big_content = docx_header + b"\x00" * 200
+            response = client.post(
+                "/api/upload",
+                files={"file": ("big.docx", big_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
+            )
+        assert response.status_code == 400
+        assert "too large" in response.json()["detail"]["message"].lower()
+
+    def test_estimate_oversized_file_rejected(self, client, db, seed_simple_mode):
+        """#793: /estimate's size check runs through the same _read_bounded
+        helper /upload uses now (previously its own `await file.read()` +
+        separate size check). Mirrors test_oversized_file_rejected above for
+        /upload."""
+        self._create_auth_user(client, db)
+        docx_header = b"PK\x03\x04"
+        with patch("app.api.upload.MAX_UPLOAD_SIZE", 100):
+            big_content = docx_header + b"\x00" * 200  # 204 bytes > 100 byte limit
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("big.docx", big_content, "application/octet-stream")},
+            )
+        assert response.status_code == 400
+        assert "too large" in response.json()["detail"]["message"].lower()
+
     def test_randomized_filename_on_disk(self, client, db, seed_simple_mode, tmp_path):
         """Uploaded files are stored with randomized names, not the
         user-provided filename. Uses .docx (not the formerly-accepted .pdf,
@@ -752,6 +798,216 @@ class TestUploadValidation:
         )
         assert response.status_code == 400
         assert "does not match .docx format" in response.json()["detail"]["message"]
+
+    @pytest.mark.parametrize("endpoint, data", [
+        ("/api/upload", {"submission_type": "own_cv"}),
+        ("/api/estimate", None),
+    ])
+    def test_high_ratio_docx_rejected_before_parsing(self, client, db, seed_simple_mode, endpoint, data):
+        """#793: both endpoints reject a docx whose declared uncompressed
+        size exceeds the expansion cap, before python-docx reads it."""
+        import io
+        from docx import Document
+        self._create_auth_user(client, db)
+        doc = Document()
+        doc.add_paragraph("A" * 50_000)
+        buf = io.BytesIO()
+        doc.save(buf)
+        with patch("app.api.upload._DOCX_MAX_UNCOMPRESSED_BYTES", 40_000), \
+                patch("app.api.upload._extract_text") as extract:
+            response = client.post(
+                endpoint,
+                files={"file": ("cv.docx", buf.getvalue(), "application/octet-stream")},
+                data=data,
+            )
+        assert response.status_code == 400
+        assert "does not match .docx format" in response.json()["detail"]["message"]
+        extract.assert_not_called()
+
+    def test_estimate_reuses_extract_text(self, client, db, seed_simple_mode):
+        """#794: /estimate now computes text_characters from the SAME
+        _extract_text /upload uses, instead of a second inline docx walk
+        that could compute a different count for the same file."""
+        self._create_auth_user(client, db)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value="y" * 4321) as extract_mock:
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["text_characters"] == 4321
+        extract_mock.assert_called_once()
+        assert extract_mock.call_args.args[1] == ".docx"
+
+    def test_estimate_readable_but_empty_document_uses_minimum_not_fallback(self, client, db, seed_simple_mode, caplog):
+        """#793 polish (M12): a document that IS readable but has no text
+        (`_extract_text` returns `""`, not `None`) must take the
+        `max(0, 1000) == 1000` path, not the 5000 unreadable-fallback --
+        `if extracted is None` and `if not extracted` disagree exactly here,
+        since `""` is falsy but not None."""
+        self._create_auth_user(client, db)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value=""), \
+             caplog.at_level(logging.WARNING):
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("blank.docx", docx_content, "application/octet-stream")},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["text_characters"] == 1000
+        fallback_logs = [r for r in caplog.records if "fixed char-count guess" in r.getMessage()]
+        assert fallback_logs == []  # extraction succeeded -- no fallback warning
+
+    def test_estimate_logs_and_falls_back_when_extraction_fails(self, client, db, seed_simple_mode, caplog):
+        """#794: the bare `except Exception` that silently set
+        text_char_count = 5000 is gone (§5.4) -- extraction failure
+        (`_extract_text` returning None) now logs a WARNING before falling
+        back to the same fixed guess, instead of failing open with no
+        record of it anywhere. CODING_STANDARDS §4.7: the warning does NOT
+        carry the raw filename (CV filenames usually carry the owner's
+        name) -- the request id already ties it back to the request."""
+        self._create_auth_user(client, db)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value=None), \
+             caplog.at_level(logging.WARNING):
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("resume.docx", docx_content, "application/octet-stream")},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["text_characters"] == 5000
+        fallback_logs = [r for r in caplog.records if "fixed char-count guess" in r.getMessage()]
+        assert len(fallback_logs) == 1
+        assert "resume.docx" not in fallback_logs[0].getMessage()
+
+    def test_estimate_respects_rate_limit(self, client, db, seed_simple_mode):
+        """#795: /estimate is rate-limited the same way /upload is --
+        reusing check_rate_limit (/upload's own per-run quota) rather than a
+        dedicated estimate budget. A user over quota gets /upload's exact
+        429 shape and the document is never read, let alone parsed.
+
+        Residual (T-UP report): check_rate_limit counts Run rows, so this
+        only blocks a user already over their run quota -- a user under
+        quota can still call /estimate an unbounded number of times.
+        """
+        self._create_auth_user(client, db)
+        rate_limit_body = {
+            "error": "rate_limited",
+            "message": "Daily limit of 10 runs reached.",
+            "details": {
+                "limit_type": "daily", "limit": 10, "used": 10,
+                "resets_at": "2026-09-23T00:00:00-04:00",
+            },
+        }
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload.check_rate_limit", return_value=rate_limit_body), \
+             patch("app.api.upload._extract_text") as extract_mock:
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+        assert response.status_code == 429, response.text
+        assert response.json()["detail"] == rate_limit_body
+        extract_mock.assert_not_called()
+
+    def test_estimate_per_user_budget_blocks_before_parsing(self, client, db, seed_simple_mode):
+        """#795: a per-pod, in-memory, per-user counter caps /estimate calls
+        on its own, even for a user nowhere near their check_rate_limit run
+        quota. The call that exceeds it gets check_rate_limit's 429 shape,
+        and the body is never read (_read_bounded) or parsed (_extract_text,
+        _validate_docx_magic) -- the budget is spent before either runs."""
+        from unittest.mock import AsyncMock
+        from app.api import upload as upload_module
+        self._create_auth_user(client, db)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        small_limiter = upload_module._EstimatePerUserWindow(max_calls=2, window_seconds=300)
+        with patch("app.api.upload._estimate_rate_limiter", small_limiter), \
+             patch("app.api.upload._validate_docx_magic", return_value=True) as magic_mock, \
+             patch("app.api.upload._extract_text", return_value="x" * 2000) as extract_mock:
+            for _ in range(2):
+                ok_response = client.post(
+                    "/api/estimate",
+                    files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+                )
+                assert ok_response.status_code == 200, ok_response.text
+            magic_mock.reset_mock()
+            extract_mock.reset_mock()
+            with patch("app.api.upload._read_bounded", new_callable=AsyncMock) as read_mock:
+                over_response = client.post(
+                    "/api/estimate",
+                    files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+                )
+        assert over_response.status_code == 429, over_response.text
+        detail = over_response.json()["detail"]
+        # Same {error, message, details} shape check_rate_limit's callers
+        # return (#795) -- not just the error code, so a caller relying on
+        # `message` or `details` for display sees the fields it expects.
+        assert set(detail) == {"error", "message", "details"}
+        assert detail["error"] == "rate_limited"
+        assert isinstance(detail["message"], str) and detail["message"]
+        assert set(detail["details"]) == {"limit_type", "limit", "window_seconds"}
+        assert detail["details"]["limit_type"] == "estimate"
+        read_mock.assert_not_called()
+        magic_mock.assert_not_called()
+        extract_mock.assert_not_called()
+
+    def test_estimate_per_user_budget_resets_after_window(self):
+        """The window genuinely resets rather than banning a user permanently
+        once tripped. Uses an injected clock so the test controls elapsed
+        time directly instead of sleeping or patching the real clock."""
+        from app.api.upload import _EstimatePerUserWindow
+        now = [0.0]
+        limiter = _EstimatePerUserWindow(max_calls=1, window_seconds=300, clock=lambda: now[0])
+        assert limiter.allow(user_id=1) is True
+        assert limiter.allow(user_id=1) is False  # still inside the window
+        now[0] = 299.9
+        assert limiter.allow(user_id=1) is False  # not yet elapsed
+        now[0] = 300.0
+        assert limiter.allow(user_id=1) is True  # window elapsed -- fresh budget
+
+    def test_estimate_per_user_budget_is_per_user(self):
+        """One user hitting their budget must not affect another user's --
+        the window dict is keyed by user id, not shared globally."""
+        from app.api.upload import _EstimatePerUserWindow
+        limiter = _EstimatePerUserWindow(max_calls=1, window_seconds=300)
+        assert limiter.allow(user_id=1) is True
+        assert limiter.allow(user_id=1) is False
+        assert limiter.allow(user_id=2) is True  # a different user is unaffected
+
+    def test_estimate_per_user_budget_is_per_user_through_endpoint(self, client, db, seed_simple_mode):
+        """#795: the per-user check above proves the helper's own keying, but
+        not that the endpoint passes the right user id through. Two real
+        authenticated users against a shared, small-budget limiter: user A
+        spends their whole budget, and user B -- a distinct user id -- still
+        gets a 200, not a 429, on the pod they share."""
+        from app.api import upload as upload_module
+        self._create_auth_user(client, db, email="user-a@example.com")
+        small_limiter = upload_module._EstimatePerUserWindow(max_calls=1, window_seconds=300)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload._estimate_rate_limiter", small_limiter), \
+             patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value="x" * 2000):
+            first_a = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+            assert first_a.status_code == 200, first_a.text
+            second_a = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+            assert second_a.status_code == 429, second_a.text
+
+            self._create_auth_user(client, db, email="user-b@example.com")
+            first_b = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+        assert first_b.status_code == 200, first_b.text
 
     def test_random_bytes_rejected(self, client, db, seed_simple_mode):
         """A file with random bytes (not matching any format) is rejected."""

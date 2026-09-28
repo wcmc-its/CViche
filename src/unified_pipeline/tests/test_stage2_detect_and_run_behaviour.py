@@ -467,6 +467,75 @@ def test_malformed_and_out_of_bounds_delimiters_are_silently_ignored(monkeypatch
     assert cost_info["cost"] == 0.001
 
 
+def test_pre_llm_scrub_wire_dob_and_ssn_never_reach_call_llm_messages(monkeypatch, tmp_path):
+    """#847 wire test: `extract_unified_elements`'s pre-LLM scrub survives
+    into the EXACT `messages` stage 2 hands to `call_llm` -- driven from a
+    real synthetic docx through the real reader, not a hand-built element
+    dict, so nothing between the reader and the prompt can silently
+    reintroduce a raw value."""
+    from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
+
+    doc = Document()
+    doc.add_paragraph("Date of Birth: 01/02/1970")
+    doc.add_paragraph("SSN: 123-45-6789")
+    docx_path = tmp_path / "wire_test.docx"
+    doc.save(str(docx_path))
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    captured = {}
+
+    def fake(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return _llm_result({"delimiters": []})
+
+    monkeypatch.setattr(stage2, "call_llm", fake)
+    stage2.detect_entries_for_section(
+        ["S"], elements,
+        elements[0]["unified_idx"], elements[-1]["unified_idx"],
+        element_index_map=_idx_map(elements),
+    )
+
+    prompt_text = "\n".join(m["content"] for m in captured["messages"])
+    assert "01/02/1970" not in prompt_text
+    assert "123-45-6789" not in prompt_text
+    assert "[withheld]" in prompt_text
+
+
+def test_pre_llm_scrub_wire_dob_in_table_cells_never_reach_call_llm_messages(monkeypatch, tmp_path):
+    """#847 round 2 wire test: a DOB label in one table CELL and its value
+    in the NEXT cell of the same row -- stage 2 builds its table-row prompt
+    text by joining `elem["data"]` cells directly
+    (`" | ".join(cell.get("text") ...)`, stage_2_entry_extraction.py), so
+    the scrub must have already run per-cell, not just on the element's own
+    joined `text` field."""
+    from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
+
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Date of Birth:"
+    table.cell(0, 1).text = "01/02/1970"
+    docx_path = tmp_path / "wire_test_table.docx"
+    doc.save(str(docx_path))
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    captured = {}
+
+    def fake(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return _llm_result({"delimiters": []})
+
+    monkeypatch.setattr(stage2, "call_llm", fake)
+    stage2.detect_entries_for_section(
+        ["S"], elements,
+        elements[0]["unified_idx"], elements[-1]["unified_idx"],
+        element_index_map=_idx_map(elements),
+    )
+
+    prompt_text = "\n".join(m["content"] for m in captured["messages"])
+    assert "01/02/1970" not in prompt_text
+    assert "[withheld]" in prompt_text
+
+
 # =============================================================== run_stage_2 (end to end)
 
 def test_run_stage_2_flat_hierarchy_sorts_headers_content_and_breaks(tmp_path, monkeypatch):
@@ -583,6 +652,43 @@ def test_run_stage_2_strip_template_instructions_false_keeps_instruction_entry(t
     texts = [e["text"] for e in output_data["entries"]]
     assert texts == ["Jane Doe", "EDUCATION", "Faculty Curriculum Vitae Template"]
     assert output_data["total_entries"] == 3
+
+
+def test_run_stage_2_drops_an_older_template_revision_s_reworded_instruction(tmp_path, monkeypatch):
+    """#829: a faculty copy of another template revision words the licensure
+    note "...to the NYP Hospital staff..." where the tracked 2020 template
+    says "...to the Hospital staff...". Kept, it was classified F1 and stage
+    4 read "New York State" out of it as a license the faculty member does
+    not hold. The near-match drops it; the real licence row beside it stays."""
+    _redirect_output_manager(monkeypatch, tmp_path)
+
+    note = ("Licensure: Every physician appointed to the NYP Hospital staff, except "
+            "interns, and aliens in the US via non-immigrant visas, must have a New "
+            "York State license or a temporary certificate in lieu of the license.")
+    doc = Document()
+    for text in ["Jane Doe", "LICENSURE", note, "Fictional State Medical License 12345"]:
+        doc.add_paragraph(text)
+    docx_path = tmp_path / "lic.docx"
+    doc.save(docx_path)
+
+    hpath = _write_hierarchy(
+        tmp_path, "lic_h.json", "LIC1",
+        hierarchy_with_indices=[{"text": "Licensure", "level": "H1", "element_idx": 1, "children": []}],
+        section_boundaries=[{"hierarchy": ["Licensure"], "element_idx_start": 1, "element_idx_end": 3, "has_children": False}],
+    )
+    _route_call_llm(monkeypatch, {
+        "Personal Data": [{"element_idx_start": 0, "element_idx_end": 0, "element_type": "paragraph", "confidence": 0.9}],
+        "Licensure": [
+            {"element_idx_start": 2, "element_idx_end": 2, "element_type": "paragraph", "confidence": 0.85},
+            {"element_idx_start": 3, "element_idx_end": 3, "element_type": "paragraph", "confidence": 0.85},
+        ],
+    })
+
+    output_data, _ = stage2.run_stage_2(str(docx_path), str(hpath))
+
+    texts = [e["text"] for e in output_data["entries"]]
+    assert note not in texts
+    assert "Fictional State Medical License 12345" in texts
 
 
 def test_run_stage_2_cancel_check_raises_mid_run_and_no_output_is_written(tmp_path, monkeypatch):
