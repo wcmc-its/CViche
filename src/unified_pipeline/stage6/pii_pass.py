@@ -723,6 +723,10 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             # (the entry's raw text usually carries the very same phrase)
             # is not counted twice.
             noticed = {m.category for m in matches}
+            if value_hits:
+                # Which fields went, so a field-first writer can tell a
+                # withheld award from one that never had a name field.
+                entry["_pii_dropped_fields"] = sorted(value_hits)
             for key, categories in value_hits.items():
                 del fields[key]
                 for category in categories:

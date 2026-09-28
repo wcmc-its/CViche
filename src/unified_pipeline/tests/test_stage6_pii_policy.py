@@ -451,6 +451,7 @@ def test_892_field_value_alone_triggers_the_pass_and_is_recorded():
     result = _run({"H": [entry]})
     assert "award_name" not in entry["extracted_fields"]
     assert entry["_pii_withheld"] is True
+    assert entry["_pii_dropped_fields"] == ["award_name"]
     assert result.withheld == [WithheldItem(CAT_VISA, "Honors", 0)]
 
 
