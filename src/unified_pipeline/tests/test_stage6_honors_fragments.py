@@ -730,12 +730,12 @@ def test_a_fused_multi_award_list_is_not_a_header_row():
     award cell of a fused list counted and the entry was dropped before the
     parser saw it, rendering nothing at all. Three of the review's own shapes
     did that, and the assertion below names which."""
+    # Since #756 the shared check needs every cell to be header vocabulary, so
+    # it no longer calls any of these a header on its own.
     shared_check_says_header = [
         name for name, text, _ in ODD_PIPE_SHAPES
         if _is_table_header_entry(text, _ENTRY_HEADER_KEYWORDS)]
-    assert shared_check_says_header == [
-        "three awards", "extra whitespace", "odd number of parts"], \
-        shared_check_says_header
+    assert shared_check_says_header == [], shared_check_says_header
     for name, text, _ in ODD_PIPE_SHAPES:
         assert not _is_honors_header_entry(text), name
 

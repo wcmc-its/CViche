@@ -261,7 +261,7 @@ def test_pipe_separated_columns_match_plural_header_word():
     # no trailing "s?"), word-boundary matching stopped matching "Dates"
     # entirely (0 of 2 parts match, below the 50% threshold) rather than
     # just dropping the "candidate" false positive it was meant to fix.
-    text = "Dates|Something"
+    text = "Dates|Journal Title"
     assert _is_table_header_entry(text, ["date"]) is True
 
 
@@ -272,3 +272,52 @@ def test_pipe_separated_columns_still_ignore_substring_inside_a_longer_word():
     # immediately before "date" within that word either way.
     text = "Candidates|Update"
     assert _is_table_header_entry(text, ["date"]) is False
+
+
+# --- #756: a pipe-joined entry is a header only if EVERY cell is header vocabulary
+
+_HONORS_KW = ["award", "honor", "organization", "date", "year", "granting"]
+
+
+@pytest.mark.parametrize("text", [
+    "Best Teaching Award | 2020",
+    "Best Teaching Award | Purdue University",
+    "Award A | 2024 | Award B | 2023 | Award C | 2022",
+    "  Award A   |   2024   |   Award B   |   2023",
+    "2020\tAward A | Award B | 2019",
+    "Award | Purdue University",
+])
+def test_pipe_joined_content_is_not_a_header_row(text):
+    assert _is_table_header_entry(text, _HONORS_KW) is False
+
+
+@pytest.mark.parametrize("text", [
+    "Name of award | Organization | Date awarded (yyyy)",
+    "Year | Title",
+    "Dates | Journal Title",
+    "Year (YYYY) | Person Months (##.##)",
+    "Dates of Role(s) | Title of Role(s)",
+])
+def test_pipe_joined_header_rows_are_still_headers(text):
+    assert _is_table_header_entry(text, _HONORS_KW) is True
+
+
+def test_a_year_in_any_cell_makes_the_entry_data():
+    assert _is_table_header_entry("Year | 2020", _HONORS_KW) is False
+
+
+def test_membership_row_with_member_cell_is_not_a_header():
+    # Corpus shape (web240): the "Member" cell is a header keyword, the
+    # society cell is content.
+    kw = ["organization", "membership", "society", "date", "member"]
+    assert _is_table_header_entry("Society for Neuroscience\tMember", kw) is False
+
+
+def test_a_year_beside_header_words_makes_the_cell_data():
+    # "Awarded 2020" is made of header words plus a year; a header row names
+    # a date column, it never carries a date value.
+    assert _is_table_header_entry("Awarded 2020 | Organization", _HONORS_KW) is False
+
+
+def test_an_entry_of_only_delimiters_is_not_a_header():
+    assert _is_table_header_entry(" | | ", _HONORS_KW) is False
