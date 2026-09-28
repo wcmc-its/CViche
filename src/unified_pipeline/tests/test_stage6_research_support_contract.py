@@ -904,16 +904,56 @@ def test_a_goal_identical_to_the_title_is_not_rendered_twice():
     assert 'Major project goals:' not in labels
 
 
-def test_a_goal_that_differs_from_the_title_still_renders():
+@pytest.mark.parametrize('goals, expected', [
+    # Differs from the title outright.
+    ('Map the pollinator corridors and survey nesting sites',
+     'Map the pollinator corridors and survey nesting sites'),
+    # Extends the title: the title is a literal prefix, plus more text. A
+    # containment check (`title in goals`) would wrongly read this as a
+    # repeat of the title rather than the equality check the guard is meant
+    # to be (round-4 review: a mutant swapping `==` for `in` survived with no
+    # test covering this shape).
+    ('Map the pollinator corridors of the Example Valley and survey nesting sites',
+     'Map the pollinator corridors of the Example Valley and survey nesting sites'),
+])
+def test_a_goal_that_differs_from_the_title_still_renders(goals, expected):
     """Only an exact (normalized) match is suppressed -- a goal that extends or
     differs from the title is still new information and still renders.
     """
     fields = {'title': 'Map the pollinator corridors of the Example Valley',
-              'major_goals': 'Map the pollinator corridors and survey nesting sites',
+              'major_goals': goals,
               'start_date': '01/2019'}
     cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
-    assert cells['Major project goals:'] == \
-        'Map the pollinator corridors and survey nesting sites'
+    assert cells['Major project goals:'] == expected
+
+
+def test_a_goal_repeating_a_whitespace_padded_title_is_still_suppressed():
+    """The guard strips both sides before comparing. `title` can carry
+    surrounding whitespace (nothing upstream of `_create_grant_table` trims
+    it when the raw field has no `|` for `_deduplicate_repeated_content` to
+    act on) -- dropping `.strip()` on the title side alone left every test
+    green (round-4 review).
+    """
+    fields = {'title': '  Map the pollinator corridors of the Example Valley  ',
+              'major_goals': 'MAP THE POLLINATOR CORRIDORS OF THE EXAMPLE VALLEY',
+              'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+
+def test_the_goal_repeat_guard_compares_the_rendered_title_not_the_raw_field():
+    """The guard's `title` is the computed value -- deduplicated, with the
+    trial_title/study_title/text fallback chain already applied -- that is
+    actually rendered as 'Project title:', not the raw `fields.get('title')`.
+    A grant whose title comes only from a fallback field has no `'title'` key
+    at all, so comparing against the raw field would never suppress a repeat
+    here (round-4 review: this mutant also left every test green).
+    """
+    fields = {'trial_title': 'Map the pollinator corridors of the Example Valley',
+              'major_goals': 'MAP THE POLLINATOR CORRIDORS OF THE EXAMPLE VALLEY',
+              'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert 'Major project goals:' not in labels
 
 
 # --- #958: major goals from the source text -------------------------------------
@@ -975,6 +1015,13 @@ _GOAL = 'Map the pollinator corridors of the Example Valley'
     (f'Our major goals include improving efficiencies.\n'
      f'The major goals of this project are: {_GOAL}', _GOAL),
     (f'Major goals and aims. The major goals of this project are: {_GOAL}', _GOAL),
+    # Two *anchored* labels in one text -- the first wins, matching dev's own
+    # `.search()` semantics (which also stops at the first match). Nothing
+    # above exercises two anchored labels together, so a selection bug that
+    # picks the last one instead of the first (round-4 review) left every
+    # test green.
+    (f'The major goals of this project are: {_GOAL}\n'
+     f'Major Goals: A later, different goal entirely', _GOAL),
 ])
 def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
     assert parse_major_goals(text) == expected
