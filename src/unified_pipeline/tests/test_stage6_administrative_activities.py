@@ -429,3 +429,63 @@ class TestStartOnlyRowIsOneYear:
                  ]}}
         assert _rows(entry) == [("Committee One", "Member", "2018"),
                                 ("Committee Two", "Member", "2020-Present")]
+
+
+class TestExtractedInstitutionRendersInNameCell:
+    """#985 (C): P's table has no Institution column, so an extracted
+    `institution` was dropped. It now folds into the name cell as
+    "<committee>, <institution>" unless the name already contains it."""
+
+    @staticmethod
+    def _entry(fields, text="Steering committee (2011-2013)"):
+        return {"text": text, "extracted_fields": fields, "taxonomy_code": "P"}
+
+    def test_single_record_appends_institution(self):
+        rows = _rows(self._entry({
+            "committee_name": "Steering committee for research",
+            "role": "Member", "institution": "Northgate University",
+            "start_date": "2011", "end_date": "2013"}))
+        assert [r[0] for r in rows] == [
+            "Steering committee for research, Northgate University"]
+        assert rows[0][1] == "Member"
+
+    def test_name_already_containing_institution_is_unchanged_case_insensitive(self):
+        rows = _rows(self._entry({
+            "committee_name": "NORTHGATE UNIVERSITY Senate",
+            "institution": "Northgate University",
+            "start_date": "2011", "end_date": "2013"}))
+        assert [r[0] for r in rows] == ["NORTHGATE UNIVERSITY Senate"]
+
+    def test_no_institution_leaves_name_untouched(self):
+        rows = _rows(self._entry({
+            "committee_name": "Steering committee", "start_date": "2011",
+            "end_date": "2013"}))
+        assert [r[0] for r in rows] == ["Steering committee"]
+
+    def test_record_list_appends_institution_per_record(self):
+        rows = _rows(self._entry({"committee_name": [
+            {"committee_name": "Budget panel", "institution": "Lee & Park College",
+             "start_date": "2010", "end_date": "2012"},
+            {"committee_name": "Ethics panel",
+             "start_date": "2010", "end_date": "2012"},
+        ]}))
+        assert [r[0] for r in rows] == [
+            "Budget panel, Lee & Park College", "Ethics panel"]
+
+    def test_structured_institution_is_coerced_not_crashing(self):
+        rows = _rows(self._entry({
+            "committee_name": "Budget panel", "institution": ["Ana Cruz Institute"],
+            "start_date": "2010", "end_date": "2012"}))
+        assert rows[0][0].startswith("Budget panel")
+        assert "Ana Cruz Institute" in rows[0][0]
+
+    def test_raw_text_fallback_name_also_gets_the_institution(self):
+        rows = _rows(self._entry({"institution": "Northgate University"},
+                                 text="Some raw committee line"))
+        assert [r[0] for r in rows] == [
+            "Some raw committee line, Northgate University"]
+
+    def test_helper_never_renders_institution_without_a_name(self):
+        from unified_pipeline.stage6.sections.administrative_activities import (
+            _name_with_institution)
+        assert _name_with_institution("", "Northgate University") == ""

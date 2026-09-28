@@ -136,6 +136,7 @@ class _CommitteeRecord:
     role: str = ''
     start_date: str = ''
     end_date: str = ''
+    institution: str = ''
 
     @classmethod
     def from_raw(cls, raw, *, name_fallback: bool = False) -> '_CommitteeRecord':
@@ -158,7 +159,22 @@ class _CommitteeRecord:
             role=_committee_cell_text(raw.get('role')),
             start_date=raw.get('start_date') or '',
             end_date=raw.get('end_date') or '',
+            institution=_committee_cell_text(raw.get('institution')),
         )
+
+
+def _name_with_institution(activity: str, institution: str) -> str:
+    """Fold the extracted institution into the committee-name cell (#985).
+
+    The P table has no Institution column, so an extracted `institution` had
+    nowhere to render and was dropped. Append it as "Committee, Institution"
+    unless the name already contains it (case-insensitive), or there is no
+    committee name to attach it to.
+    """
+    # An empty institution is a substring of every name, so it falls out here.
+    if not activity or institution.casefold() in activity.casefold():
+        return activity
+    return f"{activity}, {institution}"
 
 
 class AdministrativeActivitiesSection:
@@ -231,7 +247,10 @@ class AdministrativeActivitiesSection:
                         record.start_date, record.end_date, taxonomy_code,
                         original_text) or ''
                     if record.activity:
-                        rows.append((record.activity, record.role, dates))
+                        rows.append((
+                            _name_with_institution(
+                                record.activity, record.institution),
+                            record.role, dates))
                 continue
 
             record = _CommitteeRecord.from_raw(fields)
@@ -342,7 +361,9 @@ class AdministrativeActivitiesSection:
             else:
                 if not activity:
                     activity = original_text[:150]
-                rows.append((activity, role, dates))
+                rows.append((
+                    _name_with_institution(activity, record.institution),
+                    role, dates))
 
         return rows
 
