@@ -54,6 +54,17 @@ def _no_teams_webhook_leak(monkeypatch):
     monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_estimate_rate_limiter():
+    """/estimate's per-pod, in-memory, per-user counter (#795) is a process
+    global, unlike the per-test in-memory DB above -- without this, one
+    test's /api/estimate calls count against the next test's budget for the
+    same (test-fixture) user id.
+    """
+    from app.api.upload import _estimate_rate_limiter
+    _estimate_rate_limiter.reset()
+
+
 @pytest.fixture
 def db():
     """Provide a test database session."""

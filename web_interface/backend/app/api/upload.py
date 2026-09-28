@@ -7,6 +7,8 @@ import os
 import secrets
 import string
 import tempfile
+import threading
+import time
 import zipfile
 import zlib
 from pathlib import Path
@@ -30,6 +32,7 @@ from app.rate_limiter import check_rate_limit
 from app.config_loader import get_config_value
 from app.services.config_service import (
     MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
+    ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
     get_estimated_run_cost, get_estimate_model_name,
 )
 from app.errors import bad_request, internal_error
@@ -153,6 +156,83 @@ async def _read_bounded(file: UploadFile, max_size: int) -> bytes:
             raise bad_request(f"File too large. Maximum size is {max_size // (1024 * 1024)} MB.")
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+class _EstimatePerUserWindow:
+    """Per-pod, in-memory, fixed-window call counter, one window per user id.
+
+    Distinct from check_rate_limit's DB-backed run quota (#795): this counts
+    calls directly, not Run rows, so it catches a user who never goes over
+    their run quota but calls /estimate repeatedly. `clock` is injectable so
+    tests can control window elapsing without sleeping or patching the real
+    clock.
+
+    ponytail: the count is per POD and resets on restart -- it does not
+    share state across the up to 3 backend pods in prod, so a user's real
+    ceiling is close to max_calls * pod_count per window, not max_calls.
+    Upgrade path: back this with the same Valkey URL LoginThrottle
+    (app/login_throttle.py) uses, CVICHE_REDIS_URL, if a pod-shared bound is
+    ever needed.
+    """
+
+    def __init__(
+        self,
+        max_calls: int,
+        window_seconds: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max_calls = max_calls
+        self._window_seconds = window_seconds
+        self._clock = clock
+        # user_id -> (window_start, count_in_window)
+        self._windows: dict[int, tuple[float, int]] = {}
+        # estimate_processing is async, so today allow() runs on the event
+        # loop; the lock keeps the read-modify-write safe if it is ever
+        # called from a threadpool.
+        self._lock = threading.Lock()
+
+    def allow(self, user_id: int) -> bool:
+        """Record one call for user_id and return whether it is within the
+        current window's budget. A window that has fully elapsed since the
+        user's last call starts fresh rather than carrying its count over."""
+        now = self._clock()
+        with self._lock:
+            window_start, count = self._windows.get(user_id, (now, 0))
+            if now - window_start >= self._window_seconds:
+                window_start, count = now, 0
+            if count >= self._max_calls:
+                return False
+            self._windows[user_id] = (window_start, count + 1)
+            return True
+
+    def reset(self) -> None:
+        """Test-only: clear every user's window."""
+        with self._lock:
+            self._windows.clear()
+
+
+_estimate_rate_limiter = _EstimatePerUserWindow(
+    ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS
+)
+
+
+def _check_estimate_rate_limit(user_id: int) -> dict | None:
+    """Same {error, message, details} shape check_rate_limit returns, so
+    estimate_processing raises the identical 429 either way (#795)."""
+    if _estimate_rate_limiter.allow(user_id):
+        return None
+    return {
+        "error": "rate_limited",
+        "message": (
+            f"Estimate limit of {ESTIMATE_RATE_LIMIT_MAX} calls per "
+            f"{ESTIMATE_RATE_LIMIT_WINDOW_SECONDS} seconds reached."
+        ),
+        "details": {
+            "limit_type": "estimate",
+            "limit": ESTIMATE_RATE_LIMIT_MAX,
+            "window_seconds": ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
+        },
+    }
 
 
 router = APIRouter()
@@ -616,10 +696,18 @@ async def estimate_processing(
             "Please convert your file to .docx before uploading."
         )
 
-    # Rate-limited the same as /upload (#795): estimation parses a full
-    # document, the same expensive work /upload is already limited for. This
-    # reuses /upload's per-run quota rather than a dedicated estimate budget
-    # -- see the T-UP report for the residual gap that leaves open.
+    # Per-pod, per-user in-memory budget (#795), checked first since it's
+    # cheaper than the DB-backed check below -- a user already over it never
+    # costs a query. Both checks run before the body is read (_read_bounded)
+    # or parsed (_extract_text).
+    estimate_limit_error = _check_estimate_rate_limit(current_user.id)
+    if estimate_limit_error:
+        raise HTTPException(status_code=429, detail=estimate_limit_error)
+
+    # Also rate-limited the same as /upload (#795): reuses /upload's
+    # DB-backed per-run quota, which on its own only blocks a user already
+    # over their run quota -- an estimate creates no Run row. The budget
+    # above is what actually caps /estimate's own call volume.
     rate_limit_error = check_rate_limit(current_user, db)
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
