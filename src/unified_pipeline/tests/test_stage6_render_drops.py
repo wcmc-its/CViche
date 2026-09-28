@@ -13,12 +13,21 @@ ones from those artifacts.
 # The three predicates below moved to stage6/parsing/records.py in the #398
 # split. They were @staticmethod on the generator, and this file already knew
 # it -- it reached them through the class, never an instance.
+import json
+import re
+from pathlib import Path
+
 from unified_pipeline.stage6.parsing import (
     _is_mentee_record,
     _is_mentoring_outcome,
     _is_orphan_fragment,
 )
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+from unified_pipeline.stage_6_word_template import (
+    _TAXONOMY_WARNED_CONFUSIONS,
+    WCMTemplateGenerator,
+)
+
+_TAXONOMY_V7 = Path(__file__).resolve().parents[1] / "core" / "taxonomy_v7.json"
 
 
 # --- #262: the orphan-fragment guard must not discard titled entries -----------
@@ -123,20 +132,51 @@ def test_tie_within_one_section_still_reroutes_deterministically() -> None:
     # K1 and K2 both render under 'teaching', so the tie is harmless: the
     # reroute still happens, and to the same code in either order.
     for expected in (["K1", "K2"], ["K2", "K1"]):
-        entry = _mismatched("K4", expected, "Teaching")
+        entry = _mismatched("K3", expected, "Teaching")
         assert _group(entry) == {"K1": [entry["text"]]}, expected
-        assert entry["taxonomy_code_original"] == "K4"
+        assert entry["taxonomy_code_original"] == "K3"
 
 
-def test_a_single_most_specific_expected_code_still_reroutes() -> None:
-    # Unchanged behaviour: one longest code -> same-family reroute applies.
+def test_a_single_section_heading_still_reroutes_same_family() -> None:
+    entry = _mismatched("S6", ["S8"], "Abstracts")
+    assert _group(entry) == {"S8": [entry["text"]]}
+    assert entry["taxonomy_code_original"] == "S6"
+
+
+def test_same_family_skipped_when_expected_codes_span_sections() -> None:
+    # "Committees" -> P, Q2, O: three sections. The longest-code pick made
+    # every Q3 there Q2 (#946 item 3: 69 corpus rows); the classifier stands.
     entry = _mismatched("Q3", ["P", "Q2", "O"], "Committees")
-    assert _group(entry) == {"Q2": [entry["text"]]}
-    # ...and cross-family still needs low confidence.
+    assert _group(entry) == {"Q3": [entry["text"]]}
+    assert "taxonomy_code_original" not in entry
+
+
+def test_cross_family_low_confidence_rule_is_unchanged() -> None:
+    # The span-of-sections rule is same-family only: cross-family still
+    # reroutes on low confidence, whatever the heading names.
     low = _mismatched("H", ["P", "Q2", "O"], "Committees", confidence=0.5)
     high = _mismatched("H", ["P", "Q2", "O"], "Committees", confidence=0.9)
     assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(low, "H") == "Q2"
     assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(high, "H") == "H"
+
+
+def test_taxonomy_warned_pairs_are_never_rerouted() -> None:
+    # One-section heading, so only the warned-pair rule can stop each one.
+    for assigned, target in sorted(_TAXONOMY_WARNED_CONFUSIONS):
+        entry = _mismatched(assigned, [target], "Heading")
+        assert _group(entry) == {assigned: [entry["text"]]}, (assigned, target)
+        assert "taxonomy_code_original" not in entry
+
+
+def test_each_warned_pair_is_named_by_the_taxonomy() -> None:
+    # Pins the frozenset to its source: the target code's common_confusions
+    # says "... misclassified as <target> instead of <assigned>".
+    codes = {c["code"]: c for c in json.loads(_TAXONOMY_V7.read_text())["codes"]}
+    for assigned, target in sorted(_TAXONOMY_WARNED_CONFUSIONS):
+        warnings = " ".join(codes[target].get("common_confusions", []))
+        assert re.search(
+            rf"misclassified as {target}\b[^.;]*instead of[^.;]*\b{assigned}\b", warnings,
+        ), (assigned, target)
 
 
 if __name__ == "__main__":
