@@ -37,3 +37,34 @@ def entry_lines(text: str | None) -> list[str]:
     every current caller would change output at once.
     """
     return [line.strip() for line in str(text or "").split("\n") if line.strip()]
+
+
+# The extractor's join between the cells of one table row
+# (`core/docx_structure_extractor.py`); a cell's own paragraphs are joined with
+# a newline inside it.
+CELL_SEPARATOR = " | "
+
+
+def rejoin_wrapped_row(text: str | None) -> str | None:
+    """One table row whose cells wrap over paragraphs, read back as that ONE
+    row (#987); None when `text` is not such a row.
+
+    The extractor joins a cell's own paragraphs with a newline and the row's
+    cells with `CELL_SEPARATOR`, so a single course whose title cell wraps has
+    several `entry_lines` lines although it is one entry. The row is wrapped
+    when its non-empty cells do not all have the same number of lines: a row of
+    N courses stacked in its cells has N paragraphs in EVERY cell, a wrapped
+    cell makes the counts differ. Empty cells (a blank column) are not
+    counted. A single cell, or cells that all have the same count, is None and
+    the caller keeps the lines as they are.
+
+    Each cell's paragraphs rejoin with a space and the cells with
+    `CELL_SEPARATOR`, so every token of `text` is kept, in order; empty cells
+    are dropped, as `_clean_inline_tabs` drops them when it renders the row.
+    Whether `text` is ONE row (not several rows fused into one entry) is the
+    caller's to decide from the element indices; this only reads the text.
+    """
+    cells = [entry_lines(cell) for cell in str(text or "").split(CELL_SEPARATOR)]
+    if len({len(cell) for cell in cells if cell}) < 2:
+        return None
+    return CELL_SEPARATOR.join(" ".join(cell) for cell in cells if cell)
