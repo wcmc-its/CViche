@@ -154,11 +154,13 @@ def _raise_or_warn_on_batch_failures(
 
     A batch-level LLM failure used to be logged and swallowed, leaving a
     normal-looking artifact with those institutions silently unenriched.
-    Mirrors stage 3b's total-failure guard (stage_3b_entry_classifier.py):
-    if nothing was enriched -- every batch failed and no entry got its
-    enrichment any other way (cache or an earlier run) -- refuse to emit an
-    artifact that looks complete. Any other failure stays non-fatal but
-    must be visible per-run.
+    Fails the run only when every LLM batch failed and nothing was
+    enriched any other way (cache or an earlier run). Unlike stage 3b's
+    total-failure guard, a batch that succeeds but resolves no match is
+    not a failure here -- that lookup is cached as None, a legitimate
+    negative -- so zero enriched alone does not trip this guard; it
+    requires failed_batches == llm_batches too. Any other failure stays
+    non-fatal but must be visible per-run.
     """
     if llm_batches > 0 and failed_batches == llm_batches and entries_enriched == 0:
         raise RuntimeError(
@@ -212,11 +214,8 @@ def _build_institution_enrichment_stats(
         'cost': total_cost,
         'model': observed_model or model,
         # Naive on purpose: every sibling stats dict (stage_5c, stage_5d,
-        # core/validators/calibration_logger.py) writes this same field with
-        # a naive datetime.now(), nothing reads institution_enrichment_stats
-        # 'timestamp' back for comparison, and MariaDB DATETIME columns here
-        # are naive -- an aware value here would be the one mixed type among
-        # otherwise-naive stage stats blobs. See #700 review point 3.
+        # calibration_logger) writes naive datetime.now().isoformat() and
+        # nothing reads it back -- stay consistent across stage JSON.
         'timestamp': datetime.now().isoformat()
     }
 
@@ -232,7 +231,7 @@ def _finalize_stage5b_enrichment(
     ``_build_institution_enrichment_stats``/``_raise_or_warn_on_batch_failures``
     directly -- with two separate calls, a caller could pass the guard a
     different ``entries_enriched`` than what stats actually derived, letting
-    the #700 fatal guard misfire or fail to fire (#941 review point 1).
+    the #700 fatal guard misfire or fail to fire.
     """
     stats = _build_institution_enrichment_stats(
         entries, institution_entries, cached_count, uncached_count, llm_calls,
