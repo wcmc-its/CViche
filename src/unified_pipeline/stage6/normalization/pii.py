@@ -495,6 +495,9 @@ def _boundary_ok(prefix_since_last_delim: str) -> bool:
             or bool(_LIST_MARKER_RE.match(stripped)))
 
 
+_LABEL_WORD_START_RE = re.compile(r"(?<![\w'\u2019-])")
+
+
 def _follows_field_value(prefix_since_last_delim: str) -> bool:
     """True when the text since the last hard delimiter already holds a
     completed `<known field label>: <value>` pair (#849): a policy label one
@@ -534,12 +537,15 @@ def _explicit_dob_label(text: str, m: re.Match) -> bool:
             and _WHOLE_DATE_AFTER_LABEL_RE.match(text, m.end()) is not None)
 
 
-def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) -> list[tuple[int, int]]:
+def _label_spans(text: str, pattern: re.Pattern, category: str | None = None,
+                 follows_ok: bool = False) -> list[tuple[int, int]]:
     """(start, end) of every fragment `pattern` opens in `text`: from the
     opener's own start to the next hard delimiter (or end of string), kept
     only where `_boundary_ok` accepts the text since the previous delimiter,
-    that text already holds a known `label: value` pair
-    (`_follows_field_value`), or the opener is an explicit DOB label with a whole date after it."""
+    that text already holds a known `label: value` pair AND the opener starts
+    a whole word AND `follows_ok` (`_follows_field_value`; only rows whose
+    label is not an ordinary title word -- "Global Health:" -- pass it), or
+    the opener is an explicit DOB label with a whole date after it."""
     spans = []
     for m in pattern.finditer(text):
         start = m.start()
@@ -547,7 +553,9 @@ def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) ->
         for d in _PII_FRAGMENT_SPLIT_RE.finditer(text, 0, start):
             prev_delim_end = d.end()
         prefix = text[prev_delim_end:start]
-        if not (_boundary_ok(prefix) or _follows_field_value(prefix)
+        follows = (follows_ok and _LABEL_WORD_START_RE.match(text, start) is not None
+                   and _follows_field_value(prefix))
+        if not (_boundary_ok(prefix) or follows
                 or (category == CAT_DATE_OF_BIRTH and _explicit_dob_label(text, m))):
             continue
         nxt = _PII_FRAGMENT_SPLIT_RE.search(text, start)
@@ -582,7 +590,8 @@ def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX) -> 
     for rule, pattern in _rules_for_scope(scope):
         if rule.label is not None or rule.anchored:
             found.extend(PiiMatch(s, e, rule.category)
-                         for s, e in _label_spans(text, pattern, rule.category))
+                         for s, e in _label_spans(text, pattern, rule.category,
+                                          rule.scope == SCOPE_ALL_CODES))
         else:
             found.extend(PiiMatch(m.start(), m.end(), rule.category)
                          for m in pattern.finditer(text))

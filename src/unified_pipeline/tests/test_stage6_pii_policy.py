@@ -327,6 +327,38 @@ def test_label_after_a_non_field_prefix_stays_refused():
     assert not _denied("MyCitizenship: US Marital Status: Single", A)
 
 
+@pytest.mark.parametrize("text", [
+    "Citizenship: US Language: Spanish",
+    "Office Address: 1300 York Ave Webpage: www.example.org",
+    "Name: Jane Doe Global Health: program director",
+    "Citizenship: US Idea: novel",
+    "Citizenship: US Osborn: Smith",
+    "Citizenship: US Subfamily: Bovinae",
+    "Citizenship: US Stage: II",
+    "Citizenship: US Image: fig1",
+    "Citizenship: US Nonvisa: none",
+    "Citizenship: US Mypassport: none",
+    "Citizenship: US Homespouse: none",
+])
+def test_849_label_inside_a_word_or_title_phrase_after_a_pair_is_not_withheld(text):
+    """#849 round 2: the follows-a-known-pair path needs a word boundary
+    before the label, and never opens an ordinary-title-word row."""
+    assert _pii_matches(text) == []
+
+
+def test_849_pair_in_an_earlier_fragment_does_not_open_a_later_label():
+    """A known pair before a hard delimiter (newline, `;`, tab, 3+ spaces)
+    must not count for the next fragment's mid-sentence label."""
+    for sep in ("\n", "; ", "\t", "   "):
+        assert _pii_matches(f"Citizenship: US{sep}Lecture on Marital Status: outcomes") == []
+
+
+def test_849_pre_llm_scrub_reaches_the_dob_after_a_pair():
+    from unified_pipeline.stage6.normalization.pii import redact_pre_llm_values
+    out = redact_pre_llm_values("Citizenship: US Date of Birth: 1970")
+    assert "1970" not in str(out) and "Citizenship: US" in str(out)
+
+
 def test_semicolon_is_a_hard_fragment_boundary():
     """M07: without `;` in the split set the label after it is not
     fragment-initial and the fragment before it would swallow it."""
