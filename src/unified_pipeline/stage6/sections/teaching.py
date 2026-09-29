@@ -19,6 +19,11 @@ source CV's sub-headings are deliberately not carried over: the WCM subsections
 already are the taxonomy, and re-emitting the original hierarchy produced two
 competing levels of grouping.
 
+The one exception is INSIDE an entry (#423): a table row whose source cell is a
+title followed by bullets renders the bullets one list level in. The reader
+flattens the cell, so `SourceCellLevels` re-reads the level from the source
+docx; see its docstring for how a row is found and when it is refused.
+
 Insertion runs backwards. `_insert_bulleted_entry` inserts BEFORE the index it
 is given, so the list is walked in reverse and each entry lands above the one
 inserted before it, leaving reverse-chronological order on the page. That is
@@ -101,13 +106,20 @@ Title" or a dangling continuation line is source-table furniture, not a
 teaching activity.
 """
 import logging
+import zipfile
 from typing import TypedDict
+
+from docx import Document
+from docx.opc.exceptions import PackageNotFoundError
+from docx.oxml.ns import qn
+from docx.table import _Row
 
 from ..formatting import normalize_iso_dates_in_text
 from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.render_check import entry_lines, wrapped_row_text
+from unified_pipeline.core.docx_structure_extractor import get_paragraph_text
+from unified_pipeline.core.render_check import CELL_SEPARATOR, entry_lines, wrapped_row_text
 
 logger = logging.getLogger(__name__)
 
@@ -286,10 +298,132 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str,
     return [text] if text else []
 
 
+# What can go wrong opening the source CV or indexing into it. Anything else is
+# a code bug and must surface, not read as "this CV has no hierarchy" (§5.4).
+_SOURCE_READ_ERRORS = (OSError, KeyError, IndexError, zipfile.BadZipFile, PackageNotFoundError)
+
+
+def _cell_zero_paragraphs(row: _Row) -> tuple[list[str], list[bool]]:
+    """A source row's cell-0 paragraphs as `(texts, has_numPr)`, blanks dropped.
+
+    Text is read with the reader's own `get_paragraph_text`, the function
+    `extract_table_metadata` builds a cell's text from, so this side and the
+    entry's text cannot disagree over tabs, line breaks, hyperlinks or tracked
+    insertions. `w:numPr` is read through `._p` because python-docx has no
+    public accessor for a paragraph's numbering; `_apply_list_bullet` writes it
+    the same way.
+    """
+    texts: list[str] = []
+    flags: list[bool] = []
+    for para in row.cells[0].paragraphs:
+        text = get_paragraph_text(para).strip()
+        if not text:
+            continue
+        pPr = para._p.find(qn('w:pPr'))
+        texts.append(text)
+        flags.append(pPr is not None and pPr.find(qn('w:numPr')) is not None)
+    return texts, flags
+
+
+def _row_matches_lines(source: list[str], lines: list[str]) -> bool:
+    """True when `lines` is exactly this source cell, paragraph for paragraph.
+
+    Every line must be its source paragraph verbatim. The one licensed
+    difference is the FIRST line: stage 2 attaches a multi-column row's trailing
+    columns (date, institution) to cell 0's first paragraph, joined with
+    `CELL_SEPARATOR` (#488, `join_row_cells`), so that line may carry a tail and
+    no other line may.
+    """
+    if len(source) != len(lines) or source[1:] != lines[1:]:
+        return False
+    # `join_row_cells` keeps whatever whitespace sat between the paragraph and
+    # the separator, so the tail may follow spaces the stripped source lacks.
+    head, tail = lines[0][:len(source[0])], lines[0][len(source[0]):]
+    return head == source[0] and (not tail or tail.lstrip().startswith(CELL_SEPARATOR.strip()))
+
+
+class SourceCellLevels:
+    """Sub-bullet levels read back from the source CV's table cells (#423).
+
+    The reader flattens a table cell to newline-joined text, so the
+    per-paragraph `w:numPr` that says which lines are children of the entry's
+    title reaches no stage artifact. The cell still has it, and both drivers
+    already hand stage 6 the source path (`original_doc_path`), so the levels
+    are re-read here instead of being threaded through five stages.
+
+    Rows are found by CONTENT, not by `row_index`: that index counts the
+    reader's processed rows (row 0 is dropped when it is the table's header,
+    merged rows are split), so it is not a position in `table.rows`. A row is
+    accepted only when its cell-0 paragraphs reproduce the entry's lines
+    (`_row_matches_lines`); several matching rows are accepted only when they
+    agree. Every other outcome is None and the caller renders flat, so an
+    unusable source is never worse than none.
+    """
+
+    def __init__(self, path: str) -> None:
+        self._path = path
+        self._doc = None
+        self._rows_by_table: dict[int, list[tuple[list[str], list[bool]]]] = {}
+        self._warned = False
+
+    def _table_rows(self, table_index: int) -> list[tuple[list[str], list[bool]]]:
+        if table_index not in self._rows_by_table:
+            if self._doc is None:
+                self._doc = Document(self._path)
+            seen_cells = set()
+            rows = []
+            for row in self._doc.tables[table_index].rows:
+                tc = row.cells[0]._tc
+                if tc not in seen_cells:  # a vertically merged cell repeats across rows
+                    seen_cells.add(tc)
+                    rows.append(_cell_zero_paragraphs(row))
+            self._rows_by_table[table_index] = rows
+        return self._rows_by_table[table_index]
+
+    def flags_for(self, entry: _TeachingEntry, lines: list[str]) -> list[bool] | None:
+        """Per-line "was a sub-bullet in the source cell", or None.
+
+        None when the entry is not a table row, the source is unreadable, no
+        source row (or disagreeing rows) reproduces `lines`, or the cell is not
+        a title followed by bullets. A cell whose first paragraph is itself a
+        list item, or none of whose later ones are, has no title/child
+        hierarchy to restore: 104 of 217 source sub-bullet clusters measured
+        were whole sections of peer bullets, where flat is the right rendering.
+        """
+        table_index = entry.get('table_index')
+        if entry.get('element_type') != 'table_row' or table_index is None or len(lines) < 2:
+            return None
+        try:
+            rows = self._table_rows(table_index)
+        except _SOURCE_READ_ERRORS as e:
+            # Once per run, not per entry: a missing source or a stale table
+            # index is a whole-run condition, and silence would make the
+            # feature no-op read as "this CV has no hierarchy".
+            if not self._warned:
+                self._warned = True
+                logger.warning("Could not read source cell levels from %s, "
+                               "section K stays flat: %s", self._path, e)
+            return None
+        matches = [flags for texts, flags in rows if _row_matches_lines(texts, lines)]
+        if not matches or any(m != matches[0] for m in matches):
+            return None
+        flags = matches[0]
+        # Only a title-then-bullets cell carries hierarchy worth restoring.
+        if flags[0] or not any(flags[1:]):
+            return None
+        return flags
+
+
 class TeachingSection:
     """Section K writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_teaching(self, entries_by_code: dict[str, list[_TeachingEntry]]) -> None:
+    # Set per render by `generate()`; None means no source CV, so every K
+    # bullet stays level 0. A class default so a generator built without
+    # `__init__` (several tests do) still renders.
+    _source_cell_levels: SourceCellLevels | None = None
+
+    def _fill_teaching(self, entries_by_code: dict[str, list[_TeachingEntry]],
+                       original_doc_path: str | None = None) -> None:
         """Fill K. TEACHING ACTIVITIES section.
 
         Routes K-codes to their appropriate WCM subsections:
@@ -301,10 +435,16 @@ class TeachingSection:
 
         Entries are inserted as a flat chronological list under each K-code section.
         The WCM template provides the structure; Stage 5c handles per-entry formatting.
-        Original CV hierarchy labels are not carried over. When two codes share
+        Original CV hierarchy labels are not carried over, but a table row whose
+        source cell is a title plus bullets renders its bullets one level in
+        (#423): `original_doc_path` is where those levels are re-read from, and
+        None leaves every bullet at level 0. Built per call, so one CV's rows
+        never carry into the next render. When two codes share
         the fallback heading, the module docstring states the order they land in.
         """
         k_section_map = TEACHING_SECTION_HEADERS
+        self._source_cell_levels = (
+            SourceCellLevels(original_doc_path) if original_doc_path else None)
 
         # Count total entries
         total_entries = sum(len(entries_by_code.get(code, [])) for code in k_section_map.keys())
@@ -366,8 +506,16 @@ class TeachingSection:
         if _is_orphan_fragment(fields, formatted_text, original_text):
             return
 
+        raw_lines = entry_lines(original_text)
+        levels = (self._source_cell_levels.flags_for(entry, raw_lines)
+                  if self._source_cell_levels else None)
+        # A row whose source cell is a title plus bullets is a hierarchy, not one
+        # course whose cells wrap (#987): `wrapped_row_text` cannot tell them
+        # apart from the text alone, and would weld the bullets into one line.
         lines = _teaching_entry_lines(fields, original_text,
-                                      row_text=wrapped_row_text(entry))
+                                      row_text=None if levels else wrapped_row_text(entry))
+        if levels and lines != raw_lines:
+            levels = None  # not the raw-lines path (e.g. stage 5c prose); nothing to align
         if not lines:
             logger.warning("teaching entry produced no renderable line (%s): %r",
                            entry.get('taxonomy_code'), original_text[:80])
@@ -379,8 +527,11 @@ class TeachingSection:
         # a multi-line entry is annotated once rather than N times, and the
         # blank line goes above the bullet that ends up visually first.
         for j, line_text in enumerate(reversed(lines)):
+            # The loop is reversed, so bullet j is source line len-1-j; indexing
+            # `levels` with j would invert the hierarchy.
+            is_child = bool(levels and levels[len(lines) - 1 - j])
             self._insert_bulleted_entry(
                 insert_idx, line_text, entry if j == 0 else None,
                 add_blank_before=is_first_visible and j == len(lines) - 1,
-                list_level=0
+                list_level=1 if is_child else 0
             )
