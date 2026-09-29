@@ -554,10 +554,9 @@ _SPLIT_CITATION = "Wende ME, Smith J. A study of things. J Things. 2023;1:1-9."
             "No matching author here at all.", None, "",
             ("No matching author here at all.", "", ""),
         ),
-        # The docstring's claimed "Wende, M" comma form: the regex
-        # (`\bWende\s*[A-Z]{0,3}\.?\b`) cannot match across a comma, so it
-        # matches only the bare surname "Wende" and stops there -- pinning
-        # the actual behaviour, not the docstring's claim.
+        # The "Wende, M" comma form: trailing initials join the surname only
+        # across whitespace (`_trailing_initials_end`), not a comma, so only
+        # the bare surname "Wende" is bolded.
         (
             "Wende, M, Smith J. A study of things. J Things. 2023;1:1-9.",
             None, "wende",
