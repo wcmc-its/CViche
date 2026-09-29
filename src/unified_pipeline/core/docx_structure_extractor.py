@@ -92,7 +92,7 @@ def get_cell_text(cell, tab_char: str = ' ') -> str:
     return '\n'.join(get_paragraph_text(p, tab_char=tab_char) for p in cell.paragraphs)
 
 
-def extract_paragraph_metadata(para: Paragraph, idx: int) -> dict[str, Any]:
+def extract_paragraph_metadata(para: Paragraph, idx: int | None) -> dict[str, Any]:
     """
     Extract comprehensive metadata from a paragraph.
 
@@ -1161,7 +1161,8 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
     num_table_headers = 0
     num_empty = 0
 
-    # Also track original para_idx for backward compatibility
+    # A doc.paragraphs position: body paragraphs only. Layout-table cell
+    # paragraphs below carry para_idx/idx None -- use unified_idx (#609).
     para_idx = 0
 
     # Iterate through document body elements in order
@@ -1213,13 +1214,12 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                     for cell_para in cell.paragraphs:
                         if not get_paragraph_text(cell_para).strip():
                             continue
-                        para_data = extract_paragraph_metadata(cell_para, para_idx)
+                        para_data = extract_paragraph_metadata(cell_para, None)
                         para_data["unified_idx"] = unified_idx
-                        para_data["para_idx"] = para_idx
+                        para_data["para_idx"] = None
                         elements.append(para_data)
                         num_paragraphs += 1
                         unified_idx += 1
-                        para_idx += 1
                 num_tables += 1
                 continue
 
