@@ -393,6 +393,92 @@ class TestThreeLineBurstFallsBackWhenReparseYieldsNothing:
         assert rows == [("2010\n2011\n2012", "", "")]
 
 
+def _complete_fields():
+    return {"committee_name": "Zorblax Standing Committee", "role": "Member",
+            "start_date": "2015", "end_date": "2020"}
+
+
+class TestMultiRecordIsDetectedPerDatedLineNotByLineCount:
+    """#660: a complete structured record is trusted when the text holds one
+    dated record, at any length, and re-parsed when it holds two or more, at
+    any length. PR #714's `len(lines) <= 3` cap was wrong in both directions."""
+
+    STRUCTURED = (("Zorblax Standing Committee", "Member",
+                   format_date_range("2015", "2020", "P")),)
+
+    def test_long_wrapped_description_with_one_date_keeps_the_structured_record(self):
+        text = "\n".join(["Zorblax Standing Committee (Member 2015-2020)"]
+                         + [f"Wrapped description line {n}" for n in range(6)])
+        entry = {"text": text, "extracted_fields": _complete_fields(), "taxonomy_code": "P"}
+
+        assert _rows(entry) == list(self.STRUCTURED)
+
+    def test_three_dated_records_are_reparsed_despite_fitting_the_old_cap(self):
+        text = ("Committee A (Chair 2011-2013)\nCommittee B (Member 2014-2016)\n"
+                "Committee C (Member 2017-2019)")
+        entry = {"text": text, "extracted_fields": _complete_fields(), "taxonomy_code": "P"}
+
+        rows = _rows(entry)
+
+        assert [r[0] for r in rows] == ["Committee A", "Committee B", "Committee C"]
+
+    def test_date_prefixed_block_is_reparsed(self):
+        # The corpus counter-example that forced PR #714's cap: every record
+        # opens with its own date and extraction captured one of them.
+        text = ("2015-2016\tCommittee A\n2014-2015\tCommittee B\n"
+                "2014-2015\tCommittee C\n2012-2016\tCommittee D")
+        entry = {"text": text, "extracted_fields": _complete_fields(), "taxonomy_code": "P"}
+
+        rows = _rows(entry)
+
+        assert len(rows) == 4
+        assert self.STRUCTURED[0] not in rows
+
+    def test_orphaned_date_column_is_reparsed_even_when_counts_disagree(self):
+        # 4 activities, 3 dates: the parser leaves every date unassigned, so
+        # a detector built on its output would see no dated record at all.
+        text = "Committee A\nCommittee B\nCommittee C\nCommittee D\n2011\n2012\n2013"
+        entry = {"text": text, "extracted_fields": _complete_fields(), "taxonomy_code": "P"}
+
+        rows = _rows(entry)
+
+        assert [r[0] for r in rows] == ["Committee A", "Committee B", "Committee C", "Committee D"]
+
+    def test_mega_block_with_prose_between_records_is_reparsed(self):
+        text = "\n".join(["Committee A (Chair 2011-2013)"]
+                         + [f"Duties line {n}" for n in range(20)]
+                         + ["Committee B (Member 2014-2016)"])
+        entry = {"text": text, "extracted_fields": _complete_fields(), "taxonomy_code": "P"}
+
+        rows = _rows(entry)
+
+        assert {"Committee A", "Committee B"} <= {r[0] for r in rows}
+
+    def test_p_pipe_rows_keep_the_middle_cell_in_the_activity(self):
+        # P's pipe middle cell is a Role/activity cell, not an institution:
+        # P must not opt into the parser's institution column (#664), or the
+        # cell would move to a field P never renders.
+        text = ("Zorblax Board | Quuxville General Hospital | 2001-2003\n"
+                "Frobnitz Panel | Wibble College | 2004-2006\n"
+                "Gamma Council | Blorp Institute | 2007-2009")
+        rows = _rows({"text": text, "extracted_fields": {}, "taxonomy_code": "P"})
+        assert len(rows) == 3
+        assert "Quuxville General Hospital" in rows[0][0]
+
+    def test_wrapped_record_without_extracted_dates_is_not_trusted_as_structured(self):
+        # No extracted dates: `structured_complete` must be False even though
+        # the text holds one dated line, so a 4-line entry re-parses (the
+        # behaviour before #660) instead of collapsing to the one record.
+        text = ("Zorblax Standing Committee (Member 2015-2020)\n"
+                "Wrapped description line 1\nWrapped description line 2\n"
+                "Wrapped description line 3")
+        fields = _complete_fields()
+        fields.pop("start_date"); fields.pop("end_date")
+        rows = _rows({"text": text, "extracted_fields": fields, "taxonomy_code": "P"})
+        assert len(rows) == 4
+        assert rows[0][2] == format_date_range("2015", "2020", "P")
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
