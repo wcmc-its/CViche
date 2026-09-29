@@ -86,6 +86,11 @@ if TYPE_CHECKING:
 # imports this module, so this does not create the cycle `quality_score ->
 # run_doctor -> doctor.lints.enrichment -> quality_score` would (run_doctor.py
 # itself is never imported here).
+from unified_pipeline.core.template_boilerplate import (
+    is_near_template_instruction,
+    is_template_instruction,
+    is_template_label_line,
+)
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
 from unified_pipeline.doctor.shared import docx_body_blocks
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX, read_stage_errors
@@ -609,8 +614,127 @@ def score_protected_data(outputs_dir: Path) -> tuple[float, str, int | None]:
     return 0.0, "protected_data_hits=0", None
 
 
+#: A T entry whose every non-empty cell is one of these normalized tokens
+#: states nothing at all -- an unfilled template prompt, not scaffolding an
+#: editor has to act on (#822 finding 2, second exclusion). Matched after
+#: lowercasing and stripping surrounding whitespace/punctuation, so "N/A.",
+#: "Not Applicable," and "none" all normalize onto one of these three.
+#: Deliberately narrower than `core.template_boilerplate._UNANSWERED`: that
+#: set also accepts "listed above" and is only ever checked ALONGSIDE a
+#: recognized template label (`is_unanswered_prompt`) -- this one asks
+#: nothing about the other cells because a placeholder-only row, by
+#: definition, has no other content to recognize.
+PLACEHOLDER_ONLY_TOKENS = frozenset({"n/a", "not applicable", "none"})
+
+#: Same cell split as `core.template_boilerplate._LABEL_PIECE_SPLIT_RE`: a
+#: table row reaches stage 3b joined by "|", and a wrapped source line by a
+#: tab or newline.
+_PLACEHOLDER_CELL_SPLIT_RE = re.compile(r"[|\t\n]")
+
+
+def _is_placeholder_only_row(text: str | None) -> bool:
+    """True when *text* carries no content an editor could act on: every
+    non-empty cell normalizes to a PLACEHOLDER_ONLY_TOKENS entry, or every
+    cell is blank -- a bare ``| |`` row (#822 finding 2, YTPMZK's own
+    example). A row with no cell separator at all (a single bare word) still
+    qualifies when that word is itself a placeholder token; a real one-word
+    entry ("Teaching") is not, since it fails the token check below.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    pieces = [
+        p.strip().strip(".,:;").lower()
+        for p in _PLACEHOLDER_CELL_SPLIT_RE.split(stripped)
+        if p.strip()
+    ]
+    return all(p in PLACEHOLDER_ONLY_TOKENS for p in pieces)
+
+
+def _goal_claimed_row_ids(entries: list[dict]) -> set[int]:
+    """``id()`` of every T entry stage 6 claims into an M2 grant's own table
+    as that grant's major-goals row (#963/#1002; #822 finding 2, third
+    exclusion) -- reusing stage6's own span-matching and goal-parsing logic
+    (`research_support.claim_goal_rows`) rather than a second, drifting copy
+    of `MAJOR_GOALS_LABEL_RE` here (CODING_STANDARDS.md #1.5's one-definition
+    rule). `entries` is the classified.json entries list, read BEFORE stage 4
+    field extraction -- a "grant" here is a plain M2A/M2B/M2C entry with no
+    `extracted_fields` yet, which is exactly the shape `claim_goal_rows`
+    needs: `_spans_element` reads only `element_idx_start`/`element_idx_end`,
+    present on every entry since stage 2.
+
+    What this does NOT reproduce is `_fill_research_support`'s
+    `rendered_grant_ids` filter -- whether the owning grant goes on to find a
+    template slot and actually render is a docx-template question this
+    JSON-only scorer has no state to answer. A T row claimed here by a grant
+    that (for an unrelated reason) never renders is still excluded. That is a
+    judgement call, not a bug: the claim itself -- one grant's own
+    source-table row naming that grant's goal -- is what makes the row
+    non-actionable scaffolding, independent of whether stage 6 finds
+    somewhere to put the grant it belongs to.
+
+    Layering note (CODING_STANDARDS.md #1): `stage6/__init__.py` names
+    `stage_6_word_template.py` as the package's public import surface, and
+    `claim_goal_rows` is not re-exported there
+    (`test_stage6_import_surface.py`'s STAGE6_IMPORT_SURFACE). This reaches
+    past that surface, directly into `stage6/sections/research_support.py`,
+    on the judgement that a second, hand-copied regex is the worse layering
+    violation of the two (#1.5). The import is function-local, not
+    module-level: `research_support.py` raises ImportError at import time
+    when python-docx is absent, and quality_score.py otherwise treats
+    python-docx as optional (`_load_docx`) -- a missing python-docx degrades
+    this one exclusion to "claim nothing" rather than breaking every other
+    dimension's import.
+    """
+    try:
+        from unified_pipeline.stage6.sections.research_support import (
+            RESEARCH_SUPPORT_SECTIONS,
+            claim_goal_rows,
+            copy_entries_for_render,
+        )
+    except ImportError:
+        return set()
+
+    grant_codes = {code for code, _header in RESEARCH_SUPPORT_SECTIONS}
+    grants = copy_entries_for_render(
+        [e for e in entries if e.get("taxonomy_code") in grant_codes])
+    # Rows are passed uncopied, on purpose: claim_goal_rows never writes
+    # through a row (only through the grant it claims into), and identity
+    # here is what lets the caller map a claim back to the ORIGINAL entry.
+    t_rows = [e for e in entries if e.get("taxonomy_code") == "T"]
+    claimed = claim_goal_rows(grants, t_rows)
+    return {id(row) for row, _grant in claimed}
+
+
 def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
-    """Share of entries in the stage_3b ``T`` catch-all ('nothing else fits')."""
+    """Share of entries in the stage_3b ``T`` catch-all ('nothing else fits').
+
+    #822 finding 2: a T entry the pipeline correctly diverted -- template
+    scaffolding, a placeholder row, or a grant's own goal statement that
+    stage 6 renders into that grant's table -- costs an editor nothing, so it
+    should not count as catch-all OVER-USE. Three exclusions, each matched
+    against the T entry's own text in the classified.json ``entries`` list
+    (not ``meta``, which has no per-entry text to match against):
+
+      1. template instruction / near-template / label-only text, via the
+         same `core.template_boilerplate` helpers stage 6 itself uses to
+         drop this text -- no new phrase list (CODING_STANDARDS.md #1.5).
+      2. a placeholder-only row (`_is_placeholder_only_row`).
+      3. a grant's own major-goals row that stage 6 claims into that grant's
+         table (`_goal_claimed_row_ids`).
+
+    Each T entry is excluded by at most one of the three (checked in the
+    order above), so a row matching more than one reason is not
+    double-subtracted.
+
+    The denominator (`total`) is deliberately UNCHANGED: an excluded entry is
+    still real output the run produced, and total_entries is what the 3%/
+    8%/15% ramp calibrates against as "how much this document contains," not
+    "how much of it needs a human." Only the NUMERATOR -- what counts as
+    unresolved catch-all -- shrinks. Judgement call (#822): re-scoring the
+    farm is what tests whether the ramp still separates good runs from bad
+    under this narrower numerator; see the PR description.
+    """
     data, reason = _load_first(outputs_dir, "*_classified.json")
     if data is None:
         return 1.0, _missing_or_unreadable_detail("classified.json", reason), None
@@ -629,7 +753,26 @@ def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
                 code_distribution_sum=code_dist_sum, total_entries=total_entries_meta)
 
     total = sum(code_dist.values()) or meta.get("total_entries", 1) or 1
-    t_count = code_dist.get("T", 0)
+    t_count_raw = code_dist.get("T", 0)
+
+    entries = data.get("entries")
+    entries = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    excluded_template = excluded_placeholder = excluded_goal_claim = 0
+    if entries:
+        goal_claimed_ids = _goal_claimed_row_ids(entries)
+        for entry in entries:
+            if entry.get("taxonomy_code") != "T":
+                continue
+            text = entry.get("text")
+            if id(entry) in goal_claimed_ids:
+                excluded_goal_claim += 1
+            elif (is_template_instruction(text) or is_near_template_instruction(text)
+                    or is_template_label_line(text)):
+                excluded_template += 1
+            elif _is_placeholder_only_row(text):
+                excluded_placeholder += 1
+
+    t_count = max(t_count_raw - excluded_template - excluded_placeholder - excluded_goal_claim, 0)
     t_ratio = t_count / total
 
     if t_ratio <= 0.03:
@@ -648,8 +791,10 @@ def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
         fraction = clamp(fraction + 0.2)
 
     detail = (
-        f"T_count={t_count}; total={total}; t_ratio={t_ratio:.4f}; "
-        f"t_validation_error={tv_error!r}; fraction={fraction:.3f}"
+        f"T_count_raw={t_count_raw}; T_excluded_template={excluded_template}; "
+        f"T_excluded_placeholder={excluded_placeholder}; "
+        f"T_excluded_goal_claim={excluded_goal_claim}; T_count={t_count}; total={total}; "
+        f"t_ratio={t_ratio:.4f}; t_validation_error={tv_error!r}; fraction={fraction:.3f}"
     )
     return fraction, detail, None
 

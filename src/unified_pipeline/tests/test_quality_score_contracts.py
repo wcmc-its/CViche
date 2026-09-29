@@ -28,6 +28,8 @@ from unified_pipeline.quality_score import (  # noqa: E402
     FATAL_ERROR_PATTERN,
     SCORED_ARTIFACT_COUNT,
     VALID_GATE_MODES,
+    _goal_claimed_row_ids,
+    _is_placeholder_only_row,
     _load_docx,
     _load_first,
     band_for,
@@ -90,6 +92,25 @@ def _write_json(dir_path: Path, name: str, obj) -> Path:
     p = dir_path / name
     p.write_text(json.dumps(obj))
     return p
+
+
+def _classified_with_entries(entries: list[dict], total_entries: int | None = None) -> dict:
+    """A classified.json shaped the way stage_3b_entry_classifier.py actually
+    writes one (#822 finding 2): meta.code_distribution is DERIVED from the
+    entries' own taxonomy_code, the same as the real writer's `code_counts`
+    loop, so a test fixture can't silently disagree with itself the way a
+    hand-typed code_distribution could."""
+    code_dist: dict[str, int] = {}
+    for e in entries:
+        code = e.get("taxonomy_code", "?")
+        code_dist[code] = code_dist.get(code, 0) + 1
+    return {
+        "meta": {
+            "total_entries": total_entries if total_entries is not None else len(entries),
+            "code_distribution": code_dist,
+        },
+        "entries": entries,
+    }
 
 
 # --------------------------------------------------------------------- D1
@@ -1283,3 +1304,207 @@ def test_new_hard_fail_dimensions_do_not_move_a_clean_runs_score(tmp_path):
     assert dims["No rendered output produced at all (HARD-FAIL gate)"]["max"] == 0
     assert dims["Stage-3b batch-fallback ratio (HARD-FAIL gate)"]["max"] == 0
     assert before["hard_fail_caps_applied"] == []
+
+
+# --------------------------------------------------------------------- D22
+# #822 finding 2: score_t_bucket excludes correctly-diverted T entries
+# (template scaffolding, placeholder rows, claimed grant-goal rows) from the
+# catch-all-over-use numerator, without moving the denominator.
+# --------------------------------------------------------------------- D22
+
+# A real phrase from core/template_boilerplate_phrases.json's "instructions"
+# set (>= 25 normalized chars, so it is a distinctive, exact-match instruction
+# under is_template_instruction's own length floor) -- not a hand-typed
+# phrase, so this test cannot silently drift from the actual boilerplate list.
+_REAL_TEMPLATE_INSTRUCTION_TEXT = "Please include medical and scientific societies.)"
+
+# The same real instruction, worded as an older template revision would (one
+# word changed, matching is_near_template_instruction's own docstring
+# example of "a comma or a word" off) -- ratio 0.973, above _NEAR_MATCH_MIN_RATIO
+# (0.93), so is_template_instruction (exact-match only) must NOT match this,
+# and is_near_template_instruction must.
+_NEAR_TEMPLATE_INSTRUCTION_TEXT = (
+    "Please do not delete or modify numbering or lettering of the various "
+    "sections and subsections;"
+)
+
+
+def test_placeholder_only_row_helper():
+    assert _is_placeholder_only_row("N/A | N/A") is True
+    assert _is_placeholder_only_row("Not Applicable") is True
+    assert _is_placeholder_only_row("none") is True
+    assert _is_placeholder_only_row("N/A.") is True
+    assert _is_placeholder_only_row("| |") is True          # bare pipe row
+    assert _is_placeholder_only_row("") is False
+    assert _is_placeholder_only_row(None) is False
+    assert _is_placeholder_only_row("Teaching") is False     # real one-word entry
+    assert _is_placeholder_only_row("N/A | Teaching") is False  # mixed: real content present
+
+
+def test_goal_claimed_row_ids_matches_the_owning_grants_row_only():
+    """A T row inside a grant's own element range, stating that grant's
+    major goal, is claimed; a T row outside any grant's range, or one that
+    is not goals-shaped at all, is not."""
+    grant = {"taxonomy_code": "M2A", "text": "Some Grant",
+              "element_idx_start": 10, "element_idx_end": 10}
+    goal_row = {"taxonomy_code": "T",
+                "text": "The major goals of this project are: to cure things",
+                "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11}
+    unrelated_row = {"taxonomy_code": "T", "text": "Some unrelated appendix line",
+                      "parent_idx": 10, "element_idx_start": 12, "element_idx_end": 12}
+    orphan_goal_row = {"taxonomy_code": "T",
+                        "text": "The major goals of this project are: orphaned",
+                        "parent_idx": 999, "element_idx_start": 13, "element_idx_end": 13}
+    entries = [grant, goal_row, unrelated_row, orphan_goal_row]
+    claimed = _goal_claimed_row_ids(entries)
+    assert claimed == {id(goal_row)}
+
+
+def test_t_bucket_excludes_template_instruction_text(tmp_path):
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": _REAL_TEMPLATE_INSTRUCTION_TEXT,
+         "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=1" in detail, detail
+    assert "T_count=0" in detail, detail
+    assert "total=2" in detail, detail   # denominator unchanged by the exclusion
+    assert fraction == 0.0
+    assert cap is None
+
+
+def test_t_bucket_excludes_near_template_instruction_text(tmp_path):
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": _NEAR_TEMPLATE_INSTRUCTION_TEXT,
+         "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=1" in detail, detail
+    assert "T_count=0" in detail, detail
+
+
+def test_t_bucket_excludes_placeholder_only_rows(tmp_path):
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": "N/A | N/A",
+         "element_idx_start": 2, "element_idx_end": 2},
+        {"taxonomy_code": "T", "text": "| |",
+         "element_idx_start": 3, "element_idx_end": 3},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_placeholder=2" in detail, detail
+    assert "T_count=0" in detail, detail
+    assert "total=3" in detail, detail
+
+
+def test_t_bucket_excludes_grant_goal_claim_rows(tmp_path):
+    entries = [
+        {"taxonomy_code": "M2A", "text": "Some Grant",
+         "element_idx_start": 10, "element_idx_end": 10},
+        {"taxonomy_code": "T",
+         "text": "The major goals of this project are: to cure things",
+         "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_goal_claim=1" in detail, detail
+    assert "T_count=0" in detail, detail
+    assert "total=2" in detail, detail
+
+
+def test_t_bucket_a_genuine_misroute_still_counts(tmp_path):
+    """None of the three exclusions apply to ordinary unrouted content -- the
+    fix must not zero out a real T over-use signal."""
+    entries = [
+        {"taxonomy_code": "T",
+         "text": "A genuinely unrouted piece of real content about something specific",
+         "element_idx_start": 1, "element_idx_end": 1},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=0" in detail, detail
+    assert "T_excluded_placeholder=0" in detail, detail
+    assert "T_excluded_goal_claim=0" in detail, detail
+    assert "T_count=1" in detail, detail
+
+
+def test_t_bucket_row_inside_a_grants_span_but_no_goal_falls_through_to_placeholder(tmp_path):
+    """A T row that sits inside a grant's own element range is only a
+    goal-claim if it actually states a goal -- `claim_goal_rows` requires
+    `parse_major_goals` to return one. A bare "N/A" in that same span parses
+    to no goal, so `_goal_claimed_row_ids` correctly leaves it unclaimed and
+    it falls through to the placeholder check instead -- proof the three
+    exclusions are checked in order and a row is only ever counted once,
+    under whichever category actually applies."""
+    entries = [
+        {"taxonomy_code": "M2A", "text": "Some Grant",
+         "element_idx_start": 10, "element_idx_end": 10},
+        {"taxonomy_code": "T", "text": "N/A",
+         "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_goal_claim=0" in detail, detail
+    assert "T_excluded_placeholder=1" in detail, detail
+    assert "T_count=0" in detail, detail
+
+
+def test_t_bucket_legacy_meta_only_artifact_is_unaffected(tmp_path):
+    """No 'entries' key at all (every pre-existing synthetic fixture in this
+    file, and any artifact from before this fix) must score exactly as
+    before -- no exclusion is possible without per-entry text."""
+    _write_json(tmp_path, "X_classified.json",
+               _classified(code_distribution={"A": 97, "T": 3}))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=0" in detail, detail
+    assert "T_excluded_placeholder=0" in detail, detail
+    assert "T_excluded_goal_claim=0" in detail, detail
+    assert "T_count_raw=3" in detail and "T_count=3" in detail, detail
+
+
+def test_t_bucket_entries_not_a_list_falls_back_gracefully(tmp_path):
+    """A malformed 'entries' value (wrong shape, not the expected list of
+    dicts) must not crash the scorer -- it degrades to no exclusions,
+    exactly like the artifact having no 'entries' key at all."""
+    data = _classified(code_distribution={"A": 97, "T": 3})
+    data["entries"] = {"not": "a list"}
+    _write_json(tmp_path, "X_classified.json", data)
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_count=3" in detail, detail
+
+
+def test_t_bucket_exclusions_clamp_at_zero_on_a_meta_entries_mismatch(tmp_path):
+    """meta.code_distribution and the entries list are the same writer's own
+    two views of one fact and should never disagree in real output, but the
+    subtraction must not go negative if they ever do -- an entries list
+    claiming more excludable T rows than meta's own T count reports."""
+    entries = [
+        {"taxonomy_code": "T", "text": "N/A", "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": "None", "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    data = _classified_with_entries(entries)
+    data["meta"]["code_distribution"]["T"] = 1  # meta under-reports vs. the entries list
+    data["meta"]["total_entries"] = 1
+    _write_json(tmp_path, "X_classified.json", data)
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_count=0" in detail, detail
+    assert fraction == 0.0
+
+
+def test_t_bucket_non_dict_entry_in_list_is_skipped_not_crashed(tmp_path):
+    entries = ["not a dict", None, 42,
+               {"taxonomy_code": "T", "text": "A genuinely unrouted piece of content",
+                "element_idx_start": 1, "element_idx_end": 1}]
+    data = _classified(code_distribution={"T": 1})
+    data["entries"] = entries
+    _write_json(tmp_path, "X_classified.json", data)
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_count=1" in detail, detail
