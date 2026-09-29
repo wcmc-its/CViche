@@ -106,6 +106,10 @@ def test_is_header_match_paragraph_must_be_whole_words_inside_the_header():
     # unescaped "(" or "+" would mis-match or raise re.error.
     assert is_header_match("awards (selected) list and honors", "awards (selected) list", strict=True) is True
     assert is_header_match("k+ channels research", "k+ channels", strict=True) is True
+    # Paragraph ends in a non-word char: a \b boundary would reject these.
+    assert is_header_match("honors (selected) and awards", "honors (selected)", strict=True) is True
+    assert is_header_match("research & teaching", "research &", strict=True) is True
+    assert is_header_match("k+ channels", "k+", strict=True) is True
 
 
 def test_is_header_match_strict_mode_rejects_long_content_paragraph():

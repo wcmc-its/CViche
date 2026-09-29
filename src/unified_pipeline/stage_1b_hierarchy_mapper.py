@@ -116,7 +116,9 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
     # The paragraph must be whole words inside the header: a bare substring made
     # the sibling header "National" satisfy the expected header "International",
     # so the geographic sub-label bound to the wrong header paragraph (#429).
-    if re.search(r'\b' + re.escape(para_text) + r'\b', expected_header):
+    # Lookarounds, not \b: \b needs a word char at the phrase end, so a paragraph
+    # ending in a symbol ("research &", "k+") could never match whole-phrase.
+    if re.search(r'(?<!\w)' + re.escape(para_text) + r'(?!\w)', expected_header):
         if len(para_text) <= len(expected_header) * 2:
             return True
 
