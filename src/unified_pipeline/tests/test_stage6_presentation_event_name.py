@@ -83,3 +83,29 @@ def test_untitled_entry_renders_its_whole_text_not_the_first_150_characters():
                               "extracted_fields": {"year": "2022"}}])
     firsts = [row.cells[0].text for table in gen.doc.tables for row in table.rows]
     assert text in firsts
+
+
+def test_role_leads_the_venue():
+    """#475: the speaker's role was never in the R schema, then never rendered."""
+    assert _venue(institution="Northgate Institute, Springfield",
+                  role="Visiting Professor") == \
+        "Visiting Professor, Northgate Institute, Springfield"
+
+
+def test_role_leads_event_name_and_venue():
+    assert _venue(institution="Springfield", event_name="Zorblax Lecture",
+                  role="Visiting Professor") == \
+        "Visiting Professor, Zorblax Lecture, Springfield"
+
+
+def test_role_stands_alone_when_no_venue_was_extracted():
+    assert _venue(institution="", role="Visiting Professor") == "Visiting Professor"
+
+
+def test_role_already_in_the_venue_is_not_repeated():
+    assert _venue(institution="Visiting Professor, Northgate Institute",
+                  role="Visiting Professor") == "Visiting Professor, Northgate Institute"
+
+
+def test_string_none_role_is_not_rendered():
+    assert _venue(institution="Springfield", role="None") == "Springfield"

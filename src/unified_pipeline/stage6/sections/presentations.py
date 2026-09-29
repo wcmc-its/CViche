@@ -142,6 +142,14 @@ class PresentationsSection:
                 if event_name and event_name.casefold() not in f"{institution} {title}".casefold():
                     institution = f"{event_name}, {institution}" if institution else event_name
 
+                # The speaker's role ("Visiting Professor") likewise has no
+                # column; stage 4 extracts it as `role` and it leads the venue.
+                role = str(fields.get('role') or '').strip()
+                if role.lower() == 'none':
+                    role = ''
+                if role and role.casefold() not in f"{institution} {title}".casefold():
+                    institution = f"{role}, {institution}" if institution else role
+
                 row = table.add_row()
                 num_cols = len(row.cells)
                 if num_cols >= 3:

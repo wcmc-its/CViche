@@ -173,3 +173,11 @@ def test_grant_buckets_ask_the_llm_for_status_and_notes(code):
     fields = schemas_mod.get_field_schema(code)["fields"]
     assert "status" in fields and "notes" in fields
     assert {"status", "notes"} <= set(schemas_mod.FIELD_DESCRIPTIONS[code])
+
+
+def test_invited_presentation_schema_asks_the_llm_for_the_speaker_role():
+    """#475: web160's 11 "Visiting Professor" roles were dropped at stage 4
+    because R had no `role` field. Read off the ACTIVE (config-merged) schema,
+    which is what the prompt's field list is built from."""
+    assert "role" in schemas_mod.get_field_schema("R")["fields"]
+    assert "role" in schemas_mod.FIELD_DESCRIPTIONS["R"]
