@@ -90,8 +90,8 @@ def apply_header_pin(entries: Iterable[dict], context: TaxonomyContext) -> tuple
                 "pre_pin_reasoning": entry.get("classification_reasoning"),
                 "taxonomy_code": pin,
                 "classification_reasoning": (
-                    f"Header pin {pin}: filed by the CV author under a section mapped to {pin}; "
-                    f"the model answered {entry['taxonomy_code']}"
+                    f"Kept in the section where the CV author listed it (category {pin}); "
+                    f"reading the entry alone had suggested {entry['taxonomy_code']}."
                 ),
             }
         out.append(entry)

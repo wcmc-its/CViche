@@ -103,7 +103,7 @@ def test_recodes_each_overridable_confusion_under_r(wrong):
     assert out["classification_source"] == "llm"
 
 
-@pytest.mark.parametrize("right", ["S8", "S1", "Q2", "M2B", "T", "R"])
+@pytest.mark.parametrize("right", ["S8", "S1", "Q2", "M2B", "T", "R", "K3"])
 def test_leaves_every_other_model_answer_under_r(right):
     entry = _entry(right)
     (out,), n = apply_header_pin([entry], R_CTX)
@@ -150,3 +150,11 @@ def test_input_entries_are_not_mutated():
     before = dict(entry)
     apply_header_pin([entry], R_CTX)
     assert entry == before
+
+
+def test_pin_reasoning_is_a_plain_sentence_for_the_optional_word_comment():
+    # Stage 6 shows classification_reasoning as a Word comment when the user opts in.
+    (out,), _ = apply_header_pin([_entry("K4")], R_CTX)
+    text = out["classification_reasoning"]
+    assert "pin" not in text.lower() and "mapped" not in text.lower()
+    assert text.endswith(".") and "category R" in text and "K4" in text
