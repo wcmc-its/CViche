@@ -149,9 +149,9 @@ def test_build_warnings_renderer_declined_for_non_m1_routed_code_names_no_writer
 
 
 def test_build_warnings_two_unrouted_codes_sorted_by_code():
-    written = [_entry("ZZ"), _entry("M4A"), _entry("M4A")]
+    written = [_entry("ZZ"), _entry("N3"), _entry("N3")]
     warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
-    assert [w["code"] for w in warnings] == ["M4A", "ZZ"]
+    assert [w["code"] for w in warnings] == ["N3", "ZZ"]
     assert [w["count"] for w in warnings] == [2, 1]
     assert all(w["reason"] == REASON_NO_RENDER_ROUTE for w in warnings)
 

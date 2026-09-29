@@ -416,7 +416,7 @@ The WCM CV taxonomy consists of **60 valid codes** organized into **20 top-level
    - Job title only → D
 
 4. **Clinical Trials**
-   - Now classified under M2A/M2B/M2C based on status (not M4)
+   - Now classified under M2A (no end date) or M2B (ended), by end date (#291; not M4)
 
 ---
 

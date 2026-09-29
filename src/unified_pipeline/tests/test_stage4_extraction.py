@@ -739,6 +739,8 @@ def test_grant_instructions_map_clinical_trial_fields_onto_grant_fields():
     prompt = _prompt("M2B", [{"text": "Site PI, invented Phase II trial, NCT00000000"}])
     assert "grant_number = its NCT or protocol number" in prompt
     assert "agency = its sponsor" in prompt
+    for code in ("M2C", "M2D"):  # a pending application or a patent is never a trial
+        assert "CLINICAL TRIAL" not in _prompt(code, [{"text": "Invented entry"}])
 
 
 def test_the_instruction_follows_the_code_specific_rules_block():

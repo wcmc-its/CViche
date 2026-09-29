@@ -586,7 +586,7 @@ TAXONOMY_LABELS = {
     "M2B": "Past Research Funding",
     "M2C": "Pending Research Funding",
     "M2D": "Patents & Innovations",
-    # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C
+    # NOTE: M4 clinical trial codes removed - clinical trials file as M2A or M2B by end date (#291)
     "N1": "Leadership and Mentoring in Programs",
     "N2": "Institutional Training Grants",
     "N3": "Mentees",

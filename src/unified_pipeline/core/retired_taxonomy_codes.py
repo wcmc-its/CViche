@@ -7,11 +7,14 @@ output stored before a code was retired. One list, so the two cannot drift.
 from types import MappingProxyType
 
 RETIRED_TAXONOMY_CODES = MappingProxyType({
+    # ponytail: M3 is a pure rename -- old code and target mean the same thing.
     'M3': 'M2D',  # Patents & Innovations -- former M3 renamed to M2D (taxonomy v7)
-    # Clinical trials (#291, decided 2026-09-09): the WCM CV has no trials
-    # section, so a trial is research support. It files as a current grant,
-    # and the grant date rule moves one whose end date has passed to M2B
-    # (grant_status_corrector in 3b, reclassify_past_m2a_grants in stage 6).
+    # ponytail: the M4 codes are a re-route, not a rename -- a trial TYPE lands
+    # on a funding STATUS. That is right only because the grant date rule runs
+    # afterwards (grant_status_corrector in 3b, reclassify_past_m2a_grants in
+    # stage 6) and moves an ended trial to M2B (#291, decided 2026-09-09: the
+    # WCM CV has no trials section). The trial type itself is not kept; if the
+    # template ever grows a trials section, route by type instead of here.
     'M4': 'M2A',
     'M4A': 'M2A',
     'M4B': 'M2A',

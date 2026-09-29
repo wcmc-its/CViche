@@ -179,7 +179,7 @@ Where the simple implementation is knowingly not the general one, say so at the 
 
 ```python
 # ponytail: fixed window; expire only on the first hit. Orphan key ...
-# ponytail: pure renames ONLY -- old code and target must mean the same thing.
+# ponytail: the M4 codes are a re-route, not a rename -- a trial TYPE lands ...
 ```
 
 It marks intent, not ignorance: the reader can tell a considered trade-off from an oversight, which is the difference between leaving it alone and "fixing" it into something more complex. Distinct from `TODO`, which means unfinished — a labelled shortcut may be finished and correct at its stated scale, permanently.

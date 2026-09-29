@@ -2026,7 +2026,7 @@ def test_every_field_the_module_reads_is_declared_on_the_grant_record_type():
 def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     """The other direction: a declared key no reader wants is dead contract.
 
-    All 26 keys, `status` included, are reached through a `fields.get(...)` in
+    All 27 keys, `status` included, are reached through a `fields.get(...)` in
     this module -- `status` from the bucket rules rather than from a rendered
     row. A key left on the record type after its reader is deleted would go on
     suppressing that key's line in the unconsumed-fields diagnostic, silently.
@@ -2034,7 +2034,26 @@ def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     declared_but_unread = research_support.CONSUMED_GRANT_FIELDS - _fields_get_keys()
 
     assert declared_but_unread == set(), sorted(declared_but_unread)
-    assert len(research_support.CONSUMED_GRANT_FIELDS) == 26
+    assert len(research_support.CONSUMED_GRANT_FIELDS) == 27
+
+
+# --- #291: clinical trials render in the grant block ------------------------------
+
+def test_a_trial_record_renders_its_nct_id_sponsor_and_role():
+    """Stage 4 maps a trial onto the grant fields (NCT id -> grant_number,
+    sponsor -> agency), so all three must reach the table."""
+    fields = {'title': 'Phase II trial of an invented compound', 'grant_number': 'NCT00000001',
+              'agency': 'Invented Pharma', 'pi_role': 'Site PI', 'start_date': '2019'}
+    text = ' '.join(' '.join(r) for r in _rows(_generator()._create_grant_table(fields, 'M2A')))
+    assert 'NCT00000001' in text and 'Invented Pharma' in text and 'Site PI' in text
+
+
+def test_a_stored_pre_291_trial_record_keeps_its_nct_id():
+    """Stage-4 output from before #291 carries the id as `nct_number`."""
+    fields = {'trial_title': 'Phase III trial of an invented device', 'nct_number': 'NCT00000002',
+              'sponsor': 'Invented Devices', 'start_date': '2018'}
+    text = ' '.join(' '.join(r) for r in _rows(_generator()._create_grant_table(fields, 'M2A')))
+    assert 'NCT00000002' in text and 'Invented Devices' in text
 
 
 # --- #982: stage 4 now keeps status and notes, and the block renders them --------

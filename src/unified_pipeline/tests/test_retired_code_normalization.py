@@ -50,7 +50,9 @@ def test_a_finished_trial_ends_up_in_past_funding_not_current():
     # "Current Research Funding". The remap is safe only with the date rule.
     trial = {"taxonomy_code": "M4A", "extracted_fields": {
         "title": "Phase I trial of an invented compound", "end_date": "1996"}}
-    normalize_retired_code(trial)
+    # Stage 6 buckets by the normalized code, so the trial must reach M2A
+    # first; the date rule only ever sees the M2A bucket.
+    assert normalize_retired_code(trial) == "M2A"
     current, past, _ = reclassify_past_m2a_grants([trial], [], current_year=2026)
     assert current == []
     assert past == [trial]

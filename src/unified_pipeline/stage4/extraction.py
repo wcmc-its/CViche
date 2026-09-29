@@ -489,6 +489,14 @@ CONTEXT_HEADING_INSTRUCTION = """
 10. **Sub-heading context**: an entry marked "(under: X)" sits beneath the sub-heading X in the CV. Use X to fill institution, role, title, audience, level or status fields when the entry text itself omits them. Never override what the entry text states. When the entry gives its own role, even as a verb or a qualifier, that role wins over X: "Co-directed with ..." under "Course Director" is role "Co-Director", and "Assistant ..." or "Associate ..." stays as the entry words it. Do not copy X into a field it does not describe, and never copy X verbatim when it only names a kind of activity (e.g. "New Course Development")."""
 
 
+# Clinical trials file as current or past funding (#291), never as a pending
+# application or a patent, so only these two grant prompts carry the mapping of
+# a trial onto the grant fields the grant table renders.
+CLINICAL_TRIAL_CODES = frozenset({'M2A', 'M2B'})
+CLINICAL_TRIAL_FIELD_MAPPING = """
+   - A CLINICAL TRIAL filed here uses the same fields: title = the trial title with its phase (e.g., "Phase II trial of ..."), grant_number = its NCT or protocol number, agency = its sponsor, pi_role = the CV owner's role on the trial (e.g., "Site PI", "Sub-Investigator")"""
+
+
 def build_extraction_prompt(
     entries: list[dict[str, Any]],
     schema: dict[str, Any],
@@ -561,8 +569,9 @@ def build_extraction_prompt(
    - Do NOT put the project title in pi_name field
    - If no PI name is found, leave pi_name as null
    - status = the grant's status only when the entry itself states one (e.g., "Update: withdrawn" → "withdrawn"); otherwise null
-   - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null
-   - A CLINICAL TRIAL filed here uses the same fields: title = the trial title with its phase (e.g., "Phase II trial of ..."), grant_number = its NCT or protocol number, agency = its sponsor, pi_role = the CV owner's role on the trial (e.g., "Site PI", "Sub-Investigator")"""
+   - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null"""
+        if code in CLINICAL_TRIAL_CODES:
+            code_specific_instructions += CLINICAL_TRIAL_FIELD_MAPPING
     elif code == 'K4':
         code_specific_instructions = """
 9. **CONTINUING EDUCATION (K4)** - CRITICAL field separation:

@@ -75,7 +75,7 @@
     "T4_References": ["T"]
   },
   "invalid_codes": {
-    "codes": ["Q5", "S10", "S11", "S12", "S13", "S14", "S15"],
+    "codes": ["Q5", "S10", "S11", "S12", "S13", "S14", "S15", "M4", "M4A", "M4B", "M4C"],
     "note": "These are not valid CV taxonomy endpoints and must not be used in final classification output."
   },
   "disambiguation_notes": {
