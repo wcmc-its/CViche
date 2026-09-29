@@ -213,8 +213,7 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
             stage="stage_5d",
             messages=messages,
             temperature=0.2,
-            response_format={"type": "json_object"},
-            max_tokens=8000
+            response_format={"type": "json_object"}
         )
 
         result_text = llm_result["content"]

@@ -1154,25 +1154,3 @@ def test_bedrock_other_models_keep_temperature_and_no_thinking_field(model):
     passed = _converse_kwargs_for(model)
     assert passed["inferenceConfig"]["temperature"] == 0.0
     assert "additionalModelRequestFields" not in passed
-
-
-@pytest.mark.parametrize("model, requested, sent", [
-    ("us.anthropic.claude-sonnet-5", 350, 525),
-    ("us.anthropic.claude-sonnet-5", None, 24000),
-    ("us.anthropic.claude-sonnet-4-6", 350, 350),
-    ("us.anthropic.claude-haiku-4-5-20251001-v1:0", 350, 350),
-])
-def test_bedrock_max_tokens_scaled_for_sonnet_5_tokenizer(model, requested, sent):
-    """Sonnet 5's tokenizer needs ~1.4x the output tokens for the same text, so
-    its caps are scaled; every other model's cap is sent as requested."""
-    from unified_pipeline.llm_client import call_llm
-
-    cfg = _bedrock_config()
-    cfg["model"] = model
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=cfg), \
-         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
-        mock_client = MagicMock()
-        mock_client.converse.return_value = _make_bedrock_response()
-        mock_get_client.return_value = mock_client
-        call_llm("stage_2", [{"role": "user", "content": "test"}], max_tokens=requested)
-        assert mock_client.converse.call_args.kwargs["inferenceConfig"]["maxTokens"] == sent

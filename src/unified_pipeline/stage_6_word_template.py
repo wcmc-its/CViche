@@ -2447,10 +2447,10 @@ Now analyze the text above:"""
                     {"role": "system", "content": "You are an expert at analyzing academic CV content and classifying it into standard CV taxonomy categories."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,
-                # Generous cap: a truncated segment list silently loses the
-                # trailing records (#209) — never tighten this back down.
-                max_tokens=4000
+                temperature=0.3
+                # No call-site cap: a truncated segment list silently loses the
+                # trailing records (#209); the 16K DEFAULT_MAX_TOKENS floor still
+                # bounds a runaway. Never add a tighter cap back.
             )
 
             return parse_reclassified_segments(

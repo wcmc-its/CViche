@@ -366,8 +366,7 @@ IMPORTANT:
         result_llm = call_llm(
             stage="core_candidate_surfacer",
             messages=messages,
-            response_format=response_schema,
-            max_tokens=1500,
+            response_format=response_schema
         )
 
         # Parse response

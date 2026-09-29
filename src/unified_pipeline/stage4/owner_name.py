@@ -596,8 +596,7 @@ Return ONLY valid JSON, no explanation."""
                     {"role": "system", "content": "You extract location information from CV data. Return only valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,
-                max_tokens=500
+                temperature=0.1
             )
 
             response_text = llm_result["content"].strip()
