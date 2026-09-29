@@ -17,6 +17,7 @@ from the rest of unified_pipeline.
 
 import math
 import re
+import statistics
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,8 +25,10 @@ from pathlib import Path
 import pdfplumber
 from docx import Document
 from docx.shared import Pt
+from pdfminer.pdfdocument import PDFPasswordIncorrect
 from pdfplumber.page import Page
 from pdfplumber.utils import cluster_objects
+from pdfplumber.utils.exceptions import PdfminerException
 
 # --- Line grouping -------------------------------------------------------
 
@@ -46,8 +49,22 @@ LINE_BOTTOM_TOLERANCE_PT = 4.0
 PARAGRAPH_GAP_EM = 0.45
 #: Gap above which an empty paragraph is emitted before the new one.
 BLANK_GAP_EM = 1.0
-#: Horizontal gap between two words above which they are joined with "\t".
+#: Horizontal gap between two words above which they MAY be joined with "\t".
 TAB_GAP_EM = 1.5
+#: ...and only if it is also at least this many times the line's median
+#: word gap: a justified line has uniformly wide gaps (no tabs), a
+#: label/value line has one outlier gap (a tab).
+TAB_OUTLIER_RATIO = 2.0
+#: A line with at most this many word gaps skips the median test (with one
+#: or two gaps the median is the gap itself, so nothing could be an outlier).
+TAB_FEW_GAPS_MAX = 2
+#: A line that starts with a list marker begins a new entry, never a
+#: wrapped continuation: "12." / "3)" (1-3 digits, then whitespace), "[12]",
+#: a bullet glyph, or a dash/asterisk/hyphen followed by whitespace.
+LIST_MARKER_RE = re.compile(r"^(?:\d{1,3}[.)]\s|\[\d{1,3}\]|[•▪◦‣●○■□]|[–—*-]\s)")
+#: A line starting more than this many points LEFT of the previous line is
+#: an outdented entry (hanging indent), not a continuation.
+OUTDENT_TOLERANCE_PT = 3.0
 #: A line ends "full" (so the next one is a wrapped continuation) when its
 #: right edge is within this fraction of the text width of the page's
 #: rightmost line. Short lines are entries/list items and must not merge.
@@ -73,8 +90,15 @@ FURNITURE_POSITION_BUCKET_PT = 3.0
 #: reported as image-only (scanned page; #536).
 IMAGE_ONLY_MAX_CHARS = 20
 
-#: Font-name substrings (case-insensitive) that mark a bold face.
-BOLD_FONT_MARKERS = ("bold", "black", "heavy")
+# ponytail: bold is guessed from the font NAME. Ceiling: generic subset
+# names ("CIDFont+F1") carry no weight and read as regular. Upgrade path:
+# read the font descriptor (pdfminer `PDFFont.descriptor` StemV / FontWeight
+# / the ForceBold flag) instead of the name.
+#: Bold face names (matched case-insensitively): Bold/SemiBold/DemiBold,
+#: Black, Heavy, Demi, URW "-Medi" (NimbusRomNo9L-Medi), and LaTeX bold
+#: extended CMBX12 / CMSSBX10 (`bx` before the size, after the subset prefix).
+#: "Medium" (HelveticaNeue-Medium) is deliberately NOT bold: `-medi(?!um)`.
+BOLD_FONT_RE = re.compile(r"bold|black|heavy|demi|-medi(?!um)|(?:^|\+)cm[a-z]*bx\d")
 
 #: XML 1.0 forbids these; python-docx raises ValueError on them.
 _XML_ILLEGAL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
@@ -123,8 +147,17 @@ class _Para:
 
 
 def _is_bold(fontname: str) -> bool:
-    name = fontname.lower()
-    return any(marker in name for marker in BOLD_FONT_MARKERS)
+    return BOLD_FONT_RE.search(fontname.lower()) is not None
+
+
+def _column_gaps(words: list[dict]) -> list[bool]:
+    """For each pair of adjacent words: is the gap between them a column gap
+    (a tab), as opposed to a word space, including a stretched justified one?"""
+    gaps = [b["x0"] - a["x1"] for a, b in zip(words, words[1:])]
+    median = statistics.median(gaps) if gaps else 0.0
+    few = len(gaps) <= TAB_FEW_GAPS_MAX
+    return [gap > TAB_GAP_EM * a["size"] and (few or gap >= TAB_OUTLIER_RATIO * median)
+            for gap, a in zip(gaps, words)]
 
 
 def _build_line(words: list[dict]) -> _Line:
@@ -132,22 +165,19 @@ def _build_line(words: list[dict]) -> _Line:
     change, words joined by a space, or a tab across a wide column gap."""
     words = sorted(words, key=lambda w: w["x0"])
     runs: list[_Run] = []
-    has_tab = False
-    prev = None
-    for w in words:
+    column_gap = _column_gaps(words)
+    has_tab = any(column_gap)
+    for index, w in enumerate(words):
         bold, size = _is_bold(w["fontname"]), round(w["size"], 1)
         sep = ""
-        if prev is not None:
-            wide = w["x0"] - prev["x1"] > TAB_GAP_EM * prev["size"]
-            has_tab = has_tab or wide
-            sep = "\t" if wide else " "
+        if index:
+            sep = "\t" if column_gap[index - 1] else " "
         if runs and sep:
             runs[-1].text += sep  # separator stays with the run on its left
         if runs and (runs[-1].bold, runs[-1].size) == (bold, size):
             runs[-1].text += w["text"]
         else:
             runs.append(_Run(w["text"], bold, size))
-        prev = w
     return _Line(
         top=min(w["top"] for w in words),
         bottom=max(w["bottom"] for w in words),
@@ -191,7 +221,12 @@ def _is_full_line(line: _Line, left: float, right: float) -> bool:
 
 def _continues(prev: _Line, line: _Line, left: float, right: float) -> bool:
     """True when `line` looks like a wrapped continuation of `prev`: same
-    weight and size, no tabs, and `prev` ran to the right margin."""
+    weight and size, no tabs, not a list-marker or outdented line (a new
+    entry), and `prev` ran to the right margin.
+    ponytail: a paragraph with a first-line indent (line 2 starts left of
+    line 1) is split there. Upgrade path: compare against the modal x0."""
+    if LIST_MARKER_RE.match(line.text) or line.x0 < prev.x0 - OUTDENT_TOLERANCE_PT:
+        return False
     if prev.has_tab or line.has_tab or prev.all_bold != line.all_bold:
         return False
     if abs(prev.size - line.size) > MERGE_SIZE_TOLERANCE_PT:
@@ -250,12 +285,19 @@ def convert_pdf_to_docx(pdf_path: str | Path, docx_path: str | Path) -> Conversi
     # multi-column detection, so a two-column page interleaves its columns
     # line by line. Upgrade path: cluster words into column bands by x0 gaps
     # before line grouping.
-    with pdfplumber.open(str(pdf_path)) as pdf:
-        for number, page in enumerate(pdf.pages, start=1):
-            pages.append(_page_lines(page))
-            heights.append(float(page.height))
-            if _is_image_only(page):
-                image_only.append(number)
+    try:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            for number, page in enumerate(pdf.pages, start=1):
+                pages.append(_page_lines(page))
+                heights.append(float(page.height))
+                if _is_image_only(page):
+                    image_only.append(number)
+    except PdfminerException as exc:
+        # pdfplumber wraps everything in a message-less PdfminerException;
+        # name the one cause a caller can act on, re-raise the rest as is.
+        if exc.args and isinstance(exc.args[0], PDFPasswordIncorrect):
+            raise ValueError("encrypted/password-protected PDF") from exc
+        raise
     furniture = _furniture_keys(pages, heights)
     # The key carries the position, and only edge-band lines enter
     # `furniture`, so a body line can never match.

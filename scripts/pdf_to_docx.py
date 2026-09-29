@@ -55,10 +55,11 @@ def main(argv=None) -> int:
     for pdf in _inputs(source):
         try:
             report = convert_pdf_to_docx(pdf, out_dir / f"{pdf.stem}.docx")
-        except Exception:
+        except Exception as exc:
             # The batch contract: one bad PDF (encrypted, corrupt) is an
             # 'error' row and a non-zero exit, never a stop for the rest.
-            logger.exception("conversion failed: %s", pdf.name)
+            logger.exception("conversion failed: %s (%s: %s)", pdf.name,
+                             type(exc).__name__, exc)
             failed += 1
             # stdout is the TSV contract (see the docstring): print(), not the logger.
             print(f"{pdf.stem}\t\t\t\t\t\terror")
