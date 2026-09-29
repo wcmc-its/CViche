@@ -483,7 +483,7 @@ def _get_field_descriptions(taxonomy_code: str) -> str:
 #: Appended (as instruction 10) when a batch holds an entry stamped with
 #: `context_heading` (#985). Leading newline: it follows instruction 8/9.
 CONTEXT_HEADING_INSTRUCTION = """
-10. **Sub-heading context**: an entry marked "(under: X)" sits beneath the sub-heading X in the CV. Use X to fill institution, role, title, audience, level or status fields when the entry text itself omits them. Never override what the entry text states: a role the entry qualifies ("Co-directed", "Assistant", "Associate") stays as the entry words it. Do not copy X into a field it does not describe, and never copy X verbatim when it only names a kind of activity (e.g. "New Course Development")."""
+10. **Sub-heading context**: an entry marked "(under: X)" sits beneath the sub-heading X in the CV. Use X to fill institution, role, title, audience, level or status fields when the entry text itself omits them. Never override what the entry text states. When the entry gives its own role, even as a verb or a qualifier, that role wins over X: "Co-directed with ..." under "Course Director" is role "Co-Director", and "Assistant ..." or "Associate ..." stays as the entry words it. Do not copy X into a field it does not describe, and never copy X verbatim when it only names a kind of activity (e.g. "New Course Development")."""
 
 
 def build_extraction_prompt(

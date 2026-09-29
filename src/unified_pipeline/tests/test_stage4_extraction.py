@@ -748,7 +748,8 @@ def test_the_instruction_says_fill_missing_never_override_and_do_not_misplace():
     assert "Do not copy X into a field it does not describe" in text
     # The live A/B (#985): "Co-directed" rows became the heading's "Course
     # Director", and an activity-kind heading was copied as a role.
-    assert "a role the entry qualifies" in text
+    assert "even as a verb or a qualifier, that role wins over X" in text
+    assert '"Co-directed with ..." under "Course Director" is role "Co-Director"' in text
     assert "never copy X verbatim when it only names a kind of activity" in text
 
 
