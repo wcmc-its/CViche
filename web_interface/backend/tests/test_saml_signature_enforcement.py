@@ -260,6 +260,9 @@ def acs_app(acs_env, client, db, seed_saml_mode, monkeypatch):
         return real_load(self, {**cfg, "metadata": {"local": [acs_env["idp_md"]]}}, *a, **kw)
 
     monkeypatch.setattr("app.saml_client.Saml2Config.load", load_local_metadata)
+    # Pin the production default: the wrong-Destination case is rejected by the
+    # replay gate's fail-closed branch, so a local opt-out must not flip it.
+    monkeypatch.setenv("CVICHE_SAML_REPLAY_FAIL_CLOSED", "1")
     set_replay_cache(None)
 
     def post(xml):
