@@ -151,7 +151,7 @@ class TestWhatIsNotFannedOut:
                          'extracted_fields': {'award_name': [_award('Alpha Prize'), _award('Beta Prize')]}})
 
     def test_a_list_holding_an_empty_record(self):
-        self._unchanged(_honors('Alpha Prize\tBeta Prize', [{}, _award('Beta Prize')]))
+        self._unchanged(_honors('Beta Prize, Hollis College\tBeta Prize', [{}, _award('Beta Prize')]))
 
     def test_records_that_share_no_key_with_the_schema(self):
         # web181's K2 `mentees: [{name, year}]`: nothing the K2 renderer reads.
