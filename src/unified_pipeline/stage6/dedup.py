@@ -117,16 +117,22 @@ def _year_ranges(text: str) -> list[tuple[int, int]]:
     return ranges
 
 
-# "Phase I" / "phase 2": the one mark that tells two trials of the same drug
-# apart (#1106). A one-character numeral is not a significant word, so the
-# token-containment branch below cannot see it.
-_TRIAL_PHASE_RE = re.compile(r'\bphase\s*([1-4]|iv|i{1,3})\b', re.IGNORECASE)
+# "Phase I" / "phase 2" / "Phase II/III": the one mark that tells two trials of
+# the same drug apart (#1106). A one-character numeral is not a significant
+# word, so the token-containment branch below cannot see it. A combined-phase
+# design names every numeral in its list, so it covers a copy naming any one.
+_PHASE_NUMERAL = r'(?:[1-4]|iv|i{1,3})'
+_TRIAL_PHASE_RE = re.compile(
+    rf'\bphases?\s*({_PHASE_NUMERAL}(?:\s*(?:/|-|&|,|and)\s*{_PHASE_NUMERAL})*)\b',
+    re.IGNORECASE)
 _ROMAN_PHASE = {'i': '1', 'ii': '2', 'iii': '3', 'iv': '4'}
 
 
 def _trial_phases(text: str) -> set[str]:
     """Every trial phase the text names, Roman numerals as digits."""
-    return {_ROMAN_PHASE.get(p.lower(), p) for p in _TRIAL_PHASE_RE.findall(text)}
+    return {_ROMAN_PHASE.get(n.lower(), n)
+            for group in _TRIAL_PHASE_RE.findall(text)
+            for n in re.findall(_PHASE_NUMERAL, group, re.IGNORECASE)}
 
 
 def _dates_compatible(dropped_text: str, kept_text: str) -> bool:

@@ -84,6 +84,16 @@ def test_distinct_trial_phases_of_one_drug_kept():
     assert deduplicate_entries([phase1, phase2]) == [phase1, phase2]
 
 
+@pytest.mark.parametrize("kept_phase,dropped_phase", [
+    ("Phase II/III", "Phase III"), ("Phase I/II", "Phase II"),
+])
+def test_a_combined_phase_trial_covers_a_copy_naming_one_of_its_phases(kept_phase, dropped_phase):
+    kept = {"text": f"Randomized {kept_phase} study of ZX-101 (invented inhibitor) versus placebo "
+                    "in combination with examplecin in patients with advanced disease."}
+    dup = {"text": f"{dropped_phase} study of ZX-101 invented inhibitor versus placebo with examplecin."}
+    assert deduplicate_entries([kept, dup]) == [kept]
+
+
 def test_same_trial_phase_written_two_ways_still_dropped():
     # "Phase 2" and "Phase II" are one phase, so the reworded copy still goes.
     kept = {"text": "Randomized Phase II study of ZX-101 (invented inhibitor) versus placebo "
