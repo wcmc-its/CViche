@@ -49,8 +49,11 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     DROP_BARE_YEAR,
     DROP_BLANK,
     DROP_COLUMN_HEADER,
+    DROP_CV_TITLE,
+    DROP_DATE_STAMP,
     DROP_NEAR_TEMPLATE_INSTRUCTION,
     DROP_RENDERS_EMPTY,
+    DROP_SECTION_HEADER,
     DROP_SOURCE_BOILERPLATE,
     DROP_STATUS_MARKER,
     DROP_TEMPLATE_INSTRUCTION,
@@ -674,3 +677,103 @@ def test_a_year_next_to_real_content_is_not_dropped(tmp_path, caplog):
         "1. 2021 Assistant Professor, Weill Cornell Medicine",
     ]
     assert "removed" not in _appendix_log(caplog)
+
+
+# --- #885 residual: T-validation-confirmed structural shapes ---------------
+# Two signals must agree: the reasoning names the kind, AND the text has the
+# kind's positive shape. Invented text only.
+
+def _confirmed(kind_sentence):
+    return f"[T-validation confirmed] {kind_sentence} It is a structural artifact."
+
+
+def _residual(text, reasoning, code="T"):
+    return _appendix_drop_reason(text, _clean_inline_tabs(text), code, reasoning)
+
+
+@pytest.mark.parametrize("text, kind_sentence, reason", [
+    ("CURRICULUM VITA", "Document title 'CURRICULUM VITA' with no content.", DROP_CV_TITLE),
+    ("Curriculum Vitae & Bibliography", "Document title/header with no content.", DROP_CV_TITLE),
+    ("Sample-legal Curriculum Vitae", "This is a document title/header.", DROP_CV_TITLE),
+    ("Curriculum Vitae\nJune 2014", "Document header with date - pure structural.", DROP_CV_TITLE),
+    ("As of August 10, 2022", "Date stamp 'As of August 10, 2022' is metadata.", DROP_DATE_STAMP),
+    ("Date: July 24, 2022", "This is a date stamp indicating CV version.", DROP_DATE_STAMP),
+    ("DATE Mar 14th, 2023", "Date stamp only - temporal marker.", DROP_DATE_STAMP),
+    ("*Revised June 29, 2018", "This is a revision date stamp.", DROP_DATE_STAMP),
+    ("Date April, 6, 2024", "This is a document date stamp.", DROP_DATE_STAMP),
+    ("Professional Experience", "This is a section header ('Professional Experience').", DROP_SECTION_HEADER),
+    ("Courses Taught:", "Section header 'Courses Taught:' is a structural marker.", DROP_SECTION_HEADER),
+    ("III. SAMPLE EXPERIENCE", "Section header label appearing under another section.", DROP_SECTION_HEADER),
+    ("Graduate", "This is a section subheader categorizing degree type.", DROP_SECTION_HEADER),
+    ("Advisory Boards or Committees", "Section category label that organizes content.", DROP_SECTION_HEADER),
+    ("Years     School     Degree", "This is a column header row (Years, School, Degree).", DROP_COLUMN_HEADER),
+    ("Trainee | Topic | Program | Outcome", "Column header row for table.", DROP_COLUMN_HEADER),
+])
+def test_confirmed_structural_shapes_are_dropped(text, kind_sentence, reason):
+    assert _residual(text, _confirmed(kind_sentence)) == reason
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    # Reasoning says header but the text is a sentence / carries data.
+    ("Professional Experience includes two positions.", "This is a section header."),
+    ("Section 4 overview", "This is a section header."),  # digit
+    ("Professional Experience 2019", "This is a section header."),
+    ("One two three four five six seven eight nine ten eleven", "Section header only."),  # > cap
+    ("Current position: Assistant Professor (as of 2021), Sample University",
+     "This is a date stamp."),
+    ("Date of birth June 3, 1980, Springfield", "This is a date stamp."),
+    ("Curriculum Vitae of Jane Q Sample, Sample University", "Document title/header."),
+    ("Year | Degree | Major\n2001 | BS | Biology", "Column header row with data following."),
+])
+def test_confirmed_kind_without_the_positive_shape_survives(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) is None
+
+
+@pytest.mark.parametrize("text, reasoning", [
+    # Right shape, but stage 3b did not confirm it structural.
+    ("Professional Experience", "This is a section header."),
+    ("Professional Experience", "[T-validation overridden] Section header."),
+    ("Professional Experience", ""),
+    ("Professional Experience", None),
+    # Right shape, confirmed, but the reasoning names a different kind.
+    ("Professional Experience", _confirmed("Personal hobby with no professional content.")),
+    ("Cooking", _confirmed("Personal interest listed under hobbies.")),
+    ("Leverhulme Trust", _confirmed("Funding organization name with no grant details.")),
+    ("Sample Journal of Testing", _confirmed("Orphaned journal title with no article detail.")),
+    # A looser "structural header" verdict is not a SECTION header verdict:
+    # the corpus used it for a name line and an institution name.
+    ("Sam Q Example MD MPH", _confirmed("This is a name/credentials line and a structural header.")),
+    ("Example Institute of Testing", _confirmed("Standalone institution name; structural header only.")),
+    # "none" says something about the content, so it is not a bare label.
+    ("Patents (none)", _confirmed("Section header 'Patents (none)' is structural notation.")),
+    # Kind word only deep in the prose, past the lead window.
+    ("Professional Experience",
+     "[T-validation confirmed] " + "x" * 120 + " section header"),
+])
+def test_shape_without_confirmed_kind_survives(text, reasoning):
+    assert _residual(text, reasoning) is None
+
+
+@pytest.mark.parametrize("code", [None, "A", "G", "N4", "M1"])
+def test_confirmed_structural_shapes_survive_when_not_t_coded(code):
+    text = "Professional Experience"
+    assert _residual(text, _confirmed("This is a section header."), code) is None
+
+
+def test_filter_reads_reasoning_from_the_entry_and_counts_each_reason():
+    header = _confirmed("This is a section header.")
+    entries = [
+        {"text": "Curriculum Vitae & Bibliography", "taxonomy_code": "T",
+         "classification_reasoning": _confirmed("Document title.")},
+        {"text": "As of May 1, 2020", "taxonomy_code": "T",
+         "classification_reasoning": _confirmed("Date stamp.")},
+        {"text": "Awards", "taxonomy_code": "T", "classification_reasoning": header},
+        {"text": "Awards", "taxonomy_code": "T"},  # no reasoning: kept
+        {"text": "Awards", "taxonomy_code": "A", "classification_reasoning": header},
+    ]
+    kept, dropped = _filter_unmapped_entries(entries)
+    assert [t for _, t in kept] == ["Awards", "Awards"]
+    assert dropped == Counter({DROP_CV_TITLE: 1, DROP_DATE_STAMP: 1, DROP_SECTION_HEADER: 1})
+    assert _describe_dropped(dropped) == (
+        "3 non-content blocks removed (cv-title 1, date-stamp 1, section-header 1)"
+    )
