@@ -76,7 +76,7 @@ def test_extract_table_metadata_does_not_mangle_tracked_insertion(tmp_path):
     cell = table.rows[0].cells[0]
     _down_syndrome_paragraph(cell.paragraphs[0])
 
-    metadata = extract_table_metadata(table, idx=0)
+    metadata = extract_table_metadata(table, idx="table_0")
     cell_text = metadata["data"][0][0]["text"]
     assert cell_text == "Down Syndrome"
     assert "yndrome" not in cell_text.replace("Syndrome", "")

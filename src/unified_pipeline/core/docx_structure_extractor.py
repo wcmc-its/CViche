@@ -470,9 +470,12 @@ def is_column_header_row(cell_texts: list[str], marked_repeat_header: bool) -> b
     return _is_column_header_row(" | ".join(sorted(filled)))
 
 
-def extract_table_metadata(table: Table, idx: int) -> dict[str, Any]:
+def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
     """
     Extract table structure and content.
+
+    `idx` is the table's element id, always a `"table_N"` string: stage 2
+    branches on `.startswith("table_")` and derives sort keys from it (#315).
 
     Returns table as array of rows with cell metadata. When row 0 is a
     column-label row (`is_column_header_row`, #424) the result also carries
@@ -488,17 +491,11 @@ def extract_table_metadata(table: Table, idx: int) -> dict[str, Any]:
             # or malformed XML (e.g., <w:rPr> inside <w:t> instead of as sibling)
             cell_text = get_cell_text(cell).strip()
 
-            # Fallback: Extract text directly from XML using recursive text extraction
+            # Fallback: Extract text directly from XML using recursive text extraction.
+            # No try/except: lxml's itertext() on a parsed element does not raise,
+            # and a bare except here hid real bugs as empty cells (#611).
             if not cell_text and cell._element is not None:
-                try:
-                    # Method 1: Try itertext() which gets ALL text nodes recursively
-                    cell_text = ''.join(cell._element.itertext()).strip()
-                except:
-                    try:
-                        # Method 2: Fallback to manual iteration
-                        cell_text = ''.join(node.text for node in cell._element.iter() if node.text).strip()
-                    except:
-                        pass  # If both methods fail, keep empty string
+                cell_text = ''.join(cell._element.itertext()).strip()
 
             # Get cell formatting if available
             cell_data = {
@@ -734,10 +731,7 @@ def get_table_first_cell_text(table: Table) -> str:
 
     # Fallback extraction if needed
     if not cell_text and first_cell._element is not None:
-        try:
-            cell_text = ''.join(first_cell._element.itertext()).strip()
-        except:
-            pass
+        cell_text = ''.join(first_cell._element.itertext()).strip()
 
     return cell_text
 
