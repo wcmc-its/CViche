@@ -1113,7 +1113,7 @@ def test_date_only_lines_warns_at_threshold_with_three_samples():
     assert len(findings) == 1
     f = findings[0]
     assert f["lint"] == "date_only_lines" and f["severity"] == "WARN"
-    assert "5 body paragraph(s)" in f["message"]
+    assert f["message"].startswith("5 body paragraph(s)")
     assert f["evidence"] == dates[:3]
 
 
@@ -1121,7 +1121,7 @@ def test_date_only_lines_info_below_threshold():
     dates = ["June 2019"] * (DATE_ONLY_LINES_WARN_COUNT - 1)
     findings = lint_date_only_lines(_date_only_blocks(dates))
     assert [f["severity"] for f in findings] == ["INFO"]
-    assert "4 body paragraph(s)" in findings[0]["message"]
+    assert findings[0]["message"].startswith("4 body paragraph(s)")
 
 
 def test_date_only_lines_ignores_table_cells():
@@ -1133,7 +1133,9 @@ def test_date_only_lines_ignores_the_appendix_until_the_next_section():
     blocks = ([("p", "T. APPENDIX")] + [("p", "\u2022 June 2019")] * 10
               + [("p", "U. OTHER"), ("p", "March 2020")])
     findings = lint_date_only_lines(blocks)
-    assert len(findings) == 1 and "1 body paragraph(s)" in findings[0]["message"]
+    assert len(findings) == 1
+    assert findings[0]["message"].startswith("1 body paragraph(s)")
+    assert findings[0]["evidence"] == ["March 2020"]
 
 
 def test_date_only_lines_sees_through_a_list_enumerator_but_not_words():
