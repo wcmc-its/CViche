@@ -429,6 +429,19 @@ def test_a_rerun_that_succeeds_clears_the_stage_error(tmp_path, monkeypatch, cap
     assert read_stage_errors(tmp_path / _STAGE_ERRORS) == []
 
 
+def test_a_rerun_that_skips_a_stage_keeps_its_earlier_failure(tmp_path, monkeypatch, capsys):
+    """A stage skipped for a missing prerequisite did not succeed, so it must
+    not clear its own earlier record: erasing it would uncap the score of a
+    run whose stage 4 still has not produced output."""
+    from unified_pipeline.stage_errors import read_stage_errors
+    _run_main(tmp_path, monkeypatch, capsys, fail={'4'})
+    monkeypatch.chdir(tmp_path)
+    capsys.readouterr()
+    _install_stubs(monkeypatch, _Calls(), {'3b'}, None, None, tmp_path)
+    run_full_pipeline.main()
+    assert sorted(e.stage for e in read_stage_errors(tmp_path / _STAGE_ERRORS)) == ['3b', '4']
+
+
 def test_entrypoint_propagates_the_return_value_to_the_exit_status():
     """The last link: `main()` on its own discards the return value and the
     process exits 0 again, which is the whole bug. pytest imports this module

@@ -287,6 +287,16 @@ def test_malformed_stage_error_record_is_named_not_read_as_clean(tmp_path):
     assert "nonnull_error_fields=1" in detail
 
 
+def test_a_stage_error_file_that_is_not_json_is_counted_once(tmp_path):
+    """The generic *.json loop already reports an unparseable file; the
+    stage-error reader must not report it a second time."""
+    (tmp_path / "ABC_stage_errors.json").write_text("{not json", encoding="utf-8")
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert cap is None
+    assert "nonnull_error_fields=1" in detail, detail
+    assert detail.count("ABC_stage_errors.json") == 1, detail
+
+
 def test_run_without_stage_error_record_falls_back_to_the_pattern(tmp_path):
     """A run that predates the record is scored exactly as before."""
     _write_json(tmp_path, "ABC_classified.json",
