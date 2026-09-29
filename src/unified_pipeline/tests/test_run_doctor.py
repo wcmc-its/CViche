@@ -1006,9 +1006,13 @@ def test_table_shape_flags_org_fabricated_from_the_name():
     """#889: name == org, org + an award word, or org + a year."""
     org = "Association for Educational Research"
     for name in (org, f"{org} Award", f"{org} Fellowship", f"{org} 2019",
-                 f"{org} Prize 2019"):
+                 f"{org} Prize 2019", f"{org} List"):
         ev = _honors_evidence(name, org)
         assert any("duplicated in name" in e for e in ev), name
+
+
+def test_table_shape_award_word_name_without_the_org_is_not_flagged():
+    assert _honors_evidence("Award 2019", "Some University") == []
 
 
 def test_table_shape_initials_and_dr_are_not_sentence_boundaries():
@@ -1016,6 +1020,11 @@ def test_table_shape_initials_and_dr_are_not_sentence_boundaries():
     blob; two real sentences still are."""
     name = "Dr. Robert D. & Alma W. Moreton Original Research Award for 1997"
     assert _honors_evidence(name, "Southern Medical Association", "1997") == []
+    # each guard alone: Dr. only, and single-letter initials only
+    assert _honors_evidence("Dr. Smith and Dr. Jones Award",
+                            "Some University") == []
+    assert _honors_evidence("R. D. Smith and A. W. Jones Award",
+                            "Some University") == []
     two = "Best Poster Award. Given at the meeting. Judged by peers."
     assert any("blob" in e for e in _honors_evidence(two, "Some University"))
 
