@@ -64,7 +64,9 @@ ID_CONVERTER_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
 # (retitled on publication) score 0.45-0.57.
 MIN_TITLE_WORD_OVERLAP = 0.4
 
-# Words shorter than this carry no signal ("of", "in", "a").
+# Words shorter than this carry no signal ("of", "in", "a"); 3 keeps short
+# content words such as "DNA" and "HIV". Preventive, no incident: a stopword
+# proxy, not a measured value.
 _MIN_TITLE_WORD_LEN = 3
 
 

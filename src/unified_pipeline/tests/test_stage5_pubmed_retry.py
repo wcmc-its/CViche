@@ -517,3 +517,8 @@ def test_rejection_records_the_rounded_overlap(monkeypatch):
     entry = _titled('Heron tides and coastal lunar cycles', pmid=PMID)  # 1 of 3
     [result] = enricher._enrich_by_pmid([(entry, PMID)])
     assert result['enrichment_rejected']['title_word_overlap'] == 0.33
+
+
+def test_three_letter_words_count():
+    # 'DNA' is signal: a 4-letter floor would score these two titles 0.
+    assert title_word_overlap('DNA repair', ['DNA damage']) == 0.5
