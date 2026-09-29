@@ -28,7 +28,7 @@ What is deliberately NOT fanned out:
   raw text would be lost;
 - an entry a stage-5 formatter already rendered whole (`formatted_text` /
   `formatted_citation`), which would repeat that rendering on every child;
-- an entry whose text is mostly words no field holds (`_MIN_TEXT_COVERAGE`);
+- an entry whose text is mostly words no field holds (`_fields_carry_text`);
 - an entry that carries more than one such list, or an item that carries a key
   outside the schema next to schema keys (web228's K4 `sessions: [{date, title,
   duration}]`: `title` is the session's own name and no K4 renderer reads it, so
@@ -57,6 +57,26 @@ _TEXT_SEGMENT_SEPARATOR = '\t'
 # to `_recover_unrendered_records`, which verifies pipe/tab record lines.
 _BUILT_TEXT_SEPARATOR = ' | '
 
+# How much of the entry's own wording the records must carry before the entry
+# is treated as a list of records rather than prose that has a list extracted
+# from it. A child renders from its fields, so a word no field holds is not
+# rendered: a paragraph on committee service that stage 4 reduced to six
+# committees (web185) or a service entry that also describes a grant and its
+# duties (web240) would lose the prose. Three tests, all on the entry's own
+# text against the string leaves of its `extracted_fields`:
+#   - no year may be absent from the fields (a lost date is never a qualifier);
+#   - at most `_MAX_UNCOVERED_WORDS` words absent (web218's "(1-3 committees/
+#     yr)" and "for Department of Anatomy & Neurobiology" are the qualifiers
+#     this tolerates: stage 4 does not carry them into any field);
+#   - at least `_MIN_TEXT_COVERAGE` of the words present.
+# Words are letters-only and at least `_MIN_WORD_CHARS` long, so "of"/"the" and
+# numbers cannot decide it. Measured on the 148-CV render set in the PR body.
+_MIN_TEXT_COVERAGE = 0.8
+_MAX_UNCOVERED_WORDS = 3
+_MIN_WORD_CHARS = 4
+_WORD_RE = re.compile(r'[a-z]+')
+_YEAR_RE = re.compile(r'\b(?:19|20)\d{2}\b')
+
 # Keys a stage-5 formatter writes for the WHOLE entry (5c teaching prose, 5d
 # citation). An entry that carries one already has a rendering of all its
 # records; a child copying it would repeat the whole list once per record.
@@ -66,19 +86,6 @@ _FORMATTED_KEYS = ('formatted_text', 'formatted_citation')
 # tab-separated roles ..."). Not a field of any record, so children do not
 # inherit it.
 _ENTRY_REMARK_KEY = 'notes'
-
-# How much of the entry's own wording the records must carry before the entry
-# is treated as a list of records rather than prose that has a list extracted
-# from it. A child renders from its fields, so words no field holds are not
-# rendered: a paragraph on committee service that stage 4 reduced to six
-# committees (web185) or a service entry that also describes a grant and its
-# duties (web240) would lose the prose. Words are letters-only and at least
-# `_MIN_WORD_CHARS` long, so dates, numbers and "of"/"the" cannot decide it.
-# Measured over the 148-CV render set: every entry that was a clean list scored
-# 0.82 or more, every prose one 0.61 or less (see the PR body).
-_MIN_TEXT_COVERAGE = 0.8
-_MIN_WORD_CHARS = 4
-_WORD_RE = re.compile(r'[a-z]+')
 
 _DATE_KEY_SUFFIX = '_date'
 _BARE_DATE_KEYS = frozenset({'date', 'year'})
@@ -106,12 +113,16 @@ def _leaf_text(value: Any) -> str:
     return '' if value is None else str(value)
 
 
-def _text_coverage(text: Any, fields: Mapping[str, Any]) -> float:
-    """The share of `text`'s words that some extracted field also holds."""
+def _fields_carry_text(text: Any, fields: Mapping[str, Any]) -> bool:
+    """Whether the extracted fields hold enough of `text` to render it from
+    them alone -- see `_MIN_TEXT_COVERAGE` for the three tests."""
+    held = _leaf_text(fields)
+    if set(_YEAR_RE.findall(str(text or ''))) - set(_YEAR_RE.findall(held)):
+        return False
     words = _words(str(text or ''))
-    if not words:
-        return 1.0
-    return len(words & _words(_leaf_text(fields))) / len(words)
+    uncovered = words - _words(held)
+    return (len(uncovered) <= _MAX_UNCOVERED_WORDS
+            and len(words - uncovered) >= _MIN_TEXT_COVERAGE * len(words))
 
 
 def _record_list(value: Any, schema: frozenset[str]) -> bool:
@@ -196,7 +207,7 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dic
     keys = _record_keys(fields, schema)
     if len(keys) != 1 or any(fields.get(k) for k in _FORMATTED_KEYS):
         return None
-    if _text_coverage(entry.get('text'), fields) < _MIN_TEXT_COVERAGE:
+    if not _fields_carry_text(entry.get('text'), fields):
         return None
     key = keys[0]
     items = fields[key]
