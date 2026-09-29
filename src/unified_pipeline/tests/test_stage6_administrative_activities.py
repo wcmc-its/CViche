@@ -504,6 +504,12 @@ class TestExtractedInstitutionRendersInNameCell:
             "start_date": "2010", "end_date": "2012"}))
         assert [r[0] for r in rows] == ["Northgate panel, Northgate University"]
 
+    def test_name_that_is_only_a_substring_of_an_institution_word_is_appended(self):
+        rows = _rows(self._entry({
+            "committee_name": "Board", "institution": "Dashboard Hospital",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Board, Dashboard Hospital"]
+
     @pytest.mark.parametrize("hedged", [
         "Northgate University (implied)", "Northgate University, implied",
         "inferred from context", "Not provided", "NOT  PROVIDED"])
