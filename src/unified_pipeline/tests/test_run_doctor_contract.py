@@ -565,6 +565,33 @@ def test_ten_of_the_surface_is_private():
     )
 
 
+def test_optional_registry_views_are_real_and_never_gate_the_lint(tmp_path, monkeypatch):
+    """#890: `classified_unrendered` takes stage 4 as an OPTIONAL view. The row
+    names a real view, the rule still runs when stage 4 is absent (it falls back
+    to the token test, no "skipped: missing stage_4" INFO under its key), and
+    receives the loaded stage-4 dict when it is present."""
+    import shutil
+    from test_run_doctor import _UID, _build_clean_run  # noqa: E402 (path set above)
+    mod = _module()
+    for spec in mod.LINT_REGISTRY:
+        for view in spec.optional:
+            assert view in mod._VIEW_LABELS, (spec.lint_id, view)
+            assert view not in spec.inputs, (spec.lint_id, view)
+    seen = []
+    monkeypatch.setattr(mod, "LINT_REGISTRY", _registry_with(
+        mod, classified_unrendered=lambda *args: seen.append(args) or []))
+
+    root = _build_clean_run(tmp_path)
+    mod.run_doctor(root, _UID)
+    assert len(seen[-1]) == 3 and isinstance(seen[-1][2], dict), "stage 4 not handed over"
+
+    shutil.rmtree(root / "stage_4_field_extraction")
+    payload = mod.run_doctor(root, _UID)
+    assert seen[-1][2] is None, "an absent stage 4 must still run the lint"
+    assert not [f for f in payload["findings"]
+                if f["lint"] == "classified_unrendered" and f["message"].startswith("skipped")]
+
+
 if __name__ == "__main__":
     test_known_lints_matches_what_the_lints_actually_emit()
     test_known_lints_is_in_dispatch_order()

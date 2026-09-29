@@ -28,7 +28,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    _classified_entry_rendered,
     _entry_rendered,
+    _fields_rendered,
+    _stage4_evidence,
     lint_classified_unrendered,
 )
 from unified_pipeline.doctor.shared import _haystacks  # noqa: E402
@@ -102,3 +105,271 @@ def test_lint_classified_unrendered_ignores_short_entries_in_the_evidence():
     assert "mckenna" not in evidence_text.lower()
     assert "quach" not in evidence_text.lower()
     assert "Distinguished Career" in evidence_text
+
+
+# --- #890: stage-4 field values and policy-withheld Personal Data entries ----
+
+_SPACER = ("p", "An unrelated paragraph that shares nothing with the entries.")
+
+
+def _entry(idx, code, text, end=None):
+    return {"element_idx_start": idx, "element_idx_end": end,
+            "element_type": "paragraph", "taxonomy_code": code, "text": text}
+
+
+def _record(idx, code, fields, success=True, end=None):
+    return {**_entry(idx, code, "", end), "extracted_fields": fields,
+            "extraction_success": success}
+
+
+# A licence line whose rendered form is a table row: state | number | date. No
+# verbatim piece and almost no raw token survives, so the token test alone
+# calls it unrendered (the web209 F1 shape).
+_LICENCE_TEXT = "Vermont #00000: Expires December 31, 2013 (renewal pending review)"
+_LICENCE_FIELDS = {"state_country": "Vermont", "license_number": "#00000",
+                   "expiration_date": "2013-12-31"}
+_LICENCE_ROW = ("table", "Vermont | #00000 | 12/31/2013\nVermont | #00000 | 12/31/2013")
+
+
+def _licence_inputs(blocks, fields=None, success=True):
+    stage3b = {"entries": [_entry(7, "F1", _LICENCE_TEXT)]}
+    stage4 = {"entries": [_record(7, "F1", fields or _LICENCE_FIELDS, success)]}
+    return stage3b, blocks, stage4
+
+
+def test_field_values_on_one_rendered_row_count_as_rendered():
+    stage3b, blocks, stage4 = _licence_inputs([_SPACER, _LICENCE_ROW])
+    assert lint_classified_unrendered(stage3b, blocks) != [], "control: token test alone fires"
+    assert lint_classified_unrendered(stage3b, blocks, stage4) == []
+
+
+def test_absent_stage4_keeps_the_token_test_verdict():
+    stage3b, blocks, _ = _licence_inputs([_SPACER, _LICENCE_ROW])
+    assert lint_classified_unrendered(stage3b, blocks, None) == \
+        lint_classified_unrendered(stage3b, blocks)
+
+
+def test_failed_extraction_is_not_field_evidence():
+    stage3b, blocks, stage4 = _licence_inputs([_SPACER, _LICENCE_ROW], success=False)
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_one_label_value_is_not_enough_the_1092_shape():
+    # A program-name label rendered alone: the detail was lost. One field value
+    # found on a line must never clear the entry.
+    stage3b = {"entries": [_entry(3, "B2", "Sample Clinical Program: Over 100 procedures performed")]}
+    stage4 = {"entries": [_record(3, "B2", {"program_name": "Sample Clinical Program",
+                                            "start_date": "2000-09"})]}
+    blocks = [_SPACER, ("p", "Sample Clinical Program")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_values_scattered_over_different_lines_are_not_one_record():
+    # The name on one line, the number on another: chance, not a rendered record.
+    stage3b, _, stage4 = _licence_inputs([])
+    blocks = [_SPACER, ("p", "Vermont Health and Science University"),
+              ("p", "Reference #00000 in an unrelated grant")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_a_year_alone_beside_a_short_value_is_not_enough():
+    # No value of RENDERED_FIELDS_MIN_VALUE_CHARS+ on the line: chance hits.
+    stage3b = {"entries": [_entry(4, "D3", "Ohio 2014 committee member and chair of the panel")]}
+    stage4 = {"entries": [_record(4, "D3", {"state": "Ohio", "year": "2014"})]}
+    blocks = [_SPACER, ("p", "Ohio | 2014")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_a_value_shared_by_other_records_is_boilerplate():
+    # The same long value on two records is repeated content, not evidence.
+    shared = "Weill Cornell Medicine, New York"
+    stage3b = {"entries": [_entry(1, "C", "Fellow, alpha unusual text one"),
+                           _entry(2, "C", "Resident, beta unusual text two")]}
+    stage4 = {"entries": [_record(1, "C", {"institution": shared, "start_date": "2001"}),
+                          _record(2, "C", {"institution": shared, "start_date": "2002"})]}
+    blocks = [_SPACER, ("p", f"{shared} | 2001")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_withheld_date_of_birth_and_marital_status_are_not_losses():
+    stage3b = {"entries": [
+        _entry(1, "A", "Marital Status: Married (Spouse Example) Children: (1), Child Example, 01/02/2000"),
+        _entry(2, "A", "Date of Birth: January 2, 1970")]}
+    assert lint_classified_unrendered(stage3b, [_SPACER]) == []
+
+
+def test_home_contact_without_a_colon_is_withheld_not_lost():
+    stage3b = {"entries": [_entry(
+        1, "A", "Jane Example M.D.\t123 Example St Anytown, New York 00000"
+                "\tHome Phone (555) 010-0100")]}
+    assert lint_classified_unrendered(stage3b, [_SPACER]) == []
+
+
+def test_an_unrendered_personal_data_entry_without_protected_data_still_fires():
+    stage3b = {"entries": [_entry(1, "A", _LONG_ENTRY)]}
+    assert len(lint_classified_unrendered(stage3b, [_SPACER])) == 1
+
+
+def test_policy_withheld_exclusion_is_personal_data_only():
+    # The same marital-status text under another code is judged as before.
+    text = "Marital Status: Married (Spouse Example) Children: (1), Child Example, 01/02/2000"
+    stage3b = {"entries": [_entry(1, "N1", text)]}
+    assert len(lint_classified_unrendered(stage3b, [_SPACER])) == 1
+
+
+def test_dates_shared_by_records_do_not_block_a_rendered_row():
+    # Two training records with the same years: dates are not content values,
+    # so the year both share neither vouches for nor blocks the row whose
+    # title and institution are on it (the web196 C shape).
+    stage3b = {"entries": [_entry(1, "C", "1992-1996 Postdoc Res. Assoc., Depts. Alpha, U. of Exampleton"),
+                           _entry(2, "C", "1992-1996 Clin. Res. Fellow, Dept. Beta, Example U.")]}
+    stage4 = {"entries": [
+        _record(1, "C", {"training_type": "Postdoctoral Research Associate",
+                         "institution": "Expanded Institute Name", "start_date": "1992", "end_date": "1996"}),
+        _record(2, "C", {"training_type": "Clinical Research Fellow",
+                         "institution": "Another Abbrev. Inst.", "start_date": "1992", "end_date": "1996"})]}
+    blocks = [_SPACER, ("table", "Postdoctoral Research Associate | Expanded Institute Name | 1992-1996")]
+    assert lint_classified_unrendered(stage3b, blocks, stage4) == []
+
+
+def test_authors_and_year_alone_do_not_render_a_citation():
+    # Only the author list and the year survive of authors/title/book/year: one
+    # of three content values is not a majority.
+    stage3b = {"entries": [_entry(6, "S4", "1. Doe J, Roe K, Poe L. Sample title of a chapter. In: Sample Book. 2020.")]}
+    stage4 = {"entries": [_record(6, "S4", {
+        "authors": "Doe J, Roe K, Poe L", "title": "Sample title of a chapter",
+        "book": "Sample Book of Examples", "year": "2020"})]}
+    blocks = [_SPACER, ("p", "1. Doe J, Roe K, Poe L. 2020.")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+    # Control: the same record with the title on the line as well is a majority.
+    blocks = [_SPACER, ("p", "1. Doe J, Roe K, Poe L. Sample title of a chapter. 2020.")]
+    assert lint_classified_unrendered(stage3b, blocks, stage4) == []
+
+
+def test_a_date_column_alone_does_not_render_a_degree():
+    # Degree and institution lost; the rendered line is only the dates,
+    # "1987-07" included.
+    stage3b = {"entries": [_entry(8, "B1", "M.D., Example University, July 1987 to July 1994 (Exampletown, Ohio program)")]}
+    stage4 = {"entries": [_record(8, "B1", {
+        "degree": "M.D.", "institution": "Example University",
+        "start_date": "1987-07", "end_date": "1994"})]}
+    blocks = [_SPACER, ("p", "07/1987-07/1994")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_a_record_with_fewer_than_two_content_values_falls_through_to_the_token_test():
+    # One content value (the rest are dates): never field evidence.
+    stage3b = {"entries": [_entry(9, "B1", _UNSHARED_TEXT)]}
+    stage4 = {"entries": [_record(9, "B1", {"degree": "Doctorate of Example",
+                                            "start_date": "1987-07", "end_date": "1994"})]}
+    blocks = [_SPACER, ("p", "Doctorate of Example 1987-07 1994")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_month_word_dates_are_not_content_values():
+    # "July 1987" squashes to "july1987"; the date test must see it unsquashed.
+    stage3b = {"entries": [_entry(10, "B1", "M.D., Example University, 1987 until 1994 (Exampletown, Ohio program)")]}
+    stage4 = {"entries": [_record(10, "B1", {
+        "degree": "M.D.", "institution": "Example University",
+        "start_date": "July 1987", "end_date": "July 1994", "issue_date": "June 1990"})]}
+    blocks = [_SPACER, ("p", "July 1987 June 1990 July 1994")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_template_scaffolding_is_not_a_content_value():
+    # The template's own "Title, include area of training" prompt sits on every
+    # rendered training row; it must not count toward the majority.
+    stage3b = {"entries": [_entry(11, "C", _UNSHARED_TEXT)]}
+    stage4 = {"entries": [_record(11, "C", {
+        "training_type": "Title, include area of training",
+        "institution": "Distinctive Example Institute",
+        "specialty": "Second Distinctive Specialty"})]}
+    blocks = [_SPACER, ("table", "Title, include area of training | Distinctive Example Institute")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_a_short_value_shared_by_records_still_counts():
+    # Only values of RENDERED_FIELDS_MIN_VALUE_CHARS+ can be boilerplate; a
+    # state both records carry is still one of each record's content values.
+    stage3b = {"entries": [_entry(1, "F1", _UNSHARED_TEXT), _entry(2, "F1", _UNSHARED_TEXT + " two")]}
+    stage4 = {"entries": [
+        _record(1, "F1", {"state_country": "Ohio", "license_number": "#11111"}),
+        _record(2, "F1", {"state_country": "Ohio", "license_number": "#22222"})]}
+    blocks = [_SPACER, ("table", "Ohio | #11111\nOhio | #22222")]
+    assert lint_classified_unrendered(stage3b, blocks, stage4) == []
+
+
+# A text no rendered line shares a token or a piece with, so only field values
+# can vouch for it.
+_UNSHARED_TEXT = "Zqxjv wkplm unusual passage nobody rendered anywhere"
+
+
+def test_a_value_that_is_template_scaffolding_is_not_a_distinctive_value():
+    # "Postdoctoral Training" is a template heading. Beside a year on one row
+    # it would be two values on a line; the template heading alone is not
+    # evidence the entry rendered (#744's twin for fields).
+    stage3b = {"entries": [_entry(1, "C", _UNSHARED_TEXT)]}
+    stage4 = {"entries": [_record(1, "C", {"program": "Postdoctoral Training",
+                                           "start_date": "2014"})]}
+    blocks = [_SPACER, ("table", "Postdoctoral Training | 2014")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_a_short_value_matches_on_a_word_boundary_not_inside_another_word():
+    # "MA" is inside "pharmacology": one real value on the row, not two.
+    stage3b = {"entries": [_entry(1, "D3", _UNSHARED_TEXT)]}
+    stage4 = {"entries": [_record(1, "D3", {"title": "Distinctive Example Title",
+                                            "state": "MA"})]}
+    inside = [_SPACER, ("table", "Distinctive Example Title | pharmacology")]
+    assert len(lint_classified_unrendered(stage3b, inside, stage4)) == 1
+    beside = [_SPACER, ("table", "Distinctive Example Title | MA")]
+    assert lint_classified_unrendered(stage3b, beside, stage4) == []
+
+
+def test_records_sharing_a_start_index_pair_by_their_end_index():
+    # Both records start at 5; the entry spans 5-9. The record that rendered
+    # is 5-6's, listed last: pairing by start alone would pick it.
+    stage3b = {"entries": [_entry(5, "F1", _UNSHARED_TEXT, end=9)]}
+    stage4 = {"entries": [
+        _record(5, "F1", {"state_country": "Ohio", "license_number": "#99999"}, end=9),
+        _record(5, "F1", _LICENCE_FIELDS, end=6)]}
+    assert len(lint_classified_unrendered(stage3b, [_SPACER, _LICENCE_ROW], stage4)) == 1
+    # And the other way round: the entry's own record rendered, a sibling
+    # sharing the start index (listed last) did not.
+    stage4 = {"entries": [
+        _record(5, "F1", _LICENCE_FIELDS, end=9),
+        _record(5, "F1", {"state_country": "Ohio", "license_number": "#99999"}, end=6)]}
+    assert lint_classified_unrendered(stage3b, [_SPACER, _LICENCE_ROW], stage4) == []
+
+
+def test_two_records_on_one_span_are_ambiguous_and_give_no_evidence():
+    stage3b = {"entries": [_entry(5, "F1", _UNSHARED_TEXT, end=9)]}
+    stage4 = {"entries": [_record(5, "F1", {"note": "something else entirely"}, end=9),
+                          _record(5, "F1", _LICENCE_FIELDS, end=9)]}
+    assert len(lint_classified_unrendered(stage3b, [_SPACER, _LICENCE_ROW], stage4)) == 1
+
+
+def test_boilerplate_is_counted_over_every_record_including_ambiguous_ones():
+    # The institution sits on two records that share a span (so neither pairs
+    # with an entry) and on the entry's own record: shared by three, boilerplate.
+    inst = "Weill Cornell Medicine, New York"
+    stage3b = {"entries": [_entry(1, "C", _UNSHARED_TEXT, end=2)]}
+    stage4 = {"entries": [
+        _record(1, "C", {"title": "Distinctive Example Title", "institution": inst}, end=2),
+        _record(5, "C", {"institution": inst}, end=9),
+        _record(5, "C", {"institution": inst, "note": "other"}, end=9)]}
+    blocks = [_SPACER, ("table", f"Distinctive Example Title | {inst}")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_a_withheld_entry_is_not_judged_even_when_its_field_values_rendered():
+    # Withheld -> None (never judged) must come BEFORE the field check: the
+    # entry may not vouch for its code by a True verdict either.
+    text = "Marital Status: Married (Spouse Example)"
+    entry = _entry(1, "A", text)
+    stage4 = _stage4_evidence({"entries": [_record(
+        1, "A", {"label": "Marital Status", "value": "Married Spouse Example"})]})
+    h = _haystacks([("table", "Marital Status | Married Spouse Example")])
+    assert _fields_rendered(entry, h.text.split("\x00"), stage4) is True, "control"
+    assert _classified_entry_rendered(entry, h, h.text.split("\x00"),
+                                      frozenset(), stage4) is None

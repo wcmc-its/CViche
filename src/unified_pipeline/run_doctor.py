@@ -787,10 +787,12 @@ def _run_lint(lint_id: str, rule: Callable[..., list[dict]],
 class LintSpec(NamedTuple):
     """One row of the lint registry: the key the lint emits, the rule that
     emits it, and the loaded-input views it takes, in the rule's positional
-    order."""
+    order. `optional` views are passed after `inputs` and may be None: the lint
+    has a fallback without them, so their absence is not a skip (#890)."""
     lint_id: str
     rule: Callable[..., list[dict]]
     inputs: tuple[str, ...]
+    optional: tuple[str, ...] = ()
 
 
 #: The loader LABEL each input view is checked under by `_ready` -- the key
@@ -829,7 +831,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("missed_headers", lint_missed_headers, ("candidates", "stage_1a", "stage_2")),
     LintSpec("bucket_status", lint_bucket_status, ("stage_4", "blocks")),
     LintSpec("under_extraction", lint_under_extraction, ("stage_4",)),
-    LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks")),
+    LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks"),
+             optional=("stage_4",)),
     LintSpec("taxonomy_code_coverage", lint_taxonomy_code_coverage, ("stage_3b",)),
     LintSpec("stage3b_fallback_ratio", lint_stage3b_fallback_ratio, ("stage_3b",)),
     LintSpec("output_hygiene", lint_output_hygiene, ("blocks",)),
@@ -1040,7 +1043,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
         inputs = {_VIEW_LABELS[view]: views[view] for view in spec.inputs}
         if ready(spec.lint_id, **inputs):
             _run_lint(spec.lint_id, spec.rule,
-                      [views[view] for view in spec.inputs], findings)
+                      [views[view] for view in spec.inputs + spec.optional], findings)
 
     _run_hand_dispatched_gates(views, paths, uid, unreadable, findings, ready)
 
