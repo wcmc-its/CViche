@@ -62,6 +62,7 @@ never "human-verified correct."
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -780,6 +781,38 @@ INSTRUCTION_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
+#: The WCM template stage 6 renders every CV into (`TEMPLATE_PATH` in
+#: `stage_6_word_template.py`). Not imported from there: that module
+#: `sys.exit`s at import when python-docx is missing, which would defeat this
+#: scorer's graceful degradation. The 2020/2012 files in `key_files/` are not
+#: render targets, so only this revision's paragraphs are excluded.
+_TEMPLATE_DOCX_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
+)
+
+
+def _normalize_whitespace(text: str) -> str:
+    """Collapse whitespace runs to one space and strip the ends."""
+    return " ".join(text.split())
+
+
+@functools.cache
+def _template_body_paragraph_texts() -> frozenset[str]:
+    """Whitespace-normalized text of every non-blank body paragraph of the
+    template stage 6 renders into (#822 finding 1).
+
+    Stage 6 keeps the template's own instruction paragraphs on purpose, so a
+    rendered paragraph identical to one of these is not a prompt echo.
+    A missing template raises (python-docx's own FileNotFoundError): it is a
+    checked-in asset, and an empty set would silently undo the exclusion.
+    """
+    from docx import Document
+    template_doc = Document(_TEMPLATE_DOCX_PATH)
+    return frozenset(
+        _normalize_whitespace(p.text) for p in template_doc.paragraphs if p.text.strip()
+    )
+
 
 def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     """Raw-tab and prompt-echo (template instruction) artifacts in the docx.
@@ -814,6 +847,19 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
       versus the instruction markers' dozens of legitimate hits -- so any
       other tab inside a cell is still a meaningful signal of a
       raw-formatting artifact leaking into the docx.
+    - A body paragraph that matches ``INSTRUCTION_MARKERS`` is still not
+      counted as an echo if its whitespace-normalized text exactly equals
+      one of the template's own body paragraphs
+      (`_template_body_paragraph_texts`, #822 finding 1). Stage 6 keeps the
+      template's 20 instruction paragraphs verbatim in every rendered CV on
+      purpose, and every one of them matches ``INSTRUCTION_MARKERS`` by
+      construction (that is how the pattern was narrowed) -- without this
+      exclusion, every run counts the template's own kept text as a defect.
+      A marker hit that is NOT byte-identical to a template paragraph still
+      counts: a marker phrase originating in the template's own table cells
+      (e.g. "Date (yyyy-yyyy)") landing as a body paragraph, or a template
+      instruction line altered by the pipeline before being kept, are both
+      still genuine signals, not the template's own untouched text.
 
     Headers and footers are not scanned either way: stage 6 never writes to
     them.
@@ -822,13 +868,18 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     if doc is None:
         return 0.5, reason, None
 
-    raw_tab_paragraphs = echo_count = 0
+    template_paragraphs = _template_body_paragraph_texts()
+
+    raw_tab_paragraphs = echo_count = template_echo_excluded = 0
     for p in doc.paragraphs:
         text = p.text
         if "\t" in text:
             raw_tab_paragraphs += 1
         if INSTRUCTION_MARKERS.search(text):
-            echo_count += 1
+            if _normalize_whitespace(text) in template_paragraphs:
+                template_echo_excluded += 1
+            else:
+                echo_count += 1
 
     raw_tab_cells = _count_raw_tab_cells(doc.tables)
     total_raw_tab = raw_tab_paragraphs + raw_tab_cells
@@ -836,7 +887,8 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     fraction = clamp(0.6 * (total_raw_tab / 20) + 0.4 * (echo_count / 15))
     detail = (
         f"raw_tab_paragraphs={raw_tab_paragraphs}; raw_tab_cells={raw_tab_cells}; "
-        f"echo_paragraphs={echo_count}; fraction={fraction:.3f}"
+        f"echo_paragraphs={echo_count}; template_echo_excluded={template_echo_excluded}; "
+        f"fraction={fraction:.3f}"
     )
     return fraction, detail, None
 

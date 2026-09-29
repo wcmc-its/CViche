@@ -570,16 +570,12 @@ def test_broken_format_legitimate_prose_not_counted_as_echo(tmp_path, prose):
 
 
 @pytest.mark.parametrize("instruction", [
-    # Verbatim body-paragraph instruction lines from the pristine WCM
-    # template, one per alternation the narrowed pattern keeps.
-    "Current Employment Status (Please choose one, list here, delete the others):",
-    "Part-time salaried by Cornell (show percentage of full time effort, e.g., 50%)",
-    "Please include medical and scientific societies.)",
-    "Clinical teaching (bedside teaching, teaching rounds, teaching in operating "
-    "room, precepting in clinic, morning report, etc.)",
-    "Duplicate table below as needed. For each funding vehicle, please include the following:",
+    # Marker hits that are NOT byte-identical to a template body paragraph
+    # (a truncated/altered quote of one, or a marker phrase that only
+    # occurs in the template's own table CELLS -- see the module docstring's
+    # per-marker cell locations) -- still genuine signals after #822
+    # finding 1, so still counted.
     "*Please annotate multi-investigator, program project, center grants (P50 etc.)",
-    "Please summarize as for current projects: source-type, project title, dates, your role.",
     "Please list trainees and faculty that you have formally supervised",
     "Entries should follow standard journal format. Please also include PMCID: PMC",
     "If yes, please provide Visa type (Examples: J-1, H-1B, E-3, TN, etc.):",
@@ -587,10 +583,63 @@ def test_broken_format_legitimate_prose_not_counted_as_echo(tmp_path, prose):
     "DEA number: (optional)",
     "Type of Supervision (research, clinical, teaching, leadership)",
 ])
-def test_broken_format_template_instruction_line_counted_as_echo(tmp_path, instruction):
+def test_broken_format_non_template_instruction_line_counted_as_echo(tmp_path, instruction):
     _make_docx([instruction]).save(tmp_path / "out.docx")
     fraction, detail, cap = score_broken_format(tmp_path)
     assert "echo_paragraphs=1" in detail, detail
+    assert "template_echo_excluded=0" in detail, detail
+
+
+# ------------------------------------------------------------------ #822 F1
+# #822 finding 1: 20 of the 21 echo_paragraphs YTPMZK scored were
+# byte-identical (after whitespace normalization) to one of the template's
+# own 20 body instruction paragraphs -- stage 6 keeps them verbatim on
+# purpose, so every run lost ~5.3 of 10 points on this dimension for the
+# template's own text. A marker hit is now excluded when its
+# whitespace-normalized text exactly equals a template body paragraph's.
+# ------------------------------------------------------------------ #822 F1
+
+@pytest.mark.parametrize("instruction", [
+    # Verbatim body-paragraph instruction lines from the pristine WCM
+    # template (one per alternation the narrowed pattern keeps that also
+    # has an exact body-paragraph match, not only a cell-text match).
+    "Current Employment Status (Please choose one, list here, delete the others):",
+    "Part-time salaried by Cornell (show percentage of full time effort, e.g., 50%)",
+    "Please include medical and scientific societies.)",
+    "Clinical teaching (bedside teaching, teaching rounds, teaching in operating "
+    "room, precepting in clinic, morning report, etc.)",
+    "Duplicate table below as needed. For each funding vehicle, please include the following:",
+    "Please summarize as for current projects: source-type, project title, dates, your role.",
+])
+def test_broken_format_verbatim_template_paragraph_excluded_from_echo(tmp_path, instruction):
+    """A body paragraph identical to one of the template's own kept
+    instruction paragraphs is not counted as a prompt echo (#822 finding
+    1) -- it still matches INSTRUCTION_MARKERS (that's how the pattern was
+    narrowed), it is just not counted as a defect."""
+    _make_docx([instruction]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=0" in detail, detail
+    assert "template_echo_excluded=1" in detail, detail
+
+
+def test_broken_format_verbatim_template_paragraph_whitespace_variant_still_excluded(tmp_path):
+    """The match is on whitespace-NORMALIZED text: a stray leading space and
+    a doubled internal space must not defeat the #822 finding 1 exclusion."""
+    _make_docx([" Please include  medical and scientific societies.) "]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=0" in detail, detail
+    assert "template_echo_excluded=1" in detail, detail
+
+
+def test_broken_format_altered_template_paragraph_still_counted_as_echo(tmp_path):
+    """A near-miss -- a template instruction line with content appended --
+    is NOT byte-identical to the template's own paragraph, so it is still a
+    genuine echo signal, not excluded."""
+    _make_docx(["Please include medical and scientific societies.) and honor societies"]
+               ).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=1" in detail, detail
+    assert "template_echo_excluded=0" in detail, detail
 
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "key_files" / \
@@ -608,6 +657,45 @@ def test_broken_format_narrowed_pattern_still_matches_every_template_instruction
     matched = [p.text for p in doc.paragraphs if qs.INSTRUCTION_MARKERS.search(p.text)]
     assert len(matched) == 20, matched
     assert all(p.strip() for p in matched)
+
+
+@pytest.mark.skipif(not _TEMPLATE.exists(), reason="pristine WCM template not checked out")
+def test_broken_format_every_matched_template_instruction_is_excluded_from_echo():
+    """#822 finding 1's real-farm contract: every one of the template's own
+    20 instruction paragraphs -- read from the actual checked-in template,
+    not retyped -- is in the exclusion set `_template_body_paragraph_texts`
+    builds, so none of them is ever counted as a prompt echo when stage 6
+    keeps them verbatim in a rendered CV."""
+    doc = Document(_TEMPLATE)
+    matched = [p.text for p in doc.paragraphs if qs.INSTRUCTION_MARKERS.search(p.text)]
+    excluded = qs._template_body_paragraph_texts()
+    assert len(matched) == 20, matched
+    for text in matched:
+        assert qs._normalize_whitespace(text) in excluded, text
+
+
+@pytest.mark.skipif(not _TEMPLATE.exists(), reason="pristine WCM template not checked out")
+def test_template_body_paragraph_texts_cached_across_calls():
+    """Built once, memoized at module level: two calls return the identical
+    frozenset object, not two independently re-parsed copies."""
+    first = qs._template_body_paragraph_texts()
+    second = qs._template_body_paragraph_texts()
+    assert first is second
+
+
+def test_template_body_paragraph_texts_missing_file_raises(tmp_path, monkeypatch):
+    """#822 finding 1's 'do not swallow' contract: the WCM template is a
+    checked-in repo asset, not run output, so a missing file means a broken
+    checkout and must raise -- never silently return an empty exclusion set,
+    which would silently un-fix finding 1 and score every run as if the
+    template had no instruction paragraphs of its own."""
+    monkeypatch.setattr(qs, "_TEMPLATE_DOCX_PATH", tmp_path / "missing.docx")
+    qs._template_body_paragraph_texts.cache_clear()
+    try:
+        with pytest.raises(FileNotFoundError):
+            qs._template_body_paragraph_texts()
+    finally:
+        qs._template_body_paragraph_texts.cache_clear()
 
 
 # --------------------------------------------------------------------- D16
