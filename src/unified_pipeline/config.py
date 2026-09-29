@@ -66,17 +66,21 @@ DEFAULT_MODEL = "us.anthropic.claude-sonnet-4-6"
 # LLM API pricing (per 1M tokens) -- nested by provider
 PRICING = {
     "bedrock": {
-        # Anthropic Claude models -- per 1M tokens, identical to the direct
-        # Anthropic API. Keyed by the BARE model ID; calculate_cost() strips
-        # region inference-profile prefixes (us./eu./apac./global.) before
-        # lookup, so "us.anthropic.claude-sonnet-4-6" resolves here.
+        # Anthropic Claude models -- per 1M tokens, at Bedrock's REGIONAL
+        # (us. cross-region inference) rates, which are 1.1x the direct
+        # Anthropic API / Bedrock "global." rates. CViche calls us. profiles
+        # only, and the September 2026 AWS bill charged exactly these rates
+        # on every line item (e.g. Sonnet 4.6 input $3.30/M, Haiku 4.5 output
+        # $5.50/M). Keyed by the BARE model ID; calculate_cost() strips region
+        # inference-profile prefixes (us./eu./apac./global.) before lookup, so
+        # "us.anthropic.claude-sonnet-4-6" resolves here.
         "anthropic.claude-sonnet-4-6": {
-            "input": 3.000,
-            "output": 15.000,
+            "input": 3.300,
+            "output": 16.500,
         },
         "anthropic.claude-haiku-4-5": {
-            "input": 1.000,
-            "output": 5.000,
+            "input": 1.100,
+            "output": 5.500,
         },
         # Bedrock requires the FULL versioned inference-profile id for Haiku 4.5
         # (the bare alias above is rejected by the API), and _normalize_model_id
@@ -85,16 +89,16 @@ PRICING = {
         # Same price as the bare entry; keep both in sync. (Sonnet 4.6 needs no
         # dated variant -- its inference-profile id carries no date.)
         "anthropic.claude-haiku-4-5-20251001-v1:0": {
-            "input": 1.000,
-            "output": 5.000,
+            "input": 1.100,
+            "output": 5.500,
         },
         "anthropic.claude-opus-4-7": {
-            "input": 15.000,
-            "output": 75.000,
+            "input": 5.500,
+            "output": 27.500,
         },
         "anthropic.claude-opus-4-6": {
-            "input": 15.000,
-            "output": 75.000,
+            "input": 5.500,
+            "output": 27.500,
         },
         # Older Claude 3.x generation -- kept for historical cost calculations
         "anthropic.claude-3-haiku-20240307-v1:0": {
@@ -282,8 +286,11 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
 # 0.075 rescaled by blended(anthropic.claude-sonnet-4-6) / blended(gpt-4o) =
 # 0.075 * (5.4 / 4.0) = 0.10125, so estimate_cost_per_1k_doc_tokens() returns
 # the same value for the default config as it did before the re-anchor.
-# Recalibrate from real run-cost data as runs accumulate.
-COST_ESTIMATE_ANCHOR_RATE = 0.10125
+# That rescale used Sonnet 4.6's list price; PRICING now holds the us.
+# regional rate CViche is actually billed (1.1x), so the anchor carries the
+# same 1.1x: 0.10125 * 1.1 = 0.111375. Recalibrate from real run-cost data
+# as runs accumulate.
+COST_ESTIMATE_ANCHOR_RATE = 0.111375
 COST_ESTIMATE_ANCHOR_MODEL = ("bedrock", "anthropic.claude-sonnet-4-6")
 # Fraction of pipeline LLM tokens that are input (prompts/schemas dominate).
 COST_ESTIMATE_INPUT_SHARE = 0.8

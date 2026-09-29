@@ -103,13 +103,15 @@ Before the pipeline can call the model:
 
 ## Cost
 
-Bedrock and the direct Anthropic API charge the **same per-token price**, including prompt caching. Per-1M-token rates (mirrored in `PRICING` in `config.py`):
+Bedrock bills `us.` (regional cross-region inference) profiles at **1.1× the direct Anthropic API price**; only `global.` profiles bill at the API price, and CViche uses `us.` profiles only (no `global.`, for data residency). The September 2026 AWS bill charged exactly the regional rates on every line item. Per-1M-token rates as billed (mirrored in `PRICING` in `config.py`):
 
 | Model | Input | Output |
 |---|---|---|
-| Claude Sonnet 4.6 (active) | $3.00 | $15.00 |
-| Claude Haiku 4.5 (downgrade option) | $1.00 | $5.00 |
-| Claude Opus 4.7 | $15.00 | $75.00 |
+| Claude Sonnet 4.6 (active) | $3.30 | $16.50 |
+| Claude Haiku 4.5 (stage 3b) | $1.10 | $5.50 |
+| Claude Opus 4.7 | $5.50 | $27.50 |
+
+Cache reads (0.1× input) and writes (1.25× input) scale from these regional input prices.
 
 `calculate_cost()` strips region inference-profile prefixes (`us.` / `eu.` / `apac.` / `global.`) before the `PRICING` lookup, so `us.anthropic.claude-sonnet-4-6` resolves correctly. If a model is missing from `PRICING`, cost is computed at the Bedrock default model's rates (Claude Sonnet 4.6) and a one-time warning is logged — **add new models to `PRICING` whenever the configured model changes**, or recorded run costs will be wrong.
 

@@ -16,9 +16,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from unified_pipeline.config import (
+    COST_ESTIMATE_ANCHOR_RATE,
     DEFAULT_MODEL,
     PRICING,
     calculate_cost,
+    estimate_cost_per_1k_doc_tokens,
     get_stage_config,
     reload_config,
 )
@@ -190,10 +192,14 @@ stages:
 
 def test_pricing_nested_structure():
     """PRICING dict is nested: provider -> model -> input/output."""
-    assert PRICING["bedrock"]["anthropic.claude-sonnet-4-6"]["input"] == 3.000
-    assert PRICING["bedrock"]["anthropic.claude-sonnet-4-6"]["output"] == 15.000
-    assert PRICING["bedrock"]["anthropic.claude-haiku-4-5"]["input"] == 1.000
-    assert PRICING["bedrock"]["anthropic.claude-haiku-4-5"]["output"] == 5.000
+    # us. regional (cross-region inference) rates, as billed.
+    assert PRICING["bedrock"]["anthropic.claude-sonnet-4-6"]["input"] == 3.300
+    assert PRICING["bedrock"]["anthropic.claude-sonnet-4-6"]["output"] == 16.500
+    assert PRICING["bedrock"]["anthropic.claude-haiku-4-5"]["input"] == 1.100
+    assert PRICING["bedrock"]["anthropic.claude-haiku-4-5"]["output"] == 5.500
+    # Opus 4.6/4.7 list at $5/$25 (not the Opus 4/4.1 $15/$75); regional 1.1x.
+    for opus in ("anthropic.claude-opus-4-6", "anthropic.claude-opus-4-7"):
+        assert PRICING["bedrock"][opus] == {"input": 5.500, "output": 27.500}
 
 
 # ---------------------------------------------------------------------------
@@ -202,24 +208,24 @@ def test_pricing_nested_structure():
 
 def test_calculate_cost_with_provider():
     """calculate_cost accepts provider parameter for multi-provider pricing."""
-    # 1M input + 1M output tokens at anthropic.claude-haiku-4-5: 1.000 + 5.000 = 6.000
+    # 1M input + 1M output tokens at anthropic.claude-haiku-4-5: 1.100 + 5.500 = 6.600
     cost = calculate_cost(1_000_000, 1_000_000, model="anthropic.claude-haiku-4-5", provider="bedrock")
-    assert cost == pytest.approx(6.000)
+    assert cost == pytest.approx(6.600)
 
 
 def test_calculate_cost_backward_compat():
     """calculate_cost still works without model/provider args (falls back to
     DEFAULT_MODEL on the bedrock provider)."""
     cost = calculate_cost(1_000_000, 1_000_000)
-    # DEFAULT_MODEL is us.anthropic.claude-sonnet-4-6: 3.000 + 15.000 = 18.000
-    assert cost == pytest.approx(18.000)
+    # DEFAULT_MODEL is us.anthropic.claude-sonnet-4-6: 3.300 + 16.500 = 19.800
+    assert cost == pytest.approx(19.800)
 
 
 def test_calculate_cost_unknown_model_fallback():
     """Unknown model falls back to the Bedrock default model's pricing without error."""
     cost = calculate_cost(1_000_000, 1_000_000, model="unknown-model", provider="bedrock")
-    # Should fall back to DEFAULT_MODEL (Sonnet 4.6): 3.000 + 15.000 = 18.000
-    assert cost == pytest.approx(18.000)
+    # Should fall back to DEFAULT_MODEL (Sonnet 4.6): 3.300 + 16.500 = 19.800
+    assert cost == pytest.approx(19.800)
 
 
 def test_bedrock_region_prefix_is_stripped():
@@ -234,10 +240,19 @@ def test_bedrock_region_prefix_is_stripped():
         1_000_000, 1_000_000,
         model="us.anthropic.claude-haiku-4-5-20251001-v1:0", provider="bedrock",
     )
-    # Haiku 4.5: 1.000 + 5.000 = 6.000, via the region-prefix-stripped match
-    # -- not the Sonnet-4.6 DEFAULT_MODEL fallback (18.000), which the
+    # Haiku 4.5: 1.100 + 5.500 = 6.600, via the region-prefix-stripped match
+    # -- not the Sonnet-4.6 DEFAULT_MODEL fallback (19.800), which the
     # previous version of this test could not distinguish from a real fix.
-    assert cost == pytest.approx(6.000)
+    assert cost == pytest.approx(6.600)
+
+
+def test_cost_estimate_anchor_is_at_billed_regional_rate():
+    """The /estimate anchor carries the same 1.1x us.-regional premium as
+    PRICING: 0.10125 (list-price anchor) * 1.1. For the anchor model itself
+    the rescale ratio is 1, so the estimate equals the anchor."""
+    assert COST_ESTIMATE_ANCHOR_RATE == pytest.approx(0.10125 * 1.1)
+    rate = estimate_cost_per_1k_doc_tokens(model="us.anthropic.claude-sonnet-4-6", provider="bedrock")
+    assert rate == pytest.approx(0.111375)
 
 
 def test_dated_haiku_4_5_id_prices_as_haiku_not_fallback():
@@ -249,6 +264,6 @@ def test_dated_haiku_4_5_id_prices_as_haiku_not_fallback():
     misstated."""
     model = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     cost = calculate_cost(1_000_000, 1_000_000, model=model, provider="bedrock")
-    # Haiku 4.5: 1.000 + 5.000 = 6.000; the Sonnet-4-6 fallback would be 18.000.
-    assert cost == pytest.approx(6.000)
-    assert cost != pytest.approx(18.000)
+    # Haiku 4.5: 1.100 + 5.500 = 6.600; the Sonnet-4-6 fallback would be 19.800.
+    assert cost == pytest.approx(6.600)
+    assert cost != pytest.approx(19.800)
