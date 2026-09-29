@@ -233,6 +233,17 @@ def _target_surname(target_name: str) -> str:
     return target_name
 
 
+# A stage-4 target_name longer than this, or holding a colon, is not an author
+# name (the corpus has a book title there) and is skipped for the owner surname.
+_MAX_TARGET_NAME_TOKENS = 4
+
+
+def _looks_like_author_name(target_name: str | None) -> bool:
+    """False for a blank target_name or one shaped like a title, not a name."""
+    return bool(target_name) and ':' not in target_name \
+        and len(target_name.split()) <= _MAX_TARGET_NAME_TOKENS
+
+
 def _citation_author_split(citation: str, target_name: str | None,
                            cv_owner_last_name: str) -> tuple[str, str, str]:
     """Split a citation around the author name that should render bold.
@@ -250,7 +261,8 @@ def _citation_author_split(citation: str, target_name: str | None,
 
     Prefers `target_name` when it appears in the citation as written; then
     tries its surname alone, so "Quill J" still finds "Quill JD"; otherwise
-    falls back to `cv_owner_last_name`. A surname match takes trailing capital
+    falls back to `cv_owner_last_name`. A `target_name` shaped like a title
+    (a colon, or more than `_MAX_TARGET_NAME_TOKENS` words) is skipped. A surname match takes trailing capital
     initials, e.g. "Wende ME", "Wende M", and any leading particles ("de la
     Cruz M"). The comma form ("Wende, M") bolds only the surname, pinned by
     test_citation_author_split_additional_dimensions.
@@ -259,6 +271,8 @@ def _citation_author_split(citation: str, target_name: str | None,
     citation's own text. When nothing matches, `name_to_bold` is '' and the
     whole citation is in `before`.
     """
+    if not _looks_like_author_name(target_name):
+        target_name = None
     span = _find_name_span(citation, target_name) if target_name else None
     if span is None and target_name:
         span = _find_surname_span(citation, _target_surname(target_name))
