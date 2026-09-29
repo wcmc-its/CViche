@@ -351,8 +351,13 @@ def test_withheld_comment_names_appendix_when_the_residual_rendered_there(tmp_pa
     bodies = [b for _, b in _comments(tmp_path / "out.docx") if " \u2022 " in b]
     assert len(bodies) == 1
     lines = [ln for ln in bodies[0].splitlines() if ln.startswith(" \u2022 ")]
-    assert any(ln.endswith("Appendix)") for ln in lines), lines
-    assert any(ln.endswith("Personal Data)") for ln in lines), (
+    # Per category, not "any": an off-by-one in the entry index would swap
+    # the two labels and still satisfy an any()-shaped check.
+    phone = [ln for ln in lines if "home address / phone" in ln]
+    dob = [ln for ln in lines if "date of birth" in ln]
+    assert len(phone) == 1 and len(dob) == 1, lines
+    assert phone[0].endswith("Appendix)"), phone
+    assert dob[0].endswith("Personal Data)"), (
         "the bare Date of Birth has no residual and must keep its label")
 
 
