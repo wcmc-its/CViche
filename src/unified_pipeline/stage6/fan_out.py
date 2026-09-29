@@ -180,9 +180,8 @@ def _rendered_text(key: str, value: object, code: str) -> str:
     """What the renderer writes for one field: a date as the code's date column
     shows it (year only for most, so a month the text names is not held), any
     other value as it stands."""
-    if _is_date_key(key) and not isinstance(value, (Mapping, list)):
-        return format_date_for_section(str(value or ''), code, is_end_date='end' in key)
-    return _leaf_text(value)
+    text = _leaf_text(value)
+    return format_date_for_section(text, code) if _is_date_key(key) else text
 
 
 def _fields_carry_text(entry: Mapping[str, Any],
