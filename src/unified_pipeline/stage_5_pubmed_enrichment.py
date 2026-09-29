@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime
 
+from unified_pipeline.core.pubmed_xml import ID_TYPE_DOI, ID_TYPE_PMC, own_article_id
+
 logger = logging.getLogger(__name__)
 
 
@@ -519,14 +521,8 @@ class PubMedEnricher:
                     pass
 
             # DOI and PMCID
-            doi = ''
-            pmcid = ''
-            for id_elem in article.findall('.//ArticleId'):
-                id_type = id_elem.get('IdType')
-                if id_type == 'doi' and id_elem.text:
-                    doi = id_elem.text.strip()
-                elif id_type == 'pmc' and id_elem.text:
-                    pmcid = id_elem.text.strip()
+            doi = own_article_id(article, ID_TYPE_DOI)
+            pmcid = own_article_id(article, ID_TYPE_PMC)
 
             # Authors in Vancouver format
             authors = []
