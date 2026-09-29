@@ -291,7 +291,7 @@ def _batch_progress_printer(total_batches: int) -> Callable[[int, _BatchResult],
     return make_progress_printer(format_lines)
 
 
-def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1",
+def run_stage_5d(input_path: str, output_path: str = None,
                  verbose: bool = True, batch_size: int = 20,
                  workers: int = STAGE5D_BATCH_WORKERS) -> str:
     """
@@ -300,7 +300,6 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
     Args:
         input_path: Path to input JSON (Stage 5c or earlier)
         output_path: Optional output path
-        model: OpenAI model for formatting
         verbose: Whether to print progress
         batch_size: Number of citations to process per LLM call
         workers: Batches formatted at once (default STAGE5D_BATCH_WORKERS).
@@ -414,7 +413,7 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
         'input_file': input_path,
         'non_enriched_count': len(non_enriched),
         'formatted_count': formatted_count,
-        'model': observed_model or model,
+        'model': observed_model,
         'timestamp': datetime.now().isoformat(),
         'total_cost': total_cost,
         'prompt_tokens': total_prompt_tokens,
@@ -448,8 +447,6 @@ def main():
     )
     parser.add_argument('input_path', help='Path to input JSON file')
     parser.add_argument('-o', '--output', help='Output path (optional)')
-    parser.add_argument('-m', '--model', default='gpt-5.1',
-                        help='OpenAI model for formatting (default: gpt-5.1)')
     parser.add_argument('-b', '--batch-size', type=int, default=20,
                         help='Citations per LLM call (default: 20)')
     parser.add_argument('-q', '--quiet', action='store_true',
@@ -460,7 +457,6 @@ def main():
     output = run_stage_5d(
         args.input_path,
         output_path=args.output,
-        model=args.model,
         batch_size=args.batch_size,
         verbose=not args.quiet
     )

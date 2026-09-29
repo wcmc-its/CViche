@@ -84,14 +84,14 @@ from unified_pipeline.stage6.parsing import _is_table_header_entry  # noqa: E402
 from unified_pipeline.stage6.sections.honors import (  # noqa: E402
     _ENTRY_HEADER_KEYWORDS,
     _FALLBACK_SCHEMA_STAT,
-    _MAX_RAW_AWARD_CHARS,
     HonorRecord,
+    _award_cell_first_shape,
     _entry_parts,
     _extract_organization_from_award,
     _honor_columns,
     _is_date_column,
     _is_honors_header_entry,
-    _merge_first_cell_continuation,
+    _merge_in_cell_paragraphs,
     _split_award_year,
     parse_honor_entry,
 )
@@ -332,6 +332,23 @@ def test_three_column_pipe_form_accepts_a_month_and_year_date_cell():
     rows = _render_honors(
         [_raw("Best Teaching Award | Purdue University | August 2020")])
     assert rows == [["Best Teaching Award", "Purdue University", "2020"]]
+
+
+def test_three_column_pipe_form_reads_a_two_digit_year_date_cell():
+    """#867: the raw fallback path rendered a two-digit-year date cell
+    verbatim ("10/30/17" stayed "10/30/17") instead of as the year, because
+    the year normaliser only recognised a four-digit year."""
+    rows = _render_honors(
+        [_raw("Best Paper Award | Some Society | 10/30/17")])
+    assert rows == [["Best Paper Award", "Some Society", "2017"]]
+
+
+def test_three_column_pipe_form_reads_a_two_digit_year_before_the_pivot():
+    """The other side of the century pivot: a two-digit year above the pivot
+    reads as 19xx rather than 20xx."""
+    rows = _render_honors(
+        [_raw("Lifetime Achievement Award | Some Society | 10/30/99")])
+    assert rows == [["Lifetime Achievement Award", "Some Society", "1999"]]
 
 
 def test_two_column_pipe_form_reads_the_second_cell_as_the_date():
@@ -713,12 +730,12 @@ def test_a_fused_multi_award_list_is_not_a_header_row():
     award cell of a fused list counted and the entry was dropped before the
     parser saw it, rendering nothing at all. Three of the review's own shapes
     did that, and the assertion below names which."""
+    # Since #756 the shared check needs every cell to be header vocabulary, so
+    # it no longer calls any of these a header on its own.
     shared_check_says_header = [
         name for name, text, _ in ODD_PIPE_SHAPES
         if _is_table_header_entry(text, _ENTRY_HEADER_KEYWORDS)]
-    assert shared_check_says_header == [
-        "three awards", "extra whitespace", "odd number of parts"], \
-        shared_check_says_header
+    assert shared_check_says_header == [], shared_check_says_header
     for name, text, _ in ODD_PIPE_SHAPES:
         assert not _is_honors_header_entry(text), name
 
@@ -998,14 +1015,15 @@ def test_the_table_filled_is_the_one_after_the_heading():
     assert [c.text for c in decoy.rows[0].cells] == ["decoy", ""]
 
 
-def test_a_long_raw_entry_is_capped_not_spilled():
-    """An entry stage 4 extracted nothing from renders as its own text, so
-    the cap is the only thing stopping a runaway blob filling the cell."""
+def test_a_long_raw_entry_renders_whole_not_cut_mid_word():
+    """#983: an entry stage 4 extracted nothing from renders as its own text.
+    It was cut at 150 characters, which took the tail off a third honor
+    ("... History Honor Societ") and the year with it."""
     text = "Recognition of Sustained Contribution " * 8
     rows = _render_honors([_raw(text)])
     assert len(rows) == 1
-    assert rows[0][0] == text.strip()[:_MAX_RAW_AWARD_CHARS]
-    assert len(rows[0][0]) == _MAX_RAW_AWARD_CHARS
+    assert rows[0][0] == text.strip()
+    assert len(rows[0][0]) > 150
 
 
 # --- verbose mode -----------------------------------------------------------
@@ -1230,7 +1248,37 @@ def test_continuation_merge_requires_both_organization_and_date():
         "Fictional Award", "(continuation) | Imaginary Testing Society"]
 
 
-# --- one negative test per `_merge_first_cell_continuation` guard ------------
+def test_stage2_award_cell_first_row_shape_is_one_record():
+    """#488: stage 2 now puts a multi-paragraph first cell's other columns on
+    its FIRST paragraph ("Award | Org | Date" then the parenthetical). That
+    must read back as the same single record as the older shape, not as a
+    second award "(parenthetical)" with no organization or date."""
+    text = ("Fictional Team Award | Imaginary Testing Society | 10/30/2017\n"
+            "(Co-recipient team award)")
+    rows = _render_honors([_raw(text)])
+    assert rows == [["Fictional Team Award (Co-recipient team award)",
+                     "Imaginary Testing Society", "2017"]]
+
+
+def test_award_cell_first_shape_leaves_other_inputs_alone():
+    assert _award_cell_first_shape(["A"]) == ["A"]
+    assert _award_cell_first_shape([]) == []
+    assert _award_cell_first_shape(["A", "(x) | Org | 2019"]) == ["A", "(x) | Org | 2019"]
+    assert _award_cell_first_shape(["A | 2024", "B | 2023"]) == ["A | 2024", "B | 2023"]
+    assert _award_cell_first_shape(["A | Org | 2019", "(x)", "(y)"]) == [
+        "A", "(x)", "(y) | Org | 2019"]
+
+
+def test_award_cell_first_shape_leaves_a_date_cell_continuation_alone():
+    """#488 review: cells ['Award', 'Org', '2019\\n2020'] (only the LAST cell
+    spans lines) read "Award | Org | 2019" then "2020". The tail line is a date,
+    so it belongs to the date cell and must not be moved into the award title."""
+    lines = ["Award | Org | 2019", "2020"]
+    assert _award_cell_first_shape(lines) == lines
+    assert _merge_in_cell_paragraphs(lines) == lines
+
+
+# --- one negative test per `_merge_in_cell_paragraphs` guard ------------
 # Each names the guard it targets. The guards are three named booleans
 # combined in one `if` (tab / year-or-header / column shape) -- see the
 # function's own docstring for which of these are independently killable by
@@ -1243,7 +1291,7 @@ def test_continuation_merge_requires_an_organization():
     3-column shape the merge is scoped to -- mirrors the date-only guard
     above but for the organization half of `_honor_columns`."""
     lines = ["Fictional Award", "(continuation) | 10/30/2017"]
-    assert _merge_first_cell_continuation(lines) == lines
+    assert _merge_in_cell_paragraphs(lines) == lines
 
 
 def test_continuation_merge_rejects_a_bare_year_remainder_line():
@@ -1255,7 +1303,7 @@ def test_continuation_merge_rejects_a_bare_year_remainder_line():
     '|' check is kept: harmless, and it fails closed the same way if the
     fallback's shape ever changes.)"""
     lines = ["Fictional Award", "2018"]
-    assert _merge_first_cell_continuation(lines) == lines
+    assert _merge_in_cell_paragraphs(lines) == lines
 
 
 def test_continuation_merge_rejects_a_header_row_remainder_line():
@@ -1267,17 +1315,15 @@ def test_continuation_merge_rejects_a_header_row_remainder_line():
     otherwise merge as if it were real data."""
     lines = ["Fictional Award",
              "Name of Award | Organization | 10/30/2017"]
-    assert _merge_first_cell_continuation(lines) == lines
+    assert _merge_in_cell_paragraphs(lines) == lines
 
 
 def test_continuation_merge_rejects_a_first_line_with_its_own_pipe():
-    """A first line already carrying its own '|' is a genuinely separate,
-    already-complete 3-column award row, not a plain continuation-target
-    title -- folding the next line into it would swallow a whole second
-    award."""
+    """Two complete 3-column rows fused into one entry rejoin to five cells,
+    not three -- folding them would swallow a whole second award (#924)."""
     lines = ["Fictional Award One | Imaginary Testing Society | 10/30/2017",
              "Fictional Award Two | Imaginary Testing Society Two | 5/1/2018"]
-    assert _merge_first_cell_continuation(lines) == lines
+    assert _merge_in_cell_paragraphs(lines) == lines
 
 
 def test_continuation_merge_rejects_a_first_line_with_a_tab():
@@ -1286,7 +1332,7 @@ def test_continuation_merge_rejects_a_first_line_with_a_tab():
     title the merge is scoped to."""
     lines = ["Fictional Award\tSome Note",
              "(continuation) | Imaginary Testing Society | 10/30/2017"]
-    assert _merge_first_cell_continuation(lines) == lines
+    assert _merge_in_cell_paragraphs(lines) == lines
 
 
 def test_continuation_merge_rejects_a_remainder_line_with_a_tab():
@@ -1294,16 +1340,57 @@ def test_continuation_merge_rejects_a_remainder_line_with_a_tab():
     a clean '|'-joined row the continuation merge is scoped to."""
     lines = ["Fictional Award",
              "(continuation)\t| Imaginary Testing Society | 10/30/2017"]
-    assert _merge_first_cell_continuation(lines) == lines
+    assert _merge_in_cell_paragraphs(lines) == lines
 
 
-def test_continuation_merge_does_not_apply_past_exactly_two_lines():
-    """Three or more lines is not the narrow two-line shape the merge is
-    scoped to, whatever the first two look like -- returned unchanged."""
+def test_continuation_merge_rejects_a_line_break_inside_the_date_cell():
+    """A paragraph after the date cell -- a stacked cell or a second record
+    -- is not one row's date, so the lines are returned unchanged (#924)."""
     lines = ["Fictional Award",
              "(continuation) | Imaginary Testing Society | 10/30/2017",
              "A third line"]
-    assert _merge_first_cell_continuation(lines) == lines
+    assert _merge_in_cell_paragraphs(lines) == lines
+
+
+# --- #924: a paragraph break in the ORGANIZATION cell ----------------------
+# A5IZ6Q's honors rows carry the city as a second paragraph of the
+# organization cell: "Award | Organization\nCity, ST | 2014". Split per line,
+# every "City, ST" rendered as an award row of its own (25 awards -> 58 rows).
+
+def test_city_paragraph_in_the_organization_cell_stays_one_row():
+    entry = {
+        "text": "Fictional Merit Award | Imaginary Research Council\n"
+                "Springfield, ZZ | 2014",
+        "extracted_fields": {"award_name": "Fictional Merit Award",
+                             "granting_body": "Imaginary Research Council",
+                             "date": "2014"},
+    }
+    assert _render_honors([entry]) == [
+        ["Fictional Merit Award", "Imaginary Research Council", "2014"]]
+
+
+def test_paragraph_breaks_in_several_cells_join_per_cell():
+    """Award-cell paragraphs join with a space, the other cells' with ', ',
+    so the raw fallback reads "Organization, Parent, City" rather than one
+    row per paragraph."""
+    text = ("Fictional Commanders Award\nFor Outstanding Leadership | "
+            "Imaginary Institute\nImaginary Department\nSpringfield, ZZ | 2011")
+    assert _merge_in_cell_paragraphs(text.split("\n")) == [
+        "Fictional Commanders Award For Outstanding Leadership | "
+        "Imaginary Institute, Imaginary Department, Springfield, ZZ | 2011"]
+    assert _render_honors([_raw(text)]) == [[
+        "Fictional Commanders Award For Outstanding Leadership",
+        "Imaginary Institute, Imaginary Department, Springfield, ZZ", "2011"]]
+
+
+def test_a_stacked_cell_of_several_awards_still_splits():
+    """One source row whose three cells each stack several awards is several
+    records: its date cell holds more than one paragraph, so it is not merged
+    and each award keeps its own year."""
+    text = ("Fictional Award One\nFictional Award Two | "
+            "Imaginary Society\nImaginary Council | 2019\n2018")
+    assert _merge_in_cell_paragraphs(text.split("\n")) == text.split("\n")
+    assert len(parse_honor_entry(_raw(text))) > 1
 
 
 # --- proof: the ticket's four synthetic rows, one record each (#828 R3) -----

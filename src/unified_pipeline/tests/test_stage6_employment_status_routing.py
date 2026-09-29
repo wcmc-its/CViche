@@ -259,3 +259,130 @@ def test_real_wcm_template_routes_employer_and_status_rows():
     assert ("Current Employment Status (Please choose one, list here, delete the "
             "others):\tFull-time salaried by Weill Cornell") in texts
     assert generator.stats["entries_inserted"] == 2
+
+
+# --- #807: E-coded entries under a foreign heading ---------------------------
+
+
+def _e_coded(text: str, heading: str = "Other Example Activities") -> dict:
+    """An E-coded entry filed under a heading that is not Employment Status --
+    the over-segmented copy stage 3b's dedup can leave behind."""
+    return {"text": text, "hierarchy": [heading], "taxonomy_code": "E", "extracted_fields": {}}
+
+
+def test_e_coded_entry_under_foreign_heading_is_written_and_consumed():
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+    entry = _e_coded("Position/Title: Example Professor")
+
+    consumed = generator._fill_passthrough_sections([entry])
+
+    assert consumed == [entry]
+    assert "Position/Title:\tExample Professor" in _texts(doc)
+    assert generator.stats["entries_inserted"] == 1
+
+
+def test_e_coded_foreign_entry_with_unknown_label_is_not_written_or_consumed():
+    """The known-label guard (#571) still gates a code-selected entry."""
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+
+    consumed = generator._fill_passthrough_sections([_e_coded("Favorite Color: blue")])
+
+    assert consumed == []
+    assert not any("blue" in text for text in _texts(doc))
+    assert generator.stats["entries_inserted"] == 0
+
+
+@pytest.mark.parametrize("text", ["Position Example Professor", "Position/Title: ab"])
+def test_e_coded_foreign_entry_without_a_label_value_shape_is_not_written(text):
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+
+    assert generator._fill_passthrough_sections([_e_coded(text)]) == []
+    assert generator.stats["entries_inserted"] == 0
+
+
+def test_only_e_code_is_selected_under_a_foreign_heading():
+    """A T-coded entry with an employment-shaped label under a foreign heading
+    is not E's: selection is by the E code, not by the label alone."""
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+    entry = _e_coded("Position/Title: Example Professor")
+    entry["taxonomy_code"] = "T"
+
+    assert generator._fill_passthrough_sections([entry]) == []
+    assert generator.stats["entries_inserted"] == 0
+
+
+@pytest.mark.parametrize(
+    "heading",
+    ["G. INSTITUTIONAL/HOSPITAL AFFILIATION", "Hospital Affiliations", "J. PERCENT EFFORT"],
+)
+def test_e_coded_entry_under_another_passthrough_heading_is_not_claimed(heading):
+    """A heading G or J owns is not E's to claim: the entry would otherwise be
+    written by two writers."""
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+
+    # E's writer alone: the stub carries no G/J template to drive theirs.
+    assert generator._fill_employment_status(
+        [_e_coded("Position/Title: Example Professor", heading)]) == []
+    assert generator.stats["entries_inserted"] == 0
+
+
+def test_foreign_copy_of_a_written_row_is_a_consumed_duplicate_not_a_second_write():
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+    heading_entry = _entry("Position/Title: Example Professor")
+    copy = _e_coded("Position/Title: Example Professor")
+
+    # The foreign copy comes FIRST in the input: the heading entry still wins.
+    consumed = generator._fill_passthrough_sections([copy, heading_entry])
+
+    assert consumed == [heading_entry, copy]
+    assert _texts(doc).count("Position/Title:\tExample Professor") == 1
+    assert generator.stats["entries_inserted"] == 1
+
+
+def test_conflicting_foreign_copy_neither_overwrites_nor_is_consumed(caplog):
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+    heading_entry = _entry("Position/Title: Example Professor")
+    conflict = _e_coded("Position/Title: Example Lecturer")
+
+    with caplog.at_level(logging.WARNING):
+        consumed = generator._fill_passthrough_sections([conflict, heading_entry])
+
+    assert consumed == [heading_entry]
+    assert "Position/Title:\tExample Professor" in _texts(doc)
+    assert not any("Example Lecturer" in text for text in _texts(doc))
+    assert any("already written" in r.getMessage() for r in caplog.records)
+
+
+def test_foreign_copies_of_one_row_write_once_and_the_conflict_stays_unconsumed():
+    """With no heading-matched entry at all, the first foreign copy claims the
+    row; a second with the same value is a duplicate, one with another value is
+    left for the Appendix."""
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+    first = _e_coded("Position/Title: Example Professor")
+    same = _e_coded("Position/Title: Example Professor", "Another Example Heading")
+    other = _e_coded("Position/Title: Example Lecturer")
+
+    consumed = generator._fill_passthrough_sections([first, other, same])
+
+    assert consumed == [first, same]
+    assert generator.stats["entries_inserted"] == 1
+
+
+def test_three_character_value_passes_the_value_length_gate():
+    """Pins the `<= 2` boundary in `_employment_candidates`: a 2-character value
+    is refused, a 3-character value is admitted."""
+    three = _e_coded("Position/Title: abc")
+    two = _e_coded("Position/Title: ab")
+
+    heading_entries, foreign_entries = PassthroughSection._employment_candidates([two, three])
+
+    assert heading_entries == []
+    assert foreign_entries == [three]

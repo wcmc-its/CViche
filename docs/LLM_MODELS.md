@@ -5,7 +5,7 @@
 
 ## TL;DR
 
-- **Provider:** AWS Bedrock.
+- **Provider:** AWS Bedrock — the only supported provider (#953). CViche is Bedrock-only, and all LLM traffic stays in AWS Bedrock; see [docs/BEDROCK_DATA_PROTECTION.md](BEDROCK_DATA_PROTECTION.md) for what AWS states about that boundary.
 - **Model:** Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`) for **every** live pipeline stage.
 - Configured in [`src/unified_pipeline/config/llm_config.yaml`](../src/unified_pipeline/config/llm_config.yaml).
 - Bedrock bills Claude models at the **same per-token price as Anthropic's direct API** — there is no cost penalty for staying on Bedrock.
@@ -43,7 +43,7 @@ The repository contains several generations of pipeline code. **Only one pipelin
 
 ## Model assignment
 
-Every live stage runs **Claude Sonnet 4.6**. There are no per-stage overrides — the whole pipeline inherits the `default` block in `llm_config.yaml`.
+Every live stage runs **Claude Sonnet 4.6** (the `default` block in `llm_config.yaml`) except `stage_3b`, which a `stages:` override puts on **Claude Haiku 4.5** — a gold eval found it more accurate than Sonnet on that stage at ~2.9× lower cost (rationale in the YAML comment above the override).
 
 **Rationale.** The decision was to err toward the more capable model:
 
@@ -70,14 +70,16 @@ The largest single lever is `stage_4` (the 30–60+ call hotspot). Before changi
 
 All LLM calls go through `call_llm(stage="...", ...)` in `src/unified_pipeline/llm_client.py`. The model is resolved by `get_stage_config()` in `src/unified_pipeline/config.py`, with this precedence (later wins):
 
-1. Hardcoded defaults (`openai` / `gpt-4o-mini`).
+1. Hardcoded defaults (`bedrock` / `us.anthropic.claude-sonnet-4-6`).
 2. The `default` block in `llm_config.yaml`.
 3. A per-stage override under `stages:` in `llm_config.yaml`.
-4. The `CVICHE_LLM_PROVIDER` / `CVICHE_LLM_MODEL` environment variables — these override the `default` block **only**, never an explicit per-stage override.
+4. The `CVICHE_LLM_PROVIDER` / `CVICHE_LLM_MODEL` environment variables — these override the `default` block **only**, never an explicit per-stage override. `bedrock` is the only supported value for `CVICHE_LLM_PROVIDER`.
 
 > **Operational caveat — check your deployment environment.** Because env vars override the YAML `default`, a `CVICHE_LLM_MODEL` set in a deployment (Docker, EKS, a `.env` file) silently wins over this repo's `llm_config.yaml`. If a stale `CVICHE_LLM_MODEL` points at a Claude 3-era model, that is what runs regardless of this file. **Verify those env vars** point at `us.anthropic.claude-sonnet-4-6` (or are unset) when rolling this out.
 
-The `model` argument still threaded through some `stage_4` functions is **vestigial** — `call_llm` ignores it; `llm_config.yaml` is the single source of truth. The orchestrator no longer carries a `self.model` field.
+`llm_config.yaml` is the single source of truth. No stage function takes a `model` argument and no CLI takes `--model` — the last inert ones (5b, 5c, 5d, the candidate surfacer) were removed in #954; the orchestrator carries no `self.model` field. Stage artifacts record the model that actually served the call (`null` if none did).
+
+**To change a stage's model:** add or edit its entry under `stages:` in `llm_config.yaml` (the file ships in the image, so this needs a rebuild and a deploy). To change every non-overridden stage without a rebuild, set `CVICHE_LLM_MODEL` in the environment. For a corpus A/B, `scripts/run_corpus_batch.sh`'s 4th argument sets `CVICHE_LLM_MODEL` for that batch. Add any new model to `PRICING` in `config.py` (see [Cost](#cost)).
 
 ## Bedrock setup
 
@@ -101,21 +103,23 @@ Before the pipeline can call the model:
 
 ## Cost
 
-Bedrock and the direct Anthropic API charge the **same per-token price**, including prompt caching. Per-1M-token rates (mirrored in `PRICING` in `config.py`):
+Bedrock bills `us.` (regional cross-region inference) profiles at **1.1× the direct Anthropic API price**; only `global.` profiles bill at the API price, and CViche uses `us.` profiles only (no `global.`, for data residency). The September 2026 AWS bill charged exactly the regional rates on every line item. Per-1M-token rates as billed (mirrored in `PRICING` in `config.py`):
 
 | Model | Input | Output |
 |---|---|---|
-| Claude Sonnet 4.6 (active) | $3.00 | $15.00 |
-| Claude Haiku 4.5 (downgrade option) | $1.00 | $5.00 |
-| Claude Opus 4.7 | $15.00 | $75.00 |
+| Claude Sonnet 4.6 (active) | $3.30 | $16.50 |
+| Claude Haiku 4.5 (stage 3b) | $1.10 | $5.50 |
+| Claude Opus 4.7 | $5.50 | $27.50 |
 
-`calculate_cost()` strips region inference-profile prefixes (`us.` / `eu.` / `apac.` / `global.`) before the `PRICING` lookup, so `us.anthropic.claude-sonnet-4-6` resolves correctly. If a model is missing from `PRICING`, cost is computed at gpt-4o-mini rates and a one-time warning is logged — **add new models to `PRICING` whenever the configured model changes**, or recorded run costs will be wrong.
+Cache reads (0.1× input) and writes (1.25× input) scale from these regional input prices.
+
+`calculate_cost()` strips region inference-profile prefixes (`us.` / `eu.` / `apac.` / `global.`) before the `PRICING` lookup, so `us.anthropic.claude-sonnet-4-6` resolves correctly. If a model is missing from `PRICING`, cost is computed at the Bedrock default model's rates (Claude Sonnet 4.6) and a one-time warning is logged — **add new models to `PRICING` whenever the configured model changes**, or recorded run costs will be wrong.
 
 ### The web UI cost estimate
 
 The `/estimate` endpoint's USD-per-1,000-document-token rate is no longer a hardcoded constant. It is derived from the configured model (`estimate_cost_per_1k_doc_tokens()` in `config.py`): an empirically anchored rate is rescaled by the ratio of blended model prices, so the estimate shown on the upload page tracks `llm_config.yaml`. The upload page also displays which model the estimate assumes. `CVICHE_COST_PER_1K_TOKENS`, if set, still pins the rate to an explicit value.
 
-The anchor rate (`COST_ESTIMATE_ANCHOR_RATE` in `config.py`) is calibrated against gpt-4o-era runs and is approximate — see [Follow-ups](#follow-ups).
+The anchor rate (`COST_ESTIMATE_ANCHOR_RATE` in `config.py`) was originally calibrated against gpt-4o-era runs and re-anchored to Claude Sonnet 4.6 pricing (#953, Bedrock-only) without remeasuring, so it is still approximate — see [Follow-ups](#follow-ups).
 
 ## Prompt caching
 

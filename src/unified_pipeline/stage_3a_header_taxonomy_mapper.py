@@ -356,7 +356,6 @@ def run_stage_3a(
         document_uid: Document identifier
         stage_1a_path: Path to Stage 1a output (optional, will auto-detect)
         output_dir: Output directory (optional, will auto-detect)
-        model: OpenAI model to use
 
     Returns:
         Result dict with mappings, stats, and output path

@@ -37,6 +37,12 @@ _MONTH_NAME_TO_NUM = MappingProxyType({
 # "Fall 2016" indistinguishable).
 _SEASON_TOKENS = frozenset({'spring', 'summer', 'fall', 'autumn', 'winter'})
 
+# Century pivot for a two-digit year (mm/dd/yy, #867): yy <= this reads as
+# 20yy, above it as 19yy. A constant rather than the clock (§7.4). CV dates
+# are almost all past events, so it sits well below strptime's 68.
+TWO_DIGIT_YEAR_PIVOT = 30
+
+
 # The keywords that mean "still ongoing" wherever a CV omits an end date.
 # Single source of truth, shared by formatting/dates.py (rendering) and
 # sorting/chronological.py (reverse-chron ordering) so the vocabulary can't
@@ -68,6 +74,9 @@ def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int |
     impossible day (2024-04-31) degrades to (year, month, None) since the
     month is still trustworthy, and an impossible month (2021-13) drops the
     whole date, since nothing about it can be.
+
+    A two-digit year (mm/dd/yy, #867) resolves through `TWO_DIGIT_YEAR_PIVOT`;
+    a bare mm/yy stays unparsed, since it may be a day rather than a year.
     """
     s = str(date_str or '').strip()
     if not s:
@@ -80,6 +89,12 @@ def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int |
     m = re.fullmatch(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', s)
     if m:
         return _validate_full_date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+    # MM/DD/YY / MM-DD-YY (#867): two-digit year, century read off the pivot.
+    m = re.fullmatch(r'(\d{1,2})[-/](\d{1,2})[-/](\d{2})', s)
+    if m:
+        yy = int(m.group(3))
+        year = (2000 if yy <= TWO_DIGIT_YEAR_PIVOT else 1900) + yy
+        return _validate_full_date(year, int(m.group(1)), int(m.group(2)))
     # YYYY-MM / YYYY/MM (disjoint from MM/YYYY below: 4-digit lead vs 4-digit tail)
     m = re.fullmatch(r'(\d{4})[-/](\d{1,2})', s)
     if m:
@@ -121,6 +136,35 @@ def _validate_full_date(year: int, month: int, day: int) -> tuple[int | None, in
     except ValueError:
         return (year, month, None) if 1 <= month <= 12 else (None, None, None)
     return (year, month, day)
+
+
+# A purely numeric date that states a four-digit year: YYYY-M-D, M[-D]-YYYY.
+# Read only after `_parse_date_components` has refused the string, to tell a
+# calendar-invalid date ("13/2024") from text that was never a date ("TBD").
+# A two-part YYYY-NN is deliberately NOT here: "2014-15" is an academic-year
+# range, and reading its "15" as a month would collapse it to "2014". Nor is
+# a hyphenated NN-YYYY: "98-2002" is a two-digit-start year range, so the
+# two-part month form takes only a slash ("13/2024").
+_NUMERIC_DATE_WITH_YEAR = (
+    re.compile(r'(\d{4})[-/]\d{1,2}[-/]\d{1,2}'),
+    re.compile(r'\d{1,2}[-/]\d{1,2}[-/](\d{4})'),
+    re.compile(r'\d{1,2}/(\d{4})'),
+)
+
+
+def _year_of_calendar_invalid_date(date_str: str) -> int | None:
+    """The stated year of a numeric date `_parse_date_components` refused
+    for an impossible month ("13/2024", "2024-99-99", "2024-13-01"), else None.
+
+    The year is still what the CV said; only the month is not. Text that is
+    not numeric-date-shaped ("TBD", "2024-invalid", "13/05/17") returns None.
+    """
+    s = str(date_str or '').strip()
+    for pattern in _NUMERIC_DATE_WITH_YEAR:
+        m = pattern.fullmatch(s)
+        if m:
+            return int(m.group(1))
+    return None
 
 
 def _get_entry_date_range(entry: Dict) -> tuple:

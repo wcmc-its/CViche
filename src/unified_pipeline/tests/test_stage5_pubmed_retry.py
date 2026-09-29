@@ -36,8 +36,10 @@ if str(_SRC) not in sys.path:
 
 import unified_pipeline.stage_5_pubmed_enrichment as stage5  # noqa: E402
 from unified_pipeline.stage_5_pubmed_enrichment import (  # noqa: E402
+    MIN_TITLE_WORD_OVERLAP,
     PubMedEnricher,
     _sanitize_error,
+    title_word_overlap,
 )
 
 
@@ -319,6 +321,7 @@ def test_new_status_matches_doctor_failed_vocabulary():
     # run_doctor lint 9 matches enrichment_status.endswith('_failed')
     assert 'doi_lookup_failed'.endswith('_failed')
     assert not 'doi_not_in_pubmed'.endswith('_failed')
+    assert 'title_check_failed'.endswith('_failed')  # #1043 rejection surfaces too
 
 
 # --------------------------- (h) ERROR body once per failure class per run
@@ -373,3 +376,149 @@ def test_pmcid_conversion_failure_logged_at_error(monkeypatch, caplog):
         enricher._convert_pmcids_to_pmids(['PMC1234567'])
     assert len(caplog.records) == 1
     assert 'pmcid_conversion' in caplog.records[0].getMessage()
+
+
+# ------------------------------------- own ArticleIdList, never ReferenceList (#1042)
+
+REFERENCE_LIST_XML = (
+    Path(__file__).resolve().parent / 'fixtures' / 'efetch_with_reference_list.xml'
+).read_bytes()
+
+
+def test_efetch_reads_own_ids_not_last_reference(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=REFERENCE_LIST_XML)])
+    record = enricher._fetch_pubmed_batch(['11111111', '22222222'])['11111111']
+    assert record['doi'] == '10.1000/own.1'
+    assert record['pmcid'] == 'PMC1111111'
+
+
+def test_efetch_article_without_own_ids_gets_empty_not_reference_ids(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=REFERENCE_LIST_XML)])
+    record = enricher._fetch_pubmed_batch(['11111111', '22222222'])['22222222']
+    assert record['doi'] == ''
+    assert record['pmcid'] == ''
+
+
+# ------------------------- (i) title gate: a record naming another paper (#1043)
+
+UNRELATED_TITLE = 'Lunar tides and migratory patterns of coastal herons'
+PMCID = 'PMC7654321'
+
+
+def _article_xml(title, vernacular=None):
+    vern = f'<VernacularTitle>{vernacular}</VernacularTitle>' if vernacular else ''
+    return f"""<?xml version="1.0"?>
+<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>{PMID}</PMID>
+<Article><ArticleTitle>{title}</ArticleTitle>{vern}<Journal><Title>J</Title></Journal></Article>
+</MedlineCitation></PubmedArticle></PubmedArticleSet>""".encode()
+
+
+def _titled(title, **ids):
+    return {'extracted_fields': {'title': title, **ids}}
+
+
+def test_pmid_path_rejects_a_record_for_another_paper(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=PUBMED_XML)])
+    entry = _titled(UNRELATED_TITLE, pmid=PMID)
+    [result] = enricher._enrich_by_pmid([(entry, PMID)])
+    assert result['enrichment_status'] == 'title_check_failed'
+    assert 'enrichment_data' not in result  # stage 6 renders the CV's own citation
+    assert result['enrichment_rejected'] == {
+        'source': 'pmid', 'pubmed_pmid': PMID,
+        'pubmed_title': 'A Test Article', 'title_word_overlap': 0.0}
+    assert enricher.stats['title_mismatches'] == 1
+    assert enricher.stats['failed_lookups'] == 1
+    assert enricher.stats['enriched'] == 0
+
+
+def test_pmid_path_accepts_the_same_paper(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=PUBMED_XML)])
+    [result] = enricher._enrich_by_pmid([(_titled('A test article.', pmid=PMID), PMID)])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['enrichment_source'] == 'pmid'
+    assert enricher.stats['title_mismatches'] == 0
+
+
+def test_pmcid_path_rejection_does_not_store_the_discovered_pmid(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [
+        FakeResponse(200, json_data={'records': [{'pmcid': PMCID, 'pmid': PMID}]}),
+        FakeResponse(200, content=PUBMED_XML),
+    ])
+    [result] = enricher._enrich_by_pmcid([(_titled(UNRELATED_TITLE, pmcid=PMCID), PMCID)])
+    assert result['enrichment_status'] == 'title_check_failed'
+    assert result['enrichment_rejected']['source'] == 'pmcid_conversion'
+    assert 'pmid' not in result['extracted_fields']
+
+
+def test_doi_path_rejection_does_not_store_the_discovered_pmid(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [
+        FakeResponse(200, json_data=ESEARCH_JSON),
+        FakeResponse(200, content=PUBMED_XML),
+    ])
+    [result] = enricher._enrich_by_doi([(_titled(UNRELATED_TITLE, doi=DOI), DOI)])
+    assert result['enrichment_status'] == 'title_check_failed'
+    assert result['enrichment_rejected']['source'] == 'doi_search'
+    assert 'pmid' not in result['extracted_fields']
+
+
+def test_translated_title_matches_through_vernacular_title(monkeypatch):
+    # PubMed brackets the English translation and keeps the original,
+    # unaccented, in VernacularTitle; the CV cites the original with accents.
+    xml = _article_xml('[Seasonal patterns of heron migration on the coast].',
+                       vernacular='Patrones estacionales de la migracion de garzas en la costa')
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=xml)])
+    entry = _titled('Patrones estacionales de la migración de garzas en la costa', pmid=PMID)
+    [result] = enricher._enrich_by_pmid([(entry, PMID)])
+    assert result['enrichment_status'] == 'enriched'
+
+
+def test_untitled_source_skips_the_gate(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=PUBMED_XML)])
+    [result] = enricher._enrich_by_pmid([({'extracted_fields': {'pmid': PMID}}, PMID)])
+    assert result['enrichment_status'] == 'enriched'
+
+
+def test_chapter_title_is_compared_when_there_is_no_title(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=PUBMED_XML)])
+    entry = {'extracted_fields': {'chapter_title': UNRELATED_TITLE, 'pmid': PMID}}
+    [result] = enricher._enrich_by_pmid([(entry, PMID)])
+    assert result['enrichment_status'] == 'title_check_failed'
+
+
+def test_overlap_at_the_floor_is_accepted_and_just_below_is_not():
+    # 2 of the shorter title's 5 words shared = 0.4, the floor itself.
+    assert title_word_overlap('alpha bravo charlie delta echo',
+                              ['alpha bravo xray yankee zulu kilo']) == MIN_TITLE_WORD_OVERLAP
+    assert title_word_overlap('alpha bravo charlie delta echo foxtrot',
+                              ['alpha bravo xray yankee zulu kilo']) < MIN_TITLE_WORD_OVERLAP
+
+
+def test_overlap_ignores_short_words_case_and_accents():
+    assert title_word_overlap('Él y la Garza', ['EL Y LA GARZA']) == 1.0  # only 'garza' counts
+    assert title_word_overlap('of in a', ['Herons']) is None
+    assert title_word_overlap('Women\u2019s health', ["Women's health"]) == 1.0
+
+
+def test_accent_folding_matches_unaccented_vernacular():
+    assert title_word_overlap('Garzas migración', ['Garzas migracion']) == 1.0
+
+
+def test_record_exactly_at_the_floor_is_enriched(monkeypatch):
+    xml = _article_xml('alpha bravo xray yankee zulu')
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=xml)])
+    entry = _titled('alpha bravo charlie delta echo', pmid=PMID)  # 2 of 5 = 0.4
+    [result] = enricher._enrich_by_pmid([(entry, PMID)])
+    assert result['enrichment_status'] == 'enriched'
+
+
+def test_rejection_records_the_rounded_overlap(monkeypatch):
+    xml = _article_xml('Heron Article Reviewed')
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=xml)])
+    entry = _titled('Heron tides and coastal lunar cycles', pmid=PMID)  # 1 of 3
+    [result] = enricher._enrich_by_pmid([(entry, PMID)])
+    assert result['enrichment_rejected']['title_word_overlap'] == 0.33
+
+
+def test_three_letter_words_count():
+    # 'DNA' is signal: a 4-letter floor would score these two titles 0.
+    assert title_word_overlap('DNA repair', ['DNA damage']) == 0.5

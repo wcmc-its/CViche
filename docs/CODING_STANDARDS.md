@@ -216,7 +216,7 @@ A section renderer receives its region and its entries, and returns what it prod
 *Why:* this is §3.4's rule stated as state rather than as lookup, and together they are what make section bleed structurally impossible instead of defensively guarded. §1.3 (peers don't import peers) is this rule's structural half and *is* a gate; the state half — no appends to shared instance lists — is AST-checkable in principle (the same shape as §4.1's scan) but nobody's built it, so this stays a review question with §1.3 as its mechanical floor.
 
 **4.5 Lazy singletons are locked. [gate — check pending]**
-*Why:* `llm_client.py:176-180` uses a double-checked lock and documents the exact boto3 hazard — `llm_client.py` has exactly 2 lazy singletons (the OpenAI and Bedrock clients), both locked by the same `_client_init_lock`. `storage/factory.py:18` constructs the same kind of client unlocked. §9's row previously said "4 locked, 1 unlocked"; a fresh sweep for the same shape (module-level `None` sentinel, populated by a function under `global`, re-checked inside a lock) found 6 locked and 5 unlocked repo-wide, not 4 and 1 — including one not previously documented: `core/async_rate_limiter.py`'s `get_rate_limiter_sync()` shares the module-level `_rate_limiter` global with the locked async getter but has no lock of its own around its check-and-init. Real hazard, currently zero blast radius — the module has no importers anywhere in the repo and no test references it (one commit total, the initial one), the same orphan shape already on record for `core/cv_pipeline.py` (§2.2). Filed as #653 rather than left as a doc footnote.
+*Why:* `llm/bedrock.py`'s `_get_bedrock_client` uses a double-checked lock (`_client_init_lock`, defined in `llm/retry.py`) and documents the exact boto3 hazard. `storage/factory.py:18` constructs the same kind of client unlocked. §9's row previously said "4 locked, 1 unlocked"; a fresh sweep for the same shape (module-level `None` sentinel, populated by a function under `global`, re-checked inside a lock) found 6 locked and 5 unlocked repo-wide, not 4 and 1 — including one not previously documented: `core/async_rate_limiter.py`'s `get_rate_limiter_sync()` shares the module-level `_rate_limiter` global with the locked async getter but has no lock of its own around its check-and-init. Real hazard, currently zero blast radius — the module has no importers anywhere in the repo and no test references it (one commit total, the initial one), the same orphan shape already on record for `core/cv_pipeline.py` (§2.2). Filed as #653 rather than left as a doc footnote. #953 (Bedrock-only) removed `llm/openai.py`'s client singleton, dropping the locked count from 6 to 5.
 *Check:* an AST scan — module-level `Name = None`, then a function with `global <name>` containing `if <name> is None:` that reassigns it, flagged unless that block is nested inside a `with` whose context resolves to a `threading.Lock`/`RLock`/`asyncio.Lock` instantiation guarding a second, identical check. Not implemented yet — the pattern is confirmed detectable (grep alone isn't reliable enough; the check needs the AST shape) but no script exists; see §9.
 
 *(§4.6 retired — folded into this rule.)*
@@ -252,7 +252,7 @@ A validator, gate or script exits non-zero when it could not do its job. "Nothin
 
 **5.6 Retries live in exactly one stated layer: the LLM client, and nowhere else. [gate]**
 A stage never wraps its own retry loop around a `call_llm` call; `_call_with_retry` (`llm_client.py:230-295`) is the one place a transient LLM fault gets a second attempt.
-*Why:* true today — checked all 9 `call_llm`-calling stage modules for `for attempt in`/`retry_count=`/`@retry`/`_call_with_retry`, zero hits — but worth stating because the failure mode is cheap to introduce and expensive to notice: a stage-level retry stacked on the client's own would compound silently. It already compounds once, underneath this layer and outside this file's control: both providers' SDKs retry on their own defaults (OpenAI's client `max_retries=2`, botocore's `max_attempts=3`), so one logical `call_llm()` call can cost up to 4×3=12 raw requests today, and up to 24 when a Bedrock JSON-repair cycle also fires (`llm_client.py:727-765`) — a multiplier nothing here currently documents or caps.
+*Why:* true today — checked all 9 `call_llm`-calling stage modules for `for attempt in`/`retry_count=`/`@retry`/`_call_with_retry`, zero hits — but worth stating because the failure mode is cheap to introduce and expensive to notice: a stage-level retry stacked on the client's own would compound silently. It already compounds once, underneath this layer and outside this file's control: `_call_with_retry`'s own outer loop (default `retry_count=3`, so up to 4 attempts) sits on top of botocore's own internal retries on its own default (`max_attempts=3`), so one logical `call_llm()` call can cost up to 4×3=12 raw requests today, and up to 24 when a Bedrock JSON-repair cycle also fires (`llm_client.py:727-765`) — a multiplier nothing here currently documents or caps.
 *Check:* `grep -rn 'for attempt in\|retry_count=\|@retry\|_call_with_retry' src/unified_pipeline/stage_*.py` returns nothing.
 *Also:* the compounded ceiling itself — up to 12 raw requests per logical call today, 24 with a Bedrock JSON-repair cycle — is stated once, next to the code that produces it, not only in this paragraph. Neither `_call_with_retry`'s docstring nor the JSON-repair branch (`llm_client.py:727-765`) currently names the number; a provider SDK's own `max_retries`/`max_attempts` default changing is a real change to this ceiling and should be visible at the call site, not just here.
 *Check, this half:* `llm_client.py` states the current worst case as a comment or constant next to `_call_with_retry`, and it agrees with the number in this paragraph. Unmet today — no such comment exists yet. Too fiddly a shape (a product across two SDK defaults and one conditional repair branch) for an AST scan to gate on; a human re-reading both sites is the check.
@@ -281,7 +281,7 @@ The taxonomy-code half is tracked at #651.
 **5.12 A stage artifact records the prompt template hash, the call params, and the model id the call actually used. [gate — check pending]**
 Every LLM-calling stage's returned metrics include three fields: `prompt_template_hash` (the system prompt, user template, and any tool/response-schema definition, hashed *before* CV content is interpolated in — it identifies the template and call shape, not the per-call, per-CV text), `params` (temperature, max_tokens, schema version), and `model_id`.
 *Why:* `"gpt-5.1"` is a repeated default-parameter literal in `taxonomy_mapper_v2.py` that disagreed with the model `llm_config.yaml` actually resolved (§8.2, #377) — a 96-CV batch was stamped with a model it did not use, in both the CLI banner (#444) and the stage artifacts themselves (#459). Separately, §5.11's own rule has no way to fire without this: a prompt or parameter change is a behaviour change under §6.3's table, but nothing in a corpus run today makes one *visible*, so there is no artifact-level basis for the A/B §6.3 asks for. `prompt_template_hash` is exactly that basis — hashed pre-interpolation so it fingerprints the template, not the CV content flowing through it, which keeps this rule clear of §4.7's PII scope. This is the checkable half of §5.11's determinism policy; where prompts live and how they're diffed is a separate, unscoped design question this rule doesn't answer.
-*Check:* each LLM-calling stage's returned metrics dict includes `prompt_template_hash`, `params`, and `model_id`. `model_id` is read from the provider's response where one is returned — both OpenAI's and Bedrock's responses carry a model identifier that can be more specific than the request — and falls back to the request/config value only where no response-side field exists. Not implemented yet — this is a target, not a measured state; see §9.
+*Check:* each LLM-calling stage's returned metrics dict includes `prompt_template_hash`, `params`, and `model_id`. `model_id` is read from the provider's response where one is returned — Bedrock's response carries a model identifier that can be more specific than the request — and falls back to the request/config value only where no response-side field exists. Not implemented yet — this is a target, not a measured state; see §9.
 
 ## 6. Testing expectations
 
@@ -427,37 +427,18 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
 | 1.4 core does not import the web backend | 0 | 1 | ✗ |
 | 2.1 no `db.query(` in `api/` | falling | 30 | ratchet |
-| 3.x oversized-function debt (excess lines) | falling | 2219 | ratchet |
+| 3.x oversized-function debt (excess lines) | falling | 2133 | ratchet |
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 6 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 3 | ratchet |
-| 5.4 blind `except Exception` (BLE001) | falling | 98 | ratchet |
+| 5.4 blind `except Exception` (BLE001) | falling | 93 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
-| 7.1 print() in library code (T201) | falling | 784 | ratchet |
+| 7.1 print() in library code (T201) | falling | 693 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
-| 8.3 typing syntax (UP*, RUF013) | falling | 224 | ratchet |
-| 8.3 missing annotations (ANN*, RUF012) | falling | 550 | ratchet |
+| 8.3 typing syntax (UP*, RUF013) | falling | 222 | ratchet |
+| 8.3 missing annotations (ANN*, RUF012) | falling | 536 | ratchet |
 
 <!-- check_standards:auto:end -->
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 ### Requires judgment
 
@@ -474,7 +455,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 4.2a ownership checked on artifact-read endpoints | 0 gaps | holds at 15 of 16 run-scoped routes (14 via `check_run_access`, 1 websocket via the same call); the 16th (`/admin/run/{run_id}/score`) is intentionally `require_admin`-only, not a gap. Hand-verified, not yet a standing test | ✓ |
 | 4.3 complete cache keys | 0 | **0 — fixed.** `_institution_cache_key()` folds a hash of the owner context into the cache key, closing #582 (PR #585); now at `stage5b/cache.py:122` after the stage-5b split | ✓ |
 | 4.4 own your region | per-section | shared `_overflow_entries`, `_appendix_pending`, `_cleared_tables` still declared and written only in `stage_6_word_template.py`, but `_cleared_tables` is now read cross-file from `stage6/sections/service.py:790`. Sections are mixins, so all 23 reach all three by construction; no section module mutates them today | ✗ |
-| 4.5 lazy singletons locked | all | 6 locked (`llm/openai.py:14` and `llm/bedrock.py:50`, both under `llm/retry.py:137`'s shared lock; `async_rate_limiter.py`, `session_idle.py`, `saml_replay.py`, `login_throttle.py`), **7** unlocked (`storage/factory.py:18`, `stage4/schemas.py:609`, `taxonomy_mapper_v2.py` ×2, `config.py:450`, `consent.py:19-20`, and `async_rate_limiter.py`'s own `get_rate_limiter_sync()` sharing state with its locked sibling — orphaned module, #653). Revised upward twice now (4/1 → 6/5 → 6/7), the last two both pre-existing and simply missed — build the check rather than hand-count a fourth time | ~ |
+| 4.5 lazy singletons locked | all | 5 locked (`llm/bedrock.py:50`, under `llm/retry.py:137`'s shared lock; `async_rate_limiter.py`, `session_idle.py`, `saml_replay.py`, `login_throttle.py` — `llm/openai.py:14`'s client singleton removed by #953, Bedrock-only), **7** unlocked (`storage/factory.py:18`, `stage4/schemas.py:609`, `taxonomy_mapper_v2.py` ×2, `config.py:450`, `consent.py:19-20`, and `async_rate_limiter.py`'s own `get_rate_limiter_sync()` sharing state with its locked sibling — orphaned module, #653). Revised upward twice, then down once (4/1 → 6/5 → 6/7 → 5/7 on #953) — build the check rather than hand-count a fifth time | ~ |
 | 5.1 error policy owned by the driver | 1 policy | 2 opposite policies — CLI catches at 11 sites, orchestrator raises, now pinned by a regression test on each side (#647, merged, §5.1); the policies themselves are still not unified | ✗ |
 | 5.2 never report success on failure | enforced | met, with a regression test (`test_run_full_pipeline_exit_status.py`) | ✓ |
 | 5.3 degradation visible in the artifact | all paths | 2 silent LLM fallbacks in stage 6, both still present (`stage_6_word_template.py:1098`, `:2034`); a third, in stage 3b, was made visible this round — a rejected taxonomy code now records `classification_source: llm_invalid_code` plus an `invalid_code_entries` stat (c6402bf) | ✗ |

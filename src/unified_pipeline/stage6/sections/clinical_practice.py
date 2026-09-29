@@ -24,6 +24,10 @@ the right place, so the permissive accept only ever clobbered another
 section's table. 21 of 105 corpus CVs lost a mentee's rendered table this
 way; see #841.)
 
+Bullet levels (#984): a multi-part entry ("title<TAB>hours<TAB>dates", or the
+same on separate lines) renders its first part as a level-0 bullet and every
+later part as a level-1 sub-bullet under it; a single-part entry is level 0.
+
 `_insert_multiline_as_bullets` is the bullet fallback used by all three
 subsections (L2 joined L1 and L3 in #572; it used the single-bullet inserter,
 which collapsed a multi-line entry into one list paragraph with soft line
@@ -92,6 +96,13 @@ from ..parsing import _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
+
+
+# List levels for a multi-part entry (#984): the first part is the entry's
+# title bullet, every later part (hours, dates, volume) is a sub-bullet under
+# it. Same scheme as `_insert_overflow_bullet`'s title / context split.
+_TITLE_BULLET_LEVEL = 0
+_DETAIL_BULLET_LEVEL = 1
 
 
 def _bullet_parts(text: str) -> list[str]:
@@ -630,7 +641,9 @@ class ClinicalPracticeSection:
 
     def _insert_multiline_as_bullets(self, insert_idx: int, text: str, entry: dict | None = None,
                                        add_blank_before: bool = False) -> int:
-        """Insert multi-part text as separate bullets, one per part.
+        """Insert multi-part text as separate bullets, one per part. The first part
+        is a level-0 bullet and parts 2..N are level-1 sub-bullets under it
+        (#984), so hours/dates stay attached to their title.
 
         This is the STANDARD method for inserting bulleted content. It respects
         the original document's structure - if the source had multiple lines or
@@ -665,7 +678,8 @@ class ClinicalPracticeSection:
             para = self._insert_bulleted_entry(
                 insert_idx, line_text,
                 entry if is_last else None,  # Attach entry/comments to first bullet
-                add_blank_before=add_blank_before and is_last, list_level=0,
+                add_blank_before=add_blank_before and is_last,
+                list_level=_TITLE_BULLET_LEVEL if is_last else _DETAIL_BULLET_LEVEL,
                 # Because insertion runs backwards, every later bullet of this
                 # entry already exists by the time the first one -- the one the
                 # entry rides -- is written. Hand them over with it: the

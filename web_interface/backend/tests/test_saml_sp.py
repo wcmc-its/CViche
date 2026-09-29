@@ -70,6 +70,17 @@ class TestExtractUserAttrs:
         result = extract_user_attrs(identity)
         assert result["email"] == "testuser@med.cornell.edu"
 
+    def test_extract_attrs_whitespace_only_email_is_none(self):
+        """Whitespace-only mail collapses to None, not '' (#413) -- '' would
+        collide with every other missing-email user once email is a unique
+        nullable column."""
+        identity = {
+            ATTR_MAIL: ["  "],
+            ATTR_EPPN: ["testuser@cornell.edu"],  # provides the cwid anchor
+        }
+        result = extract_user_attrs(identity)
+        assert result["email"] is None
+
     def test_unmapped_attrs_are_logged_not_silent(self, caplog):
         """Attributes the IdP releases that we don't consume are logged (by
         name) so the drop is visible -- and their VALUES are never logged."""
@@ -366,6 +377,7 @@ def _mock_saml_client(identity_dict=None):
     if identity_dict is not None:
         mock_response = MagicMock()
         mock_response.get_identity.return_value = identity_dict
+        mock_response.response.destination = None  # absent Destination is allowed (#672)
         # A real pysaml2 response always carries an assertion ID; give this
         # stub one too so the replay gate's fail-closed default (a missing
         # ID) doesn't fire on tests that aren't exercising that path.

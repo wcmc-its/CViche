@@ -1,9 +1,13 @@
-"""DELETE /api/admin/feedback/{feedback_id} behavior.
+"""DELETE /api/admin/feedback/{feedback_id} and PUT /api/admin/users/{id}.
 
 Admins can hard-delete a single feedback submission to purge a garbage/abusive
 response that would otherwise pollute the aggregated Feedback Insights. The
 endpoint is admin-only (non-admins get 403), removes the row (204), and a
 re-delete of the same id returns 404.
+
+Also covers PUT /api/admin/users/{id} role/status validation (#409): the
+update_user last-admin guards compare body.role/body.status against literal
+strings, so an out-of-set value used to bypass them entirely.
 """
 import os
 from datetime import datetime
@@ -52,7 +56,7 @@ def _as_admin(client, fn):
     from app.auth import require_admin
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
-        role="admin", email="admin@example.com"
+        id=-1, role="admin", email="admin@example.com"
     )
     try:
         return fn()
@@ -111,3 +115,97 @@ def test_redelete_returns_404(client, db):
     second = _as_admin(client, lambda: client.delete(f"/api/admin/feedback/{fb_id}"))
     assert second.status_code == 404
     assert second.json()["detail"]["error"] == "not_found"
+
+
+def _seed_lone_admin(db):
+    """Insert a single active admin user, returning it."""
+    from app.models import User
+
+    user = User(
+        email="lone-admin@example.com",
+        display_name="Lone Admin",
+        role="admin",
+        status="active",
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def test_update_user_rejects_invalid_role_value(client, db):
+    """role='viewer' 422s before the handler runs, so the last-admin guard
+    (which only matches the literal 'user'/'admin') never sees it (#409)."""
+    admin = _seed_lone_admin(db)
+
+    resp = _as_admin(
+        client,
+        lambda: client.put(f"/api/admin/users/{admin.id}", json={"role": "viewer"}),
+    )
+
+    assert resp.status_code == 422
+    db.refresh(admin)
+    assert admin.role == "admin"
+
+
+def test_update_user_rejects_invalid_status_value(client, db):
+    """status='Disabled' (wrong case) 422s before the handler runs, so the
+    disable-last-admin guard (which only matches literal 'disabled') never
+    sees it (#409)."""
+    admin = _seed_lone_admin(db)
+
+    resp = _as_admin(
+        client,
+        lambda: client.put(
+            f"/api/admin/users/{admin.id}", json={"status": "Disabled"}
+        ),
+    )
+
+    assert resp.status_code == 422
+    db.refresh(admin)
+    assert admin.status == "active"
+
+
+def test_update_user_last_admin_guard_still_blocks_valid_demotion(client, db):
+    """A valid role value ('user') on the last admin still trips the
+    last-admin guard -- the Literal constraint doesn't touch this path."""
+    admin = _seed_lone_admin(db)
+
+    resp = _as_admin(
+        client,
+        lambda: client.put(f"/api/admin/users/{admin.id}", json={"role": "user"}),
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["message"] == "Cannot remove the last admin."
+    db.refresh(admin)
+    assert admin.role == "admin"
+
+
+def test_update_user_accepts_valid_role_and_status_values(client, db):
+    """Valid role/status values still update normally (no false rejection)."""
+    from app.models import User
+
+    admin = _seed_lone_admin(db)
+    second_admin = User(
+        email="second-admin@example.com",
+        display_name="Second Admin",
+        role="admin",
+        status="active",
+    )
+    db.add(second_admin)
+    db.commit()
+    db.refresh(second_admin)
+
+    resp = _as_admin(
+        client,
+        lambda: client.put(
+            f"/api/admin/users/{second_admin.id}",
+            json={"role": "user", "status": "disabled"},
+        ),
+    )
+
+    assert resp.status_code == 200
+    db.refresh(second_admin)
+    assert second_admin.role == "user"
+    assert second_admin.status == "disabled"

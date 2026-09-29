@@ -420,3 +420,32 @@ def test_process_cv_passes_its_docx_path_to_extract_fields_from_mapped_entries(m
     stage_4_field_extractor.process_cv(cv_path)
 
     assert captured["docx_path"] == cv_path
+
+
+def test_process_cv_stamps_over_the_unfiltered_3b_list_before_dropping_fragments(monkeypatch, tmp_path):
+    """#985 B1: a sub-heading 3b flagged is_fragment is filtered out before
+    extraction, so the stamp must run on the FULL list, where that fragment
+    still ends the previous heading's run."""
+    document_uid = "synthetic_cv_985"
+    stage3b = Path(stage_4_field_extractor.__file__).parent / "outputs" / "stage_3b_classified_entries" / f"{document_uid}_classified.json"
+    hier = ["Service"]
+    entries = [
+        {"text": "Alpha University:", "taxonomy_code": "T", "hierarchy": hier},
+        {"text": "Member, Committee X", "taxonomy_code": "P", "hierarchy": hier},
+        {"text": "Beta University:", "taxonomy_code": "O", "hierarchy": hier, "is_fragment": True},
+        {"text": "Chair, Committee Y", "taxonomy_code": "P", "hierarchy": hier},
+    ]
+    real_exists = Path.exists
+    monkeypatch.setattr(Path, "exists", lambda self: True if self == stage3b else real_exists(self))
+    monkeypatch.setattr(Path, "mkdir", lambda self, *a, **k: None)
+    monkeypatch.setattr(stage_4_field_extractor, "open", lambda path, mode="r", *a, **k: (
+        io.StringIO(json.dumps({"entries": entries})) if Path(path) == stage3b else io.StringIO()), raising=False)
+    captured = {}
+
+    def fake_extract(mapped_entries, **kwargs):
+        captured["stamps"] = [(e["text"], e.get("context_heading")) for e in mapped_entries]
+        return {"entries": [], "cv_owner": {}, "cv_owner_location": {}, "total_cost": 0.0, "total_tokens": 0, "stats": {"extracted": 0, "skipped": 0}}
+
+    monkeypatch.setattr(stage_4_field_extractor, "extract_fields_from_mapped_entries", fake_extract)
+    stage_4_field_extractor.process_cv(str(tmp_path / f"{document_uid}.docx"))
+    assert captured["stamps"] == [("Alpha University:", None), ("Member, Committee X", "Alpha University"), ("Chair, Committee Y", None)]

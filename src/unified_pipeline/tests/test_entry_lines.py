@@ -22,7 +22,12 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
+from unified_pipeline.core.render_check import (  # noqa: E402
+    entry_fragments,
+    entry_lines,
+    rejoin_wrapped_row,
+    wrapped_row_text,
+)
 
 
 def _old_idiom(text):
@@ -100,3 +105,48 @@ def test_does_not_split_on_dashes():
         "University Medical Center—New Orleans",
     ]:
         assert entry_lines(intact) == [intact]
+
+
+def test_rejoin_wrapped_row_cases():
+    """#987: a row whose non-empty cells have unequal line counts is ONE row;
+    equal counts (stacked courses), a single cell and blank input are not."""
+    cases = [
+        ("Spring 2012 | Dept\nSeminar\nTitle | 1 | 40",
+         "Spring 2012 | Dept Seminar Title | 1 | 40"),
+        ("a\nb | c | d", "a b | c | d"),
+        ("a | b\nc\n\n | d", "a | b c | d"),
+        ("2020\n2021 | Course A\nCourse B", None),
+        ("2020\n2021 |  | Course A\nCourse B", None),
+        ("Fall\n2012 |  | Course A", "Fall 2012 | Course A"),
+        ("a\nb\nc", None),
+        ("a | b | c", None),
+        ("", None),
+        (None, None),
+    ]
+    for text, expected in cases:
+        assert rejoin_wrapped_row(text) == expected, text
+
+
+def test_wrapped_row_text_cases():
+    """#987: only ONE table_row element whose cells wrap is rejoined; a
+    paragraph, a multi-element entry or a row missing its indices is not."""
+    wrapped = "Spring 2012 | Dept\nSeminar\nTitle | 1 | 40"
+    one_line = "Spring 2012 | Dept Seminar Title | 1 | 40"
+
+    def row(text, element_type="table_row", start=5, end=5):
+        return {"text": text, "element_type": element_type,
+                "element_idx_start": start, "element_idx_end": end}
+
+    cases = [
+        (row(wrapped), one_line),
+        (row("a\nb | c | d"), "a b | c | d"),
+        (row("2020\n2021 | Course A\nCourse B | Lecturer\nDirector"), None),
+        (row("a\nb\nc"), None),
+        (row("a | b | c"), None),
+        (row(wrapped, element_type="paragraph"), None),
+        (row(wrapped, start=5, end=6), None),
+        ({"text": wrapped, "element_type": "table_row"}, None),
+        ({}, None),
+    ]
+    for entry, expected in cases:
+        assert wrapped_row_text(entry) == expected, entry

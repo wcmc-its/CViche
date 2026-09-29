@@ -15,9 +15,9 @@ lines), `_truncate_appendix_text` and `_describe_dropped`. `AppendixSection`'s
 methods only write that model into the Word document. The rules are therefore
 testable without a document, and the writer carries no rule of its own.
 
-Five checks run before anything is written, in `_appendix_drop_reason`'s order.
-Every drop is counted under the check that caught it, so the summary comment
-and the log line say what was removed instead of calling every drop
+Several checks run before anything is written, in `_appendix_drop_reason`'s
+order. Every drop is counted under the check that caught it, so the summary
+comment and the log line say what was removed instead of calling every drop
 "boilerplate":
 
 - blank text;
@@ -47,6 +47,47 @@ currently exercise. `test_stage6_appendix_header_row_filter.py` pins the real
 header shapes, the numeric-token and short-entry negatives, and that
 false-positive class, so a change to the heuristic is visible.
 
+Three more checks (#885) catch structural scaffolding that is specific to T:
+a bare year ("2021"), a lone status word ("Completed", "In Press") and a
+source CV's own table-of-contents line ("Honors and Awards       Page 7").
+The issue's own filed figure -- T-validation-confirmed structural entries are
+about 79% of that batch's Appendix lines -- covers EVERY shape stage 3b's
+`classification_reasoning` calls structural (also section headers, date
+stamps, CV titles, and table-header rows the pattern above already catches);
+these three checks are a safe subset of that, not all of it. A render A/B on
+the issue's own 20-CV batch (dev vs. this fix, over the farm's cached stage
+output for determinism, `T. APPENDIX` numbered-line count) shows what these
+three checks alone remove: about 30% of that batch's Appendix lines (65 of
+219). The remaining lines -- section headers, date stamps, CV titles, and
+other T-validation-confirmed shapes these three checks do not match -- were
+that change's disclosed residual, handled by the two-signal check described
+after this paragraph. Stage 3b's own T-validation pass already flags the shapes these checks
+remove in free text ("[T-validation confirmed] Bare year '2021' is a
+structural marker"), but that string is free LLM text, not a drop predicate:
+the SAME tag also covers real, correctly-T-coded content (hobbies, a
+career-gap explanation, a skills list) that must not be dropped, so
+`_appendix_drop_reason` never reads it. Each of the three checks instead
+matches the entry's raw TEXT shape, independent of any reasoning string, and
+-- unlike every check above -- is gated to `taxonomy_code == "T"`: measured
+against the full 126-CV #885 corpus (37,704 entries, every taxonomy code),
+none of the three shapes ever occurs outside T, so the gate is defense in
+depth, not the thing doing the precision work. See the comments above
+`_BARE_YEAR_RE`, `_STATUS_MARKER_WORDS` and `_TOC_LINE_RE`.
+
+The residual (#885) is closed for four shapes by `_confirmed_structural_reason`,
+which, unlike the three checks above, DOES read `classification_reasoning` --
+but never alone. An entry is dropped only when it is T-coded, stage 3b's
+`[T-validation confirmed]` reasoning names the kind in its first
+`_REASONING_LEAD_CHARS` characters (a section header, a document title, a date
+stamp, a table header row), AND the raw text has that kind's positive shape:
+a short digit-free label (`_is_section_label_text`), a "Curriculum Vitae"
+title (`_CV_TITLE_RE`), "Date/As of/Revised <date>" (`_DATE_STAMP_RE`), or a
+multi-cell digit-free row (`_is_label_only_row`). Either signal alone keeps the
+entry, so hobbies, reference lists, orphaned journal titles and organisation
+names that carry the same confirmation tag survive. It runs last, so no older
+check loses a drop to it. Reasons: `cv-title`, `date-stamp`, `section-header`,
+and the existing `column-header`.
+
 What was dropped is reported ONCE, as a single Word comment on the introductory
 paragraph, rather than per entry -- N comments saying so is itself noise.
 
@@ -67,13 +108,17 @@ Numbering restarts under each heading. Bodies are capped at
 appendix is a pointer back to the original document, not a second copy of it.
 """
 import logging
+import re
 from collections import Counter
 from collections.abc import Sequence
 from typing import TypedDict
 
 from ...core.template_boilerplate import (
+    is_near_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
+    is_template_label_line,
+    is_unanswered_prompt,
 )
 from ..formatting import _set_font
 from ..normalization import _clean_inline_tabs
@@ -101,13 +146,162 @@ DROP_TEMPLATE_INSTRUCTION = "template-instruction"
 DROP_SOURCE_BOILERPLATE = "source-boilerplate"
 DROP_RENDERS_EMPTY = "renders-empty"
 DROP_COLUMN_HEADER = "column-header"
+DROP_BARE_YEAR = "bare-year"
+DROP_STATUS_MARKER = "status-marker"
+DROP_TOC_LINE = "toc-line"
+DROP_NEAR_TEMPLATE_INSTRUCTION = "near-template-instruction"
+DROP_UNANSWERED_PROMPT = "unanswered-prompt"
+DROP_TEMPLATE_LABEL = "template-label"
+DROP_CV_TITLE = "cv-title"
+DROP_DATE_STAMP = "date-stamp"
+DROP_SECTION_HEADER = "section-header"
 DROP_REASONS = (
     DROP_BLANK,
     DROP_TEMPLATE_INSTRUCTION,
     DROP_SOURCE_BOILERPLATE,
     DROP_RENDERS_EMPTY,
     DROP_COLUMN_HEADER,
+    DROP_BARE_YEAR,
+    DROP_STATUS_MARKER,
+    DROP_TOC_LINE,
+    DROP_NEAR_TEMPLATE_INSTRUCTION,
+    DROP_UNANSWERED_PROMPT,
+    DROP_TEMPLATE_LABEL,
+    DROP_CV_TITLE,
+    DROP_DATE_STAMP,
+    DROP_SECTION_HEADER,
 )
+
+# The taxonomy code this whole module exists for (CODING_STANDARDS.md 8.2:
+# a comparison on a taxonomy code reads through a named constant). Named
+# despite being the module's own subject -- spelled out as a literal
+# elsewhere in this file ("T. APPENDIX", `_write_appendix_intro`) -- because
+# the #885 gate below is a CLASSIFICATION decision on the code, the shape
+# 8.2 names as its canonical instance, not a display string.
+_APPENDIX_TAXONOMY_CODE = "T"
+
+# #885: three T-only structural shapes -- see the module docstring's "Three
+# more checks" paragraph for why these match the entry's raw TEXT rather than
+# its (untrustworthy as a predicate) `classification_reasoning` string.
+
+# A bare four-digit year, optionally with one trailing period ("2021",
+# "2016.") -- a year with nothing else attached carries no information a
+# reader could act on. Matched on 323 T entries across the #885 corpus (126
+# CVs, 37,704 entries of every taxonomy code) and zero non-T entries.
+_BARE_YEAR_RE = re.compile(r"^(?:19|20)\d{2}\.?$")
+
+# A single status word with no subject, title, or venue attached -- "a
+# specific ... entry" (the #885 issue's own phrase) always carries more than
+# just its status. Exact, case-insensitive, whole-string match (not
+# "contains") against the shapes actually observed: web210's presentation
+# statuses, web226's grant statuses. Matched on 7 T entries, zero non-T.
+_STATUS_MARKER_WORDS = frozenset({
+    "completed", "scheduled", "pending", "ongoing", "active", "current",
+    "funded", "not funded", "withdrawn", "submitted", "in press", "published",
+})
+
+# A source CV's own table of contents: heading text, then a run of
+# whitespace (the dot leader Word draws between a ToC entry and its page
+# number, collapsed by the reader -- as little as the single space in
+# "...Extramural Presentations Page 17"), then "Page N" or "Page N-M".
+# Matched on all 18 ToC lines in web181, the CV #885 was filed against, and
+# zero other entries in the #885 corpus.
+_TOC_LINE_RE = re.compile(r"^.{1,90}?[ \t]Page\s+\d+(?:[-–—]\d+)?\s*$")
+
+
+# #885 residual: four structural shapes that need TWO independent signals, so
+# neither the free-text reasoning nor the raw text carries the drop alone.
+# Signal 1: stage 3b's T-validation pass confirmed the entry structural AND
+# its reasoning names the kind in its opening words. Signal 2: the entry's raw
+# TEXT has the positive shape of that kind. "[T-validation confirmed]" alone
+# also tags real T content (hobbies, reference lists, orphaned journal titles),
+# which is why it is never sufficient here.
+_T_CONFIRMED_PREFIX = "[T-validation confirmed]"
+# How much of the reasoning, after the tag, may name the kind. The model
+# states the verdict first ("Section header 'X' ..."), so a kind word deep in
+# the prose (an explanation of why something is NOT a header) does not count.
+_REASONING_LEAD_CHARS = 100
+
+_MONTH = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|"
+    r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+_MONTH_YEAR = rf"{_MONTH}\.?,?\s*(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s*)?(?:19|20)\d{{2}}"
+
+# "Date May 30th, 2020", "As of August 10, 2022", "*Revised June 29, 2018":
+# a stamp word, then nothing but a date.
+_DATE_STAMP_RE = re.compile(
+    rf"^\*?(?:date|as\s+of|revised|last\s+updated|updated|revision\s+date)\s*:?\s*{_MONTH_YEAR}$",
+    re.IGNORECASE,
+)
+
+# The CV's own title, up to two leading words ("Medico-legal Curriculum
+# Vitae"), an optional "& Bibliography", and optionally a date line under it.
+_CV_TITLE_RE = re.compile(
+    r"^(?:[\w.\-]+\s+){0,2}curriculum\s+vit(?:ae|a)"
+    r"(?:\s*(?:&|and)\s*bibliography)?"
+    rf"(?:\s*\n\s*(?:{_MONTH}\.?,?\s*)?(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s*)?(?:19|20)\d{{2}})?$",
+    re.IGNORECASE,
+)
+
+_SECTION_HEADER_MAX_WORDS = 10
+_NONE_WORD_RE = re.compile(r"\bnone\b", re.IGNORECASE)
+_HEADER_CELL_SPLIT_RE = re.compile(r"\s*\|\s*|\t+|\n|\s{2,}")
+_HEADER_ROW_MAX_CELL_WORDS = 8
+
+_KIND_REASONING = {
+    DROP_CV_TITLE: re.compile(r"(?:document|cv|curriculum vitae)[^.;]{0,25}(?:title|header)"),
+    DROP_DATE_STAMP: re.compile(r"date (?:stamp|line)|revision date"),
+    DROP_COLUMN_HEADER: re.compile(r"(?:column|table)?\s*header row|column header"),
+    DROP_SECTION_HEADER: re.compile(
+        # The verdict must be a SECTION header/label, not a looser
+        # "structural header" (which also described a name line, an
+        # institution name and a career-gap explanation in the corpus).
+        r"(?:sub)?section (?:header|heading|subheader|subheading|category|label|title)"
+    ),
+}
+
+
+def _is_section_label_text(text: str) -> bool:
+    """A short, digit-free, non-sentence line: what a section heading looks
+    like on the page. Trailing colon allowed; a terminal period is a sentence."""
+    body = text.strip()
+    if not body or body.endswith(".") or any(ch.isdigit() for ch in body):
+        return False
+    if _NONE_WORD_RE.search(body):  # "Patents (none)": says something about content
+        return False
+    return len(body.split()) <= _SECTION_HEADER_MAX_WORDS
+
+
+def _is_label_only_row(text: str) -> bool:
+    """A multi-cell row whose every cell is a short, digit-free label -- the
+    shape of a table header the vocabulary heuristic (`_is_column_header_row`)
+    missed. Any digit means data (a year, a count), so the row is kept."""
+    cells = [c for c in _HEADER_CELL_SPLIT_RE.split(text) if c and c.strip()]
+    if len(cells) < 2 or any(ch.isdigit() for ch in text):
+        return False
+    return all(len(c.split()) <= _HEADER_ROW_MAX_CELL_WORDS for c in cells)
+
+
+_KIND_SHAPE = {
+    DROP_CV_TITLE: lambda t: bool(_CV_TITLE_RE.match(t)),
+    DROP_DATE_STAMP: lambda t: bool(_DATE_STAMP_RE.match(t)),
+    DROP_COLUMN_HEADER: _is_label_only_row,
+    DROP_SECTION_HEADER: _is_section_label_text,
+}
+
+
+def _confirmed_structural_reason(text: str, reasoning: str | None) -> str | None:
+    """The `DROP_*` reason for a T entry that BOTH stage 3b's T-validation
+    confirmed as structural of a named kind AND whose raw text has that kind's
+    positive shape (#885 residual), else None."""
+    if not reasoning or not reasoning.startswith(_T_CONFIRMED_PREFIX):
+        return None
+    lead = reasoning[len(_T_CONFIRMED_PREFIX):].lstrip()[:_REASONING_LEAD_CHARS].lower()
+    for reason, kind_re in _KIND_REASONING.items():
+        if kind_re.search(lead) and _KIND_SHAPE[reason](text.strip()):
+            return reason
+    return None
 
 
 class UnmappedEntry(TypedDict, total=False):
@@ -159,6 +353,17 @@ _DECLINED_GRANT_CODES = frozenset({'M2A', 'M2B', 'M2C'})
 # record. Applies regardless of the code's own routing status.
 REASON_RECOVERED_UNRENDERED = "recovered_unrendered"
 
+# Stage 4 (`stage4/code_check.py`, #651) re-coded this entry to T because its
+# stage 3b code is not in taxonomy_v7.json. Distinct from REASON_NO_RENDER_ROUTE
+# (a VALID code nothing renders): here the code was never a real one. Keyed off
+# the entry's `taxonomy_code_quarantine_reason` marker, not the code -- a
+# quarantined entry's code is the ordinary T. The string is duplicated from
+# `code_check.INVALID_CODE_REASON` rather than imported (stage6 does not import
+# stage 4; the stage 6 input JSON is the contract).
+REASON_INVALID_CODE = "invalid_code"
+_QUARANTINE_MARKER_KEY = "taxonomy_code_quarantine_reason"
+_QUARANTINE_MARKER_INVALID_CODE = "invalid_taxonomy_code"
+
 # E, G and J -- the three passthrough sections. None of the three is in
 # `RENDER_ROUTED_CODES` (they have no taxonomy-code dispatch of their own --
 # the passthrough writers select by source hierarchy, not code), so an
@@ -178,11 +383,10 @@ REASON_RECOVERED_UNRENDERED = "recovered_unrendered"
 # `RENDER_ROUTED_CODES` lives in `stage_6_word_template.py`, which is not a
 # `sections/*` peer and is free to import both `appendix.py` and
 # `passthrough.py` and pass each module's constant down as an argument).
-# No existing constant elsewhere covers exactly the E/G/J triple without
-# also pulling in N4 (`doctor/lints/extraction.py`'s
-# `_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES` is a DIFFERENT set, for a
-# different lint, and N4 is not a passthrough section -- reusing it here
-# would misclassify N4 the same way F2 is fixing for E/G/J).
+# No existing constant elsewhere is named for that triple's role in this
+# module (`doctor/lints/extraction.py`'s
+# `_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES` happens to hold the same three
+# codes since #587, but it is a DIFFERENT set, owned by a different lint).
 
 # The one code whose REASON_RENDERER_DECLINED case is the M1 conditional
 # discard in `generate()` -- every OTHER routed code that reaches
@@ -250,6 +454,11 @@ def _diversion_message(code: str, count: int, reason: str,
       for `_RESEARCH_SUMMARY_CODE`): the shared `_REASON_TEXT` lookup.
     """
     noun = _plural_entries(count)
+    if reason == REASON_INVALID_CODE:
+        return (f"{code}: {count} {noun} diverted to the Appendix — stage 4 "
+                f"quarantined {'it' if count == 1 else 'them'}: the stage 3b "
+                f"taxonomy code was not a valid taxonomy code (see "
+                f"original_taxonomy_code in the stage 4 artifact)")
     if reason == REASON_RECOVERED_UNRENDERED:
         verb = _plural_was(count)
         return (f"{code}: {count} {noun} classified {code} {verb} not "
@@ -359,7 +568,10 @@ def build_appendix_diversion_warnings(
     counts: Counter[tuple[str, str]] = Counter()
     for entry in written:
         code = entry.get("taxonomy_code") or "?"
-        reason = _appendix_diversion_reason(code, render_routed_codes, passthrough_codes)
+        if entry.get(_QUARANTINE_MARKER_KEY) == _QUARANTINE_MARKER_INVALID_CODE:
+            reason = REASON_INVALID_CODE
+        else:
+            reason = _appendix_diversion_reason(code, render_routed_codes, passthrough_codes)
         counts[(code, reason)] += 1
     for code in recovered_codes:
         counts[(code or "?", REASON_RECOVERED_UNRENDERED)] += 1
@@ -379,11 +591,27 @@ def build_appendix_diversion_warnings(
     return warnings
 
 
-def _appendix_drop_reason(text: str, rendered: str) -> str | None:
+def _appendix_drop_reason(
+    text: str,
+    rendered: str,
+    taxonomy_code: str | None = None,
+    reasoning: str | None = None,
+) -> str | None:
     """The `DROP_*` reason *text* stays out of the appendix, or None to keep it.
 
     *rendered* is *text* with the readers' cell separators collapsed; it is
     passed in rather than recomputed so each survivor is rendered once.
+
+    *taxonomy_code* gates the three #885 structural checks (bare year, status
+    marker, ToC line -- see the module docstring and the comments above
+    `_BARE_YEAR_RE`) to T-coded entries only. Optional, defaulting to None
+    (which skips those three checks), so a caller checking only text shape --
+    `test_stage6_appendix_header_row_filter.py`'s unit tests among them --
+    is unaffected.
+
+    *reasoning* (the entry's `classification_reasoning`) feeds the #885
+    residual check, `_confirmed_structural_reason`, which is likewise T-only
+    and additionally needs the text's own positive shape.
     """
     if not text.strip():
         return DROP_BLANK
@@ -395,6 +623,24 @@ def _appendix_drop_reason(text: str, rendered: str) -> str | None:
         return DROP_RENDERS_EMPTY
     if _is_column_header_row(text):
         return DROP_COLUMN_HEADER
+    if taxonomy_code == _APPENDIX_TAXONOMY_CODE:
+        stripped = text.strip()
+        if _BARE_YEAR_RE.match(stripped):
+            return DROP_BARE_YEAR
+        if stripped.rstrip(".").lower() in _STATUS_MARKER_WORDS:
+            return DROP_STATUS_MARKER
+        if _TOC_LINE_RE.match(text):
+            return DROP_TOC_LINE
+    if is_near_template_instruction(text):
+        return DROP_NEAR_TEMPLATE_INSTRUCTION
+    if is_unanswered_prompt(text):
+        return DROP_UNANSWERED_PROMPT
+    if is_template_label_line(text):
+        return DROP_TEMPLATE_LABEL
+    # Last, so every older check keeps the drop it already claimed; only
+    # entries nothing else caught reach the two-signal residual test.
+    if taxonomy_code == _APPENDIX_TAXONOMY_CODE:
+        return _confirmed_structural_reason(text, reasoning)
     return None
 
 
@@ -408,7 +654,12 @@ def _filter_unmapped_entries(
     for entry in entries:
         text = entry.get("text") or ""
         rendered = _clean_inline_tabs(text)
-        reason = _appendix_drop_reason(text, rendered)
+        reason = _appendix_drop_reason(
+            text,
+            rendered,
+            entry.get("taxonomy_code"),
+            entry.get("classification_reasoning"),
+        )
         if reason is None:
             kept.append((entry, rendered))
         else:

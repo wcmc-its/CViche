@@ -105,6 +105,26 @@ def test_artifacts_are_flattened_out_of_stage_subdirs(tmp_path, monkeypatch):
     ], seen
 
 
+def test_stage_error_record_is_collected_for_the_scorer(tmp_path, monkeypatch):
+    """#745: the drivers' stage-error record lives in its own dir beside the
+    stage_* dirs; it must reach the flattened dir the scorer reads, or a
+    recorded stage failure never caps the score."""
+    cli = _load_cli()
+    seen = {}
+
+    def _capture(outputs_dir, run_id):
+        seen["names"] = sorted(p.name for p in Path(outputs_dir).iterdir())
+        return _REPORT
+
+    monkeypatch.setattr(cli, "score_run", _capture)
+    _stage_artifacts(tmp_path)
+    (tmp_path / "stage_errors").mkdir()
+    (tmp_path / "stage_errors" / "web05_stage_errors.json").write_text("[]", encoding="utf-8")
+
+    assert cli.main([str(tmp_path), "web05"]) == 0
+    assert "web05_stage_errors.json" in seen["names"], seen
+
+
 def test_no_artifacts_exits_nonzero_instead_of_scoring_an_empty_dir(tmp_path, capsys, monkeypatch):
     """This is the #435 failure mode: never emit a score for nothing."""
     cli = _load_cli()

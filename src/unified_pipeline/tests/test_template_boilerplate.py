@@ -21,7 +21,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.core.template_boilerplate import (  # noqa: E402
+    is_near_template_instruction,
     is_template_instruction,
+    is_template_label_line,
+    is_unanswered_prompt,
     filter_template_instructions,
 )
 
@@ -151,6 +154,155 @@ def test_a_filled_row_with_a_long_template_label_is_kept(row):
 ])
 def test_an_unfilled_row_with_a_long_template_label_still_drops(row):
     assert is_template_instruction(row) is True
+
+
+# --- #829: another template revision's wording of a long instruction ---
+# Each is the tracked Oct-2022 phrase with the edit an older revision made
+# (A5IZ6Q): the exact and containment rules above all miss it.
+NEAR_MATCHES = [
+    # "…institutions. Include division…" -> "…institutions, including division…"
+    "Please list activities at WCM and affiliates, NYP, and previously employed "
+    "institutions, including division or department positions, directorships, "
+    "deanships, chairmanships on major institutional committees.",
+    # an extra comma, plus the faculty member's "N/A" answer appended
+    "Include year(s), leadership role, and description of activity/program, i.e., "
+    "director/head of service/clinic or procedure area.: N/A",
+    # the 2022 label without "as teacher": 0.933, just over the threshold. (The
+    # fixture here used to be "Have you passed the examination ...? N/A",
+    # which the 2020 revision now matches exactly -- #829.)
+    "Continuing education and professional education (role and scope of activity)",
+]
+
+
+@pytest.mark.parametrize("text", NEAR_MATCHES)
+def test_a_reworded_long_instruction_is_a_near_match(text):
+    assert not is_template_instruction(text)  # the gap this rule closes
+    assert is_near_template_instruction(text)
+
+
+@pytest.mark.parametrize("text", [
+    # A filled "label | answer" row whose label is a long instruction: the
+    # answer is real data (#897), so '|' rows are never near-matched.
+    "Is your eligibility to work in the U.S. based on an employment visa?: | No",
+    "If yes, please provide Visa type (Examples: J-1, H-1B, E-3, TN): | H-1B",
+    # Pipe-free label + answer at 0.90 similarity -- below the threshold.
+    "Eligibility to work in the U.S. based on an employment visa: No",
+    # Real content that shares vocabulary with an instruction.
+    "Director of the residency program, 2015-present, Department of Medicine, "
+    "Weill Cornell Medicine",
+    # Too short to near-match at all, even though it is a known label.
+    "If no license:",
+    "",
+])
+def test_near_match_keeps_answers_and_real_content(text):
+    assert not is_near_template_instruction(text)
+
+
+def test_a_protected_term_is_never_near_matched(monkeypatch):
+    """No protected term is both >= 40 chars and a known instruction today,
+    but generating the phrase set from more template revisions (#829) could
+    make one -- and a section header must still never drop."""
+    from unified_pipeline.core import template_boilerplate as tb
+    header = "professional organizations and society memberships"
+    assert header in tb._PROTECTED
+    monkeypatch.setattr(tb, "_INSTRUCTION_SET", tb._INSTRUCTION_SET | {header})
+    assert not is_near_template_instruction("PROFESSIONAL ORGANIZATIONS AND SOCIETY MEMBERSHIPS")
+
+
+@pytest.mark.parametrize("text", [
+    "N/A",
+    "Not Applicable",
+    "None",
+    "Listed above",
+    "N/A |  |",
+    "Not Applicable |  |  |",
+    "Primary Hospital Affiliation: | N/A",
+])
+def test_an_unanswered_prompt_is_detected(text):
+    assert is_unanswered_prompt(text)
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "|  |",                       # nothing at all: the renders-empty check's job
+    "Primary Hospital Affiliation: | NewYork-Presbyterian",  # answered
+    "Grant pending | N/A",        # an unrecognised cell is faculty data
+    "N/A for 2019; resumed 2020", # an answer that says something
+    "Primary Hospital Affiliation:",  # an unfilled label with no N/A
+])
+def test_an_answered_or_unrecognised_line_is_not_unanswered(text):
+    assert not is_unanswered_prompt(text)
+
+
+# --- #829: the phrase set covers every tracked template revision ---
+
+def test_the_committed_phrase_set_is_what_the_generator_produces(tmp_path, monkeypatch):
+    """template_boilerplate_phrases.json is generated, never hand-edited:
+    regenerating it from key_files/ must reproduce the committed file."""
+    import importlib.util
+    import json
+    root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(
+        "gen_template_boilerplate", root / "scripts" / "gen_template_boilerplate.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    out = tmp_path / "phrases.json"
+    monkeypatch.setattr(gen, "OUTPUT_PATH", out)
+    gen.main()
+    committed = root / "src" / "unified_pipeline" / "core" / "template_boilerplate_phrases.json"
+    assert json.loads(out.read_text()) == json.loads(committed.read_text())
+
+
+@pytest.mark.parametrize("text", [
+    # 2020 revision only: its licensure note (not in the 2022 file at all)
+    "Licensure: Every physician appointed to the Hospital staff, except interns, "
+    "and aliens in the US via non-immigrant visas, must have a New York State "
+    "license or a temporary certificate in lieu of the license.",
+    # 2012 revision only
+    "(Every doctor appointed to the Hospital staff, except interns and aliens in "
+    "the US via non-immigrant visas, must have a New York State license or a "
+    "temporary certificate in lieu of the license.)",
+])
+def test_older_revisions_instructions_are_boilerplate(text):
+    assert is_template_instruction(text)
+
+
+@pytest.mark.parametrize("header", [
+    "B. EDUCATIONAL BACKGROUND",               # 2012
+    "PROFESSIONAL POSITIONS AND EMPLOYMENT",   # 2012 and 2020
+    "LICENSURE, BOARD CERTIFICATION, MALPRACTICE",
+])
+def test_older_revisions_section_headers_are_never_dropped(header):
+    assert not is_template_instruction(header)
+    assert not is_near_template_instruction(header)
+# --- #829: a line of nothing but template labels (Appendix only) ---
+
+@pytest.mark.parametrize("text", [
+    "Signature:",                        # short: below is_template_instruction's floor
+    "If no license:",
+    "Site/Position |",
+    "Research |  |",                     # an unfilled effort-table row
+    "Duration of support:\n(mm/yyyy-mm/yyyy) |",   # label split over two lines
+    "DEA number: (optional)\t\nNPI number: (optional)\t",
+    "Signature:\tIf no license:",        # two labels on one line, tab-separated
+    # a section header alone (protected, and in no instruction phrase)
+    "CLINICAL PRACTICE, INNOVATION, and LEADERSHIP",
+])
+def test_a_line_of_only_template_labels(text):
+    assert not is_template_instruction(text)  # the gap: too short for the floor
+    assert is_template_label_line(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Your role*\toversight",             # one real piece keeps the line
+    "Site/Position | Fictional Assistant Director, Imaginary Library",
+    "Signature: Jane Q. Fictional",
+    "Worked with the fictional outreach team",
+    "",
+    " |  | ",
+])
+def test_a_line_with_any_real_piece_is_not_label_only(text):
+    assert not is_template_label_line(text)
 
 
 def test_layer1_integration_filter():

@@ -22,42 +22,6 @@ from unified_pipeline.config import reload_config
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_mock_response(content="test response", prompt_tokens=100,
-                        completion_tokens=50, total_tokens=150,
-                        finish_reason="stop"):
-    """Create a mock OpenAI ChatCompletion response object."""
-    mock_response = MagicMock()
-    mock_response.choices = [MagicMock()]
-    mock_response.choices[0].message.content = content
-    mock_response.choices[0].finish_reason = finish_reason
-    mock_response.usage.prompt_tokens = prompt_tokens
-    mock_response.usage.completion_tokens = completion_tokens
-    mock_response.usage.total_tokens = total_tokens
-    return mock_response
-
-
-def _default_config():
-    """Return a default stage config dict for mocking get_stage_config."""
-    return {
-        "provider": "openai",
-        "model": "gpt-4o-mini",
-        "temperature": 0,
-        "max_tokens": None,
-        "retry_count": 3,
-    }
-
-
-def _stage_4_config():
-    """Return a stage_4 config dict (model overridden to gpt-4o)."""
-    return {
-        "provider": "openai",
-        "model": "gpt-4o",
-        "temperature": 0,
-        "max_tokens": None,
-        "retry_count": 3,
-    }
-
-
 def _bedrock_config():
     """Return a config dict with bedrock as provider."""
     return {
@@ -91,174 +55,44 @@ def _make_bedrock_response(content="test response", input_tokens=100,
 
 @pytest.fixture(autouse=True)
 def reset_state():
-    """Reset config cache, OpenAI client, and Bedrock client before each test.
+    """Reset config cache and Bedrock client before each test.
 
-    The client caches live in llm.openai / llm.bedrock (#496), not
-    llm_client -- resetting a same-named attribute on llm_client itself
-    would rebind only that module's name, not the global `_get_openai_client`
-    / `_get_bedrock_client` read via `global` in the modules that actually
-    own it, leaving the real cache unreset.
+    The client cache lives in llm.bedrock (#496), not llm_client --
+    resetting a same-named attribute on llm_client itself would rebind only
+    that module's name, not the global `_get_bedrock_client` read via
+    `global` in the module that actually owns it, leaving the real cache
+    unreset.
     """
     reload_config()
-    import unified_pipeline.llm.openai as openai_mod
     import unified_pipeline.llm.bedrock as bedrock_mod
-    openai_mod._openai_client = None
     bedrock_mod._bedrock_client = None
     yield
     reload_config()
-    openai_mod._openai_client = None
     bedrock_mod._bedrock_client = None
-
-
-# ---------------------------------------------------------------------------
-# Basic call_llm functionality (LLM-01)
-# ---------------------------------------------------------------------------
-
-def test_call_llm_openai():
-    """call_llm returns a dict with all required keys for an OpenAI call."""
-    from unified_pipeline.llm_client import call_llm
-
-    mock_response = _make_mock_response()
-
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai_cls.return_value = mock_client
-
-        result = call_llm("stage_2", [{"role": "user", "content": "test"}])
-
-    assert isinstance(result, dict)
-    assert result["content"] == "test response"
-    assert result["provider"] == "openai"
-    assert result["model"] == "gpt-4o-mini"
-    assert result["prompt_tokens"] == 100
-    assert result["completion_tokens"] == 50
-    assert result["total_tokens"] == 150
-    assert result["finish_reason"] == "stop"
-    assert "cost" in result
-    assert "latency_ms" in result
-
-
-def test_call_llm_params():
-    """call_llm passes model from stage config and response_format to OpenAI SDK."""
-    from unified_pipeline.llm_client import call_llm
-
-    mock_response = _make_mock_response()
-
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_stage_4_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai_cls.return_value = mock_client
-
-        messages = [{"role": "user", "content": "classify"}]
-        call_llm("stage_4", messages, response_format={"type": "json_object"})
-
-        call_kwargs = mock_client.chat.completions.create.call_args
-        passed_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
-        assert passed_kwargs["model"] == "gpt-4o"
-        assert passed_kwargs["response_format"] == {"type": "json_object"}
-
-
-def test_call_llm_temperature():
-    """call_llm passes temperature from config to OpenAI SDK."""
-    from unified_pipeline.llm_client import call_llm
-
-    mock_response = _make_mock_response()
-
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai_cls.return_value = mock_client
-
-        call_llm("stage_2", [{"role": "user", "content": "test"}])
-
-        call_kwargs = mock_client.chat.completions.create.call_args
-        passed_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
-        assert passed_kwargs["temperature"] == 0
-
-
-def test_call_llm_kwargs_override():
-    """kwargs override config values for model and temperature."""
-    from unified_pipeline.llm_client import call_llm
-
-    mock_response = _make_mock_response()
-
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai_cls.return_value = mock_client
-
-        result = call_llm("stage_2", [{"role": "user", "content": "test"}],
-                          model="gpt-4o", temperature=0.5)
-
-        call_kwargs = mock_client.chat.completions.create.call_args
-        passed_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
-        assert passed_kwargs["model"] == "gpt-4o"
-        assert passed_kwargs["temperature"] == 0.5
-        # Result should reflect the overridden model
-        assert result["model"] == "gpt-4o"
 
 
 # ---------------------------------------------------------------------------
 # Normalized response format (LLM-04)
 # ---------------------------------------------------------------------------
 
-def test_normalized_response():
-    """Returned dict has exactly the required keys with correct values."""
-    from unified_pipeline.llm_client import call_llm
-
-    mock_response = _make_mock_response(
-        content="extracted text",
-        prompt_tokens=200,
-        completion_tokens=80,
-        total_tokens=280,
-        finish_reason="stop",
-    )
-
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai_cls.return_value = mock_client
-
-        result = call_llm("stage_2", [{"role": "user", "content": "test"}])
-
-    expected_keys = {"content", "prompt_tokens", "completion_tokens", "total_tokens",
-                     "cache_read_tokens", "cache_write_tokens",
-                     "cost", "model", "provider", "finish_reason", "latency_ms"}
-    assert set(result.keys()) == expected_keys
-    assert result["content"] == "extracted text"
-    assert result["prompt_tokens"] == 200
-    assert result["completion_tokens"] == 80
-    assert result["total_tokens"] == 280
-    # OpenAI path never reports cache splits.
-    assert result["cache_read_tokens"] == 0
-    assert result["cache_write_tokens"] == 0
-    assert result["finish_reason"] == "stop"
-    assert result["model"] == "gpt-4o-mini"
-    assert result["provider"] == "openai"
-
-
 def test_normalized_response_cost():
     """cost field is computed via calculate_cost() with correct provider and model."""
     from unified_pipeline.llm_client import call_llm
     from unified_pipeline.config import calculate_cost
 
-    mock_response = _make_mock_response(prompt_tokens=1000, completion_tokens=500, total_tokens=1500)
+    mock_response = _make_bedrock_response(input_tokens=1000, output_tokens=500, total_tokens=1500)
 
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai_cls.return_value = mock_client
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
 
         result = call_llm("stage_2", [{"role": "user", "content": "test"}])
 
-    expected_cost = calculate_cost(1000, 500, model="gpt-4o-mini", provider="openai")
+    expected_cost = calculate_cost(1000, 500, model="anthropic.claude-3-haiku-20240307-v1:0",
+                                   provider="bedrock")
     assert result["cost"] == pytest.approx(expected_cost)
 
 
@@ -266,13 +100,14 @@ def test_normalized_response_latency():
     """latency_ms field is a positive integer measuring elapsed time."""
     from unified_pipeline.llm_client import call_llm
 
-    mock_response = _make_mock_response()
+    mock_response = _make_bedrock_response()
 
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai_cls.return_value = mock_client
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
 
         result = call_llm("stage_2", [{"role": "user", "content": "test"}])
 
@@ -314,95 +149,6 @@ def test_normalized_response_bedrock():
     assert result["cache_write_tokens"] == 0
     assert result["finish_reason"] == "stop"
     assert result["provider"] == "bedrock"
-
-
-# ---------------------------------------------------------------------------
-# Retry behavior
-# ---------------------------------------------------------------------------
-
-def test_call_llm_retry_on_rate_limit():
-    """call_llm retries on RateLimitError and succeeds on 3rd try."""
-    from unified_pipeline.llm_client import call_llm
-    from openai import RateLimitError
-
-    mock_response = _make_mock_response()
-
-    rate_limit_error = RateLimitError(
-        "rate limited",
-        response=MagicMock(status_code=429, headers={}),
-        body=None,
-    )
-
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls, \
-         patch("unified_pipeline.llm_client.time.sleep"):  # skip actual sleep
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.side_effect = [
-            rate_limit_error,
-            rate_limit_error,
-            mock_response,  # success on 3rd try
-        ]
-        mock_openai_cls.return_value = mock_client
-
-        result = call_llm("stage_2", [{"role": "user", "content": "test"}])
-
-    assert result["content"] == "test response"
-    assert mock_client.chat.completions.create.call_count == 3
-
-
-def test_call_llm_retry_exhausted():
-    """call_llm raises RateLimitError when all retries are exhausted."""
-    from unified_pipeline.llm_client import call_llm
-    from openai import RateLimitError
-
-    rate_limit_error = RateLimitError(
-        "rate limited",
-        response=MagicMock(status_code=429, headers={}),
-        body=None,
-    )
-
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls, \
-         patch("unified_pipeline.llm_client.time.sleep"):
-        mock_client = MagicMock()
-        # retry_count=3 means 4 total attempts (initial + 3 retries)
-        mock_client.chat.completions.create.side_effect = [
-            rate_limit_error,
-            rate_limit_error,
-            rate_limit_error,
-            rate_limit_error,
-        ]
-        mock_openai_cls.return_value = mock_client
-
-        with pytest.raises(RateLimitError):
-            call_llm("stage_2", [{"role": "user", "content": "test"}])
-
-    assert mock_client.chat.completions.create.call_count == 4
-
-
-def test_call_llm_no_retry_on_auth_error():
-    """call_llm raises AuthenticationError immediately without retrying."""
-    from unified_pipeline.llm_client import call_llm
-    from openai import AuthenticationError
-
-    auth_error = AuthenticationError(
-        "invalid api key",
-        response=MagicMock(status_code=401, headers={}),
-        body=None,
-    )
-
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls, \
-         patch("unified_pipeline.llm_client.time.sleep"):
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.side_effect = auth_error
-        mock_openai_cls.return_value = mock_client
-
-        with pytest.raises(AuthenticationError):
-            call_llm("stage_2", [{"role": "user", "content": "test"}])
-
-    # Should only be called once (no retry)
-    assert mock_client.chat.completions.create.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -603,12 +349,16 @@ def test_call_llm_bedrock_retry_on_throttle():
 
 
 def test_call_llm_bedrock_retry_exhausted():
-    """call_llm raises ClientError when all Bedrock retries are exhausted."""
+    """call_llm raises ClientError when all Bedrock retries are exhausted.
+
+    ModelTimeoutException, not ThrottlingException: since #912 a throttle is
+    outage-class and waits out CVICHE_LLM_OUTAGE_BUDGET_SECONDS instead.
+    """
     from unified_pipeline.llm_client import call_llm
     from botocore.exceptions import ClientError
 
     throttle_error = ClientError(
-        {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+        {"Error": {"Code": "ModelTimeoutException", "Message": "Model timed out"}},
         "Converse",
     )
 
@@ -861,27 +611,6 @@ def test_bedrock_json_schema_appends_json_only_hint():
 # Lazy initialization
 # ---------------------------------------------------------------------------
 
-def test_openai_client_lazy_init():
-    """Importing llm_client does not create an OpenAI client. First call does."""
-    import unified_pipeline.llm_client as mod
-    import unified_pipeline.llm.openai as openai_mod
-
-    # After import (and reset in fixture), client should be None
-    assert openai_mod._openai_client is None
-
-    mock_response = _make_mock_response()
-
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai_cls.return_value = mock_client
-
-        # After calling, client should be set
-        mod.call_llm("stage_2", [{"role": "user", "content": "test"}])
-        assert openai_mod._openai_client is not None
-
-
 def test_bedrock_client_lazy_init():
     """Importing llm_client does not create a Bedrock client. First Bedrock call does."""
     import unified_pipeline.llm_client as mod
@@ -900,31 +629,6 @@ def test_bedrock_client_lazy_init():
 
         mod.call_llm("stage_2", [{"role": "user", "content": "test"}])
         assert bedrock_mod._bedrock_client is not None
-
-
-# ---------------------------------------------------------------------------
-# response_format passthrough
-# ---------------------------------------------------------------------------
-
-def test_response_format_passthrough():
-    """response_format dict is passed through to OpenAI SDK create() as-is."""
-    from unified_pipeline.llm_client import call_llm
-
-    mock_response = _make_mock_response()
-    rf = {"type": "json_object"}
-
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
-        mock_client = MagicMock()
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai_cls.return_value = mock_client
-
-        call_llm("stage_2", [{"role": "user", "content": "test"}],
-                 response_format=rf)
-
-        call_kwargs = mock_client.chat.completions.create.call_args
-        passed_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
-        assert passed_kwargs["response_format"] == {"type": "json_object"}
 
 
 # ---------------------------------------------------------------------------
@@ -973,10 +677,19 @@ def test_retry_backoff_uses_equal_jitter(monkeypatch):
     import unified_pipeline.llm_client as mod
     from botocore.exceptions import ClientError
 
+    import random
+
     sleeps = []
     monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+    # Pin the jitter a quarter of the way up [0, base/2], so a constant wait
+    # (base, or base/2) fails instead of landing on an inclusive bound.
+    monkeypatch.setattr(random, "uniform", lambda lo, hi: lo + (hi - lo) * 0.25)
+    # If the error below ever turns outage-class, fail fast instead of spinning
+    # against the real-clock 1800s outage budget with sleep mocked.
+    monkeypatch.setenv("CVICHE_LLM_OUTAGE_BUDGET_SECONDS", "0.01")
 
-    throttle = ClientError({"Error": {"Code": "ThrottlingException"}}, "Converse")
+    # Not ThrottlingException: outage-class since #912, on its own backoff.
+    throttle = ClientError({"Error": {"Code": "ModelTimeoutException"}}, "Converse")
 
     def always_throttled():
         raise throttle
@@ -984,10 +697,9 @@ def test_retry_backoff_uses_equal_jitter(monkeypatch):
     with pytest.raises(ClientError):
         mod._call_with_retry(always_throttled, retry_count=3)
 
-    # retry_count=3 -> sleeps before attempts 1,2,3 with exponential bases 1,2,4.
-    assert len(sleeps) == 3
-    for wait, base in zip(sleeps, (1, 2, 4)):
-        assert base / 2 <= wait <= base
+    # retry_count=3 -> sleeps before attempts 1,2,3 with exponential bases 1,2,4;
+    # each wait is base/2 + uniform(0, base/2) = 0.625 * base under the pin.
+    assert sleeps == [0.625, 1.25, 2.5]
 
 
 def test_call_semaphore_released_on_success_and_failure(monkeypatch):
@@ -1222,12 +934,10 @@ def test_call_llm_logs_response_exactly_once_per_provider_path():
     log_prompt_response used to be copy-pasted into all three return branches
     (OpenAI, Bedrock forced-tool, Bedrock text), so adding a fourth exit meant
     remembering a fourth copy -- and forgetting silently dropped the log. There
-    is now one exit point; this pins it for all three paths.
+    is now one exit point; this pins it for both remaining (Bedrock) paths.
     """
     from unified_pipeline.llm_client import call_llm
 
-    openai_cfg = {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0,
-                  "max_tokens": None, "retry_count": 3}
     schema_fmt = {
         "type": "json_schema",
         "json_schema": {"name": "grant_record",
@@ -1236,15 +946,7 @@ def test_call_llm_logs_response_exactly_once_per_provider_path():
 
     paths = []
 
-    # 1. OpenAI
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=openai_cfg), \
-         patch("unified_pipeline.llm.openai._get_openai_client") as mock_openai, \
-         patch("unified_pipeline.llm_client.log_prompt_response") as logged:
-        mock_openai.return_value.chat.completions.create.return_value = _make_mock_response()
-        call_llm("stage_2", [{"role": "user", "content": "hi"}])
-        paths.append(("openai", logged.call_count))
-
-    # 2. Bedrock text/json_object path
+    # 1. Bedrock text/json_object path
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_bedrock_config()), \
          patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client, \
          patch("unified_pipeline.llm_client.log_prompt_response") as logged:
@@ -1252,7 +954,7 @@ def test_call_llm_logs_response_exactly_once_per_provider_path():
         call_llm("stage_2", [{"role": "user", "content": "hi"}])
         paths.append(("bedrock-text", logged.call_count))
 
-    # 3. Bedrock forced-tool json_schema path (#46)
+    # 2. Bedrock forced-tool json_schema path (#46)
     tool_response = {
         "output": {"message": {"content": [
             {"toolUse": {"name": "grant_record", "input": {"title": "x"}}},
@@ -1268,7 +970,7 @@ def test_call_llm_logs_response_exactly_once_per_provider_path():
                  response_format=schema_fmt)
         paths.append(("bedrock-tool", logged.call_count))
 
-    assert paths == [("openai", 1), ("bedrock-text", 1), ("bedrock-tool", 1)]
+    assert paths == [("bedrock-text", 1), ("bedrock-tool", 1)]
 
 
 def test_call_llm_unsupported_provider_logs_no_orphan_prompt():

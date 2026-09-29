@@ -43,8 +43,10 @@ TERMINAL_ERROR_TYPES = frozenset({
 })
 
 # Defaults: feature OFF, and even when on, a small attempt ceiling plus a backoff
-# so a persistently failing run cannot loop unbounded.
-DEFAULT_MAX_AUTO_RETRIES = 3
+# so a persistently failing run cannot loop unbounded. The cap counts retries
+# after the first run: attempt_count starts at 1 and a run stays eligible while
+# attempt_count <= cap, so 2 means at most 3 executions in total (#145 decision).
+DEFAULT_MAX_AUTO_RETRIES = 2
 DEFAULT_BACKOFF_SECONDS = 30
 
 # Strings parsed as truthy for the on/off flag (case-insensitive).
@@ -78,7 +80,7 @@ def auto_retry_enabled() -> bool:
 
 
 def max_auto_retries() -> int:
-    """Max number of auto-retry attempts. Default DEFAULT_MAX_AUTO_RETRIES (3).
+    """Max number of auto-retries after the first run. Default DEFAULT_MAX_AUTO_RETRIES (2).
 
     Reads ``CVICHE_MAX_AUTO_RETRIES``; a missing or non-integer value falls back
     to the default rather than raising.

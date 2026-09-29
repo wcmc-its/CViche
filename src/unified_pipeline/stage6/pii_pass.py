@@ -48,11 +48,18 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from .normalization.pii import (  # noqa: F401
+    CAT_THIRD_PARTY_CONTACT,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     WITHHOLD_POLICY,
+    PiiMatch,
     WithheldItem,
+    _BARE_EMAIL_SHAPE,
+    _BARE_PHONE_SHAPE,
+    _KNOWN_FIELD_LABEL_RE,
     _PII_FRAGMENT_SPLIT_RE,
+    _is_bare_label_span,
+    _merge_matches,
     _pii_field_key_category,
     _pii_matches,
 )
@@ -120,96 +127,6 @@ _SIBLING_LABEL_RE = re.compile(
     r"[ \t]*:"
 )
 
-#: Field labels this pipeline RENDERS, curated from the code that already
-#: recognises each one -- the second half of `_KNOWN_FIELD_LABEL_RE`'s
-#: vocabulary (the first half is `WITHHOLD_POLICY`'s own label rows).
-#: Verbose-mode alternatives, case-insensitive, no colon (the shared
-#: `\s*:` terminator is appended once, the way `pii.py::_label_pattern`
-#: appends it for a policy row).
-#:
-#: Every entry names a field some renderer or classifier looks for by
-#: name; nothing here is a guess about English word shape. Source per
-#: entry (all on this branch):
-#:
-#: - the six PERSONAL DATA table rows `_write_personal_data_table_cells`
-#:   matches by their own cell text -- 'office address'
-#:   (`sections/personal_data.py:631`), 'office telephone' (`:637`),
-#:   'work email' (`:642`), 'home address' (`:647`), 'cell phone'
-#:   (`:653`), 'personal email' (`:658`). 'home address' also arrives via
-#:   `WITHHOLD_POLICY`'s own home-contact row, which is fine: the
-#:   vocabulary is a union.
-#: - `_classify_contact_label`'s label words -- `_EMAIL_LABEL_WORDS`
-#:   ('e-mail', 'email') `:158`, `_PHONE_LABEL_WORDS` ('phone',
-#:   'telephone') `:159`, `_ADDRESS_LABEL_WORDS` ('address', 'business')
-#:   `:163`, `_PERSON_NAME_LABELS` ('name', 'full name', 'legal name',
-#:   'candidate name', 'applicant name') `:169-172`.
-#: - the phone-type words the entry classifier reads out of the raw text:
-#:   'cell', 'mobile' (`personal_data.py:423`).
-#: - 'fax' -- consumed and deliberately dropped by
-#:   `_parse_address_block` (`personal_data.py:892`) and by
-#:   `normalization/fields.py:174-177`.
-#: - 'citizenship', 'nationality' and 'personal email' -- the #821
-#:   "render" defaults, listed as NOT in the table at
-#:   `normalization/pii.py:304-305`.
-#: - 'npi' -- the same list's public identifier (`pii.py:306`), detected
-#:   by `sections/licensure.py:86` `_NPI_LABEL_RE`.
-#: - 'orcid' -- section S0's own identifier
-#:   (`sections/researcher_profiles.py:1-3`, `sections/__init__.py:29`).
-#: - 'website', 'home page', 'homepage', 'contact' -- the contact nouns
-#:   `core/validators/contact_section.py:90-92` `CONTACT_NOUNS` lists.
-#:
-#: Adding a field is one row. A label NOT here is not leaked: the run is
-#: cut whole (see `_extend_bare_label_span`), so the cost of a gap is a
-#: lost sibling field, never a rendered protected value.
-_RENDER_SET_FIELD_LABELS: tuple[str, ...] = (
-    r"office \s* address",
-    r"office \s* (?: telephone | phone )",
-    r"work \s* e-? \s* mail",
-    r"personal \s* e-? \s* mail",
-    r"cell (?: \s* phone )?",
-    r"mobile (?: \s* phone )?",
-    r"e-? \s* mail (?: \s* address )?",
-    r"telephone",
-    r"phone",
-    r"address",
-    r"business",
-    r"name",
-    r"(?: full | legal | candidate | applicant ) \s* name",
-    r"fax",
-    r"citizenship",
-    r"nationality",
-    r"npi",
-    r"orcid",
-    r"website",
-    r"home \s* page | homepage",
-    r"contact",
-)
-
-#: The ONLY thing a bare-label extension may stop at part-way through a
-#: whitespace run (#821 R4 F-1): a label this codebase actually knows, at
-#: a word start, optionally behind a list marker.
-#:
-#: Built from `WITHHOLD_POLICY`'s label rows PLUS
-#: `_RENDER_SET_FIELD_LABELS`, the same way `pii.py::_PII_LABEL_RE` is
-#: built from those rows -- one source, so the vocabulary cannot drift
-#: from the policy when a row is added.
-#:
-#: The leading `(?<![\w'’-])` is what makes it a FIELD NAME rather than a
-#: substring: without it "MyCitizenship:" inside a value stops the cut and
-#: everything before it renders.
-_KNOWN_FIELD_LABEL_RE = re.compile(
-    r"(?<![\w'’-])"
-    r"(?:(?:[•·*–—-]|\d{1,3}[.)])[ \t]*)?"
-    r"(?:"
-    + "|".join(
-        [r"(?:" + str(rule.label) + r")"
-         for rule in WITHHOLD_POLICY if rule.label is not None]
-        + [r"(?:" + label + r")" for label in _RENDER_SET_FIELD_LABELS]
-    )
-    + r")\s*:",
-    re.X | re.I,
-)
-
 
 class _BareLabelSpan(NamedTuple):
     """What `_extend_bare_label_span` decided about one bare-label match.
@@ -245,6 +162,235 @@ class PiiPassResult:
     order. `sections/personal_data.py` appends the values its docx recovery
     withheld, so the notice and the comment cover both paths."""
     withheld: list[WithheldItem] = field(default_factory=list)
+
+
+#: #833: local parts of a generic mailbox an editorial board / journal
+#: publishes ("submissions@<journal>.org"), not a person's own address --
+#: the negative control the issue names. A small, closed vocabulary rather
+#: than a word-shape guess, same reasoning as `_RENDER_SET_FIELD_LABELS`
+#: above: matched on the FULL local part, so "editorial@..." (not "editor")
+#: is not spared by accident.
+#:
+#: No phone equivalent (a published department / front-desk line) exists
+#: here. That is deliberate, not an oversight: #833 is about a References
+#: block's PERSONAL contact data, and a generic-mailbox concept for phones
+#: was never raised against this corpus. Out of scope for this issue --
+#: add one the same way (a closed vocabulary of known front-desk numbers,
+#: not a shape guess) if a real CV ever needs it.
+_GENERIC_MAILBOX_LOCAL_PARTS = frozenset({
+    "editor", "office", "info", "journal", "admin", "submissions",
+})
+
+#: Neither shape below has a case-sensitive literal or a literal space
+#: outside a character class, so `re.I`/`re.X` matched nothing either flag
+#: would change; dropped rather than kept as decoration, since a future
+#: edit that DID add a literal space outside `[...]` would otherwise be
+#: silently verbose-formatted away instead of erroring.
+_THIRD_PARTY_EMAIL_RE = re.compile(_BARE_EMAIL_SHAPE)
+_THIRD_PARTY_PHONE_RE = re.compile(_BARE_PHONE_SHAPE)
+
+#: Name tokens shorter than this (initials, "Dr", "Jr") are dropped before
+#: the owner-name-sharing check below, so they cannot cheaply satisfy it.
+_MIN_OWNER_NAME_TOKEN_LEN = 3
+_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'-]+")
+
+
+def _phone_digits(value: str) -> str:
+    """Digits only, with a US country-code `1` stripped when it produces
+    an 11-digit result (#920 review: `_phone_digits` normalised
+    "+1 212-555-0100" and "212-555-0100" to different strings, so the
+    owner-contact comparison below missed the same number in two formats
+    -- correctness only, since the old behaviour failed SAFE by
+    over-withholding the owner's own number rather than leaking anyone
+    else's)."""
+    digits = re.sub(r"\D", "", value)
+    return digits[1:] if len(digits) == 11 and digits.startswith("1") else digits
+
+
+def _owner_contacts(a_entries: Sequence[dict]) -> frozenset[str]:
+    """Every email/phone the CV owner's own 'A' entries carry, from `text`
+    and `extracted_fields` alike (#833): the whole point of the rule below
+    is telling the owner's OWN contact block -- which legitimately repeats
+    inside an Appendix-bound entry, e.g. a resume-portal footer -- from a
+    third party's. Phones are digit-normalised so a formatting difference
+    ("212-555-0100" vs "(212) 555-0100") cannot defeat the comparison;
+    emails are case-folded."""
+    contacts: set[str] = set()
+    for entry in a_entries:
+        values: list[str] = [entry.get("text") or ""]
+        values.extend(v for v in (entry.get("extracted_fields") or {}).values()
+                      if isinstance(v, str))
+        for value in values:
+            contacts.update(m.group().lower()
+                            for m in _THIRD_PARTY_EMAIL_RE.finditer(value))
+            contacts.update(_phone_digits(m.group())
+                            for m in _THIRD_PARTY_PHONE_RE.finditer(value))
+    return frozenset(contacts)
+
+
+def _owner_name_tokens(a_entries: Sequence[dict]) -> frozenset[str]:
+    """Tokens of the CV owner's own name (the #833 second-email negative
+    control, now the #920 per-value email exemption too):
+    `extracted_fields['name']` of the first 'A' entry that has one, else
+    the first 'A' entry's raw text -- a References-block-style entry
+    ("Name, Title, Institution") puts the owner's own name first exactly
+    the way a normal Personal Data block does.
+
+    Document-order guarantee for the fallback: `a_entries` is
+    `entries_by_code['A']` as `run_pii_pass` receives it, built by
+    `stage_6_word_template.py::_group_entries_by_code`'s single
+    `for entry in entries: entries_by_code[code].append(entry)` pass, so
+    within-code order is exactly `entries`' own order. `entries` itself is
+    Stage 4's `all_entries`, EXPLICITLY sorted by
+    `(element_idx_start, element_idx_end)`
+    (`stage4/extraction.py:1037`) before Stage 6 ever sees it, and no
+    later stage (5, 5b, 5c, 5d) re-sorts it (`stage_5_pubmed_enrichment.py`,
+    `stage_5b_institution_enrichment.py` sort only glob results, never the
+    entries list; `stage_5c_teaching_formatter.py` and
+    `stage_5d_citation_formatter.py` group `data['entries']` by k-code with
+    a plain `dict.get`, with no `sorted(...)`/`.sort()` on the list
+    itself either). `a_entries[0]` is therefore document-order-first,
+    modulo #916's own residual (same-start duplicate headers in stage 1a,
+    OPEN) -- a defect in how `element_idx` itself is computed, not in
+    whether this list is sorted by it."""
+    name = ""
+    for entry in a_entries:
+        candidate = (entry.get("extracted_fields") or {}).get("name")
+        if isinstance(candidate, str) and candidate.strip():
+            name = candidate
+            break
+    if not name and a_entries:
+        name = a_entries[0].get("text") or ""
+    return frozenset(tok.lower() for tok in _NAME_TOKEN_RE.findall(name)
+                     if len(tok) >= _MIN_OWNER_NAME_TOKEN_LEN)
+
+
+def _shares_owner_name(text: str, owner_name_tokens: frozenset[str]) -> bool:
+    """True when `text` carries enough of the owner's own name tokens that
+    it reads as the owner's OWN entry rather than a third party's -- at
+    least two tokens, or the one token there is when the name has only
+    one. Restored verbatim from the #833 baseline (82f3744) -- the #920
+    fix keeps this ENTRY-level gate as one of two conjuncts an email must
+    now satisfy (`_email_spared_by_owner_name`) rather than replacing it:
+    on its own it is per-entry (the #920 leak: a whole References block
+    sharing the owner's name spared every referee's contact in it), and on
+    its own it is also too permissive at the SEGMENT level, which is what
+    conjunct (b) below narrows."""
+    if not owner_name_tokens:
+        return False
+    text_tokens = {tok.lower() for tok in _NAME_TOKEN_RE.findall(text)}
+    return len(owner_name_tokens & text_tokens) >= min(2, len(owner_name_tokens))
+
+
+#: Splits an email local part into `.`/`_`/`-`/digit-delimited segments
+#: (#920 fix): "jane.doe77" -> ["jane", "doe", ""], "eduardo" -> ["eduardo"]
+#: (one segment, the whole string -- no delimiter to split on). Matched
+#: against `owner_name_tokens` by WHOLE-SEGMENT equality, never substring:
+#: `_local_part_shares_owner_name`, the function this fix removes, tested
+#: `token in local` -- a token anywhere in the local part, so an owner
+#: token "edu" spared `eduardo@` (the #920 review finding) and an owner
+#: token "lee" spared `kathleen@`. A local part carries the OWNER's own
+#: address in a `first.last`/`flast`/`firstl` shape, where a name token is
+#: always its own segment; a substring hit that is not also a whole
+#: segment is, by construction, some OTHER word merely containing the
+#: token as a fragment.
+_LOCAL_PART_SEGMENT_RE = re.compile(r"[^a-z]+")
+
+
+def _email_spared_by_owner_name(
+    text: str, local: str, owner_name_tokens: frozenset[str],
+) -> bool:
+    """True only when BOTH the #833 baseline's entry-level gate
+    (`_shares_owner_name`) and a per-value, whole-segment check on the
+    email's OWN local part hold (#920 fix for the blind verifier's FAIL on
+    `b0c5d9e`): `jane.doe@`, `jdoe@`, `doej@` style is the owner's own
+    address, `kathleen@`/`doeringer@`/`kimberly.jones@` are not, even
+    though each contains an owner token as a bare substring
+    (`lee`/`doe`/`kim`).
+
+    Requiring conjunct (a) as well as (b) is what makes the result a
+    SUBSET of what the #833 baseline (82f3744) itself spared by name: the
+    baseline's `_shares_owner_name` alone (conjunct (a)) is a superset of
+    every email this function spares, so no email the baseline withheld
+    can newly be spared here -- the #920 entry-wide leak
+    (`test_a_references_entry_sharing_the_owner_s_name_still_withholds_a_third_party_s_contact`)
+    stays fixed, because a referee's local part does not carry an owner
+    name segment even when the surrounding entry does carry the owner's
+    name."""
+    if not _shares_owner_name(text, owner_name_tokens):
+        return False
+    segments = _LOCAL_PART_SEGMENT_RE.split(local.lower())
+    return any(segment in owner_name_tokens for segment in segments)
+
+
+def _third_party_contact_matches(
+    text: str, owner: frozenset[str], owner_name_tokens: frozenset[str],
+) -> list[PiiMatch]:
+    """CAT_THIRD_PARTY_CONTACT spans in an Appendix-bound entry: an email or
+    US phone shape that is not one of `owner`'s own contacts and is not a
+    generic editorial mailbox -- an email is ADDITIONALLY spared when BOTH
+    the entry as a whole reads as the owner's own AND the email's OWN local
+    part carries one of the owner's name tokens as a whole segment
+    (`_email_spared_by_owner_name`).
+
+    #920 review round 1 (the PR's headline finding): the exemption used to
+    be PER ENTRY ONLY -- any value in an entry that also carried the
+    owner's own name anywhere in its text was spared whole, so a
+    References entry with a "References for <owner>" heading, letterhead
+    line or footer leaked every referee's phone and email in that same
+    block. #920 review round 2 (the blocker on the round-1 fix): making the
+    check per-value by switching to a BARE SUBSTRING test on the local
+    part alone (dropping the entry-level gate entirely) went too far the
+    other way -- `_local_part_shares_owner_name`'s `any(token in local ...)`
+    spared `eduardo@` on the owner's own harvested "edu" fragment and
+    `kathleen@`/`doeringer@`/`kimberly.jones@` on "lee"/"doe"/"kim", none
+    of which the #833 baseline (82f3744) spared. The exemption now
+    requires BOTH conjuncts, so it can only ever spare a SUBSET of what the
+    baseline itself spared by name (see `_email_spared_by_owner_name`'s
+    docstring) -- the round-1 fix (a phone has no per-value name signal at
+    all, so a phone can only ever be spared by being in `owner`) is
+    unchanged.
+
+    # ponytail: the entry-level gate is a coarse two-token heuristic, not a
+    # name parser, and the segment gate does not know a name from any
+    # other word -- ceiling, narrowed by this two-conjunct rewrite from the
+    # round-1 per-value-only version's bare substring test: an email is
+    # now wrongly spared only when BOTH (a) its own entry already meets
+    # the baseline's two-token gate (`_shares_owner_name`) AND (b) its
+    # local part has a whole `.`/`_`/`-`/digit-delimited SEGMENT equal to
+    # an owner token -- e.g. a same-surname relative sharing the owner's
+    # entry, or, when `_owner_name_tokens` had no `extracted_fields['name']`
+    # and fell back to the whole first 'A' entry's text, a fallback token
+    # that reads as a real word purely because the fallback tokenizer has
+    # no concept of "label" or "domain fragment" (real fallback token sets
+    # measured on the local corpus: `and`, `edu`, `com`, `gmail`, `email`,
+    # `phone`, `number`, `address`, `name`, `this`, `some`, `text`, `room`,
+    # `floor`) landing as a WHOLE segment of a third party's local part
+    # rather than a substring inside a longer one. Conjunct (a) is
+    # entry-text-wide, so under the fallback an email's own local part and
+    # domain can supply both matching tokens by themselves (e.g.
+    # `email.desk@example-state.edu` matches fallback tokens `email` and
+    # `edu`), satisfying (a) with no other owner-referencing text in the
+    # entry at all -- corpus incidence today is 0. Upgrade path unchanged
+    # in kind from the #833/#920-round-1 docstrings: restrict the fallback
+    # in `_owner_name_tokens` to a leading name-shaped run, if a real CV
+    # ever shows this narrower false negative
+    # (`test_email_local_part_sharing_a_fallback_word_as_its_own_segment_is_still_spared`).
+    """
+    found: list[PiiMatch] = []
+    for m in _THIRD_PARTY_EMAIL_RE.finditer(text):
+        value = m.group()
+        local = value.split("@", 1)[0].lower()
+        if (value.lower() in owner
+                or local in _GENERIC_MAILBOX_LOCAL_PARTS
+                or _email_spared_by_owner_name(text, local, owner_name_tokens)):
+            continue
+        found.append(PiiMatch(m.start(), m.end(), CAT_THIRD_PARTY_CONTACT))
+    for m in _THIRD_PARTY_PHONE_RE.finditer(text):
+        if _phone_digits(m.group()) in owner:
+            continue
+        found.append(PiiMatch(m.start(), m.end(), CAT_THIRD_PARTY_CONTACT))
+    return found
 
 
 def _entry_scope(code: str, routed_codes: frozenset[str] | set[str]) -> str:
@@ -288,7 +434,8 @@ def _extend_bare_label_span(text: str, start: int, end: int) -> _BareLabelSpan:
     from safe kept content (the pipe shape leaked a home phone into the
     Appendix exactly this way before this fix).
 
-    Only fires when the match text, right-stripped, ends in `:` -- a
+    Only fires when the match text is a bare label (`_is_bare_label_span`:
+    it ends in `:`, or in a #1041 dash terminator) -- a
     normal label+value match (the far more common shape, e.g. "Home
     Phone: 555-1234") already captured its value and is returned
     unchanged. Computed against the ORIGINAL `text` and its real offsets,
@@ -329,7 +476,7 @@ def _extend_bare_label_span(text: str, start: int, end: int) -> _BareLabelSpan:
     value is still sitting there uncut (see `_BareLabelSpan`): a label with
     nothing after it, or with another labelled field after it, orphans
     nothing and its residual is safe to render (#821 R3 F-D)."""
-    if not text[start:end].rstrip().endswith(':'):
+    if not _is_bare_label_span(text, start, end):
         return _BareLabelSpan(end, False)
     delim = _PII_FRAGMENT_SPLIT_RE.match(text, end)
     if delim is None:
@@ -365,6 +512,20 @@ def _cut_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
     stripped = _MULTI_SPACE_RE.sub(" ", stripped)
     stripped = _BLANK_LINE_RE.sub("\n", stripped)
     return stripped.strip()
+
+
+def _pii_field_value_hits(fields: Mapping, scope: str) -> dict[str, list[str]]:
+    """Field key -> the PII categories its string VALUE matches at `scope`
+    (#892): a field-first renderer prints the value whatever key it sits
+    under ("award_name": "... O-1 Visa"), so the key-name check alone
+    leaves it on the page beside a notice saying it was withheld."""
+    hits: dict[str, list[str]] = {}
+    for key, value in fields.items():
+        if isinstance(value, str) and value:
+            categories = [m.category for m in _pii_matches(value, scope)]
+            if categories:
+                hits[key] = categories
+    return hits
 
 
 def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
@@ -405,6 +566,9 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
       residual renders (#821 R3 F-D).
     """
     result = PiiPassResult()
+    a_entries = entries_by_code.get(PERSONAL_DATA_CODE, [])
+    owner_contacts = _owner_contacts(a_entries)
+    owner_name_tokens = _owner_name_tokens(a_entries)
     index = -1
     for code, entries in entries_by_code.items():
         scope = _entry_scope(code, routed_codes)
@@ -413,12 +577,37 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             index += 1
             raw_text = entry.get("text", "") or ""
             matches = _pii_matches(raw_text, scope) if raw_text else []
+            # #833: an Appendix-bound entry also gets the value-shape
+            # third-party-contact check -- scope already excludes every
+            # routed content code (SCOPE_ALL_CODES). #920 review: an
+            # explicit `code != PERSONAL_DATA_CODE` guard used to also
+            # exclude 'A' itself, disclosed in the original PR as a proven
+            # -equivalent mutant (every value in an 'A' entry's own text is
+            # harvested into `owner_contacts` below, from that SAME set of
+            # entries, so it is always already a member of `owner` by the
+            # time this runs against it -- removing the guard cannot
+            # change what an 'A' entry renders). Deleted rather than kept
+            # "for readability": a proven-dead branch is dead weight in a
+            # PII-withholding path. The equivalence is uniform across every
+            # 'A' entry, not just the first: a second, distinct 'A' entry
+            # harvests into `owner_contacts` from that same
+            # `entries_by_code[PERSONAL_DATA_CODE]` loop, so the guard's
+            # removal is a no-op there too, for the identical reason --
+            # not a new case the removal additionally "covers".
+            if raw_text and scope == SCOPE_PERSONAL_AND_APPENDIX:
+                matches = _merge_matches(list(matches) + _third_party_contact_matches(
+                    raw_text, owner_contacts, owner_name_tokens))
 
             fields = entry.get("extracted_fields") or {}
             pii_keys = [(k, _pii_field_key_category(k)) for k in fields]
             pii_keys = [(k, c) for k, c in pii_keys if c is not None]
 
-            if not matches and not pii_keys:
+            pii_key_names = {k for k, _ in pii_keys}
+            value_hits = {
+                k: cats for k, cats in _pii_field_value_hits(fields, scope).items()
+                if k not in pii_key_names}
+
+            if not matches and not pii_keys and not value_hits:
                 continue
 
             # Extend a bare-label match (`_extend_bare_label_span`) to pull
@@ -442,6 +631,22 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             for key, category in pii_keys:
                 del fields[key]
                 result.withheld.append(WithheldItem(category, section, index))
+            # #892: a PII value under a non-PII key is dropped like a
+            # PII-keyed field. The same item already recorded from `text`
+            # (the entry's raw text usually carries the very same phrase)
+            # is not counted twice.
+            noticed = {m.category for m in matches}
+            if value_hits:
+                # Which fields went, so a field-first writer can tell a
+                # withheld award from one that never had a name field.
+                entry["_pii_dropped_fields"] = sorted(value_hits)
+            for key, categories in value_hits.items():
+                del fields[key]
+                for category in categories:
+                    if category not in noticed:
+                        noticed.add(category)
+                        result.withheld.append(
+                            WithheldItem(category, section, index))
 
     return result
 
@@ -449,7 +654,9 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
 def withheld_comment_text(withheld: Sequence[WithheldItem]) -> str:
     """The Word comment's text: header, one bullet per category (in order
     of first appearance) with its item count and the section(s) the items
-    would have rendered in, footer. Categories and counts only."""
+    would have rendered in, footer. Categories and counts only. The count
+    is parenthesised, not dash-joined: "marital status — 1 item" is a
+    dash-terminated label (#1041) and would lint as protected data."""
     counts: dict[str, int] = {}
     sections: dict[str, list[str]] = {}
     for item in withheld:
@@ -460,6 +667,6 @@ def withheld_comment_text(withheld: Sequence[WithheldItem]) -> str:
     lines = [WITHHELD_COMMENT_HEADER]
     for category, count in counts.items():
         noun = "item" if count == 1 else "items"
-        lines.append(f" • {category} — {count} {noun}, {', '.join(sections[category])}")
+        lines.append(f" • {category} ({count} {noun}, {', '.join(sections[category])})")
     lines.append(WITHHELD_COMMENT_FOOTER)
     return "\n".join(lines)

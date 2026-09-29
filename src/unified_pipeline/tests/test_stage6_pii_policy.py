@@ -23,6 +23,7 @@ Run with:
 """
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -54,17 +55,22 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     CAT_SALARY,
     CAT_SPOUSE,
     CAT_SSN,
+    CAT_THIRD_PARTY_CONTACT,
     CAT_VETERAN,
     CAT_VISA,
     DECIDED_820,
     DECIDED_821,
     DECIDED_821_PENDING,
+    PRE_LLM_PLACEHOLDER,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     WITHHOLD_POLICY,
     WithheldItem,
     _pii_fragments,
     _pii_matches,
+    pre_llm_bare_label_category,
+    redact_pre_llm_value_of_category,
+    redact_pre_llm_values,
 )
 from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
     _resolve_licensure,
@@ -74,6 +80,8 @@ from unified_pipeline.stage6.pii_pass import (  # noqa: E402
     WITHHELD_COMMENT_FOOTER,
     WITHHELD_COMMENT_HEADER,
     _entry_scope,
+    _owner_name_tokens,
+    _THIRD_PARTY_PHONE_RE,
     run_pii_pass,
     withheld_comment_text,
 )
@@ -126,6 +134,28 @@ PROBE_TABLE = [
     ("• Date of Birth: 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
     ("12. Date of Birth: 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
     ("• Children: Ann, Bob", CAT_CHILDREN, _PERSONAL_ONLY),
+    # #847 residual round 3: "Date and Place of Birth" combines both labels
+    # in a word order neither existing alternative (which only combines
+    # "Birth Date and Birth Place"/"Birthdate and Birthplace") matched.
+    ("Date and Place of Birth: 01/02/1970, Example City", CAT_DATE_OF_BIRTH, _ALL),
+    # #1071: a parenthetical between the DOB stem and its colon -- the
+    # value itself (nothing after the colon) or a format hint.
+    ("Birth Date (01/02/1970):", CAT_DATE_OF_BIRTH, _ALL),
+    ("Date of Birth (01/02/1970):", CAT_DATE_OF_BIRTH, _ALL),
+    ("Date of Birth (mm/dd/yyyy): 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
+    ("Birth-date (January 2, 1970):", CAT_DATE_OF_BIRTH, _ALL),
+    # ...bounded at 40 characters (`_DOB_PAREN_MAX`): a longer
+    # parenthetical, or one with no colon after it, opens no label.
+    ("Date of Birth (" + "x" * 40 + "): 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
+    ("Date of Birth (" + "x" * 41 + "): 01/02/1970", None, _NEVER),
+    ("Date of birth (an example study) and outcomes", None, _NEVER),
+    # ...and one parenthesis pair on one line: it never nests, never closes
+    # on a later unrelated ")", never spans a newline.
+    ("Date of birth (cohort A (n=40): outcomes", None, _NEVER),
+    ("Date of birth (cohort A) by site B): outcomes", None, _NEVER),
+    ("Date of birth (see\nnote): outcomes", None, _NEVER),
+    # The combined label keeps its own alternative (no parenthetical).
+    ("Birth Date and Birth Place: 01/02/1970, Example City", CAT_DATE_OF_BIRTH, _ALL),
     # --- the comment's categories --------------------------------------
     ("Social Security #: 123-45-6789", CAT_SSN, _ALL),
     ("SS#: 123-45-6789", CAT_SSN, _ALL),
@@ -151,6 +181,11 @@ PROBE_TABLE = [
     ("DEA #: AB1234567", CAT_DEA, _PERSONAL_ONLY),
     ("Religion: Example", CAT_RELIGION, _PERSONAL_ONLY),
     ("Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
+    # #1071: the combined race-and-ethnicity label (a bare "Race:" stays a
+    # negative control below).
+    ("Race/Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
+    ("Race / Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
+    ("Race and Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
     ("Gender: Female", CAT_GENDER, _PERSONAL_ONLY),
     ("Veteran Status: Yes", CAT_VETERAN, _PERSONAL_ONLY),
     ("Disability: None", CAT_DISABILITY, _PERSONAL_ONLY),
@@ -277,6 +312,209 @@ def test_unanchored_matching_is_a_label_after_a_separator_not_a_bare_word():
     assert not _denied("The date of birth: a study of registries", CONTENT)
 
 
+def test_dash_preceded_dob_label_is_now_caught():
+    """#847 residual: a name-then-label form ("Jane Doe - DOB: ...", a
+    per-child line in a Family/Children block) was refused by the `,:(`
+    boundary rule. An explicit DOB label with a whole date after it is now
+    accepted after any prefix (`_explicit_dob_label`)."""
+    assert _denied("Jane Doe - DOB: 01/02/2010", A)
+    assert _denied("Jane Doe – Date of Birth: 01/02/2010", A)
+
+
+def test_dash_preceded_boundary_stays_refused_for_other_categories():
+    """Not a blanket boundary change: an unrelated category (marital status
+    here) still refuses a dash-preceded label exactly as before."""
+    assert not _denied("Research interests - Marital Status: Single", A)
+
+
+# #1041: one label per dash-terminated category. A value that is not
+# SSN/date shaped, so only the label row (never a colonless shape row)
+# can be what matches.
+_DASH_LABELS = [
+    ("Date of Birth", CAT_DATE_OF_BIRTH),
+    ("Birthplace", CAT_PLACE_OF_BIRTH),
+    ("Place of Birth", CAT_PLACE_OF_BIRTH),
+    ("SSN", CAT_SSN),
+    ("Passport Number", CAT_PASSPORT),
+    ("Alien Registration Number", CAT_ALIEN_REGISTRATION),
+    ("Driver's License", CAT_DRIVERS_LICENSE),
+    ("Marital Status", CAT_MARITAL_STATUS),
+    ("Emergency Contact", CAT_EMERGENCY_CONTACT),
+    ("Visa Status", CAT_VISA),
+    ("Immigration Status", CAT_VISA),
+]
+_DASHES = ["-", " -", "\u2013", " \u2013", "\u2014", " \u2014"]
+
+
+@pytest.mark.parametrize("dash", _DASHES)
+@pytest.mark.parametrize("label, category", _DASH_LABELS)
+def test_1041_dash_terminated_label_is_withheld_at_every_destination(dash, label, category):
+    """#1041: a label closed by a hyphen / en dash / em dash, then
+    whitespace, is withheld at every destination, like its colon form."""
+    text = f"{label}{dash} Synthetic Value"
+    for code in (A, APPENDIX, CONTENT):
+        assert _denied(text, code), code
+    assert [m.category for m in _pii_matches(text, SCOPE_ALL_CODES)] == [category]
+
+
+# The whitespace after the dash, as the corpus has it: XY66RT's lines
+# carry 5-11 spaces, a hard `_PII_FRAGMENT_SPLIT_RE` delimiter, so the
+# match is the label alone and the VALUE is cut only by the pass's
+# bare-label extension. A tab is the same shape.
+_DASH_GAPS = ["-      ", " -     ", "\u2013\t", "\u2014\t", "-\t"]
+
+
+@pytest.mark.parametrize("gap", _DASH_GAPS)
+@pytest.mark.parametrize("label, category", _DASH_LABELS)
+def test_1041_pass_cuts_the_value_after_a_gapped_dash_label(gap, label, category):
+    entry = {"text": f"{label}{gap}Synthetic Value", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    result = _run({"T": [entry]})
+    assert "Synthetic" not in entry["text"], entry["text"]
+    assert [i.category for i in result.withheld] == [category]
+    assert entry["_pii_orphaned_value"] is False
+
+
+@pytest.mark.parametrize("terminator", [":", " -", "\u2013", " \u2014"])
+def test_1041_dash_label_before_a_newline_orphans_its_value_like_a_colon(terminator):
+    """F2: the value on the next line is not reached by the extension (a
+    newline is the source's own field separator), so the entry is flagged
+    `_pii_orphaned_value` -- the dash form exactly as the colon form."""
+    entry = {"text": f"Marital Status{terminator}\nSynthetic", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    _run({"T": [entry]})
+    assert entry["_pii_orphaned_value"] is True
+
+
+@pytest.mark.parametrize("terminator", [":", " -", "-", "\u2013", " \u2014"])
+def test_1041_dash_label_alone_at_the_end_of_a_cell_matches_like_a_colon(terminator):
+    text = f"Marital Status{terminator}"
+    assert [m.category for m in _pii_matches(text, SCOPE_ALL_CODES)] == [CAT_MARITAL_STATUS]
+    assert pre_llm_bare_label_category(f"Date of Birth{terminator}") == CAT_DATE_OF_BIRTH
+
+
+@pytest.mark.parametrize("gap", _DASH_GAPS)
+def test_1041_pre_llm_scrub_reaches_a_date_after_a_gapped_dash_label(gap):
+    text = f"Date of Birth{gap}01/02/1970"
+    assert "01/02/1970" not in redact_pre_llm_values(text)
+
+
+@pytest.mark.parametrize("text, value", [
+    # No colonless shape row reaches these: only the next-run extension
+    # (`_pre_llm_value_span_in_next_run`) behind a dash-terminated label.
+    ("Date of Birth - | 01/02/1970", "01/02/1970"),
+    ("Year of Birth -\t1970", "1970"),
+    ("Birthday \u2013\t01/02/1970", "01/02/1970"),
+])
+def test_1041_pre_llm_scrub_takes_the_next_run_after_a_bare_dash_label(text, value):
+    assert value not in redact_pre_llm_values(text)
+
+
+def test_1041_bare_child_count_behind_a_marital_cut_is_withheld():
+    """XY66RT's line: the `;` hard split left "<n> Children" behind the
+    marital-status cut and it rendered in the Appendix."""
+    entry = {"text": "Marital Status-     Synthetic; 2 Children", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    result = _run({"T": [entry]})
+    assert "Synthetic" not in entry["text"] and "Children" not in entry["text"]
+    assert [i.category for i in result.withheld] == [CAT_MARITAL_STATUS, CAT_CHILDREN]
+
+
+def test_1041_content_after_a_dash_label_with_its_value_survives():
+    """A dash label that CARRIES its value is not bare: the cut stops at the
+    label's own fragment, and a later unrelated fragment survives."""
+    entry = {"text": "Marital Status - Zqv; Board Certified Internal Medicine",
+             "taxonomy_code": "T", "extracted_fields": {}}
+    _run({"T": [entry]})
+    assert entry["text"] == "; Board Certified Internal Medicine"
+
+
+@pytest.mark.parametrize("text", [
+    "Status; 2 sons",
+    "Status; 1 daughter",
+    "Status; 3 kids",
+    "Status; 2 children.",
+    "Status\n1 child",
+    "Status   2 children",
+    "2 children   Board Certified",
+    "Status | 2 children | Board Certified",
+])
+def test_1041_child_count_fragment_is_withheld_at_personal_and_appendix(text):
+    for code in (A, APPENDIX):
+        assert _denied(text, code), code
+
+
+def test_1041_child_count_row_does_not_reach_a_content_code():
+    """The row is PERSONAL_AND_APPENDIX only: a count in a research or
+    teaching entry is study data, not the owner's family."""
+    text = "Enrollment\t40 children\tNIH R01"
+    assert not _denied(text, CONTENT)
+    entry = {"text": text, "taxonomy_code": CONTENT, "extracted_fields": {}}
+    _run({CONTENT: [entry]})
+    assert entry["text"] == text
+
+
+@pytest.mark.parametrize("text", [
+    "Enrolled 20 children and 20 adults",
+    "Studied 20 subjects, 20 children",
+    "Outcomes in 4 children",
+    "Single (2 children) is not a fragment of its own",
+    "Cohort A; 20 children with asthma",
+    "Board Certified   20 children treated",
+    "Board Certified, 2 children",
+    "Board Certified 2 children",
+])
+def test_1041_child_count_inside_prose_is_not_withheld(text):
+    assert not [m for m in _pii_matches(text) if m.category == CAT_CHILDREN]
+
+
+@pytest.mark.parametrize("text", [
+    # The corpus false withholds a dash terminator on the ambiguous
+    # title-word rows produced (#1041 A/B), synthetic stand-ins.
+    "Health- Example Institute, Springfield",
+    "Age-related differences in memory",
+    "Age- and sex-specific norms",
+    "Gender- and Race-Based Disparities",
+    "Family-centered health promotion",
+    "Sexuality and Health – Volume 3",
+    # An unambiguous label glued to a compound word: no whitespace after
+    # the hyphen, so not a terminator.
+    "Salary-based compensation study",
+    "Visa-free travel policy review",
+    "Visa\u2014free travel policy review",
+    "Visa\u2013sponsored scholars program",
+    # Rows left colon-only: their labels open real titles.
+    "Spouse \u2013 A Documentary Film Review",
+    "Honorarium - Grand Rounds lecture",
+])
+def test_1041_dash_joined_non_pii_line_is_not_newly_withheld(text):
+    assert not _denied(text, A)
+    assert not _denied(text, APPENDIX)
+
+
+@pytest.mark.parametrize("label", [
+    "Religion", "Home Address", "Home Phone", "DEA", "Spouse", "Salary", "Honorarium",
+    "Gender", "Age", "Health", "Family", "Children", "Ethnicity",
+])
+@pytest.mark.parametrize("dash", [" - ", " \u2013 ", " \u2014 "])
+def test_1041_colon_only_category_does_not_close_on_a_dash(label, dash):
+    """The dash set is opt-in: a row outside `_DASH_TERMINATED_CATEGORIES`
+    must keep needing its colon, so the set cannot silently widen."""
+    assert _pii_matches(f"{label}{dash}Synthetic Value") == []
+
+
+@pytest.mark.parametrize("text, code", [
+    ("Marital Status: Single", CONTENT),
+    ("Birthplace: Synthetic City", CONTENT),
+    ("Visa Status: Synthetic", CONTENT),
+    ("Health: good", A),
+    ("Age: 45", A),
+    ("Gender: X", A),
+])
+def test_1041_colon_terminated_labels_unchanged(text, code):
+    assert _denied(text, code)
+
+
 def test_semicolon_is_a_hard_fragment_boundary():
     """M07: without `;` in the split set the label after it is not
     fragment-initial and the fragment before it would swallow it."""
@@ -397,6 +635,52 @@ def test_pass_records_one_item_per_fragment_and_per_key():
         CAT_DATE_OF_BIRTH, CAT_PLACE_OF_BIRTH, CAT_DATE_OF_BIRTH]
 
 
+_O1_HONOR = {
+    # web26 (#892): the stage-4 record a field-first renderer prints from.
+    "award_name": "Extraordinary Ability in Sciences, O-1 Visa",
+    "granting_body": "U.S. Citizen & Immigration Service (USCIS)",
+    "date": "2019",
+}
+
+
+def test_892_pass_drops_a_pii_value_under_a_non_pii_key_and_counts_it_once():
+    """The text carries the same visa phrase, so the notice is recorded
+    once (from text), not a second time for the field."""
+    entry = {"text": "2019 Extraordinary Ability in Sciences, O-1 Visa | USCIS",
+             "taxonomy_code": "H", "extracted_fields": dict(_O1_HONOR)}
+    result = _run({"H": [entry]})
+    assert "award_name" not in entry["extracted_fields"]
+    assert "O-1" not in str(entry["extracted_fields"])
+    assert "O-1" not in entry["text"]
+    assert entry["_pii_withheld"] is True
+    assert result.withheld == [WithheldItem(CAT_VISA, "Honors", 0)]
+
+
+def test_892_field_value_alone_triggers_the_pass_and_is_recorded():
+    """No match in `text`: the field value is the only place the visa is."""
+    entry = {"text": "Award", "taxonomy_code": "H",
+             "extracted_fields": dict(_O1_HONOR)}
+    result = _run({"H": [entry]})
+    assert "award_name" not in entry["extracted_fields"]
+    assert entry["_pii_withheld"] is True
+    assert entry["_pii_dropped_fields"] == ["award_name"]
+    assert result.withheld == [WithheldItem(CAT_VISA, "Honors", 0)]
+
+
+def test_892_non_pii_field_values_are_untouched():
+    """Negative control: same shape, nothing protected -- the entry is left
+    completely alone (same dict, no bookkeeping keys)."""
+    fields = {"award_name": "Distinguished Teaching Award",
+              "granting_body": "Example University", "date": "2019"}
+    entry = {"text": "2019 Distinguished Teaching Award | Example University",
+             "taxonomy_code": "H", "extracted_fields": fields}
+    before = {**entry, "extracted_fields": dict(fields)}
+    result = _run({"H": [entry]})
+    assert entry == before
+    assert entry["extracted_fields"] is fields
+    assert result.withheld == []
+
+
 # --------------------------------------------------------------------------
 # 3. The comment text
 # --------------------------------------------------------------------------
@@ -409,8 +693,8 @@ def test_comment_text_names_categories_counts_and_sections_only():
     ])
     lines = text.split("\n")
     assert lines[0] == WITHHELD_COMMENT_HEADER
-    assert lines[1] == " • date of birth — 1 item, Personal Data"
-    assert lines[2] == " • visa / immigration status — 2 items, Appendix, Licensure"
+    assert lines[1] == " • date of birth (1 item, Personal Data)"
+    assert lines[2] == " • visa / immigration status (2 items, Appendix, Licensure)"
     assert lines[3] == WITHHELD_COMMENT_FOOTER
     assert len(lines) == 4
 
@@ -424,7 +708,518 @@ def test_comment_text_carries_no_value():
 
 
 # --------------------------------------------------------------------------
-# 4. Bare-label span extension (#821 R3 F-B)
+# 4. Third-party contact in an unlabelled References block (#833)
+#
+# `WITHHOLD_POLICY` is label-driven; a free-form References block ("Name,
+# Title, Institution" / phone / email, no label) carries nothing it keys
+# on, so it needs a VALUE-SHAPE rule of its own -- applied only to entries
+# `run_pii_pass` already scopes as Appendix-bound (code not in
+# `routed_codes` and not 'A'), and only to a phone/email that is not the
+# CV owner's own (known from the 'A' entries) and not a generic mailbox.
+# --------------------------------------------------------------------------
+
+def _owner_a_entry(name, *contacts):
+    text = name + "\t" + "\t".join(contacts)
+    return {"text": text, "taxonomy_code": "A",
+            "extracted_fields": {"name": name}}
+
+
+def test_references_block_with_name_title_institution_phone_and_email_is_withheld():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "212-555-0100")
+    t = {"text": "Dr. Jordan Reviewer, Chair, Example State University\t"
+                 "555-234-8899\tjreviewer@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert t["_pii_withheld"] is True
+    assert t["text"] == "Dr. Jordan Reviewer, Chair, Example State University"
+    assert [i.category for i in result.withheld if i.entry_index == 1] == [
+        CAT_THIRD_PARTY_CONTACT, CAT_THIRD_PARTY_CONTACT]
+
+
+def test_references_block_with_only_an_email_is_withheld():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dr. Jordan Reviewer, Example State University, "
+                 "jreviewer@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+@pytest.mark.parametrize("phone", [
+    "555-234-8899", "(555) 234-8899", "555.234.8899", "555 234 8899",
+    "+1 555-234-8899",
+])
+def test_references_block_with_only_a_phone_is_withheld(phone):
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": f"Dr. Jordan Reviewer, Example State University, {phone}",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert phone not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_two_references_in_one_entry_each_get_their_own_withheld_item():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dr. Jordan Reviewer, jreviewer@example-state.edu\n"
+                 "Dr. Alex Second, asecond@example-college.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert "asecond@example-college.edu" not in t["text"]
+    assert [i.category for i in result.withheld] == [
+        CAT_THIRD_PARTY_CONTACT, CAT_THIRD_PARTY_CONTACT]
+
+
+def test_comment_names_third_party_contact():
+    text = withheld_comment_text([
+        WithheldItem(CAT_THIRD_PARTY_CONTACT, APPENDIX_SECTION_LABEL, 1)])
+    assert f" • {CAT_THIRD_PARTY_CONTACT} (1 item, {APPENDIX_SECTION_LABEL})" in text
+
+
+# --- negative controls, each a test -----------------------------------
+
+def test_lab_website_with_no_email_or_phone_is_untouched():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Lab website: https://example-lab.example.edu/research",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == "Lab website: https://example-lab.example.edu/research"
+    assert result.withheld == []
+
+
+def test_owners_own_email_and_phone_from_a_are_untouched_in_an_appendix_entry():
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "212-555-0100")
+    t = {"text": "Reprint requests to Dana Example, dana.example@wcm.example.edu, "
+                 "212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_own_contact_with_no_owner_name_in_the_entry_is_still_untouched():
+    """Exercises the owner-contact exemption on its own terms (#833 round
+    2, still true post-#920's per-value rewrite): this entry carries NO
+    owner-name token anywhere -- not in its prose, not in the email's own
+    local part -- so only the owner-contact set comparison can spare it.
+    The owner's email is deliberately NOT `dana.example@...` -- that local
+    part literally spells out the owner's own name tokens, so reusing it
+    here would let the local-part check pass instead of the owner-contact
+    check, making the owner-contact comparison itself untested (the
+    round-1 verifier's exact finding, reproduced against a name-free
+    address to confirm the check does the work alone)."""
+    a = _owner_a_entry("Dana Example", "office-contact-9142@wcm.test", "212-555-0100")
+    t = {"text": "Contact for reprints: office-contact-9142@wcm.test, 212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_phone_in_a_different_format_is_still_recognised_as_the_owners_own():
+    """`_phone_digits` normalises before comparing (#833 round 2): the same
+    phone, formatted differently in the Appendix entry than in the 'A'
+    entry, must still be spared -- no owner-name token here either, so the
+    normalisation itself is what has to do the work."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "212-555-0100")
+    t = {"text": "Contact for reprints: (212) 555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_phone_with_a_plus_one_country_code_matches_the_bare_10_digit_form():
+    """#920 review: `_phone_digits` used to strip only non-digits, so
+    "+1 212-555-0100" (11 digits: "12125550100") and "212-555-0100" (10
+    digits: "2125550100") normalised to two DIFFERENT strings and never
+    matched each other. Now an 11-digit result starting with "1" has that
+    leading digit stripped first, so the owner's own number is recognised
+    regardless of which format carries the country code."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu", "+1 212-555-0100")
+    t = {"text": "Contact for reprints: 212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owners_phone_only_in_extracted_fields_is_still_recognised():
+    """The owner set is gathered from `extracted_fields` as well as `text`
+    (#833 round 2): a phone present only in the 'A' entry's structured
+    field, never in its raw text, still spares the same phone elsewhere."""
+    a = {"text": "Dana Example", "taxonomy_code": "A",
+         "extracted_fields": {"name": "Dana Example", "phone": "212-555-0100"}}
+    t = {"text": "Contact for reprints: 212-555-0100",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_owner_name_tokens_fall_back_to_the_first_a_entry_s_whole_text():
+    """When no 'A' entry has `extracted_fields['name']`, the owner name
+    tokens fall back to the first 'A' entry's raw text (#833 round 2): a
+    References-block-style Personal Data entry ("Name, Title,
+    Institution", no separate name field) still spares the owner's own
+    second contact -- via the #920 per-value rule, because the second
+    email's OWN LOCAL PART ("dana.example.alt") carries the fallback
+    tokens, not because the surrounding entry prose happens to."""
+    a = {"text": "Dana Example, Professor, Example State University",
+         "taxonomy_code": "A", "extracted_fields": {}}
+    t = {"text": "Dana Example is also reachable at "
+                 "dana.example.alt@gmail.com for editorial correspondence",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_plus_one_country_code_is_fully_cut_not_left_dangling():
+    """The phone shape's optional `+1` prefix must be cut along with the
+    digits it introduces (#833 round 2) -- assert the exact residual, not
+    just that the digits are gone, so a mutant that cuts only the 3-3-4
+    digit run and leaves '+1' behind is caught."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dr. Jordan Reviewer, Example State University, "
+                 "+1 555-234-8899",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == "Dr. Jordan Reviewer, Example State University,"
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_owners_second_email_without_a_name_token_in_its_local_part_is_now_withheld():
+    """#920 review, the headline fix: the exemption used to be PER ENTRY --
+    2+ of the owner's own name tokens ANYWHERE in the entry's text spared
+    every value in it, so this exact shape (the owner's own name in the
+    prose, right beside a second email of theirs) was untouched under the
+    old rule for the wrong reason -- the entry-wide name check, not
+    anything about the email itself. It is now PER VALUE
+    (`_email_spared_by_owner_name`): a local part with no owner-name
+    token in it gets no exemption from the name-sharing path, only from
+    `owner` (the owner's OWN harvested contacts) -- and this second
+    address was never harvested, because it never appeared in an 'A'
+    entry. The correct, safer new behaviour is to withhold it: an
+    over-redacted second email of the owner's own costs almost nothing; a
+    real reference's contact info beside the owner's name used to leak
+    completely (see the entry-wide leak test below).
+
+    Synthetic value only: `dqe.alt77@example.org`, not the real-looking
+    `@gmail.com` domain this test carried before the #920 blocker fix
+    (verifier minor note)."""
+    a = _owner_a_entry("Dana Q Example", "dana.example@wcm.example.edu")
+    t = {"text": "Dana Q Example is also reachable at "
+                 "dqe.alt77@example.org for editorial correspondence",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "dqe.alt77@example.org" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_owners_second_email_whose_own_local_part_carries_a_name_token_is_untouched():
+    """The positive of the test above: the owner-own-second-email case the
+    #920 fix must keep sparing. Nothing OUTSIDE the address itself names
+    the owner (no "Dana", no "Example" in the surrounding prose) -- the
+    entry-level gate (`_shares_owner_name`) is satisfied here only because
+    it scans the WHOLE entry text and the address's own local part
+    ("dana.q.example") tokenises to "dana" and "example" too, and the
+    SAME local part also carries those tokens as whole segments, so the
+    #920 fix's second conjunct holds as well. Both conjuncts true, by the
+    address's own shape alone -- proving the exemption still reaches this
+    case without a separate name-bearing heading or footer."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "Reprint requests: dana.q.example@gmail.com",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_a_references_entry_sharing_the_owner_s_name_still_withholds_a_third_party_s_contact():
+    """#920 review -- THE LEAK this ticket closes. On the baseline
+    (`_shares_owner_name`, per-entry): a References entry that carries the
+    CV owner's own name anywhere in it -- a "References for <owner>"
+    heading, a letterhead line, a footer -- was spared WHOLE the moment
+    the owner's name tokens matched, so every referee's phone and email in
+    that same block rendered verbatim in the Appendix. Neither the
+    referee's email's local part ("jreviewer") nor the phone shares any
+    owner name token, and neither is one of the owner's own harvested
+    contacts, so under the #920 fix's two-conjunct rule (`_shares_owner_name`
+    AND a whole-segment local-part match) both are withheld even though the
+    entry as a whole satisfies the first conjunct on its own. This test
+    FAILS on baseline commit 82f3744 (proven by running it, unmodified,
+    against a `git archive` of that commit -- see the PR reply) -- and
+    would ALSO fail against the #920-round-1 fix (`b0c5d9e`) with the
+    email's local part changed to a name-token substring, since that
+    fix dropped the entry-level conjunct entirely rather than adding a
+    second one."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": "References for Dana Example\n"
+                 "Dr. Jordan Reviewer, Example State University\n"
+                 "jreviewer@example-state.edu, 212-555-0199",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert "212-555-0199" not in t["text"]
+    assert [i.category for i in result.withheld] == [
+        CAT_THIRD_PARTY_CONTACT, CAT_THIRD_PARTY_CONTACT]
+
+
+@pytest.mark.xfail(
+    reason=(
+        "#920 round 2 narrows the ceiling to two conjuncts but does not "
+        "eliminate it: an email is wrongly spared whenever (a) its own "
+        "entry already meets `_shares_owner_name`'s baseline two-token "
+        "gate AND (b) its local part has a whole segment equal to an "
+        "owner name token -- here 'email', harvested by "
+        "`_owner_name_tokens`'s no-name-field fallback from the WHOLE "
+        "first 'A' entry's raw text, which has no concept of 'label' or "
+        "'domain fragment'. Real fallback token sets measured on the "
+        "local corpus include `and`, `edu`, `com`, `gmail`, `email`, "
+        "`phone`, `number`, `address`, `name`, `this`, `some`, `text`, "
+        "`room`, `floor` -- any one of these landing as a THIRD PARTY's "
+        "own local-part segment, in an entry that also shares two of the "
+        "owner's fallback tokens, is spared by the same mechanism tested "
+        "here. A same-surname relative is the WITH-a-name-field analogue "
+        "(`_owner_name_tokens` need not fall back for the ceiling to "
+        "bite). Phones are unaffected (no per-value name signal at all). "
+        "Upgrade path unchanged from the #833/#920-round-1 docstrings: "
+        "restrict the fallback in `_owner_name_tokens` to a leading "
+        "name-shaped run."
+    ),
+    strict=True,
+)
+def test_email_local_part_sharing_a_fallback_word_as_its_own_segment_is_still_spared():
+    a = {"text": "Personal Data: Name field not provided on the source "
+                 "form. Email: dana.example@state.edu. Phone: 212-555-0100.",
+         "taxonomy_code": "A", "extracted_fields": {}}
+    t = {"text": "Personal Data forwarded here: email.desk@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "email.desk@example-state.edu" not in t["text"]
+    assert result.withheld != []
+
+
+_FALLBACK_A_TEXT = (
+    "Dana Example. Name field intentionally left blank on the source "
+    "form. Email: dana@state.edu. Alternate email: dana.alt@example.com. "
+    "A Gmail account is also on file. Phone Number: 212-555-0100. Mailing "
+    "Address: 1 Example St, Room 204, Floor 3. This profile does not "
+    "list some fields and the text is limited. Previously affiliated "
+    "with MIT. Research area: leg biomechanics. New Haven, CT."
+)
+
+
+def _fallback_a_entry() -> dict:
+    """An 'A' entry with NO `extracted_fields['name']`, so
+    `_owner_name_tokens` falls back to tokenising this WHOLE raw text
+    (#833 round 2 / #920 blocker). Deliberately carries, as ordinary
+    prose or label/domain fragments and never as anyone's actual name,
+    every fallback token this ticket's evidence measured on the local
+    corpus (`and`, `edu`, `com`, `gmail`, `email`, `phone`, `number`,
+    `address`, `name`, `this`, `some`, `text`, `room`, `floor`) plus
+    `new`, `mit` and `leg`, each used below in a real-corpus-shaped
+    substring-vs-whole-segment counter-example. Returns a FRESH dict each
+    call -- `run_pii_pass` mutates entries in place, and this is shared
+    across parametrize cases."""
+    return {"text": _FALLBACK_A_TEXT, "taxonomy_code": "A",
+            "extracted_fields": {}}
+
+
+#: (owner 'A' entry factory, the owner's own name for a References
+#: heading, the counter-example local part, a case id). Each local part
+#: is a SUBSTRING of an owner token without being a whole
+#: `.`/`_`/`-`/digit-delimited SEGMENT of itself -- exactly the shape
+#: `_local_part_shares_owner_name`'s bare substring test wrongly spared
+#: (the #920 blocker this fix closes): 'edu' inside 'eduardo', 'new'
+#: inside 'newman', 'mit' inside the 'smith' half of 'york.smith', 'leg'
+#: inside the 'college' half of 'college.admin2', 'lee' inside
+#: 'kathleen', 'doe' inside 'doeringer', 'kim' inside the 'kimberly' half
+#: of 'kimberly.jones'.
+_SEGMENT_GATE_COUNTER_EXAMPLES = [
+    (_fallback_a_entry, "Dana Example", "eduardo", "fallback-edu"),
+    (_fallback_a_entry, "Dana Example", "newman", "fallback-new"),
+    (_fallback_a_entry, "Dana Example", "york.smith", "fallback-mit"),
+    (_fallback_a_entry, "Dana Example", "college.admin2", "fallback-leg"),
+    (lambda: _owner_a_entry("Ann Lee", "ann.lee@example.com"), "Ann Lee",
+     "kathleen", "name-lee"),
+    (lambda: _owner_a_entry("Jane Doe", "jane.doe@example.com"), "Jane Doe",
+     "doeringer", "name-doe"),
+    (lambda: _owner_a_entry("Bo Kim", "bo.kim@example.com"), "Bo Kim",
+     "kimberly.jones", "name-kim"),
+]
+
+
+@pytest.mark.parametrize(
+    "owner_a_entry, owner_name, local_part, case_id",
+    _SEGMENT_GATE_COUNTER_EXAMPLES,
+    ids=[c[3] for c in _SEGMENT_GATE_COUNTER_EXAMPLES],
+)
+@pytest.mark.parametrize(
+    "shares_name", [True, False],
+    ids=["shares-name-heading", "no-owner-name-heading"])
+def test_920_blocker_every_substring_counter_example_is_withheld(
+    owner_a_entry, owner_name, local_part, case_id, shares_name,
+):
+    """#920 blocker fix, the required regression test: every one of these
+    real-corpus-shaped local parts was WRONGLY SPARED by `b0c5d9e`'s bare
+    substring check (`_local_part_shares_owner_name`) -- a PII regression
+    against the #833 baseline (82f3744), which withheld all seven in the
+    no-owner-name-heading variant (its own entry-level gate already
+    refuses when the heading does not name the owner) but SPARED them
+    per-entry in the shares-name-heading variant (the baseline's gate is
+    entry-wide, so a name-sharing heading spares every value in that
+    entry -- the #920 entry-wide leak this fix also closes). The
+    two-conjunct fix (`_email_spared_by_owner_name`) withholds every one
+    of them in BOTH variants: when the heading does not name the owner,
+    the baseline entry-level gate alone already refuses to spare it
+    (barring an incidental single-token overlap from the synthetic
+    `@example.org`/`@example.com` domains sharing "example" with the
+    fallback owner's own name -- never enough on its own to reach the
+    two-token threshold); when it does, the whole-segment check on the
+    local part is what refuses -- the SAME substring-vs-segment
+    distinction that fixes the #920 blocker."""
+    heading = (f"References for {owner_name}" if shares_name
+               else "Please see attached documentation for details")
+    t = {"text": f"{heading}\n{local_part}@example.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [owner_a_entry()], "T": [t]})
+    assert f"{local_part}@example.org" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_920_blocker_segment_match_alone_does_not_spare_without_the_entry_gate():
+    """Isolates conjunct (a) (`_shares_owner_name`) from conjunct (b): the
+    referee entry below shares only ONE of Ann Lee's two name tokens by
+    construction (no "Ann" anywhere, and the domain contributes neither),
+    so `_shares_owner_name` refuses it -- the threshold is 2 of 2 -- even
+    though the email's own local part ("lee") is an EXACT whole-segment
+    match for the other token. A mutant that drops conjunct (a) and
+    spares on the segment match alone wrongly spares this email."""
+    a = _owner_a_entry("Ann Lee", "ann.lee@example.com")
+    t = {"text": "External submission, nothing else related: lee@example.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "lee@example.org" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+def test_920_blocker_segment_split_treats_a_digit_as_a_separator():
+    """Isolates the segment-split regex itself (`_LOCAL_PART_SEGMENT_RE`,
+    `re.split(r"[^a-z]+", ...)`, never a `.`-only split): a digit suffix
+    must split off exactly like `.`/`_`/`-` do, so "kim2" reduces to the
+    same segment "kim" a bare "kim" would. Bo Kim's own second address in
+    this shape is spared -- unlike the `kimberly.jones` counter-example
+    above, whose segments never reduce to "kim" at all -- pinning that
+    digit-splitting is not itself the leak the #920 blocker closed."""
+    a = _owner_a_entry("Bo Kim", "bo.kim@example.com")
+    t = {"text": "References for Bo Kim\nAlternate contact: kim2@example.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+@pytest.mark.parametrize("local_part", [
+    "editor", "office", "info", "journal", "admin", "submissions",
+])
+def test_generic_editorial_mailbox_is_untouched(local_part):
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    t = {"text": f"Journal of Example Studies, Editorial Board, "
+                 f"{local_part}@example-journal.org",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    before = t["text"]
+    result = _run({"A": [a], "T": [t]})
+    assert t["text"] == before
+    assert result.withheld == []
+
+
+def test_an_a_coded_entrys_own_values_are_never_withheld_by_this_rule():
+    """#920 review: the explicit `code != PERSONAL_DATA_CODE` guard that
+    used to keep the third-party check off code 'A' entirely is gone --
+    the rule now runs against 'A' entries too. It is still always a
+    no-op there, but for a different, more robust reason than the old
+    per-entry name check: `_owner_contacts` harvests every email/phone
+    SHAPE out of the very same 'A' entries this rule then scans, so
+    whatever this entry carries is already a member of `owner` by
+    construction, by the time the check runs -- including a value that
+    is not really the CV owner's, as here."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    a["text"] += "\tAlso listed: Jordan Reviewer, jreviewer@example-state.edu"
+    before = a["text"]
+    result = _run({"A": [a]})
+    assert a["text"] == before
+    assert result.withheld == []
+
+
+def test_a_routed_entry_with_a_third_party_email_is_untouched():
+    """Scope is Appendix-only: a routed content code (here F1, Licensure)
+    never runs the third-party check even when it carries someone else's
+    contact."""
+    a = _owner_a_entry("Dana Example", "dana.example@wcm.example.edu")
+    f1 = {"text": "Reference: Dr. Jordan Reviewer, jreviewer@example-state.edu",
+          "taxonomy_code": "F1", "extracted_fields": {}}
+    before = f1["text"]
+    result = _run({"A": [a], "F1": [f1]})
+    assert f1["text"] == before
+    assert result.withheld == []
+
+
+def test_bare_ssn_in_an_appendix_entry_classifies_as_ssn_not_phone():
+    """#833 constraint: the phone value shape must not swallow an SSN's
+    3-2-4 run. No 'A' entries at all here -- the point is the shape
+    distinction, not owner provenance."""
+    t = {"text": "SSN: 123-45-6789", "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"T": [t]})
+    assert [i.category for i in result.withheld] == [CAT_SSN]
+    assert t["text"] == ""
+
+
+def test_third_party_phone_shape_rejects_an_ssn_shape_outright():
+    """r2 m08: the previous SSN-vs-phone test only proved `_merge_matches`
+    picks the SSN row first when BOTH policy rows match -- it never
+    checked that `_THIRD_PARTY_PHONE_RE`'s own shape rejects an SSN's
+    3-2-4 run. Direct regex assertions, not routed through the pass, so a
+    mutant that widens the phone shape's middle group (`\\d{3}` ->
+    `\\d{2,3}`) is caught even if merge precedence would otherwise hide it."""
+    assert _THIRD_PARTY_PHONE_RE.search("123-45-6789") is None
+    m = _THIRD_PARTY_PHONE_RE.search("212-555-0100")
+    assert m is not None
+    assert m.group() == "212-555-0100"
+
+
+def test_owner_name_tokens_drop_initials_and_honorifics():
+    """r2 m14: `_MIN_OWNER_NAME_TOKEN_LEN` must actually filter out short
+    tokens (initials, "Jr") before they can cheaply satisfy the
+    owner-name-sharing check. Direct assertion on `_owner_name_tokens`
+    pins the set itself; the entry-level assertion pins the consequence --
+    an Appendix entry sharing only "Jr" and an initial (never in the
+    filtered token set) with the owner is still a third party, so its
+    email is cut."""
+    a = {"text": "", "taxonomy_code": "A",
+         "extracted_fields": {"name": "J. Q. Sampleton Jr"}}
+    assert _owner_name_tokens([a]) == frozenset({"sampleton"})
+
+    t = {"text": "J. Reviewer Jr, Example State University, "
+                 "jreviewer@example-state.edu",
+         "taxonomy_code": "T", "extracted_fields": {}}
+    result = _run({"A": [a], "T": [t]})
+    assert "jreviewer@example-state.edu" not in t["text"]
+    assert [i.category for i in result.withheld] == [CAT_THIRD_PARTY_CONTACT]
+
+
+# --------------------------------------------------------------------------
+# 5. Bare-label span extension (#821 R3 F-B)
 #
 # The extension exists because a hard delimiter can sit between a label and
 # its own value, leaving the value uncut. It must reach exactly that value
@@ -519,3 +1314,554 @@ def test_bare_label_followed_by_a_sibling_label_orphans_nothing():
              "extracted_fields": {}}
     _run({"A": [entry]})
     assert entry["_pii_orphaned_value"] is False
+
+
+# --------------------------------------------------------------------------
+# redact_pre_llm_values (#847) -- the value-only scrub applied before any
+# LLM stage reads the text, at extract_unified_elements. Reuses this same
+# WITHHOLD_POLICY table (via _pii_matches), restricted to CAT_DATE_OF_BIRTH
+# and CAT_SSN; every other category is untouched here regardless of scope.
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_replaces_ssn_value_keeps_label():
+    out = redact_pre_llm_values("SSN: 123-45-6789")
+    assert out == f"SSN: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_replaces_bare_ssn_shape_with_no_label():
+    out = redact_pre_llm_values("Contact ref 123-45-6789 on file.")
+    assert out == f"Contact ref {PRE_LLM_PLACEHOLDER} on file."
+
+
+def test_redact_pre_llm_values_replaces_dob_value_with_colon_keeps_label():
+    out = redact_pre_llm_values("Date of Birth: 01/02/1970")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_replaces_dob_value_colonless_keeps_label():
+    out = redact_pre_llm_values("Born on 01/02/1970, in Example City")
+    assert out == f"Born on {PRE_LLM_PLACEHOLDER}, in Example City"
+
+
+@pytest.mark.parametrize("text, expected", [
+    # #1071: the value sits INSIDE the label's parentheses.
+    ("Birth Date (01/02/1970):", f"Birth Date ({PRE_LLM_PLACEHOLDER}):"),
+    ("Date of Birth (01/02/1970):", f"Date of Birth ({PRE_LLM_PLACEHOLDER}):"),
+    # A format hint in the parentheses is not a value; the date after the
+    # colon is.
+    ("Date of Birth (mm/dd/yyyy): 01/02/1970",
+     f"Date of Birth (mm/dd/yyyy): {PRE_LLM_PLACEHOLDER}"),
+    ("Date of Birth (mm/dd/yyyy):\t01/02/1970",
+     f"Date of Birth (mm/dd/yyyy):\t{PRE_LLM_PLACEHOLDER}"),
+    # A race/ethnicity value is render-time only (#847 scrubs DOB/SSN).
+    ("Race/Ethnicity: Example", "Race/Ethnicity: Example"),
+])
+def test_1071_pre_llm_scrub_reaches_a_dob_label_parenthetical(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+def test_1071_bare_dob_label_with_a_format_hint_names_its_category():
+    """A label cell alone ("Date of Birth (mm/dd/yyyy):") hands its category
+    to the next cell's scrub; one whose parentheses hold the value does not
+    -- its own text is scrubbed instead."""
+    assert pre_llm_bare_label_category("Date of Birth (mm/dd/yyyy):") == CAT_DATE_OF_BIRTH
+    assert pre_llm_bare_label_category("Birth Date (01/02/1970):") is None
+
+
+@pytest.mark.parametrize("text", [
+    "Jane Example Date of Birth (mm/dd/yyyy): 01/02/1970",
+    "Jane Example Birth Date (MM/DD/YYYY): 01/02/1970",
+    "Jane Example Birth Date and Birth Place: 01/02/1970",
+])
+def test_1071_explicit_dob_label_with_a_parenthetical_skips_the_boundary_rule(text):
+    """#847 residual: an explicit DOB label then a whole date is a DOB
+    whatever precedes it -- with a parenthetical in the label too, and
+    for the combined birth date and birth place label."""
+    assert [m.category for m in _pii_matches(text, SCOPE_ALL_CODES)] == [CAT_DATE_OF_BIRTH]
+    assert redact_pre_llm_values(text).endswith(f": {PRE_LLM_PLACEHOLDER}")
+
+
+@pytest.mark.parametrize("text", [
+    "Date of Birth (" * 20_000,
+    "Birth Date (" + "a" * 200_000,
+    "Birth Date " + "(" * 200_000,
+    "Race / " * 20_000 + "Ethnicity",
+])
+def test_1071_dob_parenthetical_scan_stays_linear_on_adversarial_input(text):
+    """The parenthetical is one bounded class, no nested quantifier: each
+    of these took well under a second when written (~0.1s); a
+    backtracking blow-up would not finish at all."""
+    started = time.perf_counter()
+    _pii_matches(text)
+    redact_pre_llm_values(text)
+    assert time.perf_counter() - started < 5.0
+
+
+def test_redact_pre_llm_values_untouched_publication_date_no_dob_label():
+    text = "Smith J. Date: 2015. A study of examples."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_untouched_non_ssn_shaped_nine_digit_number():
+    text = "Reference number 123456789 on the invoice."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_untouched_grant_number_shape():
+    text = "Grant number R01-CA123456 funded 1999."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_untouched_out_of_scope_category():
+    # Marital status is in WITHHOLD_POLICY but not a pre-LLM category --
+    # only render-time (#820/#821) withholds it.
+    text = "Marital Status: Married"
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_is_idempotent():
+    once = redact_pre_llm_values("Date of Birth: 01/02/1970")
+    twice = redact_pre_llm_values(once)
+    assert once == twice == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+# --------------------------------------------------------------------------
+# round 2 (#847): value after a hard delimiter, whole-date shapes, and
+# category-not-scope selection ("Born: ..." is SCOPE_PERSONAL_AND_APPENDIX,
+# not SCOPE_ALL_CODES -- scope is a render-time routing concept and there
+# is no taxonomy code yet at the point this scrub runs).
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_value_after_a_tab_is_scrubbed():
+    out = redact_pre_llm_values("Date of Birth:\t01/02/1970")
+    assert out == f"Date of Birth:\t{PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_value_after_three_plus_spaces_is_scrubbed():
+    out = redact_pre_llm_values("Date of Birth:    01/02/1970")
+    assert out == f"Date of Birth:    {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_value_after_a_pipe_is_scrubbed():
+    out = redact_pre_llm_values("Date of Birth: | 01/02/1970")
+    assert out == f"Date of Birth: | {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_never_extends_across_a_newline():
+    # The label's own line has nothing after it -- a value on the NEXT
+    # line is a different field and must not be pulled across.
+    out = redact_pre_llm_values("Date of Birth:\nSSN: 123-45-6789")
+    assert out == f"Date of Birth:\nSSN: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_iso_date_takes_the_whole_value():
+    out = redact_pre_llm_values("Date of Birth: 1970-01-02")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_dotted_date_takes_the_whole_value():
+    out = redact_pre_llm_values("Date of Birth: 12.03.1970")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+# #847: an ordinal day ("1st", "22nd") matched no full-date shape, so only the
+# year was withheld and the month and day reached the LLM (run 6TJNBQ).
+@pytest.mark.parametrize("value", [
+    "April 1st, 1990", "April 22nd, 1990", "Apr 3rd 1990", "April 4th, 1990",
+    "1st April 1990", "21st of April, 1990",
+])
+def test_redact_pre_llm_values_ordinal_day_takes_the_whole_value(value):
+    out = redact_pre_llm_values(f"Date of Birth: {value}")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_value_of_category_ordinal_day_in_a_value_cell():
+    # The "Birth date:" | "May 2nd, 1985" table-row shape from 6TJNBQ.
+    for cross_boundary in (False, True):
+        out = redact_pre_llm_value_of_category(
+            "April 1st, 1990", CAT_DATE_OF_BIRTH, cross_boundary=cross_boundary)
+        assert out == PRE_LLM_PLACEHOLDER
+
+
+def test_redact_pre_llm_values_untouched_ordinal_date_with_no_dob_label():
+    text = "Presented at the 1st Annual Meeting, April 2nd, 2019."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_untouched_iso_date_publication_no_dob_label():
+    text = "Published 2020-05-01 in Journal X."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_born_colon_is_scrubbed_regardless_of_scope():
+    # "Born:" is CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX -- excluded by the
+    # round-1 SCOPE_ALL_CODES filter. Pre-LLM there is no taxonomy code to
+    # route by, so category alone decides.
+    out = redact_pre_llm_values("Born: 01/02/1970")
+    assert out == f"Born: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_untouched_born_with_no_colon_or_date():
+    text = "Born in New York, he later trained as a surgeon."
+    assert redact_pre_llm_values(text) == text
+
+
+# --------------------------------------------------------------------------
+# pre_llm_bare_label_category / redact_pre_llm_value_of_category -- the
+# label-cell / value-cell table fix (round 2, #847).
+# --------------------------------------------------------------------------
+
+def test_pre_llm_bare_label_category_detects_a_whole_cell_dob_label():
+    assert pre_llm_bare_label_category("Date of Birth:") == CAT_DATE_OF_BIRTH
+
+
+def test_pre_llm_bare_label_category_detects_a_whole_cell_ssn_label():
+    assert pre_llm_bare_label_category("SSN:") == CAT_SSN
+
+
+def test_pre_llm_bare_label_category_none_for_an_ordinary_cell():
+    assert pre_llm_bare_label_category("Notes") is None
+
+
+def test_pre_llm_bare_label_category_none_when_the_cell_already_has_a_value():
+    # Whole match already covers the value -- nothing "bare" about it.
+    assert pre_llm_bare_label_category("Date of Birth: 01/02/1970") is None
+
+
+def test_redact_pre_llm_value_of_category_replaces_the_value_cell():
+    out = redact_pre_llm_value_of_category("01/02/1970", CAT_DATE_OF_BIRTH)
+    assert out == PRE_LLM_PLACEHOLDER
+
+
+def test_redact_pre_llm_value_of_category_untouched_when_no_shape_matches():
+    text = "Notes"
+    assert redact_pre_llm_value_of_category(text, CAT_DATE_OF_BIRTH) == text
+
+
+# --------------------------------------------------------------------------
+# #847 residual: a child's date under a "Children:"/"Dependents:" label with
+# no DOB sub-label of its own. Matches CAT_CHILDREN, not CAT_DATE_OF_BIRTH/
+# CAT_BIRTH, so `_child_list_date_spans` handles it -- the render-time
+# policy row is untouched (still SCOPE_PERSONAL_AND_APPENDIX, still denies
+# the whole fragment as before).
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_dob_under_a_children_label_with_no_dob_sub_label():
+    out = redact_pre_llm_values("Children: Jane (01/02/2010)")
+    assert out == f"Children: Jane ({PRE_LLM_PLACEHOLDER})"
+
+
+def test_redact_pre_llm_values_dob_under_a_dependents_label():
+    out = redact_pre_llm_values("Dependents: Ann, born 01/02/2010")
+    assert out == f"Dependents: Ann, born {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_children_label_with_no_date_is_untouched():
+    text = "Children: Ann, Bob"
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_children_label_bare_year_is_untouched():
+    # Corpus blast-radius finding: a "Children:" PREFIX on a book/article
+    # title ("Children: Research, Practice and Policy...", the module's own
+    # #473 negative control) can end in a bare year that is a publication
+    # year, not a birth year -- the corpus run caught this live, twice, in
+    # a real CV. A bare year alone is not distinctive enough to AND against
+    # the false positive; only a full date in a child item is (`_CHILD_ITEM_RE`).
+    text = "Children: A Study of Early Intervention, City Press, 2015."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_children_render_policy_row_unchanged():
+    # This round-3 fix only widens the PRE-LLM value scrub -- the render-time
+    # policy row for CAT_CHILDREN keeps its own scope and still denies the
+    # whole fragment at render time exactly as before #847.
+    assert _denied("Children: Ann, Bob", A)
+    assert not _denied("Children: Ann, Bob", "S4")
+
+
+# --------------------------------------------------------------------------
+# #847 residual: a Children label naming more than one child's date takes
+# every child item's date, not just the first.
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_children_label_withholds_every_full_date():
+    text = "Children: Ann (01/02/2010), Bob (03/04/2012), Cy (05/06/2014)"
+    out = redact_pre_llm_values(text)
+    assert out == (
+        f"Children: Ann ({PRE_LLM_PLACEHOLDER}), "
+        f"Bob ({PRE_LLM_PLACEHOLDER}), Cy ({PRE_LLM_PLACEHOLDER})"
+    )
+    assert not any(c.isdigit() for c in out)
+
+
+def test_redact_pre_llm_values_dob_label_still_takes_only_one_value():
+    # A DOB/SSN label span carries exactly one value -- the child-list
+    # rule above must not touch this existing single-value shape.
+    out = redact_pre_llm_values("Date of Birth: 01/02/1970")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_children_label_withholds_every_date_across_tabs():
+    # A tab-separated child list: each child's date sits in its own
+    # tab-delimited run, past the label's own fragment.
+    text = "Children:\tAnn (01/02/2010)\tBob (03/04/2012)\tCy (05/06/2014)"
+    out = redact_pre_llm_values(text)
+    assert out == (
+        f"Children:\tAnn ({PRE_LLM_PLACEHOLDER})\t"
+        f"Bob ({PRE_LLM_PLACEHOLDER})\tCy ({PRE_LLM_PLACEHOLDER})"
+    )
+    assert not any(c.isdigit() for c in out)
+
+
+def test_redact_pre_llm_values_children_label_withholds_every_date_after_a_column_gap():
+    # A 3+-space column gap after the label, then a comma-separated list
+    # of children on one line.
+    text = "Children:       Ann (01/02/2010), Bob (03/04/2012), Cy (05/06/2014)"
+    out = redact_pre_llm_values(text)
+    assert out == (
+        f"Children:       Ann ({PRE_LLM_PLACEHOLDER}), "
+        f"Bob ({PRE_LLM_PLACEHOLDER}), Cy ({PRE_LLM_PLACEHOLDER})"
+    )
+    assert not any(c.isdigit() for c in out)
+
+
+def test_redact_pre_llm_values_next_run_scrub_stops_at_a_newline():
+    # Negative control: a value on the NEXT LINE (not a same-line hard
+    # delimiter) is a different field and must not be pulled in, same
+    # guarantee as the existing never_extends_across_a_newline test above.
+    out = redact_pre_llm_values("Date of Birth:\nSSN: 123-45-6789")
+    assert out == f"Date of Birth:\nSSN: {PRE_LLM_PLACEHOLDER}"
+
+
+# --------------------------------------------------------------------------
+# #847 residual: redact_pre_llm_value_of_category(cross_boundary=True) -- for
+# a value at a lower-confidence position (a cell below a label, the next
+# paragraph in the stream) the value must OPEN the text and, for a DOB, be
+# a whole date. A bare year, or a date after other text, is left alone.
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_value_of_category_cross_boundary_still_replaces_a_full_date():
+    out = redact_pre_llm_value_of_category("01/02/1970", CAT_DATE_OF_BIRTH, cross_boundary=True)
+    assert out == PRE_LLM_PLACEHOLDER
+
+
+def test_redact_pre_llm_value_of_category_cross_boundary_takes_a_date_after_leading_whitespace():
+    out = redact_pre_llm_value_of_category("  01/02/1970", CAT_DATE_OF_BIRTH, cross_boundary=True)
+    assert out == f"  {PRE_LLM_PLACEHOLDER}"
+
+
+@pytest.mark.parametrize("text", [
+    "2001",                                  # bare year: not a whole date
+    "1990-1994 BA, Example College",         # bare year opening a range
+    "Appointed 07/01/2005",                  # whole date, but not opening
+    "Date of Appointment: 07/01/2005",       # its own label opens the text
+])
+def test_redact_pre_llm_value_of_category_cross_boundary_leaves_it_alone(text):
+    assert redact_pre_llm_value_of_category(text, CAT_DATE_OF_BIRTH, cross_boundary=True) == text
+
+
+def test_redact_pre_llm_value_of_category_default_still_takes_a_bare_year():
+    # The default (same-row/same-cell) path is unchanged -- only the
+    # cross-boundary callers get the narrower match.
+    out = redact_pre_llm_value_of_category("2001", CAT_DATE_OF_BIRTH)
+    assert out == PRE_LLM_PLACEHOLDER
+
+
+# --------------------------------------------------------------------------
+# #847 residual, blind-verifier round 2: precision. A DOB/SSN label takes
+# ONE value; a Children label takes only dates inside a child-shaped list;
+# the next-run fallback never reaches into a run that carries its own label.
+# Each expected string is what origin/dev's scrub produces for the same text.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, dev_output", [
+    ("Date of Birth:\t01/02/1970\tDate of Appointment:\t07/01/2005",
+     f"Date of Birth:\t{PRE_LLM_PLACEHOLDER}\tDate of Appointment:\t07/01/2005"),
+    ("Date of Birth: 01/02/1970, Appointed Assistant Professor 2005",
+     f"Date of Birth: {PRE_LLM_PLACEHOLDER}, Appointed Assistant Professor 2005"),
+    ("Born:\t1970\tMD\t1996", f"Born:\t{PRE_LLM_PLACEHOLDER}\tMD\t1996"),
+    ("Date of birth: January 1, 1970, US citizen since 1990, married 1995",
+     f"Date of birth: {PRE_LLM_PLACEHOLDER}, US citizen since 1990, married 1995"),
+    ("Children: Research, Practice and Policy. Oxford Press, 03/15/2019",
+     "Children: Research, Practice and Policy. Oxford Press, 03/15/2019"),
+])
+def test_redact_pre_llm_values_keeps_non_dob_dates_as_dev_does(text, dev_output):
+    assert redact_pre_llm_values(text) == dev_output
+
+
+def test_redact_pre_llm_values_next_run_with_its_own_label_is_left_alone():
+    # The DOB label's own value is blank; the next run is a different field.
+    text = "Date of Birth:\tDate of Appointment: 07/01/2005"
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_child_list_stops_at_a_non_child_item():
+    text = "Children: Ann (01/02/2010), see Annual Report 03/04/2012"
+    assert redact_pre_llm_values(text) == f"Children: Ann ({PRE_LLM_PLACEHOLDER}), see Annual Report 03/04/2012"
+
+
+def test_redact_pre_llm_values_child_list_takes_a_nested_dob_keyword():
+    out = redact_pre_llm_values("Children:  Ann DOB: 01/02/2010")
+    assert out == f"Children:  Ann DOB: {PRE_LLM_PLACEHOLDER}"
+
+
+# A child item is one given-name token plus a parenthesised date or a
+# born/DOB keyword. Each expected string is origin/dev's output for the same
+# text, except that the children's own dates in the first two are withheld.
+@pytest.mark.parametrize("text, expected", [
+    ("Children: Ann (01/02/2010), Bob (03/04/2012), Appointed 07/01/2015",
+     f"Children: Ann ({PRE_LLM_PLACEHOLDER}), Bob ({PRE_LLM_PLACEHOLDER}), Appointed 07/01/2015"),
+    ("Children: Ann (01/02/2010), Grant R01, 07/01/2015",
+     f"Children: Ann ({PRE_LLM_PLACEHOLDER}), Grant R01, 07/01/2015"),
+    ("Children: A Randomized Trial (03/15/2019)", "Children: A Randomized Trial (03/15/2019)"),
+    ("Children: Healthy Eating Trial, 07/01/2005", "Children: Healthy Eating Trial, 07/01/2005"),
+    ("Dependents: Health Plan, 01/01/2020", "Dependents: Health Plan, 01/01/2020"),
+    ("Children: Jane, 01/02/2010", "Children: Jane, 01/02/2010"),
+    ("Children: Healthy Eating Trial (07/01/2005)", "Children: Healthy Eating Trial (07/01/2005)"),
+    ("Children: Trial (07/01/2015 - 06/30/2020)", "Children: Trial (07/01/2015 - 06/30/2020)"),
+    ("Children: pilot (07/01/2015)", "Children: pilot (07/01/2015)"),
+])
+def test_redact_pre_llm_values_child_list_takes_only_child_shaped_items(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+# "Birthday" also names an event, so it never gets the explicit-DOB
+# exemption from the boundary rule: both the pre-LLM scrub and the render
+# pass (A, T, S4) leave these exactly as origin/dev does.
+@pytest.mark.parametrize("text", [
+    "Symposium for Dr. Smith's 70th Birthday: 06/15/2019, Boston, MA",
+    "Grand Rounds, Hospital Birthday: 06/15/2019",
+])
+def test_birthday_after_a_prefix_is_not_an_explicit_dob_label(text):
+    assert redact_pre_llm_values(text) == text
+    entries = {code: [{"text": text, "taxonomy_code": code, "extracted_fields": {}}]
+               for code in ("A", "T", "S4")}
+    result = _run(entries)
+    assert [entries[code][0]["text"] for code in ("A", "T", "S4")] == [text] * 3
+    assert result.withheld == []
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Jane Doe DOB: 1/12/45", f"Jane Doe DOB: {PRE_LLM_PLACEHOLDER}"),
+    ("Name: Jane Doe, MD Birth Date:  01/12/1945",
+     f"Name: Jane Doe, MD Birth Date:  {PRE_LLM_PLACEHOLDER}"),
+])
+def test_explicit_dob_label_with_a_whole_date_is_caught_after_any_prefix(text, expected):
+    assert redact_pre_llm_values(text) == expected
+    # One shared policy: the render deny catches it at every destination too.
+    assert _denied(text, A) and _denied(text, APPENDIX) and _denied(text, CONTENT)
+
+
+@pytest.mark.parametrize("text", [
+    "Jane Doe DOB: 1945",                    # bare year: not a whole date
+    "Jane Doe DOB: pending",                 # no date at all
+    "Rebirth Date: 01/02/2019 conference",   # label glued inside a word
+    "Jane Doe Birthplace: 01/02/1945",       # not the DOB row's label
+])
+def test_explicit_dob_label_narrowing_stays_refused_without_all_three_conditions(text):
+    assert redact_pre_llm_values(text) == text
+    assert not _denied(text, CONTENT)
+
+
+# --------------------------------------------------------------------------
+# #849: a policy label one plain space after another field's value
+#
+# The stop is the KNOWN-label vocabulary (`_KNOWN_FIELD_LABEL_RE`), never a
+# guess at where a value ends (#821 R4). All values synthetic.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, kept, gone", [
+    ("Citizenship: US Date of Birth: March 1971", "Citizenship: US", "March 1971"),
+    ("Citizenship: US Social Security Number: 900 12 3456", "Citizenship: US", "900 12 3456"),
+    ("Citizenship: US Born: 03/04/1971", "Citizenship: US", "03/04/1971"),
+    ("Citizenship: US Place of Birth: Springfield", "Citizenship: US", "Springfield"),
+    ("Nationality: Dual Citizen Marital Status: Married", "Nationality: Dual Citizen", "Married"),
+    ("Date of Birth: 03/04/1971 Marital Status: Married", "", "Married"),
+])
+def test_849_policy_label_after_a_known_field_value_is_withheld(text, kept, gone):
+    assert _pii_fragments(text)
+    entries = {"A": [{"text": text, "taxonomy_code": "A", "extracted_fields": {}}]}
+    result = _run(entries)
+    residual = entries["A"][0]["text"]
+    assert gone not in residual
+    assert kept in residual
+    assert result.withheld
+
+
+@pytest.mark.parametrize("text", [
+    "Gave a talk on Date of Birth: a history of the census",  # no known label before it
+    "Citizenship: US Member of the Social Security Number society",  # label words, no colon
+    "Note: gave a talk on Date of Birth: a history",           # a colon, but not a KNOWN label
+    "Citizenship: US Appointed 2005",                       # no policy label at all
+])
+def test_849_prose_containing_a_label_word_is_not_cut(text):
+    assert _pii_fragments(text) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Citizenship: US Language: Spanish",                        # "age:" inside Language
+    "Office Address: 1300 York Ave Webpage: www.example.org",   # "age:" inside Webpage
+    "Citizenship: US Idea: a new clinic",                       # "dea:" inside Idea
+    "Phone: 555-0100 Pre-Marital Status: survey",               # hyphen before the label
+    "Phone: 555-0100 O'Visa: none",                             # apostrophe before the label
+])
+def test_849_policy_label_inside_a_word_after_a_known_field_is_not_cut(text):
+    """The known-field path accepts a policy label only at a word start;
+    it used to match "age:" inside "Language:" and render "Langu"."""
+    entries = {"A": [{"text": text, "taxonomy_code": "A", "extracted_fields": {}}]}
+    _run(entries)
+    assert entries["A"][0]["text"] == text
+
+
+# --------------------------------------------------------------------------
+# #847 residual round 5: child dates the child-item rule did not reach.
+# All names, dates and years synthetic.
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_children_label_after_a_merged_known_field_still_takes_child_items():
+    # The Children label's span merges into the Marital Status span that
+    # opens the line and keeps ITS category, so the child-item rule never
+    # ran on it: the child's date reached the LLM.
+    text = "Marital Status: Married Children: Ann (01/02/2010)"
+    assert redact_pre_llm_values(text) == f"Marital Status: Married Children: Ann ({PRE_LLM_PLACEHOLDER})"
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A Children label after another known field on its own line is a
+    # Personal Data field, not a title: every whole date it carries is a
+    # child's, whatever the item looks like.
+    ("Marital Status: Married (Jo) Children: (1), Jane Roe, 01/02/94",
+     f"Marital Status: Married (Jo) Children: (1), Jane Roe, {PRE_LLM_PLACEHOLDER}"),
+    ("Citizenship: US Children: Jane, 01/02/2010 and Bob, 03/04/2012",
+     f"Citizenship: US Children: Jane, {PRE_LLM_PLACEHOLDER} and Bob, {PRE_LLM_PLACEHOLDER}"),
+    # ...up to the next known field label only.
+    ("Citizenship: US Children: Jane, 01/02/2010 Date of Appointment: 07/01/2015",
+     f"Citizenship: US Children: Jane, {PRE_LLM_PLACEHOLDER} Date of Appointment: 07/01/2015"),
+    # A bare year is still never a child's date here.
+    ("Marital Status: Married Children: two, since 2010", "Marital Status: Married Children: two, since 2010"),
+    # A known label mid-line is not a Personal Data line: a citation.
+    ("Roe J. Threats to Health: Youth in India. Health of Children: Hazards, Bangkok, 3-7 March 2002",
+     "Roe J. Threats to Health: Youth in India. Health of Children: Hazards, Bangkok, 3-7 March 2002"),
+])
+def test_redact_pre_llm_values_children_label_after_a_known_field_takes_every_whole_date(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A whole date that OPENS a Children label's value is a child's date:
+    # no title opens with one.
+    ("Dependents: 01/02/2010", f"Dependents: {PRE_LLM_PLACEHOLDER}"),
+    ("Children: 01/02/2010, 03/04/2012 and 05/06/2014",
+     f"Children: {PRE_LLM_PLACEHOLDER}, {PRE_LLM_PLACEHOLDER} and {PRE_LLM_PLACEHOLDER}"),
+    ("Children: Ann (01/02/2010), 03/04/2012",
+     f"Children: Ann ({PRE_LLM_PLACEHOLDER}), {PRE_LLM_PLACEHOLDER}"),
+    # A bare date followed by more text is not a list item.
+    ("Children: 01/02/2010 Symposium, Boston", "Children: 01/02/2010 Symposium, Boston"),
+    ("Children: Ann (01/02/2010), 07/01/2015 Appointed",
+     f"Children: Ann ({PRE_LLM_PLACEHOLDER}), 07/01/2015 Appointed"),
+    # A year range is not a whole date.
+    ("Children: 2015-2016 NHANES data brief", "Children: 2015-2016 NHANES data brief"),
+])
+def test_redact_pre_llm_values_a_date_opening_a_children_value_is_a_child_item(text, expected):
+    assert redact_pre_llm_values(text) == expected

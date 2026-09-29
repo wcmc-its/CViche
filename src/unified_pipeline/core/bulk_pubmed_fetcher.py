@@ -18,6 +18,8 @@ import requests
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 
+from .pubmed_xml import ID_TYPE_DOI, ID_TYPE_PMC, own_article_id
+
 
 class BulkPubMedFetcher:
     """
@@ -235,19 +237,9 @@ class BulkPubMedFetcher:
                 except ValueError:
                     pass
 
-            # DOI (search in ArticleIdList)
-            doi = ''
-            for id_elem in article.findall('.//ArticleId'):
-                if id_elem.get('IdType') == 'doi' and id_elem.text:
-                    doi = id_elem.text.strip()
-                    break
-
-            # PMCID
-            pmcid = ''
-            for id_elem in article.findall('.//ArticleId'):
-                if id_elem.get('IdType') == 'pmc' and id_elem.text:
-                    pmcid = id_elem.text.strip()
-                    break
+            # DOI and PMCID: the article's own, never a cited reference's (#1042)
+            doi = own_article_id(article, ID_TYPE_DOI)
+            pmcid = own_article_id(article, ID_TYPE_PMC)
 
             # Abstract
             abstract_text = ''

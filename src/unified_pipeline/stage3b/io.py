@@ -10,6 +10,7 @@ hop because this file sits one directory deeper than the module the function
 moved out of.
 """
 
+import functools
 import json
 import logging
 import math
@@ -53,8 +54,25 @@ def load_taxonomy() -> dict:
     # One .parent more than the original stage_3b_entry_classifier.py site:
     # this file lives in stage3b/, one directory below unified_pipeline/.
     taxonomy_path = Path(__file__).parent.parent / "core" / "taxonomy_v7.json"
-    with open(taxonomy_path, 'r') as f:
+    with open(taxonomy_path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+def taxonomy_code_set(taxonomy: dict) -> set[str]:
+    """The set of codes `taxonomy` actually defines (its "codes" list)."""
+    return {
+        c["code"] for c in taxonomy.get("codes", [])
+        if isinstance(c, dict) and isinstance(c.get("code"), str) and c["code"]
+    }
+
+
+@functools.cache
+def canonical_taxonomy_codes() -> frozenset[str]:
+    """The ONE canonical valid-code list (#651): every code in
+    core/taxonomy_v7.json -- the same set stage 3b validates an LLM-returned
+    code against (`classify._valid_taxonomy_codes`). Stage 4 checks its input
+    against this at the 3b -> 4 boundary; do not add a second list (#383)."""
+    return frozenset(taxonomy_code_set(load_taxonomy()))
 
 
 def load_stage_2_entries(path: Path) -> tuple[list[dict], list[dict]]:
@@ -73,7 +91,7 @@ def load_stage_2_entries(path: Path) -> tuple[list[dict], list[dict]]:
             is rejected here rather than raising AttributeError/TypeError
             deeper in the loop below.
     """
-    with open(path, 'r') as f:
+    with open(path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
     if not isinstance(data, dict):

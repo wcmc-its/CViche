@@ -14,9 +14,9 @@ is testable on strings alone.
 
     _entry_parts                    the entry's parts: newlines always, '|'
                                     for the newline-blind single-line case
-    _merge_first_cell_continuation  folds a 3-column row's second-paragraph
-                                    award cell back into one line before
-                                    _entry_parts sees it (#828)
+    _merge_in_cell_paragraphs       folds a 3-column row whose cells hold
+                                    several paragraphs back into one line
+                                    before _entry_parts sees it (#828, #924)
     _is_honors_header_entry         whether the whole entry is the source
                                     CV's own column-header row
     _parse_honor_lines              one pass over those parts, sorting them
@@ -129,10 +129,6 @@ _LINE_HEADER_KEYWORDS = frozenset({
     'name of award', 'date awarded', 'organization', 'granting body',
     'honor', 'year'})
 _MIN_LINE_HEADER_KEYWORDS = 2
-
-# A raw entry with no extracted award name renders as its own text; cap it so
-# a runaway blob cannot fill the cell.
-_MAX_RAW_AWARD_CHARS = 150
 
 # The WCM template's H table: award | organization | date awarded (yyyy).
 _HONORS_TABLE_COLUMNS = 3
@@ -285,17 +281,14 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     A genuinely multi-line entry (entry_lines already returns >1 part) is
     returned UNCHANGED -- its existing per-part tab/pipe handling below stays
     exactly as today, with ONE narrow exception routed through
-    `_merge_first_cell_continuation` first (#828 review round 3): the
+    `_merge_in_cell_paragraphs` first (#828 review round 3, #924): the
     extractor joins a cell's own paragraphs with '\\n' *inside* the cell and
-    then joins the row's cells with ' | ', so a parenthetical second
-    paragraph under the award name arrives as line 0 = the plain award title
-    (no '|' of its own) and line 1 = "(description) | organization | date"
-    -- the row's remaining two columns, with the continuation text still
-    attached to the first of them. Read as two lines by `entry_lines` alone,
-    that looks exactly like a second, genuinely separate award. It is only
-    folded back into one line when line 1 is a recognised 3-column row (via
-    `_honor_columns`) with its own organization AND date -- see that
-    function for the full guard. Reading the farm's changed uids proved the
+    then joins the row's cells with ' | ', so ONE row whose award or
+    organization cell has a second paragraph ("Organization\\nCity, ST")
+    arrives as several lines, each of which reads like a separate award. It
+    is only folded back into one line when the whole entry is exactly one
+    3-column row with its own organization AND date (via `_honor_columns`) --
+    see that function for the full guard. Reading the farm's changed uids proved the
     general UNCHANGED rule matters:
     2054_Opresko_Cv's "1994 | American Chemical Society Award,\\nLehigh Valley
     Chapter of ACS" already has 2 lines by newline alone, and additionally
@@ -372,7 +365,7 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     removal, not merely asserted); reintroduce it only against a wire test
     proving a reachable input it alone catches.
     """
-    lines = _merge_first_cell_continuation(entry_lines(text))
+    lines = _merge_in_cell_paragraphs(entry_lines(text))
     if len(lines) != 1 or '\t' in lines[0]:
         return lines
     parts = [p.strip() for p in lines[0].split('|') if p.strip()]
@@ -387,62 +380,76 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     return parts
 
 
-def _merge_first_cell_continuation(lines: Sequence[str]) -> list[str]:
-    """A second paragraph in a 3-column row's first cell, read back as a
-    continuation of the award name rather than a second award (#828 review
-    round 3).
+def _award_cell_first_shape(lines: Sequence[str]) -> list[str]:
+    """Stage 2's row shape for a multi-paragraph first cell (#488), read back
+    in the older shape `_merge_in_cell_paragraphs` was written against.
+
+    Stage 2 now puts the row's other columns on the FIRST paragraph of cell 0
+    ("Award | Org | Date" then the award cell's remaining paragraphs), and only
+    does so when no other cell spans lines. Detected as: line 0 holds the '|'
+    columns and no later line holds one. Re-shaped to "Award", then the
+    remaining paragraphs, the last one carrying " | Org | Date". Any other
+    input is returned unchanged.
+
+    The text alone cannot always tell this shape from the older one where only
+    the LAST cell spans lines ("Award | Org | 2019" then that date cell's own
+    continuation): both read "Award | Org | Date" then one more line. A tail
+    line that is itself a date can only be a date cell's continuation, so it is
+    left in the older shape; a non-date continuation stays ambiguous and is
+    read as the award's own paragraph.
+    """
+    if len(lines) < 2:
+        return list(lines)
+    first, *tail = lines
+    if ('|' not in first or any('|' in line for line in tail)
+            or any(_is_date_column(line) for line in tail)):
+        return list(lines)
+    award, *columns = first.split('|')
+    return [award.strip(), *tail[:-1],
+            ' | '.join([tail[-1], *(c.strip() for c in columns)])]
+
+
+def _merge_in_cell_paragraphs(lines: Sequence[str]) -> list[str]:
+    """One 3-column table row whose cells hold several paragraphs, read back
+    as that one row rather than one award per line (#828 review round 3,
+    #924).
 
     The extractor joins a cell's own paragraphs with '\\n' *inside* the cell,
     then joins the row's cells with ' | ' (`core/docx_structure_extractor.py`).
-    So "Award Name" + "(description)" as the first cell's two paragraphs, next
-    to an organization and a date cell, arrives as exactly two `entry_lines`
-    lines: line 0 = "Award Name" (the award title alone, no '|' of its own)
-    and line 1 = "(description) | Organization | 10/30/2017" -- the row's
-    remaining two columns, with the continuation paragraph still attached to
-    the front of the first one. Read as two lines with nothing to say
-    otherwise, that looks exactly like "Award Name" followed by a genuinely
-    separate award.
+    So a row whose award cell has a parenthetical second paragraph, or whose
+    organization cell has the city on its own line ("Organization\\nCity,
+    ST"), arrives as several `entry_lines` lines, and each one used to render
+    as its own award row -- A5IZ6Q: 25 awards rendered as 58 rows, every
+    "City, ST" line a row of its own.
 
-    Only the narrow shape that says otherwise qualifies: exactly two lines,
-    the first carrying no tab or '|' of its own (a plain title, not already a
-    multi-column line), the second carrying no tab, not itself a bare year or
-    the source table's fused header row, and a recognised 3-column row
-    (`_honor_columns`) with its own organization AND date. Two real award
-    lines, a first line that is already column-structured, or a second line
-    that fails any of those checks, are returned unchanged and fall through
-    to `_parse_honor_lines` exactly as before.
+    The test is the whole row, not the lines: rejoined and read by
+    `_honor_columns`, it must name an organization AND a date, which only a
+    three-cell row whose last cell is a single date does. Two or more
+    complete rows fused into one entry have more than three cells; a stacked
+    cell of several awards has several paragraphs in its date cell, which is
+    then no date; a two-column shape has no organization or no date. Two
+    fused 2-column rows ("A | 2024\\nB | 2023") do rejoin to three cells, but
+    with a date paragraph inside the middle one, which no single row has.
+    Each of those is returned unchanged and falls through to
+    `_parse_honor_lines` exactly as before. So is any entry with a tab
+    (column-structured on its own) or a line that is the source table's
+    fused header row ("Name of Award | Organization | 10/30/2017" has an org
+    and a date cell of its own).
 
-    The three guard conditions are computed up front, named, then combined
-    into one early return (#828 review round 4): whether `second` is a bare
-    year or the source table's fused header row (`is_year_or_header`), and
-    whether it fails to parse as a proper 3-column row with its own
-    organization AND date (`is_invalid_column_shape`). `_honor_columns` now
-    runs before the tab check rather than after -- all three are pure
-    (`_honor_columns` and `_looks_like_column_header` only split/lower/regex
-    the string; neither has a side effect or a code path that raises on a
-    tab-containing, bare-year, or header-shaped `second`), so reordering
-    their evaluation cannot change which lines return early. `is_year_or_header`
-    is guaranteed redundant with `is_invalid_column_shape` for a bare year
-    specifically -- `_YEAR_ONLY_RE` requires the whole line to be nothing but
-    a year, and a pipe-free line can never satisfy `_honor_columns`'s 2- or
-    3-cell shape either way -- but NOT for the fused-header case: "Name of
-    Award | Organization | 10/30/2017" has its own org and date cells and
-    would otherwise merge as if it were a real continuation row, which
-    `_looks_like_column_header` alone catches (proved in the test suite: the
-    bare-year guard's own mutant survives on the `columns is None` fallback,
-    the header guard's does not).
+    The award cell's paragraphs are joined with a space (a title and its
+    parenthetical); the other cells' with ', ' ("Organization, City, ST").
     """
-    if len(lines) != 2 or '\t' in lines[0] or '|' in lines[0]:
+    if any('\t' in line or _looks_like_column_header(line) for line in lines):
         return list(lines)
-    first, second = lines
-    is_year_or_header = bool(_YEAR_ONLY_RE.match(second)) or _looks_like_column_header(second)
-    columns = _honor_columns(second)
-    is_invalid_column_shape = columns is None or not columns.organization or not columns.date
-    if '\t' in second or is_year_or_header or is_invalid_column_shape:
+    award, *rest = [[p.strip() for p in cell.split('\n') if p.strip()]
+                    for cell in '\n'.join(_award_cell_first_shape(lines)).split('|')]
+    if any(_is_date_column(p) for cell in [award, *rest[:-1]] for p in cell):
         return list(lines)
-    parts = [p.strip() for p in second.split('|') if p.strip()]
-    parts[0] = f"{first} {parts[0]}".strip()
-    return [' | '.join(parts)]
+    row = ' | '.join([' '.join(award)] + [', '.join(c) for c in rest])
+    columns = _honor_columns(row)
+    if columns is None or not columns.organization or not columns.date:
+        return list(lines)
+    return [row]
 
 
 def _field_text(fields: Mapping, *names: str) -> str:
@@ -675,13 +682,13 @@ def _record_for_single_award(fallback_text: str,
     first line is the source table's header row used to render that header
     as the award name, because the line `_parse_honor_lines` had already
     dropped was still in the string this falls back to (#733 review). It is
-    otherwise the raw text, verbatim and merely capped -- an entry whose
+    otherwise the raw text, verbatim (#983 removed the 150-character cap: it cut
+    a third honor mid-word and lost the year) -- an entry whose
     pipe shape the parser declined to guess at still renders as its own
     text, which is the contract the module docstring states.
     """
     if not award_name:
-        award_name = (columns.award if columns is not None
-                      else fallback_text[:_MAX_RAW_AWARD_CHARS])
+        award_name = columns.award if columns is not None else fallback_text
     if columns is not None:
         granting_body = granting_body or columns.organization
         date = date or columns.date
@@ -874,7 +881,7 @@ def _build_org_around_keyword(txt: str) -> str:
     return org.strip('.,; ')
 
 
-def _extract_organization_from_award(text: str) -> str:
+def _organization_candidate(text: str) -> str:
     """Extract organization name from award/honor text using institutional keyword patterns.
 
     Uses a multi-strategy approach:
@@ -927,6 +934,45 @@ def _extract_organization_from_award(text: str) -> str:
         return org
 
     return ''
+
+
+# The award-name words that end an award's own name. An organization equal
+# to the award name minus one of these is the award, not its grantor (#887).
+_AWARD_NAME_TAIL_RE = re.compile(
+    r'\s+(?:Award|Prize|Fellowship|Scholarship|List|Fellow)\s*$',
+    re.IGNORECASE)
+
+# A role a person holds, never the last word of an institution's name.
+_ORG_ROLE_WORDS = frozenset(['representative', 'fellow', 'member'])
+
+
+def _is_fabricated_organization(org: str, text: str) -> bool:
+    """Is `org` the award's own name (or part of a role), not a grantor?
+
+    Strategies 3/4 of `_organization_candidate` anchor on `College` /
+    `University` and build outward, so an award named after a college
+    ("College of Education 2015 Outstanding Thesis Award") became its own
+    organization (#887). Three tells, each independent: the candidate is the
+    whole award name minus its trailing award word; it carries a digit (a
+    year belongs to the date column); it ends in a role word.
+    """
+    stripped = text.strip().rstrip('.,;')
+    if _AWARD_NAME_TAIL_RE.sub('', stripped).strip().lower() == org.lower() \
+            and _AWARD_NAME_TAIL_RE.search(stripped):
+        return True
+    if any(ch.isdigit() for ch in org):
+        return True
+    return org.split()[-1].lower().strip('.,;') in _ORG_ROLE_WORDS
+
+
+def _extract_organization_from_award(text: str) -> str:
+    """The organization `_organization_candidate` finds in the award text,
+    unless it is a fragment of the award name itself (#887), in which case
+    an empty cell is the honest render."""
+    org = _organization_candidate(text)
+    if org and _is_fabricated_organization(org, text):
+        return ''
+    return org
 
 
 class HonorsSection:
@@ -1009,6 +1055,12 @@ class HonorsSection:
                     logger.warning("  Skipping header entry: '%s...'", original_text[:50])
                 continue
 
+            if 'award_name' in entry.get('_pii_dropped_fields', ()):
+                # #892: the PII pass dropped this entry's award name (an
+                # O-1 visa). What is left -- a cut-text remnant, the
+                # immigration service as organization, the year -- still
+                # describes the withheld item, so no row renders.
+                continue
             for record in parse_honor_entry(entry):
                 if not (record.award or record.organization or record.date):
                     # An entry with no text and no extracted fields has

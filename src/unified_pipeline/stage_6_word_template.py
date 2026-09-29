@@ -18,6 +18,7 @@ Date: 2025-11-29
 """
 
 import logging
+import functools
 import os
 import sys
 import json
@@ -32,6 +33,9 @@ from datetime import datetime
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
+
+# stats key counting _classify_geographic_scope LLM failures (#547).
+GEO_SCOPE_FAILURE_STAT = 'geographic_classification_failures'
 
 try:
     from docx import Document
@@ -160,6 +164,8 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     normalize_retired_code,
     segment_already_rendered,
 )
+from unified_pipeline.stage4.schemas import FIELD_SCHEMAS
+from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
@@ -458,6 +464,9 @@ RENDER_ROUTED_CODES = frozenset({
     'N2',  # Mentoring - Institutional Training Grants and Mentored Trainee
            # Grants (#529)
     'N3A', 'N3B',  # Mentoring (current/past mentees)
+    'N4',  # Mentoring - outcome narrative lines; `_fill_mentoring` renders
+           # them under the MENTORING header, so they must not also reach
+           # the Appendix (#587)
     'O',   # Institutional Leadership
     'P',   # Administrative Committees
     'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D',  # Service Activities
@@ -471,6 +480,94 @@ RENDER_ROUTED_CODES = frozenset({
 # for them, merging only entries whose date ranges overlap or match. A
 # taxonomy fact, not a setting (§7.2: no new configuration mechanism).
 _DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1'})
+
+# Codes routed by the entry's own publication status, not by the heading it
+# sits under: a submitted / in-review / in-preparation manuscript (S7) belongs
+# in "In review" wherever the author listed it. A hierarchy mismatch never
+# reroutes one of these -- status beats heading (#946: two submitted chapters
+# under "Book Chapters" rendered under "Books").
+_STATUS_ROUTED_CODES = frozenset({'S7'})
+
+# (assigned, target) same-family pairs a hierarchy mismatch never reroutes:
+# the target code's own `common_confusions` in core/taxonomy_v7.json names
+# exactly this mistake ("CME ... misclassified as K1 instead of K4" on K1), so
+# the heading is the weaker signal there (#946 item 3). A taxonomy fact; the
+# test file pins each pair to its taxonomy_v7 text.
+_TAXONOMY_WARNED_CONFUSIONS = frozenset({
+    ('D3', 'D1'), ('K1', 'K4'), ('K4', 'K1'), ('K5', 'K4'),
+    ('Q1', 'Q2'), ('Q2', 'Q3'), ('S1', 'S8'), ('S2', 'S1'),
+})
+
+
+_KEEP_SENTINEL = 'KEEP'
+_TAXONOMY_PATH = Path(__file__).parent / "core" / "taxonomy_v7.json"
+
+
+# Leading markdown list / quote / heading / emphasis markers on a reply line.
+_MD_LINE_PREFIX = re.compile(r'^(?:[\s>#*_\-\u2022]+|\d+[.)]\s+)+')
+
+
+@functools.cache
+def _taxonomy_codes() -> frozenset[str]:
+    """Every code in core/taxonomy_v7.json. A reclassification reply may only
+    name one of these (or KEEP); a shape regex let 'ALL' and 'NOTE' through
+    (#264)."""
+    with open(_TAXONOMY_PATH, encoding="utf-8") as f:
+        return frozenset(entry['code'] for entry in json.load(f)['codes'])
+
+
+def parse_reclassified_segments(
+        result_text: str, original_code: str) -> list[tuple[str, str | None]] | None:
+    """Parse `_reclassify_entry_segments`' "CODE: text" lines.
+
+    Returns [(segment_text, code)], or None when no line is usable. Only a
+    colon-bearing line that opens with a real taxonomy code or KEEP becomes a
+    segment; any other line is model commentary (a "Here is the analysis:"
+    preamble, "**Rationale:**" bullets, "> **Note:** ..."), and folding it in
+    as a segment renders it as a faculty-visible bullet (#264). Such lines are
+    dropped one by one, not the whole reply: live replies routinely carry a
+    preamble around valid code lines, and refusing them sent the entry back
+    to the appendix. A reply with no valid line returns None, so the caller
+    keeps the original entry text (fail closed).
+    """
+    segments: list[tuple[str, str | None]] = []
+    for line in result_text.strip().split('\n'):
+        line = line.strip()
+        if not line or ':' not in line:
+            continue
+        code, segment_text = (part.strip() for part in line.split(':', 1))
+        # A markdown list/emphasis wrapper around a real code ('- K2: ...',
+        # '**K2:** ...', '1. K2: ...') is still a code line, not commentary.
+        code = _MD_LINE_PREFIX.sub('', code).rstrip('*_ ').upper()
+        segment_text = segment_text.lstrip('*_ ')
+        if code != _KEEP_SENTINEL and code not in _taxonomy_codes():
+            logger.warning(
+                "Stage 6 reclassification reply: dropped non-code line "
+                "with prefix %r", code[:40])
+            continue
+        if segment_text and len(segment_text) > 10:
+            # KEEP means "correct as originally coded" -- resolve to the
+            # original code so the caller can route it home instead of
+            # dumping it in the appendix (#209).
+            resolved = (original_code if original_code != '?' else None) if code == _KEEP_SENTINEL else code
+            segments.append((segment_text, resolved))
+    return segments or None
+
+
+def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
+    """The one code a hierarchy mismatch should reroute to, or None to skip.
+
+    The most specific (longest) expected code, provided every code tied at
+    that length lands in the same WCM section; otherwise the heading does not
+    say which section it means, and the classifier's own code stands. Before
+    #946 `max(key=len)` took whichever tied code stage 3b's set happened to
+    list first ("Book Chapters" -> ['S3', 'S4'] -> Books). `min()` of the
+    tied codes, so the result never depends on `expected_codes` order."""
+    longest = max(len(code) for code in expected_codes)
+    candidates = [code for code in expected_codes if len(code) == longest]
+    if len({TAXONOMY_TO_SECTION.get(code) for code in candidates}) > 1:
+        return None
+    return min(candidates)
 
 
 def _merge_appendix_diversion_warnings(
@@ -633,6 +730,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Tables already cleared this render, by element id. Guards against one
         # filler wiping another's rows when both resolve to the same table (#454).
         self._cleared_tables = set()
+        # Body paragraphs `_insert_bulleted_entry` wrote this render. A header
+        # anchor must never resolve to one of them (#548): an ALL-CAPS bullet
+        # (the writer does not bold, but the shape test accepts bold too) would pass `_find_header_paragraph`'s shape test.
+        self._bullet_paras = set()
         self.stats = {
             'sections_filled': 0,
             'entries_inserted': 0,
@@ -644,6 +745,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             'overflow_to_appendix': 0,
             'appendix_segments_reconsidered': 0,
             'unrendered_records_recovered': 0,
+            GEO_SCOPE_FAILURE_STAT: 0,
         }
 
     def _find_template(self, template_path: str = None) -> str:
@@ -670,15 +772,22 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         """Correct taxonomy code routing when hierarchy mismatch flag indicates a likely misclassification.
 
         Conservative correction rules:
-        - Same-family reroutes (e.g., K5→K1): always applied since the LLM got the family
-          right but the sub-type wrong, and the CV's section structure is a better judge.
+        - Same-family reroutes (e.g., K3→K1): applied only when every expected
+          code renders in one WCM section, and the pair is not one the
+          taxonomy warns about (`_TAXONOMY_WARNED_CONFUSIONS`). A heading that
+          names codes in several sections ("Committees" -> P, Q2, O) does not
+          say which one it means, and the longest-code pick only favoured the
+          two-character code (#946 item 3: 200 corpus reroutes, most wrong).
         - Cross-family reroutes (e.g., C→K1): only applied when the LLM's confidence
           was low (< 0.7), since the content analysis may have been uncertain.
+        - Never: a status-routed code (`_STATUS_ROUTED_CODES`, S7), or a
+          heading whose expected codes tie across WCM sections
+          (`_pick_mismatch_target`) (#946).
 
         Returns:
             The (possibly corrected) taxonomy code to use for routing.
         """
-        if not entry.get('hierarchy_mismatch_flag'):
+        if not entry.get('hierarchy_mismatch_flag') or assigned_code in _STATUS_ROUTED_CODES:
             return assigned_code
 
         detail = entry.get('hierarchy_mismatch_detail', {})
@@ -686,10 +795,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         if not expected_codes:
             return assigned_code
 
-        # Pick the most specific expected code (longest, e.g., "K1" over "K")
-        best_expected = max(expected_codes, key=len)
+        best_expected = _pick_mismatch_target(expected_codes)
 
-        # Check if correction would change the WCM section
+        # Check if correction would change the WCM section (None: no target)
         assigned_section = TAXONOMY_TO_SECTION.get(assigned_code)
         expected_section = TAXONOMY_TO_SECTION.get(best_expected)
         if not expected_section or assigned_section == expected_section:
@@ -701,6 +809,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         confidence = entry.get('taxonomy_confidence', 1.0)
 
         if assigned_family == expected_family:
+            if ((assigned_code, best_expected) in _TAXONOMY_WARNED_CONFUSIONS
+                    or len({TAXONOMY_TO_SECTION.get(code) for code in expected_codes}) > 1):
+                return assigned_code
             if self.verbose:
                 logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
                       f"(same family, hierarchy-guided) [{entry.get('text', '')[:60]}...]")
@@ -876,10 +987,16 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         this and `_dedup_grouped_entries` below -- a near-duplicate dedup is
         about to drop is still re-scanned by `_recover_unrendered_records`
         (`stage6/pii_pass.py`), so it needs its own strip too, before dedup
-        ever removes it. Behaviour unchanged.
+        ever removes it.
+
+        #983: an entry whose stage-4 records sit under a key the schema does
+        not define is first fanned out into one entry per record
+        (`stage6/fan_out.py`), so grouping, the PII pass and dedup all see the
+        records individually.
         """
         entries_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
         mismatch_corrections = 0
+        entries = fan_out_multi_record_entries(entries, FIELD_SCHEMAS)
         for entry in entries:
             code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code)
@@ -1042,12 +1159,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('board_certification', frozenset({'F2'}), lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification
             ('honors', frozenset({'H'}), lambda: self._fill_honors(entries_by_code.get('H', []))),  # H = Honors and Awards
             ('memberships', frozenset({'I'}), lambda: self._fill_memberships(entries_by_code.get('I', []))),  # I = Professional Memberships
-            ('teaching', frozenset({'K1', 'K2', 'K3', 'K4', 'K5'}), lambda: self._fill_teaching(entries_by_code)),  # K1-K5 = Teaching Activities
+            ('teaching', frozenset({'K1', 'K2', 'K3', 'K4', 'K5'}), lambda: self._fill_teaching(entries_by_code, original_doc_path)),  # K1-K5 = Teaching Activities
             ('research_summary', frozenset({'M1'}), lambda: self._fill_research_summary(research_summary_data)),  # Stage 4.5 output
             ('research_support', frozenset({'M2A', 'M2B', 'M2C'}), lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
             # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
             ('patents', frozenset({'M2D'}), lambda: self._fill_patents(entries_by_code.get('M2D', []))),
-            ('mentoring', frozenset({'N1', 'N2', 'N3A', 'N3B'}), lambda: self._fill_mentoring(entries_by_code)),
+            ('mentoring', frozenset({'N1', 'N2', 'N3A', 'N3B', 'N4'}), lambda: self._fill_mentoring(entries_by_code)),
             ('clinical_practice', frozenset({'L1', 'L2', 'L3'}), lambda: self._fill_clinical_practice(entries_by_code)),  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
             ('leadership', frozenset({'O'}), lambda: self._fill_leadership(entries_by_code.get('O', []))),  # O = Institutional Leadership
             ('administrative_activities', frozenset({'P'}), lambda: self._fill_administrative_activities(entries_by_code.get('P', []))),  # P = Administrative Committees
@@ -1055,17 +1172,15 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('presentations', frozenset({'R'}), lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
             ('bibliography', frozenset({'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'}), lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
         ]
-        research_summary_rendered = False
-        for label, codes, fn in section_dispatch:
-            result = self._render_section(label, fn, codes)
-            if label == 'research_summary':
-                research_summary_rendered = bool(result)
+        # In dispatch order; research_support returns the T goals rows it placed in a grant table (#958).
+        section_results = {label: self._render_section(label, fn, codes) for label, codes, fn in section_dispatch}
+        research_summary_rendered = bool(section_results['research_summary'])
 
         # Fill passthrough sections (Employment Status, Institutional Affiliation,
         # Percent Effort) -- copied from source CV when it matches WCM (#294, #260).
         passthrough_result = self._render_section(
             'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
-        passthrough_consumed_ids = {id(e) for e in (passthrough_result or [])}
+        consumed_ids = {id(e) for e in (passthrough_result or []) + (section_results['research_support'] or [])}
 
         # Add appendix for ALL unmapped content -- declined M2A/M2B/M2C
         # entries (#839) are appended at the fill below, not seeded here
@@ -1086,10 +1201,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         unmapped_entries: list[dict] = []
 
-        # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260).
+        # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260) and claimed goals rows (#958).
         for code, entries in entries_by_code.items():
             if code not in mapped_codes:
-                unmapped_entries.extend(e for e in entries if id(e) not in passthrough_consumed_ids)
+                unmapped_entries.extend(e for e in entries if id(e) not in consumed_ids)
 
         # A stays in mapped_codes, but NOT because its entries are all consumed
         # -- that was the old assumption here and the corpus refutes it (145 of
@@ -1150,7 +1265,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         validation_issues = _merge_appendix_diversion_warnings(
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
-        all_warnings = self._section_failures + validation_issues
+        all_warnings = self._section_failures + validation_issues + self._geo_scope_failure_warnings()
         _log_validation_warnings(all_warnings)
 
         self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
@@ -1173,6 +1288,23 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             logger.info(f"\nSaved to: {output_path}")
 
         return output_path
+
+    def _geo_scope_failure_warnings(self) -> list[dict[str, Any]]:
+        """One sidecar WARN when any geographic-scope classification failed
+        (#547), so the run doctor sees it. Empty when none failed."""
+        failures = self.stats.get(GEO_SCOPE_FAILURE_STAT, 0)
+        if not failures:
+            return []
+        return [{
+            "check": GEO_SCOPE_FAILURE_STAT,
+            "code": None,
+            "section": "presentations/service",
+            "message": (f"{failures} geographic scope classification(s) failed "
+                        "and defaulted to National; the Regional/National/"
+                        "International split may be wrong"),
+            "evidence": [f"{GEO_SCOPE_FAILURE_STAT}={failures}"],
+            "severity": "WARN",
+        }]
 
     def _render_section(self, label: str, fn: Callable[[], Any],
                          codes: frozenset[str] = frozenset()) -> Any:  # noqa: ANN401
@@ -1382,9 +1514,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             return scope
 
-        except Exception as e:
-            if self.verbose:
-                logger.warning(f"    ⚠ Geographic classification error: {e}")
+        except Exception:
+            # Never gated on verbose (#547): production runs are not verbose,
+            # and an LLM outage would otherwise refile every presentation as
+            # National with no record. The default itself is kept.
+            logger.warning("Geographic scope classification failed; "
+                           "defaulting to National", exc_info=True)
+            self.stats[GEO_SCOPE_FAILURE_STAT] += 1
             return 'National'  # Default on error
 
 
@@ -1424,6 +1560,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Create the bulleted entry paragraph first
         entry_para = self.doc.paragraphs[insert_idx].insert_paragraph_before("")
+        self._bullet_paras.add(entry_para._p)
 
         # Add blank line before if requested (insert before the entry we just created)
         if add_blank_before:
@@ -1566,11 +1703,17 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         MENTORING section's '**Optional: List publications...' paragraph
         contains 'bibliography' by substring and would swallow S-code
         recoveries mid-Mentoring if plain substring search were used.
+
+        Nor may it match a bullet an earlier section inserted (#548): those are
+        skipped by identity, since a bullet can be ALL-CAPS and so pass the
+        shape test below (which also accepts a bold run; no bullet writer bolds).
         """
         search = search_text.lower()
         for i, para in enumerate(self.doc.paragraphs):
             text = para.text.strip()
             if len(text) < 3 or search not in text.lower():
+                continue
+            if para._p in self._bullet_paras:
                 continue
             if text.isupper() or (para.runs and para.runs[0].bold):
                 return i
@@ -2310,28 +2453,8 @@ Now analyze the text above:"""
                 max_tokens=4000
             )
 
-            result_text = llm_result["content"].strip()
-
-            # Parse the response
-            segments = []
-            for line in result_text.split('\n'):
-                line = line.strip()
-                if not line or ':' not in line:
-                    continue
-                # Parse "CODE: text" format
-                parts = line.split(':', 1)
-                if len(parts) == 2:
-                    code = parts[0].strip().upper()
-                    segment_text = parts[1].strip()
-                    if segment_text and len(segment_text) > 10:
-                        # KEEP means "correct as originally coded" — resolve to
-                        # the original code so the caller can route it home
-                        # instead of dumping it in the appendix (#209).
-                        if code == 'KEEP':
-                            code = original_code if original_code != '?' else None
-                        segments.append((segment_text, code))
-
-            return segments if segments else None
+            return parse_reclassified_segments(
+                llm_result["content"], original_code)
 
         except Exception as e:
             if self.verbose:

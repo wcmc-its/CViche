@@ -31,6 +31,16 @@ MAX_UPLOAD_SIZE = int(get_config("auth", "CVICHE_MAX_UPLOAD_MB", default=10)[0])
 TIME_PER_1K_TOKENS = int(get_config("auth", "CVICHE_TIME_PER_1K_TOKENS", default=30)[0])
 BASE_OVERHEAD_SECONDS = int(get_config("auth", "CVICHE_BASE_OVERHEAD_SECONDS", default=60)[0])
 
+# Per-pod, in-memory, per-user call budget for POST /estimate (#795).
+# check_rate_limit (above) is DB-backed and counts Run rows -- an estimate
+# creates no Run, so a user under their run quota could otherwise call
+# /estimate without bound, doing the same expensive parsing /upload is
+# already limited for. This is a separate, cheaper budget scoped to that one
+# endpoint. About 20 calls per 5 minutes per user per pod; with up to 3
+# backend pods that is at most ~60 per user per window, not 20.
+ESTIMATE_RATE_LIMIT_MAX = int(get_config("auth", "CVICHE_ESTIMATE_RATE_LIMIT", default=20)[0])
+ESTIMATE_RATE_LIMIT_WINDOW_SECONDS = int(get_config("auth", "CVICHE_ESTIMATE_RATE_WINDOW", default=5 * 60)[0])
+
 # The cost rate (USD per 1,000 document tokens) is derived from the model
 # configured in llm_config.yaml so the estimate tracks the active preset.
 # CVICHE_COST_PER_1K_TOKENS, if set, pins it to an explicit value instead.

@@ -404,6 +404,8 @@
         "total_funding": {"extract": true, "category": "template", "wcm_column": "Amount, total"},
         "annual_funding": {"extract": true, "category": "template", "wcm_column": "Amount, yearly direct"},
         "percent_effort": {"extract": true, "category": "template", "wcm_column": "Effort"},
+        "status": {"extract": true, "category": "optional"},
+        "notes": {"extract": true, "category": "optional"},
         "narrative": {"extract": false, "category": "optional"}
       }
     },
@@ -421,6 +423,8 @@
         "start_date": {"extract": true, "category": "template"},
         "end_date": {"extract": true, "category": "template"},
         "total_funding": {"extract": true, "category": "template"},
+        "status": {"extract": true, "category": "optional"},
+        "notes": {"extract": true, "category": "optional"},
         "narrative": {"extract": false, "category": "optional"}
       }
     },
@@ -437,6 +441,8 @@
         "agency": {"extract": true, "category": "template"},
         "total_funding_requested": {"extract": true, "category": "template"},
         "submission_date": {"extract": true, "category": "template"},
+        "status": {"extract": true, "category": "optional"},
+        "notes": {"extract": true, "category": "optional"},
         "narrative": {"extract": false, "category": "optional"}
       }
     },
@@ -722,6 +728,7 @@
         "location": {"extract": true, "category": "template", "wcm_column": "Institution/Location"},
         "date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy)"},
         "event_name": {"extract": false, "category": "optional"},
+        "role": {"extract": true, "category": "optional"},
         "presentation_type": {"extract": false, "category": "optional"},
         "host_organization": {"extract": false, "category": "optional"},
         "scope": {"extract": false, "category": "optional"},

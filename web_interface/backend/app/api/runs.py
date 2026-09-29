@@ -15,14 +15,17 @@ from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency
 from app.auth import get_current_user
 from app.api.upload import UPLOAD_DIR, create_run_archive, commit_run_or_compensate
-from app.services.run_service import check_run_access
+from app.services.run_service import check_run_access, claim_run_as_running
 from app.rate_limiter import check_rate_limit
-from app.errors import not_found, bad_request
+from app.errors import not_found, bad_request, conflict
 from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Run statuses /start may move to "running" (the conditional UPDATE's predicate).
+STARTABLE_STATUSES = ("created", "paused")
 
 
 def _run_duration_seconds(run) -> int | None:
@@ -190,7 +193,8 @@ async def start_run(
 
     run = check_run_access(run_id, current_user, db)
 
-    if run.status not in ["created", "paused"]:
+    # "paused" rows predate the pause endpoint's removal (#115); /start stays their recovery path.
+    if run.status not in STARTABLE_STATUSES:
         raise bad_request(f"Cannot start run in status: {run.status}")
 
     # Get the uploaded file path. Use the shared UPLOAD_DIR constant (same path
@@ -232,8 +236,13 @@ async def start_run(
             headers={"Retry-After": "30"},
         )
 
-    # Update status
-    run.status = "running"
+    # Atomic created/paused -> running (#799). The guard above is only a fast
+    # path: the conditional UPDATE decides which concurrent starter wins. The
+    # loser returns its slot and never reaches the pipeline dispatch.
+    if not claim_run_as_running(db, run_id, Run.status.in_(STARTABLE_STATUSES)):
+        db.rollback()
+        concurrency.release_slot()
+        raise conflict("This run was already started by another request.")
     db.commit()
 
     # Start pipeline execution in background. The slot acquired above is held
@@ -256,25 +265,6 @@ async def start_run(
     return {"message": f"Pipeline started for run {run_id}", "status": "running"}
 
 
-@router.post("/run/{run_id}/pause")
-async def pause_run(
-    run_id: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """Pause a running pipeline."""
-
-    run = check_run_access(run_id, current_user, db)
-
-    if run.status != "running":
-        raise bad_request(f"Cannot pause run in status: {run.status}")
-
-    run.status = "paused"
-    db.commit()
-
-    return {"message": f"Run {run_id} paused", "status": "paused"}
-
-
 @router.post("/run/{run_id}/cancel")
 async def cancel_run(
     run_id: str,
@@ -282,22 +272,12 @@ async def cancel_run(
     current_user: User = Depends(get_current_user),
 ):
     """Cancel a running pipeline."""
-    from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
-
     run = check_run_access(run_id, current_user, db)
 
     if run.status != "running":
         raise bad_request(f"Cannot cancel run in status: {run.status}")
 
-    # Signal cancellation to orchestrator
-    orchestrator_cancel(run_id)
-
-    # Update run status
-    run.status = "cancelled"
-    run.error_message = "Cancelled by user"
-    from datetime import datetime
-    run.completed_at = datetime.now()
-    db.commit()
+    _cancel_run_record(db, run)
 
     return {"message": f"Run {run_id} cancelled", "status": "cancelled"}
 
@@ -431,7 +411,50 @@ async def restart_run(
 
     commit_run_or_compensate(db, new_run_id, current_user.email, new_file_path)
 
+    # #181: restart replaces a still-running original rather than forking a
+    # second copy that keeps spending alongside the new run. Done last, after
+    # the child is committed, so a failed restart (429/404/502 above) leaves
+    # the original running. Refresh first: the orchestrator may have finished
+    # it since check_run_access() read it.
+    db.refresh(original_run)
+    if original_run.status == "running":
+        _cancel_run_record(db, original_run)
+
     return {"run_id": new_run_id, "message": f"New run created from {run_id}"}
+
+
+def _cancel_run_record(db: Session, run: Run) -> None:
+    """Mark `run` cancelled, then signal the orchestrator to stop it.
+
+    Shared by cancel_run and restart_run (#181); each caller checks that
+    the run is still running first.
+
+    Commit BEFORE signalling, not after: db.commit() can raise (see
+    commit_run_or_compensate's #802 handling above), while orchestrator_cancel
+    cannot -- cancel_run's set.add can't raise, and RedisBroker.request_cancel
+    wraps its body in try/except (redis_broker.py, "best-effort"). Signalling
+    first would leave a window where the pipeline is told to stop but the row
+    never reflects it if the commit then raises: check_cancelled's
+    CancelledException handler does not touch the DB (orchestrator.py,
+    "status already updated by API endpoint"), so the row would stay
+    "running" until reconcile_stale_runs sweeps it up to an hour later with a
+    misleading "server restarted" message. Committing first means a commit
+    failure here leaves the run running with nothing told to stop it --
+    consistent, and the caller's exception surfaces normally.
+    """
+    run.status = "cancelled"
+    run.error_message = "Cancelled by user"
+    # Naive, matching every other Run timestamp write (orchestrator.py,
+    # run_service.py, upload.py): pymysql drops tzinfo on write, so an aware
+    # value would round-trip as naive UTC and get mislabelled with the
+    # server's LOCAL offset by schemas.py's _iso_with_offset -- wrong by
+    # that offset (timestamp and duration both) on a non-UTC host.
+    run.completed_at = datetime.now()
+    db.commit()
+
+    from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
+
+    orchestrator_cancel(run.id)
 
 
 @router.post("/run/{run_id}/retry/{step_number}")
@@ -504,6 +527,16 @@ async def retry_step(
     # Reset the failed step and every step after it back to pending; the earlier
     # completed steps are left untouched so the pipeline resumes rather than
     # restarts. Clear stale per-step metadata so the re-run repopulates it.
+    # Atomic -> running (#799): only one of two concurrent retries may claim a
+    # run that is not already running. The step resets below share this
+    # transaction, so the loser changes nothing and returns its slot.
+    if not claim_run_as_running(
+        db, run_id, Run.status != "running", error_message=None, completed_at=None
+    ):
+        db.rollback()
+        concurrency.release_slot()
+        raise conflict("This run is already running.")
+
     downstream_steps = db.query(Step).filter(
         Step.run_id == run_id,
         Step.step_number >= step_number,
@@ -516,9 +549,6 @@ async def retry_step(
         s.duration_seconds = None
         s.cost = None
 
-    run.status = "running"
-    run.error_message = None
-    run.completed_at = None
     db.commit()
 
     # Resume pipeline execution in the background, mirroring start_run. The slot

@@ -33,6 +33,8 @@ reached only from this module.
 """
 import logging
 import re
+from collections.abc import Mapping
+from types import MappingProxyType
 
 try:
     from docx.table import Table
@@ -43,9 +45,9 @@ except ImportError as exc:
 
 from unified_pipeline.core.render_check import entry_fragments
 
-from ..formatting import _clear_table_data, format_date_range
+from ..formatting import _clear_table_data, format_date_for_section, format_date_range
 from ..normalization import _get_cleaned_institution_name
-from ..parsing import _dates_overlap_or_match, _is_table_header_entry
+from ..parsing import _dates_overlap_or_match, _is_table_header_entry, _parse_date_components
 from ..resolution import _get_institution_location, _location_already_in_institution
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
 
@@ -60,6 +62,24 @@ CellContent = list[tuple[str, bool, str]]
 # Professional Positions.
 POSITION_TAXONOMY_CODES = ('D1', 'D2', 'D3')
 ACADEMIC_APPOINTMENT_CODE, HOSPITAL_APPOINTMENT_CODE, OTHER_POSITION_CODE = POSITION_TAXONOMY_CODES
+
+# #946: the academic-rank ladder the decision on the issue names, lowest
+# first -- Instructor -> Assistant Professor -> Associate Professor ->
+# Professor. A start-only D1 row renders "<start>-Present" unless a higher
+# rung in the same table starts the same year or later; then it renders the
+# bare start (`_superseded_rank_rows`). The word before "professor" -- or
+# before a "clinical"/"research" qualifier in front of it -- picks the rung,
+# so "Asst.", "Assoc." and "Assistant Clinical Professor" are not read as
+# full Professor. "Associate Dean and Professor" is a Professor.
+INSTRUCTOR_RANK, ASSISTANT_PROFESSOR_RANK, ASSOCIATE_PROFESSOR_RANK, PROFESSOR_RANK = range(4)
+_INSTRUCTOR_RE = re.compile(r'\binstructor\b', re.IGNORECASE)
+_PROFESSOR_RE = re.compile(
+    r'(?:\b(assistant|asst|associate|assoc)\b\.?\s+(?:(?:clinical|research)\s+)?)?\bprofessor\b',
+    re.IGNORECASE)
+_PROFESSOR_PREFIX_RANKS = MappingProxyType({
+    'assistant': ASSISTANT_PROFESSOR_RANK, 'asst': ASSISTANT_PROFESSOR_RANK,
+    'associate': ASSOCIATE_PROFESSOR_RANK, 'assoc': ASSOCIATE_PROFESSOR_RANK,
+})
 
 # #476: glyphs that mark a tab-joined child fragment as its own
 # career-progression row (a title promoted/re-titled within the same
@@ -410,7 +430,42 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
     return False
 
 
-def _position_row_cells(entry: dict) -> tuple[CellContent, CellContent, CellContent]:
+def _academic_rank(title: str) -> int | None:
+    """The highest ladder rung `title` names, or None for a title on no rung
+    ("Core Faculty", "Chair")."""
+    ranks = [_PROFESSOR_PREFIX_RANKS.get((m.group(1) or '').lower(), PROFESSOR_RANK)
+             for m in _PROFESSOR_RE.finditer(title)]
+    if _INSTRUCTOR_RE.search(title):
+        ranks.append(INSTRUCTOR_RANK)
+    return max(ranks, default=None)
+
+
+def _superseded_rank_rows(records: list[dict]) -> set[int]:
+    """Indexes of the D1 records in one table whose start-only date renders
+    as the bare start rather than "<start>-Present" (#946).
+
+    A D1 record qualifies when it has a start and no end, its title is on the
+    rank ladder, and another D1 record in the same table holds a higher rung
+    whose start year is the same or later -- the promotion ended it, even
+    though the source gave it no end date. Every other record, non-rank
+    titles included, keeps the default.
+    """
+    ranked = []
+    for index, record in enumerate(records):
+        if record.get('taxonomy_code') != ACADEMIC_APPOINTMENT_CODE:
+            continue
+        fields = record.get('extracted_fields', {}) or {}
+        rank = _academic_rank(str(fields.get('title') or ''))
+        start_year = _parse_date_components(str(fields.get('start_date') or ''))[0]
+        if rank is not None and start_year is not None:
+            ranked.append((index, rank, start_year, bool(fields.get('end_date'))))
+    return {index for index, rank, start_year, has_end in ranked
+            if not has_end and any(other_rank > rank and other_start >= start_year
+                                   for _, other_rank, other_start, _ in ranked)}
+
+
+def _position_row_cells(entry: dict,
+                        superseded: bool = False) -> tuple[CellContent, CellContent, CellContent]:
     """The Title / Institution / Dates cell contents of one position row.
 
     Split out of `_add_position_row` so that the decision to render a record
@@ -421,6 +476,8 @@ def _position_row_cells(entry: dict) -> tuple[CellContent, CellContent, CellCont
 
     Each cell is the `(text, is_track_change, reason)` run list that
     `_add_table_row_with_mixed_content` takes. Reads the record only.
+    `superseded` renders a start-only date as the bare start
+    (`_superseded_rank_rows`, #946).
     """
     fields = entry.get('extracted_fields', {}) or {}
 
@@ -462,7 +519,10 @@ def _position_row_cells(entry: dict) -> tuple[CellContent, CellContent, CellCont
     # Dates - format according to D1/D2/D3 requirements (mm/yy - mm/yy)
     start = fields.get('start_date', '')
     end = fields.get('end_date', '')
-    dates = format_date_range(start, end, taxonomy_code)
+    if superseded:
+        dates = format_date_for_section(start, taxonomy_code)
+    else:
+        dates = format_date_range(start, end, taxonomy_code)
 
     # Build cell contents with mixed normal/track-change content
     title_content = [(title, False, "")]
@@ -566,7 +626,17 @@ class PositionsSection:
             entry[INHERITED_INSTITUTION_KEY] = parent.get('element_idx_start')
             # Also propagate enrichment if available
             if last_enrichment and not entry.get('institution_enrichment'):
-                entry['institution_enrichment'] = dict(last_enrichment)
+                if isinstance(last_enrichment, Mapping):
+                    entry['institution_enrichment'] = dict(last_enrichment)
+                else:
+                    # A non-Mapping (list, str, ...) shouldn't reach here, but
+                    # stage 5b is an LLM output and one malformed run is
+                    # enough (#743). Treat it like no enrichment to inherit
+                    # rather than failing the section.
+                    logger.warning(
+                        "institution_enrichment is %s, not a mapping; "
+                        "treating as absent for propagation",
+                        type(last_enrichment).__name__)
             propagated += 1
         if verbose and propagated > 0:
             logger.info("Propagated institution to %d sub-entries", propagated)
@@ -826,8 +896,7 @@ class PositionsSection:
             if acad_table:
                 _clear_table_data(acad_table, keep_header=True)
                 self.stats['tables_populated'] += 1
-                for position in self._normalized_positions(d1_entries):
-                    self._add_position_row(acad_table, position)
+                self._add_position_rows(acad_table, d1_entries)
 
         # Fill Hospital Appointments table (D2)
         hosp_idx = self._find_paragraph_with_text("Hospital Appointments")
@@ -836,8 +905,7 @@ class PositionsSection:
             if hosp_table:
                 _clear_table_data(hosp_table, keep_header=True)
                 self.stats['tables_populated'] += 1
-                for position in self._normalized_positions(d2_entries):
-                    self._add_position_row(hosp_table, position)
+                self._add_position_rows(hosp_table, d2_entries)
 
         # Fill Other Professional Positions table (D3)
         other_idx = self._find_paragraph_with_text("Other Professional Positions")
@@ -846,8 +914,7 @@ class PositionsSection:
             if other_table:
                 _clear_table_data(other_table, keep_header=True)
                 self.stats['tables_populated'] += 1
-                for position in self._normalized_positions(d3_entries):
-                    self._add_position_row(other_table, position)
+                self._add_position_rows(other_table, d3_entries)
 
         # Fallback: If no specific subsection tables found, use the generic PROFESSIONAL POSITIONS table
         if acad_idx is None and hosp_idx is None and other_idx is None:
@@ -864,8 +931,7 @@ class PositionsSection:
 
             # Combine all and sort
             all_entries = d1_entries + d2_entries + d3_entries
-            for position in self._normalized_positions(all_entries):
-                self._add_position_row(table, position)
+            self._add_position_rows(table, all_entries)
 
     def _is_source_column_header(self, entry: dict) -> bool:
         """True for a source table's column-header row that field extraction
@@ -959,7 +1025,16 @@ class PositionsSection:
                              "employer or dates", blank)
         return positions
 
-    def _add_position_row(self, table: Table, entry: dict) -> None:
+    def _add_position_rows(self, table: Table, entries: list[dict]) -> None:
+        """Render a table's normalized position records, one row each, with
+        the rank-ladder dates of `_superseded_rank_rows` decided over the
+        whole table (#946)."""
+        positions = self._normalized_positions(entries)
+        superseded = _superseded_rank_rows(positions)
+        for index, position in enumerate(positions):
+            self._add_position_row(table, position, superseded=index in superseded)
+
+    def _add_position_row(self, table: Table, entry: dict, superseded: bool = False) -> None:
         """Render one normalized position record as one table row.
 
         Renders unconditionally: every record `_normalized_positions` yields
@@ -968,6 +1043,6 @@ class PositionsSection:
         """
         self._add_table_row_with_mixed_content(
             table,
-            list(_position_row_cells(entry)),
+            list(_position_row_cells(entry, superseded)),
             entry=entry
             )
