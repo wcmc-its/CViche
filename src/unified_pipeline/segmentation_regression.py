@@ -43,6 +43,7 @@ import json
 import logging
 import re
 import sys
+import unicodedata
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -190,11 +191,26 @@ def _counts(m: Metrics) -> dict[str, int]:
     }
 
 
+def _fold_marks(text: str) -> str:
+    """Drop combining marks ('Müller' -> 'Muller', Greek tonos, Cyrillic
+    breve) so an accented word tokenizes the same as its base letters (#541).
+    NFKD then NFC: NFC recomposes Hangul jamo so a CJK string keeps its
+    character count (the CJK floor is deferred, #722). Pure-ASCII input is
+    returned untouched, byte-identical."""
+    if text.isascii():
+        return text
+    decomposed = unicodedata.normalize("NFKD", text)
+    kept = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return unicodedata.normalize("NFC", kept)
+
+
 def _norm(text: str) -> str:
-    return " ".join(str(text or "").split()).lower()
+    return _fold_marks(" ".join(str(text or "").split()).lower())
 
 
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Unicode letters/digits, no underscore: identical to [a-z0-9]+ on the
+# lowercased ASCII input this used to see (#541).
+_TOKEN_RE = re.compile(r"[^\W_]+")
 
 
 def _tokens(text: str) -> Counter[str]:

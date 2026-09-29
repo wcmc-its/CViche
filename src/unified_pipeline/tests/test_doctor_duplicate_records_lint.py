@@ -744,3 +744,11 @@ def test_record_rendered_ignores_tokens_ubiquitous_in_the_output():
     assert _record_rendered(record, "", out) is False
     short = "Bostwick S, Weill Cornell Medicine. Sleep apnea."
     assert _record_rendered(short, "", out) is None
+
+
+def test_passage_key_keeps_non_ascii_letters_and_ascii_unchanged():
+    """#541: non-ASCII letters no longer fold to whitespace; ASCII keys are
+    byte-identical to the old [^a-z0-9] fold."""
+    from unified_pipeline.doctor.lints.render import _passage_key
+    assert _passage_key("1. Zoë Brändström, Иван") == "zoe brandstrom иван"
+    assert _passage_key("• Plain_text: A-B (2019)") == "plain text a b 2019"

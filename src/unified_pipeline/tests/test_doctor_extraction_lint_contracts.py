@@ -591,11 +591,10 @@ def test_lint_dedup_drops_repeated_tokens_fully_present_still_safe():
     assert lint_dedup_drops({"dedup_decisions": [same]}) == []
 
 
-def test_alphanumeric_tokens_unicode_diaeresis_splits_on_the_non_ascii_char():
-    # _norm lowercases and joins whitespace but does not strip diacritics;
-    # _DEDUP_TOKEN_RE is ASCII-only ([a-z0-9]+), so it breaks at the 'ü'
-    # rather than treating "müller" as one token or normalizing it away.
-    assert _alphanumeric_tokens("Müller") == Counter({"m": 1, "ller": 1})
+def test_alphanumeric_tokens_unicode_diaeresis_folds_to_one_token():
+    # #541: _norm folds combining marks and _DEDUP_TOKEN_RE is Unicode-aware,
+    # so "müller" is one token (it used to split into "m" + "ller").
+    assert _alphanumeric_tokens("Müller") == Counter({"muller": 1})
 
 
 def test_alphanumeric_tokens_digits_are_tokens_punctuation_is_not():
@@ -986,3 +985,16 @@ def test_wrong_start_date_leaves_the_extracted_value_alone():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_dedup_and_render_tokens_are_unicode_aware():
+    """#541: accented Latin stays whole, Cyrillic/Greek produce tokens,
+    ASCII is unchanged. Invented names."""
+    from unified_pipeline.doctor.shared import _long_word_tokens
+    assert _alphanumeric_tokens("Zoë Brändström") == Counter(
+        {"zoe": 1, "brandstrom": 1})
+    assert _alphanumeric_tokens("Иван Петров") == Counter(
+        {"иван": 1, "петров": 1})
+    assert _long_word_tokens("Zoë Brändström") == {"brandstrom"}
+    assert _long_word_tokens("Ελένη Παπαδοπούλου") == {"ελενη", "παπαδοπουλου"}
+    assert _long_word_tokens("Alpha beta gamma12") == {"alpha", "gamma"}
