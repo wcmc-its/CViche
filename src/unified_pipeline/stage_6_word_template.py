@@ -492,6 +492,45 @@ _TAXONOMY_WARNED_CONFUSIONS = frozenset({
 })
 
 
+# A taxonomy code as the reclassification prompt asks for it: one letter, up
+# to two digits, up to two trailing letters (K1, M2B, N3A, Q4A, O, P), or the
+# KEEP sentinel. Anything else before the colon is model commentary (#264).
+_RECLASSIFIED_CODE_RE = re.compile(r'^(?:[A-Z][0-9]{0,2}[A-Z]{0,2}|KEEP)$')
+
+
+def parse_reclassified_segments(
+        result_text: str, original_code: str) -> list[tuple[str, str | None]] | None:
+    """Parse `_reclassify_entry_segments`' "CODE: text" lines.
+
+    Returns [(segment_text, code)], or None when the reply is unusable. Every
+    colon-bearing line must open with a taxonomy-code-shaped token; a line
+    that does not is model commentary about its own decision ("**All
+    segments are retained under M2B: the grant details ..."), and folding it
+    in as a segment renders it as a faculty-visible bullet (#264). A reply
+    containing any such line is refused whole, so the caller keeps the
+    original entry text (fail closed) instead of a half-trusted parse.
+    """
+    segments: list[tuple[str, str | None]] = []
+    for line in result_text.strip().split('\n'):
+        line = line.strip()
+        if not line or ':' not in line:
+            continue
+        code, segment_text = (part.strip() for part in line.split(':', 1))
+        code = code.upper()
+        if not _RECLASSIFIED_CODE_RE.match(code):
+            logger.warning(
+                "Stage 6 reclassification reply refused: non-code line "
+                "prefix %r; keeping the original entry text", code[:40])
+            return None
+        if segment_text and len(segment_text) > 10:
+            # KEEP means "correct as originally coded" -- resolve to the
+            # original code so the caller can route it home instead of
+            # dumping it in the appendix (#209).
+            resolved = (original_code if original_code != '?' else None) if code == 'KEEP' else code
+            segments.append((segment_text, resolved))
+    return segments or None
+
+
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
     """The one code a hierarchy mismatch should reroute to, or None to skip.
 
@@ -2358,28 +2397,8 @@ Now analyze the text above:"""
                 max_tokens=4000
             )
 
-            result_text = llm_result["content"].strip()
-
-            # Parse the response
-            segments = []
-            for line in result_text.split('\n'):
-                line = line.strip()
-                if not line or ':' not in line:
-                    continue
-                # Parse "CODE: text" format
-                parts = line.split(':', 1)
-                if len(parts) == 2:
-                    code = parts[0].strip().upper()
-                    segment_text = parts[1].strip()
-                    if segment_text and len(segment_text) > 10:
-                        # KEEP means "correct as originally coded" — resolve to
-                        # the original code so the caller can route it home
-                        # instead of dumping it in the appendix (#209).
-                        if code == 'KEEP':
-                            code = original_code if original_code != '?' else None
-                        segments.append((segment_text, code))
-
-            return segments if segments else None
+            return parse_reclassified_segments(
+                llm_result["content"], original_code)
 
         except Exception as e:
             if self.verbose:

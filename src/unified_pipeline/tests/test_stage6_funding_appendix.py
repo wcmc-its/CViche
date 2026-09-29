@@ -29,6 +29,7 @@ from unified_pipeline.core.template_boilerplate import is_source_boilerplate  # 
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
     grant_status_rebucket_target,
+    parse_reclassified_segments,
     segment_already_rendered,
 )
 
@@ -248,6 +249,54 @@ def test_reconsider_routes_unrendered_siblings_home(monkeypatch):
     assert not any("FSMB" in text for text, _ in routed)
     assert not any("FSMB" in item[0] for item in appended)
     assert appended == []
+
+
+# ---------------------------------------------------------------- #264
+
+_PROSE_REPLY = (
+    "**All segments are retained under M2B: the grant details, project goals "
+    "and associated publications directly relate to the funded project.\n"
+    "M2B: Synthetic Grant Alpha | Example Agency | 2010-2012"
+)
+
+
+def test_parse_reclassified_segments_well_formed():
+    reply = ("M2B: Synthetic Grant Alpha | Example Agency | 2010-2012\n"
+             "K2: Participate in clinical teaching conferences\n"
+             "KEEP: Attending Physician, Example Hospital, 2004-Present\n"
+             "q4a: Editorial board member, Example Journal")
+    assert parse_reclassified_segments(reply, "M2B") == [
+        ("Synthetic Grant Alpha | Example Agency | 2010-2012", "M2B"),
+        ("Participate in clinical teaching conferences", "K2"),
+        ("Attending Physician, Example Hospital, 2004-Present", "M2B"),
+        ("Editorial board member, Example Journal", "Q4A"),
+    ]
+
+
+def test_parse_reclassified_segments_refuses_commentary_reply():
+    """Model commentary with a colon used to parse as a segment whose 'code'
+    was the sentence, then rendered as an appendix bullet (#264)."""
+    assert parse_reclassified_segments(_PROSE_REPLY, "M2B") is None
+
+
+def test_reclassify_prose_reply_never_reaches_document(monkeypatch):
+    """End to end with call_llm stubbed to return commentary: the original
+    entry text is what lands in the appendix, never the model's prose."""
+    import unified_pipeline.stage_6_word_template as st6
+
+    monkeypatch.setattr(st6, "call_llm", lambda **kw: {"content": _PROSE_REPLY})
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    original = "Synthetic Grant Alpha, Example Agency, 2010-2012, funded project"
+    gen._appendix_pending = [({"text": original, "taxonomy_code": "M2B",
+                               "extracted_fields": {}}, 10.0)]
+
+    gen._reconsider_appendix_entries()
+
+    texts = [p.text for p in gen.doc.paragraphs]
+    assert not any("All segments are retained" in t or "grant details" in t
+                   for t in texts)
+    assert any(original in t for t in texts)
 
 
 def test_all_noise_batch_creates_no_appendix():
