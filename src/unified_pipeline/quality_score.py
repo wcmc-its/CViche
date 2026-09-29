@@ -650,6 +650,25 @@ def _is_placeholder_only_row(text: str | None) -> bool:
     return is_unanswered_prompt("|".join(pieces))
 
 
+def _has_nothing_to_extract(entry: dict) -> bool:
+    """True when stage 4 had no fields to find in *entry* (#427): stage 4
+    skipped it (`extraction_skipped`, too short to extract), or its text is a
+    placeholder-only row or the WCM template's own words -- the same
+    `core.template_boilerplate` helpers `score_t_bucket` uses. Not keyed on
+    taxonomy code: stage 4 does extract T entries, so a T miss still counts."""
+    text = entry.get("text")
+    if not isinstance(text, str):
+        text = None
+    if entry.get("extraction_skipped") or _is_placeholder_only_row(text):
+        return True
+    if is_template_instruction(text) or is_near_template_instruction(text):
+        return True
+    # ponytail: is_template_label_line is Appendix-only and "100%" is a label,
+    # so "Clinical | 100%" (a real J effort record) would match; a label-only
+    # header row carries no digit. Tighten if a digit-free real record appears.
+    return is_template_label_line(text) and not any(c.isdigit() for c in text)
+
+
 def _goal_claimed_row_ids(entries: list[dict]) -> set[int]:
     """``id()`` of every T entry stage 6 claims into an M2 grant's table as
     its major-goals row (#963/#1002; #822 finding 2). Reuses stage 6's
@@ -1034,6 +1053,11 @@ def score_field_sparseness(outputs_dir: Path) -> tuple[float, str, None]:
     (how many carry no usable fields regardless of what the extractor
     claimed). An entry that fails both is meant to weigh on both terms --
     that is the calibration, not a double-count of one failure.
+
+    #427: an entry with nothing to extract (`_has_nothing_to_extract`) counts
+    on neither term -- its all-null fields or skipped extraction are correct
+    output, not a miss. As in `score_t_bucket`, only the numerators
+    shrink; the denominator stays every entry the run produced.
     """
     data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
@@ -1044,24 +1068,28 @@ def score_field_sparseness(outputs_dir: Path) -> tuple[float, str, None]:
     if total == 0:
         return 1.0, "no entries", None
 
-    allnull_or_zero = success_count = 0
+    allnull_or_zero = failed_count = nothing_to_extract = 0
     for e in entries:
+        if _has_nothing_to_extract(e):
+            nothing_to_extract += 1
+            continue
         ef = e.get("extracted_fields", {}) or {}
         cov = e.get("extraction_coverage", {}) or {}
         cov_pct = cov.get("extraction_coverage_percent", None)
-        if e.get("extraction_success", False):
-            success_count += 1
+        if not e.get("extraction_success", False):
+            failed_count += 1
         all_null = all(v is None for v in ef.values()) if ef else True
         zero_cov = (cov_pct is not None and cov_pct == 0)
         if all_null or zero_cov:
             allnull_or_zero += 1
 
-    success_rate = success_count / total
+    success_rate = 1 - failed_count / total
     a = 0.5 * ((allnull_or_zero / total) / 0.10)
     b = 0.5 * ((1 - success_rate) / 0.10)
     fraction = clamp(a + b)
     detail = (
-        f"total_entries={total}; allnull_or_zerocov={allnull_or_zero}; "
+        f"total_entries={total}; nothing_to_extract={nothing_to_extract}; "
+        f"allnull_or_zerocov={allnull_or_zero}; "
         f"success_rate={success_rate:.3f}; fraction={fraction:.3f}"
     )
     return fraction, detail, None

@@ -1084,6 +1084,64 @@ def test_field_sparseness_saturates_at_ten_percent_both_failing(tmp_path):
     assert one == pytest.approx(1.0) and two == pytest.approx(1.0)
 
 
+# #427: an entry with nothing to extract counts on neither term. YTPMZK's own
+# shapes: a stage-4-skipped entry, a column-header row, a placeholder row, and
+# template instruction text (each helper isolated; the constants are defined
+# further down, so they are looked up at call time).
+@pytest.mark.parametrize("extra", [
+    {"taxonomy_code": "T", "text": "N/A", "extraction_skipped": True},
+    {"taxonomy_code": "T", "text": "x", "extraction_skipped": True},
+    {"taxonomy_code": "N3A", "text": "Site/Position |"},
+    {"taxonomy_code": "K3", "text": "N/A"},
+    {"taxonomy_code": "A", "text": "_CONTAINMENT_ONLY_TEMPLATE_TEXT"},
+    {"taxonomy_code": "A", "text": "_NEAR_TEMPLATE_INSTRUCTION_TEXT"},
+])
+def test_field_sparseness_entry_with_nothing_to_extract_counts_on_neither_term(
+        tmp_path, extra):
+    extra = {**extra, "text": globals().get(extra["text"], extra["text"])}
+    entries = [{**_BOTH, **extra}] + [_CLEAN] * 9
+    fraction, detail, _ = _sparseness(tmp_path, entries)
+    assert "nothing_to_extract=1" in detail, detail
+    assert "allnull_or_zerocov=0" in detail, detail
+    assert "success_rate=1.000" in detail, detail   # denominator stays 10
+    assert fraction == 0.0
+
+
+@pytest.mark.parametrize("code,text", [
+    ("K3", "Developed curriculum for residents 1995"),
+    # stage 4 extracts T entries, so a real T entry's miss still counts
+    ("T", "Chaired the departmental seminar series"),
+    # every piece is a template label, but it is a real J effort record
+    ("J", "Clinical | 100%"),
+])
+def test_field_sparseness_real_content_with_null_fields_still_counts(tmp_path, code, text):
+    entries = [{**_BOTH, "taxonomy_code": code, "text": text}] + [_CLEAN] * 9
+    fraction, detail, _ = _sparseness(tmp_path, entries)
+    assert "nothing_to_extract=0" in detail, detail
+    assert fraction == pytest.approx(1.0)
+
+
+def test_field_sparseness_non_string_text_is_scored_not_crashed(tmp_path):
+    entries = [{**_BOTH, "text": 5}] + [_CLEAN] * 9
+    fraction, detail, _ = _sparseness(tmp_path, entries)
+    assert "nothing_to_extract=0" in detail, detail
+    assert fraction == pytest.approx(1.0)
+
+
+def test_field_sparseness_exclusion_leaves_the_denominator_at_every_entry(tmp_path):
+    t_entry = {**_BOTH, "taxonomy_code": "T", "text": "x", "extraction_skipped": True}
+    fraction, detail, _ = _sparseness(tmp_path, [t_entry, _FAILED_ONLY] + [_CLEAN] * 8)
+    assert "success_rate=0.900" in detail, detail   # 1 failure of 10, not of 9
+    assert fraction == pytest.approx(0.5)
+
+
+def test_field_sparseness_missing_success_flag_counts_as_a_failure(tmp_path):
+    no_flag = {"extracted_fields": {"title": "x"}}
+    _, detail, _ = _sparseness(tmp_path, [no_flag] + [_CLEAN] * 9)
+    assert "success_rate=0.900" in detail, detail
+
+
+
 # --------------------------------------------------------------------- D20
 # _load_docx catches only what python-docx raises for a present-but-unreadable
 # file (the rule #724 review item 12 set for _load_first, applied to its
