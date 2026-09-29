@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from unified_pipeline.core import prompt_logger  # noqa: E402
 from unified_pipeline.core.batch_pool import (  # noqa: E402
     make_batches,
+    make_progress_printer,
     map_in_order,
     workers_from_config,
 )
@@ -341,3 +342,27 @@ def test_make_batches_empty_items_returns_empty_list():
 def test_make_batches_rejects_batch_size_below_one():
     with pytest.raises(ValueError):
         make_batches([1, 2, 3], 0)
+
+
+def test_make_progress_printer_numbers_by_completion_and_prints_one_block(capsys, monkeypatch):
+    """#923: the shared on_result shape of stages 2/3b/5d. ``done`` counts
+    calls in call order, ``index`` passes through untouched, and each call's
+    lines go out as one print (a single write, so blocks cannot splice)."""
+    seen = []
+
+    def format_lines(done, index, result):
+        seen.append((done, index))
+        return [f"[{done}/3] {result}", "  detail"]
+
+    printer = make_progress_printer(format_lines)
+    real_print = print
+    prints = []
+    monkeypatch.setattr("builtins.print", lambda *a, **k: (prints.append(a), real_print(*a, **k)))
+    for index in (2, 0, 1):
+        printer(index, f"item{index}")
+    monkeypatch.undo()
+
+    assert len(prints) == 3  # one print per block, however many lines it has
+
+    assert seen == [(1, 2), (2, 0), (3, 1)]
+    assert capsys.readouterr().out == "[1/3] item2\n  detail\n[2/3] item0\n  detail\n[3/3] item1\n  detail\n"

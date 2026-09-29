@@ -27,6 +27,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 import requests
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -55,6 +56,42 @@ EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ELINK_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
 ID_CONVERTER_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+
+# Minimum share of the shorter title's words that the PubMed record's title
+# must share with the source title before the record replaces the citation
+# (#1043). Over 105 local CVs, every wrong-paper substitution scored below 0.4
+# (swapped adjacent PMIDs top out at 0.33); the lowest same-paper matches
+# (retitled on publication) score 0.45-0.57.
+MIN_TITLE_WORD_OVERLAP = 0.4
+
+# Words shorter than this carry no signal ("of", "in", "a"); 3 keeps short
+# content words such as "DNA" and "HIV". Preventive, no incident: a stopword
+# proxy, not a measured value.
+_MIN_TITLE_WORD_LEN = 3
+
+
+def _title_words(title: str) -> set[str]:
+    """Accent-folded lowercase words, so 'geneticas' matches 'genéticas'.
+    Apostrophes are dropped first so "Men’s" and "Men's" both give 'mens'."""
+    unquoted = re.sub(r"['\u2019]", '', title or '')
+    folded = unicodedata.normalize('NFKD', unquoted).encode('ascii', 'ignore').decode()
+    return {w for w in re.findall(r'[a-z0-9]+', folded.lower()) if len(w) >= _MIN_TITLE_WORD_LEN}
+
+
+def title_word_overlap(source_title: str, pubmed_titles: list[str]) -> float | None:
+    """Best overlap (shared words / shorter title's words) between the source
+    title and any of the record's titles, or None when either side has no
+    words to compare. PubMed brackets a translated ArticleTitle and keeps the
+    original in VernacularTitle, so a non-English source title is compared
+    against both."""
+    source = _title_words(source_title)
+    if not source:
+        return None
+    scores = [
+        len(source & words) / min(len(source), len(words))
+        for words in map(_title_words, pubmed_titles) if words
+    ]
+    return max(scores, default=None)
 
 
 def _sanitize_error(error: Any) -> str:
@@ -98,6 +135,7 @@ class PubMedEnricher:
             'pmcid_conversions': 0,
             'doi_searches': 0,
             'failed_lookups': 0,
+            'title_mismatches': 0,
             'api_errors': 0
         }
 
@@ -275,10 +313,7 @@ class PubMedEnricher:
         # Merge enrichment data into entries
         for pmid, entry in entry_map.items():
             if pmid in all_records:
-                self._merge_pubmed_data(entry, all_records[pmid])
-                entry['enrichment_status'] = 'enriched'
-                entry['enrichment_source'] = 'pmid'
-                self.stats['enriched'] += 1
+                self._accept_record(entry, all_records[pmid], 'pmid')
             else:
                 entry['enrichment_status'] = 'lookup_failed'
                 self.stats['failed_lookups'] += 1
@@ -310,13 +345,10 @@ class PubMedEnricher:
             pmid = pmcid_to_pmid.get(pmcid)
             pmid_str = str(pmid) if pmid else None
             if pmid_str and pmid_str in records:
-                self._merge_pubmed_data(entry, records[pmid_str])
-                # Also store the PMID we discovered
-                if 'extracted_fields' in entry:
-                    entry['extracted_fields']['pmid'] = pmid_str
-                entry['enrichment_status'] = 'enriched'
-                entry['enrichment_source'] = 'pmcid_conversion'
-                self.stats['enriched'] += 1
+                if self._accept_record(entry, records[pmid_str], 'pmcid_conversion'):
+                    # Also store the PMID we discovered
+                    if 'extracted_fields' in entry:
+                        entry['extracted_fields']['pmid'] = pmid_str
             else:
                 entry['enrichment_status'] = 'pmcid_conversion_failed'
                 self.stats['failed_lookups'] += 1
@@ -353,13 +385,10 @@ class PubMedEnricher:
             if pmid:
                 records = self._fetch_pubmed_batch([pmid])
                 if pmid in records:
-                    self._merge_pubmed_data(entry, records[pmid])
-                    # Store discovered PMID
-                    if 'extracted_fields' in entry:
-                        entry['extracted_fields']['pmid'] = pmid
-                    entry['enrichment_status'] = 'enriched'
-                    entry['enrichment_source'] = 'doi_search'
-                    self.stats['enriched'] += 1
+                    if self._accept_record(entry, records[pmid], 'doi_search'):
+                        # Store discovered PMID
+                        if 'extracted_fields' in entry:
+                            entry['extracted_fields']['pmid'] = pmid
                 else:
                     entry['enrichment_status'] = 'doi_found_but_fetch_failed'
                     self.stats['failed_lookups'] += 1
@@ -497,6 +526,8 @@ class PubMedEnricher:
             # Title
             title_elem = article.find('.//ArticleTitle')
             title = title_elem.text if title_elem is not None and title_elem.text else ''
+            vernacular_elem = article.find('.//VernacularTitle')
+            vernacular_title = ''.join(vernacular_elem.itertext()) if vernacular_elem is not None else ''
 
             # Journal
             journal_elem = article.find('.//Journal/Title')
@@ -550,6 +581,7 @@ class PubMedEnricher:
             record = {
                 'pmid': pmid,
                 'title': title,
+                'vernacular_title': vernacular_title,
                 'journal': journal,
                 'journal_iso': journal_iso,
                 'volume': volume,
@@ -639,6 +671,35 @@ class PubMedEnricher:
         if id_list:
             return id_list[0]  # First match
         return None
+
+    def _accept_record(self, entry: dict, pubmed_record: dict, source: str) -> bool:
+        """Merge the record into the entry unless its title names a different
+        paper (#1043): a wrong PMID/PMCID/DOI in the CV, or two entries'
+        PMIDs swapped, otherwise replaces the citation with an unrelated one.
+        A rejected entry keeps its CV-extracted fields; the rejected record is
+        kept under `enrichment_rejected` for audit."""
+        fields = entry.get('extracted_fields') or {}
+        source_title = fields.get('title') or fields.get('chapter_title') or ''
+        overlap = title_word_overlap(
+            source_title,
+            [pubmed_record.get('title') or '', pubmed_record.get('vernacular_title') or ''],
+        )
+        if overlap is not None and overlap < MIN_TITLE_WORD_OVERLAP:
+            entry['enrichment_status'] = 'title_check_failed'
+            entry['enrichment_rejected'] = {
+                'source': source,
+                'pubmed_pmid': pubmed_record.get('pmid'),
+                'pubmed_title': pubmed_record.get('title'),
+                'title_word_overlap': round(overlap, 2),
+            }
+            self.stats['title_mismatches'] += 1
+            self.stats['failed_lookups'] += 1
+            return False
+        self._merge_pubmed_data(entry, pubmed_record)
+        entry['enrichment_status'] = 'enriched'
+        entry['enrichment_source'] = source
+        self.stats['enriched'] += 1
+        return True
 
     def _merge_pubmed_data(self, entry: dict, pubmed_record: dict):
         """

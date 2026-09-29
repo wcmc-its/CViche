@@ -64,7 +64,7 @@ VALID_CODES = {
     'I',
     'J',
     'K', 'K1', 'K2', 'K3', 'K4', 'K5',
-    'M', 'M1', 'M2', 'M2A', 'M2B', 'M2C', 'M2D',  # NOTE: M3/M4 removed - M2D=patents, clinical trials use M2A/M2B/M2C
+    'M', 'M1', 'M2', 'M2A', 'M2B', 'M2C', 'M2D',  # NOTE: M3/M4 removed - M2D=patents, clinical trials use M2A/M2B by end date (#291)
     'N', 'N1', 'N2', 'N3', 'N3A', 'N3B',
     'O',
     'P',

@@ -17,6 +17,8 @@ Self-contained: no DB, no network, no real LLM call.
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -171,3 +173,24 @@ def test_lookup_institutions_llm_well_formed_input_is_unaffected(monkeypatch):
     user_prompt = captured["messages"][1]["content"]
     assert "Cornell University" in user_prompt
     assert "B1, MD, 2020-2024" in user_prompt
+
+
+def test_lookup_institutions_llm_outage_propagates_but_other_errors_skip_the_batch(monkeypatch):
+    """A provider outage past the budget fails the run (#810); any other
+    call_llm error still degrades to "skip this batch"."""
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    batch = [("INST-0001", {"name": "Cornell University"}, "B1")]
+
+    def outage(**kwargs):
+        raise LLMOutageError("provider down", seconds_waited=1800.0)
+
+    monkeypatch.setattr("unified_pipeline.stage5b.lookup.call_llm", outage)
+    with pytest.raises(LLMOutageError):
+        lookup_institutions_llm(batch, None, verbose=False)
+
+    def blip(**kwargs):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr("unified_pipeline.stage5b.lookup.call_llm", blip)
+    assert lookup_institutions_llm(batch, None, verbose=False) == (None, 0.0, None)

@@ -450,3 +450,13 @@ def test_all_noise_batch_creates_no_appendix():
 
     assert len(gen.doc.paragraphs) == before
     assert not any("T. APPENDIX" in p.text for p in gen.doc.paragraphs)
+
+
+def test_a_trial_enrollment_status_is_not_a_completed_award():
+    # #291: a trial closed to accrual is still running; only its end date may
+    # move it to Past Funding. A plain "Completed"/"Closed" still does.
+    for status in ("Closed to accrual", "Enrollment completed", "Accrual completed",
+                   "Recruitment completed", "Closed to new patients"):
+        assert grant_status_rebucket_target(status) == (None, None), status
+    assert grant_status_rebucket_target("Closed")[0] == "M2B"
+    assert grant_status_rebucket_target("Completed 2021")[0] == "M2B"

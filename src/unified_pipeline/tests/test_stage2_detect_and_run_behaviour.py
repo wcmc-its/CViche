@@ -1216,6 +1216,19 @@ def test_section_progress_lines_are_monotonic_and_unspliced(tmp_path, monkeypatc
             assert out[i + 3] == "", out[i:i + 4]
 
 
+def test_section_progress_line_is_read_by_progress_patterns(capsys, progress_patterns):
+    """mrj4001's point #5 on PR #918: stage 2's ``[N/M] Processing:`` claim
+    was asserted by docstring only. Drive the real printer and read its line
+    the way orchestrator.py does (first pattern that matches wins), so the
+    bar gets (done, total) -- the completion count, not the submission index."""
+    printer = stage2._section_progress_printer([["Education"], ["Awards"], ["Grants"]])
+    printer(2, stage2._SectionResult([], {}, set(), ["  Elements: 0 to 1"]))  # index 2 finishes first
+    line = capsys.readouterr().out.splitlines()[0]
+    match = next(m for p in progress_patterns if (m := p.search(line)))
+    assert (int(match.group(1)), int(match.group(2))) == (1, 3)
+    assert line.endswith("Processing: Grants")
+
+
 def test_sections_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):
     from unified_pipeline.core import prompt_logger
 
@@ -1670,3 +1683,48 @@ def test_run_stage_2_fold_gives_the_same_artifact_serial_and_parallel(tmp_path, 
     serial, _ = stage2.run_stage_2(str(path), str(hpath), workers=1)
     parallel, _ = stage2.run_stage_2(str(path), str(hpath), workers=4)
     assert serial["entries"] == parallel["entries"]
+
+
+def _header_row_table(idx=50):
+    return {
+        "unified_idx": idx, "type": "table", "table_index": 6, "header_row": True,
+        "data": [
+            [{"text": "Title"}, {"text": "Institution/Location"}],
+            [{"text": "Example Role"}, {"text": "Example Org"}],
+        ],
+        "rows": 2, "cols": 2,
+    }
+
+
+def test_flagged_header_row_is_never_an_entry_and_never_sent_to_the_llm(monkeypatch):
+    # #424: row 0 is skipped at the source. Row indices are unchanged, the
+    # header is neither offered to the model nor recovered as an unclaimed row.
+    elements = [_header_row_table()]
+    seen = []
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: seen.append(kw["messages"]) or _llm_result({"delimiters": []}))
+    entries, _ = stage2.detect_entries_for_section(["Service"], elements, 50, 50, element_index_map=_idx_map(elements))
+    assert [e["element_idx_start"] for e in entries] == ["50.1"]
+    assert entries[0]["text"] == "Example Role | Example Org"
+    assert "Institution/Location" not in json.dumps(seen)
+
+
+def test_unflagged_table_row_zero_still_becomes_an_entry(monkeypatch):
+    elements = [_header_row_table()]
+    del elements[0]["header_row"]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": []}))
+    entries, _ = stage2.detect_entries_for_section(["Service"], elements, 50, 50, element_index_map=_idx_map(elements))
+    assert [e["element_idx_start"] for e in entries] == ["50.0", "50.1"]
+
+
+def test_flagged_header_row_stays_out_of_a_whole_table_span_and_the_parent_still_collapses(monkeypatch):
+    # The header line is over the #418 coverage floor (12 chars). Were it in
+    # the whole-table span's text, no sibling row could cover it and the parent
+    # would survive beside its own rows (a double render).
+    elements = [_header_row_table()]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": [
+        {"element_idx_start": 50, "element_idx_end": 50, "element_type": "table", "confidence": 0.9},
+        {"element_idx_start": "50.1", "element_idx_end": "50.1", "element_type": "table_row", "confidence": 0.9},
+    ]}))
+    entries, _ = stage2.detect_entries_for_section(["Service"], elements, 50, 50, element_index_map=_idx_map(elements))
+    assert [e["element_idx_start"] for e in entries] == ["50.1"]
+    assert stage2.get_element_text(elements[0]) == "Example Role\tExample Org"

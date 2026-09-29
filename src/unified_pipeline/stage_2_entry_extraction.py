@@ -26,7 +26,7 @@ from docx import Document
 sys.path.insert(0, str(Path(__file__).parent))
 
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
+from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import (
     extract_docx_structure,
@@ -82,6 +82,15 @@ def build_element_index_map(doc_structure: dict) -> dict[int, dict]:
     return element_map
 
 
+def _header_row_count(element: dict) -> int:
+    """Rows at the top of a table element that are a column-label header (#424):
+    1 when the reader flagged row 0, else 0. Those rows never become entries,
+    and stay out of the text a whole-table span is rebuilt from, so a header
+    line cannot leave a whole-table parent looking like it has an uncovered
+    remainder (`remove_subset_delimiters`)."""
+    return 1 if element.get("header_row") else 0
+
+
 def get_element_text(element: dict) -> str:
     """
     Extract text from an element (paragraph, table_header, table_content, table, or empty).
@@ -100,7 +109,7 @@ def get_element_text(element: dict) -> str:
         # stage 6 and the doctor branch on '\t' in this text, and a pipe join
         # turns an all-empty wide row into a separator line the #418 dedup
         # counts as uncovered content.
-        rows = element.get("data", [])
+        rows = element.get("data", [])[_header_row_count(element):]
         row_texts = []
         for row in rows:
             cell_texts = [cell.get("text", "") for cell in row]
@@ -741,7 +750,8 @@ def detect_entries_for_section(
             if isinstance(table_data, list) and len(table_data) > 1:
                 # Multi-row table: break into individual rows for LLM processing
                 # This allows the LLM to identify individual entries (grants, publications, etc.)
-                for row_idx, row in enumerate(table_data):
+                header_rows = _header_row_count(elem)  # #424: never an entry
+                for row_idx, row in enumerate(table_data[header_rows:], start=header_rows):
                     # Check if this row contains merged entries that should be split
                     if isinstance(row, list):
                         pseudo_rows = split_merged_row_into_pseudo_rows(row)
@@ -1211,7 +1221,7 @@ STAGE2_SECTION_WORKERS = workers_from_config("CVICHE_STAGE2_SECTION_WORKERS")
 class _SectionResult(NamedTuple):
     entries: list[dict]
     cost_info: dict
-    assigned: set
+    assigned: set[int]
     lines: list[str]
 
 
@@ -1227,41 +1237,17 @@ class _DocumentContext(NamedTuple):
 
 
 def _section_progress_printer(hierarchy_paths: list[list[str]]) -> Callable[[int, _SectionResult], None]:
-    """Build a map_in_order ``on_result`` callback: one atomic print per
-    finished section, numbered by completion.
-
-    map_in_order guarantees ``on_result`` fires only on the CALLING thread,
-    one call at a time -- both its serial path and its ``as_completed`` loop
-    invoke it inline, never from a pool thread -- so despite the pool
-    underneath, this closure is single-threaded: no lock, no ``nonlocal``
-    gymnastics beyond the one ``done`` counter needs as a closure variable.
-    The ``[N/M] Processing:`` line is a parsed contract -- orchestrator.py's
-    PROGRESS_PATTERNS read it into the progress bar -- so N counts sections
-    *finished*, which stays monotonic however the pool orders completions,
-    and the whole block goes out in one print so two sections' lines cannot
-    splice (#881).
-
-    ``on_result``'s two arguments are deliberately different orderings:
-    ``index`` is map_in_order's dispatch-order position into the input
-    list (so ``hierarchy_paths[index]`` always names the section that
-    actually finished, whichever order sections complete in), while
-    ``done`` is this closure's own completion counter -- it increments
-    once per call, in call order, so it is always 1, 2, 3... regardless of
-    which ``index`` each call carries. The printed ``[N/M]`` uses ``done``,
-    never ``index``.
+    """``[N/M] Processing: <path>`` then the section's own lines, via the
+    shared make_progress_printer (#923). The ``[N/M]`` line is a parsed
+    contract -- orchestrator.py's PROGRESS_PATTERNS read it into the
+    progress bar; pinned by test_section_progress_line_is_read_by_progress_patterns.
+    N is ``done`` (completion count), never ``index`` (which only names the
+    section that finished).
     """
-    done = 0
-
-    def on_result(index: int, result: _SectionResult) -> None:
-        nonlocal done
-        _, _, _, lines = result
-        done += 1
-        print("\n".join([
-            f"[{done}/{len(hierarchy_paths)}] Processing: {' > '.join(hierarchy_paths[index])}",
-            *lines,
-        ]))
-
-    return on_result
+    return make_progress_printer(lambda done, index, result: [
+        f"[{done}/{len(hierarchy_paths)}] Processing: {' > '.join(hierarchy_paths[index])}",
+        *result.lines,
+    ])
 
 
 def _extract_section(

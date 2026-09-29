@@ -254,9 +254,11 @@ FIELD_SCHEMAS = {
     "M2D": {  # Patents & Innovations (formerly M3)
         "fields": ["patent_number", "title", "inventors", "filing_date", "issue_date", "status", "assignee", "narrative"],
     },
-    # NOTE: M4 clinical trial codes have been removed. Clinical trials should now be
-    # classified as M2A (active/current), M2B (completed/past), or M2C (pending) based
-    # on their status. The M2A/M2B/M2C schemas support clinical trial fields via narrative.
+    # Clinical trials have no code of their own (#291): they file as M2A (no end
+    # date) or M2B (ended), and map onto the grant fields -- NCT/protocol number
+    # -> grant_number, sponsor -> agency, trial role -> pi_role, trial title
+    # (with its phase) -> title. The mapping is stated once, in stage 4's
+    # grant instructions (extraction.build_extraction_prompt).
 
     # -------------------------------------------------------------------------
     # Mentoring (N1, N2, N3, N4)
@@ -389,6 +391,15 @@ GRANT_NOTES_DESCRIPTION = (
 )
 
 FIELD_DESCRIPTIONS = {
+    # `program_name` fills the template's "Description" column and no other B2
+    # field holds detail text, so a title-only extraction drops the rest of the
+    # line silently (#1092).
+    "B2": {
+        "program_name": "The WHOLE entry as the CV words it: its title AND any detail after it (e.g. 'Advanced Life Support: completed the two-day provider course' is all of that, not just 'Advanced Life Support'). Leave out only the institution and dates",
+        "institution": "Where it took place",
+        "start_date": "When it started",
+        "end_date": "When it ended",
+    },
     "K1": {
         "course_title": "Name of the course taught",
         "role": "Your role (e.g., 'PBL Tutor', 'Course Director', 'Lecturer')",
@@ -584,7 +595,7 @@ TAXONOMY_LABELS = {
     "M2B": "Past Research Funding",
     "M2C": "Pending Research Funding",
     "M2D": "Patents & Innovations",
-    # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C
+    # NOTE: M4 clinical trial codes removed - clinical trials file as M2A or M2B by end date (#291)
     "N1": "Leadership and Mentoring in Programs",
     "N2": "Institutional Training Grants",
     "N3": "Mentees",

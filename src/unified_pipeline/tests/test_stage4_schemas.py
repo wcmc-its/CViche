@@ -187,3 +187,12 @@ def test_invited_presentation_role_hint_keeps_the_presentation_format_in_event_n
     """#475 r3: adding `role` made the LLM drop 'Invited Workshop' (in neither
     role nor event_name); the description must say where a format goes."""
     assert "event_name" in schemas_mod.FIELD_DESCRIPTIONS["R"]["role"]
+
+
+def test_b2_guide_covers_every_extracted_field_and_asks_for_the_whole_line():
+    """#1092: a code listed in FIELD_DESCRIPTIONS shows the model only those
+    fields, so the B2 guide must name all of them; and program_name fills the
+    template's Description column, so it must ask for the detail, not only the
+    title."""
+    assert set(schemas_mod.FIELD_DESCRIPTIONS["B2"]) == set(schemas_mod.get_field_schema("B2")["fields"])
+    assert "WHOLE entry" in schemas_mod.FIELD_DESCRIPTIONS["B2"]["program_name"]

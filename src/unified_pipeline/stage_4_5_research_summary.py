@@ -32,7 +32,7 @@ SECTION_WEIGHTS = {
     'M2A': 0.0,     # Current Funding
     'S1': -0.05,    # Peer-reviewed articles
     'S0': -0.05,    # Bibliometric profile
-    # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C based on status
+    # NOTE: M4 clinical trial codes removed - clinical trials file as M2A (no end date) or M2B (ended) (#291)
     'N4': -0.1,     # Mentorship outputs
     'H': -0.2,      # Honors & Awards
 

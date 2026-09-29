@@ -153,6 +153,7 @@ class GrantFields(TypedDict, total=False):
     major_goals: str | None
     narrative: str | None
     grant_number: str | None
+    nct_number: str | None  # stage-4 output stored before #291 dropped the M4 schemas
     non_financial_support: str | None
     percent_effort: str | None
     pi_role: str | None
@@ -1190,7 +1191,7 @@ class ResearchSupportSection:
         role = fields.get('pi_role') or fields.get('role', '') or fields.get('description', '')
         start_date = fields.get('start_date', '') or fields.get('date', '')
         end_date = fields.get('end_date', '')
-        grant_number = (fields.get('grant_number') or '').strip()
+        grant_number = (fields.get('grant_number') or fields.get('nct_number') or '').strip()
 
         has_title = bool(title and len(title.strip()) > 10)
         # For clinical trials: if we have a title and a date, that's substantive enough

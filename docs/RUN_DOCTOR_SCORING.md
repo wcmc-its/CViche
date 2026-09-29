@@ -104,7 +104,7 @@ score = round(max(0, final))
 | 25 | Pipeline/API errors **(HARD-FAIL, cap 40)** | 1.0 on a fatal pattern; else `min(1, nonnull_errors / 3)` |
 | 15 | CV owner name/contact **(HARD-FAIL, cap 25)** | 1.0 if name missing or no `*_fields.json`; else 0.4 no location inference + 0.3 no primary location + 0.3 no contact field |
 | 15 | T-bucket share (3b catch-all) | 0 at ratio ≤0.03, linear to 0.4 at 0.08, to 0.8 at 0.15, 1.0 above; +0.2 if `t_validation.error` |
-| 12 | Sparse tables in output docx | `0.6*(sparse_table_ratio/0.25) + 0.4*((global_empty_ratio-0.10)/0.40)` |
+| 12 | Sparse tables in output docx | `0.6*(sparse_table_ratio/0.25) + 0.4*((global_empty_ratio-0.10)/0.40)`, over tables carrying CV content only: a table whose every non-empty cell is template text is skipped, and 0 if none remain (#452) |
 | 10 | Duplicate-entry ratio | 0 at ≤0.10, linear to 0.4 at 0.30, to 0.8 at 0.50, 1.0 above; +0.1 if entries coverage >130% |
 | 10 | Raw-tab / prompt-echo artifacts | `0.6*(raw_tab_paragraphs/20) + 0.4*(echo_paragraphs/15)` |
 | 8 | Field-extraction sparseness | `0.5*((allnull_or_zerocov/total)/0.10) + 0.5*((1-success_rate)/0.10)` |

@@ -8,6 +8,7 @@ import json
 import logging
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm.retry import LLMOutageError
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +227,8 @@ def lookup_institutions_llm(
         # artifact with a model the run never used (#459).
         return results, cost, llm_result.get("model")
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception:
         # Broad on purpose: call_llm()'s failure surface (network, provider,
         # auth) isn't enumerable from here, and a batch failure must degrade

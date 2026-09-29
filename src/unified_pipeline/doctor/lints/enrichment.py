@@ -35,8 +35,8 @@ from ..shared import _finding
 
 def lint_enrichment_failures(stage5e: dict) -> list[dict]:
     """Publications whose stage-5 PubMed enrichment ended in a *_failed status
-    (lookup_failed, pmcid_conversion_failed, doi_found_but_fetch_failed):
-    their citations degrade to CV-extracted fields. Non-failure outcomes
+    (lookup_failed, pmcid_conversion_failed, doi_found_but_fetch_failed,
+    title_check_failed): their citations degrade to CV-extracted fields. Non-failure outcomes
     (enriched, no_identifier, doi_not_in_pubmed) are expected vocabulary."""
     failed = [e for e in stage5e.get("entries", [])
               if str(e.get("enrichment_status") or "").endswith("_failed")]

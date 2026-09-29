@@ -238,6 +238,8 @@ def _translate_messages(messages, response_format=None, use_schema_tool=False):
                 raise NotImplementedError(
                     "Bedrock Converse translation does not support multimodal "
                     "(list) system message content -- see #265.")
+            if json_hint:
+                text += "\n\nRespond with valid JSON only."
             system_prompts.append({"text": text})
         else:
             text = msg["content"]
@@ -260,30 +262,11 @@ def _translate_messages(messages, response_format=None, use_schema_tool=False):
                 "content": [{"text": text}],
             })
 
-    # The JSON hint goes once, on the LAST system block, so a stable leading
-    # block (see _cache_point_index) stays byte-identical across calls.
-    if json_hint and system_prompts:
-        system_prompts[-1]["text"] += "\n\nRespond with valid JSON only."
-    elif json_hint:
-        # JSON format requested but no system message existed: create one
+    # If JSON format requested but no system message existed, create one
+    if json_hint and not system_prompts:
         system_prompts.append({"text": "Respond with valid JSON only."})
 
     return system_prompts, converse_messages
-
-
-def _cache_point_index(messages: list[dict]) -> int | None:
-    """Index of the system block a cachePoint must follow, or None.
-
-    A system message carrying ``"cache_point": True`` marks the end of a
-    stable prefix: everything after it is per-call variable content and must
-    stay outside the cached prefix (#50). System blocks map 1:1, in order, to
-    the system messages. The last marked message wins.
-    """
-    marked = None
-    for i, msg in enumerate(m for m in messages if m["role"] == "system"):
-        if msg.get("cache_point"):
-            marked = i
-    return marked
 
 
 def _validate_json_response(content, response_format):
@@ -320,8 +303,7 @@ def _call_bedrock(model, messages, temperature, response_format=None,
         response_format: Optional response format (triggers prompt injection per D-04)
         max_tokens: Optional max tokens limit
         enable_prompt_caching: If True, append a cachePoint checkpoint after
-            the system block (or, when a system message is marked
-            ``"cache_point": True``, after that block only) so the system prompt is read from cache on
+            the system block so the system prompt is read from cache on
             subsequent calls within the 5-minute TTL. When False, the request
             is byte-identical to the pre-caching shape.
         **kwargs: Additional arguments (currently unused for Bedrock)
@@ -353,15 +335,7 @@ def _call_bedrock(model, messages, temperature, response_format=None,
         # AFTER the cacheable content, marking it as the end of the cached
         # prefix. Bedrock returns the previously-written cache as a read on
         # subsequent calls that match the cached prefix.
-        marked = _cache_point_index(messages)
-        if marked is None:
-            system_prompts = system_prompts + [{"cachePoint": {"type": "default"}}]
-        else:
-            # Cache only the stable prefix; the variable blocks after it stay
-            # uncached rather than paying a cache write on every call (#50).
-            system_prompts = (system_prompts[:marked + 1]
-                              + [{"cachePoint": {"type": "default"}}]
-                              + system_prompts[marked + 1:])
+        system_prompts = system_prompts + [{"cachePoint": {"type": "default"}}]
 
     call_kwargs = {
         "modelId": model,

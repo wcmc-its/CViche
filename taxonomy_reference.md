@@ -30,7 +30,7 @@ The WCM CV taxonomy consists of **60 valid codes** organized into **20 top-level
 - **Child codes** (2-char): 36 codes (B1-B2, D1-D3, F1-F2, K1-K5, L1-L3, M1-M2, N1-N4, Q1-Q4, S0-S9)
 - **Sub-child codes** (3-char): 9 codes (M2A-M2D, N3A-N3B, Q4A-Q4D)
 
-**NOTE**: Clinical trials are now classified under M2A/M2B/M2C based on status (like grants). M4 codes are deprecated.
+**NOTE**: Clinical trials are classified under M2A (no end date) or M2B (ended), by end date (#291). The M4 codes are removed.
 
 ### Category Groups
 
@@ -129,7 +129,7 @@ The WCM CV taxonomy consists of **60 valid codes** organized into **20 top-level
   - **M2C**: Pending Funding (includes pending clinical trials)
   - **M2D**: Patents & Inventions (includes Technology Transfer/T2)
 
-**NOTE**: Clinical trials are now classified under M2A/M2B/M2C based on status, not M4. The M4 codes (M4A, M4B, M4C) are deprecated.
+**NOTE**: Clinical trials are classified under M2A (no end date) or M2B (ended), by end date (#291). The M4 codes (M4A, M4B, M4C) are removed.
 
 ### N - Mentoring
 - **N1**: Leadership and mentoring in programs
@@ -419,7 +419,7 @@ The WCM CV taxonomy consists of **60 valid codes** organized into **20 top-level
 **Key Rules**:
 - Local quality improvement → L
 - Systematic evaluation with publication → M1
-- Trial participation → M2A/M2B/M2C (based on status)
+- Trial participation → M2A/M2B (by end date)
 - Educational supervision → K2
 
 ---
@@ -437,7 +437,7 @@ The WCM CV taxonomy consists of **60 valid codes** organized into **20 top-level
 - **M2C - Pending**: Submitted grants AND pending clinical trials
 - **M2D - Patents & Inventions**: Patent numbers (US1234567), licensed IP, technology transfer (formerly T2)
 
-**NOTE**: Clinical trials are now unified with grants under M2A/M2B/M2C based on status. The former M3 (Patents) is now M2D. M4 codes are deprecated.
+**NOTE**: Clinical trials are unified with grants under M2A (no end date) or M2B (ended), by end date (#291). The former M3 (Patents) is now M2D. M4 codes are removed.
 
 **Common Confusions**:
 - **M1 ↔ L**: Research vs QI

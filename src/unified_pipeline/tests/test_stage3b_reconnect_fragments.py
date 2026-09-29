@@ -357,5 +357,18 @@ def test_non_string_reasoning_is_coerced_to_empty_string(monkeypatch):
     assert stats["fragments_reconnected"] == 1
 
 
+def test_llm_outage_propagates_instead_of_returning_entries_unchanged(monkeypatch):
+    """A provider outage past the budget fails the run (#810); only other
+    errors fall back to returning the entries unchanged."""
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    def outage(**kw):
+        raise LLMOutageError("provider down", seconds_waited=1800.0)
+
+    monkeypatch.setattr(classify, "call_llm", outage)
+    with pytest.raises(LLMOutageError):
+        classify.reconnect_fragments(_fragment_setup())
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

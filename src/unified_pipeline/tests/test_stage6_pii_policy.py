@@ -23,6 +23,7 @@ Run with:
 """
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -137,6 +138,24 @@ PROBE_TABLE = [
     # in a word order neither existing alternative (which only combines
     # "Birth Date and Birth Place"/"Birthdate and Birthplace") matched.
     ("Date and Place of Birth: 01/02/1970, Example City", CAT_DATE_OF_BIRTH, _ALL),
+    # #1071: a parenthetical between the DOB stem and its colon -- the
+    # value itself (nothing after the colon) or a format hint.
+    ("Birth Date (01/02/1970):", CAT_DATE_OF_BIRTH, _ALL),
+    ("Date of Birth (01/02/1970):", CAT_DATE_OF_BIRTH, _ALL),
+    ("Date of Birth (mm/dd/yyyy): 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
+    ("Birth-date (January 2, 1970):", CAT_DATE_OF_BIRTH, _ALL),
+    # ...bounded at 40 characters (`_DOB_PAREN_MAX`): a longer
+    # parenthetical, or one with no colon after it, opens no label.
+    ("Date of Birth (" + "x" * 40 + "): 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
+    ("Date of Birth (" + "x" * 41 + "): 01/02/1970", None, _NEVER),
+    ("Date of birth (an example study) and outcomes", None, _NEVER),
+    # ...and one parenthesis pair on one line: it never nests, never closes
+    # on a later unrelated ")", never spans a newline.
+    ("Date of birth (cohort A (n=40): outcomes", None, _NEVER),
+    ("Date of birth (cohort A) by site B): outcomes", None, _NEVER),
+    ("Date of birth (see\nnote): outcomes", None, _NEVER),
+    # The combined label keeps its own alternative (no parenthetical).
+    ("Birth Date and Birth Place: 01/02/1970, Example City", CAT_DATE_OF_BIRTH, _ALL),
     # --- the comment's categories --------------------------------------
     ("Social Security #: 123-45-6789", CAT_SSN, _ALL),
     ("SS#: 123-45-6789", CAT_SSN, _ALL),
@@ -162,6 +181,11 @@ PROBE_TABLE = [
     ("DEA #: AB1234567", CAT_DEA, _PERSONAL_ONLY),
     ("Religion: Example", CAT_RELIGION, _PERSONAL_ONLY),
     ("Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
+    # #1071: the combined race-and-ethnicity label (a bare "Race:" stays a
+    # negative control below).
+    ("Race/Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
+    ("Race / Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
+    ("Race and Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
     ("Gender: Female", CAT_GENDER, _PERSONAL_ONLY),
     ("Veteran Status: Yes", CAT_VETERAN, _PERSONAL_ONLY),
     ("Disability: None", CAT_DISABILITY, _PERSONAL_ONLY),
@@ -1317,6 +1341,60 @@ def test_redact_pre_llm_values_replaces_dob_value_with_colon_keeps_label():
 def test_redact_pre_llm_values_replaces_dob_value_colonless_keeps_label():
     out = redact_pre_llm_values("Born on 01/02/1970, in Example City")
     assert out == f"Born on {PRE_LLM_PLACEHOLDER}, in Example City"
+
+
+@pytest.mark.parametrize("text, expected", [
+    # #1071: the value sits INSIDE the label's parentheses.
+    ("Birth Date (01/02/1970):", f"Birth Date ({PRE_LLM_PLACEHOLDER}):"),
+    ("Date of Birth (01/02/1970):", f"Date of Birth ({PRE_LLM_PLACEHOLDER}):"),
+    # A format hint in the parentheses is not a value; the date after the
+    # colon is.
+    ("Date of Birth (mm/dd/yyyy): 01/02/1970",
+     f"Date of Birth (mm/dd/yyyy): {PRE_LLM_PLACEHOLDER}"),
+    ("Date of Birth (mm/dd/yyyy):\t01/02/1970",
+     f"Date of Birth (mm/dd/yyyy):\t{PRE_LLM_PLACEHOLDER}"),
+    # A race/ethnicity value is render-time only (#847 scrubs DOB/SSN).
+    ("Race/Ethnicity: Example", "Race/Ethnicity: Example"),
+])
+def test_1071_pre_llm_scrub_reaches_a_dob_label_parenthetical(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+def test_1071_bare_dob_label_with_a_format_hint_names_its_category():
+    """A label cell alone ("Date of Birth (mm/dd/yyyy):") hands its category
+    to the next cell's scrub; one whose parentheses hold the value does not
+    -- its own text is scrubbed instead."""
+    assert pre_llm_bare_label_category("Date of Birth (mm/dd/yyyy):") == CAT_DATE_OF_BIRTH
+    assert pre_llm_bare_label_category("Birth Date (01/02/1970):") is None
+
+
+@pytest.mark.parametrize("text", [
+    "Jane Example Date of Birth (mm/dd/yyyy): 01/02/1970",
+    "Jane Example Birth Date (MM/DD/YYYY): 01/02/1970",
+    "Jane Example Birth Date and Birth Place: 01/02/1970",
+])
+def test_1071_explicit_dob_label_with_a_parenthetical_skips_the_boundary_rule(text):
+    """#847 residual: an explicit DOB label then a whole date is a DOB
+    whatever precedes it -- with a parenthetical in the label too, and
+    for the combined birth date and birth place label."""
+    assert [m.category for m in _pii_matches(text, SCOPE_ALL_CODES)] == [CAT_DATE_OF_BIRTH]
+    assert redact_pre_llm_values(text).endswith(f": {PRE_LLM_PLACEHOLDER}")
+
+
+@pytest.mark.parametrize("text", [
+    "Date of Birth (" * 20_000,
+    "Birth Date (" + "a" * 200_000,
+    "Birth Date " + "(" * 200_000,
+    "Race / " * 20_000 + "Ethnicity",
+])
+def test_1071_dob_parenthetical_scan_stays_linear_on_adversarial_input(text):
+    """The parenthetical is one bounded class, no nested quantifier: each
+    of these took well under a second when written (~0.1s); a
+    backtracking blow-up would not finish at all."""
+    started = time.perf_counter()
+    _pii_matches(text)
+    redact_pre_llm_values(text)
+    assert time.perf_counter() - started < 5.0
 
 
 def test_redact_pre_llm_values_untouched_publication_date_no_dob_label():

@@ -238,6 +238,34 @@ class TestRetryStep:
         assert steps[6].error_message is None
         assert steps[12].status == "pending"         # downstream: reset
 
+    def test_retry_restarts_started_at_so_the_reaper_skips_it(
+        self, client, db, seed_simple_mode
+    ):
+        """#145: a retry of a run first started hours ago must not look stale.
+        reconcile_stale_runs ages runs by started_at, and the retry used to keep
+        the original one, so the next sweep failed the run mid-execution."""
+        user = _make_user(db)
+        _auth_cookie(client, user)
+        run = _seed_failed_run(db, user, run_id="RETRY4", failed_at=6)
+        run.started_at = datetime.now() - timedelta(hours=3)
+        db.commit()
+
+        from app.api.upload import UPLOAD_DIR
+        upload_file = UPLOAD_DIR / "RETRY4.docx"
+        upload_file.write_bytes(b"dummy")
+        try:
+            with patch("app.api.runs.PipelineOrchestrator") as MockOrch:
+                MockOrch.return_value.execute = AsyncMock(return_value=None)
+                assert client.post("/api/run/RETRY4/retry/6").status_code == 200
+        finally:
+            upload_file.unlink(missing_ok=True)
+
+        db.expire_all()
+        assert reconcile_stale_runs(db) == 0
+        run = db.query(Run).filter(Run.id == "RETRY4").first()
+        assert run.status == "running"
+        assert run.started_at > datetime.now() - timedelta(minutes=1)
+
     def test_retry_rejects_non_failed_step(self, client, db, seed_simple_mode):
         user = _make_user(db)
         _auth_cookie(client, user)
@@ -439,5 +467,109 @@ class TestConcurrencyAdmission:
             assert db.query(Run).filter(Run.id == "BUSY02").first().status == "failed"
             step6 = db.query(Step).filter(Step.run_id == "BUSY02", Step.step_number == 6).first()
             assert step6.status == "error"
+        finally:
+            upload_file.unlink(missing_ok=True)
+
+
+# --- #799  atomic -> running transition -------------------------------------
+
+def _stale_read_after_winner_commits(monkeypatch, run_id, stale_status):
+    """Model the race: the loser reads the run, then the winner commits.
+
+    Wraps ``check_run_access`` so that after the loser's read returns, another
+    starter flips the row to "running" and commits; the loser's in-memory
+    object still says ``stale_status``, so its status guard passes.
+    """
+    from sqlalchemy import update
+    from sqlalchemy.orm.attributes import set_committed_value
+    from app.api import runs as runs_api
+
+    real = runs_api.check_run_access
+
+    def racing(rid, user, db, **kw):
+        run = real(rid, user, db, **kw)
+        db.execute(update(Run).where(Run.id == run_id).values(status="running"))
+        db.commit()
+        set_committed_value(run, "status", stale_status)
+        return run
+
+    monkeypatch.setattr(runs_api, "check_run_access", racing)
+
+
+class TestAtomicRunStart:
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        concurrency._active_runs = 0
+        yield
+        concurrency._active_runs = 0
+
+    @pytest.mark.parametrize("status", ["created", "paused"])
+    def test_second_starter_loses_with_409_and_dispatches_nothing(
+        self, client, db, seed_simple_mode, monkeypatch, status
+    ):
+        from app.api.upload import UPLOAD_DIR
+        user = _make_user(db, email=f"race-{status}@example.com")
+        _auth_cookie(client, user)
+        run_id = f"RACE{status[:2].upper()}1"
+        db.add(Run(id=run_id, filename="cv.docx", file_type="docx", status=status,
+                   user_id=user.id, started_at=datetime.now()))
+        db.commit()
+        upload_file = UPLOAD_DIR / f"{run_id}.docx"
+        upload_file.write_bytes(b"dummy")
+        _stale_read_after_winner_commits(monkeypatch, run_id, status)
+        try:
+            with patch("app.api.runs.PipelineOrchestrator") as MockOrch:
+                resp = client.post(f"/api/run/{run_id}/start")
+
+                assert resp.status_code == 409
+                assert resp.json()["detail"]["error"] == "conflict"
+                MockOrch.assert_not_called()
+            assert concurrency.active_count() == 0   # loser's slot returned
+        finally:
+            upload_file.unlink(missing_ok=True)
+
+    def test_sequential_second_start_is_rejected_and_first_dispatches_once(
+        self, client, db, seed_simple_mode
+    ):
+        from app.api.upload import UPLOAD_DIR
+        user = _make_user(db, email="seq@example.com")
+        _auth_cookie(client, user)
+        db.add(Run(id="SEQ001", filename="cv.docx", file_type="docx", status="created",
+                   user_id=user.id, started_at=datetime.now()))
+        db.commit()
+        upload_file = UPLOAD_DIR / "SEQ001.docx"
+        upload_file.write_bytes(b"dummy")
+        try:
+            with patch("app.api.runs.PipelineOrchestrator") as MockOrch:
+                MockOrch.return_value.execute = AsyncMock(return_value=None)
+                first = client.post("/api/run/SEQ001/start")
+                second = client.post("/api/run/SEQ001/start")
+
+                assert first.status_code == 200
+                assert second.status_code == 400
+                MockOrch.return_value.execute.assert_awaited_once()
+        finally:
+            upload_file.unlink(missing_ok=True)
+
+    def test_second_retry_loses_with_409_and_leaves_steps_untouched(
+        self, client, db, seed_simple_mode, monkeypatch
+    ):
+        from app.api.upload import UPLOAD_DIR
+        user = _make_user(db, email="raceretry@example.com")
+        _auth_cookie(client, user)
+        _seed_failed_run(db, user, run_id="RACER1", failed_at=6)
+        upload_file = UPLOAD_DIR / "RACER1.docx"
+        upload_file.write_bytes(b"dummy")
+        _stale_read_after_winner_commits(monkeypatch, "RACER1", "failed")
+        try:
+            with patch("app.api.runs.PipelineOrchestrator") as MockOrch:
+                resp = client.post("/api/run/RACER1/retry/6")
+
+                assert resp.status_code == 409
+                MockOrch.assert_not_called()
+            assert concurrency.active_count() == 0
+            db.expire_all()
+            step6 = db.query(Step).filter(Step.run_id == "RACER1", Step.step_number == 6).first()
+            assert step6.status == "error"   # the loser did not reset it
         finally:
             upload_file.unlink(missing_ok=True)

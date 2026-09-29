@@ -53,6 +53,7 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.core.render_check import entry_fragments, entry_lines
 # Every name below is re-exported from this module by being imported here: it is
 # the public import surface (tests/test_stage6_import_surface.py pins 21 of them).
@@ -398,7 +399,7 @@ TAXONOMY_TO_SECTION = MappingProxyType({
     'M2B': 'completed_grants',
     'M2C': 'pending_grants',
     'M2D': 'patents',
-    # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C based on status
+    # NOTE: M4 clinical trial codes removed - clinical trials file as M2A (no end date) or M2B (ended) (#291)
 
     # Mentoring
     'N1': 'mentoring_leadership',
@@ -1159,7 +1160,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('board_certification', frozenset({'F2'}), lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification
             ('honors', frozenset({'H'}), lambda: self._fill_honors(entries_by_code.get('H', []))),  # H = Honors and Awards
             ('memberships', frozenset({'I'}), lambda: self._fill_memberships(entries_by_code.get('I', []))),  # I = Professional Memberships
-            ('teaching', frozenset({'K1', 'K2', 'K3', 'K4', 'K5'}), lambda: self._fill_teaching(entries_by_code)),  # K1-K5 = Teaching Activities
+            ('teaching', frozenset({'K1', 'K2', 'K3', 'K4', 'K5'}), lambda: self._fill_teaching(entries_by_code, original_doc_path)),  # K1-K5 = Teaching Activities
             ('research_summary', frozenset({'M1'}), lambda: self._fill_research_summary(research_summary_data)),  # Stage 4.5 output
             ('research_support', frozenset({'M2A', 'M2B', 'M2C'}), lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
             # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
@@ -1514,6 +1515,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             return scope
 
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
         except Exception:
             # Never gated on verbose (#547): production runs are not verbose,
             # and an LLM outage would otherwise refile every presentation as
@@ -2456,6 +2459,8 @@ Now analyze the text above:"""
             return parse_reclassified_segments(
                 llm_result["content"], original_code)
 
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
         except Exception as e:
             if self.verbose:
                 logger.warning(f"  Warning: LLM reclassification failed: {e}")

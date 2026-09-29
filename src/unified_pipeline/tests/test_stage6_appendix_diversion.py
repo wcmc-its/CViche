@@ -149,9 +149,9 @@ def test_build_warnings_renderer_declined_for_non_m1_routed_code_names_no_writer
 
 
 def test_build_warnings_two_unrouted_codes_sorted_by_code():
-    written = [_entry("ZZ"), _entry("M4A"), _entry("M4A")]
+    written = [_entry("ZZ"), _entry("N3"), _entry("N3")]
     warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
-    assert [w["code"] for w in warnings] == ["M4A", "ZZ"]
+    assert [w["code"] for w in warnings] == ["N3", "ZZ"]
     assert [w["count"] for w in warnings] == [2, 1]
     assert all(w["reason"] == REASON_NO_RENDER_ROUTE for w in warnings)
 
@@ -275,13 +275,13 @@ def test_positive_two_unrouted_codes_sorted_by_code(tmp_path):
     entries = [_OWNER_ENTRY,
                _t_entry("ZZ_ONE reviewed grant applications for the Foundation "
                         "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1),
-               _t_entry("M4A_ONE Phase II interventional trial of a novel "
-                        "analgesic in postoperative pain", "M4A", ["Clinical Trials"], 2),
-               _t_entry("M4A_TWO Phase III device trial evaluating a wearable "
-                        "cardiac monitor", "M4A", ["Clinical Trials"], 3)]
+               _t_entry("N3_ONE mentored an invented graduate student on a "
+                        "thesis about postoperative pain", "N3", ["Mentees"], 2),
+               _t_entry("N3_TWO mentored an invented postdoctoral fellow on "
+                        "wearable cardiac monitors", "N3", ["Mentees"], 3)]
     _doc, sidecar = _render(tmp_path, "T531B", entries)
     diversions = _diversion_warnings(sidecar)
-    assert [w["code"] for w in diversions] == ["M4A", "ZZ"]
+    assert [w["code"] for w in diversions] == ["N3", "ZZ"]
     assert [w["count"] for w in diversions] == [2, 1]
 
 

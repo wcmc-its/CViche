@@ -7,8 +7,8 @@ Source CVs list leadership as a table, and when entry extraction reads that
 table it frequently returns the whole block as ONE entry whose
 `extracted_fields` describe only the first row. Rendering that straight loses
 every row but the first, so the writer looks past the fields at the raw text and
-counts lines: 3+ lines, or 2 lines with no extracted role, means re-parse rather
-than trust the fields.
+counts lines: 3+ lines, or 2 lines with no extracted role, means re-parse
+rather than trust the fields.
 
 `_add_multiline_leadership_rows` is that re-parse. The line parser itself is
 `_parse_flattened_committee_lines` in `stage6.parsing`, shared with section P
@@ -159,8 +159,8 @@ class LeadershipSection:
             # fallback here the way P's parenthetical regex is. `fields_complete`
             # guards this so an entry extraction already fully resolved is
             # never rerouted (and its institution, which the multiline path
-            # cannot carry -- #664 item 1, out of scope here -- lost) just
-            # because its raw text happens to contain a `|`.
+            # cannot carry for a non-pipe row, lost) just because its raw
+            # text happens to contain a `|`.
             has_unresolved_pipe = not fields_complete and '|' in original_text
             # #987: a row whose cells merely wrap is ONE role, not several
             # lines; each branch below that would split it renders the rejoined
@@ -226,8 +226,10 @@ class LeadershipSection:
         The line parser is `_parse_flattened_committee_lines`, shared with
         section P (#572). O's table has no role column, so parenthetical role
         titles are folded back into the activity text: "Committee (Chair)".
+        Its institution/location column is the parser's `institution` (#664):
+        a "Role | Institution | Dates" pipe row keeps its middle cell.
         """
-        for item in _parse_flattened_committee_lines(lines):
+        for item in _parse_flattened_committee_lines(lines, institution_column=True):
             if item.roles:
                 activity = f"{item.activity} ({'; '.join(item.roles)})"
             else:
@@ -238,4 +240,4 @@ class LeadershipSection:
             # blank leadership row.
             if not activity:
                 continue
-            self._add_leadership_row(table, activity, '', item.dates)
+            self._add_leadership_row(table, activity, item.institution, item.dates)

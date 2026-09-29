@@ -806,6 +806,10 @@ def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
     return fraction, detail, None
 
 
+#: A table at least this share empty counts as sparse.
+SPARSE_TABLE_EMPTY_SHARE = 0.5
+
+
 def score_sparse_tables(outputs_dir: Path) -> tuple[float, str, None]:
     """Sparse / under-filled tables in the generated docx."""
     doc, reason = _load_docx(outputs_dir)
@@ -821,27 +825,33 @@ def score_sparse_tables(outputs_dir: Path) -> tuple[float, str, None]:
         # have zero tables, so this never fires on real output today.
         return 1.0, "no tables in docx (template always renders tables)", None
 
-    total_cells = empty_cells = sparse_count = 0
+    template_cells = _template_cell_texts()
+    total_cells = empty_cells = sparse_count = scored_tables = 0
     for tbl in tables:
-        t_total = t_empty = 0
-        for row in tbl.rows:
-            for cell in row.cells:
-                t_total += 1
-                if not _cell_text(cell).strip():
-                    t_empty += 1
-        total_cells += t_total
-        empty_cells += t_empty
-        if t_total > 0 and t_empty / t_total >= 0.5:
+        texts = [_normalize_whitespace(_cell_text(cell)) for row in tbl.rows for cell in row.cells]
+        filled = [t for t in texts if t]
+        # #452: a table holding nothing but the template's own cell text is
+        # scaffolding for a section the source never had -- the blank
+        # template scored the full 12-point penalty on 31 such tables. A
+        # section emptied by a misroute is the doctor's `section_lost`.
+        if all(t in template_cells for t in filled):
+            continue
+        scored_tables += 1
+        total_cells += len(texts)
+        empty_cells += len(texts) - len(filled)
+        if len(texts) - len(filled) >= SPARSE_TABLE_EMPTY_SHARE * len(texts):
             sparse_count += 1
 
-    sparse_table_ratio = sparse_count / total_tables
+    if scored_tables == 0:
+        return 0.0, f"total_tables={total_tables}; no table carries CV content", None
+    sparse_table_ratio = sparse_count / scored_tables
     global_empty_ratio = empty_cells / total_cells if total_cells else 0.0
     a = 0.6 * (sparse_table_ratio / 0.25)
     b = 0.4 * ((global_empty_ratio - 0.10) / 0.40)
     fraction = clamp(a + b)
 
     detail = (
-        f"total_tables={total_tables}; sparse_tables={sparse_count}; "
+        f"total_tables={total_tables}; scored_tables={scored_tables}; sparse_tables={sparse_count}; "
         f"sparse_table_ratio={sparse_table_ratio:.3f}; empty_cells={empty_cells}/{total_cells}; "
         f"global_empty_ratio={global_empty_ratio:.3f}; fraction={fraction:.3f}"
     )
@@ -975,6 +985,20 @@ def _template_body_paragraph_texts() -> frozenset[str]:
     return frozenset(
         _normalize_whitespace(_paragraph_text(p))
         for p in template_doc.paragraphs if _paragraph_text(p).strip()
+    )
+
+
+@functools.cache
+def _template_cell_texts() -> frozenset[str]:
+    """Whitespace-normalized text of every non-blank table cell of the
+    template stage 6 renders into (#452): labels, column headers and
+    placeholders like "DEA number: (optional)". Missing template raises, as
+    `_template_body_paragraph_texts` does."""
+    from docx import Document
+    template_doc = Document(_TEMPLATE_DOCX_PATH)
+    return frozenset(
+        text for tbl in template_doc.tables for row in tbl.rows for cell in row.cells
+        if (text := _normalize_whitespace(_cell_text(cell)))
     )
 
 
