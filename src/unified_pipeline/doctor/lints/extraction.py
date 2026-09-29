@@ -90,8 +90,13 @@ _FUNDING_BOUNDARY_TITLES = frozenset({
 
 
 def _entry_status(entry: Dict) -> Optional[str]:
+    """The entry's grant status: the stage-4 field when the vocabulary
+    `grant_status_rebucket_target` (what `lint_bucket_status` judges by)
+    recognises it, else the labelled fragment in the raw text. Stage 4 has no
+    response schema, so a stray value must not mask a status the text carries
+    (#720)."""
     status = (entry.get("extracted_fields") or {}).get("status")
-    if status:
+    if status and grant_status_rebucket_target(str(status))[0] is not None:
         return str(status)
     match = _STATUS_LABEL_RE.search(str(entry.get("text", "")))
     return match.group(1).strip() if match else None
