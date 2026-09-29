@@ -56,7 +56,7 @@ CODE_MENTION_PATTERNS = [
 
 # Valid taxonomy codes (to filter false positives)
 VALID_CODES = {
-    'A', 'B', 'B1', 'B2', 'C', 'C1', 'C2',
+    'A', 'B', 'B1', 'B2', 'C', 'C1', 'C2', 'C3',
     'D', 'D1', 'D2', 'D3',
     'E', 'E1', 'E2',
     'G',
