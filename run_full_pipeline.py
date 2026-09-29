@@ -604,22 +604,33 @@ def run_stage(ctx: PipelineContext, stage: str,
 
 
 def _count_headers(nodes: list[dict]) -> int:
-    """Total header nodes in a hierarchy, including every nested child."""
-    count = len(nodes)
-    for node in nodes:
-        count += _count_headers(node.get('children', []))
+    """Total header nodes in a hierarchy, including every nested child.
+
+    Iterative: a deep header chain must not hit the interpreter's recursion limit.
+    """
+    count = 0
+    stack = [nodes]
+    while stack:
+        level = stack.pop()
+        count += len(level)
+        for node in level:
+            stack.append(node.get('children', []))
     return count
 
 
 def _hierarchy_lines(nodes: list[dict], depth: int = 0) -> list[str]:
-    """Indented ``[LEVEL] text`` lines for the human-readable stage 1a dump."""
+    """Indented ``[LEVEL] text`` lines for the human-readable stage 1a dump.
+
+    Iterative pre-order walk (see ``_count_headers``).
+    """
     lines: list[str] = []
-    for node in nodes:
-        indent = "  " * depth
+    stack = [(node, depth) for node in reversed(nodes)]
+    while stack:
+        node, d = stack.pop()
         level = node.get('level', 'H1')
         text = node.get('text', '')
-        lines.append(f"{indent}[{level}] {text}")
-        lines.extend(_hierarchy_lines(node.get('children', []), depth + 1))
+        lines.append(f"{'  ' * d}[{level}] {text}")
+        stack.extend((child, d + 1) for child in reversed(node.get('children', [])))
     return lines
 
 

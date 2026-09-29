@@ -1076,3 +1076,59 @@ def test_prompt_logger_resets_when_main_raises(tmp_path, monkeypatch, capsys):
 
     assert prompt_logger._current_run_id.get() is None, (
         "an exception left prompt_logger scoped to a finished run")
+
+
+# ---- #306: hierarchy walkers must be iterative -----------------------------------
+
+def _nested_hierarchy():
+    return [
+        {"level": "H1", "text": "A", "children": [
+            {"level": "H2", "text": "A1", "children": [{"level": "H3", "text": "A1a"}]},
+            {"level": "H2", "text": "A2", "children": []},
+        ]},
+        {"level": "H1", "text": "B"},
+        {"level": "H1", "text": "C", "children": [{"level": "H2", "text": "C1", "children": []}]},
+    ]
+
+
+def _deep_chain(depth):
+    root = {"level": "H1", "text": "n0", "children": []}
+    tip = root
+    for i in range(1, depth):
+        child = {"level": "H2", "text": f"n{i}", "children": []}
+        tip["children"].append(child)
+        tip = child
+    return [root]
+
+
+def _recursive_count(nodes):
+    return len(nodes) + sum(_recursive_count(n.get("children", [])) for n in nodes)
+
+
+def _recursive_lines(nodes, depth=0):
+    out = []
+    for n in nodes:
+        out.append(f"{'  ' * depth}[{n.get('level', 'H1')}] {n.get('text', '')}")
+        out.extend(_recursive_lines(n.get("children", []), depth + 1))
+    return out
+
+
+def test_count_headers_matches_recursive_reference():
+    h = _nested_hierarchy()
+    assert run_full_pipeline._count_headers(h) == _recursive_count(h) == 7
+    assert run_full_pipeline._count_headers([]) == 0
+
+
+def test_count_headers_deep_chain_does_not_recurse():
+    assert run_full_pipeline._count_headers(_deep_chain(5000)) == 5000
+
+
+def test_hierarchy_lines_match_recursive_reference():
+    h = _nested_hierarchy()
+    assert run_full_pipeline._hierarchy_lines(h) == _recursive_lines(h)
+
+
+def test_hierarchy_lines_deep_chain_does_not_recurse():
+    lines = run_full_pipeline._hierarchy_lines(_deep_chain(5000))
+    assert len(lines) == 5000
+    assert lines[-1].endswith("[H2] n4999")
