@@ -15,6 +15,7 @@ import json
 import logging
 import time
 import bisect
+import re
 from functools import partial
 from pathlib import Path
 from collections.abc import Callable
@@ -1084,6 +1085,99 @@ Respond **only** with a JSON array containing the identified entries. If no entr
     return all_validated_entries, cost_info
 
 
+# Detail-line fold (#986). A dateless line that opens with one of these labels
+# belongs to the entry above it: left alone, the detector or the unassigned-line
+# fallback makes it a sibling entry that 3b codes and routes away from its
+# parent. Compared lower-cased against the line's start. Indent is deliberately
+# not a trigger: adjacent siblings (a student list, a course list) share an
+# indent, so an indent rule fused separate records on the corpus.
+DETAIL_LINE_LABELS = ("project:", "role:")
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_FOLDABLE_ELEMENT_TYPES = ("paragraph", "break")
+
+
+def _is_foldable_paragraph(entry: dict, element_index_map: dict) -> bool:
+    """A non-empty paragraph/break entry whose start element is a plain paragraph
+    (never a table row or header) -- a boundary the fold must not cross."""
+    return (
+        entry.get("element_type") in _FOLDABLE_ELEMENT_TYPES
+        and isinstance(entry.get("element_idx_end"), int)
+        and bool(entry.get("text"))
+        and element_index_map.get(entry.get("element_idx_start"), {}).get("type") == "paragraph"
+    )
+
+
+def _is_adjacent_dateless_line(prev: dict, cur: dict, element_index_map: dict) -> bool:
+    """``cur`` is a single line with no year of its own, on the line right after
+    ``prev`` (no blank line or header between) in the same section."""
+    return (
+        _is_foldable_paragraph(prev, element_index_map)
+        and _is_foldable_paragraph(cur, element_index_map)
+        and cur["element_idx_start"] == cur["element_idx_end"]
+        and cur["element_idx_start"] == prev["element_idx_end"] + 1
+        and prev.get("hierarchy") == cur.get("hierarchy")
+        and not _YEAR_RE.search(cur["text"])
+    )
+
+
+def _is_template_text(text: str) -> bool:
+    """WCM-template instruction text, exact or reworded. ``_drop_template_instructions``
+    runs after the fold, so folding one into a real entry would drop that entry."""
+    return is_template_instruction(text) or is_near_template_instruction(text)
+
+
+def _continues_previous_entry(prev: dict, cur: dict, element_index_map: dict) -> bool:
+    """True when ``cur`` is a dateless line that continues ``prev``: it starts
+    with a detail label and has content after it.
+
+    Never for template instruction text on either side, and never for a bare
+    label with nothing after the colon or into a parent whose first line ends
+    in a colon: either one is a sub-header heading the lines after it, not a
+    record the detail line completes.
+    """
+    return (
+        _is_adjacent_dateless_line(prev, cur, element_index_map)
+        and cur["text"].lower().startswith(DETAIL_LINE_LABELS)
+        and cur["text"].strip().lower() not in DETAIL_LINE_LABELS
+        and not prev["text"].split("\t", 1)[0].rstrip().endswith(":")
+        and not _is_template_text(prev["text"])
+        and not _is_template_text(cur["text"])
+    )
+
+
+def fold_labelled_detail_entries(entries: list[dict], element_index_map: dict) -> list[dict]:
+    """Fold each dateless labelled detail line into the entry directly above it (#986).
+
+    Runs on one section's entries (content entries plus the non-empty unassigned
+    lines 3b also classifies) after detection and validation, so it behaves the
+    same whether the detector split a detail line off or missed it. The folded
+    entry keeps the parent's type, confidence and hierarchy; its range extends to
+    the detail line and its text is joined with the tab stage 2 already uses.
+    Returns ``entries`` itself, unsorted and untouched, when nothing folds.
+    """
+    ordered = sorted(
+        entries,
+        key=lambda e: e["element_idx_start"] if isinstance(e["element_idx_start"], int) else float("inf"),
+    )
+    folded: list[dict] = []
+    fold_count = 0
+    for entry in ordered:
+        if folded and _continues_previous_entry(folded[-1], entry, element_index_map):
+            parent = folded[-1]
+            folded[-1] = {
+                **parent,
+                "element_idx_end": entry["element_idx_end"],
+                "text": parent["text"] + "\t" + entry["text"],
+            }
+            fold_count += 1
+        else:
+            folded.append(entry)
+    if fold_count:
+        logger.info(f"    Folded {fold_count} labelled detail line(s) into the entry above")
+        return folded
+    return entries
+
+
 def _bound_coverage_indices(
     all_assigned_indices: set[int | str], doc_length: int
 ) -> tuple[set[int], set[int]]:
@@ -1306,7 +1400,9 @@ def _extract_section(
 
     # Combine all entries for this section: headers -> content -> breaks,
     # the same order the pre-#881 loop extended all_entries in.
-    section_entries_in_order = section_headers + entries + break_entries
+    section_entries_in_order = fold_labelled_detail_entries(
+        section_headers + entries + break_entries, context.element_index_map
+    )
 
     return _SectionResult(section_entries_in_order, cost_info, section_assigned, lines)
 
