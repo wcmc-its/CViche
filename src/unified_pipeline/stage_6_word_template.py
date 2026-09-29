@@ -171,6 +171,7 @@ from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
     PiiPassResult,
+    relocate_withheld,
     run_pii_pass,
     withheld_comment_text,
 )
@@ -697,6 +698,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # What the #820 pre-render pass withheld this run -- set by generate();
         # empty means no notice and no comment. Per-instance, never shared.
         self._pii_result = PiiPassResult()
+        # Entry indexes whose non-withheld residual rendered in the Appendix
+        # (#848); the withheld comment names "Appendix" for their items.
+        self._appendix_withheld_entry_indexes: set[int] = set()
 
         # Content overflow tracking: entries where extraction lost significant content
         self._overflow_entries = []  # List of (entry, para, taxonomy_code) tuples
@@ -1066,6 +1070,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._pii_result = run_pii_pass(
             entries_by_code, routed_codes=RENDER_ROUTED_CODES,
             section_names=TAXONOMY_TO_SECTION)
+        self._appendix_withheld_entry_indexes = set()
 
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None) -> str:
@@ -2660,7 +2665,9 @@ Now analyze the text above:"""
                 # sections, never a value. Not a classification comment, so
                 # it is emitted whatever `emit_comments` says (#153).
                 self._add_word_comment(
-                    entry_para, withheld_comment_text(self._pii_result.withheld),
+                    entry_para, withheld_comment_text(relocate_withheld(
+                        self._pii_result.withheld,
+                        self._appendix_withheld_entry_indexes)),
                     author=WITHHELD_COMMENT_AUTHOR, always=True)
                 continue
             self._add_word_comment(
@@ -2908,6 +2915,9 @@ Now analyze the text above:"""
                     text = _strip_dangling_separators(text).strip()
                     if text and _squash(text) not in haystack:
                         batch.append((text, 'A', 0))
+                        index = entry.get('_pii_entry_index')
+                        if index is not None:
+                            self._appendix_withheld_entry_indexes.add(index)
                         continue
                 continue
             if not text:

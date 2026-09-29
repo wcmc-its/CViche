@@ -338,6 +338,24 @@ def test_appendix_residual_survives_a_fused_withheld_and_kept_fragment(tmp_path:
     )
 
 
+def test_withheld_comment_names_appendix_when_the_residual_rendered_there(tmp_path: Path) -> None:
+    """#848: the withheld-item Word comment names the section the item's
+    entry actually rendered in. A fused orphan whose residual reached the
+    Appendix is "Appendix" -- not the A code's nominal "Personal Data" --
+    while an item that never had a residual (a bare Date of Birth, nothing
+    left to render) keeps its nominal label."""
+    _render(tmp_path, [
+        _a("Home Phone: 555-123-4567; Citizenship: US"),
+        _a("Date of Birth: 04/01/1958"),
+    ])
+    bodies = [b for _, b in _comments(tmp_path / "out.docx") if " \u2022 " in b]
+    assert len(bodies) == 1
+    lines = [ln for ln in bodies[0].splitlines() if ln.startswith(" \u2022 ")]
+    assert any(ln.endswith("Appendix)") for ln in lines), lines
+    assert any(ln.endswith("Personal Data)") for ln in lines), (
+        "the bare Date of Birth has no residual and must keep its label")
+
+
 def test_appendix_residual_is_refused_when_the_value_sits_past_a_hard_delimiter(
         tmp_path: Path) -> None:
     """#821 R2 F3 safety check, corpus-observed: a "Label: |

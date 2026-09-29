@@ -82,6 +82,7 @@ from unified_pipeline.stage6.pii_pass import (  # noqa: E402
     _entry_scope,
     _owner_name_tokens,
     _THIRD_PARTY_PHONE_RE,
+    relocate_withheld,
     run_pii_pass,
     withheld_comment_text,
 )
@@ -697,6 +698,19 @@ def test_comment_text_names_categories_counts_and_sections_only():
     assert lines[2] == " • visa / immigration status (2 items, Appendix, Licensure)"
     assert lines[3] == WITHHELD_COMMENT_FOOTER
     assert len(lines) == 4
+
+
+def test_relocate_withheld_renames_only_the_listed_entries():
+    """#848: items of an entry whose residual rendered in the Appendix are
+    renamed; other entries and docx-recovered items (index None) are not."""
+    items = [
+        WithheldItem(CAT_DATE_OF_BIRTH, "Personal Data", 0),
+        WithheldItem(CAT_VISA, "Personal Data", 1),
+        WithheldItem(CAT_VISA, "Personal Data", None),
+    ]
+    assert relocate_withheld(items, {1}) == [
+        items[0], WithheldItem(CAT_VISA, "Appendix", 1), items[2]]
+    assert relocate_withheld(items, set()) == items
 
 
 def test_comment_text_carries_no_value():
