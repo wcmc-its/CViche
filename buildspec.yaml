@@ -189,6 +189,10 @@ phases:
       # this, `rollout restart` returns immediately and the deploy reports green
       # even when the new ReplicaSet never rolls out (e.g. a failing migration
       # init container), silently leaving the previous image serving traffic.
-      - kubectl rollout status deployment/cviche-backend -n cviche-${ENV_NAME} --timeout=300s
+      # Backend gets 1800s, not 300s: an old pod now drains in-flight runs for
+      # up to ~26 min on SIGTERM (#116) and keeps its CPU/memory requests while
+      # it does, so on a node group without spare headroom a new pod can stay
+      # Pending until an old one exits.
+      - kubectl rollout status deployment/cviche-backend -n cviche-${ENV_NAME} --timeout=1800s
       - kubectl rollout status deployment/cviche-frontend -n cviche-${ENV_NAME} --timeout=300s
 

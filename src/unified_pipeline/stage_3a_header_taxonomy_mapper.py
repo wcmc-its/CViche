@@ -310,8 +310,7 @@ Now output the JSON mapping. Remember: output ONLY valid JSON, no markdown or co
         stage="stage_3a",
         messages=messages,
         response_format={"type": "json_object"},
-        temperature=0.2,
-        max_tokens=8000
+        temperature=0.2
     )
 
     # Parse response

@@ -78,6 +78,10 @@ PRICING = {
             "input": 3.300,
             "output": 16.500,
         },
+        "anthropic.claude-sonnet-5": {
+            "input": 2.200,
+            "output": 11.000,
+        },
         "anthropic.claude-haiku-4-5": {
             "input": 1.100,
             "output": 5.500,
@@ -424,6 +428,7 @@ def estimate_run_cost_usd(text_char_count: int, model: str = None,
 # Human-readable names for known model IDs, used by the web UI.
 _FRIENDLY_MODEL_NAMES = {
     "anthropic.claude-sonnet-4-6": "Claude Sonnet 4.6",
+    "anthropic.claude-sonnet-5": "Claude Sonnet 5",
     "anthropic.claude-haiku-4-5": "Claude Haiku 4.5",
     "anthropic.claude-haiku-4-5-20251001-v1:0": "Claude Haiku 4.5",
     "anthropic.claude-opus-4-7": "Claude Opus 4.7",

@@ -21,6 +21,7 @@ import re
 from unified_pipeline.segmentation_regression import (
     _norm,
     compute_metrics,
+    find_lost_blocks,
     lint_metrics,
 )
 
@@ -42,6 +43,24 @@ def lint_segmentation(source_lines: list[str], stage1a: dict,
                     if flag.startswith("coverage") else [])
         findings.append(_finding("segmentation", "WARN", flag, evidence))
     return findings
+
+
+def lint_table_lost(source_block_lines: list[tuple[int, str]],
+                    stage2: dict) -> list[dict]:
+    """Source tables stage 2 mostly lost, however well the rest of the
+    document covered (#815): web207 lost its whole personal-data table at
+    99.1% document coverage. One finding per run, not per table -- a run
+    whose stage 2 failed loses dozens of tables, and a per-table count
+    would double as severity (#438). Evidence is the worst table's lines."""
+    lost_blocks = find_lost_blocks(source_block_lines, stage2)
+    if not lost_blocks:
+        return []
+    worst = max(lost_blocks, key=lambda b: len(b["lost_lines"]))
+    return [_finding(
+        "table_lost", "WARN",
+        f"{len(lost_blocks)} source table(s) mostly lost; worst: "
+        f"{len(worst['lost_lines'])} of {worst['substantive_lines']} lines",
+        [line[:100] for line in worst["lost_lines"][:5]])]
 
 
 # --------------------------------------------------------------------------

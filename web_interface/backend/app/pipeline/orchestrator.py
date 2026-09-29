@@ -163,6 +163,19 @@ def cancel_run(run_id: str):
         _broker.request_cancel(run_id)
 
 
+def stop_run_locally(run_id: str) -> None:
+    """Make this process's executor of ``run_id`` stop at its next cancel check.
+
+    For shutdown (#116), which fails the runs it could not drain: the flag stops
+    the run's pipeline thread at its next stage boundary and, if the process
+    somehow outlives the drain, keeps the pre-"complete" check from writing
+    complete over the failure. Deliberately not sent through the broker: the
+    Redis flag outlives this pod by CANCEL_TTL_SECONDS and would cancel a retry
+    of the same run that another pod starts inside that window.
+    """
+    _cancelled_runs.add(run_id)
+
+
 def is_cancelled(run_id: str) -> bool:
     """Check if a run has been cancelled (locally or via the broker)."""
     if run_id in _cancelled_runs:

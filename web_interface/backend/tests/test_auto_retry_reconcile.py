@@ -232,3 +232,27 @@ def test_sweep_does_not_fail_a_run_a_sibling_resumed_mid_sweep(db, monkeypatch):
     db.refresh(run)
     assert run.status == "running"
     assert run.completed_at is None
+
+
+def test_launch_resume_releases_the_slot_it_took_for_the_run(db, monkeypatch, tmp_path):
+    """The resumed pipeline's thread must release the slot held for *this* run:
+    the shutdown drain (#116) waits on slot-holding run ids, so a slot left
+    behind would hold every deploy for the full drain budget."""
+    import time
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.pipeline import concurrency
+    from tests.conftest import TestingSessionLocal
+
+    monkeypatch.setattr("app.database.SessionLocal", TestingSessionLocal)
+    orchestrator_cls = MagicMock()
+    orchestrator_cls.return_value.execute = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.pipeline.orchestrator.PipelineOrchestrator", orchestrator_cls)
+
+    assert run_service._launch_resume("RSUME1", tmp_path / "cv.docx", 4) is True
+
+    deadline = time.monotonic() + 5
+    while concurrency.active_run_ids() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert concurrency.active_run_ids() == []
+    orchestrator_cls.return_value.execute.assert_awaited_once_with(start_step_number=4)
