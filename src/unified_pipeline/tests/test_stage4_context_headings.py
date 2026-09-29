@@ -187,7 +187,8 @@ def test_a_bare_label_inside_a_run_of_t_entries_or_before_one_is_a_list_item():
 
 def _flat(text_code_pairs):
     """Entries under one leaf that spans >= FLAT_HIERARCHY_MIN_LETTERS code letters."""
-    filler = [_e(f"filler {c}", c) for c in "ABCD"[:ch.FLAT_HIERARCHY_MIN_LETTERS]]
+    filler = [_e(f"filler {c}{i}", c) for c in "ABCD"[:ch.FLAT_HIERARCHY_MIN_LETTERS]
+              for i in range(ch.FLAT_LETTER_MIN_ENTRIES)]
     return filler + [_e(t, c) for t, c in text_code_pairs]
 
 
@@ -199,6 +200,26 @@ def test_in_a_flat_hierarchy_a_run_stops_when_the_code_letter_changes():
 def test_in_a_coherent_hierarchy_a_run_may_mix_code_letters():
     entries = [_e("Alpha University:", "T"), _e("p1", "P"), _e("o1", "O")]
     assert _stamps(entries) == [None, "Alpha University", "Alpha University"]
+
+
+def test_a_letter_held_by_too_few_entries_does_not_make_a_leaf_flat():
+    # One stray Q1 and one Q2 under a P/O leaf: still coherent, so the run
+    # keeps its O children (the three letters are there, but only P and O
+    # are held by enough entries to count).
+    few = ch.FLAT_LETTER_MIN_ENTRIES - 1
+    strays = [_e(f"q{i}", "Q1") for i in range(few)]
+    fillers = [_e(f"p{i}", "P") for i in range(ch.FLAT_LETTER_MIN_ENTRIES)]
+    entries = strays + fillers + [_e("Alpha University:", "T"), _e("p-child", "P"), _e("o-child", "O"),
+                                  _e("o-child 2", "O")]
+    assert _stamps(entries)[-3:] == ["Alpha University"] * 3
+
+
+def test_a_t_entry_that_is_not_a_heading_ends_the_run():
+    # "2003-2016 Beta Institute ..." is T but has a digit, so it is no heading;
+    # the entries after it belong to its group, not to the heading above.
+    entries = [_e("Alpha University:", "T"), _e("child 1"),
+               _e("2003-2016 Beta Institute, Gamma", "T"), _e("child 2")]
+    assert _stamps(entries) == [None, "Alpha University", None, None]
 
 
 def test_a_bare_label_whose_next_entry_is_t_governs_nothing():

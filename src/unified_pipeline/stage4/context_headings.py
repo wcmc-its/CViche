@@ -12,6 +12,7 @@ text, and never mutates its input.
 """
 
 import re
+from collections import Counter
 from typing import Any
 
 #: Taxonomy code stage 3b gives an unclassifiable / heading-like entry.
@@ -179,6 +180,11 @@ def _is_heading(entry: dict[str, Any], t_streak: int, next_entry: dict[str, Any]
 #: A coherent leaf ('Institutional Service': P, O) legitimately mixes codes.
 FLAT_HIERARCHY_MIN_LETTERS = 3
 
+#: Entries a taxonomy letter needs in a leaf before it counts toward
+#: FLAT_HIERARCHY_MIN_LETTERS: one stray misclassified entry (web051's lone Q1
+#: and Q2 under 'Institutional Service') must not make a coherent leaf flat.
+FLAT_LETTER_MIN_ENTRIES = 3
+
 
 def _code_family(code: str) -> str:
     """Leading letter of a taxonomy code ('N3A' -> 'N')."""
@@ -186,12 +192,15 @@ def _code_family(code: str) -> str:
 
 
 def _flat_hierarchies(entries: list[dict[str, Any]]) -> set[tuple[str, ...]]:
-    letters: dict[tuple[str, ...], set[str]] = {}
+    letters: dict[tuple[str, ...], Counter[str]] = {}
     for entry in entries:
         code = entry.get("taxonomy_code") or ""
         if code and code != HEADING_TAXONOMY_CODE and not _is_dropped(entry):
-            letters.setdefault(tuple(entry.get("hierarchy") or []), set()).add(_code_family(code))
-    return {h for h, found in letters.items() if len(found) >= FLAT_HIERARCHY_MIN_LETTERS}
+            letters.setdefault(tuple(entry.get("hierarchy") or []), Counter())[_code_family(code)] += 1
+    return {
+        h for h, found in letters.items()
+        if sum(1 for n in found.values() if n >= FLAT_LETTER_MIN_ENTRIES) >= FLAT_HIERARCHY_MIN_LETTERS
+    }
 
 
 class _Run:
@@ -232,7 +241,9 @@ def _heading_runs(entries: list[dict[str, Any]]) -> list[_Run]:
             active = None if _is_generic(heading, hierarchy) else _Run(heading, list(hierarchy), tuple(hierarchy) in flat)
             if active is not None:
                 runs.append(active)
-        elif _is_heading_shaped(text, strong_only=True) or active is None or hierarchy != active.hierarchy or not active.accepts(entry):
+        elif (entry.get("taxonomy_code") == HEADING_TAXONOMY_CODE
+              or _is_heading_shaped(text, strong_only=True) or active is None
+              or hierarchy != active.hierarchy or not active.accepts(entry)):
             active = None
         else:
             active.add(idx, entry)
@@ -247,8 +258,10 @@ def stamp_context_headings(entries: list[dict[str, Any]]) -> list[dict[str, Any]
     `entries` must be stage 3b's FULL list in document order, fragments and
     duplicates included: a dropped sibling sub-heading ("University of
     Maryland:" flagged is_fragment) must still end the run before it. A stamp
-    stops at the next heading, a hierarchy change, a strongly heading-shaped
-    non-T or dropped entry, or a change of taxonomy family among the children.
+    stops at the next heading, at ANY other T entry (a T line that is not
+    heading-shaped -- "2003-2016 University of ..." -- still separates record
+    groups), a hierarchy change, a strongly heading-shaped non-T or dropped
+    entry, or a change of taxonomy family among the children of a flat leaf.
     A heading that would govern more than MAX_STAMPED_RUN entries stamps nothing.
     """
     out = [dict(entry) for entry in entries]
