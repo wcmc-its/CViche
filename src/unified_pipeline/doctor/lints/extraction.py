@@ -20,8 +20,9 @@ docstrings and comments for what changed.
 """
 import re
 from collections import Counter
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
+from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.core.template_boilerplate import (
@@ -40,6 +41,13 @@ from unified_pipeline.segmentation_regression import (
     _norm,
     _squash,
 )
+from unified_pipeline.stage6.normalization.pii import (
+    CAT_HOME_CONTACT,
+    SCOPE_PERSONAL_AND_APPENDIX,
+    WITHHOLD_POLICY,
+    _pii_matches,
+)
+from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
     grant_status_rebucket_target,
@@ -47,6 +55,7 @@ from unified_pipeline.stage_6_word_template import (
 
 from ..shared import (
     Haystack,
+    _LINE_SENTINEL,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
     _entry_pieces,
@@ -286,17 +295,163 @@ def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set,
 #: Codes `lint_classified_unrendered` does not judge; see its docstring.
 _CLASSIFIED_UNRENDERED_SKIP_CODES = frozenset({"T", "M1"})
 
+#: A stage-4 record judges an entry rendered (#890) only from at least this
+#: many CONTENT values -- non-empty string fields that are not dates. Stage 6
+#: writes an entry from its extracted fields, so a field-parsed table row, a
+#: 5c/5d-reformatted citation and a stage-5 abbreviation expansion keep the
+#: content and lose the raw tokens the overlap test counts. Two, not one: a
+#: record whose only content value is a label ("program_name") is exactly the
+#: #1092 shape -- the detail was lost and one hit proves nothing -- so fewer
+#: than two falls through to the token test.
+RENDERED_FIELDS_MIN_VALUES = 2
+#: More than this fraction of an entry's content values must sit on ONE rendered
+#: line. A majority, not "two of them": an authors-only line ("1. Doe J, Roe K.
+#: 2020.") carries one of a citation's authors/title/book/publisher, and the
+#: rest is lost. Dates never count, either way: "07/1987-07/1994" alone is a
+#: date column, not the entry it belonged to.
+RENDERED_FIELDS_MAJORITY = 0.5
+#: A value this long (squashed) matches as a substring and is the only kind
+#: `Stage4Evidence.shared_values` and the template filter judge; a shorter one
+#: ("MA", "Ohio") matches on word/cell boundaries only, since raw containment
+#: finds "ma" inside "pharmacology".
+RENDERED_FIELDS_MIN_VALUE_CHARS = 6
+
+#: The colon-less opener of the policy's home-address/phone row. A source line
+#: reads "Home Phone (914) ..." with no colon, so `_pii_matches` (whose label
+#: rows end in a colon) cannot see it, yet `_fill_personal_data` withholds
+#: home contact unconditionally at write time (#821). Built from the policy
+#: row itself so the two cannot name different labels.
+_HOME_CONTACT_LABEL_RE = re.compile(
+    "|".join(f"(?:{rule.label})" for rule in WITHHOLD_POLICY
+             if rule.category == CAT_HOME_CONTACT and rule.label),
+    re.X | re.I)
+
+
+class Stage4Evidence(NamedTuple):
+    """What `lint_classified_unrendered` reads from stage 4: each record by
+    its `(element_idx_start, element_idx_end)` span -- the start alone is not
+    unique (43 records of one batch-3 CV share one); a span two records share
+    is dropped, not guessed -- and the field values (squashed) that occur in more
+    than one record -- boilerplate ("Weill Cornell Medicine", "New York")
+    that surfaces in the output for reasons unrelated to any one entry, the
+    field-level twin of `_shared_entry_pieces` (#744). Only values of
+    RENDERED_FIELDS_MIN_VALUE_CHARS or more: a date range's years are shared
+    by many records and are still evidence beside a distinctive value."""
+    records: dict
+    shared_values: frozenset
+
+
+def _span(entry: dict) -> tuple:
+    """The key a stage-3b entry and its stage-4 record share."""
+    return (entry.get("element_idx_start"), entry.get("element_idx_end"))
+
+
+def _record_values(record: dict) -> set[str]:
+    """The record's distinct, squashed, non-empty extracted string values."""
+    return {_squash(v) for v in _nonempty_field_values(
+        record.get("extracted_fields") or {})} - {""}
+
+
+def _stage4_evidence(stage4: dict | None) -> Stage4Evidence | None:
+    """Index stage 4 for the field-value test; None when stage 4 is absent,
+    which keeps the pre-#890 behaviour exactly."""
+    if not stage4:
+        return None
+    entries = stage4.get("entries", [])
+    span_counts = Counter(_span(e) for e in entries)
+    # A span two records share cannot say which one a stage-3b entry is: no
+    # record, so no field evidence, rather than whichever came last.
+    records = {_span(e): e for e in entries if span_counts[_span(e)] == 1}
+    counts = Counter(v for r in entries for v in _record_values(r)
+                     if len(v) >= RENDERED_FIELDS_MIN_VALUE_CHARS)
+    return Stage4Evidence(records, frozenset(v for v, n in counts.items() if n > 1))
+
+
+def _value_on_line(value: str, line: str) -> bool:
+    """Whether a squashed field value is on a squashed rendered line. A value
+    under RENDERED_FIELDS_MIN_VALUE_CHARS ("MA", "M.D.") must sit on a
+    word/cell boundary; a longer one is distinctive enough to match as a
+    substring."""
+    if len(value) >= RENDERED_FIELDS_MIN_VALUE_CHARS:
+        return value in line
+    return re.search(rf"(?<![a-z0-9]){re.escape(value)}(?![a-z0-9])", line) is not None
+
+
+def _content_values(record: dict, evidence: Stage4Evidence) -> set[str]:
+    """The record's squashed values that say WHAT the entry is: not a date
+    ("1987-07", "May 2019 - Present"), not boilerplate shared with other
+    records, not a scaffolding phrase of the output template."""
+    raw = _nonempty_field_values(record.get("extracted_fields") or {})
+    values = {_squash(v) for v in raw if not _is_date_only_text(v)} - {""}
+    return {v for v in values - evidence.shared_values
+            if len(v) < RENDERED_FIELDS_MIN_VALUE_CHARS or not _piece_in_template(v)}
+
+
+def _fields_rendered(entry: dict, lines: list[str], evidence: Stage4Evidence) -> bool:
+    """Whether the entry's stage-4 record was extracted successfully and ONE
+    rendered line (a paragraph, or a table row joined across its cells --
+    `_table_lines`) carries a majority of its content values (#890).
+    Co-location is the point: a state name can turn up on any line of the
+    document, but a record's title and its book on the same line is that
+    record. False also when the record has too few content values to judge."""
+    record = evidence.records.get(_span(entry))
+    if not record or not record.get("extraction_success"):
+        return False
+    values = _content_values(record, evidence)
+    if len(values) < RENDERED_FIELDS_MIN_VALUES:
+        return False
+    return any(sum(1 for v in values if _value_on_line(v, line))
+               > RENDERED_FIELDS_MAJORITY * len(values) for line in lines)
+
+
+def _personal_data_withheld(entry: dict) -> bool:
+    """A Personal Data ('A') entry that carries a value the withhold policy
+    removes at render time (date of birth, marital status, home contact):
+    stage 6 renders that entry's remainder from named fields into a fixed
+    table, so an absent entry here is withheld on purpose, not lost (#890,
+    #820/#821). Stage 6 records the withheld items only as the docx notice and
+    comment, never per entry, so the doctor re-asks the policy itself.
+    Judgement call: ANY policy hit excludes the entry, not only an entry whose
+    whole text is policy-covered -- the 'Name, address, Home Phone' block is
+    partly withheld by design and its name rendering elsewhere is not visible
+    to a text-overlap test."""
+    if entry.get("taxonomy_code") != PERSONAL_DATA_CODE:
+        return False
+    text = str(entry.get("text") or "")
+    return bool(_pii_matches(text, SCOPE_PERSONAL_AND_APPENDIX)
+                or _HOME_CONTACT_LABEL_RE.search(text))
+
+
+def _classified_entry_rendered(entry: dict, haystacks: Haystack, lines: list[str],
+                               shared: frozenset,
+                               evidence: Stage4Evidence | None) -> bool | None:
+    """`_entry_rendered`'s verdict for a stage-3b entry, widened by what stage 4
+    knows: None (not judged) for a policy-withheld Personal Data entry, True
+    when its extracted field values surfaced (#890)."""
+    if _personal_data_withheld(entry):
+        return None
+    if evidence is not None and _fields_rendered(entry, lines, evidence):
+        return True
+    return _entry_rendered(entry.get("text"), haystacks.text, haystacks.tokens, shared)
+
 
 def lint_classified_unrendered(stage3b: Dict,
-                               blocks: List[Tuple[str, str]]) -> List[Dict]:
+                               blocks: List[Tuple[str, str]],
+                               stage4: dict | None = None) -> List[Dict]:
     """Taxonomy codes classified at 3b none of whose entries appear anywhere
     in the stage-6 output (paragraphs or tables). Skipped: 'T' (appendix
     catch-all) and 'M1', which stage 6 never renders verbatim when a research
     summary rendered -- the summary paraphrases it, by design -- and routes to
     the Appendix, where this lint does see it, when none did (YTPMZK's 2 M1
-    entries were flagged on every doctor run)."""
+    entries were flagged on every doctor run).
+
+    `stage4` (optional; absent keeps the old behaviour) lets an entry count as
+    rendered when its extracted field values did, and lets a Personal Data
+    entry the withhold policy removes stay out of the verdict (#890)."""
     h = _haystacks(blocks)
     shared = _shared_entry_pieces(stage3b.get("entries", []))
+    evidence = _stage4_evidence(stage4)
+    lines = h.text.split(_LINE_SENTINEL)
     by_code: Dict[str, List[Dict]] = {}
     for e in stage3b.get("entries", []):
         if e.get("element_type") in ("header", "break"):
@@ -310,7 +465,7 @@ def lint_classified_unrendered(stage3b: Dict,
     lost = 0
     for code in sorted(by_code):
         entries = by_code[code]
-        verdicts = [(_entry_rendered(e.get("text"), h.text, h.tokens, shared), e)
+        verdicts = [(_classified_entry_rendered(e, h, lines, shared, evidence), e)
                     for e in entries]
         verifiable = [(v, e) for v, e in verdicts if v is not None]
         if not verifiable or any(v for v, _ in verifiable):
