@@ -53,6 +53,41 @@ def test_trailing_location_is_detected(location, institution):
 
 
 @pytest.mark.parametrize("location, institution", [
+    # same city, different state or country: a different place (#566)
+    ("Rochester, MN", "Mayo Clinic, Rochester, NY"),
+    ("Portland, OR", "Maine Medical Center, Portland, ME"),
+    ("Cambridge, MA", "University of Cambridge, Cambridge, UK"),
+    ("Cambridge, MA", "University of Cambridge, Cambridge, U.K."),
+    # known limit: no country table, so "United Kingdom" vs "UK" is left undeduped (both render)
+    ("Cambridge, United Kingdom", "Cambridge University, Cambridge, UK"),
+    ("Cambridge, United Kingdom", "Harvard University, Cambridge, MA"),
+    ("Columbia, SC", "University of Missouri, Columbia, Missouri"),
+    ("Springfield, IL", "Baystate Medical Center, Springfield, Massachusetts"),
+    # a city that is only a substring of another word or city
+    ("York, PA", "Mount Sinai Hospital, New York, NY"),
+    ("Paris, France", "Parish Medical Center"),
+    ("Paris, France", "Sorbonne, Parisian Campus"),
+    ("Rochester, NY", "Mayo Clinic, Rochester Hills, MI"),
+])
+def test_same_city_other_state_or_country_is_not_already_present(location, institution):
+    assert _location_already_in_institution(location, institution) is False
+
+
+@pytest.mark.parametrize("location, institution", [
+    ("Durham, NC", "Duke University, Durham, North Carolina"),   # spelt-out state
+    ("Durham, North Carolina", "Duke University, Durham, NC"),
+    ("Durham, NC", "Duke University, Durham, north carolina"),  # case of a spelt-out state
+    ("New York, NY", "Memorial Sloan Kettering Cancer Center, New York, N.Y."),  # dotted abbreviation
+    ("Cambridge, United Kingdom", "Cambridge University, Cambridge, united kingdom"),
+    ("Rochester, NY", "Univ of Rochester, Rochester, NY"),
+    ("Boston", "Beth Israel, Boston, MA"),          # location without a state
+    ("Boston, MA", "Beth Israel, Boston"),          # institution without a state
+])
+def test_matching_or_absent_state_still_counts_as_present(location, institution):
+    assert _location_already_in_institution(location, institution) is True
+
+
+@pytest.mark.parametrize("location, institution", [
     ("", "Massachusetts General Hospital"),
     ("Boston, MA", ""),
     (", MA", "Boston, MA"),  # no city segment
