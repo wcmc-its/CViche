@@ -279,10 +279,11 @@ class TestTextCoverage:
                                       start_date='2009-07', end_date='2011-03')
         assert len(_fan(entry)) == 2
 
-    def test_a_date_looking_value_in_a_name_field_is_held_as_written(self):
-        # Only date fields go through the date formatter: "Task Force 2019" is a name.
-        entry = self._committee_entry('Task Force 2019 member\tBeta Board chair', [
-            {'committee_name': 'Task Force 2019', 'role': 'member'},
+    def test_a_date_looking_value_in_a_non_date_field_is_held_as_written(self):
+        # Only date fields go through the date formatter: `role` "July 2009"
+        # would lose "July" if it did.
+        entry = self._committee_entry('Alpha Board July 2009\tBeta Board chair', [
+            {'committee_name': 'Alpha Board', 'role': 'July 2009'},
             {'committee_name': 'Beta Board', 'role': 'chair'}])
         assert len(_fan(entry)) == 2
 
