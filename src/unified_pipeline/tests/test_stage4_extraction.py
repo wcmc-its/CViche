@@ -680,3 +680,15 @@ def test_grant_prompt_names_status_and_notes_in_fields_guide_and_rules(code):
     assert "status" in prompt.split("**Fields to Extract**:")[1].splitlines()[0]
     assert "- status:" in prompt and "- notes:" in prompt
     assert "status = the grant's status only when the entry itself states one" in prompt
+
+
+@pytest.mark.parametrize("rule", [
+    "- status = the grant's status only when the entry itself states one",
+    "- notes = a labelled remark no other field holds",
+])
+def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
+    """#982: each rule line is asserted alone, so dropping only `notes =` from the
+    M2 block fails here even though the field guide still names `- notes:`."""
+    schema = extraction.get_field_schema("M2A")
+    prompt = extraction.build_extraction_prompt([{"text": "Grant X"}], schema, "M2A")
+    assert rule in prompt

@@ -54,8 +54,9 @@ from ..shared import (
 # --------------------------------------------------------------------------
 # Grant status vs the funding subsection the grant rendered under.
 
-# Stage 4 has no 'status' field in the M2* schemas; grant statuses live in
-# the raw entry text as a labelled fragment ("Status: Not funded").
+# Stage 4 extracts 'status' for M2A/M2B/M2C (#982), but only when the entry
+# states one and the LLM fills it; `_entry_status` prefers that field and falls
+# back to the labelled fragment in the raw entry text ("Status: Not funded").
 _STATUS_LABEL_RE = re.compile(r"status\s*[:\-]\s*([^|\n]+)", re.IGNORECASE)
 
 

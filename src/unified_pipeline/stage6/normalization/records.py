@@ -36,7 +36,10 @@ _PENDING_STATUS_RE = re.compile(
     r'|awaiting\s+(?:sponsor\s+)?decision|applications?\s+awaiting'
     r'|under\s+consideration)\b'
 )
-_COMPLETED_STATUS_RE = re.compile(r'\bcompleted?\b|\bclosed\b|\bexpired\b')
+# "Review completed" / "Site visit completed" name a step of the review process,
+# not an ended award, so a "completed" that follows those words is no bucket (#982).
+_COMPLETED_STATUS_RE = re.compile(
+    r'(?<!review )(?<!visit )\bcompleted?\b|\bclosed\b|\bexpired\b')
 # A heading that names a current grant as well as a pending or completed one
 # ("Current and Pending Support", "Past and Present") does not say which bucket
 # one grant under it belongs in (#981).
@@ -123,11 +126,15 @@ def grant_heading_rebucket_target(
     hierarchy: list[str]
 ) -> tuple[str | None, str | None]:
     """The bucket a grant's own section heading puts it in, for a grant whose
-    record carries no status (#981).
+    record carries no status, or a status the vocabulary does not recognise
+    (#981, #982).
 
-    Stage 4 emits a `status` field for 3 of 1268 grant records, so the heading
-    the CV filed the grant under ("Pending applications", "NOT FUNDED") is the
-    only status signal most grants have. Same vocabulary as
+    Stage 4 emitted a `status` field for 3 of 1268 grant records before #982
+    added it to the M2A/M2B/M2C schemas, and it stays absent on any entry that
+    states none, so the heading the CV filed the grant under ("Pending
+    applications", "NOT FUNDED") is the only status signal most grants have.
+    `research_support.explicit_status_target` decides which wins when both name
+    a bucket. Same vocabulary as
     `grant_status_rebucket_target`; (None, None) when the heading is silent or
     names more than one bucket ("Current and Pending Support").
     """

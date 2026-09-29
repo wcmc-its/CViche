@@ -159,6 +159,7 @@ class GrantFields(TypedDict, total=False):
     role: str | None
     status: str | None
     notes: str | None
+    co_investigators: str | None
     study_title: str | None
     text: str | None
     title: str | None
@@ -436,13 +437,21 @@ def apply_effort_to_grants(entries: list[dict], effort_lookup: dict[str, str]) -
 
 
 def explicit_status_target(entry: dict) -> tuple[str | None, str | None]:
-    """The bucket a grant's own words put it in: its status field, or, when
-    stage 4 left no status, the heading the CV filed it under (#981)."""
+    """The bucket a grant's own words put it in: its status field, or, when the
+    status names no bucket (absent, or a word the vocabulary does not know, like
+    "withdrawn", "Funded", "NCE"), the heading the CV filed it under (#981, #982).
+
+    Judgement call, when both name a bucket and disagree: the status wins. It is
+    the grant's own word, and #210 ruled an explicit status beats other signals.
+    The hazard that argues for the heading ("Review completed" under a Pending
+    heading filing the grant Completed) is closed in the vocabulary instead: a
+    "completed" that follows "review" or "visit" names no bucket."""
     fields = cast(GrantFields, entry.get('extracted_fields') or {})
-    status = fields.get('status')
-    if status:
-        return grant_status_rebucket_target(status)
-    return grant_heading_rebucket_target(entry.get('hierarchy') or [])
+    heading_target = grant_heading_rebucket_target(entry.get('hierarchy') or [])
+    status_target = grant_status_rebucket_target(str(fields.get('status') or ''))
+    if not status_target[0]:
+        return heading_target
+    return status_target
 
 
 def rebucket_grants_by_status(
@@ -872,10 +881,19 @@ ANNUAL_COSTS_LABEL = 'Annual direct costs:'
 TOTAL_AWARD_LABEL = 'Total award:'
 STATUS_LABEL = 'Status:'
 NOTES_LABEL = 'Notes:'
+CO_INVESTIGATORS_LABEL = 'Co-Investigators:'
 
 
-def _optional_grant_rows(fields: GrantFields, title: str) -> list[tuple[str, str]]:
+def _optional_grant_rows(
+    fields: GrantFields, title: str, pi_name: str | None
+) -> list[tuple[str, str]]:
     """The rows after the eight the WCM template defines, each only when it has text.
+
+    Co-Investigators (#982) renders the people `co_investigators` lists. The
+    template has only a PI row, and #1008 stopped feeding this field into it
+    (it usually held the CV owner), which left the names in no cell. A row of
+    its own keeps them without touching the PI cell; a value identical to the
+    resolved PI is dropped, since it would repeat the row above it.
 
     Status and Notes (#982) keep a grant's own status word and labelled remark
     ("Update: withdrawn"), which reached no cell before. Major project goals
@@ -886,6 +904,9 @@ def _optional_grant_rows(fields: GrantFields, title: str) -> list[tuple[str, str
     """
     title_text = (title or '').strip().lower()
     rows = []
+    co_investigators = str(fields.get('co_investigators') or '').strip()
+    if co_investigators and co_investigators.lower() != (pi_name or '').strip().lower():
+        rows.append((CO_INVESTIGATORS_LABEL, co_investigators))
     status = str(fields.get('status') or '').strip()
     if status:
         rows.append((STATUS_LABEL, status))
@@ -1229,7 +1250,7 @@ class ResearchSupportSection:
             ('Name of Principal Investigator:', pi_name),
             ('Your role:', role),
             ('Your percent (%) effort:', percent_effort),
-            *_optional_grant_rows(fields, title),
+            *_optional_grant_rows(fields, title, pi_name),
         ]
 
         # Create a new table with 2 columns
