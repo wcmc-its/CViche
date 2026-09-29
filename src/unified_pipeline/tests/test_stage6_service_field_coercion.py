@@ -83,7 +83,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.normalization.fields import _cell_text, _committee_cell_text  # noqa: E402
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
-    _join_names_unless_contained,
+    _join_names,
     _journal_name_cell_text,
     _other_service_organization_text,
     _reviewing_org_and_committee_text,
@@ -630,8 +630,24 @@ def test_editorial_journal_name_is_not_shadowed_by_organization(tmp_path, code):
 
 
 @pytest.mark.parametrize("code, fields, expected", [
+    # equal after case/punctuation/whitespace folding -> the organization, once
+    ("Q4B", {"organization": "Fictional Press", "journal_name": "fictional  press."},
+     "Fictional Press"),
+    # containment must NOT collapse a journal into its society/publisher (#471 N1)
     ("Q4B", {"organization": "Fictional Press", "journal_name": "Fictional Press Journal"},
-     "Fictional Press Journal"),
+     "Fictional Press Journal, Fictional Press"),
+    ("Q4B", {"journal_name": "Neurology", "organization": "American Academy of Neurology"},
+     "Neurology, American Academy of Neurology"),
+    ("Q4C", {"journal_name": "Cell", "organization": "Cell Press"}, "Cell, Cell Press"),
+    ("Q4C", {"journal_name": "Pediatrics", "organization": "American Academy of Pediatrics"},
+     "Pediatrics, American Academy of Pediatrics"),
+    ("Q4B", {"journal_name": "Science",
+             "organization": "American Association for the Advancement of Science"},
+     "Science, American Association for the Advancement of Science"),
+    # whitespace-only / falsy sides count as absent (N2, N3)
+    ("Q4B", {"organization": "   ", "journal_name": "Fictional Annals"}, "Fictional Annals"),
+    ("Q4B", {"organization": "Fictional Society", "journal_name": 0}, "Fictional Society"),
+    ("Q4B", {"organization": "Fictional Society", "journal_name": []}, "Fictional Society"),
     ("Q4C", {"organization": "NIH", "journal_name": "Nihilism Review"}, "Nihilism Review, NIH"),
     ("Q4C", {"organization": "AAP", "journal_name": "Pediatric Papers"}, "Pediatric Papers, AAP"),
     ("Q4B", {"organization": "BMJ.", "journal_name": "BMJ Open"}, "BMJ Open, BMJ."),
@@ -653,10 +669,46 @@ def test_other_service_organization_text_editorial_join(code, fields, expected):
     assert _other_service_organization_text(fields, code) == expected
 
 
-def test_join_names_unless_contained_is_word_bounded():
-    assert _join_names_unless_contained("Ahab Panel", "AHA") == "Ahab Panel, AHA"
-    assert _join_names_unless_contained("Fictional Panel", "") == "Fictional Panel"
-    assert _join_names_unless_contained("", "") == ""
+def test_join_names_is_word_bounded_and_strips():
+    assert _join_names("Ahab Panel", "AHA", collapse_contained=True) == "Ahab Panel, AHA"
+    assert _join_names("Fictional Panel", "", collapse_contained=True) == "Fictional Panel"
+    assert _join_names("", "", collapse_contained=True) == ""
+    assert _join_names("Council", "   ", collapse_contained=True) == "Council"
+    assert _join_names("  ", "Council", collapse_contained=False) == "Council"
+
+
+@pytest.mark.parametrize("fields, expected", [
+    # N2: whitespace-only side is absent, no trailing ", "
+    ({"committee_name": "Council", "organization": "   "}, "Council"),
+    ({"committee_name": "\t", "organization": "Fictional Society"}, "Fictional Society"),
+    # N3: falsy non-string counts as absent, matching the old `or` chain
+    ({"organization": True, "committee_name": 0}, "True"),
+    ({"organization": 0, "committee_name": "Fictional Panel"}, "Fictional Panel"),
+    ({"organization": [], "committee_name": "Fictional Panel"}, "Fictional Panel"),
+    ({"organization": "Fictional Society", "committee_name": {}}, "Fictional Society"),
+])
+def test_reviewing_org_and_committee_text_blank_and_falsy(fields, expected):
+    assert _reviewing_org_and_committee_text(fields) == expected
+
+
+def test_two_column_dedupe_never_drops_the_journal_or_role(tmp_path):
+    """The two-column other-service layout skips `organization` when
+    `role[:20]` occurs in it. The joined `<journal>, <org>` text now feeds
+    that check, so a role phrase sitting inside the journal title must not
+    swallow the org, and the journal must stay visible. Renders end to end;
+    `role` is always kept, so the assertion is that journal and org survive."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q4B", role="Associate Editor",
+               organization="Fictional Society",
+               journal_name="Fictional Journal of Associate Editor Studies",
+               start_date="2015", end_date="2016"),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Journal of Associate Editor Studies"))
+    assert len(rows) == 1
+    assert "Fictional Society" in rows[0][0]
+    assert rows[0][0].startswith("Associate Editor")
 
 
 if __name__ == "__main__":
