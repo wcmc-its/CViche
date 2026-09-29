@@ -642,8 +642,8 @@ _TAIL = ". A study of things. J Things. 2023;1:1-9."
         ("Doe A, Wende M" + _TAIL, "  ", "Wende", "Wende M"),
         # A title-shaped target (a colon, or over four words) is skipped for
         # the owner surname, so the title inside the citation is never bolded.
-        ("Wende M. Fictional Things Of Note: Essays" + _TAIL,
-         "Fictional Things Of Note: Essays", "Wende", "Wende M"),
+        ("Wende M. Fictional Notes: Essays" + _TAIL,
+         "Fictional Notes: Essays", "Wende", "Wende M"),
         ("Wende M. The Long Fictional Book Title" + _TAIL,
          "The Long Fictional Book Title", "Wende", "Wende M"),
         # A four-word name is still a name.
