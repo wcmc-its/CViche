@@ -923,3 +923,8 @@ def test_join_row_cells_single_paragraph_and_single_cell_rows_are_unchanged():
 def test_join_row_cells_ignores_leading_and_trailing_blank_lines_in_cell_zero():
     assert stage2.join_row_cells(["\nTitle\n- a\n", "2024"]) == "Title | 2024\n- a"
     assert stage2.join_row_cells(["Title\n\n", "2024"]) == "Title\n\n | 2024"
+
+
+def test_join_row_cells_keeps_old_shape_when_another_cell_spans_lines():
+    # The trailing paragraphs could not be told from the org cell's own lines.
+    assert stage2.join_row_cells(["Title\n- a", "Org\nCity", "2024"]) == "Title\n- a | Org\nCity | 2024"

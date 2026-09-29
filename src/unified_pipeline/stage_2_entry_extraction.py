@@ -132,12 +132,14 @@ def join_row_cells(cells: list[str]) -> str:
     title followed by sub-bullets), the trailing columns (date, institution)
     describe the whole entry, so they attach to cell 0's FIRST paragraph rather
     than welding onto its last one. A single-paragraph cell 0, or a one-cell
-    row, joins exactly as before.
+    row, joins exactly as before -- and so does a row where another cell also
+    spans lines: the trailing paragraphs could then no longer be told apart
+    from those cells' own lines, and stage 6 (honors) reads that old shape.
     """
     first = cells[0] if cells else ""
     rest = cells[1:]
     stripped = first.strip()
-    if not rest or "\n" not in stripped:
+    if not rest or "\n" not in stripped or any("\n" in c.strip() for c in rest):
         return " | ".join(cells).strip()
     head, _, tail = first.lstrip().partition("\n")
     return (" | ".join([head, *rest]) + "\n" + tail).strip()
