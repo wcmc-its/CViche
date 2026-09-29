@@ -52,6 +52,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_stage6_warnings,
+    lint_table_lost,
     lint_table_shape,
     lint_under_extraction,
     lint_unrendered_records,
@@ -127,6 +128,40 @@ def test_segmentation_lint_quiet_on_clean_extraction():
                           _entry(_GRANT_TEMPLETON, start=2),
                           _entry(_GRANT_NBME, start=3)]}
     assert lint_segmentation(source, _STAGE1A, stage2) == []
+
+
+def test_table_lost_lint_is_one_warn_per_run_with_worst_table_evidence():
+    stage2 = {"entries": [_entry(_GRANT_FSMB, start=1)]}
+    small = [f"lost contact line {i} zebra" for i in range(3)]
+    large = [f"lost grant line {i} yak" for i in range(6)]
+    block_lines = ([(0, _GRANT_FSMB)] + [(1, l) for l in small]
+                   + [(2, l) for l in large])
+    findings = lint_table_lost(block_lines, stage2)
+    assert [(f["lint"], f["severity"]) for f in findings] == [("table_lost", "WARN")]
+    assert findings[0]["message"] == "2 source table(s) mostly lost; worst: 6 of 6 lines"
+    assert findings[0]["evidence"] == large[:5]
+
+
+def test_run_doctor_reports_a_lost_source_table(tmp_path):
+    """The wire: run_doctor reads the source docx once, and both the flat
+    lines (coverage) and the block-tagged lines (table_lost) come from it."""
+    root = _build_clean_run(tmp_path)
+    source_path = root / "uploads" / f"{_UID}_cv.docx"
+    source = Document(str(source_path))
+    table = source.add_table(rows=3, cols=1)
+    for i in range(3):
+        table.rows[i].cells[0].paragraphs[0].text = f"lost contact line {i} zebra"
+    source.save(str(source_path))
+
+    payload = run_doctor(root, _UID)
+    lost = [f for f in payload["findings"] if f["lint"] == "table_lost"]
+    assert [f["message"] for f in lost] == [
+        "1 source table(s) mostly lost; worst: 3 of 3 lines"]
+    assert payload["metrics"]["source_coverage_pct"] == 50.0
+
+
+def test_table_lost_lint_quiet_when_every_table_survives():
+    assert lint_table_lost([(0, _GRANT_FSMB)], {"entries": [_entry(_GRANT_FSMB, start=1)]}) == []
 
 
 # ------------------------------------------------------ lint 2: missed headers
@@ -1653,12 +1688,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (24), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (25), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 23
+    assert len(payload["findings"]) == 24
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

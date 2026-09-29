@@ -470,8 +470,7 @@ Respond with JSON only:
     llm_result = call_llm(
         stage="stage_4_5",
         messages=messages,
-        temperature=0.1,
-        max_tokens=200
+        temperature=0.1
     )
 
     result_text = llm_result["content"].strip()
@@ -544,8 +543,7 @@ Generate only the research summary paragraph (150-200 words max), no additional 
     llm_result = call_llm(
         stage="stage_4_5",
         messages=messages,
-        temperature=0.3,
-        max_tokens=350
+        temperature=0.3
     )
 
     result_text = llm_result["content"].strip()

@@ -54,6 +54,9 @@ from unified_pipeline.stage_4_5_research_summary import (  # noqa: E402
 # char-budget/filtering logic and do not care about the [CURRENT] tag.
 _NOT_CURRENT = EntryRecency(is_current=False, latest_year=None, score=0.0)
 
+# The scoring call is the only prompt that says this (stage_4_5 score_existing_m1).
+_SCORE_PROMPT_MARKER = "CONTENT TO SCORE"
+
 
 # --- score_entry_seniority ----------------------------------------------------
 
@@ -887,8 +890,8 @@ def test_run_stage_4_5_keeps_high_scoring_existing_m1(monkeypatch, tmp_path):
     """M1 score >= 0.8 -> the existing text is used verbatim, no generation
     call happens, and original_m1_content stays None (only the regenerate
     branch populates it)."""
-    def fake_call_llm(*, max_tokens, **_kwargs):
-        if max_tokens == 200:
+    def fake_call_llm(*, messages, **_kwargs):
+        if _SCORE_PROMPT_MARKER in messages[0]["content"]:
             return {
                 "content": json.dumps({"score": 0.9, "reasoning": "cohesive narrative"}),
                 "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7, "cost": 0.001,
@@ -920,8 +923,8 @@ def test_run_stage_4_5_regenerates_low_scoring_m1(monkeypatch, tmp_path):
     existing M1 text -- that would mean the fallback/keep route leaked
     through), and original_m1_content must record the low score as the
     reason it was replaced."""
-    def fake_call_llm(*, max_tokens, **_kwargs):
-        if max_tokens == 200:
+    def fake_call_llm(*, messages, **_kwargs):
+        if _SCORE_PROMPT_MARKER in messages[0]["content"]:
             return {
                 "content": json.dumps({"score": 0.3, "reasoning": "too keyword-y"}),
                 "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7, "cost": 0.001,
@@ -962,10 +965,10 @@ def test_run_stage_4_5_regenerates_low_scoring_m1(monkeypatch, tmp_path):
 
 def test_run_stage_4_5_skips_scoring_when_no_existing_m1(monkeypatch, tmp_path):
     """No M1 entries at all -> existing_m1_content is empty, so
-    score_existing_m1 must never be invoked (a call with max_tokens=200
+    score_existing_m1 must never be invoked (a call carrying the scoring prompt
     would fail the assertion below); generation proceeds directly."""
-    def fake_call_llm(*, max_tokens, **_kwargs):
-        if max_tokens == 200:
+    def fake_call_llm(*, messages, **_kwargs):
+        if _SCORE_PROMPT_MARKER in messages[0]["content"]:
             raise AssertionError("scoring must not run when there is no existing M1 content")
         return {
             "content": "Generated from context only.",
@@ -1005,8 +1008,8 @@ def test_run_stage_4_5_derives_owner_name_from_document_uid(monkeypatch, tmp_pat
     strip-then-capitalize route produces exactly "Jane"."""
     captured = {}
 
-    def fake_call_llm(*, messages, max_tokens, **_kwargs):
-        if max_tokens == 200:
+    def fake_call_llm(*, messages, **_kwargs):
+        if _SCORE_PROMPT_MARKER in messages[0]["content"]:
             raise AssertionError("no M1 content -- scoring must not run")
         captured["prompt"] = messages[0]["content"]
         return {
@@ -1058,8 +1061,8 @@ def test_run_stage_4_5_resolves_current_year_once_from_wall_clock(monkeypatch, t
     monkeypatch.setattr(stage_4_5, "datetime", _frozen_datetime(2030))
     captured = {}
 
-    def fake_call_llm(*, messages, max_tokens, **_kwargs):
-        if max_tokens == 200:
+    def fake_call_llm(*, messages, **_kwargs):
+        if _SCORE_PROMPT_MARKER in messages[0]["content"]:
             raise AssertionError("no M1 content -- scoring must not run")
         captured["prompt"] = messages[0]["content"]
         return {"content": "Summary.", "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
@@ -1078,3 +1081,30 @@ def test_run_stage_4_5_resolves_current_year_once_from_wall_clock(monkeypatch, t
     # check the CV CONTEXT entry itself is not tagged.
     assert f"{CURRENT_CONTEXT_TAG} [GRANT-M2A]" not in captured["prompt"]
     assert "[GRANT-M2A]" in captured["prompt"]
+
+
+def test_run_stage_4_5_calls_send_no_call_site_max_tokens(monkeypatch, tmp_path):
+    """Neither the scoring nor the generation call caps its output: a tight cap
+    cut the summary off mid-sentence (Sonnet 4.6 once, Sonnet 5 on 9 of 13
+    calls, 2026-09-29), and the Bedrock client's 16K floor already bounds a
+    runaway."""
+    seen = []
+
+    def fake_call_llm(*, messages, **kwargs):
+        seen.append(kwargs)
+        if _SCORE_PROMPT_MARKER in messages[0]["content"]:
+            return {"content": json.dumps({"score": 0.3, "reasoning": "r"}),
+                    "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.0}
+        return {"content": "Generated.", "prompt_tokens": 1, "completion_tokens": 1,
+                "total_tokens": 2, "cost": 0.0}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+    inp = _write_fields_json(
+        tmp_path, "TEST07",
+        [{"taxonomy_code": "M1", "text": "Cancer. Genomics.", "extracted_fields": {}}],
+        cv_owner={"first_name": "Jane", "last_name": "Doe"},
+    )
+    run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)
+
+    assert len(seen) == 2
+    assert all("max_tokens" not in kw for kw in seen)

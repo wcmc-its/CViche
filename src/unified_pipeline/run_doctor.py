@@ -10,7 +10,9 @@ Lints, ranked by the severity of the failure class they catch:
 
 1. segmentation           coverage / lost lines / mega-entries / dups via the
                           segmentation_regression metrics (8 grants fused
-                          into one table-cell entry)
+                          into one table-cell entry); its sibling
+                          `table_lost` scopes the same coverage to each
+                          source table (web207's lost personal-data table)
 2. missed_headers         ALL-CAPS bold header-like source lines absent from
                           the 1a hierarchy AND every entry hierarchy path
                           ('PROFESSIONAL EXPERIENCE' demoted to content)
@@ -146,7 +148,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.quality_score import stage3b_fallback_ratios
-from unified_pipeline.segmentation_regression import compute_metrics, iter_source_lines
+from unified_pipeline.segmentation_regression import compute_metrics, iter_source_block_lines
 
 # Lint rules and their primitives now live in the doctor/ package (#493).
 # Re-exported here rather than updating callers: five files import 33 names
@@ -254,6 +256,7 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     _hierarchy_titles,
     lint_missed_headers,
     lint_segmentation,
+    lint_table_lost,
 )
 from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
     lint_protected_data_in_output,
@@ -327,6 +330,7 @@ KNOWN_LINTS = (
     "protected_data_in_output",
     "invented_records",
     "wrong_start_date",
+    "table_lost",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -349,6 +353,9 @@ LINT_PREVALENCE = {
     "stage6_render_warnings": 0.123,
     "dedup_drops": 0.110,
     "segmentation": 0.082,
+    # 30 of 165 corpus runs (farm + 2026-09-11/-17 batches, stored stage-2
+    # artifacts, measured 2026-09-29); 19 of the 30 also trip `segmentation`.
+    "table_lost": 0.182,
     "enrichment_failures": 0.082,
     # 9 of 126 corpus renders from dev (farm + 2026-09-11/-17 batches,
     # re-rendered 2026-09-29), the corpus section_lost was calibrated on.
@@ -794,6 +801,7 @@ class LintSpec(NamedTuple):
 #: can fail alone.
 _VIEW_LABELS = {
     "source_lines": "source",
+    "source_block_lines": "source",
     "candidates": "candidates",
     "stage_1a": "stage_1a",
     "stage_2": "stage_2",
@@ -838,6 +846,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",)),
     LintSpec("invented_records", lint_invented_records, ("stage_4", "table_rows")),
     LintSpec("wrong_start_date", lint_wrong_start_date, ("stage_4",)),
+    # Last row, not beside `segmentation`: this order breaks the sweep's
+    # ranking ties, so a new lint appends rather than shifting every other.
+    LintSpec("table_lost", lint_table_lost, ("source_block_lines", "stage_2")),
 )
 
 
@@ -1008,8 +1019,13 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
     views: dict[str, object] = {
         key: _load_json(paths[key], key, _note, _ARTIFACTS[key])
         for key in _JSON_ARTIFACTS}
-    views["source_lines"] = (_try(lambda: iter_source_lines(str(source_path)), "source", _note)
-                             if source_path else None)
+    # One read of the source docx feeds both views: the flat lines are the
+    # block-tagged lines with the tag dropped.
+    source_block_lines = (_try(lambda: iter_source_block_lines(str(source_path)), "source", _note)
+                          if source_path else None)
+    views["source_block_lines"] = source_block_lines
+    views["source_lines"] = (None if source_block_lines is None
+                             else [line for _, line in source_block_lines])
     views["candidates"] = (_try(lambda: iter_header_candidates(str(source_path)), "candidates", _note)
                            if source_path else None)
     views["blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note)

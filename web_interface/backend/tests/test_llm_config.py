@@ -267,3 +267,10 @@ def test_dated_haiku_4_5_id_prices_as_haiku_not_fallback():
     # Haiku 4.5: 1.100 + 5.500 = 6.600; the Sonnet-4-6 fallback would be 19.800.
     assert cost == pytest.approx(6.600)
     assert cost != pytest.approx(19.800)
+
+
+def test_sonnet_5_prices_as_sonnet_5_not_fallback():
+    """Without its own PRICING entry, Sonnet 5 falls back to Sonnet 4.6's rates
+    and every recorded cost is overstated by 50% (the #76 failure mode)."""
+    cost = calculate_cost(1_000_000, 1_000_000, model="us.anthropic.claude-sonnet-5", provider="bedrock")
+    assert cost == pytest.approx(2.200 + 11.000)
