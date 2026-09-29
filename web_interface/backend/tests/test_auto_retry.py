@@ -59,7 +59,7 @@ def test_config_defaults_when_env_unset(monkeypatch):
     monkeypatch.delenv("CVICHE_AUTO_RETRY_BACKOFF_SECONDS", raising=False)
 
     assert auto_retry.auto_retry_enabled() is False
-    assert auto_retry.max_auto_retries() == 3
+    assert auto_retry.max_auto_retries() == 2
     assert auto_retry.auto_retry_backoff_seconds() == 30
 
 
@@ -84,7 +84,7 @@ def test_max_auto_retries_custom_and_bad_value(monkeypatch):
     assert auto_retry.max_auto_retries() == 5
     # Non-integer falls back to the default rather than raising.
     monkeypatch.setenv("CVICHE_MAX_AUTO_RETRIES", "garbage")
-    assert auto_retry.max_auto_retries() == 3
+    assert auto_retry.max_auto_retries() == 2
 
 
 def test_backoff_seconds_custom_and_bad_value(monkeypatch):
@@ -136,3 +136,17 @@ def test_eligible_false_when_attempts_over_cap(monkeypatch):
     assert auto_retry.eligible_for_resume(
         _run(attempt_count=4), last_error_type="api_error", is_interruption=True
     ) is False
+
+
+def test_default_cap_allows_three_executions_in_total(monkeypatch):
+    # #145 decision: 3 executions total. The first run is attempt 1, so the
+    # 1st and 2nd executions may be retried and the 3rd may not.
+    monkeypatch.setenv("CVICHE_AUTO_RETRY_ENABLED", "1")
+    monkeypatch.delenv("CVICHE_MAX_AUTO_RETRIES", raising=False)
+    eligible = [
+        auto_retry.eligible_for_resume(
+            _run(attempt_count=n), last_error_type=None, is_interruption=True
+        )
+        for n in (1, 2, 3)
+    ]
+    assert eligible == [True, True, False]

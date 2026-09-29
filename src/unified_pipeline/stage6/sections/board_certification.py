@@ -384,6 +384,10 @@ _CERTIFICATION_HEADER_CELLS = {
     'full name of board',
     'certificate # (indicate if board eligible)',
     'dates of certification (yyyy–yyyy)',
+    # The same two columns without their parentheticals, as a faculty copy of
+    # an older revision carries them (A5IZ6Q, #829).
+    'certificate #',
+    'dates of certification',
 }
 
 _HEADER_CELL_WHITESPACE_RE = re.compile(r'\s+')
@@ -414,6 +418,28 @@ def _is_certification_header_line(line: str) -> bool:
     if not cells:
         return False
     return all(cell in _CERTIFICATION_HEADER_CELLS for cell in cells)
+
+
+def _is_header_record(fields: dict, text: str) -> bool:
+    """True when an entry is the source table's own header row, extracted as
+    if it were a certification.
+
+    Stage 4 reads "Full Name of Board | Certificate # | ..." like any other
+    row and returns certifying_board="Full Name of Board", which the
+    single-certification path rendered as a certification (A5IZ6Q, #829).
+    Every non-empty extracted value AND every text line must be a known
+    header cell; one real value or line keeps the entry. (An entry with no
+    values and only header lines is skipped too: the text path would render
+    nothing for it anyway.)
+    """
+    values = [str(v) for key in ('certifying_board', 'certificate_number',
+                                 'year_certified', 'recertification_date')
+              for v in (fields.get(key) if isinstance(fields.get(key), list)
+                        else [fields.get(key)])
+              if v and str(v).strip()]
+    lines = entry_lines(text or '')
+    return (all(_is_certification_header_line(v) for v in values)
+            and all(_is_certification_header_line(line) for line in lines))
 
 
 class BoardCertificationSection:
@@ -468,6 +494,8 @@ class BoardCertificationSection:
         for entry in sort_entries_reverse_chronological(entries):
             fields = entry.get('extracted_fields', {}) or {}
             original_text = entry.get('text', '')
+            if _is_header_record(fields, original_text):
+                continue
 
             certifying_board = fields.get('certifying_board', '')
             certificate_number = fields.get('certificate_number', '')

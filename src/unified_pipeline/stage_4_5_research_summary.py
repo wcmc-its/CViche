@@ -15,6 +15,7 @@ import argparse
 import json
 import re
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 
@@ -31,7 +32,7 @@ SECTION_WEIGHTS = {
     'M2A': 0.0,     # Current Funding
     'S1': -0.05,    # Peer-reviewed articles
     'S0': -0.05,    # Bibliometric profile
-    # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C based on status
+    # NOTE: M4 clinical trial codes removed - clinical trials file as M2A (no end date) or M2B (ended) (#291)
     'N4': -0.1,     # Mentorship outputs
     'H': -0.2,      # Honors & Awards
 
@@ -79,6 +80,126 @@ SENIOR_AUTHOR_BONUS = 0.1  # Bonus for senior/first author on pubs
 # Taxonomy code groups (see docs/CODING_STANDARDS.md §8.2)
 GRANT_TAXONOMY_PREFIX = 'M2'  # M2A/M2B/M2C/M2D -- all grant/funding entries
 PUBLICATION_TAXONOMY_CODES = ('S1', 'S2', 'S7', 'S8')  # publication-like codes that need a title
+# Current by definition (active funding, current mentees) unless the entry's end_date has passed.
+CURRENT_TAXONOMY_CODES = ('M2A', 'N3A')
+RESEARCH_ACTIVITIES_CODE = 'M1'  # an undated M1 narrative is the owner's present research statement
+
+# Recency (#946 item 6). An entry's recency score is 1.0 when it is ongoing and
+# falls linearly to 0 over RECENCY_WINDOW_YEARS; RECENCY_WEIGHT scales it into
+# both the within-section ranking and the cross-section context order, so
+# current work outranks a decade-old first-author paper.
+RECENCY_WEIGHT = 0.4
+RECENCY_WINDOW_YEARS = 20
+DATE_FIELDS = ('year', 'start_date', 'end_date', 'date')
+YEAR_PATTERN = re.compile(r'\b(?:19|20)\d{2}\b')
+# Matches an end_date value that names no date of its own, only that the
+# entry is ongoing: the whole value ("Present"), a range's open end
+# ("2024 - Present", "to present"), or "Currently Working" (8 occurrences in
+# the local stage-4 farm). Anchored at the start so a trailing qualifier
+# ("2019, not current") does not count, and at the end so trailing text after
+# the open word ("2019 - present, renewed 2024") does not count either.
+ONGOING_PATTERN = re.compile(
+    r'(?:^|[-–—]|\bto)\s*\b(?:present|current|ongoing|now|currently\s+working)\b\s*$', re.IGNORECASE)
+OPEN_RANGE_PATTERN = re.compile(r'\b(?:19|20)\d{2}\s*[-–—]+\s*(?:present|current|ongoing|now)\b', re.IGNORECASE)
+CURRENT_CONTEXT_TAG = '[CURRENT]'
+# A leading "YYYY" or "YYYY-YYYY" token in free text, for latest_entry_year's
+# text fallback: group 2 is empty when there is no range.
+LEADING_YEAR_OR_RANGE_PATTERN = re.compile(r'\b((?:19|20)\d{2})\b(?:\s*[-–—]+\s*\b((?:19|20)\d{2})\b)?')
+
+_UNCOMPUTED = object()  # sentinel: is_current_entry() should compute latest_entry_year itself
+
+
+def latest_entry_year(entry: dict, current_year: int) -> int | None:
+    """Latest year across the entry's date fields (trusted, so not capped);
+    else the entry's own date from its free text -- the first year-or-range
+    token, taking a range's END year ("Project A, 2021-2023" -> 2023), not the max of
+    every year mentioned (a later aside, such as a renewal year, must not
+    make an old entry look recent). A range straddling current_year (start
+    <= current_year < end, e.g. "Project 2022-2028" at current_year=2026) is
+    an entry still in progress and is capped at current_year, not skipped in
+    favour of a later token. A bare year after current_year, or a range
+    whose START is after current_year, is a typo or forward-looking
+    projection and is skipped in favour of the next token in the text."""
+    fields = entry.get('extracted_fields') or {}
+    field_years = [int(y) for name in DATE_FIELDS for y in YEAR_PATTERN.findall(str(fields.get(name) or ''))]
+    if field_years:
+        return max(field_years)
+    for start, end in LEADING_YEAR_OR_RANGE_PATTERN.findall(entry.get('text') or ''):
+        if end:
+            start_year, end_year = int(start), int(end)
+            if start_year > current_year:
+                continue
+            return min(end_year, current_year)
+        candidate = int(start)
+        if candidate <= current_year:
+            return candidate
+    return None
+
+
+def resolve_current_year(current_year: int | None) -> int:
+    """The given year, or the wall-clock year when None (production's default)."""
+    return datetime.now().year if current_year is None else current_year
+
+
+def ended_before(entry: dict, current_year: int) -> bool:
+    """True when the entry's end_date names a year earlier than current_year.
+    An end_date matching ONGOING_PATTERN ("2024 - Present") has not ended,
+    whatever year it names, so an open-ended M2A/N3A stays current."""
+    fields = entry.get('extracted_fields') or {}
+    end_date = str(fields.get('end_date') or '')
+    if ONGOING_PATTERN.search(end_date):
+        return False
+    end_years = [int(y) for y in YEAR_PATTERN.findall(end_date)]
+    return bool(end_years) and max(end_years) < current_year
+
+
+def is_current_entry(entry: dict, taxonomy_code: str, current_year: int, latest_year: int | None = _UNCOMPUTED) -> bool:
+    """True for an ongoing entry: a current-by-definition section whose
+    end_date has not passed, an undated M1 narrative, an end_date of
+    'present'/'current'/'ongoing', or (M1 only -- M1 project lines carry
+    their dates only in the text) an open 'YYYY-present' range in the text.
+
+    `latest_year`, when given, is the caller's already-computed
+    latest_entry_year(entry, current_year), so the M1 undated check does not
+    compute it a second time."""
+    if taxonomy_code in CURRENT_TAXONOMY_CODES:
+        return not ended_before(entry, current_year)
+    if taxonomy_code == RESEARCH_ACTIVITIES_CODE:
+        year = latest_entry_year(entry, current_year) if latest_year is _UNCOMPUTED else latest_year
+        if year is None:
+            return True
+    fields = entry.get('extracted_fields') or {}
+    if ONGOING_PATTERN.search(str(fields.get('end_date') or '')):
+        return True
+    if taxonomy_code == RESEARCH_ACTIVITIES_CODE:
+        return bool(OPEN_RANGE_PATTERN.search(entry.get('text') or ''))
+    return False
+
+
+@dataclass(frozen=True)
+class EntryRecency:
+    """One entry's recency facts, computed once and shared by ranking and tagging."""
+    is_current: bool
+    latest_year: int | None
+    score: float
+
+
+def compute_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> EntryRecency:
+    """The entry's is_current/latest_year/score, sharing one latest_entry_year call."""
+    year = latest_entry_year(entry, current_year)
+    current = is_current_entry(entry, taxonomy_code, current_year, latest_year=year)
+    if current:
+        score = 1.0
+    elif year is None:
+        score = 0.0
+    else:
+        score = min(max(1 - (current_year - year) / RECENCY_WINDOW_YEARS, 0.0), 1.0)
+    return EntryRecency(is_current=current, latest_year=year, score=score)
+
+
+def score_entry_recency(entry: dict, taxonomy_code: str, current_year: int) -> float:
+    """0.0-1.0: 1.0 if ongoing, else linear decay over RECENCY_WINDOW_YEARS; undated scores 0."""
+    return compute_entry_recency(entry, taxonomy_code, current_year).score
 
 
 def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = '') -> float:
@@ -122,14 +243,19 @@ def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = 
     return 0.0
 
 
-def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: str = '', limit: int = None) -> list[dict]:
+def prioritize_entries(entries: list[dict], taxonomy_code: str, current_year: int, cv_owner_name: str = '',
+                       limit: int = None, recency_by_id: dict[int, EntryRecency] | None = None) -> list[dict]:
     """
     Prioritize and limit entries for a taxonomy code.
 
     Prioritization:
+    - Recency (ongoing first, then most recent)
     - Senior author / PI role
-    - Recency (most recent first)
     - Has substantive content
+
+    `recency_by_id`, keyed by id(entry), supplies an entry's already-computed
+    EntryRecency so this function does not call compute_entry_recency a
+    second time for an entry the caller (gather_context_entries) already scored.
     """
     if not entries:
         return []
@@ -137,29 +263,16 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: s
     # Score each entry
     scored_entries = []
     for entry in entries:
-        fields = entry.get('extracted_fields', {})
-
-        # Base score from seniority
         seniority_score = score_entry_seniority(entry, taxonomy_code, cv_owner_name)
-
-        # Recency score (try to extract year)
-        year = None
-        for year_field in ['year', 'start_date', 'end_date', 'date']:
-            year_val = fields.get(year_field, '')
-            if year_val:
-                year_match = re.search(r'(19|20)\d{2}', str(year_val))
-                if year_match:
-                    year = int(year_match.group(0))
-                    break
-
-        recency_score = (year - 2000) / 25 if year and year >= 2000 else 0  # 0-1 scale
+        recency = (recency_by_id or {}).get(id(entry))
+        if recency is None:
+            recency = compute_entry_recency(entry, taxonomy_code, current_year)
 
         # Content quality score (has substantive text)
         text_len = len(entry.get('text', ''))
         content_score = min(text_len / 500, 1.0)  # Cap at 1.0
 
-        # Combined score
-        total_score = seniority_score + (recency_score * 0.3) + (content_score * 0.1)
+        total_score = seniority_score + (recency.score * RECENCY_WEIGHT) + (content_score * 0.1)
         scored_entries.append((total_score, entry))
 
     # Sort by score descending
@@ -172,11 +285,19 @@ def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: s
     return [entry for _, entry in scored_entries[:limit]]
 
 
-def gather_context_entries(entries_by_code: dict[str, list[dict]], cv_owner_name: str = '') -> list[tuple[str, dict, float]]:
+def gather_context_entries(entries_by_code: dict[str, list[dict]], current_year: int,
+                           cv_owner_name: str = '') -> list[tuple[str, dict, float, EntryRecency]]:
     """
     Gather and weight entries from all sections for summary generation.
 
-    Returns list of (taxonomy_code, entry, weight) tuples, sorted by weight.
+    An entry's weight is its section weight + seniority bonus + scaled recency,
+    so ongoing work sorts ahead of older work from a higher-tier section.
+
+    Each entry's EntryRecency is computed once here and carried through as
+    the 4th tuple element, so both prioritize_entries' cut and
+    build_context_string's [CURRENT] tag reuse it instead of recomputing.
+
+    Returns list of (taxonomy_code, entry, weight, recency) tuples, sorted by weight.
     """
     weighted_entries = []
 
@@ -187,15 +308,18 @@ def gather_context_entries(entries_by_code: dict[str, list[dict]], cv_owner_name
         if base_weight <= -0.85:
             continue
 
+        recency_by_id = {id(entry): compute_entry_recency(entry, code, current_year) for entry in entries}
+
         # Prioritize and limit entries
-        prioritized = prioritize_entries(entries, code, cv_owner_name)
+        prioritized = prioritize_entries(entries, code, current_year, cv_owner_name=cv_owner_name,
+                                          recency_by_id=recency_by_id)
 
         for entry in prioritized:
-            # Add seniority bonus to weight
             seniority_bonus = score_entry_seniority(entry, code, cv_owner_name)
-            final_weight = base_weight + seniority_bonus
+            recency = recency_by_id[id(entry)]
+            final_weight = base_weight + seniority_bonus + (recency.score * RECENCY_WEIGHT)
 
-            weighted_entries.append((code, entry, final_weight))
+            weighted_entries.append((code, entry, final_weight, recency))
 
     # Sort by weight (higher = more important, closer to 0)
     weighted_entries.sort(key=lambda x: x[2], reverse=True)
@@ -266,13 +390,17 @@ def format_entry_for_context(code: str, entry: dict) -> str:
         return f"[{code}] {text}"
 
 
-def build_context_string(weighted_entries: list[tuple[str, dict, float]], max_tokens: int = 4000) -> str:
+def build_context_string(weighted_entries: list[tuple[str, dict, float, EntryRecency]],
+                         max_tokens: int = 4000) -> str:
     """
     Build context string from weighted entries, respecting token limit.
 
     Entries are:
     1. Filtered to remove invalid/empty entries
     2. Sorted in descending order by weight (most relevant first)
+
+    Each entry's EntryRecency (4th tuple element) is gather_context_entries'
+    already-computed value; the [CURRENT] tag reads its `is_current` field.
 
     Rough estimate: 1 token ≈ 4 characters
     """
@@ -282,14 +410,16 @@ def build_context_string(weighted_entries: list[tuple[str, dict, float]], max_to
 
     # Filter and sort: already sorted by gather_context_entries, but ensure descending order
     # (higher weight = more relevant, closer to 0)
-    valid_entries = [(code, entry, weight) for code, entry, weight in weighted_entries
+    valid_entries = [(code, entry, weight, recency) for code, entry, weight, recency in weighted_entries
                      if is_valid_entry(code, entry)]
 
     # Sort by weight descending (higher/closer to 0 = more relevant)
     valid_entries.sort(key=lambda x: x[2], reverse=True)
 
-    for code, entry, weight in valid_entries:
+    for code, entry, weight, recency in valid_entries:
         formatted = format_entry_for_context(code, entry)
+        if recency.is_current:
+            formatted = f"{CURRENT_CONTEXT_TAG} {formatted}"
 
         if total_chars + len(formatted) > max_chars:
             break
@@ -370,6 +500,19 @@ Respond with JSON only:
         return 0.0, "Failed to parse response", usage
 
 
+# Generation-prompt requirements (#946 item 6), named so tests pin them. Kept next to
+# generate_research_summary rather than the recency constants above: these are prompt
+# content, not recency logic, and NEUTRAL_REFERENCE_REQUIREMENT has nothing to do with dates.
+CURRENT_WORK_REQUIREMENT = (
+    f"Open with the researcher's CURRENT research and ongoing projects (entries tagged {CURRENT_CONTEXT_TAG} "
+    "and the most recent years); mention older work only briefly, as background, after the current work"
+)
+NEUTRAL_REFERENCE_REQUIREMENT = (
+    "Refer to the researcher by name or with gender-neutral phrasing (e.g. \"this research program\", \"this work\"); "
+    "never use gendered pronouns (he/she/his/her/him) and never infer gender from the name"
+)
+
+
 def generate_research_summary(context: str, cv_owner_name: str) -> tuple[str, dict]:
     """
     Generate a biosketch-style research summary from CV context.
@@ -384,12 +527,14 @@ REQUIREMENTS:
 - Mention key funding sources and roles (PI vs Co-I)
 - Highlight impact (clinical translation, policy, mentorship outcomes if relevant)
 - Write in third person
+- {CURRENT_WORK_REQUIREMENT}
+- {NEUTRAL_REFERENCE_REQUIREMENT}
 - Do NOT list publications or include citations
 - Do NOT include education or job titles
 - Be specific about research areas, not generic
 - Keep it concise - prioritize quality over comprehensiveness
 
-CV CONTEXT (ranked by relevance):
+CV CONTEXT (ranked by relevance; ongoing entries tagged {CURRENT_CONTEXT_TAG}):
 {context}
 
 Generate only the research summary paragraph (150-200 words max), no additional text or formatting."""
@@ -417,6 +562,21 @@ Generate only the research summary paragraph (150-200 words max), no additional 
     return result_text, usage
 
 
+def _resolve_stage_4_5_input_file(input_path: str) -> Path:
+    """input_path as a literal path, or else the first *_fields.json-shaped
+    match for it under a stage 4/5/5b output directory."""
+    input_file = Path(input_path)
+    if not input_file.exists():
+        for stage_dir in ['stage_5b_institution_enrichment', 'stage_5_enrichment', 'stage_4_field_extraction']:
+            candidates = list((Path(__file__).parent / "outputs" / stage_dir).glob(f"*{input_path}*.json"))
+            if candidates:
+                input_file = candidates[0]
+                break
+    if not input_file.exists():
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+    return input_file
+
+
 def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True) -> str:
     """
     Run Stage 4.5: Research Summary Generation.
@@ -429,23 +589,13 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
     Returns:
         Path to output JSON file
     """
-    # Resolve input path
-    input_file = Path(input_path)
-    if not input_file.exists():
-        # Try to find in stage directories
-        for stage_dir in ['stage_5b_institution_enrichment', 'stage_5_enrichment', 'stage_4_field_extraction']:
-            candidates = list((Path(__file__).parent / "outputs" / stage_dir).glob(f"*{input_path}*.json"))
-            if candidates:
-                input_file = candidates[0]
-                break
-
-    if not input_file.exists():
-        raise FileNotFoundError(f"Input file not found: {input_path}")
+    input_file = _resolve_stage_4_5_input_file(input_path)
 
     # Load data
     with open(input_file, 'r') as f:
         data = json.load(f)
 
+    current_year = resolve_current_year(None)  # resolved once, reused for the whole run
     document_uid = data.get('document_uid', input_file.stem)
     cv_owner = data.get('cv_owner') or {}
     cv_owner_name = f"{cv_owner.get('first_name', '')} {cv_owner.get('last_name', '')}".strip()
@@ -525,12 +675,12 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
             print(f"\nGenerating research summary from CV context...")
 
         # Gather weighted context
-        weighted_entries = gather_context_entries(entries_by_code, cv_owner_name)
+        weighted_entries = gather_context_entries(entries_by_code, current_year, cv_owner_name=cv_owner_name)
 
         if verbose:
             print(f"  Context entries: {len(weighted_entries)}")
             # Show top entries by weight
-            for code, entry, weight in weighted_entries[:5]:
+            for code, entry, weight, _recency in weighted_entries[:5]:
                 text_preview = entry.get('text', '')[:50]
                 print(f"    [{code}] (w={weight:.2f}) {text_preview}...")
 
@@ -539,7 +689,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
 
         # Track what was used
         context_entries_used = len(weighted_entries)
-        top_codes_used = list(dict.fromkeys([code for code, _, _ in weighted_entries[:20]]))
+        top_codes_used = list(dict.fromkeys([code for code, _, _, _ in weighted_entries[:20]]))
 
         if verbose:
             print(f"  Context length: {len(context)} chars")

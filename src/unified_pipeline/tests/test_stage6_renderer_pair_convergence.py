@@ -471,15 +471,18 @@ class TestCitationWritersShareOneSplit:
         before, bold, after = _citation_author_split(self.CITATION, "Nobody Q", "Jones")
         assert (before, bold, after) == (self.CITATION, "", "")
 
-    def test_split_matches_target_name_as_a_substring_not_a_word(self):
-        # Pinned, not endorsed (#625 review): target_name is matched via `in`,
-        # so a short target_name can match inside a longer surname. Both
-        # writers shared this behavior before #572; the shared function keeps
-        # it byte-identical rather than tightening it here.
+    def test_split_does_not_match_target_name_inside_a_longer_surname(self):
+        # #662 item 6 reversed the substring pin from #625: target_name is a
+        # whole author token, so "Wu" no longer bolds the head of "Wuertz".
         citation = "Wuertz K, Smith J. A study of things. J Things. 2023;1:1-9."
         before, bold, after = _citation_author_split(citation, "Wu", "Nobody")
+        assert (before, bold, after) == (citation, "", "")
+
+    def test_split_matches_target_name_as_a_whole_token(self):
+        citation = "Wuertz K, Wu J. A study of things. J Things. 2023;1:1-9."
+        before, bold, after = _citation_author_split(citation, "Wu", "Nobody")
         assert (before, bold, after) == (
-            "", "Wu", "ertz K, Smith J. A study of things. J Things. 2023;1:1-9.")
+            "Wuertz K, ", "Wu", " J. A study of things. J Things. 2023;1:1-9.")
 
     def test_split_falls_back_to_owner_last_name_for_a_hyphenated_surname(self):
         citation = "Alvarez-Diaz M, Smith J. A study of things. J Things. 2023;1:1-9."

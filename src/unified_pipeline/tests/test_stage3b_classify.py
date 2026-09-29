@@ -184,6 +184,24 @@ def test_unknown_taxonomy_code_falls_back_instead_of_persisting(monkeypatch, cap
     assert any("unknown taxonomy code" in r.getMessage() for r in caplog.records)
 
 
+def test_retired_trial_code_is_rewritten_to_current_funding_not_rejected(monkeypatch):
+    """#291: M4A is gone from the taxonomy, but a model that still answers
+    with it named a real clinical trial. It files as M2A (the date rule moves
+    a finished one to M2B later), not as an unknown-code fallback."""
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(
+        [{"index": 0, "code": "M4A", "confidence": 0.9}]
+    ))
+
+    results, stats = classify.classify_entries_batch(
+        [_entry("Site PI, invented Phase II trial", ("CLINICAL TRIALS",))],
+        _context(["H"]), _taxonomy()
+    )
+
+    assert results[0]["taxonomy_code"] == "M2A"
+    assert results[0]["classification_source"] == "llm"
+    assert stats["invalid_code_entries"] == 0
+
+
 def test_confidence_above_one_clamps_to_default(monkeypatch):
     monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(
         [{"index": 0, "code": "S1", "confidence": 5.0}]
@@ -370,6 +388,16 @@ def test_t_entry_reclassified_and_input_list_not_mutated(monkeypatch):
     assert original[0]["taxonomy_code"] == "T"
     assert updated is not original
     assert updated[0] is not original[0]
+
+
+def test_t_entry_reclassified_to_a_retired_trial_code_lands_on_m2a(monkeypatch):
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(None) | {
+        "content": json.dumps([{"entry_index": 0, "new_code": "M4B", "confidence": 0.8}])
+    })
+
+    updated, _ = classify.validate_t_classifications([_t_entry()], _taxonomy())
+
+    assert updated[0]["taxonomy_code"] == "M2A"
 
 
 def test_t_entry_confirmed_stays_t_and_input_not_mutated(monkeypatch):
@@ -560,24 +588,21 @@ def test_short_text_excluded_from_comparison():
     assert pairs == []
 
 
-def test_near_duplicates_with_different_first_100_chars_are_detected():
-    """Regression test for the prefix-bucketing bug: two entries whose
-    normalized text differs at the very start (a prepended clause) but whose
-    overall content is otherwise near-identical used to land in different
-    first-100-char buckets and NEVER be compared, silently missing a real
-    duplicate."""
-    shared_tail = "a randomized trial of a new asthma intervention in children across three centers"
+def test_duplicates_differing_only_in_opening_punctuation_are_detected():
+    """Regression test for the old prefix-bucketing bug: two entries that
+    differ at the very start used to land in different first-100-char
+    buckets and NEVER be compared. Every eligible pair is compared now, so a
+    duplicate whose only difference is leading punctuation/spacing (a
+    bullet, a dash) is still found."""
+    shared = "a randomized trial of a new asthma intervention in children across three centers"
     entries = [
-        _dup_entry("Preliminary report: " + shared_tail),
-        _dup_entry("Final results of " + shared_tail),
+        _dup_entry("-- " + shared),
+        _dup_entry("* " + shared),
     ]
-    # Confirm the two texts really do differ at the start (which is what put
-    # them in different buckets under the old first-100-char grouping), or
-    # this test would not exercise the bug it targets.
-    assert entries[0]["text"][:20] != entries[1]["text"][:20]
+    assert entries[0]["text"][:5] != entries[1]["text"][:5]
 
-    _, pairs = classify.detect_duplicates(entries, similarity_threshold=0.85)
-    assert len(pairs) == 1, "near-duplicates with different prefixes must still be compared"
+    _, pairs = classify.detect_duplicates(entries)
+    assert len(pairs) == 1, "duplicates with different prefixes must still be compared"
 
 
 def test_three_identical_entries_produce_two_pairs_and_keep_one_original():
@@ -599,6 +624,20 @@ def test_m2_preferred_over_t_when_marking_the_duplicate():
     # duplicate, leaving the better-classified M2A entry as the survivor.
     assert updated[0].get("is_duplicate") is True
     assert "is_duplicate" not in updated[1]
+
+
+def test_canonical_taxonomy_codes_is_the_set_3b_validates_against():
+    # #651: stage 4's membership check and stage 3b's must be ONE list.
+    from unified_pipeline.stage3b.io import canonical_taxonomy_codes, load_taxonomy
+    assert canonical_taxonomy_codes() == classify._valid_taxonomy_codes(load_taxonomy())
+    assert "T" in canonical_taxonomy_codes()
+    assert "S10" not in canonical_taxonomy_codes()  # taxonomy's own invalid_codes
+
+
+def test_taxonomy_code_set_skips_malformed_code_entries():
+    from unified_pipeline.stage3b.io import taxonomy_code_set
+    taxonomy = {"codes": [{"code": "A"}, {"code": ""}, {"code": 7}, {"name": "x"}, "B", {"code": "T"}]}
+    assert taxonomy_code_set(taxonomy) == {"A", "T"}
 
 
 if __name__ == "__main__":

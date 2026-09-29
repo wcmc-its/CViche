@@ -5,7 +5,7 @@ Uses URL domains as deterministic hints for section classification.
 Domains like doi.org, pubmed, github.com provide objective signals.
 
 Confidence Tiers:
-- Tier 1 (0.8-0.9): Unambiguous domains (e.g., clinicaltrials.gov → M4)
+- Tier 1 (0.8-0.9): Unambiguous domains (e.g., clinicaltrials.gov → M2A/M2B, a clinical trial)
 - Tier 2 (0.5-0.7): Strongly suggestive (e.g., doi.org → S1-S9)
 - Tier 3 (0.2-0.4): Weak hints (e.g., .edu → multiple possibilities)
 

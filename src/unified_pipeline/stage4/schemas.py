@@ -243,20 +243,22 @@ FIELD_SCHEMAS = {
         "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "annual_funding", "percent_effort", "narrative"],
     },
     "M2A": {  # Current Research Funding (active grants)
-        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "annual_funding", "percent_effort", "narrative"],
+        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "annual_funding", "percent_effort", "status", "notes", "narrative"],
     },
     "M2B": {  # Past Research Funding (completed grants)
-        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "percent_effort", "narrative"],
+        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "percent_effort", "status", "notes", "narrative"],
     },
     "M2C": {  # Pending Research Funding (submitted grants)
-        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "total_funding_requested", "submission_date", "narrative"],
+        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "total_funding_requested", "submission_date", "status", "notes", "narrative"],
     },
     "M2D": {  # Patents & Innovations (formerly M3)
         "fields": ["patent_number", "title", "inventors", "filing_date", "issue_date", "status", "assignee", "narrative"],
     },
-    # NOTE: M4 clinical trial codes have been removed. Clinical trials should now be
-    # classified as M2A (active/current), M2B (completed/past), or M2C (pending) based
-    # on their status. The M2A/M2B/M2C schemas support clinical trial fields via narrative.
+    # Clinical trials have no code of their own (#291): they file as M2A (no end
+    # date) or M2B (ended), and map onto the grant fields -- NCT/protocol number
+    # -> grant_number, sponsor -> agency, trial role -> pi_role, trial title
+    # (with its phase) -> title. The mapping is stated once, in stage 4's
+    # grant instructions (extraction.build_extraction_prompt).
 
     # -------------------------------------------------------------------------
     # Mentoring (N1, N2, N3, N4)
@@ -326,7 +328,7 @@ FIELD_SCHEMAS = {
     # Invited Presentations (R)
     # -------------------------------------------------------------------------
     "R": {  # Invitations to Speak/Present
-        "fields": ["title", "event_name", "location", "date", "presentation_type", "host_organization", "authors", "target_name", "narrative"],
+        "fields": ["title", "event_name", "location", "date", "role", "presentation_type", "host_organization", "authors", "target_name", "narrative"],
     },
 
     # -------------------------------------------------------------------------
@@ -377,6 +379,17 @@ FIELD_SCHEMAS = {
 # Shared source of truth used by both primary extraction and recovery pass.
 # Each entry maps a taxonomy code to a dict of field_name -> description string.
 # ============================================================================
+# Grant-record fields whose meaning the prompt pins down (#982). Shared by the
+# M2A/M2B/M2C field guides so the three buckets cannot word them differently.
+GRANT_STATUS_DESCRIPTION = (
+    "Status of the grant exactly as the CV words it (e.g. 'withdrawn', 'not funded', "
+    "'under review'), only when the entry states one; null otherwise. Do NOT infer it from dates"
+)
+GRANT_NOTES_DESCRIPTION = (
+    "Any labelled remark on the entry that no other field holds (e.g. text after 'Update:' "
+    "or 'Note:'), verbatim; null otherwise. Do NOT repeat the title, amounts or status here"
+)
+
 FIELD_DESCRIPTIONS = {
     "K1": {
         "course_title": "Name of the course taught",
@@ -479,6 +492,7 @@ FIELD_DESCRIPTIONS = {
         "location": "Institution or venue where presented",
         "date": "Date of the presentation",
         "event_name": "Name of the conference or event (if applicable)",
+        "role": "The speaker's role or title at the invitation (e.g., 'Visiting Professor', 'Keynote Speaker', 'Panelist'), only when the text states one. Keep the talk's own title in title (do not empty it because a role is present) and leave role empty for a plain 'Invited Speaker'. If the text names the presentation format (e.g., 'Invited Workshop', 'Invited Talk') and no event name, put that format in event_name; never drop it because role is present",
     },
     "H": {
         "award_name": "Name of the honor/award (e.g., 'Best Teacher Award', 'NIH Merit Award')",
@@ -509,6 +523,8 @@ FIELD_DESCRIPTIONS = {
         "total_funding": "Total award amount in dollars",
         "annual_funding": "Annual/yearly direct costs",
         "percent_effort": "FTE/effort percentage (convert '.08FTE' to '8%')",
+        "status": GRANT_STATUS_DESCRIPTION,
+        "notes": GRANT_NOTES_DESCRIPTION,
     },
     "M2B": {
         "grant_number": "Grant/award number",
@@ -520,6 +536,12 @@ FIELD_DESCRIPTIONS = {
         "end_date": "Funding period end",
         "total_funding": "Total award amount",
         "percent_effort": "FTE/effort (extract '.08FTE' as '8%')",
+        "status": GRANT_STATUS_DESCRIPTION,
+        "notes": GRANT_NOTES_DESCRIPTION,
+    },
+    "M2C": {
+        "status": GRANT_STATUS_DESCRIPTION,
+        "notes": GRANT_NOTES_DESCRIPTION,
     },
     "D3": {
         "title": "Job title or position",
@@ -564,7 +586,7 @@ TAXONOMY_LABELS = {
     "M2B": "Past Research Funding",
     "M2C": "Pending Research Funding",
     "M2D": "Patents & Innovations",
-    # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C
+    # NOTE: M4 clinical trial codes removed - clinical trials file as M2A or M2B by end date (#291)
     "N1": "Leadership and Mentoring in Programs",
     "N2": "Institutional Training Grants",
     "N3": "Mentees",

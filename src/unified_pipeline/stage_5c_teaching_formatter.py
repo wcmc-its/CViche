@@ -301,7 +301,7 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
         return None, None
 
 
-def run_stage_5c(input_path: str, output_path: str = None, model: str = "gpt-4o-mini",
+def run_stage_5c(input_path: str, output_path: str = None,
                  verbose: bool = True) -> str:
     """
     Run Stage 5c: Teaching/Educational Contributions Formatter.
@@ -309,7 +309,6 @@ def run_stage_5c(input_path: str, output_path: str = None, model: str = "gpt-4o-
     Args:
         input_path: Path to input JSON (Stage 5b or earlier)
         output_path: Optional output path
-        model: OpenAI model for formatting
         verbose: Whether to print progress
 
     Returns:
@@ -401,7 +400,7 @@ def run_stage_5c(input_path: str, output_path: str = None, model: str = "gpt-4o-
         'input_file': input_path,
         'k_entries_processed': total_k_entries,
         'entries_formatted': entries_formatted_count,
-        'model': (usage.get('model') if usage else None) or (model if llm_output else None),
+        'model': usage.get('model') if usage else None,
         'timestamp': datetime.now().isoformat(),
         'total_cost': total_cost,
         'prompt_tokens': usage.get('prompt_tokens', 0) if usage else 0,
@@ -434,8 +433,6 @@ def main():
     )
     parser.add_argument('input_path', help='Path to input JSON file')
     parser.add_argument('-o', '--output', help='Output path (optional)')
-    parser.add_argument('-m', '--model', default='gpt-4o-mini',
-                        help='OpenAI model for formatting (default: gpt-4o-mini)')
     parser.add_argument('-q', '--quiet', action='store_true',
                         help='Quiet mode (minimal output)')
 
@@ -444,7 +441,6 @@ def main():
     output = run_stage_5c(
         args.input_path,
         output_path=args.output,
-        model=args.model,
         verbose=not args.quiet
     )
 

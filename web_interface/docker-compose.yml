@@ -83,8 +83,6 @@ services:
       CVICHE_ALLOWED_ORIGINS: "http://localhost:3001,http://localhost:3000,http://localhost:5173,http://localhost:80,http://localhost"
       # Storage: local filesystem for dev
       CVICHE_STORAGE_BACKEND: "local"
-      # OpenAI API key -- read from host environment
-      OPENAI_API_KEY: "${OPENAI_API_KEY}"
     volumes:
       # Hot-reload: mount source code (paths mirror the in-container repo layout)
       - ./backend/app:/app/web_interface/backend/app:ro

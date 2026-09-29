@@ -149,9 +149,9 @@ def test_build_warnings_renderer_declined_for_non_m1_routed_code_names_no_writer
 
 
 def test_build_warnings_two_unrouted_codes_sorted_by_code():
-    written = [_entry("ZZ"), _entry("M4A"), _entry("M4A")]
+    written = [_entry("ZZ"), _entry("N3"), _entry("N3")]
     warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
-    assert [w["code"] for w in warnings] == ["M4A", "ZZ"]
+    assert [w["code"] for w in warnings] == ["N3", "ZZ"]
     assert [w["count"] for w in warnings] == [2, 1]
     assert all(w["reason"] == REASON_NO_RENDER_ROUTE for w in warnings)
 
@@ -275,13 +275,13 @@ def test_positive_two_unrouted_codes_sorted_by_code(tmp_path):
     entries = [_OWNER_ENTRY,
                _t_entry("ZZ_ONE reviewed grant applications for the Foundation "
                         "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1),
-               _t_entry("M4A_ONE Phase II interventional trial of a novel "
-                        "analgesic in postoperative pain", "M4A", ["Clinical Trials"], 2),
-               _t_entry("M4A_TWO Phase III device trial evaluating a wearable "
-                        "cardiac monitor", "M4A", ["Clinical Trials"], 3)]
+               _t_entry("N3_ONE mentored an invented graduate student on a "
+                        "thesis about postoperative pain", "N3", ["Mentees"], 2),
+               _t_entry("N3_TWO mentored an invented postdoctoral fellow on "
+                        "wearable cardiac monitors", "N3", ["Mentees"], 3)]
     _doc, sidecar = _render(tmp_path, "T531B", entries)
     diversions = _diversion_warnings(sidecar)
-    assert [w["code"] for w in diversions] == ["M4A", "ZZ"]
+    assert [w["code"] for w in diversions] == ["N3", "ZZ"]
     assert [w["count"] for w in diversions] == [2, 1]
 
 
@@ -712,3 +712,23 @@ def test_declined_grant_entries_reset_between_renders(tmp_path):
     assert not any(w["code"] == "M2A" for w in _diversion_warnings(sidecar2))
     assert all("SPARSE_M2A_TOKEN" not in p.text for p in doc2.paragraphs)
     assert _appendix_numbered_lines(doc2) == []
+
+
+def test_quarantined_invalid_code_is_reported_as_invalid_code_not_no_render_route():
+    # #651: stage 4 re-codes an unrecognized code to T with a marker. Stage 6
+    # must say "invalid code", and keep it apart from an ordinary unrouted T.
+    from unified_pipeline.stage6.sections.appendix import REASON_INVALID_CODE
+    written = [
+        {"taxonomy_code": "T", "taxonomy_code_quarantine_reason": "invalid_taxonomy_code",
+         "original_taxonomy_code": "ZZ9"},
+        {"taxonomy_code": "T", "taxonomy_code_quarantine_reason": "invalid_taxonomy_code"},
+        {"taxonomy_code": "T"},
+    ]
+    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+    got = {(w["code"], w["reason"]): w for w in warnings}
+    assert set(got) == {("T", REASON_INVALID_CODE), ("T", REASON_NO_RENDER_ROUTE)}
+    invalid = got[("T", REASON_INVALID_CODE)]
+    assert invalid["count"] == 2
+    assert "not a valid taxonomy code" in invalid["message"]
+    assert invalid["evidence"] == []
+    assert got[("T", REASON_NO_RENDER_ROUTE)]["count"] == 1

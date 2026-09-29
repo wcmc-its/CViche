@@ -88,6 +88,12 @@ _DELIVERY = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_pre
 # time (#782 review point 7).
 _SESSION = requests.Session()
 
+# Adaptive Card schema version on every card -- the one every card has
+# shipped with and Teams renders. A client that can't render it shows the
+# card's fallbackText instead (see _adaptive_card), so dropping to 1.4 would
+# buy nothing (#311).
+ADAPTIVE_CARD_VERSION = "1.5"
+
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = (1.0, 2.0)
 
@@ -160,7 +166,7 @@ def validate_configuration() -> dict[str, bool]:
     return {"configured": configured, "valid": valid}
 
 
-def _card_text(value, limit: int) -> str:
+def _card_text(value: object, limit: int) -> str:
     """Sanitise a run- or user-supplied string for a Teams card.
 
     Strips C0/C1 control characters and truncates to `limit` characters
@@ -173,7 +179,7 @@ def _card_text(value, limit: int) -> str:
     return text
 
 
-def _action_buttons(run_id) -> list:
+def _action_buttons(run_id: str) -> list[dict[str, str]]:
     """The "Open run" Adaptive Card action list, or [] when no app origin is set.
 
     Shared by the started and terminal cards so both link the same way.
@@ -191,7 +197,9 @@ def _action_buttons(run_id) -> list:
     ]
 
 
-def _adaptive_card(title, color, facts, run_id, summary) -> dict:
+def _adaptive_card(
+    title: str, color: str, facts: list[dict[str, str]], run_id: str, summary: str,
+) -> dict:
     """Wrap a colored title + fact list in the Teams message/adaptive-card envelope.
 
     ``summary`` is a plain-text one-liner used two ways for surfaces that do NOT
@@ -217,7 +225,7 @@ def _adaptive_card(title, color, facts, run_id, summary) -> dict:
     card = {
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "type": "AdaptiveCard",
-        "version": "1.5",
+        "version": ADAPTIVE_CARD_VERSION,
         "fallbackText": summary,
         "body": [
             {
@@ -308,6 +316,10 @@ class ScoreSummary(TypedDict, total=False):
 
     totalScore: float
     band: str
+    # quality_score.score_run's evidence inventory (#745). Absent on a cache
+    # written before #724 added it -- read as "unknown", never as incomplete.
+    data_complete: bool
+    missing_evidence: list[str]
 
 
 class DoctorFinding(TypedDict, total=False):
@@ -351,7 +363,7 @@ def build_started_payload(facts: RunFacts, submitter: str | None = None) -> dict
     )
 
 
-def _doctor_text(doctor: DoctorSummary | None) -> str | None:
+def _doctor_text(doctor_report: DoctorSummary | None) -> str | None:
     """One-line summary of the run-doctor report, or None to omit the line.
 
     Counts substantive findings only (ERROR + WARN; INFO covers skipped-lint
@@ -362,16 +374,16 @@ def _doctor_text(doctor: DoctorSummary | None) -> str | None:
     string this module doesn't fully control the shape of (#782 review,
     r3968154302 / D8 point 3).
     """
-    if not isinstance(doctor, dict):
+    if not isinstance(doctor_report, dict):
         return None
     try:
-        counts = doctor.get("counts") or {}
+        counts = doctor_report.get("counts") or {}
         total = int(counts.get("ERROR") or 0) + int(counts.get("WARN") or 0)
         if not total:
             return "0 findings"
         top = next(
             (f.get("lint") for severity in ("ERROR", "WARN")
-             for f in doctor.get("findings") or []
+             for f in doctor_report.get("findings") or []
              if f.get("severity") == severity and f.get("lint")),
             None,
         )
@@ -390,11 +402,29 @@ def _doctor_text(doctor: DoctorSummary | None) -> str | None:
         return None
 
 
+def _score_text(score: ScoreSummary | None) -> str:
+    """The card's Quality score value: "87 (GREEN (ship))", or "n/a".
+
+    A score computed with a scored artifact missing or unreadable says so
+    (#745), so a reader does not take it for a measured result. Only the
+    count goes on the card, never the missing_evidence strings: an
+    "ambiguous" entry names the matched files, and those are CV filenames.
+    """
+    if not score or score.get("totalScore") is None:
+        return "n/a"
+    text = f"{score.get('totalScore')} ({score.get('band') or 'n/a'})"
+    if score.get("data_complete") is False:
+        missing = score.get("missing_evidence")
+        count = len(missing) if isinstance(missing, list) else 0
+        text += f" — incomplete: {count} file(s) missing or unreadable" if count else " — incomplete"
+    return text
+
+
 def build_teams_payload(
     facts: RunFacts,
     score: ScoreSummary | None = None,
     submitter: str | None = None,
-    doctor: DoctorSummary | None = None,
+    doctor_report: DoctorSummary | None = None,
 ) -> dict:
     """Build the Teams card for a terminal run (complete, failed, or cancelled).
 
@@ -403,19 +433,14 @@ def build_teams_payload(
         score: the cached quality-score dict ({"totalScore": int, "band": str})
             or None when unavailable (e.g. on failure).
         submitter: display name/email of who submitted the run, or None to omit.
-        doctor: the run-doctor report dict (run_doctor payload) or None to omit
+        doctor_report: the run-doctor report dict (run_doctor payload) or None to omit
             the Doctor line (doctor disabled, failed, or a failed run).
     """
     status = facts.status
     run_id = _card_text(facts.id, _FACT_MAX_CHARS)
     filename = _card_text(facts.filename, _FACT_MAX_CHARS)
 
-    if score:
-        total = score.get("totalScore")
-        band = score.get("band") or "n/a"
-        score_text = f"{total} ({band})" if total is not None else "n/a"
-    else:
-        score_text = "n/a"
+    score_text = _score_text(score)
 
     total_cost = facts.total_cost
     cost_text = f"${total_cost:.4f}" if isinstance(total_cost, (int, float)) else "n/a"
@@ -444,7 +469,7 @@ def build_teams_payload(
         {"name": "Duration", "value": duration_text},
     ]
 
-    doctor_text = _doctor_text(doctor)
+    doctor_text = _doctor_text(doctor_report)
     if doctor_text:
         card_facts.append({"name": "Doctor", "value": doctor_text})
 
@@ -532,7 +557,7 @@ class _Attempt(NamedTuple):
     detail: str
 
 
-def _do_post(url: str, payload: dict) -> _Attempt:
+def _do_post(url: str, payload: dict, session: requests.Session = _SESSION) -> _Attempt:
     """One HTTP attempt against an already-resolved, already-validated URL.
 
     Never itself raises requests.RequestException (caught and classified
@@ -545,9 +570,12 @@ def _do_post(url: str, payload: dict) -> _Attempt:
     path and query string (#782 review, r3968176452 point 6) -- only the
     exception's type name, plus an HTTP status code when one is available,
     goes into `detail`.
+
+    `session` defaults to the module's long-lived _SESSION; a test passes its
+    own instead of monkeypatching the global (#310).
     """
     try:
-        resp = _SESSION.post(url, json=payload, timeout=_POST_TIMEOUT)
+        resp = session.post(url, json=payload, timeout=_POST_TIMEOUT)
     except requests.RequestException as e:
         detail = type(e).__name__
         status = getattr(getattr(e, "response", None), "status_code", None)
@@ -685,7 +713,7 @@ def notify_run_terminal(
     run: object,
     score: ScoreSummary | None = None,
     submitter: str | None = None,
-    doctor: DoctorSummary | None = None,
+    doctor_report: DoctorSummary | None = None,
 ) -> None:
     """Best-effort: queue a Teams notification for a terminal run.
 
@@ -703,7 +731,7 @@ def notify_run_terminal(
                 run_id, facts.status,
             )
             return
-        payload = build_teams_payload(facts, score, submitter, doctor)
+        payload = build_teams_payload(facts, score, submitter, doctor_report)
         url = _webhook_url()
         if not url:
             return

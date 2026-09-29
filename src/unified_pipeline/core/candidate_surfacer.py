@@ -78,7 +78,7 @@ TAXONOMY_CODES_CONDENSED = {
     "M2B": "Past (Completed) Funding",
     "M2C": "Pending Funding",
     "M2D": "Patents & Innovations",
-    # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C based on status
+    # NOTE: M4 clinical trial codes removed - clinical trials file as M2A (no end date) or M2B (ended) (#291)
 
     # N - Mentoring
     "N1": "Leadership and mentoring in programs",
@@ -119,7 +119,6 @@ def surface_candidates_for_subsection(
     section_header: str,
     subsection_header: str,
     sample_entries: list[str],
-    model: str = "gpt-5.1",
     max_candidates: int = 12
 ) -> dict[str, Any]:
     """
@@ -137,7 +136,6 @@ def surface_candidates_for_subsection(
         section_header: Top-level CV section (e.g., "Teaching", "Research")
         subsection_header: Subsection within that section (e.g., "Teaching Publications:")
         sample_entries: 2-3 representative entries from this subsection
-        model: LLM model to use (default: gpt-4o-mini for cost efficiency)
         max_candidates: Maximum primary candidates to return (default: 12)
 
     Returns:

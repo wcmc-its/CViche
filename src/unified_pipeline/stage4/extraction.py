@@ -15,13 +15,14 @@ import json
 import logging
 from typing import Any, Callable, NotRequired, TypedDict
 
-from openai import APITimeoutError
+from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.llm.retry import LLMOutageError
 
+from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
     apply_regex_post_processing,
     coerce_field_value_types,
@@ -130,6 +131,8 @@ class ExtractionStats(TypedDict):
     entries_reformatted: int
     cache_read_tokens: int
     cache_write_tokens: int
+    invalid_code_entries: int
+    invalid_taxonomy_codes: dict[str, int]
 
 
 class ExtractionResult(TypedDict):
@@ -435,7 +438,7 @@ def attempt_llm_recovery(
 
         return {"entries": recovered_entries, "cost": cost, "tokens": tokens}
 
-    except APITimeoutError:
+    except (ReadTimeoutError, ConnectTimeoutError):
         logger.exception("Stage 4 recovery LLM call timed out for taxonomy %s", taxonomy_code)
         return {
             "entries": [{**entry, "llm_recovery_error": LLM_TIMEOUT} for entry in entries],
@@ -481,6 +484,21 @@ def _get_field_descriptions(taxonomy_code: str) -> str:
         return "\n".join(lines)
 
     return f"Extract all available fields: {', '.join(get_field_schema(taxonomy_code)['fields'])}"
+
+
+#: Appended (as instruction 10) when a batch holds an entry stamped with
+#: `context_heading` (#985). Leading newline: it follows instruction 8/9.
+CONTEXT_HEADING_INSTRUCTION = """
+10. **Sub-heading context**: an entry marked "(under: X)" sits beneath the sub-heading X in the CV. Use X to fill institution, role, title, audience, level or status fields when the entry text itself omits them. Never override what the entry text states. When the entry gives its own role, even as a verb or a qualifier, that role wins over X: "Co-directed with ..." under "Course Director" is role "Co-Director", and "Assistant ..." or "Associate ..." stays as the entry words it. Do not copy X into a field it does not describe, and never copy X verbatim when it only names a kind of activity (e.g. "New Course Development")."""
+
+
+# Clinical trials file as current or past funding (#291), never as a pending
+# application or a patent, so only these two grant prompts carry the mapping of
+# a trial onto the grant fields the grant table renders.
+CLINICAL_TRIAL_CODES = frozenset({'M2A', 'M2B'})
+CLINICAL_TRIAL_FIELD_MAPPING = """
+   - A CLINICAL TRIAL filed here uses the same fields: title = the trial title with its phase (e.g., "Phase II trial of ..."), grant_number = its NCT or protocol number, agency = its sponsor, pi_role = the CV owner's role on the trial (e.g., "Site PI", "Sub-Investigator")"""
+
 
 def build_extraction_prompt(
     entries: list[dict[str, Any]],
@@ -536,7 +554,12 @@ def build_extraction_prompt(
 **Entries**:
 """
     for i, entry in enumerate(entries):
-        prompt += f"\n[Entry {i}]:\n{entry.get('text', '')}\n"
+        under = f" (under: {entry['context_heading']})" if entry.get("context_heading") else ""
+        prompt += f"\n[Entry {i}]{under}:\n{entry.get('text', '')}\n"
+
+    # #985: only a batch holding a stamped entry carries the extra rule, so an
+    # unstamped batch's prompt stays byte-identical.
+    context_heading_instruction = CONTEXT_HEADING_INSTRUCTION if any(e.get("context_heading") for e in entries) else ""
 
     # Add code-specific instructions
     code_specific_instructions = ""
@@ -547,7 +570,11 @@ def build_extraction_prompt(
    - title = the scientific project title - NOT a person's name, NOT FTE information
    - percent_effort = extract FTE as percentage (e.g., ".08FTE" → "8%", "0.1 FTE" → "10%")
    - Do NOT put the project title in pi_name field
-   - If no PI name is found, leave pi_name as null"""
+   - If no PI name is found, leave pi_name as null
+   - status = the grant's status only when the entry itself states one (e.g., "Update: withdrawn" → "withdrawn"); otherwise null
+   - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null"""
+        if code in CLINICAL_TRIAL_CODES:
+            code_specific_instructions += CLINICAL_TRIAL_FIELD_MAPPING
     elif code == 'K4':
         code_specific_instructions = """
 9. **CONTINUING EDUCATION (K4)** - CRITICAL field separation:
@@ -594,7 +621,7 @@ def build_extraction_prompt(
 5. Emails: extract multiple emails separately (primary_email, secondary_email, institutional_email, personal_email)
 6. Tab-separated values: If text contains tabs (\\t) or pipe characters (|), these indicate table columns - extract each column as a separate field value, not as merged text
 7. Only extract explicitly stated information - do not infer or guess
-8. CRITICAL: Include "entry_index" field in each extraction to match the entry number above{target_name_instruction}{code_specific_instructions}
+8. CRITICAL: Include "entry_index" field in each extraction to match the entry number above{target_name_instruction}{code_specific_instructions}{context_heading_instruction}
 
 Return JSON with format:
 {{
@@ -774,7 +801,7 @@ def extract_fields_batch(
                         "extraction_error": "No matching extraction in LLM response"
                     })
 
-        except APITimeoutError:
+        except (ReadTimeoutError, ConnectTimeoutError):
             logger.exception("Stage 4 extraction LLM call timed out for code %s", code)
             failed_groups += 1
             for entry in code_entries:
@@ -918,6 +945,39 @@ def _extract_batches(
     return map_in_order(run_batch, list(enumerate(batches)), workers=workers)
 
 
+def _split_skippable_entries(
+    mapped_entries: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split entries into (valid, skipped) by text length. Pure move out of
+    `extract_fields_from_mapped_entries` (function-size ratchet, #651) -- same
+    filter, same skipped-entry shape; not a behavior change."""
+    # Filter out entries with empty or minimal text
+    valid_entries = []
+    skipped_entries = []
+
+    for entry in mapped_entries:
+        text = entry.get("text", "").strip()
+        # Skip entries with empty text or less than 5 characters
+        if text and len(text) >= 5:
+            valid_entries.append(entry)
+        else:
+            skipped_entries.append({
+                **entry,
+                "extracted_fields": {},
+                "extraction_success": False,
+                "extraction_skipped": True,
+                # This branch only runs when `text` is falsy or shorter than
+                # the 5-char floor above -- a falsy (empty) string always has
+                # len 0, so `len(text) < 5 else "empty_text"` made the
+                # "empty_text" arm dead code (every skip landed on
+                # "empty_or_minimal_text", including a truly empty string).
+                # Branch on emptiness directly so the two reasons are
+                # actually distinguishable downstream.
+                "skip_reason": "empty_text" if not text else "empty_or_minimal_text"
+            })
+    return valid_entries, skipped_entries
+
+
 def extract_fields_from_mapped_entries(
     mapped_entries: list[dict[str, Any]],
     batch_size: int = 10,
@@ -948,6 +1008,9 @@ def extract_fields_from_mapped_entries(
     logger.info("=" * 80)
     logger.info("Total entries: %d", len(mapped_entries))
 
+    # 3b -> 4 boundary (#651): an unrecognized code is quarantined, not defaulted.
+    mapped_entries, invalid_codes = quarantine_invalid_taxonomy_codes(mapped_entries)
+
     # Load and display schema version
     schemas = get_active_schemas()
     logger.info("Field schemas: v%s (%d taxonomy codes)", FIELD_SCHEMA_VERSION, len(schemas))
@@ -957,30 +1020,7 @@ def extract_fields_from_mapped_entries(
 
     # Location inference runs *after* extraction -- see the call site below.
 
-    # Filter out entries with empty or minimal text
-    valid_entries = []
-    skipped_entries = []
-
-    for entry in mapped_entries:
-        text = entry.get("text", "").strip()
-        # Skip entries with empty text or less than 5 characters
-        if text and len(text) >= 5:
-            valid_entries.append(entry)
-        else:
-            skipped_entries.append({
-                **entry,
-                "extracted_fields": {},
-                "extraction_success": False,
-                "extraction_skipped": True,
-                # This branch only runs when `text` is falsy or shorter than
-                # the 5-char floor above -- a falsy (empty) string always has
-                # len 0, so `len(text) < 5 else "empty_text"` made the
-                # "empty_text" arm dead code (every skip landed on
-                # "empty_or_minimal_text", including a truly empty string).
-                # Branch on emptiness directly so the two reasons are
-                # actually distinguishable downstream.
-                "skip_reason": "empty_text" if not text else "empty_or_minimal_text"
-            })
+    valid_entries, skipped_entries = _split_skippable_entries(mapped_entries)
 
     logger.info("  - Valid entries (with text): %d", len(valid_entries))
     logger.info("  - Skipped entries (empty/minimal text): %d", len(skipped_entries))
@@ -1111,7 +1151,9 @@ def extract_fields_from_mapped_entries(
             "had_extraction_errors": failed_batches > 0,
             "entries_reformatted": reformatted_count,
             "cache_read_tokens": total_cache_read_tokens,
-            "cache_write_tokens": total_cache_write_tokens
+            "cache_write_tokens": total_cache_write_tokens,
+            "invalid_code_entries": sum(invalid_codes.values()),
+            "invalid_taxonomy_codes": invalid_codes,
         },
         "success": True,
         "partial_success": failed_batches > 0,

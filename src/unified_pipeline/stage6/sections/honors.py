@@ -130,10 +130,6 @@ _LINE_HEADER_KEYWORDS = frozenset({
     'honor', 'year'})
 _MIN_LINE_HEADER_KEYWORDS = 2
 
-# A raw entry with no extracted award name renders as its own text; cap it so
-# a runaway blob cannot fill the cell.
-_MAX_RAW_AWARD_CHARS = 150
-
 # The WCM template's H table: award | organization | date awarded (yyyy).
 _HONORS_TABLE_COLUMNS = 3
 
@@ -384,6 +380,35 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     return parts
 
 
+def _award_cell_first_shape(lines: Sequence[str]) -> list[str]:
+    """Stage 2's row shape for a multi-paragraph first cell (#488), read back
+    in the older shape `_merge_in_cell_paragraphs` was written against.
+
+    Stage 2 now puts the row's other columns on the FIRST paragraph of cell 0
+    ("Award | Org | Date" then the award cell's remaining paragraphs), and only
+    does so when no other cell spans lines. Detected as: line 0 holds the '|'
+    columns and no later line holds one. Re-shaped to "Award", then the
+    remaining paragraphs, the last one carrying " | Org | Date". Any other
+    input is returned unchanged.
+
+    The text alone cannot always tell this shape from the older one where only
+    the LAST cell spans lines ("Award | Org | 2019" then that date cell's own
+    continuation): both read "Award | Org | Date" then one more line. A tail
+    line that is itself a date can only be a date cell's continuation, so it is
+    left in the older shape; a non-date continuation stays ambiguous and is
+    read as the award's own paragraph.
+    """
+    if len(lines) < 2:
+        return list(lines)
+    first, *tail = lines
+    if ('|' not in first or any('|' in line for line in tail)
+            or any(_is_date_column(line) for line in tail)):
+        return list(lines)
+    award, *columns = first.split('|')
+    return [award.strip(), *tail[:-1],
+            ' | '.join([tail[-1], *(c.strip() for c in columns)])]
+
+
 def _merge_in_cell_paragraphs(lines: Sequence[str]) -> list[str]:
     """One 3-column table row whose cells hold several paragraphs, read back
     as that one row rather than one award per line (#828 review round 3,
@@ -417,7 +442,7 @@ def _merge_in_cell_paragraphs(lines: Sequence[str]) -> list[str]:
     if any('\t' in line or _looks_like_column_header(line) for line in lines):
         return list(lines)
     award, *rest = [[p.strip() for p in cell.split('\n') if p.strip()]
-                    for cell in '\n'.join(lines).split('|')]
+                    for cell in '\n'.join(_award_cell_first_shape(lines)).split('|')]
     if any(_is_date_column(p) for cell in [award, *rest[:-1]] for p in cell):
         return list(lines)
     row = ' | '.join([' '.join(award)] + [', '.join(c) for c in rest])
@@ -657,13 +682,13 @@ def _record_for_single_award(fallback_text: str,
     first line is the source table's header row used to render that header
     as the award name, because the line `_parse_honor_lines` had already
     dropped was still in the string this falls back to (#733 review). It is
-    otherwise the raw text, verbatim and merely capped -- an entry whose
+    otherwise the raw text, verbatim (#983 removed the 150-character cap: it cut
+    a third honor mid-word and lost the year) -- an entry whose
     pipe shape the parser declined to guess at still renders as its own
     text, which is the contract the module docstring states.
     """
     if not award_name:
-        award_name = (columns.award if columns is not None
-                      else fallback_text[:_MAX_RAW_AWARD_CHARS])
+        award_name = columns.award if columns is not None else fallback_text
     if columns is not None:
         granting_body = granting_body or columns.organization
         date = date or columns.date
@@ -856,7 +881,7 @@ def _build_org_around_keyword(txt: str) -> str:
     return org.strip('.,; ')
 
 
-def _extract_organization_from_award(text: str) -> str:
+def _organization_candidate(text: str) -> str:
     """Extract organization name from award/honor text using institutional keyword patterns.
 
     Uses a multi-strategy approach:
@@ -909,6 +934,45 @@ def _extract_organization_from_award(text: str) -> str:
         return org
 
     return ''
+
+
+# The award-name words that end an award's own name. An organization equal
+# to the award name minus one of these is the award, not its grantor (#887).
+_AWARD_NAME_TAIL_RE = re.compile(
+    r'\s+(?:Award|Prize|Fellowship|Scholarship|List|Fellow)\s*$',
+    re.IGNORECASE)
+
+# A role a person holds, never the last word of an institution's name.
+_ORG_ROLE_WORDS = frozenset(['representative', 'fellow', 'member'])
+
+
+def _is_fabricated_organization(org: str, text: str) -> bool:
+    """Is `org` the award's own name (or part of a role), not a grantor?
+
+    Strategies 3/4 of `_organization_candidate` anchor on `College` /
+    `University` and build outward, so an award named after a college
+    ("College of Education 2015 Outstanding Thesis Award") became its own
+    organization (#887). Three tells, each independent: the candidate is the
+    whole award name minus its trailing award word; it carries a digit (a
+    year belongs to the date column); it ends in a role word.
+    """
+    stripped = text.strip().rstrip('.,;')
+    if _AWARD_NAME_TAIL_RE.sub('', stripped).strip().lower() == org.lower() \
+            and _AWARD_NAME_TAIL_RE.search(stripped):
+        return True
+    if any(ch.isdigit() for ch in org):
+        return True
+    return org.split()[-1].lower().strip('.,;') in _ORG_ROLE_WORDS
+
+
+def _extract_organization_from_award(text: str) -> str:
+    """The organization `_organization_candidate` finds in the award text,
+    unless it is a fragment of the award name itself (#887), in which case
+    an empty cell is the honest render."""
+    org = _organization_candidate(text)
+    if org and _is_fabricated_organization(org, text):
+        return ''
+    return org
 
 
 class HonorsSection:
@@ -991,6 +1055,12 @@ class HonorsSection:
                     logger.warning("  Skipping header entry: '%s...'", original_text[:50])
                 continue
 
+            if 'award_name' in entry.get('_pii_dropped_fields', ()):
+                # #892: the PII pass dropped this entry's award name (an
+                # O-1 visa). What is left -- a cut-text remnant, the
+                # immigration service as organization, the year -- still
+                # describes the withheld item, so no row renders.
+                continue
             for record in parse_honor_entry(entry):
                 if not (record.award or record.organization or record.date):
                     # An entry with no text and no extracted fields has

@@ -72,7 +72,9 @@ def test_a_stage_exception_fails_the_run_and_stops_the_pipeline(monkeypatch, tmp
     run = db.query(Run).filter(Run.id == "ERRPOLICY").first()
     assert run is not None, "run row must survive the failed execute() call"
     assert run.status == "failed"
-    assert "simulated stage failure" in run.error_message
+    # The user sees a fixed message, never the exception text (#592).
+    from app.pipeline.orchestrator import GENERIC_FAILURE_MESSAGE
+    assert run.error_message == GENERIC_FAILURE_MESSAGE
 
 
 def test_stage_4_receives_the_real_resolved_cv_path(monkeypatch, tmp_path, db):

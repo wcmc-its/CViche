@@ -363,10 +363,11 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 <span>
                   {ATTESTATIONS[submissionType].text}{' '}
                   <span className="block text-xs text-gray-500 mt-1">
-                    The text of the CV is sent to a third-party AI service (currently Anthropic&apos;s Claude on Amazon
-                    Bedrock; the provider may change, for example to OpenAI). CViche attempts to withhold highly
-                    sensitive personal details such as date of birth or Social Security number, but you should not
-                    include anything you would not want these systems to see.
+                    The text of the CV is sent to a third-party AI service: Anthropic&apos;s Claude, running on Amazon
+                    Bedrock. AWS states that Bedrock does not share CV text or AI output with Anthropic or any other
+                    model provider, and does not use it to train models. Before the text is sent, CViche removes the
+                    dates of birth and Social Security numbers it recognizes. It can miss some formats, so you should
+                    not include anything you would not want these systems to see.
                   </span>
                   <span className="block text-xs text-gray-500 mt-1">
                     The original CV, intermediate outputs, and final output are retained to improve CViche and test
@@ -392,7 +393,11 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 <dl className="space-y-2 text-sm">
                   <div className="flex justify-between">
                     <dt className="text-gray-600">Document content:</dt>
-                    <dd className="font-medium">{estimate.text_characters.toLocaleString()} chars (~{estimate.document_tokens.toLocaleString()} tokens)</dd>
+                    <dd className="font-medium">
+                      {estimate.text_characters_is_guess
+                        ? 'Unknown'
+                        : `${estimate.text_characters.toLocaleString()} chars (~${estimate.document_tokens.toLocaleString()} tokens)`}
+                    </dd>
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-gray-600">Pipeline steps:</dt>
@@ -413,6 +418,14 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 </dl>
                 <p className="text-xs text-gray-500 mt-3">
                   Cost estimated for {estimate.pricing_model}.
+                </p>
+                {estimate.text_characters_is_guess && (
+                  <p className="text-xs text-amber-700 mt-1">
+                    We couldn't read this document's text, so the time and cost above are a rough guess, not based on its length.
+                  </p>
+                )}
+                <p className="text-sm text-gray-700 mt-3">
+                  You don't need to wait on this page. Processing continues if you close it, and your results will be in Run History below.
                 </p>
               </section>
             )}

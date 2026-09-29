@@ -131,6 +131,21 @@ HIERARCHY_TO_EXPECTED_CODES = {
 UNIVERSAL_CODES = {"T", "A"}  # T (misc) and A (personal info)
 
 
+# Code-family prefixes in HIERARCHY_TO_EXPECTED_CODES: positions and funding.
+POSITION_CODE_PREFIX = "D"
+FUNDING_CODE_PREFIX = "M2"
+
+
+def is_position_code(code: str) -> bool:
+    """True for the position family (D, D1, D2, D3)."""
+    return code.startswith(POSITION_CODE_PREFIX)
+
+
+def is_funding_code(code: str) -> bool:
+    """True for the M2 family (M2, M2A-M2C, and M2D patents, which share the section)."""
+    return code.startswith(FUNDING_CODE_PREFIX)
+
+
 def normalize_hierarchy_text(text: str) -> str:
     """Normalize hierarchy text for keyword matching."""
     return text.lower().strip()

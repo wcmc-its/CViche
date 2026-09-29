@@ -5,3 +5,9 @@
 pytest==9.0.3
 fakeredis==2.36.0   # in-memory Redis for the redis_broker tests (no server needed)
 pytest-cov==7.1.0   # coverage measurement only; no gate -- CODING_STANDARDS.md §6.10
+# httpx: starlette/fastapi only declare it under their (unused here) "full"/
+# "standard" extras, so nothing in requirements.txt pulls it in transitively
+# on its own. Before #953 (Bedrock-only) it rode in as openai's own hard
+# dependency; TestClient (conftest.py) and test_integration_saml.py both need
+# it directly regardless of LLM provider, so it is pinned explicitly now.
+httpx==0.28.1

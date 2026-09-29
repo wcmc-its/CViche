@@ -12,8 +12,8 @@ gaps called out in issue #104 without modifying that file:
     admin submissions Duration column (only complete/running were exercised);
   * n=1 nearest-rank p95 and 0-second / sub-second runs in /admin/stats.
 
-These pin CURRENT behaviour -- they intentionally do not encode any product
-decision about retry-cumulative-vs-last-attempt semantics.
+Retry semantics (#104, decided 2026-09-09): a resumed run accumulates onto its
+prior total_duration_seconds; a fresh run overwrites.
 
 Runnable like the rest of the suite, e.g.:
     DB_HOST=localhost DB_PORT=3306 DB_NAME=testdb DB_USER=testuser \
@@ -37,6 +37,7 @@ os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
 from app.api.runs import _run_duration_seconds
+from app.pipeline.orchestrator import GENERIC_FAILURE_MESSAGE
 
 
 def _run(**kw):
@@ -62,7 +63,7 @@ def _single_step_registry():
 
 
 def _fake_clock(start, end):
-    """time.time() stub: first call returns ``start`` (sets the orchestrator's
+    """orchestrator._now() stub (#598: patch the module clock, never time.monotonic): first call returns ``start`` (sets the orchestrator's
     start_time), every later call returns ``end`` so the terminal-commit delta
     is exactly ``end - start``.
 
@@ -83,10 +84,10 @@ def _fake_clock(start, end):
 
 def test_execute_persists_duration_on_complete(monkeypatch, tmp_path, db):
     """A run that reaches the 'complete' commit gets total_duration_seconds
-    written from the orchestrator's own time.time() delta (line 455/460), not
+    written from the orchestrator's own _now() delta in execute()'s complete path, not
     from wall-clock completed_at - started_at.
 
-    time.time() is pinned to two fixed values so the assertion is exact.
+    _now() is pinned to two fixed values so the assertion is exact.
     """
     from app.pipeline import orchestrator as orch
     from app.models import Run
@@ -107,9 +108,9 @@ def test_execute_persists_duration_on_complete(monkeypatch, tmp_path, db):
     monkeypatch.setattr(o, "_copy_to_pipeline_input", lambda: str(tmp_path / "cv.docx"))
     monkeypatch.setattr(o, "execute_step", AsyncMock())
 
-    # Pin elapsed to exactly 42s: first time.time() call sets start_time,
+    # Pin elapsed to exactly 42s: first _now() call sets start_time,
     # later calls compute the duration at the complete commit.
-    monkeypatch.setattr(orch.time, "time", _fake_clock(1000.0, 1042.0))
+    monkeypatch.setattr(orch, "_now", _fake_clock(1000.0, 1042.0))
 
     asyncio.run(o.execute())
 
@@ -122,7 +123,7 @@ def test_execute_persists_duration_on_complete(monkeypatch, tmp_path, db):
 
 def test_execute_persists_duration_on_failure(monkeypatch, tmp_path, db):
     """A run that fails AFTER the pipeline has started (start_time set) records
-    a non-NULL total_duration_seconds via the failure branch (line 504-505),
+    a non-NULL total_duration_seconds via the failure branch,
     flips to 'failed', and emits the terminal RUN_FAILED event."""
     from app.pipeline import orchestrator as orch
     from app.models import Run
@@ -142,9 +143,9 @@ def test_execute_persists_duration_on_failure(monkeypatch, tmp_path, db):
     monkeypatch.setattr(o, "execute_step", AsyncMock(side_effect=RuntimeError("stage blew up")))
 
     # start_time set on the first call; failure duration computed on a later call.
-    monkeypatch.setattr(orch.time, "time", _fake_clock(2000.0, 2017.0))
+    monkeypatch.setattr(orch, "_now", _fake_clock(2000.0, 2017.0))
 
-    # The handler re-raises after persisting (line 516).
+    # The handler re-raises after persisting.
     with pytest.raises(RuntimeError, match="stage blew up"):
         asyncio.run(o.execute())
 
@@ -152,7 +153,7 @@ def test_execute_persists_duration_on_failure(monkeypatch, tmp_path, db):
     row = db.query(Run).filter(Run.id == "EXEC_FAIL").first()
     assert row.status == "failed"
     assert row.completed_at is not None
-    assert row.error_message == "stage blew up"
+    assert row.error_message == GENERIC_FAILURE_MESSAGE
     # Duration was recorded from the time-to-failure delta (>= 0, here exactly 17).
     assert row.total_duration_seconds is not None
     assert row.total_duration_seconds >= 0
@@ -161,12 +162,12 @@ def test_execute_persists_duration_on_failure(monkeypatch, tmp_path, db):
 
 
 def test_execute_failure_before_start_leaves_duration_none(monkeypatch, tmp_path, db):
-    """If the exception fires BEFORE start_time is set (line 421), the failure
-    handler's `if start_time is not None` guard (line 504) must be honoured:
+    """If the exception fires BEFORE start_time is set in execute(), the failure
+    handler's `if start_time is not None` guard must be honoured:
     total_duration_seconds stays NULL and nothing throws a TypeError.
 
-    Forcing emit_run_start to raise reproduces a failure at line 420, before
-    start_time = time.time() on the next line.
+    Forcing emit_run_start to raise reproduces a failure in emit_run_start, before
+    start_time = _now() on the next line.
     """
     from app.pipeline import orchestrator as orch
     from app.models import Run
@@ -194,9 +195,107 @@ def test_execute_failure_before_start_leaves_duration_none(monkeypatch, tmp_path
     row = db.query(Run).filter(Run.id == "EXEC_EARLY").first()
     assert row.status == "failed"
     assert row.completed_at is not None
-    assert row.error_message == "boom before start"
-    # The guard at line 504 was respected: no wall-clock was forced in here.
+    assert row.error_message == GENERIC_FAILURE_MESSAGE
+    # The `start_time is not None` guard was respected: no wall-clock was forced in here.
     assert row.total_duration_seconds is None
+
+
+def _seed_and_wire(monkeypatch, tmp_path, db, run_id, prior, exec_step):
+    """Seed a running row with a prior total and wire a stubbed orchestrator."""
+    from app.pipeline import orchestrator as orch
+    from app.models import Run
+
+    db.add(Run(
+        id=run_id, filename="cv.docx", file_type="docx", status="running",
+        started_at=datetime(2026, 6, 4, 12, 0, 0), total_duration_seconds=prior,
+    ))
+    db.commit()
+    monkeypatch.setattr(orch, "event_emitter", AsyncMock())
+    monkeypatch.setattr(orch, "STEP_REGISTRY", _single_step_registry())
+    o = orch.PipelineOrchestrator(run_id, tmp_path / "cv.docx", db)
+    monkeypatch.setattr(o, "_copy_to_pipeline_input", lambda: str(tmp_path / "cv.docx"))
+    monkeypatch.setattr(o, "_prepare_resume", lambda run, n: n)
+    monkeypatch.setattr(o, "execute_step", exec_step)
+    return orch, o
+
+
+@pytest.mark.parametrize("resume_from, prior, expected", [
+    (1, 100, 130),     # resumed: prior N=100 + M=30
+    (1, None, 30),     # resumed with no prior total: 0 + M
+    (None, 100, 30),   # fresh run: plain overwrite, prior discarded
+])
+def test_execute_complete_duration_retry_semantics(
+    monkeypatch, tmp_path, db, resume_from, prior, expected
+):
+    from app.models import Run
+
+    orch, o = _seed_and_wire(monkeypatch, tmp_path, db, "RETRY_OK", prior, AsyncMock())
+    monkeypatch.setattr(orch, "_now", _fake_clock(0.0, 30.0))
+
+    asyncio.run(o.execute(start_step_number=resume_from))
+
+    db.expire_all()
+    row = db.query(Run).filter(Run.id == "RETRY_OK").first()
+    assert row.status == "complete"
+    assert row.total_duration_seconds == expected
+
+
+@pytest.mark.parametrize("resume_from, prior, expected", [
+    (1, 100, 117),
+    (1, None, 17),
+    (None, 100, 17),
+])
+def test_execute_failure_duration_retry_semantics(
+    monkeypatch, tmp_path, db, resume_from, prior, expected
+):
+    from app.models import Run
+
+    orch, o = _seed_and_wire(
+        monkeypatch, tmp_path, db, "RETRY_FAIL", prior,
+        AsyncMock(side_effect=RuntimeError("stage blew up")),
+    )
+    monkeypatch.setattr(orch, "_now", _fake_clock(0.0, 17.0))
+
+    with pytest.raises(RuntimeError, match="stage blew up"):
+        asyncio.run(o.execute(start_step_number=resume_from))
+
+    db.expire_all()
+    row = db.query(Run).filter(Run.id == "RETRY_FAIL").first()
+    assert row.status == "failed"
+    assert row.total_duration_seconds == expected
+
+
+def test_now_reads_time_monotonic(monkeypatch):
+    """#598: the module clock is time.monotonic (immune to wall-clock steps)."""
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch.time, "monotonic", lambda: 123.5)
+    assert orch._now() == 123.5
+
+
+def test_execute_step_duration_uses_module_clock(monkeypatch, tmp_path):
+    """The per-step duration is the _now() delta (start at 100.0, end at 125.0)."""
+    from unittest.mock import MagicMock
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "event_emitter", AsyncMock())
+    step = MagicMock()
+    fake_db = MagicMock()
+    fake_db.query.return_value.filter.return_value.first.return_value = step
+    o = orch.PipelineOrchestrator("STEPDUR", tmp_path / "cv.docx", fake_db)
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", lambda *a: None)
+    monkeypatch.setattr(o, "_sync_prompt_logs_to_storage", lambda *a: None)
+    monkeypatch.setattr(o, "_record_stage_outcome", lambda *a: None)
+
+    async def ok(stage_id, cv_path):
+        return {"cost": 0.0, "output_files": []}
+
+    monkeypatch.setattr(o, "_execute_stage_logic", ok)
+    monkeypatch.setattr(orch, "_now", _fake_clock(100.0, 125.0))
+
+    asyncio.run(o.execute_step(1, "1a", "cv.docx"))
+
+    assert step.duration_seconds == 25
 
 
 # ===========================================================================

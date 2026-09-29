@@ -36,7 +36,8 @@ phases:
        # .github/workflows/deps-audit.yml, which runs this identical gate in CI.
        - pip install "pip-audit==2.10.1"
        # Audit pinned dependencies for known vulnerabilities
-       # Ignore list is maintained in .pip-audit-ignore.txt (tracked in #126)
+       # Ignore list is maintained in .pip-audit-ignore.txt. The pysaml2 pin-knot
+       # advisories tracked in #126 were removed once pysaml2 7.5.5 shipped.
        - |
          IGNORE_FLAGS=$(grep -v '^#' .pip-audit-ignore.txt | grep -v '^$' | sed 's/^/--ignore-vuln /' | tr '\n' ' ')
          for req in \
@@ -123,6 +124,7 @@ phases:
           CVICHE_LLM_MAX_ATTEMPTS: "${CVICHE_LLM_MAX_ATTEMPTS}"
           CVICHE_STAGE_TIMEOUT_SECONDS: "${CVICHE_STAGE_TIMEOUT_SECONDS}"
           CVICHE_STALE_RUN_MINUTES: "${CVICHE_STALE_RUN_MINUTES}"
+          CVICHE_AUTO_RETRY_ENABLED: "${CVICHE_AUTO_RETRY_ENABLED}"
         redis:
           CVICHE_REDIS_URL: "${CVICHE_REDIS_URL}"
         allowed_users: []
@@ -143,7 +145,6 @@ phases:
        #- echo "DATABASE_URL=${DATABASE_URL}" > k8s/overlays/${ENV_NAME}/db.env
        #- echo "CVICHE_DATABASE_URL=${DATABASE_URL}" >> k8s/overlays/${ENV_NAME}/db.env
        - echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" > k8s/overlays/${ENV_NAME}/db.env
-       - echo "CVICHE_OPENAI_API_KEY=${OPENAI_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
        - echo "PUBMED_API_KEY=${PUBMED_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
        # Teams run-notification webhook (bearer credential -> secret, like the keys above).
        # Optional: unset -> empty value -> notifier no-ops. Set the CVICHE_TEAMS_WEBHOOK_URL

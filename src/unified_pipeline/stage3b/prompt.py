@@ -265,7 +265,7 @@ B. RESEARCH INTERESTS, IDENTIFIERS, AND GRAY LITERATURE
      * Course numbers (HIST 201, BIO 412)
      * Grant numbers (R01, U54, T32) → see M2 rules
      * Patent numbers (US 10,234,567) → M2D
-     * Clinical trial numbers (NCT-XXXX) → M2A/M2B/M2C (based on status)
+     * Clinical trial numbers (NCT-XXXX) → M2A/M2B (by end date)
      * DOIs (10.XXXX/XXXX) → part of S1–S9 citations
 
 6. GRAY LITERATURE, TECHNICAL REPORTS, AND "OTHER PUBLICATIONS"
@@ -340,18 +340,16 @@ C. GRANTS, FUNDING, CLINICAL TRIALS, AND CLINICAL ACTIVITY
      sponsors, without project titles, roles, or dates, are fragments
      of grants; classify as T (low confidence), not M2.
 
-10. CLINICAL TRIALS → M2A/M2B/M2C (BASED ON STATUS)
-    - Clinical trials are NOW classified as research funding (M2A/M2B/M2C):
+10. CLINICAL TRIALS → M2A OR M2B (BY END DATE)
+    - The WCM CV has no clinical-trials section. A trial the CV owner
+      conducts (interventional, observational/registry, or device/diagnostic)
+      is research support:
       * Presence of NCT-XXXX identifiers.
       * Descriptions of interventional/observational/diagnostic trials.
-    - Classification by STATUS (same rules as grants):
-      * M2A = Active/ongoing clinical trials (currently recruiting/enrolling)
-      * M2B = Completed clinical trials (enrollment closed, results published)
-      * M2C = Planned/pending clinical trials (not yet started)
-    - Apply the same hierarchy/date logic as grants (see Rule 7 above):
-      * Section labeled "Active", "Current", "Ongoing" → M2A
-      * Section labeled "Completed", "Past" → M2B
-      * Section labeled "Pending", "Planned" → M2C
+    - The end date decides, not the enrollment or results status:
+      * No end date, or "present"/"ongoing" → M2A
+      * An end date in the past → M2B
+    - A publication reporting a trial's results is S1, not M2.
 
 11. CLINICAL ACTIVITY CODES (L1–L3)
     - L1 = Direct patient care activities (clinical service).

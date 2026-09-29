@@ -23,6 +23,7 @@ Run with:
 """
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -133,6 +134,28 @@ PROBE_TABLE = [
     ("• Date of Birth: 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
     ("12. Date of Birth: 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
     ("• Children: Ann, Bob", CAT_CHILDREN, _PERSONAL_ONLY),
+    # #847 residual round 3: "Date and Place of Birth" combines both labels
+    # in a word order neither existing alternative (which only combines
+    # "Birth Date and Birth Place"/"Birthdate and Birthplace") matched.
+    ("Date and Place of Birth: 01/02/1970, Example City", CAT_DATE_OF_BIRTH, _ALL),
+    # #1071: a parenthetical between the DOB stem and its colon -- the
+    # value itself (nothing after the colon) or a format hint.
+    ("Birth Date (01/02/1970):", CAT_DATE_OF_BIRTH, _ALL),
+    ("Date of Birth (01/02/1970):", CAT_DATE_OF_BIRTH, _ALL),
+    ("Date of Birth (mm/dd/yyyy): 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
+    ("Birth-date (January 2, 1970):", CAT_DATE_OF_BIRTH, _ALL),
+    # ...bounded at 40 characters (`_DOB_PAREN_MAX`): a longer
+    # parenthetical, or one with no colon after it, opens no label.
+    ("Date of Birth (" + "x" * 40 + "): 01/02/1970", CAT_DATE_OF_BIRTH, _ALL),
+    ("Date of Birth (" + "x" * 41 + "): 01/02/1970", None, _NEVER),
+    ("Date of birth (an example study) and outcomes", None, _NEVER),
+    # ...and one parenthesis pair on one line: it never nests, never closes
+    # on a later unrelated ")", never spans a newline.
+    ("Date of birth (cohort A (n=40): outcomes", None, _NEVER),
+    ("Date of birth (cohort A) by site B): outcomes", None, _NEVER),
+    ("Date of birth (see\nnote): outcomes", None, _NEVER),
+    # The combined label keeps its own alternative (no parenthetical).
+    ("Birth Date and Birth Place: 01/02/1970, Example City", CAT_DATE_OF_BIRTH, _ALL),
     # --- the comment's categories --------------------------------------
     ("Social Security #: 123-45-6789", CAT_SSN, _ALL),
     ("SS#: 123-45-6789", CAT_SSN, _ALL),
@@ -158,6 +181,11 @@ PROBE_TABLE = [
     ("DEA #: AB1234567", CAT_DEA, _PERSONAL_ONLY),
     ("Religion: Example", CAT_RELIGION, _PERSONAL_ONLY),
     ("Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
+    # #1071: the combined race-and-ethnicity label (a bare "Race:" stays a
+    # negative control below).
+    ("Race/Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
+    ("Race / Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
+    ("Race and Ethnicity: Example", CAT_ETHNICITY, _PERSONAL_ONLY),
     ("Gender: Female", CAT_GENDER, _PERSONAL_ONLY),
     ("Veteran Status: Yes", CAT_VETERAN, _PERSONAL_ONLY),
     ("Disability: None", CAT_DISABILITY, _PERSONAL_ONLY),
@@ -284,6 +312,209 @@ def test_unanchored_matching_is_a_label_after_a_separator_not_a_bare_word():
     assert not _denied("The date of birth: a study of registries", CONTENT)
 
 
+def test_dash_preceded_dob_label_is_now_caught():
+    """#847 residual: a name-then-label form ("Jane Doe - DOB: ...", a
+    per-child line in a Family/Children block) was refused by the `,:(`
+    boundary rule. An explicit DOB label with a whole date after it is now
+    accepted after any prefix (`_explicit_dob_label`)."""
+    assert _denied("Jane Doe - DOB: 01/02/2010", A)
+    assert _denied("Jane Doe – Date of Birth: 01/02/2010", A)
+
+
+def test_dash_preceded_boundary_stays_refused_for_other_categories():
+    """Not a blanket boundary change: an unrelated category (marital status
+    here) still refuses a dash-preceded label exactly as before."""
+    assert not _denied("Research interests - Marital Status: Single", A)
+
+
+# #1041: one label per dash-terminated category. A value that is not
+# SSN/date shaped, so only the label row (never a colonless shape row)
+# can be what matches.
+_DASH_LABELS = [
+    ("Date of Birth", CAT_DATE_OF_BIRTH),
+    ("Birthplace", CAT_PLACE_OF_BIRTH),
+    ("Place of Birth", CAT_PLACE_OF_BIRTH),
+    ("SSN", CAT_SSN),
+    ("Passport Number", CAT_PASSPORT),
+    ("Alien Registration Number", CAT_ALIEN_REGISTRATION),
+    ("Driver's License", CAT_DRIVERS_LICENSE),
+    ("Marital Status", CAT_MARITAL_STATUS),
+    ("Emergency Contact", CAT_EMERGENCY_CONTACT),
+    ("Visa Status", CAT_VISA),
+    ("Immigration Status", CAT_VISA),
+]
+_DASHES = ["-", " -", "\u2013", " \u2013", "\u2014", " \u2014"]
+
+
+@pytest.mark.parametrize("dash", _DASHES)
+@pytest.mark.parametrize("label, category", _DASH_LABELS)
+def test_1041_dash_terminated_label_is_withheld_at_every_destination(dash, label, category):
+    """#1041: a label closed by a hyphen / en dash / em dash, then
+    whitespace, is withheld at every destination, like its colon form."""
+    text = f"{label}{dash} Synthetic Value"
+    for code in (A, APPENDIX, CONTENT):
+        assert _denied(text, code), code
+    assert [m.category for m in _pii_matches(text, SCOPE_ALL_CODES)] == [category]
+
+
+# The whitespace after the dash, as the corpus has it: XY66RT's lines
+# carry 5-11 spaces, a hard `_PII_FRAGMENT_SPLIT_RE` delimiter, so the
+# match is the label alone and the VALUE is cut only by the pass's
+# bare-label extension. A tab is the same shape.
+_DASH_GAPS = ["-      ", " -     ", "\u2013\t", "\u2014\t", "-\t"]
+
+
+@pytest.mark.parametrize("gap", _DASH_GAPS)
+@pytest.mark.parametrize("label, category", _DASH_LABELS)
+def test_1041_pass_cuts_the_value_after_a_gapped_dash_label(gap, label, category):
+    entry = {"text": f"{label}{gap}Synthetic Value", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    result = _run({"T": [entry]})
+    assert "Synthetic" not in entry["text"], entry["text"]
+    assert [i.category for i in result.withheld] == [category]
+    assert entry["_pii_orphaned_value"] is False
+
+
+@pytest.mark.parametrize("terminator", [":", " -", "\u2013", " \u2014"])
+def test_1041_dash_label_before_a_newline_orphans_its_value_like_a_colon(terminator):
+    """F2: the value on the next line is not reached by the extension (a
+    newline is the source's own field separator), so the entry is flagged
+    `_pii_orphaned_value` -- the dash form exactly as the colon form."""
+    entry = {"text": f"Marital Status{terminator}\nSynthetic", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    _run({"T": [entry]})
+    assert entry["_pii_orphaned_value"] is True
+
+
+@pytest.mark.parametrize("terminator", [":", " -", "-", "\u2013", " \u2014"])
+def test_1041_dash_label_alone_at_the_end_of_a_cell_matches_like_a_colon(terminator):
+    text = f"Marital Status{terminator}"
+    assert [m.category for m in _pii_matches(text, SCOPE_ALL_CODES)] == [CAT_MARITAL_STATUS]
+    assert pre_llm_bare_label_category(f"Date of Birth{terminator}") == CAT_DATE_OF_BIRTH
+
+
+@pytest.mark.parametrize("gap", _DASH_GAPS)
+def test_1041_pre_llm_scrub_reaches_a_date_after_a_gapped_dash_label(gap):
+    text = f"Date of Birth{gap}01/02/1970"
+    assert "01/02/1970" not in redact_pre_llm_values(text)
+
+
+@pytest.mark.parametrize("text, value", [
+    # No colonless shape row reaches these: only the next-run extension
+    # (`_pre_llm_value_span_in_next_run`) behind a dash-terminated label.
+    ("Date of Birth - | 01/02/1970", "01/02/1970"),
+    ("Year of Birth -\t1970", "1970"),
+    ("Birthday \u2013\t01/02/1970", "01/02/1970"),
+])
+def test_1041_pre_llm_scrub_takes_the_next_run_after_a_bare_dash_label(text, value):
+    assert value not in redact_pre_llm_values(text)
+
+
+def test_1041_bare_child_count_behind_a_marital_cut_is_withheld():
+    """XY66RT's line: the `;` hard split left "<n> Children" behind the
+    marital-status cut and it rendered in the Appendix."""
+    entry = {"text": "Marital Status-     Synthetic; 2 Children", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    result = _run({"T": [entry]})
+    assert "Synthetic" not in entry["text"] and "Children" not in entry["text"]
+    assert [i.category for i in result.withheld] == [CAT_MARITAL_STATUS, CAT_CHILDREN]
+
+
+def test_1041_content_after_a_dash_label_with_its_value_survives():
+    """A dash label that CARRIES its value is not bare: the cut stops at the
+    label's own fragment, and a later unrelated fragment survives."""
+    entry = {"text": "Marital Status - Zqv; Board Certified Internal Medicine",
+             "taxonomy_code": "T", "extracted_fields": {}}
+    _run({"T": [entry]})
+    assert entry["text"] == "; Board Certified Internal Medicine"
+
+
+@pytest.mark.parametrize("text", [
+    "Status; 2 sons",
+    "Status; 1 daughter",
+    "Status; 3 kids",
+    "Status; 2 children.",
+    "Status\n1 child",
+    "Status   2 children",
+    "2 children   Board Certified",
+    "Status | 2 children | Board Certified",
+])
+def test_1041_child_count_fragment_is_withheld_at_personal_and_appendix(text):
+    for code in (A, APPENDIX):
+        assert _denied(text, code), code
+
+
+def test_1041_child_count_row_does_not_reach_a_content_code():
+    """The row is PERSONAL_AND_APPENDIX only: a count in a research or
+    teaching entry is study data, not the owner's family."""
+    text = "Enrollment\t40 children\tNIH R01"
+    assert not _denied(text, CONTENT)
+    entry = {"text": text, "taxonomy_code": CONTENT, "extracted_fields": {}}
+    _run({CONTENT: [entry]})
+    assert entry["text"] == text
+
+
+@pytest.mark.parametrize("text", [
+    "Enrolled 20 children and 20 adults",
+    "Studied 20 subjects, 20 children",
+    "Outcomes in 4 children",
+    "Single (2 children) is not a fragment of its own",
+    "Cohort A; 20 children with asthma",
+    "Board Certified   20 children treated",
+    "Board Certified, 2 children",
+    "Board Certified 2 children",
+])
+def test_1041_child_count_inside_prose_is_not_withheld(text):
+    assert not [m for m in _pii_matches(text) if m.category == CAT_CHILDREN]
+
+
+@pytest.mark.parametrize("text", [
+    # The corpus false withholds a dash terminator on the ambiguous
+    # title-word rows produced (#1041 A/B), synthetic stand-ins.
+    "Health- Example Institute, Springfield",
+    "Age-related differences in memory",
+    "Age- and sex-specific norms",
+    "Gender- and Race-Based Disparities",
+    "Family-centered health promotion",
+    "Sexuality and Health – Volume 3",
+    # An unambiguous label glued to a compound word: no whitespace after
+    # the hyphen, so not a terminator.
+    "Salary-based compensation study",
+    "Visa-free travel policy review",
+    "Visa\u2014free travel policy review",
+    "Visa\u2013sponsored scholars program",
+    # Rows left colon-only: their labels open real titles.
+    "Spouse \u2013 A Documentary Film Review",
+    "Honorarium - Grand Rounds lecture",
+])
+def test_1041_dash_joined_non_pii_line_is_not_newly_withheld(text):
+    assert not _denied(text, A)
+    assert not _denied(text, APPENDIX)
+
+
+@pytest.mark.parametrize("label", [
+    "Religion", "Home Address", "Home Phone", "DEA", "Spouse", "Salary", "Honorarium",
+    "Gender", "Age", "Health", "Family", "Children", "Ethnicity",
+])
+@pytest.mark.parametrize("dash", [" - ", " \u2013 ", " \u2014 "])
+def test_1041_colon_only_category_does_not_close_on_a_dash(label, dash):
+    """The dash set is opt-in: a row outside `_DASH_TERMINATED_CATEGORIES`
+    must keep needing its colon, so the set cannot silently widen."""
+    assert _pii_matches(f"{label}{dash}Synthetic Value") == []
+
+
+@pytest.mark.parametrize("text, code", [
+    ("Marital Status: Single", CONTENT),
+    ("Birthplace: Synthetic City", CONTENT),
+    ("Visa Status: Synthetic", CONTENT),
+    ("Health: good", A),
+    ("Age: 45", A),
+    ("Gender: X", A),
+])
+def test_1041_colon_terminated_labels_unchanged(text, code):
+    assert _denied(text, code)
+
+
 def test_semicolon_is_a_hard_fragment_boundary():
     """M07: without `;` in the split set the label after it is not
     fragment-initial and the fragment before it would swallow it."""
@@ -404,6 +635,52 @@ def test_pass_records_one_item_per_fragment_and_per_key():
         CAT_DATE_OF_BIRTH, CAT_PLACE_OF_BIRTH, CAT_DATE_OF_BIRTH]
 
 
+_O1_HONOR = {
+    # web26 (#892): the stage-4 record a field-first renderer prints from.
+    "award_name": "Extraordinary Ability in Sciences, O-1 Visa",
+    "granting_body": "U.S. Citizen & Immigration Service (USCIS)",
+    "date": "2019",
+}
+
+
+def test_892_pass_drops_a_pii_value_under_a_non_pii_key_and_counts_it_once():
+    """The text carries the same visa phrase, so the notice is recorded
+    once (from text), not a second time for the field."""
+    entry = {"text": "2019 Extraordinary Ability in Sciences, O-1 Visa | USCIS",
+             "taxonomy_code": "H", "extracted_fields": dict(_O1_HONOR)}
+    result = _run({"H": [entry]})
+    assert "award_name" not in entry["extracted_fields"]
+    assert "O-1" not in str(entry["extracted_fields"])
+    assert "O-1" not in entry["text"]
+    assert entry["_pii_withheld"] is True
+    assert result.withheld == [WithheldItem(CAT_VISA, "Honors", 0)]
+
+
+def test_892_field_value_alone_triggers_the_pass_and_is_recorded():
+    """No match in `text`: the field value is the only place the visa is."""
+    entry = {"text": "Award", "taxonomy_code": "H",
+             "extracted_fields": dict(_O1_HONOR)}
+    result = _run({"H": [entry]})
+    assert "award_name" not in entry["extracted_fields"]
+    assert entry["_pii_withheld"] is True
+    assert entry["_pii_dropped_fields"] == ["award_name"]
+    assert result.withheld == [WithheldItem(CAT_VISA, "Honors", 0)]
+
+
+def test_892_non_pii_field_values_are_untouched():
+    """Negative control: same shape, nothing protected -- the entry is left
+    completely alone (same dict, no bookkeeping keys)."""
+    fields = {"award_name": "Distinguished Teaching Award",
+              "granting_body": "Example University", "date": "2019"}
+    entry = {"text": "2019 Distinguished Teaching Award | Example University",
+             "taxonomy_code": "H", "extracted_fields": fields}
+    before = {**entry, "extracted_fields": dict(fields)}
+    result = _run({"H": [entry]})
+    assert entry == before
+    assert entry["extracted_fields"] is fields
+    assert result.withheld == []
+
+
 # --------------------------------------------------------------------------
 # 3. The comment text
 # --------------------------------------------------------------------------
@@ -416,8 +693,8 @@ def test_comment_text_names_categories_counts_and_sections_only():
     ])
     lines = text.split("\n")
     assert lines[0] == WITHHELD_COMMENT_HEADER
-    assert lines[1] == " • date of birth — 1 item, Personal Data"
-    assert lines[2] == " • visa / immigration status — 2 items, Appendix, Licensure"
+    assert lines[1] == " • date of birth (1 item, Personal Data)"
+    assert lines[2] == " • visa / immigration status (2 items, Appendix, Licensure)"
     assert lines[3] == WITHHELD_COMMENT_FOOTER
     assert len(lines) == 4
 
@@ -497,7 +774,7 @@ def test_two_references_in_one_entry_each_get_their_own_withheld_item():
 def test_comment_names_third_party_contact():
     text = withheld_comment_text([
         WithheldItem(CAT_THIRD_PARTY_CONTACT, APPENDIX_SECTION_LABEL, 1)])
-    assert f" • {CAT_THIRD_PARTY_CONTACT} — 1 item, {APPENDIX_SECTION_LABEL}" in text
+    assert f" • {CAT_THIRD_PARTY_CONTACT} (1 item, {APPENDIX_SECTION_LABEL})" in text
 
 
 # --- negative controls, each a test -----------------------------------
@@ -735,7 +1012,7 @@ def test_email_local_part_sharing_a_fallback_word_as_its_own_segment_is_still_sp
 _FALLBACK_A_TEXT = (
     "Dana Example. Name field intentionally left blank on the source "
     "form. Email: dana@state.edu. Alternate email: dana.alt@example.com. "
-    "A Gmail account is also on file. Phone Number: 212-555-0100. Home "
+    "A Gmail account is also on file. Phone Number: 212-555-0100. Mailing "
     "Address: 1 Example St, Room 204, Floor 3. This profile does not "
     "list some fields and the text is limited. Previously affiliated "
     "with MIT. Research area: leg biomechanics. New Haven, CT."
@@ -1066,6 +1343,60 @@ def test_redact_pre_llm_values_replaces_dob_value_colonless_keeps_label():
     assert out == f"Born on {PRE_LLM_PLACEHOLDER}, in Example City"
 
 
+@pytest.mark.parametrize("text, expected", [
+    # #1071: the value sits INSIDE the label's parentheses.
+    ("Birth Date (01/02/1970):", f"Birth Date ({PRE_LLM_PLACEHOLDER}):"),
+    ("Date of Birth (01/02/1970):", f"Date of Birth ({PRE_LLM_PLACEHOLDER}):"),
+    # A format hint in the parentheses is not a value; the date after the
+    # colon is.
+    ("Date of Birth (mm/dd/yyyy): 01/02/1970",
+     f"Date of Birth (mm/dd/yyyy): {PRE_LLM_PLACEHOLDER}"),
+    ("Date of Birth (mm/dd/yyyy):\t01/02/1970",
+     f"Date of Birth (mm/dd/yyyy):\t{PRE_LLM_PLACEHOLDER}"),
+    # A race/ethnicity value is render-time only (#847 scrubs DOB/SSN).
+    ("Race/Ethnicity: Example", "Race/Ethnicity: Example"),
+])
+def test_1071_pre_llm_scrub_reaches_a_dob_label_parenthetical(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+def test_1071_bare_dob_label_with_a_format_hint_names_its_category():
+    """A label cell alone ("Date of Birth (mm/dd/yyyy):") hands its category
+    to the next cell's scrub; one whose parentheses hold the value does not
+    -- its own text is scrubbed instead."""
+    assert pre_llm_bare_label_category("Date of Birth (mm/dd/yyyy):") == CAT_DATE_OF_BIRTH
+    assert pre_llm_bare_label_category("Birth Date (01/02/1970):") is None
+
+
+@pytest.mark.parametrize("text", [
+    "Jane Example Date of Birth (mm/dd/yyyy): 01/02/1970",
+    "Jane Example Birth Date (MM/DD/YYYY): 01/02/1970",
+    "Jane Example Birth Date and Birth Place: 01/02/1970",
+])
+def test_1071_explicit_dob_label_with_a_parenthetical_skips_the_boundary_rule(text):
+    """#847 residual: an explicit DOB label then a whole date is a DOB
+    whatever precedes it -- with a parenthetical in the label too, and
+    for the combined birth date and birth place label."""
+    assert [m.category for m in _pii_matches(text, SCOPE_ALL_CODES)] == [CAT_DATE_OF_BIRTH]
+    assert redact_pre_llm_values(text).endswith(f": {PRE_LLM_PLACEHOLDER}")
+
+
+@pytest.mark.parametrize("text", [
+    "Date of Birth (" * 20_000,
+    "Birth Date (" + "a" * 200_000,
+    "Birth Date " + "(" * 200_000,
+    "Race / " * 20_000 + "Ethnicity",
+])
+def test_1071_dob_parenthetical_scan_stays_linear_on_adversarial_input(text):
+    """The parenthetical is one bounded class, no nested quantifier: each
+    of these took well under a second when written (~0.1s); a
+    backtracking blow-up would not finish at all."""
+    started = time.perf_counter()
+    _pii_matches(text)
+    redact_pre_llm_values(text)
+    assert time.perf_counter() - started < 5.0
+
+
 def test_redact_pre_llm_values_untouched_publication_date_no_dob_label():
     text = "Smith J. Date: 2015. A study of examples."
     assert redact_pre_llm_values(text) == text
@@ -1133,6 +1464,30 @@ def test_redact_pre_llm_values_dotted_date_takes_the_whole_value():
     assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
 
 
+# #847: an ordinal day ("1st", "22nd") matched no full-date shape, so only the
+# year was withheld and the month and day reached the LLM (run 6TJNBQ).
+@pytest.mark.parametrize("value", [
+    "April 1st, 1990", "April 22nd, 1990", "Apr 3rd 1990", "April 4th, 1990",
+    "1st April 1990", "21st of April, 1990",
+])
+def test_redact_pre_llm_values_ordinal_day_takes_the_whole_value(value):
+    out = redact_pre_llm_values(f"Date of Birth: {value}")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_value_of_category_ordinal_day_in_a_value_cell():
+    # The "Birth date:" | "May 2nd, 1985" table-row shape from 6TJNBQ.
+    for cross_boundary in (False, True):
+        out = redact_pre_llm_value_of_category(
+            "April 1st, 1990", CAT_DATE_OF_BIRTH, cross_boundary=cross_boundary)
+        assert out == PRE_LLM_PLACEHOLDER
+
+
+def test_redact_pre_llm_values_untouched_ordinal_date_with_no_dob_label():
+    text = "Presented at the 1st Annual Meeting, April 2nd, 2019."
+    assert redact_pre_llm_values(text) == text
+
+
 def test_redact_pre_llm_values_untouched_iso_date_publication_no_dob_label():
     text = "Published 2020-05-01 in Journal X."
     assert redact_pre_llm_values(text) == text
@@ -1181,3 +1536,332 @@ def test_redact_pre_llm_value_of_category_replaces_the_value_cell():
 def test_redact_pre_llm_value_of_category_untouched_when_no_shape_matches():
     text = "Notes"
     assert redact_pre_llm_value_of_category(text, CAT_DATE_OF_BIRTH) == text
+
+
+# --------------------------------------------------------------------------
+# #847 residual: a child's date under a "Children:"/"Dependents:" label with
+# no DOB sub-label of its own. Matches CAT_CHILDREN, not CAT_DATE_OF_BIRTH/
+# CAT_BIRTH, so `_child_list_date_spans` handles it -- the render-time
+# policy row is untouched (still SCOPE_PERSONAL_AND_APPENDIX, still denies
+# the whole fragment as before).
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_dob_under_a_children_label_with_no_dob_sub_label():
+    out = redact_pre_llm_values("Children: Jane (01/02/2010)")
+    assert out == f"Children: Jane ({PRE_LLM_PLACEHOLDER})"
+
+
+def test_redact_pre_llm_values_dob_under_a_dependents_label():
+    out = redact_pre_llm_values("Dependents: Ann, born 01/02/2010")
+    assert out == f"Dependents: Ann, born {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_children_label_with_no_date_is_untouched():
+    text = "Children: Ann, Bob"
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_children_label_bare_year_is_untouched():
+    # Corpus blast-radius finding: a "Children:" PREFIX on a book/article
+    # title ("Children: Research, Practice and Policy...", the module's own
+    # #473 negative control) can end in a bare year that is a publication
+    # year, not a birth year -- the corpus run caught this live, twice, in
+    # a real CV. A bare year alone is not distinctive enough to AND against
+    # the false positive; only a full date in a child item is (`_CHILD_ITEM_RE`).
+    text = "Children: A Study of Early Intervention, City Press, 2015."
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_children_render_policy_row_unchanged():
+    # This round-3 fix only widens the PRE-LLM value scrub -- the render-time
+    # policy row for CAT_CHILDREN keeps its own scope and still denies the
+    # whole fragment at render time exactly as before #847.
+    assert _denied("Children: Ann, Bob", A)
+    assert not _denied("Children: Ann, Bob", "S4")
+
+
+# --------------------------------------------------------------------------
+# #847 residual: a Children label naming more than one child's date takes
+# every child item's date, not just the first.
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_children_label_withholds_every_full_date():
+    text = "Children: Ann (01/02/2010), Bob (03/04/2012), Cy (05/06/2014)"
+    out = redact_pre_llm_values(text)
+    assert out == (
+        f"Children: Ann ({PRE_LLM_PLACEHOLDER}), "
+        f"Bob ({PRE_LLM_PLACEHOLDER}), Cy ({PRE_LLM_PLACEHOLDER})"
+    )
+    assert not any(c.isdigit() for c in out)
+
+
+def test_redact_pre_llm_values_dob_label_still_takes_only_one_value():
+    # A DOB/SSN label span carries exactly one value -- the child-list
+    # rule above must not touch this existing single-value shape.
+    out = redact_pre_llm_values("Date of Birth: 01/02/1970")
+    assert out == f"Date of Birth: {PRE_LLM_PLACEHOLDER}"
+
+
+def test_redact_pre_llm_values_children_label_withholds_every_date_across_tabs():
+    # A tab-separated child list: each child's date sits in its own
+    # tab-delimited run, past the label's own fragment.
+    text = "Children:\tAnn (01/02/2010)\tBob (03/04/2012)\tCy (05/06/2014)"
+    out = redact_pre_llm_values(text)
+    assert out == (
+        f"Children:\tAnn ({PRE_LLM_PLACEHOLDER})\t"
+        f"Bob ({PRE_LLM_PLACEHOLDER})\tCy ({PRE_LLM_PLACEHOLDER})"
+    )
+    assert not any(c.isdigit() for c in out)
+
+
+def test_redact_pre_llm_values_children_label_withholds_every_date_after_a_column_gap():
+    # A 3+-space column gap after the label, then a comma-separated list
+    # of children on one line.
+    text = "Children:       Ann (01/02/2010), Bob (03/04/2012), Cy (05/06/2014)"
+    out = redact_pre_llm_values(text)
+    assert out == (
+        f"Children:       Ann ({PRE_LLM_PLACEHOLDER}), "
+        f"Bob ({PRE_LLM_PLACEHOLDER}), Cy ({PRE_LLM_PLACEHOLDER})"
+    )
+    assert not any(c.isdigit() for c in out)
+
+
+def test_redact_pre_llm_values_next_run_scrub_stops_at_a_newline():
+    # Negative control: a value on the NEXT LINE (not a same-line hard
+    # delimiter) is a different field and must not be pulled in, same
+    # guarantee as the existing never_extends_across_a_newline test above.
+    out = redact_pre_llm_values("Date of Birth:\nSSN: 123-45-6789")
+    assert out == f"Date of Birth:\nSSN: {PRE_LLM_PLACEHOLDER}"
+
+
+# --------------------------------------------------------------------------
+# #847 residual: redact_pre_llm_value_of_category(cross_boundary=True) -- for
+# a value at a lower-confidence position (a cell below a label, the next
+# paragraph in the stream) the value must OPEN the text and, for a DOB, be
+# a whole date. A bare year, or a date after other text, is left alone.
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_value_of_category_cross_boundary_still_replaces_a_full_date():
+    out = redact_pre_llm_value_of_category("01/02/1970", CAT_DATE_OF_BIRTH, cross_boundary=True)
+    assert out == PRE_LLM_PLACEHOLDER
+
+
+def test_redact_pre_llm_value_of_category_cross_boundary_takes_a_date_after_leading_whitespace():
+    out = redact_pre_llm_value_of_category("  01/02/1970", CAT_DATE_OF_BIRTH, cross_boundary=True)
+    assert out == f"  {PRE_LLM_PLACEHOLDER}"
+
+
+@pytest.mark.parametrize("text", [
+    "2001",                                  # bare year: not a whole date
+    "1990-1994 BA, Example College",         # bare year opening a range
+    "Appointed 07/01/2005",                  # whole date, but not opening
+    "Date of Appointment: 07/01/2005",       # its own label opens the text
+])
+def test_redact_pre_llm_value_of_category_cross_boundary_leaves_it_alone(text):
+    assert redact_pre_llm_value_of_category(text, CAT_DATE_OF_BIRTH, cross_boundary=True) == text
+
+
+def test_redact_pre_llm_value_of_category_default_still_takes_a_bare_year():
+    # The default (same-row/same-cell) path is unchanged -- only the
+    # cross-boundary callers get the narrower match.
+    out = redact_pre_llm_value_of_category("2001", CAT_DATE_OF_BIRTH)
+    assert out == PRE_LLM_PLACEHOLDER
+
+
+# --------------------------------------------------------------------------
+# #847 residual, blind-verifier round 2: precision. A DOB/SSN label takes
+# ONE value; a Children label takes only dates inside a child-shaped list;
+# the next-run fallback never reaches into a run that carries its own label.
+# Each expected string is what origin/dev's scrub produces for the same text.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, dev_output", [
+    ("Date of Birth:\t01/02/1970\tDate of Appointment:\t07/01/2005",
+     f"Date of Birth:\t{PRE_LLM_PLACEHOLDER}\tDate of Appointment:\t07/01/2005"),
+    ("Date of Birth: 01/02/1970, Appointed Assistant Professor 2005",
+     f"Date of Birth: {PRE_LLM_PLACEHOLDER}, Appointed Assistant Professor 2005"),
+    ("Born:\t1970\tMD\t1996", f"Born:\t{PRE_LLM_PLACEHOLDER}\tMD\t1996"),
+    ("Date of birth: January 1, 1970, US citizen since 1990, married 1995",
+     f"Date of birth: {PRE_LLM_PLACEHOLDER}, US citizen since 1990, married 1995"),
+    ("Children: Research, Practice and Policy. Oxford Press, 03/15/2019",
+     "Children: Research, Practice and Policy. Oxford Press, 03/15/2019"),
+])
+def test_redact_pre_llm_values_keeps_non_dob_dates_as_dev_does(text, dev_output):
+    assert redact_pre_llm_values(text) == dev_output
+
+
+def test_redact_pre_llm_values_next_run_with_its_own_label_is_left_alone():
+    # The DOB label's own value is blank; the next run is a different field.
+    text = "Date of Birth:\tDate of Appointment: 07/01/2005"
+    assert redact_pre_llm_values(text) == text
+
+
+def test_redact_pre_llm_values_child_list_stops_at_a_non_child_item():
+    text = "Children: Ann (01/02/2010), see Annual Report 03/04/2012"
+    assert redact_pre_llm_values(text) == f"Children: Ann ({PRE_LLM_PLACEHOLDER}), see Annual Report 03/04/2012"
+
+
+def test_redact_pre_llm_values_child_list_takes_a_nested_dob_keyword():
+    out = redact_pre_llm_values("Children:  Ann DOB: 01/02/2010")
+    assert out == f"Children:  Ann DOB: {PRE_LLM_PLACEHOLDER}"
+
+
+# A child item is one given-name token plus a parenthesised date or a
+# born/DOB keyword. Each expected string is origin/dev's output for the same
+# text, except that the children's own dates in the first two are withheld.
+@pytest.mark.parametrize("text, expected", [
+    ("Children: Ann (01/02/2010), Bob (03/04/2012), Appointed 07/01/2015",
+     f"Children: Ann ({PRE_LLM_PLACEHOLDER}), Bob ({PRE_LLM_PLACEHOLDER}), Appointed 07/01/2015"),
+    ("Children: Ann (01/02/2010), Grant R01, 07/01/2015",
+     f"Children: Ann ({PRE_LLM_PLACEHOLDER}), Grant R01, 07/01/2015"),
+    ("Children: A Randomized Trial (03/15/2019)", "Children: A Randomized Trial (03/15/2019)"),
+    ("Children: Healthy Eating Trial, 07/01/2005", "Children: Healthy Eating Trial, 07/01/2005"),
+    ("Dependents: Health Plan, 01/01/2020", "Dependents: Health Plan, 01/01/2020"),
+    ("Children: Jane, 01/02/2010", "Children: Jane, 01/02/2010"),
+    ("Children: Healthy Eating Trial (07/01/2005)", "Children: Healthy Eating Trial (07/01/2005)"),
+    ("Children: Trial (07/01/2015 - 06/30/2020)", "Children: Trial (07/01/2015 - 06/30/2020)"),
+    ("Children: pilot (07/01/2015)", "Children: pilot (07/01/2015)"),
+])
+def test_redact_pre_llm_values_child_list_takes_only_child_shaped_items(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+# "Birthday" also names an event, so it never gets the explicit-DOB
+# exemption from the boundary rule: both the pre-LLM scrub and the render
+# pass (A, T, S4) leave these exactly as origin/dev does.
+@pytest.mark.parametrize("text", [
+    "Symposium for Dr. Smith's 70th Birthday: 06/15/2019, Boston, MA",
+    "Grand Rounds, Hospital Birthday: 06/15/2019",
+])
+def test_birthday_after_a_prefix_is_not_an_explicit_dob_label(text):
+    assert redact_pre_llm_values(text) == text
+    entries = {code: [{"text": text, "taxonomy_code": code, "extracted_fields": {}}]
+               for code in ("A", "T", "S4")}
+    result = _run(entries)
+    assert [entries[code][0]["text"] for code in ("A", "T", "S4")] == [text] * 3
+    assert result.withheld == []
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Jane Doe DOB: 1/12/45", f"Jane Doe DOB: {PRE_LLM_PLACEHOLDER}"),
+    ("Name: Jane Doe, MD Birth Date:  01/12/1945",
+     f"Name: Jane Doe, MD Birth Date:  {PRE_LLM_PLACEHOLDER}"),
+])
+def test_explicit_dob_label_with_a_whole_date_is_caught_after_any_prefix(text, expected):
+    assert redact_pre_llm_values(text) == expected
+    # One shared policy: the render deny catches it at every destination too.
+    assert _denied(text, A) and _denied(text, APPENDIX) and _denied(text, CONTENT)
+
+
+@pytest.mark.parametrize("text", [
+    "Jane Doe DOB: 1945",                    # bare year: not a whole date
+    "Jane Doe DOB: pending",                 # no date at all
+    "Rebirth Date: 01/02/2019 conference",   # label glued inside a word
+    "Jane Doe Birthplace: 01/02/1945",       # not the DOB row's label
+])
+def test_explicit_dob_label_narrowing_stays_refused_without_all_three_conditions(text):
+    assert redact_pre_llm_values(text) == text
+    assert not _denied(text, CONTENT)
+
+
+# --------------------------------------------------------------------------
+# #849: a policy label one plain space after another field's value
+#
+# The stop is the KNOWN-label vocabulary (`_KNOWN_FIELD_LABEL_RE`), never a
+# guess at where a value ends (#821 R4). All values synthetic.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, kept, gone", [
+    ("Citizenship: US Date of Birth: March 1971", "Citizenship: US", "March 1971"),
+    ("Citizenship: US Social Security Number: 900 12 3456", "Citizenship: US", "900 12 3456"),
+    ("Citizenship: US Born: 03/04/1971", "Citizenship: US", "03/04/1971"),
+    ("Citizenship: US Place of Birth: Springfield", "Citizenship: US", "Springfield"),
+    ("Nationality: Dual Citizen Marital Status: Married", "Nationality: Dual Citizen", "Married"),
+    ("Date of Birth: 03/04/1971 Marital Status: Married", "", "Married"),
+])
+def test_849_policy_label_after_a_known_field_value_is_withheld(text, kept, gone):
+    assert _pii_fragments(text)
+    entries = {"A": [{"text": text, "taxonomy_code": "A", "extracted_fields": {}}]}
+    result = _run(entries)
+    residual = entries["A"][0]["text"]
+    assert gone not in residual
+    assert kept in residual
+    assert result.withheld
+
+
+@pytest.mark.parametrize("text", [
+    "Gave a talk on Date of Birth: a history of the census",  # no known label before it
+    "Citizenship: US Member of the Social Security Number society",  # label words, no colon
+    "Note: gave a talk on Date of Birth: a history",           # a colon, but not a KNOWN label
+    "Citizenship: US Appointed 2005",                       # no policy label at all
+])
+def test_849_prose_containing_a_label_word_is_not_cut(text):
+    assert _pii_fragments(text) == []
+
+
+@pytest.mark.parametrize("text", [
+    "Citizenship: US Language: Spanish",                        # "age:" inside Language
+    "Office Address: 1300 York Ave Webpage: www.example.org",   # "age:" inside Webpage
+    "Citizenship: US Idea: a new clinic",                       # "dea:" inside Idea
+    "Phone: 555-0100 Pre-Marital Status: survey",               # hyphen before the label
+    "Phone: 555-0100 O'Visa: none",                             # apostrophe before the label
+])
+def test_849_policy_label_inside_a_word_after_a_known_field_is_not_cut(text):
+    """The known-field path accepts a policy label only at a word start;
+    it used to match "age:" inside "Language:" and render "Langu"."""
+    entries = {"A": [{"text": text, "taxonomy_code": "A", "extracted_fields": {}}]}
+    _run(entries)
+    assert entries["A"][0]["text"] == text
+
+
+# --------------------------------------------------------------------------
+# #847 residual round 5: child dates the child-item rule did not reach.
+# All names, dates and years synthetic.
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_children_label_after_a_merged_known_field_still_takes_child_items():
+    # The Children label's span merges into the Marital Status span that
+    # opens the line and keeps ITS category, so the child-item rule never
+    # ran on it: the child's date reached the LLM.
+    text = "Marital Status: Married Children: Ann (01/02/2010)"
+    assert redact_pre_llm_values(text) == f"Marital Status: Married Children: Ann ({PRE_LLM_PLACEHOLDER})"
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A Children label after another known field on its own line is a
+    # Personal Data field, not a title: every whole date it carries is a
+    # child's, whatever the item looks like.
+    ("Marital Status: Married (Jo) Children: (1), Jane Roe, 01/02/94",
+     f"Marital Status: Married (Jo) Children: (1), Jane Roe, {PRE_LLM_PLACEHOLDER}"),
+    ("Citizenship: US Children: Jane, 01/02/2010 and Bob, 03/04/2012",
+     f"Citizenship: US Children: Jane, {PRE_LLM_PLACEHOLDER} and Bob, {PRE_LLM_PLACEHOLDER}"),
+    # ...up to the next known field label only.
+    ("Citizenship: US Children: Jane, 01/02/2010 Date of Appointment: 07/01/2015",
+     f"Citizenship: US Children: Jane, {PRE_LLM_PLACEHOLDER} Date of Appointment: 07/01/2015"),
+    # A bare year is still never a child's date here.
+    ("Marital Status: Married Children: two, since 2010", "Marital Status: Married Children: two, since 2010"),
+    # A known label mid-line is not a Personal Data line: a citation.
+    ("Roe J. Threats to Health: Youth in India. Health of Children: Hazards, Bangkok, 3-7 March 2002",
+     "Roe J. Threats to Health: Youth in India. Health of Children: Hazards, Bangkok, 3-7 March 2002"),
+])
+def test_redact_pre_llm_values_children_label_after_a_known_field_takes_every_whole_date(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A whole date that OPENS a Children label's value is a child's date:
+    # no title opens with one.
+    ("Dependents: 01/02/2010", f"Dependents: {PRE_LLM_PLACEHOLDER}"),
+    ("Children: 01/02/2010, 03/04/2012 and 05/06/2014",
+     f"Children: {PRE_LLM_PLACEHOLDER}, {PRE_LLM_PLACEHOLDER} and {PRE_LLM_PLACEHOLDER}"),
+    ("Children: Ann (01/02/2010), 03/04/2012",
+     f"Children: Ann ({PRE_LLM_PLACEHOLDER}), {PRE_LLM_PLACEHOLDER}"),
+    # A bare date followed by more text is not a list item.
+    ("Children: 01/02/2010 Symposium, Boston", "Children: 01/02/2010 Symposium, Boston"),
+    ("Children: Ann (01/02/2010), 07/01/2015 Appointed",
+     f"Children: Ann ({PRE_LLM_PLACEHOLDER}), 07/01/2015 Appointed"),
+    # A year range is not a whole date.
+    ("Children: 2015-2016 NHANES data brief", "Children: 2015-2016 NHANES data brief"),
+])
+def test_redact_pre_llm_values_a_date_opening_a_children_value_is_a_child_item(text, expected):
+    assert redact_pre_llm_values(text) == expected

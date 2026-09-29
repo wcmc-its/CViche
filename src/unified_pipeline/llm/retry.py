@@ -1,13 +1,13 @@
-"""Shared call infrastructure for the OpenAI and Bedrock provider adapters.
+"""Shared call infrastructure for the Bedrock provider adapter.
 
-Owns the pieces both providers depend on: retry/backoff, the per-pod
+Owns the pieces the provider adapter depends on: retry/backoff, the per-pod
 in-flight-call semaphore, the client-init lock, and the LLM tuning knobs
 (timeout, max attempts, max concurrency) read from llm_config.yaml. Split out
-of llm_client.py (#496) -- this is where it has to live: llm/openai.py and
-llm/bedrock.py both depend on it, so it cannot live in either provider file
-without creating a cross-provider dependency, and llm_client.py (the facade)
-cannot own it either without an import cycle (llm_client imports the provider
-handlers, which need this module's state).
+of llm_client.py (#496) -- this is where it has to live: llm/bedrock.py
+depends on it, so it cannot live in the provider file without creating an
+import cycle if a second provider is ever added, and llm_client.py (the
+facade) cannot own it either without an import cycle (llm_client imports the
+provider handler, which needs this module's state).
 """
 
 import sys
@@ -18,12 +18,6 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
-from openai import (
-    RateLimitError,
-    APITimeoutError,
-    APIConnectionError,
-    InternalServerError,
-)
 
 # Calculate the absolute path to web_interface/backend so `app.config_loader`
 # is importable from here (src/unified_pipeline/llm/ -> project root -> backend).
@@ -65,7 +59,7 @@ BEDROCK_OUTAGE_CODES = frozenset({
 # dead defensive code (PR #620 review).
 from botocore.exceptions import ClientError as _BotoClientError
 
-RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError, _BotoClientError)
+RETRYABLE_ERRORS = (_BotoClientError,)
 
 T = TypeVar("T")
 
@@ -86,7 +80,7 @@ class LLMOutageError(Exception):
 
 
 # Per-pod ceiling on concurrent in-flight LLM calls. A backstop against fanning
-# out too many simultaneous Bedrock/OpenAI requests from one pod -- e.g. if the
+# out too many simultaneous Bedrock requests from one pod -- e.g. if the
 # per-run admission cap (CVICHE_MAX_CONCURRENT_RUNS) is raised, or a stage ever
 # parallelizes its calls. The live pipeline runs stages sequentially and runs
 # are admission-capped, so in-flight calls are already few; this default is
@@ -180,22 +174,19 @@ def _is_outage_error(e: Exception) -> bool:
     """
     if isinstance(e, _BotoClientError):
         return e.response.get("Error", {}).get("Code", "") in BEDROCK_OUTAGE_CODES
-    return isinstance(e, (RateLimitError, InternalServerError))
+    return False
 
 
 def _retry_after_seconds(e: Exception) -> float | None:
     """Best-effort Retry-After extraction (#637): botocore surfaces it as a
-    response header, OpenAI's SDK exceptions carry the raw httpx response.
-    None if absent or unparseable -- the caller falls back to the generic
-    equal-jitter backoff.
+    response header. None if absent or unparseable -- the caller falls back
+    to the generic equal-jitter backoff.
     """
     try:
         if isinstance(e, _BotoClientError):
             value = e.response.get("ResponseMetadata", {}).get("HTTPHeaders", {}).get("retry-after")
-        else:
-            response = getattr(e, "response", None)
-            value = response.headers.get("retry-after") if response is not None else None
-        return float(value) if value is not None else None
+            return float(value) if value is not None else None
+        return None
     except (TypeError, ValueError, AttributeError):
         return None
 
@@ -218,13 +209,11 @@ def _outage_backoff_wait(outage_retries: int, retry_after: float | None) -> floa
     return base / 2 + random.uniform(0, base / 2)
 
 
-# Guards construction of the module-level OpenAI and Bedrock clients
-# (llm/openai.py, llm/bedrock.py). call_llm runs on several threads at once
-# (see _llm_call_semaphore), so two threads can both observe `_client is
-# None`. For OpenAI that is merely wasteful -- the loser's client is
-# discarded and both are valid. For Bedrock it is not safe: boto3 builds
-# clients off the shared default session, and only *use* of an existing
-# client is thread-safe, not its creation.
+# Guards construction of the module-level Bedrock client (llm/bedrock.py).
+# call_llm runs on several threads at once (see _llm_call_semaphore), so two
+# threads can both observe `_client is None`. This is not safe for Bedrock:
+# boto3 builds clients off the shared default session, and only *use* of an
+# existing client is thread-safe, not its creation.
 _client_init_lock = threading.Lock()
 
 

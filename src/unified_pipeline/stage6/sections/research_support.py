@@ -62,6 +62,8 @@ from ..formatting import (
 )
 from ..normalization import (
     _deduplicate_repeated_content,
+    grant_heading_is_past,
+    grant_heading_rebucket_target,
     grant_status_rebucket_target,
 )
 from ..resolution import _get_cv_owner_name
@@ -137,8 +139,11 @@ class GrantFields(TypedDict, total=False):
     funding_source: str | None
     sponsor: str | None
     annual_direct_costs: str | int | float | None
+    # What the stage-4 M2 schema actually emits for a yearly amount
+    # (`stage4/schemas.py`: "annual_funding": "Annual/yearly direct costs");
+    # `annual_direct_costs` above is the older spelling, kept as the first read.
+    annual_funding: str | int | float | None
     total_funding: str | int | float | None
-    co_investigators: str | None
     pi_name: str | None
     principal_investigator: str | None
     date: str | None
@@ -148,11 +153,14 @@ class GrantFields(TypedDict, total=False):
     major_goals: str | None
     narrative: str | None
     grant_number: str | None
+    nct_number: str | None  # stage-4 output stored before #291 dropped the M4 schemas
     non_financial_support: str | None
     percent_effort: str | None
     pi_role: str | None
     role: str | None
     status: str | None
+    notes: str | None
+    co_investigators: str | None
     study_title: str | None
     text: str | None
     title: str | None
@@ -197,6 +205,49 @@ PERCENT_EFFORT_PRECISION = Decimal('0.01')
 # End-date text that means "still running", so an M2A grant carrying it is
 # never reclassified as completed however the year parses.
 OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
+
+# The goals phrase in a grant's own text or in a goals row of its own (#958),
+# and four measured wording variants (#829): the WCM label "(Optional - The
+# major goals of this project are): | <goal>", the plain "The major goals of
+# this project are:<tab><goal>", the prose "The major goals of this project
+# are to <goal>", singular "The major goal of this project is" (YME2VA),
+# "...of this program are" (YME2VA), the bare "Major Goals:" / "Major Goals
+# of (the) Project:" label with no project/program noun before the separator
+# at all (BYFQBG), and A5IZ6Q's typo "The major gals of this project:" --
+# plural only; the pattern below deliberately does not also accept the
+# singular "gal", since no run has shown that typo. `proj` is the "of
+# (this|the) project/program [are|is]" anchor. `sep` -- a colon, pipe, closing
+# paren or tab -- is what makes the phrase a label rather than (with `proj`
+# present) the start of the sentence; `rest` stops at the line end, since a
+# table-form grant carries one source row per line. A bare label needs `sep`
+# to read as a label at all -- checked in `parse_major_goals`, not here,
+# because Python's `re` cannot express "`sep` required only when `proj` is
+# absent" with one named group shared across alternatives. Without that
+# check, a stray "major goal(s)" with neither anchor would swallow the rest
+# of its line as if it were a whole-sentence claim.
+#
+# `_MAJOR_GOALS_ANCHOR_PATTERN` is factored out, rather than inlined twice,
+# because `parse_major_goals` needs a *second*, shorter regex built from the
+# same leading text: one that matches only the "major goal(s)" keyword itself,
+# with none of the trailing groups below. Scanning occurrences of that short
+# anchor (instead of `MAJOR_GOALS_LABEL_RE` itself) is what lets it walk past
+# an unanchored "major goal(s)" mention to find a real, later label on the
+# *same* line -- with the full pattern's own greedy `rest` group, a skipped,
+# unanchored match's span already swallows the remainder of the line,
+# including any real label in it, so nothing would be left to find.
+_MAJOR_GOALS_ANCHOR_PATTERN = r'(?:the\s+)?major\s+(?:goals?|gals)\b'
+MAJOR_GOALS_LABEL_RE = re.compile(
+    _MAJOR_GOALS_ANCHOR_PATTERN
+    + r'(?P<proj>\s+of\s+(?:this\s+|the\s+)?(?:project|program)(?:\s+(?:are|is))?)?'
+    + r'(?P<sep>[ \t]*[:|)\t][ \t:|)]*)?'
+    + r'(?P<rest>[^\n]*)',
+    re.IGNORECASE,
+)
+_MAJOR_GOALS_ANCHOR_RE = re.compile(_MAJOR_GOALS_ANCHOR_PATTERN, re.IGNORECASE)
+# A paragraph-form grant tab-separates its fields, and the one observed after a
+# goal is the role ("...prognosis.<tab>Role: PI"). Any other tab stays in the
+# goal: a wrapped source line is tab-joined as well.
+MAJOR_GOALS_VALUE_END_RE = re.compile(r'\t(?=(?:your\s+)?role\b)', re.IGNORECASE)
 
 
 class UnsupportedRebucketTargetError(ValueError):
@@ -386,6 +437,24 @@ def apply_effort_to_grants(entries: list[dict], effort_lookup: dict[str, str]) -
     return messages
 
 
+def explicit_status_target(entry: dict) -> tuple[str | None, str | None]:
+    """The bucket a grant's own words put it in: its status field, or, when the
+    status names no bucket (absent, or a word the vocabulary does not know, like
+    "withdrawn", "Funded", "NCE"), the heading the CV filed it under (#981, #982).
+
+    Judgement call, when both name a bucket and disagree: the status wins. It is
+    the grant's own word, and #210 ruled an explicit status beats other signals.
+    The hazard that argues for the heading ("Review completed" under a Pending
+    heading filing the grant Completed) is closed in the vocabulary instead: a
+    "completed" that follows "review" or "visit" names no bucket."""
+    fields = cast(GrantFields, entry.get('extracted_fields') or {})
+    heading_target = grant_heading_rebucket_target(entry.get('hierarchy') or [])
+    status_target = grant_status_rebucket_target(str(fields.get('status') or ''))
+    if not status_target[0]:
+        return heading_target
+    return status_target
+
+
 def rebucket_grants_by_status(
     m2a_entries: list[dict], m2b_entries: list[dict], m2c_entries: list[dict]
 ) -> tuple[list[dict], list[dict], list[dict], list[str]]:
@@ -409,7 +478,7 @@ def rebucket_grants_by_status(
     for source_code, source_list in (('M2A', current), ('M2B', completed)):
         for position, entry in enumerate(list(source_list)):
             fields = cast(GrantFields, entry.get('extracted_fields') or {})
-            target, note = grant_status_rebucket_target(fields.get('status'))
+            target, note = explicit_status_target(entry)
             if not target or target == source_code:
                 continue
             title = str(fields.get('title') or 'Unknown')
@@ -475,20 +544,250 @@ def reclassify_past_m2a_grants(
     return current, completed, messages
 
 
+def promote_open_ended_m2b_grants(
+    m2a_entries: list[dict], m2b_entries: list[dict], current_year: int
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Move M2B grants that are still running into M2A, with a note (#981).
+
+    The mirror of `reclassify_past_m2a_grants`: an end date of 'present' or a
+    year >= `current_year` is a current grant, however stage 3b coded it. A
+    grant with no end date is left alone -- nothing says it is running -- and so
+    is one whose own status or heading names its bucket
+    (`explicit_status_target`) or a heading that files it as past, which beats
+    date inference. Returns
+    (M2A, M2B, verbose lines); the inputs are left as they were.
+    """
+    current = list(m2a_entries)
+    completed = list(m2b_entries)
+    messages: list[str] = []
+    for entry in list(completed):
+        fields = cast(GrantFields, entry.get('extracted_fields') or {})
+        end_date = str(fields.get('end_date') or '').strip()
+        if not end_date or 'reclassification_note' in entry:
+            continue
+        if explicit_status_target(entry)[0] or grant_heading_is_past(
+                entry.get('hierarchy') or []):
+            continue
+        year_match = re.search(r'(\d{4})', end_date)
+        if end_date.lower() in OPEN_ENDED_END_DATES:
+            running = True
+        else:
+            running = bool(year_match) and int(year_match.group(1)) >= current_year
+        if not running:
+            continue
+        completed.remove(entry)
+        entry['reclassification_note'] = (
+            f"Reclassified from Completed (M2B) to Current (M2A): end date "
+            f"{end_date} is not before {current_year}"
+        )
+        current.append(entry)
+        title = fields.get('title') or 'Unknown'
+        messages.append(f"  Reclassified to M2A: '{title[:40]}...' (ends {end_date})")
+    return current, completed, messages
+
+
+def parse_major_goals(text: str | None) -> str | None:
+    """The faculty member's own goal text after a goals label, verbatim (#958).
+
+    Two shapes carry it. A label -- `MAJOR_GOALS_LABEL_RE` with a separator
+    (`sep`) after the anchor -- is followed by the goal, which is returned
+    without the label. Without a separator the phrase must still carry the "of
+    (this|the) project/program [are|is]" anchor (`proj`): it opens the faculty
+    member's own sentence ("The major goals of this project are to ..."), and
+    the whole sentence is the goal. A match with neither `proj` nor `sep` --
+    some other use of "major goal(s)" with no project/program noun and no
+    separator -- is not a label at all, so it is left as grant content rather
+    than treated as an unbounded whole-sentence claim.
+
+    That "leave it as grant content" choice is per-match, not per-text: a
+    single `.search()` would stop at the first "major goal(s)" mention even
+    when it is the unanchored kind and a real, anchored label follows later in
+    the same text -- on the same line or a later one -- silently dropping the
+    real label. So this walks every occurrence of the bare "major goal(s)"
+    anchor (`_MAJOR_GOALS_ANCHOR_RE`, not `MAJOR_GOALS_LABEL_RE` itself: its
+    greedy `rest` group would swallow a same-line label into the very
+    unanchored match being skipped) and, at each one, tries the full label
+    pattern anchored to that position (`.match(text, pos)`), taking the first
+    that is actually anchored (`proj` or `sep`). An unanchored mention is
+    skipped rather than treated as the answer. Either way only surrounding
+    whitespace is stripped. An empty label is no goal either: None, so no row
+    renders.
+    """
+    text = text or ''
+    match = next(
+        (candidate for candidate in (
+            MAJOR_GOALS_LABEL_RE.match(text, anchor.start())
+            for anchor in _MAJOR_GOALS_ANCHOR_RE.finditer(text)
+        ) if candidate and (candidate['proj'] or candidate['sep'])),
+        None,
+    )
+    if match is None or not match['rest'].strip():
+        return None
+    goal = match['rest'] if match['sep'] else match.group(0)
+    return MAJOR_GOALS_VALUE_END_RE.split(goal, maxsplit=1)[0].strip()
+
+
+def fill_major_goals_from_text(entries: list[dict]) -> None:
+    """Give a grant the goal written in its own text when stage 4 left none (#958).
+
+    Stage 4 never extracts `major_goals` for M2 records, so a goal stated inside
+    the grant entry reached no row. Writes land on this section's copies of the
+    records (`copy_entries_for_render`), never on the caller's.
+    """
+    for entry in entries:
+        fields = cast(GrantFields, entry.get('extracted_fields') or {})
+        if not fields.get('major_goals'):
+            fields['major_goals'] = parse_major_goals(entry.get('text'))
+
+
+def _spans_element(entry: dict, element_idx: int) -> bool:
+    """True when `element_idx` lies inside the entry's own source-element range."""
+    start, end = entry.get('element_idx_start'), entry.get('element_idx_end')
+    return isinstance(start, int) and isinstance(end, int) and start <= element_idx <= end
+
+
+def claim_goal_rows(grants: list[dict], rows: list[dict]) -> list[tuple[dict, dict]]:
+    """Attach each goals-row entry to the one grant whose source table holds it (#958).
+
+    When the goals row sits in a table of its own, stage 2 emits it as a
+    separate `table_row` entry whose `parent_idx` is a source element inside the
+    grant's own `element_idx_start..element_idx_end` range, and 3b classifies it
+    T, so it went to the Appendix. The signal is that range, not proximity: a
+    row inside no grant's range, or inside two (ambiguous), is left alone, and
+    so is one whose goal differs from a goal the grant already carries -- the
+    row is then still the only place that text appears.
+
+    Returns (row, grant) pairs. The grant's copied fields gain `major_goals`; the
+    row itself is not touched. The caller decides which rows actually left the
+    Appendix, because only a grant that rendered took its goal with it.
+    """
+    claimed: list[tuple[dict, dict]] = []
+    for row in rows:
+        goal = parse_major_goals(row.get('text'))
+        parent_idx = row.get('parent_idx')
+        if goal is None or not isinstance(parent_idx, int):
+            continue
+        owners = [grant for grant in grants if _spans_element(grant, parent_idx)]
+        if len(owners) != 1:
+            continue
+        fields = cast(GrantFields, owners[0].get('extracted_fields') or {})
+        existing = fields.get('major_goals')
+        if existing and existing != goal:
+            continue
+        fields['major_goals'] = goal
+        claimed.append((row, owners[0]))
+    return claimed
+
+
+# A grant's own text often names its PI, and `co_investigators` (which resolve_pi_name
+# no longer reads) sometimes held exactly that name. These are the shapes the
+# corpus carries, tried in this order, first hit wins:
+#
+#   "PI: Lee", "(PI Park)", "[PI Dr. Ann B. Cole, ..."
+#   "Principal Investigator: Sam Ortiz", "Principal Investigators: A & B"
+#   "Nguyen (PI)", "Lee & Park (MPI)", "Dr. Ana Cruz (Principal Investigator)"
+#   "M. Silva, Principal Investigator", "Rosa Diaz, PI"
+#   "[PIs Dr. Ann Cole, Dr. Ben Hale, et al.]" (comma-separated names)
+#
+# Every shape wants a capitalised name, which is what keeps "PI: 75%",
+# "Subcontract-PI: $103,886" and "PI: smith" from matching. "Co-PI:" and
+# "Subcontract-PI:" are refused by the lookbehind (a hyphen or word character
+# before the "PI"): they name someone who is not the grant's PI. The separator
+# after a colon is spaces only, so a tab-delimited "PI:\t<next cell>" does not
+# read the next cell as a name. A name is a capitalised, digit-free token plus up
+# to PI_NAME_MAX_EXTRA_TOKENS more ("Dr." counts as a token), all on one line and
+# starting at a word boundary; two names may join with "&" or "and". A name that
+# would run past the token limit ("PI Kim Tu Thi Tran" at four tokens) does not
+# match at all rather than truncating to a wrong name. The "Name, Principal
+# Investigator" shape needs at least two tokens, so "Institute of Chicago,
+# Principal Investigator" (the owner's own role) does not read "Chicago" as a PI.
+PI_NAME_MAX_EXTRA_TOKENS = 3
+_PI_NAME_TOKEN = r"[A-Z](?:[^\W\d_]|[.'\u2019-])*"
+_PI_NAME_END = r"(?![\w'\u2019-]| +[A-Z])"
+
+
+def _pi_name(min_extra_tokens: int) -> str:
+    """A name pattern: `min_extra_tokens`..PI_NAME_MAX_EXTRA_TOKENS tokens after the first."""
+    return (
+        r"(?<![\w-])" + _PI_NAME_TOKEN
+        + r"(?: +" + _PI_NAME_TOKEN + r"){%d,%d}" % (min_extra_tokens, PI_NAME_MAX_EXTRA_TOKENS)
+        + _PI_NAME_END
+    )
+
+
+_PI_NAMES = _pi_name(0) + r"(?: +(?:&|and) +" + _pi_name(0) + r")*"
+PI_LABEL_PATTERNS = (
+    re.compile(r"(?:(?<![-\w])PI: *|[(\[]PI +)(" + _PI_NAMES + r")"),
+    re.compile(r"(?<![-\w])Principal Investigators?: *(" + _PI_NAMES + r")"),
+    re.compile(r"(" + _PI_NAMES + r") +\((?:PI|MPI|Principal Investigator)\)"),
+    re.compile(r"(" + _pi_name(1) + r"), (?:Principal Investigator|PI)\b"),
+    re.compile(r"[(\[]PIs +(" + _pi_name(0) + r"(?:, +" + _pi_name(0) + r")*)"),
+)
+_NAME_JOINER_RE = re.compile(r" (?:&|and) ")
+_NAME_WORD_RE = re.compile(r"[^\W\d_]{3,}(?:-[^\W\d_]+)*")
+
+
+def _pi_name_from_label(raw_text: str) -> str:
+    """The PI a grant's own text names, or '' when it names none."""
+    for pattern in PI_LABEL_PATTERNS:
+        match = pattern.search(raw_text or '')
+        if match:
+            return match.group(1).strip()
+    return ''
+
+
+def _surname_parts(name: str) -> frozenset[str]:
+    """The casefolded parts of the surname in "First M. Last".
+
+    A hyphenated surname contributes each part ("Rivera-Ortiz" gives both), so
+    "Ana Rivera" still reads as the owner "Ana Rivera-Ortiz". Any comma means a
+    list of names ("[PIs Lee, Park]"): no label pattern captures "Last, First",
+    and `_get_cv_owner_name` builds "First Last", so a comma never marks a
+    surname. Empty for a list or no name.
+    """
+    if ',' in name:
+        return frozenset()
+    words = _NAME_WORD_RE.findall(name)
+    return frozenset(words[-1].casefold().split('-')) if words else frozenset()
+
+
+def _is_cv_owner(pi_name: str, owner_name: str) -> bool:
+    """True when `pi_name` is one person whose surname is the CV owner's surname.
+
+    "Lee (PI)" names the CV owner "Ann Lee" by surname; the owner's full name is
+    the better cell, and it is what the owner auto-fill rendered before the label
+    was read. Surname only: a shared first name ("PI: Ann Smith" on Ann Lee's
+    CV) or a given name that is another person's surname ("PI: Mark Hale" on
+    Tom Mark Lee's CV) is someone else. A joined pair ("Lee & Park") or a list
+    ("Lee, Park") is never replaced, since dropping the other name would lose a
+    PI.
+    """
+    if not owner_name or _NAME_JOINER_RE.search(pi_name):
+        return False
+    return bool(_surname_parts(pi_name) & _surname_parts(owner_name))
+
+
 def resolve_pi_name(
     fields: GrantFields, raw_text: str, role: str | None, owner_name: str
 ) -> str | None:
     """Resolve the principal investigator for one grant.
 
-    Extracted field first, then the trailing cell of a pipe-delimited source row,
-    then the CV owner when the role says they are the PI. Text in, text out: no
-    docx, so the parser's heuristics are testable on their own (review thread
-    3932312407 item 5).
+    Extracted field first, then a PI the source text names (`PI_LABEL_PATTERNS`),
+    then the trailing cell of a pipe-delimited source row, then the CV owner when the
+    role says they are the PI. Text in, text out: no docx, so the parser's
+    heuristics are testable on their own (review thread 3932312407 item 5).
 
-    Returns None, not '', when the record carries `co_investigators` as a JSON
-    null and nothing else resolves -- the `or` chain hands the null straight
-    back. The caller renders a falsy PI as an empty cell either way, so the
-    annotation is what changed here, not the behaviour.
+    `co_investigators` is deliberately not a source. It lists the people who
+    worked on the grant alongside the PI, and on a CV that is usually the CV
+    owner: reading it here rendered the owner as "Name of Principal
+    Investigator" on a grant whose own text said "PI: <someone else>" (#982).
+    The label parse is what fills that cell instead, and it runs before the
+    owner auto-fill so a named PI is never overwritten by the owner.
+
+    Returns None, not '', when the record carries `pi_name` or
+    `principal_investigator` as a JSON null and nothing else resolves -- the
+    `or` chain hands the null straight back. The caller renders a falsy PI as an
+    empty cell either way.
 
     `role` is `str | None` for the same reason, on the way in. The caller reads
     it as `fields.get('pi_role') or fields.get('role', '')`
@@ -503,7 +802,12 @@ def resolve_pi_name(
     times, never null -- but `pi_role` is null on 81 of them, which is what
     puts the read on the `role` branch at all.
     """
-    pi_name = fields.get('pi_name') or fields.get('principal_investigator', '') or fields.get('co_investigators', '')
+    pi_name = fields.get('pi_name') or fields.get('principal_investigator', '')
+
+    if not pi_name:
+        pi_name = _pi_name_from_label(raw_text)
+        if pi_name and _is_cv_owner(pi_name, owner_name):
+            pi_name = owner_name
 
     # Parse PI name from raw text if not in extracted fields
     # Common format: "Agency | Amount | Dates | PI Name"
@@ -571,22 +875,88 @@ def _looks_like_funding_placeholder(table: Table) -> bool:
     return header_cells[0].text.strip().lower().startswith(_FUNDING_PLACEHOLDER_LABEL_PREFIX)
 
 
-def _format_grant_costs(
-    annual_direct_costs: str | int | float | None, total_funding: str | int | float | None
-) -> str:
-    """The "Annual direct costs:" cell, as currency.
+# The costs row of the WCM grant block. The template's own label is "Annual
+# direct costs:"; a total award amount gets its own label instead, because a
+# total under "Annual" states a false fact (#982).
+ANNUAL_COSTS_LABEL = 'Annual direct costs:'
+TOTAL_AWARD_LABEL = 'Total award:'
+STATUS_LABEL = 'Status:'
+NOTES_LABEL = 'Notes:'
+CO_INVESTIGATORS_LABEL = 'Co-Investigators:'
 
-    `or` on the raw value treated a real $0 as missing (round-2 review of #481,
-    point 4): the fallback is decided on what annual_direct_costs *renders*, so
-    0 wins and only a value that renders nothing (None, blank, non-amount)
-    falls through. Both arguments are `_create_grant_table`'s locals rather
-    than fresh `fields` reads, so a duplicate-of-title blanking made before the
-    call is what renders here too.
+
+def _optional_grant_rows(
+    fields: GrantFields, title: str, pi_name: str | None
+) -> list[tuple[str, str]]:
+    """The rows after the eight the WCM template defines, each only when it has text.
+
+    Co-Investigators (#982) renders the people `co_investigators` lists. The
+    template has only a PI row, and #1008 stopped feeding this field into it
+    (it usually held the CV owner), which left the names in no cell. A row of
+    its own keeps them without touching the PI cell; a value identical to the
+    resolved PI is dropped, since it would repeat the row above it.
+
+    Status and Notes (#982) keep a grant's own status word and labelled remark
+    ("Update: withdrawn"), which reached no cell before. Major project goals
+    (major_goals, description or narrative) is the older optional row, moved here
+    unchanged. A record with none of them renders exactly the eight-row block.
+    A note or goals text that only repeats the title is dropped: the same-text
+    guard as title/agency/funding -- same fact via two paths (#829, BYFQBG#82).
     """
-    costs_formatted = _format_currency(annual_direct_costs)
-    if not costs_formatted:
-        costs_formatted = _format_currency(total_funding)
-    return costs_formatted
+    title_text = (title or '').strip().lower()
+    rows = []
+    co_investigators = str(fields.get('co_investigators') or '').strip()
+    if co_investigators and co_investigators.lower() != (pi_name or '').strip().lower():
+        rows.append((CO_INVESTIGATORS_LABEL, co_investigators))
+    status = str(fields.get('status') or '').strip()
+    if status:
+        rows.append((STATUS_LABEL, status))
+    notes = str(fields.get('notes') or '').strip()
+    if notes and notes.lower() != title_text:
+        rows.append((NOTES_LABEL, notes))
+    goals = fields.get('major_goals') or fields.get('description') or fields.get('narrative') or ''
+    if len(goals.strip()) > 10 and goals.strip().lower() != title_text:  # Only if substantive
+        rows.append(('Major project goals:', goals))
+    return rows
+
+
+def _first_rendering_amount(fields: GrantFields) -> str | int | float:
+    """The yearly amount, from `annual_direct_costs` then `annual_funding`.
+
+    Decided on what each value *renders*, not on its truthiness, so a real $0
+    in the first key wins over the second (round-2 review of #481, point 4) and
+    a blank or non-amount value falls through to it.
+    """
+    annual_direct_costs = fields.get('annual_direct_costs')
+    if _format_currency(annual_direct_costs):
+        return cast(str | int | float, annual_direct_costs)
+    annual_funding = fields.get('annual_funding')
+    if _format_currency(annual_funding):
+        return cast(str | int | float, annual_funding)
+    return ''
+
+
+def _format_grant_costs(
+    annual_costs: str | int | float | None, total_funding: str | int | float | None
+) -> list[tuple[str, str]]:
+    """The costs rows as (label, currency text) pairs.
+
+    `annual_costs` goes under "Annual direct costs:" whenever it renders. A
+    `total_funding` that renders goes under "Total award:", never under
+    "Annual": alone it is the only costs row, and beside a different yearly
+    amount it is a second row, so neither figure is dropped. With neither, the
+    template's own label and an empty cell. Both arguments are
+    `_create_grant_table`'s locals rather than fresh `fields` reads, so a
+    duplicate-of-title blanking made before the call is what renders here too.
+    """
+    annual_formatted = _format_currency(annual_costs)
+    total_formatted = _format_currency(total_funding)
+    rows = []
+    if annual_formatted or not total_formatted:
+        rows.append((ANNUAL_COSTS_LABEL, annual_formatted))
+    if total_formatted and total_formatted != annual_formatted:
+        rows.append((TOTAL_AWARD_LABEL, total_formatted))
+    return rows
 
 
 class ResearchSupportSection:
@@ -598,7 +968,7 @@ class ResearchSupportSection:
         cv_owner: dict | None = None,
         document_uid: str = '',
         current_year: int | None = None,
-    ) -> None:
+    ) -> list[dict]:
         """Fill research support section with individual tables per grant.
 
         Creates a table for each grant with the WCM data model:
@@ -632,6 +1002,11 @@ class ResearchSupportSection:
             document_uid: run-scoped document id, used to resolve the owner.
             current_year: the year "current funding" is judged against. Defaults
                 to the system clock; pass it to make a boundary reproducible.
+
+        Returns:
+            The T-coded goals-row entries (#958) whose goal now renders inside a
+            grant table -- the caller's own dicts, by identity, for `generate()`
+            to keep out of the Appendix.
         """
         # Get CV owner name for auto-filling PI when role is Principal Investigator
         owner_name = _get_cv_owner_name(cv_owner, document_uid)
@@ -659,6 +1034,15 @@ class ResearchSupportSection:
         m2a_entries, m2b_entries, messages = reclassify_past_m2a_grants(
             m2a_entries, m2b_entries, current_year)
         _print_verbose(messages, self.verbose)
+
+        m2a_entries, m2b_entries, messages = promote_open_ended_m2b_grants(
+            m2a_entries, m2b_entries, current_year)
+        _print_verbose(messages, self.verbose)
+
+        grants = m2a_entries + m2b_entries + m2c_entries
+        fill_major_goals_from_text(grants)
+        claimed_goal_rows = claim_goal_rows(grants, entries_by_code.get('T', []))
+        rendered_grant_ids: set[int] = set()
 
         # Map taxonomy codes to WCM template section headers
         # These must match the exact text in the official WCM template
@@ -712,6 +1096,7 @@ class ResearchSupportSection:
                 # Create grant table - pass the element to insert after and owner name
                 grant_table = self._create_grant_table(fields, code, entry, insert_after_element=last_element, owner_name=owner_name)
                 if grant_table:
+                    rendered_grant_ids.add(id(entry))
                     self.stats['tables_populated'] += 1
                     self.stats['entries_inserted'] += 1
 
@@ -724,6 +1109,10 @@ class ResearchSupportSection:
                         spacing_para = self._add_spacing_paragraph(after_element=grant_table._tbl)
                         if spacing_para is not None:
                             last_element = spacing_para
+
+        # A goals row leaves the Appendix only with a grant that rendered: a
+        # declined grant, or one under a header the template lacks, took nothing.
+        return [row for row, grant in claimed_goal_rows if id(grant) in rendered_grant_ids]
 
     def _create_grant_table(
         self,
@@ -772,11 +1161,12 @@ class ResearchSupportSection:
         agency = fields.get('agency') or fields.get('funding_source', '') or fields.get('sponsor', '')
         # The two funding keys are read twice, in opposite precedence: the
         # duplicate-content check below wants total_funding first, the rendered
-        # "Annual direct costs" row wants annual_direct_costs first. Both reads
+        # costs row wants the yearly amount first (`annual_direct_costs`, else
+        # `annual_funding`, the key stage 4 emits). Both reads
         # go through these locals, so clearing a duplicate below no longer has to
         # write '' back into the caller's `fields` to make the second read agree
         # (review thread 3932312407 item 1).
-        annual_direct_costs = fields.get('annual_direct_costs', '')
+        annual_direct_costs = _first_rendering_amount(fields)
         total_funding = fields.get('total_funding', '') or annual_direct_costs
 
         # Detect and fix cross-field duplication where the same content appears in multiple fields
@@ -794,14 +1184,14 @@ class ResearchSupportSection:
         if title and agency and title.strip().lower() == agency.strip().lower():
             # Agency and title are identical - keep as title only, clear agency
             agency = ''
-        if title and total_funding and title.strip().lower() == total_funding.strip().lower():
+        if title and total_funding and title.strip().lower() == str(total_funding).strip().lower():
             # Funding is same as title - clear funding
             total_funding = ''
             annual_direct_costs = ''
         role = fields.get('pi_role') or fields.get('role', '') or fields.get('description', '')
         start_date = fields.get('start_date', '') or fields.get('date', '')
         end_date = fields.get('end_date', '')
-        grant_number = (fields.get('grant_number') or '').strip()
+        grant_number = (fields.get('grant_number') or fields.get('nct_number') or '').strip()
 
         has_title = bool(title and len(title.strip()) > 10)
         # For clinical trials: if we have a title and a date, that's substantive enough
@@ -839,7 +1229,7 @@ class ResearchSupportSection:
         raw_text = entry.get('text', '') if entry else ''
         pi_name = resolve_pi_name(fields, raw_text, role, owner_name)
 
-        costs_formatted = _format_grant_costs(annual_direct_costs, total_funding)
+        cost_rows = _format_grant_costs(annual_direct_costs, total_funding)
 
         # Carry the grant/award identifier in Award Source. The WCM template has no
         # grant-number row -- its block is exactly these 8 rows plus optional goals --
@@ -855,18 +1245,14 @@ class ResearchSupportSection:
         rows = [
             ('Award Source:', agency),
             ('Project title:', title),
-            ('Annual direct costs:', costs_formatted),
+            *cost_rows,
             ('Non-financial support:', fields.get('non_financial_support', '')),
             ('Duration of support:', self._format_grant_duration(fields, code)),
             ('Name of Principal Investigator:', pi_name),
             ('Your role:', role),
             ('Your percent (%) effort:', percent_effort),
+            *_optional_grant_rows(fields, title, pi_name),
         ]
-
-        # Add optional major goals if present (check major_goals, description, or narrative)
-        goals = fields.get('major_goals') or fields.get('description', '') or fields.get('narrative', '')
-        if goals and len(goals.strip()) > 10:  # Only if substantive
-            rows.append(('Major project goals:', goals))
 
         # Create a new table with 2 columns
         table = self.doc.add_table(rows=len(rows), cols=2)

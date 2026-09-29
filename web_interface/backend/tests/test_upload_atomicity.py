@@ -11,6 +11,7 @@ NOT fail the upload.
 These tests pin both halves of that contract via the in-memory SQLite TestClient
 harness from conftest (no real S3, no real file parsing).
 """
+import asyncio
 import hashlib
 import io
 import json
@@ -22,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from docx import Document
+from fastapi import HTTPException
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import object_session
 
@@ -331,6 +333,31 @@ def test_validate_docx_magic_accepts_a_real_docx():
     assert _validate_docx_magic(_docx_bytes("real content")) is True
 
 
+def test_validate_docx_magic_rejects_a_high_ratio_docx(monkeypatch):
+    """#793: expansion is bounded before python-docx parses. A docx whose
+    declared uncompressed total exceeds the cap is rejected, and one within
+    it passes (cap patched small so the fixture stays tiny)."""
+    import app.api.upload as upload
+    bomb = _docx_bytes("A" * 50_000)  # deflates to a few hundred bytes
+    monkeypatch.setattr(upload, "_DOCX_MAX_UNCOMPRESSED_BYTES", 40_000)
+    assert len(bomb) < 40_000
+    assert _validate_docx_magic(bomb) is False
+    monkeypatch.setattr(upload, "_DOCX_MAX_UNCOMPRESSED_BYTES", 10_000_000)
+    assert _validate_docx_magic(bomb) is True
+
+
+def test_validate_docx_magic_rejects_too_many_entries(monkeypatch):
+    """#793: the entry-count bound, at and past the cap."""
+    import app.api.upload as upload
+    content = _docx_bytes("hello")
+    with zipfile.ZipFile(io.BytesIO(content)) as z:
+        n = len(z.infolist())
+    monkeypatch.setattr(upload, "_DOCX_MAX_ENTRIES", n)
+    assert _validate_docx_magic(content) is True
+    monkeypatch.setattr(upload, "_DOCX_MAX_ENTRIES", n - 1)
+    assert _validate_docx_magic(content) is False
+
+
 # --- #865 review: _extract_text catches only the measured read failures ------
 
 def _zip_bytes(**members: str) -> bytes:
@@ -353,6 +380,21 @@ _RELS = (
 )
 
 
+def _corrupt_deflate_docx() -> bytes:
+    """A docx whose zip directory is intact but whose word/document.xml
+    deflate stream is not: python-docx gets past the zip layer and zlib
+    raises while inflating the part."""
+    raw = bytearray(_docx_bytes("synthetic paragraph " * 200))
+    with zipfile.ZipFile(io.BytesIO(bytes(raw))) as z:
+        info = z.getinfo("word/document.xml")
+    name_len, extra_len = int.from_bytes(raw[info.header_offset + 26:info.header_offset + 28], "little"), \
+        int.from_bytes(raw[info.header_offset + 28:info.header_offset + 30], "little")
+    start = info.header_offset + 30 + name_len + extra_len
+    for i in range(start + 2, start + 2 + 35):
+        raw[i] ^= 0xFF
+    return bytes(raw)
+
+
 @pytest.mark.parametrize("label, content", [
     ("not a zip at all -> PackageNotFoundError", b"PK\x03\x04 but not really a zip"),
     ("truncated docx -> PackageNotFoundError", _docx_bytes("hello")[:1200]),
@@ -360,6 +402,7 @@ _RELS = (
     ("malformed document.xml -> XMLSyntaxError",
      _zip_bytes(**{"[Content_Types].xml": _CONTENT_TYPES, "_rels__.rels": _RELS,
                    "word__document.xml": "<<<not xml"})),
+    ("corrupt deflate stream in document.xml -> zlib.error", _corrupt_deflate_docx()),
 ])
 def test_extract_text_returns_none_and_logs_a_traceback_for_a_known_read_failure(label, content, caplog):
     """PR #865 review thread on upload.py's ``except Exception`` (r4034042444):
@@ -450,6 +493,134 @@ def test_upload_returns_wcm_template_warning(client, db, seed_simple_mode, tmp_p
     detect.assert_called_once()
     assert detect.call_args.args[0] == extracted  # reuses the extracted text, no re-parse
     assert db.query(Run).filter(Run.id == body["run_id"]).first().status == "created"
+
+
+# --- #793: bounded read + off-event-loop extraction -------------------------
+
+class _TrackedFile:
+    """Minimal UploadFile stand-in that records every chunk `.read()` served,
+    so a test can measure how much of the body `_read_bounded` actually
+    consumed instead of only asserting the final rejection."""
+
+    def __init__(self, data: bytes):
+        self._data = data
+        self._pos = 0
+        self.total_served = 0
+
+    async def read(self, size: int) -> bytes:
+        chunk = self._data[self._pos:self._pos + size]
+        self._pos += len(chunk)
+        self.total_served += len(chunk)
+        return chunk
+
+
+def test_read_bounded_returns_the_full_body_within_the_limit():
+    """#793 positive case: a body under max_size is read completely and
+    reassembled in order, across multiple chunks."""
+    data = b"a" * 250 + b"b" * 250  # 500 bytes, 2.5 chunks at chunk_size=200
+    fake = _TrackedFile(data)
+    with patch("app.api.upload._UPLOAD_READ_CHUNK_SIZE", 200):
+        result = asyncio.run(upload_module._read_bounded(fake, max_size=1000))
+    assert result == data
+    assert fake.total_served == len(data)
+
+
+def test_read_bounded_aborts_without_buffering_the_whole_oversized_body():
+    """#793 negative case: a body far larger than max_size is rejected after
+    only a little over the cap has been read -- not fully buffered first the
+    way `await file.read()` + a size check used to (#793 item 1)."""
+    huge = b"x" * (10 * 1024 * 1024)  # 10 MB body
+    fake = _TrackedFile(huge)
+    with patch("app.api.upload._UPLOAD_READ_CHUNK_SIZE", 1024):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(upload_module._read_bounded(fake, max_size=2048))
+    assert exc_info.value.status_code == 400
+    assert "too large" in exc_info.value.detail["message"].lower()
+    # Aborted at most one chunk past the cap -- nowhere near the full 10 MB body.
+    assert fake.total_served <= 2048 + 1024
+
+
+def test_read_bounded_pins_the_size_boundary():
+    """#793 polish (M10): a body of exactly max_size bytes is accepted (the
+    check is `total > max_size`, not `>=`); one byte over is rejected. Pins
+    the boundary itself, not just "some big body is rejected"."""
+    with patch("app.api.upload._UPLOAD_READ_CHUNK_SIZE", 4096):
+        exactly_at_cap = asyncio.run(
+            upload_module._read_bounded(_TrackedFile(b"a" * 1000), max_size=1000)
+        )
+        assert exactly_at_cap == b"a" * 1000
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                upload_module._read_bounded(_TrackedFile(b"a" * 1001), max_size=1000)
+            )
+    assert exc_info.value.status_code == 400
+
+
+def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db, seed_simple_mode, tmp_path):
+    """#793 item 3: `_extract_text` and `detect_wcm_template` are dispatched
+    through `run_in_threadpool`, not called synchronously inside the async
+    handler. Reverting either `await run_in_threadpool(fn, ...)` call back to
+    a bare `fn(...)` leaves the response unchanged but this test catches it,
+    since it asserts run_in_threadpool was the actual dispatch mechanism for
+    both, not just that the endpoint still returns 200."""
+    user = _make_user(db)
+    _auth(client, user)
+    extract_mock = MagicMock(return_value="x" * 600)
+    detect_mock = MagicMock(return_value=(False, None))
+    real_run_in_threadpool = upload_module.run_in_threadpool
+    dispatched: list[object] = []
+
+    async def spy(func, *args, **kwargs):
+        dispatched.append(func)
+        return await real_run_in_threadpool(func, *args, **kwargs)
+
+    patches = [
+        patch("app.api.upload.UPLOAD_DIR", tmp_path),
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", extract_mock),
+        patch("app.api.upload.detect_wcm_template", detect_mock),
+        patch("app.api.upload.get_storage", return_value=MagicMock()),
+        patch("app.api.upload.run_in_threadpool", spy),
+    ]
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 200, resp.text
+    assert dispatched == [extract_mock, detect_mock]
+
+
+def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode):
+    """#793 polish (M6): /estimate's `_extract_text` call is off the event
+    loop too, the same as /upload's (issue text: '/estimate is off the
+    event loop, same as /upload'). A bare synchronous `_extract_text(...)`
+    call would leave the response unchanged, so this asserts
+    run_in_threadpool was the actual dispatch mechanism, not just that
+    /estimate still returns 200."""
+    user = _make_user(db)
+    _auth(client, user)
+    extract_mock = MagicMock(return_value="x" * 600)
+    real_run_in_threadpool = upload_module.run_in_threadpool
+    dispatched: list[object] = []
+
+    async def spy(func, *args, **kwargs):
+        dispatched.append(func)
+        return await real_run_in_threadpool(func, *args, **kwargs)
+
+    patches = [
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", extract_mock),
+        patch("app.api.upload.run_in_threadpool", spy),
+    ]
+    resp = _run_patches(
+        patches,
+        lambda: client.post(
+            "/api/estimate",
+            files={"file": ("cv.docx", b"PK\x03\x04dummy-docx-bytes", "application/octet-stream")},
+        ),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert dispatched == [extract_mock]
 
 
 # --- item 9: render options persisted --------------------------------------

@@ -5,6 +5,9 @@ rendered output by breaking it into fragments; keeping that one splitter here
 stops the two copies drifting apart (they were verbatim-duplicated with no
 enforced sync)."""
 
+from collections.abc import Mapping
+from typing import Any
+
 def entry_fragments(text: str | None) -> list[str]:
     """An entry's fragments: per line, per '|' cell, and per tab cell.
 
@@ -37,3 +40,49 @@ def entry_lines(text: str | None) -> list[str]:
     every current caller would change output at once.
     """
     return [line.strip() for line in str(text or "").split("\n") if line.strip()]
+
+
+# The extractor's join between the cells of one table row
+# (`core/docx_structure_extractor.py`); a cell's own paragraphs are joined with
+# a newline inside it.
+CELL_SEPARATOR = " | "
+
+
+def rejoin_wrapped_row(text: str | None) -> str | None:
+    """One table row whose cells wrap over paragraphs, read back as that ONE
+    row (#987); None when `text` is not such a row.
+
+    The extractor joins a cell's own paragraphs with a newline and the row's
+    cells with `CELL_SEPARATOR`, so a single course whose title cell wraps has
+    several `entry_lines` lines although it is one entry. The row is wrapped
+    when its non-empty cells do not all have the same number of lines: a row of
+    N courses stacked in its cells has N paragraphs in EVERY cell, a wrapped
+    cell makes the counts differ. Empty cells (a blank column) are not
+    counted. A single cell, or cells that all have the same count, is None and
+    the caller keeps the lines as they are.
+
+    Each cell's paragraphs rejoin with a space and the cells with
+    `CELL_SEPARATOR`, so every token of `text` is kept, in order; empty cells
+    are dropped, as `_clean_inline_tabs` drops them when it renders the row.
+    Whether `text` is ONE row (not several rows fused into one entry) is the
+    caller's to decide from the element indices; this only reads the text.
+    """
+    cells = [entry_lines(cell) for cell in str(text or "").split(CELL_SEPARATOR)]
+    if len({len(cell) for cell in cells if cell}) < 2:
+        return None
+    return CELL_SEPARATOR.join(" ".join(cell) for cell in cells if cell)
+
+
+def wrapped_row_text(entry: Mapping[str, Any]) -> str | None:
+    """The raw text of ONE table row whose cells wrap over paragraphs, rejoined
+    into a single line (#987); None for any other entry.
+
+    "One row" is a single `table_row` element (`element_idx_start ==
+    element_idx_end`); whether its cells wrap, as opposed to holding several
+    stacked records, is `rejoin_wrapped_row`'s test. Shared by every stage-6
+    section that renders an entry's raw lines one bullet each.
+    """
+    start, end = entry.get('element_idx_start'), entry.get('element_idx_end')
+    if entry.get('element_type') != 'table_row' or start is None or start != end:
+        return None
+    return rejoin_wrapped_row(entry.get('text'))

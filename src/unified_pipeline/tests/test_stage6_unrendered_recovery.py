@@ -673,7 +673,7 @@ def test_deduped_entry_unique_record_still_recovered(tmp_path, monkeypatch):
         "text": ("Member | Committee on Subterranean Balloon Safety Standards"
                  " | Guild of Meandering Auditors | reviews annual protocols "
                  "and certification checklists for subterranean balloon "
-                 "safety inspections across member lodges"),
+                 "safety inspections across member lodges, 2013-2016"),
         "extracted_fields": {
             "role": "Member",
             "committee": "Committee on Subterranean Balloon Safety Standards",
@@ -692,7 +692,9 @@ def test_deduped_entry_unique_record_still_recovered(tmp_path, monkeypatch):
         },
     }
     # Preflight: the fixture must actually trigger the dedup drop (title
-    # containment) so this test exercises the pre-dedup snapshot.
+    # containment) so this test exercises the pre-dedup snapshot. The kept
+    # text states the dropped record's 2013-2016 range: a dropped entry whose
+    # date range the kept one lacks is kept, not dropped (#666).
     from unified_pipeline.stage_6_word_template import deduplicate_entries
     assert deduplicate_entries([kept_entry, dropped_entry],
                                verbose=False) == [kept_entry]

@@ -128,6 +128,7 @@ def reconcile_stale_runs(db: Session) -> int:
     failed_count = 0
     resumed_count = 0
     for run in stale_runs:
+        seen_started_at = run.started_at
         last_error_type, start_step_number = _resume_info_for_run(run, db)
 
         # A stale "running" run is, by definition, an interruption (the in-process
@@ -137,10 +138,14 @@ def reconcile_stale_runs(db: Session) -> int:
         if auto_retry.eligible_for_resume(
             run, last_error_type=last_error_type, is_interruption=True
         ):
-            _schedule_auto_retry(run, db, start_step_number)
-            resumed_count += 1
+            if _schedule_auto_retry(run, db, start_step_number, seen_started_at):
+                resumed_count += 1
             continue
 
+        # Every replica sweeps: fail the run only if no other pod has resumed or
+        # failed it since this sweep read it.
+        if not _claim_stale_run(db, run, seen_started_at, status="failed"):
+            continue
         _mark_run_failed(run, db, now)
         failed_count += 1
 
@@ -266,7 +271,29 @@ def reap_orphaned_created_runs(
     return result
 
 
-def _transition_run_for_retry(run: Run, db: Session, start_step_number: int) -> None:
+def _claim_stale_run(db: Session, run: Run, seen_started_at: datetime, **values: object) -> bool:
+    """Atomically take a stale run this sweep read; False if another pod got it first.
+
+    Every replica runs the reaper, and a pod's startup sweep can land seconds
+    after a sibling's periodic one (#145: two pods took the same run 34 s apart,
+    and the second failed it while the first was re-running it). The UPDATE
+    matches only while the run is still "running" with the ``started_at`` this
+    sweep read; a resume restarts ``started_at``, so a run another pod has
+    already taken no longer matches. Does not commit.
+    """
+    won = db.query(Run).filter(
+        Run.id == run.id,
+        Run.status == "running",
+        Run.started_at == seen_started_at,
+    ).update(values, synchronize_session=False) == 1
+    if won:
+        db.refresh(run)
+    return won
+
+
+def _transition_run_for_retry(
+    run: Run, db: Session, start_step_number: int, seen_started_at: datetime
+) -> bool:
     """Pure DB-state transition that arms a stale run for a resume launch.
 
     Mirrors the step/run reset that runs.py:retry_step performs for a manual
@@ -276,11 +303,19 @@ def _transition_run_for_retry(run: Run, db: Session, start_step_number: int) -> 
     "running" with its terminal fields cleared. No thread, no pipeline, no
     concurrency slot -- kept separate from the launch so it is unit-testable
     without actually running the pipeline.
+
+    ``started_at`` restarts with the attempt so the resumed run is not stale on
+    the next sweep. Returns False, changing nothing, if another pod already took
+    the run (see ``_claim_stale_run``).
     """
-    run.attempt_count = (run.attempt_count or 1) + 1
-    run.status = "running"
-    run.error_message = None
-    run.completed_at = None
+    if not _claim_stale_run(
+        db, run, seen_started_at,
+        attempt_count=Run.attempt_count + 1,
+        started_at=datetime.now(),
+        error_message=None,
+        completed_at=None,
+    ):
+        return False
 
     downstream_steps = (
         db.query(Step)
@@ -297,6 +332,7 @@ def _transition_run_for_retry(run: Run, db: Session, start_step_number: int) -> 
         step.cost = None
 
     db.commit()
+    return True
 
 
 def _launch_resume(run_id: str, file_path, start_step_number: int) -> bool:
@@ -350,7 +386,9 @@ def _launch_resume(run_id: str, file_path, start_step_number: int) -> bool:
         return False
 
 
-def _schedule_auto_retry(run: Run, db: Session, start_step_number: int) -> None:
+def _schedule_auto_retry(
+    run: Run, db: Session, start_step_number: int, seen_started_at: datetime
+) -> bool:
     """Compose the DB transition + background launch for a bounded auto-retry.
 
     FLAG-GATED (issue #145): only reached when ``auto_retry.eligible_for_resume``
@@ -361,6 +399,7 @@ def _schedule_auto_retry(run: Run, db: Session, start_step_number: int) -> None:
       1. Resolve the original upload (re-materialising from durable storage if
          the pod-local copy is gone, exactly as start/retry do).
       2. ``_transition_run_for_retry`` -- the pure, testable DB state change.
+         If another pod already took the run, stop here and return False.
       3. ``_launch_resume`` -- the threaded pipeline launch. If it can't launch
          (no slot, or any error), fall back to marking the run failed so a
          stale run is never silently left "running" with no executor.
@@ -383,16 +422,40 @@ def _schedule_auto_retry(run: Run, db: Session, start_step_number: int) -> None:
         logger.exception(
             "Auto-retry could not resolve input for run %s; marking failed", run.id
         )
-        _mark_run_failed(run, db, datetime.now())
-        return
+        if _claim_stale_run(db, run, seen_started_at, status="failed"):
+            _mark_run_failed(run, db, datetime.now())
+        return False
 
-    _transition_run_for_retry(run, db, start_step_number)
+    if not _transition_run_for_retry(run, db, start_step_number, seen_started_at):
+        return False
 
     if not _launch_resume(run.id, file_path, start_step_number):
         # Launch declined (no slot) or errored -- don't leave the run pinned at
         # "running" with nothing executing it. Fall back to the failed path.
+        # This pod took the run in the transition above, so no claim is needed.
         _mark_run_failed(run, db, datetime.now())
         db.commit()
+        return False
+    return True
+
+
+def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set) -> bool:
+    """Atomically move a run to "running"; True only for the one caller that did.
+
+    A single ``UPDATE runs SET status='running' WHERE id=:id AND <criteria>``
+    whose rowcount is checked, so two concurrent starters that both read the
+    run as startable cannot both win (#799). Works on SQLite and MariaDB/MySQL:
+    both report matched rows for a conditional UPDATE, and the status change
+    guarantees the winning row is actually modified.
+
+    ``status_criteria`` are SQLAlchemy expressions on ``Run.status``; ``also_set``
+    are extra columns written in the same statement. Does not commit: the caller
+    commits on a win, and on a loss holds nothing to undo.
+    """
+    result = db.query(Run).filter(Run.id == run_id, *status_criteria).update(
+        {"status": "running", **also_set}, synchronize_session="evaluate"
+    )
+    return result == 1
 
 
 def check_run_access(run_id: str, current_user: User, db: Session, *, eager=()) -> Run:
