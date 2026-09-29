@@ -391,6 +391,15 @@ GRANT_NOTES_DESCRIPTION = (
 )
 
 FIELD_DESCRIPTIONS = {
+    # `program_name` fills the template's "Description" column and no other B2
+    # field holds detail text, so a title-only extraction drops the rest of the
+    # line silently (#1092).
+    "B2": {
+        "program_name": "The WHOLE entry as the CV words it: its title AND any detail after it (e.g. 'Advanced Life Support: completed the two-day provider course' is all of that, not just 'Advanced Life Support'). Leave out only the institution and dates",
+        "institution": "Where it took place",
+        "start_date": "When it started",
+        "end_date": "When it ended",
+    },
     "K1": {
         "course_title": "Name of the course taught",
         "role": "Your role (e.g., 'PBL Tutor', 'Course Director', 'Lecturer')",
