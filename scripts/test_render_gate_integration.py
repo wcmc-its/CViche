@@ -462,6 +462,17 @@ def test_the_gate_never_lets_stage6_guess_a_source_docx():
             assert stub.calls[0]["discover_original_doc"] is False, label
 
 
+def test_an_arm_with_no_uids_fails_the_gate():
+    # An empty arm renders nothing; exit 0 would read as a clean A/B arm.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        arm = _make_arm(root, [])
+        with _stage6(_make_stub(_renders_a_good_docx)):
+            code, output = _run_main([str(arm), str(root / "out")])
+        assert code == 1, "an arm with no uids must fail"
+        assert "empty arm" in output
+
+
 if __name__ == "__main__":
     test_a_successful_render_exits_zero_and_writes_the_docx()
     test_a_raising_renderer_fails_the_gate()
@@ -479,4 +490,5 @@ if __name__ == "__main__":
     test_the_llm_is_restored_after_main_returns()
     test_a_uids_file_renders_a_trailing_space_uid_and_fails_on_an_unmatched_one()
     test_the_gate_never_lets_stage6_guess_a_source_docx()
+    test_an_arm_with_no_uids_fails_the_gate()
     print("ok")

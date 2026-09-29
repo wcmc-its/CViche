@@ -170,13 +170,13 @@ def _uid_filter(uids, uids_file) -> set:
     """The uids the caller asked for; an empty set means "every uid in the arm".
 
     Blank (whitespace-only) lines are dropped, so the trailing newline every
-    editor writes does not become an empty uid. Only the line terminator is
-    stripped from the rest: a uid derived from a real filename can end in a
-    space (#732), and stripping it would match no artifact.
+    editor writes does not become an empty uid. The rest are kept verbatim
+    (splitlines() already drops the terminator): a uid derived from a real
+    filename can end in a space (#732), and stripping it would match no artifact.
     """
     if uids_file is None:
         return set(uids)
-    return {line.rstrip("\r\n")
+    return {line
             for line in uids_file.read_text(encoding="utf-8").splitlines()
             if line.strip()}
 
