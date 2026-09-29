@@ -18,6 +18,7 @@ Run:
     python3 -m pytest src/unified_pipeline/tests/test_doctor_extraction_lint_contracts.py -q -p no:cacheprovider
 """
 import itertools
+from collections import Counter
 import sys
 from pathlib import Path
 
@@ -434,26 +435,35 @@ def test_entry_rendered_token_overlap_exact_boundary():
 # ==========================================================================
 # D8 (T2.7) -- dedup tokenization: repetition, Unicode, digits, punctuation.
 
-def test_alphanumeric_tokens_repeated_tokens_collapse():
-    # A dropped entry that repeats one token is fully covered by a kept
-    # entry with a single occurrence of it -- the SET collapses repeats.
+def test_alphanumeric_tokens_repeated_tokens_keep_multiplicity():
+    # #718: the token view is a multiset, so a dropped entry that repeats a
+    # token is NOT fully covered by a kept entry that says it once.
     dropped = {"code": "A", "metric": "j",
               "dropped_text": "grant grant grant", "kept_text": "grant"}
-    assert lint_dedup_drops({"dedup_decisions": [dropped]}) == []
-    assert _alphanumeric_tokens("grant grant grant") == {"grant"}
-    assert _alphanumeric_tokens("grant") == {"grant"}
+    result = lint_dedup_drops({"dedup_decisions": [dropped]})
+    assert len(result) == 1
+    assert "33% covered" in result[0]["evidence"][0]
+    assert _alphanumeric_tokens("grant grant grant") == Counter({"grant": 3})
+    assert _alphanumeric_tokens("grant") == Counter({"grant": 1})
+
+
+def test_lint_dedup_drops_repeated_tokens_fully_present_still_safe():
+    # The true-duplicate case is unchanged: same multiset -> 100%.
+    same = {"code": "A", "metric": "j",
+            "dropped_text": "grant grant funded", "kept_text": "funded grant grant x"}
+    assert lint_dedup_drops({"dedup_decisions": [same]}) == []
 
 
 def test_alphanumeric_tokens_unicode_diaeresis_splits_on_the_non_ascii_char():
     # _norm lowercases and joins whitespace but does not strip diacritics;
     # _DEDUP_TOKEN_RE is ASCII-only ([a-z0-9]+), so it breaks at the 'ü'
     # rather than treating "müller" as one token or normalizing it away.
-    assert _alphanumeric_tokens("Müller") == {"m", "ller"}
+    assert _alphanumeric_tokens("Müller") == Counter({"m": 1, "ller": 1})
 
 
 def test_alphanumeric_tokens_digits_are_tokens_punctuation_is_not():
-    assert _alphanumeric_tokens("Grant 2020") == {"grant", "2020"}
-    assert _alphanumeric_tokens("grant, funded!") == {"grant", "funded"}
+    assert _alphanumeric_tokens("Grant 2020") == Counter({"grant": 1, "2020": 1})
+    assert _alphanumeric_tokens("grant, funded!") == Counter({"grant": 1, "funded": 1})
 
 
 # ==========================================================================
