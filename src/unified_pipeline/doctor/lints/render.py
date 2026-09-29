@@ -11,8 +11,10 @@ module, so they move together and stop being module-global.
 
 Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 """
+import json
 import re
 from collections import Counter
+from pathlib import Path
 from typing import Dict, List, NamedTuple, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
@@ -165,7 +167,28 @@ def _is_bare_date_line(line: str) -> bool:
 
 
 # '• [M2A] ...' style taxonomy-code leak (the pre-#214 appendix format).
-_BRACKET_CODE_RE = re.compile(r"\[[A-Z]\d?[A-Z]?\d?\]")
+# The shape alone also matches the source CV's own text ("[H2O]", "[CO2]",
+# "[AI]"), so a hit only counts when the token is a real taxonomy code (#888).
+_BRACKET_CODE_RE = re.compile(r"\[([A-Z]\d?[A-Z]?\d?)\]")
+
+_TAXONOMY_PATH = Path(__file__).resolve().parents[2] / "core" / "taxonomy_v7.json"
+
+
+def _load_taxonomy_codes() -> frozenset[str]:
+    """Every code a leak could carry: the live v7 codes plus the retired
+    `invalid_codes` stage 3b must never emit."""
+    taxonomy = json.loads(_TAXONOMY_PATH.read_text(encoding="utf-8"))
+    codes = {entry["code"] for entry in taxonomy["codes"]}
+    codes.update(taxonomy["invalid_codes"]["codes"])
+    return frozenset(codes)
+
+
+_TAXONOMY_CODES = _load_taxonomy_codes()
+
+
+def _has_taxonomy_code_leak(line: str) -> bool:
+    return any(m.group(1) in _TAXONOMY_CODES
+               for m in _BRACKET_CODE_RE.finditer(line))
 
 
 _APPENDIX_HEADER = "T. APPENDIX"
@@ -249,7 +272,7 @@ def lint_output_hygiene(blocks: list[tuple[str, str]]) -> list[dict]:
     leaks = []
     for _, text in blocks:
         for line in str(text).split("\n"):
-            if _BRACKET_CODE_RE.search(line):
+            if _has_taxonomy_code_leak(line):
                 leaks.append(line.strip())
     if leaks:
         findings.append(_finding(
