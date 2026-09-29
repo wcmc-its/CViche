@@ -16,7 +16,7 @@ from unified_pipeline.core.validators.reasoning_consistency_checker import (
 )
 
 
-def test_reasoning_pointing_at_c3_corrects_a_generic_c_entry():
+def test_reasoning_pointing_at_c3_records_c3_conflict_on_generic_c():
     entries = [{
         "text": "Clinical Fellow, Example Hospital, 2019-2021",
         "taxonomy_code": "C",

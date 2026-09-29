@@ -55,10 +55,12 @@ def test_is_likely_internal_unit_standalone_institutes_are_not_internal_units():
     for name in [
         "Institute for Advanced Study",
         "institute for advanced study",
-        "  Institute for Advanced Study  ",
+        "Institute for Advanced Study  ",
+        "Institute for Advanced Study , Princeton",
         "Institute for Advanced Study, Princeton, NJ",
         "Institute for Systems Biology",
         "Institute for Health Metrics and Evaluation",
+        "Institute for Defense Analyses",
     ]:
         assert not is_likely_internal_unit(name), f"expected standalone: {name!r}"
 
