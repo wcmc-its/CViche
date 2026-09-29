@@ -47,6 +47,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+from unified_pipeline.core.template_boilerplate import (
+    is_near_template_instruction,
+    is_template_instruction,
+)
+
 logger = logging.getLogger(__name__)
 
 # Substantive-line threshold: shorter lines ("2016", "PhD", bare bullets)
@@ -268,6 +273,25 @@ def _walk_headers(nodes: list[HierarchyNode] | None, titles: list[str]) -> None:
         _walk_headers(node.get("children"), titles)
 
 
+# Template text shorter than this still counts toward coverage: a short
+# template string is also a real value in a CV. "Full-time salaried by Weill
+# Cornell" (35 chars) is one of the template's Employment Status options and,
+# where a CV keeps only that option, the author's answer -- dev lost it on 12
+# runs. 976WPY's template prompts are 42-55 chars.
+TEMPLATE_SCAFFOLDING_MIN_CHARS = 40
+
+
+def _is_template_scaffolding(line: str) -> bool:
+    """A source line that is WCM template instruction text, verbatim or
+    another revision's rewording, and long enough not to double as a value.
+    Not `is_template_label_line`: a short label ("2. Principal Investigator",
+    "Weill Cornell Medical College") is also a real value in a CV, and its
+    loss must still count."""
+    if len(_norm(line)) < TEMPLATE_SCAFFOLDING_MIN_CHARS:
+        return False
+    return is_template_instruction(line) or is_near_template_instruction(line)
+
+
 def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -> Metrics:
     """Pure: structural metrics for one CV from its source lines + stage
     1a/2 outputs. Everything the compare/lint verdicts read comes from here."""
@@ -290,7 +314,11 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
     # tokens catch mid-line merges. A line is lost only if neither holds.
     entry_squash = [_squash(e.get("text", "")) for e in entries]
     entry_tokens = [_tokens(e.get("text", "")) for e in entries]
-    substantive = [l for l in source_lines if len(_norm(l)) >= SUBSTANTIVE_LINE_CHARS]
+    # The WCM template's own prompts and column labels (a CV written on the
+    # template) are not content stage 2 should keep, so they are neither
+    # covered nor lost (#815: 976WPY's 64 "lost" lines were its labels).
+    substantive = [l for l in source_lines if len(_norm(l)) >= SUBSTANTIVE_LINE_CHARS
+                   and not _is_template_scaffolding(l)]
 
     def _covered(line: str) -> bool:
         squashed = _squash(line)
