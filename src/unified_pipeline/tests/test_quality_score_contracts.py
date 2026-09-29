@@ -1436,6 +1436,28 @@ def test_t_bucket_a_genuine_misroute_still_counts(tmp_path):
     assert "T_count=1" in detail, detail
 
 
+def test_t_bucket_a_row_matching_two_reasons_is_excluded_only_once(tmp_path):
+    """A row can genuinely satisfy BOTH the template-instruction check and
+    the goal-claim check at once: the template's own major-goals LABEL
+    (`is_template_instruction`, via containment) with real goal text
+    appended after it (which `parse_major_goals` still reads as a claim,
+    and `claim_goal_rows` still matches to the owning grant by span). The
+    goal-claim branch runs first and the others are `elif`, so this must be
+    subtracted once, not twice."""
+    text = "(Optional - The major goals of this project are): to cure disease"
+    entries = [
+        {"taxonomy_code": "M2A", "text": "Some Grant",
+         "element_idx_start": 10, "element_idx_end": 10},
+        {"taxonomy_code": "T", "text": text,
+         "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_goal_claim=1" in detail, detail
+    assert "T_excluded_template=0" in detail, detail
+    assert "T_count=0" in detail, detail
+
+
 def test_t_bucket_row_inside_a_grants_span_but_no_goal_falls_through_to_placeholder(tmp_path):
     """A T row that sits inside a grant's own element range is only a
     goal-claim if it actually states a goal -- `claim_goal_rows` requires
