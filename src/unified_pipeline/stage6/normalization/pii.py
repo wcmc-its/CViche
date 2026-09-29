@@ -755,15 +755,50 @@ _PRE_LLM_VALUE_RE_FULL_DATE_ONLY: dict[str, re.Pattern] = {
 # the label's colon; the first thing that isn't one ends the list, so
 # "Bob (03/04/2012), Appointed 07/01/2015" keeps the appointment date and
 # "A Randomized Trial (03/15/2019)" or "Health Plan, 01/01/2020" is left
-# alone.
+# alone. A whole date with no name before it is an item too when it ENDS
+# its item -- a comma, a semicolon, "and" or the end of the line comes next
+# ("Dependents: 01/02/2010", "Ann (01/02/2010), 03/04/2012"): no title
+# opens with a whole date, and "Children: 01/02/2010 Symposium" or
+# "..., 07/01/2015 Appointed" is left alone.
 _CHILD_BIRTH_KEYWORD = r"(?i:born|b\.|d\.?o\.?b\.?)\s*:?"
 _CHILD_DATE = r"(?i:" + _WHOLE_DATE_VALUE + r")"
+_CHILD_ITEM_END = r"(?=[ \t]*(?:[,;]|and\b|$))"
 # Case-sensitive on purpose: the given name must be capitalised.
 _CHILD_ITEM_RE = re.compile(
-    r"[\s,;]*(?:and\s+)?[A-Z][a-z'’-]+\s*"
+    r"[\s,;]*(?:and\s+)?(?:[A-Z][a-z'’-]+\s*"
     r"(?:\(\s*(?:" + _CHILD_BIRTH_KEYWORD + r"\s*)?(?P<paren>" + _CHILD_DATE + r")\s*\)"
     r"|,?\s*" + _CHILD_BIRTH_KEYWORD + r"\s*(?P<keyword>" + _CHILD_DATE + r"))"
+    r"|(?P<bare>" + _CHILD_DATE + r")" + _CHILD_ITEM_END + r")"
 )
+_CHILD_ITEM_GROUPS = ("paren", "keyword", "bare")
+
+#: The one Children/Dependents label row, compiled -- walked on its own
+#: (`_child_label_date_spans`) because `_merge_matches` folds a Children
+#: label that follows another field on its line ("Marital Status: Married
+#: Children: Ann (01/02/2010)") into that field's span and category, and the
+#: child-item rule then never ran on it.
+_CHILDREN_LABEL_RE = next(pattern for rule, pattern in _COMPILED_POLICY
+                          if rule.category == CAT_CHILDREN and rule.label is not None)
+
+# A child's birth year in prose, with no label at all: a count word and a
+# child noun ("Two children", "One child", "3 daughters"), then -- in the
+# same sentence -- "born" and one or more bare years that end the clause
+# ("Two children, born 2001 and 2004.", "One child, Ann Roe (born 1990)").
+# Every part is required: a birth-cohort title has no count word ("children
+# born 1969-2007 in ..."), a range or "born in"/"born to" has no bare year
+# ending the clause, and "Two children. Born 2001 cohort" crosses a
+# sentence.
+_CHILD_COUNT_WORD = r"(?:one|two|three|four|five|six|seven|eight|nine|ten|[1-9])"
+_CHILD_NOUN = r"(?:child(?:ren)?|sons?|daughters?)"
+_CHILD_PROSE_SAME_SENTENCE = r"[^.;:\n]{0,60}?"
+_PROSE_CHILD_BIRTH_YEARS_RE = re.compile(
+    r"\b" + _CHILD_COUNT_WORD + r"\s+" + _CHILD_NOUN + r"\b" + _CHILD_PROSE_SAME_SENTENCE
+    + r"\bborn\s+(?P<years>" + _YEAR_VALUE
+    + r"(?:(?:\s*,\s*(?:and\s+)?|\s+and\s+)" + _YEAR_VALUE + r")*)"
+    + r"(?=\s*(?:[.;,)]|$))",
+    re.I,
+)
+_YEAR_ONLY_RE = re.compile(_YEAR_VALUE)
 
 
 def _child_list_date_spans(text: str, label_start: int) -> list[tuple[int, int]]:
@@ -774,9 +809,55 @@ def _child_list_date_spans(text: str, label_start: int) -> list[tuple[int, int]]
     line_end = len(text) if line_end < 0 else line_end
     spans: list[tuple[int, int]] = []
     while (item := _CHILD_ITEM_RE.match(text, pos, line_end)) is not None:
-        group = "paren" if item.group("paren") is not None else "keyword"
+        group = next(g for g in _CHILD_ITEM_GROUPS if item.group(g) is not None)
         spans.append(item.span(group))
         pos = item.end()
+    return spans
+
+
+def _fragment_start(text: str, pos: int) -> int:
+    """Where the `_PII_FRAGMENT_SPLIT_RE` fragment holding `pos` begins."""
+    start = 0
+    for delim in _PII_FRAGMENT_SPLIT_RE.finditer(text, 0, pos):
+        start = delim.end()
+    return start
+
+
+def _known_field_child_date_spans(text: str, label_start: int, frag_end: int) -> list[tuple[int, int]]:
+    """Every whole date in the value of the Children label at `label_start`
+    when its fragment OPENS with another known field label
+    (`_KNOWN_FIELD_LABEL_RE`, #849) and the Children label starts a word
+    after it: "Marital Status: Married Children: (1), Jane Roe, 01/02/94" is
+    a Personal Data line, not a title, so the child item shape is not
+    asked. A known label somewhere mid-line is not enough -- "Arora M. ...
+    Threats to Health: ... Health of Children: Hazards, Bangkok, 3-7 March
+    2002" is a citation. Stops at the next colon -- the next field's label,
+    known or not ("... Date of Appointment: 07/01/2015") -- or the
+    fragment's end; never a bare year."""
+    frag_start = _fragment_start(text, label_start)
+    opener = _KNOWN_FIELD_LABEL_RE.match(text, len(text) - len(text[frag_start:].lstrip()))
+    if (opener is None or opener.end() > label_start
+            or _LABEL_WORD_START_RE.match(text, label_start) is None):
+        return []
+    value_start = text.index(":", label_start) + 1
+    next_colon = text.find(":", value_start, frag_end)
+    stop = frag_end if next_colon < 0 else next_colon
+    return [m.span() for m in _PRE_LLM_FULL_DATE_ONLY_RE.finditer(text, value_start, stop)]
+
+
+def _pre_llm_child_date_spans(text: str) -> list[tuple[int, int]]:
+    """Every child's birth date or year `redact_pre_llm_values` withholds:
+    the child items after each Children/Dependents label
+    (`_child_list_date_spans`), every whole date after one that follows
+    another known field (`_known_field_child_date_spans`), and the years of
+    a child-birth phrase in prose (`_PROSE_CHILD_BIRTH_YEARS_RE`)."""
+    spans: list[tuple[int, int]] = []
+    for label_start, frag_end in _label_spans(text, _CHILDREN_LABEL_RE, CAT_CHILDREN):
+        spans.extend(_child_list_date_spans(text, label_start))
+        spans.extend(_known_field_child_date_spans(text, label_start, frag_end))
+    for phrase in _PROSE_CHILD_BIRTH_YEARS_RE.finditer(text):
+        years_start, years_end = phrase.span("years")
+        spans.extend(m.span() for m in _YEAR_ONLY_RE.finditer(text, years_start, years_end))
     return spans
 
 
@@ -807,6 +888,24 @@ def _pre_llm_value_span_in_next_run(text: str, frag_end: int, value_re: re.Patte
     return (vm.start(), vm.end()) if vm else None
 
 
+def _pre_llm_label_value_spans(text: str) -> list[tuple[int, int]]:
+    """The one value each DOB/SSN label fragment of `text` carries: the
+    first value shape inside the fragment, else the value opening the next
+    tab/`|`/column-gap run (`_pre_llm_value_span_in_next_run`)."""
+    spans: list[tuple[int, int]] = []
+    for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX):
+        value_re = _PRE_LLM_VALUE_RE.get(m.category)
+        if value_re is None:
+            continue
+        vm = value_re.search(text, m.start, m.end)
+        span = (vm.start(), vm.end()) if vm else None
+        if span is None and text[m.start:m.end].rstrip().endswith(":"):
+            span = _pre_llm_value_span_in_next_run(text, m.end, value_re)
+        if span:
+            spans.append(span)
+    return spans
+
+
 def redact_pre_llm_values(text: str | None) -> str:
     """Replace the VALUE half of a date-of-birth or SSN fragment with
     `PRE_LLM_PLACEHOLDER`, leaving the label and everything else in `text`
@@ -826,27 +925,16 @@ def redact_pre_llm_values(text: str | None) -> str:
     `_PRE_LLM_VALUE_RE` to find, so a second pass is a no-op.
 
     A DOB/SSN label takes its FIRST value only, so "Date of Birth:
-    01/02/1970, Appointed 2005" keeps 2005. A Children label takes every
-    date of its child list (`_child_list_date_spans`)."""
+    01/02/1970, Appointed 2005" keeps 2005 (`_pre_llm_label_value_spans`).
+    Children's dates and birth years come from
+    `_pre_llm_child_date_spans`."""
     text = str(text or "")
     if not text:
         return text
     edits: list[tuple[int, int]] = []
-    for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX):
-        value_re = _PRE_LLM_VALUE_RE.get(m.category)
-        if m.category == CAT_CHILDREN:
-            spans = _child_list_date_spans(text, m.start)
-        elif value_re is None:
-            continue
-        else:
-            vm = value_re.search(text, m.start, m.end)
-            span = (vm.start(), vm.end()) if vm else None
-            if span is None and text[m.start:m.end].rstrip().endswith(":"):
-                span = _pre_llm_value_span_in_next_run(text, m.end, value_re)
-            spans = [span] if span else []
-        for span in spans:
-            if not edits or span[0] >= edits[-1][1]:
-                edits.append(span)
+    for span in sorted(_pre_llm_label_value_spans(text) + _pre_llm_child_date_spans(text)):
+        if not edits or span[0] >= edits[-1][1]:
+            edits.append(span)
     if not edits:
         return text
     out: list[str] = []
