@@ -119,9 +119,11 @@ def test_every_paragraph_of_the_text_goes_to_exactly_one_entry():
 
 
 def test_text_that_does_not_split_into_one_paragraph_per_record_is_left_whole():
-    # 2 records, 4 paragraphs: which paragraph belongs to which record is a guess
-    entry = _honors_entry("1988 Alpha Honor Society\tExample University\tBeta Honor Society\tSecond Note",
-                          _AWARDS[:2])
+    # 2 records, 4 paragraphs: the first two match the records, but the last
+    # two would be dropped if the entry were fanned out on that match alone
+    text = ("Alpha Honor Society, Example University\tBeta Honor Society, Example University\t"
+            "Gamma Honor Society, Example University\tA Fourth Note")
+    entry = _honors_entry(text, _AWARDS[:2])
     assert _fan_out([entry]) == [entry]
 
 
@@ -152,13 +154,13 @@ def test_records_that_hold_only_a_date_are_parts_not_siblings():
 def test_lists_that_are_not_sibling_records_are_left_alone():
     schema_key = next(iter(_schema_fields("H")))
     cases = {
-        "one record only": {"awards": [{"award_name": "Solo"}]},
-        "a schema field": {schema_key: [{"award_name": "A"}, {"award_name": "B"}]},
-        "no key in the schema": {"things": [{"colour": "red"}, {"colour": "blue"}]},
-        "not dicts": {"awards": ["A", "B"]},
+        "one record only": ("Solo Award", {"awards": [{"award_name": "Solo Award"}]}),
+        "a schema field": ("Alpha\tBeta", {schema_key: [{"award_name": "Alpha"}, {"award_name": "Beta"}]}),
+        "no key in the schema": ("Red\tBlue", {"things": [{"colour": "Red"}, {"colour": "Blue"}]}),
+        "not dicts": ("Alpha\tBeta", {"awards": ["Alpha", "Beta"]}),
     }
-    for name, fields in cases.items():
-        entry = {"taxonomy_code": "H", "text": "A\tB", "extracted_fields": fields}
+    for name, (text, fields) in cases.items():
+        entry = {"taxonomy_code": "H", "text": text, "extracted_fields": fields}
         assert _fan_out([entry]) == [entry], name
 
 

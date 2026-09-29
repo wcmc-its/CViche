@@ -44,8 +44,6 @@ MIN_RECORDS_TO_FAN_OUT = 2
 NESTED_NOT_SIBLING_CODE_PREFIXES = ("M",)
 
 # Field names that carry a date: `start_date`, `issue_date`, `date`, `year`, ...
-# A record that holds only a date is a part of the entry, not a sibling record:
-# it names no thing of its own.
 DATE_KEY_SUFFIXES = ("_date", "_dates", "_year")
 DATE_KEYS = frozenset({"date", "dates", "year", "dates_attended"})
 
@@ -64,15 +62,12 @@ def _is_date_key(key: str) -> bool:
 
 
 def _is_sibling_record(item: object, schema_fields: Collection[str]) -> bool:
-    """A dict that names a non-date schema field and holds no value under any
-    other key. A value under a key the schema does not define (a K4 session's
-    `title`, an S3 chapter's `chapter`) is one the renderer cannot show, so
-    the raw text is the only place it survives: that entry stays whole."""
-    if not isinstance(item, dict):
-        return False
-    held = [key for key, value in item.items() if not _is_empty(value)]
-    return (all(key in schema_fields for key in held)
-            and any(not _is_date_key(key) for key in held))
+    """A dict that holds no value under a key the schema does not define. Such
+    a value (a K4 session's `title`, an S3 chapter's `chapter`) is one the
+    renderer cannot show, so the raw text is the only place it survives: that
+    entry stays whole."""
+    return isinstance(item, dict) and all(
+        key in schema_fields for key, value in item.items() if not _is_empty(value))
 
 
 def _record_lists(fields: dict[str, Any],
@@ -89,7 +84,10 @@ def _record_lists(fields: dict[str, Any],
 def _share_of_record_in(segment: str, record: dict[str, Any]) -> float:
     """The share of the record's significant words that `segment` contains.
     Dates are left out: records of one list often share a year, and a shared
-    year would pull a record toward a neighbour's paragraph."""
+    year would pull a record toward a neighbour's paragraph. A record that
+    holds only a date (a K4 program's session) has no words left, shares
+    nothing with any paragraph and so is never paired: it is a part of the
+    entry, not a sibling record."""
     record_words: set[str] = set()
     for key, value in record.items():
         if not _is_empty(value) and not _is_date_key(key):
