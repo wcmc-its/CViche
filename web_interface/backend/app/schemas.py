@@ -386,9 +386,16 @@ class AdminUser(BaseModel):
 
 
 class AdminUserUpdate(BaseModel):
-    """Request body for updating a user via admin."""
-    role: str | None = None  # "user" or "admin"
-    status: str | None = None  # "active" or "disabled"
+    """Request body for updating a user via admin.
+
+    role/status are constrained to their valid sets so an out-of-set value
+    (e.g. role="viewer") 422s here instead of reaching the last-admin /
+    last-active-admin guards in admin_routes.update_user, which compare
+    against the literal strings "user"/"admin" and "active"/"disabled" and
+    silently no-op the guard for anything else (#409).
+    """
+    role: Literal["user", "admin"] | None = None
+    status: Literal["active", "disabled"] | None = None
     daily_limit: int | None = None  # 0 = reset to system default
     monthly_limit: int | None = None  # 0 = reset to system default
 
@@ -406,6 +413,10 @@ class AdminRunEntry(BaseModel):
     has_feedback: bool = False
     quality_score: int | None = None      # advisory 0-100, None if not computed
     quality_band: str | None = None       # "GREEN (ship)" / "YELLOW ..." / "RED ..."
+    # False when the score was computed with a scored artifact missing or
+    # unreadable (#745); None when not computed or cached before the field existed.
+    quality_data_complete: bool | None = None
+    quality_missing_evidence: list[str] = []
 
     class Config:
         from_attributes = True
@@ -418,6 +429,11 @@ class QualityScoreResult(BaseModel):
     band: str
     dimensionScores: list[dict] = []
     flags: list[str] = []
+    # quality_score.score_run's evidence inventory (#745): data_complete is
+    # False when any scored artifact was missing or unreadable, and
+    # missing_evidence names each one. None only for a pre-#724 result.
+    data_complete: bool | None = None
+    missing_evidence: list[str] = []
 
 
 class AdminRunsResponse(BaseModel):

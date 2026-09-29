@@ -282,6 +282,24 @@ def test_normal_table_row_claimed_and_unclaimed_sibling_row_recovered(monkeypatc
     assert by_idx["9.0"]["recovered_row"] is True
 
 
+@pytest.mark.parametrize("elem_type", ["table_content", "table"])
+def test_multi_paragraph_cell_zero_takes_trailing_columns_on_its_entry_line(monkeypatch, elem_type):
+    # #488: the row's date/institution columns attach to cell 0's FIRST
+    # paragraph, not its last sub-bullet. Both element shapes, normal rows and
+    # merged (pseudo) rows, so each of the four join sites is on the wire.
+    normal = [{"text": "Entry title\n- sub bullet one\n- sub bullet two"}, {"text": "2024"}, {"text": "Some Org"}]
+    single = [{"text": "Solo title"}, {"text": "2023"}]
+    merged = [{"text": "Title A\n- bullet A\n\nTitle B\n- bullet B"}, {"text": "2020\n\n2021"}]
+    elements = [{"unified_idx": 4, "type": elem_type, "table_index": 1, "data": [normal, single, merged]}]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": []}))
+    entries, _ = stage2.detect_entries_for_section(["Service"], elements, 4, 4, element_index_map=_idx_map(elements))
+    by_idx = {e["element_idx_start"]: e["text"] for e in entries}
+    assert by_idx["4.0"] == "Entry title | 2024 | Some Org\n- sub bullet one\n- sub bullet two"
+    assert by_idx["4.1"] == "Solo title | 2023"  # one-paragraph cell 0: unchanged
+    assert by_idx["4.2.0"] == "Title A | 2020\n- bullet A"
+    assert by_idx["4.2.1"] == "Title B | 2021\n- bullet B"
+
+
 def test_table_content_with_no_row_data_falls_back_to_single_integer_element(monkeypatch):
     elements = [{"unified_idx": 20, "type": "table_content", "text": "Fallback summary text", "data": [], "rows": 0, "table_index": 3}]
     monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result(
@@ -467,6 +485,75 @@ def test_malformed_and_out_of_bounds_delimiters_are_silently_ignored(monkeypatch
     assert cost_info["cost"] == 0.001
 
 
+def test_pre_llm_scrub_wire_dob_and_ssn_never_reach_call_llm_messages(monkeypatch, tmp_path):
+    """#847 wire test: `extract_unified_elements`'s pre-LLM scrub survives
+    into the EXACT `messages` stage 2 hands to `call_llm` -- driven from a
+    real synthetic docx through the real reader, not a hand-built element
+    dict, so nothing between the reader and the prompt can silently
+    reintroduce a raw value."""
+    from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
+
+    doc = Document()
+    doc.add_paragraph("Date of Birth: 01/02/1970")
+    doc.add_paragraph("SSN: 123-45-6789")
+    docx_path = tmp_path / "wire_test.docx"
+    doc.save(str(docx_path))
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    captured = {}
+
+    def fake(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return _llm_result({"delimiters": []})
+
+    monkeypatch.setattr(stage2, "call_llm", fake)
+    stage2.detect_entries_for_section(
+        ["S"], elements,
+        elements[0]["unified_idx"], elements[-1]["unified_idx"],
+        element_index_map=_idx_map(elements),
+    )
+
+    prompt_text = "\n".join(m["content"] for m in captured["messages"])
+    assert "01/02/1970" not in prompt_text
+    assert "123-45-6789" not in prompt_text
+    assert "[withheld]" in prompt_text
+
+
+def test_pre_llm_scrub_wire_dob_in_table_cells_never_reach_call_llm_messages(monkeypatch, tmp_path):
+    """#847 round 2 wire test: a DOB label in one table CELL and its value
+    in the NEXT cell of the same row -- stage 2 builds its table-row prompt
+    text by joining `elem["data"]` cells directly
+    (`" | ".join(cell.get("text") ...)`, stage_2_entry_extraction.py), so
+    the scrub must have already run per-cell, not just on the element's own
+    joined `text` field."""
+    from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
+
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Date of Birth:"
+    table.cell(0, 1).text = "01/02/1970"
+    docx_path = tmp_path / "wire_test_table.docx"
+    doc.save(str(docx_path))
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    captured = {}
+
+    def fake(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return _llm_result({"delimiters": []})
+
+    monkeypatch.setattr(stage2, "call_llm", fake)
+    stage2.detect_entries_for_section(
+        ["S"], elements,
+        elements[0]["unified_idx"], elements[-1]["unified_idx"],
+        element_index_map=_idx_map(elements),
+    )
+
+    prompt_text = "\n".join(m["content"] for m in captured["messages"])
+    assert "01/02/1970" not in prompt_text
+    assert "[withheld]" in prompt_text
+
+
 # =============================================================== run_stage_2 (end to end)
 
 def test_run_stage_2_flat_hierarchy_sorts_headers_content_and_breaks(tmp_path, monkeypatch):
@@ -583,6 +670,43 @@ def test_run_stage_2_strip_template_instructions_false_keeps_instruction_entry(t
     texts = [e["text"] for e in output_data["entries"]]
     assert texts == ["Jane Doe", "EDUCATION", "Faculty Curriculum Vitae Template"]
     assert output_data["total_entries"] == 3
+
+
+def test_run_stage_2_drops_an_older_template_revision_s_reworded_instruction(tmp_path, monkeypatch):
+    """#829: a faculty copy of another template revision words the licensure
+    note "...to the NYP Hospital staff..." where the tracked 2020 template
+    says "...to the Hospital staff...". Kept, it was classified F1 and stage
+    4 read "New York State" out of it as a license the faculty member does
+    not hold. The near-match drops it; the real licence row beside it stays."""
+    _redirect_output_manager(monkeypatch, tmp_path)
+
+    note = ("Licensure: Every physician appointed to the NYP Hospital staff, except "
+            "interns, and aliens in the US via non-immigrant visas, must have a New "
+            "York State license or a temporary certificate in lieu of the license.")
+    doc = Document()
+    for text in ["Jane Doe", "LICENSURE", note, "Fictional State Medical License 12345"]:
+        doc.add_paragraph(text)
+    docx_path = tmp_path / "lic.docx"
+    doc.save(docx_path)
+
+    hpath = _write_hierarchy(
+        tmp_path, "lic_h.json", "LIC1",
+        hierarchy_with_indices=[{"text": "Licensure", "level": "H1", "element_idx": 1, "children": []}],
+        section_boundaries=[{"hierarchy": ["Licensure"], "element_idx_start": 1, "element_idx_end": 3, "has_children": False}],
+    )
+    _route_call_llm(monkeypatch, {
+        "Personal Data": [{"element_idx_start": 0, "element_idx_end": 0, "element_type": "paragraph", "confidence": 0.9}],
+        "Licensure": [
+            {"element_idx_start": 2, "element_idx_end": 2, "element_type": "paragraph", "confidence": 0.85},
+            {"element_idx_start": 3, "element_idx_end": 3, "element_type": "paragraph", "confidence": 0.85},
+        ],
+    })
+
+    output_data, _ = stage2.run_stage_2(str(docx_path), str(hpath))
+
+    texts = [e["text"] for e in output_data["entries"]]
+    assert note not in texts
+    assert "Fictional State Medical License 12345" in texts
 
 
 def test_run_stage_2_cancel_check_raises_mid_run_and_no_output_is_written(tmp_path, monkeypatch):
@@ -1486,3 +1610,108 @@ def test_batch_progress_goes_to_the_logger_not_stdout(monkeypatch, caplog, capsy
 
     out = capsys.readouterr().out
     assert "Processing batch" not in out
+
+
+# =============================================================== detail-line fold (#986)
+
+def _detail_fold_docx(tmp_path):
+    doc = Document()
+    for text in ["MENTORING", "2016 Ana Cruz, Graduate Student", "Project: Study of tides",
+                 "2015 Lee Park, Undergraduate", "Project: Study of kelp", "",
+                 "ADVISING", "2014 Kim Ortiz, Fellow", "Role: Primary advisor"]:
+        doc.add_paragraph(text)
+    path = tmp_path / "fold.docx"
+    doc.save(path)
+    hpath = _write_hierarchy(
+        tmp_path, "fold_h.json", "FOLDUID",
+        hierarchy_with_indices=[
+            {"text": "Mentoring", "level": "H1", "element_idx": 0, "children": []},
+            {"text": "Advising", "level": "H1", "element_idx": 6, "children": []},
+        ],
+        section_boundaries=[
+            {"hierarchy": ["Mentoring"], "element_idx_start": 0, "element_idx_end": 5, "has_children": False},
+            {"hierarchy": ["Advising"], "element_idx_start": 6, "element_idx_end": 8, "has_children": False},
+        ],
+    )
+    return path, hpath
+
+
+def test_run_stage_2_folds_detail_lines_whether_detector_missed_or_split_them(tmp_path, monkeypatch):
+    _redirect_output_manager(monkeypatch, tmp_path)
+    path, hpath = _detail_fold_docx(tmp_path)
+    # Mentoring: the detector returns nothing, so every line is an unassigned
+    # "break". Advising: it splits the Role line off as its own entry.
+    _route_call_llm(monkeypatch, {
+        "Advising": [
+            {"element_idx_start": 7, "element_idx_end": 7, "element_type": "paragraph", "confidence": 0.9},
+            {"element_idx_start": 8, "element_idx_end": 8, "element_type": "paragraph", "confidence": 0.9},
+        ],
+    })
+
+    output_data, _ = stage2.run_stage_2(str(path), str(hpath))
+
+    rows = [(e["element_idx_start"], e["element_idx_end"], e["element_type"], e["text"])
+            for e in output_data["entries"] if e["element_type"] != "header"]
+    assert rows == [
+        (1, 2, "break", "2016 Ana Cruz, Graduate Student\tProject: Study of tides"),
+        (3, 4, "break", "2015 Lee Park, Undergraduate\tProject: Study of kelp"),
+        (5, 5, "break", ""),
+        (7, 8, "paragraph", "2014 Kim Ortiz, Fellow\tRole: Primary advisor"),
+    ]
+    assert output_data["coverage"]["coverage_percentage"] == 100.0
+    assert output_data["coverage"]["unaccounted_indices"] == []
+    assert output_data["coverage"]["content_entries"] == 1  # only the paragraph; folded breaks are 3b-visible breaks
+
+
+def test_run_stage_2_fold_gives_the_same_artifact_serial_and_parallel(tmp_path, monkeypatch):
+    _redirect_output_manager(monkeypatch, tmp_path)
+    path, hpath = _detail_fold_docx(tmp_path)
+    _route_call_llm(monkeypatch, {})
+    serial, _ = stage2.run_stage_2(str(path), str(hpath), workers=1)
+    parallel, _ = stage2.run_stage_2(str(path), str(hpath), workers=4)
+    assert serial["entries"] == parallel["entries"]
+
+
+def _header_row_table(idx=50):
+    return {
+        "unified_idx": idx, "type": "table", "table_index": 6, "header_row": True,
+        "data": [
+            [{"text": "Title"}, {"text": "Institution/Location"}],
+            [{"text": "Example Role"}, {"text": "Example Org"}],
+        ],
+        "rows": 2, "cols": 2,
+    }
+
+
+def test_flagged_header_row_is_never_an_entry_and_never_sent_to_the_llm(monkeypatch):
+    # #424: row 0 is skipped at the source. Row indices are unchanged, the
+    # header is neither offered to the model nor recovered as an unclaimed row.
+    elements = [_header_row_table()]
+    seen = []
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: seen.append(kw["messages"]) or _llm_result({"delimiters": []}))
+    entries, _ = stage2.detect_entries_for_section(["Service"], elements, 50, 50, element_index_map=_idx_map(elements))
+    assert [e["element_idx_start"] for e in entries] == ["50.1"]
+    assert entries[0]["text"] == "Example Role | Example Org"
+    assert "Institution/Location" not in json.dumps(seen)
+
+
+def test_unflagged_table_row_zero_still_becomes_an_entry(monkeypatch):
+    elements = [_header_row_table()]
+    del elements[0]["header_row"]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": []}))
+    entries, _ = stage2.detect_entries_for_section(["Service"], elements, 50, 50, element_index_map=_idx_map(elements))
+    assert [e["element_idx_start"] for e in entries] == ["50.0", "50.1"]
+
+
+def test_flagged_header_row_stays_out_of_a_whole_table_span_and_the_parent_still_collapses(monkeypatch):
+    # The header line is over the #418 coverage floor (12 chars). Were it in
+    # the whole-table span's text, no sibling row could cover it and the parent
+    # would survive beside its own rows (a double render).
+    elements = [_header_row_table()]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": [
+        {"element_idx_start": 50, "element_idx_end": 50, "element_type": "table", "confidence": 0.9},
+        {"element_idx_start": "50.1", "element_idx_end": "50.1", "element_type": "table_row", "confidence": 0.9},
+    ]}))
+    entries, _ = stage2.detect_entries_for_section(["Service"], elements, 50, 50, element_index_map=_idx_map(elements))
+    assert [e["element_idx_start"] for e in entries] == ["50.1"]
+    assert stage2.get_element_text(elements[0]) == "Example Role\tExample Org"

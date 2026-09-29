@@ -660,7 +660,9 @@ def main():
             json.dump(new_baseline, fh, indent=2, sort_keys=True)
             fh.write("\n")
         with open(DOC, "w", encoding="utf-8") as fh:
-            fh.write(before + fresh.rstrip("\n") + "\n" + after)
+            # `after` opens with the end marker's own newline; strip it so
+            # re-running --update doesn't add a blank line each time.
+            fh.write(before + fresh.rstrip("\n") + "\n\n" + after.lstrip("\n"))
         if blocked:
             for label, prior, count in blocked:
                 print(f"refusing to raise the baseline for {label}: {prior} -> {count}. "

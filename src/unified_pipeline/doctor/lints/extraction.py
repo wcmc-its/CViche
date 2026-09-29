@@ -4,10 +4,11 @@ One responsibility: compare the entries and fields stages 3b/4 produced against
 the source they came from and the document they landed in -- grants filed under
 the wrong funding heading, entries whose field extraction covered almost none of
 their text, taxonomy codes that vanished between classification and render,
-dedup drops that were not duplicates.
+dedup drops that were not duplicates, records fabricated from the template's
+own scaffolding.
 
 The line against `render.py` is which side of the comparison is the subject.
-These four are about the extracted record; the render lints are about the page.
+These five are about the extracted record; the render lints are about the page.
 `lint_classified_unrendered` reads the output blocks, but only to decide whether
 a 3b classification survived -- the finding is about the classification.
 
@@ -18,13 +19,25 @@ in `run_doctor.py`, so they move together and stop being module-global.
 docstrings and comments for what changed.
 """
 import re
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.core.template_boilerplate import (
+    _MIN_EXACT_LEN,
+    is_near_template_instruction,
+    is_template_instruction,
+    is_template_label_line,
+)
+from unified_pipeline.stage4.coercion import (
+    DATE_RANGE_TAXONOMY_CODES,
+    find_single_closed_range,
+)
 from unified_pipeline.segmentation_regression import (
     SUBSTANTIVE_LINE_CHARS,
     _looks_like_record,
     _norm,
+    _squash,
 )
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
@@ -41,14 +54,16 @@ from ..shared import (
     _long_word_tokens,
     _magnitude_severity,
     _output_section_header,
+    _piece_in_template,
 )
 
 
 # --------------------------------------------------------------------------
 # Grant status vs the funding subsection the grant rendered under.
 
-# Stage 4 has no 'status' field in the M2* schemas; grant statuses live in
-# the raw entry text as a labelled fragment ("Status: Not funded").
+# Stage 4 extracts 'status' for M2A/M2B/M2C (#982), but only when the entry
+# states one and the LLM fills it; `_entry_status` prefers that field and falls
+# back to the labelled fragment in the raw entry text ("Status: Not funded").
 _STATUS_LABEL_RE = re.compile(r"status\s*[:\-]\s*([^|\n]+)", re.IGNORECASE)
 
 
@@ -77,8 +92,13 @@ _FUNDING_BOUNDARY_TITLES = frozenset({
 
 
 def _entry_status(entry: Dict) -> Optional[str]:
+    """The entry's grant status: the stage-4 field when the vocabulary
+    `grant_status_rebucket_target` (what `lint_bucket_status` judges by)
+    recognises it, else the labelled fragment in the raw text. Stage 4 has no
+    response schema, so a stray value must not mask a status the text carries
+    (#720)."""
     status = (entry.get("extracted_fields") or {}).get("status")
-    if status:
+    if status and grant_status_rebucket_target(str(status))[0] is not None:
         return str(status)
     match = _STATUS_LABEL_RE.search(str(entry.get("text", "")))
     return match.group(1).strip() if match else None
@@ -113,6 +133,7 @@ def lint_bucket_status(stage4: Dict, blocks: List[Tuple[str, str]]) -> List[Dict
     document files the grant under the wrong funding heading, or lost it."""
     titles = dict(_FUNDING_SECTIONS)
     rendered = _funding_haystacks(blocks)
+    shared = _shared_entry_pieces(stage4.get("entries", []))
     findings = []
     for e in stage4.get("entries", []):
         code = e.get("taxonomy_code")
@@ -122,7 +143,7 @@ def lint_bucket_status(stage4: Dict, blocks: List[Tuple[str, str]]) -> List[Dict
         target, _note = grant_status_rebucket_target(status or "")
         if not target or target == code:
             continue
-        verdicts = {bucket: _entry_rendered(e.get("text"), h.text, h.tokens)
+        verdicts = {bucket: _entry_rendered(e.get("text"), h.text, h.tokens, shared)
                     for bucket, h in rendered.items()}
         if verdicts[target]:
             continue  # stage 6 rebucketed it correctly
@@ -195,15 +216,52 @@ def lint_under_extraction(stage4: Dict) -> List[Dict]:
 CLASSIFIED_UNRENDERED_WARN_ENTRIES = 2
 
 
-def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set) -> bool | None:
+def _shared_entry_pieces(entries: list[dict]) -> frozenset:
+    """Pieces that occur in more than one entry of the same document: the
+    boilerplate ('Department of Medicine', a repeated institution line) that
+    surfaces verbatim in the output for reasons unrelated to any one entry
+    (#744). "More than one" counts entries with DIFFERENT text: two entries
+    with identical text are one record listed twice (stage 4 dedups them into
+    the one rendered record), and that record's own text is real content, not
+    boilerplate."""
+    texts_by_piece: dict[str, set] = {}
+    for e in entries:
+        squashed = _squash(e.get("text"))
+        for piece in _entry_pieces(e.get("text")):
+            texts_by_piece.setdefault(piece, set()).add(squashed)
+    return frozenset(p for p, texts in texts_by_piece.items() if len(texts) > 1)
+
+
+def _only_boilerplate_hit(text: str | None, pieces: list[str],
+                          distinctive: list[str], haystack: str) -> bool:
+    """True when the entry's verbatim hit in the output is boilerplate and
+    nothing else: it has no distinctive piece, a boilerplate piece found in
+    the haystack, and no fragment too short to be a piece (a short value such
+    as the phone number after an 'Office telephone:' label is content this
+    check cannot see, so the entry stays unverifiable rather than lost)."""
+    if distinctive or not any(p in haystack for p in pieces):
+        return False
+    return sum(1 for f in entry_fragments(text) if _squash(f)) == len(pieces)
+
+
+def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set,
+                    shared_pieces: frozenset = frozenset()) -> bool | None:
     """Whether an entry's text surfaces in the output: verbatim piece
     containment first, then distinctive-token overlap over the whole text and
     each fragment (stages 4-6 re-render entries from extracted fields, so no
     verbatim piece survives the 5c/5d formatters, and stage 6 keeps the
     title/institution fields while dropping long narratives). None = too
-    short to verify either way."""
+    short to verify either way.
+
+    A piece that is boilerplate does not count as containment evidence: one in
+    `shared_pieces` (see `_shared_entry_pieces`) or one present in the pristine
+    WCM template (#744). An entry whose ONLY evidence was such a hit is
+    verifiable-and-unmatched (False); see `_only_boilerplate_hit`.
+    """
     pieces = _entry_pieces(text)
-    if any(piece in haystack for piece in pieces):
+    distinctive = [p for p in pieces
+                   if p not in shared_pieces and not _piece_in_template(p)]
+    if any(piece in haystack for piece in distinctive):
         return True
     # Seeded False, not bool(pieces): a short label-prefixed entry ("Email:
     # x@y.org") produces a piece but every chunk below falls under
@@ -211,8 +269,9 @@ def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set) -> bo
     # this used to fall through to a hard False (definitively unrendered)
     # instead of None (too short to verify). Matches _record_rendered's
     # sibling pattern in render.py, which never sets verifiable from pieces
-    # alone (#537).
-    verifiable = False
+    # alone (#537). The one exception is an entry whose only evidence was a
+    # boilerplate hit (#744): that hit is what made it look rendered.
+    verifiable = _only_boilerplate_hit(text, pieces, distinctive, haystack)
     for chunk in [str(text or "")] + entry_fragments(text):
         tokens = _long_word_tokens(chunk)
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
@@ -229,6 +288,7 @@ def lint_classified_unrendered(stage3b: Dict,
     in the stage-6 output (paragraphs or tables); 'T' is skipped (appendix
     catch-all)."""
     h = _haystacks(blocks)
+    shared = _shared_entry_pieces(stage3b.get("entries", []))
     by_code: Dict[str, List[Dict]] = {}
     for e in stage3b.get("entries", []):
         if e.get("element_type") in ("header", "break"):
@@ -242,7 +302,7 @@ def lint_classified_unrendered(stage3b: Dict,
     lost = 0
     for code in sorted(by_code):
         entries = by_code[code]
-        verdicts = [(_entry_rendered(e.get("text"), h.text, h.tokens), e)
+        verdicts = [(_entry_rendered(e.get("text"), h.text, h.tokens, shared), e)
                     for e in entries]
         verifiable = [(v, e) for v, e in verdicts if v is not None]
         if not verifiable or any(v for v, _ in verifiable):
@@ -264,27 +324,26 @@ def lint_classified_unrendered(stage3b: Dict,
 # --------------------------------------------------------------------------
 # Taxonomy codes stage 3b can assign that stage 6 has no render route for.
 
-# Codes a `_fill_*` method reads and renders directly, but that were never
-# added to RENDER_ROUTED_CODES: E/G/J match on the source heading rather
-# than a taxonomy code (stage6/sections/passthrough.py), and N4 is pulled
-# via entries_by_code.get('N4', ...) in stage6/sections/mentoring.py (added
-# by #261's fix, which gave N4 a render path without also adding it here).
-# All four DO render. E, G and J's writers also report back exactly which
-# entry dicts they wrote (by object identity, not by code), which
-# `generate()` uses to exclude those specific entries from the appendix a
-# second time (#294, #260) -- so their entries do NOT duplicate. N4 has no
-# such tracking and still does duplicate into the appendix (#587, N4 is out
-# of scope here).
+# Codes a `_fill_*` method renders directly but that are not in
+# RENDER_ROUTED_CODES: E/G/J match on the source heading rather than a
+# taxonomy code (stage6/sections/passthrough.py), so they have no code
+# dispatch to add them to. Their writers report back exactly which entry
+# dicts they wrote (by object identity, not by code), which `generate()`
+# uses to exclude those specific entries from the appendix a second time
+# (#294, #260), so their entries do NOT duplicate. (N4 used to be a fourth
+# member: it renders via mentoring.py but had never been added to
+# RENDER_ROUTED_CODES, so it duplicated into the appendix -- fixed in #587 by
+# routing it, which is why it is no longer exempted here.)
 #
 # This is itself a second, hand-maintained source of truth for stage-6
 # routing (review on #588) -- a code silently added here without a real
 # passthrough route would make this lint wrongly stay quiet about it.
 # test_taxonomy_code_render_coverage.py's
 # test_render_exceptions_still_wired_into_generate() is a cheap guard
-# against the two hooks these four codes depend on being removed without
+# against the hook these three codes depend on being removed without
 # updating this set; it can't prove a *new* addition is correct, only that
 # the existing ones haven't silently gone stale.
-_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES = frozenset({'E', 'G', 'J', 'N4'})
+_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES = frozenset({'E', 'G', 'J'})
 
 
 def unrouted_code_counts(stage3b: dict) -> dict[str, int]:
@@ -344,7 +403,7 @@ def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
 # --------------------------------------------------------------------------
 # Stage 6 dedup drops that were not duplicates.
 
-# A dropped entry this well contained (token-wise) in the kept entry is a
+# A dropped entry this well contained (token-multiset-wise, #718) in the kept entry is a
 # true duplicate; anything below carries content the kept entry lacks. On
 # 2Q1_ZQ the one true duplicate scored 1.00 and the seven real losses
 # 0.60-0.89 (#227).
@@ -352,9 +411,11 @@ DEDUP_SAFE_CONTAINMENT = 0.9
 _DEDUP_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def _alphanumeric_tokens(text) -> set:
-    """a-z0-9 token set for one string (lint 11 dedup-containment coverage)."""
-    return set(_DEDUP_TOKEN_RE.findall(_norm(text)))
+def _alphanumeric_tokens(text) -> Counter:
+    """a-z0-9 token multiset for one string (lint 11 dedup-containment
+    coverage). A Counter, not a set, so a dropped passage that repeats a
+    word is not fully covered by a kept passage that says it once (#718)."""
+    return Counter(_DEDUP_TOKEN_RE.findall(_norm(text)))
 
 
 def lint_dedup_drops(report: Dict) -> List[Dict]:
@@ -367,7 +428,7 @@ def lint_dedup_drops(report: Dict) -> List[Dict]:
         kept = _alphanumeric_tokens(d.get("kept_text", ""))
         if not dropped:
             continue
-        coverage = len(dropped & kept) / len(dropped)
+        coverage = sum((dropped & kept).values()) / sum(dropped.values())
         if coverage >= DEDUP_SAFE_CONTAINMENT:
             continue
         suspect.append(
@@ -381,3 +442,179 @@ def lint_dedup_drops(report: Dict) -> List[Dict]:
         f"{len(suspect)} dedup drop(s) poorly covered by the kept entry — "
         f"possible distinct records lost (#227)",
         suspect[:6])]
+
+
+# --------------------------------------------------------------------------
+# Records fabricated from the WCM template's own scaffolding text (#829).
+#
+# #959 fixed one instance of this: stage 6's board-certification writer now
+# skips an F2 entry whose extracted_fields are the table's own header cells
+# ("Full Name of Board", "Certificate #") read back by stage 4 as if they
+# were a real certification (A5IZ6Q). That fix is local to one section --
+# `stage6/sections/board_certification.py`'s own `_CERTIFICATION_HEADER_
+# CELLS` -- so nothing catches the same LLM misread recurring on a
+# different section's header row. This generalizes the check to every
+# taxonomy code, reusing the SAME phrase set `is_template_label_line`
+# already loads (`core/template_boilerplate.py`) rather than a new list.
+#
+# A single short matched value is not enough evidence: "Total" and "100%"
+# are themselves registered template phrases (the blank %-effort table's own
+# worked example), and a real, fully-filled J (Percent Effort) table
+# legitimately ends in a "Total | 100%" row -- measured on A5IZ6Q's own
+# effort table, whose four real percentages actually sum to 100. Two guards,
+# both required, keep that row from matching: at least
+# INVENTED_RECORD_MIN_VALUES populated fields, ALL of them recognized
+# labels, and their combined text at least `_MIN_EXACT_LEN` chars long --
+# the same distinctiveness floor `is_template_instruction`'s own exact-match
+# rule uses, for the same reason (a short generic label collides with real
+# content; a longer, more specific one essentially never does). Measured
+# over 278 unique local stage-4 artifact sets (the rg_farm, batch-3,
+# batch-4, the local _autopsy stage_4 set, src/unified_pipeline/outputs,
+# and A5IZ6Q -- corpus paths listed with run_doctor.py's LINT_PREVALENCE
+# comment; 149 of the 278 have a locally retained rendered docx, needed to
+# evaluate this guard's render-match requirement): zero false positives,
+# but the lint is not a one-incident-only detector -- it fires on 3 uids /
+# 4 records total, not on A5IZ6Q alone. A5IZ6Q supplies both of the shapes
+# below (its own F2 header row here, plus its F1 licensure record via part
+# (b)); 976WPY (entry 48) and IO4DEA (entry 208) are two further, organic
+# part-(b) hits, each the identical fabricated "New York State" F1 record
+# built from the same unfilled licensure-instruction paragraph as A5IZ6Q's
+# -- the same #829 misread recurring verbatim on two more CVs.
+INVENTED_RECORD_MIN_VALUES = 2
+
+
+# F1 is Licensure (PIPELINE_README.md) -- the one taxonomy code this lint
+# also checks against the entry's raw SOURCE TEXT rather than its extracted
+# fields. A5IZ6Q's invented licence extracted only one real-looking value
+# (`state_country: "New York State"`, itself lifted from inside the
+# instruction paragraph, not a template label) from an unfilled licensure
+# PROMPT paragraph -- `_is_invented_record` cannot see a single non-label
+# value, but the entry's source text is a near-verbatim copy of a known
+# instruction (#829).
+INVENTED_RECORD_LICENSURE_CODE = "F1"
+
+
+def _nonempty_field_values(fields: dict) -> list[str]:
+    """Every non-empty STRING value a stage-4 entry's extracted_fields
+    holds, flattening a list-valued field. A dict-valued field
+    (`additional_award`, `additional_grant`, ...) is not flattened -- an
+    entry whose only values live there reports none at all, which the
+    caller reads as "not enough evidence", the same precision-biased
+    default `template_boilerplate.py` uses throughout."""
+    values: list[str] = []
+    for value in fields.values():
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            if isinstance(item, str) and item.strip():
+                values.append(item)
+    return values
+
+
+def _is_invented_record(fields: dict) -> bool:
+    """True when a stage-4 record is built entirely from the WCM template's
+    own labels rather than real CV content -- see the module comment above
+    for why both guards (value count, combined length) are needed."""
+    values = _nonempty_field_values(fields)
+    if len(values) < INVENTED_RECORD_MIN_VALUES:
+        return False
+    joined = "|".join(values)
+    if len(joined) < _MIN_EXACT_LEN:
+        return False
+    return all(is_template_label_line(v) for v in values)
+
+
+def _rendered_row_value_sets(
+    table_rows: list[list[list[str]]],
+) -> set[frozenset[str]]:
+    """The normalized, non-empty-cell VALUE SET of every rendered table row,
+    across every table in the document -- order- and position-independent,
+    so a fabricated row missing its trailing column (`['Full Name of
+    Board', 'Certificate #', '']`) compares as a set of 2 and is never
+    confused with the table's own 3-cell header row, which carries the
+    columns' parentheticals and so never collides with a data row's set."""
+    rows: set[frozenset[str]] = set()
+    for tbl in table_rows:
+        for row in tbl:
+            cells = frozenset(_norm(c) for c in row if c and str(c).strip())
+            if cells:
+                rows.add(cells)
+    return rows
+
+
+def lint_invented_records(stage4: dict,
+                          table_rows: list[list[list[str]]]) -> list[dict]:
+    """A record built from the WCM template's own scaffolding rather than
+    real CV content, reaching the delivered document (#829):
+
+    (a) a RENDERED stage-4 record whose extracted field values are all
+        known template labels -- #959's board-certification header-row fix,
+        generalized to every taxonomy code (`_is_invented_record`).
+    (b) an F1 (Licensure) entry whose SOURCE TEXT is a known template
+        instruction, exact or near-match -- A5IZ6Q's invented New York
+        licence, extracted from a licensure prompt paragraph the faculty
+        member never filled in.
+    """
+    rendered = _rendered_row_value_sets(table_rows)
+    findings = []
+    for e in stage4.get("entries", []):
+        code = e.get("taxonomy_code")
+        if code == "T":
+            continue
+        fields = e.get("extracted_fields") or {}
+        if _is_invented_record(fields):
+            values = _nonempty_field_values(fields)
+            if frozenset(_norm(v) for v in values) in rendered:
+                findings.append(_finding(
+                    "invented_records", "WARN",
+                    f"entry {e.get('element_idx_start')} ({code}): every "
+                    f"extracted field value is a known WCM template label, "
+                    f"rendered as if it were a real record (#829)",
+                    [f"{k}: {v}" for k, v in fields.items() if v]))
+        if code == INVENTED_RECORD_LICENSURE_CODE:
+            text = str(e.get("text", ""))
+            if is_template_instruction(text) or is_near_template_instruction(text):
+                findings.append(_finding(
+                    "invented_records", "WARN",
+                    f"entry {e.get('element_idx_start')} (F1): source text "
+                    f"is a known WCM template instruction, not a real "
+                    f"licence (#829)",
+                    [text[:120]]))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# A wrong start date left beside an empty end date (#729, split from #556).
+
+def lint_wrong_start_date(stage4: dict) -> list[dict]:
+    """An entry whose schema declares both dates, whose `end_date` is empty,
+    and whose own text carries exactly one closed 4-digit range with no
+    present/ongoing marker: the range is in the source but the entry renders
+    "<start>-Present". `reconcile_date_range` repairs the blank-start and
+    agreeing-start shapes; what reaches this lint is the shape it
+    deliberately leaves alone, chiefly the FSMB one (text "2025-2026"
+    extracted as start_date=2026). WARN when the extracted start equals the
+    range's END year (the model took the wrong end of the range), INFO for
+    any other disagreement. Report-only by decision (2026-09-09): the
+    extracted value is never changed."""
+    findings = []
+    for e in stage4.get("entries", []):
+        if e.get("taxonomy_code") not in DATE_RANGE_TAXONOMY_CODES:
+            continue
+        fields = e.get("extracted_fields") or {}
+        if fields.get("end_date"):
+            continue
+        text = str(e.get("text", ""))
+        closed_range = find_single_closed_range(text)
+        if closed_range is None:
+            continue
+        range_start, range_end = closed_range
+        start = str(fields.get("start_date") or "").strip()
+        severity = "WARN" if start == range_end else "INFO"
+        findings.append(_finding(
+            "wrong_start_date", severity,
+            f"entry {e.get('element_idx_start')} ({e.get('taxonomy_code')}): "
+            f"start_date '{start}' with an empty end_date, but the text "
+            f"carries the single closed range {range_start}-{range_end} -- "
+            f"renders '{start}-Present' (#729)",
+            [text[:120]]))
+    return findings

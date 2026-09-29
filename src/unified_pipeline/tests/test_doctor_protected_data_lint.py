@@ -395,6 +395,22 @@ def test_ambiguous_label_is_a_finding_in_the_appendix_but_not_in_a_content_secti
     assert len(lint_protected_data_in_output(personal)) == 1
 
 
+def test_1071_dob_label_parenthetical_and_race_ethnicity_are_findings():
+    """#1071: the doctor scans with the same policy rows, so both label
+    shapes are findings in the Appendix; the race/ethnicity row keeps its
+    Personal Data / Appendix scope, and a bare "Race:" stays clean."""
+    appendix = [_p("T. APPENDIX"), _p("• Birth Date (01/02/1970):"),
+                _p("• Date of Birth (mm/dd/yyyy): 01/02/1970"),
+                _p("• Race/Ethnicity: Example"), _p("• Race and Ethnicity: Example"),
+                _p("• Race: reporting practices in clinical trials")]
+    messages = [f["message"] for f in lint_protected_data_in_output(appendix)]
+    assert [m.split("(")[1].split(")")[0] for m in messages] == [
+        "date of birth", "date of birth", "ethnicity", "ethnicity"]
+    body = [_p("HONORS"), _p("Birth Date (01/02/1970):"), _p("Race/Ethnicity: Example")]
+    assert [f["message"].split("(")[1].split(")")[0]
+            for f in lint_protected_data_in_output(body)] == ["date of birth"]
+
+
 def test_unambiguous_label_is_a_finding_in_any_section():
     body = [_p("HONORS"), _p("Award; Date of Birth: 01/02/1970")]
     findings = lint_protected_data_in_output(body)

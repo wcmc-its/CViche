@@ -278,7 +278,7 @@ def _echo_call_llm(monkeypatch):
     not response content. Reads indices back out of the "[N] (Section: ...)"
     lines _classify_one_batch builds into the user message."""
     def call(**kwargs):
-        user_msg = kwargs["messages"][1]["content"]
+        user_msg = next(m["content"] for m in kwargs["messages"] if m["role"] == "user")
         indices = [int(m) for m in re.findall(r"^\[(\d+)\]", user_msg, flags=re.MULTILINE)]
         return {
             "content": json.dumps({"classifications": [

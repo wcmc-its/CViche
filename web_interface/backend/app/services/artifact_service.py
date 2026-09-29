@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Log, Step
 from app.schemas import OutputPreview
+from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +327,20 @@ def generate_preview(db: Session, run_id: str, filename: str) -> OutputPreview |
     build `output_dir / filename` directly, bypassing resolve_artifact's
     traversal/ownership checks)."""
     resolved = resolve_artifact(db, run_id, filename)
-    if resolved.local_path is None or not is_json_artifact(resolved.basename):
+    if not is_json_artifact(resolved.basename):
         return None
-    return generate_preview_from_path(resolved.local_path)
+    if resolved.local_path is not None:
+        return generate_preview_from_path(resolved.local_path)
+    # Durable storage fallback, as the JSON viewer does: once the pod that ran
+    # the step is recycled, the artifact exists only in S3. A missing object is
+    # "no preview"; any other storage error propagates (#936 -- an outage must
+    # not read as a missing file).
+    try:
+        raw = get_storage().get_file(run_id, resolved.storage_key)
+    except FileNotFoundError:
+        return None
+    try:
+        return parse_json_to_preview(json.loads(raw))
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError, TypeError, KeyError) as exc:
+        logger.warning("Error generating preview from storage %s/%s: %s", run_id, resolved.storage_key, exc)
+        return None

@@ -11,7 +11,7 @@ name, eliminating duplication like "Durham, NC, Durham, NC" in Stage 6 output.
 
 Applies to:
 - B1, B2: Education (university locations)
-- C, C1, C2: Postdoctoral Training
+- C, C1, C2, C3: Postdoctoral Training
 - D1, D2, D3: Professional Positions
 
 Input: Stage 5 enriched JSON (or Stage 4 fields JSON)
@@ -59,7 +59,7 @@ from unified_pipeline.stage5b.normalize import (  # noqa: F401  (re-exports)
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5b_institution_enrichment"
 
 # Taxonomy codes that need institution location enrichment
-INSTITUTION_CODES = ['B1', 'B2', 'C', 'C1', 'C2', 'D1', 'D2', 'D3']
+INSTITUTION_CODES = ['B1', 'B2', 'C', 'C1', 'C2', 'C3', 'D1', 'D2', 'D3']
 
 # LLM batch size
 BATCH_SIZE = 10
@@ -146,8 +146,101 @@ def enrich_entry_with_result(entry: dict, result: dict) -> dict:
     return entry
 
 
+def _raise_or_warn_on_batch_failures(
+    document_uid: str, llm_batches: int, failed_batches: int,
+    institutions_unresolved: int, entries_enriched: int,
+) -> None:
+    """Surface batch-level LLM lookup failures on the run (#700).
+
+    A batch-level LLM failure used to be logged and swallowed, leaving a
+    normal-looking artifact with those institutions silently unenriched.
+    Fails the run only when every LLM batch failed and nothing was
+    enriched any other way (cache or an earlier run). Unlike stage 3b's
+    total-failure guard, a batch that succeeds but resolves no match is
+    not a failure here -- that lookup is cached as None, a legitimate
+    negative -- so zero enriched alone does not trip this guard; it
+    requires failed_batches == llm_batches too. Any other failure stays
+    non-fatal but must be visible per-run.
+    """
+    if llm_batches > 0 and failed_batches == llm_batches and entries_enriched == 0:
+        raise RuntimeError(
+            f"Stage 5b produced zero successful institution lookups across "
+            f"{llm_batches} batches ({institutions_unresolved} institutions "
+            f"unresolved) for {document_uid}. Refusing to emit a normal-looking "
+            f"artifact with no institutions enriched; see batch errors above."
+        )
+
+    if failed_batches > 0:
+        msg = (
+            f"{failed_batches} of {llm_batches} institution lookup batches failed; "
+            f"{institutions_unresolved} institutions unresolved"
+        )
+        logger.warning("Stage 5b (%s): %s", document_uid, msg)
+
+
+def _build_institution_enrichment_stats(
+    entries: list, institution_entries: int, cached_count: int, uncached_count: int,
+    llm_calls: int, llm_batches: int, failed_batches: int, institutions_unresolved: int,
+    total_cost: float, observed_model: str | None,
+) -> dict:
+    """Count enriched entries and assemble ``institution_enrichment_stats``
+    (pure move out of run_stage5b, plus the #700 failed-batch fields).
+
+    ``entry.get('institution_enrichment')`` is a presence check. No code
+    writes ``{}``: in 5b, ``enrich_entry_with_result`` always assigns a
+    7-key dict, and stage 6's positions.py only copies an existing truthy
+    mapping (after 5b has counted). An explicit ``{}`` counts as absent.
+    """
+    enriched_count = sum(
+        1 for entry in entries
+        if entry.get('taxonomy_code', '') in INSTITUTION_CODES
+        and entry.get('institution_enrichment')
+    )
+    return {
+        'entries_processed': institution_entries,
+        'entries_enriched': enriched_count,
+        'cache_hits': cached_count,
+        'llm_lookups': uncached_count,
+        'llm_calls': llm_calls,
+        'llm_batches': llm_batches,
+        'failed_batches': failed_batches,
+        'institutions_unresolved': institutions_unresolved,
+        'cost': total_cost,
+        'model': observed_model,
+        # Naive on purpose: every sibling stats dict (stage_5c, stage_5d,
+        # calibration_logger) writes naive datetime.now().isoformat() and
+        # nothing reads it back -- stay consistent across stage JSON.
+        'timestamp': datetime.now().isoformat()
+    }
+
+
+def _finalize_stage5b_enrichment(
+    document_uid: str, entries: list, institution_entries: int, cached_count: int,
+    uncached_count: int, llm_calls: int, llm_batches: int, failed_batches: int,
+    institutions_unresolved: int, total_cost: float, observed_model: str | None,
+) -> dict:
+    """Single entry point for #700 finalization: compute
+    ``institution_enrichment_stats`` once, then run the batch-failure guard
+    against the value this same call just computed. Call this instead of
+    ``_build_institution_enrichment_stats``/``_raise_or_warn_on_batch_failures``
+    directly -- with two separate calls, a caller could pass the guard a
+    different ``entries_enriched`` than what stats actually derived, letting
+    the #700 fatal guard misfire or fail to fire.
+    """
+    stats = _build_institution_enrichment_stats(
+        entries, institution_entries, cached_count, uncached_count, llm_calls,
+        llm_batches, failed_batches, institutions_unresolved, total_cost,
+        observed_model,
+    )
+    _raise_or_warn_on_batch_failures(
+        document_uid, llm_batches, failed_batches, institutions_unresolved,
+        stats['entries_enriched'],
+    )
+    return stats
+
+
 def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
-                model: str = "gpt-5.1", refresh_cache: bool = False) -> str:
+                refresh_cache: bool = False) -> str:
     """
     Run Stage 5b: Institution Enrichment via LLM.
 
@@ -155,7 +248,6 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         input_path: Path to Stage 5 (or Stage 4) JSON
         output_path: Optional output path
         verbose: Print progress
-        model: LLM model to use for institution resolution
         refresh_cache: If True, ignore existing cache and re-lookup all institutions
 
     Returns:
@@ -173,7 +265,6 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         logger.info("%s", '=' * 60)
         logger.info("Stage 5b: Institution Enrichment (LLM) - %s", document_uid)
         logger.info("%s", '=' * 60)
-        logger.info("Model: %s", model)
 
     # Load cv_owner_location from Stage 4 if not in input
     if not cv_owner_location or not cv_owner_location.get('inference_success'):
@@ -321,6 +412,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     total_cost = 0.0
     observed_model = None
     llm_calls = 0
+    llm_batches = failed_batches = institutions_unresolved = 0
 
     if uncached_count > 0:
         # Build batches
@@ -334,8 +426,10 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                 batch.append((inst_id, info['institution_name'], info['context'], cache_key, info))
             batches.append(batch)
 
+        llm_batches = len(batches)
+
         if verbose:
-            logger.info("LLM batches: %d (batch size: %d)", len(batches), BATCH_SIZE)
+            logger.info("LLM batches: %d (batch size: %d)", llm_batches, BATCH_SIZE)
 
         for batch_idx, batch in enumerate(batches):
             # Prepare for LLM call
@@ -344,7 +438,6 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
             results, cost, call_model = lookup_institutions_llm(
                 llm_batch,
                 cv_owner_location,
-                model=model,
                 verbose=verbose
             )
             total_cost += cost
@@ -353,6 +446,8 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
 
             # None means the LLM call itself failed — don't cache anything
             if results is None:
+                failed_batches += 1
+                institutions_unresolved += len(batch)
                 if verbose:
                     logger.info("Batch failed — skipping cache writes for %d institutions", len(batch))
                 continue
@@ -389,31 +484,21 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     # Save cache
     save_institution_cache()
 
-    # Count enriched entries
-    enriched_count = sum(
-        1 for entry in entries
-        if entry.get('taxonomy_code', '') in INSTITUTION_CODES
-        and entry.get('institution_enrichment')
+    stats = _finalize_stage5b_enrichment(
+        document_uid, entries, institution_entries, cached_count, uncached_count, llm_calls,
+        llm_batches, failed_batches, institutions_unresolved, total_cost,
+        observed_model,
     )
 
     if verbose:
-        logger.info("Institutions enriched: %d/%d", enriched_count, institution_entries)
+        logger.info("Institutions enriched: %d/%d", stats['entries_enriched'], institution_entries)
         logger.info("LLM calls: %d", llm_calls)
         logger.info("Total cost: $%.4f", total_cost)
 
     # Prepare output
     data['entries'] = entries
     data['stage'] = '5b'
-    data['institution_enrichment_stats'] = {
-        'entries_processed': institution_entries,
-        'entries_enriched': enriched_count,
-        'cache_hits': cached_count,
-        'llm_lookups': uncached_count,
-        'llm_calls': llm_calls,
-        'cost': total_cost,
-        'model': observed_model or model,
-        'timestamp': datetime.now().isoformat()
-    }
+    data['institution_enrichment_stats'] = stats
 
     # Determine output path
     if output_path is None:
@@ -437,7 +522,6 @@ def main():
     parser.add_argument('input', help='Stage 5 enriched JSON file or document UID')
     parser.add_argument('--output', '-o', help='Output JSON path')
     parser.add_argument('--quiet', '-q', action='store_true', help='Suppress progress output')
-    parser.add_argument('--model', '-m', default='gpt-5.1', help='LLM model (default: gpt-5.1)')
     parser.add_argument('--refresh-cache', action='store_true',
                         help='Ignore existing cache and re-lookup all institutions via LLM')
 
@@ -463,7 +547,6 @@ def main():
     output_path = run_stage5b(
         input_path, args.output,
         verbose=not args.quiet,
-        model=args.model,
         refresh_cache=args.refresh_cache
     )
     logger.info("Generated: %s", output_path)

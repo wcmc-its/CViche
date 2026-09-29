@@ -35,17 +35,10 @@ bullet (review thread 3927100368, item 4). 0 farm K entries reach this branch
 with either text present, so the positive control is synthetic (§6.5 hole,
 disclosed in the PR body).
 
-This branch turns out to be unreachable through `_insert_teaching_entry` as
-written, for a reason that has nothing to do with #476:
-`_is_structural_label(entry)` (parsing/text.py, unrelated, pre-existing)
-returns True -- and the function returns immediately -- whenever
-`entry.get('text', '')` is falsy, which is exactly the condition the
-`elif formatted_text:` branch needs to be reached at all. The positive and
-negative controls below patch `_is_structural_label` out for the tests that
-need to exercise the branch itself, which is the honest way to pin what the
-changed line does without either fabricating a reachable-looking fixture or
-silently declining to test it the way the other four sections' positive
-controls are tested end to end.
+This branch was unreachable through `_insert_teaching_entry` until #757:
+`_is_structural_label(entry)` returned True for any blank raw text, dropping
+the entry before reconstruction. The controls below still patch it out; they
+pin what the changed line does independent of that gate.
 
 Run with:
 
@@ -60,6 +53,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
@@ -211,16 +205,17 @@ def test_regression_guard_raw_text_entry_fragments_would_wrongly_fragment_the_fa
 def _generator(*paragraph_texts):
     """A generator whose document is exactly these paragraphs, in this order.
 
-    `_find_paragraph_with_text` is a case-insensitive substring scan over
-    `self.doc.paragraphs`, so a "heading" is simply a paragraph written here.
-    That is what lets one test give a code its own heading, the next give it
+    `_find_header_paragraph` is a case-insensitive substring scan over
+    `self.doc.paragraphs` restricted to header-shaped paragraphs (#548), so a
+    "heading" is a paragraph written here with a bold run, as in the shipped
+    template. That is what lets one test give a code its own heading, the next give it
     only the shared EDUCATIONAL CONTRIBUTIONS fallback, and the next give it
     nothing at all -- the three routing outcomes, without three fixtures.
     """
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document()
     for text in paragraph_texts:
-        gen.doc.add_paragraph(text)
+        gen.doc.add_paragraph().add_run(text).bold = True
     return gen
 
 
@@ -772,19 +767,158 @@ def test_whitespace_only_original_text_uses_the_formatted_text():
     is zero lines, not one -- it must not be mistaken for a multi-item entry
     and must not suppress the formatted text.
 
-    At the render it never gets that far: `_is_structural_label` (parsing, not
-    this section, and unrelated to #476) returns True for any entry whose text
-    strips to empty, so the entry is dropped before reconstruction. Both
-    halves are asserted because they disagree, and a reader of the helper test
-    alone would predict the wrong page. 0 of the 722 K entries in the local
-    corpus have whitespace-only text.
+    At the render the entry is kept too (#757): `_is_structural_label` no
+    longer drops a blank-text entry that carries formatted_text, so the
+    formatted text is reconstructed onto the page.
     """
     assert _teaching_entry_lines({"formatted_text": "Grand rounds"}, "  \n  ") == \
         ["Grand rounds"]
 
     gen = _generator("Didactic teaching", "SENTINEL-END")
     gen._fill_teaching({"K1": [_entry("K1", "  \n  ", formatted_text="Grand rounds")]})
-    assert _visible(gen) == ["Didactic teaching", "SENTINEL-END"]
+    assert _visible(gen) == ["Didactic teaching", "Grand rounds", "SENTINEL-END"]
+
+
+# --- a table row whose cells wrap over paragraphs (#987) --------------------
+
+# web244's K1 row: one course, whose second cell wraps over four paragraphs.
+_WRAPPED_ROW_TEXT = ("Spring 2012 | Department of Environmental Engineering Sciences\n"
+                     "Spring 2012 Seminar\nOne Health: A Promising Approach to Difficult\n"
+                     "Public Health Problems | 1 | 40 | Speaker | 3%")
+_WRAPPED_ROW_ONE_LINE = ("Spring 2012 | Department of Environmental Engineering Sciences "
+                         "Spring 2012 Seminar One Health: A Promising Approach to Difficult "
+                         "Public Health Problems | 1 | 40 | Speaker | 3%")
+_WRAPPED_ROW_BULLET = _WRAPPED_ROW_ONE_LINE.replace(" | ", " \u2014 ")
+# 5c's text for the same row: it drops words the raw cells carry.
+_WRAPPED_ROW_5C = ("2012 - One Health: A Promising Approach to Difficult Public Health "
+                   "Problems, Speaker (1 credit hr; 40 students)")
+# Two courses stacked in one row: every cell has two paragraphs.
+_STACKED_ROW_TEXT = "2020\n2021 | Course A\nCourse B | Lecturer\nDirector"
+
+
+def _row_entry(text, element_type="table_row", start=5, end=5, **fields):
+    entry = _entry("K1", text, **fields)
+    entry.update(element_type=element_type, element_idx_start=start,
+                 element_idx_end=end)
+    return entry
+
+
+def _render_k1(entry):
+    gen = _generator("Didactic teaching", "SENTINEL-END")
+    gen._fill_teaching({"K1": [entry]})
+    return _visible(gen)[1:-1]
+
+
+def test_wrapped_table_row_renders_one_bullet_of_the_rejoined_raw_text():
+    """#987: one row, one wrapped cell -> ONE bullet of its raw text with each
+    cell's paragraphs joined by a space. Before, the raw lines won and the row
+    came out as four bullets. 5c's text does NOT replace it: it drops words."""
+    rendered = _render_k1(_row_entry(_WRAPPED_ROW_TEXT, formatted_text=_WRAPPED_ROW_5C))
+    assert rendered == [_WRAPPED_ROW_BULLET]
+    assert _WRAPPED_ROW_5C not in rendered
+
+
+def test_wrapped_table_row_keeps_every_word_of_the_source():
+    rendered = _render_k1(_row_entry(_WRAPPED_ROW_TEXT, formatted_text=_WRAPPED_ROW_5C))
+    words = lambda t: sorted(t.replace("|", " ").replace("\u2014", " ").split())  # noqa: E731
+    assert words(rendered[0]) == words(_WRAPPED_ROW_TEXT)
+
+
+def test_wrapped_table_row_with_a_blank_column_is_not_misread_as_stacked():
+    """A blank cell has 0 lines; it must not make the counts 'differ' for a
+    stacked row nor hide the wrap of a real one."""
+    stacked = _row_entry("2020\n2021 |  | Course A\nCourse B", formatted_text="fused")
+    assert _render_k1(stacked) == ["2020", "2021 \u2014 Course A", "Course B"]
+    wrapped = _row_entry("Fall\n2012 |  | Course A", formatted_text="fused")
+    assert _render_k1(wrapped) == ["Fall 2012 \u2014 Course A"]
+
+
+def test_wrapped_table_row_without_5c_text_uses_the_field_fallback():
+    """Regression pin, not new behaviour: with no 5c text the field fallback
+    already applies to every entry, wrapped or not."""
+    rendered = _render_k1(_row_entry(_WRAPPED_ROW_TEXT,
+                                     course_title="One Health", role="Speaker"))
+    assert rendered == ["One Health (Speaker)"]
+
+
+def test_row_with_a_line_count_per_cell_that_lines_up_stays_split():
+    """The guard: N stacked courses have N paragraphs in EVERY cell, so the
+    raw lines are still the more faithful record."""
+    rendered = _render_k1(_row_entry(_STACKED_ROW_TEXT, formatted_text="fused"))
+    assert "fused" not in rendered
+    assert rendered == ["2020", "2021 \u2014 Course A", "Course B \u2014 Lecturer", "Director"]
+
+
+def test_multiline_text_that_is_not_a_single_table_row_stays_split():
+    fused = "fused"
+    for kwargs in ({"element_type": "paragraph"}, {"start": 5, "end": 6}):
+        rendered = _render_k1(_row_entry(_WRAPPED_ROW_TEXT, formatted_text=fused, **kwargs))
+        assert fused not in rendered and len(rendered) > 1, kwargs
+
+
+# --- #548 instance B: a K-code's entries must not land under the previous
+# K-code's heading. `_fill_teaching` resolves each K anchor after the previous
+# code's bullets are already in the document.
+
+def _k_entry(code, text):
+    return {"taxonomy_code": code, "text": text, "extracted_fields": {"formatted_text": text}}
+
+
+def _k_layout(entries_by_code):
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_teaching(entries_by_code)
+    return [p.text for p in gen.doc.paragraphs]
+
+
+def _between(texts, start_prefix, end_prefix):
+    start = next(i for i, t in enumerate(texts) if t.startswith(start_prefix))
+    end = next(i for i, t in enumerate(texts) if t.startswith(end_prefix))
+    return [t for t in texts[start + 1:end] if t.strip()]
+
+
+
+@pytest.mark.parametrize("k1_text", [
+    "Clinical teaching skills workshop for junior trainees",
+    "CLINICAL TEACHING SKILLS WORKSHOP",
+])
+def test_k2_entry_is_not_captured_by_a_k1_bullet_naming_its_heading(k1_text):
+    texts = _k_layout({"K1": [_k_entry("K1", k1_text)],
+                       "K2": [_k_entry("K2", "Attending rounds on the ward")]})
+
+    assert _between(texts, "Didactic teaching (", "Clinical teaching (") == [k1_text]
+    assert _between(texts, "Clinical teaching (", "Administrative teaching (") == [
+        "Attending rounds on the ward"]
+
+
+def test_later_k_codes_land_under_their_own_headings_in_one_render():
+    texts = _k_layout({
+        "K1": [_k_entry("K1", "Didactic teaching seminar series")],
+        "K2": [_k_entry("K2", "Bedside teaching rounds")],
+        "K3": [_k_entry("K3", "Administrative teaching: fellowship director")],
+        "K4": [_k_entry("K4", "Continuing education course for practitioners")],
+        "K5": [_k_entry("K5", "Community education and outreach activities talk")],
+    })
+
+    assert _between(texts, "Didactic teaching (", "Clinical teaching (") == [
+        "Didactic teaching seminar series"]
+    assert _between(texts, "Clinical teaching (", "Administrative teaching (") == [
+        "Bedside teaching rounds"]
+    assert _between(texts, "Administrative teaching (", "Continuing education") == [
+        "Administrative teaching: fellowship director"]
+    assert _between(texts, "Continuing education", "Other education/outreach") == [
+        "Continuing education course for practitioners"]
+    assert _between(texts, "Other education/outreach", "CLINICAL PRACTICE") == [
+        "Community education and outreach activities talk"]
+
+
+def test_fallback_heading_skips_instruction_prose_that_mentions_it():
+    gen = _generator("EDUCATIONAL CONTRIBUTIONS", "SENTINEL-END")
+    gen.doc.paragraphs[0].insert_paragraph_before("See the educational contributions guidance")
+    gen._fill_teaching({"K1": [_k_entry("K1", "Seminar series")]})
+
+    assert _visible(gen) == ["See the educational contributions guidance",
+                             "EDUCATIONAL CONTRIBUTIONS", "Seminar series", "SENTINEL-END"]
 
 
 if __name__ == "__main__":

@@ -16,15 +16,17 @@ stage3b module.
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import TypedDict
 
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
-from .io import _safe_float
+from .io import _safe_float, taxonomy_code_set
 from .prompt import (
     CLASSIFICATION_RULES_VERSION,
+    _CLASSIFICATION_BATCH_CONTEXT_TEMPLATE,
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     _T_VALIDATION_SYSTEM_PROMPT_TEMPLATE,
     build_taxonomy_codes_for_prompt,
@@ -93,10 +95,7 @@ def _valid_taxonomy_codes(taxonomy: dict) -> set[str]:
     untrusted input; a code outside this set must not be persisted as a
     real classification.
     """
-    return {
-        c["code"] for c in taxonomy.get("codes", [])
-        if isinstance(c, dict) and isinstance(c.get("code"), str) and c["code"]
-    }
+    return taxonomy_code_set(taxonomy)
 
 
 def _normalize_confidence(value: object, default: float = 0.5) -> float:
@@ -252,11 +251,8 @@ def _classify_one_batch(
         return results, stats
 
     # Build prompt
-    context_str = taxonomy_context.format_context_string()
-
-    system_prompt = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
-        context_str=context_str, taxonomy_ref=taxonomy_ref
-    )
+    batch_context = _CLASSIFICATION_BATCH_CONTEXT_TEMPLATE.format(
+        context_str=taxonomy_context.format_context_string(), taxonomy_ref=taxonomy_ref)
 
     # Build entries list for user message (include per-entry hierarchy)
     entries_lines = []
@@ -273,7 +269,9 @@ def _classify_one_batch(
 Return ONLY valid JSON with the classifications array."""
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        # cache_point ends the cached prefix; the per-group block after it is uncached (#50).
+        {"role": "system", "content": _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE, "cache_point": True},
+        {"role": "system", "content": batch_context},
         {"role": "user", "content": user_message}
     ]
 
@@ -929,44 +927,47 @@ Fragment at index {idx}:
         return entries, {"fragments_reviewed": len(fragment_candidates), "fragments_reconnected": locals().get("reconnected_count", 0), "cost": 0.0, "error": str(e)}
 
 
-def detect_duplicates(entries: list[dict], similarity_threshold: float = 0.9) -> tuple[list[dict], list[dict]]:
+def _duplicate_key(text: str) -> str:
+    """The comparison key two entries must share EXACTLY to be duplicates.
+
+    Lowercased, with every non-word character removed -- punctuation AND
+    whitespace. So a case, punctuation, or spacing difference (including a
+    token split or joined: "2013 - present" vs "2013present") still matches,
+    but any change to a letter or digit does not.
     """
-    Detect and flag duplicate entries based on text similarity.
+    return re.sub(r"[^\w]", "", text.lower())
+
+
+def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """
+    Detect and flag duplicate entries: entries whose text is the same once
+    case, punctuation and whitespace are ignored (`_duplicate_key`).
 
     Duplicates occur when the same content appears under multiple CV sections
     (e.g., grants listed under both "Other Publications" and "Grant Support").
 
+    A flagged entry is filtered out by stage 4 before extraction and never
+    reaches the output, so a false positive is a silent content loss. That
+    is why this is key EQUALITY and not a similarity ratio: it used to flag
+    any pair at >= 0.9 SequenceMatcher similarity, and sibling records that
+    share a long template differ by exactly the word or year that identifies
+    them -- "Best Junior ... Award" (2019) vs "Best Senior ... Award" (2020),
+    "... Airway Workshop" vs "... Suture Workshop" -- so the second one of
+    each vanished (#945). A near-duplicate that differs by a real letter or
+    digit (a citation re-typed with an extra initial, a template label left
+    in) is now kept and rendered: a visible repeat the CV owner can delete,
+    instead of a silent drop they never see.
+
     Args:
         entries: List of classified entries
-        similarity_threshold: Minimum similarity ratio to consider duplicate (0-1)
 
     Returns:
         Tuple of (deduplicated_entries, duplicate_info)
         - deduplicated_entries: Entries with duplicates marked
         - duplicate_info: List of detected duplicate pairs
     """
-    import re
-    from difflib import SequenceMatcher
-
-    def normalize_text(text: str) -> str:
-        """Normalize text for comparison."""
-        if not text:
-            return ""
-        # Lowercase, remove extra whitespace, strip punctuation
-        text = text.lower()
-        text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'[^\w\s]', '', text)
-        return text.strip()
-
-    def normalized_similarity(n1: str, n2: str) -> float:
-        """Similarity ratio between two ALREADY-normalized texts."""
-        if not n1 or not n2:
-            return 0.0
-        # Use SequenceMatcher for fuzzy matching
-        return SequenceMatcher(None, n1, n2).ratio()
-
     # Candidates for comparison: entries with enough text to be meaningfully
-    # compared (skip near-empty fragments). normalize_text runs once per
+    # compared (skip near-empty fragments). The key is computed once per
     # candidate here rather than repeatedly inside the comparison loop below.
     candidates = []
     for idx, entry in enumerate(entries):
@@ -979,40 +980,34 @@ def detect_duplicates(entries: list[dict], similarity_threshold: float = 0.9) ->
         # entry that is merely too short.
         if not isinstance(text, str) or len(text) < 20:  # Skip very short/non-string entries
             continue
-        candidates.append((idx, entry, normalize_text(text)))
+        candidates.append((idx, entry, _duplicate_key(text)))
 
     # Find duplicates
     duplicate_pairs = []
     seen_duplicates = set()  # Track which indices have been marked as duplicates
 
-    # O(n^2) over `candidates`. This used to bucket entries by their first
-    # 100 normalized characters and only compare within a bucket -- a real
-    # correctness bug, not just an optimization: two near-duplicate entries
-    # that diverged in that prefix (different opening wording, a prepended
-    # date/title) landed in different buckets and were NEVER compared,
-    # silently missing real duplicates. Compare every eligible pair instead.
-    # CV entry counts are small (at most a few hundred per document), so the
-    # quadratic comparison is fine in practice; do not reintroduce prefix
-    # bucketing (or any other blocking key) without proving it can't split a
-    # genuinely similar pair the way the prefix key did.
-    for i, (idx1, entry1, norm1) in enumerate(candidates):
-        for idx2, entry2, norm2 in candidates[i + 1:]:
+    # Every eligible pair is compared. O(n^2), but each comparison is a
+    # plain string equality, so even the largest CV in the corpus (~1,150
+    # candidates) costs milliseconds.
+    for i, (idx1, entry1, key1) in enumerate(candidates):
+        for idx2, entry2, key2 in candidates[i + 1:]:
             if idx1 in seen_duplicates and idx2 in seen_duplicates:
                 continue
 
-            sim = normalized_similarity(norm1, norm2)
-            if sim >= similarity_threshold:
+            if key1 == key2:
                 # A duplicate pair is recorded once per (idx1, idx2)
-                # comparison that clears the threshold -- the loop above
-                # only *skips* a pair when BOTH sides are already marked
-                # duplicate, so one entry CAN appear in more than one
-                # recorded pair (e.g. three near-identical entries A/B/C
-                # produce pairs (A,B) and (A,C), both B and C marked
-                # duplicate, A left as the surviving original).
+                # comparison that matches -- the loop above only *skips* a
+                # pair when BOTH sides are already marked duplicate, so one
+                # entry CAN appear in more than one recorded pair (e.g.
+                # three identical entries A/B/C produce pairs (A,B) and
+                # (A,C), both B and C marked duplicate, A left as the
+                # surviving original).
                 duplicate_pairs.append({
                     "entry1_idx": idx1,
                     "entry2_idx": idx2,
-                    "similarity": sim,
+                    # Always 1.0 now (key equality); kept so the
+                    # meta.duplicate_pairs artifact keeps its shape.
+                    "similarity": 1.0,
                     "entry1_hierarchy": entry1.get("hierarchy", []),
                     "entry2_hierarchy": entry2.get("hierarchy", []),
                     "entry1_code": entry1.get("taxonomy_code"),

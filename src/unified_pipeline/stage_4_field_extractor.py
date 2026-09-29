@@ -51,6 +51,7 @@ from unified_pipeline.stage4.coercion import (  # noqa: F401
     normalize_authors_vancouver,
     normalize_dates,
 )
+from unified_pipeline.stage4.context_headings import stamp_context_headings
 from unified_pipeline.stage4.extraction import (  # noqa: F401
     _get_field_descriptions,
     attempt_llm_recovery,
@@ -125,7 +126,9 @@ def process_cv(
     with open(stage3b_path, "r", encoding="utf-8") as f:
         stage_data = json.load(f)
     # Stage 3b uses "entries" key
-    mapped_entries = stage_data.get("entries", [])
+    # #985: stamp over the FULL list, before the filter below drops fragment /
+    # duplicate sub-headings that must still end a heading's run.
+    mapped_entries = stamp_context_headings(stage_data.get("entries", []))
 
     # Filter out fragments and duplicates (they don't need field extraction)
     valid_entries = [

@@ -1,6 +1,7 @@
 """Step details and data API endpoints."""
 import json
 import logging
+from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -67,10 +68,13 @@ def get_step_detail(
             )
             output_files = []
 
-    # Try to load preview of first output file
+    # Try to load preview of first output file. The pipeline stores absolute
+    # paths; the resolver takes basenames only (it 400s on a leading "/"), so
+    # passing the raw path failed every completed step's detail request.
     output_preview = None
     if output_files and step.status == "complete":
-        output_preview = artifact_service.generate_preview(db, run_id, output_files[0])
+        output_preview = artifact_service.generate_preview(
+            db, run_id, Path(output_files[0]).name)
 
     return StepDetail(
         step_id=step.id,

@@ -50,14 +50,22 @@ from unified_pipeline.stage6.sections import research_support  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     UnsupportedRebucketTargetError,
     apply_effort_to_grants,
+    claim_goal_rows,
+    fill_major_goals_from_text,
     filter_role_effort_headers,
     match_effort_for_title,
     normalize_percent_effort,
+    parse_major_goals,
+    promote_open_ended_m2b_grants,
     rebucket_grants_by_status,
     reclassify_past_m2a_grants,
     resolve_pi_name,
+    _is_cv_owner,
 )
-from unified_pipeline.stage6.normalization import grant_status_rebucket_target  # noqa: E402
+from unified_pipeline.stage6.normalization import (  # noqa: E402
+    grant_heading_rebucket_target,
+    grant_status_rebucket_target,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 CURRENT = 'Current Research Funding'
@@ -418,6 +426,181 @@ def test_pi_name_is_not_extracted_from_a_rejected_trailing_cell(raw, reason):
     assert resolve_pi_name({}, raw, '', '') == '', reason
 
 
+# --- #982: PI resolution -- no co_investigators fallback, a "PI:" label first ---
+
+def test_co_investigators_never_fills_the_pi_cell():
+    """web207: `co_investigators` held the CV owner and rendered as the PI (#982)."""
+    fields = {'co_investigators': 'Tanaka, CoI'}
+    assert resolve_pi_name(fields, '', 'Co-Investigator', 'Ada Testowner') == ''
+
+
+def test_pi_label_in_the_source_text_fills_the_pi_before_the_owner_auto_fill():
+    """A named PI wins over the owner even when the role says the owner is a PI."""
+    raw = 'PI: Holloway | $329,925 | 5% Tanaka, CoI'
+    assert resolve_pi_name({}, raw, 'Principal Investigator', 'Ada Testowner') == 'Holloway'
+
+
+@pytest.mark.parametrize('raw, expected', [
+    ('P30CA047904 Cancer Center Support Grant (PI: Keller) | NCI', 'Keller'),
+    ('PI:Moss', 'Moss'),
+    ('PI: R Voss', 'R Voss'),
+    ('PI: De Luca', 'De Luca'),
+    ('(PI: Dr. Min Wu, Department of Radiation Oncology, UMB)', 'Dr. Min Wu'),
+    ('Sponsor: Tanaka\nPI: Bradley\nRole: Co-I', 'Bradley'),
+    # "(PI Name)" and "[PI Name" without a colon
+    ('Quadrangle Seminar Fund (PI Paul Reyes), 2003', 'Paul Reyes'),
+    ('(PI Lan Mai Thu Pham, CONVERGE trainee graduate)', 'Lan Mai Thu Pham'),
+    ('$3,000,000 / [PI Dr. Ann B. Cole, Co-Is Dr. Omar Haddad]', 'Dr. Ann B. Cole'),
+    ('Ellison Foundation (PI Lee and Park)', 'Lee and Park'),
+    # "Principal Investigator(s): Name(s)"
+    ('Role: Postdoctoral Fellow\tPrincipal Investigator: Sam Ortiz\tTitle: X', 'Sam Ortiz'),
+    ('Principal Investigators: Ann Cole & Beth Hale\tFunding agency: A',
+     'Ann Cole & Beth Hale'),
+    # "Name (PI)", "Names (MPI)", "Name (Principal Investigator)"
+    ('National Cancer Institute (R01)\tNguyen (PI)\t07/01/25', 'Nguyen'),
+    ('NIA (R21)\tLee & Park (MPI)\t12/01/24', 'Lee & Park'),
+    ('Collaborating with Dr. Ana Cruz (Principal Investigator) and others', 'Dr. Ana Cruz'),
+    ('1R21EB002742-01 Srinivasan (PI)  9/1/03 - 8/31/05', 'Srinivasan'),
+    ('R21EB002742-01 Srinivasan (PI)  9/1/03 - 8/31/05', 'Srinivasan'),
+    # "Name, Principal Investigator" / "Name, PI"
+    ('$144,301. M. Silva, Principal Investigator, A Byrne, Co-Investigator.', 'M. Silva'),
+    ('Rosa Diaz, PI.   Co-investigators: Ivan T. Roth', 'Rosa Diaz'),
+    # "[PIs A, B, ...]"
+    ('$1,350,000 [PIs Dr. Ann Cole, Dr. Ben Hale, et al.]',
+     'Dr. Ann Cole, Dr. Ben Hale'),
+])
+def test_pi_label_name_shapes(raw, expected):
+    assert resolve_pi_name({}, raw, '', '') == expected
+
+
+@pytest.mark.parametrize('raw, reason', [
+    ('Co-PI: Eric Stone', 'a Co-PI is not the PI'),
+    ('Subcontract-PI: $103,886 (direct costs)', 'an amount, not a name'),
+    ('06/01/2021-05/31/2026 PI: 75%\tNIAID', 'an effort figure, not a name'),
+    ('PI:\tHart Role on Grant:', 'a tab ends the field: the next cell is not the name'),
+    ('PI: smith', 'a lower-case word is not a name'),
+    ('(PI Lan Mai Thu Pham Vo Ha)', 'a name past the token limit is not truncated to a wrong one'),
+    ('(PI: Jones R01 renewal)', 'an award-number token after a surname is not part of a name'),
+    ('Rehabilitation Institute of Chicago, Principal Investigator.',
+     '"Name, Principal Investigator" needs two tokens: Chicago is the owner\'s place'),
+    ('1P20CA086278-01A1Frost (PI)', 'an award number glued to a name is not a name'),
+    ('Manual Therapy grant (co-principal investigator) Smith', 'no PI label at all'),
+])
+def test_pi_label_that_is_not_a_pi_name_is_left_alone(raw, reason):
+    assert resolve_pi_name({}, raw, '', '') == '', reason
+
+
+def test_a_pi_label_naming_the_cv_owner_by_surname_renders_the_owner_full_name():
+    """"Srinivasan (PI)" on Srinivasan's own CV is the owner, so the cell keeps the
+    owner's full name, as the owner auto-fill rendered it before the label was read."""
+    assert resolve_pi_name({}, 'Duke (PI: Srinivasan) 2017', 'PI', 'Priya Srinivasan') \
+        == 'Priya Srinivasan'
+    assert resolve_pi_name({}, 'Duke (PI: Someone Else) 2017', 'PI', 'Priya Srinivasan') \
+        == 'Someone Else'
+
+
+@pytest.mark.parametrize('raw, owner', [
+    ('PI: Nora Smith', 'Nora M. Quinn'),
+    ('PI: Mark Anderson', 'Andrew Mark Jones'),
+])
+def test_a_pi_sharing_only_a_given_name_with_the_cv_owner_is_not_the_owner(raw, owner):
+    """A shared first or middle name is not the owner: the named PI is kept."""
+    assert resolve_pi_name({}, raw, '', owner) == raw[len('PI: '):]
+
+
+@pytest.mark.parametrize('raw', ['PI: Quinn', 'PI: Quinn, Nora', 'PI: Nora Quinn'])
+def test_a_pi_with_the_cv_owners_surname_is_the_owner(raw):
+    assert resolve_pi_name({}, raw, '', 'Nora M. Quinn') == 'Nora M. Quinn'
+
+
+@pytest.mark.parametrize('name, owner, expected', [
+    ('Quinn, Nora', 'Nora M. Quinn', False),
+    ('Quinn, Holloway', 'Nora M. Quinn', False),
+    ('Nora Quinn', 'Nora M. Quinn', True),
+    ('Dr. Nora Quinn, Dr. Ann Lee', 'Nora M. Quinn', False),
+    ('Quinn', '', False),
+    ('Al Li', 'Bo Ng', False),
+    ('Ana Rivera', 'Ana Rivera-Ortiz', True),
+    ('Rivera AO', 'Ana Rivera-Ortiz', True),
+    ('Ana Ortiz', 'Ana Rivera-Ortiz', True),
+    ('Ana Smith', 'Ana Rivera-Ortiz', False),
+    ('Lee & Park', 'Amy Park', False),
+])
+def test_is_cv_owner_matches_one_surname_and_never_a_list(name, owner, expected):
+    assert _is_cv_owner(name, owner) is expected
+
+
+@pytest.mark.parametrize('raw', ['Harvard (PIs Quinn, Holloway) 2019', '[PIs Nora Quinn, Bo Li]'])
+def test_a_pi_list_naming_the_cv_owner_keeps_every_pi(raw):
+    """A "PIs" list that includes the owner is not collapsed to the owner: that
+    would drop the other PI, the loss #982 is about."""
+    assert resolve_pi_name({}, raw, '', 'Nora M. Quinn') == raw.split('PIs ')[1].rstrip(']').split(')')[0]
+
+
+def test_an_and_joined_pair_naming_the_cv_owner_keeps_both_pis():
+    assert resolve_pi_name({}, 'Ellison Foundation (PI Lee and Park)', '', 'Amy Park') == 'Lee and Park'
+
+
+@pytest.mark.parametrize('raw, expected', [
+    ("PI: Mary O'Brien", "Mary O'Brien"),
+    ('PI: Mary O\u2019Brien', 'Mary O\u2019Brien'),
+    ('PI: Ana Rivera-Ortiz', 'Ana Rivera-Ortiz'),
+])
+def test_pi_name_tokens_keep_apostrophes_and_hyphens(raw, expected):
+    assert resolve_pi_name({}, raw, '', '') == expected
+
+
+def test_a_hyphenated_pi_label_naming_the_cv_owner_renders_the_owner():
+    assert resolve_pi_name({}, 'PI: Ana Rivera', '', 'Ana Rivera-Ortiz') == 'Ana Rivera-Ortiz'
+
+
+def test_a_name_glued_to_an_award_number_by_a_hyphen_is_not_a_name():
+    assert resolve_pi_name({}, 'R01-Frost (PI)', '', '') == ''
+
+
+def test_pi_name_token_limit_is_exactly_three_extra_tokens():
+    """Four extra tokens is over the limit and is skipped, not truncated."""
+    assert resolve_pi_name({}, '(PI Ann Bo Cy Di)', '', '') == 'Ann Bo Cy Di'
+    assert resolve_pi_name({}, '(PI Ann Bo Cy Di Ed)', '', '') == ''
+
+
+def test_a_joined_pair_naming_the_cv_owner_is_not_collapsed_to_the_owner():
+    assert resolve_pi_name({}, 'NIA\tLee & Park (MPI)', '', 'Amy Lee') == 'Lee & Park'
+
+
+def test_an_explicit_pi_label_beats_a_name_suffix_shape():
+    """Shapes are tried in order: "PI: <name>" outranks "<name>, Principal Investigator"."""
+    raw = 'Ada Lovelace, Principal Investigator; renewal (PI: Grace Hopper)'
+    assert resolve_pi_name({}, raw, '', '') == 'Grace Hopper'
+
+
+def test_a_null_source_text_resolves_to_no_pi_rather_than_raising():
+    """`entry['text']` can be a JSON null; the label parse must not hand it to `re`."""
+    assert resolve_pi_name({}, None, '', 'Ada Testowner') == ''
+
+
+def test_extracted_pi_name_beats_the_pi_label():
+    assert resolve_pi_name({'pi_name': 'Jane Smith'}, 'PI: Someone Else', '', '') == 'Jane Smith'
+
+
+def test_pi_label_beats_the_pipe_row_trailing_cell():
+    raw = 'NIH | $100,000 | 2019-2021 | Jane Smith (PI: Ada Lovelace)'
+    assert resolve_pi_name({}, raw, '', '') == 'Ada Lovelace'
+
+
+def test_a_grant_whose_text_names_another_pi_does_not_render_the_owner():
+    """The rendered wire: co-investigator owner, `PI: <other>` in the text."""
+    gen = _generator()
+    table = gen._create_grant_table(
+        {'title': 'Structure-specific nuclease study', 'agency': 'NIH',
+         'co_investigators': 'Tanaka, CoI', 'annual_funding': '329925'},
+        'M2A', entry={'text': 'PI: Holloway | $329,925 | 5% Tanaka, CoI'},
+        owner_name='Mia Tanaka')
+    cells = _cells(table)
+    assert cells['Name of Principal Investigator:'] == 'Holloway'
+    assert cells['Annual direct costs:'] == '$329,925'
+
+
 # --- item 8: percent-effort extraction, parsed and applied ----------------------
 
 def test_role_effort_header_is_parsed_into_the_effort_lookup():
@@ -733,16 +916,83 @@ def test_agency_precedence_is_agency_then_funding_source_then_sponsor():
 
 # --- item 14: funding fallback --------------------------------------------------
 
-@pytest.mark.parametrize('field', ['annual_direct_costs', 'total_funding'])
+@pytest.mark.parametrize('field', ['annual_direct_costs', 'annual_funding'])
 def test_annual_direct_costs_fallbacks(field):
-    """Either funding key alone fills the "Annual direct costs:" row.
+    """Either yearly key alone fills the "Annual direct costs:" row.
 
-    Untested before, and the two keys are read twice in opposite precedence
-    inside the renderer (review thread 3932451691 item 14).
+    `annual_funding` is the key the stage-4 M2 schema actually emits, and it
+    was never read, so 16 corpus records rendered an empty Annual cell (#982).
     """
     fields = {'title': 'Funded Cohort Study', field: '100000', 'start_date': '01/2019'}
     cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
     assert cells['Annual direct costs:'] == '$100,000'
+    assert 'Total award:' not in cells
+
+
+def test_total_funding_alone_is_labelled_total_award_not_annual():
+    """A total with no yearly figure is a total: it never sits under "Annual".
+
+    web36's "Institutional Award: $2,638,299" used to render as Annual direct
+    costs (#982). The row keeps its slot, so the block is still eight rows.
+    """
+    fields = {'title': 'Funded Cohort Study', 'total_funding': '2638299',
+              'start_date': '01/2019'}
+    table = _generator()._create_grant_table(fields, 'M2A')
+    cells = _cells(table)
+    assert cells['Total award:'] == '$2,638,299'
+    assert 'Annual direct costs:' not in cells
+    assert len(table.rows) == 8
+
+
+def test_annual_and_total_both_render_as_two_rows_and_neither_is_dropped():
+    """web207 R01CA284633: annual $329,925 under Annual, the $1,649,625 total under
+    its own label directly after it -- the old render showed the total (mislabelled)
+    and dropped the annual figure, so dropping the total now would just swap the loss."""
+    fields = {'title': 'Funded Cohort Study', 'annual_funding': '329925',
+              'total_funding': '1649625', 'start_date': '01/2019'}
+    table = _generator()._create_grant_table(fields, 'M2A')
+    rows = _rows(table)
+    costs_at = [label for label, _ in rows].index('Annual direct costs:')
+    assert rows[costs_at] == ('Annual direct costs:', '$329,925')
+    assert rows[costs_at + 1] == ('Total award:', '$1,649,625')
+    assert len(rows) == 9
+
+
+def test_a_total_equal_to_the_annual_amount_is_one_row():
+    """The same figure twice is one fact; `total_funding` falling back to the
+    yearly amount must not manufacture a Total award row."""
+    fields = {'title': 'Funded Cohort Study', 'annual_funding': '100000',
+              'total_funding': '100000', 'start_date': '01/2019'}
+    table = _generator()._create_grant_table(fields, 'M2A')
+    assert len(table.rows) == 8
+    assert 'Total award:' not in _cells(table)
+
+
+def test_annual_direct_costs_beats_annual_funding_and_blank_falls_through_to_it():
+    """The older key is read first; a blank one does not shadow `annual_funding`."""
+    both = {'title': 'Funded Cohort Study', 'annual_direct_costs': '100000',
+            'annual_funding': '200000', 'start_date': '01/2019'}
+    assert _cells(_generator()._create_grant_table(both, 'M2A'))['Annual direct costs:'] \
+        == '$100,000'
+    blank = dict(both, annual_direct_costs='  ')
+    assert _cells(_generator()._create_grant_table(blank, 'M2A'))['Annual direct costs:'] \
+        == '$200,000'
+
+
+def test_numeric_annual_funding_without_a_total_does_not_crash():
+    """The title-duplicate check compares `total_funding`, which falls back to the
+    yearly amount, so a JSON number there reached `.strip()` once the yearly key
+    was read at all (#982)."""
+    fields = {'title': 'Funded Cohort Study', 'annual_funding': 329925,
+              'start_date': '01/2019'}
+    cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
+    assert cells['Annual direct costs:'] == '$329,925'
+
+
+def test_no_amount_at_all_keeps_the_annual_label_with_an_empty_cell():
+    fields = {'title': 'Funded Cohort Study', 'start_date': '01/2019'}
+    cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
+    assert cells['Annual direct costs:'] == ''
 
 
 def test_annual_direct_costs_wins_when_both_funding_keys_are_present():
@@ -883,6 +1133,348 @@ def test_major_goals_precedence_is_goals_then_description_then_narrative():
     del fields['description']
     assert _cells(_generator()._create_grant_table(fields, 'M2A'))['Major project goals:'] \
         == 'A narrative here'
+
+
+def test_a_goal_identical_to_the_title_is_not_rendered_twice():
+    """A goal that is (normalized) the same text already rendered as the title
+    is not a second fact -- it is the title read twice, once by the title
+    fallback chain and once by the goals label (#829 corpus scan, BYFQBG#82:
+    stage 4 put the goal text straight into `title`, and the same entry's own
+    "Major Goals:" label parsed to the identical string, so the block rendered
+    it twice). Comparing case-insensitively and whitespace-stripped, matching
+    the title/agency and title/funding duplicate checks above.
+    """
+    fields = {'title': 'Map the pollinator corridors of the Example Valley',
+              'major_goals': '  MAP THE POLLINATOR CORRIDORS OF THE EXAMPLE VALLEY  ',
+              'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+
+@pytest.mark.parametrize('goals, expected', [
+    # Differs from the title outright.
+    ('Map the pollinator corridors and survey nesting sites',
+     'Map the pollinator corridors and survey nesting sites'),
+    # Extends the title: the title is a literal prefix, plus more text. A
+    # containment check (`title in goals`) would wrongly read this as a
+    # repeat of the title rather than the equality check the guard is meant
+    # to be (round-4 review: a mutant swapping `==` for `in` survived with no
+    # test covering this shape).
+    ('Map the pollinator corridors of the Example Valley and survey nesting sites',
+     'Map the pollinator corridors of the Example Valley and survey nesting sites'),
+    # A strict substring of the title is not a repeat either (`goals in title`).
+    ('Map the pollinator corridors', 'Map the pollinator corridors'),
+])
+def test_a_goal_that_differs_from_the_title_still_renders(goals, expected):
+    """Only an exact (normalized) match is suppressed -- a goal that extends or
+    differs from the title is still new information and still renders.
+    """
+    fields = {'title': 'Map the pollinator corridors of the Example Valley',
+              'major_goals': goals,
+              'start_date': '01/2019'}
+    cells = _cells(_generator()._create_grant_table(fields, 'M2A'))
+    assert cells['Major project goals:'] == expected
+
+
+def test_null_goal_and_title_fields_do_not_crash_the_goals_row():
+    """stage 4 can emit a key with a null value; `fields.get(k, '')` then
+    returns None, so the guard must not call .strip() on it.
+    """
+    no_goal = {'title': 'Map the pollinator corridors of the Example Valley',
+               'narrative': None, 'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(no_goal, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+    no_title = {'text': None, 'agency': 'Example Fund', 'start_date': '01/2019',
+                'major_goals': 'Survey nesting sites across the valley'}
+    cells = _cells(_generator()._create_grant_table(no_title, 'M2A'))
+    assert cells['Major project goals:'] == 'Survey nesting sites across the valley'
+
+
+def test_a_goal_repeating_a_whitespace_padded_title_is_still_suppressed():
+    """The guard strips both sides before comparing. `title` can carry
+    surrounding whitespace (nothing upstream of `_create_grant_table` trims
+    it when the raw field has no `|` for `_deduplicate_repeated_content` to
+    act on) -- dropping `.strip()` on the title side alone left every test
+    green (round-4 review).
+    """
+    fields = {'title': '  Map the pollinator corridors of the Example Valley  ',
+              'major_goals': 'MAP THE POLLINATOR CORRIDORS OF THE EXAMPLE VALLEY',
+              'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+
+def test_the_goal_repeat_guard_compares_the_rendered_title_not_the_raw_field():
+    """The guard's `title` is the computed value -- deduplicated, with the
+    trial_title/study_title/text fallback chain already applied -- that is
+    actually rendered as 'Project title:', not the raw `fields.get('title')`.
+    A grant whose title comes only from a fallback field has no `'title'` key
+    at all, so comparing against the raw field would never suppress a repeat
+    here (round-4 review: this mutant also left every test green).
+    """
+    fields = {'trial_title': 'Map the pollinator corridors of the Example Valley',
+              'major_goals': 'MAP THE POLLINATOR CORRIDORS OF THE EXAMPLE VALLEY',
+              'start_date': '01/2019'}
+    labels = [label for label, _ in _rows(_generator()._create_grant_table(fields, 'M2A'))]
+    assert 'Major project goals:' not in labels
+
+
+# --- #958: major goals from the source text -------------------------------------
+
+_GOAL = 'Map the pollinator corridors of the Example Valley'
+
+
+@pytest.mark.parametrize('text, expected', [
+    # The plain label, tab-separated, as the last line of a table-form grant.
+    (f'Award Source: | Example Fund\nThe major goals of this project are:\t{_GOAL}', _GOAL),
+    # The WCM template's own label, in a goals row of its own.
+    (f'(Optional - The major goals of this project are): | {_GOAL}', _GOAL),
+    (f'(Optional - The major goals of this project are:) | {_GOAL}', _GOAL),
+    (f'The major goals of this project are: | {_GOAL}', _GOAL),
+    (f'The major goals of this project are | {_GOAL}', _GOAL),
+    (f'The major goals of this project are\t{_GOAL}', _GOAL),
+    (f'THE MAJOR GOALS OF THIS PROJECT ARE: {_GOAL}', _GOAL),
+    # No separator: the phrase opens the faculty member's sentence, kept whole.
+    ('Example Study\tThe major goals of this project are to map the corridors.',
+     'The major goals of this project are to map the corridors.'),
+    # ...and a paragraph-form grant's next field, the role, is not the goal.
+    ('The major goals of this project are to map the corridors.\tRole: PI',
+     'The major goals of this project are to map the corridors.'),
+    (f'The major goals of this project are: {_GOAL}\tYour role: Co-PI', _GOAL),
+    # Any other tab is a wrapped source line and stays, verbatim.
+    ('The major goals of this project are:  Survey the valley; oversaw\tfield work  ',
+     'Survey the valley; oversaw\tfield work'),
+    # The goal ends with its line.
+    (f'The major goals of this project are: {_GOAL}\nAnnual direct costs: | $5,000', _GOAL),
+    # Measured wording variants (#829).
+    # A bare label -- no "of (this|the) project/program" noun at all -- still
+    # needs its separator to read as a label.
+    (f'Major Goals: {_GOAL}', _GOAL),
+    (f'Major Goals of Project: {_GOAL}', _GOAL),
+    (f'Major Goals of the Project: {_GOAL}', _GOAL),
+    # Singular "goal ... is", and "program" in place of "project" -- both keep
+    # the sentence-form fallback the plural "goals ... are" case already has.
+    ('Example Study\tThe major goal of this project is to map the pollinator corridors.',
+     'The major goal of this project is to map the pollinator corridors.'),
+    ('Example Study\tThe major goals of this program are to map the pollinator corridors.',
+     'The major goals of this program are to map the pollinator corridors.'),
+    # Singular "goal ... is" with an explicit separator -- the goal alone, not
+    # the whole label sentence. "are" and "is" are both live alternatives in
+    # `proj`; the plural cases above only exercise "are" before a separator,
+    # and the "is" sentence-form case above never reaches `proj` for "is" at
+    # all (it flows straight into `rest` whether or not `proj` matches it).
+    (f'The major goal of this project is: {_GOAL}', _GOAL),
+    (f'The major goals of this program is: {_GOAL}', _GOAL),
+    # The "gals" typo (A5IZ6Q) with an explicit separator -- the goal only,
+    # not the misspelled label.
+    (f'Example Grant\tThe major gals of this project: {_GOAL}', _GOAL),
+    # A stray, unanchored "major goal(s)" mention earlier in the text must not
+    # shadow a real, anchored label that follows it (regression: `.search()`
+    # stopped at the first mention and returned None here, dropping the real
+    # label further down) -- on its own line, and on the *same* line, where a
+    # naive fix (skip the unanchored match, `finditer` for the next one) still
+    # fails: the unanchored match's own greedy `rest` group has already
+    # swallowed the real label as part of the span being skipped.
+    (f'Our major goals include improving efficiencies.\n'
+     f'The major goals of this project are: {_GOAL}', _GOAL),
+    (f'Major goals and aims. The major goals of this project are: {_GOAL}', _GOAL),
+    # Two *anchored* labels in one text -- the first wins, matching dev's own
+    # `.search()` semantics (which also stops at the first match). Nothing
+    # above exercises two anchored labels together, so a selection bug that
+    # picks the last one instead of the first (round-4 review) left every
+    # test green.
+    (f'The major goals of this project are: {_GOAL}\n'
+     f'Major Goals: A later, different goal entirely', _GOAL),
+])
+def test_major_goals_are_parsed_verbatim_from_the_source_text(text, expected):
+    assert parse_major_goals(text) == expected
+
+
+@pytest.mark.parametrize('text', [
+    'The major goals of this project are: |',
+    '(Optional - The major goals of this project are):',
+    'The major goals of this project are\nAward Source: | Example Fund',
+    'Award Source: | Example Fund\nProject title: | Example Study',
+    '',
+    None,
+    # A bare label with an empty value is still no goal.
+    'Major Goals:',
+    'Major Goals of Project:',
+    # "Major goal(s)" with neither the "of (this|the) project/program" anchor
+    # nor an explicit separator is grant content, not a label -- otherwise it
+    # would be read as an unbounded whole-sentence claim.
+    'Our major goals include improving efficiencies across the department.',
+    'The committee highlighted major goals for the coming year during the review.',
+    # A5IZ6Q's measured typo is the plural "gals"; the singular "gal" is not a
+    # measured variant, so the anchor deliberately does not accept it.
+    f'The major gal of this project is: {_GOAL}',
+])
+def test_an_empty_or_absent_goals_label_is_no_goal(text):
+    """An empty label renders nothing -- and never borrows the next line."""
+    assert parse_major_goals(text) is None
+
+
+def test_a_grant_gains_the_goal_stated_in_its_own_text():
+    grant = _entry('M2B', text=f'Award Source: | Example Fund\n'
+                               f'The major goals of this project are:\t{_GOAL}',
+                   title='Example Corridor Study', agency='Example Fund')
+
+    fill_major_goals_from_text([grant])
+
+    assert grant['extracted_fields']['major_goals'] == _GOAL
+
+
+def test_a_stage4_goal_is_not_replaced_by_the_text():
+    grant = _entry('M2B', text=f'The major goals of this project are: {_GOAL}',
+                   major_goals='Goal as stage 4 extracted it')
+
+    fill_major_goals_from_text([grant])
+
+    assert grant['extracted_fields']['major_goals'] == 'Goal as stage 4 extracted it'
+
+
+def test_a_goal_parsed_from_the_grants_own_text_that_repeats_its_title_does_not_double_render():
+    """End-to-end shape of BYFQBG#82 (#829 blocking item 1): stage 4 set `title`
+    to the goal text itself, `major_goals` was left empty, and the same entry's
+    raw text carries a "Major Goals:" label after the role -- so
+    `fill_major_goals_from_text` parses that label into `major_goals` with the
+    identical string. Rendering must not show the goal a second time under
+    "Major project goals:" once it already appears as "Project title:".
+    """
+    grant = _entry('M2B', text=f'Role: PI\nMajor Goals: {_GOAL}',
+                   title=_GOAL, agency='Example Fund', start_date='01/2019')
+
+    fill_major_goals_from_text([grant])
+    assert grant['extracted_fields']['major_goals'] == _GOAL  # parsed, as #958 promises
+
+    table = _generator()._create_grant_table(grant['extracted_fields'], 'M2B')
+    cells = _cells(table)
+    assert cells['Project title:'] == _GOAL
+    assert 'Major project goals:' not in [label for label, _ in _rows(table)]
+
+
+def _grant(start, end, text='grant', **fields):
+    entry = _entry('M2B', text=text, title='Example Corridor Study',
+                   agency='Example Fund', start_date='01/2019', **fields)
+    entry.update(element_idx_start=start, element_idx_end=end)
+    return entry
+
+
+def _goal_row(parent_idx, goal=_GOAL):
+    return {'text': f'The major goals of this project are: | {goal}'.rstrip(),
+            'taxonomy_code': 'T', 'element_type': 'table_row', 'recovered_row': True,
+            'parent_idx': parent_idx, 'extracted_fields': {}}
+
+
+@pytest.mark.parametrize('parent_idx', [236, 237, 238])
+def test_a_goals_row_inside_the_grant_range_is_claimed_by_that_grant(parent_idx):
+    """Both range ends included: the real rows hang off the grant's LAST element."""
+    grant, row = _grant(236, 238), _goal_row(parent_idx)
+    submitted = dict(row)
+
+    claimed = claim_goal_rows([grant], [row])
+
+    assert claimed == [(row, grant)]
+    assert grant['extracted_fields']['major_goals'] == _GOAL
+    assert row == submitted
+
+
+@pytest.mark.parametrize('parent_idx', [235, 239])
+def test_a_goals_row_outside_every_grant_range_is_left_alone(parent_idx):
+    grant = _grant(236, 238)
+
+    assert claim_goal_rows([grant], [_goal_row(parent_idx)]) == []
+    assert 'major_goals' not in grant['extracted_fields']
+
+
+def test_a_goals_row_inside_two_grant_ranges_is_ambiguous_and_left_alone():
+    first, second = _grant(236, 238), _grant(238, 240)
+
+    assert claim_goal_rows([first, second], [_goal_row(238)]) == []
+    assert 'major_goals' not in first['extracted_fields']
+
+
+def test_a_goals_row_does_not_replace_a_different_goal_the_grant_already_has():
+    grant = _grant(236, 238, major_goals='A different stated goal')
+
+    assert claim_goal_rows([grant], [_goal_row(238)]) == []
+    assert grant['extracted_fields']['major_goals'] == 'A different stated goal'
+
+
+def test_a_goals_row_repeating_the_grant_own_goal_is_claimed():
+    """A5IZ6Q's shape: the grant's text already carries the row's goal."""
+    grant = _grant(236, 238, text=f'The major goals of this project are:\t{_GOAL}')
+    row = _goal_row(238)
+    fill_major_goals_from_text([grant])
+
+    assert claim_goal_rows([grant], [row]) == [(row, grant)]
+
+
+def test_an_empty_goals_row_is_not_claimed():
+    grant = _grant(236, 238)
+
+    assert claim_goal_rows([grant], [_goal_row(238, goal='')]) == []
+    assert 'major_goals' not in grant['extracted_fields']
+
+
+def test_a_goals_line_with_no_parent_table_is_not_claimed():
+    row = _goal_row(238)
+    del row['parent_idx']
+
+    assert claim_goal_rows([_grant(236, 238)], [row]) == []
+
+
+@pytest.mark.parametrize('start, end', [(None, 240), (236, None), ('236', '238')])
+def test_a_grant_without_an_integer_element_range_claims_nothing(start, end):
+    assert claim_goal_rows([_grant(start, end)], [_goal_row(238)]) == []
+
+
+def test_section_fill_renders_the_claimed_goal_and_returns_the_row():
+    grant, row = _grant(236, 238), _goal_row(238)
+    t_entries = [row]
+
+    gen = _sectioned_generator()
+    claimed = gen._fill_research_support({'M2B': [grant], 'T': t_entries},
+                                         current_year=TEST_YEAR)
+
+    assert claimed == [row] and claimed[0] is row
+    assert _cells(_tables_under(gen, COMPLETED)[0])['Major project goals:'] == _GOAL
+    assert 'major_goals' not in grant['extracted_fields']
+
+
+@pytest.mark.parametrize('code, header', [
+    ('M2A', CURRENT), ('M2B', COMPLETED), ('M2C', PENDING)])
+def test_section_fill_renders_the_goal_from_the_grant_own_text(code, header):
+    grant = _grant(236, 238, text=f'The major goals of this project are:\t{_GOAL}')
+    grant['taxonomy_code'] = code
+
+    gen = _sectioned_generator()
+    claimed = gen._fill_research_support({code: [grant]}, current_year=TEST_YEAR)
+
+    assert claimed == []
+    assert _cells(_tables_under(gen, header)[0])['Major project goals:'] == _GOAL
+
+
+def test_a_row_claimed_by_a_declined_grant_is_not_returned():
+    """A grant too sparse to render took no goal with it: the row stays Appendix."""
+    sparse = _entry('M2B', text='x')
+    sparse.update(element_idx_start=236, element_idx_end=238)
+
+    gen = _sectioned_generator()
+    claimed = gen._fill_research_support({'M2B': [sparse], 'T': [_goal_row(238)]},
+                                         current_year=TEST_YEAR)
+
+    assert claimed == []
+    assert gen._declined_grant_entries
+
+
+def test_a_row_claimed_by_a_grant_under_a_missing_header_is_not_returned():
+    gen = _generator()  # no funding headers: nothing renders
+    claimed = gen._fill_research_support({'M2B': [_grant(236, 238)], 'T': [_goal_row(238)]},
+                                         current_year=TEST_YEAR)
+
+    assert claimed == []
 
 
 # --- item 18: grant duration ----------------------------------------------------
@@ -1094,6 +1686,9 @@ def test_each_grant_table_lands_after_its_own_section_header():
     ('Under review', 'M2C'),
     ('Completed', 'M2B'),
     ('Awarded', None),          # no move: an award is not a rebucketing signal
+    ('Review completed', None),  # a process step, not an ended award (#982)
+    ('Site visit completed', None),
+    ('Project completed', 'M2B'),
     ('', None),
     (None, None),
 ])
@@ -1167,6 +1762,172 @@ def test_reclassify_past_m2a_grants_leaves_its_inputs_alone():
     assert m2a == [entry] and m2b == []
     assert current == [] and completed == [entry]
     assert messages == ["  Reclassified to M2B: 'Ended Project Study...' (ended 2020)"]
+
+
+# --- #981: the heading is the status when stage 4 extracted none ---------------
+
+def _under(heading, code='M2A', **fields):
+    """A grant record filed under a hierarchy heading, with no status field."""
+    entry = _entry(code, **fields)
+    entry['hierarchy'] = list(heading)
+    return entry
+
+
+@pytest.mark.parametrize('heading, expected_code', [
+    (['GRANT SUPPORT', 'Pending applications'], 'M2C'),
+    (['GRANTS', 'GRANT APPLICATIONS IN REVIEW'], 'M2C'),
+    (['Non-funded applications'], 'M2C'),
+    (['GRANTS', 'GRANT APPLICATIONS AWAITING FINAL ADMINISTRATIVE APPROVAL'], 'M2C'),
+    (['NOT FUNDED'], 'M2C'),
+    (['Submitted, Not Funded'], 'M2C'),
+    (['Grants', 'Completed Research Support'], 'M2B'),
+    (['Current Grant Support'], None),       # "Grant Support" alone is no status
+    (['Research Support', 'Active'], None),
+    (['Current and Pending Support'], None),  # names two buckets: silent
+    (['Past and Present Funding'], None),
+    (['Pending and Completed Grants'], None),
+    (['Impending Renewals'], None),           # whole words only
+    (['Reunfunded Items'], None),             # no boundary before the word
+    (['Unfundedness Report'], None),          # no boundary after the word
+    (['Pendingx Applications'], None),        # no boundary after a pending word
+    ([], None),
+])
+def test_grant_heading_rebucket_target(heading, expected_code):
+    target, note = grant_heading_rebucket_target(heading)
+    assert target == expected_code
+    assert (note is not None) is (expected_code is not None)
+
+
+def test_heading_note_says_the_text_came_from_the_heading():
+    _, note = grant_heading_rebucket_target(['Pending applications'])
+    assert note == "Reclassified to Pending (M2C): section heading is 'Pending applications'"
+
+
+def test_a_grant_without_a_status_moves_on_its_heading():
+    """3b coded it completed; the CV filed it under "Pending applications"."""
+    entry = _under(['Pending applications'], code='M2B', title='Filed Pending')
+
+    current, completed, pending, _ = rebucket_grants_by_status([], [entry], [])
+
+    assert (current, completed, pending) == ([], [], [entry])
+    assert entry['reclassification_note'].startswith('Reclassified to Pending (M2C)')
+
+
+def test_a_status_field_beats_the_heading():
+    entry = _under(['Pending applications'], code='M2B', title='Awarded',
+                   status='Completed')
+
+    current, completed, pending, _ = rebucket_grants_by_status([], [entry], [])
+
+    assert (current, completed, pending) == ([], [entry], [])
+
+
+def test_not_funded_heading_keeps_the_grant_under_pending_with_a_review_note():
+    gen = _sectioned_generator(emit_comments=True)
+    gen._fill_research_support(
+        {'M2B': [_under(['NOT FUNDED'], code='M2B', title='Declined Heading Study',
+                        agency='NIH', start_date='01/2020')]},
+        current_year=TEST_YEAR)
+
+    assert _titles_under(gen, PENDING) == ['Declined Heading Study']
+    notes = [c['text'] for c in gen._comments if c['author'] == 'Reclassification']
+    assert notes and 'confirm whether to keep this entry on the CV' in notes[0]
+
+
+def test_a_current_grant_support_heading_moves_nothing():
+    entry = _under(['Current Grant Support'], title='Running Study')
+
+    current, completed, pending, messages = rebucket_grants_by_status([entry], [], [])
+
+    assert (current, completed, pending, messages) == ([entry], [], [], [])
+
+
+# --- #981: a completed-coded grant that is still running is current ------------
+
+@pytest.mark.parametrize('end_date', ['present', 'Ongoing', '12/31/2026', '06/2028'])
+def test_an_m2b_grant_still_running_is_promoted_to_current(end_date):
+    entry = _under(['Grants'], code='M2B', title='Running Study', end_date=end_date)
+
+    current, completed, messages = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed) == ([entry], [])
+    assert entry['reclassification_note'].startswith('Reclassified from Completed (M2B)')
+    assert messages == [f"  Reclassified to M2A: 'Running Study...' (ends {end_date})"]
+
+
+@pytest.mark.parametrize('fields', [
+    {'end_date': '12/31/2025'},               # ended last year
+    {'end_date': ''},                         # nothing says it is running
+    {},
+    {'end_date': '2028', 'status': 'Completed'},  # an explicit status beats the date
+])
+def test_an_m2b_grant_that_is_not_running_stays_completed(fields):
+    entry = _under(['Grants'], code='M2B', title='Past Study', **fields)
+
+    current, completed, messages = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed, messages) == ([], [entry], [])
+
+
+@pytest.mark.parametrize('heading', [
+    ['GRANT SUPPORT', 'PAST GRANT SUPPORT'],
+    ['GRANTS', 'Summary of Major Previous Grants'],
+    ['Grants: Prior'],
+])
+def test_an_m2b_grant_under_a_past_heading_is_not_promoted_on_an_open_end_date(heading):
+    """"ongoing" in a grant filed under "Past Grant Support" does not outvote the heading."""
+    entry = _under(heading, code='M2B', title='Past Study', end_date='ongoing')
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed) == ([], [entry])
+
+
+def test_an_m2b_grant_under_a_past_and_present_heading_is_promoted_on_its_date():
+    entry = _under(['Past and Present Funding'], code='M2B', title='Running Study',
+                   end_date='2028')
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed) == ([entry], [])
+
+
+def test_an_m2b_grant_whose_heading_says_completed_stays_completed():
+    entry = _under(['Completed Grants'], code='M2B', title='Past Study', end_date='2028')
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed) == ([], [entry])
+
+
+def test_a_grant_already_moved_by_a_rule_is_not_promoted_back():
+    """A status rebucket or past-date demotion leaves a note; that move stands."""
+    entry = _under(['Grants'], code='M2B', title='Moved', end_date='2028')
+    entry['reclassification_note'] = 'Reclassified from Current (M2A) to Completed (M2B)'
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed) == ([], [entry])
+
+
+def test_promoting_leaves_its_inputs_alone():
+    entry = _under(['Grants'], code='M2B', title='Running Study', end_date='present')
+    m2a, m2b = [], [entry]
+
+    promote_open_ended_m2b_grants(m2a, m2b, TEST_YEAR)
+
+    assert m2a == [] and m2b == [entry]
+
+
+def test_fill_research_support_files_a_running_completed_coded_grant_under_current():
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2B': [_under(['Grants'], code='M2B', title='Running Study', agency='NIH',
+                        start_date='03/2024', end_date='12/2028')]},
+        current_year=TEST_YEAR)
+
+    assert _titles_under(gen, CURRENT) == ['Running Study']
+    assert _titles_under(gen, COMPLETED) == []
 
 
 # --- thread 3932312407 item 8: the rendering contract ---------------------------
@@ -1265,7 +2026,7 @@ def test_every_field_the_module_reads_is_declared_on_the_grant_record_type():
 def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     """The other direction: a declared key no reader wants is dead contract.
 
-    All 24 keys, `status` included, are reached through a `fields.get(...)` in
+    All 26 keys, `status` included, are reached through a `fields.get(...)` in
     this module -- `status` from the bucket rules rather than from a rendered
     row. A key left on the record type after its reader is deleted would go on
     suppressing that key's line in the unconsumed-fields diagnostic, silently.
@@ -1273,4 +2034,109 @@ def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     declared_but_unread = research_support.CONSUMED_GRANT_FIELDS - _fields_get_keys()
 
     assert declared_but_unread == set(), sorted(declared_but_unread)
-    assert len(research_support.CONSUMED_GRANT_FIELDS) == 24
+    assert len(research_support.CONSUMED_GRANT_FIELDS) == 26
+
+
+# --- #982: stage 4 now keeps status and notes, and the block renders them --------
+
+def test_status_and_notes_render_as_their_own_rows_after_the_effort_row():
+    """web39's withdrawn grants lost the status word: no row named `status`."""
+    fields = {'title': 'Withdrawn Cohort Study', 'agency': 'NIH', 'start_date': '01/2019',
+              'percent_effort': '10%', 'status': 'withdrawn', 'notes': 'Sponsor closed the call'}
+    rows = _rows(_generator()._create_grant_table(fields, 'M2B'))
+    labels = [label for label, _ in rows]
+    assert rows[labels.index('Status:')] == ('Status:', 'withdrawn')
+    assert rows[labels.index('Notes:')] == ('Notes:', 'Sponsor closed the call')
+    assert labels.index('Your percent (%) effort:') < labels.index('Status:') < labels.index('Notes:')
+
+
+def test_a_grant_with_no_status_or_notes_keeps_the_eight_row_template_block():
+    fields = {'title': 'Funded Cohort Study', 'start_date': '01/2019', 'status': None, 'notes': '  '}
+    table = _generator()._create_grant_table(fields, 'M2A')
+    assert len(table.rows) == 8
+    assert 'Status:' not in _cells(table) and 'Notes:' not in _cells(table)
+
+
+def test_a_note_that_only_repeats_the_title_is_dropped():
+    fields = {'title': 'Funded Cohort Study', 'notes': 'funded cohort study', 'start_date': '01/2019'}
+    assert 'Notes:' not in _cells(_generator()._create_grant_table(fields, 'M2A'))
+
+
+def test_withdrawn_status_reaches_the_document_through_the_section_fill():
+    """The wire: `_fill_research_support` (bucket rules included) to the table cell."""
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2B': [_entry('M2B', title='Withdrawn Cohort Study', agency='NIH',
+                        status='withdrawn', notes='Update: withdrawn', start_date='01/2020',
+                        end_date='06/2021')]},
+        current_year=TEST_YEAR)
+    (table,) = _tables_under(gen, COMPLETED)
+    assert _cells(table)['Status:'] == 'withdrawn'
+    assert _cells(table)['Notes:'] == 'Update: withdrawn'
+
+
+# --- #982: an unrecognised status falls back to the heading --------------------
+
+@pytest.mark.parametrize('status', ['withdrawn', 'Funded', 'NCE', 'Awarded 2021'])
+def test_an_unrecognised_status_falls_back_to_the_heading(status):
+    """The vocabulary knows none of these; they must not silence the #981 heading rule."""
+    entry = _under(['Pending applications'], code='M2B', title='Filed Pending', status=status)
+
+    assert research_support.explicit_status_target(entry)[0] == 'M2C'
+    current, completed, pending, _ = rebucket_grants_by_status([], [entry], [])
+    assert (current, completed, pending) == ([], [], [entry])
+
+
+def test_an_unrecognised_status_under_a_silent_heading_moves_nothing():
+    entry = _under(['Current Grant Support'], title='Running Study', status='withdrawn')
+
+    assert research_support.explicit_status_target(entry) == (None, None)
+
+
+def test_a_review_completed_status_does_not_file_a_pending_grant_as_completed():
+    """Judgement call: "Review completed" names no bucket, so the Pending heading decides."""
+    entry = _under(['Pending applications'], title='Under Review Study',
+                   status='Review completed')
+
+    target, note = research_support.explicit_status_target(entry)
+
+    assert target == 'M2C'
+    assert 'section heading' in note
+
+
+def test_a_recognised_status_beats_a_disagreeing_heading():
+    """Judgement call: the status is the grant's own word, so it wins a disagreement."""
+    pending_status = _under(['Completed Research Support'], code='M2B',
+                            title='Resubmitted', status='Under review')
+    completed_status = _under(['Pending applications'], code='M2C',
+                              title='Ended', status='Project completed')
+
+    assert research_support.explicit_status_target(pending_status)[0] == 'M2C'
+    assert research_support.explicit_status_target(completed_status)[0] == 'M2B'
+
+
+# --- #982: co_investigators renders in its own row -----------------------------
+
+def test_co_investigators_render_in_their_own_row_and_leave_the_pi_cell_alone():
+    fields = {'title': 'Shared Cohort Study', 'pi_name': 'Ada Lovelace-Test',
+              'co_investigators': 'Tanaka, CoI; Reyes, CoTwo', 'start_date': '01/2019'}
+    rows = _rows(_generator()._create_grant_table(fields, 'M2A'))
+    labels = [label for label, _ in rows]
+
+    assert rows[labels.index('Co-Investigators:')] == (
+        'Co-Investigators:', 'Tanaka, CoI; Reyes, CoTwo')
+    assert rows[labels.index('Name of Principal Investigator:')][1] == 'Ada Lovelace-Test'
+    assert labels.index('Your percent (%) effort:') < labels.index('Co-Investigators:')
+
+
+def test_co_investigators_identical_to_the_pi_are_not_repeated():
+    fields = {'title': 'Solo Study', 'pi_name': 'Tanaka, CoI',
+              'co_investigators': 'tanaka, coi', 'start_date': '01/2019'}
+
+    assert 'Co-Investigators:' not in _cells(_generator()._create_grant_table(fields, 'M2A'))
+
+
+def test_no_co_investigators_keeps_the_eight_row_block():
+    fields = {'title': 'Solo Study', 'co_investigators': None, 'start_date': '01/2019'}
+
+    assert len(_generator()._create_grant_table(fields, 'M2A').rows) == 8

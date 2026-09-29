@@ -10,6 +10,7 @@ Covers:
   - websocket._terminal_event_for_run (replay terminal status on reconnect)   [E4]
   - PipelineOrchestrator per-stage timeout -> surfaced error                  [E3]
   - llm_client / orchestrator timeout config env parsing                      [E3]
+  - orchestrator.user_facing_error: run.error_message never carries str(exc) [#592]
 """
 import asyncio
 import json
@@ -207,3 +208,138 @@ def test_check_cancelled_reads_the_db_status_not_only_the_process_local_flag(db,
     assert "CANCDB" not in orch._cancelled_runs
     with pytest.raises(orch.CancelledException):
         o.check_cancelled()
+
+
+# ---------------------------------------------------------------------------
+# #745: a failed stage leaves a structured stage-error record for the scorer
+# ---------------------------------------------------------------------------
+
+def _orchestrator_for_step(monkeypatch, tmp_path, stage_logic):
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "event_emitter", AsyncMock())
+    fake_db = MagicMock()
+    fake_db.query.return_value.filter.return_value.first.return_value = MagicMock()
+    o = orch.PipelineOrchestrator("test-745-run", tmp_path / "cv745.docx", fake_db)
+    o.pipeline_output_dir = tmp_path / "outputs"
+    persisted: list[list[str]] = []
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", persisted.append)
+    monkeypatch.setattr(o, "_sync_prompt_logs_to_storage", lambda *a: None)
+    monkeypatch.setattr(o, "_execute_stage_logic", stage_logic)
+    return o, persisted
+
+
+def test_execute_step_failure_writes_and_mirrors_a_stage_error_record(monkeypatch, tmp_path):
+    """The orchestrator raises (fails the run) but first records which stage
+    broke and how, and mirrors it to outputs/ where the scorer collects it --
+    even when the message names no exception type."""
+    from unified_pipeline.stage_errors import StageError, read_stage_errors, stage_errors_path
+
+    async def boom(stage_id, cv_path):
+        raise TypeError("'int' object is not iterable")
+
+    o, persisted = _orchestrator_for_step(monkeypatch, tmp_path, boom)
+    with pytest.raises(TypeError):
+        asyncio.run(o.execute_step(6, "4", "cv.docx"))
+
+    path = stage_errors_path(o.pipeline_output_dir, "cv745")
+    assert read_stage_errors(path) == [
+        StageError("4", "TypeError", "'int' object is not iterable", fatal=True)]
+    assert [str(path)] in persisted
+
+
+def test_execute_step_success_clears_an_earlier_stage_error(monkeypatch, tmp_path):
+    """A retried stage that now succeeds removes its entry, locally and in the
+    mirrored copy, so a recovered run is not capped by its own history."""
+    from unified_pipeline.stage_errors import (
+        StageError, read_stage_errors, record_stage_outcome, stage_errors_path)
+
+    async def ok(stage_id, cv_path):
+        return {"cost": 0.0, "output_files": []}
+
+    o, persisted = _orchestrator_for_step(monkeypatch, tmp_path, ok)
+    path = stage_errors_path(o.pipeline_output_dir, "cv745")
+    record_stage_outcome(path, "4", StageError("4", "TypeError", "x", fatal=True))
+
+    asyncio.run(o.execute_step(6, "4", "cv.docx"))
+
+    assert read_stage_errors(path) == []
+    assert [str(path)] in persisted
+
+
+def test_execute_step_success_without_a_record_writes_none(monkeypatch, tmp_path):
+    from unified_pipeline.stage_errors import stage_errors_path
+
+    async def ok(stage_id, cv_path):
+        return {"cost": 0.0, "output_files": []}
+
+    o, persisted = _orchestrator_for_step(monkeypatch, tmp_path, ok)
+    asyncio.run(o.execute_step(6, "4", "cv.docx"))
+    assert not stage_errors_path(o.pipeline_output_dir, "cv745").exists()
+    assert persisted == [[]]
+
+
+# ---------------------------------------------------------------------------
+# #592: run.error_message is a fixed user-facing message, never str(exc)
+# ---------------------------------------------------------------------------
+
+_LEAKY = "boto3 ClientError: /app/src/unified_pipeline/x.py RequestId=abc123"
+
+
+def test_user_facing_error_generic_failure_hides_exception_text():
+    from app.pipeline.orchestrator import GENERIC_FAILURE_MESSAGE, user_facing_error
+
+    msg = user_facing_error(RuntimeError(_LEAKY), resuming=False)
+    assert msg == GENERIC_FAILURE_MESSAGE
+    assert "abc123" not in msg and "/app/" not in msg
+
+
+def test_user_facing_error_llm_outage_found_through_the_chain():
+    """A stage that wraps LLMOutageError (raise X from outage) still reads as
+    an outage, so the user is told to wait rather than that the CV is bad."""
+    from app.pipeline.orchestrator import LLM_OUTAGE_MESSAGE, user_facing_error
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    try:
+        try:
+            raise LLMOutageError(_LEAKY, seconds_waited=31.0)
+        except LLMOutageError as outage:
+            raise RuntimeError("stage 4 failed") from outage
+    except RuntimeError as wrapped:
+        assert user_facing_error(wrapped, resuming=False) == LLM_OUTAGE_MESSAGE
+
+
+def test_user_facing_error_stage_timeout():
+    from app.pipeline.orchestrator import STAGE_TIMEOUT_MESSAGE, user_facing_error
+
+    exc = TimeoutError("Stage 4 (Field Extraction) timed out after 1800s")
+    assert user_facing_error(exc, resuming=False) == STAGE_TIMEOUT_MESSAGE
+
+
+def test_user_facing_error_missing_input_only_special_on_resume():
+    from app.pipeline.orchestrator import (
+        GENERIC_FAILURE_MESSAGE,
+        RESUME_INPUT_MISSING_MESSAGE,
+        user_facing_error,
+    )
+
+    exc = FileNotFoundError("[Errno 2] No such file or directory: '/x/y.json'")
+    assert user_facing_error(exc, resuming=True) == RESUME_INPUT_MISSING_MESSAGE
+    assert user_facing_error(exc, resuming=False) == GENERIC_FAILURE_MESSAGE
+
+
+def test_user_facing_error_messages_name_real_buttons():
+    """Every message's quoted action must be a button PipelineViewer renders."""
+    from app.pipeline import orchestrator as orch
+
+    viewer = (
+        Path(__file__).parents[2] / "frontend" / "src" / "components" / "PipelineViewer.tsx"
+    ).read_text()
+    for msg in (
+        orch.RESUME_INPUT_MISSING_MESSAGE,
+        orch.LLM_OUTAGE_MESSAGE,
+        orch.STAGE_TIMEOUT_MESSAGE,
+        orch.GENERIC_FAILURE_MESSAGE,
+    ):
+        for label in msg.split('"')[1::2]:
+            assert label in viewer, f"{label!r} is not a PipelineViewer button"

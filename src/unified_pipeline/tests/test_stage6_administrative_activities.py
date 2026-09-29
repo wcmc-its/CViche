@@ -29,6 +29,8 @@ Run with:
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -391,6 +393,288 @@ class TestThreeLineBurstFallsBackWhenReparseYieldsNothing:
         assert rows == [("2010\n2011\n2012", "", "")]
 
 
+def _complete_fields():
+    return {"committee_name": "Zorblax Standing Committee", "role": "Member",
+            "start_date": "2015", "end_date": "2020"}
+
+
+class TestMultiRecordIsDetectedPerDatedLineNotByLineCount:
+    """#660: a complete structured record is trusted when the text holds one
+    dated record, at any length, and re-parsed when it holds two or more, at
+    any length. PR #714's `len(lines) <= 3` cap was wrong in both directions."""
+
+    STRUCTURED = (("Zorblax Standing Committee", "Member",
+                   format_date_range("2015", "2020", "P")),)
+
+    def test_long_wrapped_description_with_one_date_keeps_the_structured_record(self):
+        text = "\n".join(["Zorblax Standing Committee (Member 2015-2020)"]
+                         + [f"Wrapped description line {n}" for n in range(6)])
+        entry = {"text": text, "extracted_fields": _complete_fields(), "taxonomy_code": "P"}
+
+        assert _rows(entry) == list(self.STRUCTURED)
+
+    def test_three_dated_records_are_reparsed_despite_fitting_the_old_cap(self):
+        text = ("Committee A (Chair 2011-2013)\nCommittee B (Member 2014-2016)\n"
+                "Committee C (Member 2017-2019)")
+        entry = {"text": text, "extracted_fields": _complete_fields(), "taxonomy_code": "P"}
+
+        rows = _rows(entry)
+
+        assert [r[0] for r in rows] == ["Committee A", "Committee B", "Committee C"]
+
+    def test_date_prefixed_block_is_reparsed(self):
+        # The corpus counter-example that forced PR #714's cap: every record
+        # opens with its own date and extraction captured one of them.
+        text = ("2015-2016\tCommittee A\n2014-2015\tCommittee B\n"
+                "2014-2015\tCommittee C\n2012-2016\tCommittee D")
+        entry = {"text": text, "extracted_fields": _complete_fields(), "taxonomy_code": "P"}
+
+        rows = _rows(entry)
+
+        assert len(rows) == 4
+        assert self.STRUCTURED[0] not in rows
+
+    def test_orphaned_date_column_is_reparsed_even_when_counts_disagree(self):
+        # 4 activities, 3 dates: the parser leaves every date unassigned, so
+        # a detector built on its output would see no dated record at all.
+        text = "Committee A\nCommittee B\nCommittee C\nCommittee D\n2011\n2012\n2013"
+        entry = {"text": text, "extracted_fields": _complete_fields(), "taxonomy_code": "P"}
+
+        rows = _rows(entry)
+
+        assert [r[0] for r in rows] == ["Committee A", "Committee B", "Committee C", "Committee D"]
+
+    def test_mega_block_with_prose_between_records_is_reparsed(self):
+        text = "\n".join(["Committee A (Chair 2011-2013)"]
+                         + [f"Duties line {n}" for n in range(20)]
+                         + ["Committee B (Member 2014-2016)"])
+        entry = {"text": text, "extracted_fields": _complete_fields(), "taxonomy_code": "P"}
+
+        rows = _rows(entry)
+
+        assert {"Committee A", "Committee B"} <= {r[0] for r in rows}
+
+    def test_p_pipe_rows_keep_the_middle_cell_in_the_activity(self):
+        # P's pipe middle cell is a Role/activity cell, not an institution:
+        # P must not opt into the parser's institution column (#664), or the
+        # cell would move to a field P never renders.
+        text = ("Zorblax Board | Quuxville General Hospital | 2001-2003\n"
+                "Frobnitz Panel | Wibble College | 2004-2006\n"
+                "Gamma Council | Blorp Institute | 2007-2009")
+        rows = _rows({"text": text, "extracted_fields": {}, "taxonomy_code": "P"})
+        assert len(rows) == 3
+        assert "Quuxville General Hospital" in rows[0][0]
+
+    def test_wrapped_record_without_extracted_dates_is_not_trusted_as_structured(self):
+        # No extracted dates: `structured_complete` must be False even though
+        # the text holds one dated line, so a 4-line entry re-parses (the
+        # behaviour before #660) instead of collapsing to the one record.
+        text = ("Zorblax Standing Committee (Member 2015-2020)\n"
+                "Wrapped description line 1\nWrapped description line 2\n"
+                "Wrapped description line 3")
+        fields = _complete_fields()
+        fields.pop("start_date"); fields.pop("end_date")
+        rows = _rows({"text": text, "extracted_fields": fields, "taxonomy_code": "P"})
+        assert len(rows) == 4
+        assert rows[0][2] == format_date_range("2015", "2020", "P")
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
+
+
+class TestStartOnlyRowIsOneYear:
+    """#946: P is a point-in-time code. A committee or event row with a start
+    and no end renders the bare year, unless the end date or the source text
+    says the row is still open."""
+
+    def _entry(self, text, **fields):
+        return {"text": text, "taxonomy_code": "P",
+                "extracted_fields": {"committee_name": "Fictional Event Coverage",
+                                     "role": "Medical Volunteer", **fields}}
+
+    def test_start_only_renders_the_bare_year(self):
+        rows = _rows(self._entry("2021 Fictional Event Coverage\tMedical Volunteer",
+                                 start_date="2021", end_date=""))
+        assert rows == [("Fictional Event Coverage", "Medical Volunteer", "2021")]
+
+    def test_an_open_dash_in_the_source_keeps_present(self):
+        rows = _rows(self._entry("2021-\tFictional Event Coverage\tMedical Volunteer",
+                                 start_date="2021", end_date=""))
+        assert rows == [("Fictional Event Coverage", "Medical Volunteer", "2021-Present")]
+
+    def test_a_present_end_date_keeps_present(self):
+        rows = _rows(self._entry("2021 Fictional Event Coverage\tMedical Volunteer",
+                                 start_date="2021", end_date="present"))
+        assert rows == [("Fictional Event Coverage", "Medical Volunteer", "2021-Present")]
+
+    def test_a_multi_committee_record_reads_the_entry_text(self):
+        entry = {"text": "2018 Committee One\n2020- Committee Two", "taxonomy_code": "P",
+                 "extracted_fields": {"committee_name": [
+                     {"committee_name": "Committee One", "role": "Member", "start_date": "2018"},
+                     {"committee_name": "Committee Two", "role": "Member", "start_date": "2020"},
+                 ]}}
+        assert _rows(entry) == [("Committee One", "Member", "2018"),
+                                ("Committee Two", "Member", "2020-Present")]
+
+
+class TestExtractedInstitutionRendersInNameCell:
+    """#985 (C): P's table has no Institution column, so an extracted
+    `institution` was dropped. It now folds into the name cell as
+    "<committee>, <institution>" unless the name already contains it."""
+
+    @staticmethod
+    def _entry(fields, text="Steering committee (2011-2013)"):
+        return {"text": text, "extracted_fields": fields, "taxonomy_code": "P"}
+
+    def test_single_record_appends_institution(self):
+        rows = _rows(self._entry({
+            "committee_name": "Steering committee for research",
+            "role": "Member", "institution": "Northgate University",
+            "start_date": "2011", "end_date": "2013"}))
+        assert [r[0] for r in rows] == [
+            "Steering committee for research, Northgate University"]
+        assert rows[0][1] == "Member"
+
+    def test_name_already_containing_institution_is_unchanged_case_insensitive(self):
+        rows = _rows(self._entry({
+            "committee_name": "NORTHGATE UNIVERSITY Senate",
+            "institution": "Northgate University",
+            "start_date": "2011", "end_date": "2013"}))
+        assert [r[0] for r in rows] == ["NORTHGATE UNIVERSITY Senate"]
+
+    def test_no_institution_leaves_name_untouched(self):
+        rows = _rows(self._entry({
+            "committee_name": "Steering committee", "start_date": "2011",
+            "end_date": "2013"}))
+        assert [r[0] for r in rows] == ["Steering committee"]
+
+    def test_record_list_appends_institution_per_record(self):
+        rows = _rows(self._entry({"committee_name": [
+            {"committee_name": "Budget panel", "institution": "Lee & Park College",
+             "start_date": "2010", "end_date": "2012"},
+            {"committee_name": "Ethics panel",
+             "start_date": "2010", "end_date": "2012"},
+        ]}))
+        assert [r[0] for r in rows] == [
+            "Budget panel, Lee & Park College", "Ethics panel"]
+
+    def test_structured_institution_is_coerced_not_crashing(self):
+        rows = _rows(self._entry({
+            "committee_name": "Budget panel",
+            "institution": ["Ana Cruz Institute", "Lee Annex"],
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == [
+            "Budget panel, Ana Cruz Institute; Lee Annex"]
+
+    def test_name_contained_in_institution_is_not_duplicated(self):
+        rows = _rows(self._entry({
+            "committee_name": "The Riverbend Association, Inc.",
+            "institution": "The Riverbend Association, Inc., Dover, DE",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["The Riverbend Association, Inc."]
+
+    def test_institution_whose_words_are_all_in_the_name_is_not_appended(self):
+        rows = _rows(self._entry({
+            "committee_name": "Campaign for Harbor Equity Lakeview (CHEL), "
+                              "Board of Directors",
+            "institution": "Campaign for Harbor Equity Lakeview",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == [
+            "Campaign for Harbor Equity Lakeview (CHEL), Board of Directors"]
+
+    def test_name_with_acronym_contained_in_a_longer_institution_is_not_duplicated(self):
+        rows = _rows(self._entry({
+            "committee_name": "Campaign for Harbor Equity (CHE)",
+            "institution": "Racial Equity Institute (REI) / Campaign for Harbor Equity",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Campaign for Harbor Equity (CHE)"]
+
+    def test_institution_differing_only_by_function_words_is_not_appended(self):
+        rows = _rows(self._entry({
+            "committee_name": "Genetics Department Faculty Meeting Minutes",
+            "institution": "Department of Genetics",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Genetics Department Faculty Meeting Minutes"]
+
+    def test_leading_article_alone_does_not_make_an_institution_new(self):
+        rows = _rows(self._entry({
+            "committee_name": "Riverbend Association Board",
+            "institution": "The Riverbend Association",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Riverbend Association Board"]
+
+    def test_only_each_parenthetical_is_ignored_not_the_text_between_them(self):
+        rows = _rows(self._entry({
+            "committee_name": "Harbor (HE) Zeta (ad hoc)",
+            "institution": "Harbor Fund",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Harbor (HE) Zeta (ad hoc), Harbor Fund"]
+
+    def test_name_that_is_only_an_acronym_is_not_treated_as_contained(self):
+        rows = _rows(self._entry({
+            "committee_name": "(CHE)", "institution": "Harbor College",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["(CHE), Harbor College"]
+
+    def test_institution_sharing_only_some_words_with_the_name_is_appended(self):
+        rows = _rows(self._entry({
+            "committee_name": "Northgate panel", "institution": "Northgate University",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Northgate panel, Northgate University"]
+
+    def test_name_that_is_only_a_substring_of_an_institution_word_is_appended(self):
+        rows = _rows(self._entry({
+            "committee_name": "Board", "institution": "Dashboard Hospital",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Board, Dashboard Hospital"]
+
+    @pytest.mark.parametrize("hedged", [
+        "Northgate University (implied)", "Northgate University, implied",
+        "inferred from context", "Not provided", "NOT  PROVIDED"])
+    def test_hedged_institution_is_never_rendered(self, hedged):
+        rows = _rows(self._entry({
+            "committee_name": "Budget panel", "institution": hedged,
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Budget panel"]
+
+    def test_hedged_institution_in_a_record_list_is_never_rendered(self):
+        rows = _rows(self._entry({"committee_name": [
+            {"committee_name": "Budget panel",
+             "institution": "Northgate University (implied)",
+             "start_date": "2010", "end_date": "2012"}]}))
+        assert [r[0] for r in rows] == ["Budget panel"]
+
+    def test_raw_text_fallback_name_also_gets_the_institution(self):
+        rows = _rows(self._entry({"institution": "Northgate University"},
+                                 text="Some raw committee line"))
+        assert [r[0] for r in rows] == [
+            "Some raw committee line, Northgate University"]
+
+    def test_raw_text_fallback_name_is_stripped_before_appending(self):
+        rows = _rows(self._entry({"institution": "Northgate University"},
+                                 text="Some raw committee line   \t "))
+        assert [r[0] for r in rows] == [
+            "Some raw committee line, Northgate University"]
+
+    def test_unchanged_name_is_not_stripped_when_nothing_is_appended(self):
+        from unified_pipeline.stage6.sections.administrative_activities import (
+            _name_with_institution)
+        assert _name_with_institution("Panel  ", "") == "Panel  "
+
+    def test_helper_never_renders_institution_without_a_name(self):
+        from unified_pipeline.stage6.sections.administrative_activities import (
+            _name_with_institution)
+        assert _name_with_institution("", "Northgate University") == ""
+
+
+class TestRawFallbackIsNotTruncated:
+    """#983: an entry with no extracted activity renders its raw text as the
+    Activity cell. It was cut at 150 characters, mid-word."""
+
+    def test_long_raw_text_is_the_whole_activity(self):
+        text = "Faculty Senate Standing Committee on Research Policy " * 5
+        assert len(text.strip()) > 150
+        rows = _rows({"text": text.strip(), "extracted_fields": {}, "taxonomy_code": "P"})
+        assert rows == [(text.strip(), "", "")]

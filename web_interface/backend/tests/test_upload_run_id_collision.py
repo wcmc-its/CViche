@@ -1034,3 +1034,113 @@ def test_duplicate_restart_creates_independent_children(db, tmp_path):
     db.refresh(original)
     assert _snapshot_run(original) == before
     assert sorted(p.name for p in upload_dir.iterdir()) == ["CHILD1.docx", "CHILD2.docx", "ORIGD1.docx"]
+
+
+# --- (i) #181: restart replaces a still-running original --------------------
+
+
+def test_restart_cancels_a_running_original(db, tmp_path):
+    """#181: "Restart with file" on a still-running original must replace it,
+    not fork a second copy that keeps burning Bedrock spend alongside the
+    new one. Cancellation happens only after the child is fully created (see
+    test_restart_does_not_cancel_original_when_restart_fails for the reverse)."""
+    user = _make_user(db, email="running-restart@example.com")
+    original = _make_original(db, user, "ORIGR1", status="running")
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "ORIGR1.docx").write_bytes(b"PK\x03\x04 fake-running-original")
+
+    orchestrator_cancel = MagicMock()
+    with _restart_env(
+        original, storage, upload_dir,
+        extra=[patch("app.pipeline.orchestrator.cancel_run", orchestrator_cancel)],
+    ) as runs_api:
+        result = _restart(runs_api, "ORIGR1", db, user)
+
+    assert result["run_id"] != "ORIGR1"
+    # Without this signal the original's pipeline keeps running every stage.
+    orchestrator_cancel.assert_called_once_with("ORIGR1")
+    db.refresh(original)
+    assert original.status == "cancelled"
+    assert original.error_message == "Cancelled by user"
+    assert original.completed_at is not None
+    # The child itself is untouched by the cancel of its parent.
+    child = db.get(Run, result["run_id"])
+    assert child.status == "created"
+
+
+def test_cancel_run_record_does_not_signal_orchestrator_if_commit_fails(db):
+    """PR #942 review comment 4106923776: db.commit() can raise (#802's
+    commit_run_or_compensate establishes the same is true on the sibling
+    write path), so it must run BEFORE the orchestrator signal, not after --
+    otherwise a commit failure would leave the pipeline told to stop while
+    the row still reads "running" (CancelledException's handler does not
+    touch the DB; see orchestrator.py's "status already updated by API
+    endpoint"), stranding the run until reconcile_stale_runs sweeps it up an
+    hour later. orchestrator_cancel itself can't raise (cancel_run's
+    set.add, and RedisBroker.request_cancel's own try/except), so a raised
+    commit is the only failure this ordering needs to guard against."""
+    from app.api import runs as runs_api
+
+    user = _make_user(db, email="commit-fails-on-cancel@example.com")
+    run = _make_original(db, user, "CANCELFAIL1", status="running")
+
+    orchestrator_cancel = MagicMock()
+    with patch("app.pipeline.orchestrator.cancel_run", orchestrator_cancel), \
+            patch.object(db, "commit", side_effect=RuntimeError("db down")):
+        with pytest.raises(RuntimeError):
+            runs_api._cancel_run_record(db, run)
+
+    orchestrator_cancel.assert_not_called()
+
+
+def test_cancel_run_endpoint_marks_and_signals(db):
+    """cancel_run (POST /run/{id}/cancel) must actually delegate to
+    _cancel_run_record -- the handler's own return dict hardcodes
+    status="cancelled" regardless, so this kills the mutant that deletes
+    the _cancel_run_record(db, run) call from cancel_run by checking the
+    DB row and the orchestrator signal, not just the response body."""
+    from app.api import runs as runs_api
+
+    user = _make_user(db, email="cancel-endpoint@example.com")
+    run = _make_original(db, user, "CANCELOK1", status="running")
+
+    orchestrator_cancel = MagicMock()
+    with patch.object(runs_api, "check_run_access", return_value=run), \
+            patch("app.pipeline.orchestrator.cancel_run", orchestrator_cancel):
+        result = asyncio.run(
+            runs_api.cancel_run(run_id="CANCELOK1", db=db, current_user=user)
+        )
+
+    assert result["status"] == "cancelled"
+    orchestrator_cancel.assert_called_once_with("CANCELOK1")
+    db.refresh(run)
+    assert run.status == "cancelled"
+    assert run.error_message == "Cancelled by user"
+    assert run.completed_at is not None
+
+
+def test_restart_does_not_cancel_original_when_restart_fails(db, tmp_path):
+    """#181 regression guard: a restart that fails (missing file, here) must
+    leave a running original alone. Cancelling the original before the
+    child is known to exist would strand the user with neither run -- see
+    the 404 branch of restart_run, which raises before create_run_archive."""
+    user = _make_user(db, email="running-restart-fails@example.com")
+    original = _make_original(db, user, "ORIGR2", status="running")
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))  # empty
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()  # no ORIGR2.docx anywhere -> 404
+
+    with _restart_env(original, storage, upload_dir) as runs_api:
+        with pytest.raises(HTTPException) as exc:
+            _restart(runs_api, "ORIGR2", db, user)
+
+    assert exc.value.status_code == 404
+    db.refresh(original)
+    assert original.status == "running"
+    assert original.error_message is None
+    assert original.completed_at is None
+    assert [r.id for r in db.query(Run).all()] == ["ORIGR2"]

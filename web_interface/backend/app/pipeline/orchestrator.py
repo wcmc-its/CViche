@@ -19,6 +19,7 @@ import io
 from pathlib import Path
 from datetime import datetime
 from typing import Any
+from collections.abc import Iterator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -34,6 +35,7 @@ from app.models import Run, Step, Log
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.pipeline.event_emitter import event_emitter
 from app.storage import get_storage
+from app.storage.base import RunStorage
 from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,7 @@ logger = logging.getLogger(__name__)
 # replicate fresh files into per-run storage so they survive container
 # restarts and replica scale-up.
 PROMPT_LOGS_DIR = PARENT_DIR / 'src' / 'unified_pipeline' / 'prompt_logs'
+
 
 # Import stage functions from run_full_pipeline.py dependencies
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
@@ -56,7 +59,86 @@ from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
+from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
 from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
+from unified_pipeline.llm.retry import LLMOutageError
+
+
+def _now() -> float:
+    """Monotonic clock for elapsed-duration measurement (#598).
+
+    A module-level indirection so tests patch ``orchestrator._now`` directly.
+    Patching ``time.monotonic`` itself is wrong: ``asyncio.run()`` calls it
+    internally and would consume the stub.
+    """
+    return time.monotonic()
+
+
+def _record_total_duration(run: Run, elapsed: int, resumed: bool) -> None:
+    """Persist ``run.total_duration_seconds`` (#104).
+
+    A resumed run (retry from a step) accumulates onto the prior total so the
+    metric answers "how long did this run take" across attempts; a fresh run
+    is a plain assignment.
+    """
+    if resumed:
+        run.total_duration_seconds = (run.total_duration_seconds or 0) + elapsed
+    else:
+        run.total_duration_seconds = elapsed
+
+
+# run.error_message is shown verbatim to the (non-technical) user, so it
+# never carries str(exc): exception text can hold filesystem paths, provider
+# request ids and API detail (#592). The raw text stays in the ERROR log line
+# and in step.error_message (with traceback), which the UI does not render.
+RESUME_INPUT_MISSING_MESSAGE = (
+    "Couldn't resume: earlier pipeline results are no longer "
+    "available (the server may have restarted since this run). "
+    'Please use "Restart with file" to run it from the beginning.'
+)
+LLM_OUTAGE_MESSAGE = (
+    "The AI service was unavailable for too long, so this run stopped. "
+    'This is usually temporary; please try "Retry failed step" in a few minutes.'
+)
+STAGE_TIMEOUT_MESSAGE = (
+    "A processing step took too long and was stopped. "
+    'Please try "Retry failed step"; if it happens again, contact the CViche team.'
+)
+GENERIC_FAILURE_MESSAGE = (
+    "Something went wrong while processing this CV, and the details were "
+    'logged for the CViche team. You can try "Retry failed step", or '
+    '"Restart with file" to run it from the beginning.'
+)
+
+
+def _exception_chain(exc: BaseException | None) -> Iterator[BaseException]:
+    """Yield exc and every __cause__/__context__ behind it, once each."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        exc = exc.__cause__ or exc.__context__
+
+
+def user_facing_error(exc: BaseException, resuming: bool) -> str:
+    """Map a pipeline failure to the fixed message stored in run.error_message."""
+    chain = list(_exception_chain(exc))
+    if any(isinstance(e, LLMOutageError) for e in chain):
+        return LLM_OUTAGE_MESSAGE
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return STAGE_TIMEOUT_MESSAGE
+    err_text = str(exc).lower()
+    is_missing_input = (
+        isinstance(exc, FileNotFoundError)
+        or "no such file or directory" in err_text
+        or "no input available" in err_text
+    )
+    # On a resume (per-step retry), a missing input file means an earlier
+    # stage's output is no longer on disk -- e.g. the pod recycled since the
+    # original run -- so "Restart with file" is the actionable next step.
+    if resuming and is_missing_input:
+        return RESUME_INPUT_MISSING_MESSAGE
+    return GENERIC_FAILURE_MESSAGE
 
 
 # Cancellation tracking. The in-process set covers same-worker cancels (and is
@@ -361,7 +443,7 @@ class PipelineOrchestrator:
                           input_tokens_delta: int = 0, output_tokens_delta: int = 0,
                           cache_read_tokens_delta: int = 0,
                           cache_write_tokens_delta: int = 0,
-                          provider: str = "openai"):
+                          provider: str = "bedrock"):
         """Update run costs in real-time and emit cost update event.
 
         cache_read_tokens_delta / cache_write_tokens_delta are subsets of
@@ -478,6 +560,48 @@ class PipelineOrchestrator:
                     path_str, self.run_id, e,
                 )
 
+    def _stage_errors_path(self) -> Path:
+        return stage_errors_path(self.pipeline_output_dir, self.document_uid)
+
+    def _record_stage_outcome(self, stage_id: str, error: StageError | None) -> None:
+        """Write (or, on success, clear) ``stage_id``'s entry in the stage-error
+        record quality_score reads for its fatal gate (#745), then mirror it to
+        durable storage beside the other outputs, where the scorer collects it.
+
+        Best-effort like the output mirror: failing to write the record must
+        never mask the stage's own exception or fail a stage that succeeded,
+        so the failure is logged with its traceback and the step carries on.
+        """
+        path = self._stage_errors_path()
+        try:
+            written = record_stage_outcome(path, stage_id, error)
+        except (OSError, ValueError):
+            logger.exception(
+                "Could not update the stage-error record for run %s stage %s",
+                self.run_id, stage_id)
+            return
+        if written:
+            self._persist_outputs_to_storage([str(path)])
+
+    def _rehydrate_stage_errors(self, storage: RunStorage) -> None:
+        """Bring a resumed run's stage-error record (#745) back from durable
+        storage when the pod-local copy is gone, so a retried stage that now
+        succeeds can clear its entry instead of the stale durable copy
+        capping the score. A run with no failed stage has none to fetch."""
+        path = self._stage_errors_path()
+        if path.exists():
+            return
+        try:
+            data = storage.get_file(self.run_id, f"outputs/{path.name}")
+        except FileNotFoundError:
+            return  # no stage has failed for this run
+        except Exception:
+            logger.exception(
+                "Could not rehydrate the stage-error record for run %s", self.run_id)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
     def _prepare_resume(self, run: Run, start_step_number: int) -> int:
         """Prime in-memory state for a resumed run (per-step retry) and return
         the step to actually resume from.
@@ -504,6 +628,7 @@ class PipelineOrchestrator:
         """
         output_paths = self._get_output_paths()
         storage = get_storage()
+        self._rehydrate_stage_errors(storage)
 
         effective_start = start_step_number
         for step_def in STEP_REGISTRY:
@@ -579,7 +704,7 @@ class PipelineOrchestrator:
             run_id_token = set_current_run_id(self.run_id)
 
             await event_emitter.emit_run_start(self.run_id)
-            start_time = time.time()
+            start_time = _now()
 
             # Notify Teams that a fresh run started processing (issue #154).
             # Only on a true start, not a per-step retry/resume (which passes a
@@ -621,12 +746,12 @@ class PipelineOrchestrator:
             if run.status == "cancelled" or is_cancelled(self.run_id):
                 raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
-            duration = int(time.time() - start_time)
+            duration = int(_now() - start_time)
             run.status = "complete"
             run.completed_at = datetime.now()
             # Persist the authoritative pipeline duration (previously only emitted
             # over the WebSocket) so historical conversion-time metrics are queryable.
-            run.total_duration_seconds = duration
+            _record_total_duration(run, duration, start_step_number is not None)
             run.total_cost = self.total_cost
             self.db.commit()
 
@@ -673,29 +798,18 @@ class PipelineOrchestrator:
 
         except Exception as e:
             run.status = "failed"
-            # On a resume (per-step retry), a missing input file means an earlier
-            # stage's output is no longer on disk -- e.g. the pod recycled since
-            # the original run. Surface a clear next step instead of leaking a raw
-            # filesystem path + errno to the (non-technical) user.
-            err_text = str(e).lower()
-            is_missing_input = (
-                isinstance(e, FileNotFoundError)
-                or "no such file or directory" in err_text
-                or "no input available" in err_text
+            run.error_message = user_facing_error(
+                e, resuming=start_step_number is not None
             )
-            if start_step_number is not None and is_missing_input:
-                run.error_message = (
-                    "Couldn't resume: earlier pipeline results are no longer "
-                    "available (the server may have restarted since this run). "
-                    'Please use "Restart with this file" to run it from the beginning.'
-                )
-            else:
-                run.error_message = str(e)
             run.completed_at = datetime.now()
             # Record time-to-failure too -- useful when diagnosing a run that was
             # "taking too long" and then errored out.
             if start_time is not None:
-                run.total_duration_seconds = int(time.time() - start_time)
+                _record_total_duration(
+                    run,
+                    int(_now() - start_time),
+                    start_step_number is not None,
+                )
             self.db.commit()
             await self.log(0, f"Pipeline failed: {str(e)}", "ERROR")
             # Authoritative terminal failure signal. Emit the user-facing
@@ -704,7 +818,7 @@ class PipelineOrchestrator:
             # RUN_COMPLETE / RUN_CANCELLED so the UI stops the timer and
             # switches to the failure state without waiting for a status poll.
             await event_emitter.emit_run_failed(
-                self.run_id, run.error_message or str(e), self.failed_step_number
+                self.run_id, run.error_message, self.failed_step_number
             )
 
             # Notify on terminal failure too (failures are the most important to
@@ -867,7 +981,7 @@ class PipelineOrchestrator:
             await event_emitter.emit_step_start(self.run_id, step_number, self.total_cost)
             await self.log(step_number, f"Starting Stage {stage_id}: {step_def.name}")
 
-            start_time = time.time()
+            start_time = _now()
 
             # Execute the actual stage logic, bounded by a coarse per-stage
             # wall-clock ceiling. A hung stage (e.g. a wedged provider call)
@@ -889,7 +1003,7 @@ class PipelineOrchestrator:
                     f"{stage_timeout}s and was stopped."
                 ) from exc
 
-            duration = int(time.time() - start_time)
+            duration = int(_now() - start_time)
 
             # Mark as complete
             step.status = "complete"
@@ -904,6 +1018,7 @@ class PipelineOrchestrator:
             await asyncio.get_running_loop().run_in_executor(
                 None, self._persist_outputs_to_storage, result.get("output_files", [])
             )
+            await asyncio.to_thread(self._record_stage_outcome, stage_id, None)
 
             await self.log(step_number, f"Completed Stage {stage_id} in {duration}s")
             await event_emitter.emit_step_complete(
@@ -933,6 +1048,8 @@ class PipelineOrchestrator:
             # Remember which stage broke so the run-level handler can name it
             # in the terminal RUN_FAILED event.
             self.failed_step_number = step_number
+            await asyncio.to_thread(
+                self._record_stage_outcome, stage_id, StageError.from_exception(stage_id, e))
 
             await self.log(step_number, f"Error in Stage {stage_id}: {str(e)}", "ERROR")
             await event_emitter.emit_step_error(self.run_id, step_number, str(e))

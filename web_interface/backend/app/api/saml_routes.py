@@ -9,7 +9,7 @@ from saml2 import SAMLError
 from saml2.mdstore import SourceNotFound
 from saml2.metadata import create_metadata_string
 from saml2.sigver import SigverError, CertificateError
-from saml2.response import IncorrectlySigned
+from saml2.response import AuthnResponse, IncorrectlySigned
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -206,6 +206,10 @@ def _parse_saml_assertion(
         return None, None, RedirectResponse("/login?error=auth_failed", status_code=302)
 
     # Outside the parsing try on purpose -- see the docstring.
+    destination_error = _reject_wrong_destination(authn_response)
+    if destination_error is not None:
+        return None, None, destination_error
+
     replay_error = _reject_replayed_assertion(authn_response)
     if replay_error is not None:
         return None, None, replay_error
@@ -224,6 +228,24 @@ def _parse_saml_assertion(
     return attrs, relay_state, None
 
 
+def _reject_wrong_destination(authn_response: AuthnResponse) -> RedirectResponse | None:
+    """Reject a Response whose Destination is not one of this SP's ACS URLs.
+
+    pysaml2 7.5.x only LOGS this mismatch: StatusResponse._verify returns None
+    and entity._parse_response discards that, handing back a usable response
+    (#672). An absent Destination is allowed, matching pysaml2's own check.
+    Returns a redirect to reject with, or None to continue.
+    """
+    destination = authn_response.response.destination
+    if destination and destination not in authn_response.return_addrs:
+        logger.warning(
+            "[SECURITY] SAML response rejected: Destination %r is not this SP's ACS %r",
+            destination, authn_response.return_addrs,
+        )
+        return RedirectResponse("/login?error=auth_failed", status_code=302)
+    return None
+
+
 def _reject_replayed_assertion(authn_response) -> RedirectResponse | None:
     """Replay gate: allow_unsolicited=True (required for IdP-initiated SSO)
     means pysaml2 never matches InResponseTo, so a captured signed response
@@ -233,11 +255,11 @@ def _reject_replayed_assertion(authn_response) -> RedirectResponse | None:
     """
     ids = assertion_ids(authn_response)
     if len(ids) > 1:
-        # ponytail: single-assertion invariant -- pysaml2 7.5.4's
+        # ponytail: single-assertion invariant -- pysaml2 7.5.5's
         # parse_assertion (saml2/response.py, "saml2int limitation") raises
-        # InvalidAssertion before this function ever runs unless a response
-        # carries exactly one plain (or one encrypted) assertion, so this
-        # branch is dead code on every real response; a Lua
+        # InvalidAssertion unless a response carries exactly one plain OR
+        # exactly one encrypted assertion, so this branch is reached only by a
+        # mixed response (e.g. one plain plus one encrypted), which it rejects; a Lua
         # EXISTS-all-then-SET-all script (fakeredis would need the `lupa`
         # extra, not installed/pinned) is the upgrade path if
         # multi-assertion responses are ever accepted.

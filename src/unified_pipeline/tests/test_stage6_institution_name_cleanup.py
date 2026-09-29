@@ -66,6 +66,16 @@ def test_whitespace_only_cleaned_name_is_returned_verbatim_not_as_a_fallback() -
     assert _get_cleaned_institution_name(entry) == "   "
 
 
+def test_non_mapping_enrichment_is_treated_as_absent() -> None:
+    """#743: a list- or str-valued institution_enrichment (a malformed
+    stage-5b LLM output) used to raise AttributeError on `.get`, which
+    failed every section that reads it; `_render_section` then sent that
+    section to the Appendix. It must fall back to the
+    no-enrichment result instead."""
+    assert _get_cleaned_institution_name({"institution_enrichment": ["a"]}) is None
+    assert _get_cleaned_institution_name({"institution_enrichment": "abc"}) is None
+
+
 # --------------------------------------------------------------------------
 # item 5: _strip_org_tail
 # --------------------------------------------------------------------------

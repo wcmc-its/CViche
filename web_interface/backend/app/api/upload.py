@@ -7,10 +7,14 @@ import os
 import secrets
 import string
 import tempfile
+import threading
+import time
 import zipfile
+import zlib
 from pathlib import Path
 from collections.abc import Callable
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from datetime import datetime
 from pydantic import BaseModel
@@ -28,6 +32,7 @@ from app.rate_limiter import check_rate_limit
 from app.config_loader import get_config_value
 from app.services.config_service import (
     MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
+    ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
     get_estimated_run_cost, get_estimate_model_name,
 )
 from app.errors import bad_request, internal_error
@@ -52,13 +57,46 @@ ALLOWED_UPLOAD_EXTENSIONS = (".docx",)
 # certainly a scanned image, a password-protected file, or effectively blank.
 MIN_EXTRACTED_CHARS = 500
 
+# /estimate's placeholder char count when _extract_text couldn't read the
+# document at all (#794) -- a mid-range guess so the quote shown is neither
+# suspiciously cheap nor alarmingly expensive while the real content is
+# unknown. Distinct from MIN_EXTRACTED_CHARS above, which gates /upload.
+_ESTIMATE_FALLBACK_CHAR_COUNT = 5000
+# Floor on the char count an estimate is sized from: a readable-but-blank
+# document still costs a run's fixed per-stage overhead.
+_ESTIMATE_MIN_CHAR_COUNT = 1000
+
+
+def _estimate_char_count(extracted: str | None) -> int:
+    """The char count both /estimate's quote and /upload's stall-watchdog
+    duration are sized from, so one file gets one number (#794). ``None``
+    (unreadable) takes the fixed fallback; /estimate flags that to the user."""
+    if extracted is None:
+        return _ESTIMATE_FALLBACK_CHAR_COUNT
+    return max(len(extracted), _ESTIMATE_MIN_CHAR_COUNT)
+
+
+# Expansion bound checked before python-docx parses (#793). zipfile stops
+# inflating each entry at its declared file_size, so capping the declared
+# totals caps what a parse can expand to. The 392 local corpus CVs top out at
+# 37 entries and 7.2 MB uncompressed; a zip bomb declares gigabytes.
+_DOCX_MAX_ENTRIES = 1000
+_DOCX_MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+
 
 def _validate_docx_magic(content: bytes) -> bool:
-    """Check if content is a ZIP archive containing Word document structure."""
+    """Check if content is a ZIP archive containing Word document structure,
+    within the entry-count and uncompressed-size bounds above."""
     if content[:4] != ZIP_MAGIC:
         return False
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            entries = zf.infolist()
+            if (len(entries) > _DOCX_MAX_ENTRIES
+                    or sum(e.file_size for e in entries) > _DOCX_MAX_UNCOMPRESSED_BYTES):
+                logger.warning("Rejected docx: %d entries, %d bytes uncompressed",
+                               len(entries), sum(e.file_size for e in entries))
+                return False
             return "word/document.xml" in zf.namelist()
     except (zipfile.BadZipFile, Exception):
         return False
@@ -69,7 +107,8 @@ def _validate_docx_magic(content: bytes) -> bool:
 # XMLSyntaxError; a truncated zip -> BadZipFile; not an OPC package at all ->
 # PackageNotFoundError; the tempfile round-trip -> OSError. Anything else is a
 # bug and must surface, not be swallowed (§5.4).
-_DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSyntaxError, OSError)
+_DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSyntaxError, OSError,
+                     zlib.error)
 
 
 def _extract_text(content: bytes, file_ext: str) -> str | None:
@@ -102,6 +141,113 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
         os.unlink(tmp_path)
 
 
+# Bytes read per chunk while bounding an upload body (#793): large enough that
+# a normal CV (a few hundred KB) reads in one or two chunks, small enough that
+# a request over the size cap is caught well before the whole body is buffered.
+_UPLOAD_READ_CHUNK_SIZE = 1024 * 1024
+
+
+async def _read_bounded(file: UploadFile, max_size: int) -> bytes:
+    """Read an upload in bounded chunks, aborting once max_size is exceeded.
+
+    Unlike ``await file.read()`` followed by a size check, this never buffers
+    more than ``max_size`` plus one chunk of an oversized body before
+    rejecting it (#793).
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_READ_CHUNK_SIZE)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            # Production caps are always a whole number of MB (config_service
+            # builds MAX_UPLOAD_SIZE as int(CVICHE_MAX_UPLOAD_MB)*1024*1024),
+            # so the cap is always printed in whole MB -- no KB/bytes
+            # fallback for a sub-1MB cap, which only a test ever patches in.
+            raise bad_request(f"File too large. Maximum size is {max_size // (1024 * 1024)} MB.")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+class _EstimatePerUserWindow:
+    """Per-pod, in-memory, fixed-window call counter, one window per user id.
+
+    Distinct from check_rate_limit's DB-backed run quota (#795): this counts
+    calls directly, not Run rows, so it catches a user who never goes over
+    their run quota but calls /estimate repeatedly. `clock` is injectable so
+    tests can control window elapsing without sleeping or patching the real
+    clock.
+
+    ponytail: the count is per POD and resets on restart -- it does not
+    share state across the up to 3 backend pods in prod, so a user's real
+    ceiling is close to max_calls * pod_count per window, not max_calls.
+    Upgrade path: back this with the same Valkey URL LoginThrottle
+    (app/login_throttle.py) uses, CVICHE_REDIS_URL, if a pod-shared bound is
+    ever needed.
+    """
+
+    def __init__(
+        self,
+        max_calls: int,
+        window_seconds: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max_calls = max_calls
+        self._window_seconds = window_seconds
+        self._clock = clock
+        # user_id -> (window_start, count_in_window)
+        self._windows: dict[int, tuple[float, int]] = {}
+        # estimate_processing is async, so today allow() runs on the event
+        # loop; the lock keeps the read-modify-write safe if it is ever
+        # called from a threadpool.
+        self._lock = threading.Lock()
+
+    def allow(self, user_id: int) -> bool:
+        """Record one call for user_id and return whether it is within the
+        current window's budget. A window that has fully elapsed since the
+        user's last call starts fresh rather than carrying its count over."""
+        now = self._clock()
+        with self._lock:
+            window_start, count = self._windows.get(user_id, (now, 0))
+            if now - window_start >= self._window_seconds:
+                window_start, count = now, 0
+            if count >= self._max_calls:
+                return False
+            self._windows[user_id] = (window_start, count + 1)
+            return True
+
+    def reset(self) -> None:
+        """Test-only: clear every user's window."""
+        with self._lock:
+            self._windows.clear()
+
+
+_estimate_rate_limiter = _EstimatePerUserWindow(
+    ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS
+)
+
+
+def _check_estimate_rate_limit(user_id: int) -> dict | None:
+    """Same {error, message, details} shape check_rate_limit returns, so
+    estimate_processing raises the identical 429 either way (#795)."""
+    if _estimate_rate_limiter.allow(user_id):
+        return None
+    return {
+        "error": "rate_limited",
+        "message": (
+            f"Estimate limit of {ESTIMATE_RATE_LIMIT_MAX} calls per "
+            f"{ESTIMATE_RATE_LIMIT_WINDOW_SECONDS} seconds reached."
+        ),
+        "details": {
+            "limit_type": "estimate",
+            "limit": ESTIMATE_RATE_LIMIT_MAX,
+            "window_seconds": ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
+        },
+    }
+
+
 router = APIRouter()
 
 
@@ -117,6 +263,18 @@ class EstimateResponse(BaseModel):
     filename: str
     file_size_kb: float
     pricing_model: str
+    # True when the document's text couldn't be read and text_characters is
+    # the fixed fallback guess, not a measurement (#794).
+    text_characters_is_guess: bool = False
+
+
+# Recalibrated after the #881 parallel LLM batches went live (dev-207): the old
+# 20 s/stage overhead and 3-min floor quoted ~2.5x the real wall time on every
+# post-parallel prod run (e.g. estimate max 421 s vs actual 89-105 s). With 5 s
+# and a 1-min floor, all six runs from 2026-09-28/29 land inside [min, max].
+_PER_STAGE_OVERHEAD_SECONDS = 5
+_MIN_ESTIMATE_SECONDS = 60
+_MIN_ESTIMATE_SPREAD_SECONDS = 60
 
 
 def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
@@ -131,9 +289,9 @@ def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
     text_char_count = max(text_char_count, 1000)
     estimated_tokens = text_char_count // 4
     base_time = BASE_OVERHEAD_SECONDS + (estimated_tokens / 1000) * TIME_PER_1K_TOKENS
-    total_time = base_time + len(STEP_REGISTRY) * 20  # ~20s/stage init + API overhead
-    time_min = max(int(total_time * 0.6), 180)        # at least 3 min
-    time_max = max(int(total_time * 1.3), time_min + 180)
+    total_time = base_time + len(STEP_REGISTRY) * _PER_STAGE_OVERHEAD_SECONDS
+    time_min = max(int(total_time * 0.6), _MIN_ESTIMATE_SECONDS)
+    time_max = max(int(total_time * 1.3), time_min + _MIN_ESTIMATE_SPREAD_SECONDS)
     return time_min, time_max
 
 
@@ -385,12 +543,9 @@ async def upload_cv(
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
 
-    # Read file content first for validation
-    content = await file.read()
-
-    # Check file size
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise bad_request(f"File too large ({len(content) // (1024*1024)} MB). Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.")
+    # Read file content in bounded chunks so an oversized body is never fully
+    # buffered before being rejected (#793).
+    content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
     # Validate magic bytes match claimed extension
     if file_ext == ".docx" and not _validate_docx_magic(content):
@@ -401,7 +556,7 @@ async def upload_cv(
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
     # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
-    extracted = _extract_text(content, file_ext)
+    extracted = await run_in_threadpool(_extract_text, content, file_ext)
     if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
@@ -416,7 +571,9 @@ async def upload_cv(
     # returns (False, None), so this never blocks an upload. We only warn (the UI
     # requires an acknowledgement) -- we never reject, since reformatting an
     # existing publication list is a legitimate, template-shaped use.
-    wcm_template_warning, wcm_template_match_ratio = detect_wcm_template(extracted)
+    wcm_template_warning, wcm_template_match_ratio = await run_in_threadpool(
+        detect_wcm_template, extracted
+    )
     if wcm_template_warning:
         logger.info(
             "Upload looks like a blank WCM template (user=%s, match_ratio=%s)",
@@ -487,10 +644,8 @@ async def upload_cv(
     # Input-scaled wall-clock estimate, stored so the client stall watchdog can
     # scale its "taking longer than expected" threshold to this CV instead of a
     # fixed constant (large CVs were false-positiving as "may be stuck"). Same
-    # helper as /estimate. extracted is None only when text extraction couldn't
-    # run; fall back to a size-based char estimate then.
-    est_char_count = len(extracted) if extracted else max(1, len(content) // 30000) * 2000
-    _, estimated_duration_seconds = estimate_run_seconds(est_char_count)
+    # helper and char count as /estimate.
+    _, estimated_duration_seconds = estimate_run_seconds(_estimate_char_count(extracted))
 
     # Create run record. Persist the user's output-rendering choices (issue
     # #153) as the truthy ints the Stage 6 generator reads at render time.
@@ -536,6 +691,7 @@ async def upload_cv(
 @router.post("/estimate", response_model=EstimateResponse)
 async def estimate_processing(
     file: UploadFile = File(...),
+    db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
@@ -548,9 +704,6 @@ async def estimate_processing(
 
     The file is not saved - this is just for estimation.
     """
-    import tempfile
-    import os
-
     # Validate file type
     if not file.filename:
         raise bad_request("No filename provided")
@@ -562,12 +715,25 @@ async def estimate_processing(
             "Please convert your file to .docx before uploading."
         )
 
-    # Read file content
-    content = await file.read()
+    # Per-pod, per-user in-memory budget (#795), checked first since it's
+    # cheaper than the DB-backed check below -- a user already over it never
+    # costs a query. Both checks run before the body is read (_read_bounded)
+    # or parsed (_extract_text).
+    estimate_limit_error = _check_estimate_rate_limit(current_user.id)
+    if estimate_limit_error:
+        raise HTTPException(status_code=429, detail=estimate_limit_error)
 
-    # Check file size
-    if len(content) > MAX_UPLOAD_SIZE:
-        raise bad_request(f"File too large ({len(content) // (1024*1024)} MB). Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.")
+    # Also rate-limited the same as /upload (#795): reuses /upload's
+    # DB-backed per-run quota, which on its own only blocks a user already
+    # over their run quota -- an estimate creates no Run row. The budget
+    # above is what actually caps /estimate's own call volume.
+    rate_limit_error = check_rate_limit(current_user, db)
+    if rate_limit_error:
+        raise HTTPException(status_code=429, detail=rate_limit_error)
+
+    # Read file content in bounded chunks so an oversized body is never fully
+    # buffered before being rejected (#793).
+    content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
     # Validate magic bytes
     if file_ext == ".docx" and not _validate_docx_magic(content):
@@ -576,39 +742,18 @@ async def estimate_processing(
 
     file_size_kb = len(content) / 1024
 
-    # Extract actual text from document to estimate tokens
-    document_text = ""
-    text_char_count = 0
-
-    try:
-        if file_ext == ".docx":
-            # Extract text from Word document
-            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-
-            try:
-                from docx import Document
-                doc = Document(tmp_path)
-                # Get text from paragraphs
-                paragraphs_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
-                # Also get text from tables
-                tables_text = ""
-                for table in doc.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            if cell.text.strip():
-                                tables_text += cell.text + " "
-                document_text = paragraphs_text + "\n" + tables_text
-                text_char_count = len(document_text)
-            finally:
-                os.unlink(tmp_path)
-    except Exception as e:
-        # Fallback: very rough estimate
-        text_char_count = 5000  # Assume a typical CV has ~5000 characters
-
-    # Ensure we have a reasonable minimum
-    text_char_count = max(text_char_count, 1000)
+    # Extract text through the same implementation /upload uses (#794) --
+    # this endpoint used to re-walk the docx paragraphs/tables inline, which
+    # could compute a different text_char_count for the same file. Off the
+    # event loop, same as /upload (#793).
+    extracted = await run_in_threadpool(_extract_text, content, file_ext)
+    if extracted is None:
+        # _extract_text already logged the specific read failure (§5.4). No
+        # filename here (CODING_STANDARDS §4.7): CV filenames usually carry
+        # the owner's name, and every log line already carries the request id
+        # via RequestIDFilter.
+        logger.warning("Estimate falling back to a fixed char-count guess")
+    text_char_count = _estimate_char_count(extracted)
 
     # Estimate tokens (roughly 4 characters per token for English text)
     estimated_tokens = text_char_count // 4
@@ -641,4 +786,5 @@ async def estimate_processing(
         filename=file.filename,
         file_size_kb=round(file_size_kb, 1),
         pricing_model=get_estimate_model_name(),
+        text_characters_is_guess=extracted is None,
     )

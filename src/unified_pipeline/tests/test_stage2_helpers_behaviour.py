@@ -3,7 +3,8 @@
 Covers: get_hierarchy_path, build_element_index_map, get_element_text,
 split_merged_row_into_pseudo_rows, extract_leaf_sections_with_boundaries,
 collect_header_indices, collect_header_info, remove_subset_delimiters,
-recover_unclaimed_table_rows, _dedup_idx_key, filter_extraction_noise.
+recover_unclaimed_table_rows, _dedup_idx_key, filter_extraction_noise,
+fold_labelled_detail_entries (#986).
 
 The first seven of those have NO existing coverage anywhere in the test
 suite. The last four (remove_subset_delimiters, recover_unclaimed_table_rows,
@@ -37,7 +38,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest  # noqa: E402
+from docx import Document  # noqa: E402
+
 from unified_pipeline import stage_2_entry_extraction as stage2  # noqa: E402
+from unified_pipeline.core.docx_structure_extractor import extract_unified_elements  # noqa: E402
 
 get_hierarchy_path = stage2.get_hierarchy_path
 build_element_index_map = stage2.build_element_index_map
@@ -144,6 +149,32 @@ def test_get_element_text_unknown_type_falls_back_to_stripped_text():
 
 def test_get_element_text_missing_type_falls_back_to_stripped_text():
     assert get_element_text({"text": " no type key "}) == "no type key"
+
+
+def test_get_element_text_next_paragraph_dob_scrub_not_readable_from_data(tmp_path):
+    # Reader-level regression (#847 residual round 4): a "Date of Birth:"
+    # label paragraph directly followed by a table -- the pre-LLM scrub
+    # (core/docx_structure_extractor.py::_scrub_pre_llm_pii_next_element)
+    # used to update only that table element's pre-flattened `text`, never
+    # its per-cell `data`. This branch reads `data` (tab/newline-joined),
+    # not `text` -- so the raw DOB still came out here even after the
+    # element's own `text` field had already been scrubbed clean.
+    doc = Document()
+    doc.add_paragraph("Date of Birth:")
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "01/02/1970"
+    table.cell(0, 1).text = "Example City"
+    docx_path = tmp_path / "next_element_table_dob.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    table_element = next(e for e in elements if e.get("data"))
+
+    out = get_element_text(table_element)
+    assert "01/02/1970" not in out
+    assert out == "[withheld]\tExample City"
+    # ...and the same element's flattened `text` (extract_text_from_docx's reader).
+    assert "01/02/1970" not in table_element["text"]
 
 
 # ------------------------------------------- split_merged_row_into_pseudo_rows
@@ -674,3 +705,226 @@ def test_filter_extraction_noise_no_drops_returns_all_entries_untouched():
         {"element_type": "paragraph", "text": "unique two", "element_idx_start": 2},
     ]
     assert filter_extraction_noise(entries) == entries
+
+
+# ------------------------------------------------- fold_labelled_detail_entries (#986)
+
+fold_labelled_detail_entries = stage2.fold_labelled_detail_entries
+_HIER = ["Mentoring"]
+
+
+def _fold_el(idx, left=0.0, etype="paragraph"):
+    return {"unified_idx": idx, "type": etype, "text": f"line {idx}",
+            "indent_left": left}
+
+
+def _fold_entry(start, end=None, text="x", etype="paragraph", hier=None, conf=0.9):
+    return {"element_idx_start": start, "element_idx_end": start if end is None else end,
+            "element_type": etype, "confidence": conf, "text": text,
+            "hierarchy": _HIER if hier is None else hier}
+
+
+def _fold(entries, elements):
+    return fold_labelled_detail_entries(entries, build_element_index_map({"elements": elements}))
+
+
+def _spans(entries):
+    return [(e["element_idx_start"], e["element_idx_end"]) for e in entries]
+
+
+@pytest.mark.parametrize("label", ["project:", "role:"])
+def test_fold_label_line_joins_parent_keeping_parent_fields(label):
+    entries = [_fold_entry(3, text="2016 Ana Cruz, Graduate Student", conf=0.7),
+               _fold_entry(4, text=label.upper() + " Study of tides", etype="break")]
+    out = _fold(entries, [_fold_el(3), _fold_el(4)])
+    assert len(out) == 1
+    assert out[0] == {"element_idx_start": 3, "element_idx_end": 4, "element_type": "paragraph",
+                      "confidence": 0.7, "hierarchy": _HIER,
+                      "text": "2016 Ana Cruz, Graduate Student\t" + label.upper() + " Study of tides"}
+
+
+def test_fold_does_not_mutate_input_entries():
+    entries = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, text="Project: tides")]
+    _fold(entries, [_fold_el(3), _fold_el(4)])
+    assert entries[0]["text"] == "2016 Ana Cruz" and entries[0]["element_idx_end"] == 3
+
+
+@pytest.mark.parametrize("indent", [dict(), dict(left=0.5), dict(left=1.5), dict(left=4.5)])
+def test_fold_indent_alone_never_folds_adjacent_sibling_lines(indent):
+    # A student list or course list: same-shape lines, however far indented
+    # under the line above. Fusing them made 3b code several records as one.
+    entries = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, text="Kim Lee"),
+               _fold_entry(5, text="Lee Park"), _fold_entry(6, text="Kim Ortiz")]
+    els = [_fold_el(3)] + [_fold_el(i, **indent) for i in (4, 5, 6)]
+    assert _spans(_fold(entries, els)) == [(3, 3), (4, 4), (5, 5), (6, 6)]
+
+
+def test_fold_label_line_folds_at_any_indent_including_flush():
+    entries = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, text="Project: tides")]
+    for el4 in (_fold_el(4), _fold_el(4, left=1.5)):
+        assert _spans(_fold(entries, [_fold_el(3), el4])) == [(3, 4)]
+
+
+def test_fold_line_with_its_own_year_is_never_folded():
+    entries = [_fold_entry(3, text="Lab Mentorship"), _fold_entry(4, text="Project: tides 2015")]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4)])) == [(3, 3), (4, 4)]
+
+
+def test_fold_requires_the_very_next_element():
+    entries = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(5, text="Project: tides")]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4), _fold_el(5)])) == [(3, 3), (5, 5)]
+
+
+def test_fold_never_crosses_a_hierarchy_boundary():
+    entries = [_fold_entry(3, text="2016 Ana Cruz", hier=["A"]), _fold_entry(4, text="Project: tides", hier=["B"])]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4)])) == [(3, 3), (4, 4)]
+
+
+def test_fold_never_folds_into_or_out_of_a_header_or_empty_break():
+    els = [_fold_el(3), _fold_el(4)]
+    header_parent = [_fold_entry(3, text="MENTORING", etype="header"), _fold_entry(4, text="Project: tides")]
+    assert _spans(_fold(header_parent, els)) == [(3, 3), (4, 4)]
+    empty_parent = [_fold_entry(3, text="", etype="break"), _fold_entry(4, text="Project: tides")]
+    assert _spans(_fold(empty_parent, els)) == [(3, 3), (4, 4)]
+    header_child = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, text="Project: tides", etype="header")]
+    assert _spans(_fold(header_child, els)) == [(3, 3), (4, 4)]
+
+
+def test_fold_leaves_table_rows_and_multi_element_lines_alone():
+    els = [_fold_el(3), _fold_el(4), _fold_el(5)]
+    rows = [_fold_entry(3, text="2016 Ana Cruz", etype="table_row"), _fold_entry(4, text="Project: tides", etype="table_row")]
+    assert _spans(_fold(rows, els)) == [(3, 3), (4, 4)]
+    multi = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, 5, text="Project: tides")]
+    assert _spans(_fold(multi, els)) == [(3, 3), (4, 5)]
+    table_cell = [_fold_el(3), _fold_el(4, etype="table_content")]
+    entries = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, text="Project: tides")]
+    assert _spans(_fold(entries, table_cell)) == [(3, 3), (4, 4)]
+
+
+def test_fold_string_row_indices_pass_through_last_without_error():
+    row = _fold_entry("22.2", text="Project: tides", etype="table_row")
+    entries = [row, _fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, text="Project: tides")]
+    out = _fold(entries, [_fold_el(3), _fold_el(4)])
+    assert _spans(out) == [(3, 4), ("22.2", "22.2")]
+
+
+def test_fold_unassigned_break_lines_fold_like_entries():
+    # The detector missed a whole section: every line is a non-empty "break".
+    entries = [_fold_entry(3, text="2016 Ana Cruz", etype="break"),
+               _fold_entry(4, text="Project: tides", etype="break"),
+               _fold_entry(5, text="2015 Lee Park", etype="break"),
+               _fold_entry(6, text="Project: kelp", etype="break")]
+    out = _fold(entries, [_fold_el(i) for i in range(3, 7)])
+    assert _spans(out) == [(3, 4), (5, 6)]
+    assert [e["element_type"] for e in out] == ["break", "break"]
+
+
+def test_fold_chain_of_labels_extends_the_one_parent():
+    entries = [_fold_entry(3, text="2008 Ana Cruz"), _fold_entry(4, text="Project: a"),
+               _fold_entry(5, text="Project: b"), _fold_entry(6, text="2007 Lee Park")]
+    out = _fold(entries, [_fold_el(i) for i in range(3, 7)])
+    assert _spans(out) == [(3, 5), (6, 6)]
+    assert out[0]["text"] == "2008 Ana Cruz\tProject: a\tProject: b"
+
+
+@pytest.mark.parametrize("bare", ["Role:", "Project:  ", "ROLE:"])
+def test_fold_bare_label_that_heads_the_lines_after_it_stays_separate(bare):
+    entries = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, text=bare),
+               _fold_entry(5, text="Chair"), _fold_entry(6, text="Member")]
+    out = _fold(entries, [_fold_el(i) for i in range(3, 7)])
+    assert _spans(out) == [(3, 3), (4, 4), (5, 5), (6, 6)]
+
+
+@pytest.mark.parametrize("parent_text", ["Past Grants:", "Past Grants:  ", "Past Grants:\tsee list"])
+def test_fold_never_folds_a_label_line_into_a_sub_header_parent(parent_text):
+    # The parent's FIRST line ends in a colon: it heads the lines below it.
+    entries = [_fold_entry(3, text=parent_text), _fold_entry(4, text="Role: Chair")]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4)])) == [(3, 3), (4, 4)]
+
+
+def test_fold_parent_with_a_colon_after_its_first_line_still_takes_a_label_line():
+    # Only the first line decides: a folded parent ending in "tides:" is a record.
+    entries = [_fold_entry(3, text="2016 Ana Cruz\tProject: tides:"), _fold_entry(4, text="Role: Chair")]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4)])) == [(3, 4)]
+
+
+def test_fold_label_with_content_after_a_colon_still_folds():
+    entries = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, text="Role: Chair, tides:")]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4)])) == [(3, 4)]
+
+
+def test_fold_never_folds_a_template_instruction_child_into_a_real_entry():
+    # _drop_template_instructions runs after the fold and would drop the whole
+    # folded entry, real content included.
+    parent = "2010-present Society of Example Medicine, member"
+    els = [_fold_el(3), _fold_el(4)]
+    for child in ("Role: (i.e., officer, secretary, chair, etc.)",
+                  "Role (i.e., officer, secretary, chair, etc.)"):
+        assert stage2._is_template_text(child)
+        entries = [_fold_entry(3, text=parent), _fold_entry(4, text=child)]
+        assert _spans(_fold(entries, els)) == [(3, 3), (4, 4)]
+        assert stage2._drop_template_instructions(_fold(entries, els))[0]["text"] == parent
+
+
+def test_fold_never_folds_a_label_line_into_a_template_instruction_parent():
+    parent = "Role (i.e., officer, secretary, chair, etc.)"
+    entries = [_fold_entry(3, text=parent), _fold_entry(4, text="Role: Chair")]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4)])) == [(3, 3), (4, 4)]
+    kept = stage2._drop_template_instructions(_fold(entries, [_fold_el(3), _fold_el(4)]))
+    assert [e["text"] for e in kept] == ["Role: Chair"]
+
+
+def test_fold_exact_only_template_instruction_is_also_never_folded():
+    # 36 chars: an exact template match, below the near-match length floor.
+    parent = "Role (i.e., member, secretary, etc.)"
+    assert stage2.is_template_instruction(parent) and not stage2.is_near_template_instruction(parent)
+    entries = [_fold_entry(3, text=parent), _fold_entry(4, text="Role: Chair")]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4)])) == [(3, 3), (4, 4)]
+
+
+def test_fold_mentor_label_is_not_a_trigger():
+    # No corpus CV has a "Mentor:" detail line, so it is not in DETAIL_LINE_LABELS.
+    entries = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, text="Mentor: Lee Park")]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4)])) == [(3, 3), (4, 4)]
+
+
+def test_fold_entry_with_a_string_end_index_never_raises_or_folds():
+    parent = _fold_entry(3, text="2016 Ana Cruz")
+    parent["element_idx_end"] = "3.1"
+    entries = [parent, _fold_entry(4, text="Project: tides")]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4)])) == [(3, "3.1"), (4, 4)]
+
+
+def test_fold_second_label_line_is_judged_against_the_folded_parent_not_the_label_line():
+    # "Project: tides:" ends in a colon, but the entry the next line joins is the
+    # folded parent, whose first line is "2016 Ana Cruz".
+    entries = [_fold_entry(3, text="2016 Ana Cruz"), _fold_entry(4, text="Project: tides:"),
+               _fold_entry(5, text="Role: Chair")]
+    assert _spans(_fold(entries, [_fold_el(i) for i in (3, 4, 5)])) == [(3, 5)]
+
+
+def test_fold_returns_the_same_list_object_when_nothing_folds():
+    entries = [_fold_entry(4, text="Kim Lee"), _fold_entry(3, text="2016 Ana Cruz")]
+    assert _fold(entries, [_fold_el(3), _fold_el(4)]) is entries
+
+
+# =============================================================== join_row_cells (#488)
+
+def test_join_row_cells_attaches_trailing_columns_to_first_paragraph():
+    assert stage2.join_row_cells(["Title\n- a\n- b", "2024", "Org"]) == "Title | 2024 | Org\n- a\n- b"
+
+
+def test_join_row_cells_single_paragraph_and_single_cell_rows_are_unchanged():
+    assert stage2.join_row_cells(["  Title  ", "2024"]) == "Title   | 2024"
+    assert stage2.join_row_cells(["Title\n- a"]) == "Title\n- a"
+    assert stage2.join_row_cells([]) == ""
+
+
+def test_join_row_cells_ignores_leading_and_trailing_blank_lines_in_cell_zero():
+    assert stage2.join_row_cells(["\nTitle\n- a\n", "2024"]) == "Title | 2024\n- a"
+    assert stage2.join_row_cells(["Title\n\n", "2024"]) == "Title\n\n | 2024"
+
+
+def test_join_row_cells_keeps_old_shape_when_another_cell_spans_lines():
+    # The trailing paragraphs could not be told from the org cell's own lines.
+    assert stage2.join_row_cells(["Title\n- a", "Org\nCity", "2024"]) == "Title\n- a | Org\nCity | 2024"

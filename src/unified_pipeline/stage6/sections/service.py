@@ -43,6 +43,14 @@ LEADERSHIP_TAXONOMY_CODE = 'Q1'         # Leadership in Extramural Organizations
 GRANT_REVIEWING_CODE = 'Q3'             # Grant Reviewing / Study Sections
 EDITORIAL_BOARD_CODES = ('Q4B', 'Q4C')  # Editorial Board Membership roles
 
+# The fields that can name the organization of a Q1 row, in priority order. Q1's
+# own schema names it `organization`; an entry the hierarchy-mismatch reroute
+# (`_correct_mismatch_if_needed`) moves to Q1 still carries the schema of the
+# code it was extracted under -- a Q4B entry names it `journal_name` and a K3
+# entry `program_name`. No corpus row takes this path today (#972's same-family
+# rule keeps the #946 Q4B entry out of Q1); it guards the reroutes still allowed.
+EXTRAMURAL_ORGANIZATION_FIELDS = ('organization', 'journal_name', 'program_name')
+
 # Q3/Q4/Q4A/Q4B/Q4C -> (WCM template section display name, header search-text candidates)
 OTHER_SERVICE_SECTION_ROUTING = {
     GRANT_REVIEWING_CODE: ('Grant Reviewing', ['Grant Reviewing', 'Study Sections']),
@@ -113,6 +121,55 @@ EXTRAMURAL_ROLE_KEYWORDS = (
 _ROLE_STEM_SUFFIXES = ('s', 'es', 'ed', 'ing', 'ship', 'ships', 'man', 'men',
                        'woman', 'women', 'person', 'persons', 'people',
                        'or', 'ors', 'lor', 'lors')
+
+
+# A year, or a year range ("2005-present", "1993-1996", "2001-"), used to find
+# the date text stage 4 already moved into `start_date`/`end_date`.
+_YEAR = r'(?:1[89]|20)\d{2}'
+_DATE_SPAN = re.compile(
+    rf'(?<!\d){_YEAR}(?:\s*[-–—]\s*(?:{_YEAR}|present|current|ongoing)?)?(?!\d)',
+    re.IGNORECASE)
+_TEXT_CELL_SEPARATORS = re.compile(r'[\t\n|]+')
+_EDGE_PUNCTUATION = ' ,;:.-–—|"“”'
+
+
+def _organization_left_in_text(text: object, role: object, start_date: object,
+                               end_date: object) -> str:
+    """The organization of a Q1 row whose stage-4 fields name none: the entry
+    text with what the other two columns already show taken out.
+
+    `_fill_extramural_leadership` used to put the whole raw entry line in the
+    Organization column when no organization field was set, so the role and the
+    dates were printed twice and the source's tab separators came through
+    (#946 shape: "2022-present Fictional Gazette<TAB>Section Editor").
+    What is left after removing the role text and the dates stage 4 extracted
+    is the organization ("Fictional Gazette"). Nothing else is removed: a year
+    that is not in `start_date`/`end_date` (the Dates cell would not show it)
+    and every word outside the role stay, so the row never loses text the
+    other columns do not carry. When the role is the whole line the result is
+    '' -- the Role cell already holds it.
+
+    A `role` that is not a plain string (stage 4 files a list of per-record
+    dicts there for a fused entry, and `_cell_text` then renders them with
+    their own organization names) is no text to subtract, so the entry text is
+    returned as it stands.
+    """
+    text = _cell_text(text)
+    if not isinstance(role, str):
+        return text
+    known_years = set(re.findall(_YEAR, f'{_cell_text(start_date)} {_cell_text(end_date)}'))
+
+    def _drop_known_dates(match: re.Match[str]) -> str:
+        return '' if set(re.findall(_YEAR, match.group())) <= known_years else match.group()
+
+    text = _DATE_SPAN.sub(_drop_known_dates, text)
+    for part in re.split(r'\s*;\s*', _cell_text(role)):
+        words = re.findall(r'\w+', part)
+        if words:
+            joined = r'[\W_]*'.join(map(re.escape, words))
+            text = re.sub(rf'\b{joined}\b', '', text, flags=re.IGNORECASE)
+    segments = (segment.strip(_EDGE_PUNCTUATION) for segment in _TEXT_CELL_SEPARATORS.split(text))
+    return ', '.join(re.sub(r'\s{2,}', ' ', segment) for segment in segments if segment)
 
 
 def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:
@@ -479,7 +536,76 @@ def _journal_name_cell_text(value: object, taxonomy_code: str) -> str:
     return _cell_text(value)
 
 
-def _service_boards_dates_text(fields: dict, taxonomy_code: str) -> str:
+def _contains_words(haystack: str, needle: str) -> bool:
+    """True when `needle` occurs in `haystack` on word boundaries, ignoring case."""
+    return re.search(rf'(?<!\w){re.escape(needle)}(?!\w)', haystack, re.IGNORECASE) is not None
+
+
+def _fold_name(text: str) -> str:
+    """Case, punctuation and whitespace folded form, for equality tests."""
+    return ' '.join(re.sub(r'[\W_]+', ' ', text).casefold().split())
+
+
+def _join_names(name: str, org: str, *, collapse_contained: bool) -> str:
+    """`"<name>, <org>"`, collapsed when the two say the same thing.
+
+    Both sides are stripped and an empty side returns the other, so a lone
+    value is unchanged. Equal after `_fold_name` returns `org` (what the old
+    `organization or ...` chains rendered). With `collapse_contained`,
+    whole-word containment also collapses to the longer side (see
+    `_contains_words`)."""
+    name, org = name.strip(), org.strip()
+    if not org or not name:
+        return org or name
+    if _fold_name(name) == _fold_name(org):
+        return org
+    if collapse_contained:
+        if _contains_words(org, name):
+            return org
+        if _contains_words(name, org):
+            return name
+    return f"{name}, {org}"
+
+
+_LEADING_THE = re.compile(r'^\s*the\s+', re.IGNORECASE)
+
+
+def _journal_names_contain(journal_value: object, org: str) -> bool:
+    """True when `org` occurs as whole words in any single journal name.
+
+    A list-of-records `journal_name` is tested name by name, so a date
+    suffix or a neighbouring journal cannot make a match. A leading "The "
+    on `org` is ignored ("The Lancet" matches journal "Lancet"). An empty
+    `org` never matches."""
+    org = _LEADING_THE.sub('', org.strip())
+    if not org:
+        return False
+    items = journal_value if isinstance(journal_value, list) else [journal_value]
+    return any(_contains_words(_cell_text(item), org)
+               for item in items)
+
+
+def _reviewing_org_and_committee_text(fields: dict) -> str:
+    """Display text for a journal-reviewing row that has no `journal_name`.
+
+    A Q2 entry rerouted into `_fill_journal_reviewing` (`_route_q2_entries`)
+    has no `journal_name`, and its `organization` is often just the funder
+    or society ("NIH", "American Heart Association") while `committee_name`
+    names the actual panel or program (#471). `organization or
+    committee_name` rendered only the generic organization, so the panel
+    name was dropped from the docx. Render both -- "<committee>, <org>".
+    Whole-word containment collapses here ("NIH" + "NIH Study Section" ->
+    "NIH Study Section"): a committee is a sub-unit of its organization, so
+    one string containing the other is the same body named twice. Falsy
+    values count as absent, as in the old `or` chain."""
+    return _join_names(
+        _cell_text(fields.get('committee_name') or ''),
+        _cell_text(fields.get('organization') or ''),
+        collapse_contained=True)
+
+
+def _service_boards_dates_text(fields: dict, taxonomy_code: str,
+                               source_text: str = '') -> str:
     """Coerce `start_date`/`end_date` before `format_date_range` for a
     Service on Boards (Q2) row.
 
@@ -488,10 +614,13 @@ def _service_boards_dates_text(fields: dict, taxonomy_code: str) -> str:
     into the dates cell instead of crashing. Coerce before the `or ''` so a
     falsy coerced result (`None`/`[]` -> `''`) still collapses the same way
     the original code did (a pure move of `_fill_service_boards`'s round-2
-    prelude, round 3, verify-D-812-R2 finding 2 -- no formula changed)."""
+    prelude, round 3, verify-D-812-R2 finding 2 -- no formula changed).
+
+    `source_text` is the entry's text, which `format_date_range` reads to
+    tell a bare year from an open "2020-" range on a start-only row (#946)."""
     start_date = _cell_text(fields.get('start_date') or '')
     end_date = _cell_text(fields.get('end_date') or '')
-    return format_date_range(start_date, end_date, taxonomy_code) or ''
+    return format_date_range(start_date, end_date, taxonomy_code, source_text) or ''
 
 
 def _other_service_organization_text(fields: dict, taxonomy_code: str) -> str:
@@ -500,27 +629,62 @@ def _other_service_organization_text(fields: dict, taxonomy_code: str) -> str:
     Q3 uses `agency`; others use `organization`/`committee_name`. Q4B/Q4C
     (editorial) use `journal_name` -- the one candidate that can carry a
     list of per-journal `{name, start_date, end_date}` records (#812,
-    web204's multi-journal Q4C entry) -- only reached when the other three
-    are all empty, so it routes through the date-aware journal coercer
-    instead of the plain one this chain otherwise uses (a pure move of
-    `_fill_other_service`'s round-2 prelude, round 3, verify-D-812-R2
-    finding 2 -- no formula changed)."""
+    web204's multi-journal Q4C entry) -- so it routes through the date-aware
+    journal coercer instead of the plain one this chain otherwise uses. On
+    Q4B/Q4C a populated organization no longer hides `journal_name`: both
+    render via `_join_names` without containment collapse (#471). Every
+    other code, and an editorial row with only one of the two, is unchanged."""
     organization = (fields.get('organization', '') or
                     fields.get('committee_name', '') or
                     fields.get('agency', ''))
+    journal = _journal_name_cell_text(fields.get('journal_name', ''), taxonomy_code)
+    if organization and taxonomy_code in EDITORIAL_BOARD_CODES:
+        # #471: on an editorial row `organization` (often a publisher or
+        # society) shadowed `journal_name`, the field naming the journal.
+        # One-way containment: when the journal names the organization
+        # ("The Lancet" / "Lancet", "JAMA Network Open" / "JAMA") the journal
+        # alone already says both. The reverse must NOT collapse: a journal
+        # is routinely named inside its society or publisher ("Neurology" /
+        # "American Academy of Neurology", "Cell" / "Cell Press"), and
+        # collapsing would drop the journal title. An exact folded repeat
+        # renders once, as the organization.
+        org_text = _cell_text(organization)
+        if (fields.get('journal_name')
+                and _journal_names_contain(fields['journal_name'], org_text)
+                and _fold_name(journal) != _fold_name(org_text)):
+            return journal
+        return _join_names(journal if fields.get('journal_name') else '',
+                           org_text, collapse_contained=False)
     if organization:
         return _cell_text(organization)
-    return _journal_name_cell_text(fields.get('journal_name', ''), taxonomy_code)
+    return journal
 
 
-def _other_service_dates_text(fields: dict, taxonomy_code: str) -> str:
+def _role_dedupe_text(fields: dict, taxonomy_code: str, organization: str) -> str:
+    """The text the two-column layout's `role in organization` check reads.
+
+    That check drops the organization from the cell when the role's first 20
+    characters occur in it. Since #471 an editorial row's `organization`
+    also carries the journal title, so a role phrase inside a journal name
+    ("Associate Editor Studies") would trip the check and drop the journal
+    AND the organization, which the old chain never did. Check the
+    organization chain alone there, as before."""
+    if taxonomy_code in EDITORIAL_BOARD_CODES and fields.get('journal_name'):
+        chain = (fields.get('organization') or fields.get('committee_name') or
+                 fields.get('agency') or '')
+        return _cell_text(chain) or organization
+    return organization
+
+
+def _other_service_dates_text(fields: dict, taxonomy_code: str,
+                              source_text: str = '') -> str:
     """Coerce `start_date`/`end_date` before `format_date_range` for an
     Other Service row (#812 round 2; see `_service_boards_dates_text` above
-    for the defect this guards -- a pure move, round 3, verify-D-812-R2
-    finding 2, no formula changed)."""
+    for the defect this guards and for `source_text` -- a pure move, round 3,
+    verify-D-812-R2 finding 2, no formula changed)."""
     start_date = _cell_text(fields.get('start_date', ''))
     end_date = _cell_text(fields.get('end_date', ''))
-    return format_date_range(start_date, end_date, taxonomy_code)
+    return format_date_range(start_date, end_date, taxonomy_code, source_text)
 
 
 class ServiceSection:
@@ -683,11 +847,12 @@ class ServiceSection:
                 if not committee:
                     committee = organization
                     organization = ''
-                dates = _service_boards_dates_text(fields, taxonomy_code)
+                dates = _service_boards_dates_text(fields, taxonomy_code,
+                                                   entry.get('text', ''))
 
                 # If we don't have structured fields, parse from raw text
                 if not committee:
-                    text = entry.get('text', '')[:150]
+                    text = entry.get('text', '')
                     committee = text
 
                 # Add row to table
@@ -746,7 +911,8 @@ class ServiceSection:
             fields = entry.get('extracted_fields', {}) or {}
 
             # Check if extracted_fields has valid data - prefer using LLM extraction over raw parsing
-            organization = fields.get('organization', '')
+            organization = next(
+                (fields[key] for key in EXTRAMURAL_ORGANIZATION_FIELDS if fields.get(key)), '')
             role = fields.get('role', '')
             # #812 round 2: coerced here (not just inside _add_extramural_row
             # below) because format_date_range() runs BEFORE that call --
@@ -761,7 +927,8 @@ class ServiceSection:
             if organization or role:
                 dates = format_date_range(start_date, end_date, 'Q1')
                 if not organization:
-                    organization = original_text[:100]
+                    organization = _organization_left_in_text(
+                        original_text, role, start_date, end_date)
                 self._add_extramural_row(table, organization, role, dates)
             else:
                 # No useful extracted fields - try to parse from raw text
@@ -771,7 +938,7 @@ class ServiceSection:
                     self._parse_extramural_leadership_lines(table, lines)
                 else:
                     # Single entry without extracted fields - use raw text
-                    self._add_extramural_row(table, original_text[:100], '', '')
+                    self._add_extramural_row(table, original_text, '', '')
 
     def _parse_extramural_leadership_lines(self, table, lines: list[str]) -> None:
         """Parse multiple extramural leadership lines and add rows.
@@ -966,7 +1133,7 @@ class ServiceSection:
             if journal_name_value:
                 journal = _journal_name_cell_text(journal_name_value, taxonomy_code)
             else:
-                journal = _cell_text(fields.get('organization') or fields.get('committee_name'))
+                journal = _reviewing_org_and_committee_text(fields)
             # #812 round 2: coerce before format_date_range (see
             # _fill_service_boards above for why -- it only str()s a
             # structured value's Python repr into the cell).
@@ -976,7 +1143,7 @@ class ServiceSection:
 
             if not journal:
                 # Parse from raw text, but clean up common patterns
-                raw_text = entry.get('text', '')[:100]
+                raw_text = entry.get('text', '')
                 # Remove "Reviewer" prefix if present
                 journal = re.sub(r'^(?:Reviewer|Ad hoc Reviewer)[,:\s]*', '', raw_text, flags=re.IGNORECASE).strip()
 
@@ -1084,7 +1251,8 @@ class ServiceSection:
                         elif _squash(panel_name) not in _squash(organization):
                             organization = f"{organization} - {panel_name}"
 
-                    dates = _other_service_dates_text(fields, taxonomy_code)
+                    dates = _other_service_dates_text(fields, taxonomy_code,
+                                                      entry.get('text', ''))
 
                     # For Q4B/Q4C entries, try to parse role from raw text if missing
                     if not role and taxonomy_code in EDITORIAL_BOARD_CODES:
@@ -1115,7 +1283,7 @@ class ServiceSection:
                         # Parse from raw text as fallback, but strip date prefix
                         raw_text = entry.get('text', '')
                         # Remove common date patterns from beginning
-                        organization = re.sub(r'^\d{4}[-–]?\d{0,4}\s*\|?\s*', '', raw_text)[:100]
+                        organization = re.sub(r'^\d{4}[-–]?\d{0,4}\s*\|?\s*', '', raw_text)
                         # If role already contains most of the organization text, don't duplicate
                         if role and organization and role.lower()[:30] in organization.lower():
                             organization = ''
@@ -1128,7 +1296,8 @@ class ServiceSection:
                         row.cells[2].text = dates or ''
                     elif num_cols >= 2:
                         # Avoid duplicating content when role already contains full description
-                        if role and organization and role.lower()[:20] in organization.lower():
+                        dedupe_text = _role_dedupe_text(fields, taxonomy_code, organization)
+                        if role and organization and role.lower()[:20] in dedupe_text.lower():
                             row.cells[0].text = role
                         elif role and organization:
                             row.cells[0].text = f"{role}, {organization}"

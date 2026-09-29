@@ -229,6 +229,38 @@ class TestGeneratePreview:
         assert preview.headers == ["a"]
         assert preview.rows == [["1"]]
 
+    def test_falls_back_to_storage_when_not_on_this_pod(self, db, monkeypatch, tmp_path):
+        """Once the pod that ran a step is recycled, the artifact exists only
+        in durable storage (S3). The preview must read it from there, as the
+        JSON viewer does, instead of silently showing none."""
+        monkeypatch.setattr(svc, "_WEB_OUTPUTS_ROOT", tmp_path / "outputs")
+        monkeypatch.setattr(svc, "_PIPELINE_OUTPUTS_ROOT", tmp_path / "pipeline_outputs")
+        asked = []
+
+        class _Storage:
+            def get_file(self, run_id, key):
+                asked.append((run_id, key))
+                return json.dumps([{"a": 2}]).encode()
+
+        monkeypatch.setattr(svc, "get_storage", lambda: _Storage())
+        preview = svc.generate_preview(db, "RUN1", "data.json")
+        assert asked == [("RUN1", "outputs/data.json")]
+        assert preview is not None and preview.rows == [["2"]]
+
+    def test_storage_outage_propagates_not_none(self, db, monkeypatch, tmp_path):
+        """A missing object is "no preview"; any other storage error must
+        surface (#936), not read as a missing file."""
+        monkeypatch.setattr(svc, "_WEB_OUTPUTS_ROOT", tmp_path / "outputs")
+        monkeypatch.setattr(svc, "_PIPELINE_OUTPUTS_ROOT", tmp_path / "pipeline_outputs")
+
+        class _Down:
+            def get_file(self, run_id, key):
+                raise ConnectionError("s3 unreachable")
+
+        monkeypatch.setattr(svc, "get_storage", lambda: _Down())
+        with pytest.raises(ConnectionError):
+            svc.generate_preview(db, "RUN1", "data.json")
+
     def test_malformed_json_returns_none_and_logs_warning(self, tmp_path, caplog):
         bad = tmp_path / "bad.json"
         bad.write_text("{not valid json")

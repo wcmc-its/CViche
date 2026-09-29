@@ -88,7 +88,7 @@ This starts three services:
 - **backend:** FastAPI on port 8000 (with hot-reload, runs Alembic migrations on startup)
 - **frontend:** Vite dev server on port 3000 (with hot-reload)
 
-The `OPENAI_API_KEY` environment variable must be set in your host shell before running `docker compose up`. All other environment variables have development defaults.
+AWS credentials for Bedrock must be set in your host shell before running `docker compose up` (CViche is Bedrock-only). All other environment variables have development defaults.
 
 To stop: `docker compose down`
 
@@ -161,7 +161,7 @@ The frontend runs on port 3000 by default and proxies `/api` and `/ws` requests 
 | `CVICHE_STORAGE_BACKEND` | No | `local` | `local` for filesystem storage (dev), `s3` for S3 storage (production). |
 | `CVICHE_S3_BUCKET` | If `s3` | -- | S3 bucket name. Required when `CVICHE_STORAGE_BACKEND=s3`. |
 | `CVICHE_S3_PREFIX` | No | `cviche` | Key prefix within the S3 bucket. Allows sharing a bucket across environments. |
-| `OPENAI_API_KEY` | Yes | -- | OpenAI API key for all LLM calls in the pipeline. |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Yes (unless using an IAM role) | -- | AWS credentials for Bedrock, the only LLM provider CViche supports. |
 | `CVICHE_LOCAL_STORAGE_DIR` | No | `web_interface/uploads/` | Override the default local storage directory for uploads and outputs. Only applies when `CVICHE_STORAGE_BACKEND=local`. |
 
 ### TLS termination in production
@@ -173,7 +173,7 @@ The container's network exposure must be restricted to the LB only (security-gro
 For the full contract the LB must honor and a go-live checklist, see [docs/PRODUCTION_TLS.md](../docs/PRODUCTION_TLS.md).
 ### Secrets in production
 
-The variables above marked "Yes (prod)" plus `OPENAI_API_KEY` are secrets and must not be committed, baked into the image, or passed on the command line. AWS credentials should come from IRSA, not static `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
+The variables above marked "Yes (prod)" are secrets and must not be committed, baked into the image, or passed on the command line. AWS credentials should come from IRSA, not static `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
 
 For the provisioning pattern (External Secrets Operator + AWS Secrets Manager on EKS, `.env` on a VM), the IRSA trust policy and IAM policy templates, the bucket policy, and a verification checklist, see [docs/PRODUCTION_SECRETS.md](../docs/PRODUCTION_SECRETS.md). `auth_config.yaml` provisioning is documented separately in the root [README](../README.md).
 
@@ -189,11 +189,7 @@ CViche uses MariaDB with the `utf8mb4` character set. Create the database:
 mysql -u root -e "CREATE DATABASE IF NOT EXISTS cviche CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
 ```
 
-For production, use a managed MariaDB instance and set `CVICHE_DATABASE_URL` accordingly:
-
-```
-mysql+pymysql://cviche_user:PASSWORD@mariadb-host:3306/cviche
-```
+For production, use a managed MariaDB instance and set `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER` accordingly (`app/database.py` via `app/database_factory.py:create_cviche_engine`; defaults to RDS IAM auth, no password needed). See [docs/PRODUCTION_SECRETS.md](../docs/PRODUCTION_SECRETS.md) for provisioning patterns.
 
 For backup configuration, snapshot retention, point-in-time recovery, and the restore runbook, see [docs/PRODUCTION_BACKUPS.md](../docs/PRODUCTION_BACKUPS.md). That doc also covers S3 versioning and the (currently fragile) prompt-log persistence story.
 
@@ -437,7 +433,6 @@ Full Swagger documentation is available at `http://localhost:8000/docs` when the
 | `GET` | `/api/runs?offset=0&limit=20` | Yes | Paginated list of runs for the current user, most recent first. |
 | `GET` | `/api/run/{run_id}/status` | Yes | Run status with all step details (status, duration, cost, output files). |
 | `POST` | `/api/run/{run_id}/start` | Yes | Start pipeline execution for a created run. |
-| `POST` | `/api/run/{run_id}/pause` | Yes | Pause a running pipeline. |
 | `POST` | `/api/run/{run_id}/cancel` | Yes | Cancel a running pipeline. |
 | `POST` | `/api/run/{run_id}/restart` | Yes | Create a new run using the same uploaded file. Inherits submission type. |
 | `POST` | `/api/run/{run_id}/retry/{step_number}` | Yes | Retry a failed step. |
@@ -662,7 +657,7 @@ web_interface/
 **Fix:**
 1. Verify MariaDB is running: `mysql -u root -e "SELECT 1"`
 2. Verify the database exists: `mysql -u root -e "SHOW DATABASES LIKE 'cviche'"`
-3. Check `CVICHE_DATABASE_URL` is correct. The format is: `mysql+pymysql://user:password@host:port/database`
+3. Check `DB_HOST`/`DB_PORT`/`DB_NAME`/`DB_USER` are correct (there is no connection-string form; `app/database.py` reads these four individually).
 4. In Docker, ensure the `db` service is healthy before the backend starts (docker-compose handles this via `depends_on` with health check).
 
 ### Alembic migration fails
@@ -688,7 +683,7 @@ web_interface/
 
 **Cause:** Varies by stage. Common issues:
 
-- **Stage 1a (Hierarchy Extraction):** OpenAI API timeout or rate limit. Check `OPENAI_API_KEY` is valid and has sufficient quota.
+- **Stage 1a (Hierarchy Extraction):** Bedrock timeout or throttling. Check AWS credentials are valid and Bedrock model access is enabled for the configured model/region.
 - **Stage 2 (Entry Extraction):** Corrupt or password-protected document. Try converting to .docx first.
 - **Stages 3a/3b (Taxonomy Mapping):** LLM response parsing error. Check step logs for the raw LLM response.
 - **Stage 4 (Field Extraction):** Token limit exceeded for very large CVs. The step logs will show a `finish_reason: length` warning.

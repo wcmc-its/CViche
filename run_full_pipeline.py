@@ -97,6 +97,7 @@ from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
+from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
 
 logger = logging.getLogger(__name__)
 # "__main__" when this file is run as the CLI, "run_full_pipeline" when a test
@@ -187,6 +188,10 @@ def configure_cli_logging() -> None:
 _COMPOSITE_STAGE = '3'
 # Nothing runs after stage 6, so its failure notice does not promise to continue.
 _FINAL_STAGE = '6'
+
+#: Root the stage_* output dirs (and the #745 stage-error record) live under,
+#: relative to the repo root the CLI runs from.
+_OUTPUTS_ROOT = Path('src/unified_pipeline/outputs')
 # The only stages that open the source document. Everything else works from the
 # JSON artifacts an earlier run left behind -- including stage 4, which reads
 # Path(docx_path).stem and never the file -- so a standalone --stage rerun of
@@ -334,7 +339,7 @@ def get_output_paths(document_uid: str) -> dict[str, Path]:
     Those five modules name their output from the ``document_uid`` carried in
     their input JSON, which every stage propagates unchanged from stage 1a.
     """
-    base = Path('src/unified_pipeline/outputs')
+    base = _OUTPUTS_ROOT
     return {
         '1a': base / 'stage_1a_segmentation' / f'{document_uid}_segmented.json',
         '1b': base / 'stage_1b_hierarchy_mapping' / f'{document_uid}_hierarchy_mapped.json',
@@ -550,6 +555,21 @@ def _skipped(stage: str, requirement: str) -> StageResult:
     return StageResult(stage=stage, skipped_reason=f"{requirement} required")
 
 
+def _record_stage_outcome(document_uid: str, stage: str, error: StageError | None) -> None:
+    """Write (or, on success, clear) ``stage``'s entry in the stage-error record
+    quality_score reads for its fatal gate (#745).
+
+    Failing to write it must neither turn a clean stage into a failure nor mask
+    the stage's own exception, which run_stage has already logged and recorded
+    in the summary -- so the write failure is logged with its traceback and the
+    run carries on, the CLI's documented continue-on-error behaviour.
+    """
+    try:
+        record_stage_outcome(stage_errors_path(_OUTPUTS_ROOT, document_uid), stage, error)
+    except (OSError, ValueError):
+        logger.exception("Could not update the stage-error record for stage %s", stage)
+
+
 def run_stage(ctx: PipelineContext, stage: str,
               fn: Callable[[PipelineContext], StageResult]) -> StageResult:
     """Run one stage inside the pipeline's single failure boundary.
@@ -560,6 +580,7 @@ def run_stage(ctx: PipelineContext, stage: str,
     so no summary printed and failed_stages() never ran.
     """
     start = time.perf_counter()
+    stage_error: StageError | None = None
     try:
         result = fn(ctx)
     except Exception as e:
@@ -571,7 +592,10 @@ def run_stage(ctx: PipelineContext, stage: str,
         if stage != _FINAL_STAGE:
             logger.warning("  Continuing with remaining stages...")
         result = StageResult(stage=stage, error=f"{type(e).__name__}: {e}")
+        stage_error = StageError.from_exception(stage, e)
     result = replace(result, duration_seconds=time.perf_counter() - start)
+    if stage_error is not None or result.succeeded:
+        _record_stage_outcome(ctx.document_uid, stage, stage_error)
     if result.succeeded:
         logger.info("  Time: %s", format_duration(result.duration_seconds))
     logger.info("")

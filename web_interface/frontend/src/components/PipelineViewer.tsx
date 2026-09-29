@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, XCircle, AlertCircle, CheckCircle2, Download, LifeBuoy } from 'lucide-react'
 import { getRunDataJson, cancelRun, restartRun, retryStep, startRun } from '../api/runs'
 import { runRoutes } from '../api/routes'
-import { formatCost } from '../utils'
+import { formatCost, runningStepCost } from '../utils'
 import { usePipelineRun } from '../hooks/usePipelineRun'
 
 import PipelineHeader from './PipelineHeader'
@@ -30,7 +30,7 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   '4': 'Extracts structured fields from entries: authors, titles, journals, DOIs, grant numbers, institutions, dates. Also infers CV owner location from employment/education history for geographic scope classification.',
   '4.5': 'Generates a biosketch-style M1 research summary statement analyzing your CV content.',
   '5': 'Enriches publications with PubMed metadata: full author lists, MeSH terms, publication types, abstracts, PMCIDs.',
-  '5b': 'Adds institution location data (city, state, country) via batched LLM lookups, using CV owner context for disambiguation. Applies to education (B1, B2), training (C, C1, C2), and position (D1, D2, D3) entries.',
+  '5b': 'Adds institution location data (city, state, country) via batched LLM lookups, using CV owner context for disambiguation. Applies to education (B1, B2), training (C, C1, C2, C3), and position (D1, D2, D3) entries.',
   '5c': 'Reformats teaching entries (K-codes) into a consistent, readable format.',
   '5d': 'Reformats non-enriched citations to Vancouver bibliographic format.',
   '6': 'Generates the final WCM-formatted Word document with all sections filled by taxonomy code. Routes presentations and service activities to Regional/National/International tables based on inferred CV owner location.',
@@ -90,17 +90,6 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const logsEndRef = useRef<HTMLDivElement>(null)
   const [cvInsights, setCvInsights] = useState<any>(null)
 
-  // Explicit user page exit protection alert interceptor
-  useEffect(() => {
-    if (runStatus?.status !== 'running') return
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault()
-      e.returnValue = ''
-    }
-    window.addEventListener('beforeunload', handleBeforeUnload)
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
-  }, [runStatus?.status])
-
   // Automatic target window scroll tracker targeting live user context feedback triggers
   useEffect(() => {
     if (window.location.hash === '#feedback' && runStatus?.status === 'complete') {
@@ -111,6 +100,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
       return () => clearTimeout(timer)
     }
   }, [runStatus?.status])
+
+  const runningStep = runStatus?.steps.find((s) => s.status === 'running')
+  const runningStepProgress = runningStep ? stepProgress[runningStep.step_number] : undefined
 
   // Pure data derived state execution calculation — maps linear updates instantly on changes
   const calculateProgress = useCallback(() => {
@@ -388,6 +380,19 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           </div>
           <span className="text-sm font-semibold text-gray-900 min-w-[50px] text-right">{displayProgress}%</span>
         </div>
+        <div className="mt-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-sm text-gray-600">
+          <span>
+            {runningStep && (
+              <>
+                {runningStep.step_name}
+                {runningStepProgress && runningStepProgress.total > 0 && (
+                  <>: {runningStepProgress.current} of {runningStepProgress.total}</>
+                )}
+              </>
+            )}
+          </span>
+          <span>You can close this page. Processing continues, and the result will be in your Run History.</span>
+        </div>
       </div>
 
       <div className="flex flex-col md:flex-row max-w-full">
@@ -406,7 +411,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                   <span className="hidden md:inline">·</span>
                   <span>Duration: <strong>{currentStepData.status === 'running' && stepStartTimes[currentStep] ? `${Math.floor((Date.now() - stepStartTimes[currentStep]) / 1000)}s` : currentStepData.duration_seconds ? `${currentStepData.duration_seconds}s` : '—'}</strong></span>
                   <span className="hidden md:inline">·</span>
-                  <span>Cost: <strong>{currentStepData.status === 'running' ? formatCost((runStatus.total_cost || 0) - (stepStartCosts[currentStep] || 0), 3) : formatCost(currentStepData.cost, 3)}</strong></span>
+                  <span>Cost: <strong>{currentStepData.status === 'running' ? formatCost(runningStepCost(runStatus.total_cost, stepStartCosts[currentStep]), 3) : formatCost(currentStepData.cost, 3)}</strong></span>
                 </div>
 
                 {currentStepData.status === 'running' && stepProgress[currentStep] && stepProgress[currentStep].total > 0 && (

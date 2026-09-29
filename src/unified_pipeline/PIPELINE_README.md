@@ -84,9 +84,6 @@ python3 run_full_pipeline.py data/sample_cvs/word/2015_Wende.docx
 # Run specific stage only
 python3 run_full_pipeline.py 2015_Wende --stage 4
 
-# Run with different model
-python3 run_full_pipeline.py 2015_Wende --model gpt-4o-mini
-
 # Run Stage 5: PubMed Enrichment
 python3 stage_5_pubmed_enrichment.py 2015_Wende
 

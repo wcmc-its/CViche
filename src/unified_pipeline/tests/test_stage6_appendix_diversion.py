@@ -712,3 +712,23 @@ def test_declined_grant_entries_reset_between_renders(tmp_path):
     assert not any(w["code"] == "M2A" for w in _diversion_warnings(sidecar2))
     assert all("SPARSE_M2A_TOKEN" not in p.text for p in doc2.paragraphs)
     assert _appendix_numbered_lines(doc2) == []
+
+
+def test_quarantined_invalid_code_is_reported_as_invalid_code_not_no_render_route():
+    # #651: stage 4 re-codes an unrecognized code to T with a marker. Stage 6
+    # must say "invalid code", and keep it apart from an ordinary unrouted T.
+    from unified_pipeline.stage6.sections.appendix import REASON_INVALID_CODE
+    written = [
+        {"taxonomy_code": "T", "taxonomy_code_quarantine_reason": "invalid_taxonomy_code",
+         "original_taxonomy_code": "ZZ9"},
+        {"taxonomy_code": "T", "taxonomy_code_quarantine_reason": "invalid_taxonomy_code"},
+        {"taxonomy_code": "T"},
+    ]
+    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+    got = {(w["code"], w["reason"]): w for w in warnings}
+    assert set(got) == {("T", REASON_INVALID_CODE), ("T", REASON_NO_RENDER_ROUTE)}
+    invalid = got[("T", REASON_INVALID_CODE)]
+    assert invalid["count"] == 2
+    assert "not a valid taxonomy code" in invalid["message"]
+    assert invalid["evidence"] == []
+    assert got[("T", REASON_NO_RENDER_ROUTE)]["count"] == 1

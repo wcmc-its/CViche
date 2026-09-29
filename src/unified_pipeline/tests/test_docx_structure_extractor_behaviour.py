@@ -19,7 +19,7 @@ Document()/add_paragraph/add_table and saved to tmp_path only where a real
 path is required (extract_unified_elements / extract_docx_structure take a
 path, not a Document).
 
-Untestable: main() (argparse + sys.exit + file I/O side effects) and the
+Untestable: the
 `if __name__ == '__main__'` guard -- no network/corpus fixture is available
 and covering it would only re-test print()/json.dump plumbing already
 exercised indirectly through extract_docx_structure/create_simplified_layout_json.
@@ -27,6 +27,7 @@ exercised indirectly through extract_docx_structure/create_simplified_layout_jso
     python3 -m pytest src/unified_pipeline/tests/test_docx_structure_extractor_behaviour.py -p no:cacheprovider
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -44,6 +45,8 @@ from docx.shared import Inches, Pt  # noqa: E402
 
 from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     _is_date_column,
+    _fold_orphan_date_tail,
+    _is_date_only_text,
     create_simplified_layout_json,
     extract_docx_structure,
     extract_paragraph_metadata,
@@ -421,6 +424,48 @@ def test_split_merged_cells_two_line_aligned_cells_not_split():
     ]
 
     assert split_merged_cells_in_row(row, min_chars=50, min_newlines=2) == [row]
+
+
+def _all_lines(rows):
+    return sorted(
+        line.strip() for r in rows for c in r for line in c["text"].split("\n") if line.strip()
+    )
+
+
+def test_split_merged_cells_date_column_never_drops_surplus_lines_612():
+    # #612 shape (invented text): cell 0 holds a blank paragraph, so the \n\n
+    # pass claims max_splits=2 from cell 0 alone; the aligned-line pass never
+    # runs. The 4-line title cell is unsplit and the 4-line date cell is
+    # distributed by the date-column fallback, which used to emit only the
+    # first max_splits (2) dates and drop the other two.
+    row = [
+        {"text": "Alpha unit one\nAlpha unit two\n\nAlpha unit three", "row": 0, "col": 0},
+        {"text": "Rank A\nRank B\nRank C\nRank D", "row": 0, "col": 1},
+        {"text": "2011 - Present\n2009 - 2011\n2007 - 2009\n2000 - Present", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert _all_lines(out) == _all_lines([row])
+    assert [r[2]["text"] for r in out] == [
+        "2011 - Present",
+        "2009 - 2011\n2007 - 2009\n2000 - Present",
+    ]
+
+
+def test_split_merged_cells_aligned_date_column_longer_than_target_keeps_surplus_612():
+    # Aligned-line pass (two 3-line cells => target 3) beside a 4-line date
+    # column: the old `padded_lines[:target_count]` truncation dropped line 4.
+    row = [
+        {"text": "a\nb\nc", "row": 0, "col": 0},
+        {"text": "d\ne\nf", "row": 0, "col": 1},
+        {"text": "2001\n2002\n2003\n2004", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert _all_lines(out) == _all_lines([row])
+    assert [r[2]["text"] for r in out] == ["2001", "2002", "2003\n2004"]
 
 
 # --------------------------------------------------------------------------
@@ -886,6 +931,394 @@ def test_extract_unified_elements_scans_table_rows_for_subheaders(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# extract_unified_elements -- pre-LLM DOB/SSN value scrub (#847)
+# --------------------------------------------------------------------------
+
+
+def test_extract_unified_elements_scrubs_dob_and_ssn_values(tmp_path):
+    # Positive cases, all SYNTHETIC: a colon DOB, a colonless DOB, an SSN,
+    # and a DOB label+value that sits inside a single table cell -- every
+    # one keeps its label text and only the value is replaced.
+    doc = Document()
+    doc.add_paragraph("Date of Birth: 01/02/1970")
+    doc.add_paragraph("Born on 05/06/1975 in Example City")
+    doc.add_paragraph("SSN: 123-45-6789")
+    table = doc.add_table(rows=1, cols=1)
+    table.cell(0, 0).text = "Date of Birth: 03/04/1980"
+    docx_path = tmp_path / "pre_llm_scrub_positive.docx"
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+    elements = result["elements"]
+
+    texts = [e["text"] for e in elements]
+    assert texts == [
+        "Date of Birth: [withheld]",
+        "Born on [withheld] in Example City",
+        "SSN: [withheld]",
+        "Date of Birth: [withheld]",
+    ]
+    # No value digit survives in any scrubbed element.
+    for t in texts:
+        assert not any(c.isdigit() for c in t)
+
+
+def test_extract_unified_elements_scrubs_dob_and_ssn_in_table_cells(tmp_path):
+    # Round 2 (#847): a 3-COLUMN table, unlike the single-column table
+    # above (which the extractor EXPLODES into paragraph elements, never
+    # exercising the "data" cell loop at all -- the earlier, single-column
+    # fixture made the "skip table cells" mutant survive). This fixture
+    # asserts on `element["data"]` cell text directly, which is what
+    # stage 2 actually reads (`cell.get("text")`), plus a label-cell /
+    # value-cell pair on its own row.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).text = "Note"
+    table.cell(0, 1).text = "SSN: 123-45-6789"
+    table.cell(0, 2).text = "Other"
+    table.cell(1, 0).text = "Date of Birth:"
+    table.cell(1, 1).text = "01/02/1970"
+    table.cell(1, 2).text = "Unrelated"
+    docx_path = tmp_path / "pre_llm_scrub_table_cells.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    table_elements = [e for e in elements if e.get("data")]
+    assert table_elements, "fixture must produce at least one element with cell data"
+
+    all_cell_texts = [
+        cell.get("text", "") if isinstance(cell, dict) else str(cell)
+        for el in table_elements
+        for row in el["data"]
+        for cell in row
+    ]
+    assert "Note" in all_cell_texts
+    assert "Other" in all_cell_texts
+    assert "Unrelated" in all_cell_texts
+    assert "SSN: [withheld]" in all_cell_texts
+    assert "Date of Birth:" in all_cell_texts
+    assert "[withheld]" in all_cell_texts
+    # No raw value survives anywhere in the cell data.
+    assert not any("123-45-6789" in t or "01/02/1970" in t for t in all_cell_texts)
+
+
+def test_extract_unified_elements_pre_llm_scrub_leaves_other_text_untouched(tmp_path):
+    # Negative cases: nothing that merely LOOKS numeric or date-adjacent,
+    # without a DOB/SSN label or shape, is touched -- and element count and
+    # every non-matching element's text are unchanged.
+    doc = Document()
+    doc.add_paragraph("Publications:")
+    doc.add_paragraph("Smith J. Date: 2015. A study of examples.")
+    doc.add_paragraph("Grant number R01-CA123456 funded 1999.")
+    doc.add_paragraph("Reference number 123456789 on file.")
+    docx_path = tmp_path / "pre_llm_scrub_negative.docx"
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+    texts = [e["text"] for e in result["elements"]]
+
+    assert texts == [
+        "Publications:",
+        "Smith J. Date: 2015. A study of examples.",
+        "Grant number R01-CA123456 funded 1999.",
+        "Reference number 123456789 on file.",
+    ]
+    assert result["meta"]["num_elements"] == 4
+
+
+def test_extract_unified_elements_pre_llm_scrub_element_count_unchanged(tmp_path):
+    # Scrubbing a value must never add or remove an element -- stage 2's
+    # element indices depend on the count and order staying identical.
+    docx_path = tmp_path / "unified_fixture_for_count.docx"
+    _build_unified_fixture_docx(docx_path)
+    baseline_count = len(extract_unified_elements(str(docx_path))["elements"])
+
+    doc = Document(str(docx_path))
+    doc.add_paragraph("Date of Birth: 01/02/1970")
+    doc.add_paragraph("SSN: 123-45-6789")
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+    assert len(result["elements"]) == baseline_count + 2
+    assert [e["unified_idx"] for e in result["elements"]] == list(
+        range(len(result["elements"]))
+    )
+
+
+def test_extract_unified_elements_pre_llm_scrub_is_idempotent(tmp_path):
+    # An already-scrubbed value (e.g. a doc round-tripped through a prior
+    # run) has no digits left to find, so a second extraction is a no-op.
+    doc = Document()
+    doc.add_paragraph("Date of Birth: [withheld]")
+    docx_path = tmp_path / "already_scrubbed.docx"
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+    assert result["elements"][0]["text"] == "Date of Birth: [withheld]"
+
+
+def test_extract_unified_elements_scrubs_dob_in_the_cell_below_a_label(tmp_path):
+    # Round 3 (#847 residual): a two-row FORM table -- a label row, its
+    # value directly BELOW it in the same column, not beside it in the
+    # same row. Two columns (not one), so the table is NOT exploded into
+    # paragraph elements and this actually exercises `data`'s row grid.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Date of Birth:"
+    table.cell(0, 1).text = "Note"
+    table.cell(1, 0).text = "01/02/1970"
+    table.cell(1, 1).text = "Unrelated"
+    docx_path = tmp_path / "pre_llm_scrub_cell_below.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    table_elements = [e for e in elements if e.get("data")]
+    all_cell_texts = [
+        cell.get("text", "") if isinstance(cell, dict) else str(cell)
+        for el in table_elements
+        for row in el["data"]
+        for cell in row
+    ]
+    assert "Date of Birth:" in all_cell_texts
+    assert "Note" in all_cell_texts
+    assert "Unrelated" in all_cell_texts
+    assert "[withheld]" in all_cell_texts
+    assert not any("01/02/1970" in t for t in all_cell_texts)
+
+
+def test_extract_unified_elements_leaves_the_cell_below_a_non_dob_label_alone(tmp_path):
+    # Negative control: the label row's OWN value is not a bare label ("Note"
+    # has no colon), so `pre_llm_bare_label_category` never fires and the
+    # cell below is untouched -- an ordinary two-row table is not affected.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Note"
+    table.cell(0, 1).text = "Year"
+    table.cell(1, 0).text = "See below"
+    table.cell(1, 1).text = "1970"
+    docx_path = tmp_path / "pre_llm_scrub_cell_below_negative.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    all_cell_texts = [
+        cell.get("text", "") if isinstance(cell, dict) else str(cell)
+        for el in elements if el.get("data")
+        for row in el["data"]
+        for cell in row
+    ]
+    assert "1970" in all_cell_texts
+
+
+def test_extract_unified_elements_scrubs_dob_in_the_next_paragraph(tmp_path):
+    # Round 3 (#847 residual): a label-only paragraph ("Date of Birth:")
+    # with its value as the NEXT paragraph in the unified stream, not on
+    # the same line -- `redact_pre_llm_values`'s in-text lookahead cannot
+    # see across a paragraph boundary, only within one string.
+    doc = Document()
+    doc.add_paragraph("Date of Birth:")
+    doc.add_paragraph("01/02/1970")
+    doc.add_paragraph("SSN:")
+    doc.add_paragraph("123-45-6789")
+    docx_path = tmp_path / "pre_llm_scrub_next_paragraph.docx"
+    doc.save(str(docx_path))
+
+    texts = [e["text"] for e in extract_unified_elements(str(docx_path))["elements"]]
+    assert texts == [
+        "Date of Birth:",
+        "[withheld]",
+        "SSN:",
+        "[withheld]",
+    ]
+
+
+def test_extract_unified_elements_leaves_the_next_paragraph_alone_when_label_has_no_colon(tmp_path):
+    # Negative control: "Education" is not a bare DOB/SSN label (no colon,
+    # no match), so the following paragraph -- which happens to start with
+    # a year -- is left untouched.
+    doc = Document()
+    doc.add_paragraph("Education")
+    doc.add_paragraph("2010 - MD, Example University")
+    docx_path = tmp_path / "pre_llm_scrub_next_paragraph_negative.docx"
+    doc.save(str(docx_path))
+
+    texts = [e["text"] for e in extract_unified_elements(str(docx_path))["elements"]]
+    assert texts == ["Education", "2010 - MD, Example University"]
+
+
+def test_extract_unified_elements_next_paragraph_scrub_element_count_unchanged(tmp_path):
+    docx_path = tmp_path / "unified_fixture_for_count_next_para.docx"
+    _build_unified_fixture_docx(docx_path)
+    baseline_count = len(extract_unified_elements(str(docx_path))["elements"])
+
+    doc = Document(str(docx_path))
+    doc.add_paragraph("Date of Birth:")
+    doc.add_paragraph("01/02/1970")
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+    assert len(result["elements"]) == baseline_count + 2
+    assert [e["unified_idx"] for e in result["elements"]] == list(
+        range(len(result["elements"]))
+    )
+
+
+def test_extract_text_from_docx_carries_the_pre_llm_scrub(tmp_path):
+    # Stage 1a's chunk builder reads extract_text_from_docx, which wraps
+    # extract_unified_elements -- confirm the scrub survives that wrapper,
+    # since it is one of stage 1a/1b/2's three callers (#847 scout Q1).
+    try:
+        from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
+            extract_text_from_docx,
+        )
+    except ImportError:
+        pytest.skip("chunked_chat_hierarchy_extractor not importable in this env")
+
+    doc = Document()
+    doc.add_paragraph("Date of Birth: 01/02/1970")
+    docx_path = tmp_path / "stage1a_scrub.docx"
+    doc.save(str(docx_path))
+
+    lines = extract_text_from_docx(str(docx_path))
+    assert lines == ["Date of Birth: [withheld]"]
+
+
+def test_extract_text_from_docx_carries_the_cell_below_scrub(tmp_path):
+    # Reader-level regression (#847 residual round 4): a two-row FORM
+    # table's pre-LLM scrub (_scrub_pre_llm_pii_column) used to update only
+    # the below-cell's OWN `data["text"]`, never the table element's
+    # pre-flattened `text` field -- the field stage 1a's chunk builder
+    # (extract_text_from_docx, wrapping extract_unified_elements) actually
+    # reads. The raw DOB survived here even though `data` was clean.
+    try:
+        from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
+            extract_text_from_docx,
+        )
+    except ImportError:
+        pytest.skip("chunked_chat_hierarchy_extractor not importable in this env")
+
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Date of Birth:"
+    table.cell(0, 1).text = "Note"
+    table.cell(1, 0).text = "01/02/1970"
+    table.cell(1, 1).text = "Unrelated"
+    docx_path = tmp_path / "stage1a_scrub_cell_below.docx"
+    doc.save(str(docx_path))
+
+    lines = extract_text_from_docx(str(docx_path))
+    assert len(lines) == 1
+    assert "01/02/1970" not in lines[0]
+    assert "[withheld]" in lines[0]
+    # ...and the same element's per-cell `data` (get_element_text's reader).
+    table_element = next(e for e in extract_unified_elements(str(docx_path))["elements"] if e.get("data"))
+    assert not any("01/02/1970" in c["text"] for row in table_element["data"] for c in row)
+
+
+def test_extract_unified_elements_scrubs_every_child_date_under_a_children_label(tmp_path):
+    # #847 residual round 4: redact_pre_llm_values used to take only the
+    # FIRST value match inside a label's span -- a "Children:" line naming
+    # more than one child's date left every date after the first one
+    # reaching the LLM unscrubbed.
+    doc = Document()
+    doc.add_paragraph("Children: Ann (01/02/2010), Bob (03/04/2012), Cy (05/06/2014)")
+    docx_path = tmp_path / "pre_llm_scrub_multiple_children.docx"
+    doc.save(str(docx_path))
+
+    texts = [e["text"] for e in extract_unified_elements(str(docx_path))["elements"]]
+    assert texts == ["Children: Ann ([withheld]), Bob ([withheld]), Cy ([withheld])"]
+
+
+def test_extract_unified_elements_cell_below_scrub_skips_a_row_already_resolved(tmp_path):
+    # Negative control (#847 residual round 4): the label's OWN row already
+    # carries its value beside it ("Date of Birth:" | "01/02/1970"), so
+    # `_scrub_pre_llm_pii_row` already withholds it same-row. The row BELOW
+    # is an unrelated field ("Appointed 2001") and must be left alone --
+    # without the same-row guard this used to become "Appointed [withheld]".
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Date of Birth:"
+    table.cell(0, 1).text = "01/02/1970"
+    table.cell(1, 0).text = "Appointed 2001"
+    table.cell(1, 1).text = "Note"
+    docx_path = tmp_path / "pre_llm_scrub_cell_below_row_resolved.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    all_cell_texts = [
+        cell.get("text", "") if isinstance(cell, dict) else str(cell)
+        for el in elements if el.get("data")
+        for row in el["data"]
+        for cell in row
+    ]
+    assert "Appointed 2001" in all_cell_texts
+
+
+def test_extract_unified_elements_cell_below_scrub_skips_a_row_already_resolved_full_date(tmp_path):
+    # Same negative control as above, but the cell below OPENS with a whole
+    # date ("03/04/1999"), so the cross-boundary shape check alone would
+    # take it; only the same-row-resolved guard blocks it.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Date of Birth:"
+    table.cell(0, 1).text = "01/02/1970"
+    table.cell(1, 0).text = "03/04/1999"
+    table.cell(1, 1).text = "Note"
+    docx_path = tmp_path / "pre_llm_scrub_cell_below_row_resolved_full_date.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    all_cell_texts = [
+        cell.get("text", "") if isinstance(cell, dict) else str(cell)
+        for el in elements if el.get("data")
+        for row in el["data"]
+        for cell in row
+    ]
+    assert "03/04/1999" in all_cell_texts
+
+
+def test_extract_unified_elements_next_paragraph_scrub_leaves_an_unrelated_year_range_alone(tmp_path):
+    # Negative control (#847 residual round 4): a blank "Date of Birth:"
+    # label paragraph followed by an unrelated education line starting
+    # with a bare year -- the bare-year fallback in the DOB value shape
+    # must not fire at this lower-confidence, cross-paragraph position
+    # (it used to turn "1990-1994 BA, Example College" into
+    # "[withheld]-1994 BA, Example College").
+    doc = Document()
+    doc.add_paragraph("Date of Birth:")
+    doc.add_paragraph("1990-1994 BA, Example College")
+    docx_path = tmp_path / "pre_llm_scrub_next_paragraph_year_range.docx"
+    doc.save(str(docx_path))
+
+    texts = [e["text"] for e in extract_unified_elements(str(docx_path))["elements"]]
+    assert texts == ["Date of Birth:", "1990-1994 BA, Example College"]
+
+
+def test_extract_unified_elements_cell_below_scrub_leaves_a_bare_year_alone(tmp_path):
+    # Negative control (#847 residual round 4): the label's own row has NO
+    # value beside it (so the same-row-resolved guard does not apply), and
+    # the cell below is a BARE year, not a whole date -- the cell-below
+    # scrub must require a full date at this cross-boundary position, same
+    # as the next-paragraph case above.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Date of Birth:"
+    table.cell(0, 1).text = "Note"
+    table.cell(1, 0).text = "2001"
+    table.cell(1, 1).text = "Unrelated"
+    docx_path = tmp_path / "pre_llm_scrub_cell_below_bare_year.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    all_cell_texts = [
+        cell.get("text", "") if isinstance(cell, dict) else str(cell)
+        for el in elements if el.get("data")
+        for row in el["data"]
+        for cell in row
+    ]
+    assert "2001" in all_cell_texts
+
+
+# --------------------------------------------------------------------------
 # extract_docx_structure
 # --------------------------------------------------------------------------
 
@@ -1018,3 +1451,402 @@ def test_create_simplified_layout_json_table_preview_is_first_row():
     assert table_elem["rows"] == 2
     assert table_elem["cols"] == 2
     assert table_elem["preview"] == [{"text": "R0C0"}, {"text": "R0C1"}]
+
+
+def _reader_view(docx_path):
+    """(element text, per-cell data) for every element, plus the
+    extract_text_from_docx lines -- both fields an LLM reader can see."""
+    from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
+        extract_text_from_docx,
+    )
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    view = [(e.get("text", ""), [[c.get("text", "") for c in row] for row in e.get("data") or []])
+            for e in elements]
+    return view, extract_text_from_docx(str(docx_path))
+
+
+# #847 residual: a blank "Date of Birth:" label never reaches into a next
+# paragraph or cell below that does not OPEN with its value. Each expected
+# view is origin/dev's output for the same synthetic docx.
+def test_next_paragraph_scrub_leaves_a_labelled_or_prose_date_alone(tmp_path):
+    for idx, following in enumerate(
+        ["Date of Appointment: 07/01/2005", "Appointed Assistant Professor 07/01/2005"]
+    ):
+        doc = Document()
+        doc.add_paragraph("Date of Birth:")
+        doc.add_paragraph(following)
+        docx_path = tmp_path / f"next_paragraph_control_{idx}.docx"
+        doc.save(str(docx_path))
+        assert _reader_view(docx_path) == (
+            [("Date of Birth:", []), (following, [])], ["Date of Birth:", following]
+        )
+
+
+@pytest.mark.parametrize("neighbour, below", [
+    ("", "Appointed 07/01/2005"),
+    ("Rank", "Date of Appointment: 07/01/2005"),
+])
+def test_cell_below_scrub_leaves_a_labelled_or_prose_date_alone(tmp_path, neighbour, below):
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    for (r, c), text in {(0, 0): "Date of Birth:", (0, 1): neighbour,
+                         (1, 0): below, (1, 1): "Dept"}.items():
+        table.cell(r, c).text = text
+    docx_path = tmp_path / "cell_below_control.docx"
+    doc.save(str(docx_path))
+    flat = f"Date of Birth: | {neighbour}".rstrip() + f"\n{below} | Dept"
+    assert _reader_view(docx_path) == (
+        [(flat, [["Date of Birth:", neighbour], [below, "Dept"]])], [flat]
+    )
+
+
+def test_next_element_scrub_reaches_only_the_first_cell_of_a_table(tmp_path):
+    doc = Document()
+    doc.add_paragraph("Date of Birth:")
+    table = doc.add_table(rows=2, cols=2)
+    for (r, c), text in {(0, 0): "Appointed 07/01/2005", (0, 1): "07/01/2005",
+                         (1, 0): "08/01/2010", (1, 1): "Promoted"}.items():
+        table.cell(r, c).text = text
+    docx_path = tmp_path / "next_element_table_control.docx"
+    doc.save(str(docx_path))
+    flat = "Appointed 07/01/2005 | 07/01/2005\n08/01/2010 | Promoted"
+    assert _reader_view(docx_path) == (
+        [("Date of Birth:", []),
+         (flat, [["Appointed 07/01/2005", "07/01/2005"], ["08/01/2010", "Promoted"]])],
+        ["Date of Birth:", flat],
+    )
+
+
+def test_next_element_scrub_takes_a_date_opening_a_table(tmp_path):
+    doc = Document()
+    doc.add_paragraph("Date of Birth:")
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "01/02/1970"
+    table.cell(0, 1).text = "03/04/1999"
+    docx_path = tmp_path / "next_element_table_positive.docx"
+    doc.save(str(docx_path))
+    flat = "[withheld] | 03/04/1999"
+    assert _reader_view(docx_path) == (
+        [("Date of Birth:", []), (flat, [["[withheld]", "03/04/1999"]])], ["Date of Birth:", flat]
+    )
+
+
+# #488: every table element's `text` is built with the same per-row join as the
+# stage-2 row entries (join_row_cells), so the #418 whole-table-parent dedup
+# finds the parent's lines in those rows.
+@pytest.mark.parametrize("header_rows", [
+    [],
+    [["Honors and Awards", ""]],
+    [["Honors and Awards", ""], ["Teaching", ""]],
+])
+def test_table_element_text_uses_the_stage2_row_join(tmp_path, header_rows):
+    body = [["Visiting Program\n- Training course", "Fictional City", "2024 to present"],
+            ["Another Entry", "Imaginary Place", "2020 to 2022"]]
+    rows = header_rows + body
+    doc = Document()
+    table = doc.add_table(rows=len(rows), cols=3)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            table.cell(r, c).text = text
+    docx_path = tmp_path / "row_join.docx"
+    doc.save(str(docx_path))
+
+    elements = [e for e in extract_unified_elements(str(docx_path))["elements"]
+                if e["type"] in ("table", "table_content")]
+    joined = "\n".join(e["text"] for e in elements)
+    assert "Visiting Program | Fictional City | 2024 to present\n- Training course" in joined
+    assert "Another Entry | Imaginary Place | 2020 to 2022" in joined
+
+
+# --------------------------------------------------------------------------
+# Orphan date rows (#259): a date column with more \n\n segments than the
+# name column must not leave bare-date rows, and a multi-column row must not
+# lose its date cell to the embedded-header branch.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    "May 2019", "07/2008 \u2013 06/2013", "October Issue 2025", "October 13, 2016",
+    "2024-2025", "08/2025 \u2013 Present", "Sept. 2019", "2020",
+])
+def test_is_date_only_text_accepts_date_expressions(text):
+    assert _is_date_only_text(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Johns Hopkins University, 1991",  # a year inside a name is not a date
+    "Award 1991", "May", "no digits here", "",
+])
+def test_is_date_only_text_rejects_text_with_words_or_no_year(text):
+    assert not _is_date_only_text(text)
+
+
+def test_split_merged_cells_folds_overflow_dates_into_last_named_row():
+    row = [
+        {"text": "Lecture Alpha\n\nLecture Beta", "row": 1, "col": 0},
+        {"text": "May 2019\n\nJune 2019\n\nJuly 2019\n\nAugust 2019", "row": 1, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert len(out) == 2
+    assert [c["text"] for c in out[0]] == ["Lecture Alpha", "May 2019"]
+    assert [c["text"] for c in out[1]] == [
+        "Lecture Beta", "June 2019\nJuly 2019\nAugust 2019",
+    ]
+    # Metadata of the anchor row survives the fold.
+    assert out[1][1]["row"] == 1 and out[1][1]["col"] == 1
+    # No row is a date on its own.
+    assert all(c["text"] for r in out for c in r[:1])
+
+
+def test_split_merged_cells_fold_leaves_tail_rows_that_are_not_pure_dates():
+    # The overflow row's date-column text ("To be determined") is not a date, so
+    # it is a real value and the tail is not folded.
+    row = [
+        {"text": "Lecture Alpha\n\nLecture Beta", "row": 0, "col": 0},
+        {"text": "May 2019\n\nJune 2019\n\nTo be determined", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Lecture Alpha", "May 2019"],
+        ["Lecture Beta", "June 2019"],
+        ["", "To be determined"],
+    ]
+
+
+def test_split_merged_cells_fold_keeps_overflow_row_with_a_non_date_cell_separate():
+    # 3 columns: the overflow row ['', 'July 2019', 'Room 3'] has a date in cell 1
+    # but real text ('Room 3') in cell 2, so it is not date-only and must stay
+    # its own row. Folding on "any cell is a date" would merge 'Room 3' into
+    # the anchor row.
+    row = [
+        {"text": "Lecture Alpha\n\nLecture Beta", "row": 0, "col": 0},
+        {"text": "May 2019\n\nJune 2019\n\nJuly 2019", "row": 0, "col": 1},
+        {"text": "Room 1\n\nRoom 2\n\nRoom 3", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Lecture Alpha", "May 2019", "Room 1"],
+        ["Lecture Beta", "June 2019", "Room 2"],
+        ["", "July 2019", "Room 3"],
+    ]
+
+
+def test_split_merged_cells_fold_does_not_touch_single_cell_rows():
+    # No blank sibling cell -> not an orphan date row, so "MBA" / "1998" stay
+    # two rows exactly as before.
+    row = [{"text": "MBA\n\n1998", "row": 0, "col": 0}]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [r[0]["text"] for r in out] == ["MBA", "1998"]
+
+
+def test_split_merged_cells_fold_keeps_role_held_over_two_stints_as_two_rows():
+    # #886: a single (unsplit) role cell beside a two-stint date cell is a
+    # deliberate continuation row -- its blank cell is not split padding, so the
+    # second date is not an orphan and must not be folded into the first.
+    row = [
+        {"text": "Research Fellow", "row": 0, "col": 0},
+        {"text": "2019-2020\n\n2021-2022", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Research Fellow", "2019-2020"], ["", "2021-2022"],
+    ]
+
+
+def test_fold_orphan_date_tail_needs_a_named_row_to_fold_into():
+    # Every row is date-only (blank cell 0 is split padding), so there is no
+    # anchor row: nothing to fold into, rows are returned as given.
+    rows = [
+        [{"text": "", "col": 0}, {"text": "2019", "col": 1}],
+        [{"text": "", "col": 0}, {"text": "2020", "col": 1}],
+    ]
+
+    assert _fold_orphan_date_tail(rows, {0}) == rows
+
+
+def test_fold_orphan_date_tail_into_an_empty_anchor_cell_adds_no_leading_newline():
+    rows = [
+        [{"text": "Lecture Alpha", "col": 0}, {"text": "", "col": 1}],
+        [{"text": "", "col": 0}, {"text": "2019", "col": 1}],
+        [{"text": "", "col": 0}, {"text": "2020", "col": 1}],
+    ]
+
+    out = _fold_orphan_date_tail(rows, {0})
+
+    assert out == [[{"text": "Lecture Alpha", "col": 0}, {"text": "2019\n2020", "col": 1}]]
+
+
+def test_extract_unified_elements_multicolumn_row_with_embedded_header_keeps_dates(tmp_path):
+    # Row 1's first cell holds several \n\n-separated activities, one of which
+    # ("Clinical Teaching") reads like a section header; its second cell holds the
+    # dates. The embedded-header branch used to emit only cell 0 and drop every
+    # date; the row must instead fall through to the merged-cell split.
+    doc = Document()
+    t = doc.add_table(rows=2, cols=2)
+    t.cell(0, 0).text = "Didactic Teaching"
+    t.cell(0, 1).text = "Dates"
+    t.cell(1, 0).text = (
+        "Lecturer, Anatomy Course, Example University, Example City\n\n"
+        "Clinical Teaching\nWeekly review of cases with residents\n\n"
+        "Course Director, Pathology Course, Example Medical Center, Example City"
+    )
+    t.cell(1, 1).text = "March 2011\n\nJune 2012\n\nOctober 2013"
+    docx_path = tmp_path / "embedded_header_multicol.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    content = " ".join(e["text"] for e in elements if e["type"] == "table_content")
+    for date in ("March 2011", "June 2012", "October 2013"):
+        assert date in content
+    assert "Lecturer, Anatomy Course" in content
+    # Judgement call (#259): a multi-column row no longer takes the embedded-header
+    # branch, so the embedded "Clinical Teaching" is NOT emitted as a table_header;
+    # it stays as text in a content row. Pinned so a change is deliberate.
+    headers = [e["text"] for e in elements if e["type"] == "table_header"]
+    assert "Clinical Teaching" not in headers
+    assert "Clinical Teaching" in content
+
+
+def test_extract_unified_elements_single_cell_embedded_header_still_splits(tmp_path):
+    # Guard is scoped to multi-column rows: single-content-cell rows keep the
+    # embedded-header behaviour (an embedded header becomes a table_header).
+    doc = Document()
+    t = doc.add_table(rows=2, cols=2)
+    t.cell(0, 0).text = "Research Summary"
+    t.cell(0, 1).text = ""
+    t.cell(1, 0).text = "Some prose about the work.\n\nEducation and Degrees\n2005 BS Example University"
+    t.cell(1, 1).text = ""
+    docx_path = tmp_path / "embedded_header_single.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    assert "Education and Degrees" in [e["text"] for e in elements if e["type"] == "table_header"]
+
+
+# --------------------------------------------------------------------------
+# Column-header row flag (#424). All text below is synthetic.
+# --------------------------------------------------------------------------
+
+
+def _two_row_table(header_cells, data_cells):
+    doc = Document()
+    table = doc.add_table(rows=2, cols=len(header_cells))
+    for col, text in enumerate(header_cells):
+        table.cell(0, col).text = text
+    for col, text in enumerate(data_cells):
+        table.cell(1, col).text = text
+    return doc, table
+
+
+def _mark_repeat_header(table, val=None):
+    attr = "" if val is None else f' w:val="{val}"'
+    tr_pr = table.rows[0]._tr.get_or_add_trPr()
+    tr_pr.append(parse_xml(f"<w:tblHeader {nsdecls('w')}{attr}/>"))
+
+
+def test_column_label_row_is_flagged_as_header_row():
+    _, table = _two_row_table(
+        ["Title", "Institution/Location", "Dates"], ["Example Role", "Example Org", "Example"]
+    )
+    assert extract_table_metadata(table, "t")["header_row"] is True
+
+
+def test_word_repeat_header_row_is_flagged_even_without_label_vocabulary():
+    _, table = _two_row_table(["Alpha", "Beta"], ["Gamma", "Delta"])
+    assert "header_row" not in extract_table_metadata(table, "t")
+    _mark_repeat_header(table)
+    assert extract_table_metadata(table, "t")["header_row"] is True
+
+
+def test_word_repeat_header_switched_off_is_not_a_header_marker():
+    _, table = _two_row_table(["Alpha", "Beta"], ["Gamma", "Delta"])
+    _mark_repeat_header(table, val="0")
+    assert "header_row" not in extract_table_metadata(table, "t")
+
+
+@pytest.mark.parametrize(
+    "header_cells",
+    [
+        ["Role", "Organization", "Dates 2019"],  # a digit means a record
+        ["Name:", "Example"],  # label|value form row: 50% vocabulary, still a value row
+        ["Title", ""],  # a single filled cell
+        ["Example Person", "Example Lab"],  # no label vocabulary
+    ],
+)
+def test_record_like_row_zero_is_not_flagged(header_cells):
+    _, table = _two_row_table(header_cells, ["x"] * len(header_cells))
+    assert "header_row" not in extract_table_metadata(table, "t")
+
+
+def test_two_word_committee_chair_row_zero_is_the_known_false_positive():
+    # 50% column-label vocabulary, two filled cells, no digit: flagged. The same
+    # residual class #736's appendix filter documents; pinned so a change to
+    # the rule is visible.
+    _, table = _two_row_table(["Committee", "Chair"], ["x", "y"])
+    assert extract_table_metadata(table, "t")["header_row"] is True
+
+
+def test_one_row_table_is_never_flagged():
+    doc = Document()
+    table = doc.add_table(rows=1, cols=3)
+    for col, text in enumerate(["Title", "Institution", "Dates"]):
+        table.cell(0, col).text = text
+    assert "header_row" not in extract_table_metadata(table, "t")
+
+
+def test_unified_no_header_table_keeps_flagged_row_zero_unsplit_and_marked(tmp_path):
+    # Row 0 would split on "\n\n" as a data row; flagged, it stays one row at
+    # index 0 so stage 2's skip lands on it. The element carries the flag.
+    doc = Document()
+    t = doc.add_table(rows=2, cols=2)
+    t.cell(0, 0).text = "Title\n\nInstitution"
+    t.cell(0, 1).text = "Dates\n\nLocation"
+    t.cell(1, 0).text = "Example Award"
+    t.cell(1, 1).text = "Example Org"
+    path = tmp_path / "flagged.docx"
+    doc.save(str(path))
+
+    elements = extract_unified_elements(str(path))["elements"]
+
+    assert [e["type"] for e in elements] == ["table"]
+    assert elements[0]["header_row"] is True
+    assert elements[0]["rows"] == 2
+    assert [c["text"] for c in elements[0]["data"][0]] == ["Title\n\nInstitution", "Dates\n\nLocation"]
+
+
+def test_unified_unflagged_table_element_has_no_header_row_key(tmp_path):
+    docx_path = tmp_path / "unified_fixture.docx"
+    _build_unified_fixture_docx(docx_path)
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    assert all("header_row" not in e for e in elements)
+
+
+def test_main_writes_both_json_files_as_readable_utf8(tmp_path, monkeypatch):
+    from unified_pipeline.core import docx_structure_extractor as mod
+
+    doc = Document()
+    doc.add_paragraph("José Muñoz")
+    docx_path = tmp_path / "cv.docx"
+    doc.save(str(docx_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["docx_structure_extractor.py", str(docx_path)])
+
+    mod.main()
+
+    for name in ("cv_structure.json", "cv_layout.json"):
+        raw = (tmp_path / name).read_bytes().decode("utf-8")
+        assert "José Muñoz" in raw
+        assert "\\u00e9" not in raw
+        assert json.loads(raw)

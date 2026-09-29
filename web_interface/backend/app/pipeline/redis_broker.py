@@ -33,8 +33,13 @@ from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
-EVENTS_CHANNEL = "cviche:run:{run_id}:events"
-EVENTS_PATTERN = "cviche:run:*:events"
+# One channel for every run, with run_id in the payload. Not a per-run channel
+# plus PSUBSCRIBE: ElastiCache Serverless (prod Valkey) rejects PSUBSCRIBE with
+# "unknown command", which silently killed all brokered event delivery (#960).
+# ponytail: every worker receives every run's events and drops the ones with no
+# local socket; fine at a few concurrent runs, switch to per-run SUBSCRIBE on
+# connect if event volume ever matters.
+EVENTS_CHANNEL = "cviche:run-events"
 CANCEL_KEY = "cviche:run:{run_id}:cancelled"
 # Safety net: if the orchestrator dies mid-run and never clears the flag, the
 # key expires rather than cancelling a future run that reuses the id.
@@ -71,7 +76,7 @@ class RedisBroker:
         if not self.enabled:
             return
         try:
-            self._sync().publish(EVENTS_CHANNEL.format(run_id=run_id), json.dumps(event))
+            self._sync().publish(EVENTS_CHANNEL, json.dumps({"run_id": run_id, "event": event}))
         except Exception:
             logger.warning("Redis publish failed for run %s", run_id, exc_info=True)
 

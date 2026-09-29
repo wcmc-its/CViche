@@ -86,6 +86,25 @@ class TestStepDetailAuthorization:
         assert resp.status_code == 401
 
 
+class TestStepDetailPreview:
+    def test_absolute_output_path_still_gets_200_and_a_preview(
+            self, client, db, seed_simple_mode, monkeypatch, tmp_path):
+        """The orchestrator stores absolute paths in Step.output_files (every
+        completed prod step checked, 2026-09-28). The preview must resolve the
+        basename, not 400 the whole step-detail request on the leading "/"."""
+        user, run = _user_and_run(db, suffix="-step-abs")
+        _seed_local_file(monkeypatch, tmp_path, run.id, "cv_entries.json",
+                         content=json.dumps({"entries": [{"text": "x"}]}).encode())
+        db.add(Step(run_id=run.id, step_number=3, stage_id="2", step_name="Entries",
+                    status="complete", output_files=json.dumps(
+                        ["/app/src/unified_pipeline/outputs/stage_2_entry_extraction/cv_entries.json"])))
+        db.commit()
+        _auth(client, user)
+        resp = client.get(f"/api/run/{run.id}/step/3")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["output_preview"] is not None
+
+
 class TestDataFileAuthorization:
     def test_owner_gets_200(self, client, db, seed_simple_mode, monkeypatch, tmp_path):
         user, run = _user_and_run(db, suffix="-data-owner")

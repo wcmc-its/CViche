@@ -156,7 +156,7 @@ def test_prompt_indices_match_the_positions_the_lookup_reads_back(monkeypatch):
     entries = [_break(), _entry("Dean's Award, 2015"), _entry("Consulting, Acme Corp")]
     results, _ = classify_entries_batch(entries, _context(), TAXONOMY)
 
-    user_message = captured["messages"][1]["content"]
+    user_message = next(m["content"] for m in captured["messages"] if m["role"] == "user")
     prompt_indices = [int(m) for m in re.findall(r"^\[(\d+)\]", user_message, re.MULTILINE)]
 
     # Producer side: the break at position 0 is excluded, so the prompt

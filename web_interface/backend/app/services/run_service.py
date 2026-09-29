@@ -593,6 +593,25 @@ def _schedule_auto_retry(run: Run, db: Session, start_step_number: int) -> None:
         db.commit()
 
 
+def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set) -> bool:
+    """Atomically move a run to "running"; True only for the one caller that did.
+
+    A single ``UPDATE runs SET status='running' WHERE id=:id AND <criteria>``
+    whose rowcount is checked, so two concurrent starters that both read the
+    run as startable cannot both win (#799). Works on SQLite and MariaDB/MySQL:
+    both report matched rows for a conditional UPDATE, and the status change
+    guarantees the winning row is actually modified.
+
+    ``status_criteria`` are SQLAlchemy expressions on ``Run.status``; ``also_set``
+    are extra columns written in the same statement. Does not commit: the caller
+    commits on a win, and on a loss holds nothing to undo.
+    """
+    result = db.query(Run).filter(Run.id == run_id, *status_criteria).update(
+        {"status": "running", **also_set}, synchronize_session="evaluate"
+    )
+    return result == 1
+
+
 def check_run_access(run_id: str, current_user: User, db: Session, *, eager=()) -> Run:
     """Verify run exists and user has access. Returns the Run.
 
