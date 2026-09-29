@@ -11,10 +11,12 @@ module, so they move together and stop being module-global.
 
 Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 """
+import functools
 import json
 import re
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
+from types import MappingProxyType
 from typing import Dict, List, NamedTuple, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
@@ -36,6 +38,7 @@ from ..shared import (
     _haystacks,
     _long_word_tokens,
     _output_section_header,
+    _template_haystack,
 )
 
 
@@ -573,6 +576,135 @@ def lint_unrendered_records(stage4: dict,
             f"entry {e.get('element_idx_start')} ({code}): {len(absent)} of "
             f"{len(records)} records absent from output",
             [r[:100] for r in absent[:5]]))
+    return findings
+
+
+# Lint 8b, section_lost (#817): a taxonomy code whose stage-4 entries leave
+# no trace in the code's OWN output section -- lost at render (YME2VA's 5
+# institutional-leadership records, section empty) or routed elsewhere
+# (BYFQBG's 11 training grants, all in the Appendix). Lint 8 cannot see
+# either: it checks only multi-record entries, against the WHOLE document,
+# where the same words in lectures or mentee job titles vouch for the lost
+# record. Calibrated 2026-09-29 on 126 corpus renders from dev plus the 12
+# score-vs-autopsy runs, every flag hand-labelled: each test below alone was
+# 15-29% precise; the three together flag 19 codes on stage-4 input, 13 real.
+SECTION_LOST_SHARE = 0.25       # the code's tokens present in its section
+SECTION_LOST_MIN_TOKENS = 6     # a code with fewer tokens is too thin to judge
+SECTION_LOST_ENTRY_HITS = 3     # tokens one entry needs in the section to count as rendered
+SECTION_LOST_HEAD_SHARE = 0.5   # share of an entry's first-line tokens that counts as rendered
+SECTION_LOST_HEAD_MIN_TOKENS = 2  # a one-token first line matches by coincidence too easily
+
+#: Output section heading prefixes by taxonomy letter, in stage 6's
+#: wording. C renders under EDUCATION and L under EDUCATIONAL CONTRIBUTIONS,
+#: so neither has a heading of its own.
+_SECTION_HEADING_PREFIXES = MappingProxyType({
+    "A": "PERSONAL DATA", "B": "EDUCATION", "D": "PROFESSIONAL POSITIONS",
+    "E": "EMPLOYMENT STATUS", "F": "LICENSURE", "G": "INSTITUTIONAL/HOSPITAL",
+    "H": "HONORS", "I": "PROFESSIONAL ORGANIZATIONS", "J": "PERCENT EFFORT",
+    "K": "EDUCATIONAL CONTRIBUTIONS", "M": "RESEARCH", "N": "MENTORING",
+    "O": "INSTITUTIONAL LEADERSHIP", "P": "INSTITUTIONAL ADMINISTRATIVE",
+    "Q": "EXTRAMURAL", "R": "INVITATIONS TO SPEAK", "S": "BIBLIOGRAPHY",
+})
+_SECTION_SHARED_WITH = MappingProxyType({"C": "B", "L": "K"})
+_SECTION_LETTERS = frozenset(_SECTION_HEADING_PREFIXES) | frozenset(_SECTION_SHARED_WITH)
+
+#: A is withheld by design (protected data), M1 is replaced by the research
+#: summary, T is the Appendix catch-all.
+_SECTION_LOST_SKIP_CODES = frozenset({"A", "M1", "T"})
+
+
+@functools.cache
+def _template_label_tokens() -> frozenset[str]:
+    """Tokens of the template's one-word lines ("Awards", "Institution"):
+    the squashed template haystack joins every multi-word line into one
+    long run, so only single-word labels come out as real words. They are
+    column and section labels every render carries, so they vouch for no
+    entry. The calibration measured exactly this set; the template's full
+    vocabulary instead doubled the flags at lower precision."""
+    return frozenset(_long_word_tokens(_template_haystack()))
+
+
+def _section_letter(header: str) -> str | None:
+    """Taxonomy letter of an output section header ("T" for the Appendix);
+    None for a sub-heading, which stays in the section above it. Longest
+    prefix first: EDUCATION is a prefix of EDUCATIONAL CONTRIBUTIONS."""
+    head = header.strip().upper()
+    if head.startswith(_APPENDIX_HEADER):
+        return "T"
+    for letter, prefix in sorted(_SECTION_HEADING_PREFIXES.items(),
+                                 key=lambda item: -len(item[1])):
+        if head.startswith(prefix):
+            return letter
+    return None
+
+
+def _section_tokens(blocks: list[tuple[str, str]]) -> defaultdict[str | None, set[str]]:
+    """Distinctive-token set of each output section, keyed by letter (None
+    for anything above the first recognized heading)."""
+    tokens: dict[str | None, set[str]] = defaultdict(set)
+    letter = None
+    for kind, text in blocks:
+        if kind == "p" and _output_section_header(text):
+            letter = _section_letter(text) or letter
+        tokens[letter] |= _long_word_tokens(text)
+    for code_letter, host in _SECTION_SHARED_WITH.items():
+        tokens[code_letter] = tokens[host]
+    return tokens
+
+
+def _code_absent_from_section(texts: list[str], section: set[str],
+                              ubiquitous: frozenset[str]) -> bool:
+    """Whether a code's entries leave no trace in its section. All three
+    must hold: under SECTION_LOST_SHARE of the code's distinctive tokens are
+    there; no entry has SECTION_LOST_ENTRY_HITS of its tokens there; and no
+    entry's first line (the record's title/role) is there by
+    SECTION_LOST_HEAD_SHARE. The first-line test keeps a rendered role row
+    whose long description the section's table has no slot for.
+
+    Not judged at all: a code with under SECTION_LOST_MIN_TOKENS tokens, or
+    whose entries all have under SECTION_LOST_ENTRY_HITS (nothing substantial
+    enough to call lost). A first line with under
+    SECTION_LOST_HEAD_MIN_TOKENS tokens cannot vouch for its entry."""
+    union: set[str] = set()
+    entry_hits = []
+    for text in texts:
+        tokens = _long_word_tokens(text) - ubiquitous
+        union |= tokens
+        if len(tokens) >= SECTION_LOST_ENTRY_HITS:
+            entry_hits.append(len(tokens & section))
+        first = next((line for line in text.split("\n") if line.strip()), "")
+        head = _long_word_tokens(first) - ubiquitous
+        if (len(head) >= SECTION_LOST_HEAD_MIN_TOKENS
+                and len(head & section) / len(head) >= SECTION_LOST_HEAD_SHARE):
+            return False
+    return (len(union) >= SECTION_LOST_MIN_TOKENS
+            and len(union & section) / len(union) < SECTION_LOST_SHARE
+            and bool(entry_hits) and max(entry_hits) < SECTION_LOST_ENTRY_HITS)
+
+
+def lint_section_lost(stage4: dict,
+                      blocks: list[tuple[str, str]]) -> list[dict]:
+    """One WARN per taxonomy code whose entries are absent from the code's
+    own output section (see `_code_absent_from_section`): lost at render,
+    or rendered in another section or the Appendix."""
+    texts: dict[str, list[str]] = defaultdict(list)
+    for e in stage4.get("entries", []):
+        code = e.get("taxonomy_code") or ""
+        if code and code not in _SECTION_LOST_SKIP_CODES and code[0] in _SECTION_LETTERS:
+            texts[code].append(str(e.get("text") or ""))
+    sections = _section_tokens(blocks)
+    ubiquitous = _rendered_lines(blocks).ubiquitous | _template_label_tokens()
+    findings = []
+    for code, entry_texts in texts.items():
+        if not _code_absent_from_section(entry_texts, sections[code[0]], ubiquitous):
+            continue
+        heading = _SECTION_HEADING_PREFIXES.get(
+            _SECTION_SHARED_WITH.get(code[0], code[0]), code[0])
+        findings.append(_finding(
+            "section_lost", "WARN",
+            f"{code}: {len(entry_texts)} entr{'y' if len(entry_texts) == 1 else 'ies'} "
+            f"absent from the {heading} section (lost, or rendered elsewhere)",
+            [t.strip().split("\n")[0][:100] for t in entry_texts[:5]]))
     return findings
 
 
