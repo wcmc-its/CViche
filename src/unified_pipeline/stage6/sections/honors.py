@@ -390,11 +390,19 @@ def _award_cell_first_shape(lines: Sequence[str]) -> list[str]:
     columns and no later line holds one. Re-shaped to "Award", then the
     remaining paragraphs, the last one carrying " | Org | Date". Any other
     input is returned unchanged.
+
+    The text alone cannot always tell this shape from the older one where only
+    the LAST cell spans lines ("Award | Org | 2019" then that date cell's own
+    continuation): both read "Award | Org | Date" then one more line. A tail
+    line that is itself a date can only be a date cell's continuation, so it is
+    left in the older shape; a non-date continuation stays ambiguous and is
+    read as the award's own paragraph.
     """
     if len(lines) < 2:
         return list(lines)
     first, *tail = lines
-    if '|' not in first or any('|' in line for line in tail):
+    if ('|' not in first or any('|' in line for line in tail)
+            or any(_is_date_column(line) for line in tail)):
         return list(lines)
     award, *columns = first.split('|')
     return [award.strip(), *tail[:-1],

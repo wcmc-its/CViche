@@ -28,7 +28,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from core.output_manager import OutputManager
-from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
+from core.docx_structure_extractor import (
+    extract_docx_structure,
+    extract_unified_elements,
+    join_row_cells,
+    row_cell_texts,
+    _flatten_table_content_text,
+)
 from core.template_boilerplate import is_near_template_instruction, is_template_instruction
 
 logger = logging.getLogger(__name__)
@@ -92,12 +98,7 @@ def get_element_text(element: dict) -> str:
         return element.get("text", "").strip()
     elif elem_type == "table":
         # Legacy table format - flatten data into text
-        rows = element.get("data", [])
-        row_texts = []
-        for row in rows:
-            cell_texts = [cell.get("text", "") for cell in row]
-            row_texts.append("\t".join(cell_texts))
-        return "\n".join(row_texts)
+        return _flatten_table_content_text(element.get("data", []))
     else:
         return element.get("text", "").strip()
 
@@ -118,31 +119,6 @@ def _element_text_or_fallback(idx: int, element_index_map: dict, doc: Document) 
         return get_element_text(element_index_map[idx])
     logger.warning(f"    Index {idx} missing from element_index_map; falling back to doc.paragraphs")
     return doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
-
-
-def row_cell_texts(row: list) -> list[str]:
-    """Text of each cell in a table row (cell dicts or bare values)."""
-    return [cell.get("text", "") if isinstance(cell, dict) else str(cell) for cell in row]
-
-
-def join_row_cells(cells: list[str]) -> str:
-    """Join a table row's cell texts into one entry text (#488).
-
-    Cells are joined with " | ". When cell 0 holds several paragraphs (an entry
-    title followed by sub-bullets), the trailing columns (date, institution)
-    describe the whole entry, so they attach to cell 0's FIRST paragraph rather
-    than welding onto its last one. A single-paragraph cell 0, or a one-cell
-    row, joins exactly as before -- and so does a row where another cell also
-    spans lines: the trailing paragraphs could then no longer be told apart
-    from those cells' own lines, and stage 6 (honors) reads that old shape.
-    """
-    first = cells[0] if cells else ""
-    rest = cells[1:]
-    stripped = first.strip()
-    if not rest or "\n" not in stripped or any("\n" in c.strip() for c in rest):
-        return " | ".join(cells).strip()
-    head, _, tail = first.lstrip().partition("\n")
-    return (" | ".join([head, *rest]) + "\n" + tail).strip()
 
 
 def split_merged_row_into_pseudo_rows(row: list) -> list:

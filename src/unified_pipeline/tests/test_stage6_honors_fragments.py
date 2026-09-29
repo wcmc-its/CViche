@@ -1269,6 +1269,15 @@ def test_award_cell_first_shape_leaves_other_inputs_alone():
         "A", "(x)", "(y) | Org | 2019"]
 
 
+def test_award_cell_first_shape_leaves_a_date_cell_continuation_alone():
+    """#488 review: cells ['Award', 'Org', '2019\\n2020'] (only the LAST cell
+    spans lines) read "Award | Org | 2019" then "2020". The tail line is a date,
+    so it belongs to the date cell and must not be moved into the award title."""
+    lines = ["Award | Org | 2019", "2020"]
+    assert _award_cell_first_shape(lines) == lines
+    assert _merge_in_cell_paragraphs(lines) == lines
+
+
 # --- one negative test per `_merge_in_cell_paragraphs` guard ------------
 # Each names the guard it targets. The guards are three named booleans
 # combined in one `if` (tab / year-or-header / column shape) -- see the

@@ -24,8 +24,14 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
+    _flatten_table_content_text,
+)
 from unified_pipeline.stage_2_entry_extraction import (  # noqa: E402
+    get_element_text,
+    join_row_cells,
     remove_subset_delimiters,
+    row_cell_texts,
 )
 
 ROWS = [
@@ -144,3 +150,26 @@ if __name__ == "__main__":
             fn()
             print(f"ok  {name}")
     print("all passed")
+
+
+def test_parent_of_multi_paragraph_first_cell_rows_is_dropped_and_rows_kept():
+    """#488: a row whose cell 0 spans lines gets its trailing columns on cell
+    0's FIRST paragraph. The parent's text is built by the same join, so its
+    lines are found in the rows and the parent drops -- not the fixed row."""
+    table = [
+        [{"text": "Visiting Faculty Program\n- Ultrasound training course"},
+         {"text": "Fictional City, Country"}, {"text": "November 2024 to present"}],
+        [{"text": "Another Program Entry"}, {"text": "Imaginary Place"},
+         {"text": "2020 to 2022"}],
+    ]
+    parent = _d(7, text=_flatten_table_content_text(table))
+    rows = [_d(f"7.{i}", text=join_row_cells(row_cell_texts(r)))
+            for i, r in enumerate(table)]
+
+    assert _starts(remove_subset_delimiters([parent] + rows)) == ["7.0", "7.1"]
+
+
+def test_legacy_table_element_text_uses_the_same_row_join():
+    table = [[{"text": "Title\n- a"}, {"text": "2024"}]]
+    assert get_element_text({"type": "table", "data": table}) == \
+        _flatten_table_content_text(table) == "Title | 2024\n- a"
