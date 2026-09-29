@@ -65,7 +65,7 @@ _BUILT_TEXT_SEPARATOR = ' | '
 # a paragraph on committee service that stage 4 reduced to six committees
 # (web185), a service entry that also describes a grant (web240), a P entry
 # whose every item carries `institution` although the P renderer never writes
-# it (web240's "Neuroscience Training Program", web218's "UMB"). The entry is
+# it (web240's group prefixes, web218's institution abbreviation). The entry is
 # fanned out only when EVERY token of its own text is held, with at least the
 # multiplicity the text has, by a field the target code's renderer writes
 # (`_RENDERED_FIELDS`). Zero uncovered tokens, not a tolerance: any

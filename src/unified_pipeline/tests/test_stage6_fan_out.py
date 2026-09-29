@@ -219,14 +219,15 @@ class TestTextCoverage:
         entry = self._committee_entry(prose)
         assert _fan(entry) == [entry]
 
-    @pytest.mark.parametrize('qualifier', ['(weekly)', '(1-3 committees/yr)', 'UMB'])
+    @pytest.mark.parametrize('qualifier', ['(weekly)', '(1-3 committees/yr)', 'UXB'])
     def test_one_word_no_field_holds_keeps_the_entry_whole(self, qualifier):
-        # No tolerance: web218's "(1-3 committees/yr)" and "UMB" were lost.
+        # No tolerance: web218's "(1-3 committees/yr)" and its institution
+        # abbreviation were lost.
         entry = self._committee_entry(self._RECORDS.format(a=' ' + qualifier, b=''))
         assert _fan(entry) == [entry]
 
     def test_a_field_the_renderer_never_writes_holds_nothing(self):
-        # web240's "Neuroscience Training Program": every item carries
+        # web240's group prefixes: every item carries
         # `institution`, the P renderer never writes it.
         text = ('Alpha Curriculum Oversight Council member, Ashby University\t'
                 'Beta Admissions Selection Council chair, Ashby University')
