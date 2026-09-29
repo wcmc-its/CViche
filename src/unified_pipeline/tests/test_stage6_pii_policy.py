@@ -396,12 +396,49 @@ def test_1041_bare_child_count_behind_a_marital_cut_is_withheld():
     assert [i.category for i in result.withheld] == [CAT_MARITAL_STATUS, CAT_CHILDREN]
 
 
+def test_1041_content_after_a_dash_label_with_its_value_survives():
+    """A dash label that CARRIES its value is not bare: the cut stops at the
+    label's own fragment, and a later unrelated fragment survives."""
+    entry = {"text": "Marital Status - Zqv; Board Certified Internal Medicine",
+             "taxonomy_code": "T", "extracted_fields": {}}
+    _run({"T": [entry]})
+    assert entry["text"] == "; Board Certified Internal Medicine"
+
+
+@pytest.mark.parametrize("text", [
+    "Status; 2 sons",
+    "Status; 1 daughter",
+    "Status; 3 kids",
+    "Status; 2 children.",
+    "Status\n1 child",
+    "Status   2 children",
+    "2 children   Board Certified",
+    "Status | 2 children | Board Certified",
+])
+def test_1041_child_count_fragment_is_withheld_at_personal_and_appendix(text):
+    for code in (A, APPENDIX):
+        assert _denied(text, code), code
+
+
+def test_1041_child_count_row_does_not_reach_a_content_code():
+    """The row is PERSONAL_AND_APPENDIX only: a count in a research or
+    teaching entry is study data, not the owner's family."""
+    text = "Enrollment\t40 children\tNIH R01"
+    assert not _denied(text, CONTENT)
+    entry = {"text": text, "taxonomy_code": CONTENT, "extracted_fields": {}}
+    _run({CONTENT: [entry]})
+    assert entry["text"] == text
+
+
 @pytest.mark.parametrize("text", [
     "Enrolled 20 children and 20 adults",
     "Studied 20 subjects, 20 children",
     "Outcomes in 4 children",
     "Single (2 children) is not a fragment of its own",
     "Cohort A; 20 children with asthma",
+    "Board Certified   20 children treated",
+    "Board Certified, 2 children",
+    "Board Certified 2 children",
 ])
 def test_1041_child_count_inside_prose_is_not_withheld(text):
     assert not [m for m in _pii_matches(text) if m.category == CAT_CHILDREN]
@@ -429,6 +466,17 @@ def test_1041_child_count_inside_prose_is_not_withheld(text):
 def test_1041_dash_joined_non_pii_line_is_not_newly_withheld(text):
     assert not _denied(text, A)
     assert not _denied(text, APPENDIX)
+
+
+@pytest.mark.parametrize("label", [
+    "Religion", "Home Address", "Home Phone", "DEA", "Spouse", "Salary", "Honorarium",
+    "Gender", "Age", "Health", "Family", "Children", "Ethnicity",
+])
+@pytest.mark.parametrize("dash", [" - ", " \u2013 ", " \u2014 "])
+def test_1041_colon_only_category_does_not_close_on_a_dash(label, dash):
+    """The dash set is opt-in: a row outside `_DASH_TERMINATED_CATEGORIES`
+    must keep needing its colon, so the set cannot silently widen."""
+    assert _pii_matches(f"{label}{dash}Synthetic Value") == []
 
 
 @pytest.mark.parametrize("text, code", [
