@@ -1355,13 +1355,22 @@ def test_placeholder_only_row_helper():
     assert _is_placeholder_only_row("Not Applicable") is True
     assert _is_placeholder_only_row("none") is True
     assert _is_placeholder_only_row("N/A.") is True
+    assert _is_placeholder_only_row("na") is True            # is_unanswered_prompt's own "na" spelling
+    assert _is_placeholder_only_row("Listed above") is True  # ditto, its "listed above" spelling
     assert _is_placeholder_only_row("| |") is True          # bare pipe row
     assert _is_placeholder_only_row("N/A\tN/A") is True      # tab-separated cells (wrapped source line)
     assert _is_placeholder_only_row("N/A\nNone") is True     # newline-separated cells
     assert _is_placeholder_only_row("") is False
     assert _is_placeholder_only_row(None) is False
     assert _is_placeholder_only_row("Teaching") is False     # real one-word entry
-    assert _is_placeholder_only_row("N/A | Teaching") is False  # mixed: real content present
+    # A known template LABEL paired with an unanswered value is exactly what
+    # `is_unanswered_prompt` treats as a non-answer (its own docstring
+    # example: "Primary Hospital Affiliation: | N/A") -- "Teaching" is
+    # itself a recognized template label, not incidental real content, so
+    # reusing that helper here correctly now excludes this row too.
+    assert _is_placeholder_only_row("N/A | Teaching") is True
+    # Real, non-label content paired with an unanswered cell is still kept.
+    assert _is_placeholder_only_row("N/A | Robotic Surgery Outcomes") is False
 
 
 def test_goal_claimed_row_ids_matches_the_owning_grants_row_only():
@@ -1402,6 +1411,52 @@ def test_goal_claimed_row_ids_ignores_a_non_grant_entry_sharing_the_grants_span(
     entries = [grant, overlapping_non_grant, goal_row]
     claimed = _goal_claimed_row_ids(entries)
     assert claimed == {id(goal_row)}
+
+
+def test_goal_claimed_row_ids_only_considers_t_coded_rows_as_candidates():
+    """`_goal_claimed_row_ids` must build its ROW candidates (`claim_goal_rows`'s
+    second argument, `t_rows`) from ONLY taxonomy_code=='T' entries, not every
+    entry. `claim_goal_rows` claims the FIRST goal-shaped row it sees for a
+    given grant and skips a later one whose goal differs (`existing and
+    existing != goal: continue`) -- so a non-T entry that happens to share the
+    grant's exact `parent_idx` span, states a DIFFERENT goal, and sits earlier
+    in `entries` must never compete for that grant's claim. Stage 6 itself
+    only ever passes `entries_by_code['T']` as candidate rows; a mutant that
+    widens `t_rows` to `list(entries)` lets the earlier non-T row win the
+    claim instead of the real T row, which this pins by asserting on the
+    identity of the row actually claimed, not just that something was."""
+    grant = {"taxonomy_code": "M2A", "text": "Some Grant",
+              "element_idx_start": 10, "element_idx_end": 10}
+    non_t_row = {"taxonomy_code": "A",
+                 "text": "The major goals of this project are: to build widgets",
+                 "parent_idx": 10, "element_idx_start": 10, "element_idx_end": 10}
+    goal_row = {"taxonomy_code": "T",
+                "text": "The major goals of this project are: to cure things",
+                "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11}
+    entries = [grant, non_t_row, goal_row]
+    claimed = _goal_claimed_row_ids(entries)
+    assert claimed == {id(goal_row)}
+
+
+def test_goal_claimed_row_ids_degrades_to_empty_set_when_stage6_import_fails(monkeypatch):
+    """`_goal_claimed_row_ids`'s ``except ImportError: return set()`` fallback
+    (its own docstring: "a missing python-docx degrades this one exclusion to
+    claim nothing") needs its own test -- python-docx is installed in this
+    environment, so nothing else exercises the except branch, and a mutant
+    that replaces it with a bare `raise` would break every OTHER
+    quality_score dimension's ability to run against a real artifact, not
+    just silence this one exclusion. A `None` entry in `sys.modules` forces
+    `ModuleNotFoundError` (an `ImportError` subclass) on the `from ... import`
+    regardless of whether the real dependency is present, without needing to
+    actually uninstall python-docx for the test."""
+    monkeypatch.setitem(
+        sys.modules, "unified_pipeline.stage6.sections.research_support", None)
+    grant = {"taxonomy_code": "M2A", "text": "Some Grant",
+              "element_idx_start": 10, "element_idx_end": 10}
+    goal_row = {"taxonomy_code": "T",
+                "text": "The major goals of this project are: to cure things",
+                "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11}
+    assert _goal_claimed_row_ids([grant, goal_row]) == set()
 
 
 def test_t_bucket_excludes_template_instruction_text(tmp_path):

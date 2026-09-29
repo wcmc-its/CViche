@@ -90,6 +90,7 @@ from unified_pipeline.core.template_boilerplate import (
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
+    is_unanswered_prompt,
 )
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
 from unified_pipeline.doctor.shared import docx_body_blocks
@@ -614,41 +615,39 @@ def score_protected_data(outputs_dir: Path) -> tuple[float, str, int | None]:
     return 0.0, "protected_data_hits=0", None
 
 
-#: A T entry whose every non-empty cell is one of these normalized tokens
-#: states nothing at all -- an unfilled template prompt, not scaffolding an
-#: editor has to act on (#822 finding 2, second exclusion). Matched after
-#: lowercasing and stripping surrounding whitespace/punctuation, so "N/A.",
-#: "Not Applicable," and "none" all normalize onto one of these three.
-#: Deliberately narrower than `core.template_boilerplate._UNANSWERED`: that
-#: set also accepts "listed above" and is only ever checked ALONGSIDE a
-#: recognized template label (`is_unanswered_prompt`) -- this one asks
-#: nothing about the other cells because a placeholder-only row, by
-#: definition, has no other content to recognize.
-PLACEHOLDER_ONLY_TOKENS = frozenset({"n/a", "not applicable", "none"})
-
 #: Same cell split as `core.template_boilerplate._LABEL_PIECE_SPLIT_RE`: a
 #: table row reaches stage 3b joined by "|", and a wrapped source line by a
-#: tab or newline.
+#: tab or newline. `is_unanswered_prompt` itself only splits on "|", so a
+#: tab/newline-wrapped row is normalized onto pipes with this before being
+#: handed to it (see `_is_placeholder_only_row`).
 _PLACEHOLDER_CELL_SPLIT_RE = re.compile(r"[|\t\n]")
 
 
 def _is_placeholder_only_row(text: str | None) -> bool:
-    """True when *text* carries no content an editor could act on: every
-    non-empty cell normalizes to a PLACEHOLDER_ONLY_TOKENS entry, or every
-    cell is blank -- a bare ``| |`` row (#822 finding 2, YTPMZK's own
-    example). A row with no cell separator at all (a single bare word) still
-    qualifies when that word is itself a placeholder token; a real one-word
-    entry ("Teaching") is not, since it fails the token check below.
+    """True when *text* carries no content an editor could act on (#822
+    finding 2, second exclusion): an unfilled template prompt ("N/A",
+    "Not Applicable", a known label whose answer cell is one of those), or
+    every cell is blank -- a bare ``| |`` row (YTPMZK's own example).
+
+    Reuses `core.template_boilerplate.is_unanswered_prompt` for the first
+    case -- the same "answer cell says nothing" check stage 6's own
+    `_appendix_drop_reason` already uses -- rather than a second, narrower
+    token set that would drift from it (an earlier version of this function
+    kept its own ``{"n/a", "not applicable", "none"}`` constant, which
+    already disagreed with `is_unanswered_prompt`'s own vocabulary by
+    missing "na" and "listed above"; CODING_STANDARDS.md #1.5). A bare-
+    separator row has no non-empty cell at all, so it can never satisfy
+    `is_unanswered_prompt`'s own "at least one cell says N/A" guard --
+    that shape is handled by the explicit check below instead, not folded
+    into the reused helper.
     """
     stripped = (text or "").strip()
     if not stripped:
         return False
-    pieces = [
-        p.strip().strip(".,:;").lower()
-        for p in _PLACEHOLDER_CELL_SPLIT_RE.split(stripped)
-        if p.strip()
-    ]
-    return all(p in PLACEHOLDER_ONLY_TOKENS for p in pieces)
+    pieces = _PLACEHOLDER_CELL_SPLIT_RE.split(stripped)
+    if all(not p.strip() for p in pieces):
+        return True
+    return is_unanswered_prompt("|".join(pieces))
 
 
 def _goal_claimed_row_ids(entries: list[dict]) -> set[int]:
