@@ -981,9 +981,12 @@ class ServiceSection:
 
             if not journal:
                 # Parse from raw text, but clean up common patterns
-                raw_text = _raw_fallback_cell(entry.get('text', ''))
-                # Remove "Reviewer" prefix if present
-                journal = re.sub(r'^(?:Reviewer|Ad hoc Reviewer)[,:\s]*', '', raw_text, flags=re.IGNORECASE).strip()
+                raw_text = entry.get('text', '')
+                # Remove "Reviewer" prefix if present (before the tab-joining:
+                # the regex consumes the whitespace after the prefix)
+                journal = _raw_fallback_cell(
+                    re.sub(r'^(?:Reviewer|Ad hoc Reviewer)[,:\s]*', '', raw_text,
+                           flags=re.IGNORECASE))
 
             # Skip if still empty or too short
             if not journal or len(journal.strip()) < 3:
@@ -1119,9 +1122,12 @@ class ServiceSection:
 
                     if not organization:
                         # Parse from raw text as fallback, but strip date prefix
-                        raw_text = _raw_fallback_cell(entry.get('text', ''))
-                        # Remove common date patterns from beginning
-                        organization = re.sub(r'^\d{4}[-–]?\d{0,4}\s*\|?\s*', '', raw_text)
+                        raw_text = entry.get('text', '')
+                        # Remove common date patterns from beginning; the
+                        # regex consumes the tab after the date, so it runs
+                        # before the tab-joining, not after (#983)
+                        organization = _raw_fallback_cell(
+                            re.sub(r'^\d{4}[-–]?\d{0,4}\s*\|?\s*', '', raw_text))
                         # If role already contains most of the organization text, don't duplicate
                         if role and organization and role.lower()[:30] in organization.lower():
                             organization = ''

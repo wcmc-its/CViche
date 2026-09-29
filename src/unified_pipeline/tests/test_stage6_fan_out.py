@@ -230,3 +230,24 @@ def test_generate_does_not_cut_a_raw_service_entry_mid_word(tmp_path):
 
     assert any(long_text.strip() in c for c in cells)
 
+
+def test_generate_strips_the_date_prefix_before_joining_tab_parts_in_other_service(tmp_path):
+    """The service fallback removes a leading date with a regex that consumes
+    the tab after it; joining the parts first left a stray "; " in front of the
+    cell (the 2082 corpus CV, found by the render A/B)."""
+    entry = {"taxonomy_code": "Q4", "text": "2016-23\tLibrary Representative",
+             "extracted_fields": {"service_type": "Library Representative",
+                                  "start_date": "2016", "end_date": "2023"}}
+    cells = _all_cells(_render(tmp_path, [_OWNER_ENTRY, entry]))
+
+    assert any("Library Representative" in c for c in cells)
+    assert not any(c.startswith(";") for c in cells)
+
+
+def test_generate_strips_the_reviewer_prefix_before_joining_tab_parts(tmp_path):
+    entry = {"taxonomy_code": "Q4D", "text": "Reviewer\tJournal of Examples", "extracted_fields": {}}
+    cells = _all_cells(_render(tmp_path, [_OWNER_ENTRY, entry]))
+
+    assert "Journal of Examples" in cells
+    assert not any(c.startswith(";") for c in cells)
+
