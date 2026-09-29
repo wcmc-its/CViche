@@ -79,7 +79,7 @@ def test_text_is_built_from_the_record_when_segments_do_not_match_the_count():
 
     assert len(out) == 2
     assert "\t" not in out[0]["text"]
-    assert out[0]["text"] == "Delta Omega, National Honorary | University of Pittsburgh | 1988"
+    assert out[0]["text"] == "Delta Omega, National Honorary, University of Pittsburgh, 1988"
 
 
 def test_shared_scalars_are_inherited_and_an_empty_value_does_not_erase_them():

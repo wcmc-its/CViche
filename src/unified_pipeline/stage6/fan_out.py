@@ -54,10 +54,9 @@ SEGMENT_REPRESENTED_MIN_SHARE = 0.8
 
 _SEGMENT_SPLIT_RE = re.compile(r"[\t\n]")
 
-# Joins a fanned-out child's values when its text has to be rebuilt. A pipe,
-# because `entry_fragments` (the render-presence check) splits on it, so each
-# value is tested for presence on its own.
-_BUILT_TEXT_SEPARATOR = " | "
+# Joins a fanned-out child's values when its text has to be rebuilt. Not a
+# pipe: a renderer that falls back to `text` would show it (web26's memberships).
+_BUILT_TEXT_SEPARATOR = ", "
 
 SchemaFieldsLookup = Callable[[str], Collection[str]]
 
