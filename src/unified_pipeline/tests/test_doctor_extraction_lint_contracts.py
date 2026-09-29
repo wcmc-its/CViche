@@ -175,6 +175,19 @@ def test_lint_bucket_status_warns_when_rendered_under_the_wrong_bucket():
     assert "current research funding" in message
 
 
+def test_lint_bucket_status_unrecognised_extracted_status_does_not_mask_text():
+    # Stage 4's stray value ("Awarded") must not hide the text's "Not funded".
+    stage4 = {"entries": [
+        {"taxonomy_code": "M2A", "element_idx_start": 7,
+         "text": _LOCATABLE_GRANT_TEXT + "\nStatus: Not funded",
+         "extracted_fields": {"status": "Awarded"}},
+    ]}
+    findings = lint_bucket_status(
+        stage4, _blocks_under("M2A", _LOCATABLE_GRANT_TEXT))
+    assert len(findings) == 1
+    assert "M2C" in findings[0]["message"]
+
+
 def test_lint_bucket_status_silent_when_rebucketed_correctly():
     # Rendered under the bucket the status implies (M2B) -> stage 6 already
     # rebucketed it correctly, no finding.
@@ -213,9 +226,20 @@ def test_lint_bucket_status_warns_when_target_unlocatable_but_another_bucket_hit
     ({"text": "Status: Funded | PI: Smith"}, "Funded"),
     ({"text": "Some header line\nStatus: Pending review\nmore text"},
      "Pending review"),
-    # extracted_fields.status wins over any text label.
-    ({"text": "Status: Funded", "extracted_fields": {"status": "Awarded"}},
-     "Awarded"),
+    # A recognised extracted_fields.status wins over any text label (#720).
+    ({"text": "Status: Funded", "extracted_fields": {"status": "Completed"}},
+     "Completed"),
+    ({"text": "Status: Completed",
+      "extracted_fields": {"status": "Under review"}}, "Under review"),
+    ({"text": "x", "extracted_fields": {"status": "Not funded"}}, "Not funded"),
+    # An unrecognised extracted status falls back to the text label (#720).
+    ({"text": "Status: Not funded", "extracted_fields": {"status": "Awarded"}},
+     "Not funded"),
+    ({"text": "Status: Pending review",
+      "extracted_fields": {"status": "zzz"}}, "Pending review"),
+    # Unrecognised and no text label: nothing to report.
+    ({"text": "no label", "extracted_fields": {"status": "zzz"}}, None),
+    ({"text": "Status: Funded", "extracted_fields": {"status": ""}}, "Funded"),
     ({"text": "No label here at all"}, None),
 ])
 def test_entry_status_label_extraction(entry, expected):
