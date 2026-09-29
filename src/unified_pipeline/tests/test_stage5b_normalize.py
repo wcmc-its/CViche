@@ -49,14 +49,29 @@ def test_is_likely_internal_unit_negative_cases():
         assert not is_likely_internal_unit(name), f"expected NOT internal unit: {name!r}"
 
 
-def test_is_likely_internal_unit_known_false_positive_standalone_institutes():
-    # Confirmed false positive (see #523 review): a standalone institute
-    # whose name doesn't mention any major_indicators gets misclassified as
-    # an internal unit and silently skipped from lookup. Pre-existing
-    # heuristic behavior, not something this test suite has tuned a fix for
-    # yet -- pinned here so a future fix has a failing case to turn green,
-    # and so this doesn't regress further. See #678.
-    assert is_likely_internal_unit("Institute for Advanced Study")
+def test_is_likely_internal_unit_standalone_institutes_are_not_internal_units():
+    # #678: standalone institutes whose own name is an "Institute for X"
+    # pattern and mentions no parent institution.
+    for name in [
+        "Institute for Advanced Study",
+        "institute for advanced study",
+        "  Institute for Advanced Study  ",
+        "Institute for Advanced Study, Princeton, NJ",
+        "Institute for Systems Biology",
+        "Institute for Health Metrics and Evaluation",
+    ]:
+        assert not is_likely_internal_unit(name), f"expected standalone: {name!r}"
+
+
+def test_is_likely_internal_unit_allowlist_is_exact_not_a_prefix_match():
+    # The allowlist must not widen into "any institute": a sibling name that
+    # only shares the first words with an allowlisted one stays internal.
+    for name in [
+        "Institute for Advanced Study of Aging",
+        "Institute for Cancer Research",
+        "Institute for Systems Biology Core Facility",
+    ]:
+        assert is_likely_internal_unit(name), f"expected internal unit: {name!r}"
 
 
 def test_format_location_us_drops_country_and_abbreviates_state():
