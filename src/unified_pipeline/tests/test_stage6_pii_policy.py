@@ -1621,6 +1621,8 @@ def test_redact_pre_llm_values_child_birth_years_in_prose(text, expected):
     "Two children born 1969-2007 in a cohort study",
     "Departmental Director of Blood Born Pathogen Certification 2009-2011",
     "Two children. Born 2001 cohort follow-up study",
+    "Two children. Born 2001, the cohort enrolled infants",
+    "Outcomes of children born 2001 and 2004.",
     "Rudolf Virchow (born 1821): a lecture on cellular pathology, 2015",
     "Two children, born 2001 in a Swedish registry: a cohort, 2019",
 ])
