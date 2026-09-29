@@ -10,6 +10,7 @@ Run with:
 """
 
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -22,8 +23,10 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.segmentation_regression import (  # noqa: E402
     _COUNT_KEYS,
+    _has_compact_window,
     BODY_BLOCK,
     COVERAGE_DROP_TOLERANCE_PTS,
+    COVERAGE_WINDOW_SLACK,
     MEGA_ENTRY_MIN_RECORDS,
     SUBSTANTIVE_LINE_CHARS,
     compare_metrics,
@@ -180,6 +183,52 @@ def test_coverage_line_cannot_match_across_entry_boundary():
                           _entry("delta epsilon zeta", start=2)]}
     m = compute_metrics(source, _STAGE1A, stage2)
     assert m["lost_lines"] == ["alpha beta gamma delta epsilon zeta"]
+
+
+def test_coverage_words_scattered_through_unrelated_entry_are_lost():
+    """#610: an entry that merely CONTAINS the line's words, far apart and out
+    of order inside an unrelated sentence, does not cover the line."""
+    source = ["Diabetes Research Grant Foundation Award"]
+    stage2 = {"entries": [_entry(
+        "The foundation gave an award to the committee chair after a long "
+        "review of her research on diabetes, and a further grant was pending "
+        "in the spring of the following year", start=1)]}
+    m = compute_metrics(source, _STAGE1A, stage2)
+    assert m["lost_lines"] == ["Diabetes Research Grant Foundation Award"]
+    assert m["text_coverage_pct"] == 0.0
+
+
+def test_coverage_reformatted_line_with_spliced_phrase_is_still_covered():
+    """The mid-line merge the token fallback exists for (web053/web057):
+    stage 2 splices a phrase into the line, so it is no contiguous substring,
+    but every token is present in order and close together."""
+    source = ["\t\t1984-1989\t\t\t\tB.S.\t (Biology)"]
+    stage2 = {"entries": [_entry("1984-1989    B.S. University of Utah (Biology)", start=1)]}
+    m = compute_metrics(source, _STAGE1A, stage2)
+    assert m["lost_lines"] == []
+    assert m["text_coverage_pct"] == 100.0
+
+
+def test_coverage_reordered_but_compact_line_is_still_covered():
+    """Stage 2 can reorder a line's parts inside one cell; nothing is lost."""
+    source = ["Maple Ridge Medical School, Springfield, Freedonia - Visiting Faculty"]
+    stage2 = {"entries": [_entry(
+        "Visiting Faculty Northwind Maple Ridge Medical School, Springfield, "
+        "Freedonia  June 2006", start=1)]}
+    m = compute_metrics(source, _STAGE1A, stage2)
+    assert m["lost_lines"] == []
+
+
+def test_compact_window_slack_boundary():
+    need = Counter(["a", "b"])
+    filler = ["x"] * COVERAGE_WINDOW_SLACK
+    span = 2 + COVERAGE_WINDOW_SLACK
+    assert _has_compact_window(need, ["a"] + filler + ["b"], span)
+    assert not _has_compact_window(need, ["a"] + filler + ["x", "b"], span)
+    # Multiplicity counts: two "a" tokens need two occurrences in the window.
+    assert not _has_compact_window(Counter(["a", "a"]), ["a", "b", "c"], 9)
+    # The window slides: a later compact stretch qualifies.
+    assert _has_compact_window(need, ["a"] + filler + ["x", "a", "b"], span)
 
 
 def test_template_scaffolding_is_neither_covered_nor_lost():

@@ -204,6 +204,40 @@ def _tokens(text: str) -> Counter[str]:
     return Counter(_TOKEN_RE.findall(_norm(text)))
 
 
+def _token_list(text: str) -> list[str]:
+    """Word/number tokens in document ORDER (`_tokens` drops the order)."""
+    return _TOKEN_RE.findall(_norm(text))
+
+
+#: How many tokens beyond the line's own count the smallest stretch of an
+#: entry holding all of the line's tokens may span for the line to still count
+#: as covered by that entry (#610). Stage 2 splices whole phrases into a line
+#: ('B.S.' + 'University of Utah' + '(Biology)') and can reorder its parts;
+#: the same words merely scattered through an unrelated entry span far more.
+COVERAGE_WINDOW_SLACK = 12
+
+
+def _has_compact_window(need: Counter[str], entry_tokens: list[str], max_span: int) -> bool:
+    """True when some run of at most `max_span` consecutive `entry_tokens`
+    holds every token of `need` (with multiplicity), in any order."""
+    have: Counter[str] = Counter()
+    missing = sum(need.values())
+    lo = 0
+    for hi, token in enumerate(entry_tokens):
+        if token in need:
+            have[token] += 1
+            missing -= have[token] <= need[token]
+        while missing == 0:
+            if hi - lo + 1 <= max_span:
+                return True
+            left = entry_tokens[lo]
+            if left in need:
+                have[left] -= 1
+                missing += have[left] < need[left]
+            lo += 1
+    return False
+
+
 def _squash(text: str) -> str:
     """Whitespace-FREE normalization for the coverage check: stage 2 joins
     text across in-paragraph line breaks with no whitespace at all
@@ -335,18 +369,25 @@ def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
       entry : '1984-1989    B.S. University of Utah (Biology)'
     Nothing is lost (the entry is a superset), but the source line is no longer
     a contiguous substring. That alone scored web053 96.0% and web057 67.5%.
-    So a line also counts as covered when one entry holds ALL of its tokens.
-    Both checks are kept: squash catches glued text with no token boundaries,
+    So a line also counts as covered when one entry holds ALL of its tokens
+    within one COMPACT stretch, at most COVERAGE_WINDOW_SLACK tokens longer
+    than the line (#610: holding the same words scattered through an
+    unrelated entry is not coverage). Both checks are kept: squash catches glued text with no token boundaries,
     tokens catch mid-line merges. A line is lost only if neither holds."""
     entry_squash = [_squash(e.get("text", "")) for e in entries]
     entry_tokens = [_tokens(e.get("text", "")) for e in entries]
+    entry_seqs = [_token_list(e.get("text", "")) for e in entries]
 
     def _covered(line: str) -> bool:
         squashed = _squash(line)
         if squashed and any(squashed in es for es in entry_squash):
             return True
         line_tokens = _tokens(line)
-        return bool(line_tokens) and any(line_tokens <= et for et in entry_tokens)
+        if not line_tokens:
+            return False
+        max_span = sum(line_tokens.values()) + COVERAGE_WINDOW_SLACK
+        return any(line_tokens <= et and _has_compact_window(line_tokens, seq, max_span)
+                   for et, seq in zip(entry_tokens, entry_seqs))
 
     return [l.strip() for l in substantive if not _covered(l)]
 
