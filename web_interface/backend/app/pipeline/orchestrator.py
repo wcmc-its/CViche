@@ -44,6 +44,29 @@ logger = logging.getLogger(__name__)
 # restarts and replica scale-up.
 PROMPT_LOGS_DIR = PARENT_DIR / 'src' / 'unified_pipeline' / 'prompt_logs'
 
+
+def _now() -> float:
+    """Monotonic clock for elapsed-duration measurement (#598).
+
+    A module-level indirection so tests patch ``orchestrator._now`` directly.
+    Patching ``time.monotonic`` itself is wrong: ``asyncio.run()`` calls it
+    internally and would consume the stub.
+    """
+    return time.monotonic()
+
+
+def _record_total_duration(run: Run, elapsed: int, resumed: bool) -> None:
+    """Persist ``run.total_duration_seconds`` (#104).
+
+    A resumed run (retry from a step) accumulates onto the prior total so the
+    metric answers "how long did this run take" across attempts; a fresh run
+    is a plain assignment.
+    """
+    if resumed:
+        run.total_duration_seconds = (run.total_duration_seconds or 0) + elapsed
+    else:
+        run.total_duration_seconds = elapsed
+
 # Import stage functions from run_full_pipeline.py dependencies
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
@@ -672,7 +695,7 @@ class PipelineOrchestrator:
             run_id_token = set_current_run_id(self.run_id)
 
             await event_emitter.emit_run_start(self.run_id)
-            start_time = time.time()
+            start_time = _now()
 
             # Notify Teams that a fresh run started processing (issue #154).
             # Only on a true start, not a per-step retry/resume (which passes a
@@ -714,12 +737,12 @@ class PipelineOrchestrator:
             if run.status == "cancelled" or is_cancelled(self.run_id):
                 raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
-            duration = int(time.time() - start_time)
+            duration = int(_now() - start_time)
             run.status = "complete"
             run.completed_at = datetime.now()
             # Persist the authoritative pipeline duration (previously only emitted
             # over the WebSocket) so historical conversion-time metrics are queryable.
-            run.total_duration_seconds = duration
+            _record_total_duration(run, duration, start_step_number is not None)
             run.total_cost = self.total_cost
             self.db.commit()
 
@@ -773,7 +796,11 @@ class PipelineOrchestrator:
             # Record time-to-failure too -- useful when diagnosing a run that was
             # "taking too long" and then errored out.
             if start_time is not None:
-                run.total_duration_seconds = int(time.time() - start_time)
+                _record_total_duration(
+                    run,
+                    int(_now() - start_time),
+                    start_step_number is not None,
+                )
             self.db.commit()
             await self.log(0, f"Pipeline failed: {str(e)}", "ERROR")
             # Authoritative terminal failure signal. Emit the user-facing
@@ -945,7 +972,7 @@ class PipelineOrchestrator:
             await event_emitter.emit_step_start(self.run_id, step_number, self.total_cost)
             await self.log(step_number, f"Starting Stage {stage_id}: {step_def.name}")
 
-            start_time = time.time()
+            start_time = _now()
 
             # Execute the actual stage logic, bounded by a coarse per-stage
             # wall-clock ceiling. A hung stage (e.g. a wedged provider call)
@@ -967,7 +994,7 @@ class PipelineOrchestrator:
                     f"{stage_timeout}s and was stopped."
                 ) from exc
 
-            duration = int(time.time() - start_time)
+            duration = int(_now() - start_time)
 
             # Mark as complete
             step.status = "complete"
