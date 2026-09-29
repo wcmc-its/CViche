@@ -80,6 +80,12 @@ Lints, ranked by the severity of the failure class they catch:
                           (FSMB "2025-2026" extracted as start_date=2026);
                           report-only, the value is not repaired (#729)
 
+14d. date_only_lines      body paragraphs (outside the Appendix, never table
+                          cells) whose whole text is a date -- a record's date
+                          column split from its payload and rendered as its
+                          own bullet (#259: ZXVGAC, 28 under EDUCATIONAL
+                          CONTRIBUTIONS); WARN at a corpus-derived count
+
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
 construction lints, because each one on its own caps quality_score.py's final
@@ -241,6 +247,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     appendix_entry_count,
     honors_table_totals,
     lint_dead_sections,
+    lint_date_only_lines,
     lint_duplicate_passages,
     lint_duplicate_records,
     lint_output_hygiene,
@@ -331,6 +338,7 @@ KNOWN_LINTS = (
     "invented_records",
     "wrong_start_date",
     "table_lost",
+    "date_only_lines",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -350,6 +358,10 @@ LINT_PREVALENCE = {
     "table_shape": 0.562,
     "missed_headers": 0.288,
     "classified_unrendered": 0.288,
+    # 32 of 126 corpus renders fired at any severity (33 with prod run
+    # ZXVGAC), from a fresh dev render of the same farm + 2026-09-11/-17
+    # batches section_lost was calibrated on (#259).
+    "date_only_lines": 0.254,
     "stage6_render_warnings": 0.123,
     "dedup_drops": 0.110,
     "segmentation": 0.082,
@@ -852,6 +864,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # Last row, not beside `segmentation`: this order breaks the sweep's
     # ranking ties, so a new lint appends rather than shifting every other.
     LintSpec("table_lost", lint_table_lost, ("source_block_lines", "stage_2")),
+    LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
 )
 
 

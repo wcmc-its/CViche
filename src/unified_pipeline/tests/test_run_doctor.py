@@ -25,6 +25,7 @@ import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
 from unified_pipeline.quality_score import score_cv_owner  # noqa: E402
+from unified_pipeline.doctor.lints.render import DATE_ONLY_LINES_WARN_COUNT  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     MISSED_HEADERS_WARN_COUNT,
@@ -39,6 +40,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_dead_sections,
     lint_dedup_drops,
     DUPLICATE_PASSAGE_MIN_BLOCKS,
+    lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
     lint_missed_headers,
@@ -1090,6 +1092,68 @@ def test_dedup_drops_quiet_with_no_decisions():
     assert lint_dedup_drops({"warnings": [], "dedup_decisions": []}) == []
 
 
+# ------------------------------------------- lint 14d: date-only lines (#259)
+
+_EDU_HEADER = ("p", "K. EDUCATIONAL CONTRIBUTIONS")
+
+
+def _date_only_blocks(dates):
+    """Level-0 bullets interleaved with activity names -- ZXVGAC's shape."""
+    blocks = [_EDU_HEADER]
+    for i, date in enumerate(dates):
+        blocks += [("p", f"Guest lecture number {i}"), ("p", date)]
+    return blocks
+
+
+def test_date_only_lines_warns_at_threshold_with_three_samples():
+    dates = ["June 2019", "07/2008 \u2013 06/2013", "October Issue 2025",
+             "October 13, 2016", "2024-2025"]
+    assert DATE_ONLY_LINES_WARN_COUNT == 5  # the gap between the corpus's 4 and 7
+    assert len(dates) == DATE_ONLY_LINES_WARN_COUNT
+    findings = lint_date_only_lines(_date_only_blocks(dates))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "date_only_lines" and f["severity"] == "WARN"
+    assert f["message"].startswith("5 body paragraph(s)")
+    assert f["evidence"] == dates[:3]
+
+
+def test_date_only_lines_info_below_threshold():
+    dates = ["June 2019"] * (DATE_ONLY_LINES_WARN_COUNT - 1)
+    findings = lint_date_only_lines(_date_only_blocks(dates))
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert findings[0]["message"].startswith("4 body paragraph(s)")
+
+
+def test_date_only_lines_ignores_table_cells():
+    blocks = [_EDU_HEADER] + [("table", "June 2019")] * 10
+    assert lint_date_only_lines(blocks) == []
+
+
+def test_date_only_lines_ignores_the_appendix_until_the_next_section():
+    blocks = ([("p", "T. APPENDIX")] + [("p", "\u2022 June 2019")] * 10
+              + [("p", "U. OTHER"), ("p", "March 2020")])
+    findings = lint_date_only_lines(blocks)
+    assert len(findings) == 1
+    assert findings[0]["message"].startswith("1 body paragraph(s)")
+    assert findings[0]["evidence"] == ["March 2020"]
+
+
+def test_date_only_lines_sees_through_a_list_enumerator_but_not_words():
+    blocks = [_EDU_HEADER, ("p", "3. 2009."), ("p", "\u2022 June 2019"),
+              ("p", "Johns Hopkins University, 1991"),
+              ("p", "Course director, June 2019 \u2013 Present")]
+    findings = lint_date_only_lines(blocks)
+    assert findings[0]["evidence"] == ["3. 2009.", "\u2022 June 2019"]
+
+
+def test_date_only_lines_is_a_registered_lint():
+    from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_REGISTRY
+    assert "date_only_lines" in KNOWN_LINTS
+    assert any(spec.lint_id == "date_only_lines" and spec.rule is lint_date_only_lines
+               for spec in LINT_REGISTRY)
+
+
 # ------------------------------------------------------ lint 12: pipe leaks
 
 def test_pipe_leaks_flags_multi_pipe_paragraphs_not_tables():
@@ -1688,12 +1752,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (25), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (26), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 24
+    assert len(payload["findings"]) == 25
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
