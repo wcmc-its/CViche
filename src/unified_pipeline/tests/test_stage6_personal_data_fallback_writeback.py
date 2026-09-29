@@ -1515,3 +1515,54 @@ def test_a_home_number_inside_a_business_address_cell_phone_line_is_dropped(tmp_
     assert rows.get("office telephone:", "") == ""
     assert "914-555-0111" not in _docx_texts(tmp_path / "out.docx")
     assert [i.category for i in gen._pii_result.withheld] == [CAT_HOME_CONTACT]
+
+
+# --------------------------------------------------------------------------
+# #732: discover_original_doc=False renders with no source document at all,
+# whatever SAMPLE_CV_DIR or the CWD happen to hold.
+# --------------------------------------------------------------------------
+
+_DISCOVERABLE_EMAIL = "guess@example.com"
+
+
+def _plant_discoverable_source(tmp_path, monkeypatch):
+    """A <uid>.docx in a fake SAMPLE_CV_DIR, which only the guess can find."""
+    sample_dir = tmp_path / "sample_cvs"
+    sample_dir.mkdir()
+    _make_label_table_docx(sample_dir / "TESTPDWB.docx",
+                           [("Work email:", _DISCOVERABLE_EMAIL)])
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.SAMPLE_CV_DIR", sample_dir)
+
+
+def _render_uid_only(tmp_path, **kwargs) -> dict:
+    ip, op = tmp_path / "in.json", tmp_path / "out.docx"
+    ip.write_text(json.dumps({"document_uid": "TESTPDWB", "entries": []}))
+    run_stage6(str(ip), str(op), verbose=False, **kwargs)
+    return _personal_data_row_values(op)
+
+
+def test_discovery_is_the_default_and_finds_the_sample_dir_docx(tmp_path, monkeypatch):
+    _plant_discoverable_source(tmp_path, monkeypatch)
+
+    rows = _render_uid_only(tmp_path)
+
+    assert rows.get("work email:") == _DISCOVERABLE_EMAIL
+
+
+def test_discover_original_doc_false_skips_the_sample_dir_guess(tmp_path, monkeypatch):
+    _plant_discoverable_source(tmp_path, monkeypatch)
+
+    rows = _render_uid_only(tmp_path, discover_original_doc=False)
+
+    assert rows.get("work email:", "") == ""
+
+
+def test_discover_original_doc_false_still_honours_an_explicit_source(tmp_path, monkeypatch):
+    _plant_discoverable_source(tmp_path, monkeypatch)
+    explicit = tmp_path / "explicit.docx"
+    _make_label_table_docx(explicit, [("Work email:", "explicit@example.com")])
+
+    rows = _render_uid_only(tmp_path, original_doc_path=str(explicit),
+                            discover_original_doc=False)
+
+    assert rows.get("work email:") == "explicit@example.com"

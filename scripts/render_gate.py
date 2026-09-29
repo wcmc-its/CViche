@@ -22,19 +22,23 @@ determinism control) and is the thing that actually passes or fails.
 --source-dir DIR points this at the directory holding <uid>*.docx (e.g.
 data/sample_cvs/word/) so stage 6's personal-data fallback (#550) can recover
 contact fields from the original document. Without it -- the default -- this
-gate could not see that path at all: SAMPLE_CV_DIR auto-discovery
-(stage_6_word_template.py:716-727) resolves for none of the farm uids in a
-fresh worktree, so every render took the fallback's "no original doc" branch
-and #550 was corpus-unprovable. Omitting the flag, or passing it for a uid
-with no matching docx, renders identically to today -- opt-in, and a missing
-docx is a one-line notice in the index, not an error. Mirrors
-doctor_gate.py's --source-dir: same fail-closed non-directory check, same
-_uid_owns boundary rule (a shorter uid must not match a longer uid's file).
+gate renders with NO source docx, deterministically (#732): every render
+passes discover_original_doc=False to run_stage6(), which skips stage 6's
+SAMPLE_CV_DIR / CWD-relative data/sample_cvs/word guess, so the output cannot
+depend on the launch directory or checkout. The same holds for a uid with no
+matching docx under --source-dir: a one-line notice in the index, not an
+error, and no guessed path. Mirrors doctor_gate.py's --source-dir: same
+fail-closed non-directory check, same _uid_owns boundary rule (a shorter uid
+must not match a longer uid's file).
 
 With the flag this gate reproduces a live run: run_stage6() takes an
 original_doc_path parameter and forwards it to generate(), and both drivers
 pass the resolved source path the same way (#550), so a delta this flag
 surfaces is a delta a real CV render produces too.
+
+A requested uid (positional or --uids-file) that matches no artifact fails the
+run non-zero. --uids-file lines lose only their line terminator: trailing
+spaces are part of real uids.
 
 Fixes two defects found in an earlier, uncommitted version of this script
 (docs/analysis/HANDOFF-wave1-completion-2026-08-11.md, issue #584):
@@ -165,13 +169,14 @@ def _atomic_write_json(path: Path, obj) -> None:
 def _uid_filter(uids, uids_file) -> set:
     """The uids the caller asked for; an empty set means "every uid in the arm".
 
-    Blank lines and surrounding whitespace are dropped, so the trailing newline
-    every editor writes does not become an empty uid -- which matches nothing
-    and would quietly narrow the run rather than fail it.
+    Blank (whitespace-only) lines are dropped, so the trailing newline every
+    editor writes does not become an empty uid. Only the line terminator is
+    stripped from the rest: a uid derived from a real filename can end in a
+    space (#732), and stripping it would match no artifact.
     """
     if uids_file is None:
         return set(uids)
-    return {line.strip()
+    return {line.rstrip("\r\n")
             for line in uids_file.read_text(encoding="utf-8").splitlines()
             if line.strip()}
 
@@ -181,10 +186,9 @@ def _discover_uids(arm_outputs: Path, only: set) -> list:
     uids = sorted({p.name.replace("_fields.json", "")
                    for p in (arm_outputs / "stage_4_field_extraction").glob("*_fields.json")})
     if only:
-        # Stripped, as `_uid_filter` strips each requested uid: harvested
-        # filenames can end in a space ("... CV _fields.json"), and an exact
-        # match dropped those uids from a --uids-file run without a word.
-        uids = [u for u in uids if u.strip() in only]
+        # Exact match: harvested filenames can end in a space
+        # ("... CV _fields.json") and `_uid_filter` keeps that space.
+        uids = [u for u in uids if u in only]
     return uids
 
 
@@ -317,7 +321,8 @@ def _render_uid(s6, src: Path, dest: Path, source_path) -> dict:
     # uid is allowed to fail. A run is not allowed to disappear.
     try:
         s6.run_stage6(input_path=str(src), output_path=str(dest), verbose=False,
-                      original_doc_path=str(source_path) if source_path else None)
+                      original_doc_path=str(source_path) if source_path else None,
+                      discover_original_doc=False)
         # A renderer that returns without raising and without writing the
         # output file is not a successful render -- "no exception" is not
         # "rendered" (review on #589, same fail-closed guarantee this
@@ -385,14 +390,14 @@ def main(argv=None):
     import unified_pipeline.stage_6_word_template as s6
 
     uids = _discover_uids(arm_outputs, only)
-    if not uids:
-        print("no uids to render -- empty arm, or uid filter matched nothing", file=sys.stderr)
-        return 1
-    unmatched = sorted(only - {u.strip() for u in uids})
+    unmatched = sorted(only - set(uids))
     if unmatched:
-        # A partial match is a narrower run than the caller asked for; fail it
-        # rather than report a clean arm over fewer CVs.
+        # A partial (or empty) match is a narrower run than the caller asked
+        # for; fail it rather than report a clean arm over fewer CVs.
         print("requested uids not in this arm:", *unmatched, sep="\n  ", file=sys.stderr)
+        return 1
+    if not uids:
+        print("no uids to render -- empty arm", file=sys.stderr)
         return 1
 
     results = _render_all(s6, arm_outputs, out, source_dir, uids)

@@ -919,7 +919,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         return cv_owner_location
 
     def _resolve_original_doc_path(
-            self, document_uid: str, original_doc_path: str | None
+            self, document_uid: str, original_doc_path: str | None,
+            discover_original_doc: bool = True,
     ) -> str | None:
         """The original document path if not already given, or None.
 
@@ -928,10 +929,15 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         `SAMPLE_CV_DIR` constant plus the process CWD, instead of a stack of
         brittle '..'/.parent chains that broke silently on any restructure.
 
-        Split out of `generate()` as a PURE move (#820 R3, §3.2): identical
-        body, no behaviour change.
+        `discover_original_doc=False` skips the guess entirely (#732): the
+        result is then exactly what the caller passed, so the render cannot
+        depend on the launch directory or checkout. Default True keeps every
+        other caller unchanged.
+
+        Split out of `generate()` as a PURE move (#820 R3, §3.2); the
+        `discover_original_doc` early return is the only addition.
         """
-        if original_doc_path:
+        if original_doc_path or not discover_original_doc:
             return original_doc_path
         possible_paths = [
             SAMPLE_CV_DIR / f"{document_uid}.docx",
@@ -1068,7 +1074,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             section_names=TAXONOMY_TO_SECTION)
 
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
-                 original_doc_path: str = None) -> str:
+                 original_doc_path: str = None, discover_original_doc: bool = True) -> str:
         """
         Main entry point: Generate WCM document from pipeline output.
 
@@ -1114,7 +1120,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # are lifted out to their own helpers (#820 R3, pure moves -- §3.2):
         # identical bodies, no behaviour change.
         original_doc_path = self._resolve_original_doc_path(
-            document_uid, original_doc_path)
+            document_uid, original_doc_path, discover_original_doc)
         research_summary_data = self._load_research_summary_data(
             research_summary_path, input_path, document_uid)
 
@@ -3485,7 +3491,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
                emit_track_changes: bool = True, emit_comments: bool = False,
                strip_template_instructions: bool = True,
                recover_unrendered_records: bool = True,
-               original_doc_path: str | None = None) -> str:
+               original_doc_path: str | None = None,
+               discover_original_doc: bool = True) -> str:
     r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -3552,6 +3559,9 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
             by constructing its own generator, so the gate measures the
             production entry point. Without it generate() falls back to the
             SAMPLE_CV_DIR guess.
+        discover_original_doc: False renders with no source document when
+            original_doc_path is None, skipping that guess (#732). Only
+            scripts/render_gate.py passes it; default True.
 
     Returns:
         Path to generated document
@@ -3563,7 +3573,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         strip_template_instructions=strip_template_instructions,
         recover_unrendered_records=recover_unrendered_records,
     )
-    return generator.generate(input_path, output_path, original_doc_path=original_doc_path)
+    return generator.generate(input_path, output_path, original_doc_path=original_doc_path,
+                              discover_original_doc=discover_original_doc)
 
 
 def main():
