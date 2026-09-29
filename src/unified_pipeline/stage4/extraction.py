@@ -26,6 +26,7 @@ from unified_pipeline.stage4.coercion import (
     coerce_field_value_types,
     normalize_dates,
 )
+from unified_pipeline.stage4.context_headings import stamp_context_headings
 from unified_pipeline.stage4.owner_name import (
     add_target_names,
     extract_cv_owner_name,
@@ -479,6 +480,13 @@ def _get_field_descriptions(taxonomy_code: str) -> str:
 
     return f"Extract all available fields: {', '.join(get_field_schema(taxonomy_code)['fields'])}"
 
+
+#: Appended (as instruction 10) when a batch holds an entry stamped with
+#: `context_heading` (#985). Leading newline: it follows instruction 8/9.
+CONTEXT_HEADING_INSTRUCTION = """
+10. **Sub-heading context**: an entry marked "(under: X)" sits beneath the sub-heading X in the CV. Use X to fill institution, role, title, audience, level or status fields when the entry text itself omits them. Never override what the entry text states, and do not copy X into a field it does not describe."""
+
+
 def build_extraction_prompt(
     entries: list[dict[str, Any]],
     schema: dict[str, Any],
@@ -533,7 +541,12 @@ def build_extraction_prompt(
 **Entries**:
 """
     for i, entry in enumerate(entries):
-        prompt += f"\n[Entry {i}]:\n{entry.get('text', '')}\n"
+        under = f" (under: {entry['context_heading']})" if entry.get("context_heading") else ""
+        prompt += f"\n[Entry {i}]{under}:\n{entry.get('text', '')}\n"
+
+    # #985: only a batch holding a stamped entry carries the extra rule, so an
+    # unstamped batch's prompt stays byte-identical.
+    context_heading_instruction = CONTEXT_HEADING_INSTRUCTION if any(e.get("context_heading") for e in entries) else ""
 
     # Add code-specific instructions
     code_specific_instructions = ""
@@ -593,7 +606,7 @@ def build_extraction_prompt(
 5. Emails: extract multiple emails separately (primary_email, secondary_email, institutional_email, personal_email)
 6. Tab-separated values: If text contains tabs (\\t) or pipe characters (|), these indicate table columns - extract each column as a separate field value, not as merged text
 7. Only extract explicitly stated information - do not infer or guess
-8. CRITICAL: Include "entry_index" field in each extraction to match the entry number above{target_name_instruction}{code_specific_instructions}
+8. CRITICAL: Include "entry_index" field in each extraction to match the entry number above{target_name_instruction}{code_specific_instructions}{context_heading_instruction}
 
 Return JSON with format:
 {{
@@ -937,6 +950,7 @@ def extract_fields_from_mapped_entries(
         workers: Batches in flight at once (default STAGE4_BATCH_WORKERS).
             1 reproduces the pre-#881 serial loop exactly.
     """
+    mapped_entries = stamp_context_headings(mapped_entries)  # #985: before batching loses document order
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
 
