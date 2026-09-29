@@ -19,8 +19,11 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 
 from unified_pipeline.segmentation_regression import (  # noqa: E402
+    BODY_BLOCK,
     compare_metrics,
     compute_metrics,
+    find_lost_blocks,
+    iter_source_block_lines,
     iter_source_lines,
     lint_metrics,
 )
@@ -193,6 +196,74 @@ def test_short_template_text_and_real_content_still_count_as_lost():
     m = compute_metrics(source, _STAGE1A, {"entries": [_entry(_GRANT_A, start=1)]})
     assert m["lost_lines"] == source[:3]
     assert m["text_coverage_pct"] == 25.0
+
+
+def test_iter_source_block_lines_tags_each_table_and_matches_flat_lines(tmp_path):
+    doc = Document()
+    doc.add_paragraph("A body paragraph outside every table")
+    first = doc.add_table(rows=2, cols=1)
+    first.cell(0, 0).text = "first table row one"
+    first.cell(1, 0).text = "first table row two"
+    second = doc.add_table(rows=1, cols=1)
+    second.cell(0, 0).text = "second table cell"
+    second.cell(0, 0).add_table(rows=1, cols=1).cell(0, 0).text = "nested table cell"
+    path = tmp_path / "blocks.docx"
+    doc.save(path)
+
+    pairs = iter_source_block_lines(str(path))
+    assert pairs == [
+        (BODY_BLOCK, "A body paragraph outside every table"),
+        (0, "first table row one"),
+        (0, "first table row two"),
+        (1, "second table cell"),
+        (2, "nested table cell"),
+    ]
+    assert iter_source_lines(str(path)) == [line for _, line in pairs]
+
+
+def _covered_line(i):
+    return f"covered record line number {i} alpha"
+
+
+def _lost_line(i):
+    return f"lost personal data line {i} zebra"
+
+
+def test_small_table_lost_whole_is_found_despite_high_document_coverage():
+    """#815 (web207): a small table lost whole is a rounding error against
+    the rest of the document, so the document-wide lint stays quiet."""
+    covered = [_covered_line(i) for i in range(200)]
+    lost = [_lost_line(i) for i in range(5)]
+    block_lines = [(0, l) for l in covered] + [(1, l) for l in lost]
+    stage2 = {"entries": [_entry(l, start=i) for i, l in enumerate(covered)]}
+
+    metrics = compute_metrics([l for _, l in block_lines], _STAGE1A, stage2)
+    assert metrics["text_coverage_pct"] >= 97.0
+    assert not any(f.startswith("coverage") for f in lint_metrics(metrics))
+
+    assert find_lost_blocks(block_lines, stage2) == [
+        {"block": 1, "substantive_lines": 5, "lost_lines": lost}]
+    # Exactly half of a table lost is already a lost block.
+    half = [(2, covered[0]), (2, covered[1]), (2, lost[0]), (2, lost[1])]
+    assert find_lost_blocks(half, stage2) == [
+        {"block": 2, "substantive_lines": 4, "lost_lines": lost[:2]}]
+
+
+def test_lost_lines_scattered_across_tables_or_in_body_are_not_a_lost_block():
+    covered = [_covered_line(i) for i in range(50)]
+    lost = [_lost_line(i) for i in range(5)]
+    stage2 = {"entries": [_entry(l, start=i) for i, l in enumerate(covered)]}
+    # One lost line in each of five 10-line tables: 10% per table.
+    scattered = [(i // 10, l) for i, l in enumerate(covered)] + [
+        (i, l) for i, l in enumerate(lost)]
+    assert find_lost_blocks(scattered, stage2) == []
+    # A whole table lost below the size floor, and lost body text.
+    # (Short lines are not substantive, so they do not lift it over the floor.)
+    small = [(0, l) for l in covered] + [
+        (1, lost[0]), (1, lost[1]), (1, "2016"), (1, "PhD")]
+    body = [(0, l) for l in covered] + [(BODY_BLOCK, l) for l in lost]
+    assert find_lost_blocks(small, stage2) == []
+    assert find_lost_blocks(body, stage2) == []
 
 
 # ------------------------------------------------------------------ compare
