@@ -19,7 +19,7 @@ of concerns says it belongs, then re-export the name from this module. A
 one-line `from .stage6.text import _phone_cell_text` at the bottom of
 `stage_6_word_template.py` keeps every existing caller working.
 
-**Nine of these names are private** (leading underscore). That is deliberate,
+**Fifteen of these names are private** (leading underscore). That is deliberate,
 not an oversight in this test: privacy here describes intent for new callers,
 but the existing imports are real and load-bearing, so they are part of the
 contract whether or not they should have been. Narrowing the surface is
@@ -31,7 +31,9 @@ once means a failure cannot be attributed to either.
 Self-contained: imports only, no DB, no network, no LLM, no PII.
 """
 
+import ast
 import importlib
+import subprocess
 import sys
 from pathlib import Path
 
@@ -44,21 +46,35 @@ if str(_SRC) not in sys.path:
 
 #: Every name imported from `stage_6_word_template` anywhere in the repository,
 #: measured against origin/dev @ 5e3d8fd on 2026-07-28 by walking the AST of all
-#: 350 .py files for `ImportFrom` nodes targeting this module.
+#: 350 .py files for `ImportFrom` nodes targeting this module, then re-measured
+#: on 2026-09-29 (#667): `test_live_import_walk_is_pinned_by_the_manifest`
+#: below found 11 live names the hand-captured snapshot had missed. That test
+#: re-runs the walk on every CI run, so this tuple can no longer go stale
+#: silently.
 #:
 #: Adding to this list is fine. REMOVING from it is a breaking change, and it is
 #: the one the split is most likely to make by accident.
 STAGE6_IMPORT_SURFACE = (
     "DEDUP_FUSED_BLOB_RECORD_LINES",
+    "GEO_SCOPE_FAILURE_STAT",
+    "PII_REDACTED_NOTICE",
+    "RENDER_ROUTED_CODES",
     "RETIRED_TAXONOMY_CODES",
     "TAXONOMY_TO_SECTION",
+    "TEMPLATE_PATH",
     "WCMTemplateGenerator",
+    "_TAXONOMY_WARNED_CONFUSIONS",
     "_address_cell_text",
     "_clean_inline_tabs",
     "_committee_cell_text",
+    "_dates_overlap_or_match",
     "_drop_is_safe",
+    "_get_cleaned_institution_name",
     "_labels_its_own_address_slots",
+    "_labels_its_own_phone_slots",
     "_parse_date_components",
+    "_phone_cell_text",
+    "_pii_fragments",
     "_record_lines",
     "_squash",
     "_strip_taxonomy_code",
@@ -67,16 +83,21 @@ STAGE6_IMPORT_SURFACE = (
     "format_date_for_section",
     "grant_status_rebucket_target",
     "normalize_retired_code",
+    "parse_reclassified_segments",
     "run_stage6",
     "segment_already_rendered",
     "split_fused_citation_entries",
 )
 
-#: Same, for the shared render helpers. `entry_lines` is added by #477 and is
-#: deliberately absent here -- this file pins what exists on dev, so it can be
-#: merged before the split without waiting on any open PR.
+#: Same, for the shared render helpers. The live walk (#667) found four more
+#: live imports than the original single-name pin, `entry_lines` among them --
+#: the earlier note that it was "deliberately absent" predates its landing.
 RENDER_CHECK_IMPORT_SURFACE = (
+    "CELL_SEPARATOR",
     "entry_fragments",
+    "entry_lines",
+    "rejoin_wrapped_row",
+    "wrapped_row_text",
 )
 
 
@@ -143,6 +164,13 @@ RELOCATED_BY_398_RESIDUE = {
         "normalize_retired_code",
         "segment_already_rendered",
     ),
+}
+
+#: Names imported from a `stage6/` home that `stage_6_word_template` does NOT
+#: re-export, so they cannot sit in RELOCATED_BY_398_RESIDUE (whose test asserts
+#: the legacy address resolves to the same object). Found by the live walk (#667).
+HOME_ONLY_IMPORTS = {
+    "unified_pipeline.stage6.dedup": ("_dates_compatible",),
 }
 
 _RELOCATED_CASES = [
@@ -249,11 +277,11 @@ def test_the_surface_list_is_not_silently_empty():
     A refactor that reduced these tuples to () would make every test above
     vacuously pass by generating zero cases. Pin the counts measured on dev.
     """
-    assert len(STAGE6_IMPORT_SURFACE) == 21, (
+    assert len(STAGE6_IMPORT_SURFACE) == 32, (
         "the pinned stage 6 import surface changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
-    assert len(RENDER_CHECK_IMPORT_SURFACE) == 1
+    assert len(RENDER_CHECK_IMPORT_SURFACE) == 5
     assert len(STAGE6_CLASS_SURFACE) == 17
 
 
@@ -264,10 +292,154 @@ def test_private_names_are_a_deliberate_part_of_the_contract():
     but should be its own PR) or widening it (worth noticing).
     """
     private = [n for n in STAGE6_IMPORT_SURFACE if n.startswith("_")]
-    assert len(private) == 9, (
-        f"expected 9 private names in the stage 6 import surface, found "
+    assert len(private) == 15, (
+        f"expected 15 private names in the stage 6 import surface, found "
         f"{len(private)}: {sorted(private)}"
     )
+
+
+@pytest.mark.parametrize("home,name", sorted(
+    (home, name) for home, names in HOME_ONLY_IMPORTS.items() for name in names
+))
+def test_home_only_import_resolves_in_its_home(home, name):
+    assert hasattr(importlib.import_module(home), name), (
+        f"'{name}' is not defined in {home}."
+    )
+
+
+#: Modules whose importers the live walk checks, and the manifest each one's
+#: imported names must be a subset of. A module absent here is out of scope:
+#: the other `stage6/` submodules are new homes with no legacy address to keep
+#: stable, so a caller importing from them is not a contract this file pins.
+LIVE_WALK_MANIFESTS = {
+    "unified_pipeline.stage_6_word_template": frozenset(STAGE6_IMPORT_SURFACE),
+    "unified_pipeline.core.render_check": frozenset(RENDER_CHECK_IMPORT_SURFACE),
+    **{
+        home: frozenset(names) | frozenset(HOME_ONLY_IMPORTS.get(home, ()))
+        for home, names in RELOCATED_BY_398_RESIDUE.items()
+    },
+}
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_SRC_DIR_NAME = "src"
+WILDCARD = "*"
+
+
+def _tracked_python_files() -> list[str]:
+    """Every git-tracked .py path, repo-relative. Fails loudly outside a checkout.
+
+    Deliberately not skipped when git is unavailable: CI runs in a checkout, and
+    a silent skip is how the hand-captured manifest went unverified. Untracked
+    and gitignored trees (notably `archive/`) are NOT walked -- they are not
+    part of what ships, and a caller there is invisible to this test.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "ls-files", "*.py"],
+            cwd=_REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.fail(
+            f"cannot list tracked files with `git ls-files` in {_REPO_ROOT}: {exc}"
+        )
+    return out.split()
+
+
+def _dotted_module_of(rel_path: str) -> tuple[list[str], bool]:
+    """(dotted parts, is_package) for a repo-relative .py path.
+
+    Files under `src/` are importable relative to it; anything else keeps its
+    full path, which only matters for resolving that file's relative imports.
+    """
+    parts = Path(rel_path).with_suffix("").parts
+    if parts and parts[0] == _SRC_DIR_NAME:
+        parts = parts[1:]
+    is_package = bool(parts) and parts[-1] == "__init__"
+    return list(parts[:-1] if is_package else parts), is_package
+
+
+def _target_module(node: ast.ImportFrom, file_parts: list[str], is_package: bool) -> str:
+    """Absolute dotted module a `from ... import` node targets."""
+    if not node.level:
+        return node.module or ""
+    package = file_parts if is_package else file_parts[:-1]
+    base = package[: len(package) - (node.level - 1)]
+    return ".".join([*base, *(node.module.split(".") if node.module else [])])
+
+
+def _in_scope_imports(
+    tree: ast.AST, rel: str
+) -> set[tuple[str, str, str]]:
+    """(file, target module, original name) for each in-scope `ImportFrom`.
+
+    Aliases resolve to the original name (`import x as y` pins `x`). A wildcard
+    is recorded as `*`, which no manifest contains, so it fails the subset
+    check by design rather than being skipped. Plain `import a.b` and attribute
+    access (`s6.name`, `from unified_pipeline import stage_6_word_template as
+    s6`) are OUT OF SCOPE: only `ImportFrom` names are collected.
+    """
+    file_parts, is_package = _dotted_module_of(rel)
+    found = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        target = _target_module(node, file_parts, is_package)
+        if target in LIVE_WALK_MANIFESTS:
+            found.update((rel, target, alias.name) for alias in node.names)
+    return found
+
+
+def _live_imported_names() -> set[tuple[str, str, str]]:
+    found = set()
+    for rel in _tracked_python_files():
+        tree = ast.parse((_REPO_ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+        found |= _in_scope_imports(tree, rel)
+    return found
+
+
+def _unpinned(found: set[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+    return sorted(t for t in found if t[2] not in LIVE_WALK_MANIFESTS[t[1]])
+
+
+def test_live_import_walk_is_pinned_by_the_manifest():
+    """A new caller of an unpinned name fails here, naming the (file, name) pair.
+
+    The manifests above were captured by hand once. This re-runs that walk over
+    every tracked .py file so a PR that starts importing a new stage 6 name
+    cannot pass without the name being added -- which is the moment to decide
+    whether the split must keep it importable.
+    """
+    missing = _unpinned(_live_imported_names())
+    assert not missing, (
+        "imported from a stage 6 module but absent from its pinned manifest -- "
+        "add the name to the matching tuple in this file (adding is safe):\n"
+        + "\n".join(f"  {f}: {mod}.{name}" for f, mod, name in missing)
+    )
+
+
+def test_live_import_walk_reaches_every_scoped_module():
+    """Guard the guard: a walk that found nothing would pass vacuously."""
+    reached = {mod for _, mod, _ in _live_imported_names()}
+    assert reached == set(LIVE_WALK_MANIFESTS)
+
+
+def test_live_walk_flags_unpinned_aliased_relative_and_wildcard_imports():
+    """Drive the failure arm: each import shape below must be reported unpinned."""
+    code = (
+        "from unified_pipeline.stage_6_word_template import run_stage6, brand_new as b\n"
+        "from unified_pipeline.stage_6_word_template import *\n"
+        "from ...stage_6_word_template import another_new\n"
+        "from ..render_check import _norm, fresh_one\n"
+    )
+    found = _in_scope_imports(
+        ast.parse(code), "src/unified_pipeline/stage6/sections/x.py"
+    )
+    assert [(m.rsplit(".", 1)[-1], n) for _, m, n in _unpinned(found)] == [
+        ("render_check", "fresh_one"),
+        ("stage_6_word_template", WILDCARD),
+        ("stage_6_word_template", "another_new"),
+        ("stage_6_word_template", "brand_new"),
+    ]
 
 
 if __name__ == "__main__":
@@ -281,6 +453,8 @@ if __name__ == "__main__":
         test_relocated_name_still_importable_from_stage6_module(_home, _n)
         test_relocated_name_resolves_in_its_new_home(_home, _n)
     test_the_relocated_surface_is_not_silently_empty()
+    test_live_import_walk_is_pinned_by_the_manifest()
+    test_live_import_walk_reaches_every_scoped_module()
     test_the_surface_list_is_not_silently_empty()
     test_private_names_are_a_deliberate_part_of_the_contract()
     print("OK")
