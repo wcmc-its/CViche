@@ -239,6 +239,21 @@ def test_a_bare_label_followed_by_a_dropped_t_entry_governs_nothing():
     assert set(_stamps(entries)) == {None}
 
 
+def test_a_streak_of_another_letter_ends_the_run():
+    n = ch.MAX_FOREIGN_LETTER_STREAK
+    entries = [_e("Course Lecturer:", "T")] + [_e(f"course {i}", "K1") for i in range(n + 1)] \
+        + [_e(f"mentee {i}", "N3B") for i in range(n)]
+    assert _stamps(entries)[1:] == ["Course Lecturer"] * (n + 1) + [None] * n
+
+
+def test_a_short_detour_and_a_misfiled_first_child_keep_the_run():
+    n = ch.MAX_FOREIGN_LETTER_STREAK
+    detour = [_e("misfiled", "L1")] + [_e(f"course {i}", "K1") for i in range(n)] \
+        + [_e(f"other {i}", "D3") for i in range(n - 1)] + [_e("course last", "K2")]
+    entries = [_e("Alpha School of Medicine", "T")] + detour
+    assert _stamps(entries)[1:] == ["Alpha School of Medicine"] * len(detour)
+
+
 def test_a_bare_label_whose_next_entry_is_t_governs_nothing():
     entries = [_e("Alpha Journal", "T"), _e("A long list item, with a comma", "T"), _e("child")]
     assert set(_stamps(entries)) == {None}

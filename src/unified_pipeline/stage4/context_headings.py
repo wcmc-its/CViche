@@ -206,6 +206,29 @@ def _flat_hierarchies(entries: list[dict[str, Any]]) -> set[tuple[str, ...]]:
     }
 
 
+#: Consecutive children of one taxonomy letter, other than the run's most
+#: common letter, that end a run: web199's 'Course Lecturer' K1 rows ran on into
+#: seven N3B mentee rows, which took "Course Lecturer" as their position. One
+#: or two misfiled children (web31's lone L1, web24's lone D3) do not.
+MAX_FOREIGN_LETTER_STREAK = 3
+
+
+def _trim_foreign_streak(indices: list[int], entries: list[dict[str, Any]]) -> list[int]:
+    """`indices` up to the first MAX_FOREIGN_LETTER_STREAK consecutive
+    children sharing a letter other than the run's most common one."""
+    if not indices:
+        return indices
+    letters = [_code_family(entries[i].get("taxonomy_code") or "") for i in indices]
+    dominant = Counter(letters).most_common(1)[0][0]
+    streak = 0
+    for pos, letter in enumerate(letters):
+        foreign = letter != dominant
+        streak = streak + 1 if foreign and streak and letter == letters[pos - 1] else int(foreign)
+        if streak >= MAX_FOREIGN_LETTER_STREAK:
+            return indices[:pos - streak + 1]
+    return indices
+
+
 class _Run:
     """The entries one heading governs; in a flat hierarchy, one code letter."""
 
@@ -264,13 +287,14 @@ def stamp_context_headings(entries: list[dict[str, Any]]) -> list[dict[str, Any]
     stops at the next heading, at ANY other T entry (a T line that is not
     heading-shaped -- "2003-2016 University of ..." -- still separates record
     groups), a hierarchy change, a strongly heading-shaped non-T or dropped
-    entry, or a change of taxonomy family among the children of a flat leaf.
+    entry, a change of taxonomy family among the children of a flat leaf, or
+    MAX_FOREIGN_LETTER_STREAK children of a letter other than the run's own.
     A heading that would govern more than MAX_STAMPED_RUN entries stamps nothing.
     """
     out = [dict(entry) for entry in entries]
     for run in _heading_runs(entries):
         if len(run.indices) > MAX_STAMPED_RUN:
             continue
-        for idx in run.indices:
+        for idx in _trim_foreign_streak(run.indices, entries):
             out[idx]["context_heading"] = run.heading
     return out

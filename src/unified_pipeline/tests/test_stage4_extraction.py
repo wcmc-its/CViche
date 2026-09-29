@@ -745,7 +745,11 @@ def test_the_instruction_says_fill_missing_never_override_and_do_not_misplace():
     text = extraction.CONTEXT_HEADING_INSTRUCTION
     assert "when the entry text itself omits them" in text
     assert "Never override what the entry text states" in text
-    assert "do not copy X into a field it does not describe" in text
+    assert "Do not copy X into a field it does not describe" in text
+    # The live A/B (#985): "Co-directed" rows became the heading's "Course
+    # Director", and an activity-kind heading was copied as a role.
+    assert "a role the entry qualifies" in text
+    assert "never copy X verbatim when it only names a kind of activity" in text
 
 
 def test_extract_fields_from_mapped_entries_sends_a_stamped_entrys_heading(monkeypatch):
