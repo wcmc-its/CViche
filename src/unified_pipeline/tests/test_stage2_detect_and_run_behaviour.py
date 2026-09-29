@@ -282,6 +282,24 @@ def test_normal_table_row_claimed_and_unclaimed_sibling_row_recovered(monkeypatc
     assert by_idx["9.0"]["recovered_row"] is True
 
 
+@pytest.mark.parametrize("elem_type", ["table_content", "table"])
+def test_multi_paragraph_cell_zero_takes_trailing_columns_on_its_entry_line(monkeypatch, elem_type):
+    # #488: the row's date/institution columns attach to cell 0's FIRST
+    # paragraph, not its last sub-bullet. Both element shapes, normal rows and
+    # merged (pseudo) rows, so each of the four join sites is on the wire.
+    normal = [{"text": "Entry title\n- sub bullet one\n- sub bullet two"}, {"text": "2024"}, {"text": "Some Org"}]
+    single = [{"text": "Solo title"}, {"text": "2023"}]
+    merged = [{"text": "Title A\n- bullet A\n\nTitle B\n- bullet B"}, {"text": "2020\n\n2021"}]
+    elements = [{"unified_idx": 4, "type": elem_type, "table_index": 1, "data": [normal, single, merged]}]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": []}))
+    entries, _ = stage2.detect_entries_for_section(["Service"], elements, 4, 4, element_index_map=_idx_map(elements))
+    by_idx = {e["element_idx_start"]: e["text"] for e in entries}
+    assert by_idx["4.0"] == "Entry title | 2024 | Some Org\n- sub bullet one\n- sub bullet two"
+    assert by_idx["4.1"] == "Solo title | 2023"  # one-paragraph cell 0: unchanged
+    assert by_idx["4.2.0"] == "Title A | 2020\n- bullet A"
+    assert by_idx["4.2.1"] == "Title B | 2021\n- bullet B"
+
+
 def test_table_content_with_no_row_data_falls_back_to_single_integer_element(monkeypatch):
     elements = [{"unified_idx": 20, "type": "table_content", "text": "Fallback summary text", "data": [], "rows": 0, "table_index": 3}]
     monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result(

@@ -85,6 +85,7 @@ from unified_pipeline.stage6.sections.honors import (  # noqa: E402
     _ENTRY_HEADER_KEYWORDS,
     _FALLBACK_SCHEMA_STAT,
     HonorRecord,
+    _award_cell_first_shape,
     _entry_parts,
     _extract_organization_from_award,
     _honor_columns,
@@ -1245,6 +1246,36 @@ def test_continuation_merge_requires_both_organization_and_date():
             "(continuation) | Imaginary Testing Society")
     assert _entry_parts(text) == [
         "Fictional Award", "(continuation) | Imaginary Testing Society"]
+
+
+def test_stage2_award_cell_first_row_shape_is_one_record():
+    """#488: stage 2 now puts a multi-paragraph first cell's other columns on
+    its FIRST paragraph ("Award | Org | Date" then the parenthetical). That
+    must read back as the same single record as the older shape, not as a
+    second award "(parenthetical)" with no organization or date."""
+    text = ("Fictional Team Award | Imaginary Testing Society | 10/30/2017\n"
+            "(Co-recipient team award)")
+    rows = _render_honors([_raw(text)])
+    assert rows == [["Fictional Team Award (Co-recipient team award)",
+                     "Imaginary Testing Society", "2017"]]
+
+
+def test_award_cell_first_shape_leaves_other_inputs_alone():
+    assert _award_cell_first_shape(["A"]) == ["A"]
+    assert _award_cell_first_shape([]) == []
+    assert _award_cell_first_shape(["A", "(x) | Org | 2019"]) == ["A", "(x) | Org | 2019"]
+    assert _award_cell_first_shape(["A | 2024", "B | 2023"]) == ["A | 2024", "B | 2023"]
+    assert _award_cell_first_shape(["A | Org | 2019", "(x)", "(y)"]) == [
+        "A", "(x)", "(y) | Org | 2019"]
+
+
+def test_award_cell_first_shape_leaves_a_date_cell_continuation_alone():
+    """#488 review: cells ['Award', 'Org', '2019\\n2020'] (only the LAST cell
+    spans lines) read "Award | Org | 2019" then "2020". The tail line is a date,
+    so it belongs to the date cell and must not be moved into the award title."""
+    lines = ["Award | Org | 2019", "2020"]
+    assert _award_cell_first_shape(lines) == lines
+    assert _merge_in_cell_paragraphs(lines) == lines
 
 
 # --- one negative test per `_merge_in_cell_paragraphs` guard ------------

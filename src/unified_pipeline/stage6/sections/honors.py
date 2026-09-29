@@ -380,6 +380,35 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     return parts
 
 
+def _award_cell_first_shape(lines: Sequence[str]) -> list[str]:
+    """Stage 2's row shape for a multi-paragraph first cell (#488), read back
+    in the older shape `_merge_in_cell_paragraphs` was written against.
+
+    Stage 2 now puts the row's other columns on the FIRST paragraph of cell 0
+    ("Award | Org | Date" then the award cell's remaining paragraphs), and only
+    does so when no other cell spans lines. Detected as: line 0 holds the '|'
+    columns and no later line holds one. Re-shaped to "Award", then the
+    remaining paragraphs, the last one carrying " | Org | Date". Any other
+    input is returned unchanged.
+
+    The text alone cannot always tell this shape from the older one where only
+    the LAST cell spans lines ("Award | Org | 2019" then that date cell's own
+    continuation): both read "Award | Org | Date" then one more line. A tail
+    line that is itself a date can only be a date cell's continuation, so it is
+    left in the older shape; a non-date continuation stays ambiguous and is
+    read as the award's own paragraph.
+    """
+    if len(lines) < 2:
+        return list(lines)
+    first, *tail = lines
+    if ('|' not in first or any('|' in line for line in tail)
+            or any(_is_date_column(line) for line in tail)):
+        return list(lines)
+    award, *columns = first.split('|')
+    return [award.strip(), *tail[:-1],
+            ' | '.join([tail[-1], *(c.strip() for c in columns)])]
+
+
 def _merge_in_cell_paragraphs(lines: Sequence[str]) -> list[str]:
     """One 3-column table row whose cells hold several paragraphs, read back
     as that one row rather than one award per line (#828 review round 3,
@@ -413,7 +442,7 @@ def _merge_in_cell_paragraphs(lines: Sequence[str]) -> list[str]:
     if any('\t' in line or _looks_like_column_header(line) for line in lines):
         return list(lines)
     award, *rest = [[p.strip() for p in cell.split('\n') if p.strip()]
-                    for cell in '\n'.join(lines).split('|')]
+                    for cell in '\n'.join(_award_cell_first_shape(lines)).split('|')]
     if any(_is_date_column(p) for cell in [award, *rest[:-1]] for p in cell):
         return list(lines)
     row = ' | '.join([' '.join(award)] + [', '.join(c) for c in rest])

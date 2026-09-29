@@ -829,25 +829,43 @@ def _handle_table_row_zero(
     return new_elements, unified_idx, num_table_headers_emitted, table_rows, current_content_rows
 
 
+def row_cell_texts(row: list) -> list[str]:
+    """Text of each cell in a table row (cell dicts or bare values)."""
+    return [cell.get("text", "") if isinstance(cell, dict) else str(cell) for cell in row]
+
+
+def join_row_cells(cells: list[str]) -> str:
+    """Join a table row's cell texts into one entry text (#488).
+
+    Cells are joined with " | ". When cell 0 holds several paragraphs (an entry
+    title followed by sub-bullets), the trailing columns (date, institution)
+    describe the whole entry, so they attach to cell 0's FIRST paragraph rather
+    than welding onto its last one. A single-paragraph cell 0, or a one-cell
+    row, joins exactly as before -- and so does a row where another cell also
+    spans lines: the trailing paragraphs could then no longer be told apart
+    from those cells' own lines, and stage 6 (honors) reads that old shape.
+    """
+    first = cells[0] if cells else ""
+    rest = cells[1:]
+    stripped = first.strip()
+    if not rest or "\n" not in stripped or any("\n" in c.strip() for c in rest):
+        return " | ".join(cells).strip()
+    head, _, tail = first.lstrip().partition("\n")
+    return (" | ".join([head, *rest]) + "\n" + tail).strip()
+
+
 def _flatten_table_content_text(rows: list[Any]) -> str:
-    """The SAME join `extract_unified_elements` uses, at all three call
-    sites, to build a table_content/table element's `text` field from its
-    `data` rows at construction time: cells joined by " | " within a row,
-    rows joined by "\\n". Used to REBUILD `text` after the pre-LLM scrub
-    mutates cells inside `data` in place, so `text` (what
-    `extract_text_from_docx` and `get_element_text`'s `table_content`
-    branch read) and `data` (what `get_element_text`'s legacy `table`
-    branch and every cell-level consumer read) never disagree (#847
-    residual round 4: a below-cell/next-paragraph scrub touched only one
-    of the two, so the value still reached an LLM reader through
-    whichever field it left alone)."""
+    """The ONE join that builds a table_content/table element's `text` from
+    its `data` rows: each row via `join_row_cells`, rows joined by "\\n".
+    Every construction site in `extract_unified_elements` uses it, as does
+    the pre-LLM scrub when it REBUILDS `text` after mutating cells inside
+    `data` in place, so `text` (what `extract_text_from_docx` and
+    `get_element_text` read) and `data` (what every cell-level consumer
+    reads) never disagree (#847 residual round 4). Stage 2 builds its
+    per-row entries with the same `join_row_cells`, which is what lets the
+    #418 whole-table-parent dedup find the parent's lines in those rows."""
     return "\n".join(
-        " | ".join(
-            cell.get("text", "") if isinstance(cell, dict) else str(cell)
-            for cell in row
-        )
-        for row in rows
-        if isinstance(row, list)
+        join_row_cells(row_cell_texts(row)) for row in rows if isinstance(row, list)
     )
 
 
@@ -1166,12 +1184,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                                     if is_seg_header and len(first_line) <= 80:
                                         # Emit accumulated content first
                                         if current_content_rows:
-                                            content_text = "\n".join(
-                                                " | ".join(
-                                                    cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                                                    for cell in row_data
-                                                ) for row_data in current_content_rows
-                                            )
+                                            content_text = _flatten_table_content_text(current_content_rows)
                                             elements.append({
                                                 "unified_idx": unified_idx,
                                                 "type": "table_content",
@@ -1238,12 +1251,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                         if is_row_header and cell_text and (not has_value_cells or header_left_content_right):
                             # Emit accumulated content rows first
                             if current_content_rows:
-                                content_text = "\n".join(
-                                    " | ".join(
-                                        cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                                        for cell in row_data
-                                    ) for row_data in current_content_rows
-                                )
+                                content_text = _flatten_table_content_text(current_content_rows)
                                 elements.append({
                                     "unified_idx": unified_idx,
                                     "type": "table_content",
@@ -1289,12 +1297,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
                 # Emit any remaining content rows
                 if current_content_rows:
-                    content_text = "\n".join(
-                        " | ".join(
-                            cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                            for cell in row_data
-                        ) for row_data in current_content_rows
-                    )
+                    content_text = _flatten_table_content_text(current_content_rows)
                     elements.append({
                         "unified_idx": unified_idx,
                         "type": "table_content",
@@ -1314,12 +1317,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                     processed_rows.extend(split_rows)
 
                 # Rebuild content text from processed rows
-                content_text = "\n".join(
-                    " | ".join(
-                        cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                        for cell in row_data
-                    ) for row_data in processed_rows
-                )
+                content_text = _flatten_table_content_text(processed_rows)
                 elements.append({
                     "unified_idx": unified_idx,
                     "type": "table",

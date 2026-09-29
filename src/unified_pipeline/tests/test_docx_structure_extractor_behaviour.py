@@ -1451,7 +1451,7 @@ def test_cell_below_scrub_leaves_a_labelled_or_prose_date_alone(tmp_path, neighb
         table.cell(r, c).text = text
     docx_path = tmp_path / "cell_below_control.docx"
     doc.save(str(docx_path))
-    flat = f"Date of Birth: | {neighbour}\n{below} | Dept"
+    flat = f"Date of Birth: | {neighbour}".rstrip() + f"\n{below} | Dept"
     assert _reader_view(docx_path) == (
         [(flat, [["Date of Birth:", neighbour], [below, "Dept"]])], [flat]
     )
@@ -1486,6 +1486,33 @@ def test_next_element_scrub_takes_a_date_opening_a_table(tmp_path):
     assert _reader_view(docx_path) == (
         [("Date of Birth:", []), (flat, [["[withheld]", "03/04/1999"]])], ["Date of Birth:", flat]
     )
+
+
+# #488: every table element's `text` is built with the same per-row join as the
+# stage-2 row entries (join_row_cells), so the #418 whole-table-parent dedup
+# finds the parent's lines in those rows.
+@pytest.mark.parametrize("header_rows", [
+    [],
+    [["Honors and Awards", ""]],
+    [["Honors and Awards", ""], ["Teaching", ""]],
+])
+def test_table_element_text_uses_the_stage2_row_join(tmp_path, header_rows):
+    body = [["Visiting Program\n- Training course", "Fictional City", "2024 to present"],
+            ["Another Entry", "Imaginary Place", "2020 to 2022"]]
+    rows = header_rows + body
+    doc = Document()
+    table = doc.add_table(rows=len(rows), cols=3)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            table.cell(r, c).text = text
+    docx_path = tmp_path / "row_join.docx"
+    doc.save(str(docx_path))
+
+    elements = [e for e in extract_unified_elements(str(docx_path))["elements"]
+                if e["type"] in ("table", "table_content")]
+    joined = "\n".join(e["text"] for e in elements)
+    assert "Visiting Program | Fictional City | 2024 to present\n- Training course" in joined
+    assert "Another Entry | Imaginary Place | 2020 to 2022" in joined
 
 
 # --------------------------------------------------------------------------
