@@ -120,7 +120,6 @@ class ExtractedFields(TypedDict, total=False):
     mentee_name: Any
     name: Any
     narrative: Any
-    nct_number: Any
     notes: Any
     npi_number: Any
     orcid: Any
@@ -147,11 +146,9 @@ class ExtractedFields(TypedDict, total=False):
     setting: Any
     site_position: Any
     specialty: Any
-    sponsor: Any
     start_date: Any
     state_country: Any
     status: Any
-    study_title: Any
     submission_date: Any
     target_journal: Any
     target_name: Any
@@ -161,7 +158,6 @@ class ExtractedFields(TypedDict, total=False):
     total_funding: Any
     total_funding_requested: Any
     training_type: Any
-    trial_title: Any
     unit_program: Any
     url: Any
     venue: Any
@@ -501,7 +497,7 @@ GRANT_EFFORT_TAXONOMY_PREFIX = 'M2'       # grant entries where percent-effort/F
 #: or a code gains both dates.
 DATE_RANGE_TAXONOMY_CODES = (
     'B2', 'C', 'D1', 'D2', 'D3', 'I', 'K1', 'K2', 'K3', 'L1', 'L3',
-    'M2', 'M2A', 'M2B', 'M4A_DEPRECATED', 'M4B', 'N1', 'N2', 'N3', 'N3B',
+    'M2', 'M2A', 'M2B', 'N1', 'N2', 'N3', 'N3B',
     'O', 'P', 'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D',
 )
 

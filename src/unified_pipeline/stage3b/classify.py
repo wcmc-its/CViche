@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass
 from typing import TypedDict
 
+from ..core.retired_taxonomy_codes import live_taxonomy_code
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
@@ -368,7 +369,7 @@ Return ONLY valid JSON with the classifications array."""
             c = class_by_idx.get(orig_idx)
             if c is not None:
                 fallback_code = all_suggested_codes[0] if all_suggested_codes else "T"
-                code = c.get("code")
+                code = live_taxonomy_code(c.get("code"))
                 # isinstance-guard before the set membership check: `code`
                 # is untrusted LLM output and could be any JSON type (e.g. a
                 # list), which would raise TypeError: unhashable type on
@@ -659,7 +660,7 @@ Respond with a JSON array of objects, one per entry:
                 malformed += 1
                 continue
 
-            raw_new_code = reclass.get("new_code") or "T"
+            raw_new_code = live_taxonomy_code(reclass.get("new_code")) or "T"
             # isinstance-guard before the set membership check: `new_code` is
             # untrusted LLM output and could be any JSON type, which would
             # raise TypeError: unhashable type on `in valid_codes` instead of

@@ -2,7 +2,7 @@
   "meta": {
     "version": "7.5",
     "last_updated": "2025-11-28",
-    "total_valid_codes": 60,
+    "total_valid_codes": 56,
     "parent_codes": ["A", "C", "E", "G", "H", "I", "J", "O", "P", "R", "T"],
     "child_codes": [
       "B1", "B2",
@@ -10,14 +10,13 @@
       "F1", "F2",
       "K1", "K2", "K3", "K4", "K5",
       "L1", "L2", "L3",
-      "M1", "M2", "M2D", "M4",
+      "M1", "M2", "M2D",
       "N1", "N2", "N3", "N4",
       "Q1", "Q2", "Q3", "Q4",
       "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"
     ],
     "sub_child_codes": [
       "M2A", "M2B", "M2C",
-      "M4A", "M4B", "M4C",
       "N3A", "N3B",
       "Q4A", "Q4B", "Q4C", "Q4D"
     ],
@@ -29,7 +28,7 @@
       "Educational Contributions": ["K1", "K2", "K3", "K4", "K5"],
       "Clinical Activities": ["L1", "L2", "L3"],
       "Research & Scholarship": [
-        "M1", "M2", "M2A", "M2B", "M2C", "M2D", "M4", "M4A", "M4B", "M4C",
+        "M1", "M2", "M2A", "M2B", "M2C", "M2D",
         "N1", "N2", "N3", "N3A", "N3B", "N4",
         "O", "P",
         "Q1", "Q2", "Q3", "Q4", "Q4A", "Q4B", "Q4C", "Q4D",
@@ -44,12 +43,12 @@
       "H": "Recognition (honors/awards)",
       "L": "Service delivery (clinical practice/innovation/leadership)",
       "K": "Education/teaching",
-      "M": "Research (projects, funding, trials, IP)",
+      "M": "Research (projects, funding including clinical trials, IP)",
       "O_or_Q1": "Governance/leadership (internal vs external)"
     },
     "documentation_signals": {
       "grant_number": "M2/M2A/M2B/M2C",
-      "nct_number": "M4/M4A/M4B/M4C",
+      "nct_number": "M2A/M2B (clinical trials are research support)",
       "isbn": "S3 (books) or S4 (chapters)",
       "patent_number": "M2D (patents & inventions)"
     },
@@ -65,7 +64,7 @@
     },
     "dual_documentation_examples": [
       "Training grants should be documented in both M2 and N2.",
-      "Clinical trial conduct should be documented in M4 and resulting trial papers in S1.",
+      "Clinical trial conduct should be documented in M2A/M2B and resulting trial papers in S1.",
       "Textbooks that are course materials can appear in both S3 and K."
     ]
   },
@@ -809,13 +808,13 @@
       "common_confusions": [
         "Clinical teaching activities incorrectly mapped to L1 instead of K2.",
         "Quality improvement projects misclassified as L1 instead of L2.",
-        "Research activities embedded in clinical care misclassified as L1 instead of M1/M4."
+        "Research activities embedded in clinical care misclassified as L1 instead of M1/M2A/M2B."
       ],
       "key_rules": [
         "Pure patient care/service activities → L1.",
         "Teaching in clinical setting → K2.",
         "Quality improvement work → L2.",
-        "IRB-based research in clinical settings → M1 or M4."
+        "IRB-based research in clinical settings → M1; a clinical trial → M2A/M2B."
       ]
     },
     {
@@ -839,7 +838,7 @@
       "key_rules": [
         "Local QI/innovation without formal research protocol → L2.",
         "Systematic evaluation with IRB and intent to publish → M1.",
-        "Clinical trials belong in M4, not L2.",
+        "Clinical trials belong in M2A/M2B, not L2.",
         "Committee membership or service on clinical committees → P, not L2."
       ]
     },
@@ -898,7 +897,7 @@
         "Use M1 for summary descriptions of research programs, not for grants or outputs.",
         "RESEARCH INTERESTS AND THEMES → M1. Topical research-interest phrases describing research areas are M1, NEVER T.",
         "Fieldwork, excavations, and field research expeditions → M1.",
-        "Funded support should go to M2; trials go to M4; publications go to S1–S9.",
+        "Funded support and clinical trials go to M2; publications go to S1–S9.",
         "If the work is primarily local QI without research protocol, use L2 instead."
       ]
     },
@@ -914,6 +913,7 @@
         "NIH R01 grant listing with number and dates",
         "Foundation research grant supporting a specific project",
         "Industry-sponsored clinical research grants",
+        "Clinical trials the CV owner conducts (e.g. site PI on NCT01234567)",
         "Internal institutional research grants",
         "Pilot project funding",
         "Seed grants"
@@ -951,6 +951,7 @@
       ],
       "key_rules": [
         "Ongoing, active grants → M2A.",
+        "A clinical trial (interventional, observational/registry, or device/diagnostic) with no end date → M2A.",
         "If the grant has ended, it should be in M2B.",
         "If the grant is submitted and awaiting decision, use M2C."
       ]
@@ -974,6 +975,7 @@
       ],
       "key_rules": [
         "Use M2B for grants whose funding period has ended.",
+        "A clinical trial with an end date that has passed → M2B.",
         "Do not list them under current funding once they have expired."
       ]
     },
@@ -1021,96 +1023,6 @@
         "Patents and formal inventions → M2D.",
         "Legacy Technology Transfer content (T2) routes to M2D.",
         "Publications describing the invention remain in S1–S5."
-      ]
-    },
-    {
-      "code": "M4",
-      "label": "Clinical Trials (All)",
-      "parent": "M",
-      "family": "M",
-      "group": "Research & Scholarship",
-      "purpose": "Capture clinical trial conduct, with subtype specified by M4A/M4B/M4C.",
-      "description": "Listing of clinical trials in which the CV owner has a significant role.",
-      "typical_entries": [
-        "PI on NCT01234567: Phase III trial of Drug X",
-        "Co-investigator on observational registry for disease Y",
-        "Lead investigator on device study evaluating new diagnostic tool"
-      ],
-      "common_confusions": [
-        "Clinical service activities misclassified as M4 instead of L1/L2.",
-        "Trial publications misclassified as M4 instead of S1.",
-        "Registry QI projects misclassified as trials when they lack true trial structure."
-      ],
-      "key_rules": [
-        "Use M4 when there is explicit trial structure (often with NCT number).",
-        "Publications about trials belong in S1; a given trial can be linked from M4.",
-        "Use M4A for interventional trials, M4B for observational/registry, and M4C for device/diagnostic trials."
-      ]
-    },
-    {
-      "code": "M4A",
-      "label": "Interventional Clinical Trials",
-      "parent": "M4",
-      "family": "M",
-      "group": "Research & Scholarship",
-      "purpose": "Capture clinical trials involving interventions such as drugs or behavioral treatments.",
-      "description": "Trials testing interventions, usually randomized or controlled.",
-      "typical_entries": [
-        "Phase III randomized trial of new chemotherapy regimen",
-        "Trial of behavioral intervention to improve adherence",
-        "Interventional study evaluating new therapeutic device in a controlled fashion"
-      ],
-      "common_confusions": [
-        "Observational registries mislabeled as interventional trials.",
-        "QI projects with minor interventions misclassified as M4A instead of L2."
-      ],
-      "key_rules": [
-        "Interventional, randomized, or treatment trials → M4A.",
-        "Ensure that the trial involves systematic intervention and outcome measurement beyond routine care."
-      ]
-    },
-    {
-      "code": "M4B",
-      "label": "Observational/Registry Clinical Trials",
-      "parent": "M4",
-      "family": "M",
-      "group": "Research & Scholarship",
-      "purpose": "Capture cohort, registry, and other observational clinical studies.",
-      "description": "Non-interventional clinical research that collects clinical or outcomes data.",
-      "typical_entries": [
-        "Prospective registry of patients with heart failure",
-        "Longitudinal observational cohort study of asthma outcomes",
-        "Multi-center registry for rare disease tracking"
-      ],
-      "common_confusions": [
-        "Registries misclassified as M4A when they are not interventional.",
-        "Pure quality improvement projects mislabeled as M4B instead of L2."
-      ],
-      "key_rules": [
-        "Observational/registry clinical studies with research intent → M4B.",
-        "Local operational data monitoring with no research framing → L2, not M4B."
-      ]
-    },
-    {
-      "code": "M4C",
-      "label": "Device/Diagnostic Clinical Trials",
-      "parent": "M4",
-      "family": "M",
-      "group": "Research & Scholarship",
-      "purpose": "Capture clinical trials focused on devices or diagnostic tools.",
-      "description": "Device or diagnostic-focused clinical studies (interventional or observational).",
-      "typical_entries": [
-        "Clinical trial evaluating new imaging device",
-        "Diagnostic accuracy study of a novel biomarker assay",
-        "Device trial testing a new implantable cardiac device"
-      ],
-      "common_confusions": [
-        "Device publications misclassified as M4C instead of S1/S5.",
-        "Routine clinical adoption of a device misclassified as M4C instead of L1/L2."
-      ],
-      "key_rules": [
-        "Device or diagnostic trials with research design → M4C.",
-        "Routine clinical use of devices without research protocol → L1 or L2."
       ]
     },
     {
@@ -1627,7 +1539,7 @@
       "common_confusions": [
         "Review articles or editorials misclassified as S1 instead of S2.",
         "Non-peer-reviewed reports misclassified as S1 instead of S5.",
-        "Trial conduct misclassified as S1 instead of M4 (for the trial record)."
+        "Trial conduct misclassified as S1 instead of M2A/M2B (for the trial record)."
       ],
       "key_rules": [
         "Original peer-reviewed research article → S1.",

@@ -561,7 +561,8 @@ def build_extraction_prompt(
    - Do NOT put the project title in pi_name field
    - If no PI name is found, leave pi_name as null
    - status = the grant's status only when the entry itself states one (e.g., "Update: withdrawn" → "withdrawn"); otherwise null
-   - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null"""
+   - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null
+   - A CLINICAL TRIAL filed here uses the same fields: title = the trial title with its phase (e.g., "Phase II trial of ..."), grant_number = its NCT or protocol number, agency = its sponsor, pi_role = the CV owner's role on the trial (e.g., "Site PI", "Sub-Investigator")"""
     elif code == 'K4':
         code_specific_instructions = """
 9. **CONTINUING EDUCATION (K4)** - CRITICAL field separation:

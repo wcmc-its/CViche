@@ -533,7 +533,7 @@ def test_output_hygiene_flags_retired_invalid_codes():
 
 
 def test_output_hygiene_flags_every_taxonomy_code_shape():
-    codes = ["A", "B1", "D1", "K5", "M2A", "M4C", "N2", "Q4D", "S0", "T"]
+    codes = ["A", "B1", "D1", "K5", "M2A", "M2D", "N2", "Q4D", "S0", "T"]
     findings = lint_output_hygiene([("p", f"• [{c}] leaked") for c in codes])
     assert findings[0]["severity"] == "ERROR"
     assert f"{len(codes)} bracketed" in findings[0]["message"]
