@@ -158,6 +158,7 @@ class GrantFields(TypedDict, total=False):
     pi_role: str | None
     role: str | None
     status: str | None
+    notes: str | None
     study_title: str | None
     text: str | None
     title: str | None
@@ -869,6 +870,32 @@ def _looks_like_funding_placeholder(table: Table) -> bool:
 # total under "Annual" states a false fact (#982).
 ANNUAL_COSTS_LABEL = 'Annual direct costs:'
 TOTAL_AWARD_LABEL = 'Total award:'
+STATUS_LABEL = 'Status:'
+NOTES_LABEL = 'Notes:'
+
+
+def _optional_grant_rows(fields: GrantFields, title: str) -> list[tuple[str, str]]:
+    """The rows after the eight the WCM template defines, each only when it has text.
+
+    Status and Notes (#982) keep a grant's own status word and labelled remark
+    ("Update: withdrawn"), which reached no cell before. Major project goals
+    (major_goals, description or narrative) is the older optional row, moved here
+    unchanged. A record with none of them renders exactly the eight-row block.
+    A note or goals text that only repeats the title is dropped: the same-text
+    guard as title/agency/funding -- same fact via two paths (#829, BYFQBG#82).
+    """
+    title_text = (title or '').strip().lower()
+    rows = []
+    status = str(fields.get('status') or '').strip()
+    if status:
+        rows.append((STATUS_LABEL, status))
+    notes = str(fields.get('notes') or '').strip()
+    if notes and notes.lower() != title_text:
+        rows.append((NOTES_LABEL, notes))
+    goals = fields.get('major_goals') or fields.get('description') or fields.get('narrative') or ''
+    if len(goals.strip()) > 10 and goals.strip().lower() != title_text:  # Only if substantive
+        rows.append(('Major project goals:', goals))
+    return rows
 
 
 def _first_rendering_amount(fields: GrantFields) -> str | int | float:
@@ -1202,14 +1229,8 @@ class ResearchSupportSection:
             ('Name of Principal Investigator:', pi_name),
             ('Your role:', role),
             ('Your percent (%) effort:', percent_effort),
+            *_optional_grant_rows(fields, title),
         ]
-
-        # Add optional major goals if present (check major_goals, description, or narrative)
-        goals = fields.get('major_goals') or fields.get('description') or fields.get('narrative') or ''
-        # Same-text guard as title/agency/funding above -- same fact via two paths (#829, BYFQBG#82).
-        goal_repeats_title = goals.strip().lower() == (title or '').strip().lower()
-        if len(goals.strip()) > 10 and not goal_repeats_title:  # Only if substantive
-            rows.append(('Major project goals:', goals))
 
         # Create a new table with 2 columns
         table = self.doc.add_table(rows=len(rows), cols=2)

@@ -2023,7 +2023,7 @@ def test_every_field_the_module_reads_is_declared_on_the_grant_record_type():
 def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     """The other direction: a declared key no reader wants is dead contract.
 
-    All 24 keys, `status` included, are reached through a `fields.get(...)` in
+    All 25 keys, `status` included, are reached through a `fields.get(...)` in
     this module -- `status` from the bucket rules rather than from a rendered
     row. A key left on the record type after its reader is deleted would go on
     suppressing that key's line in the unconsumed-fields diagnostic, silently.
@@ -2031,4 +2031,42 @@ def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     declared_but_unread = research_support.CONSUMED_GRANT_FIELDS - _fields_get_keys()
 
     assert declared_but_unread == set(), sorted(declared_but_unread)
-    assert len(research_support.CONSUMED_GRANT_FIELDS) == 24
+    assert len(research_support.CONSUMED_GRANT_FIELDS) == 25
+
+
+# --- #982: stage 4 now keeps status and notes, and the block renders them --------
+
+def test_status_and_notes_render_as_their_own_rows_after_the_effort_row():
+    """web39's withdrawn grants lost the status word: no row named `status`."""
+    fields = {'title': 'Withdrawn Cohort Study', 'agency': 'NIH', 'start_date': '01/2019',
+              'percent_effort': '10%', 'status': 'withdrawn', 'notes': 'Sponsor closed the call'}
+    rows = _rows(_generator()._create_grant_table(fields, 'M2B'))
+    labels = [label for label, _ in rows]
+    assert rows[labels.index('Status:')] == ('Status:', 'withdrawn')
+    assert rows[labels.index('Notes:')] == ('Notes:', 'Sponsor closed the call')
+    assert labels.index('Your percent (%) effort:') < labels.index('Status:') < labels.index('Notes:')
+
+
+def test_a_grant_with_no_status_or_notes_keeps_the_eight_row_template_block():
+    fields = {'title': 'Funded Cohort Study', 'start_date': '01/2019', 'status': None, 'notes': '  '}
+    table = _generator()._create_grant_table(fields, 'M2A')
+    assert len(table.rows) == 8
+    assert 'Status:' not in _cells(table) and 'Notes:' not in _cells(table)
+
+
+def test_a_note_that_only_repeats_the_title_is_dropped():
+    fields = {'title': 'Funded Cohort Study', 'notes': 'funded cohort study', 'start_date': '01/2019'}
+    assert 'Notes:' not in _cells(_generator()._create_grant_table(fields, 'M2A'))
+
+
+def test_withdrawn_status_reaches_the_document_through_the_section_fill():
+    """The wire: `_fill_research_support` (bucket rules included) to the table cell."""
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2B': [_entry('M2B', title='Withdrawn Cohort Study', agency='NIH',
+                        status='withdrawn', notes='Update: withdrawn', start_date='01/2020',
+                        end_date='06/2021')]},
+        current_year=TEST_YEAR)
+    (table,) = _tables_under(gen, COMPLETED)
+    assert _cells(table)['Status:'] == 'withdrawn'
+    assert _cells(table)['Notes:'] == 'Update: withdrawn'

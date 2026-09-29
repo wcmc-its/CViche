@@ -243,13 +243,13 @@ FIELD_SCHEMAS = {
         "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "annual_funding", "percent_effort", "narrative"],
     },
     "M2A": {  # Current Research Funding (active grants)
-        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "annual_funding", "percent_effort", "narrative"],
+        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "annual_funding", "percent_effort", "status", "notes", "narrative"],
     },
     "M2B": {  # Past Research Funding (completed grants)
-        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "percent_effort", "narrative"],
+        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "percent_effort", "status", "notes", "narrative"],
     },
     "M2C": {  # Pending Research Funding (submitted grants)
-        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "total_funding_requested", "submission_date", "narrative"],
+        "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "total_funding_requested", "submission_date", "status", "notes", "narrative"],
     },
     "M2D": {  # Patents & Innovations (formerly M3)
         "fields": ["patent_number", "title", "inventors", "filing_date", "issue_date", "status", "assignee", "narrative"],
@@ -377,6 +377,17 @@ FIELD_SCHEMAS = {
 # Shared source of truth used by both primary extraction and recovery pass.
 # Each entry maps a taxonomy code to a dict of field_name -> description string.
 # ============================================================================
+# Grant-record fields whose meaning the prompt pins down (#982). Shared by the
+# M2A/M2B/M2C field guides so the three buckets cannot word them differently.
+GRANT_STATUS_DESCRIPTION = (
+    "Status of the grant exactly as the CV words it (e.g. 'withdrawn', 'not funded', "
+    "'under review'), only when the entry states one; null otherwise. Do NOT infer it from dates"
+)
+GRANT_NOTES_DESCRIPTION = (
+    "Any labelled remark on the entry that no other field holds (e.g. text after 'Update:' "
+    "or 'Note:'), verbatim; null otherwise. Do NOT repeat the title, amounts or status here"
+)
+
 FIELD_DESCRIPTIONS = {
     "K1": {
         "course_title": "Name of the course taught",
@@ -509,6 +520,8 @@ FIELD_DESCRIPTIONS = {
         "total_funding": "Total award amount in dollars",
         "annual_funding": "Annual/yearly direct costs",
         "percent_effort": "FTE/effort percentage (convert '.08FTE' to '8%')",
+        "status": GRANT_STATUS_DESCRIPTION,
+        "notes": GRANT_NOTES_DESCRIPTION,
     },
     "M2B": {
         "grant_number": "Grant/award number",
@@ -520,6 +533,12 @@ FIELD_DESCRIPTIONS = {
         "end_date": "Funding period end",
         "total_funding": "Total award amount",
         "percent_effort": "FTE/effort (extract '.08FTE' as '8%')",
+        "status": GRANT_STATUS_DESCRIPTION,
+        "notes": GRANT_NOTES_DESCRIPTION,
+    },
+    "M2C": {
+        "status": GRANT_STATUS_DESCRIPTION,
+        "notes": GRANT_NOTES_DESCRIPTION,
     },
     "D3": {
         "title": "Job title or position",

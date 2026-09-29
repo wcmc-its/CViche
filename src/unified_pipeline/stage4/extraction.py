@@ -544,7 +544,9 @@ def build_extraction_prompt(
    - title = the scientific project title - NOT a person's name, NOT FTE information
    - percent_effort = extract FTE as percentage (e.g., ".08FTE" → "8%", "0.1 FTE" → "10%")
    - Do NOT put the project title in pi_name field
-   - If no PI name is found, leave pi_name as null"""
+   - If no PI name is found, leave pi_name as null
+   - status = the grant's status only when the entry itself states one (e.g., "Update: withdrawn" → "withdrawn"); otherwise null
+   - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null"""
     elif code == 'K4':
         code_specific_instructions = """
 9. **CONTINUING EDUCATION (K4)** - CRITICAL field separation:

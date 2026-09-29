@@ -121,6 +121,7 @@ class ExtractedFields(TypedDict, total=False):
     name: Any
     narrative: Any
     nct_number: Any
+    notes: Any
     npi_number: Any
     orcid: Any
     organization: Any
