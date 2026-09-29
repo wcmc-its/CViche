@@ -77,6 +77,7 @@ if TYPE_CHECKING:
     from docx.document import Document as DocumentType
     from docx.oxml.table import CT_Tc
     from docx.table import Table
+    from docx.text.paragraph import Paragraph
 
 # #820/#825: the doctor's protected_data_in_output lint and this module's
 # score_protected_data must not diverge, so the scorer CALLS the lint on
@@ -93,7 +94,7 @@ from unified_pipeline.core.template_boilerplate import (
     is_unanswered_prompt,
 )
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
-from unified_pipeline.doctor.shared import docx_body_blocks
+from unified_pipeline.doctor.shared import _cell_text, _docx_text, docx_body_blocks
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX, read_stage_errors
 
 logger = logging.getLogger(__name__)
@@ -826,7 +827,7 @@ def score_sparse_tables(outputs_dir: Path) -> tuple[float, str, None]:
         for row in tbl.rows:
             for cell in row.cells:
                 t_total += 1
-                if not cell.text.strip():
+                if not _cell_text(cell).strip():
                     t_empty += 1
         total_cells += t_total
         empty_cells += t_empty
@@ -895,7 +896,8 @@ def _count_raw_tab_cells(
                     continue
                 _seen_tc.add(tc)
                 for p in cell.paragraphs:
-                    if "\t" in p.text and p.text != _TEMPLATE_TAB_CELL_TEXT:
+                    text = _paragraph_text(p)
+                    if "\t" in text and text != _TEMPLATE_TAB_CELL_TEXT:
                         count += 1
                 if _depth < 1:
                     count += _count_raw_tab_cells(cell.tables, _depth + 1, _seen_tc)
@@ -943,6 +945,16 @@ _TEMPLATE_DOCX_PATH = (
 )
 
 
+def _paragraph_text(paragraph: Paragraph) -> str:
+    """The accepted-changes text of one paragraph, tabs and line breaks kept
+    as python-docx's ``.text`` renders them (#461). ``Paragraph.text`` skips
+    runs inside ``<w:ins>`` -- where stage 6 writes enriched citations,
+    institution locations and the research summary -- so it under-reports
+    what the deliverable contains; this is the reader the doctor's lints use
+    (`doctor.shared._docx_text`), not a second walker."""
+    return _docx_text(paragraph._p, with_whitespace=True)
+
+
 def _normalize_whitespace(text: str) -> str:
     """Collapse whitespace runs to one space and strip the ends."""
     return " ".join(text.split())
@@ -961,7 +973,8 @@ def _template_body_paragraph_texts() -> frozenset[str]:
     from docx import Document
     template_doc = Document(_TEMPLATE_DOCX_PATH)
     return frozenset(
-        _normalize_whitespace(p.text) for p in template_doc.paragraphs if p.text.strip()
+        _normalize_whitespace(_paragraph_text(p))
+        for p in template_doc.paragraphs if _paragraph_text(p).strip()
     )
 
 
@@ -1030,7 +1043,7 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
 
     raw_tab_paragraphs = echo_count = template_echo_excluded = template_tab_excluded = 0
     for p in doc.paragraphs:
-        text = p.text
+        text = _paragraph_text(p)
         in_template = _normalize_whitespace(text) in template_paragraphs
         if "\t" in text:
             if in_template:
