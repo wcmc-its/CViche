@@ -559,3 +559,47 @@ def test_g_coded_entry_under_lettered_employment_heading_is_not_claimed_by_g():
 
     assert gen._fill_hospital_affiliation([entry]) == []
     assert all(_cell_paragraphs(table, i) == [""] for i in range(3))
+
+
+def test_e_coded_entry_under_foreign_heading_renders_once_not_in_appendix(tmp_path):
+    """#807 through the real `generate()`: an E-coded entry whose only copy
+    sits under a foreign heading (dedup kept it) fills its template row and
+    is excluded from the Appendix. An E-coded line with no known row label
+    under the same heading still reaches the Appendix."""
+    entries = [
+        _OWNER_ENTRY,
+        {
+            "text": "Name of Current Employer(s): DISTINCTIVE_E807_EMPLOYER",
+            "taxonomy_code": "E", "hierarchy": ["Other Example Activities"],
+            "extracted_fields": {}, "element_idx_start": 20,
+        },
+        {
+            "text": "Favorite Color: DISTINCTIVE_E807_REFUSED",
+            "taxonomy_code": "E", "hierarchy": ["Other Example Activities"],
+            "extracted_fields": {}, "element_idx_start": 21,
+        },
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    full, appendix = _full_text(doc), _appendix_text(doc)
+
+    assert "DISTINCTIVE_E807_EMPLOYER" in full, "E-coded foreign-heading entry did not render"
+    assert "DISTINCTIVE_E807_EMPLOYER" not in appendix, (
+        "#807: consumed E entry duplicated into the Appendix")
+    assert "DISTINCTIVE_E807_REFUSED" in appendix
+    assert _appendix_diversion_count(sidecar, "E") == 1
+
+
+@pytest.mark.parametrize(("heading", "expected"), [
+    ("G. INSTITUTIONAL/HOSPITAL AFFILIATION", True),
+    ("HOSPITAL AFFILIATIONS", True),
+    ("INSTITUTIONAL AFFILIATION", True),
+    ("HOSPITAL PRIVILEGES", False),
+    ("PROFESSIONAL AFFILIATIONS", False),
+    ("INSTITUTIONAL SERVICE", False),
+])
+def test_is_affiliation_heading_needs_both_words_of_a_pair(heading, expected):
+    """The one definition of G's heading (shared with E's code match, #807):
+    each accepted pair needs BOTH words, so a lone HOSPITAL or AFFILIATION
+    heading is not G's."""
+    from unified_pipeline.stage6.sections.passthrough import _is_affiliation_heading
+    assert _is_affiliation_heading(heading) is expected
