@@ -274,8 +274,7 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
         llm_result = call_llm(
             stage="stage_5c",
             messages=messages,
-            temperature=0.3,
-            max_tokens=8000
+            temperature=0.3
         )
 
         result_text = llm_result["content"]
