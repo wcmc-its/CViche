@@ -163,18 +163,35 @@ class _CommitteeRecord:
         )
 
 
+# Stage 4 sometimes hedges an institution it could not read off the entry:
+# "Duke University (implied)", "Not provided". Those words are the model's
+# own, not the CV's, so they must never reach the rendered cell (#985).
+_HEDGED_INSTITUTION_RE = re.compile(
+    r'\b(?:implied|inferred|not\s+provided)\b', re.IGNORECASE)
+_WORD_RE = re.compile(r'\w+')
+
+
 def _name_with_institution(activity: str, institution: str) -> str:
     """Fold the extracted institution into the committee-name cell (#985).
 
     The P table has no Institution column, so an extracted `institution` had
-    nowhere to render and was dropped. Append it as "Committee, Institution"
-    unless the name already contains it (case-insensitive), or there is no
-    committee name to attach it to.
+    nowhere to render and was dropped. Append it as "Committee, Institution",
+    except (name returned unchanged) when there is no name to attach it to,
+    the institution is a stage-4 hedge rather than CV text, the name already
+    carries every word of the institution (covers exact containment and
+    near-duplicates such as a name that adds an acronym), or the name is
+    itself contained in the institution.
     """
-    # An empty institution is a substring of every name, so it falls out here.
-    if not activity or institution.casefold() in activity.casefold():
+    if not activity or _HEDGED_INSTITUTION_RE.search(institution):
         return activity
-    return f"{activity}, {institution}"
+    name_words = _WORD_RE.findall(activity.casefold())
+    inst_words = _WORD_RE.findall(institution.casefold())
+    # An empty institution has no words, so it falls out here too.
+    if set(inst_words) <= set(name_words):
+        return activity
+    if f" {' '.join(name_words)} " in f" {' '.join(inst_words)} ":
+        return activity
+    return f"{activity.strip()}, {institution}"
 
 
 class AdministrativeActivitiesSection:

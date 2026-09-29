@@ -29,6 +29,8 @@ Run with:
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -474,16 +476,66 @@ class TestExtractedInstitutionRendersInNameCell:
 
     def test_structured_institution_is_coerced_not_crashing(self):
         rows = _rows(self._entry({
-            "committee_name": "Budget panel", "institution": ["Ana Cruz Institute"],
+            "committee_name": "Budget panel",
+            "institution": ["Ana Cruz Institute", "Lee Annex"],
             "start_date": "2010", "end_date": "2012"}))
-        assert rows[0][0].startswith("Budget panel")
-        assert "Ana Cruz Institute" in rows[0][0]
+        assert [r[0] for r in rows] == [
+            "Budget panel, Ana Cruz Institute; Lee Annex"]
+
+    def test_name_contained_in_institution_is_not_duplicated(self):
+        rows = _rows(self._entry({
+            "committee_name": "The Riverbend Association, Inc.",
+            "institution": "The Riverbend Association, Inc., Dover, DE",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["The Riverbend Association, Inc."]
+
+    def test_institution_whose_words_are_all_in_the_name_is_not_appended(self):
+        rows = _rows(self._entry({
+            "committee_name": "Campaign for Harbor Equity Lakeview (CHEL), "
+                              "Board of Directors",
+            "institution": "Campaign for Harbor Equity Lakeview",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == [
+            "Campaign for Harbor Equity Lakeview (CHEL), Board of Directors"]
+
+    def test_institution_sharing_only_some_words_with_the_name_is_appended(self):
+        rows = _rows(self._entry({
+            "committee_name": "Northgate panel", "institution": "Northgate University",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Northgate panel, Northgate University"]
+
+    @pytest.mark.parametrize("hedged", [
+        "Northgate University (implied)", "Northgate University, implied",
+        "inferred from context", "Not provided", "NOT  PROVIDED"])
+    def test_hedged_institution_is_never_rendered(self, hedged):
+        rows = _rows(self._entry({
+            "committee_name": "Budget panel", "institution": hedged,
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Budget panel"]
+
+    def test_hedged_institution_in_a_record_list_is_never_rendered(self):
+        rows = _rows(self._entry({"committee_name": [
+            {"committee_name": "Budget panel",
+             "institution": "Northgate University (implied)",
+             "start_date": "2010", "end_date": "2012"}]}))
+        assert [r[0] for r in rows] == ["Budget panel"]
 
     def test_raw_text_fallback_name_also_gets_the_institution(self):
         rows = _rows(self._entry({"institution": "Northgate University"},
                                  text="Some raw committee line"))
         assert [r[0] for r in rows] == [
             "Some raw committee line, Northgate University"]
+
+    def test_raw_text_fallback_name_is_stripped_before_appending(self):
+        rows = _rows(self._entry({"institution": "Northgate University"},
+                                 text="Some raw committee line   \t "))
+        assert [r[0] for r in rows] == [
+            "Some raw committee line, Northgate University"]
+
+    def test_unchanged_name_is_not_stripped_when_nothing_is_appended(self):
+        from unified_pipeline.stage6.sections.administrative_activities import (
+            _name_with_institution)
+        assert _name_with_institution("Panel  ", "") == "Panel  "
 
     def test_helper_never_renders_institution_without_a_name(self):
         from unified_pipeline.stage6.sections.administrative_activities import (
