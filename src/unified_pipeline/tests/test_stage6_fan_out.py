@@ -152,7 +152,9 @@ class TestWhatIsNotFannedOut:
                          'extracted_fields': {'award_name': [_award('Alpha Prize'), _award('Beta Prize')]}})
 
     def test_a_list_holding_an_empty_record(self):
-        self._unchanged(_honors('Beta Prize, Hollis College\tBeta Prize', [{}, _award('Beta Prize')]))
+        # The text is covered by the second record alone, so only the guard on
+        # an empty record keeps the entry whole.
+        self._unchanged(_honors('Beta Prize, Hollis College', [{}, _award('Beta Prize')]))
 
     def test_records_that_share_no_key_with_the_schema(self):
         # web181's K2 `mentees: [{name, year}]`: nothing the K2 renderer reads.
@@ -161,12 +163,12 @@ class TestWhatIsNotFannedOut:
                                                           {'name': 'Lee Park', 'year': '2020'}]}})
 
     def test_records_carrying_a_key_no_renderer_reads(self):
-        # web228's K4 `sessions`: `title` is the session's own name.
+        # web228's K4 `sessions`: `title` is the session's own name. The text is
+        # written so the fields cover it: only the key guard keeps it whole.
         sessions = [{'date': '2020-04-22', 'title': 'Definition and Clinical Evaluation'},
                     {'date': '2020-04-29', 'title': 'Complexity and Impact'}]
         self._unchanged({'taxonomy_code': 'K4',
-                         'text': '2020 Practice Improvement Project\t2020-04-22 Definition and Clinical '
-                                 'Evaluation\t2020-04-29 Complexity and Impact',
+                         'text': 'Practice Improvement Project 2020\tPractice Improvement Project 2020',
                          'extracted_fields': {'activity_title': 'Practice Improvement Project',
                                               'sessions': sessions}})
 
@@ -177,10 +179,10 @@ class TestWhatIsNotFannedOut:
         self._unchanged(parent)
 
     def test_an_entry_with_two_record_lists(self):
-        entry = {'taxonomy_code': 'P', 'text': 'Alpha Board\tBeta Board\tGamma Board\tDelta Board',
-                 'extracted_fields': {
-                     'committees': [{'committee_name': 'Alpha Board'}, {'committee_name': 'Beta Board'}],
-                     'entries': [{'committee_name': 'Gamma Board'}, {'committee_name': 'Delta Board'}]}}
+        # Covered by the first list alone: only the one-list rule keeps it whole.
+        records = [{'committee_name': 'Alpha Board'}, {'committee_name': 'Beta Board'}]
+        entry = {'taxonomy_code': 'P', 'text': 'Alpha Board\tBeta Board',
+                 'extracted_fields': {'committees': records, 'entries': list(records)}}
         self._unchanged(entry)
 
     def test_a_code_with_no_schema_and_a_non_mapping_field_bag(self):
@@ -275,6 +277,29 @@ class TestTextCoverage:
     def test_a_date_range_the_column_shows_in_full_is_fine(self):
         entry = self._committee_entry(self._RECORDS.format(a=' 2009 to 2011', b=''),
                                       start_date='2009-07', end_date='2011-03')
+        assert len(_fan(entry)) == 2
+
+    def test_a_date_looking_value_in_a_name_field_is_held_as_written(self):
+        # Only date fields go through the date formatter: "Task Force 2019" is a name.
+        entry = self._committee_entry('Task Force 2019 member\tBeta Board chair', [
+            {'committee_name': 'Task Force 2019', 'role': 'member'},
+            {'committee_name': 'Beta Board', 'role': 'chair'}])
+        assert len(_fan(entry)) == 2
+
+    @pytest.mark.parametrize('role', [['chair', 'member'], {'title': 'chair member'}])
+    def test_a_list_or_mapping_value_is_held_by_its_leaves(self, role):
+        entry = self._committee_entry('Alpha Board chair member\tBeta Board', [
+            {'committee_name': 'Alpha Board', 'role': role}, {'committee_name': 'Beta Board'}])
+        assert len(_fan(entry)) == 2
+
+    def test_a_missing_value_holds_no_word(self):
+        # `None` must not be read as the word "None".
+        entry = self._committee_entry('Alpha Board none\tBeta Board', [
+            {'committee_name': 'Alpha Board', 'role': None}, {'committee_name': 'Beta Board'}])
+        assert _fan(entry) == [entry]
+
+    def test_an_entry_with_no_text_has_nothing_to_cover(self):
+        entry = {'taxonomy_code': 'P', 'extracted_fields': {'committees': _COMMITTEES}}
         assert len(_fan(entry)) == 2
 
     def test_a_code_the_renderer_map_does_not_name_is_never_fanned_out(self, monkeypatch):
