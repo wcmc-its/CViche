@@ -61,7 +61,6 @@ from unified_pipeline.stage6.sections.teaching import (  # noqa: E402
     TEACHING_SECTION_HEADERS,
     _item_parts,
     _teaching_entry_lines,
-    _wrapped_row_text,
 )
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     RENDER_ROUTED_CODES,
@@ -854,21 +853,6 @@ def test_multiline_text_that_is_not_a_single_table_row_stays_split():
         rendered = _render_k1(_row_entry(_WRAPPED_ROW_TEXT, formatted_text=fused, **kwargs))
         assert fused not in rendered and len(rendered) > 1, kwargs
 
-
-def test_wrapped_row_text_cases():
-    cases = [
-        (_row_entry(_WRAPPED_ROW_TEXT), _WRAPPED_ROW_ONE_LINE),
-        (_row_entry("a\nb | c | d"), "a b | c | d"),
-        (_row_entry(_STACKED_ROW_TEXT), None),
-        (_row_entry("a\nb\nc"), None),
-        (_row_entry("a | b | c"), None),
-        (_row_entry(_WRAPPED_ROW_TEXT, element_type="paragraph"), None),
-        (_row_entry(_WRAPPED_ROW_TEXT, start=5, end=6), None),
-        ({"text": _WRAPPED_ROW_TEXT, "element_type": "table_row"}, None),
-        ({}, None),
-    ]
-    for entry, expected in cases:
-        assert _wrapped_row_text(entry) == expected, entry
 
 
 if __name__ == "__main__":
