@@ -962,10 +962,10 @@ _BLOB = ("Basic Science Innovation in Education Award – Runner-up "
 def test_table_shape_flags_malformed_honors_rows():
     tables = [[_HONORS_HEADER,
                [_BLOB, "MD", ""],
-               ["2020 AECT Outstanding Article Award, Association for "
-                "Educational Communication and Technology (AECT)",
-                "Association for Educational Communication and Technology "
-                "(AECT)", ""],
+               ["Association for Educational Communication and Technology "
+                "Award 2020",
+                "Association for Educational Communication and Technology",
+                "2020"],
                ["Distinguished Teaching Award", "Indiana University", "2013"]]]
     findings = lint_table_shape(tables)
     assert len(findings) == 1
@@ -978,6 +978,52 @@ def test_table_shape_flags_malformed_honors_rows():
     assert any("blob" in e for e in f["evidence"])
     assert any("empty date" in e for e in f["evidence"])
     assert any("duplicated in name" in e for e in f["evidence"])
+
+
+_GRANTOR_NAMED_AWARDS = [
+    ("American Society for Cell Biology Postdoc Travel Award",
+     "American Society for Cell Biology"),
+    ("APS/NIDDK Minority Travel Fellowship Award", "APS/NIDDK"),
+    ("RSNA R&E Foundation Roentgen Resident/Fellow Research Award",
+     "RSNA R&E Foundation"),
+    ("College of Basic Sciences Dean's List", "College of Basic Sciences"),
+    ("Japanese Government Monbusho Scholarship", "Japanese Government"),
+]
+
+
+def _honors_evidence(name, org, date="2013"):
+    findings = lint_table_shape([[_HONORS_HEADER, [name, org, date]]])
+    return findings[0]["evidence"] if findings else []
+
+
+def test_table_shape_does_not_flag_awards_named_after_their_grantor():
+    """#889: 20/23 batch-4 hits were these -- org legitimately in the name."""
+    for name, org in _GRANTOR_NAMED_AWARDS:
+        assert _honors_evidence(name, org) == [], name
+
+
+def test_table_shape_flags_org_fabricated_from_the_name():
+    """#889: name == org, org + an award word, or org + a year."""
+    org = "Association for Educational Research"
+    for name in (org, f"{org} Award", f"{org} Fellowship", f"{org} 2019",
+                 f"{org} Prize 2019"):
+        ev = _honors_evidence(name, org)
+        assert any("duplicated in name" in e for e in ev), name
+
+
+def test_table_shape_initials_and_dr_are_not_sentence_boundaries():
+    """#889: 'Dr. Robert D. & Alma W. Moreton ...' is one 64-char name, not a
+    blob; two real sentences still are."""
+    name = "Dr. Robert D. & Alma W. Moreton Original Research Award for 1997"
+    assert _honors_evidence(name, "Southern Medical Association", "1997") == []
+    two = "Best Poster Award. Given at the meeting. Judged by peers."
+    assert any("blob" in e for e in _honors_evidence(two, "Some University"))
+
+
+def test_table_shape_message_does_not_cite_closed_issue():
+    f = lint_table_shape([[_HONORS_HEADER, ["Prize. Given here. Then there.",
+                                            "NY", ""]]])[0]
+    assert "#229" not in f["message"]
 
 
 def test_table_shape_ignores_non_honors_tables_and_clean_rows():
