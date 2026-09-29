@@ -490,7 +490,7 @@ FIELD_DESCRIPTIONS = {
         "location": "Institution or venue where presented",
         "date": "Date of the presentation",
         "event_name": "Name of the conference or event (if applicable)",
-        "role": "The speaker's role or title at the invitation (e.g., 'Visiting Professor', 'Keynote Speaker', 'Panelist'), only when the text states one",
+        "role": "The speaker's role or title at the invitation (e.g., 'Visiting Professor', 'Keynote Speaker', 'Panelist'), only when the text states one. Keep the talk's own title in title (do not empty it because a role is present) and leave role empty for a plain 'Invited Speaker'",
     },
     "H": {
         "award_name": "Name of the honor/award (e.g., 'Best Teacher Award', 'NIH Merit Award')",
