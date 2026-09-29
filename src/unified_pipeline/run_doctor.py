@@ -83,7 +83,7 @@ Lints, ranked by the severity of the failure class they catch:
 14d. date_only_lines      body paragraphs (outside the Appendix, never table
                           cells) whose whole text is a date -- a record's date
                           column split from its payload and rendered as its
-                          own bullet (#259: ZXVGAC, 22 under EDUCATIONAL
+                          own bullet (#259: ZXVGAC, 28 under EDUCATIONAL
                           CONTRIBUTIONS); WARN at a corpus-derived count
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
@@ -358,6 +358,10 @@ LINT_PREVALENCE = {
     "table_shape": 0.562,
     "missed_headers": 0.288,
     "classified_unrendered": 0.288,
+    # 32 of 126 corpus renders fired at any severity (33 with prod run
+    # ZXVGAC), from a fresh dev render of the same farm + 2026-09-11/-17
+    # batches section_lost was calibrated on (#259).
+    "date_only_lines": 0.254,
     "stage6_render_warnings": 0.123,
     "dedup_drops": 0.110,
     "segmentation": 0.082,
@@ -370,10 +374,6 @@ LINT_PREVALENCE = {
     "section_lost": 0.071,
     "owner_contact_missing": 0.068,
     "duplicate_records": 0.061,
-    # 32 of 126 corpus renders fired at any severity (33 with prod run
-    # ZXVGAC), from a fresh dev render of the same farm + 2026-09-11/-17
-    # batches section_lost was calibrated on (#259).
-    "date_only_lines": 0.254,
     "pipe_leaks": 0.055,
     "unrendered_records": 0.027,
     "dead_sections": 0.027,

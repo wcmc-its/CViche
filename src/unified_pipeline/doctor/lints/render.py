@@ -1200,7 +1200,7 @@ def lint_duplicate_records(blocks: list[tuple[str, str]]) -> list[dict]:
 
 # A rendered paragraph whose whole text is a date ("June 2019", "07/2008 -
 # 06/2013") is a record's date column that the reader split from its payload
-# and stage 6 then emitted as its own bullet (#259: 22 of them under
+# and stage 6 then emitted as its own bullet (#259: 28 of them under
 # EDUCATIONAL CONTRIBUTIONS on ZXVGAC). Table cells are excluded -- a date
 # column cell is legitimate -- as is the Appendix, which is verbatim by
 # contract. The WARN floor comes from the corpus distribution: over the 126
