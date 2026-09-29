@@ -1108,6 +1108,7 @@ def _date_only_blocks(dates):
 def test_date_only_lines_warns_at_threshold_with_three_samples():
     dates = ["June 2019", "07/2008 \u2013 06/2013", "October Issue 2025",
              "October 13, 2016", "2024-2025"]
+    assert DATE_ONLY_LINES_WARN_COUNT == 5  # the gap between the corpus's 4 and 7
     assert len(dates) == DATE_ONLY_LINES_WARN_COUNT
     findings = lint_date_only_lines(_date_only_blocks(dates))
     assert len(findings) == 1

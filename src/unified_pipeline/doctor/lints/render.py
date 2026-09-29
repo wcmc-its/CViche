@@ -1203,8 +1203,11 @@ def lint_duplicate_records(blocks: list[tuple[str, str]]) -> list[dict]:
 # and stage 6 then emitted as its own bullet (#259: 22 of them under
 # EDUCATIONAL CONTRIBUTIONS on ZXVGAC). Table cells are excluded -- a date
 # column cell is legitimate -- as is the Appendix, which is verbatim by
-# contract. The WARN floor is set from the corpus distribution: see
-# DATE_ONLY_LINES_WARN_COUNT's measurement in the PR body.
+# contract. The WARN floor comes from the corpus distribution: over the 126
+# fresh dev renders (farm + 2026-09-11/-17 batches) plus ZXVGAC, 33 renders
+# fire; 30 of them carry 1-4 lines (the isolated "N. 2009." / a two-stint
+# date pair shape) and only 7, 8 and 28 lines follow, so 5 sits in the empty
+# gap and WARNs on the three runs where the shape is systematic (#259).
 DATE_ONLY_LINES_WARN_COUNT = 5
 
 
