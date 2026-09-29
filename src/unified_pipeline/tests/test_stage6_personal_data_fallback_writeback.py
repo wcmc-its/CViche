@@ -1342,6 +1342,51 @@ def test_a_repeated_home_address_is_withheld_once_not_twice(tmp_path):
     ("Personal email:", "work_email"),
     ("Mailing Address:", "office_address"),
     ("Permanently Address:", "office_address"),
+    ("Business Fax:", None),
+    ("Fax:", None),
+    ("Business Phone/Fax:", "office_phone"),
+    ("Faxon Address:", "office_address"),
+    ("Facsimile Address:", "office_address"),
 ])
 def test_home_phone_email_permanent_label_classification(label, expected):
     assert personal_data_module._classify_contact_label(label) == expected
+
+
+def test_a_business_phone_cell_carrying_its_own_number_beats_the_fax_beside_it(tmp_path):
+    """web198's shape once its Home Phone row is skipped: the Business Phone
+    number sits in the label cell and cell 1 is a fax line, which must not
+    render as the Office telephone."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Home Phone: 914-555-0111", "Citizenship: USA"),
+        ("Business Phone: 412-555-0100", "Business Fax: 412-555-0199")])
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows["office telephone:"] == "412-555-0100"
+    rendered = _docx_texts(tmp_path / "out.docx")
+    assert "412-555-0199" not in rendered and "914-555-0111" not in rendered
+
+
+def test_a_multiline_phone_label_cell_over_an_empty_cell_is_left_alone(tmp_path):
+    """Near-miss for the side-by-side rule: the whole block sits in cell 0
+    (Dogan shape) and cell 1 is empty, so nothing is taken from it."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Office Phone:\t212-555-0100\nFax:\t212-555-0199", "")])
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows.get("office telephone:", "") == ""
+
+
+def test_a_single_line_phone_label_cell_over_an_empty_cell_is_left_alone(tmp_path):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[("Business Phone: 212-555-0100", "")])
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows.get("office telephone:", "") == ""
+
+
+def test_a_multiline_phone_label_cell_beside_a_filled_cell_is_not_taken_as_one_number(tmp_path):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Office Phone:\t212-555-0100\nFax:\t212-555-0199", "Room 4B")])
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert "Fax" not in rows.get("office telephone:", "")
+    assert "212-555-0199" not in _docx_texts(tmp_path / "out.docx")

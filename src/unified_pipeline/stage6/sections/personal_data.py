@@ -177,6 +177,7 @@ _ADDRESS_LABEL_WORDS = ('address', 'business')
 # ("Home/Office Address:"): an ambiguous label costs an empty Office cell, the
 # opposite mistake renders a home address. "Permanent" is a home qualifier for
 # an ADDRESS only (US CV convention); "Permanent email" is an alumni address.
+_FAX_LABEL = re.compile(r'\bfax\b')
 _HOME_LABEL = re.compile(r'\b(?:home|residence|residential)\b')
 _HOME_ADDRESS_LABEL = re.compile(
     r'\b(?:home|residence|residential|permanent)\b')
@@ -219,6 +220,10 @@ def _classify_contact_label(label: str) -> str | None:
     if any(word in head for word in _PHONE_LABEL_WORDS):
         return (_FIELD_HOME_PHONE if _HOME_LABEL.search(head)
                 else _FIELD_OFFICE_PHONE)
+    if _FAX_LABEL.search(head):
+        # No slot takes a fax number; "Business Fax:" must not reach the
+        # address branch through its 'business' word (#730, web198).
+        return None
     if any(word in head for word in _ADDRESS_LABEL_WORDS):
         if _HOME_ADDRESS_LABEL.search(head):
             return _FIELD_HOME_ADDRESS
@@ -594,7 +599,12 @@ def _row_label_value_pairs(row: _TableRow) -> list[tuple[str, str]]:
             break
     value = value_cell.text.strip()
     embedded = label_text.partition(':')[2].strip()
-    if embedded and _classify_contact_label(label_text) in _HOME_FIELDS:
+    field = _classify_contact_label(label_text)
+    # An office phone takes its embedded number only in a real side-by-side
+    # row (cell 1 non-empty) and only when it is one line: a label cell that
+    # holds a whole multi-line block over an empty cell 1 is left as before.
+    if embedded and (field in _HOME_FIELDS or (
+            field == _FIELD_OFFICE_PHONE and value and '\n' not in embedded)):
         pairs = [(label_text, embedded)]
         if ':' in value:
             pairs.append((value, value.partition(':')[2].strip()))
