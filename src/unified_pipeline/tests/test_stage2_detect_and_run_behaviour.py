@@ -1216,6 +1216,19 @@ def test_section_progress_lines_are_monotonic_and_unspliced(tmp_path, monkeypatc
             assert out[i + 3] == "", out[i:i + 4]
 
 
+def test_section_progress_line_is_read_by_progress_patterns(capsys, progress_patterns):
+    """mrj4001's point #5 on PR #918: stage 2's ``[N/M] Processing:`` claim
+    was asserted by docstring only. Drive the real printer and read its line
+    the way orchestrator.py does (first pattern that matches wins), so the
+    bar gets (done, total) -- the completion count, not the submission index."""
+    printer = stage2._section_progress_printer([["Education"], ["Awards"], ["Grants"]])
+    printer(2, stage2._SectionResult([], {}, set(), ["  Elements: 0 to 1"]))  # index 2 finishes first
+    line = capsys.readouterr().out.splitlines()[0]
+    match = next(m for p in progress_patterns if (m := p.search(line)))
+    assert (int(match.group(1)), int(match.group(2))) == (1, 3)
+    assert line.endswith("Processing: Grants")
+
+
 def test_sections_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):
     from unified_pipeline.core import prompt_logger
 

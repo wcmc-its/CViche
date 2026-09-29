@@ -23,8 +23,15 @@ Covers:
 Self-contained: no DB, no network, no real LLM call, no corpus/PII data.
 """
 
+import io
+import importlib
+import inspect
 import json
+import logging
+import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -35,7 +42,7 @@ from unified_pipeline import stage_5c_teaching_formatter as s5c
 from unified_pipeline import stage_5d_citation_formatter as s5d
 
 
-def _llm_result(content: str, model: str = "sentinel-model") -> dict:
+def _llm_result(content: str, model: str = "sentinel-model", cost: float = 0.002) -> dict:
     return {
         "content": content,
         "prompt_tokens": 11,
@@ -43,7 +50,7 @@ def _llm_result(content: str, model: str = "sentinel-model") -> dict:
         "total_tokens": 18,
         "cache_read_tokens": 0,
         "cache_write_tokens": 0,
-        "cost": 0.002,
+        "cost": cost,
         "model": model,
     }
 
@@ -354,7 +361,7 @@ def test_5d_parse_llm_output_well_formed_direct_json():
         "CIT-0001": {"formatted_citation": "Smith JA. Title one. J Med. 2020."},
         "CIT-0002": {"formatted_citation": "Jones MB. Title two. J Med. 2021."},
     })
-    parsed = s5d.parse_llm_output(llm_output, id_map, verbose=False)
+    parsed = s5d.parse_llm_output(llm_output, id_map)
     assert parsed["CIT-0001"]["formatted_citation"] == "Smith JA. Title one. J Med. 2020."
     assert parsed["CIT-0002"]["formatted_citation"] == "Jones MB. Title two. J Med. 2021."
 
@@ -367,7 +374,7 @@ def test_5d_parse_llm_output_filters_out_an_id_the_llm_invented():
         "CIT-0001": {"formatted_citation": "real one"},
         "CIT-9999": {"formatted_citation": "the LLM invented this id"},
     })
-    parsed = s5d.parse_llm_output(llm_output, id_map, verbose=False)
+    parsed = s5d.parse_llm_output(llm_output, id_map)
     assert "CIT-0001" in parsed
     assert "CIT-9999" not in parsed
 
@@ -375,7 +382,7 @@ def test_5d_parse_llm_output_filters_out_an_id_the_llm_invented():
 def test_5d_parse_llm_output_missing_id_is_simply_absent():
     id_map = {"CIT-0001": {}, "CIT-0002": {}}
     llm_output = json.dumps({"CIT-0001": {"formatted_citation": "only this came back"}})
-    parsed = s5d.parse_llm_output(llm_output, id_map, verbose=False)
+    parsed = s5d.parse_llm_output(llm_output, id_map)
     assert "CIT-0001" in parsed
     assert "CIT-0002" not in parsed
 
@@ -389,15 +396,14 @@ def test_5d_parse_llm_output_extracts_embedded_json_from_prose():
         + json.dumps({"CIT-0001": {"formatted_citation": "extracted from prose"}})
         + "\nHope that helps!"
     )
-    parsed = s5d.parse_llm_output(llm_output, id_map, verbose=False)
+    parsed = s5d.parse_llm_output(llm_output, id_map)
     assert parsed["CIT-0001"]["formatted_citation"] == "extracted from prose"
 
 
 def test_5d_parse_llm_output_malformed_json_returns_empty_dict():
     id_map = {"CIT-0001": {}}
-    # Has a brace-delimited span but it is not valid JSON inside. verbose=True
-    # to also exercise the warning-print branch on the way to the empty dict.
-    parsed = s5d.parse_llm_output("{not: valid, json here}", id_map, verbose=True)
+    # Has a brace-delimited span but it is not valid JSON inside.
+    parsed = s5d.parse_llm_output("{not: valid, json here}", id_map)
     assert parsed == {}
 
 
@@ -406,7 +412,7 @@ def test_5d_parse_llm_output_no_braces_at_all_returns_empty_dict():
     # fails, then re.search finds no {...} span, so parse_llm_output returns
     # empty without ever attempting a second json.loads.
     id_map = {"CIT-0001": {}}
-    parsed = s5d.parse_llm_output("Sorry, I cannot format these citations.", id_map, verbose=False)
+    parsed = s5d.parse_llm_output("Sorry, I cannot format these citations.", id_map)
     assert parsed == {}
 
 
@@ -422,12 +428,12 @@ def test_5d_parse_llm_output_embedded_json_also_filters_invented_ids():
             "CIT-4242": {"formatted_citation": "invented, must be filtered"},
         })
     )
-    parsed = s5d.parse_llm_output(llm_output, id_map, verbose=False)
+    parsed = s5d.parse_llm_output(llm_output, id_map)
     assert list(parsed.keys()) == ["CIT-0001"]
 
 
 def test_5d_parse_llm_output_empty_string_returns_empty_dict():
-    parsed = s5d.parse_llm_output("", {"CIT-0001": {}}, verbose=False)
+    parsed = s5d.parse_llm_output("", {"CIT-0001": {}})
     assert parsed == {}
 
 
@@ -437,7 +443,7 @@ def test_5d_parse_llm_output_empty_string_returns_empty_dict():
 
 def test_5d_call_llm_formatter_returns_text_and_usage_tuple(monkeypatch):
     monkeypatch.setattr(s5d, "call_llm", lambda **kw: _llm_result('{"CIT-0001": {}}'))
-    text, usage = s5d.call_llm_formatter("raw content", verbose=False)
+    text, usage = s5d.call_llm_formatter("raw content")
     assert text == '{"CIT-0001": {}}'
     assert usage["model"] == "sentinel-model"
     assert usage["total_tokens"] == 18
@@ -448,10 +454,70 @@ def test_5d_call_llm_formatter_exception_arm_returns_none_none(monkeypatch):
         raise ValueError("bad request")
 
     monkeypatch.setattr(s5d, "call_llm", _boom)
-    # verbose=True to also exercise the warning-print + traceback branch.
-    text, usage = s5d.call_llm_formatter("raw content", verbose=True)
+    text, usage = s5d.call_llm_formatter("raw content")
     assert text is None
     assert usage is None
+
+
+# ---------------------------------------------------------------------------
+# stage_5d: _format_batch / _BatchResult -- id_to_formatted's three states
+# (#918 review point #2: None = no parse ran, {} = parsed and found
+# nothing, non-empty = parsed. One field, not two.)
+# ---------------------------------------------------------------------------
+
+def test_5d_format_batch_id_to_formatted_is_none_when_the_call_raises(monkeypatch):
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: (_ for _ in ()).throw(ValueError("boom")))
+    result = s5d._format_batch([{"taxonomy_code": "S1", "text": "x"}])
+    assert result.usage is None
+    assert result.id_to_formatted is None
+
+
+def test_5d_format_batch_id_to_formatted_is_none_on_a_billed_empty_response(monkeypatch):
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: _llm_result(""))
+    result = s5d._format_batch([{"taxonomy_code": "S1", "text": "x"}])
+    assert result.usage is not None
+    assert result.id_to_formatted is None
+
+
+def test_5d_format_batch_id_to_formatted_is_empty_dict_when_parse_finds_nothing(monkeypatch):
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: _llm_result("no braces here at all"))
+    result = s5d._format_batch([{"taxonomy_code": "S1", "text": "x"}])
+    assert result.usage is not None
+    assert result.id_to_formatted == {}
+
+
+def test_5d_format_batch_id_to_formatted_is_non_empty_when_parse_succeeds(monkeypatch):
+    monkeypatch.setattr(
+        s5d, "call_llm",
+        lambda **kw: _llm_result(json.dumps({"CIT-0001": {"formatted_citation": "cite"}})),
+    )
+    result = s5d._format_batch([{"taxonomy_code": "S1", "text": "x"}])
+    assert result.id_to_formatted == {"CIT-0001": {"formatted_citation": "cite"}}
+
+
+# ---------------------------------------------------------------------------
+# stage_5d: _batch_progress_printer -- the {} vs None distinction on the
+# wire (blind verifier on PR #918's rework: `if result.id_to_formatted is
+# not None:` mutated to `if result.id_to_formatted:` passed every test --
+# a batch that parsed and found nothing (id_to_formatted == {}) stopped
+# printing its "Parsed 0 formatted citations" line). Drives the real
+# printer built by _batch_progress_printer, not a hand-rolled copy.
+# ---------------------------------------------------------------------------
+
+def test_5d_batch_progress_printer_prints_parsed_0_when_a_parse_found_nothing(capsys):
+    printer = s5d._batch_progress_printer(1)
+    result = s5d._BatchResult(id_to_formatted={}, id_to_entry={"CIT-0001": {}}, usage=None)
+    printer(0, result)
+    out = capsys.readouterr().out
+    assert "Parsed 0 formatted citations" in out
+
+
+def test_5d_batch_progress_printer_omits_parsed_line_when_no_parse_ran(capsys):
+    printer = s5d._batch_progress_printer(1)
+    result = s5d._BatchResult(id_to_formatted=None, id_to_entry={"CIT-0001": {}}, usage=None)
+    printer(0, result)
+    out = capsys.readouterr().out
+    assert "Parsed" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -632,3 +698,452 @@ def test_run_stage_5d_processes_multiple_batches_independently(tmp_path, monkeyp
     assert out["entries"][0]["extracted_fields"]["formatted_citation"] == "citation for the first entry"
     assert out["entries"][1]["extracted_fields"]["formatted_citation"] == "citation for the second entry"
     assert out["stage_5d"]["formatted_count"] == 2
+
+
+# ---------------------------------------------------------------------------
+# stage_5d: run_stage_5d on core/batch_pool.map_in_order (#881 step 6)
+# ---------------------------------------------------------------------------
+
+_MANY_CITATIONS = [f"CITATION_MARKER_{i}" for i in range(6)]
+
+
+def _many_citations_input(document_uid: str) -> dict:
+    return {
+        "document_uid": document_uid,
+        "entries": [
+            {"taxonomy_code": "S1", "text": marker, "enrichment_status": "", "extracted_fields": {}}
+            for marker in _MANY_CITATIONS
+        ],
+    }
+
+
+def _citation_index_from_prompt(prompt: str, markers: list[str]) -> int:
+    return next(i for i, m in enumerate(markers) if m in prompt)
+
+
+def _strip_timestamp(data: dict) -> dict:
+    data = json.loads(json.dumps(data))  # deep copy
+    data.get("stage_5d", {}).pop("timestamp", None)
+    return data
+
+
+def test_5d_stage5d_workers_config_knob_is_read_from_env(monkeypatch):
+    # STAGE5D_BATCH_WORKERS itself is bound once, at import time, so it
+    # can't observe an env var set by a test -- this pins the reader it's
+    # built from instead: workers_from_config("CVICHE_STAGE5D_BATCH_WORKERS").
+    monkeypatch.setenv("CVICHE_STAGE5D_BATCH_WORKERS", "7")
+    assert s5d.workers_from_config("CVICHE_STAGE5D_BATCH_WORKERS") == 7
+
+
+def test_run_stage_5d_defaults_to_the_config_knob():
+    # Pins the default itself, not just the reader. An `is`/`==` check
+    # against STAGE5D_BATCH_WORKERS's own value is not enough: a hardcoded
+    # `workers: int = 4` literal would still satisfy `4 is 4` under CPython
+    # small-int caching, because the knob's real default also happens to be
+    # 4 -- verified round 1 (`4 is s5d.STAGE5D_BATCH_WORKERS` -> True). So
+    # this reloads the module with the env knob set to a value (7) nothing
+    # would coincidentally equal, and asserts run_stage_5d's default follows
+    # it -- a literal default cannot move.
+    original = os.environ.get("CVICHE_STAGE5D_BATCH_WORKERS")
+    os.environ["CVICHE_STAGE5D_BATCH_WORKERS"] = "7"
+    try:
+        importlib.reload(s5d)
+        default = inspect.signature(s5d.run_stage_5d).parameters["workers"].default
+        assert default == 7
+    finally:
+        # Restore the env var BEFORE the final reload, not after -- monkeypatch's
+        # own teardown runs after this function returns, too late to matter here.
+        if original is None:
+            os.environ.pop("CVICHE_STAGE5D_BATCH_WORKERS", None)
+        else:
+            os.environ["CVICHE_STAGE5D_BATCH_WORKERS"] = original
+        importlib.reload(s5d)
+        assert inspect.signature(s5d.run_stage_5d).parameters["workers"].default == s5d.STAGE5D_BATCH_WORKERS
+
+
+def test_5d_parallel_batches_write_the_same_artifact_as_the_serial_loop(tmp_path, monkeypatch):
+    """Batches finish in reverse-of-submission order under the pool; the
+    written artifact must not depend on that."""
+    in_flight = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+    # Order-sensitive per-batch cost: 1e16 for the first-submitted batch,
+    # 1.0 for every later one. Submitted (left-to-right) order sums to
+    # exactly 1e16 (each +1.0 rounds away at that magnitude); reversed
+    # (completion) order sums to 1.0000000000000004e16 -- a genuinely
+    # different float, not just a coincidence of these particular values
+    # (verified: sum([1e16,1,1,1,1,1]) != sum(reversed([...]))).
+    costs = {0: 1e16, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}
+
+    def slow_early_batches(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        # Later-submitted batches answer first: batch 5 sleeps least.
+        time.sleep((len(_MANY_CITATIONS) - idx) * 0.01)
+        with lock:
+            in_flight["now"] -= 1
+        return _llm_result(
+            json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}),
+            cost=costs[idx],
+        )
+
+    input_data = _many_citations_input("MANYCIT1")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", slow_early_batches)
+
+    serial_path = str(tmp_path / "serial.json")
+    s5d.run_stage_5d(input_path, output_path=serial_path, verbose=False, batch_size=1, workers=1)
+    assert in_flight["peak"] == 1  # workers=1 really is the serial loop
+
+    in_flight["peak"] = 0
+    parallel_path = str(tmp_path / "parallel.json")
+    s5d.run_stage_5d(input_path, output_path=parallel_path, verbose=False, batch_size=1, workers=4)
+    assert in_flight["peak"] > 1  # and workers=4 really overlapped
+
+    with open(serial_path, encoding="utf-8") as f:
+        serial = json.load(f)
+    with open(parallel_path, encoding="utf-8") as f:
+        parallel = json.load(f)
+
+    serial, parallel = _strip_timestamp(serial), _strip_timestamp(parallel)
+    assert serial == parallel
+    # Exact float equality: submission-order summation, not just the final
+    # entries list, must match the serial loop.
+    assert serial["stage_5d"]["total_cost"] == 1e16
+    assert parallel["stage_5d"]["total_cost"] == 1e16
+
+
+def test_5d_total_cost_equals_the_serial_sum_when_per_batch_costs_differ(tmp_path, monkeypatch):
+    costs = {0: 1e16, 1: 1.0, 2: 1.0, 3: 1.0, 4: 1.0, 5: 1.0}
+
+    def slow_early_batches(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        time.sleep((len(_MANY_CITATIONS) - idx) * 0.01)
+        return _llm_result(
+            json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}),
+            cost=costs[idx],
+        )
+
+    input_data = _many_citations_input("COSTSUM1")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", slow_early_batches)
+
+    out_path = str(tmp_path / "out.json")
+    s5d.run_stage_5d(input_path, output_path=out_path, verbose=False, batch_size=1, workers=4)
+
+    with open(out_path, encoding="utf-8") as f:
+        out = json.load(f)
+
+    # The only value that reproduces this exactly is left-to-right
+    # summation in SUBMISSION order (a completion-order accumulator would
+    # land on 1.0000000000000004e16 instead, since batch 0 -- the huge
+    # cost -- finishes LAST here).
+    assert out["stage_5d"]["total_cost"] == 1e16
+
+
+def test_5d_batch_progress_lines_are_monotonic_and_unspliced(tmp_path, monkeypatch, capsys):
+    def slow_early_batches(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        time.sleep((len(_MANY_CITATIONS) - idx) * 0.01)
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT2")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", slow_early_batches)
+
+    s5d.run_stage_5d(input_path, output_path=str(tmp_path / "out.json"), verbose=True, batch_size=1, workers=4)
+
+    out = capsys.readouterr().out.splitlines()
+    total = len(_MANY_CITATIONS)
+    marker = f"/{total} ("
+    progress = [line for line in out if "Processing batch" in line and marker in line]
+    # The line is never "[N/M]" bracketed (that would match orchestrator.py
+    # pattern 3) -- "Processing batch N/M (" is the exact shape checked.
+    assert len(progress) == total
+    nums = [int(line.split("Processing batch ")[1].split("/")[0]) for line in progress]
+    assert nums == list(range(1, total + 1))
+    # Each batch's block is one atomic print: "Processing batch..." then "Parsed...".
+    for i, line in enumerate(out):
+        if "Processing batch" in line and marker in line:
+            assert out[i + 1].strip().startswith("Parsed"), out[i:i + 2]
+
+
+def test_5d_batch_progress_does_not_match_progress_patterns(capsys, progress_patterns):
+    # Drive the REAL printer (mrj4001's point #1 on PR #918: a hand-typed
+    # literal here can't catch a future reword of the printer's own
+    # wording). The patterns come from orchestrator.py's source, pinned in
+    # conftest.py's progress_patterns fixture.
+    printer = s5d._batch_progress_printer(10)
+    filler = s5d._BatchResult(id_to_formatted=None, id_to_entry={"CIT-0001": {}}, usage=None)
+    five_cited = s5d._BatchResult(
+        id_to_formatted=None,
+        id_to_entry={f"CIT-{i:04d}": {} for i in range(5)},
+        usage=None,
+    )
+    printer(0, filler)
+    printer(0, filler)
+    printer(0, five_cited)  # 3rd completion -> "Processing batch 3/10 (5 citations)..."
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if l.strip().startswith("Processing batch 3/10"))
+    assert not any(p.search(line) for p in progress_patterns)
+
+
+def test_5d_batches_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):
+    from unified_pipeline.core import prompt_logger
+
+    seen = set()
+
+    def record(**kwargs):
+        seen.add(prompt_logger._current_run_id.get())
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT3")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", record)
+
+    token = prompt_logger.set_current_run_id("run-stg5d")
+    try:
+        s5d.run_stage_5d(input_path, output_path=str(tmp_path / "out.json"), verbose=False, batch_size=1, workers=4)
+    finally:
+        prompt_logger.reset_current_run_id(token)
+
+    assert seen == {"run-stg5d"}
+
+
+class _FakeRoutedStdout:
+    """Minimal stand-in for orchestrator.py's ``_RoutedStdout`` -- a dict
+    keyed by ``threading.get_ident()``. A registered thread's write lands in
+    its own capture; any other thread's write lands in ``leak`` instead.
+    Isolates the property under test: output must come from the calling
+    thread's ``on_result`` callback (via ``_batch_progress_printer``), not
+    from a print inside ``_format_batch`` itself.
+    """
+
+    def __init__(self, leak):
+        self._leak = leak
+        self._captures = {}
+
+    def register(self, ident, capture):
+        self._captures[ident] = capture
+
+    def write(self, text):
+        return self._captures.get(threading.get_ident(), self._leak).write(text)
+
+    def flush(self):
+        pass
+
+
+def test_5d_batch_progress_prints_only_from_the_calling_thread(tmp_path, monkeypatch):
+    def slow_early_batches(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        time.sleep((len(_MANY_CITATIONS) - idx) * 0.01)
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT4")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", slow_early_batches)
+
+    registered = io.StringIO()
+    leak = io.StringIO()
+    fake_stdout = _FakeRoutedStdout(leak)
+    fake_stdout.register(threading.get_ident(), registered)
+
+    real_stdout = sys.stdout
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+    try:
+        s5d.run_stage_5d(input_path, output_path=str(tmp_path / "out.json"), verbose=True, batch_size=1, workers=4)
+    finally:
+        monkeypatch.setattr(sys, "stdout", real_stdout)
+
+    assert "Processing batch" in registered.getvalue()
+    assert leak.getvalue() == ""
+
+
+def test_5d_workers_one_never_overlaps_and_workers_four_does(tmp_path, monkeypatch):
+    in_flight = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def track(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        time.sleep(0.02)
+        with lock:
+            in_flight["now"] -= 1
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT5")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", track)
+
+    s5d.run_stage_5d(input_path, output_path=str(tmp_path / "s1.json"), verbose=False, batch_size=1, workers=1)
+    assert in_flight["peak"] == 1
+
+    in_flight["peak"] = 0
+    s5d.run_stage_5d(input_path, output_path=str(tmp_path / "s4.json"), verbose=False, batch_size=1, workers=4)
+    assert in_flight["peak"] >= 2
+
+
+def test_5d_a_swallowed_batch_leaves_it_unformatted_others_formatted_serial_and_parallel(tmp_path, monkeypatch):
+    # Batch index 2 raises inside call_llm; call_llm_formatter's own
+    # `except Exception` swallows it and returns (None, None) -- unchanged
+    # by the move to the pool. Every other batch must still be formatted,
+    # for both workers=1 (true serial) and workers=4.
+    def flaky(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        if idx == 2:
+            raise RuntimeError("simulated LLM failure")
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT6")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", flaky)
+
+    for workers, out_name in [(1, "serial.json"), (4, "parallel.json")]:
+        out_path = str(tmp_path / out_name)
+        s5d.run_stage_5d(input_path, output_path=out_path, verbose=False, batch_size=1, workers=workers)
+        with open(out_path, encoding="utf-8") as f:
+            out = json.load(f)
+        for i, entry in enumerate(out["entries"]):
+            if i == 2:
+                assert "formatted_citation" not in entry["extracted_fields"], (workers, i)
+            else:
+                assert entry["extracted_fields"]["formatted_citation"] == f"cite {i}", (workers, i)
+        assert out["stage_5d"]["formatted_count"] == len(_MANY_CITATIONS) - 1
+        assert out["stage_5d"]["non_enriched_count"] == len(_MANY_CITATIONS)
+
+
+def test_5d_a_swallowed_batch_logs_the_exception_from_a_pool_thread(tmp_path, monkeypatch, caplog):
+    # #810 / round-1 finding: call_llm_formatter's `except Exception` runs
+    # inside _format_batch, which is always called with verbose=False --
+    # including under workers=4, where it can land on a pool thread. A
+    # print there is forbidden, but the failure must not vanish: this pins
+    # that logger.exception still carries the exception type and message
+    # into the run log, the way the pre-#881 print + traceback did.
+    def flaky(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        if idx == 2:
+            raise RuntimeError("simulated throttle")
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("MANYCIT8")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", flaky)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_5d_citation_formatter"):
+        s5d.run_stage_5d(
+            input_path, output_path=str(tmp_path / "out.json"), verbose=True, batch_size=1, workers=4
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("RuntimeError" in m and "simulated throttle" in m for m in messages), messages
+
+
+def test_5d_a_malformed_llm_response_logs_the_parse_warning_from_a_pool_thread(tmp_path, monkeypatch, caplog):
+    # Same finding, the other swallowed diagnostic: parse_llm_output's
+    # `except json.JSONDecodeError` (a batch whose brace-delimited span
+    # isn't valid JSON), also always called with verbose=False from
+    # _format_batch.
+    def garbled(**kwargs):
+        return _llm_result("{not valid json but has a brace span}")
+
+    input_data = {
+        "document_uid": "MALFORMED5D",
+        "entries": [
+            {"taxonomy_code": "S1", "text": "SOLO_ENTRY", "enrichment_status": "", "extracted_fields": {}}
+        ],
+    }
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", garbled)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_5d_citation_formatter"):
+        s5d.run_stage_5d(
+            input_path, output_path=str(tmp_path / "out.json"), verbose=True, batch_size=1, workers=4
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Could not parse LLM JSON output" in m for m in messages), messages
+
+
+def test_5d_verbose_false_prints_nothing_at_workers_one_and_four(tmp_path, monkeypatch, capsys):
+    # r2 m08: `_printer = _batch_progress_printer(len(batches)) if verbose
+    # else None` guards the printer's construction, not just its call site
+    # -- dropping the `if verbose else None` guard builds the printer
+    # unconditionally and every on_result fires regardless of verbose.
+    # >=3 batches at both worker counts so the pool path is exercised too.
+    def steady(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        idx = _citation_index_from_prompt(prompt, _MANY_CITATIONS)
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_data = _many_citations_input("QUIET5D")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", steady)
+
+    for workers, out_name in [(1, "quiet_w1.json"), (4, "quiet_w4.json")]:
+        capsys.readouterr()  # drain anything from a previous iteration
+        s5d.run_stage_5d(
+            input_path, output_path=str(tmp_path / out_name), verbose=False, batch_size=1, workers=workers
+        )
+        assert capsys.readouterr().out == "", workers
+
+
+def test_5d_empty_llm_text_with_usage_prints_no_parsed_line_and_logs_nothing(tmp_path, monkeypatch, capsys, caplog):
+    # A2: dev gated the parse + "Parsed" line on `if llm_output:` (truthy),
+    # not on usage being present. call_llm_formatter can return a real,
+    # non-None usage dict alongside an EMPTY llm_output string (the model
+    # billed tokens but produced no content) -- that must print no "Parsed"
+    # line and log no "Could not parse" warning, matching dev, and the
+    # artifact must be identical whether the batch ran serially or pooled.
+    def billed_but_empty(**kwargs):
+        return _llm_result("")
+
+    input_data = _many_citations_input("EMPTYTXT5D")
+    input_path = _write_json(tmp_path / "in.json", input_data)
+    monkeypatch.setattr(s5d, "call_llm", billed_but_empty)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_5d_citation_formatter"):
+        s5d.run_stage_5d(
+            input_path, output_path=str(tmp_path / "serial.json"), verbose=True, batch_size=1, workers=1
+        )
+    out = capsys.readouterr().out
+    assert "Parsed" not in out
+    assert "Processing batch" in out
+    assert not [r for r in caplog.records if "Could not parse" in r.getMessage()]
+
+    s5d.run_stage_5d(
+        input_path, output_path=str(tmp_path / "parallel.json"), verbose=False, batch_size=1, workers=4
+    )
+    with open(tmp_path / "serial.json", encoding="utf-8") as f:
+        serial = _strip_timestamp(json.load(f))
+    with open(tmp_path / "parallel.json", encoding="utf-8") as f:
+        parallel = _strip_timestamp(json.load(f))
+    assert serial == parallel
+    assert serial["stage_5d"]["formatted_count"] == 0
+
+    # Blind verifier on PR #918's rework: changing the accumulation gate
+    # from `if result.usage is not None:` to `if result.id_to_formatted is
+    # not None:` passed every test -- it drops a batch's cost and tokens
+    # whenever the response was billed but empty (id_to_formatted is None
+    # in exactly that case), silently undercounting a real per-run cost.
+    # _MANY_CITATIONS has 6 markers, batch_size=1 -> 6 batches, each with
+    # _llm_result("")'s usage (cost=0.002, prompt_tokens=11,
+    # completion_tokens=7): the run total must still carry all six.
+    six_batches_cost = 0.0
+    for _ in range(len(_MANY_CITATIONS)):
+        six_batches_cost += 0.002
+    assert serial["stage_5d"]["total_cost"] == six_batches_cost
+    assert serial["stage_5d"]["prompt_tokens"] == 11 * len(_MANY_CITATIONS)
+    assert serial["stage_5d"]["completion_tokens"] == 7 * len(_MANY_CITATIONS)
+    assert serial["stage_5d"]["total_tokens"] == 18 * len(_MANY_CITATIONS)
