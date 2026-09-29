@@ -303,6 +303,146 @@ def test_dash_preceded_boundary_stays_refused_for_other_categories():
     assert not _denied("Research interests - Marital Status: Single", A)
 
 
+# #1041: one label per dash-terminated category. A value that is not
+# SSN/date shaped, so only the label row (never a colonless shape row)
+# can be what matches.
+_DASH_LABELS = [
+    ("Date of Birth", CAT_DATE_OF_BIRTH),
+    ("Birthplace", CAT_PLACE_OF_BIRTH),
+    ("Place of Birth", CAT_PLACE_OF_BIRTH),
+    ("SSN", CAT_SSN),
+    ("Passport Number", CAT_PASSPORT),
+    ("Alien Registration Number", CAT_ALIEN_REGISTRATION),
+    ("Driver's License", CAT_DRIVERS_LICENSE),
+    ("Marital Status", CAT_MARITAL_STATUS),
+    ("Emergency Contact", CAT_EMERGENCY_CONTACT),
+    ("Visa Status", CAT_VISA),
+    ("Immigration Status", CAT_VISA),
+]
+_DASHES = ["-", " -", "\u2013", " \u2013", "\u2014", " \u2014"]
+
+
+@pytest.mark.parametrize("dash", _DASHES)
+@pytest.mark.parametrize("label, category", _DASH_LABELS)
+def test_1041_dash_terminated_label_is_withheld_at_every_destination(dash, label, category):
+    """#1041: a label closed by a hyphen / en dash / em dash, then
+    whitespace, is withheld at every destination, like its colon form."""
+    text = f"{label}{dash} Synthetic Value"
+    for code in (A, APPENDIX, CONTENT):
+        assert _denied(text, code), code
+    assert [m.category for m in _pii_matches(text, SCOPE_ALL_CODES)] == [category]
+
+
+# The whitespace after the dash, as the corpus has it: XY66RT's lines
+# carry 5-11 spaces, a hard `_PII_FRAGMENT_SPLIT_RE` delimiter, so the
+# match is the label alone and the VALUE is cut only by the pass's
+# bare-label extension. A tab is the same shape.
+_DASH_GAPS = ["-      ", " -     ", "\u2013\t", "\u2014\t", "-\t"]
+
+
+@pytest.mark.parametrize("gap", _DASH_GAPS)
+@pytest.mark.parametrize("label, category", _DASH_LABELS)
+def test_1041_pass_cuts_the_value_after_a_gapped_dash_label(gap, label, category):
+    entry = {"text": f"{label}{gap}Synthetic Value", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    result = _run({"T": [entry]})
+    assert "Synthetic" not in entry["text"], entry["text"]
+    assert [i.category for i in result.withheld] == [category]
+    assert entry["_pii_orphaned_value"] is False
+
+
+@pytest.mark.parametrize("terminator", [":", " -", "\u2013", " \u2014"])
+def test_1041_dash_label_before_a_newline_orphans_its_value_like_a_colon(terminator):
+    """F2: the value on the next line is not reached by the extension (a
+    newline is the source's own field separator), so the entry is flagged
+    `_pii_orphaned_value` -- the dash form exactly as the colon form."""
+    entry = {"text": f"Marital Status{terminator}\nSynthetic", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    _run({"T": [entry]})
+    assert entry["_pii_orphaned_value"] is True
+
+
+@pytest.mark.parametrize("terminator", [":", " -", "-", "\u2013", " \u2014"])
+def test_1041_dash_label_alone_at_the_end_of_a_cell_matches_like_a_colon(terminator):
+    text = f"Marital Status{terminator}"
+    assert [m.category for m in _pii_matches(text, SCOPE_ALL_CODES)] == [CAT_MARITAL_STATUS]
+    assert pre_llm_bare_label_category(f"Date of Birth{terminator}") == CAT_DATE_OF_BIRTH
+
+
+@pytest.mark.parametrize("gap", _DASH_GAPS)
+def test_1041_pre_llm_scrub_reaches_a_date_after_a_gapped_dash_label(gap):
+    text = f"Date of Birth{gap}01/02/1970"
+    assert "01/02/1970" not in redact_pre_llm_values(text)
+
+
+@pytest.mark.parametrize("text, value", [
+    # No colonless shape row reaches these: only the next-run extension
+    # (`_pre_llm_value_span_in_next_run`) behind a dash-terminated label.
+    ("Date of Birth - | 01/02/1970", "01/02/1970"),
+    ("Year of Birth -\t1970", "1970"),
+    ("Birthday \u2013\t01/02/1970", "01/02/1970"),
+])
+def test_1041_pre_llm_scrub_takes_the_next_run_after_a_bare_dash_label(text, value):
+    assert value not in redact_pre_llm_values(text)
+
+
+def test_1041_bare_child_count_behind_a_marital_cut_is_withheld():
+    """XY66RT's line: the `;` hard split left "<n> Children" behind the
+    marital-status cut and it rendered in the Appendix."""
+    entry = {"text": "Marital Status-     Synthetic; 2 Children", "taxonomy_code": "T",
+             "extracted_fields": {}}
+    result = _run({"T": [entry]})
+    assert "Synthetic" not in entry["text"] and "Children" not in entry["text"]
+    assert [i.category for i in result.withheld] == [CAT_MARITAL_STATUS, CAT_CHILDREN]
+
+
+@pytest.mark.parametrize("text", [
+    "Enrolled 20 children and 20 adults",
+    "Studied 20 subjects, 20 children",
+    "Outcomes in 4 children",
+    "Single (2 children) is not a fragment of its own",
+    "Cohort A; 20 children with asthma",
+])
+def test_1041_child_count_inside_prose_is_not_withheld(text):
+    assert not [m for m in _pii_matches(text) if m.category == CAT_CHILDREN]
+
+
+@pytest.mark.parametrize("text", [
+    # The corpus false withholds a dash terminator on the ambiguous
+    # title-word rows produced (#1041 A/B), synthetic stand-ins.
+    "Health- Example Institute, Springfield",
+    "Age-related differences in memory",
+    "Age- and sex-specific norms",
+    "Gender- and Race-Based Disparities",
+    "Family-centered health promotion",
+    "Sexuality and Health – Volume 3",
+    # An unambiguous label glued to a compound word: no whitespace after
+    # the hyphen, so not a terminator.
+    "Salary-based compensation study",
+    "Visa-free travel policy review",
+    "Visa\u2014free travel policy review",
+    "Visa\u2013sponsored scholars program",
+    # Rows left colon-only: their labels open real titles.
+    "Spouse \u2013 A Documentary Film Review",
+    "Honorarium - Grand Rounds lecture",
+])
+def test_1041_dash_joined_non_pii_line_is_not_newly_withheld(text):
+    assert not _denied(text, A)
+    assert not _denied(text, APPENDIX)
+
+
+@pytest.mark.parametrize("text, code", [
+    ("Marital Status: Single", CONTENT),
+    ("Birthplace: Synthetic City", CONTENT),
+    ("Visa Status: Synthetic", CONTENT),
+    ("Health: good", A),
+    ("Age: 45", A),
+    ("Gender: X", A),
+])
+def test_1041_colon_terminated_labels_unchanged(text, code):
+    assert _denied(text, code)
+
+
 def test_semicolon_is_a_hard_fragment_boundary():
     """M07: without `;` in the split set the label after it is not
     fragment-initial and the fragment before it would swallow it."""
@@ -481,8 +621,8 @@ def test_comment_text_names_categories_counts_and_sections_only():
     ])
     lines = text.split("\n")
     assert lines[0] == WITHHELD_COMMENT_HEADER
-    assert lines[1] == " • date of birth — 1 item, Personal Data"
-    assert lines[2] == " • visa / immigration status — 2 items, Appendix, Licensure"
+    assert lines[1] == " • date of birth (1 item, Personal Data)"
+    assert lines[2] == " • visa / immigration status (2 items, Appendix, Licensure)"
     assert lines[3] == WITHHELD_COMMENT_FOOTER
     assert len(lines) == 4
 
@@ -562,7 +702,7 @@ def test_two_references_in_one_entry_each_get_their_own_withheld_item():
 def test_comment_names_third_party_contact():
     text = withheld_comment_text([
         WithheldItem(CAT_THIRD_PARTY_CONTACT, APPENDIX_SECTION_LABEL, 1)])
-    assert f" • {CAT_THIRD_PARTY_CONTACT} — 1 item, {APPENDIX_SECTION_LABEL}" in text
+    assert f" • {CAT_THIRD_PARTY_CONTACT} (1 item, {APPENDIX_SECTION_LABEL})" in text
 
 
 # --- negative controls, each a test -----------------------------------

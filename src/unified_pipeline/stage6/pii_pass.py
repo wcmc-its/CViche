@@ -58,6 +58,7 @@ from .normalization.pii import (  # noqa: F401
     _BARE_PHONE_SHAPE,
     _KNOWN_FIELD_LABEL_RE,
     _PII_FRAGMENT_SPLIT_RE,
+    _is_bare_label_span,
     _merge_matches,
     _pii_field_key_category,
     _pii_matches,
@@ -433,7 +434,8 @@ def _extend_bare_label_span(text: str, start: int, end: int) -> _BareLabelSpan:
     from safe kept content (the pipe shape leaked a home phone into the
     Appendix exactly this way before this fix).
 
-    Only fires when the match text, right-stripped, ends in `:` -- a
+    Only fires when the match text is a bare label (`_is_bare_label_span`:
+    it ends in `:`, or in a #1041 dash terminator) -- a
     normal label+value match (the far more common shape, e.g. "Home
     Phone: 555-1234") already captured its value and is returned
     unchanged. Computed against the ORIGINAL `text` and its real offsets,
@@ -474,7 +476,7 @@ def _extend_bare_label_span(text: str, start: int, end: int) -> _BareLabelSpan:
     value is still sitting there uncut (see `_BareLabelSpan`): a label with
     nothing after it, or with another labelled field after it, orphans
     nothing and its residual is safe to render (#821 R3 F-D)."""
-    if not text[start:end].rstrip().endswith(':'):
+    if not _is_bare_label_span(text, start, end):
         return _BareLabelSpan(end, False)
     delim = _PII_FRAGMENT_SPLIT_RE.match(text, end)
     if delim is None:
@@ -652,7 +654,9 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
 def withheld_comment_text(withheld: Sequence[WithheldItem]) -> str:
     """The Word comment's text: header, one bullet per category (in order
     of first appearance) with its item count and the section(s) the items
-    would have rendered in, footer. Categories and counts only."""
+    would have rendered in, footer. Categories and counts only. The count
+    is parenthesised, not dash-joined: "marital status — 1 item" is a
+    dash-terminated label (#1041) and would lint as protected data."""
     counts: dict[str, int] = {}
     sections: dict[str, list[str]] = {}
     for item in withheld:
@@ -663,6 +667,6 @@ def withheld_comment_text(withheld: Sequence[WithheldItem]) -> str:
     lines = [WITHHELD_COMMENT_HEADER]
     for category, count in counts.items():
         noun = "item" if count == 1 else "items"
-        lines.append(f" • {category} — {count} {noun}, {', '.join(sections[category])}")
+        lines.append(f" • {category} ({count} {noun}, {', '.join(sections[category])})")
     lines.append(WITHHELD_COMMENT_FOOTER)
     return "\n".join(lines)
