@@ -83,6 +83,62 @@ DEDUP_FULL_CONTAINMENT_MIN_TOKENS = 5
 DEDUP_FUSED_BLOB_RECORD_LINES = 5
 
 
+# #666: every text-similarity signal `deduplicate_entries` uses is blind to a
+# date difference, so "Chair, X Committee, 2015-2018" is token-contained in a
+# later "Chair, X Committee, 2021-2024 ..." entry that also mentions 2015 and
+# 2018 in passing. `_drop_is_safe` therefore compares the year spans the two
+# texts state. A span is a range ("2015-2018", "2015 to 2018", "2015-18",
+# "2012-present"; an open end reaches `_YEAR_OPEN_END`) or a bare year. Text,
+# not `extracted_fields`, because a fused or prose entry has no single
+# start/end and the text is what would be lost.
+_YEAR_PATTERN = r'(?:19|20)\d{2}'
+_YEAR_RE = re.compile(rf'\b{_YEAR_PATTERN}\b')
+# The end of a range may carry a month before its year ("Jun 2021", "06/2009");
+# a bare two-digit end ("2015-18") must not be the month of "2008 - 06/2009" or
+# the month/day of a full date range ("07/01/2021-06/30/2024" is not 2021-2030).
+_YEAR_RANGE_RE = re.compile(
+    rf'\b({_YEAR_PATTERN})\s*(?:[-\u2013\u2014]|to|through|until)\s*'
+    rf'(?:(?:[A-Za-z]{{3,9}}\.?|\d{{1,2}}[/.])\s*)?'
+    rf'({_YEAR_PATTERN}|\d{{2}}(?![/\d])|present|current|now|ongoing)\b',
+    re.IGNORECASE)
+_YEAR_OPEN_END = 9999
+
+
+def _year_ranges(text: str) -> list[tuple[int, int]]:
+    """(first year, last year) of every year range the text states."""
+    ranges = []
+    for match in _YEAR_RANGE_RE.finditer(text):
+        start, end = match.group(1), match.group(2).lower()
+        if end.isdigit():
+            end_year = int(start[:2] + end) if len(end) == 2 else int(end)
+        else:
+            end_year = _YEAR_OPEN_END
+        ranges.append((int(start), end_year))
+    return ranges
+
+
+def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
+    """False when the dropped text states a date the kept text does not carry.
+
+    Each dropped range must overlap a RANGE the kept text states (a kept entry
+    that only mentions the two boundary years in passing does not vouch for it);
+    each bare dropped year must appear in the kept text or fall inside one of
+    its ranges. Undated dropped text is compatible with anything. Doubt keeps
+    the entry: a surviving duplicate is visible to a reader, a lost record is not.
+    """
+    kept_ranges = _year_ranges(kept_text)
+    for low, high in _year_ranges(dropped_text):
+        if not any(low <= kept_high and kept_low <= high
+                   for kept_low, kept_high in kept_ranges):
+            return False
+    kept_years = {int(y) for y in _YEAR_RE.findall(kept_text)}
+    for year in _YEAR_RE.findall(_YEAR_RANGE_RE.sub(' ', dropped_text)):
+        if int(year) not in kept_years and not any(
+                low <= int(year) <= high for low, high in kept_ranges):
+            return False
+    return True
+
+
 def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     """#227 guard: only drop an entry when the loss is provably recoverable.
 
@@ -98,25 +154,14 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     8 drops on 2Q1_ZQ were real content loss, all single-line); a distinct
     record swallowed by a fused table blob is the same loss class (C0ZGFW).
 
-    #666 (adversarially re-checked, not yet fixed): all three branches below
-    can approve an unsafe drop for realistic prose CV entries, not just the
-    final fallback. The shared root cause is _record_lines()'s narrow shape
-    (pipe/tab row, or a line-initial date-range prefix) -- an ordinary
-    single-paragraph entry (a mentee mention, a committee-succession
-    sentence) has ZERO record lines, so _recover_unrendered_records skips it
-    entirely and the "#221/#225 will catch it" assumption below never
-    engages for that entry at all, regardless of which branch dropped it.
-    Confirmed with repros: two distinct mentees fused into one un-split
-    entry defeats the verbatim-containment branch (one mentee's text is a
-    literal substring of the fused pair's text); two distinct multi-year
-    committee/board memberships defeat the subset-containment branch when
-    one entry's narrative prose mentions the other's identifying nouns and
-    years in passing (successor-committee framing). The final fallback has
-    its own additional, narrower hole: the recovery pass's own token-overlap
-    check (`_RENDER_TOKEN_RE`) is digit-blind, so even a fused entry that
-    DOES clear the record-line threshold can still evade recovery if two
-    records differ only by date. Corpus-verified fix needed before any of
-    this changes; see the issue for candidate directions."""
+    #666: the two non-verbatim branches also require `_dates_compatible` --
+    a dropped entry that states a date range the kept entry does not carry is a
+    different record (a second committee term, a second grant), and no text
+    similarity signal can see that. Still open, and NOT a date defect: the
+    verbatim branch, and both others when the dropped entry is undated, approve
+    dropping a record that sits inside a longer kept entry which fused it with
+    a sibling (two mentees in one un-split entry), and `_record_lines()` finds
+    no line in prose for the #221/#225 recovery pass to re-verify."""
     dropped_squashed = _squash(dropped_entry.get('text', ''))
     verbatim = bool(dropped_squashed
                     and dropped_squashed in _squash(kept_entry.get('text', '')))
@@ -136,6 +181,9 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
                              == kept_entry.get('extracted_fields'))
     if verbatim:
         return True
+    if not _dates_compatible(dropped_entry.get('text') or '',
+                             kept_entry.get('text') or ''):
+        return False  # #666: a different date is a different record
     dropped_sig = _entry_signature_words(dropped_entry)
     if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
             and dropped_sig <= _entry_signature_words(kept_entry)

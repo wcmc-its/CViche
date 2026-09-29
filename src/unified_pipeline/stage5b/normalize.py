@@ -26,6 +26,18 @@ US_STATE_ABBREVIATIONS: Final[dict] = {
 }
 
 
+# Standalone research institutes whose own name matches an internal-unit
+# pattern ("Institute for ...") and names no parent institution (#678). An
+# exact-name allowlist, not a broader rule: "Institute for Cancer Research"
+# is indistinguishable in shape from these and is usually a university unit.
+STANDALONE_INSTITUTES: Final[frozenset] = frozenset({
+    'institute for advanced study',
+    'institute for systems biology',
+    'institute for health metrics and evaluation',
+    'institute for defense analyses',
+})
+
+
 def normalize_institution_name(name: str) -> str:
     """Normalize institution name for better matching."""
     if not name:
@@ -67,6 +79,11 @@ def is_likely_internal_unit(name: str) -> bool:
     agencies, independent schools, etc).
     """
     name_lower = name.lower()
+
+    # "Institute for Advanced Study, Princeton" -> match on the part before
+    # the first comma so a trailing location doesn't defeat the allowlist.
+    if name_lower.split(',')[0].strip() in STANDALONE_INSTITUTES:
+        return False
 
     # Common internal unit patterns
     internal_patterns = [

@@ -18,6 +18,7 @@ Date: 2025-11-29
 """
 
 import logging
+import functools
 import os
 import sys
 import json
@@ -32,6 +33,9 @@ from datetime import datetime
 from collections import defaultdict
 
 logger = logging.getLogger(__name__)
+
+# stats key counting _classify_geographic_scope LLM failures (#547).
+GEO_SCOPE_FAILURE_STAT = 'geographic_classification_failures'
 
 try:
     from docx import Document
@@ -460,6 +464,9 @@ RENDER_ROUTED_CODES = frozenset({
     'N2',  # Mentoring - Institutional Training Grants and Mentored Trainee
            # Grants (#529)
     'N3A', 'N3B',  # Mentoring (current/past mentees)
+    'N4',  # Mentoring - outcome narrative lines; `_fill_mentoring` renders
+           # them under the MENTORING header, so they must not also reach
+           # the Appendix (#587)
     'O',   # Institutional Leadership
     'P',   # Administrative Committees
     'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D',  # Service Activities
@@ -490,6 +497,61 @@ _TAXONOMY_WARNED_CONFUSIONS = frozenset({
     ('D3', 'D1'), ('K1', 'K4'), ('K4', 'K1'), ('K5', 'K4'),
     ('Q1', 'Q2'), ('Q2', 'Q3'), ('S1', 'S8'), ('S2', 'S1'),
 })
+
+
+_KEEP_SENTINEL = 'KEEP'
+_TAXONOMY_PATH = Path(__file__).parent / "core" / "taxonomy_v7.json"
+
+
+# Leading markdown list / quote / heading / emphasis markers on a reply line.
+_MD_LINE_PREFIX = re.compile(r'^(?:[\s>#*_\-\u2022]+|\d+[.)]\s+)+')
+
+
+@functools.cache
+def _taxonomy_codes() -> frozenset[str]:
+    """Every code in core/taxonomy_v7.json. A reclassification reply may only
+    name one of these (or KEEP); a shape regex let 'ALL' and 'NOTE' through
+    (#264)."""
+    with open(_TAXONOMY_PATH, encoding="utf-8") as f:
+        return frozenset(entry['code'] for entry in json.load(f)['codes'])
+
+
+def parse_reclassified_segments(
+        result_text: str, original_code: str) -> list[tuple[str, str | None]] | None:
+    """Parse `_reclassify_entry_segments`' "CODE: text" lines.
+
+    Returns [(segment_text, code)], or None when no line is usable. Only a
+    colon-bearing line that opens with a real taxonomy code or KEEP becomes a
+    segment; any other line is model commentary (a "Here is the analysis:"
+    preamble, "**Rationale:**" bullets, "> **Note:** ..."), and folding it in
+    as a segment renders it as a faculty-visible bullet (#264). Such lines are
+    dropped one by one, not the whole reply: live replies routinely carry a
+    preamble around valid code lines, and refusing them sent the entry back
+    to the appendix. A reply with no valid line returns None, so the caller
+    keeps the original entry text (fail closed).
+    """
+    segments: list[tuple[str, str | None]] = []
+    for line in result_text.strip().split('\n'):
+        line = line.strip()
+        if not line or ':' not in line:
+            continue
+        code, segment_text = (part.strip() for part in line.split(':', 1))
+        # A markdown list/emphasis wrapper around a real code ('- K2: ...',
+        # '**K2:** ...', '1. K2: ...') is still a code line, not commentary.
+        code = _MD_LINE_PREFIX.sub('', code).rstrip('*_ ').upper()
+        segment_text = segment_text.lstrip('*_ ')
+        if code != _KEEP_SENTINEL and code not in _taxonomy_codes():
+            logger.warning(
+                "Stage 6 reclassification reply: dropped non-code line "
+                "with prefix %r", code[:40])
+            continue
+        if segment_text and len(segment_text) > 10:
+            # KEEP means "correct as originally coded" -- resolve to the
+            # original code so the caller can route it home instead of
+            # dumping it in the appendix (#209).
+            resolved = (original_code if original_code != '?' else None) if code == _KEEP_SENTINEL else code
+            segments.append((segment_text, resolved))
+    return segments or None
 
 
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
@@ -679,6 +741,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             'overflow_to_appendix': 0,
             'appendix_segments_reconsidered': 0,
             'unrendered_records_recovered': 0,
+            GEO_SCOPE_FAILURE_STAT: 0,
         }
 
     def _find_template(self, template_path: str = None) -> str:
@@ -1097,7 +1160,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('research_support', frozenset({'M2A', 'M2B', 'M2C'}), lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
             # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
             ('patents', frozenset({'M2D'}), lambda: self._fill_patents(entries_by_code.get('M2D', []))),
-            ('mentoring', frozenset({'N1', 'N2', 'N3A', 'N3B'}), lambda: self._fill_mentoring(entries_by_code)),
+            ('mentoring', frozenset({'N1', 'N2', 'N3A', 'N3B', 'N4'}), lambda: self._fill_mentoring(entries_by_code)),
             ('clinical_practice', frozenset({'L1', 'L2', 'L3'}), lambda: self._fill_clinical_practice(entries_by_code)),  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
             ('leadership', frozenset({'O'}), lambda: self._fill_leadership(entries_by_code.get('O', []))),  # O = Institutional Leadership
             ('administrative_activities', frozenset({'P'}), lambda: self._fill_administrative_activities(entries_by_code.get('P', []))),  # P = Administrative Committees
@@ -1198,7 +1261,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         validation_issues = _merge_appendix_diversion_warnings(
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
-        all_warnings = self._section_failures + validation_issues
+        all_warnings = self._section_failures + validation_issues + self._geo_scope_failure_warnings()
         _log_validation_warnings(all_warnings)
 
         self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
@@ -1221,6 +1284,23 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             logger.info(f"\nSaved to: {output_path}")
 
         return output_path
+
+    def _geo_scope_failure_warnings(self) -> list[dict[str, Any]]:
+        """One sidecar WARN when any geographic-scope classification failed
+        (#547), so the run doctor sees it. Empty when none failed."""
+        failures = self.stats.get(GEO_SCOPE_FAILURE_STAT, 0)
+        if not failures:
+            return []
+        return [{
+            "check": GEO_SCOPE_FAILURE_STAT,
+            "code": None,
+            "section": "presentations/service",
+            "message": (f"{failures} geographic scope classification(s) failed "
+                        "and defaulted to National; the Regional/National/"
+                        "International split may be wrong"),
+            "evidence": [f"{GEO_SCOPE_FAILURE_STAT}={failures}"],
+            "severity": "WARN",
+        }]
 
     def _render_section(self, label: str, fn: Callable[[], Any],
                          codes: frozenset[str] = frozenset()) -> Any:  # noqa: ANN401
@@ -1430,9 +1510,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             return scope
 
-        except Exception as e:
-            if self.verbose:
-                logger.warning(f"    ⚠ Geographic classification error: {e}")
+        except Exception:
+            # Never gated on verbose (#547): production runs are not verbose,
+            # and an LLM outage would otherwise refile every presentation as
+            # National with no record. The default itself is kept.
+            logger.warning("Geographic scope classification failed; "
+                           "defaulting to National", exc_info=True)
+            self.stats[GEO_SCOPE_FAILURE_STAT] += 1
             return 'National'  # Default on error
 
 
@@ -2358,28 +2442,8 @@ Now analyze the text above:"""
                 max_tokens=4000
             )
 
-            result_text = llm_result["content"].strip()
-
-            # Parse the response
-            segments = []
-            for line in result_text.split('\n'):
-                line = line.strip()
-                if not line or ':' not in line:
-                    continue
-                # Parse "CODE: text" format
-                parts = line.split(':', 1)
-                if len(parts) == 2:
-                    code = parts[0].strip().upper()
-                    segment_text = parts[1].strip()
-                    if segment_text and len(segment_text) > 10:
-                        # KEEP means "correct as originally coded" — resolve to
-                        # the original code so the caller can route it home
-                        # instead of dumping it in the appendix (#209).
-                        if code == 'KEEP':
-                            code = original_code if original_code != '?' else None
-                        segments.append((segment_text, code))
-
-            return segments if segments else None
+            return parse_reclassified_segments(
+                llm_result["content"], original_code)
 
         except Exception as e:
             if self.verbose:

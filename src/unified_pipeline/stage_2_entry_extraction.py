@@ -28,7 +28,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from core.output_manager import OutputManager
-from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
+from core.docx_structure_extractor import (
+    extract_docx_structure,
+    extract_unified_elements,
+    join_row_cells,
+    row_cell_texts,
+)
 from core.template_boilerplate import is_near_template_instruction, is_template_instruction
 
 logger = logging.getLogger(__name__)
@@ -91,7 +96,10 @@ def get_element_text(element: dict) -> str:
         # Table content already has flattened text
         return element.get("text", "").strip()
     elif elem_type == "table":
-        # Legacy table format - flatten data into text
+        # Legacy table format - flatten data into text. Stays tab-joined (#488):
+        # stage 6 and the doctor branch on '\t' in this text, and a pipe join
+        # turns an all-empty wide row into a separator line the #418 dedup
+        # counts as uncovered content.
         rows = element.get("data", [])
         row_texts = []
         for row in rows:
@@ -663,7 +671,7 @@ def detect_entries_for_section(
                         if pseudo_rows:
                             # Row contains multiple merged entries - create pseudo-rows
                             for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
-                                row_text = " | ".join(pseudo_row).strip()
+                                row_text = join_row_cells(pseudo_row)
                                 if row_text:
                                     section_elements.append({
                                         "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
@@ -677,10 +685,7 @@ def detect_entries_for_section(
                                     })
                         else:
                             # Normal row - flatten cells to text
-                            row_text = " | ".join(
-                                cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                                for cell in row
-                            ).strip()
+                            row_text = join_row_cells(row_cell_texts(row))
                             if row_text:
                                 section_elements.append({
                                     "idx": f"{idx}.{row_idx}",  # Sub-index for rows
@@ -743,7 +748,7 @@ def detect_entries_for_section(
                         if pseudo_rows:
                             # Row contains multiple merged entries - create pseudo-rows
                             for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
-                                row_text = " | ".join(pseudo_row).strip()
+                                row_text = join_row_cells(pseudo_row)
                                 if row_text:
                                     section_elements.append({
                                         "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
@@ -757,10 +762,7 @@ def detect_entries_for_section(
                                     })
                         else:
                             # Normal row - flatten cells to text
-                            row_text = " | ".join(
-                                cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                                for cell in row
-                            ).strip()
+                            row_text = join_row_cells(row_cell_texts(row))
                             if row_text:
                                 section_elements.append({
                                     "idx": f"{idx}.{row_idx}",  # Sub-index for rows

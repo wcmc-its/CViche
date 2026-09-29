@@ -483,12 +483,11 @@ def test_taxonomy_code_coverage_does_not_flag_m1_the_common_routed_case():
     assert lint_taxonomy_code_coverage(stage3b) == []
 
 
-def test_taxonomy_code_coverage_does_not_flag_codes_that_duplicate_instead():
-    # E, G and N4 all render via their own direct dispatch (not the
-    # RENDER_ROUTED_CODES lookup this lint checks) and then ALSO duplicate
-    # into the appendix -- a real defect, but a different one (#294 for G,
-    # #587 for N4) from "no render route at all", which is what this lint
-    # exists to catch. Flagging them here would conflate the two classes.
+def test_taxonomy_code_coverage_does_not_flag_rendered_passthrough_codes_or_n4():
+    # E and G render via the passthrough writer's own heading match (not the
+    # RENDER_ROUTED_CODES lookup this lint checks), so the lint exempts them;
+    # N4 is in RENDER_ROUTED_CODES since #587. Flagging any of them here would
+    # call a rendered code "no render route at all".
     stage3b = {"entries": [
         _entry("Weill Cornell Medicine", taxonomy_code="G", start=1),
         _entry("Full-time", taxonomy_code="E", start=2),
@@ -1429,12 +1428,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (22), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (23), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 21
+    assert len(payload["findings"]) == 22
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -1769,6 +1768,25 @@ def test_run_doctor_wires_invented_records_through_to_the_verdict(tmp_path):
     assert invented[0]["severity"] == "WARN"
     assert "F2" in invented[0]["message"]
     assert "99" in invented[0]["message"]
+
+
+def test_run_doctor_wires_wrong_start_date_through_to_the_verdict(tmp_path):
+    """#729, end to end: the LINT_REGISTRY row must hand the lint stage 4."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "D1", "element_type": "paragraph",
+        "element_idx_start": 98, "text": "Example Board | 2025-2026",
+        "extracted_fields": {"start_date": "2026", "end_date": None}})
+    fields.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "wrong_start_date"]
+    assert len(hits) == 1
+    assert hits[0]["severity"] == "WARN"
+    assert "98" in hits[0]["message"]
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):

@@ -472,6 +472,31 @@ def test_failed_multi_code_section_all_codes_fall_to_appendix(tmp_path):
     )
 
 
+def test_failed_mentoring_section_diverts_n4_to_appendix(tmp_path):
+    """#587: N4 is owned by the mentoring section's dispatch codes, so a
+    raising `_fill_mentoring` drops N4 from `mapped_codes` like N1-N3B --
+    kills a mutant that adds N4 to RENDER_ROUTED_CODES but not to the
+    section's own code set (the entry would then vanish: unrendered AND
+    excluded from the Appendix)."""
+    gen = _new_generator()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    gen._fill_mentoring = _boom
+    entries = [
+        _personal_data_entry(),
+        {"text": "N4_TOKEN_587 outcome narrative", "taxonomy_code": "N4",
+         "extracted_fields": {}, "element_idx_start": 1},
+    ]
+    op = _render(gen, tmp_path, entries)
+
+    assert "N4_TOKEN_587" in "\n".join(_appendix_paragraphs(Document(str(op))))
+    diversions = [w for w in _sidecar(tmp_path)["warnings"]
+                  if w["check"] == "appendix_diversion" and w["code"] == "N4"]
+    assert [(w["reason"], w["count"]) for w in diversions] == [("renderer_declined", 1)]
+
+
 def test_no_failure_routed_entry_stays_out_of_appendix(tmp_path):
     """Mutant-killer: when no section fails, `_failed_section_codes` must
     stay empty and a routed H entry renders in its own slot, NOT the

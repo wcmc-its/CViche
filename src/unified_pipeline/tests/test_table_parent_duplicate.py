@@ -24,8 +24,14 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
+    _flatten_table_content_text,
+)
 from unified_pipeline.stage_2_entry_extraction import (  # noqa: E402
+    get_element_text,
+    join_row_cells,
     remove_subset_delimiters,
+    row_cell_texts,
 )
 
 ROWS = [
@@ -144,3 +150,38 @@ if __name__ == "__main__":
             fn()
             print(f"ok  {name}")
     print("all passed")
+
+
+def test_parent_of_multi_paragraph_first_cell_rows_is_dropped_and_rows_kept():
+    """#488: a row whose cell 0 spans lines gets its trailing columns on cell
+    0's FIRST paragraph. The parent's text is built by the same join, so its
+    lines are found in the rows and the parent drops -- not the fixed row."""
+    table = [
+        [{"text": "Visiting Faculty Program\n- Ultrasound training course"},
+         {"text": "Fictional City, Country"}, {"text": "November 2024 to present"}],
+        [{"text": "Another Program Entry"}, {"text": "Imaginary Place"},
+         {"text": "2020 to 2022"}],
+    ]
+    parent = _d(7, text=_flatten_table_content_text(table))
+    rows = [_d(f"7.{i}", text=join_row_cells(row_cell_texts(r)))
+            for i, r in enumerate(table)]
+
+    assert _starts(remove_subset_delimiters([parent] + rows)) == ["7.0", "7.1"]
+
+
+def test_legacy_table_parent_with_an_all_empty_wide_row_is_still_dropped(monkeypatch):
+    # #488: the legacy "table" parent text stays tab-joined. A pipe join made
+    # an all-empty 8-column row a "| | | ..." line the #418 coverage check
+    # counted as uncovered, so the parent survived and swallowed row 7.0.
+    import unified_pipeline.stage_2_entry_extraction as stage2
+    cells = lambda *xs: [{"text": x} for x in xs]
+    data = [cells("Introductory Imaging Course", "Fictional Medical College", "2024", "PI", "R01", "NIH", "$1", "2y"),
+            cells(*[""] * 8),
+            cells("Advanced Imaging Workshop", "Imaginary Medical Center", "2023", "Co-I", "K23", "NIH", "$2", "3y")]
+    element = {"unified_idx": 7, "type": "table", "data": data, "text": "x"}
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: {
+        "content": '{"entries":[{"element_idx_start":7,"element_idx_end":7,"element_type":"table"}]}',
+        "cost": 0, "total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0})
+    entries, _ = stage2.detect_entries_for_section(
+        ["Courses"], [element], 7, 7, element_index_map={7: element})
+    assert [e["element_idx_start"] for e in entries] == ["7.0", "7.2"]

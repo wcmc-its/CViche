@@ -257,11 +257,10 @@ REASON_RECOVERED_UNRENDERED = "recovered_unrendered"
 # `RENDER_ROUTED_CODES` lives in `stage_6_word_template.py`, which is not a
 # `sections/*` peer and is free to import both `appendix.py` and
 # `passthrough.py` and pass each module's constant down as an argument).
-# No existing constant elsewhere covers exactly the E/G/J triple without
-# also pulling in N4 (`doctor/lints/extraction.py`'s
-# `_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES` is a DIFFERENT set, for a
-# different lint, and N4 is not a passthrough section -- reusing it here
-# would misclassify N4 the same way F2 is fixing for E/G/J).
+# No existing constant elsewhere is named for that triple's role in this
+# module (`doctor/lints/extraction.py`'s
+# `_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES` happens to hold the same three
+# codes since #587, but it is a DIFFERENT set, owned by a different lint).
 
 # The one code whose REASON_RENDERER_DECLINED case is the M1 conditional
 # discard in `generate()` -- every OTHER routed code that reaches
