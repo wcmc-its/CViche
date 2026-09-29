@@ -53,6 +53,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
@@ -204,16 +205,17 @@ def test_regression_guard_raw_text_entry_fragments_would_wrongly_fragment_the_fa
 def _generator(*paragraph_texts):
     """A generator whose document is exactly these paragraphs, in this order.
 
-    `_find_paragraph_with_text` is a case-insensitive substring scan over
-    `self.doc.paragraphs`, so a "heading" is simply a paragraph written here.
-    That is what lets one test give a code its own heading, the next give it
+    `_find_header_paragraph` is a case-insensitive substring scan over
+    `self.doc.paragraphs` restricted to header-shaped paragraphs (#548), so a
+    "heading" is a paragraph written here with a bold run, as in the shipped
+    template. That is what lets one test give a code its own heading, the next give it
     only the shared EDUCATIONAL CONTRIBUTIONS fallback, and the next give it
     nothing at all -- the three routing outcomes, without three fixtures.
     """
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document()
     for text in paragraph_texts:
-        gen.doc.add_paragraph(text)
+        gen.doc.add_paragraph().add_run(text).bold = True
     return gen
 
 
@@ -853,6 +855,70 @@ def test_multiline_text_that_is_not_a_single_table_row_stays_split():
         rendered = _render_k1(_row_entry(_WRAPPED_ROW_TEXT, formatted_text=fused, **kwargs))
         assert fused not in rendered and len(rendered) > 1, kwargs
 
+
+# --- #548 instance B: a K-code's entries must not land under the previous
+# K-code's heading. `_fill_teaching` resolves each K anchor after the previous
+# code's bullets are already in the document.
+
+def _k_entry(code, text):
+    return {"taxonomy_code": code, "text": text, "extracted_fields": {"formatted_text": text}}
+
+
+def _k_layout(entries_by_code):
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_teaching(entries_by_code)
+    return [p.text for p in gen.doc.paragraphs]
+
+
+def _between(texts, start_prefix, end_prefix):
+    start = next(i for i, t in enumerate(texts) if t.startswith(start_prefix))
+    end = next(i for i, t in enumerate(texts) if t.startswith(end_prefix))
+    return [t for t in texts[start + 1:end] if t.strip()]
+
+
+
+@pytest.mark.parametrize("k1_text", [
+    "Clinical teaching skills workshop for junior trainees",
+    "CLINICAL TEACHING SKILLS WORKSHOP",
+])
+def test_k2_entry_is_not_captured_by_a_k1_bullet_naming_its_heading(k1_text):
+    texts = _k_layout({"K1": [_k_entry("K1", k1_text)],
+                       "K2": [_k_entry("K2", "Attending rounds on the ward")]})
+
+    assert _between(texts, "Didactic teaching (", "Clinical teaching (") == [k1_text]
+    assert _between(texts, "Clinical teaching (", "Administrative teaching (") == [
+        "Attending rounds on the ward"]
+
+
+def test_later_k_codes_land_under_their_own_headings_in_one_render():
+    texts = _k_layout({
+        "K1": [_k_entry("K1", "Didactic teaching seminar series")],
+        "K2": [_k_entry("K2", "Bedside teaching rounds")],
+        "K3": [_k_entry("K3", "Administrative teaching: fellowship director")],
+        "K4": [_k_entry("K4", "Continuing education course for practitioners")],
+        "K5": [_k_entry("K5", "Community education and outreach activities talk")],
+    })
+
+    assert _between(texts, "Didactic teaching (", "Clinical teaching (") == [
+        "Didactic teaching seminar series"]
+    assert _between(texts, "Clinical teaching (", "Administrative teaching (") == [
+        "Bedside teaching rounds"]
+    assert _between(texts, "Administrative teaching (", "Continuing education") == [
+        "Administrative teaching: fellowship director"]
+    assert _between(texts, "Continuing education", "Other education/outreach") == [
+        "Continuing education course for practitioners"]
+    assert _between(texts, "Other education/outreach", "CLINICAL PRACTICE") == [
+        "Community education and outreach activities talk"]
+
+
+def test_fallback_heading_skips_instruction_prose_that_mentions_it():
+    gen = _generator("EDUCATIONAL CONTRIBUTIONS", "SENTINEL-END")
+    gen.doc.paragraphs[0].insert_paragraph_before("See the educational contributions guidance")
+    gen._fill_teaching({"K1": [_k_entry("K1", "Seminar series")]})
+
+    assert _visible(gen) == ["See the educational contributions guidance",
+                             "EDUCATIONAL CONTRIBUTIONS", "Seminar series", "SENTINEL-END"]
 
 
 if __name__ == "__main__":
