@@ -118,8 +118,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     records differ only by date. Corpus-verified fix needed before any of
     this changes; see the issue for candidate directions."""
     dropped_squashed = _squash(dropped_entry.get('text', ''))
-    if dropped_squashed and dropped_squashed in _squash(kept_entry.get('text', '')):
-        return True
+    verbatim = bool(dropped_squashed
+                    and dropped_squashed in _squash(kept_entry.get('text', '')))
     if dropped_entry.get(FANNED_OUT_FROM):
         # #983: a record fanned out of a multi-record entry is a single short
         # line, so the two branches below (token containment; fused-blob
@@ -127,9 +127,15 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
         # its words -- "Co-Leader, Cancer Epidemiology (2012-)" against a
         # "Co-Leader, Cancer Epidemiology Program (2012-2015)" -- and the
         # recovery pass never re-checks it, because a single segment is not a
-        # record line. Only a verbatim copy may go; anything else is kept, like
-        # the other single-record case (#227).
-        return False
+        # record line. Its text also carries none of the context it inherited
+        # from its parent, so the same mentee listed under two fellowships has
+        # identical text and different fields. Only a verbatim copy with the
+        # same fields may go; anything else is kept, like the other
+        # single-record case (#227).
+        return verbatim and (dropped_entry.get('extracted_fields')
+                             == kept_entry.get('extracted_fields'))
+    if verbatim:
+        return True
     dropped_sig = _entry_signature_words(dropped_entry)
     if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
             and dropped_sig <= _entry_signature_words(kept_entry)

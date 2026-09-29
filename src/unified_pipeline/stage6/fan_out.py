@@ -28,6 +28,7 @@ What is deliberately NOT fanned out:
   raw text would be lost;
 - an entry a stage-5 formatter already rendered whole (`formatted_text` /
   `formatted_citation`), which would repeat that rendering on every child;
+- an entry whose text is mostly words no field holds (`_MIN_TEXT_COVERAGE`);
 - an entry that carries more than one such list, or an item that carries a key
   outside the schema next to schema keys (web228's K4 `sessions: [{date, title,
   duration}]`: `title` is the session's own name and no K4 renderer reads it, so
@@ -37,6 +38,7 @@ What is deliberately NOT fanned out:
 from __future__ import annotations
 
 import copy
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -65,6 +67,19 @@ _FORMATTED_KEYS = ('formatted_text', 'formatted_citation')
 # inherit it.
 _ENTRY_REMARK_KEY = 'notes'
 
+# How much of the entry's own wording the records must carry before the entry
+# is treated as a list of records rather than prose that has a list extracted
+# from it. A child renders from its fields, so words no field holds are not
+# rendered: a paragraph on committee service that stage 4 reduced to six
+# committees (web185) or a service entry that also describes a grant and its
+# duties (web240) would lose the prose. Words are letters-only and at least
+# `_MIN_WORD_CHARS` long, so dates, numbers and "of"/"the" cannot decide it.
+# Measured over the 148-CV render set: every entry that was a clean list scored
+# 0.82 or more, every prose one 0.61 or less (see the PR body).
+_MIN_TEXT_COVERAGE = 0.8
+_MIN_WORD_CHARS = 4
+_WORD_RE = re.compile(r'[a-z]+')
+
 _DATE_KEY_SUFFIX = '_date'
 _BARE_DATE_KEYS = frozenset({'date', 'year'})
 
@@ -76,6 +91,27 @@ def _is_date_key(key: str) -> bool:
 def _is_blank(value: Any) -> bool:
     return value is None or (isinstance(value, str) and not value.strip()) \
         or (isinstance(value, (list, dict)) and not value)
+
+
+def _words(text: str) -> set[str]:
+    return {w for w in _WORD_RE.findall(text.lower()) if len(w) >= _MIN_WORD_CHARS}
+
+
+def _leaf_text(value: Any) -> str:
+    """Every string, number and nested string inside `value`, space-joined."""
+    if isinstance(value, Mapping):
+        return ' '.join(_leaf_text(v) for v in value.values())
+    if isinstance(value, list):
+        return ' '.join(_leaf_text(v) for v in value)
+    return '' if value is None else str(value)
+
+
+def _text_coverage(text: Any, fields: Mapping[str, Any]) -> float:
+    """The share of `text`'s words that some extracted field also holds."""
+    words = _words(str(text or ''))
+    if not words:
+        return 1.0
+    return len(words & _words(_leaf_text(fields))) / len(words)
 
 
 def _record_list(value: Any, schema: frozenset[str]) -> bool:
@@ -159,6 +195,8 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dic
         return None
     keys = _record_keys(fields, schema)
     if len(keys) != 1 or any(fields.get(k) for k in _FORMATTED_KEYS):
+        return None
+    if _text_coverage(entry.get('text'), fields) < _MIN_TEXT_COVERAGE:
         return None
     key = keys[0]
     items = fields[key]
