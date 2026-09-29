@@ -408,6 +408,20 @@ _capture_var: contextvars.ContextVar[StreamingStdoutCapture | None] = contextvar
 )
 
 
+def _write_hierarchy(f, nodes, depth: int = 0) -> None:
+    """Write ``[LEVEL] text`` lines, indented two spaces per depth, to ``f``.
+
+    Iterative pre-order walk so a deep header chain cannot hit the recursion limit.
+    """
+    stack = [(node, depth) for node in reversed(nodes)]
+    while stack:
+        node, d = stack.pop()
+        f.write(f"{'  ' * d}[{node.get('level', 'H1')}] {node.get('text', '')}\n")
+        children = node.get('children')
+        if children:
+            stack.extend((child, d + 1) for child in reversed(children))
+
+
 class PipelineOrchestrator:
     """Orchestrates the execution of all 12 pipeline stages."""
 
@@ -1113,10 +1127,17 @@ class PipelineOrchestrator:
             )
 
     def _count_headers(self, nodes) -> int:
-        """Count total headers in hierarchy."""
-        count = len(nodes)
-        for node in nodes:
-            count += self._count_headers(node.get('children', []))
+        """Count total headers in hierarchy.
+
+        Iterative: a deep header chain must not hit the interpreter's recursion limit.
+        """
+        count = 0
+        stack = [nodes]
+        while stack:
+            level = stack.pop()
+            count += len(level)
+            for node in level:
+                stack.append(node.get('children', []))
         return count
 
     def _run_with_stdout_capture_sync(self, func, step_number: int, event_loop: asyncio.AbstractEventLoop, *args, **kwargs):
@@ -1218,15 +1239,7 @@ class PipelineOrchestrator:
                 with open(txt_file, 'w') as f:
                     f.write(f"CV Hierarchy: {self.document_uid}\n")
                     f.write("=" * 80 + "\n\n")
-                    def write_hierarchy(nodes, depth=0):
-                        for node in nodes:
-                            indent = "  " * depth
-                            level = node.get('level', 'H1')
-                            text = node.get('text', '')
-                            f.write(f"{indent}[{level}] {text}\n")
-                            if node.get('children'):
-                                write_hierarchy(node['children'], depth + 1)
-                    write_hierarchy(hierarchy)
+                    _write_hierarchy(f, hierarchy)
 
                 cost = stats.get('extraction_cost', 0)
                 # Stage 1a returns 'extraction_input_tokens' and 'extraction_output_tokens'

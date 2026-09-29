@@ -1121,3 +1121,55 @@ def test_llm_outage_propagates_instead_of_falling_back(monkeypatch, call):
             sbs.normalize_hierarchy_with_llm(headers, pass_number=1)
         else:
             sbs.validate_headers_vs_entries(headers)
+
+
+# ============================================================ _write_hierarchy (#306)
+
+def _recursive_write_hierarchy_reference(f, nodes, depth=0):
+    """The pre-#306 nested closure, verbatim, as the byte-identity oracle."""
+    for node in nodes:
+        f.write(f"{'  ' * depth}[{node['level']}] {node['text']}\n")
+        if node.get('children'):
+            _recursive_write_hierarchy_reference(f, node['children'], depth + 1)
+
+
+def test_write_hierarchy_is_byte_identical_to_recursive_original():
+    import io
+    hierarchy = [
+        {"level": "H1", "text": "A", "children": [
+            {"level": "H2", "text": "A1", "children": [{"level": "H3", "text": "A1a"}]},
+            {"level": "H2", "text": "A2", "children": []},
+        ]},
+        {"level": "H1", "text": "B"},
+    ]
+    new, ref = io.StringIO(), io.StringIO()
+    sbs._write_hierarchy(new, hierarchy)
+    _recursive_write_hierarchy_reference(ref, hierarchy)
+    assert new.getvalue() == ref.getvalue()
+    assert new.getvalue().startswith("[H1] A\n  [H2] A1\n    [H3] A1a\n")
+
+
+def test_write_hierarchy_honours_starting_depth():
+    import io
+    hierarchy = [
+        {"level": "H1", "text": "A", "children": [{"level": "H2", "text": "A1"}]},
+        {"level": "H1", "text": "B"},
+    ]
+    new, ref = io.StringIO(), io.StringIO()
+    sbs._write_hierarchy(new, hierarchy, depth=1)
+    _recursive_write_hierarchy_reference(ref, hierarchy, depth=1)
+    assert new.getvalue() == ref.getvalue()
+    assert new.getvalue() == "  [H1] A\n    [H2] A1\n  [H1] B\n"
+
+
+def test_write_hierarchy_deep_chain_does_not_recurse():
+    import io
+    root = {"level": "H1", "text": "n0", "children": []}
+    tip = root
+    for i in range(1, 5000):
+        child = {"level": "H2", "text": f"n{i}", "children": []}
+        tip["children"].append(child)
+        tip = child
+    buf = io.StringIO()
+    sbs._write_hierarchy(buf, [root])
+    assert buf.getvalue().count("\n") == 5000

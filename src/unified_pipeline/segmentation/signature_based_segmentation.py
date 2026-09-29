@@ -1728,6 +1728,20 @@ def build_hierarchy_from_classifications(
 # MAIN PIPELINE
 # ============================================================================
 
+def _write_hierarchy(f, nodes: list[dict], depth: int = 0) -> None:
+    """Write ``[LEVEL] text`` lines, indented two spaces per depth, to ``f``.
+
+    Iterative pre-order walk so a deep header chain cannot hit the recursion limit.
+    """
+    stack = [(node, depth) for node in reversed(nodes)]
+    while stack:
+        node, d = stack.pop()
+        f.write(f"{'  ' * d}[{node['level']}] {node['text']}\n")
+        children = node.get('children')
+        if children:
+            stack.extend((child, d + 1) for child in reversed(children))
+
+
 def segment_cv_with_signatures(docx_path: str, output_path: str | None = None) -> dict:
     """
     Complete signature-based segmentation pipeline.
@@ -1884,15 +1898,7 @@ def segment_cv_with_signatures(docx_path: str, output_path: str | None = None) -
         f.write("INFERRED HEADER HIERARCHY:\n")
         f.write("-" * 80 + "\n\n")
 
-        def write_hierarchy(nodes, depth=0):
-            for node in nodes:
-                indent = "  " * depth
-                level_marker = f"[{node['level']}]"
-                f.write(f"{indent}{level_marker} {node['text']}\n")
-                if node.get('children'):
-                    write_hierarchy(node['children'], depth + 1)
-
-        write_hierarchy(hierarchy)
+        _write_hierarchy(f, hierarchy)
 
         f.write("\n" + "=" * 80 + "\n")
         f.write("SIGNATURE GROUPS SUMMARY:\n")
