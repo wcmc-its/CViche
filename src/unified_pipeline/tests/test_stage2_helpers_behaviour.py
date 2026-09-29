@@ -906,3 +906,20 @@ def test_fold_second_label_line_is_judged_against_the_folded_parent_not_the_labe
 def test_fold_returns_the_same_list_object_when_nothing_folds():
     entries = [_fold_entry(4, text="Kim Lee"), _fold_entry(3, text="2016 Ana Cruz")]
     assert _fold(entries, [_fold_el(3), _fold_el(4)]) is entries
+
+
+# =============================================================== join_row_cells (#488)
+
+def test_join_row_cells_attaches_trailing_columns_to_first_paragraph():
+    assert stage2.join_row_cells(["Title\n- a\n- b", "2024", "Org"]) == "Title | 2024 | Org\n- a\n- b"
+
+
+def test_join_row_cells_single_paragraph_and_single_cell_rows_are_unchanged():
+    assert stage2.join_row_cells(["  Title  ", "2024"]) == "Title   | 2024"
+    assert stage2.join_row_cells(["Title\n- a"]) == "Title\n- a"
+    assert stage2.join_row_cells([]) == ""
+
+
+def test_join_row_cells_ignores_leading_and_trailing_blank_lines_in_cell_zero():
+    assert stage2.join_row_cells(["\nTitle\n- a\n", "2024"]) == "Title | 2024\n- a"
+    assert stage2.join_row_cells(["Title\n\n", "2024"]) == "Title\n\n | 2024"

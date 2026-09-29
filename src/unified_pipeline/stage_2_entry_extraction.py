@@ -120,6 +120,29 @@ def _element_text_or_fallback(idx: int, element_index_map: dict, doc: Document) 
     return doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
 
 
+def row_cell_texts(row: list) -> list[str]:
+    """Text of each cell in a table row (cell dicts or bare values)."""
+    return [cell.get("text", "") if isinstance(cell, dict) else str(cell) for cell in row]
+
+
+def join_row_cells(cells: list[str]) -> str:
+    """Join a table row's cell texts into one entry text (#488).
+
+    Cells are joined with " | ". When cell 0 holds several paragraphs (an entry
+    title followed by sub-bullets), the trailing columns (date, institution)
+    describe the whole entry, so they attach to cell 0's FIRST paragraph rather
+    than welding onto its last one. A single-paragraph cell 0, or a one-cell
+    row, joins exactly as before.
+    """
+    first = cells[0] if cells else ""
+    rest = cells[1:]
+    stripped = first.strip()
+    if not rest or "\n" not in stripped:
+        return " | ".join(cells).strip()
+    head, _, tail = first.lstrip().partition("\n")
+    return (" | ".join([head, *rest]) + "\n" + tail).strip()
+
+
 def split_merged_row_into_pseudo_rows(row: list) -> list:
     """
     Detect and split table rows where multiple entries were merged into one row.
@@ -663,7 +686,7 @@ def detect_entries_for_section(
                         if pseudo_rows:
                             # Row contains multiple merged entries - create pseudo-rows
                             for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
-                                row_text = " | ".join(pseudo_row).strip()
+                                row_text = join_row_cells(pseudo_row)
                                 if row_text:
                                     section_elements.append({
                                         "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
@@ -677,10 +700,7 @@ def detect_entries_for_section(
                                     })
                         else:
                             # Normal row - flatten cells to text
-                            row_text = " | ".join(
-                                cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                                for cell in row
-                            ).strip()
+                            row_text = join_row_cells(row_cell_texts(row))
                             if row_text:
                                 section_elements.append({
                                     "idx": f"{idx}.{row_idx}",  # Sub-index for rows
@@ -743,7 +763,7 @@ def detect_entries_for_section(
                         if pseudo_rows:
                             # Row contains multiple merged entries - create pseudo-rows
                             for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
-                                row_text = " | ".join(pseudo_row).strip()
+                                row_text = join_row_cells(pseudo_row)
                                 if row_text:
                                     section_elements.append({
                                         "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
@@ -757,10 +777,7 @@ def detect_entries_for_section(
                                     })
                         else:
                             # Normal row - flatten cells to text
-                            row_text = " | ".join(
-                                cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                                for cell in row
-                            ).strip()
+                            row_text = join_row_cells(row_cell_texts(row))
                             if row_text:
                                 section_elements.append({
                                     "idx": f"{idx}.{row_idx}",  # Sub-index for rows
