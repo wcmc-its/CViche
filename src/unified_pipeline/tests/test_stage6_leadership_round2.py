@@ -427,6 +427,19 @@ class TestWrappedRowRendersAsOneRecord:
         rows = _o_rows(_table_row_entry(f"{names} | 2001\n2002"))
         assert len(rows) > 1
 
+    def test_two_line_wrapped_row_with_complete_fields_keeps_field_columns(self):
+        # would_split is False here (2 lines, role and dates resolved), so the
+        # rejoin must NOT fire: the row stays in its 3 field columns.
+        text = ("Site Chief, Zorblax Studies | Quuxville General Hospital\n"
+                "Quuxville, Ohio | July 2014-June 2017")
+        rows = _o_rows(_table_row_entry(
+            text, leadership_role="Site Chief, Zorblax Studies",
+            institution="Quuxville General Hospital",
+            start_date="2014-07", end_date="2017-06"))
+        assert rows == [("Site Chief, Zorblax Studies", "Quuxville General Hospital",
+                         format_date_range("2014-07", "2017-06", "O"))]
+        assert "|" not in rows[0][0]
+
     def test_entry_without_table_row_element_is_unchanged(self):
         entry = _table_row_entry(self.WRAPPED)
         entry["element_type"] = "paragraph"
