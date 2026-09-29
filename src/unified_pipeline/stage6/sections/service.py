@@ -510,6 +510,24 @@ def _join_names(name: str, org: str, *, collapse_contained: bool) -> str:
     return f"{name}, {org}"
 
 
+_LEADING_THE = re.compile(r'^\s*the\s+', re.IGNORECASE)
+
+
+def _journal_names_contain(journal_value: object, org: str) -> bool:
+    """True when `org` occurs as whole words in any single journal name.
+
+    A list-of-records `journal_name` is tested name by name, so a date
+    suffix or a neighbouring journal cannot make a match. A leading "The "
+    on `org` is ignored ("The Lancet" matches journal "Lancet"). An empty
+    `org` never matches."""
+    org = _LEADING_THE.sub('', org.strip())
+    if not org:
+        return False
+    items = journal_value if isinstance(journal_value, list) else [journal_value]
+    return any(_contains_words(_cell_text(item), org)
+               for item in items)
+
+
 def _reviewing_org_and_committee_text(fields: dict) -> str:
     """Display text for a journal-reviewing row that has no `journal_name`.
 
@@ -566,12 +584,20 @@ def _other_service_organization_text(fields: dict, taxonomy_code: str) -> str:
     if organization and taxonomy_code in EDITORIAL_BOARD_CODES:
         # #471: on an editorial row `organization` (often a publisher or
         # society) shadowed `journal_name`, the field naming the journal.
-        # Containment must NOT collapse here: a journal is routinely named
-        # inside its society or publisher ("Neurology" / "American Academy
-        # of Neurology", "Cell" / "Cell Press"), and collapsing would drop
-        # the journal title. Only an exact (folded) repeat collapses.
+        # One-way containment: when the journal names the organization
+        # ("The Lancet" / "Lancet", "JAMA Network Open" / "JAMA") the journal
+        # alone already says both. The reverse must NOT collapse: a journal
+        # is routinely named inside its society or publisher ("Neurology" /
+        # "American Academy of Neurology", "Cell" / "Cell Press"), and
+        # collapsing would drop the journal title. An exact folded repeat
+        # renders once, as the organization.
+        org_text = _cell_text(organization)
+        if (fields.get('journal_name')
+                and _journal_names_contain(fields['journal_name'], org_text)
+                and _fold_name(journal) != _fold_name(org_text)):
+            return journal
         return _join_names(journal if fields.get('journal_name') else '',
-                           _cell_text(organization), collapse_contained=False)
+                           org_text, collapse_contained=False)
     if organization:
         return _cell_text(organization)
     return journal

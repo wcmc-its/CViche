@@ -84,6 +84,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage6.normalization.fields import _cell_text, _committee_cell_text  # noqa: E402
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _join_names,
+    _journal_names_contain,
     _journal_name_cell_text,
     _other_service_organization_text,
     _reviewing_org_and_committee_text,
@@ -635,7 +636,7 @@ def test_editorial_journal_name_is_not_shadowed_by_organization(tmp_path, code):
      "Fictional Press"),
     # containment must NOT collapse a journal into its society/publisher (#471 N1)
     ("Q4B", {"organization": "Fictional Press", "journal_name": "Fictional Press Journal"},
-     "Fictional Press Journal, Fictional Press"),
+     "Fictional Press Journal"),
     ("Q4B", {"journal_name": "Neurology", "organization": "American Academy of Neurology"},
      "Neurology, American Academy of Neurology"),
     ("Q4C", {"journal_name": "Cell", "organization": "Cell Press"}, "Cell, Cell Press"),
@@ -644,6 +645,33 @@ def test_editorial_journal_name_is_not_shadowed_by_organization(tmp_path, code):
     ("Q4B", {"journal_name": "Science",
              "organization": "American Association for the Advancement of Science"},
      "Science, American Association for the Advancement of Science"),
+    # journal contains the org -> journal alone, never the reverse (re-verify)
+    ("Q4B", {"organization": "Nature",
+             "journal_name": [{"name": "Nature", "start_date": "2003", "end_date": "2004"}]},
+     "Nature (2003-2004)"),
+    ("Q4B", {"organization": "Nature",
+             "journal_name": [{"name": "Science", "start_date": "2001", "end_date": "2002"},
+                              {"name": "Nature", "start_date": "2003", "end_date": "2004"}]},
+     "Science (2001-2002); Nature (2003-2004)"),
+    ("Q4C", {"journal_name": "Journal of the American Heart Association",
+             "organization": "American Heart Association"},
+     "Journal of the American Heart Association"),
+    ("Q4C", {"journal_name": "JAMA Network Open", "organization": "JAMA"}, "JAMA Network Open"),
+    ("Q4C", {"journal_name": "The Lancet", "organization": "Lancet"}, "The Lancet"),
+    ("Q4C", {"journal_name": "Lancet", "organization": "The Lancet"}, "Lancet"),
+    ("Q4C", {"journal_name": "Nature", "organization": "NATURE"}, "NATURE"),
+    # a date suffix on a list-of-records journal is not part of its name
+    ("Q4B", {"organization": "2004",
+             "journal_name": [{"name": "Nature", "start_date": "2003", "end_date": "2004"}]},
+     "Nature (2003-2004), 2004"),
+    # near-misses: org merely a prefix/substring of a journal word, or "The" alone
+    ("Q4B", {"journal_name": "JAMA", "organization": "JAM"}, "JAMA, JAM"),
+    ("Q4B", {"journal_name": "Natural History", "organization": "Nature"}, "Natural History, Nature"),
+    ("Q4B", {"journal_name": "Annals of Thermodynamics", "organization": "The"},
+     "Annals of Thermodynamics, The"),
+    ("Q4B", {"journal_name": [{"name": "Nature", "start_date": "2003", "end_date": "2004"}],
+             "organization": "Nat"},
+     "Nature (2003-2004), Nat"),
     # whitespace-only / falsy sides count as absent (N2, N3)
     ("Q4B", {"organization": "   ", "journal_name": "Fictional Annals"}, "Fictional Annals"),
     ("Q4B", {"organization": "Fictional Society", "journal_name": 0}, "Fictional Society"),
@@ -669,6 +697,15 @@ def test_other_service_organization_text_editorial_join(code, fields, expected):
     assert _other_service_organization_text(fields, code) == expected
 
 
+def test_journal_names_contain_empty_org_never_matches():
+    assert _journal_names_contain("Fictional Annals", "") is False
+    # an empty needle matches between two non-word chars -- must be guarded
+    assert _journal_names_contain("Fictional - Annals", "") is False
+    assert _journal_names_contain("Fictional - Annals", "   ") is False
+    assert _journal_names_contain("Fictional Annals", "  ") is False
+    assert _journal_names_contain("Fictional Annals", "The ") is False
+
+
 def test_join_names_is_word_bounded_and_strips():
     assert _join_names("Ahab Panel", "AHA", collapse_contained=True) == "Ahab Panel, AHA"
     assert _join_names("Fictional Panel", "", collapse_contained=True) == "Fictional Panel"
@@ -689,6 +726,22 @@ def test_join_names_is_word_bounded_and_strips():
 ])
 def test_reviewing_org_and_committee_text_blank_and_falsy(fields, expected):
     assert _reviewing_org_and_committee_text(fields) == expected
+
+
+def test_rerouted_q2_with_only_blank_org_and_committee_falls_back_to_raw_text(tmp_path):
+    """Whitespace-only organization AND committee_name are absent, exactly
+    like missing fields: the row is rebuilt from the entry's raw text. On dev
+    the blank organization won the `or` chain and the row was silently
+    skipped, so this is a deliberate improvement (a row with real text is
+    rendered, not dropped), pinned here."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        {"text": "Ad hoc reviewer, Fictional Raw Text Journal",
+         "taxonomy_code": "Q2", "element_idx_start": 0,
+         "extracted_fields": {"organization": "   ", "committee_name": " "}},
+    ]
+    doc = _render(tmp_path, entries)
+    assert len(list(_rows_containing(doc, "Fictional Raw Text Journal"))) == 1
 
 
 def test_two_column_dedupe_never_drops_the_journal_or_role(tmp_path):
