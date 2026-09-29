@@ -27,6 +27,7 @@ responses.
 import logging
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -530,6 +531,10 @@ class _AuthnResponse:
         self.assertion = self.assertions[-1] if self.assertions else None
         self.not_on_or_after = not_on_or_after
         self._identity = identity or {}
+        # The outer <Response> and the SP's ACS URLs, read by the ACS
+        # Destination check; no Destination is allowed (#672).
+        self.response = SimpleNamespace(destination=None)
+        self.return_addrs = []
 
     def get_identity(self):
         return self._identity
@@ -730,6 +735,7 @@ class TestAcsReplayGate:
         monkeypatch.delenv("CVICHE_SAML_REPLAY_FAIL_CLOSED", raising=False)
         mock_response = MagicMock()
         mock_response.get_identity.return_value = _IDENTITY
+        mock_response.response.destination = None  # absent Destination is allowed (#672)
         mock_get_client.return_value = _mock_client(mock_response)
         response = _post_acs(client)
         assert response.status_code == 302
@@ -745,6 +751,7 @@ class TestAcsReplayGate:
         -- this keeps the mocked SAML suite and exotic parsers working."""
         mock_response = MagicMock()
         mock_response.get_identity.return_value = _IDENTITY
+        mock_response.response.destination = None  # absent Destination is allowed (#672)
         mock_get_client.return_value = _mock_client(mock_response)
         assert _post_acs(client).status_code == 302
         assert _post_acs(client).status_code == 302

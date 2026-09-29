@@ -26,6 +26,7 @@ import subprocess
 import tempfile
 import warnings
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -40,6 +41,7 @@ from saml2.saml import NAMEID_FORMAT_EMAILADDRESS
 from saml2.assertion import Policy
 from saml2.config import Config as _Saml2Config
 
+from app.api.saml_routes import _reject_wrong_destination
 from app.auth import COOKIE_NAME
 from app.models import SystemConfig
 from app.saml_client import extract_user_attrs
@@ -260,9 +262,6 @@ def acs_app(acs_env, client, db, seed_saml_mode, monkeypatch):
         return real_load(self, {**cfg, "metadata": {"local": [acs_env["idp_md"]]}}, *a, **kw)
 
     monkeypatch.setattr("app.saml_client.Saml2Config.load", load_local_metadata)
-    # Pin the production default: the wrong-Destination case is rejected by the
-    # replay gate's fail-closed branch, so a local opt-out must not flip it.
-    monkeypatch.setenv("CVICHE_SAML_REPLAY_FAIL_CLOSED", "1")
     set_replay_cache(None)
 
     def post(xml):
@@ -343,6 +342,18 @@ def test_acs_rejects_not_yet_valid_assertion(acs_env, acs_app, caplog):
     _assert_rejected(resp, caplog, "Can't use response yet")
 
 
-def test_acs_rejects_wrong_destination(acs_env, acs_app, caplog):
+def test_acs_rejects_wrong_destination(acs_env, acs_app, caplog, monkeypatch):
+    # Replay gate opened (local-dev opt-out) so the Destination check alone
+    # must reject: pysaml2 only logs this mismatch (#672).
+    monkeypatch.setenv("CVICHE_SAML_REPLAY_FAIL_CLOSED", "0")
     resp = acs_app(_mint(acs_env["idp"], destination=_WRONG_ACS))
-    _assert_rejected(resp, caplog, "not in return addresses")
+    _assert_rejected(resp, caplog, f"[SECURITY] SAML response rejected: Destination '{_WRONG_ACS}'")
+
+
+def test_absent_destination_is_allowed():
+    """No Destination attribute passes, matching pysaml2's own check (#672).
+    A unit test: the minting fixture can't drop Destination without also
+    dropping the assertion's Recipient, which pysaml2 rejects separately."""
+    shell = SimpleNamespace(response=SimpleNamespace(destination=None), return_addrs=[ACS])
+    assert _reject_wrong_destination(shell) is None
+
