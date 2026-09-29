@@ -26,6 +26,7 @@ from unified_pipeline.core.render_check import (  # noqa: E402
     entry_fragments,
     entry_lines,
     rejoin_wrapped_row,
+    wrapped_row_text,
 )
 
 
@@ -124,3 +125,28 @@ def test_rejoin_wrapped_row_cases():
     ]
     for text, expected in cases:
         assert rejoin_wrapped_row(text) == expected, text
+
+
+def test_wrapped_row_text_cases():
+    """#987: only ONE table_row element whose cells wrap is rejoined; a
+    paragraph, a multi-element entry or a row missing its indices is not."""
+    wrapped = "Spring 2012 | Dept\nSeminar\nTitle | 1 | 40"
+    one_line = "Spring 2012 | Dept Seminar Title | 1 | 40"
+
+    def row(text, element_type="table_row", start=5, end=5):
+        return {"text": text, "element_type": element_type,
+                "element_idx_start": start, "element_idx_end": end}
+
+    cases = [
+        (row(wrapped), one_line),
+        (row("a\nb | c | d"), "a b | c | d"),
+        (row("2020\n2021 | Course A\nCourse B | Lecturer\nDirector"), None),
+        (row("a\nb\nc"), None),
+        (row("a | b | c"), None),
+        (row(wrapped, element_type="paragraph"), None),
+        (row(wrapped, start=5, end=6), None),
+        ({"text": wrapped, "element_type": "table_row"}, None),
+        ({}, None),
+    ]
+    for entry, expected in cases:
+        assert wrapped_row_text(entry) == expected, entry
