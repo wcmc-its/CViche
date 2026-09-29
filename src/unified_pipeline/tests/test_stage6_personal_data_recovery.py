@@ -605,8 +605,8 @@ def test_withheld_notice_carries_one_word_comment_listing_categories(tmp_path):
     assert author == WITHHELD_COMMENT_AUTHOR
     lines = body.split("\n")
     assert lines[0] == WITHHELD_COMMENT_HEADER
-    assert " • date of birth — 1 item, Personal Data" in lines
-    assert " • visa / immigration status — 1 item, Appendix" in lines
+    assert " • date of birth (1 item, Personal Data)" in lines
+    assert " • visa / immigration status (1 item, Appendix)" in lines
     assert "01/02/1970" not in body and "O-1" not in body, "a withheld value re-leaked into the comment"
 
 
