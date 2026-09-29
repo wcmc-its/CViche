@@ -513,14 +513,12 @@ def test_extract_table_metadata_gridspan_repeats_merged_cell():
     assert row0[1]["col"] == 1
 
 
-def test_extract_table_metadata_falls_back_to_manual_iteration_when_itertext_fails(monkeypatch):
+def test_extract_table_metadata_falls_back_to_itertext_and_lets_its_errors_propagate(monkeypatch):
     # Reproduces the "cell.text returns empty for malformed/complex XML"
     # scenario named in the source comment. get_cell_text only walks
     # cell.paragraphs, so text sitting directly under <w:tc> (outside any
-    # <w:p>) is invisible to it -- cell_text starts "". Method 1
-    # (itertext()) is forced to raise, so the recovered "HIDDEN_TEXT" can
-    # only have come from method 2's manual node iteration, proving that
-    # specific fallback branch ran rather than the value being coincidental.
+    # <w:p>) is invisible to it -- cell_text starts "" and itertext() over
+    # the whole cell element recovers it.
     from docx.oxml.table import CT_Tc
 
     doc = Document()
@@ -531,13 +529,16 @@ def test_extract_table_metadata_falls_back_to_manual_iteration_when_itertext_fai
     )
     assert get_cell_text(cell) == ""  # confirm the primary walk sees nothing
 
+    assert extract_table_metadata(table, idx="table_0")["data"][0][0]["text"] == "HIDDEN_TEXT"
+
+    # #611: a failure inside the fallback is a bug, not an empty cell --
+    # it must surface instead of being swallowed by a bare except.
     def boom(self, *args, **kwargs):
-        raise RuntimeError("simulated malformed-XML itertext failure")
+        raise RuntimeError("simulated itertext failure")
 
     monkeypatch.setattr(CT_Tc, "itertext", boom)
-    meta = extract_table_metadata(table, idx="table_0")
-
-    assert meta["data"][0][0]["text"] == "HIDDEN_TEXT"
+    with pytest.raises(RuntimeError, match="simulated itertext failure"):
+        extract_table_metadata(table, idx="table_0")
 
 
 # --------------------------------------------------------------------------
