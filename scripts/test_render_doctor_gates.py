@@ -400,6 +400,10 @@ def test_render_gate_uid_filter_narrows_the_discovered_uids():
             "an empty filter means every uid in the arm")
         assert rg._discover_uids(arm, {"u2"}) == ["u2"]
         assert rg._discover_uids(arm, {"u2", "u3"}) == ["u2", "u3"]
+        (s4 / "u4 _fields.json").write_text("{}")
+        assert rg._discover_uids(arm, {"u4"}) == ["u4 "], (
+            "a uid whose filename ends in a space must match its stripped "
+            "--uids-file line, not silently drop out of the run")
         assert rg._discover_uids(arm, {"not-in-this-arm"}) == [], (
             "a filter matching nothing must produce nothing -- main() turns "
             "that into a non-zero exit rather than an empty PASS")
