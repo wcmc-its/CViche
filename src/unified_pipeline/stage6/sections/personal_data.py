@@ -69,6 +69,7 @@ try:
     # `original_doc` parameter without shadowing the factory import (#820 R3).
     from docx.document import Document as _WordDocument
     from docx.opc.exceptions import PackageNotFoundError
+    from docx.table import _Row as _TableRow
     from lxml.etree import XMLSyntaxError
 except ImportError as exc:
     raise ImportError(
@@ -148,9 +149,15 @@ _PHONE_NUMBER_PATTERN = (
 # the address branch taking a second copy.
 _FIELD_NAME = 'name'
 _FIELD_OFFICE_ADDRESS = 'office_address'
-# A home-labelled address row (#730): withheld by policy (#821), and never a
-# candidate for the Office address slot.
+# Home-labelled rows (#730): never a candidate for an Office/Work slot.
+# Address and phone are withheld by policy (#821, `CAT_HOME_CONTACT`); a home
+# email is NOT withheld (#821: personal email renders) but this scan has no
+# personal-email slot, so it is skipped rather than rendered as Work email.
 _FIELD_HOME_ADDRESS = 'home_address'
+_FIELD_HOME_PHONE = 'home_phone'
+_FIELD_HOME_EMAIL = 'home_email'
+_HOME_FIELDS = frozenset({_FIELD_HOME_ADDRESS, _FIELD_HOME_PHONE,
+                          _FIELD_HOME_EMAIL})
 _FIELD_OFFICE_PHONE = 'office_phone'
 _FIELD_WORK_EMAIL = 'work_email'
 
@@ -168,8 +175,11 @@ _ADDRESS_LABEL_WORDS = ('address', 'business')
 # Whole words only: "Homepage address" and "Homeland Security address" are not
 # home addresses. "Home" wins over "business"/"office" in the same label
 # ("Home/Office Address:"): an ambiguous label costs an empty Office cell, the
-# opposite mistake renders a home address.
-_HOME_ADDRESS_LABEL = re.compile(r'\b(?:home|residence|residential)\b')
+# opposite mistake renders a home address. "Permanent" is a home qualifier for
+# an ADDRESS only (US CV convention); "Permanent email" is an alumni address.
+_HOME_LABEL = re.compile(r'\b(?:home|residence|residential)\b')
+_HOME_ADDRESS_LABEL = re.compile(
+    r'\b(?:home|residence|residential|permanent)\b')
 
 # An allowlist, not a word match, because "name" ends far more metadata labels
 # than person labels. Widening it is a one-line edit when a corpus CV carries
@@ -202,11 +212,13 @@ def _classify_contact_label(label: str) -> str | None:
     text = ' '.join(label.strip().lower().split())
     head = text.split(':', 1)[0].strip()
     if any(word in head for word in _EMAIL_LABEL_WORDS):
-        return _FIELD_WORK_EMAIL
+        return (_FIELD_HOME_EMAIL if _HOME_LABEL.search(head)
+                else _FIELD_WORK_EMAIL)
     if ':' not in text:
         return None
     if any(word in head for word in _PHONE_LABEL_WORDS):
-        return _FIELD_OFFICE_PHONE
+        return (_FIELD_HOME_PHONE if _HOME_LABEL.search(head)
+                else _FIELD_OFFICE_PHONE)
     if any(word in head for word in _ADDRESS_LABEL_WORDS):
         if _HOME_ADDRESS_LABEL.search(head):
             return _FIELD_HOME_ADDRESS
@@ -539,16 +551,55 @@ def _withhold_recovered(value: str | None, source_text: str,
     return None
 
 
-def _withhold_home_address_row(value: str, source_text: str,
-                               withheld: list[WithheldItem]) -> None:
+def _withhold_home_row(field: str, value: str, source_text: str,
+                       withheld: list[WithheldItem]) -> None:
     """Record one home-labelled source row as withheld (#730, #821). Nothing
     is returned: the row never fills a slot. The category is the row's own
     protected-data category when the value carries one (a "Home Address:" label
-    over a birth-place value stays a birth-place withhold), else home contact."""
-    if value:
-        withheld.append(WithheldItem(
-            _pii_category_of(value, source_text) or CAT_HOME_CONTACT,
-            _PERSONAL_DATA_SECTION_LABEL, None))
+    over a birth-place value stays a birth-place withhold), else home contact.
+    A home email records nothing (#821 renders personal email).
+
+    A home-contact item is recorded once per document: the stage-4 entry pass
+    has usually withheld the same home address already, and the docx row
+    repeating it would double the notice's count. `WithheldItem` carries no
+    value, so this dedups by category, not by value -- a home phone that only
+    the docx carries is folded into the same item."""
+    if not value or field == _FIELD_HOME_EMAIL:
+        return
+    category = _pii_category_of(value, source_text) or CAT_HOME_CONTACT
+    if category == CAT_HOME_CONTACT and any(
+            item.category == category
+            and item.section_label == _PERSONAL_DATA_SECTION_LABEL
+            for item in withheld):
+        return
+    withheld.append(WithheldItem(category, _PERSONAL_DATA_SECTION_LABEL, None))
+
+
+def _row_label_value_pairs(row: _TableRow) -> list[tuple[str, str]]:
+    """The (label text, value) pairs one source-table row carries.
+
+    Normally one: label in cell 0, value in the first later cell that differs
+    from it (a gridSpan label cell repeats itself across `row.cells` --
+    NSUJZG_2027_Eil_Robert's "Professional Address:" row is label merged over
+    columns 0-1 with the value in column 2). A HOME-labelled cell 0 that
+    carries its own value ("Home Address: 12 Elm St | Business Phone: ...")
+    is a side-by-side layout: cell 0 is the home pair, and the next cell is a
+    second, unrelated label/value pair, so skipping the home row skips only
+    its own cell (#730)."""
+    label_text = row.cells[0].text
+    value_cell = row.cells[1]
+    for candidate_cell in row.cells[1:]:
+        if candidate_cell.text.strip() != label_text.strip():
+            value_cell = candidate_cell
+            break
+    value = value_cell.text.strip()
+    embedded = label_text.partition(':')[2].strip()
+    if embedded and _classify_contact_label(label_text) in _HOME_FIELDS:
+        pairs = [(label_text, embedded)]
+        if ':' in value:
+            pairs.append((value, value.partition(':')[2].strip()))
+        return pairs
+    return [(label_text, value)]
 
 
 def _withhold_recovered_lines(block: str | None, source_text: str,
@@ -1050,81 +1101,68 @@ class PersonalDataSection:
             for row in table.rows:
                 if len(row.cells) < 2:
                     continue
-                label_cell = row.cells[0]
-                # A gridSpan label cell repeats itself across row.cells:
-                # python-docx hands back the SAME cell object for every column
-                # a merge spans, so cells[1] can equal cells[0] instead of
-                # holding the value. NSUJZG_2027_Eil_Robert's "Professional
-                # Address:" row is exactly this (label merged across columns
-                # 0-1, value in column 2) -- read past however many duplicate
-                # cells the merge produced to the first one that differs.
-                value_cell = row.cells[1]
-                for candidate_cell in row.cells[1:]:
-                    if candidate_cell.text.strip() != label_cell.text.strip():
-                        value_cell = candidate_cell
-                        break
-                value = value_cell.text.strip()
-                field = _classify_contact_label(label_cell.text)
-                # The row as one text, for the protected-data gate below:
-                # a value is denied by provenance against the fragments of
-                # the line it came from, exactly as the entry path does.
-                row_text = f"{label_cell.text}\t{value}"
+                for label_text, value in _row_label_value_pairs(row):
+                    field = _classify_contact_label(label_text)
+                    # The row as one text, for the protected-data gate below:
+                    # a value is denied by provenance against the fragments of
+                    # the line it came from, exactly as the entry path does.
+                    row_text = f"{label_text}\t{value}"
 
-                # Extract name if not yet found (or only have last name)
-                if field == _FIELD_NAME and not name_is_complete:
-                    if value and len(value) > 2:
-                        recovered_name = _withhold_recovered(value, row_text, withheld)
-                        if recovered_name is not None:
-                            name = recovered_name
-                            name_is_complete = True
-                            if self.verbose:
-                                logger.debug("  Found name from table: %s", name)
+                    # Extract name if not yet found (or only have last name)
+                    if field == _FIELD_NAME and not name_is_complete:
+                        if value and len(value) > 2:
+                            recovered_name = _withhold_recovered(value, row_text, withheld)
+                            if recovered_name is not None:
+                                name = recovered_name
+                                name_is_complete = True
+                                if self.verbose:
+                                    logger.debug("  Found name from table: %s", name)
 
-                # A home-labelled row is withheld and skipped (#730): it
-                # neither fills Office address nor counts as a withheld
-                # Office row, so a business row after it still fills the slot.
-                elif field == _FIELD_HOME_ADDRESS:
-                    _withhold_home_address_row(value, row_text, withheld)
+                    # A home-labelled row is withheld and skipped (#730): it
+                    # neither fills Office address nor counts as a withheld
+                    # Office row, so a business row after it still fills the slot.
+                    elif field in _HOME_FIELDS:
+                        _withhold_home_row(field, value, row_text, withheld)
 
-                # Extract address if not yet found
-                # Note: Business address cells often contain embedded phone/fax/email
-                elif (field == _FIELD_OFFICE_ADDRESS and not office_address
-                        and not office_address_withheld):
-                    if value and len(value) > 5:
-                        block_address, block_phone, block_email = (
-                            self._parse_address_block(
-                                value, office_phone, work_email))
-                        withheld_before = len(withheld)
-                        office_address = _withhold_recovered_lines(
-                            block_address, row_text, withheld)
-                        if not office_address and len(withheld) > withheld_before:
-                            # Every address line this row supplied was
-                            # policy-denied -- stop, don't let a later
-                            # office_address row fill the slot instead.
-                            office_address_withheld = True
-                        # Only a value the block itself supplied is gated:
-                        # one already classified from the A entries is not
-                        # this row's to withhold.
-                        if not office_phone:
-                            office_phone = _withhold_recovered(block_phone, row_text, withheld)
-                        if not work_email:
-                            work_email = _withhold_recovered(block_email, row_text, withheld)
+                    # Extract address if not yet found
+                    # Note: Business address cells often contain embedded phone/fax/email
+                    elif (field == _FIELD_OFFICE_ADDRESS and not office_address
+                            and not office_address_withheld):
+                        if value and len(value) > 5:
+                            block_address, block_phone, block_email = (
+                                self._parse_address_block(
+                                    value, office_phone, work_email))
+                            withheld_before = len(withheld)
+                            office_address = _withhold_recovered_lines(
+                                block_address, row_text, withheld)
+                            if not office_address and len(withheld) > withheld_before:
+                                # Every address line this row supplied was
+                                # policy-denied -- stop, don't let a later
+                                # office_address row fill the slot instead.
+                                office_address_withheld = True
+                            # Only a value the block itself supplied is gated:
+                            # one already classified from the A entries is not
+                            # this row's to withhold.
+                            if not office_phone:
+                                office_phone = _withhold_recovered(block_phone, row_text, withheld)
+                            if not work_email:
+                                work_email = _withhold_recovered(block_email, row_text, withheld)
 
-                # Extract phone if not yet found
-                elif field == _FIELD_OFFICE_PHONE and not office_phone:
-                    if value and len(value) > 5:
-                        office_phone = _withhold_recovered(value, row_text, withheld)
-                        if self.verbose and office_phone:
-                            logger.debug("  Found phone from table: %s", office_phone)
+                    # Extract phone if not yet found
+                    elif field == _FIELD_OFFICE_PHONE and not office_phone:
+                        if value and len(value) > 5:
+                            office_phone = _withhold_recovered(value, row_text, withheld)
+                            if self.verbose and office_phone:
+                                logger.debug("  Found phone from table: %s", office_phone)
 
-                # Extract email if not yet found
-                elif field == _FIELD_WORK_EMAIL and not work_email:
-                    email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', value)
-                    if email_match:
-                        work_email = _withhold_recovered(
-                            email_match.group(0), row_text, withheld)
-                        if self.verbose and work_email:
-                            logger.debug("  Found email from table: %s", work_email)
+                    # Extract email if not yet found
+                    elif field == _FIELD_WORK_EMAIL and not work_email:
+                        email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', value)
+                        if email_match:
+                            work_email = _withhold_recovered(
+                                email_match.group(0), row_text, withheld)
+                            if self.verbose and work_email:
+                                logger.debug("  Found email from table: %s", work_email)
 
         return name, name_is_complete, work_email, office_phone, office_address
 

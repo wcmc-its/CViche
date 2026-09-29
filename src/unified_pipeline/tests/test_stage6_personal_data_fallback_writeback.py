@@ -1065,7 +1065,10 @@ def test_recovered_address_value_that_is_a_birth_place_line_is_withheld(tmp_path
     rendered = _docx_texts(tmp_path / "out.docx")
     assert "Example City" not in rendered, "a birth place rendered as the Office address"
     assert rows.get("office address:", "") == ""
-    assert [i.category for i in gen._pii_result.withheld] == ["place of birth"]
+    # #730: this row is a side-by-side layout (the home address and the
+    # birth place are separate cells), so the home cell is the withheld item
+    # and the birth-place cell is simply never read into a slot.
+    assert [i.category for i in gen._pii_result.withheld] == [CAT_HOME_CONTACT]
     assert gen._pii_result.withheld[0].section_label == "Personal Data"
     assert gen._pii_result.withheld[0].entry_index is None
 
@@ -1256,3 +1259,89 @@ def test_an_address_line_that_merely_mentions_email_is_kept(tmp_path):
         ("Business Address:", "Email Services Building\n42 Example Ave")])
     rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
     assert rows["office address:"] == "Email Services Building\n42 Example Ave"
+
+
+# --------------------------------------------------------------------------
+# #730 verifier round: home-labelled PHONE/EMAIL rows, side-by-side layouts,
+# withheld-count dedup, "Permanent Address:".
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("label", [
+    "Home Phone:", "Home phone/fax:", "Home Telephone:", "HOME PHONE:",
+    "Residential Phone:",
+])
+def test_a_home_phone_row_fills_no_slot_and_is_withheld(tmp_path, label):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[(label, "914-555-0111")])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows.get("office telephone:", "") == ""
+    assert "914-555-0111" not in _docx_texts(tmp_path / "out.docx")
+    assert [i.category for i in gen._pii_result.withheld] == [CAT_HOME_CONTACT]
+
+
+@pytest.mark.parametrize("label", ["Home E-mail:", "Home Email:",
+                                   "Home Email Address:"])
+def test_a_home_email_row_never_becomes_the_work_email(tmp_path, label):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[(label, "jdoe@example.org"),
+                                      ("E-mail:", "jdoe@example.edu")])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows["work email:"] == "jdoe@example.edu"
+    assert "jdoe@example.org" not in rows["work email:"]
+    assert gen._pii_result.withheld == [], "#821 renders personal email"
+
+
+@pytest.mark.parametrize("other,slot,expected", [
+    ("Business Phone: 212-555-0100", "office telephone:", "212-555-0100"),
+    ("Email: jdoe@example.edu", "work email:", "jdoe@example.edu"),
+    ("Business Address: 42 Example Ave", "office address:", "42 Example Ave"),
+])
+def test_a_side_by_side_home_cell_skips_only_its_own_cell(
+        tmp_path, other, slot, expected):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[("Home Address: 12 Elm St", other)])
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows[slot] == expected
+    assert "12 Elm St" not in _docx_texts(tmp_path / "out.docx")
+
+
+def test_side_by_side_home_phone_cell_skips_only_its_own_cell(tmp_path):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Home Phone: 914-555-0111", "Business Phone: 212-555-0100")])
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows["office telephone:"] == "212-555-0100"
+    assert "914-555-0111" not in _docx_texts(tmp_path / "out.docx")
+
+
+def test_a_repeated_home_address_is_withheld_once_not_twice(tmp_path):
+    """Stage 4 already withheld the home address; the docx row repeats it."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[_HOME_ROW, ("Home Phone:", "914-555-0111")])
+    _rows, gen = _render(
+        tmp_path, entries=[_a("Home Address: 12 Elm Street, Rye, NY 10580")],
+        original_doc_path=str(src))
+    assert [i.category for i in gen._pii_result.withheld].count(
+        CAT_HOME_CONTACT) == 1
+
+
+@pytest.mark.parametrize("label,expected", [
+    ("Permanent Address:", "home_address"),
+    ("PERMANENT ADDRESS:", "home_address"),
+    ("Home Phone:", "home_phone"),
+    ("Home phone/fax:", "home_phone"),
+    ("Home Telephone:", "home_phone"),
+    ("Home E-mail:", "home_email"),
+    ("Home Email Address:", "home_email"),
+    ("Permanent Email:", "work_email"),
+    ("Permanent Phone:", "office_phone"),
+    ("Homepage Phone:", "office_phone"),
+    ("Homer Email:", "work_email"),
+    ("Home page:", None),
+    ("Cell phone:", "office_phone"),
+    ("Personal email:", "work_email"),
+    ("Mailing Address:", "office_address"),
+    ("Permanently Address:", "office_address"),
+])
+def test_home_phone_email_permanent_label_classification(label, expected):
+    assert personal_data_module._classify_contact_label(label) == expected
