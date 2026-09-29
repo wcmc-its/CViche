@@ -180,3 +180,71 @@ class TestSyncPromptLogsToStorage:
 
         keys = storage.list_files("RUN001", prefix="prompt_logs/")
         assert keys == ["prompt_logs/real.txt"]
+
+
+# ---- #306: stage 1a hierarchy walkers must be iterative ----------------------------
+
+def _hierarchy_fixture():
+    return [
+        {"level": "H1", "text": "A", "children": [
+            {"level": "H2", "text": "A1", "children": [{"level": "H3", "text": "A1a"}]},
+            {"level": "H2", "text": "A2", "children": []},
+        ]},
+        {"text": "no-level"},  # level defaults to H1 in the orchestrator's writer
+        {"level": "H1", "text": "C", "children": [{"level": "H2", "children": []}]},
+    ]
+
+
+def _recursive_write_reference(f, nodes, depth=0):
+    """The pre-#306 nested closure from _execute_stage_logic, verbatim."""
+    for node in nodes:
+        indent = "  " * depth
+        level = node.get('level', 'H1')
+        text = node.get('text', '')
+        f.write(f"{indent}[{level}] {text}\n")
+        if node.get('children'):
+            _recursive_write_reference(f, node['children'], depth + 1)
+
+
+def _deep_chain(depth):
+    root = {"level": "H1", "text": "n0", "children": []}
+    tip = root
+    for i in range(1, depth):
+        child = {"level": "H2", "text": f"n{i}", "children": []}
+        tip["children"].append(child)
+        tip = child
+    return [root]
+
+
+def test_write_hierarchy_is_byte_identical_to_recursive_original():
+    import io
+    h = _hierarchy_fixture()
+    new, ref = io.StringIO(), io.StringIO()
+    orch_mod._write_hierarchy(new, h)
+    _recursive_write_reference(ref, h)
+    assert new.getvalue() == ref.getvalue()
+    assert "[H1] no-level\n" in new.getvalue()
+    assert "  [H2] \n" in new.getvalue()
+
+
+def test_write_hierarchy_honours_starting_depth():
+    import io
+    new, ref = io.StringIO(), io.StringIO()
+    orch_mod._write_hierarchy(new, _hierarchy_fixture(), depth=2)
+    _recursive_write_reference(ref, _hierarchy_fixture(), depth=2)
+    assert new.getvalue() == ref.getvalue()
+    assert new.getvalue().startswith("    [H1] A\n")
+
+
+def test_write_hierarchy_deep_chain_does_not_recurse():
+    import io
+    buf = io.StringIO()
+    orch_mod._write_hierarchy(buf, _deep_chain(5000))
+    assert buf.getvalue().count("\n") == 5000
+
+
+def test_count_headers_matches_recursive_reference_and_deep_chain():
+    count = orch_mod.PipelineOrchestrator._count_headers
+    assert count(None, _hierarchy_fixture()) == 7
+    assert count(None, []) == 0
+    assert count(None, _deep_chain(5000)) == 5000

@@ -1088,6 +1088,7 @@ def _nested_hierarchy():
         ]},
         {"level": "H1", "text": "B"},
         {"level": "H1", "text": "C", "children": [{"level": "H2", "text": "C1", "children": []}]},
+        {"text": "no-level"},  # level defaults to H1
     ]
 
 
@@ -1115,7 +1116,7 @@ def _recursive_lines(nodes, depth=0):
 
 def test_count_headers_matches_recursive_reference():
     h = _nested_hierarchy()
-    assert run_full_pipeline._count_headers(h) == _recursive_count(h) == 7
+    assert run_full_pipeline._count_headers(h) == _recursive_count(h) == 8
     assert run_full_pipeline._count_headers([]) == 0
 
 

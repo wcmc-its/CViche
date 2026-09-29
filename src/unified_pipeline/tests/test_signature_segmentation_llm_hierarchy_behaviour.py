@@ -1149,6 +1149,19 @@ def test_write_hierarchy_is_byte_identical_to_recursive_original():
     assert new.getvalue().startswith("[H1] A\n  [H2] A1\n    [H3] A1a\n")
 
 
+def test_write_hierarchy_honours_starting_depth():
+    import io
+    hierarchy = [
+        {"level": "H1", "text": "A", "children": [{"level": "H2", "text": "A1"}]},
+        {"level": "H1", "text": "B"},
+    ]
+    new, ref = io.StringIO(), io.StringIO()
+    sbs._write_hierarchy(new, hierarchy, depth=1)
+    _recursive_write_hierarchy_reference(ref, hierarchy, depth=1)
+    assert new.getvalue() == ref.getvalue()
+    assert new.getvalue() == "  [H1] A\n    [H2] A1\n  [H1] B\n"
+
+
 def test_write_hierarchy_deep_chain_does_not_recurse():
     import io
     root = {"level": "H1", "text": "n0", "children": []}
