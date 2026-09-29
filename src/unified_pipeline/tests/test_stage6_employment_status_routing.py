@@ -374,3 +374,15 @@ def test_foreign_copies_of_one_row_write_once_and_the_conflict_stays_unconsumed(
 
     assert consumed == [first, same]
     assert generator.stats["entries_inserted"] == 1
+
+
+def test_three_character_value_passes_the_value_length_gate():
+    """Pins the `<= 2` boundary in `_employment_candidates`: a 2-character value
+    is refused, a 3-character value is admitted."""
+    three = _e_coded("Position/Title: abc")
+    two = _e_coded("Position/Title: ab")
+
+    heading_entries, foreign_entries = PassthroughSection._employment_candidates([two, three])
+
+    assert heading_entries == []
+    assert foreign_entries == [three]
