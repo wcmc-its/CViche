@@ -780,6 +780,78 @@ INSTRUCTION_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
+#: The WCM template stage 6 actually renders every CV into (`TEMPLATE_PATH`
+#: in `stage_6_word_template.py`, same relative location). Not imported from
+#: there: that module calls `sys.exit(1)` at import time when python-docx is
+#: missing (its own top-level `try/except ImportError`), which would turn
+#: this scorer's deliberate graceful-degradation design (`_load_docx`
+#: returns a reason string instead of raising) into a hard process exit for
+#: every dimension, not just the docx-based ones. `key_files` also holds a
+#: 2020 and a 2012 template (`wcm_cv_template_for_website_2020.docx`,
+#: `curriculum_vitae_format_2012.docx`); neither is a stage-6 render target
+#: -- their only repo reference is `scripts/gen_template_boilerplate.py`,
+#: which mines them for the T-class boilerplate labels
+#: `core/template_boilerplate` uses (#822 finding 2, a separate dimension)
+#: -- so only this one revision's paragraphs are excluded below.
+_TEMPLATE_DOCX_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
+)
+
+#: Lazily-built, memoized below by `_template_body_paragraph_texts`. Not
+#: run-specific and never mutated once populated: it holds one checked-in
+#: repo file's own text, so a concurrent run racing the first call
+#: recomputes the same immutable value rather than observing a partial or
+#: another run's value -- unlike `INSTITUTION_CACHE`/`_group_cache` (a
+#: cache keyed by per-run input), this has exactly one possible value for
+#: the life of the process, so no lock guards the first-use race (contrast
+#: the locked lazy singletons in `llm/bedrock.py`, which guard a network
+#: client that must be constructed exactly once).
+_template_body_paragraph_texts_cache: frozenset[str] | None = None
+
+
+def _normalize_whitespace(text: str) -> str:
+    """Collapse runs of whitespace to one space and strip the ends, so a
+    stray leading/trailing space or an internal double-space doesn't hide
+    an otherwise-identical match to the template's own paragraph text."""
+    return " ".join(text.split())
+
+
+def _template_body_paragraph_texts() -> frozenset[str]:
+    """Whitespace-normalized text of every body paragraph in the WCM
+    template stage 6 renders into (`_TEMPLATE_DOCX_PATH`), built once and
+    cached at module level (see `_template_body_paragraph_texts_cache`).
+
+    Stage 6 keeps the template's own instruction paragraphs in the rendered
+    docx on purpose (#822 finding 1) -- a body paragraph identical to one of
+    these, after whitespace normalization, is the template's own text, not
+    the pipeline echoing a prompt into content. `score_broken_format` uses
+    this to exclude exactly those paragraphs from the prompt-echo count.
+
+    Raises FileNotFoundError if `_TEMPLATE_DOCX_PATH` is missing. That path
+    is a checked-in repo asset (`git ls-files key_files/` tracks it), not
+    run output, so a missing file means the checkout is broken and must
+    fail loudly -- silently returning an empty set here would silently
+    un-fix #822 finding 1, scoring every run as if the template had no
+    instruction paragraphs of its own.
+    """
+    global _template_body_paragraph_texts_cache
+    if _template_body_paragraph_texts_cache is None:
+        if not _TEMPLATE_DOCX_PATH.exists():
+            raise FileNotFoundError(
+                "quality_score.score_broken_format needs the WCM template to "
+                "exclude its own instruction paragraphs from the prompt-echo "
+                f"count (#822): not found at {_TEMPLATE_DOCX_PATH}"
+            )
+        from docx import Document
+        template_doc = Document(_TEMPLATE_DOCX_PATH)
+        _template_body_paragraph_texts_cache = frozenset(
+            _normalize_whitespace(p.text)
+            for p in template_doc.paragraphs
+            if p.text.strip()
+        )
+    return _template_body_paragraph_texts_cache
+
 
 def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     """Raw-tab and prompt-echo (template instruction) artifacts in the docx.
@@ -814,6 +886,19 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
       versus the instruction markers' dozens of legitimate hits -- so any
       other tab inside a cell is still a meaningful signal of a
       raw-formatting artifact leaking into the docx.
+    - A body paragraph that matches ``INSTRUCTION_MARKERS`` is still not
+      counted as an echo if its whitespace-normalized text exactly equals
+      one of the template's own body paragraphs
+      (`_template_body_paragraph_texts`, #822 finding 1). Stage 6 keeps the
+      template's 20 instruction paragraphs verbatim in every rendered CV on
+      purpose, and every one of them matches ``INSTRUCTION_MARKERS`` by
+      construction (that is how the pattern was narrowed) -- without this
+      exclusion, every run counts the template's own kept text as a defect.
+      A marker hit that is NOT byte-identical to a template paragraph still
+      counts: a marker phrase originating in the template's own table cells
+      (e.g. "Date (yyyy-yyyy)") landing as a body paragraph, or a template
+      instruction line altered by the pipeline before being kept, are both
+      still genuine signals, not the template's own untouched text.
 
     Headers and footers are not scanned either way: stage 6 never writes to
     them.
@@ -822,13 +907,18 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     if doc is None:
         return 0.5, reason, None
 
-    raw_tab_paragraphs = echo_count = 0
+    template_paragraphs = _template_body_paragraph_texts()
+
+    raw_tab_paragraphs = echo_count = template_echo_excluded = 0
     for p in doc.paragraphs:
         text = p.text
         if "\t" in text:
             raw_tab_paragraphs += 1
         if INSTRUCTION_MARKERS.search(text):
-            echo_count += 1
+            if _normalize_whitespace(text) in template_paragraphs:
+                template_echo_excluded += 1
+            else:
+                echo_count += 1
 
     raw_tab_cells = _count_raw_tab_cells(doc.tables)
     total_raw_tab = raw_tab_paragraphs + raw_tab_cells
@@ -836,7 +926,8 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     fraction = clamp(0.6 * (total_raw_tab / 20) + 0.4 * (echo_count / 15))
     detail = (
         f"raw_tab_paragraphs={raw_tab_paragraphs}; raw_tab_cells={raw_tab_cells}; "
-        f"echo_paragraphs={echo_count}; fraction={fraction:.3f}"
+        f"echo_paragraphs={echo_count}; template_echo_excluded={template_echo_excluded}; "
+        f"fraction={fraction:.3f}"
     )
     return fraction, detail, None
 
