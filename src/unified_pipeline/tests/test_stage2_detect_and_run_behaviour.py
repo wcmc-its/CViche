@@ -338,10 +338,10 @@ def test_legacy_table_single_row_falls_back_to_whole_table_element(monkeypatch):
     ))
     entries, _ = stage2.detect_entries_for_section(["Misc"], elements, 40, 40, element_index_map=_idx_map(elements))
     # Single-row legacy tables never get split into table_row sub-indices --
-    # they stay one integer-idx "table" element, cells joined by join_row_cells.
+    # they stay one integer-idx "table" element, cells tab-joined.
     assert entries == [{
         "element_idx_start": 40, "element_idx_end": 40, "element_type": "table",
-        "confidence": 0.4, "text": "Solo Row A | Solo Row B",
+        "confidence": 0.4, "text": "Solo Row A\tSolo Row B",
     }]
 
 

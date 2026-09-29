@@ -33,7 +33,6 @@ from core.docx_structure_extractor import (
     extract_unified_elements,
     join_row_cells,
     row_cell_texts,
-    _flatten_table_content_text,
 )
 from core.template_boilerplate import is_near_template_instruction, is_template_instruction
 
@@ -97,8 +96,16 @@ def get_element_text(element: dict) -> str:
         # Table content already has flattened text
         return element.get("text", "").strip()
     elif elem_type == "table":
-        # Legacy table format - flatten data into text
-        return _flatten_table_content_text(element.get("data", []))
+        # Legacy table format - flatten data into text. Stays tab-joined (#488):
+        # stage 6 and the doctor branch on '\t' in this text, and a pipe join
+        # turns an all-empty wide row into a separator line the #418 dedup
+        # counts as uncovered content.
+        rows = element.get("data", [])
+        row_texts = []
+        for row in rows:
+            cell_texts = [cell.get("text", "") for cell in row]
+            row_texts.append("\t".join(cell_texts))
+        return "\n".join(row_texts)
     else:
         return element.get("text", "").strip()
 

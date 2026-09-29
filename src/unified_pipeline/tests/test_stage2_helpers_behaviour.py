@@ -132,7 +132,7 @@ def test_get_element_text_table_content_strips_pre_flattened_text():
     assert get_element_text({"type": "table_content", "text": " flat \n"}) == "flat"
 
 
-def test_get_element_text_table_flattens_rows_pipe_and_newline_joined():
+def test_get_element_text_table_flattens_rows_tab_and_newline_joined():
     element = {
         "type": "table",
         "data": [
@@ -140,7 +140,7 @@ def test_get_element_text_table_flattens_rows_pipe_and_newline_joined():
             [{"text": "Smith"}, {"text": "2020"}],
         ],
     }
-    assert get_element_text(element) == "Name | Year\nSmith | 2020"
+    assert get_element_text(element) == "Name\tYear\nSmith\t2020"
 
 
 def test_get_element_text_unknown_type_falls_back_to_stripped_text():
@@ -172,7 +172,7 @@ def test_get_element_text_next_paragraph_dob_scrub_not_readable_from_data(tmp_pa
 
     out = get_element_text(table_element)
     assert "01/02/1970" not in out
-    assert out == "[withheld] | Example City"
+    assert out == "[withheld]\tExample City"
     # ...and the same element's flattened `text` (extract_text_from_docx's reader).
     assert "01/02/1970" not in table_element["text"]
 

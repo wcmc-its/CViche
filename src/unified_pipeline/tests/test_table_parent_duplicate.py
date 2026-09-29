@@ -169,7 +169,19 @@ def test_parent_of_multi_paragraph_first_cell_rows_is_dropped_and_rows_kept():
     assert _starts(remove_subset_delimiters([parent] + rows)) == ["7.0", "7.1"]
 
 
-def test_legacy_table_element_text_uses_the_same_row_join():
-    table = [[{"text": "Title\n- a"}, {"text": "2024"}]]
-    assert get_element_text({"type": "table", "data": table}) == \
-        _flatten_table_content_text(table) == "Title | 2024\n- a"
+def test_legacy_table_parent_with_an_all_empty_wide_row_is_still_dropped(monkeypatch):
+    # #488: the legacy "table" parent text stays tab-joined. A pipe join made
+    # an all-empty 8-column row a "| | | ..." line the #418 coverage check
+    # counted as uncovered, so the parent survived and swallowed row 7.0.
+    import unified_pipeline.stage_2_entry_extraction as stage2
+    cells = lambda *xs: [{"text": x} for x in xs]
+    data = [cells("Introductory Imaging Course", "Fictional Medical College", "2024", "PI", "R01", "NIH", "$1", "2y"),
+            cells(*[""] * 8),
+            cells("Advanced Imaging Workshop", "Imaginary Medical Center", "2023", "Co-I", "K23", "NIH", "$2", "3y")]
+    element = {"unified_idx": 7, "type": "table", "data": data, "text": "x"}
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: {
+        "content": '{"entries":[{"element_idx_start":7,"element_idx_end":7,"element_type":"table"}]}',
+        "cost": 0, "total_tokens": 0, "prompt_tokens": 0, "completion_tokens": 0})
+    entries, _ = stage2.detect_entries_for_section(
+        ["Courses"], [element], 7, 7, element_index_map={7: element})
+    assert [e["element_idx_start"] for e in entries] == ["7.0", "7.2"]
