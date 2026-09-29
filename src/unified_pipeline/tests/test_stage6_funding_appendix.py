@@ -21,6 +21,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
 from docx.oxml.ns import qn  # noqa: E402
@@ -277,6 +278,36 @@ def test_parse_reclassified_segments_refuses_commentary_reply():
     """Model commentary with a colon used to parse as a segment whose 'code'
     was the sentence, then rendered as an appendix bullet (#264)."""
     assert parse_reclassified_segments(_PROSE_REPLY, "M2B") is None
+
+
+@pytest.mark.parametrize("reply", [
+    # no '**': only the code check can refuse these
+    "All segments are retained under M2B: the grant details, project goals relate.",
+    "ALL: segments are retained under M2B and the grant details relate.\n"
+    "M2B: Synthetic Grant Alpha, Example Agency, 2010-2012",
+    "Note: segments are retained under M2B and the grant details relate.",
+    "M2Z: Synthetic Grant Alpha, Example Agency, 2010-2012",
+])
+def test_parse_reclassified_segments_refuses_non_taxonomy_prefix(reply):
+    assert parse_reclassified_segments(reply, "M2B") is None
+
+
+def test_parse_reclassified_segments_keep_short_and_empty_edges():
+    reply = ("  K1: Synthetic course lecture series, Example University  \n"
+             "KEEP: Synthetic Grant Alpha, Example Agency, 2010-2012\n"
+             "K2: too short\n")
+    # KEEP resolves to the original code; a segment of <=10 chars is dropped;
+    # surrounding whitespace on a line is stripped.
+    assert parse_reclassified_segments(reply, "M2B") == [
+        ("Synthetic course lecture series, Example University", "K1"),
+        ("Synthetic Grant Alpha, Example Agency, 2010-2012", "M2B")]
+    # KEEP with an unknown original code has no home: code None.
+    assert parse_reclassified_segments(
+        "KEEP: Synthetic Grant Alpha, Example Agency", "?") == [
+        ("Synthetic Grant Alpha, Example Agency", None)]
+    # Nothing usable -> None, not [].
+    assert parse_reclassified_segments("K2: too short", "M2B") is None
+    assert parse_reclassified_segments("no colons here", "M2B") is None
 
 
 def test_reclassify_prose_reply_never_reaches_document(monkeypatch):

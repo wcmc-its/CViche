@@ -18,6 +18,7 @@ Date: 2025-11-29
 """
 
 import logging
+import functools
 import os
 import sys
 import json
@@ -492,10 +493,17 @@ _TAXONOMY_WARNED_CONFUSIONS = frozenset({
 })
 
 
-# A taxonomy code as the reclassification prompt asks for it: one letter, up
-# to two digits, up to two trailing letters (K1, M2B, N3A, Q4A, O, P), or the
-# KEEP sentinel. Anything else before the colon is model commentary (#264).
-_RECLASSIFIED_CODE_RE = re.compile(r'^(?:[A-Z][0-9]{0,2}[A-Z]{0,2}|KEEP)$')
+_KEEP_SENTINEL = 'KEEP'
+_TAXONOMY_PATH = Path(__file__).parent / "core" / "taxonomy_v7.json"
+
+
+@functools.cache
+def _taxonomy_codes() -> frozenset[str]:
+    """Every code in core/taxonomy_v7.json. A reclassification reply may only
+    name one of these (or KEEP); a shape regex let 'ALL' and 'NOTE' through
+    (#264)."""
+    with open(_TAXONOMY_PATH, encoding="utf-8") as f:
+        return frozenset(entry['code'] for entry in json.load(f)['codes'])
 
 
 def parse_reclassified_segments(
@@ -503,7 +511,7 @@ def parse_reclassified_segments(
     """Parse `_reclassify_entry_segments`' "CODE: text" lines.
 
     Returns [(segment_text, code)], or None when the reply is unusable. Every
-    colon-bearing line must open with a taxonomy-code-shaped token; a line
+    colon-bearing line must open with a real taxonomy code or KEEP; a line
     that does not is model commentary about its own decision ("**All
     segments are retained under M2B: the grant details ..."), and folding it
     in as a segment renders it as a faculty-visible bullet (#264). A reply
@@ -517,7 +525,7 @@ def parse_reclassified_segments(
             continue
         code, segment_text = (part.strip() for part in line.split(':', 1))
         code = code.upper()
-        if not _RECLASSIFIED_CODE_RE.match(code):
+        if code != _KEEP_SENTINEL and code not in _taxonomy_codes():
             logger.warning(
                 "Stage 6 reclassification reply refused: non-code line "
                 "prefix %r; keeping the original entry text", code[:40])
@@ -526,7 +534,7 @@ def parse_reclassified_segments(
             # KEEP means "correct as originally coded" -- resolve to the
             # original code so the caller can route it home instead of
             # dumping it in the appendix (#209).
-            resolved = (original_code if original_code != '?' else None) if code == 'KEEP' else code
+            resolved = (original_code if original_code != '?' else None) if code == _KEEP_SENTINEL else code
             segments.append((segment_text, resolved))
     return segments or None
 
