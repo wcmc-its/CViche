@@ -74,6 +74,34 @@ def test_same_talk_distinct_venue_instances_kept():
 
 # ------------------------------------------------ true duplicates still drop
 
+def test_distinct_trial_phases_of_one_drug_kept():
+    # #1106 (web059 M2A): every significant word of the Phase I trial is in
+    # the randomized Phase II trial; only the phase tells them apart.
+    phase1 = {"text": "Phase I study of the invented inhibitor, ZX-101, in combination with examplecin."}
+    phase2 = {"text": "Randomized Phase II study of ZX-101 (invented inhibitor) versus placebo "
+                      "in combination with examplecin in patients with advanced disease "
+                      "(US Principal Investigator)."}
+    assert deduplicate_entries([phase1, phase2]) == [phase1, phase2]
+
+
+@pytest.mark.parametrize("kept_phase,dropped_phase", [
+    ("Phase II/III", "Phase III"), ("Phase I/II", "Phase II"),
+])
+def test_a_combined_phase_trial_covers_a_copy_naming_one_of_its_phases(kept_phase, dropped_phase):
+    kept = {"text": f"Randomized {kept_phase} study of ZX-101 (invented inhibitor) versus placebo "
+                    "in combination with examplecin in patients with advanced disease."}
+    dup = {"text": f"{dropped_phase} study of ZX-101 invented inhibitor versus placebo with examplecin."}
+    assert deduplicate_entries([kept, dup]) == [kept]
+
+
+def test_same_trial_phase_written_two_ways_still_dropped():
+    # "Phase 2" and "Phase II" are one phase, so the reworded copy still goes.
+    kept = {"text": "Randomized Phase II study of ZX-101 (invented inhibitor) versus placebo "
+                    "in combination with examplecin in patients with advanced disease."}
+    dup = {"text": "Phase 2 study of ZX-101 invented inhibitor versus placebo with examplecin."}
+    assert deduplicate_entries([kept, dup]) == [kept]
+
+
 def test_verbatim_contained_line_dropped():
     fused = {"text": "October 2025-Present\nAssociate Professor of Whimsy, "
                      "Department of Applied Daydreams\nJune 2020-September 2025, "
