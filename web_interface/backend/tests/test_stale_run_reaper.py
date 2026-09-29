@@ -233,3 +233,25 @@ def test_a_run_the_drain_failed_is_not_flipped_to_complete_by_its_executor(monke
     assert run.status == "failed"
     assert run.error_message == DEPLOY_INTERRUPT_MESSAGE
     db.close()
+
+
+def test_drain_stops_leftover_runs_before_failing_them(monkeypatch):
+    """Stop first, then fail: a run stopped after its failure is written could
+    pass its pre-"complete" cancel check in between and overwrite the failure."""
+    from app.pipeline import concurrency
+
+    order = []
+    monkeypatch.setattr("app.pipeline.orchestrator.stop_run_locally",
+                        lambda run_id: order.append(("stop", run_id)))
+
+    def recording_fail(db, run_ids):
+        order.append(("fail", tuple(run_ids)))
+        return len(run_ids)
+
+    monkeypatch.setattr("app.services.run_service.fail_runs_interrupted_by_shutdown", recording_fail)
+    monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "3")
+    assert concurrency.try_acquire_slot("ORDR01") is True
+
+    asyncio.run(main_mod._drain_runs_before_exit(budget_seconds=0))
+
+    assert order == [("stop", "ORDR01"), ("fail", ("ORDR01",))]
