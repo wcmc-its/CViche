@@ -49,6 +49,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _nonempty_field_values,
     _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES,
     _rendered_row_value_sets,
+    _shared_entry_pieces,
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
@@ -56,7 +57,8 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_under_extraction,
     lint_wrong_start_date,
 )
-from unified_pipeline.doctor.shared import _haystacks  # noqa: E402
+from unified_pipeline.doctor.shared import (  # noqa: E402
+    _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack)
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
 
 
@@ -277,33 +279,119 @@ def test_entry_rendered_single_long_word_is_unverifiable():
     assert _entry_rendered(entry_text, h.text, h.tokens) is None
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Known false positive (D5a): a short entry whose only piece is generic "
-    "institutional/section boilerplate ('Department of Medicine', 21 "
-    "squashed chars, only 2 long-word tokens) matches verbatim against an "
-    "UNRELATED haystack that happens to mention the same institution for a "
-    "different entry, so _entry_rendered reports True for text that never "
-    "actually rendered from THIS entry. The obvious fix -- require a piece "
-    "to carry >= RENDER_TOKEN_MIN_COUNT long-word tokens before containment "
-    "counts, in _entry_pieces -- directly reverses the #537 fix pinned by "
-    "test_short_entry_present_verbatim_is_still_rendered in "
-    "test_doctor_classified_unrendered_short_entries.py: that entry's only "
-    "piece ('Email: mary.mckenna@bcm.edu') has exactly 2 long-word tokens "
-    "('email', 'mckenna') and is recognized as rendered ONLY via "
-    "containment, never via the token-overlap fallback. Telling apart "
-    "short-generic-boilerplate from short-label-value text needs a "
-    "different signal than a token-count floor; filed as #744, which names "
-    "this test as its acceptance criterion."
-))
-def test_entry_rendered_false_positive_on_shared_institutional_boilerplate():
-    entry_text = "Department of Medicine"
-    unrelated_blocks = [
-        ("p", "Jane Smith, MD is affiliated with the Department of "
-              "Medicine at a different institution entirely, working on "
-              "unrelated topics."),
-    ]
-    h = _haystacks(unrelated_blocks)
-    assert _entry_rendered(entry_text, h.text, h.tokens) is False
+_BOILERPLATE_HAYSTACK_BLOCKS = [
+    ("p", "Jane Smith, MD is affiliated with the Department of "
+          "Medicine at a different institution entirely, working on "
+          "unrelated topics."),
+]
+
+
+def test_entry_rendered_shared_institutional_boilerplate_is_not_rendered():
+    """#744: 'Department of Medicine' occurs in two entries of the document,
+    so its verbatim hit in an unrelated paragraph is not evidence."""
+    siblings = [{"text": "Department of Medicine"},
+                {"text": "Department of Medicine\nDivision of Cardiology"}]
+    shared = _shared_entry_pieces(siblings)
+    h = _haystacks(_BOILERPLATE_HAYSTACK_BLOCKS)
+    assert _entry_rendered("Department of Medicine", h.text, h.tokens,
+                           shared) is False
+
+
+def test_entry_rendered_unshared_short_piece_still_counts_as_rendered():
+    """Control for the above: with no sibling repeating the piece (and the
+    piece absent from the template) the verbatim hit still counts."""
+    shared = _shared_entry_pieces([{"text": "Department of Medicine"},
+                                   {"text": "Division of Cardiology"}])
+    h = _haystacks(_BOILERPLATE_HAYSTACK_BLOCKS)
+    assert _entry_rendered("Department of Medicine", h.text, h.tokens,
+                           shared) is True
+
+
+def test_entry_rendered_template_scaffolding_piece_is_not_rendered():
+    """#744: 'Full Name of Board' is a cell of the pristine WCM template, so
+    finding it in the output proves nothing about this entry."""
+    h = _haystacks([("p", "Certified by the Full Name of Board of Surgery")])
+    assert _entry_rendered("Full Name of Board", h.text, h.tokens) is False
+
+
+def test_shared_entry_pieces_counts_distinct_entries_not_occurrences():
+    """One entry repeating a fragment twice is one entry: not shared."""
+    entries = [{"text": "Department of Medicine\nDepartment of Medicine"},
+               {"text": "Unrelated Other Entry Text Here"}]
+    assert _shared_entry_pieces(entries) == frozenset()
+
+
+def test_shared_entry_pieces_identical_text_duplicates_are_not_boilerplate():
+    """Two entries with identical text are one record listed twice (stage 4
+    dedups them), so their common pieces are content, not boilerplate."""
+    entries = [{"text": "Ad hoc Reviewer, Journal of Neurosurgery"},
+               {"text": "Ad hoc Reviewer, Journal of Neurosurgery"}]
+    assert _shared_entry_pieces(entries) == frozenset()
+
+
+def test_entry_rendered_boilerplate_label_with_short_value_is_unverifiable():
+    """A template label plus a value too short to be a piece: the value is
+    content _entry_rendered cannot see, so the verdict is None, not False."""
+    h = _haystacks([("p", "Office telephone: on file")])
+    assert _entry_rendered("Office telephone: | 212 555 0100",
+                           h.text, h.tokens) is None
+
+
+def test_entry_rendered_boilerplate_piece_absent_from_output_stays_unverifiable():
+    """The discount only revokes a hit that made the entry look rendered; a
+    shared piece the output never contained is no more definitive than before."""
+    shared = _shared_entry_pieces([{"text": "Epic Implementation team"},
+                                   {"text": "Epic Implementation team\nLead"}])
+    h = _haystacks([("p", "Unrelated paragraph about something else")])
+    assert _entry_rendered("Epic Implementation team", h.text, h.tokens,
+                           shared) is None
+
+
+def test_entry_rendered_distinctive_piece_absent_beside_boilerplate_hit_is_unverifiable():
+    """A boilerplate hit does not make an entry lost when another piece is
+    distinctive: that piece is simply absent, which (with too few tokens) is
+    the pre-#744 'cannot verify' answer."""
+    text = "Department of Medicine\nab cd ef gh ij kl mn op"
+    shared = _shared_entry_pieces([{"text": "Department of Medicine"},
+                                   {"text": text}])
+    h = _haystacks(_BOILERPLATE_HAYSTACK_BLOCKS)
+    assert _entry_rendered(text, h.text, h.tokens, shared) is None
+
+
+def test_entry_rendered_template_piece_matches_inside_a_longer_template_line():
+    """The template check is containment: an entry piece is a 40-char prefix
+    of a longer template paragraph, not a whole line. The output glues the
+    words so only the verbatim piece, never a token, could vouch for it."""
+    text = "Percent Effort and Institutional Responsibilities"
+    h = _haystacks([("p", "PercentEffortandInstitutionalResponsibilities")])
+    assert _entry_rendered(text, h.text, h.tokens) is False
+
+
+def test_template_piece_must_sit_inside_one_template_line():
+    """A piece spanning the end of one template line and the start of the
+    next is not scaffolding: 5 farm pieces match only across a boundary."""
+    lines = _template_haystack().split(_LINE_SENTINEL)
+    spans = [a[-8:] + b[:8] for a, b in zip(lines, lines[1:])
+             if len(a) >= 8 and len(b) >= 8]
+    spans = [p for p in spans
+             if p not in _template_haystack().replace(_LINE_SENTINEL, "|")]
+    assert spans
+    assert not any(_piece_in_template(p) for p in spans)
+
+
+def test_lint_bucket_status_does_not_trust_a_shared_boilerplate_hit():
+    """#744 at bucket_status: the entry's only piece also opens a sibling
+    entry, so its verbatim hit under the target bucket is not evidence."""
+    text = "Department of Medicine"
+    stage4 = {"entries": [
+        {"taxonomy_code": "M2A", "element_idx_start": 5, "text": text,
+         "extracted_fields": {"status": "Completed"}},
+        {"taxonomy_code": "M2A", "element_idx_start": 6,
+         "text": text + "\nDivision of Cardiology"},
+    ]}
+    findings = lint_bucket_status(stage4, _blocks_under("M2B", text))
+    assert len(findings) == 1
+    assert "no funding heading at all" in findings[0]["message"]
 
 
 # ==========================================================================
@@ -335,6 +423,22 @@ def test_lint_classified_unrendered_warns_on_false_plus_none():
         _entries(_UNVERIFIABLE_TEXT, _UNRENDERED_TEXT), _OUTPUT_BLOCKS)
     assert len(findings) == 1
     assert "2 classified" in findings[0]["message"]
+
+
+def test_lint_classified_unrendered_does_not_trust_a_shared_boilerplate_hit():
+    """#744 at the lint: two 3b entries share the piece 'Department of
+    Medicine'; the output holds only that piece, so neither code's entry has
+    real evidence and both codes are flagged (pre-fix: [])."""
+    stage3b = {"entries": [
+        {"text": "Department of Medicine", "taxonomy_code": "C",
+         "element_type": "paragraph"},
+        {"text": "Department of Medicine\nDivision of Cardiology",
+         "taxonomy_code": "D", "element_type": "paragraph"},
+    ]}
+    findings = lint_classified_unrendered(
+        stage3b, [("p", "Department of Medicine")])
+    assert sorted(f["message"].split(":")[0] for f in findings) == [
+        "taxonomy code C", "taxonomy code D"]
 
 
 def test_lint_classified_unrendered_silent_when_any_entry_verified_rendered():
