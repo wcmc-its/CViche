@@ -150,6 +150,9 @@ class TestWhatIsNotFannedOut:
         self._unchanged({'taxonomy_code': 'H', 'text': 'Alpha Prize Beta Prize',
                          'extracted_fields': {'award_name': [_award('Alpha Prize'), _award('Beta Prize')]}})
 
+    def test_a_list_holding_an_empty_record(self):
+        self._unchanged(_honors('Alpha Prize\tBeta Prize', [{}, _award('Beta Prize')]))
+
     def test_records_that_share_no_key_with_the_schema(self):
         # web181's K2 `mentees: [{name, year}]`: nothing the K2 renderer reads.
         self._unchanged({'taxonomy_code': 'K2', 'text': 'Mentored Ana Cruz 2019\tLee Park 2020',
@@ -160,7 +163,9 @@ class TestWhatIsNotFannedOut:
         # web228's K4 `sessions`: `title` is the session's own name.
         sessions = [{'date': '2020-04-22', 'title': 'Definition and Clinical Evaluation'},
                     {'date': '2020-04-29', 'title': 'Complexity and Impact'}]
-        self._unchanged({'taxonomy_code': 'K4', 'text': '2020 Practice Improvement Project\tsessions',
+        self._unchanged({'taxonomy_code': 'K4',
+                         'text': '2020 Practice Improvement Project\t2020-04-22 Definition and Clinical '
+                                 'Evaluation\t2020-04-29 Complexity and Impact',
                          'extracted_fields': {'activity_title': 'Practice Improvement Project',
                                               'sessions': sessions}})
 
@@ -221,14 +226,66 @@ class TestTextCoverage:
         assert _fan(entry) == [entry]
 
     def test_a_year_no_field_holds_keeps_the_entry_whole(self):
-        entry = self._committee_entry(self._RECORDS.format(a=' 1999-2004', b=''))
+        entry = self._committee_entry(self._RECORDS.format(a=' 1999', b=''))
         assert _fan(entry) == [entry]
 
     def test_a_year_a_field_holds_is_fine(self):
-        entry = {'taxonomy_code': 'P', 'text': self._RECORDS.format(a=' 1999-2004', b=''),
-                 'extracted_fields': {'start_date': '1999', 'end_date': '2004',
+        entry = {'taxonomy_code': 'P', 'text': self._RECORDS.format(a=' 1999', b=''),
+                 'extracted_fields': {'start_date': '1999',
                                       'committees': self._COMMITTEES}}
         assert len(_fan(entry)) == 2
+
+
+class TestTextCoverageEachTestOnItsOwn:
+    """The three tests in `_fields_carry_text`, each isolated: a long text
+    (many covered words) can pass the ratio while failing the count, and a
+    short one the reverse."""
+
+    _COVERED = ('alpha bravo charlie delta foxtrot golf hotel india juliet kilo lima '
+                'mike november oscar papa quebec romeo sierra tango uniform victor whiskey').split()
+
+    def _entry(self, uncovered):
+        first, second = self._COVERED[:11], self._COVERED[11:]
+        text = ' '.join(first) + '\t' + ' '.join(second) + ' ' + ' '.join(uncovered)
+        return {'taxonomy_code': 'P', 'text': text, 'extracted_fields': {'committees': [
+            {'committee_name': ' '.join(first)}, {'committee_name': ' '.join(second)}]}}
+
+    def test_three_uncovered_words_in_a_long_text_are_tolerated(self):
+        assert len(_fan(self._entry(['yankee', 'zebra', 'apple']))) == 2
+
+    def test_four_uncovered_words_are_not_even_when_the_ratio_holds(self):
+        entry = self._entry(['yankee', 'zebra', 'apple', 'berry'])
+        assert 22 / 26 >= 0.8
+        assert _fan(entry) == [entry]
+
+    def test_a_short_text_fails_on_the_ratio_alone(self):
+        entry = {'taxonomy_code': 'P', 'text': 'alpha bravo charlie\tdelta yankee zebra apple',
+                 'extracted_fields': {'committees': [{'committee_name': 'alpha bravo charlie'},
+                                                     {'committee_name': 'delta'}]}}
+        assert _fan(entry) == [entry]
+
+
+class TestChildrenShareNothingWithTheirParent:
+    def test_nested_values_are_copies(self):
+        parent = _honors('Alpha Prize, Hollis College\tBeta Prize, Hollis College',
+                         [dict(_award('Alpha Prize'), description=['first']), _award('Beta Prize')],
+                         venue=['hall'])
+        parent['hierarchy'] = ['HONORS']
+        first, second = _fan(parent)
+        first['hierarchy'].append('changed')
+        first['extracted_fields']['description'].append('changed')
+        first['extracted_fields']['venue'].append('changed')
+        assert second['hierarchy'] == ['HONORS'] and parent['hierarchy'] == ['HONORS']
+        assert parent['extracted_fields']['awards'][0]['description'] == ['first']
+        assert second['extracted_fields']['venue'] == ['hall']
+        assert parent['extracted_fields']['venue'] == ['hall']
+
+
+def test_built_text_leaves_out_empty_values():
+    parent = _honors('Alpha Prize\tBeta\tPrize',
+                     [{'award_name': 'Alpha Prize', 'granting_body': '', 'date': '1988'},
+                      {'award_name': 'Beta Prize', 'granting_body': None, 'date': '1989'}])
+    assert [c['text'] for c in _fan(parent)] == ['Alpha Prize | 1988', 'Beta Prize | 1989']
 
 
 class TestParentOwnRecord:
@@ -288,6 +345,27 @@ class TestParentOwnRecord:
         repeated = self._o('2015-2022 Leader, Genomics\tProgram\t2022- Deputy\tDirector',
                            leadership_role='Deputy Director', start_date='2022')
         assert len(_fan(repeated)) == 2
+
+
+    def test_a_date_the_items_do_not_repeat_is_not_an_identity(self):
+        # Four segments for two records (a wrapped line, counts undecided) and
+        # a parent whose only scalars are dates that differ from both items':
+        # the dates are context, so no extra record.
+        parent = {'taxonomy_code': 'P',
+                  'text': 'Alpha Board of\tGovernors\tBeta Board of\tTrustees',
+                  'extracted_fields': {'start_date': '2010', 'committees': [
+                      {'committee_name': 'Alpha Board of Governors', 'start_date': '2016'},
+                      {'committee_name': 'Beta Board of Trustees', 'start_date': '2017'}]}}
+        assert len(_fan(parent)) == 2
+
+    @pytest.mark.parametrize('blank', [None, '', '   ', [], {}])
+    def test_a_blank_identity_field_is_not_an_identity(self, blank):
+        # One header segment more than records, and a parent whose only
+        # identity-shaped scalar is blank: not a record of its own.
+        parent = {'taxonomy_code': 'P', 'text': 'Board:\tAlpha Board\tBeta Board',
+                  'extracted_fields': {'committee_name': blank, 'committees': [
+                      {'committee_name': 'Alpha Board'}, {'committee_name': 'Beta Board'}]}}
+        assert len(_fan(parent)) == 2
 
 
 @pytest.mark.parametrize('key,expected', [('start_date', True), ('date', True), ('year', True),

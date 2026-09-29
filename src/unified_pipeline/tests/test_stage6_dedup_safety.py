@@ -242,5 +242,14 @@ def test_a_plain_entry_is_still_dropped_against_a_fanned_out_record_that_contain
     """The guard protects the fanned record, not the entries around it."""
     child = _child("Ana Cruz, Ph.D. | Post-graduate | 2013 | 2014",
                    {"mentee_name": "Ana Cruz", "start_date": "2013"})
-    plain = {"text": "Ana Cruz, Ph.D. | Post-graduate", "extracted_fields": {"mentee_name": "Ana Cruz"}}
+    plain = {"text": "Ana Cruz, Ph.D.", "extracted_fields": {"mentee_name": "Ana Cruz"}}
     assert deduplicate_entries([child, plain]) == [child]
+
+
+def test_fanned_out_records_with_equal_fields_but_different_text_are_both_kept():
+    """Equal fields alone are not proof: the text is what the record line
+    check and the reader see, so only a verbatim copy may go."""
+    fields = {"mentee_name": "Ana Cruz", "start_date": "2013"}
+    first = _child("Ana Cruz, Ph.D. | 2013 | Waisman", dict(fields))
+    second = _child("Ana Cruz, Ph.D. | 2013 | Ashby", dict(fields), 1)
+    assert deduplicate_entries([first, second]) == [first, second]

@@ -217,7 +217,7 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dic
     records = ([scalars] if own else []) \
         + [dict(item) for item in items]
     texts = _child_texts(entry.get('text'), records)
-    return [_child(entry, {**scalars, **copy.deepcopy(record)}, text, key, i, len(records))
+    return [_child(entry, {**copy.deepcopy(scalars), **copy.deepcopy(record)}, text, key, i, len(records))
             for i, (record, text) in enumerate(zip(records, texts))]
 
 
@@ -236,6 +236,6 @@ def fan_out_multi_record_entries(
     out: list[dict[str, Any]] = []
     for entry in entries:
         schema = frozenset(schema_fields.get(entry.get('taxonomy_code'), {}).get('fields', ()))
-        children = _fan_out_entry(entry, schema) if schema else None
+        children = _fan_out_entry(entry, schema)
         out.extend(children if children is not None else [entry])
     return out
