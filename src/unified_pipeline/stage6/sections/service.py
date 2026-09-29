@@ -479,6 +479,74 @@ def _journal_name_cell_text(value: object, taxonomy_code: str) -> str:
     return _cell_text(value)
 
 
+def _contains_words(haystack: str, needle: str) -> bool:
+    """True when `needle` occurs in `haystack` on word boundaries, ignoring case."""
+    return re.search(rf'(?<!\w){re.escape(needle)}(?!\w)', haystack, re.IGNORECASE) is not None
+
+
+def _fold_name(text: str) -> str:
+    """Case, punctuation and whitespace folded form, for equality tests."""
+    return ' '.join(re.sub(r'[\W_]+', ' ', text).casefold().split())
+
+
+def _join_names(name: str, org: str, *, collapse_contained: bool) -> str:
+    """`"<name>, <org>"`, collapsed when the two say the same thing.
+
+    Both sides are stripped and an empty side returns the other, so a lone
+    value is unchanged. Equal after `_fold_name` returns `org` (what the old
+    `organization or ...` chains rendered). With `collapse_contained`,
+    whole-word containment also collapses to the longer side (see
+    `_contains_words`)."""
+    name, org = name.strip(), org.strip()
+    if not org or not name:
+        return org or name
+    if _fold_name(name) == _fold_name(org):
+        return org
+    if collapse_contained:
+        if _contains_words(org, name):
+            return org
+        if _contains_words(name, org):
+            return name
+    return f"{name}, {org}"
+
+
+_LEADING_THE = re.compile(r'^\s*the\s+', re.IGNORECASE)
+
+
+def _journal_names_contain(journal_value: object, org: str) -> bool:
+    """True when `org` occurs as whole words in any single journal name.
+
+    A list-of-records `journal_name` is tested name by name, so a date
+    suffix or a neighbouring journal cannot make a match. A leading "The "
+    on `org` is ignored ("The Lancet" matches journal "Lancet"). An empty
+    `org` never matches."""
+    org = _LEADING_THE.sub('', org.strip())
+    if not org:
+        return False
+    items = journal_value if isinstance(journal_value, list) else [journal_value]
+    return any(_contains_words(_cell_text(item), org)
+               for item in items)
+
+
+def _reviewing_org_and_committee_text(fields: dict) -> str:
+    """Display text for a journal-reviewing row that has no `journal_name`.
+
+    A Q2 entry rerouted into `_fill_journal_reviewing` (`_route_q2_entries`)
+    has no `journal_name`, and its `organization` is often just the funder
+    or society ("NIH", "American Heart Association") while `committee_name`
+    names the actual panel or program (#471). `organization or
+    committee_name` rendered only the generic organization, so the panel
+    name was dropped from the docx. Render both -- "<committee>, <org>".
+    Whole-word containment collapses here ("NIH" + "NIH Study Section" ->
+    "NIH Study Section"): a committee is a sub-unit of its organization, so
+    one string containing the other is the same body named twice. Falsy
+    values count as absent, as in the old `or` chain."""
+    return _join_names(
+        _cell_text(fields.get('committee_name') or ''),
+        _cell_text(fields.get('organization') or ''),
+        collapse_contained=True)
+
+
 def _service_boards_dates_text(fields: dict, taxonomy_code: str,
                                source_text: str = '') -> str:
     """Coerce `start_date`/`end_date` before `format_date_range` for a
@@ -504,17 +572,51 @@ def _other_service_organization_text(fields: dict, taxonomy_code: str) -> str:
     Q3 uses `agency`; others use `organization`/`committee_name`. Q4B/Q4C
     (editorial) use `journal_name` -- the one candidate that can carry a
     list of per-journal `{name, start_date, end_date}` records (#812,
-    web204's multi-journal Q4C entry) -- only reached when the other three
-    are all empty, so it routes through the date-aware journal coercer
-    instead of the plain one this chain otherwise uses (a pure move of
-    `_fill_other_service`'s round-2 prelude, round 3, verify-D-812-R2
-    finding 2 -- no formula changed)."""
+    web204's multi-journal Q4C entry) -- so it routes through the date-aware
+    journal coercer instead of the plain one this chain otherwise uses. On
+    Q4B/Q4C a populated organization no longer hides `journal_name`: both
+    render via `_join_names` without containment collapse (#471). Every
+    other code, and an editorial row with only one of the two, is unchanged."""
     organization = (fields.get('organization', '') or
                     fields.get('committee_name', '') or
                     fields.get('agency', ''))
+    journal = _journal_name_cell_text(fields.get('journal_name', ''), taxonomy_code)
+    if organization and taxonomy_code in EDITORIAL_BOARD_CODES:
+        # #471: on an editorial row `organization` (often a publisher or
+        # society) shadowed `journal_name`, the field naming the journal.
+        # One-way containment: when the journal names the organization
+        # ("The Lancet" / "Lancet", "JAMA Network Open" / "JAMA") the journal
+        # alone already says both. The reverse must NOT collapse: a journal
+        # is routinely named inside its society or publisher ("Neurology" /
+        # "American Academy of Neurology", "Cell" / "Cell Press"), and
+        # collapsing would drop the journal title. An exact folded repeat
+        # renders once, as the organization.
+        org_text = _cell_text(organization)
+        if (fields.get('journal_name')
+                and _journal_names_contain(fields['journal_name'], org_text)
+                and _fold_name(journal) != _fold_name(org_text)):
+            return journal
+        return _join_names(journal if fields.get('journal_name') else '',
+                           org_text, collapse_contained=False)
     if organization:
         return _cell_text(organization)
-    return _journal_name_cell_text(fields.get('journal_name', ''), taxonomy_code)
+    return journal
+
+
+def _role_dedupe_text(fields: dict, taxonomy_code: str, organization: str) -> str:
+    """The text the two-column layout's `role in organization` check reads.
+
+    That check drops the organization from the cell when the role's first 20
+    characters occur in it. Since #471 an editorial row's `organization`
+    also carries the journal title, so a role phrase inside a journal name
+    ("Associate Editor Studies") would trip the check and drop the journal
+    AND the organization, which the old chain never did. Check the
+    organization chain alone there, as before."""
+    if taxonomy_code in EDITORIAL_BOARD_CODES and fields.get('journal_name'):
+        chain = (fields.get('organization') or fields.get('committee_name') or
+                 fields.get('agency') or '')
+        return _cell_text(chain) or organization
+    return organization
 
 
 def _other_service_dates_text(fields: dict, taxonomy_code: str,
@@ -693,7 +795,7 @@ class ServiceSection:
 
                 # If we don't have structured fields, parse from raw text
                 if not committee:
-                    text = entry.get('text', '')[:150]
+                    text = entry.get('text', '')
                     committee = text
 
                 # Add row to table
@@ -767,7 +869,7 @@ class ServiceSection:
             if organization or role:
                 dates = format_date_range(start_date, end_date, 'Q1')
                 if not organization:
-                    organization = original_text[:100]
+                    organization = original_text
                 self._add_extramural_row(table, organization, role, dates)
             else:
                 # No useful extracted fields - try to parse from raw text
@@ -777,7 +879,7 @@ class ServiceSection:
                     self._parse_extramural_leadership_lines(table, lines)
                 else:
                     # Single entry without extracted fields - use raw text
-                    self._add_extramural_row(table, original_text[:100], '', '')
+                    self._add_extramural_row(table, original_text, '', '')
 
     def _parse_extramural_leadership_lines(self, table, lines: list[str]) -> None:
         """Parse multiple extramural leadership lines and add rows.
@@ -972,7 +1074,7 @@ class ServiceSection:
             if journal_name_value:
                 journal = _journal_name_cell_text(journal_name_value, taxonomy_code)
             else:
-                journal = _cell_text(fields.get('organization') or fields.get('committee_name'))
+                journal = _reviewing_org_and_committee_text(fields)
             # #812 round 2: coerce before format_date_range (see
             # _fill_service_boards above for why -- it only str()s a
             # structured value's Python repr into the cell).
@@ -982,7 +1084,7 @@ class ServiceSection:
 
             if not journal:
                 # Parse from raw text, but clean up common patterns
-                raw_text = entry.get('text', '')[:100]
+                raw_text = entry.get('text', '')
                 # Remove "Reviewer" prefix if present
                 journal = re.sub(r'^(?:Reviewer|Ad hoc Reviewer)[,:\s]*', '', raw_text, flags=re.IGNORECASE).strip()
 
@@ -1122,7 +1224,7 @@ class ServiceSection:
                         # Parse from raw text as fallback, but strip date prefix
                         raw_text = entry.get('text', '')
                         # Remove common date patterns from beginning
-                        organization = re.sub(r'^\d{4}[-–]?\d{0,4}\s*\|?\s*', '', raw_text)[:100]
+                        organization = re.sub(r'^\d{4}[-–]?\d{0,4}\s*\|?\s*', '', raw_text)
                         # If role already contains most of the organization text, don't duplicate
                         if role and organization and role.lower()[:30] in organization.lower():
                             organization = ''
@@ -1135,7 +1237,8 @@ class ServiceSection:
                         row.cells[2].text = dates or ''
                     elif num_cols >= 2:
                         # Avoid duplicating content when role already contains full description
-                        if role and organization and role.lower()[:20] in organization.lower():
+                        dedupe_text = _role_dedupe_text(fields, taxonomy_code, organization)
+                        if role and organization and role.lower()[:20] in dedupe_text.lower():
                             row.cells[0].text = role
                         elif role and organization:
                             row.cells[0].text = f"{role}, {organization}"

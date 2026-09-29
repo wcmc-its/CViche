@@ -581,3 +581,14 @@ class TestExtractedInstitutionRendersInNameCell:
         from unified_pipeline.stage6.sections.administrative_activities import (
             _name_with_institution)
         assert _name_with_institution("", "Northgate University") == ""
+
+
+class TestRawFallbackIsNotTruncated:
+    """#983: an entry with no extracted activity renders its raw text as the
+    Activity cell. It was cut at 150 characters, mid-word."""
+
+    def test_long_raw_text_is_the_whole_activity(self):
+        text = "Faculty Senate Standing Committee on Research Policy " * 5
+        assert len(text.strip()) > 150
+        rows = _rows({"text": text.strip(), "extracted_fields": {}, "taxonomy_code": "P"})
+        assert rows == [(text.strip(), "", "")]

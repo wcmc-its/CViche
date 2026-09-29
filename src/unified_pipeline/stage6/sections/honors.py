@@ -130,10 +130,6 @@ _LINE_HEADER_KEYWORDS = frozenset({
     'honor', 'year'})
 _MIN_LINE_HEADER_KEYWORDS = 2
 
-# A raw entry with no extracted award name renders as its own text; cap it so
-# a runaway blob cannot fill the cell.
-_MAX_RAW_AWARD_CHARS = 150
-
 # The WCM template's H table: award | organization | date awarded (yyyy).
 _HONORS_TABLE_COLUMNS = 3
 
@@ -657,13 +653,13 @@ def _record_for_single_award(fallback_text: str,
     first line is the source table's header row used to render that header
     as the award name, because the line `_parse_honor_lines` had already
     dropped was still in the string this falls back to (#733 review). It is
-    otherwise the raw text, verbatim and merely capped -- an entry whose
+    otherwise the raw text, verbatim (#983 removed the 150-character cap: it cut
+    a third honor mid-word and lost the year) -- an entry whose
     pipe shape the parser declined to guess at still renders as its own
     text, which is the contract the module docstring states.
     """
     if not award_name:
-        award_name = (columns.award if columns is not None
-                      else fallback_text[:_MAX_RAW_AWARD_CHARS])
+        award_name = columns.award if columns is not None else fallback_text
     if columns is not None:
         granting_body = granting_body or columns.organization
         date = date or columns.date

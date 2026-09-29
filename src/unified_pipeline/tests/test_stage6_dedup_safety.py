@@ -198,3 +198,58 @@ def test_distinct_committee_memberships_mentioned_in_passing_kept():
                             "in 2018."}
     result = deduplicate_entries([prior_term, current_term])
     assert result == [prior_term, current_term]
+
+
+# ----------------------------------------- #983: records fanned out of one entry
+
+def _child(text, fields, index=0):
+    return {"text": text, "extracted_fields": fields,
+            "fanned_out_from": {"key": "roles", "index": index, "count": 2}}
+
+
+def test_fanned_out_record_is_not_dropped_for_sharing_a_longer_entrys_words():
+    """A record fanned out of a multi-record entry is one short line, so every
+    word of it can sit inside a longer entry that is a different record: the
+    token-containment branch approves that drop and nothing re-checks it (a
+    single segment is not a record line). Its dates differ from the long
+    entry's, so it is a distinct post."""
+    child = _child("Co-Leader, Cancer Epidemiology, Ashby Cancer Center 2012-",
+                   {"leadership_role": "Co-Leader, Cancer Epidemiology", "start_date": "2012"})
+    longer = {"text": "Co-Leader, Cancer Epidemiology Program\tAshby Cancer Center\t2012-2015",
+              "extracted_fields": {"leadership_role": "Co-Leader, Cancer Epidemiology Program",
+                                   "start_date": "2012", "end_date": "2015"}}
+    assert deduplicate_entries([longer, child]) == [longer, child]
+    assert deduplicate_entries([child, longer]) == [child, longer]
+
+
+def test_same_person_under_two_funders_is_two_records_with_identical_text():
+    """Two fanned records whose text is the same line but whose inherited
+    fields differ (the parent's funder) are not duplicates."""
+    text = "Ana Cruz, Ph.D. | 2013"
+    first = _child(text, {"mentee_name": "Ana Cruz", "start_date": "2013", "funding_source": "Fund One"})
+    second = _child(text, {"mentee_name": "Ana Cruz", "start_date": "2013", "funding_source": "Fund Two"}, 1)
+    assert deduplicate_entries([first, second]) == [first, second]
+
+
+def test_fanned_out_record_that_is_an_exact_copy_is_still_dropped():
+    text = "Ana Cruz, Ph.D. | 2013"
+    fields = {"mentee_name": "Ana Cruz", "start_date": "2013"}
+    first, second = _child(text, dict(fields)), _child(text, dict(fields), 1)
+    assert deduplicate_entries([first, second]) == [first]
+
+
+def test_a_plain_entry_is_still_dropped_against_a_fanned_out_record_that_contains_it():
+    """The guard protects the fanned record, not the entries around it."""
+    child = _child("Ana Cruz, Ph.D. | Post-graduate | 2013 | 2014",
+                   {"mentee_name": "Ana Cruz", "start_date": "2013"})
+    plain = {"text": "Ana Cruz, Ph.D.", "extracted_fields": {"mentee_name": "Ana Cruz"}}
+    assert deduplicate_entries([child, plain]) == [child]
+
+
+def test_fanned_out_records_with_equal_fields_but_different_text_are_both_kept():
+    """Equal fields alone are not proof: the text is what the record line
+    check and the reader see, so only a verbatim copy may go."""
+    fields = {"mentee_name": "Ana Cruz", "start_date": "2013"}
+    first = _child("Ana Cruz, Ph.D. | 2013 | Waisman", dict(fields))
+    second = _child("Ana Cruz, Ph.D. | 2013 | Ashby", dict(fields), 1)
+    assert deduplicate_entries([first, second]) == [first, second]

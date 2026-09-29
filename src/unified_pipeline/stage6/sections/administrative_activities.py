@@ -387,7 +387,7 @@ class AdministrativeActivitiesSection:
                 rows.extend(parsed_rows)
             else:
                 if not activity:
-                    activity = original_text[:150]
+                    activity = original_text
                 rows.append((
                     _name_with_institution(activity, record.institution),
                     role, dates))
