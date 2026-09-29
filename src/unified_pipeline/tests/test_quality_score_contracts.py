@@ -51,6 +51,7 @@ from unified_pipeline.quality_score import (  # noqa: E402
 
 docx = pytest.importorskip("docx")
 from docx import Document  # noqa: E402
+from docx.oxml.ns import qn  # noqa: E402
 
 
 def _make_docx(paragraph_texts=(), tables=()):
@@ -702,6 +703,46 @@ def test_template_body_paragraph_texts_cached_across_calls():
     first = qs._template_body_paragraph_texts()
     second = qs._template_body_paragraph_texts()
     assert first is second
+
+
+# ------------------------------------------------------------ #822 raw tabs
+# The same exclusion, applied to raw_tab_paragraphs: the template's own
+# tabbed body paragraphs ("Signature: \t\t\t\t", "Name of Current
+# Employer(s):\t", ...) are kept by stage 6, so every run was charged for
+# them. A tabbed line with text of its own still counts.
+# ------------------------------------------------------------ #822 raw tabs
+
+@pytest.mark.skipif(not _TEMPLATE.exists(), reason="pristine WCM template not checked out")
+def test_broken_format_template_tab_paragraphs_excluded_from_raw_tab(tmp_path):
+    """Every tabbed body paragraph of the real template -- read from the
+    checked-in file, not retyped -- is excluded when kept verbatim."""
+    tabbed = [p.text for p in Document(_TEMPLATE).paragraphs if "\t" in p.text]
+    assert len(tabbed) == 5, tabbed
+    _make_docx(tabbed).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=0" in detail, detail
+    assert "template_tab_excluded=5" in detail, detail
+    assert fraction == 0.0, detail
+
+
+def test_broken_format_template_tab_paragraph_whitespace_variant_excluded(tmp_path):
+    """Matched on whitespace-NORMALIZED text: a different tab run than the
+    template's own ("Signature: \t\t\t\t") is still the template line."""
+    _make_docx(["Signature:\t"]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=0" in detail, detail
+    assert "template_tab_excluded=1" in detail, detail
+
+
+def test_broken_format_filled_template_tab_line_still_counted(tmp_path):
+    """A faculty member's real tabbed line -- a template label with a value
+    after the tab -- is not the template's own text, so it still counts,
+    and only it reaches the fraction."""
+    _make_docx(["Name:\tJane Q. Doe", "Signature: \t\t\t\t"]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=1" in detail, detail
+    assert "template_tab_excluded=1" in detail, detail
+    assert fraction == pytest.approx(0.6 * (1 / 20)), detail
 
 
 def test_template_body_paragraph_texts_missing_file_raises(tmp_path, monkeypatch):
@@ -1768,3 +1809,135 @@ def test_t_bucket_ratio_denominator_is_the_unchanged_total_entries(tmp_path):
     assert "total=3" in detail, detail
     # 1/3, NOT 1/(3-1)=0.5 -- the mutant this test kills.
     assert "t_ratio=0.3333" in detail, detail
+
+
+# ------------------------------------------------------ #461 tracked changes
+#
+# Stage 6 writes enriched citations, institution locations and the research
+# summary as `<w:ins>` tracked insertions. python-docx's `.text` skips runs
+# that are not direct children of the paragraph, so the docx dimensions must
+# read the accepted-changes view (`doctor.shared._docx_text`) instead. Text
+# in a `<w:del>` (`w:delText`) is not part of that view.
+
+def _tracked(paragraph, text, kind="ins"):
+    """Append `text` to `paragraph` as a tracked insertion (or deletion)."""
+    from docx.oxml import OxmlElement
+    wrapper = OxmlElement(f"w:{kind}")
+    wrapper.set(qn("w:id"), "1")
+    wrapper.set(qn("w:author"), "PubMed Enrichment")
+    run = OxmlElement("w:r")
+    node = OxmlElement("w:t" if kind == "ins" else "w:delText")
+    node.text = text
+    run.append(node)
+    wrapper.append(run)
+    paragraph._p.append(wrapper)
+    return paragraph
+
+
+def test_python_docx_text_misses_tracked_insertion_fixture():
+    """Guards the fixtures below: the naive reader really is blind to them."""
+    doc = _make_docx([""])
+    _tracked(doc.paragraphs[0], "inserted\ttext")
+    assert doc.paragraphs[0].text == ""
+
+
+def test_sparse_tables_cell_filled_only_by_tracked_insertion_is_not_empty(tmp_path):
+    doc = _make_docx(tables=[[["a", ""], ["b", "c"]]])
+    _tracked(doc.tables[0].cell(0, 1).paragraphs[0], "enriched location")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_sparse_tables(tmp_path)
+    assert "empty_cells=0/4" in detail, detail
+
+
+def test_sparse_tables_cell_with_only_tracked_deletion_is_still_empty(tmp_path):
+    doc = _make_docx(tables=[[["a", ""], ["b", "c"]]])
+    _tracked(doc.tables[0].cell(0, 1).paragraphs[0], "removed text", kind="del")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_sparse_tables(tmp_path)
+    assert "empty_cells=1/4" in detail, detail
+
+
+def test_broken_format_tab_inside_tracked_insertion_paragraph_counted(tmp_path):
+    doc = _make_docx([""])
+    _tracked(doc.paragraphs[0], "research summary with a\traw tab")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=1" in detail, detail
+
+
+def test_broken_format_tab_inside_tracked_insertion_cell_counted(tmp_path):
+    doc = _make_docx(tables=[[["", "clean"]]])
+    _tracked(doc.tables[0].cell(0, 0).paragraphs[0], "location\tvalue")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_cells=1" in detail, detail
+
+
+def test_broken_format_tab_inside_tracked_deletion_not_counted(tmp_path):
+    doc = _make_docx([""])
+    _tracked(doc.paragraphs[0], "gone\ttext", kind="del")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=0" in detail, detail
+
+
+def test_broken_format_tab_stop_definition_is_not_a_tab_character(tmp_path):
+    """`<w:pPr><w:tabs><w:tab/>` declares a tab stop; it renders no tab."""
+    doc = _make_docx(["plain paragraph"])
+    doc.paragraphs[0].paragraph_format.tab_stops.add_tab_stop(1000)
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=0" in detail, detail
+
+
+def test_broken_format_prompt_echo_inside_tracked_insertion_counted(tmp_path):
+    doc = _make_docx([""])
+    _tracked(doc.paragraphs[0], "Please list here your publications")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=1" in detail, detail
+
+
+def test_broken_format_template_tab_line_split_across_insertion_still_excluded(tmp_path):
+    """The template exclusion compares the accepted-changes text, so a kept
+    template line whose text is partly a tracked insertion is still it."""
+    doc = _make_docx(["Signature:"])
+    _tracked(doc.paragraphs[0], "\t")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "template_tab_excluded=1" in detail, detail
+    assert "raw_tab_paragraphs=0" in detail, detail
+
+
+def test_broken_format_template_tab_cell_inside_insertion_still_excluded(tmp_path):
+    doc = _make_docx(tables=[[["", "clean"]]])
+    _tracked(doc.tables[0].cell(0, 0).paragraphs[0], "Project title:\t\t")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_cells=0" in detail, detail
+
+
+def test_broken_format_line_break_keeps_template_paragraph_match(tmp_path):
+    """A `<w:br/>` renders as a newline (as python-docx's `.text` does), which
+    whitespace normalisation folds into the template's space -- so a kept
+    template line broken across two lines is still the template line."""
+    doc = _make_docx([""])
+    run = doc.paragraphs[0].add_run("Date of")
+    run.add_break()
+    doc.paragraphs[0].add_run("Preparation:\t")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "template_tab_excluded=1" in detail, detail
+
+
+def test_broken_format_page_break_renders_no_whitespace(tmp_path):
+    """A page break adds no text (python-docx agrees), so it glues the words
+    and the line is no longer the template line."""
+    from docx.enum.text import WD_BREAK
+    doc = _make_docx([""])
+    run = doc.paragraphs[0].add_run("Date of")
+    run.add_break(WD_BREAK.PAGE)
+    doc.paragraphs[0].add_run("Preparation:\t")
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=1" in detail, detail

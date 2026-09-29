@@ -424,6 +424,9 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                     We couldn't read this document's text, so the time and cost above are a rough guess, not based on its length.
                   </p>
                 )}
+                <p className="text-sm text-gray-700 mt-3">
+                  You don't need to wait on this page. Processing continues if you close it, and your results will be in Run History below.
+                </p>
               </section>
             )}
 

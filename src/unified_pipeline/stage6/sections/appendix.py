@@ -59,9 +59,9 @@ the issue's own 20-CV batch (dev vs. this fix, over the farm's cached stage
 output for determinism, `T. APPENDIX` numbered-line count) shows what these
 three checks alone remove: about 30% of that batch's Appendix lines (65 of
 219). The remaining lines -- section headers, date stamps, CV titles, and
-other T-validation-confirmed shapes these three checks do not match -- are a
-disclosed, unaddressed residual: this change narrows #885, it does not close
-it. Stage 3b's own T-validation pass already flags the shapes these checks
+other T-validation-confirmed shapes these three checks do not match -- were
+that change's disclosed residual, handled by the two-signal check described
+after this paragraph. Stage 3b's own T-validation pass already flags the shapes these checks
 remove in free text ("[T-validation confirmed] Bare year '2021' is a
 structural marker"), but that string is free LLM text, not a drop predicate:
 the SAME tag also covers real, correctly-T-coded content (hobbies, a
@@ -73,6 +73,20 @@ against the full 126-CV #885 corpus (37,704 entries, every taxonomy code),
 none of the three shapes ever occurs outside T, so the gate is defense in
 depth, not the thing doing the precision work. See the comments above
 `_BARE_YEAR_RE`, `_STATUS_MARKER_WORDS` and `_TOC_LINE_RE`.
+
+The residual (#885) is closed for four shapes by `_confirmed_structural_reason`,
+which, unlike the three checks above, DOES read `classification_reasoning` --
+but never alone. An entry is dropped only when it is T-coded, stage 3b's
+`[T-validation confirmed]` reasoning names the kind in its first
+`_REASONING_LEAD_CHARS` characters (a section header, a document title, a date
+stamp, a table header row), AND the raw text has that kind's positive shape:
+a short digit-free label (`_is_section_label_text`), a "Curriculum Vitae"
+title (`_CV_TITLE_RE`), "Date/As of/Revised <date>" (`_DATE_STAMP_RE`), or a
+multi-cell digit-free row (`_is_label_only_row`). Either signal alone keeps the
+entry, so hobbies, reference lists, orphaned journal titles and organisation
+names that carry the same confirmation tag survive. It runs last, so no older
+check loses a drop to it. Reasons: `cv-title`, `date-stamp`, `section-header`,
+and the existing `column-header`.
 
 What was dropped is reported ONCE, as a single Word comment on the introductory
 paragraph, rather than per entry -- N comments saying so is itself noise.
@@ -138,6 +152,9 @@ DROP_TOC_LINE = "toc-line"
 DROP_NEAR_TEMPLATE_INSTRUCTION = "near-template-instruction"
 DROP_UNANSWERED_PROMPT = "unanswered-prompt"
 DROP_TEMPLATE_LABEL = "template-label"
+DROP_CV_TITLE = "cv-title"
+DROP_DATE_STAMP = "date-stamp"
+DROP_SECTION_HEADER = "section-header"
 DROP_REASONS = (
     DROP_BLANK,
     DROP_TEMPLATE_INSTRUCTION,
@@ -150,6 +167,9 @@ DROP_REASONS = (
     DROP_NEAR_TEMPLATE_INSTRUCTION,
     DROP_UNANSWERED_PROMPT,
     DROP_TEMPLATE_LABEL,
+    DROP_CV_TITLE,
+    DROP_DATE_STAMP,
+    DROP_SECTION_HEADER,
 )
 
 # The taxonomy code this whole module exists for (CODING_STANDARDS.md 8.2:
@@ -187,6 +207,101 @@ _STATUS_MARKER_WORDS = frozenset({
 # Matched on all 18 ToC lines in web181, the CV #885 was filed against, and
 # zero other entries in the #885 corpus.
 _TOC_LINE_RE = re.compile(r"^.{1,90}?[ \t]Page\s+\d+(?:[-–—]\d+)?\s*$")
+
+
+# #885 residual: four structural shapes that need TWO independent signals, so
+# neither the free-text reasoning nor the raw text carries the drop alone.
+# Signal 1: stage 3b's T-validation pass confirmed the entry structural AND
+# its reasoning names the kind in its opening words. Signal 2: the entry's raw
+# TEXT has the positive shape of that kind. "[T-validation confirmed]" alone
+# also tags real T content (hobbies, reference lists, orphaned journal titles),
+# which is why it is never sufficient here.
+_T_CONFIRMED_PREFIX = "[T-validation confirmed]"
+# How much of the reasoning, after the tag, may name the kind. The model
+# states the verdict first ("Section header 'X' ..."), so a kind word deep in
+# the prose (an explanation of why something is NOT a header) does not count.
+_REASONING_LEAD_CHARS = 100
+
+_MONTH = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|"
+    r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+)
+_MONTH_YEAR = rf"{_MONTH}\.?,?\s*(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s*)?(?:19|20)\d{{2}}"
+
+# "Date May 30th, 2020", "As of August 10, 2022", "*Revised June 29, 2018":
+# a stamp word, then nothing but a date.
+_DATE_STAMP_RE = re.compile(
+    rf"^\*?(?:date|as\s+of|revised|last\s+updated|updated|revision\s+date)\s*:?\s*{_MONTH_YEAR}$",
+    re.IGNORECASE,
+)
+
+# The CV's own title, up to two leading words ("Medico-legal Curriculum
+# Vitae"), an optional "& Bibliography", and optionally a date line under it.
+_CV_TITLE_RE = re.compile(
+    r"^(?:[\w.\-]+\s+){0,2}curriculum\s+vit(?:ae|a)"
+    r"(?:\s*(?:&|and)\s*bibliography)?"
+    rf"(?:\s*\n\s*(?:{_MONTH}\.?,?\s*)?(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s*)?(?:19|20)\d{{2}})?$",
+    re.IGNORECASE,
+)
+
+_SECTION_HEADER_MAX_WORDS = 10
+_NONE_WORD_RE = re.compile(r"\bnone\b", re.IGNORECASE)
+_HEADER_CELL_SPLIT_RE = re.compile(r"\s*\|\s*|\t+|\n|\s{2,}")
+_HEADER_ROW_MAX_CELL_WORDS = 8
+
+_KIND_REASONING = {
+    DROP_CV_TITLE: re.compile(r"(?:document|cv|curriculum vitae)[^.;]{0,25}(?:title|header)"),
+    DROP_DATE_STAMP: re.compile(r"date (?:stamp|line)|revision date"),
+    DROP_COLUMN_HEADER: re.compile(r"(?:column|table)?\s*header row|column header"),
+    DROP_SECTION_HEADER: re.compile(
+        # The verdict must be a SECTION header/label, not a looser
+        # "structural header" (which also described a name line, an
+        # institution name and a career-gap explanation in the corpus).
+        r"(?:sub)?section (?:header|heading|subheader|subheading|category|label|title)"
+    ),
+}
+
+
+def _is_section_label_text(text: str) -> bool:
+    """A short, digit-free, non-sentence line: what a section heading looks
+    like on the page. Trailing colon allowed; a terminal period is a sentence."""
+    body = text.strip()
+    if not body or body.endswith(".") or any(ch.isdigit() for ch in body):
+        return False
+    if _NONE_WORD_RE.search(body):  # "Patents (none)": says something about content
+        return False
+    return len(body.split()) <= _SECTION_HEADER_MAX_WORDS
+
+
+def _is_label_only_row(text: str) -> bool:
+    """A multi-cell row whose every cell is a short, digit-free label -- the
+    shape of a table header the vocabulary heuristic (`_is_column_header_row`)
+    missed. Any digit means data (a year, a count), so the row is kept."""
+    cells = [c for c in _HEADER_CELL_SPLIT_RE.split(text) if c and c.strip()]
+    if len(cells) < 2 or any(ch.isdigit() for ch in text):
+        return False
+    return all(len(c.split()) <= _HEADER_ROW_MAX_CELL_WORDS for c in cells)
+
+
+_KIND_SHAPE = {
+    DROP_CV_TITLE: lambda t: bool(_CV_TITLE_RE.match(t)),
+    DROP_DATE_STAMP: lambda t: bool(_DATE_STAMP_RE.match(t)),
+    DROP_COLUMN_HEADER: _is_label_only_row,
+    DROP_SECTION_HEADER: _is_section_label_text,
+}
+
+
+def _confirmed_structural_reason(text: str, reasoning: str | None) -> str | None:
+    """The `DROP_*` reason for a T entry that BOTH stage 3b's T-validation
+    confirmed as structural of a named kind AND whose raw text has that kind's
+    positive shape (#885 residual), else None."""
+    if not reasoning or not reasoning.startswith(_T_CONFIRMED_PREFIX):
+        return None
+    lead = reasoning[len(_T_CONFIRMED_PREFIX):].lstrip()[:_REASONING_LEAD_CHARS].lower()
+    for reason, kind_re in _KIND_REASONING.items():
+        if kind_re.search(lead) and _KIND_SHAPE[reason](text.strip()):
+            return reason
+    return None
 
 
 class UnmappedEntry(TypedDict, total=False):
@@ -458,7 +573,10 @@ def build_appendix_diversion_warnings(
 
 
 def _appendix_drop_reason(
-    text: str, rendered: str, taxonomy_code: str | None = None
+    text: str,
+    rendered: str,
+    taxonomy_code: str | None = None,
+    reasoning: str | None = None,
 ) -> str | None:
     """The `DROP_*` reason *text* stays out of the appendix, or None to keep it.
 
@@ -471,6 +589,10 @@ def _appendix_drop_reason(
     (which skips those three checks), so a caller checking only text shape --
     `test_stage6_appendix_header_row_filter.py`'s unit tests among them --
     is unaffected.
+
+    *reasoning* (the entry's `classification_reasoning`) feeds the #885
+    residual check, `_confirmed_structural_reason`, which is likewise T-only
+    and additionally needs the text's own positive shape.
     """
     if not text.strip():
         return DROP_BLANK
@@ -496,6 +618,10 @@ def _appendix_drop_reason(
         return DROP_UNANSWERED_PROMPT
     if is_template_label_line(text):
         return DROP_TEMPLATE_LABEL
+    # Last, so every older check keeps the drop it already claimed; only
+    # entries nothing else caught reach the two-signal residual test.
+    if taxonomy_code == _APPENDIX_TAXONOMY_CODE:
+        return _confirmed_structural_reason(text, reasoning)
     return None
 
 
@@ -509,7 +635,12 @@ def _filter_unmapped_entries(
     for entry in entries:
         text = entry.get("text") or ""
         rendered = _clean_inline_tabs(text)
-        reason = _appendix_drop_reason(text, rendered, entry.get("taxonomy_code"))
+        reason = _appendix_drop_reason(
+            text,
+            rendered,
+            entry.get("taxonomy_code"),
+            entry.get("classification_reasoning"),
+        )
         if reason is None:
             kept.append((entry, rendered))
         else:

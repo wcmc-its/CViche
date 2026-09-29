@@ -19,7 +19,7 @@ Document()/add_paragraph/add_table and saved to tmp_path only where a real
 path is required (extract_unified_elements / extract_docx_structure take a
 path, not a Document).
 
-Untestable: main() (argparse + sys.exit + file I/O side effects) and the
+Untestable: the
 `if __name__ == '__main__'` guard -- no network/corpus fixture is available
 and covering it would only re-test print()/json.dump plumbing already
 exercised indirectly through extract_docx_structure/create_simplified_layout_json.
@@ -27,6 +27,7 @@ exercised indirectly through extract_docx_structure/create_simplified_layout_jso
     python3 -m pytest src/unified_pipeline/tests/test_docx_structure_extractor_behaviour.py -p no:cacheprovider
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -423,6 +424,48 @@ def test_split_merged_cells_two_line_aligned_cells_not_split():
     ]
 
     assert split_merged_cells_in_row(row, min_chars=50, min_newlines=2) == [row]
+
+
+def _all_lines(rows):
+    return sorted(
+        line.strip() for r in rows for c in r for line in c["text"].split("\n") if line.strip()
+    )
+
+
+def test_split_merged_cells_date_column_never_drops_surplus_lines_612():
+    # #612 shape (invented text): cell 0 holds a blank paragraph, so the \n\n
+    # pass claims max_splits=2 from cell 0 alone; the aligned-line pass never
+    # runs. The 4-line title cell is unsplit and the 4-line date cell is
+    # distributed by the date-column fallback, which used to emit only the
+    # first max_splits (2) dates and drop the other two.
+    row = [
+        {"text": "Alpha unit one\nAlpha unit two\n\nAlpha unit three", "row": 0, "col": 0},
+        {"text": "Rank A\nRank B\nRank C\nRank D", "row": 0, "col": 1},
+        {"text": "2011 - Present\n2009 - 2011\n2007 - 2009\n2000 - Present", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert _all_lines(out) == _all_lines([row])
+    assert [r[2]["text"] for r in out] == [
+        "2011 - Present",
+        "2009 - 2011\n2007 - 2009\n2000 - Present",
+    ]
+
+
+def test_split_merged_cells_aligned_date_column_longer_than_target_keeps_surplus_612():
+    # Aligned-line pass (two 3-line cells => target 3) beside a 4-line date
+    # column: the old `padded_lines[:target_count]` truncation dropped line 4.
+    row = [
+        {"text": "a\nb\nc", "row": 0, "col": 0},
+        {"text": "d\ne\nf", "row": 0, "col": 1},
+        {"text": "2001\n2002\n2003\n2004", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert _all_lines(out) == _all_lines([row])
+    assert [r[2]["text"] for r in out] == ["2001", "2002", "2003\n2004"]
 
 
 # --------------------------------------------------------------------------
@@ -1788,3 +1831,22 @@ def test_unified_unflagged_table_element_has_no_header_row_key(tmp_path):
     _build_unified_fixture_docx(docx_path)
     elements = extract_unified_elements(str(docx_path))["elements"]
     assert all("header_row" not in e for e in elements)
+
+
+def test_main_writes_both_json_files_as_readable_utf8(tmp_path, monkeypatch):
+    from unified_pipeline.core import docx_structure_extractor as mod
+
+    doc = Document()
+    doc.add_paragraph("José Muñoz")
+    docx_path = tmp_path / "cv.docx"
+    doc.save(str(docx_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["docx_structure_extractor.py", str(docx_path)])
+
+    mod.main()
+
+    for name in ("cv_structure.json", "cv_layout.json"):
+        raw = (tmp_path / name).read_bytes().decode("utf-8")
+        assert "José Muñoz" in raw
+        assert "\\u00e9" not in raw
+        assert json.loads(raw)

@@ -116,7 +116,7 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'Q4B': frozenset({'end_date', 'journal_name', 'role', 'start_date'}),
     'Q4C': frozenset({'end_date', 'journal_name', 'start_date'}),
     'Q4D': frozenset({'journal_name', 'year'}),
-    'R': frozenset({'date', 'event_name', 'location', 'title'}),
+    'R': frozenset({'date', 'event_name', 'location', 'role', 'title'}),
     'S1': frozenset({'authors', 'doi', 'issue', 'journal', 'pages', 'pmcid', 'pmid', 'title', 'volume', 'year'}),
     'S2': frozenset({'authors', 'doi', 'issue', 'journal', 'pages', 'pmcid', 'pmid', 'title', 'volume', 'year'}),
     'S3': frozenset({'authors', 'publisher', 'title', 'year'}),

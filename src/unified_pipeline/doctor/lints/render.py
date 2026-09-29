@@ -682,7 +682,36 @@ def lint_pipe_leaks(blocks: List[Tuple[str, str]]) -> List[Dict]:
 HONORS_NAME_BLOB_CHARS = 150
 
 
-_SENTENCE_BOUNDARY_RE = re.compile(r"\.\s+[A-Z]")
+# A period only ends a sentence when it is not the dot of a "Dr." title or of
+# a single-letter initial ("Robert D. & Alma W. Moreton ...", #889).
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<!\bDr)(?<!\b[A-Z])\.\s+[A-Z]")
+
+
+# Orgs of at most this many characters are not compared against the name
+# (too short to be a reliable fabrication signal).
+HONORS_ORG_MIN_CHARS = 8
+
+
+# What may remain of a name once its org is removed for the org to count as
+# "fabricated from the name" (#889): only an award word and/or digits (a year).
+# Stripped with sub() and tested for emptiness, never fullmatch() over a
+# starred alternation -- that shape backtracks exponentially on runs of years.
+_AWARD_ORG_LEFTOVER_RE = re.compile(
+    r"award|prize|fellow(?:ship)?|scholarship|list"
+    r"|\d+|[\s,.;:()\-\u2013\u2014/&]+",
+    re.IGNORECASE)
+
+
+def _org_fabricated_from_name(org: str, name: str) -> bool:
+    """True when `name` is `org` plus nothing but an award word and/or a
+    year -- the org column was copied out of the name (#229/#889). An award
+    merely NAMED AFTER its grantor ("<org> Postdoc Travel Award") has other
+    words left over and is legitimate."""
+    org_n, name_n = _norm(org), _norm(name)
+    if org_n not in name_n:
+        return False
+    leftover = name_n.replace(org_n, " ", 1)
+    return not _AWARD_ORG_LEFTOVER_RE.sub("", leftover)
 
 
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
@@ -776,7 +805,8 @@ def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
             flag(rn, f"empty date but year in name: {name[:80]}")
         if org in _US_STATE_ABBREVS:
             flag(rn, f"organization is a bare state abbrev: '{org}'")
-        elif org and len(org) > 8 and _norm(org) in _norm(name):
+        elif (org and len(org) > HONORS_ORG_MIN_CHARS
+                and _org_fabricated_from_name(org, name)):
             flag(rn, f"organization duplicated in name: {org[:60]}")
     return _HonorsTableShape(defects, defective_rows, non_blank_rows)
 
@@ -815,7 +845,7 @@ def lint_table_shape(tables: list[list[list[str]]]) -> list[dict]:
         findings.append(_finding(
             "table_shape", "INFO",
             f"honors table: {len(shape.defective_rows)}/{shape.non_blank_rows} "
-            f"row(s) malformed ({len(shape.defects)} defect(s)) — #229",
+            f"row(s) malformed ({len(shape.defects)} defect(s))",
             shape.defects[:6]))
     return findings
 

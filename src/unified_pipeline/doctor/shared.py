@@ -9,6 +9,7 @@ Nothing here imports `run_doctor`. That is what keeps the dependency a straight
 line -- run_doctor and every lint module depend on this, and it depends on
 neither.
 """
+import functools
 import re
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -48,6 +49,28 @@ _LINE_SENTINEL = "\x00"
 def _long_word_tokens(text) -> set:
     """5+-letter token set for one string (lints 5/8 render-overlap checks)."""
     return set(_RENDER_TOKEN_RE.findall(_norm(text)))
+
+
+@functools.cache
+def _template_haystack() -> str:
+    """Squashed text of every paragraph and table cell of the pristine WCM
+    template, sentinel-joined like the output haystack (#744). A piece found
+    here is the template's own scaffolding, not faculty content, so finding it
+    in a rendered document says nothing about THIS entry rendering. The path
+    is quality_score's (one template, one place); imported lazily because
+    quality_score imports this module.
+    """
+    from docx import Document
+    from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH
+    doc = Document(_TEMPLATE_DOCX_PATH)
+    texts = [p.text for p in doc.paragraphs]
+    texts += [c.text for t in doc.tables for r in t.rows for c in r.cells]
+    return _LINE_SENTINEL.join(s for s in map(_squash, texts) if s)
+
+
+def _piece_in_template(piece: str) -> bool:
+    """Whether a squashed entry piece occurs inside one template line."""
+    return piece in _template_haystack()
 
 
 # WCM output section headers come letter-prefixed ("T. APPENDIX") or as plain
@@ -110,16 +133,40 @@ def _haystacks(blocks: list[tuple[str, str]]) -> Haystack:
 # function, as run_doctor's `_get_docx_document` does, so the JSON-only lints
 # still import cleanly where the extra is absent.
 
-def _docx_text(element) -> str:
+def _docx_text(element, *, with_whitespace: bool = False) -> str:
     """All ``w:t`` text under a docx element in document order. Unlike
     python-docx's ``.text``, this INCLUDES text inside tracked-change ``<w:ins>``
     runs and EXCLUDES ``<w:delText>`` — the accepted-changes view a reader sees.
     Stage 6 inserts LLM-enriched content (research summaries, reformatted
     citations) as tracked INSERTIONS, so a reader that ignores ``<w:ins>``
     under-reports what actually rendered and false-flags content as 'unrendered'
-    (issue #249: M1 summaries and reformatted citations read as dropped)."""
+    (issue #249: M1 summaries and reformatted citations read as dropped).
+
+    ``with_whitespace=True`` also renders the run-level whitespace elements the
+    way python-docx's ``.text`` does: ``<w:tab/>`` as ``"\\t"`` and a text-wrapping
+    ``<w:br/>`` or ``<w:cr/>`` as ``"\\n"`` (#461: the scorer's raw-tab check and
+    its template-paragraph match need them; the lints do not, so it is off by
+    default). A ``<w:tab/>`` inside ``<w:pPr><w:tabs>`` is a tab STOP
+    definition, not a character, and any element inside a ``<w:del>`` is
+    deleted content; both are skipped."""
     from docx.oxml.ns import qn
-    return "".join(node.text or "" for node in element.iter(qn("w:t")))
+    if not with_whitespace:
+        return "".join(node.text or "" for node in element.iter(qn("w:t")))
+    w_t, w_r, w_del = qn("w:t"), qn("w:r"), qn("w:del")
+    whitespace = {qn("w:tab"): "\t", qn("w:br"): "\n", qn("w:cr"): "\n"}
+    w_type = qn("w:type")
+    parts = []
+    for node in element.iter(w_t, *whitespace):
+        if node.tag == w_t:
+            parts.append(node.text or "")
+            continue
+        run = node.getparent()
+        if run.tag != w_r or run.getparent().tag == w_del:
+            continue
+        if node.tag == qn("w:br") and node.get(w_type) not in (None, "textWrapping"):
+            continue  # page / column break: python-docx renders no text
+        parts.append(whitespace[node.tag])
+    return "".join(parts)
 
 
 def _cell_text(cell) -> str:
