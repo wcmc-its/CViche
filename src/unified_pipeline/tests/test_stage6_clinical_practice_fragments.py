@@ -537,5 +537,57 @@ def test_negative_control_single_part_text_unchanged():
     assert texts == [HEADING_TEXT, PIPE_COLUMN_RENDERED, SENTINEL_TEXT]
 
 
+def _ilvl(para):
+    """The paragraph's numPr ilvl, or None when it has no list properties."""
+    num_pr = para._p.pPr.numPr if para._p.pPr is not None else None
+    if num_pr is None or num_pr.ilvl is None:
+        return None
+    return int(num_pr.ilvl.val)
+
+
+def test_first_part_is_level_0_and_later_parts_are_level_1():
+    """#984: a title / hours / dates entry keeps its facts under the title."""
+    scratch = _scratch_document()
+    scratch.gen._insert_multiline_as_bullets(
+        scratch.insert_idx, "Clinician, Clinic\t8 hours per week\t12/2016 to present",
+        entry=None, add_blank_before=True)
+
+    paras = scratch.gen.doc.paragraphs
+    levels = {p.text: _ilvl(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
+    assert levels == {"Clinician, Clinic": 0, "8 hours per week": 1, "12/2016 to present": 1}
+
+
+def test_two_part_entry_is_level_0_title_and_level_1_detail():
+    """A 2-part entry has a title and one detail; the detail is still level 1."""
+    scratch = _scratch_document()
+    scratch.gen._insert_multiline_as_bullets(
+        scratch.insert_idx, "Title\tdetail", entry=None, add_blank_before=False)
+
+    paras = scratch.gen.doc.paragraphs
+    levels = {p.text: _ilvl(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
+    assert levels == {"Title": 0, "detail": 1}
+
+
+def test_four_part_entry_keeps_every_detail_at_level_1():
+    """web24/web40 carry 4+ part entries; only the title is level 0."""
+    scratch = _scratch_document()
+    scratch.gen._insert_multiline_as_bullets(
+        scratch.insert_idx, "Staff Radiologist\tMusculoskeletal\t14,000 studies\t500 procedures",
+        entry=None, add_blank_before=False)
+
+    paras = scratch.gen.doc.paragraphs
+    levels = {p.text: _ilvl(p) for p in paras if p.text and p.text not in (HEADING_TEXT, SENTINEL_TEXT)}
+    assert levels == {"Staff Radiologist": 0, "Musculoskeletal": 1, "14,000 studies": 1, "500 procedures": 1}
+
+
+def test_single_part_entry_stays_level_0():
+    scratch = _scratch_document()
+    scratch.gen._insert_multiline_as_bullets(
+        scratch.insert_idx, "Attending Physician", entry=None, add_blank_before=False)
+
+    para = next(p for p in scratch.gen.doc.paragraphs if p.text == "Attending Physician")
+    assert _ilvl(para) == 0
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
