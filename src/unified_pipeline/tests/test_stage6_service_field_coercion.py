@@ -917,6 +917,18 @@ def test_q1_rerouted_entry_names_its_organization_by_the_original_schema(tmp_pat
     assert row == ["Fictional Gazette WoW", "Section Editor", "2022-Present"]
 
 
+@pytest.mark.parametrize("empty", ["", None])
+def test_q1_empty_organization_falls_through_to_a_filled_alias(tmp_path, empty):
+    """An empty `organization` does not shadow a filled alias field."""
+    row = _q1_row(
+        tmp_path,
+        _q1_entry("2022-present Gazette\tSection Editor", organization=empty,
+                  journal_name="Fictional Gazette WoW", role="Section Editor",
+                  start_date="2022", end_date="present"),
+        "Fictional Gazette")
+    assert row[0] == "Fictional Gazette WoW"
+
+
 def test_q1_organization_field_wins_over_the_aliases(tmp_path):
     row = _q1_row(
         tmp_path,
@@ -942,6 +954,8 @@ def test_q1_organization_field_wins_over_the_aliases(tmp_path):
     ("Fictional 2001- Society Treasurer", "Treasurer", "2001", None, "Fictional Society"),
     # Punctuation the removal leaves at the edges of a segment is trimmed.
     ("Fictional Society, Treasurer.", "Treasurer", None, None, "Fictional Society"),
+    # The role is removed whatever its case in the entry text.
+    ("Fictional Society PRESIDENT", "President", None, None, "Fictional Society"),
     # No role, no dates, no separators: the text is returned as is.
     ("Fictional Society", "", None, None, "Fictional Society"),
     (None, "Treasurer", None, None, ""),
