@@ -259,3 +259,72 @@ def test_only_blank_entries_still_skip_the_llm_call(monkeypatch):
 
     assert prompts == []
     assert result["last_name"] == ""
+
+
+def _window_lines(prompts):
+    return prompts[0].split("Content:\n", 1)[1].split("\n\nReturn JSON", 1)[0].split("\n")
+
+
+def test_entry_at_the_char_cap_is_long_and_one_under_is_short(monkeypatch):
+    """Pins the `<` boundary: a 499-char entry is a header-style line (kept
+    as-is, long entries skipped); a 500-char one is long."""
+    cap = owner_name.OWNER_NAME_ENTRY_MAX_CHARS
+    prompts = []
+    monkeypatch.setattr(owner_name, "call_llm", _name_from_prompt_llm(prompts))
+
+    owner_name.extract_cv_owner_name(
+        "web000", [{"text": "s" * (cap - 1)}, {"text": "L" * cap}]
+    )
+    assert _window_lines(prompts) == ["s" * (cap - 1)]
+
+    prompts.clear()
+    owner_name.extract_cv_owner_name("web000", [{"text": "L" * cap}, {"text": "M" * cap}])
+    assert _window_lines(prompts) == ["L" * cap, "M" * cap]
+
+
+def test_window_reads_at_most_the_first_twelve_entries(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(owner_name, "call_llm", _name_from_prompt_llm(prompts))
+    entries = [{"text": f"Line{i}"} for i in range(owner_name.OWNER_NAME_WINDOW_ENTRIES + 3)]
+
+    owner_name.extract_cv_owner_name("web000", entries)
+
+    # the prompt itself is further capped to 10 lines (first_entries[:10]);
+    # entries 12+ must not be reachable through the window either way.
+    assert _window_lines(prompts) == [f"Line{i}" for i in range(10)]
+    assert owner_name._owner_name_window(entries) == [
+        f"Line{i}" for i in range(owner_name.OWNER_NAME_WINDOW_ENTRIES)
+    ]
+
+
+def test_narrative_body_name_outranks_side_channel_name(monkeypatch, tmp_path):
+    """Precedence change from #457, pinned. On dev a narrative CV had an empty
+    window, skipped the body tier, and went straight to the #456 side channel.
+    Now the body tier runs first on the truncated prose, and any last_name it
+    returns means the side channel is never consulted."""
+    body_person = "Ardwin Selcombe"  # e.g. a mentor named in the prose
+    header_person = "Marisol Trenholt"  # the real owner, in the page header
+    prompts = []
+
+    def fake(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        prompts.append(prompt)
+        person = body_person if body_person in prompt else header_person
+        first, last = person.split()
+        return _llm_result(json.dumps(
+            {"first_name": first, "last_name": last, "full_name": person}
+        ))
+
+    docx = tmp_path / "cv.docx"
+    docx.write_bytes(b"only Path.is_file() is checked")
+    monkeypatch.setattr(owner_name, "call_llm", fake)
+    monkeypatch.setattr(
+        owner_name, "extract_owner_side_channel",
+        lambda path: {"sdt_lines": [], "header_lines": [header_person], "footer_lines": []},
+    )
+    entries = [{"text": "Trained under " + body_person + _NARRATIVE_FILLER * 6}]
+
+    result = owner_name.extract_cv_owner_name("web000", entries, docx_path=str(docx))
+
+    assert result["full_name"] == body_person
+    assert len(prompts) == 1, "the side channel is not reached once the body tier names anyone"
