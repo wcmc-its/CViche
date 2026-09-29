@@ -391,6 +391,48 @@ def test_raw_text_fallback_role_is_not_cut_at_100_characters():
     assert [row.cells[0].text for row in table.rows[1:]] == [text]
 
 
+def _o_rows(entry):
+    gen = _real_template_generator()
+    gen._fill_leadership([entry])
+    table = gen._find_table_after_paragraph(gen._find_paragraph_exact(CANONICAL_HEADER))
+    return [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+
+
+def _table_row_entry(text, **fields):
+    return {"text": text, "extracted_fields": fields, "taxonomy_code": "O",
+            "element_type": "table_row", "element_idx_start": 7, "element_idx_end": 7}
+
+
+class TestWrappedRowRendersAsOneRecord:
+    """#987: one table row whose institution cell wraps is one role."""
+
+    WRAPPED = ("Director, Zorblax Studies | Quuxville General Hospital\n"
+               "Quuxville, Ohio | Sept. 1999 -\nJune 2010")
+
+    def test_wrapped_row_is_one_row_with_every_token(self):
+        rows = _o_rows(_table_row_entry(self.WRAPPED))
+        assert len(rows) == 1
+        text = " ".join(rows[0])
+        for token in self.WRAPPED.replace("|", " ").split():
+            assert token in text
+
+    def test_stacked_row_still_splits(self):
+        # two records stacked in each cell: equal line counts, not wrapped
+        stacked = ("Chair, Alpha Board\nChair, Beta Board | 2001-2003\n2004-2006")
+        rows = _o_rows(_table_row_entry(stacked))
+        assert len(rows) == 2
+
+    def test_long_stacked_list_with_unequal_columns_still_splits(self):
+        names = "\n".join(f"Committee {i}" for i in range(6))
+        rows = _o_rows(_table_row_entry(f"{names} | 2001\n2002"))
+        assert len(rows) > 1
+
+    def test_entry_without_table_row_element_is_unchanged(self):
+        entry = _table_row_entry(self.WRAPPED)
+        entry["element_type"] = "paragraph"
+        assert len(_o_rows(entry)) > 1
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
