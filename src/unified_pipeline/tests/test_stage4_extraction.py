@@ -694,6 +694,95 @@ def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
     assert rule in prompt
 
 
+# --- #985: sub-heading context reaches the stage 4 prompt ---------------------
+
+#: sha256 of build_extraction_prompt for two unstamped entries on origin/dev
+#: (measured before the change); pins the byte-identical-prompt contract.
+_UNSTAMPED_PROMPT_SHA256 = {
+    "M2A": "86ea3b1974cae4a7cbc7d3a7c07072581cd1939f01040fff6cb2bf26a98b1c10",
+    "K1": "ef35c4fa2a36b6a8fda487c77bf95d130dbda5f3c561c13cf074ad32546a58b7",
+}
+
+
+def _prompt(code, entries):
+    return extraction.build_extraction_prompt(entries, extraction.get_field_schema(code), code)
+
+
+@pytest.mark.parametrize("code", ["M2A", "K1"])
+def test_an_unstamped_batch_prompt_is_byte_identical_to_origin_dev(code):
+    import hashlib
+    prompt = _prompt(code, [{"text": "Alpha course"}, {"text": "Beta course"}])
+    assert hashlib.sha256(prompt.encode()).hexdigest() == _UNSTAMPED_PROMPT_SHA256[code]
+
+
+def test_an_empty_context_heading_is_treated_as_unstamped():
+    plain = _prompt("K1", [{"text": "Alpha course"}])
+    assert _prompt("K1", [{"text": "Alpha course", "context_heading": ""}]) == plain
+
+
+def test_a_stamped_entry_shows_under_and_the_instruction_appears_once_after_the_entries():
+    prompt = _prompt("K1", [{"text": "Alpha course", "context_heading": "Course Director"},
+                            {"text": "Beta course"}])
+    assert "[Entry 0] (under: Course Director):\nAlpha course" in prompt
+    assert "[Entry 1]:\nBeta course" in prompt            # unstamped sibling untouched
+    assert prompt.count(extraction.CONTEXT_HEADING_INSTRUCTION) == 1
+    assert prompt.index("Beta course") < prompt.index("10. **Sub-heading context**")
+    assert prompt.index("10. **Sub-heading context**") < prompt.index("Return JSON")
+
+
+def test_the_instruction_follows_the_code_specific_rules_block():
+    prompt = _prompt("M2A", [{"text": "Alpha", "context_heading": "Funded"}])
+    assert prompt.index("- notes = a labelled remark") < prompt.index("10. **Sub-heading context**")
+
+
+def test_removing_the_stamp_and_instruction_restores_the_unstamped_prompt_exactly():
+    stamped = _prompt("M2A", [{"text": "Alpha", "context_heading": "Funded"}, {"text": "Beta"}])
+    restored = stamped.replace(" (under: Funded)", "").replace(extraction.CONTEXT_HEADING_INSTRUCTION, "")
+    assert restored == _prompt("M2A", [{"text": "Alpha"}, {"text": "Beta"}])
+
+
+def test_the_instruction_says_fill_missing_never_override_and_do_not_misplace():
+    text = extraction.CONTEXT_HEADING_INSTRUCTION
+    assert "when the entry text itself omits them" in text
+    assert "Never override what the entry text states" in text
+    assert "Do not copy X into a field it does not describe" in text
+    # The live A/B (#985): "Co-directed" rows became the heading's "Course
+    # Director", and an activity-kind heading was copied as a role.
+    assert "even as a verb or a qualifier, that role wins over X" in text
+    assert '"Co-directed with ..." under "Course Director" is role "Co-Director"' in text
+    assert "never copy X verbatim when it only names a kind of activity" in text
+
+
+def test_extract_fields_from_mapped_entries_sends_a_stamped_entrys_heading(monkeypatch):
+    """Wire: a `context_heading` already on the entry (process_cv stamps it, over
+    the unfiltered list) survives batching and reaches the prompt. The
+    orchestrator itself does not stamp: it only ever sees the filtered list."""
+    _stub_owner(monkeypatch)
+    sent = []
+
+    def fake_llm(stage, messages, **kwargs):
+        sent.append(messages[-1]["content"])
+        return {"content": '{"entries": []}', "cost": 0.0, "total_tokens": 0}
+
+    monkeypatch.setattr(extraction, "call_llm", fake_llm)
+    entries = [
+        {"text": "Survey course, lecturer", "taxonomy_code": "K1", "hierarchy": ["Teaching"], "element_idx_start": 1,
+         "context_heading": "Northgate University"},
+        {"text": "Other course", "taxonomy_code": "K2", "hierarchy": ["Elsewhere"], "element_idx_start": 2},
+        {"text": "Northgate University:", "taxonomy_code": "T", "hierarchy": ["Teaching"], "element_idx_start": 0},
+        {"text": "Third course", "taxonomy_code": "K3", "hierarchy": ["Teaching"], "element_idx_start": 3},
+    ]
+    before = json.dumps(entries)
+    extraction.extract_fields_from_mapped_entries(entries, workers=1)
+    assert json.dumps(entries) == before                     # caller's list untouched
+    k1 = [p for p in sent if "**Classification**: K1" in p]
+    assert k1 and "(under: Northgate University):\nSurvey course, lecturer" in k1[0]
+    assert extraction.CONTEXT_HEADING_INSTRUCTION in k1[0]
+    for code in ("K2", "K3"):
+        other = [p for p in sent if f"**Classification**: {code}" in p]
+        assert other and "(under:" not in other[0] and extraction.CONTEXT_HEADING_INSTRUCTION not in other[0]
+
+
 # ---------------------------------------------------------------------------
 # #759 -- the field schema an entry is extracted under is its OWN code's
 # ---------------------------------------------------------------------------
