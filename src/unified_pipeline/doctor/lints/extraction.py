@@ -23,6 +23,7 @@ from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.core.template_boilerplate import (
     _MIN_EXACT_LEN,
     is_near_template_instruction,
@@ -356,7 +357,8 @@ def unrouted_code_counts(stage3b: dict) -> dict[str, int]:
     for e in stage3b.get("entries", []):
         if e.get("element_type") in ("header", "break"):
             continue
-        code = e.get("taxonomy_code")
+        # Stage 6 renders a retired code under its live one (#291).
+        code = live_taxonomy_code(e.get("taxonomy_code"))
         if not code or code == "T" or code == "M1":
             # M1 is normally routed; it only falls through when the Stage
             # 4.5 summary itself didn't render, a distinct, already-covered

@@ -463,39 +463,6 @@
       }
     },
 
-    "M4A_DEPRECATED": {
-      "description": "Interventional Clinical Trials",
-      "extraction_mode": "minimal",
-      "fields": {
-        "nct_number": {"extract": true, "category": "enrichment"},
-        "trial_title": {"extract": true, "category": "template"},
-        "role": {"extract": true, "category": "template"},
-        "sponsor": {"extract": true, "category": "template"},
-        "start_date": {"extract": true, "category": "template"},
-        "end_date": {"extract": true, "category": "template"},
-        "phase": {"extract": false, "category": "optional"},
-        "intervention": {"extract": false, "category": "optional"},
-        "status": {"extract": false, "category": "optional"},
-        "narrative": {"extract": false, "category": "optional"}
-      }
-    },
-
-    "M4B": {
-      "description": "Observational Studies",
-      "extraction_mode": "minimal",
-      "fields": {
-        "nct_number": {"extract": true, "category": "enrichment"},
-        "study_title": {"extract": true, "category": "template"},
-        "role": {"extract": true, "category": "template"},
-        "sponsor": {"extract": true, "category": "template"},
-        "start_date": {"extract": true, "category": "template"},
-        "end_date": {"extract": true, "category": "template"},
-        "study_type": {"extract": false, "category": "optional"},
-        "status": {"extract": false, "category": "optional"},
-        "narrative": {"extract": false, "category": "optional"}
-      }
-    },
-
     "N1": {
       "description": "Mentoring Leadership/Programs",
       "wcm_section": "MENTORING - Leadership",

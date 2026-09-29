@@ -109,3 +109,16 @@ def test_reasoning_corrector_output_outside_v7_is_quarantined_at_stage_4():
     assert out[1]["taxonomy_code"] == "T"
     assert out[1]["original_taxonomy_code"] == "K"
     assert rejected == {"'K'": 1}
+
+
+def test_a_retired_code_from_stored_3b_output_is_recoded_not_quarantined(caplog):
+    """#291: a step-4 retry of a run made before M4 was retired still carries
+    M4A. It files as current funding, keeping its original code, and is not
+    counted or logged as invalid."""
+    with caplog.at_level(logging.WARNING):
+        [out], rejected = quarantine_invalid_taxonomy_codes([{"taxonomy_code": "M4A", "text": "x"}])
+    assert out["taxonomy_code"] == "M2A"
+    assert out["taxonomy_code_original"] == "M4A"
+    assert "taxonomy_code_quarantine_reason" not in out
+    assert rejected == {}
+    assert caplog.records == []

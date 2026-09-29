@@ -38,8 +38,13 @@ _PENDING_STATUS_RE = re.compile(
 )
 # "Review completed" / "Site visit completed" name a step of the review process,
 # not an ended award, so a "completed" that follows those words is no bucket (#982).
+# Likewise "Enrollment completed" / "Closed to accrual" name a stage of a clinical
+# trial that is still running; only its end date may move it to M2B (#291).
 _COMPLETED_STATUS_RE = re.compile(
-    r'(?<!review )(?<!visit )\bcompleted?\b|\bclosed\b|\bexpired\b')
+    r'(?<!review )(?<!visit )(?<!enrollment )(?<!enrolment )(?<!accrual )(?<!recruitment )'
+    r'\bcompleted?\b'
+    r'|\bclosed\b(?!\s+to\s+(?:accrual|enrollment|enrolment|recruitment|new\s+patients))'
+    r'|\bexpired\b')
 # A heading that names a current grant as well as a pending or completed one
 # ("Current and Pending Support", "Past and Present") does not say which bucket
 # one grant under it belongs in (#981).

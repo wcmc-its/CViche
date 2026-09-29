@@ -398,7 +398,7 @@ TAXONOMY_TO_SECTION = MappingProxyType({
     'M2B': 'completed_grants',
     'M2C': 'pending_grants',
     'M2D': 'patents',
-    # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C based on status
+    # NOTE: M4 clinical trial codes removed - clinical trials file as M2A (no end date) or M2B (ended) (#291)
 
     # Mentoring
     'N1': 'mentoring_leadership',

@@ -698,8 +698,10 @@ def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
 
 #: sha256 of build_extraction_prompt for two unstamped entries on origin/dev
 #: (measured before the change); pins the byte-identical-prompt contract.
+#: M2A re-measured for #291, whose one added line (the clinical-trial field
+#: mapping in the grant instructions) is the only difference from before.
 _UNSTAMPED_PROMPT_SHA256 = {
-    "M2A": "86ea3b1974cae4a7cbc7d3a7c07072581cd1939f01040fff6cb2bf26a98b1c10",
+    "M2A": "7d08216a2d2936f486270c1a275265d2dc0a207e0137b44aa98e1130cd661232",
     "K1": "ef35c4fa2a36b6a8fda487c77bf95d130dbda5f3c561c13cf074ad32546a58b7",
 }
 
@@ -728,6 +730,17 @@ def test_a_stamped_entry_shows_under_and_the_instruction_appears_once_after_the_
     assert prompt.count(extraction.CONTEXT_HEADING_INSTRUCTION) == 1
     assert prompt.index("Beta course") < prompt.index("10. **Sub-heading context**")
     assert prompt.index("10. **Sub-heading context**") < prompt.index("Return JSON")
+
+
+def test_grant_instructions_map_clinical_trial_fields_onto_grant_fields():
+    # #291: trials file as M2A/M2B, so the grant prompt must say where the
+    # NCT number and sponsor go -- a field the grant table does not name is
+    # dropped at render.
+    prompt = _prompt("M2B", [{"text": "Site PI, invented Phase II trial, NCT00000000"}])
+    assert "grant_number = its NCT or protocol number" in prompt
+    assert "agency = its sponsor" in prompt
+    for code in ("M2C", "M2D"):  # a pending application or a patent is never a trial
+        assert "CLINICAL TRIAL" not in _prompt(code, [{"text": "Invented entry"}])
 
 
 def test_the_instruction_follows_the_code_specific_rules_block():

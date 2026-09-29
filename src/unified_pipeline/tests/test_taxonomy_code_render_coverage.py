@@ -46,7 +46,9 @@ _KNOWN_GAPS = frozenset({
     # 'N1'/'N2' are NOT here: #529 gave both a render route (mentoring.py's
     # _fill_program_leadership/_fill_training_grants), routed the same way
     # N3A/N3B already were, via RENDER_ROUTED_CODES.
-    'M2', 'M4', 'M4A', 'M4B', 'M4C',    # #291 -- parked, needs a WCM-format decision (status-aware routing)
+    # 'M4'/'M4A'/'M4B'/'M4C' are NOT here: #291 removed them from the taxonomy
+    # (clinical trials file as M2A/M2B).
+    'M2',                                # parent container code; 3b assigns M2A/M2B/M2C
     'N3',                                # no separately-filed issue found; parent container code, never itself assigned
 })
 

@@ -430,35 +430,34 @@ def test_classified_unrendered_quiet_when_reformatted_downstream():
 # --------------------------------------------------- lint: taxonomy code coverage
 
 def test_taxonomy_code_coverage_fires_for_a_code_with_no_render_route():
-    # N2 was #529's original example; #529 gave it a render route, so this
-    # now uses M4 -- #291's still-parked status-aware-routing gap (see
-    # test_taxonomy_code_render_coverage.py's _KNOWN_GAPS) -- a real,
-    # confidently-classified code stage 6 has no renderer for today.
+    # N2 was #529's original example and M4 the next (#291 gave both a
+    # route), so this uses N3, the parent container code still in
+    # test_taxonomy_code_render_coverage.py's _KNOWN_GAPS.
     stage3b = {"entries": [
-        _entry("Postdoctoral Fellowship $26,000", taxonomy_code="M4", start=1),
-        _entry("Mentored Research Scholar Grant", taxonomy_code="M4", start=2),
+        _entry("Mentored an invented student", taxonomy_code="N3", start=1),
+        _entry("Mentored an invented fellow", taxonomy_code="N3", start=2),
     ]}
     findings = lint_taxonomy_code_coverage(stage3b)
     assert len(findings) == 1
     # #816: always INFO now -- the unrouted-code counts moved to the
     # doctor's `metrics` block (unrouted_code_entries).
     assert findings[0]["severity"] == "INFO"
-    assert "M4" in findings[0]["message"]
+    assert "N3" in findings[0]["message"]
     assert "2 entries" in findings[0]["message"]
 
 
 def test_unrouted_code_counts_matches_the_lints_own_by_code_dict():
     """#816: the doctor's `metrics` block reads this SAME dict the lint
-    above builds its findings from. M4/M4A, not N1/N2: #529 gave N1 and
-    N2 render routes (see test_taxonomy_code_render_coverage.py's
-    _KNOWN_GAPS)."""
+    above builds its findings from. A retired M4 code is NOT unrouted: stage
+    6 renders it as M2A (#291), so it must not be reported as Appendix-bound."""
     stage3b = {"entries": [
-        _entry("Postdoctoral Fellowship", taxonomy_code="M4", start=1),
-        _entry("Mentored Research Scholar Grant", taxonomy_code="M4", start=2),
-        _entry("Another orphan code", taxonomy_code="M4A", start=3),
-        _entry("A grant", taxonomy_code="M2A", start=4),
+        _entry("Mentored an invented student", taxonomy_code="N3", start=1),
+        _entry("Mentored an invented fellow", taxonomy_code="N3", start=2),
+        _entry("Another orphan code", taxonomy_code="ZZ", start=3),
+        _entry("A stored clinical trial", taxonomy_code="M4A", start=4),
+        _entry("A grant", taxonomy_code="M2A", start=5),
     ]}
-    assert unrouted_code_counts(stage3b) == {"M4": 2, "M4A": 1}
+    assert unrouted_code_counts(stage3b) == {"N3": 2, "ZZ": 1}
     assert unrouted_code_counts({"entries": []}) == {}
 
 
@@ -534,7 +533,7 @@ def test_output_hygiene_flags_retired_invalid_codes():
 
 
 def test_output_hygiene_flags_every_taxonomy_code_shape():
-    codes = ["A", "B1", "D1", "K5", "M2A", "M4C", "N2", "Q4D", "S0", "T"]
+    codes = ["A", "B1", "D1", "K5", "M2A", "M4C", "N2", "Q4D", "S0", "T"]  # M4C: retired (#291), still a leak
     findings = lint_output_hygiene([("p", f"• [{c}] leaked") for c in codes])
     assert findings[0]["severity"] == "ERROR"
     assert f"{len(codes)} bracketed" in findings[0]["message"]
@@ -1699,7 +1698,7 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
 
     stage3b = {
         "entries": [
-            _entry("Postdoctoral Fellowship", taxonomy_code="M4", start=1),
+            _entry("Mentored an invented student", taxonomy_code="N3", start=1),
             _entry("A grant", taxonomy_code="M2A", start=2),
         ],
         "meta": {"stats": {
@@ -1735,7 +1734,7 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
     assert metrics["appendix_share"] == round(2 / 2, 4)
     assert metrics["honors_malformed_rows"] == 1
     assert metrics["honors_rows"] == 2
-    assert metrics["unrouted_code_entries"] == {"M4": 1}  # M4, not N2: #529 routes N2
+    assert metrics["unrouted_code_entries"] == {"N3": 1}  # N3: #529 routes N2, #291 routes M4
     assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
     assert metrics["t_validation_yield"] == round(28 / 93, 4)
     assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)
