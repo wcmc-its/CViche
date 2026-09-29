@@ -136,6 +136,7 @@ class _CommitteeRecord:
     role: str = ''
     start_date: str = ''
     end_date: str = ''
+    institution: str = ''
 
     @classmethod
     def from_raw(cls, raw, *, name_fallback: bool = False) -> '_CommitteeRecord':
@@ -158,7 +159,49 @@ class _CommitteeRecord:
             role=_committee_cell_text(raw.get('role')),
             start_date=raw.get('start_date') or '',
             end_date=raw.get('end_date') or '',
+            institution=_committee_cell_text(raw.get('institution')),
         )
+
+
+# Stage 4 sometimes hedges an institution it could not read off the entry:
+# "Duke University (implied)", "Not provided". Those words are the model's
+# own, not the CV's, so they must never reach the rendered cell (#985).
+_HEDGED_INSTITUTION_RE = re.compile(
+    r'\b(?:implied|inferred|not\s+provided)\b', re.IGNORECASE)
+_WORD_RE = re.compile(r'\w+')
+_PARENTHETICAL_RE = re.compile(r'\([^)]*\)')
+# Function words that do not make an institution a different thing ("Department
+# of Genetics" is already in "Genetics Department Faculty Meeting").
+_INSTITUTION_STOPWORDS = frozenset({'of', 'the', 'for', 'and', 'at', 'in'})
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in _WORD_RE.findall(text.casefold())
+            if w not in _INSTITUTION_STOPWORDS]
+
+
+def _name_with_institution(activity: str, institution: str) -> str:
+    """Fold the extracted institution into the committee-name cell (#985).
+
+    The P table has no Institution column, so an extracted `institution` had
+    nowhere to render and was dropped. Append it as "Committee, Institution",
+    except (name returned unchanged) when there is no name to attach it to,
+    the institution is a stage-4 hedge rather than CV text, the name already
+    carries every content word of the institution (exact containment and
+    near-duplicates), or the name -- ignoring a parenthetical acronym such as
+    "(CENO)" -- is itself contained in the institution.
+    """
+    if not activity or _HEDGED_INSTITUTION_RE.search(institution):
+        return activity
+    name_words = _content_words(activity)
+    inst_words = _content_words(institution)
+    # An empty institution has no words, so it falls out here too.
+    if set(inst_words) <= set(name_words):
+        return activity
+    core = ' '.join(_content_words(_PARENTHETICAL_RE.sub(' ', activity)))
+    if f" {core} " in f" {' '.join(inst_words)} ":
+        return activity
+    return f"{activity.strip()}, {institution}"
 
 
 class AdministrativeActivitiesSection:
@@ -231,7 +274,10 @@ class AdministrativeActivitiesSection:
                         record.start_date, record.end_date, taxonomy_code,
                         original_text) or ''
                     if record.activity:
-                        rows.append((record.activity, record.role, dates))
+                        rows.append((
+                            _name_with_institution(
+                                record.activity, record.institution),
+                            record.role, dates))
                 continue
 
             record = _CommitteeRecord.from_raw(fields)
@@ -342,7 +388,9 @@ class AdministrativeActivitiesSection:
             else:
                 if not activity:
                     activity = original_text
-                rows.append((activity, role, dates))
+                rows.append((
+                    _name_with_institution(activity, record.institution),
+                    role, dates))
 
         return rows
 

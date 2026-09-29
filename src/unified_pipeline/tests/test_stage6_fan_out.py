@@ -227,13 +227,21 @@ class TestTextCoverage:
         assert _fan(entry) == [entry]
 
     def test_a_field_the_renderer_never_writes_holds_nothing(self):
-        # web240's group prefixes: every item carries
-        # `institution`, the P renderer never writes it.
-        text = ('Alpha Curriculum Oversight Council member, Ashby University\t'
-                'Beta Admissions Selection Council chair, Ashby University')
-        entry = self._committee_entry(text)
-        assert 'institution' in FIELD_SCHEMAS['P']['fields']
+        # `description` is a P schema field the P renderer never writes, so
+        # words only it holds would be lost (web240's case before #985, with
+        # `institution`).
+        entry = self._committee_entry(self._RECORDS.format(a=' curriculum review', b=''),
+                                      description='curriculum review')
+        assert 'description' in FIELD_SCHEMAS['P']['fields']
+        assert 'description' not in fan_out._RENDERED_FIELDS['P']
         assert _fan(entry) == [entry]
+
+    def test_an_institution_p_renders_holds_its_words(self):
+        # #985: P appends `institution` to the name cell, so its words are held.
+        text = self._RECORDS.format(a=' Ashby University', b=' Ashby University')
+        entry = self._committee_entry(text, committees=[
+            dict(record, institution='Ashby University') for record in _COMMITTEES])
+        assert len(_fan(entry)) == 2
 
     def test_a_key_outside_the_schema_holds_nothing(self):
         entry = self._committee_entry(self._RECORDS.format(a=' weekly', b=''), cadence='weekly')

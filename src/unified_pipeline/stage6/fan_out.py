@@ -63,9 +63,9 @@ _BUILT_TEXT_SEPARATOR = ' | '
 
 # A child renders from its fields, so a token no RENDERED field holds is lost:
 # a paragraph on committee service that stage 4 reduced to six committees
-# (web185), a service entry that also describes a grant (web240), a P entry
-# whose every item carries `institution` although the P renderer never writes
-# it (web240's group prefixes, web218's institution abbreviation). The entry is
+# (web185), a service entry that also describes a grant (web240), or a field
+# the target renderer never writes (P's `institution`, until #985 made P append
+# it to the name cell: web240's group prefixes). The entry is
 # fanned out only when EVERY token of its own text is held, with at least the
 # multiplicity the text has, by a field the target code's renderer writes
 # (`_RENDERED_FIELDS`). Zero uncovered tokens, not a tolerance: any
@@ -107,7 +107,7 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'N3A': frozenset({'mentee_level', 'mentee_name', 'research_focus', 'start_date'}),
     'N3B': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date'}),
     'O': frozenset({'end_date', 'institution', 'leadership_role', 'start_date'}),
-    'P': frozenset({'committee_name', 'end_date', 'role', 'start_date'}),
+    'P': frozenset({'committee_name', 'end_date', 'institution', 'role', 'start_date'}),
     'Q1': frozenset({'end_date', 'organization', 'role', 'start_date'}),
     'Q2': frozenset({'committee_name', 'end_date', 'organization', 'role', 'start_date'}),
     'Q3': frozenset({'agency', 'end_date', 'panel_name', 'role', 'start_date'}),
