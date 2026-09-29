@@ -8,6 +8,7 @@ from collections.abc import Iterator
 from urllib.parse import unquote, urlparse
 from ldap3 import Server, Connection, BASE, LEVEL, SUBTREE
 from ldap3.utils.conv import escape_filter_chars
+from ldap3.utils.dn import parse_dn
 from ldap3.core.exceptions import (
     LDAPException,
     LDAPBindError,
@@ -15,6 +16,7 @@ from ldap3.core.exceptions import (
     LDAPStrongerAuthRequiredResult,
     LDAPInsufficientAccessRightsResult,
     LDAPNoSuchObjectResult,
+    LDAPInvalidDnError,
 )
 from cachetools import TTLCache
 from pydantic import SecretStr
@@ -259,20 +261,46 @@ def _dn_in_scope(user_dn: str, base_dn: str, scope) -> bool:
     LEVEL  (?one?)  -- user_dn must be a direct child of base_dn.
     SUBTREE(?sub?)  -- user_dn must be base_dn or anywhere beneath it.
 
-    DN comparison is case-insensitive per the LDAP spec.
+    Parses both DNs into RDN-component tuples with ldap3.utils.dn.parse_dn
+    (#331) rather than comparing the raw strings: a plain comma split reads an
+    escaped comma inside an RDN value as a component boundary, which both
+    misses a real child (an unescaped-looking split that doesn't land on a
+    real RDN edge) and can widen SUBTREE to match a DN that only *looks* like
+    it ends in base_dn once you split on every comma. Components are compared
+    case-insensitively per the LDAP spec; parse_dn(strip=True) also settles
+    the whitespace-after-comma variance a DN string may carry. strip=True
+    does change what parses: it also rejects a value ending in an escaped
+    space (`ou=p\\ `), which strip=False accepts. That can only turn such a
+    DN into "not in scope", the fail-closed side.
+
+    Fail-closed: a DN that won't parse is "not in scope" (False), and the
+    caller chain treats False as deny, not as "skip this check":
+    _memberurl_search_filter returns None, _user_matches_memberurl returns
+    False, and that memberURL grants no membership.
     """
-    u = user_dn.strip().lower()
-    b = base_dn.strip().lower()
+    try:
+        base_rdns = parse_dn(base_dn, strip=True)
+    except LDAPInvalidDnError:
+        # base_dn comes from the group's memberURL in the directory: a
+        # malformed group definition, not user input.
+        logger.error("memberURL base DN %r does not parse; treating as not in scope", base_dn)
+        return False
+    try:
+        user_rdns = parse_dn(user_dn, strip=True)
+    except LDAPInvalidDnError:
+        # Untrusted input. The DN itself (it carries the CWID) stays out of the log.
+        logger.warning("user DN does not parse; treating as not in scope")
+        return False
+    u = tuple((rdn_type.lower(), value.lower()) for rdn_type, value, _ in user_rdns)
+    b = tuple((rdn_type.lower(), value.lower()) for rdn_type, value, _ in base_rdns)
     if scope == BASE:
         return u == b
     if scope == LEVEL:
         # direct child: strip the user's leftmost RDN, the remainder must be base.
-        # ponytail: plain comma split -- WCM user RDNs (uid=cwid) carry no escaped
-        # commas; switch to ldap3.utils.dn.parse_dn only if a value ever needs it.
-        _, sep, rest = u.partition(",")
-        return bool(sep) and rest == b
-    # SUBTREE
-    return u == b or u.endswith("," + b)
+        return len(u) == len(b) + 1 and u[1:] == b
+    # SUBTREE: base_dn's RDN sequence must be exactly the rightmost slice of
+    # user_dn's -- i.e. user_dn is base_dn or a descendant of it.
+    return len(u) >= len(b) and u[len(u) - len(b):] == b
 
 
 def _memberurl_search_filter(member_url: str, user_dn: str) -> str | None:
@@ -545,6 +573,37 @@ def _query_ed(cwid: str, access_group: str, admin_group: str,
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def validate_startup_config(ldap_url: str, bind_dn: str, bind_password: str,
+                            access_group: str) -> None:
+    """Validate the ED config an authorization decision needs, at startup.
+
+    Every field required to reach `_bind` is checked today only per-request
+    (saml_routes.py, auth.py both build an LDAPConfig from the same env/DB
+    reads and let a bad one surface as the first login's bind failure), and
+    ED_LDAP_BIND_PASSWORD is not checked anywhere -- an empty password reaches
+    ldap3 and only then maps to EdConfigurationError (#330). Call this from
+    main.py's lifespan, gated on ed_enabled, so a misconfigured deployment
+    fails at boot instead of on the first SAML login.
+
+    Raises EdConfigurationError naming every missing/invalid field at once
+    (not just the first found) so an operator fixes the whole deployment in
+    one pass, instead of one field per restart.
+    """
+    problems = []
+    try:
+        _validate_ldap_url(ldap_url)
+    except EdConfigurationError as exc:
+        problems.append(str(exc))
+    if not bind_dn or not bind_dn.strip():
+        problems.append("ED_LDAP_BIND_DN is not set")
+    if not bind_password or not bind_password.strip():
+        problems.append("ED_LDAP_BIND_PASSWORD is not set")
+    if not access_group or not access_group.strip():
+        problems.append("ed_access_group is not set")
+    if problems:
+        raise EdConfigurationError("; ".join(problems))
+
 
 def check_ed_membership(cwid: str, access_group: str, admin_group: str,
                         cfg: LDAPConfig, *,
