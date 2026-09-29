@@ -1529,10 +1529,29 @@ def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
     # fallback tier directly (`_run_owner_name_llm`) -- an sdt-wrapped or
     # letterhead Personal Data block reached that prompt unscrubbed.
     return OwnerSideChannel(
-        sdt_lines=[redact_pre_llm_values(t) for t in sdt_lines],
-        header_lines=[redact_pre_llm_values(t) for t in header_lines],
-        footer_lines=[redact_pre_llm_values(t) for t in footer_lines],
+        sdt_lines=_scrub_pre_llm_side_channel_lines(sdt_lines),
+        header_lines=_scrub_pre_llm_side_channel_lines(header_lines),
+        footer_lines=_scrub_pre_llm_side_channel_lines(footer_lines),
     )
+
+
+def _scrub_pre_llm_side_channel_lines(lines: list[str]) -> list[str]:
+    """`redact_pre_llm_values` on every line, then the body stream's
+    next-element rule (`_scrub_pre_llm_pii_next_element`) across lines: a
+    line that is nothing but a bare DOB/SSN label has the whole date that
+    OPENS the next line withheld (#847 residual: a body-level content
+    control with "Date of Birth:" in one paragraph and its value in the
+    next, each scrubbed alone, reached the owner-name prompt). The same
+    `cross_boundary=True` narrowing: "Appointed 07/01/2005" or a bare year
+    on the next line is left alone."""
+    scrubbed = [redact_pre_llm_values(line) for line in lines]
+    for idx in range(len(scrubbed) - 1):
+        category = pre_llm_bare_label_category(scrubbed[idx])
+        if category is not None:
+            scrubbed[idx + 1] = redact_pre_llm_value_of_category(
+                scrubbed[idx + 1], category, cross_boundary=True
+            )
+    return scrubbed
 
 
 def normalize_style_name(style_name: str) -> dict[str, Any]:
