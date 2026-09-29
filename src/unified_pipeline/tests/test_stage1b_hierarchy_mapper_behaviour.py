@@ -96,6 +96,10 @@ def test_is_header_match_paragraph_must_be_whole_words_inside_the_header():
     assert is_header_match("international", "national", strict=True) is False
     assert is_header_match("international", "national") is False
     assert is_header_match("subregional", "regional", strict=True) is False
+    # Prefix cases (the trailing \b): the paragraph is the start of a longer
+    # word in the header ("ms" in "msc", "committee" in "committees").
+    assert is_header_match("graduates msc advisees", "ms", strict=True) is False
+    assert is_header_match("state and national committees", "committee", strict=True) is False
     # A whole word inside a multi-word header still matches.
     assert is_header_match("regional and national", "national", strict=True) is True
 
