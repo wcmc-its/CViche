@@ -196,47 +196,43 @@ def _get_institution_location(entry: dict) -> tuple[str, bool]:
     return (fields.get('location', ''), False)  # False = not from enrichment
 
 
-def _recover_institution_from_nearby_entries(entry: dict, all_entries: list[dict]) -> str:
-    """Recover institution name from nearby entries in the original CV.
+# The Postdoctoral Training codes (postdoc_training.POSTDOC_TRAINING_CODES,
+# which cannot be imported here: sections import this package). A test pins
+# the two together.
+_TRAINING_CODES = ('C', 'C1', 'C2', 'C3')
 
-    When a training entry (like Graduate Research Assistant) is missing institution,
-    look at subsequent entries by element_idx that might contain the institution name.
-    Common patterns: "University of X", "Department of X", institution names.
+
+def _recover_institution_from_nearby_entries(entry: dict, all_entries: list[dict]) -> str:
+    """The institution a training block names once above its lines (#1038).
+
+    A training entry whose own institution is empty takes the extracted
+    `institution` FIELD of the nearest PRECEDING training entry (C/C1/C2/C3)
+    in the same block (same `hierarchy`). Never raw entry text, never an
+    entry of another code -- the old forward scan returned the whole text of
+    an education, teaching or personal-data entry, degree and years included.
+    Returns '' when nothing qualifies: an empty cell is correct, a stranger's
+    institution is not.
     """
-    entry_end_idx = entry.get('element_idx_end', entry.get('element_idx_start', -1))
-    # Ensure entry_end_idx is an integer (may be string from JSON)
     try:
-        entry_end_idx = int(entry_end_idx)
+        entry_start = int(entry.get('element_idx_start', -1))
     except (ValueError, TypeError):
-        entry_end_idx = -1
-    if entry_end_idx < 0:
+        return ''
+    if entry_start < 0:
         return ''
 
-    # University/institution patterns
-    institution_patterns = [
-        'university of', 'college of', 'institute of', 'school of',
-        'department of', 'center for', 'laboratory', 'hospital',
-        ' – department', ' - department'
-    ]
-
-    # Look at entries within the next 5 element indices
-    for other_entry in all_entries:
-        other_start = other_entry.get('element_idx_start', -1)
-        # Ensure other_start is an integer (may be string from JSON)
+    best_start, best = -1, ''
+    for other in all_entries:
+        if other.get('taxonomy_code') not in _TRAINING_CODES:
+            continue
+        if other.get('hierarchy') != entry.get('hierarchy'):
+            continue
         try:
-            other_start = int(other_start)
+            other_start = int(other.get('element_idx_start', -1))
         except (ValueError, TypeError):
             continue
-
-        # Check if this entry is immediately after our target (within 5 elements)
-        if other_start > entry_end_idx and other_start <= entry_end_idx + 5:
-            other_text = other_entry.get('text', '').strip()
-            other_text_lower = other_text.lower()
-
-            # Check if this looks like an institution
-            for pattern in institution_patterns:
-                if pattern in other_text_lower:
-                    # Return the institution text (clean it up)
-                    return other_text
-
-    return ''
+        institution = ((other.get('extracted_fields') or {}).get('institution') or '')
+        if not isinstance(institution, str) or not institution.strip():
+            continue
+        if best_start < other_start < entry_start:
+            best_start, best = other_start, institution.strip()
+    return best
