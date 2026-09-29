@@ -45,6 +45,27 @@ def setup_database():
 
 
 @pytest.fixture(autouse=True)
+def _stage_errors_off_the_real_outputs_dir(monkeypatch, tmp_path_factory):
+    """execute_step writes a stage-error record (#745) under the orchestrator's
+    pipeline_output_dir, which defaults to the checkout's
+    src/unified_pipeline/outputs -- the local corpus farm (PII, unversioned).
+    A test that fails a stage without pointing pipeline_output_dir at its own
+    tmp dir would plant a record there that caps a real run's score. Only that
+    default root is redirected; a test that sets its own dir keeps it."""
+    from app.pipeline import orchestrator
+
+    real_root = (orchestrator.PARENT_DIR / "src" / "unified_pipeline" / "outputs").resolve()
+    sandbox = tmp_path_factory.mktemp("stage_errors_root")
+    original = orchestrator.stage_errors_path
+
+    def _redirected(outputs_root, document_uid):
+        root = sandbox if Path(outputs_root).resolve() == real_root else outputs_root
+        return original(root, document_uid)
+
+    monkeypatch.setattr(orchestrator, "stage_errors_path", _redirected)
+
+
+@pytest.fixture(autouse=True)
 def _no_teams_webhook_leak(monkeypatch):
     """Tests that exercise execute()/submit_feedback for real must not fire
     live Teams posts just because a developer has CVICHE_TEAMS_WEBHOOK_URL

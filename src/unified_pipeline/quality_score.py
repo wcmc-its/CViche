@@ -87,6 +87,7 @@ if TYPE_CHECKING:
 # itself is never imported here).
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
 from unified_pipeline.doctor.shared import docx_body_blocks
+from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX, read_stage_errors
 
 logger = logging.getLogger(__name__)
 
@@ -447,6 +448,40 @@ def stage3b_fallback_ratio_exceeded(stage_3b_data: dict | None) -> tuple[bool, s
 # Dimension scorers  -- each returns (penalty_fraction, detail, hard_fail_cap)
 # ---------------------------------------------------------------------------
 
+def _structured_stage_errors(outputs_dir: Path) -> tuple[list[str], list[str], list[str]]:
+    """(all, fatal, invalid) locations from the drivers' stage-error records (#745).
+
+    The record is authoritative for its own ``fatal`` flag, whatever the
+    message says -- that is the point: a stage failure whose text names no
+    exception type is invisible to FATAL_ERROR_PATTERN. A run without the file
+    (clean, or older than it) contributes nothing here, and the pattern scan in
+    score_pipeline_errors is unchanged, so such a run scores exactly as before.
+
+    A file that is not valid JSON is skipped here because score_pipeline_errors'
+    ``*.json`` loop already counts it as unreadable; valid JSON of the wrong
+    shape is returned in ``invalid`` for the caller to count the same way.
+    """
+    located: list[str] = []
+    fatal: list[str] = []
+    invalid: list[str] = []
+    for errors_file in sorted(outputs_dir.glob(f"*{STAGE_ERRORS_SUFFIX}")):
+        try:
+            records = read_stage_errors(errors_file)
+        except json.JSONDecodeError:
+            continue  # already counted as unreadable by the *.json loop
+        except (OSError, ValueError) as e:
+            logger.warning("quality_score could not read %s (%s)", errors_file, e)
+            invalid.append(f"{errors_file.name}: unreadable")
+            continue
+        for record in records:
+            location = (f"{errors_file.name}: stage {record.stage}: "
+                        f"{record.exception_type}: {record.message!r}")
+            located.append(location)
+            if record.fatal:
+                fatal.append(location)
+    return located, fatal, invalid
+
+
 def score_pipeline_errors(outputs_dir: Path) -> tuple[float, str, int | None]:
     """Pipeline / API errors. Fatal patterns are a hard-fail (cap=40).
 
@@ -455,6 +490,10 @@ def score_pipeline_errors(outputs_dir: Path) -> tuple[float, str, int | None]:
     OOM-killed stage leaves behind -- so it is recorded as a synthetic
     non-fatal error entry rather than silently skipped. It is not fatal by
     itself; FATAL_ERROR_PATTERN still decides that from the parse-error text.
+
+    A stage the driver recorded as failed (``*_stage_errors.json``, #745) is
+    fatal by its record's ``fatal`` flag, not by pattern; see
+    _structured_stage_errors.
     """
     nonnull_errors = 0
     fatal_locations = []
@@ -477,6 +516,11 @@ def score_pipeline_errors(outputs_dir: Path) -> tuple[float, str, int | None]:
             nonnull_errors += 1
             if FATAL_ERROR_PATTERN.search(val):
                 fatal_locations.append(f"{path}: {val!r}")
+
+    recorded, recorded_fatal, invalid_records = _structured_stage_errors(outputs_dir)
+    nonnull_errors += len(recorded) + len(invalid_records)
+    fatal_locations.extend(recorded_fatal)
+    unreadable_files.extend(invalid_records)
 
     fatal_hit = bool(fatal_locations)
     hard_fail_cap = 40 if fatal_hit else None

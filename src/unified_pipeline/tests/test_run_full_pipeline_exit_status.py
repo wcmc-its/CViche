@@ -398,6 +398,50 @@ def test_the_failure_reason_names_the_exception_type(tmp_path, monkeypatch, caps
     assert "RuntimeError" in reason, f"exception type missing from {reason!r}"
 
 
+_STAGE_ERRORS = _OUT / 'stage_errors' / f'{UID}_stage_errors.json'
+
+
+def test_a_stage_failure_writes_a_structured_stage_error_record(
+        tmp_path, monkeypatch, capsys):
+    """#745: the CLI's catch-and-continue boundary records the failure where
+    quality_score reads it, not only in the printed summary."""
+    from unified_pipeline.stage_errors import StageError, read_stage_errors
+    _run_main(tmp_path, monkeypatch, capsys, fail={'3b'})
+    assert read_stage_errors(tmp_path / _STAGE_ERRORS) == [
+        StageError('3b', 'RuntimeError', 'simulated 3b failure', fatal=True)]
+
+
+def test_a_clean_run_writes_no_stage_error_record(tmp_path, monkeypatch, capsys):
+    _run_main(tmp_path, monkeypatch, capsys)
+    assert not (tmp_path / _STAGE_ERRORS).exists()
+
+
+def test_a_rerun_that_succeeds_clears_the_stage_error(tmp_path, monkeypatch, capsys):
+    """A stale failure from an earlier run of the same uid must not keep
+    capping the score once that stage succeeds."""
+    from unified_pipeline.stage_errors import read_stage_errors
+    _run_main(tmp_path, monkeypatch, capsys, fail={'4'})
+    assert [e.stage for e in read_stage_errors(tmp_path / _STAGE_ERRORS)] == ['4']
+    monkeypatch.chdir(tmp_path)
+    capsys.readouterr()
+    _install_stubs(monkeypatch, _Calls(), set(), None, None, tmp_path)
+    assert run_full_pipeline.main() == 0
+    assert read_stage_errors(tmp_path / _STAGE_ERRORS) == []
+
+
+def test_a_rerun_that_skips_a_stage_keeps_its_earlier_failure(tmp_path, monkeypatch, capsys):
+    """A stage skipped for a missing prerequisite did not succeed, so it must
+    not clear its own earlier record: erasing it would uncap the score of a
+    run whose stage 4 still has not produced output."""
+    from unified_pipeline.stage_errors import read_stage_errors
+    _run_main(tmp_path, monkeypatch, capsys, fail={'4'})
+    monkeypatch.chdir(tmp_path)
+    capsys.readouterr()
+    _install_stubs(monkeypatch, _Calls(), {'3b'}, None, None, tmp_path)
+    run_full_pipeline.main()
+    assert sorted(e.stage for e in read_stage_errors(tmp_path / _STAGE_ERRORS)) == ['3b', '4']
+
+
 def test_entrypoint_propagates_the_return_value_to_the_exit_status():
     """The last link: `main()` on its own discards the return value and the
     process exits 0 again, which is the whole bug. pytest imports this module

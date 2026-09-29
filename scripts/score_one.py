@@ -28,12 +28,14 @@ import tempfile
 from pathlib import Path
 
 from unified_pipeline.quality_score import score_run
+from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX
 
 logger = logging.getLogger(__name__)
 
 # What the dimension scorers actually read. Keep in step with
-# quality_score_service._NEEDED_SUFFIXES.
-NEEDED_SUFFIXES = ("_classified.json", "_fields.json", "_entries.json")
+# quality_score_service._NEEDED_SUFFIXES. The stage-error record (#745) sits in
+# its own stage_errors/ dir, which the */<uid><suffix> glob below covers.
+NEEDED_SUFFIXES = ("_classified.json", "_fields.json", "_entries.json", STAGE_ERRORS_SUFFIX)
 
 
 def collect(outputs_root: Path, uid: str, wcm_docx: Path, dest: Path) -> int:
