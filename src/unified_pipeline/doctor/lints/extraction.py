@@ -4,10 +4,11 @@ One responsibility: compare the entries and fields stages 3b/4 produced against
 the source they came from and the document they landed in -- grants filed under
 the wrong funding heading, entries whose field extraction covered almost none of
 their text, taxonomy codes that vanished between classification and render,
-dedup drops that were not duplicates.
+dedup drops that were not duplicates, records fabricated from the template's
+own scaffolding.
 
 The line against `render.py` is which side of the comparison is the subject.
-These four are about the extracted record; the render lints are about the page.
+These five are about the extracted record; the render lints are about the page.
 `lint_classified_unrendered` reads the output blocks, but only to decide whether
 a 3b classification survived -- the finding is about the classification.
 
@@ -21,6 +22,12 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.core.template_boilerplate import (
+    _MIN_EXACT_LEN,
+    is_near_template_instruction,
+    is_template_instruction,
+    is_template_label_line,
+)
 from unified_pipeline.segmentation_regression import (
     SUBSTANTIVE_LINE_CHARS,
     _looks_like_record,
@@ -381,3 +388,141 @@ def lint_dedup_drops(report: Dict) -> List[Dict]:
         f"{len(suspect)} dedup drop(s) poorly covered by the kept entry — "
         f"possible distinct records lost (#227)",
         suspect[:6])]
+
+
+# --------------------------------------------------------------------------
+# Records fabricated from the WCM template's own scaffolding text (#829).
+#
+# #959 fixed one instance of this: stage 6's board-certification writer now
+# skips an F2 entry whose extracted_fields are the table's own header cells
+# ("Full Name of Board", "Certificate #") read back by stage 4 as if they
+# were a real certification (A5IZ6Q). That fix is local to one section --
+# `stage6/sections/board_certification.py`'s own `_CERTIFICATION_HEADER_
+# CELLS` -- so nothing catches the same LLM misread recurring on a
+# different section's header row. This generalizes the check to every
+# taxonomy code, reusing the SAME phrase set `is_template_label_line`
+# already loads (`core/template_boilerplate.py`) rather than a new list.
+#
+# A single short matched value is not enough evidence: "Total" and "100%"
+# are themselves registered template phrases (the blank %-effort table's own
+# worked example), and a real, fully-filled J (Percent Effort) table
+# legitimately ends in a "Total | 100%" row -- measured on A5IZ6Q's own
+# effort table, whose four real percentages actually sum to 100. Two guards,
+# both required, keep that row from matching: at least
+# INVENTED_RECORD_MIN_VALUES populated fields, ALL of them recognized
+# labels, and their combined text at least `_MIN_EXACT_LEN` chars long --
+# the same distinctiveness floor `is_template_instruction`'s own exact-match
+# rule uses, for the same reason (a short generic label collides with real
+# content; a longer, more specific one essentially never does). Measured
+# over 278 unique local stage-4 artifact sets (the rg_farm, batch-3,
+# batch-4, the local _autopsy stage_4 set, src/unified_pipeline/outputs,
+# and A5IZ6Q -- corpus paths listed with run_doctor.py's LINT_PREVALENCE
+# comment; 149 of the 278 have a locally retained rendered docx, needed to
+# evaluate this guard's render-match requirement): zero false positives,
+# but the lint is not a one-incident-only detector -- it fires on 3 uids /
+# 4 records total, not on A5IZ6Q alone. A5IZ6Q supplies both of the shapes
+# below (its own F2 header row here, plus its F1 licensure record via part
+# (b)); 976WPY (entry 48) and IO4DEA (entry 208) are two further, organic
+# part-(b) hits, each the identical fabricated "New York State" F1 record
+# built from the same unfilled licensure-instruction paragraph as A5IZ6Q's
+# -- the same #829 misread recurring verbatim on two more CVs.
+INVENTED_RECORD_MIN_VALUES = 2
+
+
+# F1 is Licensure (PIPELINE_README.md) -- the one taxonomy code this lint
+# also checks against the entry's raw SOURCE TEXT rather than its extracted
+# fields. A5IZ6Q's invented licence extracted only one real-looking value
+# (`state_country: "New York State"`, itself lifted from inside the
+# instruction paragraph, not a template label) from an unfilled licensure
+# PROMPT paragraph -- `_is_invented_record` cannot see a single non-label
+# value, but the entry's source text is a near-verbatim copy of a known
+# instruction (#829).
+INVENTED_RECORD_LICENSURE_CODE = "F1"
+
+
+def _nonempty_field_values(fields: dict) -> list[str]:
+    """Every non-empty STRING value a stage-4 entry's extracted_fields
+    holds, flattening a list-valued field. A dict-valued field
+    (`additional_award`, `additional_grant`, ...) is not flattened -- an
+    entry whose only values live there reports none at all, which the
+    caller reads as "not enough evidence", the same precision-biased
+    default `template_boilerplate.py` uses throughout."""
+    values: list[str] = []
+    for value in fields.values():
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            if isinstance(item, str) and item.strip():
+                values.append(item)
+    return values
+
+
+def _is_invented_record(fields: dict) -> bool:
+    """True when a stage-4 record is built entirely from the WCM template's
+    own labels rather than real CV content -- see the module comment above
+    for why both guards (value count, combined length) are needed."""
+    values = _nonempty_field_values(fields)
+    if len(values) < INVENTED_RECORD_MIN_VALUES:
+        return False
+    joined = "|".join(values)
+    if len(joined) < _MIN_EXACT_LEN:
+        return False
+    return all(is_template_label_line(v) for v in values)
+
+
+def _rendered_row_value_sets(
+    table_rows: list[list[list[str]]],
+) -> set[frozenset[str]]:
+    """The normalized, non-empty-cell VALUE SET of every rendered table row,
+    across every table in the document -- order- and position-independent,
+    so a fabricated row missing its trailing column (`['Full Name of
+    Board', 'Certificate #', '']`) compares as a set of 2 and is never
+    confused with the table's own 3-cell header row, which carries the
+    columns' parentheticals and so never collides with a data row's set."""
+    rows: set[frozenset[str]] = set()
+    for tbl in table_rows:
+        for row in tbl:
+            cells = frozenset(_norm(c) for c in row if c and str(c).strip())
+            if cells:
+                rows.add(cells)
+    return rows
+
+
+def lint_invented_records(stage4: dict,
+                          table_rows: list[list[list[str]]]) -> list[dict]:
+    """A record built from the WCM template's own scaffolding rather than
+    real CV content, reaching the delivered document (#829):
+
+    (a) a RENDERED stage-4 record whose extracted field values are all
+        known template labels -- #959's board-certification header-row fix,
+        generalized to every taxonomy code (`_is_invented_record`).
+    (b) an F1 (Licensure) entry whose SOURCE TEXT is a known template
+        instruction, exact or near-match -- A5IZ6Q's invented New York
+        licence, extracted from a licensure prompt paragraph the faculty
+        member never filled in.
+    """
+    rendered = _rendered_row_value_sets(table_rows)
+    findings = []
+    for e in stage4.get("entries", []):
+        code = e.get("taxonomy_code")
+        if code == "T":
+            continue
+        fields = e.get("extracted_fields") or {}
+        if _is_invented_record(fields):
+            values = _nonempty_field_values(fields)
+            if frozenset(_norm(v) for v in values) in rendered:
+                findings.append(_finding(
+                    "invented_records", "WARN",
+                    f"entry {e.get('element_idx_start')} ({code}): every "
+                    f"extracted field value is a known WCM template label, "
+                    f"rendered as if it were a real record (#829)",
+                    [f"{k}: {v}" for k, v in fields.items() if v]))
+        if code == INVENTED_RECORD_LICENSURE_CODE:
+            text = str(e.get("text", ""))
+            if is_template_instruction(text) or is_near_template_instruction(text):
+                findings.append(_finding(
+                    "invented_records", "WARN",
+                    f"entry {e.get('element_idx_start')} (F1): source text "
+                    f"is a known WCM template instruction, not a real "
+                    f"licence (#829)",
+                    [text[:120]]))
+    return findings

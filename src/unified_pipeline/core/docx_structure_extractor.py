@@ -20,6 +20,7 @@ from docx.oxml.table import CT_Tbl
 from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
 from unified_pipeline.stage6.normalization.pii import (
+    PRE_LLM_PLACEHOLDER,
     pre_llm_bare_label_category,
     redact_pre_llm_value_of_category,
     redact_pre_llm_values,
@@ -660,12 +661,12 @@ def _handle_table_row_zero(
     which case it is left for the per-row walk to recover as content
     instead. Also seeds `current_content_rows` with any text found after the
     header line in the same cell (e.g. "K. EXTRAMURAL...\\nAssociation of
-    Pediatric...").
+    Pediatric...") and, per #886, with row 0's OTHER cells when they carry a
+    genuine value the header text does not otherwise account for (e.g. a
+    one-row "Graduate Research Assistant" | "Aug 2019-May 2022" table).
 
     Pure move out of `extract_unified_elements` (#811 round 3, finding 2) --
-    behaviour unchanged. Caller only calls this once it has confirmed
-    `first_cell_text` looks like a header, so the form-label check below
-    does not need to re-test that.
+    behaviour unchanged except for the #886 addition noted above.
 
     Deliberately NOT reusing the header-left/content-right escape
     (`is_header_left_content_right_row`) here: routing a non-colon row 0
@@ -673,10 +674,10 @@ def _handle_table_row_zero(
     `\\n\\n`-embedded-header splitter, which builds single-cell synthetic
     rows and silently drops row 0's OTHER cells (found on a web206-shaped
     row: a non-colon, confidence-0.5 header like "Senior research fellow"
-    whose row 1 date range vanished when misrouted this way). A row 0
-    header-left/content-right layout (e.g. "CURRENT POSITION" | <address>)
-    is out of this ticket's scope and keeps today's existing table-level
-    header behavior.
+    whose row 1 date range vanished when misrouted this way). #886 recovers
+    row 0's other cells directly, below, via `split_merged_cells_in_row`
+    (the same primitive the per-row walk uses for an ordinary content row),
+    never by routing row 0 through that walk.
 
     Returns:
         (new_elements, unified_idx, num_table_headers_emitted, table_rows,
@@ -729,6 +730,7 @@ def _handle_table_row_zero(
     # This captures cases where a header line is followed by actual content
     # in the same cell (e.g., "K. EXTRAMURAL...\nAssociation of Pediatric...")
     # Only applies when row 0 was actually emitted as the table header above.
+    row0_other_cells_recovered = False
     if not row0_is_form_label and len(lines) > 1:
         remaining_content = '\n'.join(lines[1:]).strip()
         # Only treat as content if there's substantial text (multiple lines or >50 chars)
@@ -739,11 +741,49 @@ def _handle_table_row_zero(
                 # Create a modified row with the remaining content in cell 0
                 modified_row = [{"text": remaining_content}] + row_0[1:]
                 current_content_rows.append(modified_row)
+                row0_other_cells_recovered = True
             else:
                 # Single-cell row - just use the remaining content
                 current_content_rows.append([{"text": remaining_content}])
 
+    # #886: a one-row "Role | date-range" table (e.g. "Graduate Research
+    # Assistant" | "Aug 2019-May 2022") has a single-line, header-only cell
+    # 0 -- the branch above never fires -- yet row 0's OTHER cell(s) still
+    # carry a genuine, distinct value that the header text alone does not
+    # capture. Recover it the same way the per-row walk recovers a
+    # header-left/content-right row at index >= 1 (`split_merged_cells_in_row`
+    # on the row as-is), guarded by the same `row_has_nonblank_value_cells`
+    # predicate that already distinguishes a real value from a blank or
+    # gridSpan-duplicated trailing cell -- so a genuine header-only row 0
+    # (blank or duplicate trailing cells) is untouched. Skipped when the
+    # branch above already recovered row 0's other cells, to avoid emitting
+    # the same value twice.
+    if not row0_is_form_label and not row0_other_cells_recovered and row_has_nonblank_value_cells(row_0):
+        current_content_rows.extend(split_merged_cells_in_row(row_0))
+
     return new_elements, unified_idx, num_table_headers_emitted, table_rows, current_content_rows
+
+
+def _flatten_table_content_text(rows: list[Any]) -> str:
+    """The SAME join `extract_unified_elements` uses, at all three call
+    sites, to build a table_content/table element's `text` field from its
+    `data` rows at construction time: cells joined by " | " within a row,
+    rows joined by "\\n". Used to REBUILD `text` after the pre-LLM scrub
+    mutates cells inside `data` in place, so `text` (what
+    `extract_text_from_docx` and `get_element_text`'s `table_content`
+    branch read) and `data` (what `get_element_text`'s legacy `table`
+    branch and every cell-level consumer read) never disagree (#847
+    residual round 4: a below-cell/next-paragraph scrub touched only one
+    of the two, so the value still reached an LLM reader through
+    whichever field it left alone)."""
+    return "\n".join(
+        " | ".join(
+            cell.get("text", "") if isinstance(cell, dict) else str(cell)
+            for cell in row
+        )
+        for row in rows
+        if isinstance(row, list)
+    )
 
 
 def _scrub_pre_llm_pii_row(row: list[Any]) -> None:
@@ -765,27 +805,137 @@ def _scrub_pre_llm_pii_row(row: list[Any]) -> None:
             nxt["text"] = redact_pre_llm_value_of_category(nxt["text"], category)
 
 
+def _row_already_resolved(row: list[Any], col_idx: int) -> bool:
+    """True if some OTHER cell in `row` already carries
+    `PRE_LLM_PLACEHOLDER` -- meaning this row's own same-row scrub
+    (`_scrub_pre_llm_pii_row`, or a value sitting in the label's own cell)
+    already found and withheld a value beside the label, so the row BELOW
+    is an unrelated field, not this label's value (#847 residual round 4:
+    a "Date of Birth:" | "01/02/1970" row directly above an "Appointed
+    2001" | ... row must not touch "2001" -- the DOB was already resolved
+    same-row)."""
+    for idx, cell in enumerate(row):
+        if idx == col_idx or not isinstance(cell, dict):
+            continue
+        cell_text = cell.get("text")
+        if isinstance(cell_text, str) and PRE_LLM_PLACEHOLDER in cell_text:
+            return True
+    return False
+
+
+def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
+    """Round 3 (#847 residual): a two-row FORM table -- a label cell
+    ("Date of Birth") with its value directly below it in the SAME COLUMN
+    of the next row, not the next cell of the same row -- has no
+    `_PII_FRAGMENT_SPLIT_RE` delimiter and no same-row neighbour for
+    `_scrub_pre_llm_pii_row` to see. After every cell's own text is
+    scrubbed and every same-row label/value pair is handled, walk row
+    pairs: a cell that is nothing but a bare DOB/SSN label, with no value
+    ALREADY resolved beside it in its own row (`_row_already_resolved`),
+    has its value, if any, scrubbed out of the cell directly BELOW it
+    (same column index) in the next row. `cross_boundary=True`: a cell one
+    row down is a lower-confidence position than the same row, so its
+    value must open that cell and be a whole date -- "Appointed
+    07/01/2005" or "Date of Appointment: 07/01/2005" below a blank "Date
+    of Birth:" keeps its date, and so does a bare year."""
+    for row_idx in range(len(rows) - 1):
+        row, next_row = rows[row_idx], rows[row_idx + 1]
+        if not isinstance(row, list) or not isinstance(next_row, list):
+            continue
+        for col_idx, cell in enumerate(row):
+            if not isinstance(cell, dict) or col_idx >= len(next_row):
+                continue
+            category = pre_llm_bare_label_category(cell.get("text"))
+            if category is None or _row_already_resolved(row, col_idx):
+                continue
+            below = next_row[col_idx]
+            if isinstance(below, dict) and isinstance(below.get("text"), str):
+                below["text"] = redact_pre_llm_value_of_category(
+                    below["text"], category, cross_boundary=True
+                )
+
+
+def _scrub_pre_llm_value_of_category_in_element(el: dict[str, Any], category: str) -> None:
+    """Replace the value for `category` that OPENS `el`, wherever `el` keeps
+    its text: a plain paragraph's own `text`, or -- for a table element --
+    its first cell, with `text` (the pre-flattened join built at
+    construction time) rebuilt afterwards from `data`
+    (`_flatten_table_content_text`) so the two fields never disagree.
+    `cross_boundary=True`: the next element is a lower-confidence position
+    than the same cell or row, so only a whole date that opens it counts --
+    "Date of Appointment: 07/01/2005", "Appointed Assistant Professor
+    07/01/2005" and "1990-1994 BA, Example College" after a blank "Date of
+    Birth:" are left alone, and so is every later cell of a table."""
+    data = el.get("data")
+    if data:
+        first_row = data[0] if isinstance(data[0], list) else []
+        first = first_row[0] if first_row else None
+        if isinstance(first, dict) and isinstance(first.get("text"), str) and first["text"]:
+            first["text"] = redact_pre_llm_value_of_category(
+                first["text"], category, cross_boundary=True
+            )
+            el["text"] = _flatten_table_content_text(data)
+        return
+    text = el.get("text")
+    if isinstance(text, str) and text:
+        el["text"] = redact_pre_llm_value_of_category(text, category, cross_boundary=True)
+
+
+def _scrub_pre_llm_pii_next_element(elements: list[dict[str, Any]]) -> None:
+    """Round 3 (#847 residual): a label-only PARAGRAPH ("Date of Birth:")
+    with its value in the NEXT element of the unified stream -- a separate
+    paragraph or table, not the same string `redact_pre_llm_values`'s
+    in-text extension can search within. After every element's own text
+    is scrubbed, walk the stream once more: an element whose whole text is
+    nothing but a bare DOB/SSN label has its value, if any, scrubbed out
+    of the very next element (see `_scrub_pre_llm_value_of_category_in_element`
+    for a table next-element, whose value can be in `data`, not `text`)."""
+    for idx in range(len(elements) - 1):
+        text = elements[idx].get("text")
+        if not isinstance(text, str):
+            continue
+        category = pre_llm_bare_label_category(text)
+        if category is None:
+            continue
+        _scrub_pre_llm_value_of_category_in_element(elements[idx + 1], category)
+
+
 def _scrub_pre_llm_pii_elements(elements: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Replace DOB/SSN VALUES in place, in every element and table cell
     `extract_unified_elements` built, before any LLM stage reads them
     (#847) -- the single choke point stage 1a, 1b and stage 2 all read
     through. Element count and order are untouched; only a value span's
     text changes. See `redact_pre_llm_values` for what is and is not
-    replaced, and `_scrub_pre_llm_pii_row` for the label-cell/value-cell
-    case a single string's own scrub cannot see."""
+    replaced, `_scrub_pre_llm_pii_row` for the same-row label-cell/
+    value-cell case, `_scrub_pre_llm_pii_column` for the value directly
+    below a label in a two-row form table, and
+    `_scrub_pre_llm_pii_next_element` for a label-only paragraph whose
+    value is the following paragraph or table.
+
+    A table element's `data` (per-cell) is the source of truth once any
+    cell-level scrub runs on it: `text` (the pre-flattened join built at
+    construction time) is REBUILT from `data` afterwards
+    (`_flatten_table_content_text`), never scrubbed independently, so the
+    two can no longer drift apart (#847 residual round 4)."""
     for el in elements:
-        text = el.get("text")
-        if isinstance(text, str) and text:
-            el["text"] = redact_pre_llm_values(text)
-        for row in el.get("data") or []:
-            if not isinstance(row, list):
-                continue
-            for cell in row:
-                if isinstance(cell, dict):
-                    cell_text = cell.get("text")
-                    if isinstance(cell_text, str) and cell_text:
-                        cell["text"] = redact_pre_llm_values(cell_text)
-            _scrub_pre_llm_pii_row(row)
+        data = el.get("data") or []
+        if data:
+            for row in data:
+                if not isinstance(row, list):
+                    continue
+                for cell in row:
+                    if isinstance(cell, dict):
+                        cell_text = cell.get("text")
+                        if isinstance(cell_text, str) and cell_text:
+                            cell["text"] = redact_pre_llm_values(cell_text)
+                _scrub_pre_llm_pii_row(row)
+            _scrub_pre_llm_pii_column(data)
+            el["text"] = _flatten_table_content_text(data)
+        else:
+            text = el.get("text")
+            if isinstance(text, str) and text:
+                el["text"] = redact_pre_llm_values(text)
+    _scrub_pre_llm_pii_next_element(elements)
     return elements
 
 

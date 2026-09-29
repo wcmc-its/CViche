@@ -618,6 +618,55 @@ class TestRealTemplateHeaderCellsAreFilteredWithoutRejectingData:
         ]
 
 
+class TestTheSourceTablesOwnHeaderRowIsNotACertification:
+    """#829 (A5IZ6Q): an older template revision's header row "Full Name of
+    Board | Certificate # | Dates of Certification" reached stage 4, which
+    returned certifying_board="Full Name of Board", and the
+    single-certification path rendered it as the faculty member's
+    certification."""
+
+    HEADER = "Full Name of Board | Certificate # | Dates of Certification"
+
+    def test_a_header_row_extracted_as_fields_renders_no_row(self):
+        gen = _generator()
+        gen._fill_board_certification([{
+            "text": self.HEADER,
+            "extracted_fields": {"certifying_board": "Full Name of Board",
+                                 "certificate_number": "Certificate #"},
+        }])
+        assert _rows_after_board(gen) == []
+
+    def test_a_real_certification_beside_it_still_renders(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": self.HEADER,
+             "extracted_fields": {"certifying_board": "Full Name of Board",
+                                  "certificate_number": "Certificate #"}},
+            {"text": "American Board of Fictional Medicine | 24680 | 2015",
+             "extracted_fields": {"certifying_board": "American Board of Fictional Medicine",
+                                  "certificate_number": "24680", "year_certified": "2015"}},
+        ])
+        assert [row[:2] for row in _rows_after_board(gen)] == [
+            ("American Board of Fictional Medicine", "24680")]
+
+    def test_header_fields_with_a_real_line_in_the_text_are_kept(self):
+        """Header-only fields are not enough: a text line that is real data
+        means stage 4 read the wrong line, not that the entry is a header."""
+        from unified_pipeline.stage6.sections.board_certification import _is_header_record
+        fields = {"certifying_board": "Full Name of Board", "certificate_number": "Certificate #"}
+        assert not _is_header_record(
+            fields, self.HEADER + "\nAmerican Board of Fictional Medicine | 24680 | 2015")
+        assert _is_header_record(fields, self.HEADER)
+        # stage 4 can return certificate_number as a list
+        assert _is_header_record(
+            {"certifying_board": "Full Name of Board", "certificate_number": ["Certificate #"]},
+            self.HEADER)
+
+    def test_older_revision_header_cells_are_header_cells(self):
+        assert _is_certification_header_line(self.HEADER)
+        assert not _is_certification_header_line("Certificate # 24680")
+
+
 class TestRejectedTokenIsLogged:
     """Defect 4 (accuracy gate, 2026-08-25): a token like '123-' or '-'
     classifies to None with no log anywhere (§5.3/§5.10)."""

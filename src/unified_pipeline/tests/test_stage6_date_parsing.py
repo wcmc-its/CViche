@@ -250,6 +250,53 @@ def test_format_date_for_section_outputs(date_str, code, expected):
     assert format_date_for_section(date_str, code) == expected
 
 
+# --- calendar-invalid month renders the year alone (#543) -------------------
+#
+# Owner decision 2026-09-01: never fabricate a date component and never render
+# the invalid fragment verbatim. Year-only form chosen (no placeholder).
+
+@pytest.mark.parametrize("date_str, code, expected", [
+    ("13/2024", "B1", "2024"),          # the issue's case
+    ("13/2024", "C", "2024"),           # mm/yy code: year alone, not "13/24"
+    ("99/2024", "M2A", "2024"),
+    ("2024-13-01", "B1", "2024"),
+    ("2024-99-99", "F1", "2024"),
+    ("00/2024", "B1", "2024"),          # month 00
+    ("2024-00-00", "B1", "2024"),
+    ("2024-00-15", "M2A", "2024"),
+    ("13/05/2020", "F1", "2020"),       # invalid month in a m/d/yyyy shape
+    # Unchanged: valid dates, calendar-invalid day (month kept), non-dates.
+    # A two-part YYYY-NN is ambiguous with an academic-year range: left as
+    # written, never collapsed to its first year.
+    ("2014-15", "H", "2014-15"),
+    ("2019/20", "B1", "2019/20"),
+    ("2024-13", "H", "2024-13"),
+    ("12/2024", "B1", "12/2024"),
+    ("2024-02-31", "B1", "02/2024"),
+    ("TBD", "B1", "TBD"),
+    ("n/a", "C", "n/a"),
+    ("2024-invalid", "B1", "2024-invalid"),
+    ("13/2024 to 2025", "B1", "13/2024 to 2025"),  # a range in one field is not a date
+    ("13/05/17", "C", "13/05/17"),      # two-digit year: no trustworthy year
+    # A hyphenated NN-YYYY is a two-digit-start year range, not month 98:
+    # left as written, never cut to its end year.
+    ("98-2002", "B1", "98-2002"),
+    ("85-1990", "H", "85-1990"),
+    ("15-2016", "C", "15-2016"),
+    ("00-2005", "F1", "00-2005"),
+])
+def test_format_date_for_section_invalid_month_renders_year_only(date_str, code, expected):
+    assert format_date_for_section(date_str, code) == expected
+
+
+def test_format_date_range_invalid_month_endpoint_renders_year_only():
+    assert format_date_range("08/2020", "13/2024", "B1") == "08/2020-2024"
+
+
+def test_format_date_range_keeps_a_two_digit_start_year_range():
+    assert format_date_range("97-2001", "Present", "B1") == "97-2001-Present"
+
+
 # --- _dates_overlap_or_match: granularity-honest comparison (#553) ---------
 #
 # The rule under test: parse each boundary to (year, month-or-None) and never
@@ -504,3 +551,77 @@ def test_current_date_vocabulary_is_pinned():
     was deliberately kept out of #553's PR (cross-file constant conversion).
     """
     assert CURRENT_DATE_VALUES == frozenset({"present", "current", "ongoing", "now"})
+
+
+# --- #946: a start with no end on a point-in-time code is that one year ------
+
+from unified_pipeline.stage6.formatting.dates import (  # noqa: E402
+    POINT_IN_TIME_CODES,
+    format_date_range,
+)
+
+
+def test_point_in_time_codes_are_pinned():
+    """The decision on #946 names awards, talks, CME lectures and P/Q one-off
+    rows; each member's reason is at the constant. Pinned so adding or
+    dropping a code is a visible, deliberate act."""
+    assert POINT_IN_TIME_CODES == frozenset({"H", "R", "K4", "P", "Q2", "Q3"})
+
+
+@pytest.mark.parametrize("code", sorted(POINT_IN_TIME_CODES))
+def test_point_in_time_start_only_renders_the_bare_year(code):
+    assert format_date_range("2021", "", code) == "2021"
+
+
+@pytest.mark.parametrize("code", sorted(POINT_IN_TIME_CODES))
+def test_point_in_time_keeps_present_when_the_end_says_so(code):
+    assert format_date_range("2021", "present", code) == "2021-Present"
+    assert format_date_range("2021", "current", code) == "2021-Present"
+
+
+@pytest.mark.parametrize("code", ["D1", "D2", "D3", "O", "I", "Q1", "Q4B", "Q4C", "Q4D", "M2A"])
+def test_other_codes_still_read_a_start_only_record_as_ongoing(code):
+    assert format_date_range("2021", "", code) == "2021-Present"
+
+
+@pytest.mark.parametrize("source_text", [
+    "2021-\tMember, Quality Committee",          # open dash in a date column
+    "Quality Committee (2021-",                  # open parenthetical
+    "2021- Member, Quality Committee",           # dash touching the year
+    "11/2021- Member, Quality Committee",        # month/year form
+    "2021 -\tMember, Quality Committee",         # spaced dash, nothing after it
+    "2021 –\nMember, Quality Committee",         # spaced en dash at line end
+    "2021– Member, Quality Committee",           # en dash touching the year
+    "2021— Member, Quality Committee",           # em dash touching the year
+    "Quality Committee (2021 -)",                # spaced dash closed by a paren
+    "2021 -  \tMember, Quality Committee",       # spaces between dash and tab
+    "Member, Quality Committee, 2021-present",   # stated in words
+])
+def test_point_in_time_keeps_present_when_the_source_leaves_the_year_open(source_text):
+    assert format_date_range("2021", "", "P", source_text) == "2021-Present"
+
+
+@pytest.mark.parametrize("source_text", [
+    "2021\tMember, Quality Committee",
+    "2021 – Member, Quality Committee",          # a column separator, not a range
+    "2021-2022 Member, Quality Committee",       # a closed range
+    "2021-22 Member, Quality Committee",
+    "2019- Member, Quality Committee",           # a different year left open
+    "12021- Quality Committee",                  # not the year, part of a number
+])
+def test_point_in_time_bare_year_when_the_source_does_not_leave_it_open(source_text):
+    assert format_date_range("2021", "", "P", source_text) == "2021"
+
+
+def test_point_in_time_month_start_reads_the_year_off_the_start():
+    assert format_date_range("2019-11", "", "P", "11/2019- Clinical Committee") == "2019-Present"
+    assert format_date_range("2019-11", "", "P", "11/2019 Clinical Committee") == "2019"
+
+
+def test_point_in_time_unreadable_start_renders_as_written():
+    assert format_date_range("Fall", "", "P", "Fall- Committee") == "Fall"
+
+
+def test_an_unreadable_year_is_never_searched_for():
+    from unified_pipeline.stage6.formatting.dates import _source_leaves_year_open
+    assert _source_leaves_year_open("None- Committee", None) is False

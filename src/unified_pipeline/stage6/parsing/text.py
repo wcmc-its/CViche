@@ -136,6 +136,37 @@ def _extract_year_from_text(text: str) -> str | None:
     return None
 
 
+# Words a column header may carry besides its section's keywords: "Name of
+# award", "Date awarded (yyyy)", "Year | Committee Name". They are column-label
+# vocabulary, not content: a cell made ONLY of keywords and these is a header,
+# and a cell with any other word ("Best Teaching Award") is not.
+_HEADER_FILLER_WORDS = frozenset({
+    'name', 'of', 'the', 'and', 'or', 'awarded', 'received', 'issued', 'yyyy',
+    'mm', 'yy', 'dd', 'mm/yy', 'mm/yyyy', 'title', 'position', 'role', 'type',
+    'location', 'activity', 'committee', 'journal', 'service', 'served',
+    'period', 'years', 'year', 'current', 'last', 'known', 'degree', 'amount',
+    'nature', 'in', 'to', 'from', 'present', 'supervised', 'attended',
+    'obtained', 'specialization', 'department', 'mentor', 'training',
+    'student', 'dissertation', 'essay', 'project', 'course', 'description',
+    'person', 'month', 'body'})
+
+
+def _is_header_cell(cell: str, header_keywords: list[str]) -> bool:
+    """Is every word of this cell a header keyword or a header filler word?
+
+    A cell holding a year is a date value, which a header row names but never
+    carries.
+    """
+    if re.search(r'\b\d{4}\b', cell):
+        return False
+    words = re.findall(r"[a-z/]+", cell.replace('(s)', 's'))
+    if not words:
+        return False
+    vocabulary = _HEADER_FILLER_WORDS | {kw.lower() for kw in header_keywords}
+    return all(w in vocabulary or (w.endswith('s') and w[:-1] in vocabulary)
+               for w in words)
+
+
 def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int = 2) -> bool:
     """Detect if an entry is actually a table header that was mistakenly extracted as data.
 
@@ -190,20 +221,15 @@ def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int
         if keyword_count >= threshold and pattern_matches >= 1:
             return True
 
-        # Also check for tab/pipe-separated header-only content
-        if ('\t' in text or '|' in text):
-            parts = re.split(r'[\t|]', text_lower)
-            # If all parts are short and most match header keywords, it's a header
-            if all(len(p.strip()) < 30 for p in parts if p.strip()):
-                parts_matching = sum(
-                    1 for p in parts
-                    # Same trailing optional "s" as the keyword-count path
-                    # above, so a plural column header ("Dates") still
-                    # matches keyword "date".
-                    if any(re.search(rf'\b{re.escape(kw.lower())}s?\b', p) for kw in header_keywords)
-                )
-                if parts_matching >= len(parts) * 0.5:
-                    return True
+        # Also check for tab/pipe-separated header-only content. A header row
+        # is a header only on POSITIVE evidence: every cell is made of header
+        # words (a section keyword or a filler word such as "name of"). One
+        # cell with any other word ("Best Teaching Award", "Purdue University")
+        # or a year is content, so the entry is data (#756).
+        if '\t' in text or '|' in text:
+            cells = [c for c in re.split(r'[\t|]', text_lower) if c.strip()]
+            if cells and all(_is_header_cell(c, header_keywords) for c in cells):
+                return True
 
     return False
 
@@ -224,7 +250,12 @@ def _is_structural_label(entry: dict) -> bool:
     """
     text = (entry.get('text', '') or '').strip()
     if not text:
-        return True
+        # Blank raw text is a label only when stage 5c has nothing to say
+        # either; an entry with real formatted_text is content (#757). The
+        # hierarchy and all-caps checks below need raw text, so return here.
+        fields = entry.get('extracted_fields')
+        formatted = fields.get('formatted_text') if isinstance(fields, dict) else None
+        return not (isinstance(formatted, str) and formatted.strip())
 
     text_lower = text.lower()
     hierarchy = entry.get('hierarchy', []) or []
@@ -268,6 +299,47 @@ def _is_structural_label(entry: dict) -> bool:
     return False
 
 
+# A pipe-free membership part that is not an organization even though it is
+# neither a type nor a range: a bare year or month-year, and the column-header
+# / filler / role words a flattened table leaves behind. This is the positive
+# form of what a `len(line) > 5` cutoff used to reject by accident (#758) --
+# the same cutoff also dropped real acronym organizations (AMA, NIH, ASCO).
+_BARE_DATE_PART_RE = re.compile(
+    r'^\(?(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+)?'
+    r'\d{1,4}(?:/\d{1,4})?\)?[.,;]?$',
+    re.IGNORECASE,
+)
+_NON_ORGANIZATION_WORDS = frozenset({
+    'date', 'dates', 'year', 'years', 'role', 'roles', 'title', 'type', 'name',
+    'organization', 'organizations', 'society', 'societies', 'position',
+    'present', 'current', 'ongoing', 'to', 'none', 'yes', 'no', 'n/a', 'na',
+    'chair', 'co-chair', 'board', 'other',
+})
+
+
+# At or below this length a pipe-free part is an organization only in the slot
+# right after a membership type ("Member" then "AMA"). Anywhere else a short
+# line is a location or acronym trailing the organization before it ("NY",
+# "USA", "(AHA)"): counting it would shift every later type and date onto the
+# wrong row, since the three lists are paired by position (#758 follow-up).
+_SHORT_ORGANIZATION_MAX_CHARS = 5
+
+
+def _looks_like_organization(part: str) -> bool:
+    """True when a pipe-free membership part reads as an organization name.
+
+    Needs a run of two letters (so "-", "2005", "(1)" fail), must not be a bare
+    year / month-year, and must not be one of the column-header or filler words
+    a flattened table leaves as its own line. "AMA", "NIH" and "IEEE" pass.
+    """
+    stripped = part.strip()
+    if not re.search(r'[^\W\d_]{2}', stripped):
+        return False
+    if _BARE_DATE_PART_RE.match(stripped):
+        return False
+    return stripped.lower().rstrip(':.') not in _NON_ORGANIZATION_WORDS
+
+
 def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]]:
     """Parse multiple memberships from merged entry lines.
 
@@ -287,6 +359,7 @@ def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]
     membership_keywords = ['member', 'fellow', 'diplomat', 'associate', 'elected', 'honorary']
     date_pattern = re.compile(r'^(\d{1,2}/?\d{0,4}\s*-\s*(?:present|\d{1,2}/?\d{0,4}))$|^(\d{4}\s*-\s*(?:present|\d{4}))$', re.IGNORECASE)
 
+    after_type = False
     for line in lines:
         line = line.strip()
         if not line:
@@ -308,10 +381,14 @@ def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]
             # No pipe - classify by content
             if any(kw in line.lower() for kw in membership_keywords) and len(line.split()) <= 3:
                 membership_types.append(line)
-            elif date_pattern.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
+                after_type = True
+                continue
+            if date_pattern.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
                 dates.append(line)
-            elif len(line) > 5:  # Likely organization name
+            elif _looks_like_organization(line) and (
+                    after_type or len(line) > _SHORT_ORGANIZATION_MAX_CHARS):
                 organizations.append(line)
+            after_type = False
 
     # Match up memberships - pair organizations with types and dates
     if organizations:

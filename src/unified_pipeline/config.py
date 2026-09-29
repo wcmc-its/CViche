@@ -57,28 +57,14 @@ WEB_OUTPUT_BASE = PROJECT_ROOT / "web_interface" / "outputs"
 # LLM Settings
 # ============================================================================
 
-# Model selection
-DEFAULT_MODEL = "gpt-4o-mini"
-SEGMENTATION_MODEL = "gpt-4o-mini"
-TAXONOMY_MODEL = "gpt-4o-mini"
-PARSING_MODEL = "gpt-4o-mini"
+# Model selection is per stage in config/llm_config.yaml (get_stage_config).
+# DEFAULT_MODEL is only calculate_cost()'s pricing fallback, used when that
+# YAML is absent/malformed (get_stage_config layer 1) or a caller omits
+# `model` (calculate_cost, _model_io_rates).
+DEFAULT_MODEL = "us.anthropic.claude-sonnet-4-6"
 
 # LLM API pricing (per 1M tokens) -- nested by provider
 PRICING = {
-    "openai": {
-        "gpt-4o-mini": {
-            "input": 0.150,   # per 1M tokens
-            "output": 0.600,
-        },
-        "gpt-4o": {
-            "input": 2.50,
-            "output": 10.00,
-        },
-        "gpt-5.1": {
-            "input": 2.50,
-            "output": 10.00,
-        },
-    },
     "bedrock": {
         # Anthropic Claude models -- per 1M tokens, identical to the direct
         # Anthropic API. Keyed by the BARE model ID; calculate_cost() strips
@@ -151,9 +137,6 @@ PRICING = {
         },
     },
 }
-
-# Backward compatibility: flat dict for existing pipeline code
-PRICING_FLAT = PRICING["openai"]
 
 # ============================================================================
 # Pipeline Features (Best of Both Worlds)
@@ -230,7 +213,7 @@ CACHE_WRITE_PRICE_MULTIPLIER = 1.25  # cache writes cost 1.25x input
 
 
 def calculate_cost(prompt_tokens: int, completion_tokens: int,
-                   model: str = None, provider: str = "openai",
+                   model: str = None, provider: str = "bedrock",
                    cache_read_tokens: int = 0,
                    cache_write_tokens: int = 0) -> float:
     """
@@ -244,7 +227,7 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
         model: Model name/ID (default: DEFAULT_MODEL). Bedrock region
             inference-profile prefixes (us./eu./apac./global.) are stripped
             before the PRICING lookup.
-        provider: LLM provider name (default: "openai")
+        provider: LLM provider name (default: "bedrock")
         cache_read_tokens: Input tokens served from prompt cache, billed at
             0.1x the input rate. 0 when caching is off or unsupported.
         cache_write_tokens: Input tokens written to prompt cache on this
@@ -256,7 +239,7 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
     """
     model = model or DEFAULT_MODEL
 
-    provider_pricing = PRICING.get(provider, PRICING.get("openai", {}))
+    provider_pricing = PRICING.get(provider, PRICING.get("bedrock", {}))
 
     # Resolve the pricing key: exact match first, then region-prefix-stripped.
     lookup = model if model in provider_pricing else _normalize_model_id(model)
@@ -266,11 +249,11 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
             _warned_missing_pricing.add(model)
             logger.warning(
                 "No PRICING entry for model %r (provider %r); falling back to "
-                "gpt-4o-mini pricing -- reported cost will be inaccurate. Add "
-                "the model to PRICING in config.py.", model, provider,
+                "the Bedrock default model's pricing -- reported cost will be "
+                "inaccurate. Add the model to PRICING in config.py.", model, provider,
             )
-        provider_pricing = PRICING.get("openai", {})
-        lookup = "gpt-4o-mini"
+        provider_pricing = PRICING.get("bedrock", {})
+        lookup = _normalize_model_id(DEFAULT_MODEL)
 
     if lookup not in provider_pricing:
         return 0.0
@@ -293,10 +276,15 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
 # to the currently-configured model, so the estimate tracks llm_config.yaml.
 
 # Historically observed cost per 1,000 *document* tokens for a full 12-stage
-# run, measured when the dominant (highest call volume) stage ran on the
-# anchor model below. Recalibrate from real run-cost data as runs accumulate.
-COST_ESTIMATE_ANCHOR_RATE = 0.075
-COST_ESTIMATE_ANCHOR_MODEL = ("openai", "gpt-4o")
+# run, originally measured when the dominant (highest call volume) stage ran
+# on openai/gpt-4o (rate 0.075 at that anchor). #953 (Bedrock-only) re-anchors
+# this to the Bedrock default model instead of remeasuring: the rate below is
+# 0.075 rescaled by blended(anthropic.claude-sonnet-4-6) / blended(gpt-4o) =
+# 0.075 * (5.4 / 4.0) = 0.10125, so estimate_cost_per_1k_doc_tokens() returns
+# the same value for the default config as it did before the re-anchor.
+# Recalibrate from real run-cost data as runs accumulate.
+COST_ESTIMATE_ANCHOR_RATE = 0.10125
+COST_ESTIMATE_ANCHOR_MODEL = ("bedrock", "anthropic.claude-sonnet-4-6")
 # Fraction of pipeline LLM tokens that are input (prompts/schemas dominate).
 COST_ESTIMATE_INPUT_SHARE = 0.8
 
@@ -348,37 +336,42 @@ def estimate_cost_per_1k_doc_tokens(model: str = None, provider: str = None) -> 
 # ----------------------------------------------------------------------------
 # The flat per-doc-token rate above (estimate_cost_per_1k_doc_tokens) badly
 # under-predicts entry-dense CVs, because it assumes total cost scales with
-# document LENGTH. It does not. The dominant cost is stage 3b entry
+# document LENGTH. It does not. One large cost is stage 3b entry
 # classification, which re-sends a large, static taxonomy/rules system prompt
 # (~10.7K tokens) on ONE LLM call per hierarchy group (entries batched, max 15
 # per call). That cost scales with entry COUNT, not document length: a compact
 # but entry-dense CV is cheap by tokens yet expensive by calls.
 #
-# Constants are calibrated against a complete run (2026-03-28):
+# The 3b constants were calibrated against a complete run (2026-03-28):
 #   56,372 doc chars / 123 entries / 17 classification calls /
 #   234K input + 19K output tokens / ~$0.99 on Sonnet 4.6.
-# stage 3b alone was 191K of the 234K input tokens (~82%).
-# Recalibrate from real run-cost data as runs accumulate.
 #
-# KNOWN GAP (see issue #50): the current pipeline added a per-section
-# core_taxonomy_mapper stage absent from the 2026-03-28 calibration run, so
-# OTHER_STAGES_INPUT_MULTIPLE can under-count section-dense CVs until a
-# complete current-pipeline run is measured. The min/max band widens to
-# partially absorb this; recalibrate when a current run's logs are available.
+# #538 recalibration: the 2026-03-28 model quoted a maximum BELOW the actual
+# on every one of 24 measured runs (20 corpus CVs from 2026-09-17 at c7daa91,
+# 2 web runs from September, 2 web runs from issue #538), 5K-339K chars. Two
+# terms were missing or low: a fixed per-run load (the 5K-char CVs still cost
+# ~$0.55, not ~$0.12), and the per-document-token multiple for the other
+# stages -- stages 2 and 4 each cost more than 3b on every CV over 100K chars,
+# so 3b no longer dominates on large CVs. BASE_INPUT_TOKENS and
+# OTHER_STAGES_INPUT_MULTIPLE are a least-squares fit of (actual - 3b term) over those runs, priced at the
+# default model's rates. Every measured actual lands at 0.75x-1.32x of the
+# point estimate, inside the 0.7x-1.5x band get_estimated_run_cost quotes.
 COST_ESTIMATE_CHARS_PER_ENTRY = 458            # document chars per classified entry
 COST_ESTIMATE_ENTRIES_PER_3B_CALL = 7.2        # entries per classification call (hierarchy groups, batch <= 15)
 COST_ESTIMATE_3B_INPUT_TOKENS_PER_CALL = 11200  # static taxonomy prompt + batch text, per call
 COST_ESTIMATE_3B_OUTPUT_TOKENS_PER_ENTRY = 155  # classification JSON emitted per entry
 COST_ESTIMATE_3B_EXTRA_PASS_INPUT_TOKENS = 3221  # T-validation (~2906) + fragment reconnection (~315), once/run
-COST_ESTIMATE_OTHER_STAGES_INPUT_MULTIPLE = 2.8  # non-3b input tokens / document tokens
+COST_ESTIMATE_BASE_INPUT_TOKENS = 68000      # fixed per-run prompt load, independent of CV size (#538 fit)
+COST_ESTIMATE_OTHER_STAGES_INPUT_MULTIPLE = 21.9  # non-3b input tokens / document tokens (#538 fit)
 COST_ESTIMATE_OTHER_STAGES_OUTPUT_SHARE = 0.05   # non-3b output tokens / non-3b input tokens
 
 
 def _model_io_rates(provider: str, model: str) -> tuple:
-    """(input, output) USD per 1M tokens for a model, with gpt-4o-mini fallback."""
-    provider_pricing = PRICING.get(provider, PRICING.get("openai", {}))
+    """(input, output) USD per 1M tokens for a model, with the Bedrock default
+    model's pricing as fallback."""
+    provider_pricing = PRICING.get(provider, PRICING.get("bedrock", {}))
     lookup = model if model in provider_pricing else _normalize_model_id(model)
-    pricing = provider_pricing.get(lookup) or PRICING["openai"]["gpt-4o-mini"]
+    pricing = provider_pricing.get(lookup) or PRICING["bedrock"][_normalize_model_id(DEFAULT_MODEL)]
     return pricing["input"], pricing["output"]
 
 
@@ -388,9 +381,10 @@ def estimate_run_cost_usd(text_char_count: int, model: str = None,
 
     Models stage 3b entry classification explicitly (call_count x fixed
     prompt + per-entry output) because it dominates cost and scales with
-    entry count, and treats all other stages as roughly proportional to
-    document tokens. Priced at the active model's input/output rates so the
-    estimate tracks llm_config.yaml. See the calibration constants above.
+    entry count, treats all other stages as roughly proportional to
+    document tokens, and adds a fixed per-run load (#538). Priced at the
+    active model's input/output rates so the estimate tracks llm_config.yaml.
+    See the calibration constants above.
 
     When model/provider are omitted, the effective default config is used.
     """
@@ -415,7 +409,7 @@ def estimate_run_cost_usd(text_char_count: int, model: str = None,
     other_input = doc_tokens * COST_ESTIMATE_OTHER_STAGES_INPUT_MULTIPLE
     other_output = other_input * COST_ESTIMATE_OTHER_STAGES_OUTPUT_SHARE
 
-    total_input = stage3b_input + other_input
+    total_input = COST_ESTIMATE_BASE_INPUT_TOKENS + stage3b_input + other_input
     total_output = stage3b_output + other_output
     return (total_input * in_rate + total_output * out_rate) / 1_000_000
 
@@ -474,7 +468,7 @@ def get_stage_config(stage: str) -> dict:
     Resolve LLM config for a pipeline stage.
 
     Resolution order (later overrides earlier):
-    1. Hardcoded defaults (openai / gpt-4o-mini / temperature 0)
+    1. Hardcoded defaults (bedrock / DEFAULT_MODEL / temperature 0)
     2. YAML default block
     3. YAML stage-specific overrides
     4. CVICHE_LLM_PROVIDER / CVICHE_LLM_MODEL env vars (only for keys
@@ -490,14 +484,14 @@ def get_stage_config(stage: str) -> dict:
 
     # Layer 1: hardcoded defaults
     effective = {
-        "provider": "openai",
-        "model": "gpt-4o-mini",
+        "provider": "bedrock",
+        "model": DEFAULT_MODEL,
         "temperature": 0,
         "max_tokens": None,
         "retry_count": 3,
-        # Bedrock-only knob; ignored by the OpenAI path. Default false so the
-        # request is byte-identical to pre-caching behavior when the YAML is
-        # absent. The shipping llm_config.yaml sets it to true.
+        # Default false so the request is byte-identical to pre-caching
+        # behavior when the YAML is absent. The shipping llm_config.yaml
+        # sets it to true.
         "enable_prompt_caching": False,
     }
 

@@ -27,9 +27,15 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.core.template_boilerplate import (  # noqa: E402
+    is_near_template_instruction,
+    is_template_instruction,
+)
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     DEDUP_SAFE_CONTAINMENT,
+    INVENTED_RECORD_LICENSURE_CODE,
+    INVENTED_RECORD_MIN_VALUES,
     UNDER_EXTRACTION_MAX_PCT,
     UNDER_EXTRACTION_MIN_CHARS,
     UNDER_EXTRACTION_MIN_RECORDS,
@@ -37,13 +43,19 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _entry_rendered,
     _entry_status,
     _FUNDING_SECTIONS,
+    _is_invented_record,
+    _MIN_EXACT_LEN,
+    _nonempty_field_values,
     _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES,
+    _rendered_row_value_sets,
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
+    lint_invented_records,
     lint_under_extraction,
 )
 from unified_pipeline.doctor.shared import _haystacks  # noqa: E402
+from unified_pipeline.segmentation_regression import _norm  # noqa: E402
 
 
 # ==========================================================================
@@ -442,6 +454,344 @@ def test_alphanumeric_tokens_unicode_diaeresis_splits_on_the_non_ascii_char():
 def test_alphanumeric_tokens_digits_are_tokens_punctuation_is_not():
     assert _alphanumeric_tokens("Grant 2020") == {"grant", "2020"}
     assert _alphanumeric_tokens("grant, funded!") == {"grant", "funded"}
+
+
+# ==========================================================================
+# D9 -- lint_invented_records (#829): a record built from the WCM template's
+# own labels rather than real content, reaching the delivered document.
+#
+# "Full Name of Board" / "Certificate #" / "Dates of Certification" are the
+# WCM board-certification template's own column labels, already committed in
+# `template_boilerplate_phrases.json` -- template scaffolding text, not a
+# verbatim line from any real CV. Same for the licensure paragraph below,
+# which is the tracked template's own instruction wording with one word
+# swapped ("ABC" for the real template's own hospital name) so the near-match
+# path is exercised without reproducing any real CV's text.
+
+_BOARD_LABEL = "Full Name of Board"
+_CERT_NUMBER_LABEL = "Certificate #"
+_CERT_DATE_LABEL = "Dates of Certification"
+
+_HEADER_ROW = [_BOARD_LABEL, f"{_CERT_NUMBER_LABEL} \n(indicate if board eligible)",
+              f"{_CERT_DATE_LABEL} \n(yyyy–yyyy)"]
+_INVENTED_CERT_ROW = [_BOARD_LABEL, _CERT_NUMBER_LABEL, ""]
+_REAL_CERT_ROW = ["American Board of Internal Medicine", "123456", "2015"]
+
+_NEAR_MATCH_LICENSURE_TEXT = (
+    "(Every doctor appointed to the ABC Hospital staff, except interns and "
+    "aliens in the US via non-immigrant visas, must have a New York State "
+    "license or a temporary certificate in lieu of the license.)")
+
+
+def _invented_cert_entry(element_idx_start=1):
+    return {"taxonomy_code": "F2", "element_type": "table_row",
+            "element_idx_start": element_idx_start,
+            "text": f"{_BOARD_LABEL} | {_CERT_NUMBER_LABEL} | {_CERT_DATE_LABEL}",
+            "extracted_fields": {
+                "certifying_board": _BOARD_LABEL,
+                "certificate_number": _CERT_NUMBER_LABEL,
+                "year_certified": None, "recertification_date": None}}
+
+
+def _real_cert_entry(element_idx_start=1):
+    return {"taxonomy_code": "F2", "element_type": "table_row",
+            "element_idx_start": element_idx_start,
+            "text": "American Board of Internal Medicine | 123456 | 2015",
+            "extracted_fields": {
+                "certifying_board": "American Board of Internal Medicine",
+                "certificate_number": "123456",
+                "year_certified": "2015", "recertification_date": None}}
+
+
+def _invented_licensure_entry(element_idx_start=1, element_type="break",
+                              text=_NEAR_MATCH_LICENSURE_TEXT):
+    return {"taxonomy_code": "F1", "element_type": element_type,
+            "element_idx_start": element_idx_start, "text": text,
+            "extracted_fields": {"state_country": "New York State",
+                                 "license_number": None, "issue_date": None,
+                                 "expiration_date": None}}
+
+
+def test_invented_record_min_values_is_2_and_licensure_code_is_f1():
+    assert INVENTED_RECORD_MIN_VALUES == 2
+    assert INVENTED_RECORD_LICENSURE_CODE == "F1"
+    assert _MIN_EXACT_LEN == 25
+
+
+# -- _nonempty_field_values ------------------------------------------------
+
+def test_nonempty_field_values_flattens_lists_and_drops_blanks_and_dicts():
+    fields = {
+        "single": "Alpha",
+        "blank": "",
+        "whitespace_only": "   ",
+        "absent": None,
+        "listed": ["Beta", "", None, "Gamma"],
+        "nested": {"unexpected": "should not be flattened"},
+    }
+    assert _nonempty_field_values(fields) == ["Alpha", "Beta", "Gamma"]
+    assert _nonempty_field_values({}) == []
+
+
+# -- _is_invented_record ----------------------------------------------------
+
+def test_is_invented_record_true_on_the_board_certification_header_row():
+    assert _is_invented_record(_invented_cert_entry()["extracted_fields"])
+
+
+def test_is_invented_record_false_on_real_board_certification_values():
+    assert not _is_invented_record(_real_cert_entry()["extracted_fields"])
+
+
+def test_is_invented_record_false_below_the_min_values_floor():
+    # One matched label alone, however distinctive, is not enough evidence
+    # (the G/Institutional-Affiliation shape: a single unfilled prompt label
+    # legitimately echoes back with a blank companion cell).
+    assert not _is_invented_record({"affiliation_type": _BOARD_LABEL})
+    # Isolate the count guard from the length guard: "Board / Organization
+    # Name" alone is exactly 25 chars (== _MIN_EXACT_LEN), long enough on
+    # its own to pass the length floor, so this fails ONLY on value count.
+    long_single_label = "Board / Organization Name"
+    assert len(long_single_label) == _MIN_EXACT_LEN
+    assert not _is_invented_record({"granting_body": long_single_label})
+
+
+def test_is_invented_record_false_below_the_combined_length_floor():
+    # "Total"/"100%" are themselves registered template phrases (the blank
+    # %-effort table's own worked example), and a real, fully-filled J table
+    # legitimately ends in a "Total | 100%" row -- 2 matched values, but only
+    # 9 combined chars, well under _MIN_EXACT_LEN (25).
+    assert not _is_invented_record({"activity": "Total", "percent_effort": "100%"})
+
+
+def test_is_invented_record_true_at_the_exact_combined_length_floor():
+    # "Organization" (12 chars) and "Bibliography" (12 chars) are each their
+    # own registered template label -- raw lengths sum to 24, and the "|"
+    # the code joins them with brings the combined length to exactly 25
+    # (== _MIN_EXACT_LEN), the boundary the `<` comparison must accept.
+    # A `<` -> `<=` mutant on the length check, or a join separator swapped
+    # from "|" to "" (which drops this to 24), each flip this to False.
+    a, b = "Organization", "Bibliography"
+    assert len(a) + len(b) == 24
+    assert len(f"{a}|{b}") == _MIN_EXACT_LEN
+    assert _is_invented_record({"field_one": a, "field_two": b})
+
+
+def test_is_invented_record_false_one_char_below_the_combined_length_floor():
+    # Same two-label shape, one char short of the floor: "Organization"
+    # (12) and "Institution" (11) join to exactly 24 chars, isolating the
+    # `<` boundary from the other side.
+    a, b = "Organization", "Institution"
+    assert len(f"{a}|{b}") == _MIN_EXACT_LEN - 1
+    assert not _is_invented_record({"field_one": a, "field_two": b})
+
+
+def test_is_invented_record_false_on_a_mixed_real_and_label_record():
+    # Isolates the `all(...)` guard itself (not just the two floors above):
+    # one real value plus one template label clears both the value-count
+    # floor (2) and the combined-length floor (>= 25, here 49) but must
+    # stay False -- `any(...)` in place of `all(...)` would wrongly call
+    # this fabricated, and nothing else in this file rebuilds a
+    # certifying_board/certificate_number pair with one side real (#829).
+    mixed = {"certifying_board": "American Board of Internal Medicine",
+             "certificate_number": _CERT_NUMBER_LABEL}
+    assert len(mixed) >= INVENTED_RECORD_MIN_VALUES
+    assert len("|".join(mixed.values())) >= _MIN_EXACT_LEN
+    assert not _is_invented_record(mixed)
+
+
+def test_is_invented_record_false_with_no_values_at_all():
+    assert not _is_invented_record({"a": None, "b": ""})
+
+
+# -- _rendered_row_value_sets ------------------------------------------------
+
+def test_rendered_row_value_sets_distinguishes_header_from_data_row():
+    rows = _rendered_row_value_sets([[_HEADER_ROW, _INVENTED_CERT_ROW]])
+    invented_key = frozenset({_BOARD_LABEL.lower(), _CERT_NUMBER_LABEL.lower()})
+    header_key = frozenset(_norm(v) for v in _HEADER_ROW)
+    assert invented_key in rows
+    assert header_key in rows
+    # The header row's 3rd cell carries a parenthetical the data row's
+    # matching cell does not -- they must not collide into one set.
+    assert invented_key != header_key
+
+
+def test_rendered_row_value_sets_ignores_empty_cells_and_empty_tables():
+    assert _rendered_row_value_sets([]) == set()
+    assert _rendered_row_value_sets([[["", "", ""]]]) == set()
+    assert _rendered_row_value_sets([[["Alpha", "", "Beta"]]]) == {
+        frozenset({"alpha", "beta"})}
+
+
+# -- lint_invented_records: part (a), the rendered-header-record shape -----
+
+def test_lint_invented_records_warns_on_a_rendered_header_record():
+    stage4 = {"entries": [_invented_cert_entry(element_idx_start=7)]}
+    table_rows = [[_HEADER_ROW, _INVENTED_CERT_ROW]]
+    findings = lint_invented_records(stage4, table_rows)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert set(finding.keys()) == {"lint", "severity", "message", "evidence"}
+    assert finding["lint"] == "invented_records"
+    assert finding["severity"] == "WARN"
+    assert "F2" in finding["message"] and "7" in finding["message"]
+    assert "#829" in finding["message"]
+    # The evidence is the populated field values, not just the finding's
+    # key set -- an `[]` in place of the list comprehension would still
+    # pass every assertion above (#829's own contract test only checks
+    # keys), silently dropping what a reviewer sees. The two None-valued
+    # fields (`year_certified`, `recertification_date`) contribute nothing.
+    assert finding["evidence"] == [
+        "certifying_board: Full Name of Board",
+        "certificate_number: Certificate #",
+    ]
+
+
+def test_lint_invented_records_silent_when_the_header_record_never_rendered():
+    # Stage 4 still fabricates the entry, but stage 6 correctly suppressed
+    # it (#959's own fix, for this one section) -- only the real header row
+    # made it into the document, no second data row.
+    stage4 = {"entries": [_invented_cert_entry()]}
+    table_rows = [[_HEADER_ROW]]
+    assert lint_invented_records(stage4, table_rows) == []
+
+
+def test_lint_invented_records_silent_on_real_certification_content():
+    stage4 = {"entries": [_real_cert_entry()]}
+    table_rows = [[_HEADER_ROW, _REAL_CERT_ROW]]
+    assert lint_invented_records(stage4, table_rows) == []
+
+
+def test_lint_invented_records_skips_taxonomy_code_t():
+    entry = _invented_cert_entry()
+    entry["taxonomy_code"] = "T"
+    assert lint_invented_records({"entries": [entry]}, [[_HEADER_ROW, _INVENTED_CERT_ROW]]) == []
+
+
+def test_lint_invented_records_handles_extracted_fields_none_without_raising():
+    # Stage 4 can write extracted_fields: null for an entry field extraction
+    # skipped outright (not just individual field values of None, the shape
+    # test_lint_invented_records_silent_on_single_label_affiliation_prompt
+    # covers below). `lint_invented_records`'s own read is
+    # `e.get("extracted_fields") or {}`, not `e.get("extracted_fields", {})`
+    # -- the latter returns None (the key IS present) rather than {} when the
+    # value itself is None, and passing that None into `_is_invented_record`
+    # would raise AttributeError on `.values()`, which `_run_lint` in
+    # run_doctor.py turns into a doctor ERROR finding instead of the correct
+    # silent skip.
+    entry = {"taxonomy_code": "F2", "element_type": "table_row",
+            "element_idx_start": 5, "text": "unextracted row",
+            "extracted_fields": None}
+    assert lint_invented_records({"entries": [entry]}, []) == []
+
+
+def test_lint_invented_records_silent_on_single_label_affiliation_prompt():
+    # The G/Institutional-Affiliation shape: one unfilled prompt label
+    # rendered with a blank companion cell is the template's own intentional
+    # "show the prompt, blank if unfilled" convention, not a fabricated
+    # multi-field record.
+    entry = {"taxonomy_code": "G", "element_type": "break",
+            "element_idx_start": 3, "text": f"{_BOARD_LABEL}:",
+            "extracted_fields": {"organization": None,
+                                 "affiliation_type": _BOARD_LABEL}}
+    table_rows = [[[_BOARD_LABEL, ""]]]
+    assert lint_invented_records({"entries": [entry]}, table_rows) == []
+
+
+def test_lint_invented_records_silent_on_a_real_percent_effort_total_row():
+    entry = {"taxonomy_code": "J", "element_type": "table_row",
+            "element_idx_start": 4, "text": "Total | 100%",
+            "extracted_fields": {"activity": "Total", "percent_effort": "100%"}}
+    table_rows = [[["Activity", "% Effort"], ["Total", "100%"]]]
+    assert lint_invented_records({"entries": [entry]}, table_rows) == []
+
+
+# -- lint_invented_records: part (b), the F1 invented-licence shape --------
+
+def test_lint_invented_records_warns_on_an_f1_entry_matching_a_known_instruction_exactly():
+    known_instruction = ("Licensure: Every physician appointed to the "
+                         "Hospital staff, except interns, and aliens in "
+                         "the US via non-immigrant visas, must have a New "
+                         "York State license or a temporary certificate in "
+                         "lieu of the license.")
+    entry = _invented_licensure_entry(text=known_instruction)
+    findings = lint_invented_records({"entries": [entry]}, [])
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "invented_records"
+    assert findings[0]["severity"] == "WARN"
+    assert "F1" in findings[0]["message"] and "#829" in findings[0]["message"]
+    # The evidence is the source text itself (truncated), not just the
+    # message -- an `[]` in place of `[text[:120]]` would still pass every
+    # assertion above. `known_instruction` is 207 chars, so this also pins
+    # the truncation, not just that evidence is non-empty.
+    assert findings[0]["evidence"] == [known_instruction[:120]]
+
+
+def test_lint_invented_records_warns_on_an_f1_entry_matching_via_the_pipe_split_path_only():
+    # A table-row-shaped F1 text ("... | ") reaches `is_template_instruction`
+    # via its pipe-split rule (b), not the whole-string exact match in rule
+    # (a) -- the trailing "|" survives normalization, so the joined string
+    # never equals the known instruction verbatim. `is_near_template_instruction`
+    # refuses any text containing "|" outright, so this exercises the exact
+    # branch (`is_template_instruction(...)`) with the near-match branch
+    # provably False, isolating the `or` in `lint_invented_records` from the
+    # near-match test above (#829).
+    known_instruction = ("Licensure: Every physician appointed to the "
+                         "Hospital staff, except interns, and aliens in "
+                         "the US via non-immigrant visas, must have a New "
+                         "York State license or a temporary certificate in "
+                         "lieu of the license.")
+    text = f"{known_instruction} | "
+    assert is_template_instruction(text)
+    assert not is_near_template_instruction(text)
+    entry = _invented_licensure_entry(text=text)
+    findings = lint_invented_records({"entries": [entry]}, [])
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "invented_records"
+    assert "F1" in findings[0]["message"]
+
+
+def test_lint_invented_records_warns_on_an_f1_entry_near_matching_a_known_instruction():
+    entry = _invented_licensure_entry()  # the "ABC Hospital" near-variant
+    findings = lint_invented_records({"entries": [entry]}, [])
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "invented_records"
+
+
+def test_lint_invented_records_fires_on_f1_regardless_of_element_type():
+    # A5IZ6Q's own invented licence was extracted as element_type "break" --
+    # pin that this lint does not filter it out (#829).
+    for element_type in ("break", "header", "paragraph", "table_row"):
+        entry = _invented_licensure_entry(element_type=element_type)
+        assert len(lint_invented_records({"entries": [entry]}, [])) == 1, element_type
+
+
+def test_lint_invented_records_ignores_the_same_text_under_a_different_code():
+    entry = _invented_licensure_entry()
+    entry["taxonomy_code"] = "F2"
+    assert lint_invented_records({"entries": [entry]}, []) == []
+
+
+def test_lint_invented_records_silent_on_real_f1_content():
+    entry = {"taxonomy_code": "F1", "element_type": "table_row",
+            "element_idx_start": 2,
+            "text": "New York | 123456 | 06/01/2010",
+            "extracted_fields": {"state_country": "New York",
+                                 "license_number": "123456",
+                                 "issue_date": "06/01/2010",
+                                 "expiration_date": None}}
+    assert lint_invented_records({"entries": [entry]}, []) == []
+
+
+def test_lint_invented_records_reports_both_shapes_in_one_run():
+    stage4 = {"entries": [_invented_cert_entry(element_idx_start=1),
+                          _invented_licensure_entry(element_idx_start=2)]}
+    table_rows = [[_HEADER_ROW, _INVENTED_CERT_ROW]]
+    findings = lint_invented_records(stage4, table_rows)
+    assert len(findings) == 2
+    assert any("F2" in f["message"] for f in findings)
+    assert any("F1" in f["message"] for f in findings)
 
 
 if __name__ == "__main__":

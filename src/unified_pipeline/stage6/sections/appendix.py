@@ -15,9 +15,9 @@ lines), `_truncate_appendix_text` and `_describe_dropped`. `AppendixSection`'s
 methods only write that model into the Word document. The rules are therefore
 testable without a document, and the writer carries no rule of its own.
 
-Five checks run before anything is written, in `_appendix_drop_reason`'s order.
-Every drop is counted under the check that caught it, so the summary comment
-and the log line say what was removed instead of calling every drop
+Several checks run before anything is written, in `_appendix_drop_reason`'s
+order. Every drop is counted under the check that caught it, so the summary
+comment and the log line say what was removed instead of calling every drop
 "boilerplate":
 
 - blank text;
@@ -47,6 +47,33 @@ currently exercise. `test_stage6_appendix_header_row_filter.py` pins the real
 header shapes, the numeric-token and short-entry negatives, and that
 false-positive class, so a change to the heuristic is visible.
 
+Three more checks (#885) catch structural scaffolding that is specific to T:
+a bare year ("2021"), a lone status word ("Completed", "In Press") and a
+source CV's own table-of-contents line ("Honors and Awards       Page 7").
+The issue's own filed figure -- T-validation-confirmed structural entries are
+about 79% of that batch's Appendix lines -- covers EVERY shape stage 3b's
+`classification_reasoning` calls structural (also section headers, date
+stamps, CV titles, and table-header rows the pattern above already catches);
+these three checks are a safe subset of that, not all of it. A render A/B on
+the issue's own 20-CV batch (dev vs. this fix, over the farm's cached stage
+output for determinism, `T. APPENDIX` numbered-line count) shows what these
+three checks alone remove: about 30% of that batch's Appendix lines (65 of
+219). The remaining lines -- section headers, date stamps, CV titles, and
+other T-validation-confirmed shapes these three checks do not match -- are a
+disclosed, unaddressed residual: this change narrows #885, it does not close
+it. Stage 3b's own T-validation pass already flags the shapes these checks
+remove in free text ("[T-validation confirmed] Bare year '2021' is a
+structural marker"), but that string is free LLM text, not a drop predicate:
+the SAME tag also covers real, correctly-T-coded content (hobbies, a
+career-gap explanation, a skills list) that must not be dropped, so
+`_appendix_drop_reason` never reads it. Each of the three checks instead
+matches the entry's raw TEXT shape, independent of any reasoning string, and
+-- unlike every check above -- is gated to `taxonomy_code == "T"`: measured
+against the full 126-CV #885 corpus (37,704 entries, every taxonomy code),
+none of the three shapes ever occurs outside T, so the gate is defense in
+depth, not the thing doing the precision work. See the comments above
+`_BARE_YEAR_RE`, `_STATUS_MARKER_WORDS` and `_TOC_LINE_RE`.
+
 What was dropped is reported ONCE, as a single Word comment on the introductory
 paragraph, rather than per entry -- N comments saying so is itself noise.
 
@@ -67,6 +94,7 @@ Numbering restarts under each heading. Bodies are capped at
 appendix is a pointer back to the original document, not a second copy of it.
 """
 import logging
+import re
 from collections import Counter
 from collections.abc import Sequence
 from typing import TypedDict
@@ -75,6 +103,7 @@ from ...core.template_boilerplate import (
     is_near_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
+    is_template_label_line,
     is_unanswered_prompt,
 )
 from ..formatting import _set_font
@@ -103,17 +132,61 @@ DROP_TEMPLATE_INSTRUCTION = "template-instruction"
 DROP_SOURCE_BOILERPLATE = "source-boilerplate"
 DROP_RENDERS_EMPTY = "renders-empty"
 DROP_COLUMN_HEADER = "column-header"
+DROP_BARE_YEAR = "bare-year"
+DROP_STATUS_MARKER = "status-marker"
+DROP_TOC_LINE = "toc-line"
 DROP_NEAR_TEMPLATE_INSTRUCTION = "near-template-instruction"
 DROP_UNANSWERED_PROMPT = "unanswered-prompt"
+DROP_TEMPLATE_LABEL = "template-label"
 DROP_REASONS = (
     DROP_BLANK,
     DROP_TEMPLATE_INSTRUCTION,
     DROP_SOURCE_BOILERPLATE,
     DROP_RENDERS_EMPTY,
     DROP_COLUMN_HEADER,
+    DROP_BARE_YEAR,
+    DROP_STATUS_MARKER,
+    DROP_TOC_LINE,
     DROP_NEAR_TEMPLATE_INSTRUCTION,
     DROP_UNANSWERED_PROMPT,
+    DROP_TEMPLATE_LABEL,
 )
+
+# The taxonomy code this whole module exists for (CODING_STANDARDS.md 8.2:
+# a comparison on a taxonomy code reads through a named constant). Named
+# despite being the module's own subject -- spelled out as a literal
+# elsewhere in this file ("T. APPENDIX", `_write_appendix_intro`) -- because
+# the #885 gate below is a CLASSIFICATION decision on the code, the shape
+# 8.2 names as its canonical instance, not a display string.
+_APPENDIX_TAXONOMY_CODE = "T"
+
+# #885: three T-only structural shapes -- see the module docstring's "Three
+# more checks" paragraph for why these match the entry's raw TEXT rather than
+# its (untrustworthy as a predicate) `classification_reasoning` string.
+
+# A bare four-digit year, optionally with one trailing period ("2021",
+# "2016.") -- a year with nothing else attached carries no information a
+# reader could act on. Matched on 323 T entries across the #885 corpus (126
+# CVs, 37,704 entries of every taxonomy code) and zero non-T entries.
+_BARE_YEAR_RE = re.compile(r"^(?:19|20)\d{2}\.?$")
+
+# A single status word with no subject, title, or venue attached -- "a
+# specific ... entry" (the #885 issue's own phrase) always carries more than
+# just its status. Exact, case-insensitive, whole-string match (not
+# "contains") against the shapes actually observed: web210's presentation
+# statuses, web226's grant statuses. Matched on 7 T entries, zero non-T.
+_STATUS_MARKER_WORDS = frozenset({
+    "completed", "scheduled", "pending", "ongoing", "active", "current",
+    "funded", "not funded", "withdrawn", "submitted", "in press", "published",
+})
+
+# A source CV's own table of contents: heading text, then a run of
+# whitespace (the dot leader Word draws between a ToC entry and its page
+# number, collapsed by the reader -- as little as the single space in
+# "...Extramural Presentations Page 17"), then "Page N" or "Page N-M".
+# Matched on all 18 ToC lines in web181, the CV #885 was filed against, and
+# zero other entries in the #885 corpus.
+_TOC_LINE_RE = re.compile(r"^.{1,90}?[ \t]Page\s+\d+(?:[-–—]\d+)?\s*$")
 
 
 class UnmappedEntry(TypedDict, total=False):
@@ -385,11 +458,20 @@ def build_appendix_diversion_warnings(
     return warnings
 
 
-def _appendix_drop_reason(text: str, rendered: str) -> str | None:
+def _appendix_drop_reason(
+    text: str, rendered: str, taxonomy_code: str | None = None
+) -> str | None:
     """The `DROP_*` reason *text* stays out of the appendix, or None to keep it.
 
     *rendered* is *text* with the readers' cell separators collapsed; it is
     passed in rather than recomputed so each survivor is rendered once.
+
+    *taxonomy_code* gates the three #885 structural checks (bare year, status
+    marker, ToC line -- see the module docstring and the comments above
+    `_BARE_YEAR_RE`) to T-coded entries only. Optional, defaulting to None
+    (which skips those three checks), so a caller checking only text shape --
+    `test_stage6_appendix_header_row_filter.py`'s unit tests among them --
+    is unaffected.
     """
     if not text.strip():
         return DROP_BLANK
@@ -401,10 +483,20 @@ def _appendix_drop_reason(text: str, rendered: str) -> str | None:
         return DROP_RENDERS_EMPTY
     if _is_column_header_row(text):
         return DROP_COLUMN_HEADER
+    if taxonomy_code == _APPENDIX_TAXONOMY_CODE:
+        stripped = text.strip()
+        if _BARE_YEAR_RE.match(stripped):
+            return DROP_BARE_YEAR
+        if stripped.rstrip(".").lower() in _STATUS_MARKER_WORDS:
+            return DROP_STATUS_MARKER
+        if _TOC_LINE_RE.match(text):
+            return DROP_TOC_LINE
     if is_near_template_instruction(text):
         return DROP_NEAR_TEMPLATE_INSTRUCTION
     if is_unanswered_prompt(text):
         return DROP_UNANSWERED_PROMPT
+    if is_template_label_line(text):
+        return DROP_TEMPLATE_LABEL
     return None
 
 
@@ -418,7 +510,7 @@ def _filter_unmapped_entries(
     for entry in entries:
         text = entry.get("text") or ""
         rendered = _clean_inline_tabs(text)
-        reason = _appendix_drop_reason(text, rendered)
+        reason = _appendix_drop_reason(text, rendered, entry.get("taxonomy_code"))
         if reason is None:
             kept.append((entry, rendered))
         else:

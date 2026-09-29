@@ -53,6 +53,59 @@ def test_trailing_location_is_detected(location, institution):
 
 
 @pytest.mark.parametrize("location, institution", [
+    # same city, two DIFFERENT US states: a different place (#566)
+    ("Rochester, MN", "Mayo Clinic, Rochester, NY"),
+    ("Portland, OR", "Maine Medical Center, Portland, ME"),
+    ("Columbia, SC", "University of Missouri, Columbia, Missouri"),
+    ("Springfield, IL", "Baystate Medical Center, Springfield, Massachusetts"),
+    ("Springfield, IL", "Baystate Medical Center, Springfield, M. A."),
+    ("Rochester, MN", "Mayo Clinic, Rochester, New York"),      # two-word spelt-out state
+    ("Rochester, MN, USA", "Mayo Clinic, Rochester, NY"),        # state is the SECOND segment
+    # a city that is only a substring of another word or city
+    ("York, PA", "Mount Sinai Hospital, New York, NY"),
+    ("Paris, France", "Parish Medical Center"),
+    ("Paris, France", "Sorbonne, Parisian Campus"),
+    ("Rochester, NY", "Mayo Clinic, Rochester Hills, MI"),
+])
+def test_same_city_other_us_state_is_not_already_present(location, institution):
+    assert _location_already_in_institution(location, institution) is False
+
+
+@pytest.mark.parametrize("location, institution", [
+    # one place written two ways must dedup: token forms differ, place does not
+    ("Durham, NC", "Duke University, Durham, North Carolina"),
+    ("Durham, North Carolina", "Duke University, Durham, NC"),
+    ("Durham, NC", "Duke University, Durham, north carolina"),
+    ("New York, NY", "Memorial Sloan Kettering Cancer Center, New York, N.Y."),
+    ("New York, NY", "Memorial Sloan Kettering Cancer Center, New York, N. Y."),
+    ("Washington, D. C.", "Howard University, Washington, DC"),
+    ("Toronto, Canada", "Sick Kids, Toronto, Ontario"),
+    ("Toronto, Canada", "Sick Kids, Toronto, ON"),
+    ("Toronto, ON", "Sick Kids, Toronto, Canada"),
+    ("New York, NY", "Columbia, New York, USA"),
+    ("New York, NY", "Columbia, New York, U.S.A."),
+    ("New York, NY", "Columbia, New York, United States"),
+    ("London, United Kingdom", "King's College, London, UK"),
+    ("London, United Kingdom", "King's College, London, U.K."),
+    ("London, United Kingdom", "King's College, London, England"),
+    ("Cambridge, United Kingdom", "Cambridge University, Cambridge, England"),
+    ("Cambridge, United Kingdom", "Cambridge University, Cambridge, UK"),
+    ("Houston, TX", "Baylor, Houston, Tex."),
+    ("Philadelphia, PA", "Penn, Philadelphia, Penn."),
+    ("Sao Paulo, Brazil", "USP, Sao Paulo, SP"),
+    ("Sao Paulo, Brazil", "USP, Sao Paulo, Brasil"),
+    ("New York, NY 10065", "Weill Cornell, New York, NY"),   # ZIP on the location
+    # city-only either side
+    ("Boston", "Beth Israel, Boston, MA"),
+    ("Boston, MA", "Beth Israel, Boston"),
+    # residual: a US state against a foreign country is not told apart
+    ("Cambridge, MA", "University of Cambridge, Cambridge, UK"),
+])
+def test_same_place_written_two_ways_still_counts_as_present(location, institution):
+    assert _location_already_in_institution(location, institution) is True
+
+
+@pytest.mark.parametrize("location, institution", [
     ("", "Massachusetts General Hospital"),
     ("Boston, MA", ""),
     (", MA", "Boston, MA"),  # no city segment

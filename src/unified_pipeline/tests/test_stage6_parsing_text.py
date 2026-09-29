@@ -85,6 +85,7 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _extract_name_from_uid,
     _is_structural_label,
     _is_table_header_entry,
+    _parse_multi_membership_entry,
 )
 
 
@@ -197,6 +198,30 @@ def test_all_caps_content_with_an_empty_extracted_fields_dict_is_not_a_structura
     assert _is_structural_label(entry) is False
 
 
+# --- #757: blank raw text with stage-5c formatted_text is content ----------
+
+def test_blank_text_with_formatted_text_is_not_a_structural_label():
+    entry = {"text": "  \n ", "extracted_fields": {"formatted_text": "Grand rounds"}}
+    assert _is_structural_label(entry) is False
+
+
+def test_blank_text_without_formatted_text_is_still_a_structural_label():
+    assert _is_structural_label({"text": ""}) is True
+    assert _is_structural_label({"text": "  ", "extracted_fields": {}}) is True
+    assert _is_structural_label(
+        {"text": "", "extracted_fields": {"formatted_text": "   "}}) is True
+    assert _is_structural_label(
+        {"text": "", "extracted_fields": {"formatted_text": None}}) is True
+
+
+def test_blank_text_with_formatted_text_and_a_blank_hierarchy_label_is_kept():
+    # A blank hierarchy label must not re-trigger the "text equals its own
+    # hierarchy label" check ('' == '') for an entry that has formatted_text.
+    entry = {"text": "", "hierarchy": [""],
+             "extracted_fields": {"formatted_text": "Grand rounds"}}
+    assert _is_structural_label(entry) is False
+
+
 # --- item 4: header-keyword matching must be token-boundary, not substring -
 
 def test_keyword_count_path_ignores_substring_matches():
@@ -237,7 +262,7 @@ def test_pipe_separated_columns_match_plural_header_word():
     # no trailing "s?"), word-boundary matching stopped matching "Dates"
     # entirely (0 of 2 parts match, below the 50% threshold) rather than
     # just dropping the "candidate" false positive it was meant to fix.
-    text = "Dates|Something"
+    text = "Dates|Journal Title"
     assert _is_table_header_entry(text, ["date"]) is True
 
 
@@ -248,3 +273,80 @@ def test_pipe_separated_columns_still_ignore_substring_inside_a_longer_word():
     # immediately before "date" within that word either way.
     text = "Candidates|Update"
     assert _is_table_header_entry(text, ["date"]) is False
+
+
+# --- #756: a pipe-joined entry is a header only if EVERY cell is header vocabulary
+
+_HONORS_KW = ["award", "honor", "organization", "date", "year", "granting"]
+
+
+@pytest.mark.parametrize("text", [
+    "Best Teaching Award | 2020",
+    "Best Teaching Award | Purdue University",
+    "Award A | 2024 | Award B | 2023 | Award C | 2022",
+    "  Award A   |   2024   |   Award B   |   2023",
+    "2020\tAward A | Award B | 2019",
+    "Award | Purdue University",
+])
+def test_pipe_joined_content_is_not_a_header_row(text):
+    assert _is_table_header_entry(text, _HONORS_KW) is False
+
+
+@pytest.mark.parametrize("text", [
+    "Name of award | Organization | Date awarded (yyyy)",
+    "Year | Title",
+    "Dates | Journal Title",
+    "Year (YYYY) | Person Months (##.##)",
+    "Dates of Role(s) | Title of Role(s)",
+])
+def test_pipe_joined_header_rows_are_still_headers(text):
+    assert _is_table_header_entry(text, _HONORS_KW) is True
+
+
+def test_a_year_in_any_cell_makes_the_entry_data():
+    assert _is_table_header_entry("Year | 2020", _HONORS_KW) is False
+
+
+def test_membership_row_with_member_cell_is_not_a_header():
+    # Corpus shape (web240): the "Member" cell is a header keyword, the
+    # society cell is content.
+    kw = ["organization", "membership", "society", "date", "member"]
+    assert _is_table_header_entry("Society for Neuroscience\tMember", kw) is False
+
+
+def test_a_year_beside_header_words_makes_the_cell_data():
+    # "Awarded 2020" is made of header words plus a year; a header row names
+    # a date column, it never carries a date value.
+    assert _is_table_header_entry("Awarded 2020 | Organization", _HONORS_KW) is False
+
+
+def test_an_entry_of_only_delimiters_is_not_a_header():
+    assert _is_table_header_entry(" | | ", _HONORS_KW) is False
+
+
+# --- #758: short acronym organizations on the pipe-free path ----------------
+
+def test_short_acronym_organizations_are_kept_on_the_pipe_free_path():
+    # `_entry_parts` hands this parser parts with the pipes already removed, so
+    # every part takes the no-pipe branch. AMA/NIH/ASCO/IEEE are real
+    # organizations of five characters or fewer and used to be dropped by a
+    # `len(line) > 5` cutoff.
+    parts = ["Member", "AMA", "2010-present",
+             "Fellow", "ASCO", "2015-present",
+             "Member", "IEEE", "2018-present"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "AMA", "2010-present"),
+        ("Fellow", "ASCO", "2015-present"),
+        ("Member", "IEEE", "2018-present"),
+    ]
+
+
+@pytest.mark.parametrize("junk", [
+    "2005", "(2005)", "May 2005", "3/2010", "-", "--", "7",
+    "Dates", "Role", "Title", "Present", "N/A", "Chair", "Board", "Yes",
+])
+def test_non_organization_parts_are_still_rejected_on_the_pipe_free_path(junk):
+    # What the length cutoff was (accidentally) guarding against, now rejected
+    # by shape: bare years / month-years, punctuation, column-header and filler
+    # words. None of them may become an organization.
+    assert _parse_multi_membership_entry(["Member", junk, "2010-present"]) == []

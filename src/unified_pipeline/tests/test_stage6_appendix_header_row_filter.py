@@ -46,12 +46,16 @@ from unified_pipeline.stage6.render_check import _is_column_header_row  # noqa: 
 from unified_pipeline.stage6.sections import appendix as appendix_module  # noqa: E402
 from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     APPENDIX_MAX_CHARS,
+    DROP_BARE_YEAR,
     DROP_BLANK,
     DROP_COLUMN_HEADER,
     DROP_NEAR_TEMPLATE_INSTRUCTION,
     DROP_RENDERS_EMPTY,
     DROP_SOURCE_BOILERPLATE,
+    DROP_STATUS_MARKER,
     DROP_TEMPLATE_INSTRUCTION,
+    DROP_TEMPLATE_LABEL,
+    DROP_TOC_LINE,
     DROP_UNANSWERED_PROMPT,
     _appendix_drop_reason,
     _describe_dropped,
@@ -219,6 +223,8 @@ def test_documented_false_positive_class_is_pinned(entry):
      DROP_NEAR_TEMPLATE_INSTRUCTION),
     ("N/A", DROP_UNANSWERED_PROMPT),
     ("Not Applicable |  |  |", DROP_UNANSWERED_PROMPT),
+    ("Signature:", DROP_TEMPLATE_LABEL),
+    ("Site/Position |", DROP_TEMPLATE_LABEL),
 ])
 def test_drop_reason_names_the_check_that_fired(text, reason):
     assert _appendix_drop_reason(text, _clean_inline_tabs(text)) == reason
@@ -230,9 +236,130 @@ def test_drop_reason_names_the_check_that_fired(text, reason):
     "Chair, Admissions Committee",
     "Is your eligibility to work in the U.S. based on an employment visa?: | No",
     "Grant pending | N/A",
+    "Your role*\toversight",
 ])
 def test_genuine_content_has_no_drop_reason(text):
     assert _appendix_drop_reason(text, _clean_inline_tabs(text)) is None
+
+
+# ------------------------------------- unit-level: the #885 structural checks
+#
+# Root cause of #885: T-validation's own `classification_reasoning` already
+# says these shapes are structural ("[T-validation confirmed] Bare year
+# '2021' is a structural marker"), but that string is free LLM text covering
+# real T content too (a hobby, a career-gap note) -- not a safe drop
+# predicate. These three checks match the entry's TEXT shape instead, and
+# only when `taxonomy_code == "T"` (every other DROP_* check above applies
+# regardless of code).
+
+@pytest.mark.parametrize("text, reason", [
+    ("2021", DROP_BARE_YEAR),
+    ("1991", DROP_BARE_YEAR),
+    ("2016.", DROP_BARE_YEAR),  # trailing period: web228/web26 shape
+    ("  2021  ", DROP_BARE_YEAR),  # padded: kills a `stripped = text` mutant
+    ("Completed", DROP_STATUS_MARKER),
+    ("Scheduled", DROP_STATUS_MARKER),
+    ("In Press", DROP_STATUS_MARKER),
+    ("Published", DROP_STATUS_MARKER),
+    ("Not Funded", DROP_STATUS_MARKER),
+    ("ACTIVE", DROP_STATUS_MARKER),  # case-insensitive
+    ("Completed.", DROP_STATUS_MARKER),  # trailing period: the `.rstrip(".")` call
+    ("  Completed  ", DROP_STATUS_MARKER),  # padded: same `stripped` mutant, 2nd path
+    # One case per remaining `_STATUS_MARKER_WORDS` member, so dropping a word fails.
+    ("Pending", DROP_STATUS_MARKER),
+    ("Funded", DROP_STATUS_MARKER),
+    ("Submitted", DROP_STATUS_MARKER),
+    ("Current", DROP_STATUS_MARKER),
+    ("Withdrawn", DROP_STATUS_MARKER),
+    ("Ongoing", DROP_STATUS_MARKER),
+    ("Honors and Awards       Page 7", DROP_TOC_LINE),  # web181 shape
+    ("Visiting Professorships, Seminars, and Extramural Presentations Page 17",
+     DROP_TOC_LINE),
+    ("Abstracts, Preliminary Communications, Panel Discussions  Page 42-54",
+     DROP_TOC_LINE),  # a page RANGE, not just one number
+])
+def test_structural_shapes_are_dropped_when_t_coded(text, reason):
+    assert _appendix_drop_reason(text, _clean_inline_tabs(text), "T") == reason
+
+
+@pytest.mark.parametrize("text", [
+    "2021", "Completed", "Honors and Awards       Page 7",
+])
+def test_structural_shapes_survive_when_not_t_coded(text):
+    """The taxonomy_code gate: the exact same shapes that #885 confirmed only
+    ever occur T-coded (measured over 37,704 entries of every code in the
+    #885 corpus) are defense-in-depth gated so a non-T code can never lose
+    one, even if some future entry did carry this shape."""
+    for code in (None, "H", "A", "M1"):
+        assert _appendix_drop_reason(text, _clean_inline_tabs(text), code) is None
+
+
+@pytest.mark.parametrize("text", [
+    "2021 Assistant Professor, Weill Cornell Medicine",  # a year NEXT TO text
+    "Class of 2021",
+    "Cooking",  # a genuine single-word T record (a real hobby, #885's own example)
+    "Tabletop role-playing games",
+    "Funded by the NIH",  # contains "Funded" but is not a bare status word
+    "Completed the fellowship in 2019",
+    "See page 7 for details",  # lowercase "page", not the ToC shape
+    "Honors and Awards Page 7 Best Teacher Award 2019",  # real title AFTER
+    # "Page N" -- kills a mutant that drops _TOC_LINE_RE's trailing `\s*$`:
+    # without that end anchor, `.match()` would accept this as a PREFIX match
+    # and drop a real, later-in-the-line award title.
+    "Honors and Awards       page 7",  # lowercase "page": same shape as the
+    # dropped web181 positive above, differing ONLY in case. Pins that the
+    # match is case-sensitive -- unlike "See page 7 for details" above, which
+    # is rejected by its trailing text and would still survive even if the
+    # regex grew `re.I`.
+    #
+    # Real-shaped lines the corpus never exercises, so a widened regex
+    # would otherwise go unnoticed.
+    #
+    # A citation-shaped line over 90 chars ending " Page 12" -- kills a mutant
+    # that widens `_TOC_LINE_RE`'s `.{1,90}?` heading-length cap to `.*?`. The
+    # cap exists because a real, long line (a bibliography citation, here) can
+    # end in "Page N" by coincidence; only a SHORT heading before it is the
+    # source CV's own table of contents.
+    "Anderson RJ, Kim SY, Patel N, Gomez L, Chen W. Long-term outcomes "
+    "following minimally invasive cardiac surgery Page 12",
+    # No space before "Page" -- kills a mutant that drops the `[ \t]` run-in
+    # requirement from `_TOC_LINE_RE`, which would then match "Page" fused
+    # onto the end of any word.
+    "HomePage 7",
+    # A 4-digit number outside 19xx/20xx -- kills a mutant that widens
+    # `_BARE_YEAR_RE` from `(?:19|20)\d{2}` to bare `\d{4}`.
+    "1066",
+    "3021",
+    # A year run into other characters -- kills an unescaped `.?` in
+    # `_BARE_YEAR_RE` (only a literal trailing period is allowed).
+    "2019-",
+    "2019)",
+    "2019a",
+])
+def test_real_content_survives_even_when_t_coded(text):
+    """Never drop anything carrying real content (#885's own gate): a year
+    next to text, a single-word real record, and a sentence that merely
+    contains a status or page word are not the bare shapes above."""
+    assert _appendix_drop_reason(text, _clean_inline_tabs(text), "T") is None
+
+
+def test_filter_counts_the_885_reasons_separately():
+    entries = [
+        {"text": "2021", "taxonomy_code": "T"},
+        {"text": "Completed", "taxonomy_code": "T"},
+        {"text": "Honors and Awards       Page 7", "taxonomy_code": "T"},
+        {"text": "2021 Assistant Professor, Weill Cornell Medicine", "taxonomy_code": "T"},
+        {"text": "2021"},  # no taxonomy_code at all -- must not be dropped
+    ]
+    kept, dropped = _filter_unmapped_entries(entries)
+    assert [text for _, text in kept] == [
+        "2021 Assistant Professor, Weill Cornell Medicine", "2021",
+    ]
+    assert dropped == Counter({
+        DROP_BARE_YEAR: 1,
+        DROP_STATUS_MARKER: 1,
+        DROP_TOC_LINE: 1,
+    })
 
 
 def test_blank_table_row_is_counted_as_renders_empty_not_as_a_header():
@@ -490,3 +617,60 @@ def test_real_source_table_header_row_is_dropped_but_data_row_survives(tmp_path,
     ]
     assert "Year — Degree" not in _output_text(out)
     assert "1 non-content block removed (column-header 1)" in _comment_texts(out)
+
+
+# --------------------------------------------- render-level: #885's own wire
+
+def test_web210_shape_bare_years_and_status_markers_dropped(tmp_path, caplog):
+    """web210 shape (#885): a presentations list is mostly bare years and
+    lone status words, with the genuine titles between them surviving under
+    their original numbers-minus-drops -- the years and statuses are gone,
+    the quoted title is not."""
+    entries = [_NAME_ENTRY,
+               _t_entry("Scheduled", ["PRESENTATIONS"], 1),
+               _t_entry("Completed", ["PRESENTATIONS"], 2),
+               _t_entry("2021", ["PRESENTATIONS"], 3),
+               _t_entry(GENUINE_ONE, ["PRESENTATIONS"], 4),
+               _t_entry("2019", ["PRESENTATIONS"], 5)]
+    out = _render(tmp_path, entries, caplog, emit_comments=True)
+    # Scoped to the appendix section itself, not the whole document: the WCM
+    # template's own boilerplate legitimately contains "Completed" ("Past
+    # (Completed) Funding"), so a whole-document substring check would be
+    # vacuous here.
+    assert _appendix_paragraphs(out) == [
+        'From "PRESENTATIONS":',
+        f"1. {GENUINE_ONE}",
+    ]
+    comment = _appendix_log(caplog)
+    assert "bare-year 2" in comment
+    assert "status-marker 2" in comment
+
+
+def test_web181_shape_toc_lines_dropped(tmp_path, caplog):
+    """web181 shape (#885): the source CV's own table of contents reached the
+    appendix as numbered lines; dropped, with a genuine section title (no
+    'Page N' suffix) surviving."""
+    entries = [_NAME_ENTRY,
+               _t_entry("Honors and Awards       Page 7", ["APPOINTMENTS"], 1),
+               _t_entry("Grants         Page 4", ["APPOINTMENTS"], 2),
+               _t_entry("EDUCATION AND TRAINING", ["APPOINTMENTS"], 3)]
+    out = _render(tmp_path, entries, caplog, emit_comments=True)
+    assert _appendix_paragraphs(out) == [
+        'From "APPOINTMENTS":',
+        "1. EDUCATION AND TRAINING",
+    ]
+    assert "2 non-content blocks removed (toc-line 2)" in _comment_texts(out)
+
+
+def test_a_year_next_to_real_content_is_not_dropped(tmp_path, caplog):
+    """Negative control: #885's own line -- a bare year is structural, a year
+    NEXT TO text is a real (if fragmentary) record and must reach the page."""
+    entries = [_NAME_ENTRY,
+               _t_entry("2021 Assistant Professor, Weill Cornell Medicine",
+                        ["Positions"], 1)]
+    out = _render(tmp_path, entries, caplog, emit_comments=True)
+    assert _appendix_paragraphs(out) == [
+        'From "Positions":',
+        "1. 2021 Assistant Professor, Weill Cornell Medicine",
+    ]
+    assert "removed" not in _appendix_log(caplog)

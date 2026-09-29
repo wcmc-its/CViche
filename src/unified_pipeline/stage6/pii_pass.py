@@ -56,6 +56,7 @@ from .normalization.pii import (  # noqa: F401
     WithheldItem,
     _BARE_EMAIL_SHAPE,
     _BARE_PHONE_SHAPE,
+    _KNOWN_FIELD_LABEL_RE,
     _PII_FRAGMENT_SPLIT_RE,
     _merge_matches,
     _pii_field_key_category,
@@ -123,96 +124,6 @@ _SIBLING_LABEL_RE = re.compile(
     r"[A-Za-z][\w.'’&/-]*"
     r"(?:[ \t][A-Za-z][\w.'’&/-]*){0," + str(_SIBLING_LABEL_MAX_WORDS - 1) + r"}"
     r"[ \t]*:"
-)
-
-#: Field labels this pipeline RENDERS, curated from the code that already
-#: recognises each one -- the second half of `_KNOWN_FIELD_LABEL_RE`'s
-#: vocabulary (the first half is `WITHHOLD_POLICY`'s own label rows).
-#: Verbose-mode alternatives, case-insensitive, no colon (the shared
-#: `\s*:` terminator is appended once, the way `pii.py::_label_pattern`
-#: appends it for a policy row).
-#:
-#: Every entry names a field some renderer or classifier looks for by
-#: name; nothing here is a guess about English word shape. Source per
-#: entry (all on this branch):
-#:
-#: - the six PERSONAL DATA table rows `_write_personal_data_table_cells`
-#:   matches by their own cell text -- 'office address'
-#:   (`sections/personal_data.py:631`), 'office telephone' (`:637`),
-#:   'work email' (`:642`), 'home address' (`:647`), 'cell phone'
-#:   (`:653`), 'personal email' (`:658`). 'home address' also arrives via
-#:   `WITHHOLD_POLICY`'s own home-contact row, which is fine: the
-#:   vocabulary is a union.
-#: - `_classify_contact_label`'s label words -- `_EMAIL_LABEL_WORDS`
-#:   ('e-mail', 'email') `:158`, `_PHONE_LABEL_WORDS` ('phone',
-#:   'telephone') `:159`, `_ADDRESS_LABEL_WORDS` ('address', 'business')
-#:   `:163`, `_PERSON_NAME_LABELS` ('name', 'full name', 'legal name',
-#:   'candidate name', 'applicant name') `:169-172`.
-#: - the phone-type words the entry classifier reads out of the raw text:
-#:   'cell', 'mobile' (`personal_data.py:423`).
-#: - 'fax' -- consumed and deliberately dropped by
-#:   `_parse_address_block` (`personal_data.py:892`) and by
-#:   `normalization/fields.py:174-177`.
-#: - 'citizenship', 'nationality' and 'personal email' -- the #821
-#:   "render" defaults, listed as NOT in the table at
-#:   `normalization/pii.py:304-305`.
-#: - 'npi' -- the same list's public identifier (`pii.py:306`), detected
-#:   by `sections/licensure.py:86` `_NPI_LABEL_RE`.
-#: - 'orcid' -- section S0's own identifier
-#:   (`sections/researcher_profiles.py:1-3`, `sections/__init__.py:29`).
-#: - 'website', 'home page', 'homepage', 'contact' -- the contact nouns
-#:   `core/validators/contact_section.py:90-92` `CONTACT_NOUNS` lists.
-#:
-#: Adding a field is one row. A label NOT here is not leaked: the run is
-#: cut whole (see `_extend_bare_label_span`), so the cost of a gap is a
-#: lost sibling field, never a rendered protected value.
-_RENDER_SET_FIELD_LABELS: tuple[str, ...] = (
-    r"office \s* address",
-    r"office \s* (?: telephone | phone )",
-    r"work \s* e-? \s* mail",
-    r"personal \s* e-? \s* mail",
-    r"cell (?: \s* phone )?",
-    r"mobile (?: \s* phone )?",
-    r"e-? \s* mail (?: \s* address )?",
-    r"telephone",
-    r"phone",
-    r"address",
-    r"business",
-    r"name",
-    r"(?: full | legal | candidate | applicant ) \s* name",
-    r"fax",
-    r"citizenship",
-    r"nationality",
-    r"npi",
-    r"orcid",
-    r"website",
-    r"home \s* page | homepage",
-    r"contact",
-)
-
-#: The ONLY thing a bare-label extension may stop at part-way through a
-#: whitespace run (#821 R4 F-1): a label this codebase actually knows, at
-#: a word start, optionally behind a list marker.
-#:
-#: Built from `WITHHOLD_POLICY`'s label rows PLUS
-#: `_RENDER_SET_FIELD_LABELS`, the same way `pii.py::_PII_LABEL_RE` is
-#: built from those rows -- one source, so the vocabulary cannot drift
-#: from the policy when a row is added.
-#:
-#: The leading `(?<![\w'’-])` is what makes it a FIELD NAME rather than a
-#: substring: without it "MyCitizenship:" inside a value stops the cut and
-#: everything before it renders.
-_KNOWN_FIELD_LABEL_RE = re.compile(
-    r"(?<![\w'’-])"
-    r"(?:(?:[•·*–—-]|\d{1,3}[.)])[ \t]*)?"
-    r"(?:"
-    + "|".join(
-        [r"(?:" + str(rule.label) + r")"
-         for rule in WITHHOLD_POLICY if rule.label is not None]
-        + [r"(?:" + label + r")" for label in _RENDER_SET_FIELD_LABELS]
-    )
-    + r")\s*:",
-    re.X | re.I,
 )
 
 
@@ -601,6 +512,20 @@ def _cut_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
     return stripped.strip()
 
 
+def _pii_field_value_hits(fields: Mapping, scope: str) -> dict[str, list[str]]:
+    """Field key -> the PII categories its string VALUE matches at `scope`
+    (#892): a field-first renderer prints the value whatever key it sits
+    under ("award_name": "... O-1 Visa"), so the key-name check alone
+    leaves it on the page beside a notice saying it was withheld."""
+    hits: dict[str, list[str]] = {}
+    for key, value in fields.items():
+        if isinstance(value, str) and value:
+            categories = [m.category for m in _pii_matches(value, scope)]
+            if categories:
+                hits[key] = categories
+    return hits
+
+
 def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
                  routed_codes: frozenset[str] | set[str],
                  section_names: Mapping[str, str]) -> PiiPassResult:
@@ -675,7 +600,12 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             pii_keys = [(k, _pii_field_key_category(k)) for k in fields]
             pii_keys = [(k, c) for k, c in pii_keys if c is not None]
 
-            if not matches and not pii_keys:
+            pii_key_names = {k for k, _ in pii_keys}
+            value_hits = {
+                k: cats for k, cats in _pii_field_value_hits(fields, scope).items()
+                if k not in pii_key_names}
+
+            if not matches and not pii_keys and not value_hits:
                 continue
 
             # Extend a bare-label match (`_extend_bare_label_span`) to pull
@@ -699,6 +629,22 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             for key, category in pii_keys:
                 del fields[key]
                 result.withheld.append(WithheldItem(category, section, index))
+            # #892: a PII value under a non-PII key is dropped like a
+            # PII-keyed field. The same item already recorded from `text`
+            # (the entry's raw text usually carries the very same phrase)
+            # is not counted twice.
+            noticed = {m.category for m in matches}
+            if value_hits:
+                # Which fields went, so a field-first writer can tell a
+                # withheld award from one that never had a name field.
+                entry["_pii_dropped_fields"] = sorted(value_hits)
+            for key, categories in value_hits.items():
+                del fields[key]
+                for category in categories:
+                    if category not in noticed:
+                        noticed.add(category)
+                        result.withheld.append(
+                            WithheldItem(category, section, index))
 
     return result
 

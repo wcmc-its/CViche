@@ -170,7 +170,8 @@ export default function HelpPage() {
               <p>
                 <strong>Where.</strong> All of this is stored on WCM-managed cloud infrastructure. The only material
                 that leaves WCM systems is the CV text sent to the AI service during processing, as described under
-                &ldquo;Is my data secure?&rdquo; below.
+                &ldquo;Is my data secure?&rdquo; below, and publication identifiers (such as DOIs and PubMed IDs) sent
+                to the National Library of Medicine&apos;s PubMed service to look up citation details.
               </p>
               <p>
                 <strong>Who can access it.</strong> You can see your own runs. CViche administrators (the Library
@@ -232,10 +233,12 @@ export default function HelpPage() {
                 <p className="text-sm font-semibold text-gray-900 mb-1">Is my data secure?</p>
                 <p>
                   Your uploaded CV is stored on a secure WCM server and is only accessible to you and CViche
-                  administrators. However, the text of the CV is sent to a third-party AI service for processing
-                  (currently Anthropic&apos;s Claude on Amazon Bedrock; the provider may change, for example to OpenAI).
-                  CViche attempts to withhold highly sensitive personal details such as date of birth or Social
-                  Security number, but you should not include anything you would not want these systems to see. By
+                  administrators. However, the text of the CV is sent to a third-party AI service for processing:
+                  Anthropic&apos;s Claude, running on Amazon Bedrock. AWS states that Bedrock does not share CV text or
+                  AI output with Anthropic or any other model provider, and does not use it to train models.
+                  Before the text is sent, CViche removes the dates of birth and Social Security numbers it
+                  recognizes. It can miss some formats, so you should not include anything you would not want these
+                  systems to see. By
                   using CViche, you acknowledge that your CV content will be processed by a third-party AI service. If
                   this is not acceptable, please do not use the service.
                 </p>

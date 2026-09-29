@@ -42,6 +42,8 @@ Use Redis Pub/Sub. It is the smallest piece of infrastructure that solves both p
 | `cviche:run:{run_id}:events` | The worker running the orchestrator | Every worker; each worker filters by local WS subscriptions | The same dict that `event_emitter.emit(run_id, event)` already builds, JSON-serialised |
 | `cviche:run:{run_id}:cancel` | Any worker receiving `DELETE /runs/{id}` | The worker running the orchestrator | `{"run_id": "..."}` (cancellation is a yes/no signal; no other payload needed) |
 
+> **As built (#960):** events use one channel, `cviche:run-events`, with a `{"run_id", "event"}` envelope. The per-run channel above needed `PSUBSCRIBE`, which prod's ElastiCache Serverless Valkey rejects. Cancellation shipped as a TTL key (`cviche:run:{run_id}:cancelled`), not a channel.
+
 We could fold cancellation into the events channel with a `{"event": "CANCEL"}` message, but a separate channel keeps the cancel subscriber narrow — a worker that owns no orchestrator runs doesn't need to subscribe.
 
 Run-scoped channels (rather than one global channel) keep subscribe sets small and let workers that aren't watching a given run skip its traffic entirely. Redis pub/sub fan-out is cheap at our message rates (~10/s during stage 4) but there's no reason to be sloppy.

@@ -37,7 +37,10 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from docx import Document  # noqa: E402
+
 from unified_pipeline import stage_2_entry_extraction as stage2  # noqa: E402
+from unified_pipeline.core.docx_structure_extractor import extract_unified_elements  # noqa: E402
 
 get_hierarchy_path = stage2.get_hierarchy_path
 build_element_index_map = stage2.build_element_index_map
@@ -144,6 +147,32 @@ def test_get_element_text_unknown_type_falls_back_to_stripped_text():
 
 def test_get_element_text_missing_type_falls_back_to_stripped_text():
     assert get_element_text({"text": " no type key "}) == "no type key"
+
+
+def test_get_element_text_next_paragraph_dob_scrub_not_readable_from_data(tmp_path):
+    # Reader-level regression (#847 residual round 4): a "Date of Birth:"
+    # label paragraph directly followed by a table -- the pre-LLM scrub
+    # (core/docx_structure_extractor.py::_scrub_pre_llm_pii_next_element)
+    # used to update only that table element's pre-flattened `text`, never
+    # its per-cell `data`. This branch reads `data` (tab/newline-joined),
+    # not `text` -- so the raw DOB still came out here even after the
+    # element's own `text` field had already been scrubbed clean.
+    doc = Document()
+    doc.add_paragraph("Date of Birth:")
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "01/02/1970"
+    table.cell(0, 1).text = "Example City"
+    docx_path = tmp_path / "next_element_table_dob.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    table_element = next(e for e in elements if e.get("data"))
+
+    out = get_element_text(table_element)
+    assert "01/02/1970" not in out
+    assert out == "[withheld]\tExample City"
+    # ...and the same element's flattened `text` (extract_text_from_docx's reader).
+    assert "01/02/1970" not in table_element["text"]
 
 
 # ------------------------------------------- split_merged_row_into_pseudo_rows

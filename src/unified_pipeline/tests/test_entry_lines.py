@@ -22,7 +22,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
+from unified_pipeline.core.render_check import (  # noqa: E402
+    entry_fragments,
+    entry_lines,
+    rejoin_wrapped_row,
+)
 
 
 def _old_idiom(text):
@@ -100,3 +104,23 @@ def test_does_not_split_on_dashes():
         "University Medical Center—New Orleans",
     ]:
         assert entry_lines(intact) == [intact]
+
+
+def test_rejoin_wrapped_row_cases():
+    """#987: a row whose non-empty cells have unequal line counts is ONE row;
+    equal counts (stacked courses), a single cell and blank input are not."""
+    cases = [
+        ("Spring 2012 | Dept\nSeminar\nTitle | 1 | 40",
+         "Spring 2012 | Dept Seminar Title | 1 | 40"),
+        ("a\nb | c | d", "a b | c | d"),
+        ("a | b\nc\n\n | d", "a | b c | d"),
+        ("2020\n2021 | Course A\nCourse B", None),
+        ("2020\n2021 |  | Course A\nCourse B", None),
+        ("Fall\n2012 |  | Course A", "Fall 2012 | Course A"),
+        ("a\nb\nc", None),
+        ("a | b | c", None),
+        ("", None),
+        (None, None),
+    ]
+    for text, expected in cases:
+        assert rejoin_wrapped_row(text) == expected, text

@@ -264,6 +264,13 @@ def main():
         assert "ratchet" in updated  # the four ratcheted rows' status symbol
         print("--update rewrites the doc block and preserves prose        ok")
 
+        # a second --update must leave the doc byte-identical -- it used to
+        # add one blank line after the end marker per run
+        run(tree, "--update")
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+            assert fh.read() == updated, "--update is not idempotent"
+        print("--update is idempotent                                     ok")
+
         baseline_path = os.path.join(tree, "scripts", "standards-baseline.json")
         with open(baseline_path) as fh:
             baseline = json.load(fh)

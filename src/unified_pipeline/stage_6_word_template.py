@@ -479,6 +479,16 @@ _DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1'})
 # under "Book Chapters" rendered under "Books").
 _STATUS_ROUTED_CODES = frozenset({'S7'})
 
+# (assigned, target) same-family pairs a hierarchy mismatch never reroutes:
+# the target code's own `common_confusions` in core/taxonomy_v7.json names
+# exactly this mistake ("CME ... misclassified as K1 instead of K4" on K1), so
+# the heading is the weaker signal there (#946 item 3). A taxonomy fact; the
+# test file pins each pair to its taxonomy_v7 text.
+_TAXONOMY_WARNED_CONFUSIONS = frozenset({
+    ('D3', 'D1'), ('K1', 'K4'), ('K4', 'K1'), ('K5', 'K4'),
+    ('Q1', 'Q2'), ('Q2', 'Q3'), ('S1', 'S8'), ('S2', 'S1'),
+})
+
 
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
     """The one code a hierarchy mismatch should reroute to, or None to skip.
@@ -693,8 +703,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         """Correct taxonomy code routing when hierarchy mismatch flag indicates a likely misclassification.
 
         Conservative correction rules:
-        - Same-family reroutes (e.g., K5→K1): always applied since the LLM got the family
-          right but the sub-type wrong, and the CV's section structure is a better judge.
+        - Same-family reroutes (e.g., K3→K1): applied only when every expected
+          code renders in one WCM section, and the pair is not one the
+          taxonomy warns about (`_TAXONOMY_WARNED_CONFUSIONS`). A heading that
+          names codes in several sections ("Committees" -> P, Q2, O) does not
+          say which one it means, and the longest-code pick only favoured the
+          two-character code (#946 item 3: 200 corpus reroutes, most wrong).
         - Cross-family reroutes (e.g., C→K1): only applied when the LLM's confidence
           was low (< 0.7), since the content analysis may have been uncertain.
         - Never: a status-routed code (`_STATUS_ROUTED_CODES`, S7), or a
@@ -726,6 +740,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         confidence = entry.get('taxonomy_confidence', 1.0)
 
         if assigned_family == expected_family:
+            if ((assigned_code, best_expected) in _TAXONOMY_WARNED_CONFUSIONS
+                    or len({TAXONOMY_TO_SECTION.get(code) for code in expected_codes}) > 1):
+                return assigned_code
             if self.verbose:
                 logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
                       f"(same family, hierarchy-guided) [{entry.get('text', '')[:60]}...]")
@@ -1080,17 +1097,15 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('presentations', frozenset({'R'}), lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
             ('bibliography', frozenset({'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'}), lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
         ]
-        research_summary_rendered = False
-        for label, codes, fn in section_dispatch:
-            result = self._render_section(label, fn, codes)
-            if label == 'research_summary':
-                research_summary_rendered = bool(result)
+        # In dispatch order; research_support returns the T goals rows it placed in a grant table (#958).
+        section_results = {label: self._render_section(label, fn, codes) for label, codes, fn in section_dispatch}
+        research_summary_rendered = bool(section_results['research_summary'])
 
         # Fill passthrough sections (Employment Status, Institutional Affiliation,
         # Percent Effort) -- copied from source CV when it matches WCM (#294, #260).
         passthrough_result = self._render_section(
             'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
-        passthrough_consumed_ids = {id(e) for e in (passthrough_result or [])}
+        consumed_ids = {id(e) for e in (passthrough_result or []) + (section_results['research_support'] or [])}
 
         # Add appendix for ALL unmapped content -- declined M2A/M2B/M2C
         # entries (#839) are appended at the fill below, not seeded here
@@ -1111,10 +1126,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         unmapped_entries: list[dict] = []
 
-        # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260).
+        # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260) and claimed goals rows (#958).
         for code, entries in entries_by_code.items():
             if code not in mapped_codes:
-                unmapped_entries.extend(e for e in entries if id(e) not in passthrough_consumed_ids)
+                unmapped_entries.extend(e for e in entries if id(e) not in consumed_ids)
 
         # A stays in mapped_codes, but NOT because its entries are all consumed
         # -- that was the old assumption here and the corpus refutes it (145 of

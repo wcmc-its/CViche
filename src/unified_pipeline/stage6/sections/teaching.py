@@ -82,7 +82,13 @@ sources of text, in order:
 - the RAW lines, when the raw entry has several of them. Stage 5c routinely
   merges a multi-item teaching block into one sentence, so the original line
   breaks are the more faithful record; only one of the bullets carries the
-  entry's comments, so an entry is not annotated N times.
+  entry's comments, so an entry is not annotated N times. The exception is ONE
+  table row whose cells wrap over paragraphs (#987): the extractor joins a
+  cell's own paragraphs with a newline, so that row's raw text has several
+  lines although it is one course, and those lines are not items. Such a row
+  is rejoined into ONE bullet of its own raw text (every cell's paragraphs
+  joined with a space; stage 5c's text is not used, it drops words); see
+  `_wrapped_row_text`.
 - the extracted fields (course code, title, institution, role), when stage 5c
   produced nothing at all. Both code and title arrive as lists often enough that
   each is joined before use.
@@ -101,7 +107,7 @@ from ..formatting import normalize_iso_dates_in_text
 from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.render_check import entry_lines
+from unified_pipeline.core.render_check import entry_lines, rejoin_wrapped_row
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +140,9 @@ class _TeachingEntry(TypedDict, total=False):
     text: str
     extracted_fields: _TeachingFields
     taxonomy_code: str
+    element_type: str
+    element_idx_start: int
+    element_idx_end: int
 
 
 # K-code to candidate header strings, tried in order (see module docstring and
@@ -183,7 +192,22 @@ def _item_parts(text: str | None) -> list[str]:
             if part.strip()]
 
 
-def _teaching_entry_lines(fields: _TeachingFields, original_text: str) -> list[str]:
+def _wrapped_row_text(entry: _TeachingEntry) -> str | None:
+    """The raw text of ONE table row whose cells wrap over paragraphs, rejoined
+    into a single line (#987); None for any other entry.
+
+    "One row" is a single `table_row` element (`element_idx_start ==
+    element_idx_end`); whether its cells wrap, as opposed to holding several
+    stacked courses, is `rejoin_wrapped_row`'s test.
+    """
+    start, end = entry.get('element_idx_start'), entry.get('element_idx_end')
+    if entry.get('element_type') != 'table_row' or start is None or start != end:
+        return None
+    return rejoin_wrapped_row(entry.get('text'))
+
+
+def _teaching_entry_lines(fields: _TeachingFields, original_text: str,
+                          row_text: str | None = None) -> list[str]:
     """The bullet strings one teaching entry renders as, in page order.
 
     Pure: no document, no logging, no insertion -- extracted out of
@@ -198,6 +222,12 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str) -> list[s
     on the page AND discarded whatever raw line the entry still carried, so
     such a `formatted_text` now falls through to the raw line and, when there
     is none, to the empty list the caller reports.
+
+    `row_text` (`_wrapped_row_text`, #987) is the raw text of a row whose raw
+    lines are one course's wrapped cells rather than several items: it is the
+    one bullet in their place. Stage 5c's text is NOT used for it, because
+    5c drops words the raw cells carry. With no `formatted_text` the field
+    fallback below already applies, as it does for every entry.
     """
     formatted_text = fields.get('formatted_text', '') or ''
     if formatted_text:
@@ -209,7 +239,7 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str) -> list[s
         # Newline-only on purpose -- see the module's delimiter contract.
         original_lines = entry_lines(original_text)
         if len(original_lines) > 1:
-            return original_lines
+            return [row_text] if row_text else original_lines
         stripped = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
         if stripped.strip():
             return [stripped]
@@ -349,7 +379,8 @@ class TeachingSection:
         if _is_orphan_fragment(fields, formatted_text, original_text):
             return
 
-        lines = _teaching_entry_lines(fields, original_text)
+        lines = _teaching_entry_lines(fields, original_text,
+                                      row_text=_wrapped_row_text(entry))
         if not lines:
             logger.warning("teaching entry produced no renderable line (%s): %r",
                            entry.get('taxonomy_code'), original_text[:80])

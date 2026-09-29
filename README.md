@@ -40,9 +40,7 @@ python3 run_full_pipeline.py sample_vasquez_cv
 ### Prerequisites
 
 - Python 3.14 (matches the backend image, `python:3.14-slim`)
-- LLM provider credentials -- either:
-  - **AWS Bedrock** (default): uses the boto3 default credential chain (env vars, `~/.aws/credentials`, or IAM roles)
-  - **OpenAI**: get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+- AWS Bedrock credentials -- CViche is Bedrock-only; all LLM traffic stays in AWS Bedrock. Uses the boto3 default credential chain (env vars, `~/.aws/credentials`, or IAM roles)
 - Node.js 18+ (for the web frontend)
 
 ### Installation
@@ -55,19 +53,15 @@ pip install -r requirements.txt
 
 ### Configuration
 
-Set your LLM provider API key:
+Set your AWS credentials (CViche is Bedrock-only, so this is the only LLM credential set):
 
 ```bash
-# AWS Bedrock (default -- uses the boto3 credential chain)
 export AWS_ACCESS_KEY_ID=your-key
 export AWS_SECRET_ACCESS_KEY=your-secret
 export AWS_DEFAULT_REGION=us-east-1
-
-# OR OpenAI -- also set provider: openai in src/unified_pipeline/config/llm_config.yaml
-export OPENAI_API_KEY=your-key-here
 ```
 
-Pipeline behavior is tuned via two files: `config.yaml` (taxonomy, PDF processing, and extraction parameters) and `src/unified_pipeline/config/llm_config.yaml` (LLM provider and per-stage model selection). The latter defaults to AWS Bedrock with Claude Sonnet 4.6; set `provider: openai` there to use OpenAI instead. See [Environment Variables](#environment-variables) for the full list of configuration options.
+Pipeline behavior is tuned via two files: `config.yaml` (taxonomy, PDF processing, and extraction parameters) and `src/unified_pipeline/config/llm_config.yaml` (per-stage Bedrock model selection). The latter defaults to Claude Sonnet 4.6. See [Environment Variables](#environment-variables) for the full list of configuration options.
 
 ## Architecture
 
@@ -115,7 +109,7 @@ graph TB
 
 CViche has three layers:
 
-- **CV Parsing Pipeline** (`src/unified_pipeline/`): A 12-stage LLM pipeline where each stage produces JSON consumed by the next stage. All LLM calls go through a unified `call_llm()` abstraction that supports OpenAI and AWS Bedrock, with per-stage model configuration via `src/unified_pipeline/config/llm_config.yaml` (default: AWS Bedrock / Claude Sonnet 4.6). Entry points are the CLI (`run_full_pipeline.py`) and the web backend's pipeline orchestrator.
+- **CV Parsing Pipeline** (`src/unified_pipeline/`): A 12-stage LLM pipeline where each stage produces JSON consumed by the next stage. All LLM calls go through a unified `call_llm()` abstraction backed by AWS Bedrock (the only supported provider), with per-stage model configuration via `src/unified_pipeline/config/llm_config.yaml` (default: Claude Sonnet 4.6). Entry points are the CLI (`run_full_pipeline.py`) and the web backend's pipeline orchestrator.
 
 - **Web Backend** (`web_interface/backend/app/`): A FastAPI REST API with WebSocket support for real-time pipeline progress. Uses SQLAlchemy ORM with MariaDB (production) or SQLite (development). Follows a service layer pattern with dedicated modules for access control, configuration, user provisioning, and admin queries.
 
@@ -149,7 +143,7 @@ docker compose up --build
 | Backend  | 8000 | FastAPI API server     |
 | Frontend | 3000 | React web application  |
 
-Set the `OPENAI_API_KEY` environment variable before running `docker compose` (or configure AWS credentials for Bedrock -- see [Configuration](#configuration)).
+Configure AWS credentials for Bedrock before running `docker compose` -- see [Configuration](#configuration).
 
 ### Production Deployment
 
@@ -293,19 +287,18 @@ Key patterns:
 
 ## Environment Variables
 
-All backend configuration uses `CVICHE_*` prefixed environment variables with sensible defaults for local development. Either `OPENAI_API_KEY` (for OpenAI) or AWS credentials (for Bedrock) are required to get started.
+All backend configuration uses `CVICHE_*` prefixed environment variables with sensible defaults for local development. AWS credentials (for Bedrock) are required to get started -- CViche is Bedrock-only, so no other LLM provider credential is used.
 
 ### LLM Provider
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `OPENAI_API_KEY` | OpenAI API key for LLM pipeline stages | Yes (if using OpenAI) |
 | `AWS_ACCESS_KEY_ID` | AWS access key for Bedrock | Yes (if using Bedrock without IAM roles) |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key for Bedrock | Yes (if using Bedrock without IAM roles) |
 | `AWS_DEFAULT_REGION` | AWS region for Bedrock (default: `us-east-1`) | No |
 | `NCBI_API_KEY` | NCBI API key for faster PubMed queries | No |
 
-The pipeline runs on Claude (Anthropic) models via Bedrock by default. To use OpenAI instead, set `provider: openai` in `src/unified_pipeline/config/llm_config.yaml`.
+The pipeline runs on Claude (Anthropic) models via Bedrock; per-stage model selection lives in `src/unified_pipeline/config/llm_config.yaml`. CViche is Bedrock-only, and all LLM traffic stays in AWS Bedrock -- see [docs/BEDROCK_DATA_PROTECTION.md](docs/BEDROCK_DATA_PROTECTION.md) for what AWS states about that boundary.
 
 ### Database and Storage
 
@@ -356,11 +349,10 @@ python3 run_full_pipeline.py sample_vasquez_cv
 # Run a single stage
 python3 run_full_pipeline.py sample_vasquez_cv --stage 3b
 
-# Specify LLM model (OpenAI)
-python3 run_full_pipeline.py sample_vasquez_cv --model gpt-4.1
-
-# Use AWS Bedrock (set provider in config.yaml to "bedrock")
-python3 run_full_pipeline.py sample_vasquez_cv
+# Models are not a CLI argument: each stage's model comes from
+# src/unified_pipeline/config/llm_config.yaml (see docs/LLM_MODELS.md).
+# Override every non-pinned stage for one run:
+CVICHE_LLM_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0 python3 run_full_pipeline.py sample_vasquez_cv
 ```
 
 Stage outputs are written to `src/unified_pipeline/outputs/stage_*/`, with each stage producing a JSON file named by the document UID.

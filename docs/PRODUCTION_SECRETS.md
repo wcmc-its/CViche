@@ -10,8 +10,7 @@ How each secret CViche needs in production gets into the running container, with
 |---|---|---|
 | `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` (+ `MIGRATE_USER` for the alembic init container) | `app/database.py` via `app/database_factory.py:create_cviche_engine` | High — identifies the production database; under IAM auth no password travels with these |
 | `CVICHE_SESSION_SECRET` | session middleware (`itsdangerous`) | High — anyone with this can forge a session cookie |
-| `OPENAI_API_KEY` | `src/unified_pipeline/llm_client.py` | High — billing impact |
-| AWS credentials | `app/storage/s3_storage.py`, Bedrock client | High — broader blast radius if leaked |
+| AWS credentials | `app/storage/s3_storage.py`, Bedrock client (`src/unified_pipeline/llm/bedrock.py` -- CViche is Bedrock-only) | High — broader blast radius if leaked |
 | `CVICHE_S3_BUCKET` | `app/storage/s3_storage.py` | Low (name, not a credential) |
 | `CVICHE_ALLOWED_ORIGINS` | CORS + CSRF | Low (config, not a credential) |
 | `NCBI_API_KEY` | `src/unified_pipeline/pubmed_*` | Low — rate-limit-only key |
@@ -35,8 +34,7 @@ MIGRATE_USER=cviche_migrate
 CVICHE_SESSION_SECRET=<64-hex-chars-from-secrets.token_hex(32)>
 CVICHE_ALLOWED_ORIGINS=https://cviche.med.cornell.edu
 CVICHE_S3_BUCKET=wcm-cviche-storage
-OPENAI_API_KEY=sk-...
-# AWS creds via instance profile, NOT here
+# AWS creds (S3 + Bedrock) via instance profile, NOT here
 ```
 
 `docker-compose.prod.yml` reads all of these via `${VAR}` interpolation (`DB_HOST`, `DB_NAME`, `DB_USER` and `MIGRATE_USER` are required, and compose refuses to start without them) and pins `DB_AUTH_MODE=iam`, so `docker compose --env-file /etc/cviche/.env -f docker-compose.yml -f docker-compose.prod.yml up -d` picks them up. Variables exported in the shell take precedence over `--env-file`.
@@ -89,10 +87,8 @@ spec:
     - secretKey: CVICHE_SESSION_SECRET
       remoteRef:
         key: cviche/prod/session_secret
-    - secretKey: OPENAI_API_KEY
-      remoteRef:
-        key: cviche/prod/openai_api_key
 ```
+Bedrock/S3 credentials on EKS come from the pod's IAM role (IRSA), not a k8s Secret.
 
 The backend Deployment then references it:
 
@@ -230,10 +226,10 @@ The S3 bucket itself should:
 ## Verification checklist before go-live
 
 - [ ] `kubectl get secret cviche-app-secrets -o yaml -n cviche` shows base64'd values for every expected key — and only those keys.
-- [ ] `kubectl exec -n cviche <backend-pod> -- printenv | grep -E '(CVICHE_|AWS_|OPENAI)' | sort` shows every expected env var present, none extra.
+- [ ] `kubectl exec -n cviche <backend-pod> -- printenv | grep -E '(CVICHE_|AWS_)' | sort` shows every expected env var present, none extra.
 - [ ] `kubectl exec -n cviche <backend-pod> -- env | grep AWS_ACCESS_KEY_ID` returns nothing (IRSA, not static keys).
 - [ ] `kubectl exec -n cviche <backend-pod> -- env | grep AWS_ROLE_ARN` shows the expected role ARN.
 - [ ] `aws s3 ls s3://<bucket>/<prefix>/` from inside the pod succeeds; the same from a pod in another namespace fails.
 - [ ] Bucket policy denies plain-HTTP requests; verify with `curl http://<bucket>.s3.amazonaws.com/...` returning 403.
 - [ ] `aws s3api get-bucket-versioning --bucket <bucket>` returns `Enabled`.
-- [ ] No grep for `aws_access_key_id`, `aws_secret_access_key`, `OPENAI_API_KEY=sk-` in any committed file (`git grep -i`). The .env.example only shows placeholders.
+- [ ] No grep for `aws_access_key_id`, `aws_secret_access_key` in any committed file (`git grep -i`). The .env.example only shows placeholders.

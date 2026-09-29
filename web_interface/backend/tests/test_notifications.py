@@ -140,6 +140,50 @@ def test_payload_renders_na_on_failure_without_score(monkeypatch):
     assert _title(payload)["color"] == "attention"
 
 
+def test_payload_marks_score_computed_on_missing_evidence(monkeypatch):
+    """#745: a score computed with a scored artifact missing says so on the
+    card and in the summary, with the count only -- never the
+    missing_evidence strings, which can name CV files."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    score = {
+        "totalScore": 20,
+        "band": "RED (re-run / do-not-deliver)",
+        "data_complete": False,
+        "missing_evidence": ["docx: no docx found", "no entries.json found"],
+    }
+
+    payload = notifications.build_teams_payload(_run_facts(), score)
+
+    expected = "20 (RED (re-run / do-not-deliver)) — incomplete: 2 file(s) missing or unreadable"
+    assert _facts(payload)["Quality score"] == expected
+    assert f"score {expected}" in payload["summary"]
+    assert "no docx found" not in str(payload)
+
+
+def test_payload_score_incomplete_without_evidence_list(monkeypatch):
+    """data_complete False with no usable list still reads as incomplete."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    score = {"totalScore": 70, "band": "YELLOW (review)", "data_complete": False}
+
+    payload = notifications.build_teams_payload(_run_facts(), score)
+
+    assert _facts(payload)["Quality score"] == "70 (YELLOW (review)) — incomplete"
+
+
+@pytest.mark.parametrize("data_complete", [True, None])
+def test_payload_score_unmarked_when_complete_or_unknown(monkeypatch, data_complete):
+    """A complete score, or a cache written before data_complete existed,
+    renders as the plain number -- unknown is not incomplete."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    score = {"totalScore": 87, "band": "GREEN (ship)", "missing_evidence": ["x"]}
+    if data_complete is not None:
+        score["data_complete"] = data_complete
+
+    payload = notifications.build_teams_payload(_run_facts(), score)
+
+    assert _facts(payload)["Quality score"] == "87 (GREEN (ship))"
+
+
 def test_payload_run_link_uses_first_allowed_origin(monkeypatch):
     monkeypatch.setenv(
         "CVICHE_ALLOWED_ORIGINS",

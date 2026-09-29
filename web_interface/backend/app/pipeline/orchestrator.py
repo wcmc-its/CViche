@@ -19,6 +19,7 @@ import io
 from pathlib import Path
 from datetime import datetime
 from typing import Any
+from collections.abc import Iterator
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,61 @@ from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
 from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
+from unified_pipeline.llm.retry import LLMOutageError
+
+
+# run.error_message is shown verbatim to the (non-technical) user, so it
+# never carries str(exc): exception text can hold filesystem paths, provider
+# request ids and API detail (#592). The raw text stays in the ERROR log line
+# and in step.error_message (with traceback), which the UI does not render.
+RESUME_INPUT_MISSING_MESSAGE = (
+    "Couldn't resume: earlier pipeline results are no longer "
+    "available (the server may have restarted since this run). "
+    'Please use "Restart with file" to run it from the beginning.'
+)
+LLM_OUTAGE_MESSAGE = (
+    "The AI service was unavailable for too long, so this run stopped. "
+    'This is usually temporary; please try "Retry failed step" in a few minutes.'
+)
+STAGE_TIMEOUT_MESSAGE = (
+    "A processing step took too long and was stopped. "
+    'Please try "Retry failed step"; if it happens again, contact the CViche team.'
+)
+GENERIC_FAILURE_MESSAGE = (
+    "Something went wrong while processing this CV, and the details were "
+    'logged for the CViche team. You can try "Retry failed step", or '
+    '"Restart with file" to run it from the beginning.'
+)
+
+
+def _exception_chain(exc: BaseException | None) -> Iterator[BaseException]:
+    """Yield exc and every __cause__/__context__ behind it, once each."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        exc = exc.__cause__ or exc.__context__
+
+
+def user_facing_error(exc: BaseException, resuming: bool) -> str:
+    """Map a pipeline failure to the fixed message stored in run.error_message."""
+    chain = list(_exception_chain(exc))
+    if any(isinstance(e, LLMOutageError) for e in chain):
+        return LLM_OUTAGE_MESSAGE
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+        return STAGE_TIMEOUT_MESSAGE
+    err_text = str(exc).lower()
+    is_missing_input = (
+        isinstance(exc, FileNotFoundError)
+        or "no such file or directory" in err_text
+        or "no input available" in err_text
+    )
+    # On a resume (per-step retry), a missing input file means an earlier
+    # stage's output is no longer on disk -- e.g. the pod recycled since the
+    # original run -- so "Restart with file" is the actionable next step.
+    if resuming and is_missing_input:
+        return RESUME_INPUT_MISSING_MESSAGE
+    return GENERIC_FAILURE_MESSAGE
 
 
 # Cancellation tracking. The in-process set covers same-worker cancels (and is
@@ -360,7 +416,7 @@ class PipelineOrchestrator:
                           input_tokens_delta: int = 0, output_tokens_delta: int = 0,
                           cache_read_tokens_delta: int = 0,
                           cache_write_tokens_delta: int = 0,
-                          provider: str = "openai"):
+                          provider: str = "bedrock"):
         """Update run costs in real-time and emit cost update event.
 
         cache_read_tokens_delta / cache_write_tokens_delta are subsets of
@@ -665,24 +721,9 @@ class PipelineOrchestrator:
 
         except Exception as e:
             run.status = "failed"
-            # On a resume (per-step retry), a missing input file means an earlier
-            # stage's output is no longer on disk -- e.g. the pod recycled since
-            # the original run. Surface a clear next step instead of leaking a raw
-            # filesystem path + errno to the (non-technical) user.
-            err_text = str(e).lower()
-            is_missing_input = (
-                isinstance(e, FileNotFoundError)
-                or "no such file or directory" in err_text
-                or "no input available" in err_text
+            run.error_message = user_facing_error(
+                e, resuming=start_step_number is not None
             )
-            if start_step_number is not None and is_missing_input:
-                run.error_message = (
-                    "Couldn't resume: earlier pipeline results are no longer "
-                    "available (the server may have restarted since this run). "
-                    'Please use "Restart with this file" to run it from the beginning.'
-                )
-            else:
-                run.error_message = str(e)
             run.completed_at = datetime.now()
             # Record time-to-failure too -- useful when diagnosing a run that was
             # "taking too long" and then errored out.
@@ -696,7 +737,7 @@ class PipelineOrchestrator:
             # RUN_COMPLETE / RUN_CANCELLED so the UI stops the timer and
             # switches to the failure state without waiting for a status poll.
             await event_emitter.emit_run_failed(
-                self.run_id, run.error_message or str(e), self.failed_step_number
+                self.run_id, run.error_message, self.failed_step_number
             )
 
             # Notify on terminal failure too (failures are the most important to

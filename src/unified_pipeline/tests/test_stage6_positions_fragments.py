@@ -1153,3 +1153,150 @@ def test_a_city_named_employer_still_gets_its_location():
     inserted = "".join(t.text or "" for p in cell.paragraphs
                        for ins in p._p.findall(qn("w:ins")) for t in ins.iter(qn("w:t")))
     assert inserted == ", Crab Hollow, NY"
+
+
+# --- (g) #946: a start-only D1 rank row ended by a promotion ----------------
+#
+# Decision on #946 (2026-09-24): a D1 row with a start and no end keeps
+# "<start>-Present", except when a higher rung of Instructor -> Assistant
+# Professor -> Associate Professor -> Professor in the same table starts the
+# same year or later -- then the lower row renders the bare start. Non-rank
+# titles and D2/D3 rows keep "-Present".
+
+from unified_pipeline.stage6.sections.positions import (  # noqa: E402
+    ASSISTANT_PROFESSOR_RANK,
+    ASSOCIATE_PROFESSOR_RANK,
+    INSTRUCTOR_RANK,
+    PROFESSOR_RANK,
+    _academic_rank,
+    _superseded_rank_rows,
+)
+
+
+def _rank_entry(idx, title, start, end="", code="D1"):
+    entry = _position_entry(idx, title, "Quexley Medical College", ("ACADEMIC APPOINTMENTS",),
+                            start, end)
+    entry["taxonomy_code"] = code
+    return entry
+
+
+def _dates_by_title(rows):
+    return {title: dates for title, _, dates in rows}
+
+
+@pytest.mark.parametrize("title, rank", [
+    ("Instructor in Clinical Medicine", INSTRUCTOR_RANK),
+    ("Clinical Instructor", INSTRUCTOR_RANK),
+    ("Assistant Professor of Medicine", ASSISTANT_PROFESSOR_RANK),
+    ("Asst. Professor of Medicine", ASSISTANT_PROFESSOR_RANK),
+    ("Adjunct Associate Professor", ASSOCIATE_PROFESSOR_RANK),
+    ("Assoc Professor of Pediatrics", ASSOCIATE_PROFESSOR_RANK),
+    ("Professor", PROFESSOR_RANK),
+    ("Professor of Medicine", PROFESSOR_RANK),
+    ("Professor and Chair", PROFESSOR_RANK),
+    ("Assistant Clinical Professor", ASSISTANT_PROFESSOR_RANK),
+    ("Adjunct Associate Research Professor", ASSOCIATE_PROFESSOR_RANK),
+    ("Associate Dean and Professor of Medicine", PROFESSOR_RANK),
+    ("Associate Professor (Professor from 2020)", PROFESSOR_RANK),
+    ("Core Faculty", None),
+    ("Named Professorship Holder", None),
+    ("Instructorship Program Director", None),
+    ("", None),
+])
+def test_academic_rank_reads_the_ladder_rung(title, rank):
+    assert _academic_rank(title) == rank
+
+
+def test_a_rank_row_superseded_the_same_year_renders_the_bare_year():
+    """The ZA1VOV shape, synthesized: Instructor and Assistant Professor both
+    start in 2022 with no end, beside a non-rank title starting later."""
+    rows = _render_positions([
+        _rank_entry(1, "Core Faculty", "2025"),
+        _rank_entry(2, "Assistant Professor of Clinical Medicine", "2022"),
+        _rank_entry(3, "Instructor in Clinical Medicine", "2022"),
+    ], code="D1")
+    assert _dates_by_title(rows) == {
+        "Core Faculty": "2025-Present",
+        "Assistant Professor of Clinical Medicine": "2022-Present",
+        "Instructor in Clinical Medicine": "2022",
+    }
+
+
+def test_a_higher_rank_starting_later_supersedes_every_lower_rung():
+    rows = _render_positions([
+        _rank_entry(1, "Professor of Medicine", "2020"),
+        _rank_entry(2, "Associate Professor of Medicine", "2015"),
+        _rank_entry(3, "Assistant Professor of Medicine", "2010-07"),
+    ], code="D1")
+    assert _dates_by_title(rows) == {
+        "Professor of Medicine": "2020-Present",
+        "Associate Professor of Medicine": "2015",
+        "Assistant Professor of Medicine": "07/10",
+    }
+
+
+def test_a_higher_rank_that_started_earlier_does_not_end_a_later_row():
+    rows = _render_positions([
+        _rank_entry(1, "Instructor in Surgery", "2018"),
+        _rank_entry(2, "Professor of Surgery", "2010", "2015"),
+    ], code="D1")
+    assert _dates_by_title(rows)["Instructor in Surgery"] == "2018-Present"
+
+
+def test_the_same_rung_does_not_supersede():
+    rows = _render_positions([
+        _rank_entry(1, "Assistant Professor of Medicine", "2020"),
+        _rank_entry(2, "Assistant Professor of Pediatrics", "2020"),
+    ], code="D1")
+    assert [dates for _, _, dates in rows] == ["2020-Present", "2020-Present"]
+
+
+def test_a_superseded_row_with_its_own_end_date_keeps_it():
+    rows = _render_positions([
+        _rank_entry(1, "Assistant Professor of Medicine", "2022"),
+        _rank_entry(2, "Instructor in Medicine", "2020", "2022"),
+        _rank_entry(3, "Instructor in Pediatrics", "2020", "present"),
+    ], code="D1")
+    dates = _dates_by_title(rows)
+    assert dates["Instructor in Medicine"] == "2020-2022"
+    assert dates["Instructor in Pediatrics"] == "2020-Present"
+
+
+def test_a_higher_rank_without_a_start_supersedes_nothing():
+    rows = _render_positions([
+        _rank_entry(1, "Assistant Professor of Medicine", ""),
+        _rank_entry(2, "Instructor in Medicine", "2020"),
+    ], code="D1")
+    assert _dates_by_title(rows)["Instructor in Medicine"] == "2020-Present"
+
+
+@pytest.mark.parametrize("code", ["D2", "D3"])
+def test_hospital_and_other_positions_keep_present(code):
+    rows = _render_positions([
+        _rank_entry(1, "Professor", "2023", code=code),
+        _rank_entry(2, "Instructor", "2022", code=code),
+    ], code=code)
+    assert [dates for _, _, dates in rows] == ["2023-Present", "2022-Present"]
+
+
+def test_the_ladder_applies_in_the_generic_positions_table_to_d1_rows_only():
+    gen, table = _positions_generator(GENERIC_TABLE_ANCHOR)
+    gen._fill_positions({
+        "D1": [_rank_entry(1, "Associate Professor of Medicine", "2021"),
+               _rank_entry(2, "Assistant Professor of Medicine", "2019")],
+        "D2": [_rank_entry(3, "Instructor", "2018", code="D2")],
+    })
+    assert _dates_by_title(_rendered_rows(table)) == {
+        "Associate Professor of Medicine": "2021-Present",
+        "Assistant Professor of Medicine": "2019",
+        "Instructor": "2018-Present",
+    }
+
+
+def test_superseded_rank_rows_reads_the_records_it_is_given():
+    records = [_rank_entry(1, "Associate Professor", "2021"),
+               _rank_entry(2, "Assistant Professor", "2021"),
+               _rank_entry(3, "Core Faculty", "2019")]
+    before = copy.deepcopy(records)
+    assert _superseded_rank_rows(records) == {1}
+    assert records == before
