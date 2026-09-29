@@ -126,9 +126,10 @@ def test_lists_that_are_not_sibling_records_are_left_alone():
 
 
 def test_a_grants_nested_sub_awards_are_not_split_into_grants():
-    entry = {"taxonomy_code": "M2A", "text": "Grant\tSub A\tSub B",
-             "extracted_fields": {"title": "Grant", "sub_awards": [
-                 {"sub_title": "Sub A", "pi_name": "X"}, {"sub_title": "Sub B", "pi_name": "Y"}]}}
+    entry = {"taxonomy_code": "M2A", "text": "Grant Title\tSub Alpha 100\tSub Beta 200",
+             "extracted_fields": {"title": "Grant Title", "sub_awards": [
+                 {"sub_title": "Sub Alpha", "total_funding": "100"},
+                 {"sub_title": "Sub Beta", "total_funding": "200"}]}}
     assert _fan_out([entry]) == [entry]
 
 
