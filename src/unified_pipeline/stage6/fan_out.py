@@ -79,9 +79,13 @@ _TOKEN_RE = re.compile(r'[a-z0-9]+')
 # Per taxonomy code, the `extracted_fields` keys its section renderer writes
 # into the document, read off the renderer by rendering one entry per code with
 # a unique marker in every schema field and listing the markers that reach the
-# .docx (`test_rendered_fields_match_what_each_section_writes` repeats that
-# probe, so a renderer that starts or stops reading a field fails it). `narrative`
-# is in no set: nothing writes it. A code missing here is never fanned out.
+# .docx while the entry's own text is a neutral line
+# (`test_rendered_fields_match_what_each_section_writes` repeats that probe, so a
+# renderer that starts or stops reading a field fails it). `narrative` is in no
+# set: nothing writes it. A code missing here is never fanned out. That includes
+# every code whose section writes the entry's TEXT and no field (E, G, J, K2-K5,
+# L1, L2, M1, M2, N1, N3, N4, S0, T; `_TEXT_RENDERED_CODES`): a child of one would
+# render only its built text, which does not carry the parent's scalars.
 _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'B1': frozenset({'degree', 'institution', 'year'}),
     'B2': frozenset({'institution', 'program_name', 'year'}),
@@ -89,33 +93,19 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'D1': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),
     'D2': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),
     'D3': frozenset({'department', 'end_date', 'organization', 'start_date', 'title'}),
-    'E': frozenset({'effective_date', 'fte_percentage', 'status'}),
     'F1': frozenset({'expiration_date', 'issue_date', 'license_number', 'state_country'}),
     'F2': frozenset({'certifying_board', 'recertification_date', 'specialty', 'year_certified'}),
-    'G': frozenset({'affiliation_type', 'department', 'end_date', 'organization', 'start_date'}),
     'H': frozenset({'award_name', 'date', 'granting_body'}),
     'I': frozenset({'end_date', 'membership_type', 'organization', 'start_date'}),
-    'J': frozenset({'admin_percent', 'clinical_percent', 'description', 'research_percent', 'teaching_percent'}),
     'K1': frozenset({'course_code', 'course_title', 'institution', 'role'}),
-    'K2': frozenset({'description', 'end_date', 'hours_per_week', 'institution', 'learner_level', 'setting', 'start_date', 'teaching_role'}),
-    'K3': frozenset({'description', 'end_date', 'institution', 'program_name', 'role', 'scope', 'start_date'}),
-    'K4': frozenset({'activity_title', 'cme_credits', 'date', 'description', 'institution', 'role', 'target_audience'}),
-    'K5': frozenset({'activity_title', 'audience', 'date', 'description', 'location'}),
-    'L1': frozenset({'clinical_role', 'description', 'end_date', 'fte_clinical', 'institution', 'service_setting', 'sessions_per_week', 'start_date'}),
-    'L2': frozenset({'description', 'end_date', 'institution', 'outcome', 'project_name', 'role', 'start_date'}),
     'L3': frozenset({'end_date', 'institution', 'leadership_role', 'start_date'}),
-    'M1': frozenset({'description', 'end_date', 'institution', 'research_area', 'start_date'}),
-    'M2': frozenset({'agency', 'annual_funding', 'end_date', 'grant_number', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'title', 'total_funding'}),
     'M2A': frozenset({'agency', 'annual_funding', 'end_date', 'grant_number', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'title', 'total_funding'}),
     'M2B': frozenset({'agency', 'end_date', 'grant_number', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'title', 'total_funding'}),
     'M2C': frozenset({'agency', 'grant_number', 'pi_name', 'pi_role', 'title'}),
     'M2D': frozenset({'assignee', 'filing_date', 'inventors', 'issue_date', 'patent_number', 'status', 'title'}),
-    'N1': frozenset({'end_date', 'institution', 'number_trainees', 'program_name', 'role', 'start_date'}),
     'N2': frozenset({'agency', 'end_date', 'grant_number', 'grant_title', 'role', 'start_date'}),
-    'N3': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date', 'thesis_title'}),
     'N3A': frozenset({'mentee_level', 'mentee_name', 'research_focus', 'start_date'}),
     'N3B': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date'}),
-    'N4': frozenset({'date', 'description', 'mentee_name', 'output_type', 'title'}),
     'O': frozenset({'end_date', 'institution', 'leadership_role', 'start_date'}),
     'P': frozenset({'committee_name', 'end_date', 'role', 'start_date'}),
     'Q1': frozenset({'end_date', 'organization', 'role', 'start_date'}),
@@ -127,7 +117,6 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'Q4C': frozenset({'end_date', 'journal_name', 'start_date'}),
     'Q4D': frozenset({'journal_name', 'year'}),
     'R': frozenset({'date', 'event_name', 'location', 'title'}),
-    'S0': frozenset({'google_scholar_url', 'h_index', 'orcid', 'publication_count', 'researchgate_url', 'scopus_id', 'total_citations'}),
     'S1': frozenset({'authors', 'doi', 'issue', 'journal', 'pages', 'pmcid', 'pmid', 'title', 'volume', 'year'}),
     'S2': frozenset({'authors', 'doi', 'issue', 'journal', 'pages', 'pmcid', 'pmid', 'title', 'volume', 'year'}),
     'S3': frozenset({'authors', 'publisher', 'title', 'year'}),
@@ -137,8 +126,11 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'S7': frozenset({'authors', 'title', 'year'}),
     'S8': frozenset({'authors', 'doi', 'title', 'year'}),
     'S9': frozenset({'authors', 'title', 'year'}),
-    'T': frozenset({'content_type', 'description'}),
 })
+
+# The codes whose section renders the entry's text, not its fields (see above).
+# Pinned by `test_text_rendered_codes_write_the_text_and_no_field`.
+_TEXT_RENDERED_CODES = frozenset({'E', 'G', 'J', 'K2', 'K3', 'K4', 'K5', 'L1', 'L2', 'M1', 'M2', 'N1', 'N3', 'N4', 'S0', 'T'})
 
 # Keys a stage-5 formatter writes for the WHOLE entry (5c teaching prose, 5d
 # citation). An entry that carries one already has a rendering of all its

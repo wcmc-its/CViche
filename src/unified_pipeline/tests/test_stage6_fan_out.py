@@ -424,9 +424,14 @@ def test_date_keys_never_count_as_a_parents_identity(key, expected):
 
 # --- the renderer map, checked against the renderers themselves ---------------
 
+_NEUTRAL_TEXT = 'Xyneutral probe line'
+
+
 def _rendered_markers(tmp_path, code):
     """The schema fields of `code` whose marker reaches the .docx when one entry
-    of that code is rendered with a unique marker in every field."""
+    of that code is rendered with a unique marker in every field, and whether
+    the entry's own (neutral) text reaches it. The text must not carry the
+    markers: a section that writes the text would then "render" every field."""
     import json
 
     from docx import Document
@@ -435,7 +440,7 @@ def _rendered_markers(tmp_path, code):
 
     markers = {name: 'Zq' + name.replace('_', 'x') + 'Z'
                for name in FIELD_SCHEMAS[code]['fields'] if name != 'narrative'}
-    entry = {'taxonomy_code': code, 'element_idx_start': 0, 'text': ' '.join(markers.values()),
+    entry = {'taxonomy_code': code, 'element_idx_start': 0, 'text': _NEUTRAL_TEXT,
              'extracted_fields': dict(markers)}
     source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
     source.write_text(json.dumps({'document_uid': 'TESTAA', 'entries': [entry]}))
@@ -444,7 +449,7 @@ def _rendered_markers(tmp_path, code):
     document = Document(str(target))
     body = ' '.join(t.text or '' for t in document.element.body.iter(
         '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
-    return {name for name, marker in markers.items() if marker in body}
+    return {name for name, marker in markers.items() if marker in body}, _NEUTRAL_TEXT in body
 
 
 @pytest.mark.parametrize('code', sorted(fan_out._RENDERED_FIELDS))
@@ -453,7 +458,31 @@ def test_rendered_fields_match_what_each_section_writes(tmp_path, code):
     writes: a field the map claims but the renderer skips would let the
     coverage test pass on content the output drops (web240's `institution`),
     and one it omits would needlessly keep entries whole."""
-    assert _rendered_markers(tmp_path, code) == set(fan_out._RENDERED_FIELDS[code])
+    assert _rendered_markers(tmp_path, code) == (set(fan_out._RENDERED_FIELDS[code]), False)
+
+
+@pytest.mark.parametrize('code', sorted(fan_out._TEXT_RENDERED_CODES))
+def test_text_rendered_codes_write_the_text_and_no_field(tmp_path, code):
+    """A section that writes the entry's text is never fanned out: its children
+    would render only their built text and drop the parent's scalars (a G
+    entry's organization). If one starts writing fields, move it into the map."""
+    assert code not in fan_out._RENDERED_FIELDS
+    assert _rendered_markers(tmp_path, code) == (set(), True)
+
+
+def test_stopwords_are_exactly_the_connectives():
+    """A content word added here would let a fan-out drop it silently."""
+    assert fan_out._STOPWORDS == {'a', 'an', 'and', 'at', 'for', 'in', 'of', 'on', 'the', 'to'}
+
+
+def test_a_text_rendered_entry_with_a_record_list_is_left_whole():
+    """The verifier's G repro: the parent's organization is in no child's text."""
+    entry = {'taxonomy_code': 'G', 'element_idx_start': 0,
+             'text': 'Kestrel Harbor Hospital\tAttending Physician 2010\tConsultant 2012',
+             'extracted_fields': {'organization': 'Kestrel Harbor Hospital', 'affiliations': [
+                 {'affiliation_type': 'Attending Physician', 'start_date': '2010'},
+                 {'affiliation_type': 'Consultant', 'start_date': '2012'}]}}
+    assert fan_out_multi_record_entries([entry], FIELD_SCHEMAS) == [entry]
 
 
 def test_the_renderer_map_names_only_schema_fields_and_never_narrative():
@@ -462,5 +491,5 @@ def test_the_renderer_map_names_only_schema_fields_and_never_narrative():
         assert 'narrative' not in names, code
 
 
-def test_every_code_with_a_schema_is_in_the_renderer_map_except_personal_data():
-    assert set(FIELD_SCHEMAS) - set(fan_out._RENDERED_FIELDS) == {'A'}
+def test_every_code_with_a_schema_is_in_the_renderer_map_except_text_codes_and_personal_data():
+    assert set(FIELD_SCHEMAS) - set(fan_out._RENDERED_FIELDS) == fan_out._TEXT_RENDERED_CODES | {'A'}
