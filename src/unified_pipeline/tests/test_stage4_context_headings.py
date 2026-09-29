@@ -34,6 +34,7 @@ def _stamps(entries):
     ("Graduate Students and Postdocs", "Graduate Students and Postdocs"),  # bare label
     ("IV. VISITING FACULTY", "VISITING FACULTY"),                  # enumerator stripped
     ("GOVERNMENT (not necessarily an exhaustive listing)", "GOVERNMENT"),  # aside dropped
+    ("LEGAL CONSULTING (not necessarily an exhaustive listing)", "LEGAL CONSULTING"),  # aside dropped before the caps/word tests
 ])
 def test_a_heading_shaped_t_entry_stamps_the_entry_after_it(heading, expected):
     assert _stamps([_e(heading, "T"), _e("Member, Committee X")]) == [None, expected]
@@ -47,6 +48,8 @@ def test_a_heading_shaped_t_entry_stamps_the_entry_after_it(heading, expected):
     "Line one\nLine two:",                     # multi-line
     "X" * (ch.MAX_HEADING_CHARS + 1),          # too long
     "Dr. Jane Roe, Ph.D. Professor",           # bare label with a period
+    "Northgate Center Dept of Surgery.",       # period, no comma
+    "Northgate Center Dept. of Surgery",       # period, no comma
     "Year  School  Degree",                    # column gap
     "Is this a question?",                     # form question
     "Course Director (unbalanced",             # unbalanced paren
@@ -220,6 +223,20 @@ def test_a_t_entry_that_is_not_a_heading_ends_the_run():
     entries = [_e("Alpha University:", "T"), _e("child 1"),
                _e("2003-2016 Beta Institute, Gamma", "T"), _e("child 2")]
     assert _stamps(entries) == [None, "Alpha University", None, None]
+
+
+def test_t_and_dropped_entries_do_not_count_toward_a_flat_leaf():
+    # Three dropped Q1 fragments must not add a third letter to a P/O leaf.
+    n = ch.FLAT_LETTER_MIN_ENTRIES
+    dropped = [{**_e(f"q{i}", "Q1"), "is_fragment": True} for i in range(n)]
+    entries = dropped + [_e(f"p{i}") for i in range(n)] + [_e("Alpha University:", "T"), _e("p-child")] \
+        + [_e(f"o-child {i}", "O") for i in range(n)]
+    assert _stamps(entries)[-(n + 1):] == ["Alpha University"] * (n + 1)
+
+
+def test_a_bare_label_followed_by_a_dropped_t_entry_governs_nothing():
+    entries = [_e("Alpha Beta Label", "T"), {**_e("Gamma list item", "T"), "is_fragment": True}, _e("child")]
+    assert set(_stamps(entries)) == {None}
 
 
 def test_a_bare_label_whose_next_entry_is_t_governs_nothing():

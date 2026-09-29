@@ -116,7 +116,10 @@ def _is_heading_shaped(text: str, strong_only: bool = False) -> bool:
     raw = text.strip()
     if not raw or len(raw) > MAX_HEADING_CHARS or "\n" in raw or "|" in raw or "\t" in raw:
         return False
-    body = _ENUMERATOR_RE.sub("", raw)
+    # The trailing aside is dropped BEFORE the caps and word-count tests:
+    # "LEGAL CONSULTING (not necessarily an exhaustive listing)" is an
+    # all-caps label whose lowercase aside would otherwise fail both.
+    body = _TRAILING_ASIDE_RE.sub("", _ENUMERATOR_RE.sub("", raw)).strip()
     if any(ch.isdigit() for ch in body) or body.count("(") != body.count(")") or _INTERIOR_BREAK_RE.search(raw.rstrip(":")):
         return False
     if raw.endswith(":") or _is_all_caps(body):
