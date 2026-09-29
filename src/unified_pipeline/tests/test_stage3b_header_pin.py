@@ -47,9 +47,10 @@ def test_sublabel_under_agreeing_parent_pins():
     assert pinned_header_code(R_CTX) == "R"
 
 
-def test_bare_scope_label_alone_does_not_pin():
+@pytest.mark.parametrize("label", ["Local", "Regional", "National", "International", " national "])
+def test_bare_scope_label_alone_does_not_pin(label):
     # A teaching CV's "Local": stage 3a maps it to R with no parent to say why.
-    assert pinned_header_code(_ctx(meta=_node("Local", "R"))) is None
+    assert pinned_header_code(_ctx(meta=_node(label, "R"))) is None
 
 
 def test_scope_label_under_disagreeing_parent_does_not_pin():
