@@ -704,6 +704,46 @@ def test_template_body_paragraph_texts_cached_across_calls():
     assert first is second
 
 
+# ------------------------------------------------------------ #822 raw tabs
+# The same exclusion, applied to raw_tab_paragraphs: the template's own
+# tabbed body paragraphs ("Signature: \t\t\t\t", "Name of Current
+# Employer(s):\t", ...) are kept by stage 6, so every run was charged for
+# them. A tabbed line with text of its own still counts.
+# ------------------------------------------------------------ #822 raw tabs
+
+@pytest.mark.skipif(not _TEMPLATE.exists(), reason="pristine WCM template not checked out")
+def test_broken_format_template_tab_paragraphs_excluded_from_raw_tab(tmp_path):
+    """Every tabbed body paragraph of the real template -- read from the
+    checked-in file, not retyped -- is excluded when kept verbatim."""
+    tabbed = [p.text for p in Document(_TEMPLATE).paragraphs if "\t" in p.text]
+    assert len(tabbed) == 5, tabbed
+    _make_docx(tabbed).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=0" in detail, detail
+    assert "template_tab_excluded=5" in detail, detail
+    assert fraction == 0.0, detail
+
+
+def test_broken_format_template_tab_paragraph_whitespace_variant_excluded(tmp_path):
+    """Matched on whitespace-NORMALIZED text: a different tab run than the
+    template's own ("Signature: \t\t\t\t") is still the template line."""
+    _make_docx(["Signature:\t"]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=0" in detail, detail
+    assert "template_tab_excluded=1" in detail, detail
+
+
+def test_broken_format_filled_template_tab_line_still_counted(tmp_path):
+    """A faculty member's real tabbed line -- a template label with a value
+    after the tab -- is not the template's own text, so it still counts,
+    and only it reaches the fraction."""
+    _make_docx(["Name:\tJane Q. Doe", "Signature: \t\t\t\t"]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=1" in detail, detail
+    assert "template_tab_excluded=1" in detail, detail
+    assert fraction == pytest.approx(0.6 * (1 / 20)), detail
+
+
 def test_template_body_paragraph_texts_missing_file_raises(tmp_path, monkeypatch):
     """#822 finding 1's 'do not swallow' contract: the WCM template is a
     checked-in repo asset, not run output, so a missing file means a broken

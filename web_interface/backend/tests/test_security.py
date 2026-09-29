@@ -913,6 +913,22 @@ class TestUploadValidation:
         run = db.query(Run).filter(Run.id == up.json()["run_id"]).one()
         assert run.estimated_duration_seconds == body["estimated_time_seconds_max"]
 
+    @pytest.mark.parametrize("text_chars, actual_seconds", [
+        (3_180, 89), (3_180, 105), (13_130, 188),
+        (16_000, 227), (21_840, 255), (42_770, 330),
+    ])
+    def test_estimate_range_covers_post_parallel_prod_runs(self, text_chars, actual_seconds):
+        """Every completed prod run on dev-206/207 (2026-09-28/29, after the
+        #881 parallel LLM batches shipped) falls inside the quoted range. The
+        old 20 s/stage overhead and 3-min floor put all six below the range's
+        MINIMUM. Char counts are recovered from each run's stored estimate
+        under prod's knobs (30 s/1k tokens, 60 s base)."""
+        from app.api import upload
+        with patch.object(upload, "TIME_PER_1K_TOKENS", 30), \
+             patch.object(upload, "BASE_OVERHEAD_SECONDS", 60):
+            time_min, time_max = upload.estimate_run_seconds(text_chars)
+        assert time_min <= actual_seconds <= time_max
+
     def test_estimate_respects_rate_limit(self, client, db, seed_simple_mode):
         """#795: /estimate is rate-limited the same way /upload is --
         reusing check_rate_limit (/upload's own per-run quota) rather than a

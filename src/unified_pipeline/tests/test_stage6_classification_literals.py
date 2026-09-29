@@ -949,11 +949,14 @@ def test_normalize_institution_falls_through_an_empty_cleaned_name():
 def test_normalize_recovers_a_missing_institution_from_nearby_entries():
     """Third and last institution step, and the one that needs `all_entries`
     -- which is why the normalizer takes it. It runs only when the first two
-    produced nothing."""
-    entry = {"text": "Graduate Research Assistant",
+    produced nothing. The heading's institution sits on a PRECEDING training
+    entry of the same block (#1038)."""
+    entry = {"text": "Graduate Research Assistant", "hierarchy": ["Training"],
              "element_idx_start": 4, "element_idx_end": 4,
              "extracted_fields": {"training_type": "Fellow"}}
-    neighbours = [{"element_idx_start": 5, "text": "University of Nowhere"}]
+    neighbours = [{"element_idx_start": 3, "taxonomy_code": "C", "hierarchy": ["Training"],
+                   "text": "Internship 2001",
+                   "extracted_fields": {"institution": "University of Nowhere"}}]
     assert _normalize_training_entry(entry, "C1", neighbours).institution == "University of Nowhere"
     # no neighbours passed at all: still normalizes, just without recovery
     assert _normalize_training_entry(entry, "C1").institution == ""
