@@ -7,9 +7,10 @@ surface; these modules hold the implementation it calls into.
     io.py        stage artifact loading + input normalisation
     prompt.py    the classification system prompt and its taxonomy reference
     classify.py  the LLM classification passes (batch loop + post-passes)
+    header_pin.py  a confidently mapped section header beats a model answer in a named set of confusions (#312)
 
 Dependencies run one way and must keep doing so: `classify` imports from
-`context`, `io` and `prompt`; nothing here may import
+`context`, `io` and `prompt`; `header_pin` imports only `context`; nothing here may import
 `stage_3b_entry_classifier` -- that module imports these, so a back-edge is an
 import cycle and fails at load.
 

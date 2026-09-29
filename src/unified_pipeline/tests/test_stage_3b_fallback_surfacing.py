@@ -797,3 +797,48 @@ def test_stage_input_defaults_only_when_no_path_is_given(tmp_path):
 ])
 def test_person_name_from_uid(uid, expected):
     assert stage_3b._person_name_from_uid(uid) == expected
+
+
+# --- run_stage_3b: #312 header pin is wired into the group pass ----------------
+
+_312_MAPPINGS = [
+    {"title": "INVITED PRESENTATIONS",
+     "taxonomy_options": [{"code": "R", "confidence": 1.0}], "children": []},
+    {"title": "National",
+     "taxonomy_options": [{"code": "R", "confidence": 1.0}], "children": []},
+    {"title": "BIBLIOGRAPHY",
+     "taxonomy_options": [{"code": "S1", "confidence": 0.5}], "children": []},
+    {"title": "Local",
+     "taxonomy_options": [{"code": "R", "confidence": 1.0}], "children": []},
+]
+_312_ENTRIES = [
+    {"element_type": "text", "hierarchy": ["INVITED PRESENTATIONS", "National"],
+     "text": "Ultrasound Basics Workshop, Example Society Annual Meeting"},
+    {"element_type": "text", "hierarchy": ["BIBLIOGRAPHY", "National"],
+     "text": "Ultrasound Basics Workshop, Example Society Annual Meeting"},
+    {"element_type": "text", "hierarchy": ["Local"],
+     "text": "Ultrasound Basics Workshop, Example Society Annual Meeting"},
+]
+
+
+def test_312_header_pin_runs_in_the_stage_3b_group_pass(monkeypatch, tmp_path):
+    """The model answers K4 for all three rows. Only the one filed under a
+    confidently mapped R section becomes R; the same text under a section that
+    disagrees (BIBLIOGRAPHY) or a bare scope label (Local) keeps the model's K4."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0], code="K4"))
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, _312_ENTRIES, _312_MAPPINGS)
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV", stage_2_path=str(stage_2), stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text())
+    by_section = {e["hierarchy"][0]: e for e in output["entries"]}
+    assert by_section["INVITED PRESENTATIONS"]["taxonomy_code"] == "R"
+    assert by_section["INVITED PRESENTATIONS"]["pre_pin_code"] == "K4"
+    assert by_section["BIBLIOGRAPHY"]["taxonomy_code"] == "K4"
+    assert by_section["Local"]["taxonomy_code"] == "K4"
+    assert "pre_pin_code" not in by_section["Local"]
+    # The pin is not a fallback: stage 3b's zero-LLM-classification gate still counts these.
+    assert output["meta"]["classification_stats"]["llm_classified"] == 3
