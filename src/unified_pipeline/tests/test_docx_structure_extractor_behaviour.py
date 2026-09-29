@@ -1547,6 +1547,26 @@ def test_split_merged_cells_fold_leaves_tail_rows_that_are_not_pure_dates():
     ]
 
 
+def test_split_merged_cells_fold_keeps_overflow_row_with_a_non_date_cell_separate():
+    # 3 columns: the overflow row ['', 'July 2019', 'Room 3'] has a date in cell 1
+    # but real text ('Room 3') in cell 2, so it is not date-only and must stay
+    # its own row. Folding on "any cell is a date" would merge 'Room 3' into
+    # the anchor row.
+    row = [
+        {"text": "Lecture Alpha\n\nLecture Beta", "row": 0, "col": 0},
+        {"text": "May 2019\n\nJune 2019\n\nJuly 2019", "row": 0, "col": 1},
+        {"text": "Room 1\n\nRoom 2\n\nRoom 3", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Lecture Alpha", "May 2019", "Room 1"],
+        ["Lecture Beta", "June 2019", "Room 2"],
+        ["", "July 2019", "Room 3"],
+    ]
+
+
 def test_split_merged_cells_fold_does_not_touch_single_cell_rows():
     # No blank sibling cell -> not an orphan date row, so "MBA" / "1998" stay
     # two rows exactly as before.
@@ -1620,6 +1640,12 @@ def test_extract_unified_elements_multicolumn_row_with_embedded_header_keeps_dat
     for date in ("March 2011", "June 2012", "October 2013"):
         assert date in content
     assert "Lecturer, Anatomy Course" in content
+    # Judgement call (#259): a multi-column row no longer takes the embedded-header
+    # branch, so the embedded "Clinical Teaching" is NOT emitted as a table_header;
+    # it stays as text in a content row. Pinned so a change is deliberate.
+    headers = [e["text"] for e in elements if e["type"] == "table_header"]
+    assert "Clinical Teaching" not in headers
+    assert "Clinical Teaching" in content
 
 
 def test_extract_unified_elements_single_cell_embedded_header_still_splits(tmp_path):
