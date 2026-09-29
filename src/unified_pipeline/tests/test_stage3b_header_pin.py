@@ -125,9 +125,18 @@ def test_fallback_and_empty_entries_are_not_model_answers():
 
 
 def test_rewritten_reasoning_cannot_flip_the_code_back():
-    from unified_pipeline.core.validators.reasoning_consistency_checker import check_reasoning_consistency
-    (out,), _ = apply_header_pin([_entry("K4")], R_CTX)
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+        check_reasoning_consistency,
+    )
+    reasoning = "CME workshop for practicing professionals; K4 is appropriate"
+    # Guard the fixture: the checker must parse this as a K4 claim against code R,
+    # or the assertions below cannot fail whatever the rewrite does.
+    assert check_reasoning_consistency(_entry("R", reasoning=reasoning)).has_conflict
+    (out,), _ = apply_header_pin([_entry("K4", reasoning=reasoning)], R_CTX)
     assert not check_reasoning_consistency(out).has_conflict
+    (corrected,), _stats = apply_reasoning_corrections([out], min_confidence=0.80)
+    assert corrected["taxonomy_code"] == "R"
 
 
 def test_unpinnable_group_is_returned_unchanged():
