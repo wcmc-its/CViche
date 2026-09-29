@@ -1145,7 +1145,7 @@ def _continues_previous_entry(prev: dict, cur: dict, element_index_map: dict) ->
     )
 
 
-def fold_indented_detail_entries(entries: list[dict], element_index_map: dict) -> list[dict]:
+def fold_labelled_detail_entries(entries: list[dict], element_index_map: dict) -> list[dict]:
     """Fold each dateless labelled detail line into the entry directly above it (#986).
 
     Runs on one section's entries (content entries plus the non-empty unassigned
@@ -1173,7 +1173,7 @@ def fold_indented_detail_entries(entries: list[dict], element_index_map: dict) -
         else:
             folded.append(entry)
     if fold_count:
-        logger.info(f"    Folded {fold_count} indented detail line(s) into the entry above")
+        logger.info(f"    Folded {fold_count} labelled detail line(s) into the entry above")
         return folded
     return entries
 
@@ -1400,7 +1400,7 @@ def _extract_section(
 
     # Combine all entries for this section: headers -> content -> breaks,
     # the same order the pre-#881 loop extended all_entries in.
-    section_entries_in_order = fold_indented_detail_entries(
+    section_entries_in_order = fold_labelled_detail_entries(
         section_headers + entries + break_entries, context.element_index_map
     )
 

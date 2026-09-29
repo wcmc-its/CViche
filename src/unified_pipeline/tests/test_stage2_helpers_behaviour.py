@@ -4,7 +4,7 @@ Covers: get_hierarchy_path, build_element_index_map, get_element_text,
 split_merged_row_into_pseudo_rows, extract_leaf_sections_with_boundaries,
 collect_header_indices, collect_header_info, remove_subset_delimiters,
 recover_unclaimed_table_rows, _dedup_idx_key, filter_extraction_noise,
-fold_indented_detail_entries (#986).
+fold_labelled_detail_entries (#986).
 
 The first seven of those have NO existing coverage anywhere in the test
 suite. The last four (remove_subset_delimiters, recover_unclaimed_table_rows,
@@ -707,9 +707,9 @@ def test_filter_extraction_noise_no_drops_returns_all_entries_untouched():
     assert filter_extraction_noise(entries) == entries
 
 
-# ------------------------------------------------- fold_indented_detail_entries (#986)
+# ------------------------------------------------- fold_labelled_detail_entries (#986)
 
-fold_indented_detail_entries = stage2.fold_indented_detail_entries
+fold_labelled_detail_entries = stage2.fold_labelled_detail_entries
 _HIER = ["Mentoring"]
 
 
@@ -725,7 +725,7 @@ def _fold_entry(start, end=None, text="x", etype="paragraph", hier=None, conf=0.
 
 
 def _fold(entries, elements):
-    return fold_indented_detail_entries(entries, build_element_index_map({"elements": elements}))
+    return fold_labelled_detail_entries(entries, build_element_index_map({"elements": elements}))
 
 
 def _spans(entries):
