@@ -123,6 +123,19 @@ def test_a_parent_holding_only_shared_dates_is_replaced_not_kept():
     assert [e["extracted_fields"]["committee_name"] for e in out] == ["Alpha Committee", "Beta Committee"]
 
 
+def test_a_parent_whose_dates_differ_from_the_records_is_kept_as_the_first_record():
+    entry = {"taxonomy_code": "I", "text": "2007- Example Network\t-Candidate Member, 2007-2009\t-Full Member, 2009-",
+             "extracted_fields": {"organization": "Example Network", "membership_type": "Full Member",
+                                  "start_date": "2007", "end_date": "present", "additional_roles": [
+                 {"role": "Candidate Member", "start_date": "2007", "end_date": "2009"},
+                 {"role": "Full Member", "start_date": "2009", "end_date": "present"}]}}
+    out = _fan_out([entry])
+
+    assert len(out) == 3
+    assert out[0]["extracted_fields"]["organization"] == "Example Network"   # the parent, unchanged
+    assert out[1]["extracted_fields"] == {"role": "Candidate Member", "start_date": "2007", "end_date": "2009"}
+
+
 def test_lists_that_are_not_sibling_records_are_left_alone():
     schema_key = next(iter(_schema_fields("H")))
     cases = {

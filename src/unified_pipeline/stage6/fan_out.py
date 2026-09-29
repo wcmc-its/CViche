@@ -91,9 +91,6 @@ def _record_lists(fields: dict[str, Any],
 
 
 def _is_date_key(key: str) -> bool:
-    """A parent's dates are usually context shared by every record (one date
-    range stated for a list of committees), so they do not make the parent a
-    record of its own."""
     return key.endswith(DATE_KEY_SUFFIXES) or key in DATE_KEYS
 
 
@@ -103,11 +100,19 @@ def _parent_is_a_record(fields: dict[str, Any], records: list[dict],
     records (stage 4 put the first record in the scalars and only the REST in
     the list, e.g. `additional_roles`). Then the parent must stay in the
     output; replacing it would drop that first record.
+
+    A field both carry makes the parent a record. A DATE field does so only
+    when some record's value differs from the parent's: one date range stated
+    for a whole list of committees is context every record shares, not a
+    record of its own.
     """
-    record_keys = {key for record in records for key, value in record.items()
-                   if key in schema_fields and not _is_empty(value)
-                   and not _is_date_key(key)}
-    return any(not _is_empty(fields.get(key)) for key in record_keys)
+    for record in records:
+        for key, value in record.items():
+            if key not in schema_fields or _is_empty(value) or _is_empty(fields.get(key)):
+                continue
+            if not _is_date_key(key) or value != fields[key]:
+                return True
+    return False
 
 
 def _child_text(parent_text: str, index: int, count: int,
