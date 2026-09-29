@@ -512,6 +512,20 @@ class TestExtractedInstitutionRendersInNameCell:
             "start_date": "2010", "end_date": "2012"}))
         assert [r[0] for r in rows] == ["Genetics Department Faculty Meeting Minutes"]
 
+    def test_leading_article_alone_does_not_make_an_institution_new(self):
+        rows = _rows(self._entry({
+            "committee_name": "Riverbend Association Board",
+            "institution": "The Riverbend Association",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Riverbend Association Board"]
+
+    def test_only_each_parenthetical_is_ignored_not_the_text_between_them(self):
+        rows = _rows(self._entry({
+            "committee_name": "Harbor (HE) Zeta (ad hoc)",
+            "institution": "Harbor Fund",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Harbor (HE) Zeta (ad hoc), Harbor Fund"]
+
     def test_name_that_is_only_an_acronym_is_not_treated_as_contained(self):
         rows = _rows(self._entry({
             "committee_name": "(CHE)", "institution": "Harbor College",

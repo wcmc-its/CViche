@@ -199,7 +199,7 @@ def _name_with_institution(activity: str, institution: str) -> str:
     if set(inst_words) <= set(name_words):
         return activity
     core = ' '.join(_content_words(_PARENTHETICAL_RE.sub(' ', activity)))
-    if core and f" {core} " in f" {' '.join(inst_words)} ":
+    if f" {core} " in f" {' '.join(inst_words)} ":
         return activity
     return f"{activity.strip()}, {institution}"
 
