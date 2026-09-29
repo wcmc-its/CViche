@@ -836,6 +836,29 @@ def test_extract_unified_elements_single_column_table_explodes_to_paragraphs(tmp
     assert result["meta"]["num_paragraphs"] == 2
 
 
+def test_extract_unified_elements_para_idx_is_a_doc_paragraphs_position_after_a_layout_table(tmp_path):
+    # #609: exploded cell paragraphs used to advance para_idx, so every
+    # body paragraph after a single-column table pointed past its own
+    # doc.paragraphs slot. They now carry None, and body para_idx stays aligned.
+    doc = Document()
+    doc.add_paragraph("Before")
+    cell = doc.add_table(rows=1, cols=1).rows[0].cells[0]
+    cell.paragraphs[0].add_run("Cell one")
+    cell.add_paragraph("Cell two")
+    doc.add_paragraph("After")
+    docx_path = tmp_path / "layout_then_body.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    assert [(e["text"], e["para_idx"], e["idx"]) for e in elements] == [
+        ("Before", 0, 0), ("Cell one", None, None), ("Cell two", None, None), ("After", 1, 1),
+    ]
+    assert [e["unified_idx"] for e in elements] == [0, 1, 2, 3]
+    paragraphs = Document(str(docx_path)).paragraphs
+    assert [paragraphs[e["para_idx"]].text for e in elements if e["para_idx"] is not None] == ["Before", "After"]
+
+
 def test_extract_unified_elements_single_column_vertical_merge_dedupes_and_skips_empty(tmp_path):
     # A vertically-merged single-column table repeats the SAME cell object
     # across rows (like gridSpan repeats it across columns) -- the reader
