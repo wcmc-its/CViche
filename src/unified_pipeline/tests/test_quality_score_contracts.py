@@ -1328,6 +1328,27 @@ _NEAR_TEMPLATE_INSTRUCTION_TEXT = (
     "sections and subsections;"
 )
 
+# The real instruction above, prefixed with extra faculty-authored text so it
+# is no longer an EXACT match (rule a) -- it isolates `is_template_instruction`
+# rule (c), containment, from the other two OR-branches in score_t_bucket:
+# pipe-free but short of _NEAR_MATCH_MIN_RATIO's 0.93 (the prefix drags the
+# whole-string similarity ratio down to ~0.88), so is_near_template_instruction
+# is False; and is_template_label_line splits on "|"/tab/newline only, so the
+# whole padded sentence is ONE piece that is not itself a known label/instruction
+# verbatim, so it is also False. A mutant that replaces is_template_instruction's
+# result with False (dropping rules a-d entirely) has nothing else in the OR to
+# fall back on for this text.
+_CONTAINMENT_ONLY_TEMPLATE_TEXT = "See attached: " + _REAL_TEMPLATE_INSTRUCTION_TEXT
+
+# A short template FIELD LABEL ("degree"), not a directive sentence: below
+# is_template_instruction's own _MIN_EXACT_LEN (25 chars) and
+# is_near_template_instruction's _CONTAINMENT_MIN_LEN (40 chars) floors, so
+# both are False for it -- only is_template_label_line's "every piece is a
+# known label, no length floor" rule matches a bare label line like this
+# (the Appendix-only case its docstring describes: an unfilled field, a
+# column-header row). Isolates that helper from the other two OR-branches.
+_LABEL_ONLY_LINE_TEXT = "Degree"
+
 
 def test_placeholder_only_row_helper():
     assert _is_placeholder_only_row("N/A | N/A") is True
@@ -1335,6 +1356,8 @@ def test_placeholder_only_row_helper():
     assert _is_placeholder_only_row("none") is True
     assert _is_placeholder_only_row("N/A.") is True
     assert _is_placeholder_only_row("| |") is True          # bare pipe row
+    assert _is_placeholder_only_row("N/A\tN/A") is True      # tab-separated cells (wrapped source line)
+    assert _is_placeholder_only_row("N/A\nNone") is True     # newline-separated cells
     assert _is_placeholder_only_row("") is False
     assert _is_placeholder_only_row(None) is False
     assert _is_placeholder_only_row("Teaching") is False     # real one-word entry
@@ -1360,6 +1383,27 @@ def test_goal_claimed_row_ids_matches_the_owning_grants_row_only():
     assert claimed == {id(goal_row)}
 
 
+def test_goal_claimed_row_ids_ignores_a_non_grant_entry_sharing_the_grants_span():
+    """`_goal_claimed_row_ids` must build its ownership candidates from ONLY
+    the M2A/M2B/M2C grant codes, not every entry -- `claim_goal_rows` treats
+    a `parent_idx` spanned by more than one candidate as ambiguous (`len(
+    owners) != 1`) and claims nothing. A non-grant entry ("A") that happens
+    to share the real grant's exact element range must therefore be excluded
+    from the candidate list before calling in, or a genuine, unambiguous
+    goal-claim silently stops being claimed the moment an unrelated entry's
+    source element sits at the same index as the grant's."""
+    grant = {"taxonomy_code": "M2A", "text": "Some Grant",
+              "element_idx_start": 10, "element_idx_end": 10}
+    overlapping_non_grant = {"taxonomy_code": "A", "text": "An unrelated entry",
+                              "element_idx_start": 10, "element_idx_end": 10}
+    goal_row = {"taxonomy_code": "T",
+                "text": "The major goals of this project are: to cure things",
+                "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11}
+    entries = [grant, overlapping_non_grant, goal_row]
+    claimed = _goal_claimed_row_ids(entries)
+    assert claimed == {id(goal_row)}
+
+
 def test_t_bucket_excludes_template_instruction_text(tmp_path):
     entries = [
         {"taxonomy_code": "A", "text": "Real content",
@@ -1381,6 +1425,44 @@ def test_t_bucket_excludes_near_template_instruction_text(tmp_path):
         {"taxonomy_code": "A", "text": "Real content",
          "element_idx_start": 1, "element_idx_end": 1},
         {"taxonomy_code": "T", "text": _NEAR_TEMPLATE_INSTRUCTION_TEXT,
+         "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=1" in detail, detail
+    assert "T_count=0" in detail, detail
+
+
+def test_t_bucket_excludes_text_only_is_template_instruction_matches(tmp_path):
+    """`_CONTAINMENT_ONLY_TEMPLATE_TEXT` is True under `is_template_instruction`
+    (containment) but False under both `is_near_template_instruction` and
+    `is_template_label_line` -- unlike every other fixture in this file, whose
+    text happens to satisfy more than one of the three helpers at once. A
+    mutant that replaces `is_template_instruction(text)` with `False` in
+    score_t_bucket's OR-condition has no other helper to fall back on for
+    this text, so this is the only test that isolates it."""
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": _CONTAINMENT_ONLY_TEMPLATE_TEXT,
+         "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=1" in detail, detail
+    assert "T_count=0" in detail, detail
+
+
+def test_t_bucket_excludes_a_short_template_label_only_line(tmp_path):
+    """`_LABEL_ONLY_LINE_TEXT` is True under `is_template_label_line` only --
+    both `is_template_instruction` and `is_near_template_instruction` require
+    at least 25/40 normalized chars and this label is far shorter. A mutant
+    that replaces `is_template_label_line(text)` with `False` has no other
+    helper to fall back on for this text."""
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": _LABEL_ONLY_LINE_TEXT,
          "element_idx_start": 2, "element_idx_end": 2},
     ]
     _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
@@ -1530,3 +1612,49 @@ def test_t_bucket_non_dict_entry_in_list_is_skipped_not_crashed(tmp_path):
     _write_json(tmp_path, "X_classified.json", data)
     fraction, detail, cap = score_t_bucket(tmp_path)
     assert "T_count=1" in detail, detail
+
+
+def test_t_bucket_non_t_entries_are_never_checked_against_the_exclusions(tmp_path):
+    """The per-entry loop must skip a non-T entry entirely (`if
+    entry.get("taxonomy_code") != "T": continue`) rather than merely not
+    counting it toward `t_count_raw` -- the T_excluded_* counters are
+    subtracted from `code_dist.get("T", 0)`, which already counts ONLY T
+    entries, so a non-T entry that happens to read as placeholder/template
+    text must not increment any excluded_* counter either. A real, unrouted
+    T entry is included alongside an "A"-coded placeholder row so the
+    difference is visible: dropping the skip would incorrectly subtract the
+    "A" row's placeholder match from the genuine T entry's count."""
+    entries = [
+        {"taxonomy_code": "T",
+         "text": "A genuinely unrouted piece of real content about something specific",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "A", "text": "N/A", "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_placeholder=0" in detail, detail
+    assert "T_count=1" in detail, detail
+
+
+def test_t_bucket_ratio_denominator_is_the_unchanged_total_entries(tmp_path):
+    """t_ratio must divide by `total` (all entries, every code), never by
+    `total - excluded` -- pins the "denominator left unchanged" judgement
+    call with an exact ratio value. Needs a case with BOTH a genuine
+    (unexcluded) T entry and an excluded one, so t_count is nonzero and
+    total != total - excluded; every other exclusion test in this file has
+    T_count=0, under which both denominators give the same (zero) ratio and
+    so cannot tell them apart."""
+    entries = [
+        {"taxonomy_code": "T",
+         "text": "A genuinely unrouted piece of real content about something specific",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": "N/A", "element_idx_start": 2, "element_idx_end": 2},
+        {"taxonomy_code": "A", "text": "Real content", "element_idx_start": 3, "element_idx_end": 3},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_placeholder=1" in detail, detail
+    assert "T_count=1" in detail, detail
+    assert "total=3" in detail, detail
+    # 1/3, NOT 1/(3-1)=0.5 -- the mutant this test kills.
+    assert "t_ratio=0.3333" in detail, detail
