@@ -199,9 +199,15 @@ Same IRSA role, add the Bedrock permissions:
     "bedrock:InvokeModel",
     "bedrock:InvokeModelWithResponseStream" 
   ],
-  "Resource": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6:0"
+  "Resource": [
+    "arn:aws:bedrock:*::foundation-model/*",
+    "arn:aws:bedrock:us-east-1:<account-id>:inference-profile/us.anthropic.claude-sonnet-5",
+    "arn:aws:bedrock:us-east-1:<account-id>:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+  ]
 }
 ```
+
+A `us.` cross-region inference profile needs BOTH its `inference-profile` ARN and the underlying `foundation-model` ARNs (it can route to any US region). Changing `default.model` in `llm_config.yaml` to a new model means adding that model's inference-profile ARN here first, or every call fails with AccessDenied. The live policy is `CvicheBedrockPolicy` on `cviche-bedrock-role`.
 
 Add other model ARNs as needed. Limit to specific model ARNs; do NOT grant `Resource: "*"`.
 
