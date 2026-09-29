@@ -184,3 +184,21 @@ def test_unusable_start_index_recovers_nothing(start):
     target = _e(20, "C2")
     target["element_idx_start"] = start
     assert _recover_institution_from_nearby_entries(target, [_e(19, "C", "H")]) == ""
+
+
+def test_non_string_institution_is_skipped_not_a_crash():
+    target = _e(20, "C2")
+    entries = [_e(18, "C", "Real Hospital"), _e(19, "C", ["List Hospital"]), target]
+    assert _recover_institution_from_nearby_entries(target, entries) == "Real Hospital"
+
+
+def test_same_start_sibling_is_not_preceding():
+    target = _e(20, "C2")
+    entries = [_e(18, "C", "Real Hospital"), _e(20, "C", "Same Start Hospital"), target]
+    assert _recover_institution_from_nearby_entries(target, entries) == "Real Hospital"
+
+
+def test_bad_neighbour_start_is_skipped():
+    target = _e(20, "C2")
+    entries = [_e("x", "C", "Bad Index Hospital"), target]
+    assert _recover_institution_from_nearby_entries(target, entries) == ""
