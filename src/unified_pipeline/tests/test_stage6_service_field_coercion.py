@@ -83,7 +83,9 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.normalization.fields import _cell_text, _committee_cell_text  # noqa: E402
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
+    _join_names_unless_contained,
     _journal_name_cell_text,
+    _other_service_organization_text,
     _reviewing_org_and_committee_text,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -606,6 +608,55 @@ def test_rerouted_q2_committee_name_is_not_shadowed_by_organization(tmp_path):
 ])
 def test_reviewing_org_and_committee_text(fields, expected):
     assert _reviewing_org_and_committee_text(fields) == expected
+
+
+@pytest.mark.parametrize("code", ["Q4B", "Q4C"])
+def test_editorial_journal_name_is_not_shadowed_by_organization(tmp_path, code):
+    """#471 (web083 shape): on a Q4B/Q4C row a populated `organization` hid
+    `journal_name`, the field naming the journal."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry(code, role="Associate Editor",
+               organization="Fictional Endosurgery Group",
+               journal_name="Fictional Guidelines for Fictional Disease",
+               start_date="2015", end_date="2016"),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Guidelines for Fictional Disease"))
+    assert len(rows) == 1
+    assert rows[0][0] == ("Associate Editor, Fictional Guidelines for Fictional Disease, "
+                          "Fictional Endosurgery Group")
+    assert rows[0][1] == "2015-2016"
+
+
+@pytest.mark.parametrize("code, fields, expected", [
+    ("Q4B", {"organization": "Fictional Press", "journal_name": "Fictional Press Journal"},
+     "Fictional Press Journal"),
+    ("Q4C", {"organization": "NIH", "journal_name": "Nihilism Review"}, "Nihilism Review, NIH"),
+    ("Q4C", {"organization": "AAP", "journal_name": "Pediatric Papers"}, "Pediatric Papers, AAP"),
+    ("Q4B", {"organization": "BMJ.", "journal_name": "BMJ Open"}, "BMJ Open, BMJ."),
+    ("Q4B", {"organization": "Wiley\u2013Blackwell", "journal_name": "Fictional Annals"},
+     "Fictional Annals, Wiley\u2013Blackwell"),
+    ("Q4B", {"organization": "Fictional Society"}, "Fictional Society"),
+    ("Q4B", {"journal_name": "Fictional Annals"}, "Fictional Annals"),
+    ("Q4B", {"committee_name": "Fictional Panel", "journal_name": "Fictional Annals"},
+     "Fictional Annals, Fictional Panel"),
+    # non-editorial codes keep the old organization-wins chain
+    ("Q4", {"organization": "Fictional Society", "journal_name": "Fictional Annals"},
+     "Fictional Society"),
+    ("Q3", {"agency": "Fictional Agency", "journal_name": "Fictional Annals"},
+     "Fictional Agency"),
+    ("Q4A", {"organization": "Fictional Society", "journal_name": "Fictional Annals"},
+     "Fictional Society"),
+])
+def test_other_service_organization_text_editorial_join(code, fields, expected):
+    assert _other_service_organization_text(fields, code) == expected
+
+
+def test_join_names_unless_contained_is_word_bounded():
+    assert _join_names_unless_contained("Ahab Panel", "AHA") == "Ahab Panel, AHA"
+    assert _join_names_unless_contained("Fictional Panel", "") == "Fictional Panel"
+    assert _join_names_unless_contained("", "") == ""
 
 
 if __name__ == "__main__":

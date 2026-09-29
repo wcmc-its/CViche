@@ -484,6 +484,22 @@ def _contains_words(haystack: str, needle: str) -> bool:
     return re.search(rf'(?<!\w){re.escape(needle)}(?!\w)', haystack, re.IGNORECASE) is not None
 
 
+def _join_names_unless_contained(name: str, org: str) -> str:
+    """`"<name>, <org>"`, or the one already containing the other alone.
+
+    Whole-word containment (see `_contains_words`) collapses the pair to
+    `org` when it contains `name` (or they are equal), else to `name` when
+    it contains `org`; an empty side returns the other, so a lone value is
+    unchanged."""
+    if not org or not name:
+        return org or name
+    if _contains_words(org, name):
+        return org
+    if _contains_words(name, org):
+        return name
+    return f"{name}, {org}"
+
+
 def _reviewing_org_and_committee_text(fields: dict) -> str:
     """Display text for a journal-reviewing row that has no `journal_name`.
 
@@ -493,18 +509,10 @@ def _reviewing_org_and_committee_text(fields: dict) -> str:
     names the actual panel or program (#471). `organization or
     committee_name` rendered only the generic organization, so the panel
     name was dropped from the docx. Render both -- "<committee>, <org>" --
-    unless one already contains the other as whole words (case-insensitive;
-    "NIH" is not found inside "Nihilism Panel"), in which case
-    the longer one already says both and is rendered alone."""
-    org = _cell_text(fields.get('organization'))
-    committee = _cell_text(fields.get('committee_name'))
-    if not org or not committee:
-        return org or committee
-    if _contains_words(org, committee):
-        return org
-    if _contains_words(committee, org):
-        return committee
-    return f"{committee}, {org}"
+    via `_join_names_unless_contained`."""
+    return _join_names_unless_contained(
+        _cell_text(fields.get('committee_name')),
+        _cell_text(fields.get('organization')))
 
 
 def _service_boards_dates_text(fields: dict, taxonomy_code: str,
@@ -532,17 +540,22 @@ def _other_service_organization_text(fields: dict, taxonomy_code: str) -> str:
     Q3 uses `agency`; others use `organization`/`committee_name`. Q4B/Q4C
     (editorial) use `journal_name` -- the one candidate that can carry a
     list of per-journal `{name, start_date, end_date}` records (#812,
-    web204's multi-journal Q4C entry) -- only reached when the other three
-    are all empty, so it routes through the date-aware journal coercer
-    instead of the plain one this chain otherwise uses (a pure move of
-    `_fill_other_service`'s round-2 prelude, round 3, verify-D-812-R2
-    finding 2 -- no formula changed)."""
+    web204's multi-journal Q4C entry) -- so it routes through the date-aware
+    journal coercer instead of the plain one this chain otherwise uses. On
+    Q4B/Q4C a populated organization no longer hides `journal_name`: both
+    render via `_join_names_unless_contained` (#471). Every other code, and
+    an editorial row with only one of the two, is unchanged."""
     organization = (fields.get('organization', '') or
                     fields.get('committee_name', '') or
                     fields.get('agency', ''))
+    journal = _journal_name_cell_text(fields.get('journal_name', ''), taxonomy_code)
+    if organization and taxonomy_code in EDITORIAL_BOARD_CODES:
+        # #471: on an editorial row `organization` (often a publisher or
+        # society) shadowed `journal_name`, the field that names the journal.
+        return _join_names_unless_contained(journal, _cell_text(organization))
     if organization:
         return _cell_text(organization)
-    return _journal_name_cell_text(fields.get('journal_name', ''), taxonomy_code)
+    return journal
 
 
 def _other_service_dates_text(fields: dict, taxonomy_code: str,
