@@ -1011,6 +1011,13 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
       (e.g. "Date (yyyy-yyyy)") landing as a body paragraph, or a template
       instruction line altered by the pipeline before being kept, are both
       still genuine signals, not the template's own untouched text.
+    - The same exclusion applies to raw-tab body paragraphs (#822): the
+      template's own signature-block and employment lines ("Signature:
+      \\t\\t\\t\\t", "Name of Current Employer(s):\\t", ...) carry tabs and
+      stage 6 keeps them, so a tabbed paragraph whose whitespace-normalized
+      text equals a template body paragraph's is reported as
+      ``template_tab_excluded``, not counted. A tabbed line carrying any
+      text of its own (a filled-in value) still counts.
 
     Headers and footers are not scanned either way: stage 6 never writes to
     them.
@@ -1021,13 +1028,17 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
 
     template_paragraphs = _template_body_paragraph_texts()
 
-    raw_tab_paragraphs = echo_count = template_echo_excluded = 0
+    raw_tab_paragraphs = echo_count = template_echo_excluded = template_tab_excluded = 0
     for p in doc.paragraphs:
         text = p.text
+        in_template = _normalize_whitespace(text) in template_paragraphs
         if "\t" in text:
-            raw_tab_paragraphs += 1
+            if in_template:
+                template_tab_excluded += 1
+            else:
+                raw_tab_paragraphs += 1
         if INSTRUCTION_MARKERS.search(text):
-            if _normalize_whitespace(text) in template_paragraphs:
+            if in_template:
                 template_echo_excluded += 1
             else:
                 echo_count += 1
@@ -1038,6 +1049,7 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     fraction = clamp(0.6 * (total_raw_tab / 20) + 0.4 * (echo_count / 15))
     detail = (
         f"raw_tab_paragraphs={raw_tab_paragraphs}; raw_tab_cells={raw_tab_cells}; "
+        f"template_tab_excluded={template_tab_excluded}; "
         f"echo_paragraphs={echo_count}; template_echo_excluded={template_echo_excluded}; "
         f"fraction={fraction:.3f}"
     )
