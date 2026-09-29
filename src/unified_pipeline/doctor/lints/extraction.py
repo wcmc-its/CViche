@@ -37,6 +37,7 @@ from unified_pipeline.segmentation_regression import (
     SUBSTANTIVE_LINE_CHARS,
     _looks_like_record,
     _norm,
+    _squash,
 )
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
@@ -53,6 +54,7 @@ from ..shared import (
     _long_word_tokens,
     _magnitude_severity,
     _output_section_header,
+    _piece_in_template,
 )
 
 
@@ -126,6 +128,7 @@ def lint_bucket_status(stage4: Dict, blocks: List[Tuple[str, str]]) -> List[Dict
     document files the grant under the wrong funding heading, or lost it."""
     titles = dict(_FUNDING_SECTIONS)
     rendered = _funding_haystacks(blocks)
+    shared = _shared_entry_pieces(stage4.get("entries", []))
     findings = []
     for e in stage4.get("entries", []):
         code = e.get("taxonomy_code")
@@ -135,7 +138,7 @@ def lint_bucket_status(stage4: Dict, blocks: List[Tuple[str, str]]) -> List[Dict
         target, _note = grant_status_rebucket_target(status or "")
         if not target or target == code:
             continue
-        verdicts = {bucket: _entry_rendered(e.get("text"), h.text, h.tokens)
+        verdicts = {bucket: _entry_rendered(e.get("text"), h.text, h.tokens, shared)
                     for bucket, h in rendered.items()}
         if verdicts[target]:
             continue  # stage 6 rebucketed it correctly
@@ -208,15 +211,52 @@ def lint_under_extraction(stage4: Dict) -> List[Dict]:
 CLASSIFIED_UNRENDERED_WARN_ENTRIES = 2
 
 
-def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set) -> bool | None:
+def _shared_entry_pieces(entries: list[dict]) -> frozenset:
+    """Pieces that occur in more than one entry of the same document: the
+    boilerplate ('Department of Medicine', a repeated institution line) that
+    surfaces verbatim in the output for reasons unrelated to any one entry
+    (#744). "More than one" counts entries with DIFFERENT text: two entries
+    with identical text are one record listed twice (stage 4 dedups them into
+    the one rendered record), and that record's own text is real content, not
+    boilerplate."""
+    texts_by_piece: dict[str, set] = {}
+    for e in entries:
+        squashed = _squash(e.get("text"))
+        for piece in _entry_pieces(e.get("text")):
+            texts_by_piece.setdefault(piece, set()).add(squashed)
+    return frozenset(p for p, texts in texts_by_piece.items() if len(texts) > 1)
+
+
+def _only_boilerplate_hit(text: str | None, pieces: list[str],
+                          distinctive: list[str], haystack: str) -> bool:
+    """True when the entry's verbatim hit in the output is boilerplate and
+    nothing else: it has no distinctive piece, a boilerplate piece found in
+    the haystack, and no fragment too short to be a piece (a short value such
+    as the phone number after an 'Office telephone:' label is content this
+    check cannot see, so the entry stays unverifiable rather than lost)."""
+    if distinctive or not any(p in haystack for p in pieces):
+        return False
+    return sum(1 for f in entry_fragments(text) if _squash(f)) == len(pieces)
+
+
+def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set,
+                    shared_pieces: frozenset = frozenset()) -> bool | None:
     """Whether an entry's text surfaces in the output: verbatim piece
     containment first, then distinctive-token overlap over the whole text and
     each fragment (stages 4-6 re-render entries from extracted fields, so no
     verbatim piece survives the 5c/5d formatters, and stage 6 keeps the
     title/institution fields while dropping long narratives). None = too
-    short to verify either way."""
+    short to verify either way.
+
+    A piece that is boilerplate does not count as containment evidence: one in
+    `shared_pieces` (see `_shared_entry_pieces`) or one present in the pristine
+    WCM template (#744). An entry whose ONLY evidence was such a hit is
+    verifiable-and-unmatched (False); see `_only_boilerplate_hit`.
+    """
     pieces = _entry_pieces(text)
-    if any(piece in haystack for piece in pieces):
+    distinctive = [p for p in pieces
+                   if p not in shared_pieces and not _piece_in_template(p)]
+    if any(piece in haystack for piece in distinctive):
         return True
     # Seeded False, not bool(pieces): a short label-prefixed entry ("Email:
     # x@y.org") produces a piece but every chunk below falls under
@@ -224,8 +264,9 @@ def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set) -> bo
     # this used to fall through to a hard False (definitively unrendered)
     # instead of None (too short to verify). Matches _record_rendered's
     # sibling pattern in render.py, which never sets verifiable from pieces
-    # alone (#537).
-    verifiable = False
+    # alone (#537). The one exception is an entry whose only evidence was a
+    # boilerplate hit (#744): that hit is what made it look rendered.
+    verifiable = _only_boilerplate_hit(text, pieces, distinctive, haystack)
     for chunk in [str(text or "")] + entry_fragments(text):
         tokens = _long_word_tokens(chunk)
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
@@ -242,6 +283,7 @@ def lint_classified_unrendered(stage3b: Dict,
     in the stage-6 output (paragraphs or tables); 'T' is skipped (appendix
     catch-all)."""
     h = _haystacks(blocks)
+    shared = _shared_entry_pieces(stage3b.get("entries", []))
     by_code: Dict[str, List[Dict]] = {}
     for e in stage3b.get("entries", []):
         if e.get("element_type") in ("header", "break"):
@@ -255,7 +297,7 @@ def lint_classified_unrendered(stage3b: Dict,
     lost = 0
     for code in sorted(by_code):
         entries = by_code[code]
-        verdicts = [(_entry_rendered(e.get("text"), h.text, h.tokens), e)
+        verdicts = [(_entry_rendered(e.get("text"), h.text, h.tokens, shared), e)
                     for e in entries]
         verifiable = [(v, e) for v, e in verdicts if v is not None]
         if not verifiable or any(v for v, _ in verifiable):
