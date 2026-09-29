@@ -54,7 +54,7 @@ def load_taxonomy() -> dict:
     # One .parent more than the original stage_3b_entry_classifier.py site:
     # this file lives in stage3b/, one directory below unified_pipeline/.
     taxonomy_path = Path(__file__).parent.parent / "core" / "taxonomy_v7.json"
-    with open(taxonomy_path, 'r') as f:
+    with open(taxonomy_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 
@@ -91,7 +91,7 @@ def load_stage_2_entries(path: Path) -> tuple[list[dict], list[dict]]:
             is rejected here rather than raising AttributeError/TypeError
             deeper in the loop below.
     """
-    with open(path, 'r') as f:
+    with open(path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
     if not isinstance(data, dict):
