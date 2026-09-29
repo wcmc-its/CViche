@@ -16,6 +16,8 @@ silently downgraded IAM + verified TLS to password auth with no TLS, and
 bypassed the CA guard along with it.
 """
 import hashlib
+import re
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +27,9 @@ from app.database_factory import (
     DB_AUTH_MODE_IAM,
     DB_AUTH_MODE_PASSWORD,
     DB_CONNECT_TIMEOUT_SECONDS,
+    DB_MAX_OVERFLOW,
+    DB_POOL_SIZE,
+    DB_POOL_TIMEOUT_SECONDS,
     DB_PASSWORD_ENV,
     DEFAULT_DB_AUTH_MODE,
     RDS_CA_PATH,
@@ -364,3 +369,37 @@ def test_password_connect_is_time_bounded(
     )
     capture_engine["kwargs"]["creator"]()
     assert record_pymysql_connect[0]["connect_timeout"] == DB_CONNECT_TIMEOUT_SECONDS
+
+
+def test_engine_pool_sizing_is_explicit(monkeypatch, capture_engine):
+    """pool_size / max_overflow / pool_timeout are passed to create_engine
+    and reach the live pool, not left to SQLAlchemy defaults (#784)."""
+    _password_env(monkeypatch)
+    engine = create_cviche_engine(
+        db_host="db", db_port="3306", db_name="cviche", db_user="root"
+    )
+    kwargs = capture_engine["kwargs"]
+    assert kwargs["pool_size"] == DB_POOL_SIZE
+    assert kwargs["max_overflow"] == DB_MAX_OVERFLOW
+    assert kwargs["pool_timeout"] == DB_POOL_TIMEOUT_SECONDS
+    assert engine.pool.size() == DB_POOL_SIZE
+    assert engine.pool._max_overflow == DB_MAX_OVERFLOW
+    assert engine.pool._timeout == DB_POOL_TIMEOUT_SECONDS
+
+
+# RDS max_connections on the production instance, measured 2026-09-29 (#784).
+RDS_MAX_CONNECTIONS = 318
+_HPA_PATCHES = sorted(
+    (Path(__file__).resolve().parents[3] / "k8s" / "overlays").glob("*/hpa-patch.yaml")
+)
+
+
+def test_pool_budget_fits_rds_max_connections():
+    """Every overlay's HPA maxReplicas x 1 uvicorn worker x (pool + overflow)
+    fits under RDS max_connections (#784). Reads the real manifests, so raising
+    maxReplicas or a pool value without redoing the budget fails here."""
+    assert _HPA_PATCHES, "no k8s/overlays/*/hpa-patch.yaml found"
+    for patch_file in _HPA_PATCHES:
+        max_replicas = int(re.search(r"maxReplicas:\s*(\d+)", patch_file.read_text()).group(1))
+        worst_case = max_replicas * (DB_POOL_SIZE + DB_MAX_OVERFLOW)
+        assert worst_case <= RDS_MAX_CONNECTIONS, f"{patch_file}: {worst_case} > {RDS_MAX_CONNECTIONS}"
