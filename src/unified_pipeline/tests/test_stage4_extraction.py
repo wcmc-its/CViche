@@ -668,3 +668,27 @@ def test_add_target_names_fallback_from_raw_text():
     out = extraction.add_target_names(entries, "Smith")
 
     assert out[0]["extracted_fields"]["target_name"] == "Smith J"
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_prompt_names_status_and_notes_in_fields_guide_and_rules(code):
+    """#982: the prompt the LLM actually receives for a grant bucket lists
+    status/notes, describes them in the field guide, and says when to leave them null."""
+    schema = extraction.get_field_schema(code)
+    prompt = extraction.build_extraction_prompt(
+        [{"text": "Grant X | Update: withdrawn"}], schema, code)
+    assert "status" in prompt.split("**Fields to Extract**:")[1].splitlines()[0]
+    assert "- status:" in prompt and "- notes:" in prompt
+    assert "status = the grant's status only when the entry itself states one" in prompt
+
+
+@pytest.mark.parametrize("rule", [
+    "- status = the grant's status only when the entry itself states one",
+    "- notes = a labelled remark no other field holds",
+])
+def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
+    """#982: each rule line is asserted alone, so dropping only `notes =` from the
+    M2 block fails here even though the field guide still names `- notes:`."""
+    schema = extraction.get_field_schema("M2A")
+    prompt = extraction.build_extraction_prompt([{"text": "Grant X"}], schema, "M2A")
+    assert rule in prompt
