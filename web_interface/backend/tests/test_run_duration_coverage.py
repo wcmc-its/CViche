@@ -84,7 +84,7 @@ def _fake_clock(start, end):
 
 def test_execute_persists_duration_on_complete(monkeypatch, tmp_path, db):
     """A run that reaches the 'complete' commit gets total_duration_seconds
-    written from the orchestrator's own _now() delta (line 455/460), not
+    written from the orchestrator's own _now() delta in execute()'s complete path, not
     from wall-clock completed_at - started_at.
 
     _now() is pinned to two fixed values so the assertion is exact.
@@ -123,7 +123,7 @@ def test_execute_persists_duration_on_complete(monkeypatch, tmp_path, db):
 
 def test_execute_persists_duration_on_failure(monkeypatch, tmp_path, db):
     """A run that fails AFTER the pipeline has started (start_time set) records
-    a non-NULL total_duration_seconds via the failure branch (line 504-505),
+    a non-NULL total_duration_seconds via the failure branch,
     flips to 'failed', and emits the terminal RUN_FAILED event."""
     from app.pipeline import orchestrator as orch
     from app.models import Run
@@ -145,7 +145,7 @@ def test_execute_persists_duration_on_failure(monkeypatch, tmp_path, db):
     # start_time set on the first call; failure duration computed on a later call.
     monkeypatch.setattr(orch, "_now", _fake_clock(2000.0, 2017.0))
 
-    # The handler re-raises after persisting (line 516).
+    # The handler re-raises after persisting.
     with pytest.raises(RuntimeError, match="stage blew up"):
         asyncio.run(o.execute())
 
@@ -162,11 +162,11 @@ def test_execute_persists_duration_on_failure(monkeypatch, tmp_path, db):
 
 
 def test_execute_failure_before_start_leaves_duration_none(monkeypatch, tmp_path, db):
-    """If the exception fires BEFORE start_time is set (line 421), the failure
-    handler's `if start_time is not None` guard (line 504) must be honoured:
+    """If the exception fires BEFORE start_time is set in execute(), the failure
+    handler's `if start_time is not None` guard must be honoured:
     total_duration_seconds stays NULL and nothing throws a TypeError.
 
-    Forcing emit_run_start to raise reproduces a failure at line 420, before
+    Forcing emit_run_start to raise reproduces a failure in emit_run_start, before
     start_time = _now() on the next line.
     """
     from app.pipeline import orchestrator as orch
@@ -196,7 +196,7 @@ def test_execute_failure_before_start_leaves_duration_none(monkeypatch, tmp_path
     assert row.status == "failed"
     assert row.completed_at is not None
     assert row.error_message == GENERIC_FAILURE_MESSAGE
-    # The guard at line 504 was respected: no wall-clock was forced in here.
+    # The `start_time is not None` guard was respected: no wall-clock was forced in here.
     assert row.total_duration_seconds is None
 
 

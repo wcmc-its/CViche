@@ -45,6 +45,24 @@ logger = logging.getLogger(__name__)
 PROMPT_LOGS_DIR = PARENT_DIR / 'src' / 'unified_pipeline' / 'prompt_logs'
 
 
+# Import stage functions from run_full_pipeline.py dependencies
+from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
+from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
+from unified_pipeline.stage_2_entry_extraction import run_stage_2
+from unified_pipeline.stage_3a_header_taxonomy_mapper import run_stage_3a
+from unified_pipeline.stage_3b_entry_classifier import run_stage_3b
+from unified_pipeline.stage_4_field_extractor import process_cv as run_stage_4
+from unified_pipeline.stage_4_5_research_summary import run_stage_4_5
+from unified_pipeline.stage_5_pubmed_enrichment import run_stage5
+from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
+from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
+from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
+from unified_pipeline.stage_6_word_template import run_stage6
+from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
+from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
+from unified_pipeline.llm.retry import LLMOutageError
+
+
 def _now() -> float:
     """Monotonic clock for elapsed-duration measurement (#598).
 
@@ -66,23 +84,6 @@ def _record_total_duration(run: Run, elapsed: int, resumed: bool) -> None:
         run.total_duration_seconds = (run.total_duration_seconds or 0) + elapsed
     else:
         run.total_duration_seconds = elapsed
-
-# Import stage functions from run_full_pipeline.py dependencies
-from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
-from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
-from unified_pipeline.stage_2_entry_extraction import run_stage_2
-from unified_pipeline.stage_3a_header_taxonomy_mapper import run_stage_3a
-from unified_pipeline.stage_3b_entry_classifier import run_stage_3b
-from unified_pipeline.stage_4_field_extractor import process_cv as run_stage_4
-from unified_pipeline.stage_4_5_research_summary import run_stage_4_5
-from unified_pipeline.stage_5_pubmed_enrichment import run_stage5
-from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
-from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
-from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
-from unified_pipeline.stage_6_word_template import run_stage6
-from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
-from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
-from unified_pipeline.llm.retry import LLMOutageError
 
 
 # run.error_message is shown verbatim to the (non-technical) user, so it
