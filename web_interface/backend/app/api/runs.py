@@ -530,8 +530,11 @@ async def retry_step(
     # Atomic -> running (#799): only one of two concurrent retries may claim a
     # run that is not already running. The step resets below share this
     # transaction, so the loser changes nothing and returns its slot.
+    # started_at restarts the stale-run clock: reconcile_stale_runs ages runs by
+    # it, so a retry of a run started over an hour ago was reaped mid-run (#145).
     if not claim_run_as_running(
-        db, run_id, Run.status != "running", error_message=None, completed_at=None
+        db, run_id, Run.status != "running",
+        error_message=None, completed_at=None, started_at=datetime.now(),
     ):
         db.rollback()
         concurrency.release_slot()
