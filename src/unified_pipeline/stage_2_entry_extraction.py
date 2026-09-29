@@ -26,6 +26,7 @@ from docx import Document
 sys.path.insert(0, str(Path(__file__).parent))
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import (
@@ -494,10 +495,11 @@ def recover_unclaimed_table_rows(batch_elements: list, claimed_row_keys: set) ->
     The model returns sub-row indices as JSON NUMBERS, so a row index with a
     trailing zero collapses: "114.10" parses to the float 114.1, ``str()``
     renders it back as "114.1", and the lookup lands on row 1 -- row 10 is
-    unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50 exactly this way.
-    Rows the model simply omitted disappear identically. Either way the content
-    survived only inside whatever whole-table entry the model happened to emit,
-    which is what made those blobs load-bearing.
+    unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50 exactly this way,
+    and element 109 lost row 10. Rows the model simply omitted disappear
+    identically. Either way the content survived only inside whatever
+    whole-table entry the model happened to emit, which is what made those
+    blobs load-bearing (and what made #227's dedup drop real content loss).
 
     Recovery is structural, so the entries are marked ``recovered_row`` and given
     a lower confidence than model-attested ones.
@@ -1055,16 +1057,7 @@ Respond **only** with a JSON array containing the identified entries. If no entr
 
             # Backstop: emit any table row this batch never claimed (#420).
             #
-            # The model returns sub-row indices as JSON NUMBERS, so a row index
-            # with a trailing zero collapses: "114.10" parses to the float 114.1,
-            # str() renders it back as "114.1", and the lookup lands on row 1 --
-            # row 10 is unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50
-            # exactly this way, and element 109 lost row 10. Rows the model simply
-            # omitted disappear identically. Either way the content survived only
-            # inside whatever whole-table entry the model happened to emit, which
-            # is what made those blobs load-bearing (and what made #227's dedup
-            # drop real content loss).
-            #
+            # Why rows go unclaimed: recover_unclaimed_table_rows' docstring (#420).
             # Recovering the rows here is deterministic and costs no extra LLM
             # call. It also runs BEFORE remove_subset_delimiters, so a whole-table
             # blob whose rows are now all present becomes a provable duplicate and
@@ -1080,6 +1073,8 @@ Respond **only** with a JSON array containing the identified entries. If no entr
                 logger.info(f"    Recovered {len(recovered)} unclaimed table row(s) "
                             f"in batch {batch_idx + 1} [{full_hierarchy}]")
 
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
         except Exception as e:
             logger.warning(f"    ⚠ Error in batch {batch_idx + 1}: {e} [{full_hierarchy}]")
             continue
