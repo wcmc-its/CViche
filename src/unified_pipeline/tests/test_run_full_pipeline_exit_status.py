@@ -1129,6 +1129,12 @@ def test_hierarchy_lines_match_recursive_reference():
     assert run_full_pipeline._hierarchy_lines(h) == _recursive_lines(h)
 
 
+def test_hierarchy_lines_honours_starting_depth():
+    h = _nested_hierarchy()
+    assert run_full_pipeline._hierarchy_lines(h, depth=1) == _recursive_lines(h, depth=1)
+    assert run_full_pipeline._hierarchy_lines(h, depth=1)[0] == "  [H1] A"
+
+
 def test_hierarchy_lines_deep_chain_does_not_recurse():
     lines = run_full_pipeline._hierarchy_lines(_deep_chain(5000))
     assert len(lines) == 5000
