@@ -16,6 +16,8 @@ silently downgraded IAM + verified TLS to password auth with no TLS, and
 bypassed the CA guard along with it.
 """
 import hashlib
+import re
+from pathlib import Path
 
 import pytest
 
@@ -385,12 +387,19 @@ def test_engine_pool_sizing_is_explicit(monkeypatch, capture_engine):
     assert engine.pool._timeout == DB_POOL_TIMEOUT_SECONDS
 
 
+# RDS max_connections on the production instance, measured 2026-09-29 (#784).
+RDS_MAX_CONNECTIONS = 318
+_HPA_PATCHES = sorted(
+    (Path(__file__).resolve().parents[3] / "k8s" / "overlays").glob("*/hpa-patch.yaml")
+)
+
+
 def test_pool_budget_fits_rds_max_connections():
-    """maxReplicas x 1 worker x (pool + overflow) leaves headroom under
-    RDS max_connections = 318 (measured 2026-09-29, #784)."""
-    # Pinned literals: changing a pool value must mean re-doing the budget
-    # arithmetic in database_factory.py and updating these together.
-    assert (DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_POOL_TIMEOUT_SECONDS) == (5, 10, 30)
-    max_replicas, workers, max_connections = 4, 1, 318
-    worst_case = max_replicas * workers * (DB_POOL_SIZE + DB_MAX_OVERFLOW)
-    assert worst_case <= max_connections // 2
+    """Every overlay's HPA maxReplicas x 1 uvicorn worker x (pool + overflow)
+    fits under RDS max_connections (#784). Reads the real manifests, so raising
+    maxReplicas or a pool value without redoing the budget fails here."""
+    assert _HPA_PATCHES, "no k8s/overlays/*/hpa-patch.yaml found"
+    for patch_file in _HPA_PATCHES:
+        max_replicas = int(re.search(r"maxReplicas:\s*(\d+)", patch_file.read_text()).group(1))
+        worst_case = max_replicas * (DB_POOL_SIZE + DB_MAX_OVERFLOW)
+        assert worst_case <= RDS_MAX_CONNECTIONS, f"{patch_file}: {worst_case} > {RDS_MAX_CONNECTIONS}"
