@@ -287,8 +287,7 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dic
         return None
     key = keys[0]
     items = fields[key]
-    scalars = {k: copy.deepcopy(v) for k, v in fields.items()
-               if k not in (key, _ENTRY_REMARK_KEY)}
+    scalars = {k: v for k, v in fields.items() if k not in (key, _ENTRY_REMARK_KEY)}
     own = _parent_is_own_record(scalars, items, schema, len(_segments(entry.get('text'))))
     records = ([scalars] if own else []) \
         + [dict(item) for item in items]
