@@ -193,10 +193,12 @@ _EXTENSION = re.compile(r'\b(?:x|ext|extension)\.?\s*\d+', re.IGNORECASE)
 # and a slash with spaces around it (a bare slash is inside "212/555-0100").
 _PHONE_SEGMENT_SPLIT = re.compile(r'[;,\n]|\s/\s')
 # A segment naming a home number: whole-word home / res / residence /
-# residential, "(h)", or a bare "H:" -- not "(hosp)", "Hospital", "Homer St",
+# residential, "(h)" / "(h/o)" (a shared home line is still a home number),
+# or a bare "H:" -- not "(hosp)", "Hospital", "Homer St",
 # "Hr:". Personal/cell numbers are not protected by #821 and are kept.
 _HOME_PHONE_MARKER = re.compile(
-    r'\b(?:home|res|residence|residential)\b|\(\s*h\s*\)|(?<![a-z])h\s*:',
+    r'\b(?:home|res|residence|residential)\b|\(\s*(?:h|h\s*/\s*o|o\s*/\s*h)\s*\)'
+    r'|(?<![a-z])h\s*:',
     re.IGNORECASE)
 
 # An allowlist, not a word match, because "name" ends far more metadata labels

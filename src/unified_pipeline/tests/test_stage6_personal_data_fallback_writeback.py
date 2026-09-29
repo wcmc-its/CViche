@@ -1464,6 +1464,8 @@ def test_a_home_marked_number_inside_a_phone_value_is_dropped(tmp_path, label, o
     ("Phone: (h) 914-555-0111", "Fax: 212-555-0199"),
     ("Phone: 914-555-0111 (home)", "Fax: 212-555-0199"),
     ("Phone:", "(h) 914-555-0111"),
+    ("Phone: 914-555-0111 (h/o)", "Fax: 212-555-0199"),
+    ("Phone:", "914-555-0111 (O/H)"),
 ])
 def test_a_phone_value_that_is_only_a_home_number_leaves_the_slot_empty(tmp_path, label, other):
     src = tmp_path / "source.docx"
