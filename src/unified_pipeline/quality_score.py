@@ -716,16 +716,19 @@ def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
     against the T entry's own text in the classified.json ``entries`` list
     (not ``meta``, which has no per-entry text to match against):
 
-      1. template instruction / near-template / label-only text, via the
+      1. a grant's own major-goals row that stage 6 claims into that grant's
+         table (`_goal_claimed_row_ids`).
+      2. template instruction / near-template / label-only text, via the
          same `core.template_boilerplate` helpers stage 6 itself uses to
          drop this text -- no new phrase list (CODING_STANDARDS.md #1.5).
-      2. a placeholder-only row (`_is_placeholder_only_row`).
-      3. a grant's own major-goals row that stage 6 claims into that grant's
-         table (`_goal_claimed_row_ids`).
+      3. a placeholder-only row (`_is_placeholder_only_row`).
 
     Each T entry is excluded by at most one of the three (checked in the
-    order above), so a row matching more than one reason is not
-    double-subtracted.
+    order above -- the goal-claim check runs first because a row can
+    otherwise satisfy both it and the template check at once, e.g. the
+    template's own major-goals LABEL with real goal text appended; see
+    `test_t_bucket_a_row_matching_two_reasons_is_excluded_only_once`), so a
+    row matching more than one reason is not double-subtracted.
 
     The denominator (`total`) is deliberately UNCHANGED: an excluded entry is
     still real output the run produced, and total_entries is what the 3%/
