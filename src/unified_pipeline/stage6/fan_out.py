@@ -35,6 +35,10 @@ MIN_RECORDS_TO_FAN_OUT = 2
 # several. Prefix match, so M2A/M2B/M3... are all covered.
 NESTED_NOT_SIBLING_CODE_PREFIXES = ("M",)
 
+# Field names that carry a date: `start_date`, `issue_date`, `date`, `year`, ...
+DATE_KEY_SUFFIXES = ("_date", "_dates", "_year")
+DATE_KEYS = frozenset({"date", "dates", "year", "dates_attended"})
+
 # The one text separator a stage-2 paragraph range is joined with.
 _SEGMENT_SEPARATOR = "\t"
 
@@ -86,6 +90,13 @@ def _record_lists(fields: dict[str, Any],
     return pairs
 
 
+def _is_date_key(key: str) -> bool:
+    """A parent's dates are usually context shared by every record (one date
+    range stated for a list of committees), so they do not make the parent a
+    record of its own."""
+    return key.endswith(DATE_KEY_SUFFIXES) or key in DATE_KEYS
+
+
 def _parent_is_a_record(fields: dict[str, Any], records: list[dict],
                         schema_fields: Collection[str]) -> bool:
     """True when the parent's own schema fields already hold one of the
@@ -94,7 +105,8 @@ def _parent_is_a_record(fields: dict[str, Any], records: list[dict],
     output; replacing it would drop that first record.
     """
     record_keys = {key for record in records for key, value in record.items()
-                   if key in schema_fields and not _is_empty(value)}
+                   if key in schema_fields and not _is_empty(value)
+                   and not _is_date_key(key)}
     return any(not _is_empty(fields.get(key)) for key in record_keys)
 
 

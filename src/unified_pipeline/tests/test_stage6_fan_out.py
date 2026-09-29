@@ -112,6 +112,17 @@ def test_a_parent_that_already_holds_the_first_record_stays_and_children_do_not_
     assert "institution" not in out[1]["extracted_fields"]   # not the first record's context
 
 
+def test_a_parent_holding_only_shared_dates_is_replaced_not_kept():
+    # one date range stated for the list: context, not a record of its own
+    entry = {"taxonomy_code": "P", "text": "2018-2022  Alpha Committee\tBeta Committee",
+             "extracted_fields": {"start_date": "2018", "end_date": "2022", "entries": [
+                 {"committee_name": "Alpha Committee", "role": "Chair", "start_date": "2018", "end_date": "2022"},
+                 {"committee_name": "Beta Committee", "role": "Member", "start_date": "2018", "end_date": "2022"}]}}
+    out = _fan_out([entry])
+
+    assert [e["extracted_fields"]["committee_name"] for e in out] == ["Alpha Committee", "Beta Committee"]
+
+
 def test_lists_that_are_not_sibling_records_are_left_alone():
     schema_key = next(iter(_schema_fields("H")))
     cases = {
