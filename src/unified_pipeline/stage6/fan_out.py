@@ -28,7 +28,7 @@ What is deliberately NOT fanned out:
   raw text would be lost;
 - an entry a stage-5 formatter already rendered whole (`formatted_text` /
   `formatted_citation`), which would repeat that rendering on every child;
-- an entry whose text is mostly words no field holds (`_fields_carry_text`);
+- an entry whose text has a token no rendered field holds (`_fields_carry_text`);
 - an entry that carries more than one such list, or an item that carries a key
   outside the schema next to schema keys (web228's K4 `sessions: [{date, title,
   duration}]`: `title` is the session's own name and no K4 renderer reads it, so
@@ -39,8 +39,12 @@ from __future__ import annotations
 
 import copy
 import re
+from collections import Counter
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Any
+
+from unified_pipeline.stage6.formatting.dates import format_date_for_section
 
 # Provenance key written on every child. Shows which list the record came from
 # and where in it: `{'key': 'awards', 'index': 1, 'count': 3}`.
@@ -57,25 +61,84 @@ _TEXT_SEGMENT_SEPARATOR = '\t'
 # to `_recover_unrendered_records`, which verifies pipe/tab record lines.
 _BUILT_TEXT_SEPARATOR = ' | '
 
-# How much of the entry's own wording the records must carry before the entry
-# is treated as a list of records rather than prose that has a list extracted
-# from it. A child renders from its fields, so a word no field holds is not
-# rendered: a paragraph on committee service that stage 4 reduced to six
-# committees (web185) or a service entry that also describes a grant and its
-# duties (web240) would lose the prose. Three tests, all on the entry's own
-# text against the string leaves of its `extracted_fields`:
-#   - no year may be absent from the fields (a lost date is never a qualifier);
-#   - at most `_MAX_UNCOVERED_WORDS` words absent (web218's "(1-3 committees/
-#     yr)" and "for Department of Anatomy & Neurobiology" are the qualifiers
-#     this tolerates: stage 4 does not carry them into any field);
-#   - at least `_MIN_TEXT_COVERAGE` of the words present.
-# Words are letters-only and at least `_MIN_WORD_CHARS` long, so "of"/"the" and
-# numbers cannot decide it. Measured on the 148-CV render set in the PR body.
-_MIN_TEXT_COVERAGE = 0.8
-_MAX_UNCOVERED_WORDS = 3
-_MIN_WORD_CHARS = 4
-_WORD_RE = re.compile(r'[a-z]+')
-_YEAR_RE = re.compile(r'\b(?:19|20)\d{2}\b')
+# A child renders from its fields, so a token no RENDERED field holds is lost:
+# a paragraph on committee service that stage 4 reduced to six committees
+# (web185), a service entry that also describes a grant (web240), a P entry
+# whose every item carries `institution` although the P renderer never writes
+# it (web240's "Neuroscience Training Program", web218's "UMB"). The entry is
+# fanned out only when EVERY token of its own text is held, with at least the
+# multiplicity the text has, by a field the target code's renderer writes
+# (`_RENDERED_FIELDS`). Zero uncovered tokens, not a tolerance: any
+# "qualifier" a tolerance forgave was content the output no longer had.
+# A token is a run of letters or digits, lowercased. `_STOPWORDS` are the
+# connectives that carry no content and that a field never holds ("Chair of
+# the Board" against `role: Chair`, `committee_name: Board`).
+_STOPWORDS = frozenset({'a', 'an', 'and', 'at', 'for', 'in', 'of', 'on', 'the', 'to'})
+_TOKEN_RE = re.compile(r'[a-z0-9]+')
+
+# Per taxonomy code, the `extracted_fields` keys its section renderer writes
+# into the document, read off the renderer by rendering one entry per code with
+# a unique marker in every schema field and listing the markers that reach the
+# .docx (`test_rendered_fields_match_what_each_section_writes` repeats that
+# probe, so a renderer that starts or stops reading a field fails it). `narrative`
+# is in no set: nothing writes it. A code missing here is never fanned out.
+_RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
+    'B1': frozenset({'degree', 'institution', 'year'}),
+    'B2': frozenset({'institution', 'program_name', 'year'}),
+    'C': frozenset({'end_date', 'institution', 'specialty', 'start_date', 'training_type'}),
+    'D1': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),
+    'D2': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),
+    'D3': frozenset({'department', 'end_date', 'organization', 'start_date', 'title'}),
+    'E': frozenset({'effective_date', 'fte_percentage', 'status'}),
+    'F1': frozenset({'expiration_date', 'issue_date', 'license_number', 'state_country'}),
+    'F2': frozenset({'certifying_board', 'recertification_date', 'specialty', 'year_certified'}),
+    'G': frozenset({'affiliation_type', 'department', 'end_date', 'organization', 'start_date'}),
+    'H': frozenset({'award_name', 'date', 'granting_body'}),
+    'I': frozenset({'end_date', 'membership_type', 'organization', 'start_date'}),
+    'J': frozenset({'admin_percent', 'clinical_percent', 'description', 'research_percent', 'teaching_percent'}),
+    'K1': frozenset({'course_code', 'course_title', 'institution', 'role'}),
+    'K2': frozenset({'description', 'end_date', 'hours_per_week', 'institution', 'learner_level', 'setting', 'start_date', 'teaching_role'}),
+    'K3': frozenset({'description', 'end_date', 'institution', 'program_name', 'role', 'scope', 'start_date'}),
+    'K4': frozenset({'activity_title', 'cme_credits', 'date', 'description', 'institution', 'role', 'target_audience'}),
+    'K5': frozenset({'activity_title', 'audience', 'date', 'description', 'location'}),
+    'L1': frozenset({'clinical_role', 'description', 'end_date', 'fte_clinical', 'institution', 'service_setting', 'sessions_per_week', 'start_date'}),
+    'L2': frozenset({'description', 'end_date', 'institution', 'outcome', 'project_name', 'role', 'start_date'}),
+    'L3': frozenset({'end_date', 'institution', 'leadership_role', 'start_date'}),
+    'M1': frozenset({'description', 'end_date', 'institution', 'research_area', 'start_date'}),
+    'M2': frozenset({'agency', 'annual_funding', 'end_date', 'grant_number', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'title', 'total_funding'}),
+    'M2A': frozenset({'agency', 'annual_funding', 'end_date', 'grant_number', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'title', 'total_funding'}),
+    'M2B': frozenset({'agency', 'end_date', 'grant_number', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'title', 'total_funding'}),
+    'M2C': frozenset({'agency', 'grant_number', 'pi_name', 'pi_role', 'title'}),
+    'M2D': frozenset({'assignee', 'filing_date', 'inventors', 'issue_date', 'patent_number', 'status', 'title'}),
+    'N1': frozenset({'end_date', 'institution', 'number_trainees', 'program_name', 'role', 'start_date'}),
+    'N2': frozenset({'agency', 'end_date', 'grant_number', 'grant_title', 'role', 'start_date'}),
+    'N3': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date', 'thesis_title'}),
+    'N3A': frozenset({'mentee_level', 'mentee_name', 'research_focus', 'start_date'}),
+    'N3B': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date'}),
+    'N4': frozenset({'date', 'description', 'mentee_name', 'output_type', 'title'}),
+    'O': frozenset({'end_date', 'institution', 'leadership_role', 'start_date'}),
+    'P': frozenset({'committee_name', 'end_date', 'role', 'start_date'}),
+    'Q1': frozenset({'end_date', 'organization', 'role', 'start_date'}),
+    'Q2': frozenset({'committee_name', 'end_date', 'organization', 'role', 'start_date'}),
+    'Q3': frozenset({'agency', 'end_date', 'panel_name', 'role', 'start_date'}),
+    'Q4': frozenset({'end_date', 'journal_name', 'role', 'start_date'}),
+    'Q4A': frozenset({'end_date', 'journal_name', 'role', 'start_date'}),
+    'Q4B': frozenset({'end_date', 'journal_name', 'role', 'start_date'}),
+    'Q4C': frozenset({'end_date', 'journal_name', 'start_date'}),
+    'Q4D': frozenset({'journal_name', 'year'}),
+    'R': frozenset({'date', 'event_name', 'location', 'title'}),
+    'S0': frozenset({'google_scholar_url', 'h_index', 'orcid', 'publication_count', 'researchgate_url', 'scopus_id', 'total_citations'}),
+    'S1': frozenset({'authors', 'doi', 'issue', 'journal', 'pages', 'pmcid', 'pmid', 'title', 'volume', 'year'}),
+    'S2': frozenset({'authors', 'doi', 'issue', 'journal', 'pages', 'pmcid', 'pmid', 'title', 'volume', 'year'}),
+    'S3': frozenset({'authors', 'publisher', 'title', 'year'}),
+    'S4': frozenset({'authors', 'book_title', 'chapter_title', 'doi', 'editors', 'pages', 'publisher', 'year'}),
+    'S5': frozenset({'authors', 'title', 'year'}),
+    'S6': frozenset({'authors', 'doi', 'journal', 'pages', 'pmcid', 'pmid', 'title', 'volume', 'year'}),
+    'S7': frozenset({'authors', 'title', 'year'}),
+    'S8': frozenset({'authors', 'doi', 'title', 'year'}),
+    'S9': frozenset({'authors', 'title', 'year'}),
+    'T': frozenset({'content_type', 'description'}),
+})
 
 # Keys a stage-5 formatter writes for the WHOLE entry (5c teaching prose, 5d
 # citation). An entry that carries one already has a rendering of all its
@@ -100,8 +163,8 @@ def _is_blank(value: object) -> bool:
         or (isinstance(value, (list, dict)) and not value)
 
 
-def _words(text: str) -> set[str]:
-    return {w for w in _WORD_RE.findall(text.lower()) if len(w) >= _MIN_WORD_CHARS}
+def _tokens(text: str) -> Counter[str]:
+    return Counter(t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOPWORDS)
 
 
 def _leaf_text(value: object) -> str:
@@ -113,16 +176,32 @@ def _leaf_text(value: object) -> str:
     return '' if value is None else str(value)
 
 
-def _fields_carry_text(text: object, fields: Mapping[str, Any]) -> bool:
-    """Whether the extracted fields hold enough of `text` to render it from
-    them alone -- see `_MIN_TEXT_COVERAGE` for the three tests."""
-    held = _leaf_text(fields)
-    if set(_YEAR_RE.findall(str(text or ''))) - set(_YEAR_RE.findall(held)):
+def _rendered_text(key: str, value: object, code: str) -> str:
+    """What the renderer writes for one field: a date as the code's date column
+    shows it (year only for most, so a month the text names is not held), any
+    other value as it stands."""
+    if _is_date_key(key) and not isinstance(value, (Mapping, list)):
+        return format_date_for_section(str(value or ''), code, is_end_date='end' in key)
+    return _leaf_text(value)
+
+
+def _fields_carry_text(entry: Mapping[str, Any],
+                       child_fields: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether the fields the renderer writes, summed over the children (each
+    child writes the scalars it inherited, so they count once per child), hold
+    every token of the entry's text -- see `_STOPWORDS` for what is not counted.
+    A schema key the renderer never reads, and a key outside the schema, hold
+    nothing."""
+    code = str(entry.get('taxonomy_code'))
+    rendered = _RENDERED_FIELDS.get(code)
+    if rendered is None:
         return False
-    words = _words(str(text or ''))
-    uncovered = words - _words(held)
-    return (len(uncovered) <= _MAX_UNCOVERED_WORDS
-            and len(words - uncovered) >= _MIN_TEXT_COVERAGE * len(words))
+    held: Counter[str] = Counter()
+    for fields in child_fields:
+        for key, value in fields.items():
+            if key in rendered:
+                held += _tokens(_rendered_text(key, value, code))
+    return not _tokens(str(entry.get('text') or '')) - held
 
 
 def _record_list(value: object, schema: frozenset[str]) -> bool:
@@ -207,8 +286,6 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dic
     keys = _record_keys(fields, schema)
     if len(keys) != 1 or any(fields.get(k) for k in _FORMATTED_KEYS):
         return None
-    if not _fields_carry_text(entry.get('text'), fields):
-        return None
     key = keys[0]
     items = fields[key]
     scalars = {k: copy.deepcopy(v) for k, v in fields.items()
@@ -216,9 +293,12 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dic
     own = _parent_is_own_record(scalars, items, schema, len(_segments(entry.get('text'))))
     records = ([scalars] if own else []) \
         + [dict(item) for item in items]
+    child_fields = [{**copy.deepcopy(scalars), **copy.deepcopy(record)} for record in records]
+    if not _fields_carry_text(entry, child_fields):
+        return None
     texts = _child_texts(entry.get('text'), records)
-    return [_child(entry, {**copy.deepcopy(scalars), **copy.deepcopy(record)}, text, key, i, len(records))
-            for i, (record, text) in enumerate(zip(records, texts))]
+    return [_child(entry, fields, text, key, i, len(records))
+            for i, (fields, text) in enumerate(zip(child_fields, texts))]
 
 
 def fan_out_multi_record_entries(

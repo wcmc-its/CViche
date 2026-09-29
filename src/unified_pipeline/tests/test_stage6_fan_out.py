@@ -23,6 +23,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS  # noqa: E402
+from unified_pipeline.stage6 import fan_out  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
     fan_out_multi_record_entries,
@@ -196,15 +197,19 @@ _COMMITTEES = [
 
 
 class TestTextCoverage:
-    """Prose with a list extracted from it is not a list of records: a child
-    renders from its fields, so the words no field holds would be lost."""
+    """Every token of the entry's text must be held by a field the renderer
+    writes: a child renders from those fields alone, so any other token is
+    content the output would no longer have."""
 
-    _RECORDS = ('Alpha Curriculum Oversight Council member, Ashby University{a}\t'
-                'Beta Admissions Selection Council chair, Ashby University{b}')
+    _RECORDS = ('Alpha Curriculum Oversight Council member{a}\t'
+                'Beta Admissions Selection Council chair{b}')
 
-    def _committee_entry(self, text):
+    def _committee_entry(self, text, committees=_COMMITTEES, **scalars):
         return {'taxonomy_code': 'P', 'text': text,
-                'extracted_fields': {'committees': _COMMITTEES}}
+                'extracted_fields': {'committees': committees, **scalars}}
+
+    def test_text_the_fields_hold_is_fanned_out(self):
+        assert len(_fan(self._committee_entry(self._RECORDS.format(a='', b='')))) == 2
 
     def test_prose_around_the_records_keeps_the_entry_whole(self):
         prose = ('I serve on the Alpha Curriculum Oversight Council as a member and I chair the '
@@ -212,58 +217,69 @@ class TestTextCoverage:
         entry = self._committee_entry(prose)
         assert _fan(entry) == [entry]
 
-    def test_a_couple_of_qualifier_words_are_tolerated(self):
-        text = self._RECORDS.format(a=' (weekly)', b=' (rotating)')
-        assert len(_fan(self._committee_entry(text))) == 2
-
-    def test_four_uncovered_words_are_not(self):
-        text = self._RECORDS.format(a=' (weekly evenings)', b=' (rotating, nationwide)')
-        entry = self._committee_entry(text)
+    @pytest.mark.parametrize('qualifier', ['(weekly)', '(1-3 committees/yr)', 'UMB'])
+    def test_one_word_no_field_holds_keeps_the_entry_whole(self, qualifier):
+        # No tolerance: web218's "(1-3 committees/yr)" and "UMB" were lost.
+        entry = self._committee_entry(self._RECORDS.format(a=' ' + qualifier, b=''))
         assert _fan(entry) == [entry]
 
-    def test_many_uncovered_words_are_not_tolerated_however_long_the_text(self):
-        text = self._RECORDS.format(a=' (weekly)', b=' (rotating) ' + 'and more '.join(
-            ['stewardship', 'budgeting', 'mentoring', 'outreach', 'planning', 'reporting']))
+    def test_a_field_the_renderer_never_writes_holds_nothing(self):
+        # web240's "Neuroscience Training Program": every item carries
+        # `institution`, the P renderer never writes it.
+        text = ('Alpha Curriculum Oversight Council member, Ashby University\t'
+                'Beta Admissions Selection Council chair, Ashby University')
         entry = self._committee_entry(text)
+        assert 'institution' in FIELD_SCHEMAS['P']['fields']
         assert _fan(entry) == [entry]
+
+    def test_a_key_outside_the_schema_holds_nothing(self):
+        entry = self._committee_entry(self._RECORDS.format(a=' weekly', b=''), cadence='weekly')
+        assert _fan(entry) == [entry]
+
+    def test_a_word_the_text_repeats_must_be_held_as_often(self):
+        # 'Council' once in the fields, twice in the text.
+        text = 'Alpha Board member\tBeta Board chair\tCouncil Council'
+        entry = self._committee_entry(text, [{'committee_name': 'Alpha Board', 'role': 'member'},
+                                             {'committee_name': 'Beta Board', 'role': 'chair'}],
+                                      role='Council')
+        assert _fan(entry) == [entry]
+
+    def test_a_scalar_counts_once_per_child(self):
+        # The scalar `granting_body` is written on each of the two children,
+        # so a text that names it twice is covered.
+        entry = _honors('Alpha Prize, Hollis College\tBeta Prize, Hollis College',
+                        [{'award_name': 'Alpha Prize'}, {'award_name': 'Beta Prize'}],
+                        granting_body='Hollis College')
+        assert len(_fan(entry)) == 2
+
+    def test_connectives_are_not_counted(self):
+        text = 'Chair of the Board\tMember of Alpha in Beta for Gamma on a Delta at an Epsilon to Zeta and Eta'
+        entry = self._committee_entry(text, [{'committee_name': 'Board', 'role': 'Chair'},
+                                             {'committee_name': 'Alpha Beta Gamma Delta Epsilon Zeta Eta',
+                                              'role': 'Member'}])
+        assert len(_fan(entry)) == 2
 
     def test_a_year_no_field_holds_keeps_the_entry_whole(self):
         entry = self._committee_entry(self._RECORDS.format(a=' 1999', b=''))
         assert _fan(entry) == [entry]
 
     def test_a_year_a_field_holds_is_fine(self):
-        entry = {'taxonomy_code': 'P', 'text': self._RECORDS.format(a=' 1999', b=''),
-                 'extracted_fields': {'start_date': '1999',
-                                      'committees': _COMMITTEES}}
+        entry = self._committee_entry(self._RECORDS.format(a=' 1999', b=''), start_date='1999')
         assert len(_fan(entry)) == 2
 
-
-class TestTextCoverageEachTestOnItsOwn:
-    """The three tests in `_fields_carry_text`, each isolated: a long text
-    (many covered words) can pass the ratio while failing the count, and a
-    short one the reverse."""
-
-    _COVERED = ('alpha bravo charlie delta foxtrot golf hotel india juliet kilo lima '
-                'mike november oscar papa quebec romeo sierra tango uniform victor whiskey').split()
-
-    def _entry(self, uncovered):
-        first, second = self._COVERED[:11], self._COVERED[11:]
-        text = ' '.join(first) + '\t' + ' '.join(second) + ' ' + ' '.join(uncovered)
-        return {'taxonomy_code': 'P', 'text': text, 'extracted_fields': {'committees': [
-            {'committee_name': ' '.join(first)}, {'committee_name': ' '.join(second)}]}}
-
-    def test_three_uncovered_words_in_a_long_text_are_tolerated(self):
-        assert len(_fan(self._entry(['yankee', 'zebra', 'apple']))) == 2
-
-    def test_four_uncovered_words_are_not_even_when_the_ratio_holds(self):
-        entry = self._entry(['yankee', 'zebra', 'apple', 'berry'])
-        assert 22 / 26 >= 0.8
+    def test_a_month_the_date_column_does_not_show_keeps_the_entry_whole(self):
+        # P's date column is `yyyy`: "07/2009" is written as "2009".
+        entry = self._committee_entry(self._RECORDS.format(a=' 07/2009', b=''), start_date='07/2009')
         assert _fan(entry) == [entry]
 
-    def test_a_short_text_fails_on_the_ratio_alone(self):
-        entry = {'taxonomy_code': 'P', 'text': 'alpha bravo charlie\tdelta yankee zebra apple',
-                 'extracted_fields': {'committees': [{'committee_name': 'alpha bravo charlie'},
-                                                     {'committee_name': 'delta'}]}}
+    def test_a_date_range_the_column_shows_in_full_is_fine(self):
+        entry = self._committee_entry(self._RECORDS.format(a=' 2009 to 2011', b=''),
+                                      start_date='2009-07', end_date='2011-03')
+        assert len(_fan(entry)) == 2
+
+    def test_a_code_the_renderer_map_does_not_name_is_never_fanned_out(self, monkeypatch):
+        entry = self._committee_entry(self._RECORDS.format(a='', b=''))
+        monkeypatch.setattr(fan_out, '_RENDERED_FIELDS', {})
         assert _fan(entry) == [entry]
 
 
@@ -325,7 +341,7 @@ class TestParentOwnRecord:
         # `mentee_level` is shared context, not a record of its own, even when
         # the text has a header segment ("NIH T32 (Post-graduate):").
         parent = {'taxonomy_code': 'N3B',
-                  'text': 'Fellowship (Post-graduate):\tAna Cruz (2013)\tLee Park (2014)',
+                  'text': 'Post-graduate:\tAna Cruz (2013)\tLee Park (2014)',
                   'extracted_fields': {'mentee_level': 'Post-graduate', 'funding_source': 'Fellowship',
                                        'mentees': [{'mentee_name': 'Ana Cruz', 'start_date': '2013'},
                                                    {'mentee_name': 'Lee Park', 'start_date': '2014'}]}}
@@ -366,8 +382,8 @@ class TestParentOwnRecord:
     def test_a_blank_identity_field_is_not_an_identity(self, blank):
         # One header segment more than records, and a parent whose only
         # identity-shaped scalar is blank: not a record of its own.
-        parent = {'taxonomy_code': 'P', 'text': 'Board:\tAlpha Board\tBeta Board',
-                  'extracted_fields': {'committee_name': blank, 'committees': [
+        parent = {'taxonomy_code': 'P', 'text': 'Council:\tAlpha Board\tBeta Board',
+                  'extracted_fields': {'committee_name': blank, 'role': 'Council', 'committees': [
                       {'committee_name': 'Alpha Board'}, {'committee_name': 'Beta Board'}]}}
         assert len(_fan(parent)) == 2
 
@@ -377,3 +393,47 @@ class TestParentOwnRecord:
 def test_date_keys_never_count_as_a_parents_identity(key, expected):
     from unified_pipeline.stage6.fan_out import _is_date_key
     assert _is_date_key(key) is expected
+
+
+# --- the renderer map, checked against the renderers themselves ---------------
+
+def _rendered_markers(tmp_path, code):
+    """The schema fields of `code` whose marker reaches the .docx when one entry
+    of that code is rendered with a unique marker in every field."""
+    import json
+
+    from docx import Document
+
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    markers = {name: 'Zq' + name.replace('_', 'x') + 'Z'
+               for name in FIELD_SCHEMAS[code]['fields'] if name != 'narrative'}
+    entry = {'taxonomy_code': code, 'element_idx_start': 0, 'text': ' '.join(markers.values()),
+             'extracted_fields': dict(markers)}
+    source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
+    source.write_text(json.dumps({'document_uid': 'TESTAA', 'entries': [entry]}))
+    generator = WCMTemplateGenerator(verbose=False)
+    generator.generate(str(source), str(target), research_summary_path=None)
+    document = Document(str(target))
+    body = ' '.join(t.text or '' for t in document.element.body.iter(
+        '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+    return {name for name, marker in markers.items() if marker in body}
+
+
+@pytest.mark.parametrize('code', sorted(fan_out._RENDERED_FIELDS))
+def test_rendered_fields_match_what_each_section_writes(tmp_path, code):
+    """`_RENDERED_FIELDS[code]` is exactly the set of fields the code's section
+    writes: a field the map claims but the renderer skips would let the
+    coverage test pass on content the output drops (web240's `institution`),
+    and one it omits would needlessly keep entries whole."""
+    assert _rendered_markers(tmp_path, code) == set(fan_out._RENDERED_FIELDS[code])
+
+
+def test_the_renderer_map_names_only_schema_fields_and_never_narrative():
+    for code, names in fan_out._RENDERED_FIELDS.items():
+        assert names <= set(FIELD_SCHEMAS[code]['fields']), code
+        assert 'narrative' not in names, code
+
+
+def test_every_code_with_a_schema_is_in_the_renderer_map_except_personal_data():
+    assert set(FIELD_SCHEMAS) - set(fan_out._RENDERED_FIELDS) == {'A'}

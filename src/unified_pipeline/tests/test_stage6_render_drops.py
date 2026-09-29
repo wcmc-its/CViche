@@ -213,6 +213,9 @@ def test_fanned_out_records_each_go_through_the_pii_pass() -> None:
     """A PII-keyed scalar the children inherit is dropped from EACH child, and
     a labelled fragment in one child's own text is cut from that child only."""
     parent = _three_honors(spouse_name="Pat Example")
+    # The fragment sits in the second record's own field as well as the text:
+    # an entry is fanned out only when the fields hold every token of the text.
+    parent["extracted_fields"]["awards"][1]["granting_body"] = "Hollis College; Passport No.: X1234567"
     parent["text"] = parent["text"].replace(
         "Beta Sigma Honor Society, Hollis College",
         "Beta Sigma Honor Society, Hollis College; Passport No.: X1234567")
