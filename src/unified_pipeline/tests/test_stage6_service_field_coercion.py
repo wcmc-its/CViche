@@ -82,7 +82,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.normalization.fields import _cell_text, _committee_cell_text  # noqa: E402
-from unified_pipeline.stage6.sections.service import _journal_name_cell_text  # noqa: E402
+from unified_pipeline.stage6.sections.service import (  # noqa: E402
+    _journal_name_cell_text,
+    _reviewing_org_and_committee_text,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -554,6 +557,55 @@ def test_q2_list_role_and_organization_survive_router_and_render_end_to_end(tmp_
     assert rows[0][1] == "Fictional Role A; Fictional Role B"
     assert rows[0][2] == "Fictional Org P; Fictional Org Q"
     assert rows[0][3] == "1960-1962"
+
+
+def _rerouted_q2(**fields):
+    """A Q2 entry the router sends to `_fill_journal_reviewing`: no
+    `journal_name`, and a text that matches `REVIEWER_PATTERNS`."""
+    return {"text": "Ad hoc reviewer, " + " ".join(str(v) for v in fields.values()),
+            "taxonomy_code": "Q2", "element_idx_start": 0,
+            "extracted_fields": fields}
+
+
+def test_rerouted_q2_committee_name_is_not_shadowed_by_organization(tmp_path):
+    """#471: a rerouted Q2 entry has no `journal_name`, and the old
+    `organization or committee_name` chain rendered only the generic
+    organization -- the panel name never reached the docx."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _rerouted_q2(committee_name="Fictional Program Review Panel",
+                     organization="Fictional Heart Society",
+                     start_date="2011", end_date="2012"),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Program Review Panel"))
+    assert len(rows) == 1
+    assert rows[0][0] == "Fictional Program Review Panel, Fictional Heart Society"
+
+
+@pytest.mark.parametrize("fields, expected", [
+    # one contains the other as whole words -> the longer one alone
+    ({"organization": "NIH", "committee_name": "NIH Study Section"}, "NIH Study Section"),
+    ({"organization": "NIH Study Section", "committee_name": "nih"}, "NIH Study Section"),
+    ({"organization": "Fictional Society", "committee_name": "fictional society"}, "Fictional Society"),
+    # substring collisions are NOT containment -> both rendered
+    ({"organization": "NIH", "committee_name": "Nihilism Panel"}, "Nihilism Panel, NIH"),
+    ({"organization": "NCI", "committee_name": "Clinical Review"}, "Clinical Review, NCI"),
+    ({"organization": "AHA", "committee_name": "Ahab Award Panel"}, "Ahab Award Panel, AHA"),
+    ({"organization": "APA", "committee_name": "Papal Studies"}, "Papal Studies, APA"),
+    ({"organization": "NIH", "committee_name": "NIH-funded Panel"}, "NIH-funded Panel"),
+    ({"organization": "NSF.", "committee_name": "CAREER awards"}, "CAREER awards, NSF."),
+    ({"organization": "U.S. Army", "committee_name": "Army Research Board"}, "Army Research Board, U.S. Army"),
+    ({"organization": "R+D", "committee_name": "R+D Panel"}, "R+D Panel"),
+    ({"organization": "NIH\u2013NCI", "committee_name": "Site Visit"}, "Site Visit, NIH\u2013NCI"),
+    # one side absent -> unchanged from the old `organization or committee_name`
+    ({"organization": "Fictional Society"}, "Fictional Society"),
+    ({"committee_name": "Fictional Panel"}, "Fictional Panel"),
+    ({"organization": "", "committee_name": "Fictional Panel"}, "Fictional Panel"),
+    ({}, ""),
+])
+def test_reviewing_org_and_committee_text(fields, expected):
+    assert _reviewing_org_and_committee_text(fields) == expected
 
 
 if __name__ == "__main__":

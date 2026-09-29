@@ -479,6 +479,34 @@ def _journal_name_cell_text(value: object, taxonomy_code: str) -> str:
     return _cell_text(value)
 
 
+def _contains_words(haystack: str, needle: str) -> bool:
+    """True when `needle` occurs in `haystack` on word boundaries, ignoring case."""
+    return re.search(rf'(?<!\w){re.escape(needle)}(?!\w)', haystack, re.IGNORECASE) is not None
+
+
+def _reviewing_org_and_committee_text(fields: dict) -> str:
+    """Display text for a journal-reviewing row that has no `journal_name`.
+
+    A Q2 entry rerouted into `_fill_journal_reviewing` (`_route_q2_entries`)
+    has no `journal_name`, and its `organization` is often just the funder
+    or society ("NIH", "American Heart Association") while `committee_name`
+    names the actual panel or program (#471). `organization or
+    committee_name` rendered only the generic organization, so the panel
+    name was dropped from the docx. Render both -- "<committee>, <org>" --
+    unless one already contains the other as whole words (case-insensitive;
+    "NIH" is not found inside "Nihilism Panel"), in which case
+    the longer one already says both and is rendered alone."""
+    org = _cell_text(fields.get('organization'))
+    committee = _cell_text(fields.get('committee_name'))
+    if not org or not committee:
+        return org or committee
+    if _contains_words(org, committee):
+        return org
+    if _contains_words(committee, org):
+        return committee
+    return f"{committee}, {org}"
+
+
 def _service_boards_dates_text(fields: dict, taxonomy_code: str,
                                source_text: str = '') -> str:
     """Coerce `start_date`/`end_date` before `format_date_range` for a
@@ -972,7 +1000,7 @@ class ServiceSection:
             if journal_name_value:
                 journal = _journal_name_cell_text(journal_name_value, taxonomy_code)
             else:
-                journal = _cell_text(fields.get('organization') or fields.get('committee_name'))
+                journal = _reviewing_org_and_committee_text(fields)
             # #812 round 2: coerce before format_date_range (see
             # _fill_service_boards above for why -- it only str()s a
             # structured value's Python repr into the cell).
