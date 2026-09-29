@@ -461,7 +461,7 @@ def _load_yaml_config() -> dict:
         return _cached_config
 
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             _cached_config = yaml.safe_load(f) or {}
     except Exception as e:
         logger.warning(f"Failed to load llm_config.yaml: {e}. Using defaults.")
@@ -530,6 +530,74 @@ def reload_config():
     """Clear the cached config so the next get_stage_config() re-reads YAML."""
     global _cached_config
     _cached_config = None
+
+
+# ============================================================================
+# LLM Runtime Knobs (env -> web app's auth_config.yaml `llm:` block -> default)
+# ============================================================================
+# Mirrors web_interface/backend/app/config_loader.get_config("llm", key,
+# default)'s resolution order and source file, without the pipeline core
+# importing the web app package (#267). llm/retry.py used to sys.path-insert
+# web_interface/backend and `from app.config_loader import get_config`,
+# coupling LLM infrastructure to the web app's package layout (#620 review).
+# The yaml layer is live in deployment -- buildspec.yaml writes
+# CVICHE_LLM_TIMEOUT_SECONDS / CVICHE_LLM_MAX_ATTEMPTS into the ConfigMap's
+# `llm:` block (auth_config.yaml) -- so a bare os.environ.get() would
+# silently drop that layer and regress prod.
+
+AUTH_CONFIG_PATH = PROJECT_ROOT / "web_interface" / "backend" / "auth_config.yaml"
+AUTH_CONFIG_EXAMPLE_PATH = PROJECT_ROOT / "web_interface" / "backend" / "auth_config.yaml.example"
+
+
+def get_llm_env_config(key: str, default: object) -> tuple[object, str]:
+    """Resolve one LLM runtime knob: env var, then the `llm:` section of
+    auth_config.yaml (falling back to the tracked .example when the real
+    file is absent, same as app.config_loader.load_yaml_config), then
+    `default`. Not cached -- read infrequently (once per knob, at import),
+    so a fresh read each time is not worth a staleness/parity risk.
+
+    Returns (value, source) with source one of "env", "yaml", "default" --
+    same shape as app.config_loader.get_config.
+    """
+    value = os.environ.get(key)
+    if value:
+        return value, "env"
+
+    path = AUTH_CONFIG_PATH if AUTH_CONFIG_PATH.exists() else AUTH_CONFIG_EXAMPLE_PATH
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        if not isinstance(cfg, dict):
+            # An empty file (None) is ordinary; a list or scalar document is a
+            # misconfiguration. Either way degrade to default, as the backend's
+            # get_config does inside its broad except.
+            if cfg is not None:
+                logger.warning(
+                    "%s is not a mapping (got %s); using default for %s",
+                    path, type(cfg).__name__, key,
+                )
+            cfg = {}
+        llm_cfg = cfg.get("llm")
+        if not isinstance(llm_cfg, dict):
+            # A missing/null `llm:` block (llm_cfg is None) is the ordinary
+            # case and not worth a warning. A present-but-wrong-shaped block
+            # (e.g. `llm: "oops"`) is a misconfiguration -- log it, but still
+            # degrade to default rather than raising (parity with the
+            # backend's app.config_loader.get_config, which catches this
+            # inside its own broad except and returns default too).
+            if llm_cfg is not None:
+                logger.warning(
+                    "auth_config.yaml 'llm' section is not a mapping (got %s); ignoring it for %s",
+                    type(llm_cfg).__name__, key,
+                )
+            llm_cfg = {}
+        value = llm_cfg.get(key)
+        if value:
+            return value, "yaml"
+    except (OSError, yaml.YAMLError):
+        logger.warning("Failed to load %s; using default for %s", path, key, exc_info=True)
+
+    return default, "default"
 
 
 def validate_setup() -> dict:

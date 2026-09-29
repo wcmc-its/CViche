@@ -35,8 +35,19 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+import unified_pipeline.config as pipeline_config  # noqa: E402
 import unified_pipeline.llm.bedrock as bedrock  # noqa: E402
 import unified_pipeline.llm.retry as retry  # noqa: E402
+
+# For the #267 parity test only -- proves unified_pipeline.config's own
+# resolver reads the same value app.config_loader.get_config would, without
+# any PRODUCTION code importing the web app (that is the point of #267).
+# Test-only coupling: scripts/check_standards.py's §1.4 gate (core does not
+# import the web backend) excludes tests/ via iter_py_files.
+_BACKEND_ROOT = Path(__file__).resolve().parents[3] / "web_interface" / "backend"
+if str(_BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_ROOT))
+import app.config_loader as backend_config_loader  # noqa: E402
 
 BEDROCK_MODEL = "anthropic.claude-haiku-4-5"
 
@@ -711,6 +722,236 @@ def test_get_llm_timeout_seconds_reads_env(monkeypatch: pytest.MonkeyPatch) -> N
 def test_get_llm_max_attempts_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CVICHE_LLM_MAX_ATTEMPTS", "6")
     assert retry._get_llm_max_attempts() == 6
+
+
+def test_get_llm_timeout_seconds_reads_yaml_when_env_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#267 verify r2 BLOCKING: retry.py's readers must reach the yaml
+    (ConfigMap) layer through get_llm_env_config, not a bare
+    os.environ.get -- a bare env read would silently drop the
+    CVICHE_LLM_TIMEOUT_SECONDS ConfigMap value in prod while every
+    env-only test above stayed green."""
+    monkeypatch.delenv("CVICHE_LLM_TIMEOUT_SECONDS", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    _write_llm_yaml(yaml_path, CVICHE_LLM_TIMEOUT_SECONDS="240")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    assert retry._get_llm_timeout_seconds() == 240.0
+
+
+def test_get_llm_max_attempts_reads_yaml_when_env_unset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#267 verify r2 BLOCKING: same as the timeout test above, for the int
+    reader (_get_llm_config_int) and CVICHE_LLM_MAX_ATTEMPTS."""
+    monkeypatch.delenv("CVICHE_LLM_MAX_ATTEMPTS", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    _write_llm_yaml(yaml_path, CVICHE_LLM_MAX_ATTEMPTS="5")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    assert retry._get_llm_max_attempts() == 5
+
+
+# ---------------------------------------------------------------------------
+# config.py -- get_llm_env_config (env -> auth_config.yaml `llm:` block ->
+# default, #267). retry.py's knob readers above call this; these tests hit
+# it directly so the resolver's own branches (yaml hit, missing file,
+# malformed yaml) are covered independently of retry.py's int/float parsing.
+# ---------------------------------------------------------------------------
+
+def _write_llm_yaml(path: Path, **llm_keys: str) -> None:
+    """Write an auth_config.yaml-shaped file with only an `llm:` block."""
+    lines = ["llm:"] + [f'  {k}: "{v}"' for k, v in llm_keys.items()]
+    path.write_text("\n".join(lines) + "\n")
+
+
+def test_get_llm_env_config_env_wins_over_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    yaml_path = tmp_path / "auth_config.yaml"
+    _write_llm_yaml(yaml_path, CVICHE_TEST_PARITY_KEY="13")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    monkeypatch.setenv("CVICHE_TEST_PARITY_KEY", "99")
+    assert pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42") == ("99", "env")
+
+
+def test_get_llm_env_config_reads_yaml_when_env_unset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    _write_llm_yaml(yaml_path, CVICHE_TEST_PARITY_KEY="13")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    assert pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42") == ("13", "yaml")
+
+
+def test_get_llm_env_config_default_when_neither_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    _write_llm_yaml(yaml_path, CVICHE_OTHER_KEY="13")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    assert pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42") == ("42", "default")
+
+
+def test_get_llm_env_config_default_when_yaml_missing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    missing = tmp_path / "does-not-exist.yaml"
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", missing)
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_EXAMPLE_PATH", missing)
+    assert pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42") == ("42", "default")
+
+
+def test_get_llm_env_config_default_on_malformed_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    bad_path = tmp_path / "auth_config.yaml"
+    bad_path.write_text("llm: [unclosed\n")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", bad_path)
+    assert pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42") == ("42", "default")
+
+
+def test_get_llm_env_config_malformed_yaml_warning_carries_exc_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#267 final round item 4: the backend's own warning for this branch
+    (app.config_loader.get_config's `except Exception` handler) logs with
+    exc_info=True. The pipeline's replacement warning must carry it too, not
+    just the message -- compare origin/dev's app.config_loader.py:120."""
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    bad_path = tmp_path / "auth_config.yaml"
+    bad_path.write_text("llm: [unclosed\n")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", bad_path)
+    with caplog.at_level(logging.WARNING, logger=pipeline_config.__name__):
+        pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42")
+    assert len(caplog.records) == 1
+    assert caplog.records[0].exc_info is not None
+
+
+def test_get_llm_env_config_null_llm_block_falls_back_to_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare `llm:` key with a null value (yaml.safe_load parses it as
+    None, not {}) degrades to default like a missing `llm:` key, not raise
+    on `.get(key)`."""
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    yaml_path.write_text("llm:\n")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    assert pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42") == ("42", "default")
+
+
+def test_get_llm_env_config_empty_file_falls_back_to_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty auth_config.yaml (yaml.safe_load returns None for the whole
+    document, not just the llm: block) degrades to default, not raise on
+    `cfg.get("llm")`."""
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    yaml_path.write_text("")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    assert pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42") == ("42", "default")
+
+
+def test_get_llm_env_config_non_mapping_llm_block_falls_back_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-mapping `llm:` value (e.g. a plain scalar) degrades to default
+    with a warning naming the bad type, as the backend's
+    app.config_loader.get_config does (its broad except catches the
+    AttributeError), rather than raising from `.get(key)` at import."""
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    yaml_path.write_text('llm: "oops"\n')
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    with caplog.at_level(logging.WARNING, logger=pipeline_config.__name__):
+        result = pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42")
+    assert result == ("42", "default")
+    assert "not a mapping" in caplog.text
+
+
+@pytest.mark.parametrize("document", ["- a\n- b\n", "oops\n"])
+def test_get_llm_env_config_non_mapping_document_falls_back_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    document: str,
+) -> None:
+    """A top-level list or scalar document degrades to default with a
+    warning, the same as a non-mapping `llm:` block one level down."""
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    yaml_path.write_text(document)
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    with caplog.at_level(logging.WARNING, logger=pipeline_config.__name__):
+        result = pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42")
+    assert result == ("42", "default")
+    assert "not a mapping" in caplog.text
+
+
+@pytest.mark.parametrize("raw", ['""', "0"])
+def test_get_llm_env_config_falsy_yaml_value_falls_back_to_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    """An empty-string or zero yaml value falls through to the default, as
+    the backend's get_config treats a falsy yaml value (`if value:`)."""
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    yaml_path = tmp_path / "auth_config.yaml"
+    yaml_path.write_text(f"llm:\n  CVICHE_TEST_PARITY_KEY: {raw}\n")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    assert pipeline_config.get_llm_env_config("CVICHE_TEST_PARITY_KEY", "42") == ("42", "default")
+
+
+def test_llm_config_readers_survive_non_mapping_llm_block_at_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The parity break as filed: with `llm: "oops"` in auth_config.yaml,
+    `import unified_pipeline.llm.retry` used to raise AttributeError (the
+    module-level `_llm_call_semaphore = threading.BoundedSemaphore(...)`
+    line calls _get_max_concurrent_llm_calls at import time). retry.py is
+    already imported by the time this test runs, so call its readers
+    directly -- they must still resolve to the documented defaults
+    (180.0, 3, 8), not raise."""
+    yaml_path = tmp_path / "auth_config.yaml"
+    yaml_path.write_text('llm: "oops"\n')
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    for key in (
+        "CVICHE_LLM_TIMEOUT_SECONDS",
+        "CVICHE_LLM_MAX_ATTEMPTS",
+        "CVICHE_MAX_CONCURRENT_LLM_CALLS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    assert retry._get_llm_timeout_seconds() == 180.0
+    assert retry._get_llm_max_attempts() == 3
+    assert retry._get_max_concurrent_llm_calls() == 8
+
+
+def test_get_llm_env_config_parity_with_backend_config_loader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#267: 'the value source the backend used must still win where it
+    did.' Point both resolvers at the same auth_config.yaml and assert they
+    agree for the yaml-layer case (env unset, the ConfigMap path
+    buildspec.yaml relies on) and the env-override case."""
+    yaml_path = tmp_path / "auth_config.yaml"
+    _write_llm_yaml(yaml_path, CVICHE_TEST_PARITY_KEY="13")
+    monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
+    monkeypatch.setattr(backend_config_loader, "CONFIG_PATH", yaml_path)
+
+    monkeypatch.delenv("CVICHE_TEST_PARITY_KEY", raising=False)
+    assert pipeline_config.get_llm_env_config(
+        "CVICHE_TEST_PARITY_KEY", "42"
+    ) == backend_config_loader.get_config("llm", "CVICHE_TEST_PARITY_KEY", default="42")
+
+    monkeypatch.setenv("CVICHE_TEST_PARITY_KEY", "99")
+    assert pipeline_config.get_llm_env_config(
+        "CVICHE_TEST_PARITY_KEY", "42"
+    ) == backend_config_loader.get_config("llm", "CVICHE_TEST_PARITY_KEY", default="42")
+
+
+def test_auth_config_path_matches_backend_config_path() -> None:
+    """#267 verify r2 BLOCKING: the parity test above monkeypatches BOTH
+    resolvers onto the same tmp file, so it cannot see the two real,
+    unpatched paths drift apart (a moved file, a `.parent` depth change --
+    #620). Assert the actual module-level constants -- what prod uses --
+    still name the same files, real and .example."""
+    assert pipeline_config.AUTH_CONFIG_PATH.resolve() == backend_config_loader.CONFIG_PATH.resolve()
+    assert (
+        pipeline_config.AUTH_CONFIG_EXAMPLE_PATH.resolve()
+        == backend_config_loader.EXAMPLE_CONFIG_PATH.resolve()
+    )
 
 
 # ---------------------------------------------------------------------------

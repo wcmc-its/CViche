@@ -77,7 +77,7 @@ Modules at the same level of a package — most importantly `stage6/sections/*` 
 
 **1.4 The pipeline core does not import the web backend. [gate]**
 `src/unified_pipeline/` is a library. It knows nothing about FastAPI, the DB, or `web_interface/`.
-*Why:* `llm_client.py:50-61` injects `sys.path` so the pipeline core can import `app.config_loader` **from the web backend**, at import time, for 43 downstream modules. That arrow is backwards, and it means the CLI cannot run without the web app's config layout.
+*Why:* `llm/retry.py` (moved out of `llm_client.py:50-61` by #496) used to inject `sys.path` so the pipeline core could import `app.config_loader` **from the web backend**, at import time, for 43 downstream modules. That arrow was backwards, and meant the CLI could not run without the web app's config layout — fixed by #267, which reads the same `auth_config.yaml` `llm:` block through `unified_pipeline/config.py`'s own resolver instead.
 *Check:* `grep -rn 'web_interface\|from app\.' src/unified_pipeline/` returns nothing.
 
 **1.5 A shared vocabulary has exactly one definition. [gate]**
@@ -351,7 +351,7 @@ Progress is a callback. Metrics are a returned dict. `print()` is for humans.
 
 **7.2 One configuration source per consumer. [gate — check pending]**
 Do not add a mechanism; use the one that exists, or delete one first.
-*Why:* nine distinct mechanisms exist today: (1) root `config.yaml`, dead — **no Python reader** anywhere in the tree, yet the backend Dockerfile still copies it in; (2) `auth_config.yaml` + `config_loader.py`'s `get_config()`, also reached from the pipeline core via §1.4's `sys.path` backdoor, plus a DB-backed layer (`SystemConfig`) on top of the same file; (3) `llm_config.yaml` + `unified_pipeline/config.py`'s own, structurally separate loader; (4) `app/config/pipeline_config.py`, a hardcoded class, confirmed dead (its one importer is itself unimported); (5) `core/llm_config.py`, a second differently-named "llm config" module, zero importers, name-collides with (3); (6) the hardcoded `known_institutions` dict now at `stage6/resolution/institution.py:39-40` still claiming to mirror `config.yaml` (moved from the stale `stage_6_word_template.py:2507` this doc used to cite — see §9); (7) the `PRICING` dict in `unified_pipeline/config.py`; (8) `Settings.pricing` in `web_interface/backend/app/schemas.py`, a second hand-maintained pricing table in different units, itself dead but still there to trip over — plus two documentation copies, making model pricing defined four times total; (9) scattered direct `os.environ.get()`/`os.getenv()` reads outside both loaders, each hardcoding its own default inline.
+*Why:* nine distinct mechanisms exist today: (1) root `config.yaml`, dead — **no Python reader** anywhere in the tree, yet the backend Dockerfile still copies it in; (2) `auth_config.yaml` + `config_loader.py`'s `get_config()`, formerly also reached from the pipeline core via §1.4's `sys.path` backdoor (removed by #267 — the pipeline core now reads the same file through its own `unified_pipeline/config.py` resolver, not `app.config_loader`), plus a DB-backed layer (`SystemConfig`) on top of the same file; (3) `llm_config.yaml` + `unified_pipeline/config.py`'s own, structurally separate loader; (4) `app/config/pipeline_config.py`, a hardcoded class, confirmed dead (its one importer is itself unimported); (5) `core/llm_config.py`, a second differently-named "llm config" module, zero importers, name-collides with (3); (6) the hardcoded `known_institutions` dict now at `stage6/resolution/institution.py:39-40` still claiming to mirror `config.yaml` (moved from the stale `stage_6_word_template.py:2507` this doc used to cite — see §9); (7) the `PRICING` dict in `unified_pipeline/config.py`; (8) `Settings.pricing` in `web_interface/backend/app/schemas.py`, a second hand-maintained pricing table in different units, itself dead but still there to trip over — plus two documentation copies, making model pricing defined four times total; (9) scattered direct `os.environ.get()`/`os.getenv()` reads outside both loaders, each hardcoding its own default inline.
 *Check:* the mechanism inventory above (nine, enumerated with file:line by category) is recounted at each review; a ninth-plus-one mechanism or an eleventh pricing copy fails the count. Trends to 2 (one backend, one pipeline-core). Not implemented yet — no script counts this, the inventory above is hand-kept; see §9.
 
 **7.3 A produced field is rendered or explicitly declared unrendered — and a stage validates the shape of what it consumes, the same as what it produces. [gate — check pending]**
@@ -425,7 +425,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 |---|---|---|---|
 | 1.2 pure layers import no `docx` | 0 | 0 | ✓ |
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
-| 1.4 core does not import the web backend | 0 | 1 | ✗ |
+| 1.4 core does not import the web backend | 0 | 0 | ✓ |
 | 2.1 no `db.query(` in `api/` | falling | 30 | ratchet |
 | 3.x oversized-function debt (excess lines) | falling | 2129 | ratchet |
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
