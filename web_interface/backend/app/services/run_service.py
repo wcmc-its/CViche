@@ -24,7 +24,21 @@ DEFAULT_STALE_RUN_MINUTES = 60
 DEFAULT_ORPHAN_REAP_HOURS = 24
 
 
-def _mark_run_failed(run: Run, db: Session, now: datetime) -> None:
+RESTART_INTERRUPT_MESSAGE = (
+    "Run interrupted — the server restarted while this run was in "
+    "progress. Please restart it with the same file."
+)
+
+# Shown on a run still executing when a deploy's drain budget ran out (#116).
+DEPLOY_INTERRUPT_MESSAGE = (
+    "Run interrupted — the server was shut down for a deploy while this run "
+    "was in progress. Please restart it with the same file."
+)
+
+
+def _mark_run_failed(
+    run: Run, db: Session, now: datetime, message: str = RESTART_INTERRUPT_MESSAGE
+) -> None:
     """Mark an orphaned "running" run (and any still-running steps) failed.
 
     This is the pre-#145 behaviour, factored out so both the default path and
@@ -32,10 +46,7 @@ def _mark_run_failed(run: Run, db: Session, now: datetime) -> None:
     """
     run.status = "failed"
     run.completed_at = now
-    run.error_message = (
-        "Run interrupted — the server restarted while this run was in "
-        "progress. Please restart it with the same file."
-    )
+    run.error_message = message
     running_steps = (
         db.query(Step)
         .filter(Step.run_id == run.id, Step.status == "running")
@@ -355,7 +366,7 @@ def _launch_resume(run_id: str, file_path, start_step_number: int) -> bool:
         from app.pipeline import concurrency
         from app.pipeline.orchestrator import PipelineOrchestrator
 
-        if not concurrency.try_acquire_slot():
+        if not concurrency.try_acquire_slot(run_id):
             logger.warning(
                 "Auto-retry for run %s deferred: pod at concurrency capacity "
                 "(%d active). Will be retried on a later reaper pass.",
@@ -372,7 +383,7 @@ def _launch_resume(run_id: str, file_path, start_step_number: int) -> bool:
                 asyncio.run(orchestrator.execute(start_step_number=start_step_number))
             finally:
                 bg_db.close()
-                concurrency.release_slot()
+                concurrency.release_slot(run_id)
 
         import threading
         threading.Thread(target=run_pipeline, daemon=True).start()
@@ -437,6 +448,25 @@ def _schedule_auto_retry(
         db.commit()
         return False
     return True
+
+
+def fail_runs_interrupted_by_shutdown(db: Session, run_ids: list[str]) -> int:
+    """Mark the given runs failed because this pod is exiting mid-run (#116).
+
+    Called once at shutdown, after the drain budget ran out, with the runs that
+    still hold a slot on this pod. Each is claimed with the same conditional
+    UPDATE the reaper uses, so a run that finished (or was cancelled) since the
+    drain last looked is left alone. Returns the count marked failed.
+    """
+    now = datetime.now()
+    failed_count = 0
+    for run in db.query(Run).filter(Run.id.in_(run_ids)).all():
+        if not _claim_stale_run(db, run, run.started_at, status="failed"):
+            continue
+        _mark_run_failed(run, db, now, message=DEPLOY_INTERRUPT_MESSAGE)
+        failed_count += 1
+    db.commit()
+    return failed_count
 
 
 def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set) -> bool:
