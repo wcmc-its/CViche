@@ -13,6 +13,7 @@ question both answer. Nothing here may import `stage_6_word_template`.
 """
 import re
 
+from .fan_out import FANNED_OUT_FROM
 from .normalization import _squash
 from .parsing import _dates_overlap_or_match
 from .render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines
@@ -119,6 +120,16 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     dropped_squashed = _squash(dropped_entry.get('text', ''))
     if dropped_squashed and dropped_squashed in _squash(kept_entry.get('text', '')):
         return True
+    if dropped_entry.get(FANNED_OUT_FROM):
+        # #983: a record fanned out of a multi-record entry is a single short
+        # line, so the two branches below (token containment; fused-blob
+        # recovery) approve dropping it against any longer entry that shares
+        # its words -- "Co-Leader, Cancer Epidemiology (2012-)" against a
+        # "Co-Leader, Cancer Epidemiology Program (2012-2015)" -- and the
+        # recovery pass never re-checks it, because a single segment is not a
+        # record line. Only a verbatim copy may go; anything else is kept, like
+        # the other single-record case (#227).
+        return False
     dropped_sig = _entry_signature_words(dropped_entry)
     if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
             and dropped_sig <= _entry_signature_words(kept_entry)

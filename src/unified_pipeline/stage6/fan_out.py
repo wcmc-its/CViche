@@ -95,14 +95,18 @@ def _record_keys(fields: Mapping[str, Any], schema: frozenset[str]) -> list[str]
 
 def _parent_is_own_record(scalars: Mapping[str, Any],
                           items: Sequence[Mapping[str, Any]],
-                          schema: frozenset[str]) -> bool:
+                          schema: frozenset[str], segment_count: int) -> bool:
     """True when the parent's own scalar fields are a record the list does not
     repeat (a Co-Leader row whose `additional_roles` are the later posts).
 
-    Only a non-date field the items also use can say so: a `mentee_level` the
-    items never carry is shared context, and start/end dates the items repeat
-    are the same span. A parent value some item repeats is that item, so it is
-    not emitted twice.
+    Needs an identity value first: a non-date field the items also use. A
+    `mentee_level` the items never carry is shared context, and start/end dates
+    the items repeat are the same span, so a parent with neither is not a record.
+    Given one, the entry's own text settles it when it can: one more tab
+    segment than list items means the parent is the extra record, exactly as
+    many means the list already holds every one of them (a first post stage 4
+    also left in the parent's scalars). When the counts say neither, a parent
+    whose values some item repeats is that item, not emitted twice.
     """
     item_keys = set().union(*items)
     identity = {key: value for key, value in scalars.items()
@@ -110,6 +114,8 @@ def _parent_is_own_record(scalars: Mapping[str, Any],
                 and not _is_date_key(key) and not _is_blank(value)}
     if not identity:
         return False
+    if segment_count in (len(items), len(items) + 1):
+        return segment_count == len(items) + 1
     return not any(all(item.get(key) == value for key, value in identity.items())
                    for item in items)
 
@@ -158,7 +164,8 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dic
     items = fields[key]
     scalars = {k: copy.deepcopy(v) for k, v in fields.items()
                if k not in (key, _ENTRY_REMARK_KEY)}
-    records = ([scalars] if _parent_is_own_record(scalars, items, schema) else []) \
+    own = _parent_is_own_record(scalars, items, schema, len(_segments(entry.get('text'))))
+    records = ([scalars] if own else []) \
         + [dict(item) for item in items]
     texts = _child_texts(entry.get('text'), records)
     return [_child(entry, {**scalars, **copy.deepcopy(record)}, text, key, i, len(records))
