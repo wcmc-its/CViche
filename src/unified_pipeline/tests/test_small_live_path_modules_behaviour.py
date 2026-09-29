@@ -325,6 +325,58 @@ def test_summary_renders_as_a_tracked_insertion_under_research_activities():
     assert gen.stats["track_changes_added"] == 1
 
 
+def _index_of_summary(gen) -> int:
+    hits = [i for i, p in enumerate(gen.doc.paragraphs) if "MARKER_SUMMARY" in _all_run_text(p)]
+    assert len(hits) == 1
+    return hits[0]
+
+
+def _index_of_heading(gen, prefix: str) -> int:
+    hits = [i for i, p in enumerate(gen.doc.paragraphs) if p.text.startswith(prefix)]
+    assert len(hits) == 1
+    return hits[0]
+
+
+@pytest.mark.parametrize("bullet_text", [
+    "2020: Public lecture series describing our research activities",
+    "2020: PUBLIC LECTURE SERIES ON OUR RESEARCH ACTIVITIES",
+])
+def test_summary_lands_under_the_research_heading_not_a_teaching_bullet_naming_it(bullet_text):
+    # #548 instance A: section K runs before the summary and its bullets sit
+    # ABOVE the template's real heading in the document. A bullet that merely
+    # mentions the anchor phrase (here also in ALL CAPS, which passes a header
+    # shape test on its own) must not capture the summary.
+    gen = _s6_generator()
+    gen._fill_teaching({"K5": [{
+        "taxonomy_code": "K5", "text": bullet_text,
+        "extracted_fields": {"formatted_text": bullet_text},
+    }]})
+    bullet_idx = next(i for i, p in enumerate(gen.doc.paragraphs) if p.text == bullet_text)
+
+    assert gen._fill_research_summary({"research_summary": {"text": _LONG_SUMMARY}}) is True
+
+    heading_idx = _index_of_heading(gen, "Research Activities:")
+    assert bullet_idx < heading_idx
+    # blank line, then the summary, directly under the heading
+    assert _index_of_summary(gen) == heading_idx + 2
+
+
+def test_summary_skips_instruction_prose_that_mentions_the_anchor_phrase(tmp_path):
+    doc = Document()
+    doc.add_paragraph("Please describe your research activities in a short paragraph.")
+    header = doc.add_paragraph()
+    header.add_run("RESEARCH ACTIVITIES").bold = True
+    doc.add_paragraph("Next section body")
+    saved = tmp_path / "prose_before_header.docx"
+    doc.save(saved)
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(saved)
+
+    assert gen._fill_research_summary({"research_summary": {"text": _LONG_SUMMARY}}) is True
+
+    assert _index_of_summary(gen) == _index_of_heading(gen, "RESEARCH ACTIVITIES") + 2
+
+
 def test_verbose_prints_a_status_line_for_each_early_exit_and_the_success_path(caplog):
     """verbose=True is the CLI-visible progress-reporting path (`run_full_pipeline.py`
     prints Warning: Stage N failed around a driver that reads none of this --

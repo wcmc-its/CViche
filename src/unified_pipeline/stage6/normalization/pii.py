@@ -314,6 +314,17 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     WithholdRule(CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"born"),
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  label=r"children (?: [’'] s \s* names? )? | dependents?"),
+    # #1041: a bare child count that is its OWN fragment ("Marital Status:
+    # <status>; <n> Children" -- the `;` hard split leaves it behind the
+    # marital-status cut, and it rendered in the Appendix). The count must
+    # be the WHOLE fragment -- opening right after a hard delimiter
+    # (`_PII_FRAGMENT_SPLIT_RE`) and closing at the next -- so "20 children
+    # and 20 adults" or "20 subjects, 20 children" in a study never matches.
+    WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=r"(?: ^ | (?<= [\n\t|;] ) | (?<= [ ]{3} ) ) [ ]*"
+                       r" \d{1,2} \s+ (?: children | child | kids | sons? | daughters? )"
+                       r" (?= [ \t.]* (?: [\n\t|;] | \s{3,} | $ ) )",
+                 anchored=True),
     WithholdRule(CAT_FAMILY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"family"),
     WithholdRule(CAT_AGE, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"age"),
     WithholdRule(CAT_GENDER, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"gender"),
@@ -532,10 +543,31 @@ class PiiMatch(NamedTuple):
     category: str
 
 
+#: #1041: these rows' labels also close on a hyphen or dash followed by
+#: whitespace or the end of the text ("Marital Status-<gap><value>" rendered
+#: its value in a corpus run). A dash glued to the next character
+#: ("Visa-free") is not a terminator.
+#: Every other row keeps the colon only: with a dash, the title-word rows
+#: matched "Age-related ...", "Gender- and ...", "Health- <employer>" across
+#: 24 corpus uids, and spouse/salary open real titles ("Spouse – A
+#: Documentary Film Review", #473's negative controls).
+_DASH_TERMINATED_CATEGORIES = frozenset({
+    CAT_DATE_OF_BIRTH, CAT_PLACE_OF_BIRTH, CAT_SSN, CAT_PASSPORT,
+    CAT_ALIEN_REGISTRATION, CAT_DRIVERS_LICENSE, CAT_MARITAL_STATUS,
+    CAT_EMERGENCY_CONTACT, CAT_VISA,
+})
+_COLON_TERMINATOR = r"\s*:"
+_COLON_OR_DASH_TERMINATOR = r"\s*(?::|[-–—](?=\s|$))"
+
+
 def _label_pattern(rule: WithholdRule) -> re.Pattern:
     """The compiled opener for a label row: the row's alternatives, then
-    the shared `\\s*:` terminator, appended ONCE for the whole group."""
-    return re.compile(r"(?:" + str(rule.label) + r")\s*:", re.X | re.I)
+    its terminator (`_COLON_OR_DASH_TERMINATOR` for a
+    `_DASH_TERMINATED_CATEGORIES` row, else `_COLON_TERMINATOR`), appended
+    ONCE for the whole group."""
+    terminator = (_COLON_OR_DASH_TERMINATOR if rule.category in _DASH_TERMINATED_CATEGORIES
+                  else _COLON_TERMINATOR)
+    return re.compile(r"(?:" + str(rule.label) + r")" + terminator, re.X | re.I)
 
 
 def _shape_pattern(rule: WithholdRule) -> re.Pattern:
@@ -546,6 +578,22 @@ _COMPILED_POLICY: tuple[tuple[WithholdRule, re.Pattern], ...] = tuple(
     (rule, _label_pattern(rule) if rule.label is not None else _shape_pattern(rule))
     for rule in WITHHOLD_POLICY
 )
+
+
+def _is_bare_label_span(text: str, start: int, end: int) -> bool:
+    """True when `text[start:end]` is a label with no value after it: it
+    ends in a colon (the pre-#1041 test, unchanged), or it is a
+    dash-terminated label row's opener followed by nothing but whitespace
+    ("Marital Status -" before a column gap, tab, newline or cell end)."""
+    if text[start:end].rstrip().endswith(":"):
+        return True
+    for rule, pattern in _COMPILED_POLICY:
+        if rule.label is None or rule.category not in _DASH_TERMINATED_CATEGORIES:
+            continue
+        opener = pattern.match(text, start, end)
+        if opener is not None and not text[opener.end():end].strip():
+            return True
+    return False
 
 
 def _rules_for_scope(scope: str) -> tuple[tuple[WithholdRule, re.Pattern], ...]:
@@ -877,7 +925,7 @@ def _pre_llm_label_value_spans(text: str) -> list[tuple[int, int]]:
             continue
         vm = value_re.search(text, m.start, m.end)
         span = (vm.start(), vm.end()) if vm else None
-        if span is None and text[m.start:m.end].rstrip().endswith(":"):
+        if span is None and _is_bare_label_span(text, m.start, m.end):
             span = _pre_llm_value_span_in_next_run(text, m.end, value_re)
         if span:
             spans.append(span)
@@ -969,7 +1017,7 @@ def pre_llm_bare_label_category(text: str | None) -> str | None:
     caller (`core/docx_structure_extractor.py`) uses this to decide
     whether to scrub the VALUE shape out of the NEXT cell in the row."""
     text = str(text or "")
-    if not text or not text.rstrip().endswith(":"):
+    if not text or not _is_bare_label_span(text, 0, len(text)):
         return None
     for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX):
         if m.category not in _PRE_LLM_VALUE_RE:
