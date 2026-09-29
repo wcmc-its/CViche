@@ -1011,3 +1011,25 @@ def test_the_entrys_own_date_fields_count_as_covered_by_the_date_column():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+@pytest.mark.parametrize("trailer", ["NY", "USA", "(AHA)"])
+def test_short_line_after_an_organization_does_not_become_a_membership(trailer):
+    """#758 follow-up: a short line trailing an organization (a state, a
+    country, the organization's own acronym) is not a second organization.
+    Counting it shifted the next membership's type and date onto it."""
+    entry = {
+        "text": (f"Member\nAmerican Heart Association\n{trailer}\n2010-present\n"
+                 "Fellow\nAmerican College of Cardiology\n2012-present"),
+        "extracted_fields": {},
+    }
+    rows = _render_memberships([entry])
+    assert rows == [["Member, American Heart Association", "2010-Present"],
+                    ["Fellow, American College of Cardiology", "2012-Present"]]
+
+
+def test_short_organization_right_after_a_type_is_kept_on_the_multi_line_path():
+    entry = {"text": "Member\nAMA\n2010-present\nFellow\nACP\n2012-present",
+             "extracted_fields": {}}
+    rows = _render_memberships([entry])
+    assert rows == [["Member, AMA", "2010-Present"], ["Fellow, ACP", "2012-Present"]]

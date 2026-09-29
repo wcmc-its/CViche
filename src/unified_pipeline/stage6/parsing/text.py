@@ -317,6 +317,14 @@ _NON_ORGANIZATION_WORDS = frozenset({
 })
 
 
+# At or below this length a pipe-free part is an organization only in the slot
+# right after a membership type ("Member" then "AMA"). Anywhere else a short
+# line is a location or acronym trailing the organization before it ("NY",
+# "USA", "(AHA)"): counting it would shift every later type and date onto the
+# wrong row, since the three lists are paired by position (#758 follow-up).
+_SHORT_ORGANIZATION_MAX_CHARS = 5
+
+
 def _looks_like_organization(part: str) -> bool:
     """True when a pipe-free membership part reads as an organization name.
 
@@ -351,6 +359,7 @@ def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]
     membership_keywords = ['member', 'fellow', 'diplomat', 'associate', 'elected', 'honorary']
     date_pattern = re.compile(r'^(\d{1,2}/?\d{0,4}\s*-\s*(?:present|\d{1,2}/?\d{0,4}))$|^(\d{4}\s*-\s*(?:present|\d{4}))$', re.IGNORECASE)
 
+    after_type = False
     for line in lines:
         line = line.strip()
         if not line:
@@ -372,10 +381,14 @@ def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]
             # No pipe - classify by content
             if any(kw in line.lower() for kw in membership_keywords) and len(line.split()) <= 3:
                 membership_types.append(line)
-            elif date_pattern.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
+                after_type = True
+                continue
+            if date_pattern.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
                 dates.append(line)
-            elif _looks_like_organization(line):
+            elif _looks_like_organization(line) and (
+                    after_type or len(line) > _SHORT_ORGANIZATION_MAX_CHARS):
                 organizations.append(line)
+            after_type = False
 
     # Match up memberships - pair organizations with types and dates
     if organizations:
