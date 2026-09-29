@@ -169,6 +169,15 @@ class _CommitteeRecord:
 _HEDGED_INSTITUTION_RE = re.compile(
     r'\b(?:implied|inferred|not\s+provided)\b', re.IGNORECASE)
 _WORD_RE = re.compile(r'\w+')
+_PARENTHETICAL_RE = re.compile(r'\([^)]*\)')
+# Function words that do not make an institution a different thing ("Department
+# of Genetics" is already in "Genetics Department Faculty Meeting").
+_INSTITUTION_STOPWORDS = frozenset({'of', 'the', 'for', 'and', 'at', 'in'})
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in _WORD_RE.findall(text.casefold())
+            if w not in _INSTITUTION_STOPWORDS]
 
 
 def _name_with_institution(activity: str, institution: str) -> str:
@@ -178,18 +187,19 @@ def _name_with_institution(activity: str, institution: str) -> str:
     nowhere to render and was dropped. Append it as "Committee, Institution",
     except (name returned unchanged) when there is no name to attach it to,
     the institution is a stage-4 hedge rather than CV text, the name already
-    carries every word of the institution (covers exact containment and
-    near-duplicates such as a name that adds an acronym), or the name is
-    itself contained in the institution.
+    carries every content word of the institution (exact containment and
+    near-duplicates), or the name -- ignoring a parenthetical acronym such as
+    "(CENO)" -- is itself contained in the institution.
     """
     if not activity or _HEDGED_INSTITUTION_RE.search(institution):
         return activity
-    name_words = _WORD_RE.findall(activity.casefold())
-    inst_words = _WORD_RE.findall(institution.casefold())
+    name_words = _content_words(activity)
+    inst_words = _content_words(institution)
     # An empty institution has no words, so it falls out here too.
     if set(inst_words) <= set(name_words):
         return activity
-    if f" {' '.join(name_words)} " in f" {' '.join(inst_words)} ":
+    core = ' '.join(_content_words(_PARENTHETICAL_RE.sub(' ', activity)))
+    if core and f" {core} " in f" {' '.join(inst_words)} ":
         return activity
     return f"{activity.strip()}, {institution}"
 

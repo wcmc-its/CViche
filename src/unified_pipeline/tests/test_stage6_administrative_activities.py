@@ -498,6 +498,26 @@ class TestExtractedInstitutionRendersInNameCell:
         assert [r[0] for r in rows] == [
             "Campaign for Harbor Equity Lakeview (CHEL), Board of Directors"]
 
+    def test_name_with_acronym_contained_in_a_longer_institution_is_not_duplicated(self):
+        rows = _rows(self._entry({
+            "committee_name": "Campaign for Harbor Equity (CHE)",
+            "institution": "Racial Equity Institute (REI) / Campaign for Harbor Equity",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Campaign for Harbor Equity (CHE)"]
+
+    def test_institution_differing_only_by_function_words_is_not_appended(self):
+        rows = _rows(self._entry({
+            "committee_name": "Genetics Department Faculty Meeting Minutes",
+            "institution": "Department of Genetics",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["Genetics Department Faculty Meeting Minutes"]
+
+    def test_name_that_is_only_an_acronym_is_not_treated_as_contained(self):
+        rows = _rows(self._entry({
+            "committee_name": "(CHE)", "institution": "Harbor College",
+            "start_date": "2010", "end_date": "2012"}))
+        assert [r[0] for r in rows] == ["(CHE), Harbor College"]
+
     def test_institution_sharing_only_some_words_with_the_name_is_appended(self):
         rows = _rows(self._entry({
             "committee_name": "Northgate panel", "institution": "Northgate University",
