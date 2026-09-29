@@ -740,6 +740,20 @@ def test_confirmed_kind_without_the_positive_shape_survives(text, kind_sentence)
     ("Cooking", _confirmed("Personal interest listed under hobbies.")),
     ("Leverhulme Trust", _confirmed("Funding organization name with no grant details.")),
     ("Sample Journal of Testing", _confirmed("Orphaned journal title with no article detail.")),
+    # Each shape needs ITS OWN kind named: a date, a title and a label row
+    # under a different confirmed verdict are kept.
+    ("As of August 10, 2022", _confirmed("This is a section header.")),
+    ("Curriculum Vitae & Bibliography", _confirmed("Date stamp only.")),
+    ("Years     School     Degree", _confirmed("Personal hobby with no professional content.")),
+    ("Trainee | Topic | Program", _confirmed("This is a document title/header.")),
+    # A single cell is not a header ROW.
+    ("Assorted", _confirmed("Column header row for table.")),
+    # A cell over the word cap is prose, not a column label.
+    ("Trainee | one two three four five six seven eight nine ten", _confirmed("Column header row.")),
+    # A date followed by more text is not a bare stamp.
+    ("Date May 30, 2020 Springfield General Hospital", _confirmed("This is a date stamp.")),
+    # More than two words before the title is a different sentence.
+    ("One Two Three Curriculum Vitae", _confirmed("This is a document title/header.")),
     # A looser "structural header" verdict is not a SECTION header verdict:
     # the corpus used it for a name line and an institution name.
     ("Sam Q Example MD MPH", _confirmed("This is a name/credentials line and a structural header.")),
