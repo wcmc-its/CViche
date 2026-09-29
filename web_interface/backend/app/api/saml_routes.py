@@ -206,6 +206,10 @@ def _parse_saml_assertion(
         return None, None, RedirectResponse("/login?error=auth_failed", status_code=302)
 
     # Outside the parsing try on purpose -- see the docstring.
+    destination_error = _reject_wrong_destination(authn_response)
+    if destination_error is not None:
+        return None, None, destination_error
+
     replay_error = _reject_replayed_assertion(authn_response)
     if replay_error is not None:
         return None, None, replay_error
@@ -222,6 +226,24 @@ def _parse_saml_assertion(
         return None, None, RedirectResponse("/login?error=missing_attributes", status_code=302)
 
     return attrs, relay_state, None
+
+
+def _reject_wrong_destination(authn_response) -> RedirectResponse | None:
+    """Reject a Response whose Destination is not one of this SP's ACS URLs.
+
+    pysaml2 7.5.x only LOGS this mismatch: StatusResponse._verify returns None
+    and entity._parse_response discards that, handing back a usable response
+    (#672). An absent Destination is allowed, matching pysaml2's own check.
+    Returns a redirect to reject with, or None to continue.
+    """
+    destination = authn_response.response.destination
+    if destination and destination not in authn_response.return_addrs:
+        logger.warning(
+            "[SECURITY] SAML response rejected: Destination %r is not this SP's ACS %r",
+            destination, authn_response.return_addrs,
+        )
+        return RedirectResponse("/login?error=auth_failed", status_code=302)
+    return None
 
 
 def _reject_replayed_assertion(authn_response) -> RedirectResponse | None:
