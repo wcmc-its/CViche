@@ -1454,6 +1454,13 @@ def test_create_simplified_layout_json_table_preview_is_first_row():
     assert table_elem["preview"] == [{"text": "R0C0"}, {"text": "R0C1"}]
 
 
+def test_create_simplified_layout_json_raises_on_an_unhandled_element_type():
+    # #614: a type it has no branch for used to be dropped with no trace.
+    structure = {"elements": [{"idx": 0, "type": "table_content", "text": "Row"}]}
+    with pytest.raises(ValueError, match="table_content"):
+        create_simplified_layout_json(structure)
+
+
 def _reader_view(docx_path):
     """(element text, per-cell data) for every element, plus the
     extract_text_from_docx lines -- both fields an LLM reader can see."""

@@ -1807,6 +1807,12 @@ def create_simplified_layout_json(structure: dict[str, Any], skip_empty: bool = 
                 "preview": elem["data"][0] if elem["data"] else []
             })
 
+        else:
+            # extract_docx_structure emits only paragraph/table/empty. Another
+            # type (e.g. extract_unified_elements' table_header/table_content)
+            # would otherwise vanish from the layout silently (#614).
+            raise ValueError(f"create_simplified_layout_json: unhandled element type {elem['type']!r}")
+
     return simplified
 
 
