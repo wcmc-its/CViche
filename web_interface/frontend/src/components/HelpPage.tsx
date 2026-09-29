@@ -114,8 +114,8 @@ export default function HelpPage() {
               </p>
               <p>
                 After uploading, you will see a real-time progress view showing each step of the pipeline as it
-                processes your document. Most CVs complete in 3 to 8 minutes depending on length and number of
-                publications.
+                processes your document. Most CVs complete in 2 to 6 minutes depending on length and number of
+                publications. You don't need to keep the page open; processing continues on the server.
               </p>
               <p>
                 The estimated cost per run is displayed before you confirm the upload. This is the AI processing cost
@@ -211,8 +211,9 @@ export default function HelpPage() {
               <div>
                 <p className="text-sm font-semibold text-gray-900 mb-1">How long does processing take?</p>
                 <p>
-                  Most CVs are processed in 3 to 8 minutes. Longer CVs with many publications may take up to 15
-                  minutes. You can watch the progress in real time on the run page.
+                  Most CVs are processed in 2 to 6 minutes. Longer CVs with many publications may take 10 minutes or
+                  more. You can watch the progress in real time on the run page, or close it and come back later:
+                  processing continues on the server and the finished run appears in your run history.
                 </p>
               </div>
               <div>

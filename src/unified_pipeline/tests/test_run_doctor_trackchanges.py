@@ -39,6 +39,32 @@ def test_docx_text_includes_insertions_excludes_deletions():
     assert _docx_text(p) == "plain inserted"
 
 
+def test_docx_text_default_view_drops_tabs_and_breaks():
+    """The lints' view is text only; whitespace elements are opt-in (#461)."""
+    p = parse_xml(
+        f'<w:p {nsdecls("w")}><w:r><w:t>a</w:t><w:tab/><w:br/><w:t>b</w:t></w:r></w:p>'
+    )
+    assert _docx_text(p) == "ab"
+
+
+def test_docx_text_with_whitespace_renders_tab_break_and_cr():
+    p = parse_xml(
+        f'<w:p {nsdecls("w")}><w:r><w:t>a</w:t><w:tab/><w:t>b</w:t><w:br/>'
+        '<w:t>c</w:t><w:cr/><w:t>d</w:t></w:r></w:p>'
+    )
+    assert _docx_text(p, with_whitespace=True) == "a\tb\nc\nd"
+
+
+def test_docx_text_with_whitespace_skips_tab_stops_deletions_and_page_breaks():
+    p = parse_xml(
+        f'<w:p {nsdecls("w")}><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr>'
+        '<w:r><w:t>a</w:t><w:br w:type="page"/></w:r>'
+        '<w:del><w:r><w:tab/><w:br/><w:delText>x</w:delText></w:r></w:del>'
+        '<w:ins><w:r><w:tab/><w:t>b</w:t></w:r></w:ins></w:p>'
+    )
+    assert _docx_text(p, with_whitespace=True) == "a\tb"
+
+
 def test_docx_text_empty_paragraph():
     p = parse_xml(f'<w:p {nsdecls("w")}></w:p>')
     assert _docx_text(p) == ""
@@ -93,5 +119,8 @@ def test_hard_fail_gates_do_not_fire_on_tracked_changes(tmp_path):
 
 if __name__ == "__main__":
     test_docx_text_includes_insertions_excludes_deletions()
+    test_docx_text_default_view_drops_tabs_and_breaks()
+    test_docx_text_with_whitespace_renders_tab_break_and_cr()
+    test_docx_text_with_whitespace_skips_tab_stops_deletions_and_page_breaks()
     test_docx_text_empty_paragraph()
     print("OK")

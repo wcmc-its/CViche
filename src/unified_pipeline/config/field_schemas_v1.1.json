@@ -728,6 +728,7 @@
         "location": {"extract": true, "category": "template", "wcm_column": "Institution/Location"},
         "date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy)"},
         "event_name": {"extract": false, "category": "optional"},
+        "role": {"extract": true, "category": "optional"},
         "presentation_type": {"extract": false, "category": "optional"},
         "host_organization": {"extract": false, "category": "optional"},
         "scope": {"extract": false, "category": "optional"},

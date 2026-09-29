@@ -462,14 +462,14 @@ class TeachingSection:
             # Find the appropriate section header
             section_idx = None
             for search_text in search_texts:
-                section_idx = self._find_paragraph_with_text(search_text)
+                section_idx = self._find_header_paragraph(search_text)
                 if section_idx is not None:
                     break
 
             if section_idx is None:
                 # Fall back to general teaching section. Several codes can land
                 # here at once; the module docstring pins the resulting order.
-                section_idx = self._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
+                section_idx = self._find_header_paragraph("EDUCATIONAL CONTRIBUTIONS")
                 if section_idx is None:
                     logger.warning("no template heading for teaching code %s; "
                                    "%d entries not rendered", code, len(entries))

@@ -77,6 +77,7 @@ from unified_pipeline.stage3b.prompt import (  # noqa: F401
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     build_taxonomy_codes_for_prompt,
 )
+from unified_pipeline.stage3b.header_pin import apply_header_pin
 from unified_pipeline.core.batch_pool import map_in_order, workers_from_config
 from unified_pipeline.stage3b.classify import (  # noqa: F401
     _BatchStats,
@@ -150,6 +151,7 @@ def _classify_group(
     primary_codes = context.get_primary_codes()
 
     classified, stats = classify_entries_batch(group_entries, context, taxonomy)
+    classified, _pinned = apply_header_pin(classified, context)
 
     lines = [f"    Entries: {len(group_entries)}"]
     if primary_codes:

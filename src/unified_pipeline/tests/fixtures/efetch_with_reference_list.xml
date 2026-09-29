@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<!-- Synthetic efetch response (#1042). Each article's own ArticleIdList differs
+     from its ReferenceList's IDs. 11111111 has its own doi + pmc; 22222222 has
+     neither (one empty pmc element), but its cited references do. -->
+<PubmedArticleSet>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>11111111</PMID>
+      <Article>
+        <Journal><JournalIssue><Volume>12</Volume><PubDate><Year>2023</Year></PubDate></JournalIssue><Title>Test Journal</Title></Journal>
+        <ArticleTitle>Own IDs present</ArticleTitle>
+        <AuthorList><Author><LastName>Doe</LastName><ForeName>Jane</ForeName><Initials>J</Initials></Author></AuthorList>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>
+        <ArticleId IdType="pubmed">11111111</ArticleId>
+        <ArticleId IdType="doi">10.1000/own.1</ArticleId>
+        <ArticleId IdType="pmc"> PMC1111111 </ArticleId>
+      </ArticleIdList>
+      <ReferenceList>
+        <Reference>
+          <Citation>Reference A.</Citation>
+          <ArticleIdList>
+            <ArticleId IdType="doi">10.9999/ref.a</ArticleId>
+            <ArticleId IdType="pmc">PMC9000001</ArticleId>
+          </ArticleIdList>
+        </Reference>
+        <Reference>
+          <Citation>Reference B.</Citation>
+          <ArticleIdList>
+            <ArticleId IdType="doi">10.9999/ref.b</ArticleId>
+            <ArticleId IdType="pmc">PMC9000002</ArticleId>
+          </ArticleIdList>
+        </Reference>
+      </ReferenceList>
+    </PubmedData>
+  </PubmedArticle>
+  <PubmedArticle>
+    <MedlineCitation>
+      <PMID>22222222</PMID>
+      <Article>
+        <Journal><Title>Test Journal</Title></Journal>
+        <ArticleTitle>No own doi or pmc</ArticleTitle>
+      </Article>
+    </MedlineCitation>
+    <PubmedData>
+      <ArticleIdList>
+        <ArticleId IdType="pubmed">22222222</ArticleId>
+        <ArticleId IdType="pmc"/>
+      </ArticleIdList>
+      <ReferenceList>
+        <Reference>
+          <Citation>Reference C.</Citation>
+          <ArticleIdList>
+            <ArticleId IdType="doi">10.9999/ref.c</ArticleId>
+            <ArticleId IdType="pmc">PMC9000003</ArticleId>
+          </ArticleIdList>
+        </Reference>
+      </ReferenceList>
+    </PubmedData>
+  </PubmedArticle>
+</PubmedArticleSet>

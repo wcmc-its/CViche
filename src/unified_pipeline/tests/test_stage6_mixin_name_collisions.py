@@ -174,6 +174,7 @@ SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     'Discarded a percent effort figure: not a number': 'debug',
     'Discarded a percent effort figure: outside the range (0, %s] percent': 'debug',
     'Dropped %d position record(s) with no title, employer or dates': 'info',
+    'Employment Status row %r already written; conflicting E-coded entry %r under another heading not written': 'warning',
     'Employment Status entry %r matched no template row near the section; entry not written': 'warning',
     'Employment Status entry label %r names no known template row; entry not written': 'warning',
     'Extracted %s fields not consumed by the research-support renderer: %s': 'debug',

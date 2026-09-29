@@ -9,6 +9,7 @@ This is significantly cheaper and faster than vision-based approaches.
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any, TypedDict
@@ -25,6 +26,8 @@ from unified_pipeline.stage6.normalization.pii import (
     redact_pre_llm_value_of_category,
     redact_pre_llm_values,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def rgb_to_hex(rgb: RGBColor | None) -> str:
@@ -213,6 +216,22 @@ def _is_date_column(lines: list[str]) -> bool:
     return date_lines >= len(lines) * 0.5 and date_lines >= 1
 
 
+def _fit_lines_to_slots(lines: list[str], slots: int) -> list[str]:
+    """Return exactly `slots` strings holding every line of `lines`.
+
+    Fewer lines than slots: pad with "" at the end. More lines than slots: the
+    surplus is joined onto the last slot, never dropped (#612: a 4-line date
+    column beside a cell that split into 2 segments lost its last 2 dates).
+    """
+    if len(lines) > slots:
+        logger.info(
+            "split_merged_cells_in_row: %d lines for %d sub-rows; folding %d surplus into the last",
+            len(lines), slots, len(lines) - slots,
+        )
+        return lines[:slots - 1] + ["\n".join(lines[slots - 1:])]
+    return lines + [""] * (slots - len(lines))
+
+
 def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, min_newlines: int = 2) -> list[list[dict[str, Any]]]:
     """
     Split a table row into multiple rows if any cell contains merged content.
@@ -295,8 +314,7 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
                         elif _is_date_column(lines):
                             # Date column with fewer lines - try to distribute dates
                             # Pad with empty strings to match target_count
-                            padded_lines = lines + [''] * (target_count - len(lines))
-                            cell_splits.append(padded_lines[:target_count])
+                            cell_splits.append(_fit_lines_to_slots(lines, target_count))
                         else:
                             cell_splits.append(None)  # Don't split non-matching cells
                     break
@@ -330,10 +348,8 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
                 cell_lines_local = [line.strip() for line in cell_text.strip().split('\n') if line.strip()]
                 if _is_date_column(cell_lines_local) and len(cell_lines_local) > 1:
                     # It's a date column - distribute dates across split rows
-                    if split_idx < len(cell_lines_local):
-                        new_row.append({"text": cell_lines_local[split_idx]})
-                    else:
-                        new_row.append({"text": ""})
+                    slots = _fit_lines_to_slots(cell_lines_local, max_splits)
+                    new_row.append({"text": slots[split_idx]})
                 elif split_idx == 0:
                     new_row.append(cell)
                 else:
@@ -1745,15 +1761,15 @@ def main():
 
     # Save full structure
     output_path = Path(docx_path).stem + "_structure.json"
-    with open(output_path, 'w') as f:
-        json.dump(structure, f, indent=2)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(structure, f, indent=2, ensure_ascii=False)
     print(f"✓ Full structure saved to: {output_path}")
 
     # Save simplified layout
     simplified = create_simplified_layout_json(structure)
     simplified_path = Path(docx_path).stem + "_layout.json"
-    with open(simplified_path, 'w') as f:
-        json.dump(simplified, f, indent=2)
+    with open(simplified_path, 'w', encoding='utf-8') as f:
+        json.dump(simplified, f, indent=2, ensure_ascii=False)
     print(f"✓ Simplified layout saved to: {simplified_path}")
 
     print(f"\nSummary:")
