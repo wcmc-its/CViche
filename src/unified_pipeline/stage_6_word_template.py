@@ -33,6 +33,9 @@ from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
+# stats key counting _classify_geographic_scope LLM failures (#547).
+GEO_SCOPE_FAILURE_STAT = 'geographic_classification_failures'
+
 try:
     from docx import Document
     from docx.shared import Pt, RGBColor, Inches, Twips
@@ -679,6 +682,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             'overflow_to_appendix': 0,
             'appendix_segments_reconsidered': 0,
             'unrendered_records_recovered': 0,
+            GEO_SCOPE_FAILURE_STAT: 0,
         }
 
     def _find_template(self, template_path: str = None) -> str:
@@ -1198,7 +1202,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         validation_issues = _merge_appendix_diversion_warnings(
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
-        all_warnings = self._section_failures + validation_issues
+        all_warnings = self._section_failures + validation_issues + self._geo_scope_failure_warnings()
         _log_validation_warnings(all_warnings)
 
         self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
@@ -1221,6 +1225,23 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             logger.info(f"\nSaved to: {output_path}")
 
         return output_path
+
+    def _geo_scope_failure_warnings(self) -> list[dict[str, Any]]:
+        """One sidecar WARN when any geographic-scope classification failed
+        (#547), so the run doctor sees it. Empty when none failed."""
+        failures = self.stats.get(GEO_SCOPE_FAILURE_STAT, 0)
+        if not failures:
+            return []
+        return [{
+            "check": GEO_SCOPE_FAILURE_STAT,
+            "code": None,
+            "section": "presentations",
+            "message": (f"{failures} geographic scope classification(s) failed "
+                        "and defaulted to National; the Regional/National/"
+                        "International split may be wrong"),
+            "evidence": [f"{GEO_SCOPE_FAILURE_STAT}={failures}"],
+            "severity": "WARN",
+        }]
 
     def _render_section(self, label: str, fn: Callable[[], Any],
                          codes: frozenset[str] = frozenset()) -> Any:  # noqa: ANN401
@@ -1430,9 +1451,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             return scope
 
-        except Exception as e:
-            if self.verbose:
-                logger.warning(f"    ⚠ Geographic classification error: {e}")
+        except Exception:
+            # Never gated on verbose (#547): production runs are not verbose,
+            # and an LLM outage would otherwise refile every presentation as
+            # National with no record. The default itself is kept.
+            logger.warning("Geographic scope classification failed; "
+                           "defaulting to National", exc_info=True)
+            self.stats[GEO_SCOPE_FAILURE_STAT] += 1
             return 'National'  # Default on error
 
 
