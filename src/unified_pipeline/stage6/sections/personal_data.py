@@ -148,15 +148,28 @@ _PHONE_NUMBER_PATTERN = (
 # the address branch taking a second copy.
 _FIELD_NAME = 'name'
 _FIELD_OFFICE_ADDRESS = 'office_address'
+# A home-labelled address row (#730): withheld by policy (#821), and never a
+# candidate for the Office address slot.
+_FIELD_HOME_ADDRESS = 'home_address'
 _FIELD_OFFICE_PHONE = 'office_phone'
 _FIELD_WORK_EMAIL = 'work_email'
 
 _EMAIL_LABEL_WORDS = ('e-mail', 'email')
+# An email line inside an address cell (#730). "Email address:" is included:
+# with a home row now skipped, web198's Business Address cell is reached and
+# opens with that line, which would otherwise render as the Office address.
+_EMAIL_LINE_MARKERS = ('e-mail:', 'email:', 'e-mail\t', 'email address:',
+                       'e-mail address:')
 _PHONE_LABEL_WORDS = ('phone', 'telephone')
 # 'business' stays an address word: a bare "BUSINESS:" cell holding the whole
 # business-address block is a real corpus shape. It is reached only after the
 # email and phone words have been ruled out, which is what makes it safe.
 _ADDRESS_LABEL_WORDS = ('address', 'business')
+# Whole words only: "Homepage address" and "Homeland Security address" are not
+# home addresses. "Home" wins over "business"/"office" in the same label
+# ("Home/Office Address:"): an ambiguous label costs an empty Office cell, the
+# opposite mistake renders a home address.
+_HOME_ADDRESS_LABEL = re.compile(r'\b(?:home|residence|residential)\b')
 
 # An allowlist, not a word match, because "name" ends far more metadata labels
 # than person labels. Widening it is a one-line edit when a corpus CV carries
@@ -195,6 +208,8 @@ def _classify_contact_label(label: str) -> str | None:
     if any(word in head for word in _PHONE_LABEL_WORDS):
         return _FIELD_OFFICE_PHONE
     if any(word in head for word in _ADDRESS_LABEL_WORDS):
+        if _HOME_ADDRESS_LABEL.search(head):
+            return _FIELD_HOME_ADDRESS
         return _FIELD_OFFICE_ADDRESS
     if head in _PERSON_NAME_LABELS:
         return _FIELD_NAME
@@ -522,6 +537,18 @@ def _withhold_recovered(value: str | None, source_text: str,
         return value
     withheld.append(WithheldItem(category, _PERSONAL_DATA_SECTION_LABEL, None))
     return None
+
+
+def _withhold_home_address_row(value: str, source_text: str,
+                               withheld: list[WithheldItem]) -> None:
+    """Record one home-labelled source row as withheld (#730, #821). Nothing
+    is returned: the row never fills a slot. The category is the row's own
+    protected-data category when the value carries one (a "Home Address:" label
+    over a birth-place value stays a birth-place withhold), else home contact."""
+    if value:
+        withheld.append(WithheldItem(
+            _pii_category_of(value, source_text) or CAT_HOME_CONTACT,
+            _PERSONAL_DATA_SECTION_LABEL, None))
 
 
 def _withhold_recovered_lines(block: str | None, source_text: str,
@@ -1053,6 +1080,12 @@ class PersonalDataSection:
                             if self.verbose:
                                 logger.debug("  Found name from table: %s", name)
 
+                # A home-labelled row is withheld and skipped (#730): it
+                # neither fills Office address nor counts as a withheld
+                # Office row, so a business row after it still fills the slot.
+                elif field == _FIELD_HOME_ADDRESS:
+                    _withhold_home_address_row(value, row_text, withheld)
+
                 # Extract address if not yet found
                 # Note: Business address cells often contain embedded phone/fax/email
                 elif (field == _FIELD_OFFICE_ADDRESS and not office_address
@@ -1126,8 +1159,7 @@ class PersonalDataSection:
                 continue
 
             # Extract email if embedded in address
-            if ('e-mail:' in line_lower or 'email:' in line_lower
-                    or 'e-mail\t' in line_lower):
+            if any(marker in line_lower for marker in _EMAIL_LINE_MARKERS):
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', line)
                 if email_match and not work_email:
                     work_email = email_match.group(0)
