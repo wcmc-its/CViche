@@ -730,6 +730,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Tables already cleared this render, by element id. Guards against one
         # filler wiping another's rows when both resolve to the same table (#454).
         self._cleared_tables = set()
+        # Body paragraphs `_insert_bulleted_entry` wrote this render. A header
+        # anchor must never resolve to one of them (#548): an ALL-CAPS or bold
+        # bullet would pass `_find_header_paragraph`'s shape test.
+        self._bullet_paras = set()
         self.stats = {
             'sections_filled': 0,
             'entries_inserted': 0,
@@ -1556,6 +1560,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Create the bulleted entry paragraph first
         entry_para = self.doc.paragraphs[insert_idx].insert_paragraph_before("")
+        self._bullet_paras.add(entry_para._p)
 
         # Add blank line before if requested (insert before the entry we just created)
         if add_blank_before:
@@ -1698,11 +1703,17 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         MENTORING section's '**Optional: List publications...' paragraph
         contains 'bibliography' by substring and would swallow S-code
         recoveries mid-Mentoring if plain substring search were used.
+
+        Nor may it match a bullet an earlier section inserted (#548): those are
+        skipped by identity, since a bullet can be ALL-CAPS or bold and so pass
+        the shape test below.
         """
         search = search_text.lower()
         for i, para in enumerate(self.doc.paragraphs):
             text = para.text.strip()
             if len(text) < 3 or search not in text.lower():
+                continue
+            if para._p in self._bullet_paras:
                 continue
             if text.isupper() or (para.runs and para.runs[0].bold):
                 return i
