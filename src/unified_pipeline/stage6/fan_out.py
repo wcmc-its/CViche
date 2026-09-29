@@ -5,14 +5,22 @@ stored as a list of dicts under a key the code's schema does not define
 (``{"awards": [{...}, {...}]}`` on an H entry, ``{"committees": [...]}`` on a
 P entry). Every section renderer reads the schema's own keys only, so the
 whole list is invisible to it and the entry falls back to its raw text: one
-row, tabs and all, cut at a fixed character cap.
+row, tabs and all.
 
-`fan_out_multi_record_entries` runs on the entry list before grouping and
-replaces such an entry with one child per record, each carrying the record's
-fields under the schema keys the renderer already reads. Text the records do
-not carry is kept, verbatim, as one residual entry (below), so a fan-out never
-drops content the raw-text fallback used to show. Nothing else in the render
-path changes.
+`fan_out_multi_record_entries` replaces such an entry with one child per
+record, each carrying the record's fields under the schema keys the renderer
+already reads and ITS OWN paragraph of the source text as `text`. It does so
+only when that pairing can be checked: the entry's text must split into one
+paragraph per record (or one more, a leading paragraph for the parent's own
+fields), and each record must share more of its words with its own paragraph
+than with any other. Otherwise the entry is left whole and renders as it did before (through the
+tab-free, untruncated raw fallback). Every paragraph goes to exactly one
+output entry, verbatim: no entry's text is dropped or repeated, and none is
+rebuilt from field values (a rebuilt text repeated dates and lost the context
+a renderer prints). What a renderer then shows of an entry is the renderer's
+business, as it is for any entry of that code; a record with a value under a
+key the schema does not define (`_is_sibling_record`) is not fanned out for
+that reason, since the raw text is the only place such a value would show.
 
 Pure: takes and returns plain dicts, imports no I/O library, and takes the
 schema lookup as a parameter so this package does not import stage 4
@@ -36,27 +44,13 @@ MIN_RECORDS_TO_FAN_OUT = 2
 NESTED_NOT_SIBLING_CODE_PREFIXES = ("M",)
 
 # Field names that carry a date: `start_date`, `issue_date`, `date`, `year`, ...
+# A record that holds only a date is a part of the entry, not a sibling record:
+# it names no thing of its own.
 DATE_KEY_SUFFIXES = ("_date", "_dates", "_year")
 DATE_KEYS = frozenset({"date", "dates", "year", "dates_attended"})
 
-# The one text separator a stage-2 paragraph range is joined with.
-_SEGMENT_SEPARATOR = "\t"
-
-# A segment of the parent's text (split on tab and newline) counts as
-# represented by the children when at least this share of its significant
-# words appears in some child's field values. Guessed from the 126-CV corpus
-# (#983): the records' own segments score 0.9-1.0, a segment stage 4 did not
-# extract at all (a registration number, a "served from ... through ..."
-# sentence) scores under 0.7. Below it the segment is kept verbatim as a
-# residual entry, so a fan-out can never drop text. Revisit if stage 4's
-# extraction changes.
-SEGMENT_REPRESENTED_MIN_SHARE = 0.8
-
+# A stage-2 paragraph range is joined with a tab; a newline is a break inside one.
 _SEGMENT_SPLIT_RE = re.compile(r"[\t\n]")
-
-# Joins a fanned-out child's values when its text has to be rebuilt. Not a
-# pipe: a renderer that falls back to `text` would show it (web26's memberships).
-_BUILT_TEXT_SEPARATOR = ", "
 
 SchemaFieldsLookup = Callable[[str], Collection[str]]
 
@@ -65,155 +59,115 @@ def _is_empty(value: object) -> bool:
     return value is None or value == "" or value == [] or value == {}
 
 
-def _record_lists(fields: dict[str, Any],
-                  schema_fields: Collection[str]) -> list[tuple[str, list[dict]]]:
-    """The (key, records) pairs in `fields` that should fan out.
-
-    A pair qualifies when the key is not a schema field, the value is a list
-    of MIN_RECORDS_TO_FAN_OUT or more dicts, and every dict shares a key with
-    the schema (a list of dicts that name none of the schema's fields is
-    something else, e.g. a mentee list on a code whose schema has no mentee
-    field).
-    """
-    pairs = []
-    for key, value in fields.items():
-        if key in schema_fields:
-            continue
-        if not isinstance(value, list) or len(value) < MIN_RECORDS_TO_FAN_OUT:
-            continue
-        if not all(isinstance(item, dict) for item in value):
-            continue
-        if not all(set(item) & set(schema_fields) for item in value):
-            continue
-        pairs.append((key, value))
-    return pairs
-
-
 def _is_date_key(key: str) -> bool:
     return key.endswith(DATE_KEY_SUFFIXES) or key in DATE_KEYS
 
 
-def _parent_is_a_record(fields: dict[str, Any], records: list[dict],
-                        schema_fields: Collection[str]) -> bool:
-    """True when the parent's own schema fields already hold one of the
-    records (stage 4 put the first record in the scalars and only the REST in
-    the list, e.g. `additional_roles`). Then the parent must stay in the
-    output; replacing it would drop that first record.
-
-    A field both carry makes the parent a record. A DATE field does so only
-    when some record's value differs from the parent's: one date range stated
-    for a whole list of committees is context every record shares, not a
-    record of its own.
-    """
-    for record in records:
-        for key, value in record.items():
-            if key not in schema_fields or _is_empty(value) or _is_empty(fields.get(key)):
-                continue
-            if not _is_date_key(key) or value != fields[key]:
-                return True
-    return False
+def _is_sibling_record(item: object, schema_fields: Collection[str]) -> bool:
+    """A dict that names a non-date schema field and holds no value under any
+    other key. A value under a key the schema does not define (a K4 session's
+    `title`, an S3 chapter's `chapter`) is one the renderer cannot show, so
+    the raw text is the only place it survives: that entry stays whole."""
+    if not isinstance(item, dict):
+        return False
+    held = [key for key, value in item.items() if not _is_empty(value)]
+    return (all(key in schema_fields for key in held)
+            and any(not _is_date_key(key) for key in held))
 
 
-def _child_text(parent_text: str, index: int, count: int,
-                record: dict[str, Any]) -> str:
-    """The text a child entry carries: its own tab segment when the parent's
-    text splits into exactly one segment per record, else the record's values.
-    """
-    segments = [seg.strip() for seg in parent_text.split(_SEGMENT_SEPARATOR)
-                if seg.strip()]
-    if len(segments) == count:
-        return segments[index]
-    return _BUILT_TEXT_SEPARATOR.join(
-        str(value) for value in record.values() if not _is_empty(value))
+def _record_lists(fields: dict[str, Any],
+                  schema_fields: Collection[str]) -> list[tuple[str, list[dict]]]:
+    """The (key, records) pairs in `fields` that should fan out: the key is
+    not a schema field, and the value is MIN_RECORDS_TO_FAN_OUT or more dicts
+    that are each a sibling record."""
+    return [(key, value) for key, value in fields.items()
+            if key not in schema_fields
+            and isinstance(value, list) and len(value) >= MIN_RECORDS_TO_FAN_OUT
+            and all(_is_sibling_record(item, schema_fields) for item in value)]
 
 
-def _unrepresented_segments(parent_text: str,
-                            children: list[dict[str, Any]]) -> tuple[list[str], int]:
-    """(segments of `parent_text` the children do not carry, segment count)."""
-    represented: set[str] = set()
-    for child in children:
-        for value in child["extracted_fields"].values():
-            represented |= _significant_words(str(value))
-    segments = [seg.strip() for seg in _SEGMENT_SPLIT_RE.split(parent_text)
-                if seg.strip()]
-    missing = []
-    for segment in segments:
-        words = _significant_words(segment)
-        if words and (len(words & represented) / len(words)
-                      < SEGMENT_REPRESENTED_MIN_SHARE):
-            missing.append(segment)
-    return missing, len(segments)
+def _share_of_record_in(segment: str, record: dict[str, Any]) -> float:
+    """The share of the record's significant words that `segment` contains.
+    Dates are left out: records of one list often share a year, and a shared
+    year would pull a record toward a neighbour's paragraph."""
+    record_words: set[str] = set()
+    for key, value in record.items():
+        if not _is_empty(value) and not _is_date_key(key):
+            record_words |= _significant_words(str(value))
+    if not record_words:
+        return 0.0
+    return len(record_words & _significant_words(segment)) / len(record_words)
 
 
-def _residual_entry(parent: dict[str, Any], segments: list[str]) -> dict[str, Any]:
-    """The parent's text the children do not carry, as an entry with no
-    extracted fields: every renderer already shows such an entry as its raw
-    text, and it runs through the PII pass like any other entry."""
-    residual = {name: copy.deepcopy(value) for name, value in parent.items()
-                if name not in ("extracted_fields", "text")}
-    residual["extracted_fields"] = {}
-    residual["text"] = "\n".join(segments)
-    residual["fanned_out_from"] = {"residual": True}
-    return residual
+def _is_best_match(index: int, segments: list[str], record: dict[str, Any]) -> bool:
+    """True when the record shares words with its own paragraph, and no other
+    paragraph shares a larger part of them. Unlike a fixed share threshold it
+    can disagree with the positional pairing: on the corpus a record's own
+    share runs from 0.17 to 1.0 and a neighbour's reaches 0.67, so no single
+    cut-off separates them."""
+    shares = [_share_of_record_in(segment, record) for segment in segments]
+    return shares[index] > 0 and shares[index] >= max(shares)
 
 
-def _make_child(parent: dict[str, Any], scalars: dict[str, Any],
-                key: str, index: int, count: int,
-                record: dict[str, Any]) -> dict[str, Any]:
+def _pair_segments(text: str,
+                   records: list[dict]) -> tuple[str | None, list[str]] | None:
+    """(the parent's own leading paragraph or None, one paragraph per record),
+    or None when the text does not pair with the records."""
+    segments = [seg.strip() for seg in _SEGMENT_SPLIT_RE.split(text) if seg.strip()]
+    lead = None
+    if len(segments) == len(records) + 1:
+        lead, segments = segments[0], segments[1:]
+    if len(segments) != len(records):
+        return None
+    if not all(_is_best_match(index, segments, record)
+               for index, record in enumerate(records)):
+        return None
+    return lead, segments
+
+
+def _make_child(parent: dict[str, Any], shared: dict[str, Any], key: str,
+                index: int, count: int, record: dict[str, Any],
+                segment: str) -> dict[str, Any]:
     child = {name: copy.deepcopy(value) for name, value in parent.items()
              if name not in ("extracted_fields", "text")}
     # The record wins where it has a value; an empty value never erases the
     # parent's shared context (an institution stated once for a list of degrees).
-    merged = dict(scalars)
+    merged = dict(shared)
     merged.update({name: value for name, value in record.items()
                    if not _is_empty(value)})
     child["extracted_fields"] = copy.deepcopy(merged)
-    child["text"] = _child_text(parent.get("text") or "", index, count, record)
+    child["text"] = segment
     child["fanned_out_from"] = {"key": key, "index": index, "of": count}
     return child
-
-
-def _has_list_of_dicts(fields: object) -> bool:
-    """Cheap pre-check, so the schema lookup runs only for entries that
-    could possibly fan out (nearly none do)."""
-    return isinstance(fields, dict) and any(
-        isinstance(value, list) and len(value) >= MIN_RECORDS_TO_FAN_OUT
-        and all(isinstance(item, dict) for item in value)
-        for value in fields.values())
 
 
 def _fan_out_entry(entry: dict[str, Any],
                    schema_fields: Collection[str]) -> list[dict[str, Any]]:
     fields = entry["extracted_fields"]
     pairs = _record_lists(fields, schema_fields)
-    if not pairs:
+    if len(pairs) != 1:
+        return [entry]  # nothing to expand, or two lists one text cannot pair with
+    key, records = pairs[0]
+    paired = _pair_segments(entry.get("text") or "", records)
+    if paired is None:
         return [entry]
+    lead, segments = paired
 
-    fanned_keys = {key for key, _ in pairs}
-    scalars = {name: value for name, value in fields.items()
-               if name not in fanned_keys}
-    every_record = [rec for _, records in pairs for rec in records]
-    keep_parent = _parent_is_a_record(fields, every_record, schema_fields)
-
+    scalars = {name: value for name, value in fields.items() if name != key}
     out = []
     shared = scalars
-    if keep_parent:
+    if lead is not None:
+        # The scalars ARE a record of their own (the first one, stated in the
+        # parent's fields, with the REST in the list): keep it, with its own
+        # paragraph, and do not let a sibling inherit its role, dates or type.
         parent = dict(entry)
         parent["extracted_fields"] = scalars
+        parent["text"] = lead
         out.append(parent)
-        # The scalars ARE the first record, not context shared by all of
-        # them: a sibling must not inherit its role, dates or type.
         shared = {}
-    children = [_make_child(entry, shared, key, index, len(records), record)
-                for key, records in pairs
-                for index, record in enumerate(records)]
-    if not keep_parent:
-        missing, total = _unrepresented_segments(entry.get("text") or "", children)
-        if total and len(missing) == total:
-            return [entry]  # nothing of the text is in the records: leave it whole
-        if missing:
-            children.append(_residual_entry(entry, missing))
-    return out + children
+    out.extend(_make_child(entry, shared, key, index, len(records), record, segment)
+               for index, (record, segment) in enumerate(zip(records, segments)))
+    return out
 
 
 def fan_out_multi_record_entries(
@@ -222,14 +176,18 @@ def fan_out_multi_record_entries(
     """`entries` with each multi-record entry replaced by one child per record.
 
     `schema_fields_for(code)` returns the field names the renderer for that
-    taxonomy code reads. Entries with no qualifying list, and every entry of
-    a NESTED_NOT_SIBLING_CODE_PREFIXES code, come back as the same object.
+    taxonomy code reads (empty for a code with no schema of its own). Entries
+    with no qualifying list, entries whose text does not pair with their
+    records, and every entry of a NESTED_NOT_SIBLING_CODE_PREFIXES code come
+    back as the same object.
     """
     out: list[dict[str, Any]] = []
     for entry in entries:
         code = str(entry.get("taxonomy_code") or "")
+        fields = entry.get("extracted_fields")
         if (code.startswith(NESTED_NOT_SIBLING_CODE_PREFIXES)
-                or not _has_list_of_dicts(entry.get("extracted_fields"))):
+                or not isinstance(fields, dict)
+                or not any(isinstance(value, list) for value in fields.values())):
             out.append(entry)
             continue
         out.extend(_fan_out_entry(entry, schema_fields_for(code)))

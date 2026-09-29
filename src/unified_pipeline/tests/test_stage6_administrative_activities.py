@@ -429,3 +429,22 @@ class TestStartOnlyRowIsOneYear:
                  ]}}
         assert _rows(entry) == [("Committee One", "Member", "2018"),
                                 ("Committee Two", "Member", "2020-Present")]
+
+
+class TestRawFallbackIsNotCutOrTabbed:
+    """#983: an entry with no usable extracted fields renders as its own
+    text. That text was cut at 150 characters (mid-word, the web218 P entry)
+    and kept the tab stage 2 joins paragraphs with."""
+
+    def test_a_long_line_is_not_cut_at_150_characters(self):
+        text = ("Nomination review committee for the fictional graduate awards, "
+                "Program in Example Science, Faculty representative to the "
+                "Council of Fictional Advisors and the Standing Panel")
+        assert len(text) > 150
+        rows = _rows({"text": text, "extracted_fields": {}, "taxonomy_code": "P"})
+        assert rows == [(text, "", "")]
+
+    def test_tab_joined_paragraphs_become_one_cell_without_tabs(self):
+        rows = _rows({"text": "Alpha Standing Committee\tBeta Standing Committee",
+                      "extracted_fields": {}, "taxonomy_code": "P"})
+        assert rows == [("Alpha Standing Committee; Beta Standing Committee", "", "")]

@@ -81,7 +81,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.normalization.fields import _cell_text, _committee_cell_text  # noqa: E402
+from unified_pipeline.stage6.normalization.fields import (  # noqa: E402
+    _cell_text,
+    _committee_cell_text,
+    _raw_fallback_cell,
+)
 from unified_pipeline.stage6.sections.service import _journal_name_cell_text  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -613,3 +617,74 @@ def test_q1_start_only_row_keeps_present_end_to_end(tmp_path):
     rows = list(_rows_containing(doc, "Fictional Society Four"))
     assert len(rows) == 1
     assert rows[0][-1] == "2019-Present"
+
+
+# ---------------------------------------------------------------------------
+# Part 5 (#983): a raw-text fallback is shown whole, tab-free, never cut at a
+# fixed character count. `_raw_fallback_cell` is the one place that rule lives;
+# each service writer that falls back to raw text goes through it, and each
+# gets its own end-to-end test so deleting that call at one site fails a test.
+# ---------------------------------------------------------------------------
+
+_LONG_RAW_TEXT = ("Served on the Fictional Advisory Council for Example Studies, "
+                  "and as faculty representative to the Standing Panel for Sample "
+                  "Affairs at the Fictional University of Testing")
+
+
+def _raw_entry(code, text, **fields):
+    return {"text": text, "taxonomy_code": code, "element_idx_start": 0,
+            "extracted_fields": fields}
+
+
+def _cells_of_all_rows(doc):
+    return [cell.text for table in doc.tables for row in table.rows for cell in row.cells]
+
+
+def test_raw_fallback_cell_joins_tab_parts_and_never_cuts():
+    assert _raw_fallback_cell("Alpha\tBeta\t\tGamma ") == "Alpha; Beta; Gamma"
+    assert _raw_fallback_cell(_LONG_RAW_TEXT) == _LONG_RAW_TEXT
+    assert _raw_fallback_cell("Line one\nLine two") == "Line one\nLine two"
+    assert _raw_fallback_cell(None) == ""
+
+
+def test_service_boards_raw_text_is_not_cut_at_150(tmp_path):
+    assert len(_LONG_RAW_TEXT) > 150
+    doc = _render(tmp_path, [_entry("A", name="Jane Q. Public, MD"),
+                             _raw_entry("Q2", _LONG_RAW_TEXT)])
+    assert _LONG_RAW_TEXT in _cells_of_all_rows(doc)
+
+
+def test_extramural_role_only_entry_shows_its_raw_text_whole(tmp_path):
+    """A role but no organization: the organization cell falls back to the
+    raw text (`_fill_extramural_leadership`, the `organization or role` branch)."""
+    text = _LONG_RAW_TEXT + "\tFictional Society Five"
+    doc = _render(tmp_path, [_entry("A", name="Jane Q. Public, MD"),
+                             _raw_entry("Q1", text, role="Treasurer")])
+    assert _LONG_RAW_TEXT + "; Fictional Society Five" in _cells_of_all_rows(doc)
+
+
+def test_extramural_entry_without_fields_shows_its_raw_text_whole(tmp_path):
+    doc = _render(tmp_path, [_entry("A", name="Jane Q. Public, MD"),
+                             _raw_entry("Q1", _LONG_RAW_TEXT)])
+    assert _LONG_RAW_TEXT in _cells_of_all_rows(doc)
+
+
+def test_journal_reviewing_raw_text_is_not_cut_at_100(tmp_path):
+    text = "Reviewer\t" + _LONG_RAW_TEXT
+    doc = _render(tmp_path, [_entry("A", name="Jane Q. Public, MD"),
+                             _raw_entry("Q4D", text)])
+    # the "Reviewer" prefix is stripped BEFORE the tab-joining (the regex eats
+    # the whitespace after it), so no stray "; " leads the cell
+    assert _LONG_RAW_TEXT in _cells_of_all_rows(doc)
+
+
+def test_other_service_raw_text_is_not_cut_and_keeps_no_leading_separator(tmp_path):
+    """The date prefix is stripped before the tab-joining for the same reason;
+    joining first left a stray "; " in front of the cell (found by the render
+    gate on a corpus CV)."""
+    text = "2016-23\t" + _LONG_RAW_TEXT
+    doc = _render(tmp_path, [_entry("A", name="Jane Q. Public, MD"),
+                             _raw_entry("Q4", text)])
+    cells = _cells_of_all_rows(doc)
+    assert _LONG_RAW_TEXT in cells
+    assert not [c for c in cells if c.startswith(";")]

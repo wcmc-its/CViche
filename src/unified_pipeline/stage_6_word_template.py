@@ -160,7 +160,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     normalize_retired_code,
     segment_already_rendered,
 )
-from unified_pipeline.stage4.schemas import get_field_schema
+from unified_pipeline.stage4.schemas import get_active_schemas
 from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
@@ -929,8 +929,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # #983: a stage-4 list of sibling records under a key the schema does
         # not define becomes one entry per record, before anything else
         # (mismatch correction, the PII pass, dedup) sees the entries.
+        # A code with no schema of its own has no fields to pair records with.
+        schemas = get_active_schemas()
         entries = fan_out_multi_record_entries(
-            entries, lambda code: get_field_schema(code)["fields"])
+            entries, lambda code: schemas[code]["fields"] if code in schemas else ())
         for entry in entries:
             code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code)

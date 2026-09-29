@@ -1,11 +1,12 @@
 """#983: a stage-4 list of sibling records under a key the schema does not
 define is expanded to one entry per record, so each record renders as its own
-row instead of the whole entry falling back to raw, tab-joined, truncated text.
+row instead of the whole entry falling back to raw, tab-joined text.
 
-Two layers, because the pure helper alone would not catch a call site that
-stopped calling it:
+Three layers, because the pure helper alone would not catch a call site that
+stopped calling it or passed it the wrong schema lookup:
 
 * `fan_out_multi_record_entries` on plain dicts (the rules);
+* `WCMTemplateGenerator._group_entries_by_code` (the call site);
 * the real `generate()` path against the committed WCM template (the wire).
 
 Synthetic entries only, no PII.
@@ -26,7 +27,6 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage4.schemas import get_field_schema  # noqa: E402
-from unified_pipeline.stage6.dedup import deduplicate_entries  # noqa: E402
 from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -56,84 +56,97 @@ _AWARDS_TEXT = ("1986    Alpha Honor Society, Example University\t"
 
 # --- the rules ---------------------------------------------------------------
 
-def test_each_record_becomes_its_own_entry_with_its_fields_and_segment():
+def test_each_record_becomes_its_own_entry_with_its_fields_and_paragraph():
     out = _fan_out([_honors_entry(_AWARDS_TEXT, _AWARDS)])
 
     assert [e["extracted_fields"]["award_name"] for e in out] == [
         "Alpha Honor Society", "Beta Honor Society", "Gamma Honor Society"]
     assert all("awards" not in e["extracted_fields"] for e in out)
-    # one tab segment per record: each child carries its own, tab-free
+    # each child carries its own paragraph of the source, verbatim and tab-free
     assert out[1]["text"] == "Beta Honor Society, Example University"
+    assert out[0]["text"] == "1986    Alpha Honor Society, Example University"
     assert out[1]["fanned_out_from"] == {"key": "awards", "index": 1, "of": 3}
     assert all(e["taxonomy_code"] == "H" for e in out)
 
 
-def test_text_is_built_from_the_record_when_segments_do_not_match_the_count():
-    # 2 records, 3 tab segments (a name split across a paragraph break)
-    text = "1988    Delta Omega, National Honorary, University of\tPittsburgh\tSecond Award"
-    awards = [
-        {"award_name": "Delta Omega, National Honorary", "granting_body": "University of Pittsburgh", "date": "1988"},
-        {"award_name": "Second Award", "granting_body": None, "date": "1988"},
-    ]
-    out = _fan_out([_honors_entry(text, awards)])
-
-    assert len(out) == 2
-    assert "\t" not in out[0]["text"]
-    assert out[0]["text"] == "Delta Omega, National Honorary, University of Pittsburgh, 1988"
-
-
 def test_shared_scalars_are_inherited_and_an_empty_value_does_not_erase_them():
-    entry = {"taxonomy_code": "B1", "text": "Example University\tM.S. 2015\tPh.D. 2018",
+    entry = {"taxonomy_code": "B1",
+             "text": "Master of Science 2015 Example University\tDoctor of Philosophy 2018 Example University",
              "extracted_fields": {
                  "institution": "Example University",
-                 "degrees": [{"degree": "M.S.", "year": "2015", "institution": None},
-                             {"degree": "Ph.D.", "year": "2018"}]}}
+                 "degrees": [{"degree": "Master of Science", "year": "2015", "institution": None},
+                             {"degree": "Doctor of Philosophy", "year": "2018"}]}}
     out = _fan_out([entry])
 
     assert [(e["extracted_fields"]["degree"], e["extracted_fields"]["institution"])
-            for e in out] == [("M.S.", "Example University"), ("Ph.D.", "Example University")]
+            for e in out] == [("Master of Science", "Example University"),
+                              ("Doctor of Philosophy", "Example University")]
 
 
-def test_a_parent_that_already_holds_the_first_record_stays_and_children_do_not_inherit_it():
-    # stage 4 put the first role in the scalars and only the REST in the list
+def test_a_leading_paragraph_is_the_parents_own_entry_and_children_do_not_inherit_it():
+    # stage 4 put the first role in the scalars and only the REST in the list:
+    # one paragraph more than records, the first one the parent's own
     entry = {"taxonomy_code": "O",
-             "text": "2012- Co-Leader, Program\t2015-2022 Leader\t2022- Deputy",
+             "text": "2012- Co-Leader, Example Program\t2015-2022 Leader, Sample Program\t2022- Deputy Director",
              "extracted_fields": {
-                 "leadership_role": "Co-Leader, Program", "institution": "Example Center",
+                 "leadership_role": "Co-Leader, Example Program", "institution": "Example Center",
                  "start_date": "2012", "end_date": None,
                  "additional_roles": [
-                     {"leadership_role": "Leader", "start_date": "2015", "end_date": "2022"},
-                     {"leadership_role": "Deputy", "start_date": "2022", "end_date": "present"}]}}
+                     {"leadership_role": "Leader, Sample Program", "start_date": "2015", "end_date": "2022"},
+                     {"leadership_role": "Deputy Director", "start_date": "2022", "end_date": "present"}]}}
     out = _fan_out([entry])
 
     assert [e["extracted_fields"].get("leadership_role") for e in out] == [
-        "Co-Leader, Program", "Leader", "Deputy"]
-    assert out[0]["text"] == entry["text"]          # the first record keeps its own text
-    assert "institution" not in out[1]["extracted_fields"]   # not the first record's context
+        "Co-Leader, Example Program", "Leader, Sample Program", "Deputy Director"]
+    assert out[0]["text"] == "2012- Co-Leader, Example Program"    # its own paragraph, not the whole text
+    assert "additional_roles" not in out[0]["extracted_fields"]
+    assert out[1]["text"] == "2015-2022 Leader, Sample Program"
+    assert "institution" not in out[1]["extracted_fields"]   # not the parent's context
 
 
-def test_a_parent_holding_only_shared_dates_is_replaced_not_kept():
-    # one date range stated for the list: context, not a record of its own
-    entry = {"taxonomy_code": "P", "text": "2018-2022  Alpha Committee\tBeta Committee",
-             "extracted_fields": {"start_date": "2018", "end_date": "2022", "entries": [
-                 {"committee_name": "Alpha Committee", "role": "Chair", "start_date": "2018", "end_date": "2022"},
-                 {"committee_name": "Beta Committee", "role": "Member", "start_date": "2018", "end_date": "2022"}]}}
+def test_every_paragraph_of_the_text_goes_to_exactly_one_entry():
+    """The property a fan-out must keep: nothing dropped, nothing repeated."""
+    entry = {"taxonomy_code": "O",
+             "text": "2012- Co-Leader, Example Program\t2015-2022 Leader, Sample Program\t2022- Deputy Director",
+             "extracted_fields": {
+                 "leadership_role": "Co-Leader, Example Program", "start_date": "2012",
+                 "additional_roles": [
+                     {"leadership_role": "Leader, Sample Program", "start_date": "2015"},
+                     {"leadership_role": "Deputy Director", "start_date": "2022"}]}}
     out = _fan_out([entry])
 
-    assert [e["extracted_fields"]["committee_name"] for e in out] == ["Alpha Committee", "Beta Committee"]
+    assert "\t".join(e["text"] for e in out) == entry["text"]
 
 
-def test_a_parent_whose_dates_differ_from_the_records_is_kept_as_the_first_record():
-    entry = {"taxonomy_code": "I", "text": "2007- Example Network\t-Candidate Member, 2007-2009\t-Full Member, 2009-",
-             "extracted_fields": {"organization": "Example Network", "membership_type": "Full Member",
-                                  "start_date": "2007", "end_date": "present", "additional_roles": [
-                 {"role": "Candidate Member", "start_date": "2007", "end_date": "2009"},
-                 {"role": "Full Member", "start_date": "2009", "end_date": "present"}]}}
-    out = _fan_out([entry])
+def test_text_that_does_not_split_into_one_paragraph_per_record_is_left_whole():
+    # 2 records, 4 paragraphs: which paragraph belongs to which record is a guess
+    entry = _honors_entry("1988 Alpha Honor Society\tExample University\tBeta Honor Society\tSecond Note",
+                          _AWARDS[:2])
+    assert _fan_out([entry]) == [entry]
 
-    assert len(out) == 3
-    assert out[0]["extracted_fields"]["organization"] == "Example Network"   # the parent, unchanged
-    assert out[1]["extracted_fields"] == {"role": "Candidate Member", "start_date": "2007", "end_date": "2009"}
+
+def test_paragraphs_in_the_wrong_order_are_left_whole():
+    # the right count, but each record's words are in the OTHER record's paragraph
+    text = "Beta Honor Society, Example University\tAlpha Honor Society, Example University"
+    entry = _honors_entry(text, _AWARDS[:2])
+    assert _fan_out([entry]) == [entry]
+
+
+def test_a_record_with_a_value_the_schema_cannot_show_is_left_whole():
+    # `chapter` is not an S3 field: the chapter titles survive only in the raw text
+    entry = {"taxonomy_code": "S3",
+             "text": "Example Handbook of Testing (1995)\tSmith, J. Chapter One\tJones, K. Chapter Two",
+             "extracted_fields": {"title": "Example Handbook of Testing", "chapters_authored": [
+                 {"authors": "Smith, J.", "chapter": "Chapter One"},
+                 {"authors": "Jones, K.", "chapter": "Chapter Two"}]}}
+    assert _fan_out([entry]) == [entry]
+
+
+def test_records_that_hold_only_a_date_are_parts_not_siblings():
+    entry = {"taxonomy_code": "K4", "text": "2020- Example Program\t04/22/2020\t04/29/2020",
+             "extracted_fields": {"activity_title": "Example Program", "sessions": [
+                 {"date": "2020-04-22"}, {"date": "2020-04-29"}]}}
+    assert _fan_out([entry]) == [entry]
 
 
 def test_lists_that_are_not_sibling_records_are_left_alone():
@@ -149,42 +162,41 @@ def test_lists_that_are_not_sibling_records_are_left_alone():
         assert _fan_out([entry]) == [entry], name
 
 
+def test_two_lists_in_one_entry_are_left_whole():
+    # one text cannot be paired with two lists
+    entry = _honors_entry("Alpha Honor Society\tBeta Honor Society", _AWARDS[:2],
+                          fellowships=[{"award_name": "Alpha Honor Society"},
+                                       {"award_name": "Beta Honor Society"}])
+    assert _fan_out([entry]) == [entry]
+
+
+def test_a_code_with_no_schema_of_its_own_is_left_alone():
+    entry = _honors_entry(_AWARDS_TEXT, _AWARDS)
+    assert fan_out_multi_record_entries([entry], lambda code: ()) == [entry]
+
+
 def test_a_grants_nested_sub_awards_are_not_split_into_grants():
     entry = {"taxonomy_code": "M2A", "text": "Grant Title\tSub Alpha 100\tSub Beta 200",
              "extracted_fields": {"title": "Grant Title", "sub_awards": [
-                 {"sub_title": "Sub Alpha", "total_funding": "100"},
-                 {"sub_title": "Sub Beta", "total_funding": "200"}]}}
+                 {"title": "Sub Alpha", "total_funding": "100"},
+                 {"title": "Sub Beta", "total_funding": "200"}]}}
     assert _fan_out([entry]) == [entry]
 
 
-def test_text_the_records_do_not_carry_is_kept_verbatim_as_a_residual_entry():
-    text = ("2022-present  Alpha Committee\tBeta Committee\t"
-            "Chaired the special search for the endowed chair in 2019 and 2020")
-    entry = {"taxonomy_code": "P", "text": text, "extracted_fields": {"entries": [
-        {"committee_name": "Alpha Committee", "role": "Member", "start_date": "2022", "end_date": "present"},
-        {"committee_name": "Beta Committee", "role": "Member", "start_date": "2022", "end_date": "present"}]}}
-    out = _fan_out([entry])
+# --- the call site: _group_entries_by_code -----------------------------------
 
-    assert len(out) == 3
-    residual = out[-1]
-    assert residual["fanned_out_from"] == {"residual": True}
-    assert residual["extracted_fields"] == {}
-    assert residual["text"] == "Chaired the special search for the endowed chair in 2019 and 2020"
+def test_the_call_site_fans_out_a_known_code_and_skips_a_code_without_a_schema():
+    gen = WCMTemplateGenerator(verbose=False)
+    fanned = gen._group_entries_by_code([_honors_entry(_AWARDS_TEXT, _AWARDS)])
+    assert len(fanned["H"]) == 3
 
-
-def test_an_entry_the_records_do_not_account_for_at_all_is_left_whole():
-    entry = {"taxonomy_code": "P",
-             "text": "Prose about service on a number of college bodies over many years",
-             "extracted_fields": {"entries": [{"committee_name": "Zzz"}, {"committee_name": "Yyy"}]}}
-    assert _fan_out([entry]) == [entry]
-
-
-def test_dedup_never_pairs_a_residual_with_a_record_it_repeats():
-    child = {"taxonomy_code": "P", "text": "Alpha Committee member 2020",
-             "extracted_fields": {"committee_name": "Alpha Committee"}}
-    residual = {"taxonomy_code": "P", "text": "Alpha Committee member 2020 chaired the search",
-                "extracted_fields": {}, "fanned_out_from": {"residual": True}}
-    assert deduplicate_entries([child, residual]) == [child, residual]
+    # a code the schema registry does not know would get the DEFAULT schema
+    # (text/date/description) if the lookup asked stage 4 for it naively
+    unknown = {"taxonomy_code": "ZZ9", "text": "Alpha thing\tBeta thing",
+               "extracted_fields": {"things": [{"description": "Alpha thing"},
+                                               {"description": "Beta thing"}]}}
+    kept = gen._group_entries_by_code([unknown])
+    assert [e.get("fanned_out_from") for e in kept["ZZ9"]] == [None]
 
 
 # --- the wire: generate() ----------------------------------------------------
@@ -223,9 +235,9 @@ def test_generate_renders_each_honor_as_its_own_row_without_tabs(tmp_path):
 def test_generate_renders_each_committee_as_its_own_row_with_role_and_dates(tmp_path):
     text = "2016- present  Alpha Committee, Example School\tBeta Committee, Example School"
     entry = {"taxonomy_code": "P", "text": text, "extracted_fields": {"entries": [
-        {"committee_name": "Alpha Committee", "role": "Chair", "institution": "Example School",
+        {"committee_name": "Alpha Committee", "role": "Chair",
          "start_date": "2016", "end_date": "present"},
-        {"committee_name": "Beta Committee", "role": "Member", "institution": "Example School",
+        {"committee_name": "Beta Committee", "role": "Member",
          "start_date": "2016", "end_date": "present"}]}}
     doc = _render(tmp_path, [_OWNER_ENTRY, entry])
     rows = _rows(doc)
@@ -235,43 +247,22 @@ def test_generate_renders_each_committee_as_its_own_row_with_role_and_dates(tmp_
     assert not [c for c in _all_cells(doc) if "Committee" in c and "\t" in c]
 
 
-def test_generate_keeps_a_residual_line_and_the_record_it_repeats(tmp_path):
-    text = ("2022-present  Alpha Committee\tBeta Committee\t"
-            "Chaired the special search for the endowed chair in 2019 and 2020")
-    entry = {"taxonomy_code": "P", "text": text, "extracted_fields": {"entries": [
-        {"committee_name": "Alpha Committee", "role": "Member", "start_date": "2022", "end_date": "present"},
-        {"committee_name": "Beta Committee", "role": "Member", "start_date": "2022", "end_date": "present"}]}}
+def test_generate_repeats_no_row_for_a_leading_paragraph_entry(tmp_path):
+    """A leading paragraph gives the parent its own row; each record's row
+    appears once, and no row is the whole entry's text again."""
+    text = ("2012- Co-Leader, Example Program, Example Center\t"
+            "2015-2022 Leader, Sample Program, Example Center\t"
+            "2022- Deputy Director, Example Center")
+    entry = {"taxonomy_code": "O", "text": text, "extracted_fields": {
+        "leadership_role": "Co-Leader, Example Program", "institution": "Example Center",
+        "start_date": "2012", "end_date": None,
+        "additional_roles": [
+            {"leadership_role": "Leader, Sample Program", "institution": "Example Center",
+             "start_date": "2015", "end_date": "2022"},
+            {"leadership_role": "Deputy Director", "institution": "Example Center",
+             "start_date": "2022", "end_date": "present"}]}}
     cells = _all_cells(_render(tmp_path, [_OWNER_ENTRY, entry]))
 
-    assert any("Chaired the special search" in c for c in cells), "residual text was dropped"
-    assert "Alpha Committee" in cells and "Beta Committee" in cells
-
-
-def test_generate_does_not_cut_a_raw_service_entry_mid_word(tmp_path):
-    long_text = "Served as a member of the Long Named Advisory Council " * 6
-    entry = {"taxonomy_code": "Q1", "text": long_text.strip(), "extracted_fields": {}}
-    cells = _all_cells(_render(tmp_path, [_OWNER_ENTRY, entry]))
-
-    assert any(long_text.strip() in c for c in cells)
-
-
-def test_generate_strips_the_date_prefix_before_joining_tab_parts_in_other_service(tmp_path):
-    """The service fallback removes a leading date with a regex that consumes
-    the tab after it; joining the parts first left a stray "; " in front of the
-    cell (the 2082 corpus CV, found by the render A/B)."""
-    entry = {"taxonomy_code": "Q4", "text": "2016-23\tLibrary Representative",
-             "extracted_fields": {"service_type": "Library Representative",
-                                  "start_date": "2016", "end_date": "2023"}}
-    cells = _all_cells(_render(tmp_path, [_OWNER_ENTRY, entry]))
-
-    assert any("Library Representative" in c for c in cells)
-    assert not any(c.startswith(";") for c in cells)
-
-
-def test_generate_strips_the_reviewer_prefix_before_joining_tab_parts(tmp_path):
-    entry = {"taxonomy_code": "Q4D", "text": "Reviewer\tJournal of Examples", "extracted_fields": {}}
-    cells = _all_cells(_render(tmp_path, [_OWNER_ENTRY, entry]))
-
-    assert "Journal of Examples" in cells
-    assert not any(c.startswith(";") for c in cells)
-
+    for role in ("Co-Leader, Example Program", "Leader, Sample Program", "Deputy Director"):
+        assert len([c for c in cells if role in c]) == 1, role
+    assert not [c for c in cells if "\t" in c and "Example Center" in c]
