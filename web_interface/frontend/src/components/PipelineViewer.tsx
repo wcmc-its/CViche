@@ -90,17 +90,6 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const logsEndRef = useRef<HTMLDivElement>(null)
   const [cvInsights, setCvInsights] = useState<any>(null)
 
-  // Explicit user page exit protection alert interceptor
-  useEffect(() => {
-    if (runStatus?.status !== 'running') return
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault()
-      e.returnValue = ''
-    }
-    window.addEventListener('beforeunload', handleBeforeUnload)
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
-  }, [runStatus?.status])
-
   // Automatic target window scroll tracker targeting live user context feedback triggers
   useEffect(() => {
     if (window.location.hash === '#feedback' && runStatus?.status === 'complete') {
@@ -111,6 +100,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
       return () => clearTimeout(timer)
     }
   }, [runStatus?.status])
+
+  const runningStep = runStatus?.steps.find((s) => s.status === 'running')
+  const runningStepProgress = runningStep ? stepProgress[runningStep.step_number] : undefined
 
   // Pure data derived state execution calculation — maps linear updates instantly on changes
   const calculateProgress = useCallback(() => {
@@ -387,6 +379,19 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
             </div>
           </div>
           <span className="text-sm font-semibold text-gray-900 min-w-[50px] text-right">{displayProgress}%</span>
+        </div>
+        <div className="mt-2 flex flex-wrap justify-between gap-x-4 gap-y-1 text-sm text-gray-600">
+          <span>
+            {runningStep && (
+              <>
+                {runningStep.step_name}
+                {runningStepProgress && runningStepProgress.total > 0 && (
+                  <>: {runningStepProgress.current} of {runningStepProgress.total}</>
+                )}
+              </>
+            )}
+          </span>
+          <span>You can close this page. Processing continues, and the result will be in your Run History.</span>
         </div>
       </div>
 
