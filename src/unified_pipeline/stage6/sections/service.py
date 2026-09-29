@@ -43,6 +43,13 @@ LEADERSHIP_TAXONOMY_CODE = 'Q1'         # Leadership in Extramural Organizations
 GRANT_REVIEWING_CODE = 'Q3'             # Grant Reviewing / Study Sections
 EDITORIAL_BOARD_CODES = ('Q4B', 'Q4C')  # Editorial Board Membership roles
 
+# The fields that can name the organization of a Q1 row, in priority order. Q1's
+# own schema names it `organization`; an entry the hierarchy-mismatch reroute
+# (`_correct_mismatch_if_needed`) moves to Q1 still carries the schema of the
+# code it was extracted under -- a Q4B entry names it `journal_name` and a K3
+# entry `program_name` (#946: run ZA1VOV's "Ortho Pearls WoW" section editor).
+EXTRAMURAL_ORGANIZATION_FIELDS = ('organization', 'journal_name', 'program_name')
+
 # Q3/Q4/Q4A/Q4B/Q4C -> (WCM template section display name, header search-text candidates)
 OTHER_SERVICE_SECTION_ROUTING = {
     GRANT_REVIEWING_CODE: ('Grant Reviewing', ['Grant Reviewing', 'Study Sections']),
@@ -113,6 +120,55 @@ EXTRAMURAL_ROLE_KEYWORDS = (
 _ROLE_STEM_SUFFIXES = ('s', 'es', 'ed', 'ing', 'ship', 'ships', 'man', 'men',
                        'woman', 'women', 'person', 'persons', 'people',
                        'or', 'ors', 'lor', 'lors')
+
+
+# A year, or a year range ("2005-present", "1993-1996", "2001-"), used to find
+# the date text stage 4 already moved into `start_date`/`end_date`.
+_YEAR = r'(?:1[89]|20)\d{2}'
+_DATE_SPAN = re.compile(
+    rf'(?<!\d){_YEAR}(?:\s*[-–—]\s*(?:{_YEAR}|present|current|ongoing)?)?(?!\d)',
+    re.IGNORECASE)
+_TEXT_CELL_SEPARATORS = re.compile(r'[\t\n|]+')
+_EDGE_PUNCTUATION = ' ,;:.-–—|"“”'
+
+
+def _organization_left_in_text(text: object, role: object, start_date: object,
+                               end_date: object) -> str:
+    """The organization of a Q1 row whose stage-4 fields name none: the entry
+    text with what the other two columns already show taken out.
+
+    `_fill_extramural_leadership` used to put the whole raw entry line in the
+    Organization column when no organization field was set, so the role and the
+    dates were printed twice and the source's tab separators came through
+    (#946: "2022-present Ortho Pearls WoW<TAB>Sports Medicine Section Editor").
+    What is left after removing the role text and the dates stage 4 extracted
+    is the organization ("Ortho Pearls WoW"). Nothing else is removed: a year
+    that is not in `start_date`/`end_date` (the Dates cell would not show it)
+    and every word outside the role stay, so the row never loses text the
+    other columns do not carry. When the role is the whole line the result is
+    '' -- the Role cell already holds it.
+
+    A `role` that is not a plain string (stage 4 files a list of per-record
+    dicts there for a fused entry, and `_cell_text` then renders them with
+    their own organization names) is no text to subtract, so the entry text is
+    returned as it stands.
+    """
+    text = _cell_text(text)
+    if not isinstance(role, str):
+        return text
+    known_years = set(re.findall(_YEAR, f'{_cell_text(start_date)} {_cell_text(end_date)}'))
+
+    def _drop_known_dates(match: re.Match[str]) -> str:
+        return '' if set(re.findall(_YEAR, match.group())) <= known_years else match.group()
+
+    text = _DATE_SPAN.sub(_drop_known_dates, text)
+    for part in re.split(r'\s*;\s*', _cell_text(role)):
+        words = re.findall(r'\w+', part)
+        if words:
+            joined = r'[\W_]*'.join(map(re.escape, words))
+            text = re.sub(rf'\b{joined}\b', '', text, flags=re.IGNORECASE)
+    segments = (segment.strip(_EDGE_PUNCTUATION) for segment in _TEXT_CELL_SEPARATORS.split(text))
+    return ', '.join(re.sub(r'\s{2,}', ' ', segment) for segment in segments if segment)
 
 
 def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:
@@ -854,7 +910,8 @@ class ServiceSection:
             fields = entry.get('extracted_fields', {}) or {}
 
             # Check if extracted_fields has valid data - prefer using LLM extraction over raw parsing
-            organization = fields.get('organization', '')
+            organization = next(
+                (fields[key] for key in EXTRAMURAL_ORGANIZATION_FIELDS if fields.get(key)), '')
             role = fields.get('role', '')
             # #812 round 2: coerced here (not just inside _add_extramural_row
             # below) because format_date_range() runs BEFORE that call --
@@ -869,7 +926,8 @@ class ServiceSection:
             if organization or role:
                 dates = format_date_range(start_date, end_date, 'Q1')
                 if not organization:
-                    organization = original_text
+                    organization = _organization_left_in_text(
+                        original_text, role, start_date, end_date)
                 self._add_extramural_row(table, organization, role, dates)
             else:
                 # No useful extracted fields - try to parse from raw text

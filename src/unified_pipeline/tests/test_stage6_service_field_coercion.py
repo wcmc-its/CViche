@@ -86,6 +86,7 @@ from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _join_names,
     _journal_names_contain,
     _journal_name_cell_text,
+    _organization_left_in_text,
     _other_service_organization_text,
     _reviewing_org_and_committee_text,
 )
@@ -854,3 +855,99 @@ def test_raw_text_fallback_cell_is_the_whole_text(tmp_path, code, fields, cell):
     rows = list(_rows_containing(_render(tmp_path, entries), "Zorblax"))
     assert len(rows) == 1
     assert rows[0][cell].strip() == _LONG_RAW
+
+
+# ---------------------------------------------------------------------------
+# Part 6 (#946): a Q1 row whose stage-4 fields name no organization no longer
+# prints the whole raw entry line in the Organization cell.
+# ---------------------------------------------------------------------------
+
+def _q1_entry(text, **fields):
+    return {"text": text, "taxonomy_code": "Q1", "element_idx_start": 1,
+            "extracted_fields": fields}
+
+
+def _q1_row(tmp_path, entry, needle):
+    entries = [_entry("A", name="Jane Q. Public, MD"), entry]
+    rows = list(_rows_containing(_render(tmp_path, entries), needle))
+    assert len(rows) == 1
+    return rows[0]
+
+
+def test_q1_missing_organization_is_the_text_left_after_role_and_dates(tmp_path):
+    row = _q1_row(
+        tmp_path,
+        _q1_entry("2022-present Fictional Gazette WoW\tSection Editor, Widgets",
+                  role="Section Editor, Widgets", start_date="2022", end_date="present"),
+        "Fictional Gazette")
+    assert row == ["Fictional Gazette WoW", "Section Editor, Widgets", "2022-Present"]
+
+
+def test_q1_role_that_is_the_whole_line_leaves_organization_blank(tmp_path):
+    row = _q1_row(
+        tmp_path,
+        _q1_entry("2005-present Fictional Symposium Committee Chair",
+                  role="Fictional Symposium Committee Chair",
+                  start_date="2005", end_date="present"),
+        "Fictional Symposium")
+    assert row == ["", "Fictional Symposium Committee Chair", "2005-Present"]
+
+
+def test_q1_year_the_dates_cell_does_not_show_stays_in_organization(tmp_path):
+    row = _q1_row(
+        tmp_path,
+        _q1_entry("Board of Directors, Fictional Society\t\t2011-2013\tSecretary",
+                  role="Secretary"),
+        "Fictional Society")
+    assert row[0] == "Board of Directors, Fictional Society, 2011-2013"
+    assert row[1] == "Secretary"
+
+
+@pytest.mark.parametrize("alias", ["journal_name", "program_name"])
+def test_q1_rerouted_entry_names_its_organization_by_the_original_schema(tmp_path, alias):
+    """A Q4B/K3 entry moved to Q1 keeps `journal_name`/`program_name`."""
+    # The field's value differs from what the entry text would give, so the
+    # test tells a row that read the field from one that read the text.
+    row = _q1_row(
+        tmp_path,
+        _q1_entry("2022-present Gazette\tSection Editor",
+                  role="Section Editor", start_date="2022", end_date="present",
+                  **{alias: "Fictional Gazette WoW"}),
+        "Fictional Gazette")
+    assert row == ["Fictional Gazette WoW", "Section Editor", "2022-Present"]
+
+
+def test_q1_organization_field_wins_over_the_aliases(tmp_path):
+    row = _q1_row(
+        tmp_path,
+        _q1_entry("x", organization="Fictional Org Five", journal_name="Fictional Gazette",
+                  role="Treasurer"),
+        "Fictional Org Five")
+    assert row[0] == "Fictional Org Five"
+
+
+@pytest.mark.parametrize("text, role, start, end, expected", [
+    # A role word inside a longer word is not removed.
+    ("Chairman Fictional Society", "Chair", None, None, "Chairman Fictional Society"),
+    # Two roles separated by ';' are each removed, in any order.
+    ("Awards Committee Chair\tFictional Society\tResearch Chair",
+     "Research Chair; Awards Committee Chair", None, None, "Fictional Society"),
+    # Punctuation and spacing between the role's words may differ from the field.
+    ("1993-1996 Co-founder.  Charter Member", "Co-founder, Charter Member", "1993", "1996", ""),
+    # Only a range whose every year the fields carry is dropped.
+    ("Fictional Society 2001-2004 Treasurer", "Treasurer", "2001", None,
+     "Fictional Society 2001-2004"),
+    ("2001- Fictional Society Treasurer", "Treasurer", "2001", None, "Fictional Society"),
+    # A range with no end ("2001-") goes whole, even inside the line.
+    ("Fictional 2001- Society Treasurer", "Treasurer", "2001", None, "Fictional Society"),
+    # Punctuation the removal leaves at the edges of a segment is trimmed.
+    ("Fictional Society, Treasurer.", "Treasurer", None, None, "Fictional Society"),
+    # No role, no dates, no separators: the text is returned as is.
+    ("Fictional Society", "", None, None, "Fictional Society"),
+    (None, "Treasurer", None, None, ""),
+    # A structured role is no text to subtract: the entry text stands as it is.
+    ("2001- Fictional Society\tSecretary", [{"role": "Secretary"}], "2001", None,
+     "2001- Fictional Society\tSecretary"),
+])
+def test_organization_left_in_text(text, role, start, end, expected):
+    assert _organization_left_in_text(text, role, start, end) == expected
