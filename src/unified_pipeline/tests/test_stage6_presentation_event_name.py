@@ -68,3 +68,18 @@ def test_event_name_already_in_the_title_is_not_repeated():
 
 def test_venue_is_untouched_when_no_event_name_was_extracted():
     assert _venue(institution="Baton Rouge, LA") == "Baton Rouge, LA"
+
+
+def test_untitled_entry_renders_its_whole_text_not_the_first_150_characters():
+    """#983: an R entry with no extracted title renders as its own text;
+    `text[:150]` cut it mid-word."""
+    text = ("Grand rounds on the Zorblax method for ferrous metallurgy and its applications to "
+            "ceremonial bunting standards, with a review of historical pennant practice worldwide")
+    assert len(text) > 150
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen.cv_owner_location = None
+    gen._fill_presentations([{"taxonomy_code": "R", "text": text,
+                              "extracted_fields": {"year": "2022"}}])
+    firsts = [row.cells[0].text for table in gen.doc.tables for row in table.rows]
+    assert text in firsts

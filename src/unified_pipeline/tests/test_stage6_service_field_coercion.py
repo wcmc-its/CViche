@@ -821,3 +821,36 @@ def test_q1_start_only_row_keeps_present_end_to_end(tmp_path):
     rows = list(_rows_containing(doc, "Fictional Society Four"))
     assert len(rows) == 1
     assert rows[0][-1] == "2019-Present"
+
+
+# ---------------------------------------------------------------------------
+# Part 5 (#983): the raw-text fallback cells are not cut at 100/150 characters.
+# One row per fallback site of `service.py`: `_fill_service_boards` (Q2),
+# `_fill_extramural_leadership` (Q1, with and without a role),
+# `_fill_journal_reviewing` (Q4D) and `_fill_other_service` (Q3, Q4A, Q4C).
+# ---------------------------------------------------------------------------
+
+_LONG_RAW = ("Zorblax Trustee Council on Ferrous Metallurgy and Applied Kite Science "
+             "and its Standing Subcommittee on Ceremonial Bunting Standards and Review "
+             "of Historical Pennant Practice")
+
+
+@pytest.mark.parametrize("code, fields, cell", [
+    ("Q1", {}, 0),
+    ("Q1", {"role": "Treasurer"}, 0),
+    ("Q2", {}, 0),
+    ("Q3", {}, 1),
+    ("Q4A", {}, 0),
+    ("Q4C", {}, 0),
+    ("Q4D", {}, 0),
+])
+def test_raw_text_fallback_cell_is_the_whole_text(tmp_path, code, fields, cell):
+    assert len(_LONG_RAW) > 150
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        {"text": _LONG_RAW, "taxonomy_code": code, "element_idx_start": 1,
+         "extracted_fields": fields},
+    ]
+    rows = list(_rows_containing(_render(tmp_path, entries), "Zorblax"))
+    assert len(rows) == 1
+    assert rows[0][cell].strip() == _LONG_RAW

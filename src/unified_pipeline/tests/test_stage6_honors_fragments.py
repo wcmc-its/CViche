@@ -84,7 +84,6 @@ from unified_pipeline.stage6.parsing import _is_table_header_entry  # noqa: E402
 from unified_pipeline.stage6.sections.honors import (  # noqa: E402
     _ENTRY_HEADER_KEYWORDS,
     _FALLBACK_SCHEMA_STAT,
-    _MAX_RAW_AWARD_CHARS,
     HonorRecord,
     _entry_parts,
     _extract_organization_from_award,
@@ -1015,14 +1014,15 @@ def test_the_table_filled_is_the_one_after_the_heading():
     assert [c.text for c in decoy.rows[0].cells] == ["decoy", ""]
 
 
-def test_a_long_raw_entry_is_capped_not_spilled():
-    """An entry stage 4 extracted nothing from renders as its own text, so
-    the cap is the only thing stopping a runaway blob filling the cell."""
+def test_a_long_raw_entry_renders_whole_not_cut_mid_word():
+    """#983: an entry stage 4 extracted nothing from renders as its own text.
+    It was cut at 150 characters, which took the tail off a third honor
+    ("... History Honor Societ") and the year with it."""
     text = "Recognition of Sustained Contribution " * 8
     rows = _render_honors([_raw(text)])
     assert len(rows) == 1
-    assert rows[0][0] == text.strip()[:_MAX_RAW_AWARD_CHARS]
-    assert len(rows[0][0]) == _MAX_RAW_AWARD_CHARS
+    assert rows[0][0] == text.strip()
+    assert len(rows[0][0]) > 150
 
 
 # --- verbose mode -----------------------------------------------------------

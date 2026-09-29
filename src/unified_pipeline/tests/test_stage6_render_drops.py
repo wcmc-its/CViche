@@ -187,6 +187,65 @@ def test_each_warned_pair_is_named_by_the_taxonomy() -> None:
         ), (assigned, target)
 
 
+# --- #983: multi-record entries fan out before the PII pass and dedup --------
+# Invented values. Driven through `_group_entries_by_code` and the two calls
+# `generate()` makes next, so a test fails if the fan-out stops preceding either.
+
+def _three_honors(**scalars) -> dict:
+    return {"taxonomy_code": "H", "element_idx_start": 3,
+            "text": ("1986    Kappa Delta Honor Society, Hollis College\tBeta Sigma Honor Society, "
+                     "Hollis College\tPhi Rho History Honor Society, Hollis College"),
+            "extracted_fields": {"awards": [
+                {"award_name": "Kappa Delta Honor Society", "granting_body": "Hollis College", "date": "1986"},
+                {"award_name": "Beta Sigma Honor Society", "granting_body": "Hollis College", "date": "1986"},
+                {"award_name": "Phi Rho History Honor Society", "granting_body": "Hollis College",
+                 "date": "1986"}], **scalars}}
+
+
+def test_grouping_replaces_a_multi_record_entry_with_one_entry_per_record() -> None:
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code([_three_honors()])
+    assert [e["extracted_fields"]["award_name"] for e in groups["H"]] == [
+        "Kappa Delta Honor Society", "Beta Sigma Honor Society", "Phi Rho History Honor Society"]
+    assert [e["fanned_out_from"]["index"] for e in groups["H"]] == [0, 1, 2]
+
+
+def test_fanned_out_records_each_go_through_the_pii_pass() -> None:
+    """A PII-keyed scalar the children inherit is dropped from EACH child, and
+    a labelled fragment in one child's own text is cut from that child only."""
+    parent = _three_honors(spouse_name="Pat Example")
+    # The fragment sits in the second record's own field as well as the text:
+    # an entry is fanned out only when the fields hold every token of the text.
+    parent["extracted_fields"]["awards"][1]["granting_body"] = "Hollis College; Passport No.: X1234567"
+    parent["text"] = parent["text"].replace(
+        "Beta Sigma Honor Society, Hollis College",
+        "Beta Sigma Honor Society, Hollis College; Passport No.: X1234567")
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([parent])
+    gen._run_pii_deny_pass(groups)
+    honors = groups["H"]
+    assert all("spouse_name" not in e["extracted_fields"] for e in honors)
+    assert "X1234567" not in honors[1]["text"]
+    assert "Beta Sigma Honor Society" in honors[1]["text"]
+    assert len(gen._pii_result.withheld) == 4  # three inherited keys + one fragment
+
+
+def test_a_fanned_out_record_survives_dedup_against_a_longer_entry() -> None:
+    later_post = {"leadership_role": "Co-Leader, Genomics Program", "institution": "Ashby Cancer Center",
+                  "start_date": "2012"}
+    parent = {"taxonomy_code": "O", "text": "2012- Co-Leader, Genomics Program, Ashby Cancer Center\t"
+                                             "2022- Deputy Director, Ashby Cancer Center",
+              "extracted_fields": {"additional_roles": [
+                  later_post, {"leadership_role": "Deputy Director", "institution": "Ashby Cancer Center",
+                               "start_date": "2022"}]}}
+    longer = {"taxonomy_code": "O", "text": "Co-Leader, Genomics Program Development\tAshby Cancer Center\t2012-2015",
+              "extracted_fields": {"leadership_role": "Co-Leader, Genomics Program Development",
+                                   "institution": "Ashby Cancer Center", "start_date": "2012", "end_date": "2015"}}
+    gen = WCMTemplateGenerator(verbose=False)
+    grouped, _, _ = gen._dedup_grouped_entries(gen._group_entries_by_code([longer, parent]))
+    assert sorted(e["extracted_fields"]["leadership_role"] for e in grouped["O"]) == [
+        "Co-Leader, Genomics Program", "Co-Leader, Genomics Program Development", "Deputy Director"]
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

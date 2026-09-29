@@ -795,7 +795,7 @@ class ServiceSection:
 
                 # If we don't have structured fields, parse from raw text
                 if not committee:
-                    text = entry.get('text', '')[:150]
+                    text = entry.get('text', '')
                     committee = text
 
                 # Add row to table
@@ -869,7 +869,7 @@ class ServiceSection:
             if organization or role:
                 dates = format_date_range(start_date, end_date, 'Q1')
                 if not organization:
-                    organization = original_text[:100]
+                    organization = original_text
                 self._add_extramural_row(table, organization, role, dates)
             else:
                 # No useful extracted fields - try to parse from raw text
@@ -879,7 +879,7 @@ class ServiceSection:
                     self._parse_extramural_leadership_lines(table, lines)
                 else:
                     # Single entry without extracted fields - use raw text
-                    self._add_extramural_row(table, original_text[:100], '', '')
+                    self._add_extramural_row(table, original_text, '', '')
 
     def _parse_extramural_leadership_lines(self, table, lines: list[str]) -> None:
         """Parse multiple extramural leadership lines and add rows.
@@ -1084,7 +1084,7 @@ class ServiceSection:
 
             if not journal:
                 # Parse from raw text, but clean up common patterns
-                raw_text = entry.get('text', '')[:100]
+                raw_text = entry.get('text', '')
                 # Remove "Reviewer" prefix if present
                 journal = re.sub(r'^(?:Reviewer|Ad hoc Reviewer)[,:\s]*', '', raw_text, flags=re.IGNORECASE).strip()
 
@@ -1224,7 +1224,7 @@ class ServiceSection:
                         # Parse from raw text as fallback, but strip date prefix
                         raw_text = entry.get('text', '')
                         # Remove common date patterns from beginning
-                        organization = re.sub(r'^\d{4}[-–]?\d{0,4}\s*\|?\s*', '', raw_text)[:100]
+                        organization = re.sub(r'^\d{4}[-–]?\d{0,4}\s*\|?\s*', '', raw_text)
                         # If role already contains most of the organization text, don't duplicate
                         if role and organization and role.lower()[:30] in organization.lower():
                             organization = ''

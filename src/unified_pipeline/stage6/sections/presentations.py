@@ -130,7 +130,7 @@ class PresentationsSection:
                 formatted_date = format_date_for_section(raw_date, 'R') if raw_date else ''
 
                 if not title:
-                    title = entry.get('text', '')[:150]
+                    title = entry.get('text', '')
 
                 # The R block is Title | Institution/Location | Dates, so the
                 # meeting that hosted the talk has no column of its own and
