@@ -425,6 +425,48 @@ def test_split_merged_cells_two_line_aligned_cells_not_split():
     assert split_merged_cells_in_row(row, min_chars=50, min_newlines=2) == [row]
 
 
+def _all_lines(rows):
+    return sorted(
+        line.strip() for r in rows for c in r for line in c["text"].split("\n") if line.strip()
+    )
+
+
+def test_split_merged_cells_date_column_never_drops_surplus_lines_612():
+    # #612 shape (invented text): cell 0 holds a blank paragraph, so the \n\n
+    # pass claims max_splits=2 from cell 0 alone; the aligned-line pass never
+    # runs. The 4-line title cell is unsplit and the 4-line date cell is
+    # distributed by the date-column fallback, which used to emit only the
+    # first max_splits (2) dates and drop the other two.
+    row = [
+        {"text": "Alpha unit one\nAlpha unit two\n\nAlpha unit three", "row": 0, "col": 0},
+        {"text": "Rank A\nRank B\nRank C\nRank D", "row": 0, "col": 1},
+        {"text": "2011 - Present\n2009 - 2011\n2007 - 2009\n2000 - Present", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert _all_lines(out) == _all_lines([row])
+    assert [r[2]["text"] for r in out] == [
+        "2011 - Present",
+        "2009 - 2011\n2007 - 2009\n2000 - Present",
+    ]
+
+
+def test_split_merged_cells_aligned_date_column_longer_than_target_keeps_surplus_612():
+    # Aligned-line pass (two 3-line cells => target 3) beside a 4-line date
+    # column: the old `padded_lines[:target_count]` truncation dropped line 4.
+    row = [
+        {"text": "a\nb\nc", "row": 0, "col": 0},
+        {"text": "d\ne\nf", "row": 0, "col": 1},
+        {"text": "2001\n2002\n2003\n2004", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert _all_lines(out) == _all_lines([row])
+    assert [r[2]["text"] for r in out] == ["2001", "2002", "2003\n2004"]
+
+
 # --------------------------------------------------------------------------
 # extract_table_metadata
 # --------------------------------------------------------------------------
