@@ -247,3 +247,13 @@ def test_bedrock_cache_prefix_is_identical_across_hierarchy_groups(monkeypatch: 
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_batch_context_template_ends_with_rules_precedence_reminder() -> None:
+    # The per-batch block follows the cached rules, so its last words are the
+    # ones nearest the entries; the precedence reminder must close it (#1021).
+    rendered = _CLASSIFICATION_BATCH_CONTEXT_TEMPLATE.format(
+        context_str="Section: Invited Talks", taxonomy_ref="S8: Presentations"
+    )
+    assert rendered.index("S8: Presentations") < rendered.index("REMINDER:")
+    assert rendered.rstrip().endswith('"Not Funded").')

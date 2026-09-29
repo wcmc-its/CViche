@@ -890,11 +890,20 @@ _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.
 # It stays in the system role on purpose: a measured run with it in the user
 # message (the shape of PR #53) flipped gold-labelled publication-subtype
 # entries (S6 -> S1/S2) that the system-role placement kept (#50).
+# Closes the per-batch block. That block now follows the ~40K-char rules, so
+# the section headings sit closest to the entries; a live A/B (#1021) showed
+# the model then followed a heading over a specific rule (society talks under
+# an "Invited ..." heading went S8 -> R). Restating precedence here keeps the
+# rules first. Keep it brace-free: it is part of the .format()ed template.
+_RULES_PRECEDENCE_REMINDER = """REMINDER: The hierarchy context above is a hint, not a rule. The CV TAXONOMY CLASSIFICATION RULES in the preceding block take precedence over section headings. A heading such as "Invited Talks" or "Presentations" does not override a specific rule (e.g. rule 35: a presentation at a scientific or society meeting is S8, not R, unless it is a clearly designated keynote or plenary). Use the hierarchy to choose between codes the rules leave ambiguous, or when the heading states a fact about its entries (e.g. a funding status such as "Pending" or "Not Funded")."""
+
 _CLASSIFICATION_BATCH_CONTEXT_TEMPLATE = """HIERARCHY CONTEXT FOR THIS BATCH:
 {context_str}
 
 AVAILABLE TAXONOMY CODES (you may use ANY of these):
-{taxonomy_ref}"""
+{taxonomy_ref}
+
+""" + _RULES_PRECEDENCE_REMINDER
 
 
 # T-validation gate's system prompt (moved from an inline f-string in
