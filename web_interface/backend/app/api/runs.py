@@ -15,14 +15,17 @@ from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency
 from app.auth import get_current_user
 from app.api.upload import UPLOAD_DIR, create_run_archive, commit_run_or_compensate
-from app.services.run_service import check_run_access
+from app.services.run_service import check_run_access, claim_run_as_running
 from app.rate_limiter import check_rate_limit
-from app.errors import not_found, bad_request
+from app.errors import not_found, bad_request, conflict
 from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Run statuses /start may move to "running" (the conditional UPDATE's predicate).
+STARTABLE_STATUSES = ("created", "paused")
 
 
 def _run_duration_seconds(run) -> int | None:
@@ -191,7 +194,7 @@ async def start_run(
     run = check_run_access(run_id, current_user, db)
 
     # "paused" rows predate the pause endpoint's removal (#115); /start stays their recovery path.
-    if run.status not in ["created", "paused"]:
+    if run.status not in STARTABLE_STATUSES:
         raise bad_request(f"Cannot start run in status: {run.status}")
 
     # Get the uploaded file path. Use the shared UPLOAD_DIR constant (same path
@@ -233,8 +236,13 @@ async def start_run(
             headers={"Retry-After": "30"},
         )
 
-    # Update status
-    run.status = "running"
+    # Atomic created/paused -> running (#799). The guard above is only a fast
+    # path: the conditional UPDATE decides which concurrent starter wins. The
+    # loser returns its slot and never reaches the pipeline dispatch.
+    if not claim_run_as_running(db, run_id, Run.status.in_(STARTABLE_STATUSES)):
+        db.rollback()
+        concurrency.release_slot()
+        raise conflict("This run was already started by another request.")
     db.commit()
 
     # Start pipeline execution in background. The slot acquired above is held
@@ -519,6 +527,16 @@ async def retry_step(
     # Reset the failed step and every step after it back to pending; the earlier
     # completed steps are left untouched so the pipeline resumes rather than
     # restarts. Clear stale per-step metadata so the re-run repopulates it.
+    # Atomic -> running (#799): only one of two concurrent retries may claim a
+    # run that is not already running. The step resets below share this
+    # transaction, so the loser changes nothing and returns its slot.
+    if not claim_run_as_running(
+        db, run_id, Run.status != "running", error_message=None, completed_at=None
+    ):
+        db.rollback()
+        concurrency.release_slot()
+        raise conflict("This run is already running.")
+
     downstream_steps = db.query(Step).filter(
         Step.run_id == run_id,
         Step.step_number >= step_number,
@@ -531,9 +549,6 @@ async def retry_step(
         s.duration_seconds = None
         s.cost = None
 
-    run.status = "running"
-    run.error_message = None
-    run.completed_at = None
     db.commit()
 
     # Resume pipeline execution in the background, mirroring start_run. The slot

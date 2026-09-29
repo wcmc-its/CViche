@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from unified_pipeline.llm_client import call_llm
 
+from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
     apply_regex_post_processing,
     coerce_field_value_types,
@@ -129,6 +130,8 @@ class ExtractionStats(TypedDict):
     entries_reformatted: int
     cache_read_tokens: int
     cache_write_tokens: int
+    invalid_code_entries: int
+    invalid_taxonomy_codes: dict[str, int]
 
 
 class ExtractionResult(TypedDict):
@@ -927,6 +930,39 @@ def _extract_batches(
     return map_in_order(run_batch, list(enumerate(batches)), workers=workers)
 
 
+def _split_skippable_entries(
+    mapped_entries: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split entries into (valid, skipped) by text length. Pure move out of
+    `extract_fields_from_mapped_entries` (function-size ratchet, #651) -- same
+    filter, same skipped-entry shape; not a behavior change."""
+    # Filter out entries with empty or minimal text
+    valid_entries = []
+    skipped_entries = []
+
+    for entry in mapped_entries:
+        text = entry.get("text", "").strip()
+        # Skip entries with empty text or less than 5 characters
+        if text and len(text) >= 5:
+            valid_entries.append(entry)
+        else:
+            skipped_entries.append({
+                **entry,
+                "extracted_fields": {},
+                "extraction_success": False,
+                "extraction_skipped": True,
+                # This branch only runs when `text` is falsy or shorter than
+                # the 5-char floor above -- a falsy (empty) string always has
+                # len 0, so `len(text) < 5 else "empty_text"` made the
+                # "empty_text" arm dead code (every skip landed on
+                # "empty_or_minimal_text", including a truly empty string).
+                # Branch on emptiness directly so the two reasons are
+                # actually distinguishable downstream.
+                "skip_reason": "empty_text" if not text else "empty_or_minimal_text"
+            })
+    return valid_entries, skipped_entries
+
+
 def extract_fields_from_mapped_entries(
     mapped_entries: list[dict[str, Any]],
     batch_size: int = 10,
@@ -957,6 +993,9 @@ def extract_fields_from_mapped_entries(
     logger.info("=" * 80)
     logger.info("Total entries: %d", len(mapped_entries))
 
+    # 3b -> 4 boundary (#651): an unrecognized code is quarantined, not defaulted.
+    mapped_entries, invalid_codes = quarantine_invalid_taxonomy_codes(mapped_entries)
+
     # Load and display schema version
     schemas = get_active_schemas()
     logger.info("Field schemas: v%s (%d taxonomy codes)", FIELD_SCHEMA_VERSION, len(schemas))
@@ -966,30 +1005,7 @@ def extract_fields_from_mapped_entries(
 
     # Location inference runs *after* extraction -- see the call site below.
 
-    # Filter out entries with empty or minimal text
-    valid_entries = []
-    skipped_entries = []
-
-    for entry in mapped_entries:
-        text = entry.get("text", "").strip()
-        # Skip entries with empty text or less than 5 characters
-        if text and len(text) >= 5:
-            valid_entries.append(entry)
-        else:
-            skipped_entries.append({
-                **entry,
-                "extracted_fields": {},
-                "extraction_success": False,
-                "extraction_skipped": True,
-                # This branch only runs when `text` is falsy or shorter than
-                # the 5-char floor above -- a falsy (empty) string always has
-                # len 0, so `len(text) < 5 else "empty_text"` made the
-                # "empty_text" arm dead code (every skip landed on
-                # "empty_or_minimal_text", including a truly empty string).
-                # Branch on emptiness directly so the two reasons are
-                # actually distinguishable downstream.
-                "skip_reason": "empty_text" if not text else "empty_or_minimal_text"
-            })
+    valid_entries, skipped_entries = _split_skippable_entries(mapped_entries)
 
     logger.info("  - Valid entries (with text): %d", len(valid_entries))
     logger.info("  - Skipped entries (empty/minimal text): %d", len(skipped_entries))
@@ -1120,7 +1136,9 @@ def extract_fields_from_mapped_entries(
             "had_extraction_errors": failed_batches > 0,
             "entries_reformatted": reformatted_count,
             "cache_read_tokens": total_cache_read_tokens,
-            "cache_write_tokens": total_cache_write_tokens
+            "cache_write_tokens": total_cache_write_tokens,
+            "invalid_code_entries": sum(invalid_codes.values()),
+            "invalid_taxonomy_codes": invalid_codes,
         },
         "success": True,
         "partial_success": failed_batches > 0,

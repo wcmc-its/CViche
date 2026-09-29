@@ -598,5 +598,19 @@ def test_m2_preferred_over_t_when_marking_the_duplicate():
     assert "is_duplicate" not in updated[1]
 
 
+def test_canonical_taxonomy_codes_is_the_set_3b_validates_against():
+    # #651: stage 4's membership check and stage 3b's must be ONE list.
+    from unified_pipeline.stage3b.io import canonical_taxonomy_codes, load_taxonomy
+    assert canonical_taxonomy_codes() == classify._valid_taxonomy_codes(load_taxonomy())
+    assert "T" in canonical_taxonomy_codes()
+    assert "S10" not in canonical_taxonomy_codes()  # taxonomy's own invalid_codes
+
+
+def test_taxonomy_code_set_skips_malformed_code_entries():
+    from unified_pipeline.stage3b.io import taxonomy_code_set
+    taxonomy = {"codes": [{"code": "A"}, {"code": ""}, {"code": 7}, {"name": "x"}, "B", {"code": "T"}]}
+    assert taxonomy_code_set(taxonomy) == {"A", "T"}
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
