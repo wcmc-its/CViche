@@ -56,11 +56,15 @@ from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
     match_effort_for_title,
     normalize_percent_effort,
     parse_major_goals,
+    promote_open_ended_m2b_grants,
     rebucket_grants_by_status,
     reclassify_past_m2a_grants,
     resolve_pi_name,
 )
-from unified_pipeline.stage6.normalization import grant_status_rebucket_target  # noqa: E402
+from unified_pipeline.stage6.normalization import (  # noqa: E402
+    grant_heading_rebucket_target,
+    grant_status_rebucket_target,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 CURRENT = 'Current Research Funding'
@@ -1512,6 +1516,172 @@ def test_reclassify_past_m2a_grants_leaves_its_inputs_alone():
     assert m2a == [entry] and m2b == []
     assert current == [] and completed == [entry]
     assert messages == ["  Reclassified to M2B: 'Ended Project Study...' (ended 2020)"]
+
+
+# --- #981: the heading is the status when stage 4 extracted none ---------------
+
+def _under(heading, code='M2A', **fields):
+    """A grant record filed under a hierarchy heading, with no status field."""
+    entry = _entry(code, **fields)
+    entry['hierarchy'] = list(heading)
+    return entry
+
+
+@pytest.mark.parametrize('heading, expected_code', [
+    (['GRANT SUPPORT', 'Pending applications'], 'M2C'),
+    (['GRANTS', 'GRANT APPLICATIONS IN REVIEW'], 'M2C'),
+    (['Non-funded applications'], 'M2C'),
+    (['GRANTS', 'GRANT APPLICATIONS AWAITING FINAL ADMINISTRATIVE APPROVAL'], 'M2C'),
+    (['NOT FUNDED'], 'M2C'),
+    (['Submitted, Not Funded'], 'M2C'),
+    (['Grants', 'Completed Research Support'], 'M2B'),
+    (['Current Grant Support'], None),       # "Grant Support" alone is no status
+    (['Research Support', 'Active'], None),
+    (['Current and Pending Support'], None),  # names two buckets: silent
+    (['Past and Present Funding'], None),
+    (['Pending and Completed Grants'], None),
+    (['Impending Renewals'], None),           # whole words only
+    (['Reunfunded Items'], None),             # no boundary before the word
+    (['Unfundedness Report'], None),          # no boundary after the word
+    (['Pendingx Applications'], None),        # no boundary after a pending word
+    ([], None),
+])
+def test_grant_heading_rebucket_target(heading, expected_code):
+    target, note = grant_heading_rebucket_target(heading)
+    assert target == expected_code
+    assert (note is not None) is (expected_code is not None)
+
+
+def test_heading_note_says_the_text_came_from_the_heading():
+    _, note = grant_heading_rebucket_target(['Pending applications'])
+    assert note == "Reclassified to Pending (M2C): section heading is 'Pending applications'"
+
+
+def test_a_grant_without_a_status_moves_on_its_heading():
+    """3b coded it completed; the CV filed it under "Pending applications"."""
+    entry = _under(['Pending applications'], code='M2B', title='Filed Pending')
+
+    current, completed, pending, _ = rebucket_grants_by_status([], [entry], [])
+
+    assert (current, completed, pending) == ([], [], [entry])
+    assert entry['reclassification_note'].startswith('Reclassified to Pending (M2C)')
+
+
+def test_a_status_field_beats_the_heading():
+    entry = _under(['Pending applications'], code='M2B', title='Awarded',
+                   status='Completed')
+
+    current, completed, pending, _ = rebucket_grants_by_status([], [entry], [])
+
+    assert (current, completed, pending) == ([], [entry], [])
+
+
+def test_not_funded_heading_keeps_the_grant_under_pending_with_a_review_note():
+    gen = _sectioned_generator(emit_comments=True)
+    gen._fill_research_support(
+        {'M2B': [_under(['NOT FUNDED'], code='M2B', title='Declined Heading Study',
+                        agency='NIH', start_date='01/2020')]},
+        current_year=TEST_YEAR)
+
+    assert _titles_under(gen, PENDING) == ['Declined Heading Study']
+    notes = [c['text'] for c in gen._comments if c['author'] == 'Reclassification']
+    assert notes and 'confirm whether to keep this entry on the CV' in notes[0]
+
+
+def test_a_current_grant_support_heading_moves_nothing():
+    entry = _under(['Current Grant Support'], title='Running Study')
+
+    current, completed, pending, messages = rebucket_grants_by_status([entry], [], [])
+
+    assert (current, completed, pending, messages) == ([entry], [], [], [])
+
+
+# --- #981: a completed-coded grant that is still running is current ------------
+
+@pytest.mark.parametrize('end_date', ['present', 'Ongoing', '12/31/2026', '06/2028'])
+def test_an_m2b_grant_still_running_is_promoted_to_current(end_date):
+    entry = _under(['Grants'], code='M2B', title='Running Study', end_date=end_date)
+
+    current, completed, messages = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed) == ([entry], [])
+    assert entry['reclassification_note'].startswith('Reclassified from Completed (M2B)')
+    assert messages == [f"  Reclassified to M2A: 'Running Study...' (ends {end_date})"]
+
+
+@pytest.mark.parametrize('fields', [
+    {'end_date': '12/31/2025'},               # ended last year
+    {'end_date': ''},                         # nothing says it is running
+    {},
+    {'end_date': '2028', 'status': 'Completed'},  # an explicit status beats the date
+])
+def test_an_m2b_grant_that_is_not_running_stays_completed(fields):
+    entry = _under(['Grants'], code='M2B', title='Past Study', **fields)
+
+    current, completed, messages = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed, messages) == ([], [entry], [])
+
+
+@pytest.mark.parametrize('heading', [
+    ['GRANT SUPPORT', 'PAST GRANT SUPPORT'],
+    ['GRANTS', 'Summary of Major Previous Grants'],
+    ['Grants: Prior'],
+])
+def test_an_m2b_grant_under_a_past_heading_is_not_promoted_on_an_open_end_date(heading):
+    """"ongoing" in a grant filed under "Past Grant Support" does not outvote the heading."""
+    entry = _under(heading, code='M2B', title='Past Study', end_date='ongoing')
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed) == ([], [entry])
+
+
+def test_an_m2b_grant_under_a_past_and_present_heading_is_promoted_on_its_date():
+    entry = _under(['Past and Present Funding'], code='M2B', title='Running Study',
+                   end_date='2028')
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed) == ([entry], [])
+
+
+def test_an_m2b_grant_whose_heading_says_completed_stays_completed():
+    entry = _under(['Completed Grants'], code='M2B', title='Past Study', end_date='2028')
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed) == ([], [entry])
+
+
+def test_a_grant_already_moved_by_a_rule_is_not_promoted_back():
+    """A status rebucket or past-date demotion leaves a note; that move stands."""
+    entry = _under(['Grants'], code='M2B', title='Moved', end_date='2028')
+    entry['reclassification_note'] = 'Reclassified from Current (M2A) to Completed (M2B)'
+
+    current, completed, _ = promote_open_ended_m2b_grants([], [entry], TEST_YEAR)
+
+    assert (current, completed) == ([], [entry])
+
+
+def test_promoting_leaves_its_inputs_alone():
+    entry = _under(['Grants'], code='M2B', title='Running Study', end_date='present')
+    m2a, m2b = [], [entry]
+
+    promote_open_ended_m2b_grants(m2a, m2b, TEST_YEAR)
+
+    assert m2a == [] and m2b == [entry]
+
+
+def test_fill_research_support_files_a_running_completed_coded_grant_under_current():
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2B': [_under(['Grants'], code='M2B', title='Running Study', agency='NIH',
+                        start_date='03/2024', end_date='12/2028')]},
+        current_year=TEST_YEAR)
+
+    assert _titles_under(gen, CURRENT) == ['Running Study']
+    assert _titles_under(gen, COMPLETED) == []
 
 
 # --- thread 3932312407 item 8: the rendering contract ---------------------------
