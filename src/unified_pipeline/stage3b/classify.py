@@ -26,6 +26,7 @@ from .context import TaxonomyContext
 from .io import _safe_float
 from .prompt import (
     CLASSIFICATION_RULES_VERSION,
+    _CLASSIFICATION_BATCH_CONTEXT_TEMPLATE,
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     _T_VALIDATION_SYSTEM_PROMPT_TEMPLATE,
     build_taxonomy_codes_for_prompt,
@@ -253,11 +254,8 @@ def _classify_one_batch(
         return results, stats
 
     # Build prompt
-    context_str = taxonomy_context.format_context_string()
-
-    system_prompt = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
-        context_str=context_str, taxonomy_ref=taxonomy_ref
-    )
+    batch_context = _CLASSIFICATION_BATCH_CONTEXT_TEMPLATE.format(
+        context_str=taxonomy_context.format_context_string(), taxonomy_ref=taxonomy_ref)
 
     # Build entries list for user message (include per-entry hierarchy)
     entries_lines = []
@@ -274,7 +272,9 @@ def _classify_one_batch(
 Return ONLY valid JSON with the classifications array."""
 
     messages = [
-        {"role": "system", "content": system_prompt},
+        # cache_point ends the cached prefix; the per-group block after it is uncached (#50).
+        {"role": "system", "content": _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE, "cache_point": True},
+        {"role": "system", "content": batch_context},
         {"role": "user", "content": user_message}
     ]
 
