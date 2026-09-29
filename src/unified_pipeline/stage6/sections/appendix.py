@@ -245,9 +245,6 @@ _CV_TITLE_RE = re.compile(
 )
 
 _SECTION_HEADER_MAX_WORDS = 10
-# A leading roman numeral outline marker ("III. PROFESSIONAL EXPERIENCE") is
-# the one digit-like token a header may carry.
-_ROMAN_PREFIX_RE = re.compile(r"^[IVX]+\.\s+")
 _NONE_WORD_RE = re.compile(r"\bnone\b", re.IGNORECASE)
 _HEADER_CELL_SPLIT_RE = re.compile(r"\s*\|\s*|\t+|\n|\s{2,}")
 _HEADER_ROW_MAX_CELL_WORDS = 8
@@ -268,12 +265,12 @@ _KIND_REASONING = {
 def _is_section_label_text(text: str) -> bool:
     """A short, digit-free, non-sentence line: what a section heading looks
     like on the page. Trailing colon allowed; a terminal period is a sentence."""
-    body = _ROMAN_PREFIX_RE.sub("", text.strip())
+    body = text.strip()
     if not body or body.endswith(".") or any(ch.isdigit() for ch in body):
         return False
     if _NONE_WORD_RE.search(body):  # "Patents (none)": says something about content
         return False
-    return 0 < len(body.split()) <= _SECTION_HEADER_MAX_WORDS
+    return len(body.split()) <= _SECTION_HEADER_MAX_WORDS
 
 
 def _is_label_only_row(text: str) -> bool:

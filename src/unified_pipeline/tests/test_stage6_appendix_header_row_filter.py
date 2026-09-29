@@ -760,6 +760,13 @@ def test_confirmed_structural_shapes_survive_when_not_t_coded(code):
     assert _residual(text, _confirmed("This is a section header."), code) is None
 
 
+def test_older_checks_keep_their_drop_over_the_residual_check():
+    """'Education' is a template label AND a confirmed section header; the
+    residual check runs last so the earlier reason still owns the count."""
+    reasoning = _confirmed("This is a section header ('Education').")
+    assert _residual("Education", reasoning) == DROP_TEMPLATE_LABEL
+
+
 def test_filter_reads_reasoning_from_the_entry_and_counts_each_reason():
     header = _confirmed("This is a section header.")
     entries = [
