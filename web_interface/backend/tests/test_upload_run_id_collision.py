@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import re
 import threading
 from datetime import datetime
@@ -411,7 +412,7 @@ def test_restart_regenerates_id_on_real_storage_collision(db, tmp_path):
 
 # --- (e) exhausting every attempt fails the request, no run row ------------
 
-def test_upload_fails_after_exhausting_run_id_attempts(client, db, seed_simple_mode, tmp_path):
+def test_upload_fails_after_exhausting_run_id_attempts(client, db, seed_simple_mode, tmp_path, caplog):
     """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 23
 
     Mirrors test_upload_atomicity's contract: when the durable archive can
@@ -457,6 +458,11 @@ def test_upload_fails_after_exhausting_run_id_attempts(client, db, seed_simple_m
     assert resp.status_code == 502, resp.text
     assert resp.json()["detail"]["error"] == "storage_unavailable"
     assert db.query(Run).count() == 0
+    # #797: exhaustion is not silent -- the caller logs it at ERROR.
+    assert any(
+        r.levelno == logging.ERROR and "could not allocate a collision-free run id" in r.getMessage()
+        for r in caplog.records
+    )
     # One fresh id per attempt, bounded by the named retry constant.
     assert draw.call_count == upload_module._RUN_ID_ATTEMPTS
     # Every colliding run's archive is byte-identical to its seed and gained
@@ -860,7 +866,7 @@ def test_restart_real_storage_fault_is_not_retried(db, tmp_path):
     assert (upload_dir / "ORIGF1.docx").read_bytes() == original_bytes
 
 
-def test_restart_fails_after_exhausting_run_id_attempts(db, tmp_path):
+def test_restart_fails_after_exhausting_run_id_attempts(db, tmp_path, caplog):
     """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 19
 
     Restart shares create_run_archive, so its retry bound is the same
@@ -893,6 +899,11 @@ def test_restart_fails_after_exhausting_run_id_attempts(db, tmp_path):
     assert exc.value.detail["error"] == "storage_unavailable"
     assert draw.call_count == upload_module._RUN_ID_ATTEMPTS
     assert storage.put_file_exclusive.call_count == upload_module._RUN_ID_ATTEMPTS
+    # #797: exhaustion is not silent -- the caller logs it at ERROR.
+    assert any(
+        r.levelno == logging.ERROR and "could not allocate a collision-free run id" in r.getMessage()
+        for r in caplog.records
+    )
     storage.put_global.assert_not_called()
     assert [r.id for r in db.query(Run).all()] == ["ORIGB2"]
     assert sorted(p.name for p in upload_dir.iterdir()) == ["ORIGB2.docx"]
