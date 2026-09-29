@@ -510,13 +510,15 @@ def parse_reclassified_segments(
         result_text: str, original_code: str) -> list[tuple[str, str | None]] | None:
     """Parse `_reclassify_entry_segments`' "CODE: text" lines.
 
-    Returns [(segment_text, code)], or None when the reply is unusable. Every
-    colon-bearing line must open with a real taxonomy code or KEEP; a line
-    that does not is model commentary about its own decision ("**All
-    segments are retained under M2B: the grant details ..."), and folding it
-    in as a segment renders it as a faculty-visible bullet (#264). A reply
-    containing any such line is refused whole, so the caller keeps the
-    original entry text (fail closed) instead of a half-trusted parse.
+    Returns [(segment_text, code)], or None when no line is usable. Only a
+    colon-bearing line that opens with a real taxonomy code or KEEP becomes a
+    segment; any other line is model commentary (a "Here is the analysis:"
+    preamble, "**Rationale:**" bullets, "> **Note:** ..."), and folding it in
+    as a segment renders it as a faculty-visible bullet (#264). Such lines are
+    dropped one by one, not the whole reply: live replies routinely carry a
+    preamble around valid code lines, and refusing them sent the entry back
+    to the appendix. A reply with no valid line returns None, so the caller
+    keeps the original entry text (fail closed).
     """
     segments: list[tuple[str, str | None]] = []
     for line in result_text.strip().split('\n'):
@@ -527,9 +529,9 @@ def parse_reclassified_segments(
         code = code.upper()
         if code != _KEEP_SENTINEL and code not in _taxonomy_codes():
             logger.warning(
-                "Stage 6 reclassification reply refused: non-code line "
-                "prefix %r; keeping the original entry text", code[:40])
-            return None
+                "Stage 6 reclassification reply: dropped non-code line "
+                "with prefix %r", code[:40])
+            continue
         if segment_text and len(segment_text) > 10:
             # KEEP means "correct as originally coded" -- resolve to the
             # original code so the caller can route it home instead of

@@ -274,22 +274,56 @@ def test_parse_reclassified_segments_well_formed():
     ]
 
 
-def test_parse_reclassified_segments_refuses_commentary_reply():
-    """Model commentary with a colon used to parse as a segment whose 'code'
-    was the sentence, then rendered as an appendix bullet (#264)."""
-    assert parse_reclassified_segments(_PROSE_REPLY, "M2B") is None
+_LIVE_SHAPE_REPLY = (
+    "Here is the analysis of the CV content:\n\n"
+    "M2B: R01 XX000000 Synthetic Study of Signaling, Example Institute, 2010-2015, PI\n"
+    "M2B: Project goals: characterize pathway X\n"
+    "M2B: Associated publications: Doe J et al 2014\n"
+    "K2: Participate in clinical teaching conferences\n\n"
+    "**Rationale:**\n"
+    "- All segments remain classified as **M2B** because:\n"
+    "  - Both grants have clearly defined end dates\n"
+    "- No segments meet the threshold of **clearly** belonging elsewhere\n\n"
+    "> **Note:** If your institution treats these as active, reclassify them."
+)
+
+
+def test_parse_reclassified_segments_drops_commentary_keeps_code_lines():
+    """The real reply shape (preamble + code lines + rationale + note): only
+    the code lines are segments. Refusing the whole reply over the preamble
+    sent 13 of 18 live replies back to the appendix (#264)."""
+    assert parse_reclassified_segments(_LIVE_SHAPE_REPLY, "M2B") == [
+        ("R01 XX000000 Synthetic Study of Signaling, Example Institute, 2010-2015, PI", "M2B"),
+        ("Project goals: characterize pathway X", "M2B"),
+        ("Associated publications: Doe J et al 2014", "M2B"),
+        ("Participate in clinical teaching conferences", "K2"),
+    ]
+
+
+def test_parse_reclassified_segments_prose_line_is_dropped_not_a_segment():
+    """Commentary with a colon used to parse as a segment whose 'code' was the
+    sentence, then rendered as an appendix bullet (#264)."""
+    assert parse_reclassified_segments(_PROSE_REPLY, "M2B") == [
+        ("Synthetic Grant Alpha | Example Agency | 2010-2012", "M2B")]
 
 
 @pytest.mark.parametrize("reply", [
-    # no '**': only the code check can refuse these
+    # commentary only, no valid code line: nothing usable
     "All segments are retained under M2B: the grant details, project goals relate.",
-    "ALL: segments are retained under M2B and the grant details relate.\n"
-    "M2B: Synthetic Grant Alpha, Example Agency, 2010-2012",
+    "Here is the analysis of the CV content:\n\n**Rationale:** all stay put.",
     "Note: segments are retained under M2B and the grant details relate.",
     "M2Z: Synthetic Grant Alpha, Example Agency, 2010-2012",
 ])
-def test_parse_reclassified_segments_refuses_non_taxonomy_prefix(reply):
+def test_parse_reclassified_segments_no_code_line_is_none(reply):
     assert parse_reclassified_segments(reply, "M2B") is None
+
+
+@pytest.mark.parametrize("prefix", ["ALL", "Note", "M2Z", "**All segments", "> **Note"])
+def test_parse_reclassified_segments_non_taxonomy_prefix_never_a_segment(prefix):
+    reply = (f"{prefix}: segments are retained under M2B and details relate.\n"
+             "M2B: Synthetic Grant Alpha, Example Agency, 2010-2012")
+    assert parse_reclassified_segments(reply, "M2B") == [
+        ("Synthetic Grant Alpha, Example Agency, 2010-2012", "M2B")]
 
 
 def test_parse_reclassified_segments_keep_short_and_empty_edges():
@@ -311,11 +345,14 @@ def test_parse_reclassified_segments_keep_short_and_empty_edges():
 
 
 def test_reclassify_prose_reply_never_reaches_document(monkeypatch):
-    """End to end with call_llm stubbed to return commentary: the original
-    entry text is what lands in the appendix, never the model's prose."""
+    """End to end with call_llm stubbed to return commentary with no code
+    line: the original entry text is what lands in the appendix, never the
+    model's prose."""
     import unified_pipeline.stage_6_word_template as st6
 
-    monkeypatch.setattr(st6, "call_llm", lambda **kw: {"content": _PROSE_REPLY})
+    monkeypatch.setattr(st6, "call_llm", lambda **kw: {"content": (
+        "**All segments are retained under M2B: the grant details, project "
+        "goals and associated publications directly relate to the project.")})
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document(gen.template_path)
     original = "Synthetic Grant Alpha, Example Agency, 2010-2012, funded project"
@@ -328,6 +365,27 @@ def test_reclassify_prose_reply_never_reaches_document(monkeypatch):
     assert not any("All segments are retained" in t or "grant details" in t
                    for t in texts)
     assert any(original in t for t in texts)
+
+
+def test_reclassify_live_shape_reply_renders_segments_without_commentary(monkeypatch):
+    """End to end with the real reply shape: the code lines are used and none
+    of the preamble / rationale / note text reaches the document."""
+    import unified_pipeline.stage_6_word_template as st6
+
+    monkeypatch.setattr(st6, "call_llm", lambda **kw: {"content": _LIVE_SHAPE_REPLY})
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    original = "Synthetic Study of Signaling, Example Institute, 2010-2015, PI; project goals"
+    gen._appendix_pending = [({"text": original, "taxonomy_code": "M2B",
+                               "extracted_fields": {}}, 10.0)]
+
+    gen._reconsider_appendix_entries()
+
+    joined = "\n".join(p.text for p in gen.doc.paragraphs)
+    for leak in ("Here is the analysis", "Rationale", "If your institution",
+                 "clearly", "threshold"):
+        assert leak not in joined
+    assert "Synthetic Study of Signaling" in joined
 
 
 def test_all_noise_batch_creates_no_appendix():
