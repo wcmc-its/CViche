@@ -223,6 +223,13 @@ PROBE_TABLE = [
     ("ISBN: 978-2-1234-567-1", None, _NEVER),
     ("Sex: differences in galanin expression", None, _NEVER),
     ("Race: reporting practices in clinical trials", None, _NEVER),
+    # #1103: a label that opens with "Name of" or joins spouse and children.
+    ("Name of Spouse & Children:  Pat Example, Kim (1990), Lee (1992)", CAT_SPOUSE, _ALL),
+    ("Name of Spouse: Pat Example", CAT_SPOUSE, _ALL),
+    ("Spouse and Children: Pat Example; Kim, Lee", CAT_SPOUSE, _ALL),
+    ("Wife/Children: Pat Example, Kim", CAT_SPOUSE, _ALL),
+    ("Names of Children: Kim (1990), Lee (1992)", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("Name of Spouse \u2013 A Documentary Film Review", None, _NEVER),
 ]
 
 
