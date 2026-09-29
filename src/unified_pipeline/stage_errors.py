@@ -49,7 +49,7 @@ class StageError:
     fatal: bool
 
     @classmethod
-    def from_exception(cls, stage: str, exc: BaseException) -> "StageError":
+    def from_exception(cls, stage: str, exc: BaseException) -> StageError:
         """A stage whose runner raised. Always fatal: the stage produced
         nothing, so whatever it owned is missing from the output."""
         return cls(stage=stage, exception_type=type(exc).__name__,

@@ -34,6 +34,7 @@ from app.models import Run, Step, Log
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.pipeline.event_emitter import event_emitter
 from app.storage import get_storage
+from app.storage.base import RunStorage
 from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)
@@ -550,7 +551,7 @@ class PipelineOrchestrator:
         if written:
             self._persist_outputs_to_storage([str(path)])
 
-    def _rehydrate_stage_errors(self, storage) -> None:
+    def _rehydrate_stage_errors(self, storage: RunStorage) -> None:
         """Bring a resumed run's stage-error record (#745) back from durable
         storage when the pod-local copy is gone, so a retried stage that now
         succeeds can clear its entry instead of the stale durable copy
