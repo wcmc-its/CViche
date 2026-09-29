@@ -19,6 +19,11 @@ from unified_pipeline.stage3b.io import canonical_taxonomy_codes
 logger = logging.getLogger(__name__)
 
 QUARANTINE_CODE = "T"
+# Codes outside taxonomy_v7.json that stage 6 still renders (the postdoc
+# training children, POSTDOC_TRAINING_CODES) and that 3b's reasoning corrector
+# can emit. Accepted, not quarantined, so a corrector-set C1-C3 keeps rendering
+# where it does today; reconciling the lists is #383.
+RENDERED_NON_V7_CODES = frozenset({"C1", "C2", "C3"})
 INVALID_CODE_REASON = "invalid_taxonomy_code"
 
 
@@ -33,7 +38,7 @@ def quarantine_invalid_taxonomy_codes(
     `original_taxonomy_code` and `taxonomy_code_quarantine_reason`; the caller
     owns the stats. Logs one WARNING per distinct offending code.
     """
-    valid = canonical_taxonomy_codes()
+    valid = canonical_taxonomy_codes() | RENDERED_NON_V7_CODES
     out: list[dict[str, Any]] = []
     rejected: Counter[str] = Counter()
     for entry in entries:
@@ -51,7 +56,7 @@ def quarantine_invalid_taxonomy_codes(
     for code_repr, count in rejected.items():
         logger.warning(
             "Stage 4: %d entr%s carried taxonomy code %s, which is not in "
-            "taxonomy_v7.json; quarantined as %s (%s)",
+            "taxonomy_v7.json or rendered by stage 6; quarantined as %s (%s)",
             count, "y" if count == 1 else "ies", code_repr,
             QUARANTINE_CODE, INVALID_CODE_REASON,
         )

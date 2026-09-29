@@ -79,23 +79,33 @@ def test_one_warning_per_distinct_bad_code(caplog):
     assert any("2 entries" in m and "ZZ9" in m for m in msgs)
 
 
+def test_rendered_postdoc_children_pass_through():
+    # C1-C3 are not in taxonomy_v7.json, but stage 6 renders them as postdoc
+    # training rows, so the check leaves them as they are (#651, #383).
+    entries = [_e("C1"), _e("C2"), _e("C3")]
+    out, rejected = quarantine_invalid_taxonomy_codes(entries)
+    assert rejected == {}
+    assert all(a is b for a, b in zip(out, entries))
+
+
 def test_reasoning_corrector_output_outside_v7_is_quarantined_at_stage_4():
     # #651 second producer: stage 3b's apply_reasoning_corrections rewrites
-    # taxonomy_code to anything in its own VALID_CODES, which includes C1 (not
-    # in taxonomy_v7.json). Pins the consequence: such an entry reaches stage 4
-    # as C1 and is re-coded T with the original kept (was: rendered by the
-    # postdoc_training renderer via RENDER_ROUTED_CODES). Judgement call, #383.
+    # taxonomy_code to anything in its own VALID_CODES. A C1 it sets keeps
+    # rendering; a code nothing renders (here the bare family letter "K") is
+    # re-coded T with the original kept.
     from unified_pipeline.core.validators.reasoning_consistency_checker import (
         apply_reasoning_corrections,
     )
-    corrected, _ = apply_reasoning_corrections([{
-        "text": "Postdoctoral trainee, Example Institute",
-        "taxonomy_code": "D1",
-        "classification_reasoning": "Training position; should be C1.",
-    }])
-    assert corrected[0]["taxonomy_code"] == "C1"
+    corrected, _ = apply_reasoning_corrections([
+        {"text": "Postdoctoral trainee, Example Institute", "taxonomy_code": "D1",
+         "classification_reasoning": "Training position; should be C1."},
+        {"text": "Fictional lecture series", "taxonomy_code": "D1",
+         "classification_reasoning": "Teaching activity; should be K."},
+    ])
+    assert [e["taxonomy_code"] for e in corrected] == ["C1", "K"]
     assert "C1" not in canonical_taxonomy_codes()
     out, rejected = quarantine_invalid_taxonomy_codes(corrected)
-    assert out[0]["taxonomy_code"] == "T"
-    assert out[0]["original_taxonomy_code"] == "C1"
-    assert rejected == {"'C1'": 1}
+    assert out[0] is corrected[0]
+    assert out[1]["taxonomy_code"] == "T"
+    assert out[1]["original_taxonomy_code"] == "K"
+    assert rejected == {"'K'": 1}
