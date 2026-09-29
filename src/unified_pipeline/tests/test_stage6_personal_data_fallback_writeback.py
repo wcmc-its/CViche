@@ -1390,3 +1390,49 @@ def test_a_multiline_phone_label_cell_beside_a_filled_cell_is_not_taken_as_one_n
     rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
     assert "Fax" not in rows.get("office telephone:", "")
     assert "212-555-0199" not in _docx_texts(tmp_path / "out.docx")
+
+
+@pytest.mark.parametrize("label,other", [
+    ("Phone: (office)", "212-555-0100"),
+    ("Telephone: Work", "212-555-0100"),
+    ("Office Phone: ext. 1234", "212-555-0100"),
+    ("Phone: 55-0100", "212-555-0100"),
+])
+def test_a_phone_label_cell_without_a_number_still_reads_cell_one(tmp_path, label, other):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[(label, other)])
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows["office telephone:"] == "212-555-0100"
+
+
+@pytest.mark.parametrize("label", [
+    "Permanent Office Address:", "Permanent Business Address:",
+    "Permanent Work Address:", "Office Permanent Address:",
+])
+def test_a_permanent_office_or_business_address_is_an_office_address(tmp_path, label):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[(label, "42 Example Ave\nExample City, EX 00000")])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert "42 Example Ave" in rows["office address:"]
+    assert gen._pii_result.withheld == []
+
+
+@pytest.mark.parametrize("label,expected", [
+    ("Permanent Office Address:", "office_address"),
+    ("Permanent Business Address:", "office_address"),
+    ("Permanent Address:", "home_address"),
+    ("Permanent Home Address:", "home_address"),
+    ("Home/Office Address:", "home_address"),
+    ("Permanent Home/Office Address:", "home_address"),
+    ("Permanently Office Address:", "office_address"),
+])
+def test_permanent_precedence_classification(label, expected):
+    assert personal_data_module._classify_contact_label(label) == expected
+
+
+def test_a_seven_digit_local_number_in_the_label_cell_is_a_number(tmp_path):
+    """Boundary of the digit-count guard: 7 digits is a phone number."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[("Business Phone: 555-0100", "Room 4B")])
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows["office telephone:"] == "555-0100"

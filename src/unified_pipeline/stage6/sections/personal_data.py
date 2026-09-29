@@ -179,8 +179,14 @@ _ADDRESS_LABEL_WORDS = ('address', 'business')
 # an ADDRESS only (US CV convention); "Permanent email" is an alumni address.
 _FAX_LABEL = re.compile(r'\bfax\b')
 _HOME_LABEL = re.compile(r'\b(?:home|residence|residential)\b')
-_HOME_ADDRESS_LABEL = re.compile(
-    r'\b(?:home|residence|residential|permanent)\b')
+_HOME_ADDRESS_LABEL = re.compile(r'\b(?:home|residence|residential)\b')
+_PERMANENT_LABEL = re.compile(r'\bpermanent\b')
+# "Permanent Office/Business/Work Address:" is an office address: those words
+# outrank "permanent" (but not "home": "Home/Office Address:" stays home).
+_OFFICE_QUALIFIER = re.compile(r'\b(?:office|business|work|professional)\b')
+# An embedded office-phone value is only a number when it has this many digits
+# ("Phone: (office) | 212-555-0100" and "Phone: ext. 1234" carry none).
+_MIN_PHONE_DIGITS = 7
 
 # An allowlist, not a word match, because "name" ends far more metadata labels
 # than person labels. Widening it is a one-line edit when a corpus CV carries
@@ -225,7 +231,9 @@ def _classify_contact_label(label: str) -> str | None:
         # address branch through its 'business' word (#730, web198).
         return None
     if any(word in head for word in _ADDRESS_LABEL_WORDS):
-        if _HOME_ADDRESS_LABEL.search(head):
+        if _HOME_ADDRESS_LABEL.search(head) or (
+                _PERMANENT_LABEL.search(head)
+                and not _OFFICE_QUALIFIER.search(head)):
             return _FIELD_HOME_ADDRESS
         return _FIELD_OFFICE_ADDRESS
     if head in _PERSON_NAME_LABELS:
@@ -604,7 +612,8 @@ def _row_label_value_pairs(row: _TableRow) -> list[tuple[str, str]]:
     # row (cell 1 non-empty) and only when it is one line: a label cell that
     # holds a whole multi-line block over an empty cell 1 is left as before.
     if embedded and (field in _HOME_FIELDS or (
-            field == _FIELD_OFFICE_PHONE and value and '\n' not in embedded)):
+            field == _FIELD_OFFICE_PHONE and value and '\n' not in embedded
+            and sum(c.isdigit() for c in embedded) >= _MIN_PHONE_DIGITS)):
         pairs = [(label_text, embedded)]
         if ':' in value:
             pairs.append((value, value.partition(':')[2].strip()))
