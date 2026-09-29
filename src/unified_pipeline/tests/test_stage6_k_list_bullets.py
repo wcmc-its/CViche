@@ -415,6 +415,43 @@ def test_a_row_that_does_not_line_up_or_disagrees_is_rejected(tmp_path):
                                 [_row_entry(_LINES)]), _LINES) == ["0", "0", "0"]
 
 
+def test_a_styled_title_without_numbering_still_reads_as_the_parent(tmp_path):
+    # Real titles carry a pPr (spacing, style) but no numPr; only numPr is a
+    # bullet. Treating "has a pPr" as "is bulleted" turns every level to 0.
+    source = _source_docx(tmp_path, [_HIER])
+    title = Document(source)
+    title.tables[0].rows[0].cells[0].paragraphs[0].paragraph_format.space_after = 0
+    title.save(source)
+    assert _levels_of(_render_k(source, [_row_entry(_LINES)]), _LINES) == ["0", "1", "1"]
+
+
+def test_a_blank_paragraph_inside_the_source_cell_does_not_break_the_match(tmp_path):
+    # The entry's lines never contain the blank; a source list that kept it
+    # would differ in length and fall back flat.
+    blank_between = [_HIER[0], ("", False), _HIER[1], _HIER[2]]
+    assert _levels_of(_render_k(_source_docx(tmp_path, [blank_between]),
+                                [_row_entry(_LINES)]), _LINES) == ["0", "1", "1"]
+
+
+def test_levels_are_dropped_when_the_rendered_lines_are_not_the_raw_lines(tmp_path):
+    # No formatted_text and no tail: the entry falls to the field/raw path,
+    # which splits a long child on ';' into more lines than the source has
+    # paragraphs. Levels aligned to the source must not index into that.
+    long_child = ("Coordinate the partner site visits and prepare the annual review; "
+                  "collect trainee feedback after every rotation block")
+    assert len(long_child) > 100
+    lines = [_TITLE, _CHILDREN[0], long_child]
+    source = _source_docx(tmp_path, [[(_TITLE, False), (_CHILDREN[0], True), (long_child, True)]])
+    entry = _row_entry(lines, tail="")
+    entry["extracted_fields"] = {}
+    gen = _render_k(source, [entry])  # must not raise IndexError
+    rendered = [p for p in gen.doc.paragraphs
+                if p.text.strip() in {_TITLE, _CHILDREN[0]}
+                or p.text.strip() in {x.strip() for x in long_child.split(";")}]
+    assert len(rendered) == 4
+    assert {_num_level(p) for p in rendered} == {"0"}
+
+
 def test_a_tail_is_licensed_on_the_first_line_only(tmp_path):
     # The trailing columns may ride cell 0's first paragraph; a tail on a child
     # line means it is not this row.
