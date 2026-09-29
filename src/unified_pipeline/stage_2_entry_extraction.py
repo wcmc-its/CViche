@@ -26,7 +26,7 @@ from docx import Document
 sys.path.insert(0, str(Path(__file__).parent))
 
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
+from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import (
     extract_docx_structure,
@@ -1221,7 +1221,7 @@ STAGE2_SECTION_WORKERS = workers_from_config("CVICHE_STAGE2_SECTION_WORKERS")
 class _SectionResult(NamedTuple):
     entries: list[dict]
     cost_info: dict
-    assigned: set
+    assigned: set[int]
     lines: list[str]
 
 
@@ -1237,41 +1237,17 @@ class _DocumentContext(NamedTuple):
 
 
 def _section_progress_printer(hierarchy_paths: list[list[str]]) -> Callable[[int, _SectionResult], None]:
-    """Build a map_in_order ``on_result`` callback: one atomic print per
-    finished section, numbered by completion.
-
-    map_in_order guarantees ``on_result`` fires only on the CALLING thread,
-    one call at a time -- both its serial path and its ``as_completed`` loop
-    invoke it inline, never from a pool thread -- so despite the pool
-    underneath, this closure is single-threaded: no lock, no ``nonlocal``
-    gymnastics beyond the one ``done`` counter needs as a closure variable.
-    The ``[N/M] Processing:`` line is a parsed contract -- orchestrator.py's
-    PROGRESS_PATTERNS read it into the progress bar -- so N counts sections
-    *finished*, which stays monotonic however the pool orders completions,
-    and the whole block goes out in one print so two sections' lines cannot
-    splice (#881).
-
-    ``on_result``'s two arguments are deliberately different orderings:
-    ``index`` is map_in_order's dispatch-order position into the input
-    list (so ``hierarchy_paths[index]`` always names the section that
-    actually finished, whichever order sections complete in), while
-    ``done`` is this closure's own completion counter -- it increments
-    once per call, in call order, so it is always 1, 2, 3... regardless of
-    which ``index`` each call carries. The printed ``[N/M]`` uses ``done``,
-    never ``index``.
+    """``[N/M] Processing: <path>`` then the section's own lines, via the
+    shared make_progress_printer (#923). The ``[N/M]`` line is a parsed
+    contract -- orchestrator.py's PROGRESS_PATTERNS read it into the
+    progress bar; pinned by test_section_progress_line_is_read_by_progress_patterns.
+    N is ``done`` (completion count), never ``index`` (which only names the
+    section that finished).
     """
-    done = 0
-
-    def on_result(index: int, result: _SectionResult) -> None:
-        nonlocal done
-        _, _, _, lines = result
-        done += 1
-        print("\n".join([
-            f"[{done}/{len(hierarchy_paths)}] Processing: {' > '.join(hierarchy_paths[index])}",
-            *lines,
-        ]))
-
-    return on_result
+    return make_progress_printer(lambda done, index, result: [
+        f"[{done}/{len(hierarchy_paths)}] Processing: {' > '.join(hierarchy_paths[index])}",
+        *result.lines,
+    ])
 
 
 def _extract_section(

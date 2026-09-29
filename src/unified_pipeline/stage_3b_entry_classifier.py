@@ -78,7 +78,7 @@ from unified_pipeline.stage3b.prompt import (  # noqa: F401
     build_taxonomy_codes_for_prompt,
 )
 from unified_pipeline.stage3b.header_pin import apply_header_pin
-from unified_pipeline.core.batch_pool import map_in_order, workers_from_config
+from unified_pipeline.core.batch_pool import make_progress_printer, map_in_order, workers_from_config
 from unified_pipeline.stage3b.classify import (  # noqa: F401
     _BatchStats,
     _build_taxonomy_ref_for_batch,
@@ -104,29 +104,15 @@ _GroupResult = tuple[list[dict], ClassificationStats, list[str]]
 
 
 def _group_progress_printer(hierarchy_keys: list[str]) -> Callable[[int, _GroupResult], None]:
-    """Build a map_in_order ``on_result`` callback: one atomic print per
-    finished group, numbered by completion.
-
-    map_in_order guarantees ``on_result`` fires only on the CALLING thread,
-    one call at a time -- both its serial path and its ``as_completed`` loop
-    invoke it inline, never from a pool thread -- so despite the pool
-    underneath, this closure is single-threaded: no lock, no ``nonlocal``
-    gymnastics beyond the one ``done`` counter needs as a closure variable.
-    The ``[N/M]`` line is a parsed contract -- orchestrator.py's
-    PROGRESS_PATTERNS read it into the progress bar -- so N counts groups
-    *finished*, which stays monotonic however the pool orders completions,
-    and the whole block goes out in one print so two groups' lines cannot
-    splice (#881).
+    """``[N/M] <key>...`` then the group's own lines, via the shared
+    make_progress_printer (#923). The ``[N/M]`` line is a parsed contract --
+    orchestrator.py's PROGRESS_PATTERNS read it into the progress bar;
+    pinned by test_group_progress_line_is_read_by_progress_patterns.
     """
-    done = 0
-
-    def on_result(index: int, result: _GroupResult) -> None:
-        nonlocal done
-        _, _, lines = result
-        done += 1
-        print("\n".join([f"[{done}/{len(hierarchy_keys)}] {hierarchy_keys[index][:60]}...", *lines]))
-
-    return on_result
+    return make_progress_printer(lambda done, index, result: [
+        f"[{done}/{len(hierarchy_keys)}] {hierarchy_keys[index][:60]}...",
+        *result[2],
+    ])
 
 
 def _classify_group(
@@ -737,7 +723,7 @@ def run_stage_3b(
     output_doc["meta"]["code_distribution"] = dict(sorted(code_counts.items()))
 
     # Write output
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(output_doc, f, indent=2)
 
     print()

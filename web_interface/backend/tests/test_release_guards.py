@@ -239,6 +239,34 @@ class TestRetryStep:
         assert steps[6].error_message is None
         assert steps[12].status == "pending"         # downstream: reset
 
+    def test_retry_restarts_started_at_so_the_reaper_skips_it(
+        self, client, db, seed_simple_mode
+    ):
+        """#145: a retry of a run first started hours ago must not look stale.
+        reconcile_stale_runs ages runs by started_at, and the retry used to keep
+        the original one, so the next sweep failed the run mid-execution."""
+        user = _make_user(db)
+        _auth_cookie(client, user)
+        run = _seed_failed_run(db, user, run_id="RETRY4", failed_at=6)
+        run.started_at = datetime.now() - timedelta(hours=3)
+        db.commit()
+
+        from app.api.upload import UPLOAD_DIR
+        upload_file = UPLOAD_DIR / "RETRY4.docx"
+        upload_file.write_bytes(b"dummy")
+        try:
+            with patch("app.api.runs.PipelineOrchestrator") as MockOrch:
+                MockOrch.return_value.execute = AsyncMock(return_value=None)
+                assert client.post("/api/run/RETRY4/retry/6").status_code == 200
+        finally:
+            upload_file.unlink(missing_ok=True)
+
+        db.expire_all()
+        assert reconcile_stale_runs(db) == 0
+        run = db.query(Run).filter(Run.id == "RETRY4").first()
+        assert run.status == "running"
+        assert run.started_at > datetime.now() - timedelta(minutes=1)
+
     def test_retry_rejects_non_failed_step(self, client, db, seed_simple_mode):
         user = _make_user(db)
         _auth_cookie(client, user)

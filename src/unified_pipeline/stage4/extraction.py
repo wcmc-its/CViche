@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm.retry import LLMOutageError
 
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
@@ -461,6 +462,8 @@ def attempt_llm_recovery(
             "cost": llm_result["cost"] if llm_result else 0.0,
             "tokens": llm_result.get("total_tokens", 0) if llm_result else 0,
         }
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception:
         logger.exception("Stage 4 recovery LLM call failed for taxonomy %s", taxonomy_code)
         return {
@@ -487,6 +490,14 @@ def _get_field_descriptions(taxonomy_code: str) -> str:
 #: `context_heading` (#985). Leading newline: it follows instruction 8/9.
 CONTEXT_HEADING_INSTRUCTION = """
 10. **Sub-heading context**: an entry marked "(under: X)" sits beneath the sub-heading X in the CV. Use X to fill institution, role, title, audience, level or status fields when the entry text itself omits them. Never override what the entry text states. When the entry gives its own role, even as a verb or a qualifier, that role wins over X: "Co-directed with ..." under "Course Director" is role "Co-Director", and "Assistant ..." or "Associate ..." stays as the entry words it. Do not copy X into a field it does not describe, and never copy X verbatim when it only names a kind of activity (e.g. "New Course Development")."""
+
+
+# Clinical trials file as current or past funding (#291), never as a pending
+# application or a patent, so only these two grant prompts carry the mapping of
+# a trial onto the grant fields the grant table renders.
+CLINICAL_TRIAL_CODES = frozenset({'M2A', 'M2B'})
+CLINICAL_TRIAL_FIELD_MAPPING = """
+   - A CLINICAL TRIAL filed here uses the same fields: title = the trial title with its phase (e.g., "Phase II trial of ..."), grant_number = its NCT or protocol number, agency = its sponsor, pi_role = the CV owner's role on the trial (e.g., "Site PI", "Sub-Investigator")"""
 
 
 def build_extraction_prompt(
@@ -562,6 +573,8 @@ def build_extraction_prompt(
    - If no PI name is found, leave pi_name as null
    - status = the grant's status only when the entry itself states one (e.g., "Update: withdrawn" → "withdrawn"); otherwise null
    - notes = a labelled remark no other field holds (e.g., the text after "Note:"); otherwise null"""
+        if code in CLINICAL_TRIAL_CODES:
+            code_specific_instructions += CLINICAL_TRIAL_FIELD_MAPPING
     elif code == 'K4':
         code_specific_instructions = """
 9. **CONTINUING EDUCATION (K4)** - CRITICAL field separation:
@@ -808,6 +821,8 @@ def extract_fields_batch(
                     "extraction_success": False,
                     "extraction_error": LLM_RESPONSE_INVALID
                 })
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
         except Exception:
             logger.exception("Stage 4 extraction failed for code %s", code)
             failed_groups += 1

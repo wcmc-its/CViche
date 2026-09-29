@@ -47,6 +47,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_owner_contact_missing,
     lint_pipe_leaks,
     lint_pipeline_errors,
+    lint_section_lost,
     lint_stage3b_fallback_ratio,
     lint_taxonomy_code_coverage,
     lint_segmentation,
@@ -429,35 +430,34 @@ def test_classified_unrendered_quiet_when_reformatted_downstream():
 # --------------------------------------------------- lint: taxonomy code coverage
 
 def test_taxonomy_code_coverage_fires_for_a_code_with_no_render_route():
-    # N2 was #529's original example; #529 gave it a render route, so this
-    # now uses M4 -- #291's still-parked status-aware-routing gap (see
-    # test_taxonomy_code_render_coverage.py's _KNOWN_GAPS) -- a real,
-    # confidently-classified code stage 6 has no renderer for today.
+    # N2 was #529's original example and M4 the next (#291 gave both a
+    # route), so this uses N3, the parent container code still in
+    # test_taxonomy_code_render_coverage.py's _KNOWN_GAPS.
     stage3b = {"entries": [
-        _entry("Postdoctoral Fellowship $26,000", taxonomy_code="M4", start=1),
-        _entry("Mentored Research Scholar Grant", taxonomy_code="M4", start=2),
+        _entry("Mentored an invented student", taxonomy_code="N3", start=1),
+        _entry("Mentored an invented fellow", taxonomy_code="N3", start=2),
     ]}
     findings = lint_taxonomy_code_coverage(stage3b)
     assert len(findings) == 1
     # #816: always INFO now -- the unrouted-code counts moved to the
     # doctor's `metrics` block (unrouted_code_entries).
     assert findings[0]["severity"] == "INFO"
-    assert "M4" in findings[0]["message"]
+    assert "N3" in findings[0]["message"]
     assert "2 entries" in findings[0]["message"]
 
 
 def test_unrouted_code_counts_matches_the_lints_own_by_code_dict():
     """#816: the doctor's `metrics` block reads this SAME dict the lint
-    above builds its findings from. M4/M4A, not N1/N2: #529 gave N1 and
-    N2 render routes (see test_taxonomy_code_render_coverage.py's
-    _KNOWN_GAPS)."""
+    above builds its findings from. A retired M4 code is NOT unrouted: stage
+    6 renders it as M2A (#291), so it must not be reported as Appendix-bound."""
     stage3b = {"entries": [
-        _entry("Postdoctoral Fellowship", taxonomy_code="M4", start=1),
-        _entry("Mentored Research Scholar Grant", taxonomy_code="M4", start=2),
-        _entry("Another orphan code", taxonomy_code="M4A", start=3),
-        _entry("A grant", taxonomy_code="M2A", start=4),
+        _entry("Mentored an invented student", taxonomy_code="N3", start=1),
+        _entry("Mentored an invented fellow", taxonomy_code="N3", start=2),
+        _entry("Another orphan code", taxonomy_code="ZZ", start=3),
+        _entry("A stored clinical trial", taxonomy_code="M4A", start=4),
+        _entry("A grant", taxonomy_code="M2A", start=5),
     ]}
-    assert unrouted_code_counts(stage3b) == {"M4": 2, "M4A": 1}
+    assert unrouted_code_counts(stage3b) == {"N3": 2, "ZZ": 1}
     assert unrouted_code_counts({"entries": []}) == {}
 
 
@@ -533,7 +533,7 @@ def test_output_hygiene_flags_retired_invalid_codes():
 
 
 def test_output_hygiene_flags_every_taxonomy_code_shape():
-    codes = ["A", "B1", "D1", "K5", "M2A", "M4C", "N2", "Q4D", "S0", "T"]
+    codes = ["A", "B1", "D1", "K5", "M2A", "M4C", "N2", "Q4D", "S0", "T"]  # M4C: retired (#291), still a leak
     findings = lint_output_hygiene([("p", f"• [{c}] leaked") for c in codes])
     assert findings[0]["severity"] == "ERROR"
     assert f"{len(codes)} bracketed" in findings[0]["message"]
@@ -774,6 +774,159 @@ def test_unrendered_records_counts_generic_lines_unverifiable_not_missing():
                                  taxonomy_code="D1")]}
     blocks = [("p", "D. GRANTS"), ("table", _ROW_HARBORVIEW)]
     assert lint_unrendered_records(stage4, blocks) == []
+
+
+# ------------------------------------------------------ lint 8b: section lost
+
+# Synthetic leadership records: every token distinct from the rest of the page.
+_LEAD_ROWS = ("Founding Director, Quillfeather Cellular Therapeutics Institute\t1998-2014",
+              "Chairman, Marbleton Steering Committee on Genomic Medicine\t1992-1997")
+
+
+def _stage4(*pairs):
+    return {"entries": [{"taxonomy_code": code, "text": text} for code, text in pairs]}
+
+
+def _page(*sections):
+    """Blocks for a WCM render: (heading, [paragraph texts]) per section."""
+    return [block for heading, texts in sections
+            for block in [("p", heading)] + [("p", t) for t in texts]]
+
+
+_FILLER = ("EDUCATION", ["Bachelor of Science, Hollowbrook University, 1985"])
+
+
+def test_section_lost_fires_when_section_is_empty_but_words_render_elsewhere():
+    # YME2VA: the leadership section held only its instruction paragraph,
+    # while the same words turned up in lectures -- whole-document matching
+    # (lint 8) called that rendered.
+    blocks = _page(_FILLER,
+                   ("INSTITUTIONAL LEADERSHIP ACTIVITIES", ["Please list activities."]),
+                   ("INVITATIONS TO SPEAK/PRESENT",
+                    ["Quillfeather Cellular Therapeutics Institute lecture, Marbleton Genomic Medicine forum"]))
+    findings = lint_section_lost(_stage4(*[("O", t) for t in _LEAD_ROWS]), blocks)
+    assert [f["lint"] for f in findings] == ["section_lost"]
+    assert findings[0]["message"].startswith("O: 2 entries absent from the INSTITUTIONAL LEADERSHIP")
+
+
+def test_section_lost_fires_when_records_render_only_in_the_appendix():
+    # BYFQBG's N2 training grants rendered, but in the Appendix.
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", []),
+                   ("T. APPENDIX", list(_LEAD_ROWS)))
+    assert lint_section_lost(_stage4(*[("O", t) for t in _LEAD_ROWS]), blocks)
+
+
+def test_section_lost_quiet_when_records_render_in_their_section():
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", list(_LEAD_ROWS)))
+    assert lint_section_lost(_stage4(*[("O", t) for t in _LEAD_ROWS]), blocks) == []
+
+
+def test_section_lost_quiet_when_half_the_role_line_renders_without_its_description():
+    # 4N14RQ: the role renders as a table row, but the long description has
+    # no slot in the table. Half the first line's tokens (the floor) are in
+    # the section, under the per-entry hit floor, so only the first-line
+    # test keeps this quiet.
+    entry = ("Chief Wexcombe\n"
+             "Scope: oversaw scheduling, onboarding, curriculum, wellness, "
+             "recruitment, grievances, orientation, quality dashboards, "
+             "handoffs, simulation, mentoring, budgeting, conferences.")
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", ["Chief | 2022-2023"]))
+    assert lint_section_lost(_stage4(("O", entry)), blocks) == []
+
+
+def test_section_lost_one_token_first_line_cannot_vouch():
+    entry = "Quillfeather\nMarbleton Brambleton Ostrander Pellgrave Halloway Tollbridge"
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", ["Quillfeather"]))
+    assert lint_section_lost(_stage4(("O", entry)), blocks)
+
+
+def test_section_lost_quiet_when_one_entry_has_exactly_the_hit_floor_in_section():
+    # Title reworded at render (first-line test fails) and a long body
+    # (share under 0.25), but exactly three of the entry's own tokens are in
+    # the section: rendered, not lost.
+    entry = ("Wexcombe Pellgrave Ostrander Brambleton\n"
+             "Quorvale Zephyrine Halloway: " + ", ".join(
+                 ["planning", "staffing", "reporting", "auditing", "training",
+                  "hiring", "budgets", "outreach", "grants", "policy", "surveys",
+                  "metrics", "forums", "retreats", "bylaws"]))
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES",
+                             ["Director, Quorvale Zephyrine Halloway"]))
+    assert lint_section_lost(_stage4(("O", entry)), blocks) == []
+
+
+def test_section_lost_quiet_when_code_share_is_high_but_spread_thin():
+    # Each entry has only 2 of its 5 tokens in the section (under the hit
+    # floor, and under half its first line), but together 6 of 15: above
+    # the share threshold.
+    entries = [("P", "Alderwood Quarry Marston Fennick Oakhollow"),
+               ("P", "Birchmoor Quarry Marston Tollbridge Heatherly"),
+               ("P", "Cresswell Quarry Marston Lintwhite Brackenby")]
+    blocks = _page(_FILLER, ("INSTITUTIONAL ADMINISTRATIVE ACTIVITIES",
+                             ["Alderwood Fennick", "Birchmoor Tollbridge", "Cresswell Lintwhite"]))
+    assert lint_section_lost(_stage4(*entries), blocks) == []
+
+
+def test_section_lost_quiet_at_exactly_the_share_threshold():
+    # 2 of 8 tokens (0.25) present: the threshold is strict.
+    entries = [("P", "Alderwood Quarry Marston Oakhollow"),
+               ("P", "Birchmoor Heatherly Tollbridge Lintwhite")]
+    blocks = _page(_FILLER, ("INSTITUTIONAL ADMINISTRATIVE ACTIVITIES",
+                             ["Alderwood", "Birchmoor"]))
+    assert lint_section_lost(_stage4(*entries), blocks) == []
+
+
+def test_section_lost_leaves_codes_of_only_short_entries_unjudged():
+    # Six tokens in all, but no entry has the 3 the per-entry test needs.
+    entries = [("O", "Alderwood Quarry"), ("O", "Birchmoor Heatherly"),
+               ("O", "Cresswell Lintwhite")]
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", []))
+    assert lint_section_lost(_stage4(*entries), blocks) == []
+
+
+def test_section_lost_ignores_codes_outside_the_taxonomy_letters():
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", []))
+    assert lint_section_lost(_stage4(*[("X9", t) for t in _LEAD_ROWS]), blocks) == []
+
+
+def test_section_lost_keeps_the_section_across_its_sub_headings():
+    blocks = _page(_FILLER, ("MENTORING", []), ("PAST MENTEES", list(_LEAD_ROWS)))
+    assert lint_section_lost(_stage4(*[("N3B", t) for t in _LEAD_ROWS]), blocks) == []
+
+
+def test_section_lost_leaves_codes_too_thin_to_judge():
+    # 5 distinctive tokens: under SECTION_LOST_MIN_TOKENS, not judged.
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", []))
+    entry = "Zephyrine Quorvale Brambleton Ostrander Wexcombe"
+    assert lint_section_lost(_stage4(("O", entry)), blocks) == []
+    assert lint_section_lost(_stage4(("O", entry + " Pellgrave")), blocks)
+
+
+def test_section_lost_discounts_template_labels_every_section_carries():
+    # One-word template labels ('Administrative', 'Awards') sit in every
+    # render; counted, their 3 hits would pass an entry whose own record is gone.
+    entry = ("Zephyrine Quorvale Brambleton Ostrander Wexcombe Pellgrave\n"
+             "Administrative Awards Abstracts")
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES",
+                             ["Administrative Awards Abstracts"]))
+    assert lint_section_lost(_stage4(("O", entry)), blocks)
+
+
+def test_section_lost_skips_withheld_summary_and_appendix_codes():
+    blocks = _page(_FILLER, ("PERSONAL DATA", []), ("RESEARCH", []), ("T. APPENDIX", []))
+    stage4 = _stage4(*[(code, t) for code in ("A", "M1", "T") for t in _LEAD_ROWS])
+    assert lint_section_lost(stage4, blocks) == []
+
+
+def test_section_lost_reads_c_under_education_and_k_under_educational_contributions():
+    # EDUCATION is a prefix of EDUCATIONAL CONTRIBUTIONS: a K record rendered
+    # there must not be charged to EDUCATION, nor a C record to K.
+    postdoc = "Postdoctoral Fellowship, Wrenfield Oncology Laboratories, Caldermoor"
+    course = "Course Director, Brightwater Pharmacology Seminar Sequence, Caldermoor"
+    blocks = _page(("EDUCATION", [postdoc]), ("EDUCATIONAL CONTRIBUTIONS", [course]))
+    assert lint_section_lost(_stage4(("C", postdoc), ("K1", course)), blocks) == []
+    swapped = _page(("EDUCATION", [course]), ("EDUCATIONAL CONTRIBUTIONS", [postdoc]))
+    assert {f["message"][:2] for f in lint_section_lost(
+        _stage4(("C", postdoc), ("K1", course)), swapped)} == {"C:", "K1"}
 
 
 # -------------------------------------------------- lint 9: enrichment failures
@@ -1474,6 +1627,9 @@ def _build_clean_run(tmp_path, uid=_UID):
                                      "no_identifier")]})
 
     output = Document()
+    # Real renders carry grants under RESEARCH (section_lost reads the
+    # section by that heading); "D. GRANTS" is then a sub-heading.
+    output.add_paragraph("RESEARCH")
     output.add_paragraph("D. GRANTS")
     output.add_paragraph("Current Research Funding")
     table = output.add_table(rows=1, cols=1)
@@ -1497,12 +1653,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (23), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (24), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 22
+    assert len(payload["findings"]) == 23
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -1542,7 +1698,7 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
 
     stage3b = {
         "entries": [
-            _entry("Postdoctoral Fellowship", taxonomy_code="M4", start=1),
+            _entry("Mentored an invented student", taxonomy_code="N3", start=1),
             _entry("A grant", taxonomy_code="M2A", start=2),
         ],
         "meta": {"stats": {
@@ -1578,7 +1734,7 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
     assert metrics["appendix_share"] == round(2 / 2, 4)
     assert metrics["honors_malformed_rows"] == 1
     assert metrics["honors_rows"] == 2
-    assert metrics["unrouted_code_entries"] == {"M4": 1}  # M4, not N2: #529 routes N2
+    assert metrics["unrouted_code_entries"] == {"N3": 1}  # N3: #529 routes N2, #291 routes M4
     assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
     assert metrics["t_validation_yield"] == round(28 / 93, 4)
     assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)

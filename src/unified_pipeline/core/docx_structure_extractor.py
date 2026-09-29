@@ -92,7 +92,7 @@ def get_cell_text(cell, tab_char: str = ' ') -> str:
     return '\n'.join(get_paragraph_text(p, tab_char=tab_char) for p in cell.paragraphs)
 
 
-def extract_paragraph_metadata(para: Paragraph, idx: int) -> dict[str, Any]:
+def extract_paragraph_metadata(para: Paragraph, idx: int | None) -> dict[str, Any]:
     """
     Extract comprehensive metadata from a paragraph.
 
@@ -470,9 +470,12 @@ def is_column_header_row(cell_texts: list[str], marked_repeat_header: bool) -> b
     return _is_column_header_row(" | ".join(sorted(filled)))
 
 
-def extract_table_metadata(table: Table, idx: int) -> dict[str, Any]:
+def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
     """
     Extract table structure and content.
+
+    `idx` is the table's element id, always a `"table_N"` string: stage 2
+    branches on `.startswith("table_")` and derives sort keys from it (#315).
 
     Returns table as array of rows with cell metadata. When row 0 is a
     column-label row (`is_column_header_row`, #424) the result also carries
@@ -488,17 +491,11 @@ def extract_table_metadata(table: Table, idx: int) -> dict[str, Any]:
             # or malformed XML (e.g., <w:rPr> inside <w:t> instead of as sibling)
             cell_text = get_cell_text(cell).strip()
 
-            # Fallback: Extract text directly from XML using recursive text extraction
+            # Fallback: Extract text directly from XML using recursive text extraction.
+            # No try/except: lxml's itertext() on a parsed element does not raise,
+            # and a bare except here hid real bugs as empty cells (#611).
             if not cell_text and cell._element is not None:
-                try:
-                    # Method 1: Try itertext() which gets ALL text nodes recursively
-                    cell_text = ''.join(cell._element.itertext()).strip()
-                except:
-                    try:
-                        # Method 2: Fallback to manual iteration
-                        cell_text = ''.join(node.text for node in cell._element.iter() if node.text).strip()
-                    except:
-                        pass  # If both methods fail, keep empty string
+                cell_text = ''.join(cell._element.itertext()).strip()
 
             # Get cell formatting if available
             cell_data = {
@@ -734,10 +731,7 @@ def get_table_first_cell_text(table: Table) -> str:
 
     # Fallback extraction if needed
     if not cell_text and first_cell._element is not None:
-        try:
-            cell_text = ''.join(first_cell._element.itertext()).strip()
-        except:
-            pass
+        cell_text = ''.join(first_cell._element.itertext()).strip()
 
     return cell_text
 
@@ -1167,7 +1161,8 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
     num_table_headers = 0
     num_empty = 0
 
-    # Also track original para_idx for backward compatibility
+    # A doc.paragraphs position: body paragraphs only. Layout-table cell
+    # paragraphs below carry para_idx/idx None -- use unified_idx (#609).
     para_idx = 0
 
     # Iterate through document body elements in order
@@ -1219,13 +1214,12 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                     for cell_para in cell.paragraphs:
                         if not get_paragraph_text(cell_para).strip():
                             continue
-                        para_data = extract_paragraph_metadata(cell_para, para_idx)
+                        para_data = extract_paragraph_metadata(cell_para, None)
                         para_data["unified_idx"] = unified_idx
-                        para_data["para_idx"] = para_idx
+                        para_data["para_idx"] = None
                         elements.append(para_data)
                         num_paragraphs += 1
                         unified_idx += 1
-                        para_idx += 1
                 num_tables += 1
                 continue
 
@@ -1812,6 +1806,12 @@ def create_simplified_layout_json(structure: dict[str, Any], skip_empty: bool = 
                 "cols": elem["cols"],
                 "preview": elem["data"][0] if elem["data"] else []
             })
+
+        else:
+            # extract_docx_structure emits only paragraph/table/empty. Another
+            # type (e.g. extract_unified_elements' table_header/table_content)
+            # would otherwise vanish from the layout silently (#614).
+            raise ValueError(f"create_simplified_layout_json: unhandled element type {elem['type']!r}")
 
     return simplified
 

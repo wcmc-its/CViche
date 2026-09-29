@@ -27,6 +27,7 @@ from pathlib import Path
 from datetime import datetime
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm.retry import LLMOutageError
 
 # Paths
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5c_teaching_formatted"
@@ -292,6 +293,8 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
 
         return result_text, usage
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception as e:
         if verbose:
             print(f"  Warning: LLM formatting failed: {e}")

@@ -10,26 +10,14 @@ facade) cannot own it either without an import cycle (llm_client imports the
 provider handler, which needs this module's state).
 """
 
-import sys
 import time
 import random
 import logging
 import threading
 from collections.abc import Callable
-from pathlib import Path
 from typing import TypeVar
 
-# Calculate the absolute path to web_interface/backend so `app.config_loader`
-# is importable from here (src/unified_pipeline/llm/ -> project root -> backend).
-CURRENT_FILE = Path(__file__).resolve()
-PROJECT_ROOT = CURRENT_FILE.parent.parent.parent.parent
-BACKEND_ROOT = PROJECT_ROOT / "web_interface" / "backend"
-
-if str(BACKEND_ROOT) not in sys.path:
-    sys.path.insert(0, str(BACKEND_ROOT))
-
-from app.config_loader import get_config
-
+from unified_pipeline.config import get_llm_env_config
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +79,7 @@ def _get_llm_config_int(key: str, default: int, min_value: int = 1) -> int:
     or below min_value (min_value itself is kept -- e.g. a concurrency count
     of exactly 1 is valid)."""
     try:
-        value, _ = get_config("llm", key, default=default)
+        value, _ = get_llm_env_config(key, default)
         result = int(value)
     except (TypeError, ValueError):
         return default
@@ -105,7 +93,7 @@ def _get_llm_config_float(key: str, default: float, min_value: float = 0.0) -> f
     function's timeout/duration callers, and a 0.0 timeout is meaningless,
     not a valid edge case to keep)."""
     try:
-        value, _ = get_config("llm", key, default=default)
+        value, _ = get_llm_env_config(key, default)
         result = float(value)
     except (TypeError, ValueError):
         return default

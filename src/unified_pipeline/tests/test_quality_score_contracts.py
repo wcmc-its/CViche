@@ -13,6 +13,7 @@ files and python-docx-built fixtures.
 
 import json
 import logging
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -861,10 +862,34 @@ def test_edge_zero_tables(tmp_path):
 
 
 def test_edge_all_empty_tables(tmp_path):
+    # #452: tables with no CV content are not charged -- the render put
+    # nothing into them, the same as the blank template's own scaffolding.
     _make_docx(tables=[[["", ""], ["", ""]], [["", ""], ["", ""]]]).save(tmp_path / "out.docx")
     fraction, detail, cap = score_sparse_tables(tmp_path)
+    assert fraction == 0.0
+    assert detail == "total_tables=2; no table carries CV content"
+
+
+def test_sparse_tables_blank_template_scores_zero(tmp_path):
+    """#452's acceptance invariant: the empty WCM template carries no CV
+    content, so it must not take any sparse-tables penalty (it took the
+    full 12 points: 31 of its 33 tables are >=50% empty by construction)."""
+    shutil.copy(qs._TEMPLATE_DOCX_PATH, tmp_path / "X_wcm.docx")
+    fraction, detail, cap = score_sparse_tables(tmp_path)
+    assert (fraction, cap) == (0.0, None)
+    assert detail == "total_tables=33; no table carries CV content"
+
+
+def test_sparse_tables_scores_only_tables_carrying_cv_content(tmp_path):
+    # One template-only table (a real label cell from the template), one
+    # half-filled content table: only the second is judged, and it is sparse.
+    label = min(qs._template_cell_texts())
+    _make_docx(tables=[[[label, ""], ["", ""]],
+                       [["Cardiology Grand Rounds", ""], ["", ""]]]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_sparse_tables(tmp_path)
+    assert "total_tables=2; scored_tables=1; sparse_tables=1; sparse_table_ratio=1.000;" in detail
+    assert "empty_cells=3/4" in detail
     assert fraction == 1.0
-    assert "sparse_tables=2" in detail
 
 
 def test_edge_completely_populated_tables(tmp_path):

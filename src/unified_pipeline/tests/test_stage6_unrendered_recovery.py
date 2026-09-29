@@ -20,6 +20,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 # Ensure the repo's ``src`` directory is importable regardless of cwd/rootdir.
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -730,3 +732,33 @@ def test_generate_flag_off_drops_remainder(tmp_path):
     # for a plain substring, not a glyph-prefixed one, since #483 R2 removed
     # the glyph representation the recovery path could have produced.
     assert not any("Quantitative Basketweaving" in t for t in texts)
+
+
+@pytest.mark.parametrize("call", ["geographic_scope", "reclassify"])
+def test_stage6_llm_outage_propagates_but_other_errors_default(monkeypatch, call):
+    """A provider outage past the budget fails the run (#810); any other
+    call_llm error still takes the method's default."""
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    gen = _generator()
+    gen.cv_owner_location = {"primary_location": {"institution": "Example Medical College",
+                                                  "city": "Springfield", "state": "ZZ"}}
+    entry = {"text": "Visiting Lecturer", "extracted_fields": {"organization": "Example Institute"}}
+
+    def run():
+        if call == "geographic_scope":
+            return gen._classify_geographic_scope(entry)
+        return gen._reclassify_entry_segments("Visiting Lecturer, Example Institute, 2010", "P")
+
+    def outage(*args, **kwargs):
+        raise LLMOutageError("provider down", seconds_waited=1800.0)
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm", outage)
+    with pytest.raises(LLMOutageError):
+        run()
+
+    def blip(*args, **kwargs):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm", blip)
+    assert run() == ("National" if call == "geographic_scope" else None)

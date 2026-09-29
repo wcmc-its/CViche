@@ -513,14 +513,12 @@ def test_extract_table_metadata_gridspan_repeats_merged_cell():
     assert row0[1]["col"] == 1
 
 
-def test_extract_table_metadata_falls_back_to_manual_iteration_when_itertext_fails(monkeypatch):
+def test_extract_table_metadata_falls_back_to_itertext_and_lets_its_errors_propagate(monkeypatch):
     # Reproduces the "cell.text returns empty for malformed/complex XML"
     # scenario named in the source comment. get_cell_text only walks
     # cell.paragraphs, so text sitting directly under <w:tc> (outside any
-    # <w:p>) is invisible to it -- cell_text starts "". Method 1
-    # (itertext()) is forced to raise, so the recovered "HIDDEN_TEXT" can
-    # only have come from method 2's manual node iteration, proving that
-    # specific fallback branch ran rather than the value being coincidental.
+    # <w:p>) is invisible to it -- cell_text starts "" and itertext() over
+    # the whole cell element recovers it.
     from docx.oxml.table import CT_Tc
 
     doc = Document()
@@ -531,13 +529,16 @@ def test_extract_table_metadata_falls_back_to_manual_iteration_when_itertext_fai
     )
     assert get_cell_text(cell) == ""  # confirm the primary walk sees nothing
 
+    assert extract_table_metadata(table, idx="table_0")["data"][0][0]["text"] == "HIDDEN_TEXT"
+
+    # #611: a failure inside the fallback is a bug, not an empty cell --
+    # it must surface instead of being swallowed by a bare except.
     def boom(self, *args, **kwargs):
-        raise RuntimeError("simulated malformed-XML itertext failure")
+        raise RuntimeError("simulated itertext failure")
 
     monkeypatch.setattr(CT_Tc, "itertext", boom)
-    meta = extract_table_metadata(table, idx="table_0")
-
-    assert meta["data"][0][0]["text"] == "HIDDEN_TEXT"
+    with pytest.raises(RuntimeError, match="simulated itertext failure"):
+        extract_table_metadata(table, idx="table_0")
 
 
 # --------------------------------------------------------------------------
@@ -833,6 +834,29 @@ def test_extract_unified_elements_single_column_table_explodes_to_paragraphs(tmp
     assert texts == ["First line", "Second line"]
     assert result["meta"]["num_tables"] == 1
     assert result["meta"]["num_paragraphs"] == 2
+
+
+def test_extract_unified_elements_para_idx_is_a_doc_paragraphs_position_after_a_layout_table(tmp_path):
+    # #609: exploded cell paragraphs used to advance para_idx, so every
+    # body paragraph after a single-column table pointed past its own
+    # doc.paragraphs slot. They now carry None, and body para_idx stays aligned.
+    doc = Document()
+    doc.add_paragraph("Before")
+    cell = doc.add_table(rows=1, cols=1).rows[0].cells[0]
+    cell.paragraphs[0].add_run("Cell one")
+    cell.add_paragraph("Cell two")
+    doc.add_paragraph("After")
+    docx_path = tmp_path / "layout_then_body.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    assert [(e["text"], e["para_idx"], e["idx"]) for e in elements] == [
+        ("Before", 0, 0), ("Cell one", None, None), ("Cell two", None, None), ("After", 1, 1),
+    ]
+    assert [e["unified_idx"] for e in elements] == [0, 1, 2, 3]
+    paragraphs = Document(str(docx_path)).paragraphs
+    assert [paragraphs[e["para_idx"]].text for e in elements if e["para_idx"] is not None] == ["Before", "After"]
 
 
 def test_extract_unified_elements_single_column_vertical_merge_dedupes_and_skips_empty(tmp_path):
@@ -1451,6 +1475,13 @@ def test_create_simplified_layout_json_table_preview_is_first_row():
     assert table_elem["rows"] == 2
     assert table_elem["cols"] == 2
     assert table_elem["preview"] == [{"text": "R0C0"}, {"text": "R0C1"}]
+
+
+def test_create_simplified_layout_json_raises_on_an_unhandled_element_type():
+    # #614: a type it has no branch for used to be dropped with no trace.
+    structure = {"elements": [{"idx": 0, "type": "table_content", "text": "Row"}]}
+    with pytest.raises(ValueError, match="table_content"):
+        create_simplified_layout_json(structure)
 
 
 def _reader_view(docx_path):

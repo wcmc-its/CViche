@@ -184,6 +184,24 @@ def test_unknown_taxonomy_code_falls_back_instead_of_persisting(monkeypatch, cap
     assert any("unknown taxonomy code" in r.getMessage() for r in caplog.records)
 
 
+def test_retired_trial_code_is_rewritten_to_current_funding_not_rejected(monkeypatch):
+    """#291: M4A is gone from the taxonomy, but a model that still answers
+    with it named a real clinical trial. It files as M2A (the date rule moves
+    a finished one to M2B later), not as an unknown-code fallback."""
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(
+        [{"index": 0, "code": "M4A", "confidence": 0.9}]
+    ))
+
+    results, stats = classify.classify_entries_batch(
+        [_entry("Site PI, invented Phase II trial", ("CLINICAL TRIALS",))],
+        _context(["H"]), _taxonomy()
+    )
+
+    assert results[0]["taxonomy_code"] == "M2A"
+    assert results[0]["classification_source"] == "llm"
+    assert stats["invalid_code_entries"] == 0
+
+
 def test_confidence_above_one_clamps_to_default(monkeypatch):
     monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(
         [{"index": 0, "code": "S1", "confidence": 5.0}]
@@ -370,6 +388,16 @@ def test_t_entry_reclassified_and_input_list_not_mutated(monkeypatch):
     assert original[0]["taxonomy_code"] == "T"
     assert updated is not original
     assert updated[0] is not original[0]
+
+
+def test_t_entry_reclassified_to_a_retired_trial_code_lands_on_m2a(monkeypatch):
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(None) | {
+        "content": json.dumps([{"entry_index": 0, "new_code": "M4B", "confidence": 0.8}])
+    })
+
+    updated, _ = classify.validate_t_classifications([_t_entry()], _taxonomy())
+
+    assert updated[0]["taxonomy_code"] == "M2A"
 
 
 def test_t_entry_confirmed_stays_t_and_input_not_mutated(monkeypatch):

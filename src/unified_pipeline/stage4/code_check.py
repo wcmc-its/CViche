@@ -14,6 +14,7 @@ import logging
 from collections import Counter
 from typing import Any
 
+from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.stage3b.io import canonical_taxonomy_codes
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,12 @@ def quarantine_invalid_taxonomy_codes(
         code = entry.get("taxonomy_code")
         if isinstance(code, str) and code in valid:
             out.append(entry)
+            continue
+        live = live_taxonomy_code(code)
+        if live != code and live in valid:
+            # Stage-3b output stored before the code was retired (#291), e.g.
+            # a step-4 retry of an older run: re-coded, not quarantined.
+            out.append({**entry, "taxonomy_code": live, "taxonomy_code_original": code})
             continue
         rejected[repr(code)] += 1
         out.append({

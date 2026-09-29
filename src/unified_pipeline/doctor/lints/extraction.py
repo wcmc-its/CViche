@@ -23,6 +23,7 @@ from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.core.template_boilerplate import (
     _MIN_EXACT_LEN,
     is_near_template_instruction,
@@ -282,11 +283,18 @@ def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set,
     return False if verifiable else None
 
 
+#: Codes `lint_classified_unrendered` does not judge; see its docstring.
+_CLASSIFIED_UNRENDERED_SKIP_CODES = frozenset({"T", "M1"})
+
+
 def lint_classified_unrendered(stage3b: Dict,
                                blocks: List[Tuple[str, str]]) -> List[Dict]:
     """Taxonomy codes classified at 3b none of whose entries appear anywhere
-    in the stage-6 output (paragraphs or tables); 'T' is skipped (appendix
-    catch-all)."""
+    in the stage-6 output (paragraphs or tables). Skipped: 'T' (appendix
+    catch-all) and 'M1', which stage 6 never renders verbatim when a research
+    summary rendered -- the summary paraphrases it, by design -- and routes to
+    the Appendix, where this lint does see it, when none did (YTPMZK's 2 M1
+    entries were flagged on every doctor run)."""
     h = _haystacks(blocks)
     shared = _shared_entry_pieces(stage3b.get("entries", []))
     by_code: Dict[str, List[Dict]] = {}
@@ -294,7 +302,7 @@ def lint_classified_unrendered(stage3b: Dict,
         if e.get("element_type") in ("header", "break"):
             continue
         code = e.get("taxonomy_code")
-        if not code or code == "T":
+        if not code or code in _CLASSIFIED_UNRENDERED_SKIP_CODES:
             continue
         by_code.setdefault(code, []).append(e)
 
@@ -356,7 +364,8 @@ def unrouted_code_counts(stage3b: dict) -> dict[str, int]:
     for e in stage3b.get("entries", []):
         if e.get("element_type") in ("header", "break"):
             continue
-        code = e.get("taxonomy_code")
+        # Stage 6 renders a retired code under its live one (#291).
+        code = live_taxonomy_code(e.get("taxonomy_code"))
         if not code or code == "T" or code == "M1":
             # M1 is normally routed; it only falls through when the Stage
             # 4.5 summary itself didn't render, a distinct, already-covered

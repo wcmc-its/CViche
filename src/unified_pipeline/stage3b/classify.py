@@ -20,13 +20,13 @@ import re
 from dataclasses import dataclass
 from typing import TypedDict
 
+from ..core.retired_taxonomy_codes import live_taxonomy_code
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
 from .io import _safe_float, taxonomy_code_set
 from .prompt import (
     CLASSIFICATION_RULES_VERSION,
-    _CLASSIFICATION_BATCH_CONTEXT_TEMPLATE,
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     _T_VALIDATION_SYSTEM_PROMPT_TEMPLATE,
     build_taxonomy_codes_for_prompt,
@@ -251,8 +251,10 @@ def _classify_one_batch(
         return results, stats
 
     # Build prompt
-    batch_context = _CLASSIFICATION_BATCH_CONTEXT_TEMPLATE.format(
-        context_str=taxonomy_context.format_context_string(), taxonomy_ref=taxonomy_ref)
+    context_str = taxonomy_context.format_context_string()
+    system_prompt = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str=context_str, taxonomy_ref=taxonomy_ref
+    )
 
     # Build entries list for user message (include per-entry hierarchy)
     entries_lines = []
@@ -269,9 +271,7 @@ def _classify_one_batch(
 Return ONLY valid JSON with the classifications array."""
 
     messages = [
-        # cache_point ends the cached prefix; the per-group block after it is uncached (#50).
-        {"role": "system", "content": _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE, "cache_point": True},
-        {"role": "system", "content": batch_context},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_message}
     ]
 
@@ -368,7 +368,7 @@ Return ONLY valid JSON with the classifications array."""
             c = class_by_idx.get(orig_idx)
             if c is not None:
                 fallback_code = all_suggested_codes[0] if all_suggested_codes else "T"
-                code = c.get("code")
+                code = live_taxonomy_code(c.get("code"))
                 # isinstance-guard before the set membership check: `code`
                 # is untrusted LLM output and could be any JSON type (e.g. a
                 # list), which would raise TypeError: unhashable type on
@@ -526,6 +526,41 @@ def group_entries_by_hierarchy(entries: list[dict]) -> dict[str, list[dict]]:
     return groups
 
 
+def _parse_t_validation_response(content: str) -> list:
+    """Parse the T-validation LLM response into its list of reclassifications."""
+    # Handle both array and object responses
+    result = json.loads(content)
+    if isinstance(result, dict):
+        # If wrapped in an object, try to find the array
+        if "results" in result:
+            reclassifications = result["results"]
+        elif "entries" in result:
+            reclassifications = result["entries"]
+        elif "classifications" in result:
+            reclassifications = result["classifications"]
+        else:
+            # An unrecognized wrapper shape is malformed, not a puzzle to
+            # guess at: reaching for "the first dict value" made an
+            # unexpected response shape look like a valid one instead of
+            # a visible, logged failure.
+            logger.warning(
+                "Stage 3b T-validation: response object has none of "
+                "results/entries/classifications (keys=%s); treating as "
+                "no reclassifications", list(result.keys())
+            )
+            reclassifications = []
+    else:
+        reclassifications = result
+
+    if not isinstance(reclassifications, list):
+        logger.warning(
+            "Stage 3b T-validation: reclassifications was %s, not a "
+            "list; treating as none", type(reclassifications).__name__
+        )
+        reclassifications = []
+    return reclassifications
+
+
 def validate_t_classifications(
     entries: list[dict],
     taxonomy: dict
@@ -605,36 +640,7 @@ Respond with a JSON array of objects, one per entry:
         # Parse response
         content = llm_result["content"]
 
-        # Handle both array and object responses
-        result = json.loads(content)
-        if isinstance(result, dict):
-            # If wrapped in an object, try to find the array
-            if "results" in result:
-                reclassifications = result["results"]
-            elif "entries" in result:
-                reclassifications = result["entries"]
-            elif "classifications" in result:
-                reclassifications = result["classifications"]
-            else:
-                # An unrecognized wrapper shape is malformed, not a puzzle to
-                # guess at: reaching for "the first dict value" made an
-                # unexpected response shape look like a valid one instead of
-                # a visible, logged failure.
-                logger.warning(
-                    "Stage 3b T-validation: response object has none of "
-                    "results/entries/classifications (keys=%s); treating as "
-                    "no reclassifications", list(result.keys())
-                )
-                reclassifications = []
-        else:
-            reclassifications = result
-
-        if not isinstance(reclassifications, list):
-            logger.warning(
-                "Stage 3b T-validation: reclassifications was %s, not a "
-                "list; treating as none", type(reclassifications).__name__
-            )
-            reclassifications = []
+        reclassifications = _parse_t_validation_response(content)
 
         valid_codes = _valid_taxonomy_codes(taxonomy)
 
@@ -659,7 +665,7 @@ Respond with a JSON array of objects, one per entry:
                 malformed += 1
                 continue
 
-            raw_new_code = reclass.get("new_code") or "T"
+            raw_new_code = live_taxonomy_code(reclass.get("new_code")) or "T"
             # isinstance-guard before the set membership check: `new_code` is
             # untrusted LLM output and could be any JSON type, which would
             # raise TypeError: unhashable type on `in valid_codes` instead of
@@ -718,6 +724,8 @@ Respond with a JSON array of objects, one per entry:
 
         return updated_entries, stats
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception as exc:
         logger.exception(
             "Stage 3b T-validation failed",
@@ -918,6 +926,8 @@ Fragment at index {idx}:
 
         return entries, stats
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception as e:
         logger.exception(
             "Stage 3b fragment reconnection failed",

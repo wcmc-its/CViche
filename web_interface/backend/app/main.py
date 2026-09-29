@@ -98,7 +98,7 @@ def _add_security_headers(response: JSONResponse) -> JSONResponse:
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "font-src 'self'; "
-        "connect-src 'self' ws: wss:; "
+        "connect-src 'self'; "
         "frame-ancestors 'none'"
     )
     response.headers["X-Frame-Options"] = "DENY"
@@ -273,6 +273,23 @@ def _reconcile_queued_runs_at_startup(db: Session, reconcile_queued_runs: Callab
         return 0
 
 
+def _validate_ed_startup(db: Session) -> None:
+    """Fail fast on a misconfigured ED at boot rather than on the first SAML
+    login (#330). Gated on ed_enabled -- a deployment that doesn't use ED
+    authorization at all shouldn't be refused for an unset
+    ED_LDAP_BIND_PASSWORD it will never read."""
+    from app.config_loader import get_config_value
+    if not get_config_value(db, "ed_enabled"):
+        return
+    from app.ed_group_lookup import validate_startup_config
+    ldap_url, _ = get_config("ldap", "ED_LDAP_URL", default="")
+    bind_dn, _ = get_config("ldap", "ED_LDAP_BIND_DN", default="")
+    bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
+    ed_access_group = get_config_value(db, "ed_access_group") or ""
+    validate_startup_config(ldap_url, bind_dn, bind_password, ed_access_group)
+    logger.info("✅ ED config validated")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -313,6 +330,7 @@ async def lifespan(app: FastAPI):
         from app.saml_replay import check_deployed_posture
         check_deployed_posture(auth_mode, storage_backend)
         logger.info("✅ Auth mode: %s", auth_mode or "simple (default)")
+        _validate_ed_startup(db)
         from app.services.notifications import validate_configuration
         notif_status = validate_configuration()
         logger.info(

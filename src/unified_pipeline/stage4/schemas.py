@@ -254,9 +254,11 @@ FIELD_SCHEMAS = {
     "M2D": {  # Patents & Innovations (formerly M3)
         "fields": ["patent_number", "title", "inventors", "filing_date", "issue_date", "status", "assignee", "narrative"],
     },
-    # NOTE: M4 clinical trial codes have been removed. Clinical trials should now be
-    # classified as M2A (active/current), M2B (completed/past), or M2C (pending) based
-    # on their status. The M2A/M2B/M2C schemas support clinical trial fields via narrative.
+    # Clinical trials have no code of their own (#291): they file as M2A (no end
+    # date) or M2B (ended), and map onto the grant fields -- NCT/protocol number
+    # -> grant_number, sponsor -> agency, trial role -> pi_role, trial title
+    # (with its phase) -> title. The mapping is stated once, in stage 4's
+    # grant instructions (extraction.build_extraction_prompt).
 
     # -------------------------------------------------------------------------
     # Mentoring (N1, N2, N3, N4)
@@ -584,7 +586,7 @@ TAXONOMY_LABELS = {
     "M2B": "Past Research Funding",
     "M2C": "Pending Research Funding",
     "M2D": "Patents & Innovations",
-    # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C
+    # NOTE: M4 clinical trial codes removed - clinical trials file as M2A or M2B by end date (#291)
     "N1": "Leadership and Mentoring in Programs",
     "N2": "Institutional Training Grants",
     "N3": "Mentees",
