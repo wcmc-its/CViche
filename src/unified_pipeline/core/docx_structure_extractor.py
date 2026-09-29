@@ -9,6 +9,7 @@ This is significantly cheaper and faster than vision-based approaches.
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any, TypedDict
@@ -25,6 +26,8 @@ from unified_pipeline.stage6.normalization.pii import (
     redact_pre_llm_value_of_category,
     redact_pre_llm_values,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def rgb_to_hex(rgb: RGBColor | None) -> str:
@@ -213,6 +216,22 @@ def _is_date_column(lines: list[str]) -> bool:
     return date_lines >= len(lines) * 0.5 and date_lines >= 1
 
 
+def _fit_lines_to_slots(lines: list[str], slots: int) -> list[str]:
+    """Return exactly `slots` strings holding every line of `lines`.
+
+    Fewer lines than slots: pad with "" at the end. More lines than slots: the
+    surplus is joined onto the last slot, never dropped (#612: a 4-line date
+    column beside a cell that split into 2 segments lost its last 2 dates).
+    """
+    if len(lines) > slots:
+        logger.info(
+            "split_merged_cells_in_row: %d lines for %d sub-rows; folding %d surplus into the last",
+            len(lines), slots, len(lines) - slots,
+        )
+        return lines[:slots - 1] + ["\n".join(lines[slots - 1:])]
+    return lines + [""] * (slots - len(lines))
+
+
 def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, min_newlines: int = 2) -> list[list[dict[str, Any]]]:
     """
     Split a table row into multiple rows if any cell contains merged content.
@@ -295,8 +314,7 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
                         elif _is_date_column(lines):
                             # Date column with fewer lines - try to distribute dates
                             # Pad with empty strings to match target_count
-                            padded_lines = lines + [''] * (target_count - len(lines))
-                            cell_splits.append(padded_lines[:target_count])
+                            cell_splits.append(_fit_lines_to_slots(lines, target_count))
                         else:
                             cell_splits.append(None)  # Don't split non-matching cells
                     break
@@ -330,10 +348,8 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
                 cell_lines_local = [line.strip() for line in cell_text.strip().split('\n') if line.strip()]
                 if _is_date_column(cell_lines_local) and len(cell_lines_local) > 1:
                     # It's a date column - distribute dates across split rows
-                    if split_idx < len(cell_lines_local):
-                        new_row.append({"text": cell_lines_local[split_idx]})
-                    else:
-                        new_row.append({"text": ""})
+                    slots = _fit_lines_to_slots(cell_lines_local, max_splits)
+                    new_row.append({"text": slots[split_idx]})
                 elif split_idx == 0:
                     new_row.append(cell)
                 else:
@@ -342,7 +358,72 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
 
         split_rows.append(new_row)
 
-    return split_rows
+    padded_cols = {i for i, sp in enumerate(cell_splits) if sp is not None and len(sp) < max_splits}
+    return _fold_orphan_date_tail(split_rows, padded_cols)
+
+
+_MONTH_NAMES = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?"
+    r"|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
+)
+_DATE_FILLER_WORDS = r"present|current|ongoing|to|issue"
+_DATE_WORD_RE = re.compile(rf"\b(?:{_MONTH_NAMES}|{_DATE_FILLER_WORDS})\b\.?", re.IGNORECASE)
+_DATE_PUNCT_RE = re.compile(r"[\d\s/.,\-\u2013\u2014()]*")
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _is_date_only_text(text: str) -> bool:
+    """True if `text` is nothing but a date expression ("May 2019", "07/2008 - Present").
+
+    Stricter than `_is_date_column`, which accepts any line containing a year
+    ("Johns Hopkins University, 1991" is not a date).
+    """
+    if not _YEAR_RE.search(text):
+        return False
+    return _DATE_PUNCT_RE.fullmatch(_DATE_WORD_RE.sub("", text)) is not None
+
+
+def _is_orphan_date_row(row: list[dict[str, Any]], padded_cols: set[int]) -> bool:
+    """True if every blank cell is split-padding and every non-empty cell is date-only.
+
+    A blank cell that was never split (a role held over two stints, #886) is
+    a deliberate continuation row, not an orphan.
+    """
+    texts = [c.get("text", "").strip() for c in row if isinstance(c, dict)]
+    blank_cols = {i for i, t in enumerate(texts) if not t}
+    filled = [t for t in texts if t]
+    return (
+        bool(filled) and bool(blank_cols) and blank_cols <= padded_cols
+        and all(_is_date_only_text(t) for t in filled)
+    )
+
+
+def _fold_orphan_date_tail(
+    split_rows: list[list[dict[str, Any]]], padded_cols: set[int]
+) -> list[list[dict[str, Any]]]:
+    """Merge a trailing run of date-only rows into the last row that has content.
+
+    When a date column has more \\n\\n segments than the name column, the split
+    pads the name cell with "" and the overflow becomes rows that are nothing
+    but a date -- the name is not recoverable by position (#259, EH4XXA: 28
+    bare-date rows). Emitting them standalone yields date-only entries with no
+    subject; folding them into the preceding row keeps every date and keeps it
+    beside the name cell it overflowed from. Only a contiguous tail is folded,
+    and only where the blank cell is split padding (`padded_cols`).
+    """
+    tail_start = len(split_rows)
+    while tail_start > 1 and _is_orphan_date_row(split_rows[tail_start - 1], padded_cols):
+        tail_start -= 1
+    if tail_start == len(split_rows) or _is_orphan_date_row(split_rows[tail_start - 1], padded_cols):
+        return split_rows
+
+    anchor = [dict(cell) for cell in split_rows[tail_start - 1]]
+    for orphan in split_rows[tail_start:]:
+        for col, cell in enumerate(orphan):
+            text = cell.get("text", "").strip()
+            if text:
+                anchor[col]["text"] = f"{anchor[col].get('text', '')}\n{text}".strip("\n")
+    return split_rows[:tail_start - 1] + [anchor]
 
 
 def extract_table_metadata(table: Table, idx: int) -> dict[str, Any]:
@@ -764,25 +845,43 @@ def _handle_table_row_zero(
     return new_elements, unified_idx, num_table_headers_emitted, table_rows, current_content_rows
 
 
+def row_cell_texts(row: list) -> list[str]:
+    """Text of each cell in a table row (cell dicts or bare values)."""
+    return [cell.get("text", "") if isinstance(cell, dict) else str(cell) for cell in row]
+
+
+def join_row_cells(cells: list[str]) -> str:
+    """Join a table row's cell texts into one entry text (#488).
+
+    Cells are joined with " | ". When cell 0 holds several paragraphs (an entry
+    title followed by sub-bullets), the trailing columns (date, institution)
+    describe the whole entry, so they attach to cell 0's FIRST paragraph rather
+    than welding onto its last one. A single-paragraph cell 0, or a one-cell
+    row, joins exactly as before -- and so does a row where another cell also
+    spans lines: the trailing paragraphs could then no longer be told apart
+    from those cells' own lines, and stage 6 (honors) reads that old shape.
+    """
+    first = cells[0] if cells else ""
+    rest = cells[1:]
+    stripped = first.strip()
+    if not rest or "\n" not in stripped or any("\n" in c.strip() for c in rest):
+        return " | ".join(cells).strip()
+    head, _, tail = first.lstrip().partition("\n")
+    return (" | ".join([head, *rest]) + "\n" + tail).strip()
+
+
 def _flatten_table_content_text(rows: list[Any]) -> str:
-    """The SAME join `extract_unified_elements` uses, at all three call
-    sites, to build a table_content/table element's `text` field from its
-    `data` rows at construction time: cells joined by " | " within a row,
-    rows joined by "\\n". Used to REBUILD `text` after the pre-LLM scrub
-    mutates cells inside `data` in place, so `text` (what
-    `extract_text_from_docx` and `get_element_text`'s `table_content`
-    branch read) and `data` (what `get_element_text`'s legacy `table`
-    branch and every cell-level consumer read) never disagree (#847
-    residual round 4: a below-cell/next-paragraph scrub touched only one
-    of the two, so the value still reached an LLM reader through
-    whichever field it left alone)."""
+    """The ONE join that builds a table_content/table element's `text` from
+    its `data` rows: each row via `join_row_cells`, rows joined by "\\n".
+    Every construction site in `extract_unified_elements` uses it, as does
+    the pre-LLM scrub when it REBUILDS `text` after mutating cells inside
+    `data` in place, so `text` (what `extract_text_from_docx` and
+    `get_element_text` read) and `data` (what every cell-level consumer
+    reads) never disagree (#847 residual round 4). Stage 2 builds its
+    per-row entries with the same `join_row_cells`, which is what lets the
+    #418 whole-table-parent dedup find the parent's lines in those rows."""
     return "\n".join(
-        " | ".join(
-            cell.get("text", "") if isinstance(cell, dict) else str(cell)
-            for cell in row
-        )
-        for row in rows
-        if isinstance(row, list)
+        join_row_cells(row_cell_texts(row)) for row in rows if isinstance(row, list)
     )
 
 
@@ -1070,7 +1169,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
                         # Check for embedded headers separated by \n\n within a cell
                         # This handles cases like "Research text...\n\nEducation and Degrees\n2005..."
-                        if '\n\n' in cell_text:
+                        if '\n\n' in cell_text and not row_has_nonblank_value_cells(row):  # #259: multi-column rows keep cells 1+
                             segments = cell_text.split('\n\n')
 
                             # FIRST PASS: Check if ANY segment is a header
@@ -1101,12 +1200,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                                     if is_seg_header and len(first_line) <= 80:
                                         # Emit accumulated content first
                                         if current_content_rows:
-                                            content_text = "\n".join(
-                                                " | ".join(
-                                                    cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                                                    for cell in row_data
-                                                ) for row_data in current_content_rows
-                                            )
+                                            content_text = _flatten_table_content_text(current_content_rows)
                                             elements.append({
                                                 "unified_idx": unified_idx,
                                                 "type": "table_content",
@@ -1173,12 +1267,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                         if is_row_header and cell_text and (not has_value_cells or header_left_content_right):
                             # Emit accumulated content rows first
                             if current_content_rows:
-                                content_text = "\n".join(
-                                    " | ".join(
-                                        cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                                        for cell in row_data
-                                    ) for row_data in current_content_rows
-                                )
+                                content_text = _flatten_table_content_text(current_content_rows)
                                 elements.append({
                                     "unified_idx": unified_idx,
                                     "type": "table_content",
@@ -1224,12 +1313,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
                 # Emit any remaining content rows
                 if current_content_rows:
-                    content_text = "\n".join(
-                        " | ".join(
-                            cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                            for cell in row_data
-                        ) for row_data in current_content_rows
-                    )
+                    content_text = _flatten_table_content_text(current_content_rows)
                     elements.append({
                         "unified_idx": unified_idx,
                         "type": "table_content",
@@ -1249,12 +1333,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                     processed_rows.extend(split_rows)
 
                 # Rebuild content text from processed rows
-                content_text = "\n".join(
-                    " | ".join(
-                        cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                        for cell in row_data
-                    ) for row_data in processed_rows
-                )
+                content_text = _flatten_table_content_text(processed_rows)
                 elements.append({
                     "unified_idx": unified_idx,
                     "type": "table",
@@ -1529,10 +1608,29 @@ def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
     # fallback tier directly (`_run_owner_name_llm`) -- an sdt-wrapped or
     # letterhead Personal Data block reached that prompt unscrubbed.
     return OwnerSideChannel(
-        sdt_lines=[redact_pre_llm_values(t) for t in sdt_lines],
-        header_lines=[redact_pre_llm_values(t) for t in header_lines],
-        footer_lines=[redact_pre_llm_values(t) for t in footer_lines],
+        sdt_lines=_scrub_pre_llm_side_channel_lines(sdt_lines),
+        header_lines=_scrub_pre_llm_side_channel_lines(header_lines),
+        footer_lines=_scrub_pre_llm_side_channel_lines(footer_lines),
     )
+
+
+def _scrub_pre_llm_side_channel_lines(lines: list[str]) -> list[str]:
+    """`redact_pre_llm_values` on every line, then the body stream's
+    next-element rule (`_scrub_pre_llm_pii_next_element`) across lines: a
+    line that is nothing but a bare DOB/SSN label has the whole date that
+    OPENS the next line withheld (#847 residual: a body-level content
+    control with "Date of Birth:" in one paragraph and its value in the
+    next, each scrubbed alone, reached the owner-name prompt). The same
+    `cross_boundary=True` narrowing: "Appointed 07/01/2005" or a bare year
+    on the next line is left alone."""
+    scrubbed = [redact_pre_llm_values(line) for line in lines]
+    for idx in range(len(scrubbed) - 1):
+        category = pre_llm_bare_label_category(scrubbed[idx])
+        if category is not None:
+            scrubbed[idx + 1] = redact_pre_llm_value_of_category(
+                scrubbed[idx + 1], category, cross_boundary=True
+            )
+    return scrubbed
 
 
 def normalize_style_name(style_name: str) -> dict[str, Any]:

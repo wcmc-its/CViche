@@ -33,7 +33,7 @@ _TAXONOMY_PATH = _SRC / "unified_pipeline" / "core" / "taxonomy_v7.json"
 
 # Known, already-tracked gaps as of 2026-08-11 -- codes with NO render route
 # at all, as opposed to _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES (which DO
-# render, just also duplicate into the appendix -- a different defect, see
+# render via a writer that has no code dispatch, see
 # lint_taxonomy_code_coverage's docstring). Each has its own issue, so this
 # test isn't the place to relitigate WHY they're unmapped -- it exists only
 # to catch the set growing without anyone noticing. Update this set (and
@@ -64,8 +64,8 @@ def test_taxonomy_catalog_matches_known_gaps_exactly():
 
 
 def test_render_exceptions_still_wired_into_generate():
-    """_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES exempts E, G, J, N4 from the
-    coverage lint because a passthrough/mentoring writer renders them outside
+    """_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES exempts E, G, J from the
+    coverage lint because the passthrough writer renders them outside
     the RENDER_ROUTED_CODES dispatch table (see extraction.py's comment on
     this set). J joined E and G at #260, dispatched from the same
     `_fill_passthrough_sections(` call this test already pins -- there is no
@@ -85,10 +85,9 @@ def test_render_exceptions_still_wired_into_generate():
         "_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES so the coverage lint "
         "catches the gap"
     )
-    assert "self._fill_mentoring(" in src, (
-        "N4's mentoring hook is gone from generate() -- if it no longer "
-        "renders, remove it from _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES "
-        "so the coverage lint catches the gap"
+    assert "N4" in RENDER_ROUTED_CODES and "N4" not in _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES, (
+        "N4 renders via _fill_mentoring and must be routed, not exempted -- "
+        "an exempted N4 duplicates into the Appendix (#587)"
     )
 
 

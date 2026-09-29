@@ -18,6 +18,7 @@ Run:
     python3 -m pytest src/unified_pipeline/tests/test_doctor_extraction_lint_contracts.py -q -p no:cacheprovider
 """
 import itertools
+from collections import Counter
 import sys
 from pathlib import Path
 
@@ -53,6 +54,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_dedup_drops,
     lint_invented_records,
     lint_under_extraction,
+    lint_wrong_start_date,
 )
 from unified_pipeline.doctor.shared import _haystacks  # noqa: E402
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
@@ -113,7 +115,6 @@ _EXCEPTION_HOOKS = {
     "E": "self._fill_passthrough_sections(",
     "G": "self._fill_passthrough_sections(",
     "J": "self._fill_passthrough_sections(",
-    "N4": "self._fill_mentoring(",
 }
 
 
@@ -434,26 +435,35 @@ def test_entry_rendered_token_overlap_exact_boundary():
 # ==========================================================================
 # D8 (T2.7) -- dedup tokenization: repetition, Unicode, digits, punctuation.
 
-def test_alphanumeric_tokens_repeated_tokens_collapse():
-    # A dropped entry that repeats one token is fully covered by a kept
-    # entry with a single occurrence of it -- the SET collapses repeats.
+def test_alphanumeric_tokens_repeated_tokens_keep_multiplicity():
+    # #718: the token view is a multiset, so a dropped entry that repeats a
+    # token is NOT fully covered by a kept entry that says it once.
     dropped = {"code": "A", "metric": "j",
               "dropped_text": "grant grant grant", "kept_text": "grant"}
-    assert lint_dedup_drops({"dedup_decisions": [dropped]}) == []
-    assert _alphanumeric_tokens("grant grant grant") == {"grant"}
-    assert _alphanumeric_tokens("grant") == {"grant"}
+    result = lint_dedup_drops({"dedup_decisions": [dropped]})
+    assert len(result) == 1
+    assert "33% covered" in result[0]["evidence"][0]
+    assert _alphanumeric_tokens("grant grant grant") == Counter({"grant": 3})
+    assert _alphanumeric_tokens("grant") == Counter({"grant": 1})
+
+
+def test_lint_dedup_drops_repeated_tokens_fully_present_still_safe():
+    # The true-duplicate case is unchanged: same multiset -> 100%.
+    same = {"code": "A", "metric": "j",
+            "dropped_text": "grant grant funded", "kept_text": "funded grant grant x"}
+    assert lint_dedup_drops({"dedup_decisions": [same]}) == []
 
 
 def test_alphanumeric_tokens_unicode_diaeresis_splits_on_the_non_ascii_char():
     # _norm lowercases and joins whitespace but does not strip diacritics;
     # _DEDUP_TOKEN_RE is ASCII-only ([a-z0-9]+), so it breaks at the 'ü'
     # rather than treating "müller" as one token or normalizing it away.
-    assert _alphanumeric_tokens("Müller") == {"m", "ller"}
+    assert _alphanumeric_tokens("Müller") == Counter({"m": 1, "ller": 1})
 
 
 def test_alphanumeric_tokens_digits_are_tokens_punctuation_is_not():
-    assert _alphanumeric_tokens("Grant 2020") == {"grant", "2020"}
-    assert _alphanumeric_tokens("grant, funded!") == {"grant", "funded"}
+    assert _alphanumeric_tokens("Grant 2020") == Counter({"grant": 1, "2020": 1})
+    assert _alphanumeric_tokens("grant, funded!") == Counter({"grant": 1, "funded": 1})
 
 
 # ==========================================================================
@@ -792,6 +802,49 @@ def test_lint_invented_records_reports_both_shapes_in_one_run():
     assert len(findings) == 2
     assert any("F2" in f["message"] for f in findings)
     assert any("F1" in f["message"] for f in findings)
+
+
+# ==========================================================================
+# #729 -- lint_wrong_start_date.
+
+def _dated_entry(text, start, end=None, code="D1", idx=7):
+    return {"taxonomy_code": code, "element_idx_start": idx, "text": text,
+            "extracted_fields": {"start_date": start, "end_date": end}}
+
+
+def test_wrong_start_date_fires_on_the_fsmb_shape_as_warn():
+    findings = lint_wrong_start_date(
+        {"entries": [_dated_entry("Example Board | 2025-2026", "2026")]})
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "wrong_start_date"
+    assert findings[0]["severity"] == "WARN"
+    assert "2025-2026" in findings[0]["message"]
+    assert "2026-Present" in findings[0]["message"]
+    assert "7" in findings[0]["message"]
+
+
+def test_wrong_start_date_is_info_when_start_is_not_the_range_end():
+    findings = lint_wrong_start_date(
+        {"entries": [_dated_entry("Example Board | 2018-2020", "Sep 2018")]})
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+@pytest.mark.parametrize("entry", [
+    _dated_entry("Example Board | 2025-2026", "2026", end="2026"),  # end set
+    _dated_entry("Example Board | 2025-Present", "2026"),           # no closed range
+    _dated_entry("Example Board | 2025-2026 present", "2026"),       # ongoing marker
+    _dated_entry("Board | 2020-2021 | 2025-2026", "2026"),          # two ranges
+    _dated_entry("Course 5130-1020", "2026"),                        # implausible range
+    _dated_entry("Example Board | 2025-2026", "2026", code="S1"),    # no date schema
+])
+def test_wrong_start_date_silent_when_a_condition_fails(entry):
+    assert lint_wrong_start_date({"entries": [entry]}) == []
+
+
+def test_wrong_start_date_leaves_the_extracted_value_alone():
+    entry = _dated_entry("Example Board | 2025-2026", "2026")
+    lint_wrong_start_date({"entries": [entry]})
+    assert entry["extracted_fields"] == {"start_date": "2026", "end_date": None}
 
 
 if __name__ == "__main__":

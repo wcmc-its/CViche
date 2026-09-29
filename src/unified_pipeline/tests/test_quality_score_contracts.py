@@ -28,6 +28,8 @@ from unified_pipeline.quality_score import (  # noqa: E402
     FATAL_ERROR_PATTERN,
     SCORED_ARTIFACT_COUNT,
     VALID_GATE_MODES,
+    _goal_claimed_row_ids,
+    _is_placeholder_only_row,
     _load_docx,
     _load_first,
     band_for,
@@ -90,6 +92,25 @@ def _write_json(dir_path: Path, name: str, obj) -> Path:
     p = dir_path / name
     p.write_text(json.dumps(obj))
     return p
+
+
+def _classified_with_entries(entries: list[dict], total_entries: int | None = None) -> dict:
+    """A classified.json shaped the way stage_3b_entry_classifier.py actually
+    writes one (#822 finding 2): meta.code_distribution is DERIVED from the
+    entries' own taxonomy_code, the same as the real writer's `code_counts`
+    loop, so a test fixture can't silently disagree with itself the way a
+    hand-typed code_distribution could."""
+    code_dist: dict[str, int] = {}
+    for e in entries:
+        code = e.get("taxonomy_code", "?")
+        code_dist[code] = code_dist.get(code, 0) + 1
+    return {
+        "meta": {
+            "total_entries": total_entries if total_entries is not None else len(entries),
+            "code_distribution": code_dist,
+        },
+        "entries": entries,
+    }
 
 
 # --------------------------------------------------------------------- D1
@@ -244,6 +265,66 @@ def test_score_pipeline_errors_api_envelope_error_is_fatal(tmp_path):
     assert fraction == 1.0
     assert cap == 40
     assert "fatal_pattern=YES" in detail
+
+
+# --------------------------------------------------------------------- #745
+# score_pipeline_errors: structured stage-error records written by the drivers
+# --------------------------------------------------------------------- #745
+
+
+def test_structured_stage_error_without_exception_name_is_fatal(tmp_path):
+    """#745 acceptance: a stage failure whose message names no exception type
+    -- the farm's ODAWYA shape, which FATAL_ERROR_PATTERN cannot see -- is
+    still fatal when a driver recorded it."""
+    from unified_pipeline.stage_errors import StageError, record_stage_outcome
+    message = "'int' object is not iterable"
+    assert not FATAL_ERROR_PATTERN.search(message), "fixture must be regex-invisible"
+    record_stage_outcome(tmp_path / "ABC_stage_errors.json", "3b",
+                         StageError("3b", "TypeError", message, fatal=True))
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert cap == 40
+    assert fraction == 1.0
+    assert "fatal_pattern=YES" in detail
+    assert "stage 3b" in detail, detail
+
+
+def test_structured_non_fatal_stage_error_counts_but_does_not_cap(tmp_path):
+    from unified_pipeline.stage_errors import StageError, record_stage_outcome
+    record_stage_outcome(tmp_path / "ABC_stage_errors.json", "5b",
+                         StageError("5b", "KeyError", "degraded", fatal=False))
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert cap is None
+    assert "nonnull_error_fields=1" in detail
+    assert fraction == pytest.approx(1 / 3)
+
+
+def test_malformed_stage_error_record_is_named_not_read_as_clean(tmp_path):
+    """Valid JSON of the wrong shape is reported as unreadable (a signal),
+    never silently treated as 'no stage failed'."""
+    _write_json(tmp_path, "ABC_stage_errors.json", [{"stage": "4"}])
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert cap is None
+    assert "ABC_stage_errors.json: unreadable" in detail, detail
+    assert "nonnull_error_fields=1" in detail
+
+
+def test_a_stage_error_file_that_is_not_json_is_counted_once(tmp_path):
+    """The generic *.json loop already reports an unparseable file; the
+    stage-error reader must not report it a second time."""
+    (tmp_path / "ABC_stage_errors.json").write_text("{not json", encoding="utf-8")
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert cap is None
+    assert "nonnull_error_fields=1" in detail, detail
+    assert detail.count("ABC_stage_errors.json") == 1, detail
+
+
+def test_run_without_stage_error_record_falls_back_to_the_pattern(tmp_path):
+    """A run that predates the record is scored exactly as before."""
+    _write_json(tmp_path, "ABC_classified.json",
+               {"meta": {"stats": {"t_validation": {"error": "'int' object is not iterable"}}}})
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert cap is None
+    assert "fatal_pattern=NO" in detail
 
 
 # --------------------------------------------------------------------- D6
@@ -510,16 +591,12 @@ def test_broken_format_legitimate_prose_not_counted_as_echo(tmp_path, prose):
 
 
 @pytest.mark.parametrize("instruction", [
-    # Verbatim body-paragraph instruction lines from the pristine WCM
-    # template, one per alternation the narrowed pattern keeps.
-    "Current Employment Status (Please choose one, list here, delete the others):",
-    "Part-time salaried by Cornell (show percentage of full time effort, e.g., 50%)",
-    "Please include medical and scientific societies.)",
-    "Clinical teaching (bedside teaching, teaching rounds, teaching in operating "
-    "room, precepting in clinic, morning report, etc.)",
-    "Duplicate table below as needed. For each funding vehicle, please include the following:",
+    # Marker hits that are NOT byte-identical to a template body paragraph
+    # (a truncated/altered quote of one, or a marker phrase that only
+    # occurs in the template's own table CELLS -- see the module docstring's
+    # per-marker cell locations) -- still genuine signals after #822
+    # finding 1, so still counted.
     "*Please annotate multi-investigator, program project, center grants (P50 etc.)",
-    "Please summarize as for current projects: source-type, project title, dates, your role.",
     "Please list trainees and faculty that you have formally supervised",
     "Entries should follow standard journal format. Please also include PMCID: PMC",
     "If yes, please provide Visa type (Examples: J-1, H-1B, E-3, TN, etc.):",
@@ -527,10 +604,63 @@ def test_broken_format_legitimate_prose_not_counted_as_echo(tmp_path, prose):
     "DEA number: (optional)",
     "Type of Supervision (research, clinical, teaching, leadership)",
 ])
-def test_broken_format_template_instruction_line_counted_as_echo(tmp_path, instruction):
+def test_broken_format_non_template_instruction_line_counted_as_echo(tmp_path, instruction):
     _make_docx([instruction]).save(tmp_path / "out.docx")
     fraction, detail, cap = score_broken_format(tmp_path)
     assert "echo_paragraphs=1" in detail, detail
+    assert "template_echo_excluded=0" in detail, detail
+
+
+# ------------------------------------------------------------------ #822 F1
+# #822 finding 1: 20 of the 21 echo_paragraphs YTPMZK scored were
+# byte-identical (after whitespace normalization) to one of the template's
+# own 20 body instruction paragraphs -- stage 6 keeps them verbatim on
+# purpose, so every run lost ~5.3 of 10 points on this dimension for the
+# template's own text. A marker hit is now excluded when its
+# whitespace-normalized text exactly equals a template body paragraph's.
+# ------------------------------------------------------------------ #822 F1
+
+@pytest.mark.parametrize("instruction", [
+    # Verbatim body-paragraph instruction lines from the pristine WCM
+    # template (one per alternation the narrowed pattern keeps that also
+    # has an exact body-paragraph match, not only a cell-text match).
+    "Current Employment Status (Please choose one, list here, delete the others):",
+    "Part-time salaried by Cornell (show percentage of full time effort, e.g., 50%)",
+    "Please include medical and scientific societies.)",
+    "Clinical teaching (bedside teaching, teaching rounds, teaching in operating "
+    "room, precepting in clinic, morning report, etc.)",
+    "Duplicate table below as needed. For each funding vehicle, please include the following:",
+    "Please summarize as for current projects: source-type, project title, dates, your role.",
+])
+def test_broken_format_verbatim_template_paragraph_excluded_from_echo(tmp_path, instruction):
+    """A body paragraph identical to one of the template's own kept
+    instruction paragraphs is not counted as a prompt echo (#822 finding
+    1) -- it still matches INSTRUCTION_MARKERS (that's how the pattern was
+    narrowed), it is just not counted as a defect."""
+    _make_docx([instruction]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=0" in detail, detail
+    assert "template_echo_excluded=1" in detail, detail
+
+
+def test_broken_format_verbatim_template_paragraph_whitespace_variant_still_excluded(tmp_path):
+    """The match is on whitespace-NORMALIZED text: a stray leading space and
+    a doubled internal space must not defeat the #822 finding 1 exclusion."""
+    _make_docx([" Please include  medical and scientific societies.) "]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=0" in detail, detail
+    assert "template_echo_excluded=1" in detail, detail
+
+
+def test_broken_format_altered_template_paragraph_still_counted_as_echo(tmp_path):
+    """A near-miss -- a template instruction line with content appended --
+    is NOT byte-identical to the template's own paragraph, so it is still a
+    genuine echo signal, not excluded."""
+    _make_docx(["Please include medical and scientific societies.) and honor societies"]
+               ).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=1" in detail, detail
+    assert "template_echo_excluded=0" in detail, detail
 
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "key_files" / \
@@ -548,6 +678,85 @@ def test_broken_format_narrowed_pattern_still_matches_every_template_instruction
     matched = [p.text for p in doc.paragraphs if qs.INSTRUCTION_MARKERS.search(p.text)]
     assert len(matched) == 20, matched
     assert all(p.strip() for p in matched)
+
+
+@pytest.mark.skipif(not _TEMPLATE.exists(), reason="pristine WCM template not checked out")
+def test_broken_format_every_matched_template_instruction_is_excluded_from_echo():
+    """#822 finding 1's real-farm contract: every one of the template's own
+    20 instruction paragraphs -- read from the actual checked-in template,
+    not retyped -- is in the exclusion set `_template_body_paragraph_texts`
+    builds, so none of them is ever counted as a prompt echo when stage 6
+    keeps them verbatim in a rendered CV."""
+    doc = Document(_TEMPLATE)
+    matched = [p.text for p in doc.paragraphs if qs.INSTRUCTION_MARKERS.search(p.text)]
+    excluded = qs._template_body_paragraph_texts()
+    assert len(matched) == 20, matched
+    for text in matched:
+        assert qs._normalize_whitespace(text) in excluded, text
+
+
+@pytest.mark.skipif(not _TEMPLATE.exists(), reason="pristine WCM template not checked out")
+def test_template_body_paragraph_texts_cached_across_calls():
+    """Built once, memoized at module level: two calls return the identical
+    frozenset object, not two independently re-parsed copies."""
+    first = qs._template_body_paragraph_texts()
+    second = qs._template_body_paragraph_texts()
+    assert first is second
+
+
+# ------------------------------------------------------------ #822 raw tabs
+# The same exclusion, applied to raw_tab_paragraphs: the template's own
+# tabbed body paragraphs ("Signature: \t\t\t\t", "Name of Current
+# Employer(s):\t", ...) are kept by stage 6, so every run was charged for
+# them. A tabbed line with text of its own still counts.
+# ------------------------------------------------------------ #822 raw tabs
+
+@pytest.mark.skipif(not _TEMPLATE.exists(), reason="pristine WCM template not checked out")
+def test_broken_format_template_tab_paragraphs_excluded_from_raw_tab(tmp_path):
+    """Every tabbed body paragraph of the real template -- read from the
+    checked-in file, not retyped -- is excluded when kept verbatim."""
+    tabbed = [p.text for p in Document(_TEMPLATE).paragraphs if "\t" in p.text]
+    assert len(tabbed) == 5, tabbed
+    _make_docx(tabbed).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=0" in detail, detail
+    assert "template_tab_excluded=5" in detail, detail
+    assert fraction == 0.0, detail
+
+
+def test_broken_format_template_tab_paragraph_whitespace_variant_excluded(tmp_path):
+    """Matched on whitespace-NORMALIZED text: a different tab run than the
+    template's own ("Signature: \t\t\t\t") is still the template line."""
+    _make_docx(["Signature:\t"]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=0" in detail, detail
+    assert "template_tab_excluded=1" in detail, detail
+
+
+def test_broken_format_filled_template_tab_line_still_counted(tmp_path):
+    """A faculty member's real tabbed line -- a template label with a value
+    after the tab -- is not the template's own text, so it still counts,
+    and only it reaches the fraction."""
+    _make_docx(["Name:\tJane Q. Doe", "Signature: \t\t\t\t"]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=1" in detail, detail
+    assert "template_tab_excluded=1" in detail, detail
+    assert fraction == pytest.approx(0.6 * (1 / 20)), detail
+
+
+def test_template_body_paragraph_texts_missing_file_raises(tmp_path, monkeypatch):
+    """#822 finding 1's 'do not swallow' contract: the WCM template is a
+    checked-in repo asset, not run output, so a missing file means a broken
+    checkout and must raise -- never silently return an empty exclusion set,
+    which would silently un-fix finding 1 and score every run as if the
+    template had no instruction paragraphs of its own."""
+    monkeypatch.setattr(qs, "_TEMPLATE_DOCX_PATH", tmp_path / "missing.docx")
+    qs._template_body_paragraph_texts.cache_clear()
+    try:
+        with pytest.raises(FileNotFoundError):
+            qs._template_body_paragraph_texts()
+    finally:
+        qs._template_body_paragraph_texts.cache_clear()
 
 
 # --------------------------------------------------------------------- D16
@@ -915,6 +1124,64 @@ def test_field_sparseness_saturates_at_ten_percent_both_failing(tmp_path):
     assert one == pytest.approx(1.0) and two == pytest.approx(1.0)
 
 
+# #427: an entry with nothing to extract counts on neither term. YTPMZK's own
+# shapes: a stage-4-skipped entry, a column-header row, a placeholder row, and
+# template instruction text (each helper isolated; the constants are defined
+# further down, so they are looked up at call time).
+@pytest.mark.parametrize("extra", [
+    {"taxonomy_code": "T", "text": "N/A", "extraction_skipped": True},
+    {"taxonomy_code": "T", "text": "x", "extraction_skipped": True},
+    {"taxonomy_code": "N3A", "text": "Site/Position |"},
+    {"taxonomy_code": "K3", "text": "N/A"},
+    {"taxonomy_code": "A", "text": "_CONTAINMENT_ONLY_TEMPLATE_TEXT"},
+    {"taxonomy_code": "A", "text": "_NEAR_TEMPLATE_INSTRUCTION_TEXT"},
+])
+def test_field_sparseness_entry_with_nothing_to_extract_counts_on_neither_term(
+        tmp_path, extra):
+    extra = {**extra, "text": globals().get(extra["text"], extra["text"])}
+    entries = [{**_BOTH, **extra}] + [_CLEAN] * 9
+    fraction, detail, _ = _sparseness(tmp_path, entries)
+    assert "nothing_to_extract=1" in detail, detail
+    assert "allnull_or_zerocov=0" in detail, detail
+    assert "success_rate=1.000" in detail, detail   # denominator stays 10
+    assert fraction == 0.0
+
+
+@pytest.mark.parametrize("code,text", [
+    ("K3", "Developed curriculum for residents 1995"),
+    # stage 4 extracts T entries, so a real T entry's miss still counts
+    ("T", "Chaired the departmental seminar series"),
+    # every piece is a template label, but it is a real J effort record
+    ("J", "Clinical | 100%"),
+])
+def test_field_sparseness_real_content_with_null_fields_still_counts(tmp_path, code, text):
+    entries = [{**_BOTH, "taxonomy_code": code, "text": text}] + [_CLEAN] * 9
+    fraction, detail, _ = _sparseness(tmp_path, entries)
+    assert "nothing_to_extract=0" in detail, detail
+    assert fraction == pytest.approx(1.0)
+
+
+def test_field_sparseness_non_string_text_is_scored_not_crashed(tmp_path):
+    entries = [{**_BOTH, "text": 5}] + [_CLEAN] * 9
+    fraction, detail, _ = _sparseness(tmp_path, entries)
+    assert "nothing_to_extract=0" in detail, detail
+    assert fraction == pytest.approx(1.0)
+
+
+def test_field_sparseness_exclusion_leaves_the_denominator_at_every_entry(tmp_path):
+    t_entry = {**_BOTH, "taxonomy_code": "T", "text": "x", "extraction_skipped": True}
+    fraction, detail, _ = _sparseness(tmp_path, [t_entry, _FAILED_ONLY] + [_CLEAN] * 8)
+    assert "success_rate=0.900" in detail, detail   # 1 failure of 10, not of 9
+    assert fraction == pytest.approx(0.5)
+
+
+def test_field_sparseness_missing_success_flag_counts_as_a_failure(tmp_path):
+    no_flag = {"extracted_fields": {"title": "x"}}
+    _, detail, _ = _sparseness(tmp_path, [no_flag] + [_CLEAN] * 9)
+    assert "success_rate=0.900" in detail, detail
+
+
+
 # --------------------------------------------------------------------- D20
 # _load_docx catches only what python-docx raises for a present-but-unreadable
 # file (the rule #724 review item 12 set for _load_first, applied to its
@@ -1135,3 +1402,409 @@ def test_new_hard_fail_dimensions_do_not_move_a_clean_runs_score(tmp_path):
     assert dims["No rendered output produced at all (HARD-FAIL gate)"]["max"] == 0
     assert dims["Stage-3b batch-fallback ratio (HARD-FAIL gate)"]["max"] == 0
     assert before["hard_fail_caps_applied"] == []
+
+
+# --------------------------------------------------------------------- D22
+# #822 finding 2: score_t_bucket excludes correctly-diverted T entries
+# (template scaffolding, placeholder rows, claimed grant-goal rows) from the
+# catch-all-over-use numerator, without moving the denominator.
+# --------------------------------------------------------------------- D22
+
+# A real phrase from core/template_boilerplate_phrases.json's "instructions"
+# set (>= 25 normalized chars, so it is a distinctive, exact-match instruction
+# under is_template_instruction's own length floor) -- not a hand-typed
+# phrase, so this test cannot silently drift from the actual boilerplate list.
+_REAL_TEMPLATE_INSTRUCTION_TEXT = "Please include medical and scientific societies.)"
+
+# The same real instruction, worded as an older template revision would (one
+# word changed, matching is_near_template_instruction's own docstring
+# example of "a comma or a word" off) -- ratio 0.973, above _NEAR_MATCH_MIN_RATIO
+# (0.93), so is_template_instruction (exact-match only) must NOT match this,
+# and is_near_template_instruction must.
+_NEAR_TEMPLATE_INSTRUCTION_TEXT = (
+    "Please do not delete or modify numbering or lettering of the various "
+    "sections and subsections;"
+)
+
+# The real instruction above, prefixed with extra faculty-authored text so it
+# is no longer an EXACT match (rule a) -- it isolates `is_template_instruction`
+# rule (c), containment, from the other two OR-branches in score_t_bucket:
+# pipe-free but short of _NEAR_MATCH_MIN_RATIO's 0.93 (the prefix drags the
+# whole-string similarity ratio down to ~0.88), so is_near_template_instruction
+# is False; and is_template_label_line splits on "|"/tab/newline only, so the
+# whole padded sentence is ONE piece that is not itself a known label/instruction
+# verbatim, so it is also False. A mutant that replaces is_template_instruction's
+# result with False (dropping rules a-d entirely) has nothing else in the OR to
+# fall back on for this text.
+_CONTAINMENT_ONLY_TEMPLATE_TEXT = "See attached: " + _REAL_TEMPLATE_INSTRUCTION_TEXT
+
+# A short template FIELD LABEL ("degree"), not a directive sentence: below
+# is_template_instruction's own _MIN_EXACT_LEN (25 chars) and
+# is_near_template_instruction's _CONTAINMENT_MIN_LEN (40 chars) floors, so
+# both are False for it -- only is_template_label_line's "every piece is a
+# known label, no length floor" rule matches a bare label line like this
+# (the Appendix-only case its docstring describes: an unfilled field, a
+# column-header row). Isolates that helper from the other two OR-branches.
+_LABEL_ONLY_LINE_TEXT = "Degree"
+
+
+def test_placeholder_only_row_helper():
+    assert _is_placeholder_only_row("N/A | N/A") is True
+    assert _is_placeholder_only_row("Not Applicable") is True
+    assert _is_placeholder_only_row("none") is True
+    assert _is_placeholder_only_row("N/A.") is True
+    assert _is_placeholder_only_row("na") is True            # is_unanswered_prompt's own "na" spelling
+    assert _is_placeholder_only_row("Listed above") is True  # ditto, its "listed above" spelling
+    assert _is_placeholder_only_row("| |") is True          # bare pipe row
+    assert _is_placeholder_only_row("N/A\tN/A") is True      # tab-separated cells (wrapped source line)
+    assert _is_placeholder_only_row("N/A\nNone") is True     # newline-separated cells
+    assert _is_placeholder_only_row("") is False
+    assert _is_placeholder_only_row(None) is False
+    assert _is_placeholder_only_row("Teaching") is False     # real one-word entry
+    # A known template LABEL paired with an unanswered value is exactly what
+    # `is_unanswered_prompt` treats as a non-answer (its own docstring
+    # example: "Primary Hospital Affiliation: | N/A") -- "Teaching" is
+    # itself a recognized template label, not incidental real content, so
+    # reusing that helper here correctly now excludes this row too.
+    assert _is_placeholder_only_row("N/A | Teaching") is True
+    # Real, non-label content paired with an unanswered cell is still kept.
+    assert _is_placeholder_only_row("N/A | Robotic Surgery Outcomes") is False
+    # A real row with a blank cell is not blank: only an ALL-blank row is.
+    assert _is_placeholder_only_row("Robotic Surgery Outcomes | ") is False
+    assert _is_placeholder_only_row("Robotic Surgery | | 2019") is False
+
+
+def test_goal_claimed_row_ids_matches_the_owning_grants_row_only():
+    """A T row inside a grant's own element range, stating that grant's
+    major goal, is claimed; a T row outside any grant's range, or one that
+    is not goals-shaped at all, is not."""
+    grant = {"taxonomy_code": "M2A", "text": "Some Grant",
+              "element_idx_start": 10, "element_idx_end": 10}
+    goal_row = {"taxonomy_code": "T",
+                "text": "The major goals of this project are: to cure things",
+                "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11}
+    unrelated_row = {"taxonomy_code": "T", "text": "Some unrelated appendix line",
+                      "parent_idx": 10, "element_idx_start": 12, "element_idx_end": 12}
+    orphan_goal_row = {"taxonomy_code": "T",
+                        "text": "The major goals of this project are: orphaned",
+                        "parent_idx": 999, "element_idx_start": 13, "element_idx_end": 13}
+    entries = [grant, goal_row, unrelated_row, orphan_goal_row]
+    claimed = _goal_claimed_row_ids(entries)
+    assert claimed == {id(goal_row)}
+
+
+def test_goal_claimed_row_ids_ignores_a_non_grant_entry_sharing_the_grants_span():
+    """`_goal_claimed_row_ids` must build its ownership candidates from ONLY
+    the M2A/M2B/M2C grant codes, not every entry -- `claim_goal_rows` treats
+    a `parent_idx` spanned by more than one candidate as ambiguous (`len(
+    owners) != 1`) and claims nothing. A non-grant entry ("A") that happens
+    to share the real grant's exact element range must therefore be excluded
+    from the candidate list before calling in, or a genuine, unambiguous
+    goal-claim silently stops being claimed the moment an unrelated entry's
+    source element sits at the same index as the grant's."""
+    grant = {"taxonomy_code": "M2A", "text": "Some Grant",
+              "element_idx_start": 10, "element_idx_end": 10}
+    overlapping_non_grant = {"taxonomy_code": "A", "text": "An unrelated entry",
+                              "element_idx_start": 10, "element_idx_end": 10}
+    goal_row = {"taxonomy_code": "T",
+                "text": "The major goals of this project are: to cure things",
+                "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11}
+    entries = [grant, overlapping_non_grant, goal_row]
+    claimed = _goal_claimed_row_ids(entries)
+    assert claimed == {id(goal_row)}
+
+
+def test_goal_claimed_row_ids_only_considers_t_coded_rows_as_candidates():
+    """Only T-coded entries are claim candidates, as in stage 6
+    (`entries_by_code['T']`). A mutant widening candidates to every entry
+    also claims the non-T goal-shaped row, so the claimed set gains a non-T
+    id; this pins the exact set. (T_count itself would not move under that
+    mutant: the extra id is not a T entry.)"""
+    grant = {"taxonomy_code": "M2A", "text": "Some Grant",
+              "element_idx_start": 10, "element_idx_end": 10}
+    non_t_row = {"taxonomy_code": "A",
+                 "text": "The major goals of this project are: to build widgets",
+                 "parent_idx": 10, "element_idx_start": 10, "element_idx_end": 10}
+    goal_row = {"taxonomy_code": "T",
+                "text": "The major goals of this project are: to cure things",
+                "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11}
+    entries = [grant, non_t_row, goal_row]
+    claimed = _goal_claimed_row_ids(entries)
+    assert claimed == {id(goal_row)}
+
+
+def test_goal_claimed_row_ids_degrades_to_empty_set_when_stage6_import_fails(monkeypatch):
+    """`_goal_claimed_row_ids`'s ``except ImportError: return set()`` fallback
+    (its own docstring: "a missing python-docx degrades this one exclusion to
+    claim nothing") needs its own test -- python-docx is installed in this
+    environment, so nothing else exercises the except branch, and a mutant
+    that replaces it with a bare `raise` would break every OTHER
+    quality_score dimension's ability to run against a real artifact, not
+    just silence this one exclusion. A `None` entry in `sys.modules` forces
+    `ModuleNotFoundError` (an `ImportError` subclass) on the `from ... import`
+    regardless of whether the real dependency is present, without needing to
+    actually uninstall python-docx for the test."""
+    monkeypatch.setitem(
+        sys.modules, "unified_pipeline.stage6.sections.research_support", None)
+    grant = {"taxonomy_code": "M2A", "text": "Some Grant",
+              "element_idx_start": 10, "element_idx_end": 10}
+    goal_row = {"taxonomy_code": "T",
+                "text": "The major goals of this project are: to cure things",
+                "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11}
+    assert _goal_claimed_row_ids([grant, goal_row]) == set()
+
+
+def test_t_bucket_excludes_template_instruction_text(tmp_path):
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": _REAL_TEMPLATE_INSTRUCTION_TEXT,
+         "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=1" in detail, detail
+    assert "T_count=0" in detail, detail
+    assert "total=2" in detail, detail   # denominator unchanged by the exclusion
+    assert fraction == 0.0
+    assert cap is None
+
+
+def test_t_bucket_excludes_near_template_instruction_text(tmp_path):
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": _NEAR_TEMPLATE_INSTRUCTION_TEXT,
+         "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=1" in detail, detail
+    assert "T_count=0" in detail, detail
+
+
+def test_t_bucket_excludes_text_only_is_template_instruction_matches(tmp_path):
+    """`_CONTAINMENT_ONLY_TEMPLATE_TEXT` is True under `is_template_instruction`
+    (containment) but False under both `is_near_template_instruction` and
+    `is_template_label_line` -- unlike every other fixture in this file, whose
+    text happens to satisfy more than one of the three helpers at once. A
+    mutant that replaces `is_template_instruction(text)` with `False` in
+    score_t_bucket's OR-condition has no other helper to fall back on for
+    this text, so this is the only test that isolates it."""
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": _CONTAINMENT_ONLY_TEMPLATE_TEXT,
+         "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=1" in detail, detail
+    assert "T_count=0" in detail, detail
+
+
+def test_t_bucket_excludes_a_short_template_label_only_line(tmp_path):
+    """`_LABEL_ONLY_LINE_TEXT` is True under `is_template_label_line` only --
+    both `is_template_instruction` and `is_near_template_instruction` require
+    at least 25/40 normalized chars and this label is far shorter. A mutant
+    that replaces `is_template_label_line(text)` with `False` has no other
+    helper to fall back on for this text."""
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": _LABEL_ONLY_LINE_TEXT,
+         "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=1" in detail, detail
+    assert "T_count=0" in detail, detail
+
+
+def test_t_bucket_excludes_placeholder_only_rows(tmp_path):
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": "N/A | N/A",
+         "element_idx_start": 2, "element_idx_end": 2},
+        {"taxonomy_code": "T", "text": "| |",
+         "element_idx_start": 3, "element_idx_end": 3},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_placeholder=2" in detail, detail
+    assert "T_count=0" in detail, detail
+    assert "total=3" in detail, detail
+
+
+def test_t_bucket_excludes_grant_goal_claim_rows(tmp_path):
+    entries = [
+        {"taxonomy_code": "M2A", "text": "Some Grant",
+         "element_idx_start": 10, "element_idx_end": 10},
+        {"taxonomy_code": "T",
+         "text": "The major goals of this project are: to cure things",
+         "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_goal_claim=1" in detail, detail
+    assert "T_count=0" in detail, detail
+    assert "total=2" in detail, detail
+
+
+def test_t_bucket_a_genuine_misroute_still_counts(tmp_path):
+    """None of the three exclusions apply to ordinary unrouted content -- the
+    fix must not zero out a real T over-use signal."""
+    entries = [
+        {"taxonomy_code": "T",
+         "text": "A genuinely unrouted piece of real content about something specific",
+         "element_idx_start": 1, "element_idx_end": 1},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=0" in detail, detail
+    assert "T_excluded_placeholder=0" in detail, detail
+    assert "T_excluded_goal_claim=0" in detail, detail
+    assert "T_count=1" in detail, detail
+
+
+def test_t_bucket_a_row_matching_two_reasons_is_excluded_only_once(tmp_path):
+    """A row can genuinely satisfy BOTH the template-instruction check and
+    the goal-claim check at once: the template's own major-goals LABEL
+    (`is_template_instruction`, via containment) with real goal text
+    appended after it (which `parse_major_goals` still reads as a claim,
+    and `claim_goal_rows` still matches to the owning grant by span). The
+    goal-claim branch runs first and the others are `elif`, so this must be
+    subtracted once, not twice."""
+    text = "(Optional - The major goals of this project are): to cure disease"
+    entries = [
+        {"taxonomy_code": "M2A", "text": "Some Grant",
+         "element_idx_start": 10, "element_idx_end": 10},
+        {"taxonomy_code": "T", "text": text,
+         "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_goal_claim=1" in detail, detail
+    assert "T_excluded_template=0" in detail, detail
+    assert "T_count=0" in detail, detail
+
+
+def test_t_bucket_row_inside_a_grants_span_but_no_goal_falls_through_to_placeholder(tmp_path):
+    """A T row that sits inside a grant's own element range is only a
+    goal-claim if it actually states a goal -- `claim_goal_rows` requires
+    `parse_major_goals` to return one. A bare "N/A" in that same span parses
+    to no goal, so `_goal_claimed_row_ids` correctly leaves it unclaimed and
+    it falls through to the placeholder check instead -- proof the three
+    exclusions are checked in order and a row is only ever counted once,
+    under whichever category actually applies."""
+    entries = [
+        {"taxonomy_code": "M2A", "text": "Some Grant",
+         "element_idx_start": 10, "element_idx_end": 10},
+        {"taxonomy_code": "T", "text": "N/A",
+         "parent_idx": 10, "element_idx_start": 11, "element_idx_end": 11},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_goal_claim=0" in detail, detail
+    assert "T_excluded_placeholder=1" in detail, detail
+    assert "T_count=0" in detail, detail
+
+
+def test_t_bucket_legacy_meta_only_artifact_is_unaffected(tmp_path):
+    """No 'entries' key at all (every pre-existing synthetic fixture in this
+    file, and any artifact from before this fix) must score exactly as
+    before -- no exclusion is possible without per-entry text."""
+    _write_json(tmp_path, "X_classified.json",
+               _classified(code_distribution={"A": 97, "T": 3}))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=0" in detail, detail
+    assert "T_excluded_placeholder=0" in detail, detail
+    assert "T_excluded_goal_claim=0" in detail, detail
+    assert "T_count_raw=3" in detail and "T_count=3" in detail, detail
+
+
+def test_t_bucket_entries_not_a_list_falls_back_gracefully(tmp_path):
+    """A malformed 'entries' value (wrong shape, not the expected list of
+    dicts) must not crash the scorer -- it degrades to no exclusions,
+    exactly like the artifact having no 'entries' key at all."""
+    data = _classified(code_distribution={"A": 97, "T": 3})
+    data["entries"] = {"not": "a list"}
+    _write_json(tmp_path, "X_classified.json", data)
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_count=3" in detail, detail
+
+
+def test_t_bucket_exclusions_clamp_at_zero_on_a_meta_entries_mismatch(tmp_path):
+    """meta.code_distribution and the entries list are the same writer's own
+    two views of one fact and should never disagree in real output, but the
+    subtraction must not go negative if they ever do -- an entries list
+    claiming more excludable T rows than meta's own T count reports."""
+    entries = [
+        {"taxonomy_code": "T", "text": "N/A", "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": "None", "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    data = _classified_with_entries(entries)
+    data["meta"]["code_distribution"]["T"] = 1  # meta under-reports vs. the entries list
+    data["meta"]["total_entries"] = 1
+    _write_json(tmp_path, "X_classified.json", data)
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_count=0" in detail, detail
+    assert fraction == 0.0
+
+
+def test_t_bucket_non_dict_entry_in_list_is_skipped_not_crashed(tmp_path):
+    entries = ["not a dict", None, 42,
+               {"taxonomy_code": "T", "text": "A genuinely unrouted piece of content",
+                "element_idx_start": 1, "element_idx_end": 1}]
+    data = _classified(code_distribution={"T": 1})
+    data["entries"] = entries
+    _write_json(tmp_path, "X_classified.json", data)
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_count=1" in detail, detail
+
+
+def test_t_bucket_non_t_entries_are_never_checked_against_the_exclusions(tmp_path):
+    """The per-entry loop must skip a non-T entry entirely (`if
+    entry.get("taxonomy_code") != "T": continue`) rather than merely not
+    counting it toward `t_count_raw` -- the T_excluded_* counters are
+    subtracted from `code_dist.get("T", 0)`, which already counts ONLY T
+    entries, so a non-T entry that happens to read as placeholder/template
+    text must not increment any excluded_* counter either. A real, unrouted
+    T entry is included alongside an "A"-coded placeholder row so the
+    difference is visible: dropping the skip would incorrectly subtract the
+    "A" row's placeholder match from the genuine T entry's count."""
+    entries = [
+        {"taxonomy_code": "T",
+         "text": "A genuinely unrouted piece of real content about something specific",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "A", "text": "N/A", "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_placeholder=0" in detail, detail
+    assert "T_count=1" in detail, detail
+
+
+def test_t_bucket_ratio_denominator_is_the_unchanged_total_entries(tmp_path):
+    """t_ratio must divide by `total` (all entries, every code), never by
+    `total - excluded` -- pins the "denominator left unchanged" judgement
+    call with an exact ratio value. Needs a case with BOTH a genuine
+    (unexcluded) T entry and an excluded one, so t_count is nonzero and
+    total != total - excluded; every other exclusion test in this file has
+    T_count=0, under which both denominators give the same (zero) ratio and
+    so cannot tell them apart."""
+    entries = [
+        {"taxonomy_code": "T",
+         "text": "A genuinely unrouted piece of real content about something specific",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": "N/A", "element_idx_start": 2, "element_idx_end": 2},
+        {"taxonomy_code": "A", "text": "Real content", "element_idx_start": 3, "element_idx_end": 3},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_placeholder=1" in detail, detail
+    assert "T_count=1" in detail, detail
+    assert "total=3" in detail, detail
+    # 1/3, NOT 1/(3-1)=0.5 -- the mutant this test kills.
+    assert "t_ratio=0.3333" in detail, detail

@@ -44,6 +44,8 @@ from docx.shared import Inches, Pt  # noqa: E402
 
 from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     _is_date_column,
+    _fold_orphan_date_tail,
+    _is_date_only_text,
     create_simplified_layout_json,
     extract_docx_structure,
     extract_paragraph_metadata,
@@ -421,6 +423,48 @@ def test_split_merged_cells_two_line_aligned_cells_not_split():
     ]
 
     assert split_merged_cells_in_row(row, min_chars=50, min_newlines=2) == [row]
+
+
+def _all_lines(rows):
+    return sorted(
+        line.strip() for r in rows for c in r for line in c["text"].split("\n") if line.strip()
+    )
+
+
+def test_split_merged_cells_date_column_never_drops_surplus_lines_612():
+    # #612 shape (invented text): cell 0 holds a blank paragraph, so the \n\n
+    # pass claims max_splits=2 from cell 0 alone; the aligned-line pass never
+    # runs. The 4-line title cell is unsplit and the 4-line date cell is
+    # distributed by the date-column fallback, which used to emit only the
+    # first max_splits (2) dates and drop the other two.
+    row = [
+        {"text": "Alpha unit one\nAlpha unit two\n\nAlpha unit three", "row": 0, "col": 0},
+        {"text": "Rank A\nRank B\nRank C\nRank D", "row": 0, "col": 1},
+        {"text": "2011 - Present\n2009 - 2011\n2007 - 2009\n2000 - Present", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert _all_lines(out) == _all_lines([row])
+    assert [r[2]["text"] for r in out] == [
+        "2011 - Present",
+        "2009 - 2011\n2007 - 2009\n2000 - Present",
+    ]
+
+
+def test_split_merged_cells_aligned_date_column_longer_than_target_keeps_surplus_612():
+    # Aligned-line pass (two 3-line cells => target 3) beside a 4-line date
+    # column: the old `padded_lines[:target_count]` truncation dropped line 4.
+    row = [
+        {"text": "a\nb\nc", "row": 0, "col": 0},
+        {"text": "d\ne\nf", "row": 0, "col": 1},
+        {"text": "2001\n2002\n2003\n2004", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert _all_lines(out) == _all_lines([row])
+    assert [r[2]["text"] for r in out] == ["2001", "2002", "2003\n2004"]
 
 
 # --------------------------------------------------------------------------
@@ -1449,7 +1493,7 @@ def test_cell_below_scrub_leaves_a_labelled_or_prose_date_alone(tmp_path, neighb
         table.cell(r, c).text = text
     docx_path = tmp_path / "cell_below_control.docx"
     doc.save(str(docx_path))
-    flat = f"Date of Birth: | {neighbour}\n{below} | Dept"
+    flat = f"Date of Birth: | {neighbour}".rstrip() + f"\n{below} | Dept"
     assert _reader_view(docx_path) == (
         [(flat, [["Date of Birth:", neighbour], [below, "Dept"]])], [flat]
     )
@@ -1484,3 +1528,207 @@ def test_next_element_scrub_takes_a_date_opening_a_table(tmp_path):
     assert _reader_view(docx_path) == (
         [("Date of Birth:", []), (flat, [["[withheld]", "03/04/1999"]])], ["Date of Birth:", flat]
     )
+
+
+# #488: every table element's `text` is built with the same per-row join as the
+# stage-2 row entries (join_row_cells), so the #418 whole-table-parent dedup
+# finds the parent's lines in those rows.
+@pytest.mark.parametrize("header_rows", [
+    [],
+    [["Honors and Awards", ""]],
+    [["Honors and Awards", ""], ["Teaching", ""]],
+])
+def test_table_element_text_uses_the_stage2_row_join(tmp_path, header_rows):
+    body = [["Visiting Program\n- Training course", "Fictional City", "2024 to present"],
+            ["Another Entry", "Imaginary Place", "2020 to 2022"]]
+    rows = header_rows + body
+    doc = Document()
+    table = doc.add_table(rows=len(rows), cols=3)
+    for r, row in enumerate(rows):
+        for c, text in enumerate(row):
+            table.cell(r, c).text = text
+    docx_path = tmp_path / "row_join.docx"
+    doc.save(str(docx_path))
+
+    elements = [e for e in extract_unified_elements(str(docx_path))["elements"]
+                if e["type"] in ("table", "table_content")]
+    joined = "\n".join(e["text"] for e in elements)
+    assert "Visiting Program | Fictional City | 2024 to present\n- Training course" in joined
+    assert "Another Entry | Imaginary Place | 2020 to 2022" in joined
+
+
+# --------------------------------------------------------------------------
+# Orphan date rows (#259): a date column with more \n\n segments than the
+# name column must not leave bare-date rows, and a multi-column row must not
+# lose its date cell to the embedded-header branch.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    "May 2019", "07/2008 \u2013 06/2013", "October Issue 2025", "October 13, 2016",
+    "2024-2025", "08/2025 \u2013 Present", "Sept. 2019", "2020",
+])
+def test_is_date_only_text_accepts_date_expressions(text):
+    assert _is_date_only_text(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Johns Hopkins University, 1991",  # a year inside a name is not a date
+    "Award 1991", "May", "no digits here", "",
+])
+def test_is_date_only_text_rejects_text_with_words_or_no_year(text):
+    assert not _is_date_only_text(text)
+
+
+def test_split_merged_cells_folds_overflow_dates_into_last_named_row():
+    row = [
+        {"text": "Lecture Alpha\n\nLecture Beta", "row": 1, "col": 0},
+        {"text": "May 2019\n\nJune 2019\n\nJuly 2019\n\nAugust 2019", "row": 1, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert len(out) == 2
+    assert [c["text"] for c in out[0]] == ["Lecture Alpha", "May 2019"]
+    assert [c["text"] for c in out[1]] == [
+        "Lecture Beta", "June 2019\nJuly 2019\nAugust 2019",
+    ]
+    # Metadata of the anchor row survives the fold.
+    assert out[1][1]["row"] == 1 and out[1][1]["col"] == 1
+    # No row is a date on its own.
+    assert all(c["text"] for r in out for c in r[:1])
+
+
+def test_split_merged_cells_fold_leaves_tail_rows_that_are_not_pure_dates():
+    # The overflow row's date-column text ("To be determined") is not a date, so
+    # it is a real value and the tail is not folded.
+    row = [
+        {"text": "Lecture Alpha\n\nLecture Beta", "row": 0, "col": 0},
+        {"text": "May 2019\n\nJune 2019\n\nTo be determined", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Lecture Alpha", "May 2019"],
+        ["Lecture Beta", "June 2019"],
+        ["", "To be determined"],
+    ]
+
+
+def test_split_merged_cells_fold_keeps_overflow_row_with_a_non_date_cell_separate():
+    # 3 columns: the overflow row ['', 'July 2019', 'Room 3'] has a date in cell 1
+    # but real text ('Room 3') in cell 2, so it is not date-only and must stay
+    # its own row. Folding on "any cell is a date" would merge 'Room 3' into
+    # the anchor row.
+    row = [
+        {"text": "Lecture Alpha\n\nLecture Beta", "row": 0, "col": 0},
+        {"text": "May 2019\n\nJune 2019\n\nJuly 2019", "row": 0, "col": 1},
+        {"text": "Room 1\n\nRoom 2\n\nRoom 3", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Lecture Alpha", "May 2019", "Room 1"],
+        ["Lecture Beta", "June 2019", "Room 2"],
+        ["", "July 2019", "Room 3"],
+    ]
+
+
+def test_split_merged_cells_fold_does_not_touch_single_cell_rows():
+    # No blank sibling cell -> not an orphan date row, so "MBA" / "1998" stay
+    # two rows exactly as before.
+    row = [{"text": "MBA\n\n1998", "row": 0, "col": 0}]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [r[0]["text"] for r in out] == ["MBA", "1998"]
+
+
+def test_split_merged_cells_fold_keeps_role_held_over_two_stints_as_two_rows():
+    # #886: a single (unsplit) role cell beside a two-stint date cell is a
+    # deliberate continuation row -- its blank cell is not split padding, so the
+    # second date is not an orphan and must not be folded into the first.
+    row = [
+        {"text": "Research Fellow", "row": 0, "col": 0},
+        {"text": "2019-2020\n\n2021-2022", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert [[c["text"] for c in r] for r in out] == [
+        ["Research Fellow", "2019-2020"], ["", "2021-2022"],
+    ]
+
+
+def test_fold_orphan_date_tail_needs_a_named_row_to_fold_into():
+    # Every row is date-only (blank cell 0 is split padding), so there is no
+    # anchor row: nothing to fold into, rows are returned as given.
+    rows = [
+        [{"text": "", "col": 0}, {"text": "2019", "col": 1}],
+        [{"text": "", "col": 0}, {"text": "2020", "col": 1}],
+    ]
+
+    assert _fold_orphan_date_tail(rows, {0}) == rows
+
+
+def test_fold_orphan_date_tail_into_an_empty_anchor_cell_adds_no_leading_newline():
+    rows = [
+        [{"text": "Lecture Alpha", "col": 0}, {"text": "", "col": 1}],
+        [{"text": "", "col": 0}, {"text": "2019", "col": 1}],
+        [{"text": "", "col": 0}, {"text": "2020", "col": 1}],
+    ]
+
+    out = _fold_orphan_date_tail(rows, {0})
+
+    assert out == [[{"text": "Lecture Alpha", "col": 0}, {"text": "2019\n2020", "col": 1}]]
+
+
+def test_extract_unified_elements_multicolumn_row_with_embedded_header_keeps_dates(tmp_path):
+    # Row 1's first cell holds several \n\n-separated activities, one of which
+    # ("Clinical Teaching") reads like a section header; its second cell holds the
+    # dates. The embedded-header branch used to emit only cell 0 and drop every
+    # date; the row must instead fall through to the merged-cell split.
+    doc = Document()
+    t = doc.add_table(rows=2, cols=2)
+    t.cell(0, 0).text = "Didactic Teaching"
+    t.cell(0, 1).text = "Dates"
+    t.cell(1, 0).text = (
+        "Lecturer, Anatomy Course, Example University, Example City\n\n"
+        "Clinical Teaching\nWeekly review of cases with residents\n\n"
+        "Course Director, Pathology Course, Example Medical Center, Example City"
+    )
+    t.cell(1, 1).text = "March 2011\n\nJune 2012\n\nOctober 2013"
+    docx_path = tmp_path / "embedded_header_multicol.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    content = " ".join(e["text"] for e in elements if e["type"] == "table_content")
+    for date in ("March 2011", "June 2012", "October 2013"):
+        assert date in content
+    assert "Lecturer, Anatomy Course" in content
+    # Judgement call (#259): a multi-column row no longer takes the embedded-header
+    # branch, so the embedded "Clinical Teaching" is NOT emitted as a table_header;
+    # it stays as text in a content row. Pinned so a change is deliberate.
+    headers = [e["text"] for e in elements if e["type"] == "table_header"]
+    assert "Clinical Teaching" not in headers
+    assert "Clinical Teaching" in content
+
+
+def test_extract_unified_elements_single_cell_embedded_header_still_splits(tmp_path):
+    # Guard is scoped to multi-column rows: single-content-cell rows keep the
+    # embedded-header behaviour (an embedded header becomes a table_header).
+    doc = Document()
+    t = doc.add_table(rows=2, cols=2)
+    t.cell(0, 0).text = "Research Summary"
+    t.cell(0, 1).text = ""
+    t.cell(1, 0).text = "Some prose about the work.\n\nEducation and Degrees\n2005 BS Example University"
+    t.cell(1, 1).text = ""
+    docx_path = tmp_path / "embedded_header_single.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    assert "Education and Degrees" in [e["text"] for e in elements if e["type"] == "table_header"]

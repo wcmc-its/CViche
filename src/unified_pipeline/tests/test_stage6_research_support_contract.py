@@ -1686,6 +1686,9 @@ def test_each_grant_table_lands_after_its_own_section_header():
     ('Under review', 'M2C'),
     ('Completed', 'M2B'),
     ('Awarded', None),          # no move: an award is not a rebucketing signal
+    ('Review completed', None),  # a process step, not an ended award (#982)
+    ('Site visit completed', None),
+    ('Project completed', 'M2B'),
     ('', None),
     (None, None),
 ])
@@ -2023,7 +2026,7 @@ def test_every_field_the_module_reads_is_declared_on_the_grant_record_type():
 def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     """The other direction: a declared key no reader wants is dead contract.
 
-    All 24 keys, `status` included, are reached through a `fields.get(...)` in
+    All 26 keys, `status` included, are reached through a `fields.get(...)` in
     this module -- `status` from the bucket rules rather than from a rendered
     row. A key left on the record type after its reader is deleted would go on
     suppressing that key's line in the unconsumed-fields diagnostic, silently.
@@ -2031,4 +2034,109 @@ def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     declared_but_unread = research_support.CONSUMED_GRANT_FIELDS - _fields_get_keys()
 
     assert declared_but_unread == set(), sorted(declared_but_unread)
-    assert len(research_support.CONSUMED_GRANT_FIELDS) == 24
+    assert len(research_support.CONSUMED_GRANT_FIELDS) == 26
+
+
+# --- #982: stage 4 now keeps status and notes, and the block renders them --------
+
+def test_status_and_notes_render_as_their_own_rows_after_the_effort_row():
+    """web39's withdrawn grants lost the status word: no row named `status`."""
+    fields = {'title': 'Withdrawn Cohort Study', 'agency': 'NIH', 'start_date': '01/2019',
+              'percent_effort': '10%', 'status': 'withdrawn', 'notes': 'Sponsor closed the call'}
+    rows = _rows(_generator()._create_grant_table(fields, 'M2B'))
+    labels = [label for label, _ in rows]
+    assert rows[labels.index('Status:')] == ('Status:', 'withdrawn')
+    assert rows[labels.index('Notes:')] == ('Notes:', 'Sponsor closed the call')
+    assert labels.index('Your percent (%) effort:') < labels.index('Status:') < labels.index('Notes:')
+
+
+def test_a_grant_with_no_status_or_notes_keeps_the_eight_row_template_block():
+    fields = {'title': 'Funded Cohort Study', 'start_date': '01/2019', 'status': None, 'notes': '  '}
+    table = _generator()._create_grant_table(fields, 'M2A')
+    assert len(table.rows) == 8
+    assert 'Status:' not in _cells(table) and 'Notes:' not in _cells(table)
+
+
+def test_a_note_that_only_repeats_the_title_is_dropped():
+    fields = {'title': 'Funded Cohort Study', 'notes': 'funded cohort study', 'start_date': '01/2019'}
+    assert 'Notes:' not in _cells(_generator()._create_grant_table(fields, 'M2A'))
+
+
+def test_withdrawn_status_reaches_the_document_through_the_section_fill():
+    """The wire: `_fill_research_support` (bucket rules included) to the table cell."""
+    gen = _sectioned_generator()
+    gen._fill_research_support(
+        {'M2B': [_entry('M2B', title='Withdrawn Cohort Study', agency='NIH',
+                        status='withdrawn', notes='Update: withdrawn', start_date='01/2020',
+                        end_date='06/2021')]},
+        current_year=TEST_YEAR)
+    (table,) = _tables_under(gen, COMPLETED)
+    assert _cells(table)['Status:'] == 'withdrawn'
+    assert _cells(table)['Notes:'] == 'Update: withdrawn'
+
+
+# --- #982: an unrecognised status falls back to the heading --------------------
+
+@pytest.mark.parametrize('status', ['withdrawn', 'Funded', 'NCE', 'Awarded 2021'])
+def test_an_unrecognised_status_falls_back_to_the_heading(status):
+    """The vocabulary knows none of these; they must not silence the #981 heading rule."""
+    entry = _under(['Pending applications'], code='M2B', title='Filed Pending', status=status)
+
+    assert research_support.explicit_status_target(entry)[0] == 'M2C'
+    current, completed, pending, _ = rebucket_grants_by_status([], [entry], [])
+    assert (current, completed, pending) == ([], [], [entry])
+
+
+def test_an_unrecognised_status_under_a_silent_heading_moves_nothing():
+    entry = _under(['Current Grant Support'], title='Running Study', status='withdrawn')
+
+    assert research_support.explicit_status_target(entry) == (None, None)
+
+
+def test_a_review_completed_status_does_not_file_a_pending_grant_as_completed():
+    """Judgement call: "Review completed" names no bucket, so the Pending heading decides."""
+    entry = _under(['Pending applications'], title='Under Review Study',
+                   status='Review completed')
+
+    target, note = research_support.explicit_status_target(entry)
+
+    assert target == 'M2C'
+    assert 'section heading' in note
+
+
+def test_a_recognised_status_beats_a_disagreeing_heading():
+    """Judgement call: the status is the grant's own word, so it wins a disagreement."""
+    pending_status = _under(['Completed Research Support'], code='M2B',
+                            title='Resubmitted', status='Under review')
+    completed_status = _under(['Pending applications'], code='M2C',
+                              title='Ended', status='Project completed')
+
+    assert research_support.explicit_status_target(pending_status)[0] == 'M2C'
+    assert research_support.explicit_status_target(completed_status)[0] == 'M2B'
+
+
+# --- #982: co_investigators renders in its own row -----------------------------
+
+def test_co_investigators_render_in_their_own_row_and_leave_the_pi_cell_alone():
+    fields = {'title': 'Shared Cohort Study', 'pi_name': 'Ada Lovelace-Test',
+              'co_investigators': 'Tanaka, CoI; Reyes, CoTwo', 'start_date': '01/2019'}
+    rows = _rows(_generator()._create_grant_table(fields, 'M2A'))
+    labels = [label for label, _ in rows]
+
+    assert rows[labels.index('Co-Investigators:')] == (
+        'Co-Investigators:', 'Tanaka, CoI; Reyes, CoTwo')
+    assert rows[labels.index('Name of Principal Investigator:')][1] == 'Ada Lovelace-Test'
+    assert labels.index('Your percent (%) effort:') < labels.index('Co-Investigators:')
+
+
+def test_co_investigators_identical_to_the_pi_are_not_repeated():
+    fields = {'title': 'Solo Study', 'pi_name': 'Tanaka, CoI',
+              'co_investigators': 'tanaka, coi', 'start_date': '01/2019'}
+
+    assert 'Co-Investigators:' not in _cells(_generator()._create_grant_table(fields, 'M2A'))
+
+
+def test_no_co_investigators_keeps_the_eight_row_block():
+    fields = {'title': 'Solo Study', 'co_investigators': None, 'start_date': '01/2019'}
+
+    assert len(_generator()._create_grant_table(fields, 'M2A').rows) == 8

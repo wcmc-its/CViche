@@ -181,7 +181,10 @@ def _discover_uids(arm_outputs: Path, only: set) -> list:
     uids = sorted({p.name.replace("_fields.json", "")
                    for p in (arm_outputs / "stage_4_field_extraction").glob("*_fields.json")})
     if only:
-        uids = [u for u in uids if u in only]
+        # Stripped, as `_uid_filter` strips each requested uid: harvested
+        # filenames can end in a space ("... CV _fields.json"), and an exact
+        # match dropped those uids from a --uids-file run without a word.
+        uids = [u for u in uids if u.strip() in only]
     return uids
 
 
@@ -384,6 +387,12 @@ def main(argv=None):
     uids = _discover_uids(arm_outputs, only)
     if not uids:
         print("no uids to render -- empty arm, or uid filter matched nothing", file=sys.stderr)
+        return 1
+    unmatched = sorted(only - {u.strip() for u in uids})
+    if unmatched:
+        # A partial match is a narrower run than the caller asked for; fail it
+        # rather than report a clean arm over fewer CVs.
+        print("requested uids not in this arm:", *unmatched, sep="\n  ", file=sys.stderr)
         return 1
 
     results = _render_all(s6, arm_outputs, out, source_dir, uids)

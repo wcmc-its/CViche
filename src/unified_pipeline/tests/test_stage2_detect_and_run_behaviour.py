@@ -282,6 +282,24 @@ def test_normal_table_row_claimed_and_unclaimed_sibling_row_recovered(monkeypatc
     assert by_idx["9.0"]["recovered_row"] is True
 
 
+@pytest.mark.parametrize("elem_type", ["table_content", "table"])
+def test_multi_paragraph_cell_zero_takes_trailing_columns_on_its_entry_line(monkeypatch, elem_type):
+    # #488: the row's date/institution columns attach to cell 0's FIRST
+    # paragraph, not its last sub-bullet. Both element shapes, normal rows and
+    # merged (pseudo) rows, so each of the four join sites is on the wire.
+    normal = [{"text": "Entry title\n- sub bullet one\n- sub bullet two"}, {"text": "2024"}, {"text": "Some Org"}]
+    single = [{"text": "Solo title"}, {"text": "2023"}]
+    merged = [{"text": "Title A\n- bullet A\n\nTitle B\n- bullet B"}, {"text": "2020\n\n2021"}]
+    elements = [{"unified_idx": 4, "type": elem_type, "table_index": 1, "data": [normal, single, merged]}]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result({"delimiters": []}))
+    entries, _ = stage2.detect_entries_for_section(["Service"], elements, 4, 4, element_index_map=_idx_map(elements))
+    by_idx = {e["element_idx_start"]: e["text"] for e in entries}
+    assert by_idx["4.0"] == "Entry title | 2024 | Some Org\n- sub bullet one\n- sub bullet two"
+    assert by_idx["4.1"] == "Solo title | 2023"  # one-paragraph cell 0: unchanged
+    assert by_idx["4.2.0"] == "Title A | 2020\n- bullet A"
+    assert by_idx["4.2.1"] == "Title B | 2021\n- bullet B"
+
+
 def test_table_content_with_no_row_data_falls_back_to_single_integer_element(monkeypatch):
     elements = [{"unified_idx": 20, "type": "table_content", "text": "Fallback summary text", "data": [], "rows": 0, "table_index": 3}]
     monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result(
@@ -1592,3 +1610,63 @@ def test_batch_progress_goes_to_the_logger_not_stdout(monkeypatch, caplog, capsy
 
     out = capsys.readouterr().out
     assert "Processing batch" not in out
+
+
+# =============================================================== detail-line fold (#986)
+
+def _detail_fold_docx(tmp_path):
+    doc = Document()
+    for text in ["MENTORING", "2016 Ana Cruz, Graduate Student", "Project: Study of tides",
+                 "2015 Lee Park, Undergraduate", "Project: Study of kelp", "",
+                 "ADVISING", "2014 Kim Ortiz, Fellow", "Role: Primary advisor"]:
+        doc.add_paragraph(text)
+    path = tmp_path / "fold.docx"
+    doc.save(path)
+    hpath = _write_hierarchy(
+        tmp_path, "fold_h.json", "FOLDUID",
+        hierarchy_with_indices=[
+            {"text": "Mentoring", "level": "H1", "element_idx": 0, "children": []},
+            {"text": "Advising", "level": "H1", "element_idx": 6, "children": []},
+        ],
+        section_boundaries=[
+            {"hierarchy": ["Mentoring"], "element_idx_start": 0, "element_idx_end": 5, "has_children": False},
+            {"hierarchy": ["Advising"], "element_idx_start": 6, "element_idx_end": 8, "has_children": False},
+        ],
+    )
+    return path, hpath
+
+
+def test_run_stage_2_folds_detail_lines_whether_detector_missed_or_split_them(tmp_path, monkeypatch):
+    _redirect_output_manager(monkeypatch, tmp_path)
+    path, hpath = _detail_fold_docx(tmp_path)
+    # Mentoring: the detector returns nothing, so every line is an unassigned
+    # "break". Advising: it splits the Role line off as its own entry.
+    _route_call_llm(monkeypatch, {
+        "Advising": [
+            {"element_idx_start": 7, "element_idx_end": 7, "element_type": "paragraph", "confidence": 0.9},
+            {"element_idx_start": 8, "element_idx_end": 8, "element_type": "paragraph", "confidence": 0.9},
+        ],
+    })
+
+    output_data, _ = stage2.run_stage_2(str(path), str(hpath))
+
+    rows = [(e["element_idx_start"], e["element_idx_end"], e["element_type"], e["text"])
+            for e in output_data["entries"] if e["element_type"] != "header"]
+    assert rows == [
+        (1, 2, "break", "2016 Ana Cruz, Graduate Student\tProject: Study of tides"),
+        (3, 4, "break", "2015 Lee Park, Undergraduate\tProject: Study of kelp"),
+        (5, 5, "break", ""),
+        (7, 8, "paragraph", "2014 Kim Ortiz, Fellow\tRole: Primary advisor"),
+    ]
+    assert output_data["coverage"]["coverage_percentage"] == 100.0
+    assert output_data["coverage"]["unaccounted_indices"] == []
+    assert output_data["coverage"]["content_entries"] == 1  # only the paragraph; folded breaks are 3b-visible breaks
+
+
+def test_run_stage_2_fold_gives_the_same_artifact_serial_and_parallel(tmp_path, monkeypatch):
+    _redirect_output_manager(monkeypatch, tmp_path)
+    path, hpath = _detail_fold_docx(tmp_path)
+    _route_call_llm(monkeypatch, {})
+    serial, _ = stage2.run_stage_2(str(path), str(hpath), workers=1)
+    parallel, _ = stage2.run_stage_2(str(path), str(hpath), workers=4)
+    assert serial["entries"] == parallel["entries"]

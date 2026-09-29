@@ -19,11 +19,14 @@ per-certificate trial during IdP cert rollover; cases 2-4 show that if NO cert
 verifies, parse raises and login is denied.
 """
 import base64
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import warnings
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -34,8 +37,13 @@ from saml2.client import Saml2Client
 from saml2.metadata import entity_descriptor
 from saml2.saml import NAMEID_FORMAT_EMAILADDRESS
 
+from saml2.assertion import Policy
+from saml2.config import Config as _Saml2Config
+
+from app.auth import COOKIE_NAME
+from app.models import SystemConfig
 from app.saml_client import extract_user_attrs
-from app.saml_replay import assertion_ids
+from app.saml_replay import assertion_ids, set_replay_cache
 
 _XMLSEC = shutil.which("xmlsec1")
 _OPENSSL = shutil.which("openssl")
@@ -199,3 +207,142 @@ def test_unsolicited_response_is_accepted(harness):
     ids = assertion_ids(resp)
     assert len(ids) == 1
     assert ids[0]
+
+
+# ---------------------------------------------------------------------------
+# Real-fixture ACS validation (#672): audience / issuer / lifetime / destination
+#
+# Unlike the harness above (its own SP config, parse call only), these drive
+# POST /api/saml/acs end to end: the app's REAL get_saml_client() builds the SP
+# (entity id, ACS endpoint, want_assertions_signed) from SystemConfig -- only
+# the remote IdP-metadata URL is swapped for a local metadata file -- and
+# pysaml2 + xmlsec1 verify a really signed response. Every rejection case has
+# a valid control built through the same path, so none can pass vacuously.
+# ---------------------------------------------------------------------------
+_APP_SP_BASE = "https://sp.test.local"
+_OTHER_SP_EID = "https://other-sp.test.local/sp"
+_ROGUE_IDP_EID = "https://rogue-idp.test.local/idp"
+_WRONG_ACS = "https://evil.test.local/api/saml/acs"
+_SKEW_MINUTES = 10  # far outside pysaml2's zero default time slack
+_AUTH_FAILED = "error=auth_failed"
+
+
+@pytest.fixture(scope="module")
+def acs_env():
+    """Trusted IdP (+ rogue-issuer IdP sharing its trusted key), SP cert dir
+    and local IdP metadata, minted once."""
+    tmp = tempfile.mkdtemp(prefix="samlacs_")
+    idp_key, idp_crt = _gen_cert(tmp, "idp")
+    cert_dir = os.path.join(tmp, "spcerts")
+    os.makedirs(cert_dir)
+    _gen_cert(cert_dir, "sp")
+    sp_key, sp_crt = (os.path.join(cert_dir, "sp.key"), os.path.join(cert_dir, "sp.crt"))
+    idp_md = _write_md(_idp_conf(tmp, idp_key, idp_crt), os.path.join(tmp, "idp_md.xml"))
+    sp_md = _write_md(_sp_conf(sp_key, sp_crt), os.path.join(tmp, "sp_md.xml"))
+    idp = Server(config=Config().load(_idp_conf(tmp, idp_key, idp_crt, [sp_md])))
+    rogue_conf = _idp_conf(tmp, idp_key, idp_crt, [sp_md])
+    rogue_conf["entityid"] = _ROGUE_IDP_EID
+    rogue = Server(config=Config().load(rogue_conf))
+    yield {"idp": idp, "rogue": rogue, "idp_md": idp_md, "cert_dir": cert_dir}
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+@pytest.fixture
+def acs_app(acs_env, client, db, seed_saml_mode, monkeypatch):
+    """App configured for the fixture SP/IdP; returns a POST-to-ACS callable."""
+    for key, val in {"saml_entity_id": SP_EID, "saml_sp_base_url": _APP_SP_BASE,
+                     "saml_cert_dir": acs_env["cert_dir"]}.items():
+        db.query(SystemConfig).filter(SystemConfig.key == key).first().value = json.dumps(val)
+    db.commit()
+    real_load = _Saml2Config.load
+
+    def load_local_metadata(self, cfg, *a, **kw):
+        return real_load(self, {**cfg, "metadata": {"local": [acs_env["idp_md"]]}}, *a, **kw)
+
+    monkeypatch.setattr("app.saml_client.Saml2Config.load", load_local_metadata)
+    # Pin the production default: the wrong-Destination case is rejected by the
+    # replay gate's fail-closed branch, so a local opt-out must not flip it.
+    monkeypatch.setenv("CVICHE_SAML_REPLAY_FAIL_CLOSED", "1")
+    set_replay_cache(None)
+
+    def post(xml):
+        b64 = base64.b64encode(xml.encode()).decode()
+        return client.post("/api/saml/acs", data={"SAMLResponse": b64, "RelayState": "/"},
+                           follow_redirects=False)
+    yield post
+    set_replay_cache(None)
+
+
+def _iso(delta_minutes):
+    t = datetime.now(timezone.utc) + timedelta(minutes=delta_minutes)
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _mint(server, *, destination=ACS, audience=None, not_before=None, not_on_or_after=None):
+    """Sign a real Response/Assertion with `server`; optionally rewrite the
+    Conditions the IdP puts in the assertion BEFORE signing."""
+    real_conditions = Policy.conditions
+
+    def tweaked(self, sp_entity_id):
+        cond = real_conditions(self, sp_entity_id)
+        if audience is not None:
+            cond.audience_restriction[0].audience[0].text = audience
+        if not_before is not None:
+            cond.not_before = not_before
+        if not_on_or_after is not None:
+            cond.not_on_or_after = not_on_or_after
+        return cond
+
+    with patch.object(Policy, "conditions", tweaked):
+        return str(server.create_authn_response(
+            IDENTITY, in_response_to=None, destination=destination, sp_entity_id=SP_EID,
+            name_id=server.ident.transient_nameid(SP_EID, "victim"), authn=AUTHN,
+            # The app's SP config leaves pysaml2's want_response_signed at its
+            # default (True) and sets want_assertions_signed=True: sign both.
+            sign_assertion=True, sign_response=True))
+
+
+def _assert_rejected(resp, caplog, reason):
+    """Rejected via the app's auth_failed redirect, for the INTENDED reason
+    (pysaml2's own log line), so a wrong-reason rejection cannot pass."""
+    assert reason in caplog.text
+    assert resp.status_code == 302
+    assert _AUTH_FAILED in resp.headers["location"]
+    assert COOKIE_NAME not in {c.name for c in resp.cookies.jar}
+
+
+def test_acs_valid_signed_response_is_accepted(acs_env, acs_app):
+    """Control: the un-tweaked fixture logs in through the real ACS path."""
+    resp = acs_app(_mint(acs_env["idp"]))
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/"
+    assert COOKIE_NAME in {c.name for c in resp.cookies.jar}
+
+
+def test_acs_rejects_wrong_audience(acs_env, acs_app, caplog):
+    resp = acs_app(_mint(acs_env["idp"], audience=_OTHER_SP_EID))
+    _assert_rejected(resp, caplog, "AudienceRestrictions conditions not satisfied")
+
+
+def test_acs_rejects_wrong_issuer(acs_env, acs_app, caplog):
+    """Signed with the TRUSTED key, but issued by an entity not in the SP's
+    IdP metadata."""
+    resp = acs_app(_mint(acs_env["rogue"]))
+    _assert_rejected(resp, caplog, f"SAML signature validation failed: {_ROGUE_IDP_EID}")
+
+
+def test_acs_rejects_expired_assertion(acs_env, acs_app, caplog):
+    resp = acs_app(_mint(acs_env["idp"], not_before=_iso(-2 * _SKEW_MINUTES),
+                         not_on_or_after=_iso(-_SKEW_MINUTES)))
+    _assert_rejected(resp, caplog, "too old")
+
+
+def test_acs_rejects_not_yet_valid_assertion(acs_env, acs_app, caplog):
+    resp = acs_app(_mint(acs_env["idp"], not_before=_iso(_SKEW_MINUTES),
+                         not_on_or_after=_iso(2 * _SKEW_MINUTES)))
+    _assert_rejected(resp, caplog, "Can't use response yet")
+
+
+def test_acs_rejects_wrong_destination(acs_env, acs_app, caplog):
+    resp = acs_app(_mint(acs_env["idp"], destination=_WRONG_ACS))
+    _assert_rejected(resp, caplog, "not in return addresses")

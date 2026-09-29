@@ -373,3 +373,24 @@ def test_pmcid_conversion_failure_logged_at_error(monkeypatch, caplog):
         enricher._convert_pmcids_to_pmids(['PMC1234567'])
     assert len(caplog.records) == 1
     assert 'pmcid_conversion' in caplog.records[0].getMessage()
+
+
+# ------------------------------------- own ArticleIdList, never ReferenceList (#1042)
+
+REFERENCE_LIST_XML = (
+    Path(__file__).resolve().parent / 'fixtures' / 'efetch_with_reference_list.xml'
+).read_bytes()
+
+
+def test_efetch_reads_own_ids_not_last_reference(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=REFERENCE_LIST_XML)])
+    record = enricher._fetch_pubmed_batch(['11111111', '22222222'])['11111111']
+    assert record['doi'] == '10.1000/own.1'
+    assert record['pmcid'] == 'PMC1111111'
+
+
+def test_efetch_article_without_own_ids_gets_empty_not_reference_ids(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, content=REFERENCE_LIST_XML)])
+    record = enricher._fetch_pubmed_batch(['11111111', '22222222'])['22222222']
+    assert record['doi'] == ''
+    assert record['pmcid'] == ''

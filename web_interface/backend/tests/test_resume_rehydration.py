@@ -87,6 +87,7 @@ def _write(path: Path, body: str = "{}"):
 
 def _run_prepare(db, tmp_path, start_step, storage):
     orch = _make_orchestrator(db)
+    orch.pipeline_output_dir = tmp_path / "pipeline_outputs"
     paths = _output_paths(tmp_path)
     run = db.query(Run).filter(Run.id == RUN_ID).first()
     with patch.object(orch, "_get_output_paths", return_value=paths), \
@@ -187,3 +188,23 @@ def test_storage_error_is_swallowed_and_treated_as_missing(db, tmp_path):
     assert effective == 2
     assert set(orch.stage_outputs) == {first_stage}
     assert orch.total_cost == pytest.approx(1.0)
+
+
+def test_stage_error_record_rehydrated_from_storage(db, tmp_path):
+    """#745: a resumed run's stage-error record follows it onto a fresh pod.
+    Without it, the retried stage succeeding could not clear its entry, and the
+    durable copy -- which the scorer reads -- would keep capping the score."""
+    from unified_pipeline.stage_errors import stage_errors_path
+
+    _seed_steps(db, complete_through=LAST_STEP - 1)
+    paths = _output_paths(tmp_path)
+    for step, stage in STAGE_BY_STEP.items():
+        if step < LAST_STEP:
+            _write(paths[stage])
+    record = b'[{"stage": "6", "exception_type": "ValueError", "message": "m", "fatal": true}]'
+    storage = _FakeStorage({(RUN_ID, f"outputs/{RUN_ID}_stage_errors.json"): record})
+
+    orch, _, _ = _run_prepare(db, tmp_path, LAST_STEP, storage)
+
+    local = stage_errors_path(orch.pipeline_output_dir, RUN_ID)
+    assert local.read_bytes() == record

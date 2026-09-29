@@ -271,6 +271,15 @@ UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# Recalibrated after the #881 parallel LLM batches went live (dev-207): the old
+# 20 s/stage overhead and 3-min floor quoted ~2.5x the real wall time on every
+# post-parallel prod run (e.g. estimate max 421 s vs actual 89-105 s). With 5 s
+# and a 1-min floor, all six runs from 2026-09-28/29 land inside [min, max].
+_PER_STAGE_OVERHEAD_SECONDS = 5
+_MIN_ESTIMATE_SECONDS = 60
+_MIN_ESTIMATE_SPREAD_SECONDS = 60
+
+
 def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
     """(min, max) wall-clock seconds for a full run, scaled to document size.
 
@@ -283,9 +292,9 @@ def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
     text_char_count = max(text_char_count, 1000)
     estimated_tokens = text_char_count // 4
     base_time = BASE_OVERHEAD_SECONDS + (estimated_tokens / 1000) * TIME_PER_1K_TOKENS
-    total_time = base_time + len(STEP_REGISTRY) * 20  # ~20s/stage init + API overhead
-    time_min = max(int(total_time * 0.6), 180)        # at least 3 min
-    time_max = max(int(total_time * 1.3), time_min + 180)
+    total_time = base_time + len(STEP_REGISTRY) * _PER_STAGE_OVERHEAD_SECONDS
+    time_min = max(int(total_time * 0.6), _MIN_ESTIMATE_SECONDS)
+    time_max = max(int(total_time * 1.3), time_min + _MIN_ESTIMATE_SPREAD_SECONDS)
     return time_min, time_max
 
 

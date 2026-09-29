@@ -185,6 +185,75 @@ def test_execute_step_timeout_surfaces_error(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #745: a failed stage leaves a structured stage-error record for the scorer
+# ---------------------------------------------------------------------------
+
+def _orchestrator_for_step(monkeypatch, tmp_path, stage_logic):
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "event_emitter", AsyncMock())
+    fake_db = MagicMock()
+    fake_db.query.return_value.filter.return_value.first.return_value = MagicMock()
+    o = orch.PipelineOrchestrator("test-745-run", tmp_path / "cv745.docx", fake_db)
+    o.pipeline_output_dir = tmp_path / "outputs"
+    persisted: list[list[str]] = []
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", persisted.append)
+    monkeypatch.setattr(o, "_sync_prompt_logs_to_storage", lambda *a: None)
+    monkeypatch.setattr(o, "_execute_stage_logic", stage_logic)
+    return o, persisted
+
+
+def test_execute_step_failure_writes_and_mirrors_a_stage_error_record(monkeypatch, tmp_path):
+    """The orchestrator raises (fails the run) but first records which stage
+    broke and how, and mirrors it to outputs/ where the scorer collects it --
+    even when the message names no exception type."""
+    from unified_pipeline.stage_errors import StageError, read_stage_errors, stage_errors_path
+
+    async def boom(stage_id, cv_path):
+        raise TypeError("'int' object is not iterable")
+
+    o, persisted = _orchestrator_for_step(monkeypatch, tmp_path, boom)
+    with pytest.raises(TypeError):
+        asyncio.run(o.execute_step(6, "4", "cv.docx"))
+
+    path = stage_errors_path(o.pipeline_output_dir, "cv745")
+    assert read_stage_errors(path) == [
+        StageError("4", "TypeError", "'int' object is not iterable", fatal=True)]
+    assert [str(path)] in persisted
+
+
+def test_execute_step_success_clears_an_earlier_stage_error(monkeypatch, tmp_path):
+    """A retried stage that now succeeds removes its entry, locally and in the
+    mirrored copy, so a recovered run is not capped by its own history."""
+    from unified_pipeline.stage_errors import (
+        StageError, read_stage_errors, record_stage_outcome, stage_errors_path)
+
+    async def ok(stage_id, cv_path):
+        return {"cost": 0.0, "output_files": []}
+
+    o, persisted = _orchestrator_for_step(monkeypatch, tmp_path, ok)
+    path = stage_errors_path(o.pipeline_output_dir, "cv745")
+    record_stage_outcome(path, "4", StageError("4", "TypeError", "x", fatal=True))
+
+    asyncio.run(o.execute_step(6, "4", "cv.docx"))
+
+    assert read_stage_errors(path) == []
+    assert [str(path)] in persisted
+
+
+def test_execute_step_success_without_a_record_writes_none(monkeypatch, tmp_path):
+    from unified_pipeline.stage_errors import stage_errors_path
+
+    async def ok(stage_id, cv_path):
+        return {"cost": 0.0, "output_files": []}
+
+    o, persisted = _orchestrator_for_step(monkeypatch, tmp_path, ok)
+    asyncio.run(o.execute_step(6, "4", "cv.docx"))
+    assert not stage_errors_path(o.pipeline_output_dir, "cv745").exists()
+    assert persisted == [[]]
+
+
+# ---------------------------------------------------------------------------
 # #592: run.error_message is a fixed user-facing message, never str(exc)
 # ---------------------------------------------------------------------------
 

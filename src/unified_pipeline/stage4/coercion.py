@@ -121,6 +121,7 @@ class ExtractedFields(TypedDict, total=False):
     name: Any
     narrative: Any
     nct_number: Any
+    notes: Any
     npi_number: Any
     orcid: Any
     organization: Any
@@ -529,6 +530,24 @@ _MIN_PLAUSIBLE_YEAR = 1900
 _MAX_PLAUSIBLE_YEAR = 2100
 
 
+def find_single_closed_range(text: str) -> tuple[str, str] | None:
+    """The one plausible closed 4-digit year range in `text` as
+    (start, end) strings, or None when the text has a present/ongoing
+    marker, no range, more than one range, or an implausible one. Shared by
+    `reconcile_date_range` (which repairs from it) and the doctor's
+    `wrong_start_date` lint (which only reports on it, #729) so the two
+    cannot disagree about what "exactly one closed range" means."""
+    if not text or _PRESENT_MARKER_PATTERN.search(text):
+        return None
+    matches = CLOSED_DATE_RANGE_PATTERN.findall(text)
+    if len(matches) != 1:
+        return None
+    range_start, range_end = matches[0]
+    if not (_MIN_PLAUSIBLE_YEAR <= int(range_start) <= int(range_end) <= _MAX_PLAUSIBLE_YEAR):
+        return None
+    return range_start, range_end
+
+
 def reconcile_date_range(
     original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
 ) -> None:
@@ -579,19 +598,10 @@ def reconcile_date_range(
     """
     if updated.get('end_date'):
         return
-    if not original_text:
+    closed_range = find_single_closed_range(original_text)
+    if closed_range is None:
         return
-    if _PRESENT_MARKER_PATTERN.search(original_text):
-        return
-
-    matches = CLOSED_DATE_RANGE_PATTERN.findall(original_text)
-    if len(matches) != 1:
-        return
-
-    range_start, range_end = matches[0]
-    start_year, end_year = int(range_start), int(range_end)
-    if not (_MIN_PLAUSIBLE_YEAR <= start_year <= end_year <= _MAX_PLAUSIBLE_YEAR):
-        return
+    range_start, range_end = closed_range
 
     existing_start = updated.get('start_date')
     if existing_start and str(existing_start).strip() != range_start:

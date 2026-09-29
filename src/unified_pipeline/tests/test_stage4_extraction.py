@@ -668,3 +668,164 @@ def test_add_target_names_fallback_from_raw_text():
     out = extraction.add_target_names(entries, "Smith")
 
     assert out[0]["extracted_fields"]["target_name"] == "Smith J"
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_prompt_names_status_and_notes_in_fields_guide_and_rules(code):
+    """#982: the prompt the LLM actually receives for a grant bucket lists
+    status/notes, describes them in the field guide, and says when to leave them null."""
+    schema = extraction.get_field_schema(code)
+    prompt = extraction.build_extraction_prompt(
+        [{"text": "Grant X | Update: withdrawn"}], schema, code)
+    assert "status" in prompt.split("**Fields to Extract**:")[1].splitlines()[0]
+    assert "- status:" in prompt and "- notes:" in prompt
+    assert "status = the grant's status only when the entry itself states one" in prompt
+
+
+@pytest.mark.parametrize("rule", [
+    "- status = the grant's status only when the entry itself states one",
+    "- notes = a labelled remark no other field holds",
+])
+def test_grant_prompt_rules_block_carries_the_status_and_notes_rule_lines(rule):
+    """#982: each rule line is asserted alone, so dropping only `notes =` from the
+    M2 block fails here even though the field guide still names `- notes:`."""
+    schema = extraction.get_field_schema("M2A")
+    prompt = extraction.build_extraction_prompt([{"text": "Grant X"}], schema, "M2A")
+    assert rule in prompt
+
+
+# --- #985: sub-heading context reaches the stage 4 prompt ---------------------
+
+#: sha256 of build_extraction_prompt for two unstamped entries on origin/dev
+#: (measured before the change); pins the byte-identical-prompt contract.
+_UNSTAMPED_PROMPT_SHA256 = {
+    "M2A": "86ea3b1974cae4a7cbc7d3a7c07072581cd1939f01040fff6cb2bf26a98b1c10",
+    "K1": "ef35c4fa2a36b6a8fda487c77bf95d130dbda5f3c561c13cf074ad32546a58b7",
+}
+
+
+def _prompt(code, entries):
+    return extraction.build_extraction_prompt(entries, extraction.get_field_schema(code), code)
+
+
+@pytest.mark.parametrize("code", ["M2A", "K1"])
+def test_an_unstamped_batch_prompt_is_byte_identical_to_origin_dev(code):
+    import hashlib
+    prompt = _prompt(code, [{"text": "Alpha course"}, {"text": "Beta course"}])
+    assert hashlib.sha256(prompt.encode()).hexdigest() == _UNSTAMPED_PROMPT_SHA256[code]
+
+
+def test_an_empty_context_heading_is_treated_as_unstamped():
+    plain = _prompt("K1", [{"text": "Alpha course"}])
+    assert _prompt("K1", [{"text": "Alpha course", "context_heading": ""}]) == plain
+
+
+def test_a_stamped_entry_shows_under_and_the_instruction_appears_once_after_the_entries():
+    prompt = _prompt("K1", [{"text": "Alpha course", "context_heading": "Course Director"},
+                            {"text": "Beta course"}])
+    assert "[Entry 0] (under: Course Director):\nAlpha course" in prompt
+    assert "[Entry 1]:\nBeta course" in prompt            # unstamped sibling untouched
+    assert prompt.count(extraction.CONTEXT_HEADING_INSTRUCTION) == 1
+    assert prompt.index("Beta course") < prompt.index("10. **Sub-heading context**")
+    assert prompt.index("10. **Sub-heading context**") < prompt.index("Return JSON")
+
+
+def test_the_instruction_follows_the_code_specific_rules_block():
+    prompt = _prompt("M2A", [{"text": "Alpha", "context_heading": "Funded"}])
+    assert prompt.index("- notes = a labelled remark") < prompt.index("10. **Sub-heading context**")
+
+
+def test_removing_the_stamp_and_instruction_restores_the_unstamped_prompt_exactly():
+    stamped = _prompt("M2A", [{"text": "Alpha", "context_heading": "Funded"}, {"text": "Beta"}])
+    restored = stamped.replace(" (under: Funded)", "").replace(extraction.CONTEXT_HEADING_INSTRUCTION, "")
+    assert restored == _prompt("M2A", [{"text": "Alpha"}, {"text": "Beta"}])
+
+
+def test_the_instruction_says_fill_missing_never_override_and_do_not_misplace():
+    text = extraction.CONTEXT_HEADING_INSTRUCTION
+    assert "when the entry text itself omits them" in text
+    assert "Never override what the entry text states" in text
+    assert "Do not copy X into a field it does not describe" in text
+    # The live A/B (#985): "Co-directed" rows became the heading's "Course
+    # Director", and an activity-kind heading was copied as a role.
+    assert "even as a verb or a qualifier, that role wins over X" in text
+    assert '"Co-directed with ..." under "Course Director" is role "Co-Director"' in text
+    assert "never copy X verbatim when it only names a kind of activity" in text
+
+
+def test_extract_fields_from_mapped_entries_sends_a_stamped_entrys_heading(monkeypatch):
+    """Wire: a `context_heading` already on the entry (process_cv stamps it, over
+    the unfiltered list) survives batching and reaches the prompt. The
+    orchestrator itself does not stamp: it only ever sees the filtered list."""
+    _stub_owner(monkeypatch)
+    sent = []
+
+    def fake_llm(stage, messages, **kwargs):
+        sent.append(messages[-1]["content"])
+        return {"content": '{"entries": []}', "cost": 0.0, "total_tokens": 0}
+
+    monkeypatch.setattr(extraction, "call_llm", fake_llm)
+    entries = [
+        {"text": "Survey course, lecturer", "taxonomy_code": "K1", "hierarchy": ["Teaching"], "element_idx_start": 1,
+         "context_heading": "Northgate University"},
+        {"text": "Other course", "taxonomy_code": "K2", "hierarchy": ["Elsewhere"], "element_idx_start": 2},
+        {"text": "Northgate University:", "taxonomy_code": "T", "hierarchy": ["Teaching"], "element_idx_start": 0},
+        {"text": "Third course", "taxonomy_code": "K3", "hierarchy": ["Teaching"], "element_idx_start": 3},
+    ]
+    before = json.dumps(entries)
+    extraction.extract_fields_from_mapped_entries(entries, workers=1)
+    assert json.dumps(entries) == before                     # caller's list untouched
+    k1 = [p for p in sent if "**Classification**: K1" in p]
+    assert k1 and "(under: Northgate University):\nSurvey course, lecturer" in k1[0]
+    assert extraction.CONTEXT_HEADING_INSTRUCTION in k1[0]
+    for code in ("K2", "K3"):
+        other = [p for p in sent if f"**Classification**: {code}" in p]
+        assert other and "(under:" not in other[0] and extraction.CONTEXT_HEADING_INSTRUCTION not in other[0]
+
+
+# ---------------------------------------------------------------------------
+# #759 -- the field schema an entry is extracted under is its OWN code's
+# ---------------------------------------------------------------------------
+
+def test_extract_fields_batch_prompts_each_code_with_its_own_schema(monkeypatch):
+    # A section-I (memberships) entry and a K1 (didactic teaching) entry in
+    # ONE batch. The I group's prompt must carry section I's fields and none of
+    # K1's teaching-shaped ones, and the reply it gets back must land on the I
+    # entry -- the 2082 farm artifact held I-coded entries whose keys were
+    # course_code/institution/role (#759).
+    entries = [
+        {"text": "2019-present Fellow, Northgate Society of Widgetry",
+         "taxonomy_code": "I", "element_idx_start": 0, "element_idx_end": 0},
+        {"text": "2021 Intro to Widgetry (WGT 101), Hollis College",
+         "taxonomy_code": "K1", "element_idx_start": 1, "element_idx_end": 1},
+    ]
+    prompts: list[str] = []
+
+    def fake_call_llm(**kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        prompts.append(prompt)
+        if "WGT 101" in prompt:
+            fields = {"entry_index": 0, "course_title": "Intro to Widgetry", "institution": "Hollis College"}
+        else:
+            fields = {"entry_index": 0, "organization": "Northgate Society of Widgetry",
+                      "membership_type": "Fellow", "start_date": "2019", "end_date": "present"}
+        return {"content": json.dumps({"entries": [fields]}), "cost": 0.0, "total_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0}
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    assert len(prompts) == 2
+    membership_prompt = next(p for p in prompts if "Northgate" in p)
+    teaching_prompt = next(p for p in prompts if "WGT 101" in p)
+    membership_fields = membership_prompt.split("**Fields to Extract**: ")[1].split("\n")[0].split(", ")
+    teaching_fields = teaching_prompt.split("**Fields to Extract**: ")[1].split("\n")[0].split(", ")
+    assert {"organization", "membership_type"} <= set(membership_fields)
+    assert not {"institution", "role", "course_title"} & set(membership_fields)
+    assert {"course_title", "institution", "role"} <= set(teaching_fields)
+    assert "organization" not in teaching_fields
+    by_code = {e["taxonomy_code"]: e for e in result["entries"]}
+    assert by_code["I"]["extracted_fields"]["organization"] == "Northgate Society of Widgetry"
+    assert "institution" not in by_code["I"]["extracted_fields"]
+    assert by_code["K1"]["extracted_fields"]["course_title"] == "Intro to Widgetry"

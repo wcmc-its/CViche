@@ -34,6 +34,7 @@ Fixtures are fictional.
     python3 -m pytest src/unified_pipeline/tests/test_stage6_silent_render_failures.py -p no:cacheprovider
 """
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -61,7 +62,11 @@ from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
     _training_grant_is_sparse,
     _training_grant_rows,
 )
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
+import unified_pipeline.stage_6_word_template as s6  # noqa: E402
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    GEO_SCOPE_FAILURE_STAT,
+    WCMTemplateGenerator,
+)
 
 MENTORING_LOGGER = 'unified_pipeline.stage6.sections.mentoring'
 PATENTS_LOGGER = 'unified_pipeline.stage6.sections.patents'
@@ -986,3 +991,75 @@ def test_postdoc_missing_table_logs_warning(caplog):
     message = warnings[0].getMessage()
     assert 'Postdoctoral Training' in message
     assert '1 entries not rendered' in message
+
+
+# ---- geographic-scope classification failure (#547, instance 3) ----
+
+S6_LOGGER = 'unified_pipeline.stage_6_word_template'
+
+_OWNER_LOCATION = {
+    'inference_success': True,
+    'primary_location': {'institution': 'Example University Medical Center',
+                         'city': 'Springfield', 'state': 'XX'},
+    'locations': [],
+    'metro_area': 'Springfield',
+}
+_PRESENTATION = {'text': 'Talk at Sample Institute', 'taxonomy_code': 'R',
+                 'extracted_fields': {'organization': 'Sample Institute'}}
+
+
+def _raising_llm(*args, **kwargs):
+    raise RuntimeError('simulated LLM outage')
+
+
+def _scope_generator() -> WCMTemplateGenerator:
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.cv_owner_location = _OWNER_LOCATION
+    return gen
+
+
+def test_geo_scope_failure_warns_counts_and_defaults_national_when_not_verbose(
+        monkeypatch, caplog):
+    monkeypatch.setattr(s6, 'call_llm', _raising_llm)
+    gen = _scope_generator()
+    with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
+        assert gen._classify_geographic_scope(_PRESENTATION) == 'National'
+    warnings = _warnings(caplog, S6_LOGGER)
+    assert len(warnings) == 1
+    assert 'Geographic scope classification failed' in warnings[0].getMessage()
+    assert warnings[0].exc_info and warnings[0].exc_info[0] is RuntimeError
+    assert gen.stats[GEO_SCOPE_FAILURE_STAT] == 1
+
+
+def test_geo_scope_success_does_not_count_a_failure(monkeypatch, caplog):
+    monkeypatch.setattr(
+        s6, 'call_llm', lambda *a, **k: {'content': '{"scope": "Regional"}'})
+    gen = _scope_generator()
+    with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
+        assert gen._classify_geographic_scope(_PRESENTATION) == 'Regional'
+    assert not _warnings(caplog, S6_LOGGER)
+    assert gen.stats[GEO_SCOPE_FAILURE_STAT] == 0
+    assert gen._geo_scope_failure_warnings() == []
+
+
+def test_geo_scope_failure_reaches_the_render_warnings_sidecar(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(s6, 'call_llm', _raising_llm)
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: None
+    input_path = tmp_path / 'in.json'
+    input_path.write_text(json.dumps({
+        'document_uid': 'T547G',
+        'cv_owner_location': _OWNER_LOCATION,
+        'entries': [
+            {'text': 'Name: Jane Q. Public, MD', 'taxonomy_code': 'A',
+             'extracted_fields': {}, 'element_idx_start': 0},
+            dict(_PRESENTATION, element_idx_start=1),
+        ]}))
+    gen.generate(str(input_path), str(tmp_path / 'out.docx'))
+    sidecar = json.loads((tmp_path / 'T547G_render_warnings.json').read_text())
+    found = [w for w in sidecar['warnings']
+             if w.get('check') == GEO_SCOPE_FAILURE_STAT]
+    assert len(found) == 1
+    assert found[0]['severity'] == 'WARN'
+    assert found[0]['evidence'] == [f'{GEO_SCOPE_FAILURE_STAT}=1']

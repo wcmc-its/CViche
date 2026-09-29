@@ -19,6 +19,7 @@ in `run_doctor.py`, so they move together and stop being module-global.
 docstrings and comments for what changed.
 """
 import re
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
@@ -27,6 +28,10 @@ from unified_pipeline.core.template_boilerplate import (
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
+)
+from unified_pipeline.stage4.coercion import (
+    DATE_RANGE_TAXONOMY_CODES,
+    find_single_closed_range,
 )
 from unified_pipeline.segmentation_regression import (
     SUBSTANTIVE_LINE_CHARS,
@@ -54,8 +59,9 @@ from ..shared import (
 # --------------------------------------------------------------------------
 # Grant status vs the funding subsection the grant rendered under.
 
-# Stage 4 has no 'status' field in the M2* schemas; grant statuses live in
-# the raw entry text as a labelled fragment ("Status: Not funded").
+# Stage 4 extracts 'status' for M2A/M2B/M2C (#982), but only when the entry
+# states one and the LLM fills it; `_entry_status` prefers that field and falls
+# back to the labelled fragment in the raw entry text ("Status: Not funded").
 _STATUS_LABEL_RE = re.compile(r"status\s*[:\-]\s*([^|\n]+)", re.IGNORECASE)
 
 
@@ -271,27 +277,26 @@ def lint_classified_unrendered(stage3b: Dict,
 # --------------------------------------------------------------------------
 # Taxonomy codes stage 3b can assign that stage 6 has no render route for.
 
-# Codes a `_fill_*` method reads and renders directly, but that were never
-# added to RENDER_ROUTED_CODES: E/G/J match on the source heading rather
-# than a taxonomy code (stage6/sections/passthrough.py), and N4 is pulled
-# via entries_by_code.get('N4', ...) in stage6/sections/mentoring.py (added
-# by #261's fix, which gave N4 a render path without also adding it here).
-# All four DO render. E, G and J's writers also report back exactly which
-# entry dicts they wrote (by object identity, not by code), which
-# `generate()` uses to exclude those specific entries from the appendix a
-# second time (#294, #260) -- so their entries do NOT duplicate. N4 has no
-# such tracking and still does duplicate into the appendix (#587, N4 is out
-# of scope here).
+# Codes a `_fill_*` method renders directly but that are not in
+# RENDER_ROUTED_CODES: E/G/J match on the source heading rather than a
+# taxonomy code (stage6/sections/passthrough.py), so they have no code
+# dispatch to add them to. Their writers report back exactly which entry
+# dicts they wrote (by object identity, not by code), which `generate()`
+# uses to exclude those specific entries from the appendix a second time
+# (#294, #260), so their entries do NOT duplicate. (N4 used to be a fourth
+# member: it renders via mentoring.py but had never been added to
+# RENDER_ROUTED_CODES, so it duplicated into the appendix -- fixed in #587 by
+# routing it, which is why it is no longer exempted here.)
 #
 # This is itself a second, hand-maintained source of truth for stage-6
 # routing (review on #588) -- a code silently added here without a real
 # passthrough route would make this lint wrongly stay quiet about it.
 # test_taxonomy_code_render_coverage.py's
 # test_render_exceptions_still_wired_into_generate() is a cheap guard
-# against the two hooks these four codes depend on being removed without
+# against the hook these three codes depend on being removed without
 # updating this set; it can't prove a *new* addition is correct, only that
 # the existing ones haven't silently gone stale.
-_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES = frozenset({'E', 'G', 'J', 'N4'})
+_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES = frozenset({'E', 'G', 'J'})
 
 
 def unrouted_code_counts(stage3b: dict) -> dict[str, int]:
@@ -351,7 +356,7 @@ def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
 # --------------------------------------------------------------------------
 # Stage 6 dedup drops that were not duplicates.
 
-# A dropped entry this well contained (token-wise) in the kept entry is a
+# A dropped entry this well contained (token-multiset-wise, #718) in the kept entry is a
 # true duplicate; anything below carries content the kept entry lacks. On
 # 2Q1_ZQ the one true duplicate scored 1.00 and the seven real losses
 # 0.60-0.89 (#227).
@@ -359,9 +364,11 @@ DEDUP_SAFE_CONTAINMENT = 0.9
 _DEDUP_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def _alphanumeric_tokens(text) -> set:
-    """a-z0-9 token set for one string (lint 11 dedup-containment coverage)."""
-    return set(_DEDUP_TOKEN_RE.findall(_norm(text)))
+def _alphanumeric_tokens(text) -> Counter:
+    """a-z0-9 token multiset for one string (lint 11 dedup-containment
+    coverage). A Counter, not a set, so a dropped passage that repeats a
+    word is not fully covered by a kept passage that says it once (#718)."""
+    return Counter(_DEDUP_TOKEN_RE.findall(_norm(text)))
 
 
 def lint_dedup_drops(report: Dict) -> List[Dict]:
@@ -374,7 +381,7 @@ def lint_dedup_drops(report: Dict) -> List[Dict]:
         kept = _alphanumeric_tokens(d.get("kept_text", ""))
         if not dropped:
             continue
-        coverage = len(dropped & kept) / len(dropped)
+        coverage = sum((dropped & kept).values()) / sum(dropped.values())
         if coverage >= DEDUP_SAFE_CONTAINMENT:
             continue
         suspect.append(
@@ -525,4 +532,42 @@ def lint_invented_records(stage4: dict,
                     f"is a known WCM template instruction, not a real "
                     f"licence (#829)",
                     [text[:120]]))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# A wrong start date left beside an empty end date (#729, split from #556).
+
+def lint_wrong_start_date(stage4: dict) -> list[dict]:
+    """An entry whose schema declares both dates, whose `end_date` is empty,
+    and whose own text carries exactly one closed 4-digit range with no
+    present/ongoing marker: the range is in the source but the entry renders
+    "<start>-Present". `reconcile_date_range` repairs the blank-start and
+    agreeing-start shapes; what reaches this lint is the shape it
+    deliberately leaves alone, chiefly the FSMB one (text "2025-2026"
+    extracted as start_date=2026). WARN when the extracted start equals the
+    range's END year (the model took the wrong end of the range), INFO for
+    any other disagreement. Report-only by decision (2026-09-09): the
+    extracted value is never changed."""
+    findings = []
+    for e in stage4.get("entries", []):
+        if e.get("taxonomy_code") not in DATE_RANGE_TAXONOMY_CODES:
+            continue
+        fields = e.get("extracted_fields") or {}
+        if fields.get("end_date"):
+            continue
+        text = str(e.get("text", ""))
+        closed_range = find_single_closed_range(text)
+        if closed_range is None:
+            continue
+        range_start, range_end = closed_range
+        start = str(fields.get("start_date") or "").strip()
+        severity = "WARN" if start == range_end else "INFO"
+        findings.append(_finding(
+            "wrong_start_date", severity,
+            f"entry {e.get('element_idx_start')} ({e.get('taxonomy_code')}): "
+            f"start_date '{start}' with an empty end_date, but the text "
+            f"carries the single closed range {range_start}-{range_end} -- "
+            f"renders '{start}-Present' (#729)",
+            [text[:120]]))
     return findings
