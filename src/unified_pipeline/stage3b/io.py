@@ -10,6 +10,7 @@ hop because this file sits one directory deeper than the module the function
 moved out of.
 """
 
+import functools
 import json
 import logging
 import math
@@ -55,6 +56,23 @@ def load_taxonomy() -> dict:
     taxonomy_path = Path(__file__).parent.parent / "core" / "taxonomy_v7.json"
     with open(taxonomy_path, 'r') as f:
         return json.load(f)
+
+
+def taxonomy_code_set(taxonomy: dict) -> set[str]:
+    """The set of codes `taxonomy` actually defines (its "codes" list)."""
+    return {
+        c["code"] for c in taxonomy.get("codes", [])
+        if isinstance(c, dict) and isinstance(c.get("code"), str) and c["code"]
+    }
+
+
+@functools.cache
+def canonical_taxonomy_codes() -> frozenset[str]:
+    """The ONE canonical valid-code list (#651): every code in
+    core/taxonomy_v7.json -- the same set stage 3b validates an LLM-returned
+    code against (`classify._valid_taxonomy_codes`). Stage 4 checks its input
+    against this at the 3b -> 4 boundary; do not add a second list (#383)."""
+    return frozenset(taxonomy_code_set(load_taxonomy()))
 
 
 def load_stage_2_entries(path: Path) -> tuple[list[dict], list[dict]]:

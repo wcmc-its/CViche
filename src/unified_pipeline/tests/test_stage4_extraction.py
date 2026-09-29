@@ -829,3 +829,40 @@ def test_extract_fields_batch_prompts_each_code_with_its_own_schema(monkeypatch)
     assert by_code["I"]["extracted_fields"]["organization"] == "Northgate Society of Widgetry"
     assert "institution" not in by_code["I"]["extracted_fields"]
     assert by_code["K1"]["extracted_fields"]["course_title"] == "Intro to Widgetry"
+
+
+def test_invalid_code_is_quarantined_before_extraction_and_counted_in_stats(monkeypatch):
+    # #651: the 3b -> 4 boundary. The batch stub sees the re-coded entry, so
+    # the invalid code never selects a schema; stats and the artifact name it.
+    _stub_owner(monkeypatch)
+    seen = []
+
+    def spy(entries, batch_idx, total, cv_owner_name, cancel_check=None):
+        seen.extend(e["taxonomy_code"] for e in entries)
+        return _batch_result(entries)
+
+    monkeypatch.setattr(extraction, "extract_fields_batch", spy)
+    entries = [
+        {"text": "valid entry text", "element_idx": 0, "taxonomy_code": "B1"},
+        {"text": "bad entry text", "element_idx": 1, "taxonomy_code": "ZZ9"},
+    ]
+
+    out = extraction.extract_fields_from_mapped_entries(entries, batch_size=10, workers=1)
+
+    assert sorted(seen) == ["B1", "T"]
+    bad = next(e for e in out["entries"] if e["text"] == "bad entry text")
+    assert bad["original_taxonomy_code"] == "ZZ9"
+    assert bad["taxonomy_code_quarantine_reason"] == "invalid_taxonomy_code"
+    assert out["stats"]["invalid_code_entries"] == 1
+    assert out["stats"]["invalid_taxonomy_codes"] == {"'ZZ9'": 1}
+
+
+def test_all_valid_codes_report_zero_invalid_in_stats(monkeypatch):
+    _stub_owner(monkeypatch)
+    monkeypatch.setattr(extraction, "extract_fields_batch",
+                        lambda entries, *a, **k: _batch_result(entries))
+    out = extraction.extract_fields_from_mapped_entries(
+        [{"text": "valid entry text", "element_idx": 0, "taxonomy_code": "B1"}],
+        batch_size=10, workers=1)
+    assert out["stats"]["invalid_code_entries"] == 0
+    assert out["stats"]["invalid_taxonomy_codes"] == {}

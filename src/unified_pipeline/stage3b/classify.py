@@ -23,7 +23,7 @@ from typing import TypedDict
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
-from .io import _safe_float
+from .io import _safe_float, taxonomy_code_set
 from .prompt import (
     CLASSIFICATION_RULES_VERSION,
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
@@ -94,10 +94,7 @@ def _valid_taxonomy_codes(taxonomy: dict) -> set[str]:
     untrusted input; a code outside this set must not be persisted as a
     real classification.
     """
-    return {
-        c["code"] for c in taxonomy.get("codes", [])
-        if isinstance(c, dict) and isinstance(c.get("code"), str) and c["code"]
-    }
+    return taxonomy_code_set(taxonomy)
 
 
 def _normalize_confidence(value: object, default: float = 0.5) -> float:

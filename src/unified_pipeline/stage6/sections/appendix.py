@@ -353,6 +353,17 @@ _DECLINED_GRANT_CODES = frozenset({'M2A', 'M2B', 'M2C'})
 # record. Applies regardless of the code's own routing status.
 REASON_RECOVERED_UNRENDERED = "recovered_unrendered"
 
+# Stage 4 (`stage4/code_check.py`, #651) re-coded this entry to T because its
+# stage 3b code is not in taxonomy_v7.json. Distinct from REASON_NO_RENDER_ROUTE
+# (a VALID code nothing renders): here the code was never a real one. Keyed off
+# the entry's `taxonomy_code_quarantine_reason` marker, not the code -- a
+# quarantined entry's code is the ordinary T. The string is duplicated from
+# `code_check.INVALID_CODE_REASON` rather than imported (stage6 does not import
+# stage 4; the stage 6 input JSON is the contract).
+REASON_INVALID_CODE = "invalid_code"
+_QUARANTINE_MARKER_KEY = "taxonomy_code_quarantine_reason"
+_QUARANTINE_MARKER_INVALID_CODE = "invalid_taxonomy_code"
+
 # E, G and J -- the three passthrough sections. None of the three is in
 # `RENDER_ROUTED_CODES` (they have no taxonomy-code dispatch of their own --
 # the passthrough writers select by source hierarchy, not code), so an
@@ -443,6 +454,11 @@ def _diversion_message(code: str, count: int, reason: str,
       for `_RESEARCH_SUMMARY_CODE`): the shared `_REASON_TEXT` lookup.
     """
     noun = _plural_entries(count)
+    if reason == REASON_INVALID_CODE:
+        return (f"{code}: {count} {noun} diverted to the Appendix — stage 4 "
+                f"quarantined {'it' if count == 1 else 'them'}: the stage 3b "
+                f"taxonomy code was not a valid taxonomy code (see "
+                f"original_taxonomy_code in the stage 4 artifact)")
     if reason == REASON_RECOVERED_UNRENDERED:
         verb = _plural_was(count)
         return (f"{code}: {count} {noun} classified {code} {verb} not "
@@ -552,7 +568,10 @@ def build_appendix_diversion_warnings(
     counts: Counter[tuple[str, str]] = Counter()
     for entry in written:
         code = entry.get("taxonomy_code") or "?"
-        reason = _appendix_diversion_reason(code, render_routed_codes, passthrough_codes)
+        if entry.get(_QUARANTINE_MARKER_KEY) == _QUARANTINE_MARKER_INVALID_CODE:
+            reason = REASON_INVALID_CODE
+        else:
+            reason = _appendix_diversion_reason(code, render_routed_codes, passthrough_codes)
         counts[(code, reason)] += 1
     for code in recovered_codes:
         counts[(code or "?", REASON_RECOVERED_UNRENDERED)] += 1
