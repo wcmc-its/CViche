@@ -138,10 +138,15 @@ def _cells(**fields):
     raise AssertionError("row not rendered")
 
 
-def test_role_is_the_title_when_stage_4_left_title_empty():
-    """The role was the entry's only heading; the Title cell must not fall back to raw text."""
+def test_empty_title_keeps_the_raw_text_and_shows_the_role():
+    """The LLM emptied title but filled role: the raw entry text must still
+    render as the Title (it holds the talk title) and the role must appear."""
     cells = _cells(title="", role="Visiting Professor",
                    location="Northgate Institute, Springfield")
-    assert cells[0] == "Visiting Professor"
-    assert cells[1] == "Northgate Institute, Springfield"
-    assert "raw source line" not in cells[0]
+    assert cells[0] == "2022\t* raw source line, Springfield"
+    assert cells[1] == "Visiting Professor, Northgate Institute, Springfield"
+
+
+def test_role_is_stripped_before_it_is_rendered():
+    assert _venue(institution="Northgate Institute", role=" Visiting Professor ") == \
+        "Visiting Professor, Northgate Institute"
