@@ -1235,7 +1235,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         return [{
             "check": GEO_SCOPE_FAILURE_STAT,
             "code": None,
-            "section": "presentations",
+            "section": "presentations/service",
             "message": (f"{failures} geographic scope classification(s) failed "
                         "and defaulted to National; the Regional/National/"
                         "International split may be wrong"),
