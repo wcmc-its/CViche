@@ -16,6 +16,22 @@ from collections.abc import Mapping
 
 logger = logging.getLogger(__name__)
 
+_US_STATE_ABBREVS = {
+    'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR',
+    'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE',
+    'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID',
+    'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS',
+    'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
+    'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS',
+    'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV',
+    'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY',
+    'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK',
+    'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
+    'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT',
+    'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV',
+    'Wisconsin': 'WI', 'Wyoming': 'WY', 'District of Columbia': 'DC'
+}
+
 
 def _location_stated_in_source(entry: dict, *candidates: str) -> bool:
     """True when the source CV already states one of `candidates` as its own
@@ -51,11 +67,34 @@ def _location_already_in_institution(location: str, institution: str) -> bool:
     """
     if not (location and institution):
         return False
-    city = location.split(',')[0].strip()
+    parts = [p.strip() for p in location.split(',')]
+    city = parts[0]
     if not city:
         return False
-    tail = r',\s*' + re.escape(city) + r'(?:\s*,\s*[A-Za-z][A-Za-z .]*)?\s*$'
-    return bool(re.search(tail, institution, re.IGNORECASE))
+    tail = r',\s*' + re.escape(city) + r'(?:\s*,\s*([A-Za-z][A-Za-z .]*))?\s*$'
+    found = re.search(tail, institution, re.IGNORECASE)
+    if not found:
+        return False
+    # Keep the location only when BOTH sides name a US state and the states
+    # differ: "Rochester, MN" is not already present in "Mayo Clinic,
+    # Rochester, NY" (#566). Every other pairing -- a country against a
+    # province, "USA" or "England" against a state, "Tex.", a ZIP -- cannot be
+    # judged different from a token alone and keeps the city-only match, so a
+    # place written two ways is not printed twice. Residual: "Cambridge, MA"
+    # against "Cambridge, UK" is still treated as already present.
+    stated, wanted = _us_state(found.group(1) or ''), _us_state(parts[1] if len(parts) > 1 else '')
+    return not (stated and wanted and stated != wanted)
+
+
+def _us_state(token: str) -> str:
+    """The two-letter abbreviation `token` names, or '' when it names no US
+    state. Case, dots and spaces are ignored: "N. Y.", "new york" and "NY"
+    all give "NY"."""
+    squashed = re.sub(r'[\s.]', '', token).lower()
+    for name, abbrev in _US_STATE_ABBREVS.items():
+        if squashed in (abbrev.lower(), re.sub(r'\s', '', name).lower()):
+            return abbrev
+    return ''
 
 
 def _get_institution_location(entry: dict) -> tuple[str, bool]:
@@ -131,22 +170,7 @@ def _get_institution_location(entry: dict) -> tuple[str, bool]:
         if city and state:
             # For US, use state abbreviation
             if country_code == 'US':
-                state_abbrevs = {
-                    'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR',
-                    'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE',
-                    'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID',
-                    'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS',
-                    'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
-                    'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS',
-                    'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV',
-                    'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY',
-                    'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK',
-                    'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
-                    'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT',
-                    'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV',
-                    'Wisconsin': 'WI', 'Wyoming': 'WY', 'District of Columbia': 'DC'
-                }
-                state_abbrev = state_abbrevs.get(state, state)
+                state_abbrev = _US_STATE_ABBREVS.get(state, state)
                 location = f"{city}, {state_abbrev}"
                 # "Ewing, New Jersey" in the source is the same statement as
                 # the rendered "Ewing, NJ"; a non-US "Crewe, Cheshire" is not
