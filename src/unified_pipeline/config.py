@@ -386,12 +386,14 @@ COST_ESTIMATE_OTHER_STAGES_OUTPUT_SHARE = 0.05   # non-3b output tokens / non-3b
 
 
 def _model_io_rates(provider: str, model: str) -> tuple:
-    """(input, output) USD per 1M tokens for a model, with the Bedrock default
-    model's pricing as fallback."""
+    """Effective (input, output) USD per 1M anchor-tokenizer tokens for a model,
+    for the cost estimators only: list rates times COST_ESTIMATE_TOKEN_INFLATION.
+    Falls back to the Bedrock default model's pricing."""
     provider_pricing = PRICING.get(provider, PRICING.get("bedrock", {}))
     lookup = model if model in provider_pricing else _normalize_model_id(model)
     pricing = provider_pricing.get(lookup) or PRICING["bedrock"][_normalize_model_id(DEFAULT_MODEL)]
-    return pricing["input"], pricing["output"]
+    in_x, out_x = COST_ESTIMATE_TOKEN_INFLATION.get(_normalize_model_id(model), (1.0, 1.0))
+    return pricing["input"] * in_x, pricing["output"] * out_x
 
 
 def estimate_run_cost_usd(text_char_count: int, model: str = None,

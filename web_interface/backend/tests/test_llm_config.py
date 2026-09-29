@@ -21,6 +21,7 @@ from unified_pipeline.config import (
     PRICING,
     calculate_cost,
     estimate_cost_per_1k_doc_tokens,
+    estimate_run_cost_usd,
     get_stage_config,
     reload_config,
 )
@@ -284,3 +285,19 @@ def test_estimate_for_sonnet_5_carries_its_tokenizer_inflation():
     s5 = estimate_cost_per_1k_doc_tokens(model="us.anthropic.claude-sonnet-5", provider="bedrock")
     assert s5 / s46 == pytest.approx((0.8 * 2.2 * 1.43 + 0.2 * 11.0 * 1.20) / (0.8 * 3.3 + 0.2 * 16.5))
     assert 0.84 < s5 / s46 < 0.90
+
+
+def test_run_estimate_for_sonnet_5_carries_its_tokenizer_inflation():
+    """The run-cost estimator behind /estimate prices through the same
+    inflation. Without it, switching the default to Sonnet 5 would cut the
+    quote by the 33% list-price gap, far below the ~0.86x whole-run cost the
+    A/B measured -- the under-quote #538 fixed. With it the quote is cheaper
+    than Sonnet 4.6's but never below that measured ratio."""
+    s46 = estimate_run_cost_usd(40_000, model="us.anthropic.claude-sonnet-4-6", provider="bedrock")
+    s5 = estimate_run_cost_usd(40_000, model="us.anthropic.claude-sonnet-5", provider="bedrock")
+    assert _SONNET_5_MEASURED_WHOLE_RUN_RATIO <= s5 / s46 < 1.0
+
+
+# Whole-run Sonnet 5 / Sonnet 4.6 cost on the 2026-09-29 10-CV A/B: the
+# Sonnet stages at 0.842x, with stage 3b (Haiku, unchanged) carried over.
+_SONNET_5_MEASURED_WHOLE_RUN_RATIO = 0.86
