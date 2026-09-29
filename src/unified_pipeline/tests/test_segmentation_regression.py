@@ -12,6 +12,8 @@ Run with:
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -19,7 +21,11 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 
 from unified_pipeline.segmentation_regression import (  # noqa: E402
+    _COUNT_KEYS,
     BODY_BLOCK,
+    COVERAGE_DROP_TOLERANCE_PTS,
+    MEGA_ENTRY_MIN_RECORDS,
+    SUBSTANTIVE_LINE_CHARS,
     compare_metrics,
     compute_metrics,
     find_lost_blocks,
@@ -198,6 +204,78 @@ def test_short_template_text_and_real_content_still_count_as_lost():
     assert m["text_coverage_pct"] == 25.0
 
 
+def test_substantive_line_chars_boundary():
+    """A source line of exactly SUBSTANTIVE_LINE_CHARS is substantive (and here
+    lost); one char shorter is ignored by the coverage metric."""
+    at_floor = "a" * SUBSTANTIVE_LINE_CHARS
+    below_floor = "a" * (SUBSTANTIVE_LINE_CHARS - 1)
+    m_at = compute_metrics([at_floor], _STAGE1A, {"entries": []})
+    assert m_at["substantive_lines"] == 1
+    assert m_at["lost_lines"] == [at_floor]
+    assert m_at["text_coverage_pct"] == 0.0
+    m_below = compute_metrics([below_floor], _STAGE1A, {"entries": []})
+    assert m_below["source_lines"] == 1
+    assert m_below["substantive_lines"] == 0
+    assert m_below["lost_lines"] == []
+    assert m_below["text_coverage_pct"] == 100.0
+
+
+def _records(n):
+    return "\n".join([_GRANT_A, _GRANT_B, _GRANT_C][:n])
+
+
+def test_mega_entry_threshold_boundary():
+    """MEGA_ENTRY_MIN_RECORDS - 1 record-like lines is NOT a mega-entry; the
+    threshold count is."""
+    below = MEGA_ENTRY_MIN_RECORDS - 1
+    m_below = compute_metrics([], _STAGE1A, {"entries": [_entry(_records(below))]})
+    assert m_below["mega_entries"] == 0
+    m_at = compute_metrics([], _STAGE1A, {"entries": [_entry(_records(MEGA_ENTRY_MIN_RECORDS))]})
+    assert m_at["mega_entries"] == 1
+
+
+def test_same_text_different_start_is_not_a_duplicate():
+    """Duplicate identity is (type, text, start): identical text at a different
+    element_idx_start (a genuinely repeated line) must not be flagged."""
+    stage2 = {"entries": [_entry(_GRANT_A, start=1), _entry(_GRANT_A, start=2)]}
+    assert compute_metrics([], _STAGE1A, stage2)["duplicate_entries"] == 0
+
+
+def test_header_and_break_entries_excluded_from_content_metrics():
+    stage2 = {"entries": [
+        _entry(_records(MEGA_ENTRY_MIN_RECORDS), etype="header", start=1),
+        _entry(_records(MEGA_ENTRY_MIN_RECORDS), etype="break", start=2),
+        _entry(_GRANT_A, start=3),
+    ]}
+    m = compute_metrics([], _STAGE1A, stage2)
+    assert m["entries_total"] == 3
+    assert m["entries_content"] == 1
+    assert m["mega_entries"] == 0
+    assert m["per_h1_content_counts"] == {"grants": 1}
+
+
+def test_empty_source_reports_full_coverage_and_no_lost_lines():
+    m = compute_metrics([], _STAGE1A, {"entries": [_entry(_GRANT_A, start=1)]})
+    assert m["source_lines"] == 0
+    assert m["text_coverage_pct"] == 100.0
+    assert m["lost_lines"] == []
+
+
+def test_header_titles_exact_and_partial_shapes_tolerated():
+    m = compute_metrics([], _STAGE1A, {"entries": []})
+    assert m["header_titles"] == ["grants", "grants awarded",
+                                  "grants under review & submitted"]
+    # Missing hierarchy / untitled node / entry with no keys: defensive paths.
+    sparse = {"hierarchy": [{"children": [{"text": "Kept"}]}]}
+    m = compute_metrics([], sparse, {"entries": [{}]})
+    assert m["header_titles"] == ["kept"]
+    assert m["empty_content"] == 1
+    assert m["per_h1_content_counts"] == {"(none)": 1}
+    m = compute_metrics([], {}, {})
+    assert m["headers_detected"] == 0
+    assert m["entries_total"] == 0
+
+
 def test_iter_source_block_lines_tags_each_table_and_matches_flat_lines(tmp_path):
     doc = Document()
     doc.add_paragraph("A body paragraph outside every table")
@@ -310,6 +388,37 @@ def test_compare_reports_improvement():
     verdict, reasons = compare_metrics(_BASE, _cand(mega_entries=0))
     assert verdict == "IMPROVED"
     assert any("mega_entries" in r for r in reasons)
+
+
+def test_compare_coverage_drop_exact_tolerance_boundary():
+    """A drop EQUAL to the tolerance is wobble (OK); just above is REGRESSION."""
+    base = _cand(text_coverage_pct=99.0)
+    at = round(99.0 - COVERAGE_DROP_TOLERANCE_PTS, 1)
+    assert compare_metrics(base, _cand(text_coverage_pct=at)) == ("OK", [])
+    above = round(at - 0.1, 1)
+    verdict, reasons = compare_metrics(base, _cand(text_coverage_pct=above))
+    assert verdict == "REGRESSION"
+    assert any("coverage" in r for r in reasons)
+
+
+@pytest.mark.parametrize("key", _COUNT_KEYS)
+def test_compare_count_key_regression_and_improvement(key):
+    base = _cand(**{key: 1})
+    verdict, reasons = compare_metrics(base, _cand(**{key: 2}))
+    assert verdict == "REGRESSION"
+    assert reasons == [f"{key} 1 -> 2"]
+    verdict, reasons = compare_metrics(base, _cand(**{key: 0}))
+    assert verdict == "IMPROVED"
+    assert reasons == [f"{key} 1 -> 0"]
+
+
+def test_compare_reports_every_simultaneous_regression_reason():
+    verdict, reasons = compare_metrics(_BASE, _cand(
+        text_coverage_pct=90.0, lost_lines=["old lost line", "brand new loss"],
+        headers_detected=9, header_titles=["education"],
+        mega_entries=2, duplicate_entries=1, empty_content=1))
+    assert verdict == "REGRESSION"
+    assert len(reasons) == 3 + len(_COUNT_KEYS)  # coverage, lost lines, headers
 
 
 # --------------------------------------------------------------------- lint
