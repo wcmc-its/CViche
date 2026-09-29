@@ -33,6 +33,18 @@ from typing import Literal
 _COMMITTEE_NAME_KEYS = ('committee_name', 'committee', 'activity', 'name', 'journal', 'title')
 
 
+def _raw_fallback_cell(text: object) -> str:
+    """An entry's raw text as ONE cell: its tab-separated parts joined with
+    "; ", never cut short (#983). A newline is left alone: it is a line break
+    inside the cell, which Word renders.
+
+    The fallback for an entry stage 4 gave no usable fields for. The tab is a
+    stage-2 join between paragraphs, not something to show a reader, and a
+    fixed character cap cut the text mid-word (`[:100]`, `[:150]`)."""
+    return "; ".join(part.strip() for part in str(text or "").split("\t")
+                     if part.strip())
+
+
 def _committee_cell_text(value: object) -> str:
     """Coerce a possibly-structured committee field to plain cell text.
 

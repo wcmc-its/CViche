@@ -160,6 +160,8 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     normalize_retired_code,
     segment_already_rendered,
 )
+from unified_pipeline.stage4.schemas import get_field_schema
+from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
@@ -918,10 +920,17 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         this and `_dedup_grouped_entries` below -- a near-duplicate dedup is
         about to drop is still re-scanned by `_recover_unrendered_records`
         (`stage6/pii_pass.py`), so it needs its own strip too, before dedup
-        ever removes it. Behaviour unchanged.
+        ever removes it. Grouping is unchanged; a stage-4 list of sibling
+        records is expanded to one entry per record first (#983,
+        `stage6/fan_out.py`).
         """
         entries_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
         mismatch_corrections = 0
+        # #983: a stage-4 list of sibling records under a key the schema does
+        # not define becomes one entry per record, before anything else
+        # (mismatch correction, the PII pass, dedup) sees the entries.
+        entries = fan_out_multi_record_entries(
+            entries, lambda code: get_field_schema(code)["fields"])
         for entry in entries:
             code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code)

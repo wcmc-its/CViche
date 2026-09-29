@@ -94,7 +94,7 @@ except ImportError as exc:
     ) from exc
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
-from ..normalization import _strip_org_tail
+from ..normalization import _raw_fallback_cell, _strip_org_tail
 from ..parsing import _is_table_header_entry
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
@@ -129,10 +129,6 @@ _LINE_HEADER_KEYWORDS = frozenset({
     'name of award', 'date awarded', 'organization', 'granting body',
     'honor', 'year'})
 _MIN_LINE_HEADER_KEYWORDS = 2
-
-# A raw entry with no extracted award name renders as its own text; cap it so
-# a runaway blob cannot fill the cell.
-_MAX_RAW_AWARD_CHARS = 150
 
 # The WCM template's H table: award | organization | date awarded (yyyy).
 _HONORS_TABLE_COLUMNS = 3
@@ -663,7 +659,7 @@ def _record_for_single_award(fallback_text: str,
     """
     if not award_name:
         award_name = (columns.award if columns is not None
-                      else fallback_text[:_MAX_RAW_AWARD_CHARS])
+                      else _raw_fallback_cell(fallback_text))
     if columns is not None:
         granting_body = granting_body or columns.organization
         date = date or columns.date

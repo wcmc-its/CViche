@@ -127,6 +127,12 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     return len(_record_lines(dropped_entry.get('text', ''))) >= UNRENDERED_MIN_RECORD_LINES
 
 
+def _is_fan_out_residual(entry: dict) -> bool:
+    """True for the raw-text entry `fan_out.py` keeps for the parent text its
+    fanned-out records do not carry."""
+    return bool((entry.get('fanned_out_from') or {}).get('residual'))
+
+
 def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         require_date_overlap: bool = False,
                         decisions: list[dict] | None = None) -> list[dict]:
@@ -172,6 +178,11 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
             if j in drop_indices:
                 continue
             if not sigs[i] or not sigs[j]:
+                continue
+            if _is_fan_out_residual(entries[i]) or _is_fan_out_residual(entries[j]):
+                # #983: a residual repeats words of its sibling records BY
+                # CONSTRUCTION; letting dedup pair them would drop the
+                # structured record in favour of the raw text.
                 continue
             intersection = sigs[i] & sigs[j]
             union = sigs[i] | sigs[j]

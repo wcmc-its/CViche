@@ -83,6 +83,7 @@ from .fields import (  # noqa: F401
     _address_cell_text,
     _cell_text,
     _committee_cell_text,
+    _raw_fallback_cell,
     _labels_its_own_address_slots,
 )
 from .institutions import (  # noqa: F401

@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from typing import List, Tuple, TypedDict
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
-from ..normalization import _committee_cell_text
+from ..normalization import _committee_cell_text, _raw_fallback_cell
 from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
@@ -341,7 +341,7 @@ class AdministrativeActivitiesSection:
                 rows.extend(parsed_rows)
             else:
                 if not activity:
-                    activity = original_text[:150]
+                    activity = _raw_fallback_cell(original_text)
                 rows.append((activity, role, dates))
 
         return rows
