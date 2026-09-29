@@ -689,10 +689,13 @@ def test_template_body_paragraph_texts_missing_file_raises(tmp_path, monkeypatch
     checkout and must raise -- never silently return an empty exclusion set,
     which would silently un-fix finding 1 and score every run as if the
     template had no instruction paragraphs of its own."""
-    monkeypatch.setattr(qs, "_template_body_paragraph_texts_cache", None)
     monkeypatch.setattr(qs, "_TEMPLATE_DOCX_PATH", tmp_path / "missing.docx")
-    with pytest.raises(FileNotFoundError):
-        qs._template_body_paragraph_texts()
+    qs._template_body_paragraph_texts.cache_clear()
+    try:
+        with pytest.raises(FileNotFoundError):
+            qs._template_body_paragraph_texts()
+    finally:
+        qs._template_body_paragraph_texts.cache_clear()
 
 
 # --------------------------------------------------------------------- D16

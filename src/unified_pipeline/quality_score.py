@@ -62,6 +62,7 @@ never "human-verified correct."
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -780,77 +781,37 @@ INSTRUCTION_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
-#: The WCM template stage 6 actually renders every CV into (`TEMPLATE_PATH`
-#: in `stage_6_word_template.py`, same relative location). Not imported from
-#: there: that module calls `sys.exit(1)` at import time when python-docx is
-#: missing (its own top-level `try/except ImportError`), which would turn
-#: this scorer's deliberate graceful-degradation design (`_load_docx`
-#: returns a reason string instead of raising) into a hard process exit for
-#: every dimension, not just the docx-based ones. `key_files` also holds a
-#: 2020 and a 2012 template (`wcm_cv_template_for_website_2020.docx`,
-#: `curriculum_vitae_format_2012.docx`); neither is a stage-6 render target
-#: -- their only repo reference is `scripts/gen_template_boilerplate.py`,
-#: which mines them for the T-class boilerplate labels
-#: `core/template_boilerplate` uses (#822 finding 2, a separate dimension)
-#: -- so only this one revision's paragraphs are excluded below.
+#: The WCM template stage 6 renders every CV into (`TEMPLATE_PATH` in
+#: `stage_6_word_template.py`). Not imported from there: that module
+#: `sys.exit`s at import when python-docx is missing, which would defeat this
+#: scorer's graceful degradation. The 2020/2012 files in `key_files/` are not
+#: render targets, so only this revision's paragraphs are excluded.
 _TEMPLATE_DOCX_PATH = (
     Path(__file__).resolve().parent.parent.parent
     / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
 )
 
-#: Lazily-built, memoized below by `_template_body_paragraph_texts`. Not
-#: run-specific and never mutated once populated: it holds one checked-in
-#: repo file's own text, so a concurrent run racing the first call
-#: recomputes the same immutable value rather than observing a partial or
-#: another run's value -- unlike `INSTITUTION_CACHE`/`_group_cache` (a
-#: cache keyed by per-run input), this has exactly one possible value for
-#: the life of the process, so no lock guards the first-use race (contrast
-#: the locked lazy singletons in `llm/bedrock.py`, which guard a network
-#: client that must be constructed exactly once).
-_template_body_paragraph_texts_cache: frozenset[str] | None = None
-
 
 def _normalize_whitespace(text: str) -> str:
-    """Collapse runs of whitespace to one space and strip the ends, so a
-    stray leading/trailing space or an internal double-space doesn't hide
-    an otherwise-identical match to the template's own paragraph text."""
+    """Collapse whitespace runs to one space and strip the ends."""
     return " ".join(text.split())
 
 
+@functools.cache
 def _template_body_paragraph_texts() -> frozenset[str]:
-    """Whitespace-normalized text of every body paragraph in the WCM
-    template stage 6 renders into (`_TEMPLATE_DOCX_PATH`), built once and
-    cached at module level (see `_template_body_paragraph_texts_cache`).
+    """Whitespace-normalized text of every non-blank body paragraph of the
+    template stage 6 renders into (#822 finding 1).
 
-    Stage 6 keeps the template's own instruction paragraphs in the rendered
-    docx on purpose (#822 finding 1) -- a body paragraph identical to one of
-    these, after whitespace normalization, is the template's own text, not
-    the pipeline echoing a prompt into content. `score_broken_format` uses
-    this to exclude exactly those paragraphs from the prompt-echo count.
-
-    Raises FileNotFoundError if `_TEMPLATE_DOCX_PATH` is missing. That path
-    is a checked-in repo asset (`git ls-files key_files/` tracks it), not
-    run output, so a missing file means the checkout is broken and must
-    fail loudly -- silently returning an empty set here would silently
-    un-fix #822 finding 1, scoring every run as if the template had no
-    instruction paragraphs of its own.
+    Stage 6 keeps the template's own instruction paragraphs on purpose, so a
+    rendered paragraph identical to one of these is not a prompt echo.
+    A missing template raises (python-docx's own FileNotFoundError): it is a
+    checked-in asset, and an empty set would silently undo the exclusion.
     """
-    global _template_body_paragraph_texts_cache
-    if _template_body_paragraph_texts_cache is None:
-        if not _TEMPLATE_DOCX_PATH.exists():
-            raise FileNotFoundError(
-                "quality_score.score_broken_format needs the WCM template to "
-                "exclude its own instruction paragraphs from the prompt-echo "
-                f"count (#822): not found at {_TEMPLATE_DOCX_PATH}"
-            )
-        from docx import Document
-        template_doc = Document(_TEMPLATE_DOCX_PATH)
-        _template_body_paragraph_texts_cache = frozenset(
-            _normalize_whitespace(p.text)
-            for p in template_doc.paragraphs
-            if p.text.strip()
-        )
-    return _template_body_paragraph_texts_cache
+    from docx import Document
+    template_doc = Document(_TEMPLATE_DOCX_PATH)
+    return frozenset(
+        _normalize_whitespace(p.text) for p in template_doc.paragraphs if p.text.strip()
+    )
 
 
 def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
