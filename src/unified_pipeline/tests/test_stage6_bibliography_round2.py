@@ -569,6 +569,88 @@ def test_citation_author_split_additional_dimensions(citation, target_name, owne
     assert bibliography._citation_author_split(citation, target_name, owner) == expected
 
 
+# --- #662 item 6: one whole-token, case-insensitive, Unicode-aware matcher ---
+#
+# Names are invented. Each row is (citation, target_name, owner, bolded text);
+# `bolded` is '' when nothing should match. The rest of the citation must come
+# back unchanged around the bolded slice, which the test asserts too.
+_TAIL = ". A study of things. J Things. 2023;1:1-9."
+
+
+@pytest.mark.parametrize(
+    "citation, target_name, owner, bolded",
+    [
+        # Target path is case-insensitive and yields the citation's own text.
+        ("SMITH J, Doe A" + _TAIL, "Smith J", "Nobody", "SMITH J"),
+        # A target that ends inside a longer initials token falls through to
+        # the owner path, which takes the whole initials run.
+        ("Smith JA, Doe B" + _TAIL, "Smith J", "Smith", "Smith JA"),
+        # A surname is never matched inside a longer or hyphenated one.
+        ("Wuertz K, Doe A" + _TAIL, None, "Wu", ""),
+        ("Alvarez-Diaz M, Doe A" + _TAIL, None, "Diaz", ""),
+        ("Doe A, Diaz-Alvarez M" + _TAIL, None, "Diaz", ""),
+        ("O'Neil P, Doe A" + _TAIL, None, "Neil", ""),
+        ("Doe A, Neil P" + _TAIL, None, "Neil", "Neil P"),
+        # Hyphen and space are the same separator; apostrophes match across
+        # straight and typographic forms.
+        ("Alvarez Diaz M, Doe A" + _TAIL, None, "Alvarez-Diaz", "Alvarez Diaz M"),
+        ("O\u2019Neil P, Doe A" + _TAIL, None, "O'Neil", "O\u2019Neil P"),
+        ("Alvarez\u2010Diaz M, Doe A" + _TAIL, None, "Alvarez-Diaz", "Alvarez\u2010Diaz M"),
+        # Only stand-alone capital initials (at most three) join the surname.
+        ("Wende and colleagues" + _TAIL, None, "Wende", "Wende"),
+        ("Wende Michael, Doe A" + _TAIL, None, "Wende", "Wende"),
+        ("Wende MEJ, Doe A" + _TAIL, None, "Wende", "Wende MEJ"),
+        ("Wende MEJK, Doe A" + _TAIL, None, "Wende", "Wende"),
+        ("Wende" + _TAIL, None, "Wende", "Wende"),
+        # Particles that open the author widen the bold run leftward.
+        ("Doe A, de la Cruz M" + _TAIL, None, "Cruz", "de la Cruz M"),
+        ("Van Der Berg K, Doe A" + _TAIL, None, "Berg", "Van Der Berg K"),
+        # A particle-like word that is not at an author boundary is left alone.
+        ("Doe A, Kim Al Cruz M" + _TAIL, None, "Cruz", "Cruz M"),
+        # Non-ASCII: case-insensitive, and composed/decomposed accents agree.
+        ("Doe A, Mu\u00f1oz \u00c1" + _TAIL, None, "Mu\u00f1oz", "Mu\u00f1oz \u00c1"),
+        ("Doe A, MU\u00d1OZ A" + _TAIL, None, "Mu\u00f1oz", "MU\u00d1OZ A"),
+        ("Doe A, Mun\u0303oz A" + _TAIL, None, "Mu\u00f1oz", "Mun\u0303oz A"),
+        ("Doe A, Mu\u00f1oz A" + _TAIL, None, "Mun\u0303oz", "Mu\u00f1oz A"),
+        ("Doe A, Mu\u00f1ozz A" + _TAIL, None, "Mu\u00f1oz", ""),
+        ("Doe A, Mun\u0303ozz A" + _TAIL, None, "Mu\u00f1oz", ""),
+        # A surname followed by non-name text does not swallow the whitespace.
+        ("Doe A, Wende (with others)" + _TAIL, None, "Wende", "Wende"),
+        # A target whose initials differ from the citation's still finds the
+        # author through its surname, whichever side carries more initials.
+        ("Quill JD, Doe A" + _TAIL, "Quill J", "Nobody", "Quill JD"),
+        ("Pell-Rowan F, Doe A" + _TAIL, "Pell-Rowan FM", "Pell", "Pell-Rowan F"),
+        ("Doe A, Pell-Rowan FM" + _TAIL, "Pell-Rowan F", "Pell", "Pell-Rowan FM"),
+        ("Doe A, Tarn-Ellery K" + _TAIL, "Tarn-Ellery, K.", "Ellery", "Tarn-Ellery K"),
+        # An exact target match is taken as written, without extra initials.
+        ("Doe A, Wu J" + _TAIL, "Wu", "Nobody", "Wu"),
+        # A target that is all initials-shaped keeps its only token.
+        ("Doe A, MJ Smith" + _TAIL, "MJ", "Nobody", "MJ"),
+        # A possessive still ends the name; a hyphen or other letter does not.
+        ("News: Marrow's research" + _TAIL, "Lina Marrow", "Marrow", "Marrow"),
+        ("News: Lina Marrow's research" + _TAIL, "Lina Marrow", "Marrow", "Lina Marrow"),
+        ("News: Lina Marrow’s research" + _TAIL, "Lina Marrow", "Nobody", "Lina Marrow"),
+        ("News: Marrow-Li's research" + _TAIL, None, "Marrow", ""),
+        ("News: Marrows research" + _TAIL, None, "Marrow", ""),
+        ("News: Marrow'Sun M" + _TAIL, None, "Marrow", ""),
+        # Only capital initials (at most three) are trimmed off a target.
+        ("Wende ME, Doe A" + _TAIL, "Wende Jr", "Nobody", ""),
+        ("Wende ME, Doe A" + _TAIL, "Wende MEJK", "Nobody", ""),
+        # The target wins over the owner when both are present.
+        ("Wende ME, Smith J" + _TAIL, "Smith J", "Wende", "Smith J"),
+        # Blank names never match, and a blank target still falls to the owner.
+        ("Doe A" + _TAIL, "  ", "", ""),
+        ("Doe A, Wende M" + _TAIL, "  ", "Wende", "Wende M"),
+    ],
+)
+def test_citation_author_split_whole_token_matching(citation, target_name, owner, bolded):
+    before, bold, after = bibliography._citation_author_split(citation, target_name, owner)
+    assert bold == bolded
+    assert before + bold + after == citation
+    if bolded:
+        assert citation.index(bolded) == len(before)
+
+
 def test_plain_and_tracked_writers_bold_the_same_substring_through_the_shared_split():
     # Parity test (T1.2): the same citation through both writers must bold
     # the identical substring -- proving the "one home for the rule" claim
@@ -794,6 +876,14 @@ def test_enrichment_integration_renders_deletion_and_bold_insertion():
         if r.find(qn("w:rPr")) is not None and r.find(qn("w:rPr")).find(qn("w:b")) is not None
     )
     assert bold_run.find(qn("w:t")).text == "Smith A"
+
+
+def test_citation_author_split_target_matches_its_own_token_not_a_longer_initials_run():
+    # Two authors share a surname; the target "Harlan J" is the last one, not
+    # the head of "Harlan JG" (a substring match bolded the wrong author).
+    citation = "Doe A, Harlan JG, Roe B, Harlan J" + _TAIL
+    before, bold, after = bibliography._citation_author_split(citation, "Harlan J", "Harlan")
+    assert (before, bold, after) == ("Doe A, Harlan JG, Roe B, ", "Harlan J", _TAIL)
 
 
 if __name__ == "__main__":
