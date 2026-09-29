@@ -77,3 +77,25 @@ def test_one_warning_per_distinct_bad_code(caplog):
     msgs = [r.getMessage() for r in caplog.records]
     assert len(msgs) == 2
     assert any("2 entries" in m and "ZZ9" in m for m in msgs)
+
+
+def test_reasoning_corrector_output_outside_v7_is_quarantined_at_stage_4():
+    # #651 second producer: stage 3b's apply_reasoning_corrections rewrites
+    # taxonomy_code to anything in its own VALID_CODES, which includes C1 (not
+    # in taxonomy_v7.json). Pins the consequence: such an entry reaches stage 4
+    # as C1 and is re-coded T with the original kept (was: rendered by the
+    # postdoc_training renderer via RENDER_ROUTED_CODES). Judgement call, #383.
+    from unified_pipeline.core.validators.reasoning_consistency_checker import (
+        apply_reasoning_corrections,
+    )
+    corrected, _ = apply_reasoning_corrections([{
+        "text": "Postdoctoral trainee, Example Institute",
+        "taxonomy_code": "D1",
+        "classification_reasoning": "Training position; should be C1.",
+    }])
+    assert corrected[0]["taxonomy_code"] == "C1"
+    assert "C1" not in canonical_taxonomy_codes()
+    out, rejected = quarantine_invalid_taxonomy_codes(corrected)
+    assert out[0]["taxonomy_code"] == "T"
+    assert out[0]["original_taxonomy_code"] == "C1"
+    assert rejected == {"'C1'": 1}

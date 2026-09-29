@@ -866,3 +866,17 @@ def test_all_valid_codes_report_zero_invalid_in_stats(monkeypatch):
         batch_size=10, workers=1)
     assert out["stats"]["invalid_code_entries"] == 0
     assert out["stats"]["invalid_taxonomy_codes"] == {}
+
+
+def test_invalid_code_entries_stat_sums_repeats_of_the_same_bad_code(monkeypatch):
+    # invalid_code_entries counts ENTRIES (3), not distinct codes (1).
+    _stub_owner(monkeypatch)
+    monkeypatch.setattr(extraction, "extract_fields_batch",
+                        lambda entries, *a, **k: _batch_result(entries))
+    entries = [
+        {"text": f"bad entry {i}", "element_idx": i, "taxonomy_code": "ZZ9"}
+        for i in range(3)
+    ]
+    out = extraction.extract_fields_from_mapped_entries(entries, batch_size=10, workers=1)
+    assert out["stats"]["invalid_code_entries"] == 3
+    assert out["stats"]["invalid_taxonomy_codes"] == {"'ZZ9'": 3}
