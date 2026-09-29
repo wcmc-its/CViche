@@ -188,21 +188,23 @@ class TestWhatIsNotFannedOut:
         self._unchanged({'taxonomy_code': 'H', 'text': 't'})
 
 
+_COMMITTEES = [
+    {'committee_name': 'Alpha Curriculum Oversight Council', 'role': 'Member',
+     'institution': 'Ashby University'},
+    {'committee_name': 'Beta Admissions Selection Council', 'role': 'Chair',
+     'institution': 'Ashby University'}]
+
+
 class TestTextCoverage:
     """Prose with a list extracted from it is not a list of records: a child
     renders from its fields, so the words no field holds would be lost."""
 
-    _COMMITTEES = [
-        {'committee_name': 'Alpha Curriculum Oversight Council', 'role': 'Member',
-         'institution': 'Ashby University'},
-        {'committee_name': 'Beta Admissions Selection Council', 'role': 'Chair',
-         'institution': 'Ashby University'}]
     _RECORDS = ('Alpha Curriculum Oversight Council member, Ashby University{a}\t'
                 'Beta Admissions Selection Council chair, Ashby University{b}')
 
     def _committee_entry(self, text):
         return {'taxonomy_code': 'P', 'text': text,
-                'extracted_fields': {'committees': self._COMMITTEES}}
+                'extracted_fields': {'committees': _COMMITTEES}}
 
     def test_prose_around_the_records_keeps_the_entry_whole(self):
         prose = ('I serve on the Alpha Curriculum Oversight Council as a member and I chair the '
@@ -232,7 +234,7 @@ class TestTextCoverage:
     def test_a_year_a_field_holds_is_fine(self):
         entry = {'taxonomy_code': 'P', 'text': self._RECORDS.format(a=' 1999', b=''),
                  'extracted_fields': {'start_date': '1999',
-                                      'committees': self._COMMITTEES}}
+                                      'committees': _COMMITTEES}}
         assert len(_fan(entry)) == 2
 
 
@@ -288,17 +290,19 @@ def test_built_text_leaves_out_empty_values():
     assert [c['text'] for c in _fan(parent)] == ['Alpha Prize | 1988', 'Beta Prize | 1989']
 
 
+_LATER_POSTS = [
+    {'leadership_role': 'Leader, Genomics Program', 'start_date': '2015', 'end_date': '2022'},
+    {'leadership_role': 'Deputy Director', 'start_date': '2022', 'end_date': 'present'}]
+
+
 class TestParentOwnRecord:
     """web205's O: the Co-Leader post is in the parent's scalars, the later
     posts are `additional_roles`. web36's P stage-5d shape repeats the first
     post in both."""
 
-    _LATER = [{'leadership_role': 'Leader, Genomics Program', 'start_date': '2015', 'end_date': '2022'},
-              {'leadership_role': 'Deputy Director', 'start_date': '2022', 'end_date': 'present'}]
-
     def _o(self, text, **scalars):
         return {'taxonomy_code': 'O', 'text': text,
-                'extracted_fields': {'additional_roles': self._LATER, **scalars}}
+                'extracted_fields': {'additional_roles': _LATER_POSTS, **scalars}}
 
     def test_one_more_segment_than_records_means_the_parent_is_a_record(self):
         parent = self._o('2012- Co-Leader, Genomics Program\t2015-2022 Leader, Genomics Program\t'

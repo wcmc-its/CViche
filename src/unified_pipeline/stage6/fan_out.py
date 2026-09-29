@@ -95,7 +95,7 @@ def _is_date_key(key: str) -> bool:
     return key in _BARE_DATE_KEYS or key.endswith(_DATE_KEY_SUFFIX)
 
 
-def _is_blank(value: Any) -> bool:
+def _is_blank(value: object) -> bool:
     return value is None or (isinstance(value, str) and not value.strip()) \
         or (isinstance(value, (list, dict)) and not value)
 
@@ -104,7 +104,7 @@ def _words(text: str) -> set[str]:
     return {w for w in _WORD_RE.findall(text.lower()) if len(w) >= _MIN_WORD_CHARS}
 
 
-def _leaf_text(value: Any) -> str:
+def _leaf_text(value: object) -> str:
     """Every string, number and nested string inside `value`, space-joined."""
     if isinstance(value, Mapping):
         return ' '.join(_leaf_text(v) for v in value.values())
@@ -113,7 +113,7 @@ def _leaf_text(value: Any) -> str:
     return '' if value is None else str(value)
 
 
-def _fields_carry_text(text: Any, fields: Mapping[str, Any]) -> bool:
+def _fields_carry_text(text: object, fields: Mapping[str, Any]) -> bool:
     """Whether the extracted fields hold enough of `text` to render it from
     them alone -- see `_MIN_TEXT_COVERAGE` for the three tests."""
     held = _leaf_text(fields)
@@ -125,7 +125,7 @@ def _fields_carry_text(text: Any, fields: Mapping[str, Any]) -> bool:
             and len(words - uncovered) >= _MIN_TEXT_COVERAGE * len(words))
 
 
-def _record_list(value: Any, schema: frozenset[str]) -> bool:
+def _record_list(value: object, schema: frozenset[str]) -> bool:
     """True when `value` is 2+ dicts, every one of which is made of schema
     keys and shares at least one with the schema."""
     if not isinstance(value, list) or len(value) < _MIN_RECORDS:
@@ -167,7 +167,7 @@ def _parent_is_own_record(scalars: Mapping[str, Any],
                    for item in items)
 
 
-def _segments(text: Any) -> list[str]:
+def _segments(text: object) -> list[str]:
     return [part.strip() for part in str(text or '').split(_TEXT_SEGMENT_SEPARATOR)
             if part.strip()]
 
@@ -179,7 +179,7 @@ def _built_text(record: Mapping[str, Any]) -> str:
         if isinstance(value, (str, int, float)) and str(value).strip())
 
 
-def _child_texts(text: Any, records: Sequence[Mapping[str, Any]]) -> list[str]:
+def _child_texts(text: object, records: Sequence[Mapping[str, Any]]) -> list[str]:
     """Each record's text: its own tab segment when the segments line up one to
     one with the records, else a line built from the record's values (a record
     that wrapped across lines makes the counts disagree, and pairing segments
