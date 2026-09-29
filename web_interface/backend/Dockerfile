@@ -19,11 +19,13 @@ WORKDIR /app
 #   libmagic1      upload content-type sniffing
 #   xmlsec1        pysaml2 SAML assertion signing/verification
 #   curl           container HEALTHCHECK
+#   tini           PID 1 (see ENTRYPOINT)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     libmagic1 \
     xmlsec1 \
     curl \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
 # Install the web-backend deps AND the pipeline deps. The pipeline in src/
@@ -94,4 +96,11 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 
 USER cviche
 
-ENTRYPOINT ["/app/web_interface/backend/docker-entrypoint.sh"]
+# tini is PID 1 so uvicorn is not (#116). The kernel ignores a signal sent to
+# PID 1 when its handler is the default, and after lifespan shutdown uvicorn
+# exits by restoring the default SIGTERM handler and re-raising the signal. As
+# PID 1 that re-raise did nothing: the interpreter then joined the pipeline's
+# non-daemon worker thread, so a run the shutdown drain had marked failed kept
+# executing and could write "complete" over it. tini forwards SIGTERM to
+# uvicorn, reaps it, and exits with its status.
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/web_interface/backend/docker-entrypoint.sh"]

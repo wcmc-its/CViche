@@ -115,6 +115,10 @@ def test_drain_fails_runs_still_executing_at_the_budget(monkeypatch):
     assert long_run.error_message == DEPLOY_INTERRUPT_MESSAGE
     assert quick_run.status == "complete"
     assert quick_run.error_message is None
+    # The leftover run's executor is told to stop; the finished one is not.
+    from app.pipeline import orchestrator
+    assert orchestrator.is_cancelled("LONG01") is True
+    assert orchestrator.is_cancelled("QUICK2") is False
     db.close()
 
 
@@ -133,11 +137,99 @@ def test_lifespan_shutdown_runs_the_drain_with_the_configured_budget(monkeypatch
 
     from tests.conftest import TestingSessionLocal, engine
 
-    drain = AsyncMock()
+    from app.pipeline import redis_broker
+    from app.pipeline.event_emitter import event_emitter
+
+    # Runs still draining must be able to emit and receive cancels, so the
+    # drain has to come before the emitter and the broker are shut down.
+    order = []
+    drain = AsyncMock(side_effect=lambda budget: order.append("drain"))
     monkeypatch.setattr(main_mod, "_drain_runs_before_exit", drain)
+    real_emitter_shutdown = event_emitter.shutdown
+
+    async def recording_emitter_shutdown():
+        order.append("emitter")
+        await real_emitter_shutdown()
+
+    monkeypatch.setattr(event_emitter, "shutdown", recording_emitter_shutdown)
+    real_broker_from_env = redis_broker.broker_from_env
+
+    def recording_broker_from_env():
+        broker = real_broker_from_env()
+        real_broker_shutdown = broker.shutdown
+
+        async def recording_broker_shutdown():
+            order.append("broker")
+            await real_broker_shutdown()
+
+        broker.shutdown = recording_broker_shutdown
+        return broker
+
+    monkeypatch.setattr(redis_broker, "broker_from_env", recording_broker_from_env)
     monkeypatch.setenv("CVICHE_SHUTDOWN_DRAIN_SECONDS", "42")
     with patch("app.database.SessionLocal", TestingSessionLocal), \
          patch("app.database.engine", engine):
         with TestClient(main_mod.app):
             drain.assert_not_awaited()   # startup must not drain
     drain.assert_awaited_once_with(42)
+    assert order == ["drain", "emitter", "broker"]
+
+
+def test_drain_survives_a_db_error_marking_runs_failed(monkeypatch, caplog):
+    """The rest of shutdown (emitter, broker, notification flush) must still run
+    when failing the leftover runs raises."""
+    from app.pipeline import concurrency
+
+    def broken_fail(db, run_ids):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr("app.services.run_service.fail_runs_interrupted_by_shutdown", broken_fail)
+    monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "3")
+    assert concurrency.try_acquire_slot("ORPHN1") is True
+
+    with caplog.at_level("ERROR", logger="app.main"):
+        asyncio.run(main_mod._drain_runs_before_exit(budget_seconds=0))
+
+    assert "could not mark runs failed: ORPHN1" in caplog.text
+
+
+def test_a_run_the_drain_failed_is_not_flipped_to_complete_by_its_executor(monkeypatch, tmp_path):
+    """If the process outlives the drain, the run's still-running executor must
+    not write "complete" over the deploy failure (a user told to restart would
+    otherwise get a duplicate run)."""
+    from datetime import datetime
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.models import Run
+    from app.pipeline import concurrency
+    from app.pipeline import orchestrator as orch
+    from app.services.run_service import DEPLOY_INTERRUPT_MESSAGE
+    from tests.conftest import TestingSessionLocal
+
+    monkeypatch.setattr("app.database.SessionLocal", TestingSessionLocal)
+    monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "3")
+    db = TestingSessionLocal()
+    db.add(Run(id="FLIP01", filename="cv.docx", file_type="docx", status="running",
+               started_at=datetime.now()))
+    db.commit()
+    assert concurrency.try_acquire_slot("FLIP01") is True
+
+    monkeypatch.setattr(orch, "event_emitter", AsyncMock())
+    monkeypatch.setattr(orch, "STEP_REGISTRY", [SimpleNamespace(number=1, stage_id="1a", name="x")])
+    executor = orch.PipelineOrchestrator("FLIP01", tmp_path / "cv.docx", db)
+    monkeypatch.setattr(executor, "_copy_to_pipeline_input", lambda: str(tmp_path / "cv.docx"))
+
+    async def last_stage_outlives_the_drain(*args):
+        # Shutdown's drain runs out of budget while this stage is executing.
+        await main_mod._drain_runs_before_exit(budget_seconds=0)
+
+    monkeypatch.setattr(executor, "execute_step", last_stage_outlives_the_drain)
+
+    asyncio.run(executor.execute())
+
+    db.expire_all()
+    run = db.query(Run).filter(Run.id == "FLIP01").one()
+    assert run.status == "failed"
+    assert run.error_message == DEPLOY_INTERRUPT_MESSAGE
+    db.close()

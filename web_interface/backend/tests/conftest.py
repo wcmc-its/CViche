@@ -89,12 +89,13 @@ def _reset_estimate_rate_limiter():
 @pytest.fixture(autouse=True)
 def _reset_pod_admission_state():
     """Every client fixture's teardown runs lifespan shutdown, which puts the
-    pod into one-way draining (#116); undo that and any leaked slot so the
-    next test can start runs."""
-    from app.pipeline import concurrency
+    pod into one-way draining and stops any run still holding a slot (#116);
+    undo that, and any leaked slot, so the next test can start runs."""
+    from app.pipeline import concurrency, orchestrator
     yield
     concurrency._draining = False
     concurrency._active_run_ids.clear()
+    orchestrator._cancelled_runs.clear()
 
 
 @pytest.fixture

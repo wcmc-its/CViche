@@ -268,6 +268,9 @@ class TestRetryStep:
                 MockOrch.return_value.execute.assert_awaited_once()
                 _, kwargs = MockOrch.return_value.execute.call_args
                 assert kwargs.get("start_step_number") == 6
+            # TestClient runs the background task before returning; the retry
+            # must have released the slot it took for this run (#116 drains by id).
+            assert concurrency.active_run_ids() == []
         finally:
             upload_file.unlink(missing_ok=True)
 

@@ -204,6 +204,7 @@ async def _drain_runs_before_exit(budget_seconds: int) -> None:
     user gets a terminal status instead of a timer that climbs forever.
     """
     from app.pipeline import concurrency
+    from app.pipeline.orchestrator import stop_run_locally
     from app.services.run_service import fail_runs_interrupted_by_shutdown
     from app.database import SessionLocal
 
@@ -220,6 +221,11 @@ async def _drain_runs_before_exit(budget_seconds: int) -> None:
     if not remaining:
         logger.info("Shutdown drain: all runs on this pod finished")
         return
+
+    # Stop the leftover runs before failing them, so a run cannot pass its
+    # pre-"complete" cancel check after the failure is written.
+    for run_id in remaining:
+        stop_run_locally(run_id)
 
     def _fail() -> int:
         db = SessionLocal()

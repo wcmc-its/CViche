@@ -243,3 +243,21 @@ def test_orchestrator_cancel_falls_back_to_local_set():
         assert orch.is_cancelled("RUN1") is False
     finally:
         orch._cancelled_runs.clear()
+
+
+def test_stop_run_locally_sets_only_the_in_process_flag():
+    """Shutdown's stop (#116) must not leave a Redis cancel key behind: it
+    would outlive the pod by CANCEL_TTL_SECONDS and cancel a retry of the same
+    run started on another pod in that window."""
+    from app.pipeline import orchestrator as orch
+    broker, _ = _fakeredis_broker()
+    try:
+        orch.set_broker(broker)
+        orch._cancelled_runs.clear()
+        orch.stop_run_locally("RUN1")
+        assert orch.is_cancelled("RUN1") is True
+        orch._cancelled_runs.clear()
+        assert broker.is_cancelled("RUN1") is False
+    finally:
+        orch.set_broker(None)
+        orch._cancelled_runs.clear()
