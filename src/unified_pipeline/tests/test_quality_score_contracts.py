@@ -246,6 +246,56 @@ def test_score_pipeline_errors_api_envelope_error_is_fatal(tmp_path):
     assert "fatal_pattern=YES" in detail
 
 
+# --------------------------------------------------------------------- #745
+# score_pipeline_errors: structured stage-error records written by the drivers
+# --------------------------------------------------------------------- #745
+
+
+def test_structured_stage_error_without_exception_name_is_fatal(tmp_path):
+    """#745 acceptance: a stage failure whose message names no exception type
+    -- the farm's ODAWYA shape, which FATAL_ERROR_PATTERN cannot see -- is
+    still fatal when a driver recorded it."""
+    from unified_pipeline.stage_errors import StageError, record_stage_outcome
+    message = "'int' object is not iterable"
+    assert not FATAL_ERROR_PATTERN.search(message), "fixture must be regex-invisible"
+    record_stage_outcome(tmp_path / "ABC_stage_errors.json", "3b",
+                         StageError("3b", "TypeError", message, fatal=True))
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert cap == 40
+    assert fraction == 1.0
+    assert "fatal_pattern=YES" in detail
+    assert "stage 3b" in detail, detail
+
+
+def test_structured_non_fatal_stage_error_counts_but_does_not_cap(tmp_path):
+    from unified_pipeline.stage_errors import StageError, record_stage_outcome
+    record_stage_outcome(tmp_path / "ABC_stage_errors.json", "5b",
+                         StageError("5b", "KeyError", "degraded", fatal=False))
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert cap is None
+    assert "nonnull_error_fields=1" in detail
+    assert fraction == pytest.approx(1 / 3)
+
+
+def test_malformed_stage_error_record_is_named_not_read_as_clean(tmp_path):
+    """Valid JSON of the wrong shape is reported as unreadable (a signal),
+    never silently treated as 'no stage failed'."""
+    _write_json(tmp_path, "ABC_stage_errors.json", [{"stage": "4"}])
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert cap is None
+    assert "ABC_stage_errors.json: unreadable" in detail, detail
+    assert "nonnull_error_fields=1" in detail
+
+
+def test_run_without_stage_error_record_falls_back_to_the_pattern(tmp_path):
+    """A run that predates the record is scored exactly as before."""
+    _write_json(tmp_path, "ABC_classified.json",
+               {"meta": {"stats": {"t_validation": {"error": "'int' object is not iterable"}}}})
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert cap is None
+    assert "fatal_pattern=NO" in detail
+
+
 # --------------------------------------------------------------------- D6
 # score_sparse_tables: zero tables is worst-case, not perfect (#724 T2.6)
 # --------------------------------------------------------------------- D6

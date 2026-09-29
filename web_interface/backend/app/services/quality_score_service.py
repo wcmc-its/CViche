@@ -28,8 +28,12 @@ _SRC = Path(__file__).resolve().parents[4] / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-# Artifacts the scorer reads (see quality_score.py dimension scorers).
-_NEEDED_SUFFIXES = ("_classified.json", "_fields.json", "_entries.json", ".docx")
+from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX  # noqa: E402
+
+# Artifacts the scorer reads (see quality_score.py dimension scorers), plus the
+# orchestrator's stage-error record (#745), mirrored to outputs/ like the rest.
+_NEEDED_SUFFIXES = ("_classified.json", "_fields.json", "_entries.json", ".docx",
+                    STAGE_ERRORS_SUFFIX)
 
 CACHE_KEY = "quality_score.json"
 
