@@ -12,7 +12,7 @@ import json
 import logging
 import re
 
-from unified_pipeline.config import calculate_cost
+from unified_pipeline.config import _normalize_model_id, calculate_cost
 from unified_pipeline.llm.retry import (
     _call_with_retry,
     _client_init_lock,
@@ -63,6 +63,13 @@ class BedrockEmptyResponseError(RuntimeError):
 # of call-site or YAML discipline. See
 # docs/analysis/HANDOFF-runaway-generation-maxtokens-2026-06-17.md.
 DEFAULT_MAX_TOKENS = 16000
+
+# Models that 400 on any sampling parameter ("`temperature` is deprecated for
+# this model", probed 2026-09-29) and run adaptive thinking unless it is
+# switched off. Thinking adds billed output tokens, so it is disabled
+# explicitly. Keyed by the bare id, as in PRICING. Every model outside this set
+# gets the request shape it always had.
+NO_SAMPLING_PARAMS_MODELS = frozenset({"anthropic.claude-sonnet-5"})
 
 _bedrock_client = None
 
@@ -359,8 +366,12 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     call_kwargs = {
         "modelId": model,
         "messages": converse_messages,
-        "inferenceConfig": {"temperature": float(temperature)},
+        "inferenceConfig": {},
     }
+    if _normalize_model_id(model) in NO_SAMPLING_PARAMS_MODELS:
+        call_kwargs["additionalModelRequestFields"] = {"thinking": {"type": "disabled"}}
+    else:
+        call_kwargs["inferenceConfig"]["temperature"] = float(temperature)
     if system_prompts:
         call_kwargs["system"] = system_prompts
     # Always send maxTokens. When the caller (and config) leave it None, fall
