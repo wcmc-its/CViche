@@ -388,6 +388,22 @@ def test_lint_classified_unrendered_warns_on_false_plus_none():
     assert "2 classified" in findings[0]["message"]
 
 
+def test_lint_classified_unrendered_does_not_trust_a_shared_boilerplate_hit():
+    """#744 at the lint: two 3b entries share the piece 'Department of
+    Medicine'; the output holds only that piece, so neither code's entry has
+    real evidence and both codes are flagged (pre-fix: [])."""
+    stage3b = {"entries": [
+        {"text": "Department of Medicine", "taxonomy_code": "C",
+         "element_type": "paragraph"},
+        {"text": "Department of Medicine\nDivision of Cardiology",
+         "taxonomy_code": "D", "element_type": "paragraph"},
+    ]}
+    findings = lint_classified_unrendered(
+        stage3b, [("p", "Department of Medicine")])
+    assert sorted(f["message"].split(":")[0] for f in findings) == [
+        "taxonomy code C", "taxonomy code D"]
+
+
 def test_lint_classified_unrendered_silent_when_any_entry_verified_rendered():
     findings = lint_classified_unrendered(
         _entries(_RENDERED_TEXT, _UNRENDERED_TEXT), _OUTPUT_BLOCKS)
