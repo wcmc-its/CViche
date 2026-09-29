@@ -265,12 +265,17 @@ class TestConfigService:
         (140151, 4.93), (168421, 6.41), (198639, 6.80), (338634, 13.17),
     )
 
+    # The costs above were RECORDED at list price; Bedrock bills CViche's us.
+    # regional profiles at 1.1x that (Sept 2026 AWS bill), and PRICING now
+    # holds the billed rate, so the quote is compared to the billed cost.
+    _BILLED_OVER_RECORDED = 1.1
+
     @pytest.mark.parametrize("chars,actual", _MEASURED_RUN_COSTS)
     def test_run_cost_range_brackets_measured_actual(self, chars, actual):
         # #538: the quoted maximum was below the actual on all 24 of these.
         # Pins the cost-model constants so they can't drift back under them.
         cost_min, cost_max = get_estimated_run_cost(chars)
-        assert cost_min <= actual <= cost_max
+        assert cost_min <= actual * self._BILLED_OVER_RECORDED <= cost_max
 
     def test_run_cost_scales_with_entry_density(self):
         # Cost must rise with document size (more entries -> more stage 3b
