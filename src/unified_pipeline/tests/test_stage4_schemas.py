@@ -181,3 +181,9 @@ def test_invited_presentation_schema_asks_the_llm_for_the_speaker_role():
     which is what the prompt's field list is built from."""
     assert "role" in schemas_mod.get_field_schema("R")["fields"]
     assert "role" in schemas_mod.FIELD_DESCRIPTIONS["R"]
+
+
+def test_invited_presentation_role_hint_keeps_the_presentation_format_in_event_name():
+    """#475 r3: adding `role` made the LLM drop 'Invited Workshop' (in neither
+    role nor event_name); the description must say where a format goes."""
+    assert "event_name" in schemas_mod.FIELD_DESCRIPTIONS["R"]["role"]

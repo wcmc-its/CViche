@@ -107,6 +107,17 @@ def test_role_already_in_the_venue_is_not_repeated():
                   role="Visiting Professor") == "Visiting Professor, Northgate Institute"
 
 
+def test_role_already_in_the_title_is_not_prepended():
+    assert _venue(title="Visiting Professor Lecture: Zorblax Methods",
+                  institution="Northgate Institute", role="Visiting Professor") == \
+        "Northgate Institute"
+
+
+def test_role_duplicate_check_ignores_case():
+    assert _venue(institution="Visiting Professor, Northgate Institute",
+                  role="visiting professor") == "Visiting Professor, Northgate Institute"
+
+
 def test_string_none_role_is_not_rendered():
     assert _venue(institution="Springfield", role="None") == "Springfield"
 
