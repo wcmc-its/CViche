@@ -109,3 +109,28 @@ def test_role_already_in_the_venue_is_not_repeated():
 
 def test_string_none_role_is_not_rendered():
     assert _venue(institution="Springfield", role="None") == "Springfield"
+
+
+def _cells(**fields):
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen.cv_owner_location = None
+    fields.setdefault("year", "2022")
+    gen._fill_presentations(
+        [{"taxonomy_code": "R", "text": "2022\t* raw source line, Springfield",
+          "extracted_fields": fields}])
+    for table in gen.doc.tables:
+        for row in table.rows:
+            cells = [c.text for c in row.cells]
+            if "2022" in cells:
+                return cells
+    raise AssertionError("row not rendered")
+
+
+def test_role_is_the_title_when_stage_4_left_title_empty():
+    """The role was the entry's only heading; the Title cell must not fall back to raw text."""
+    cells = _cells(title="", role="Visiting Professor",
+                   location="Northgate Institute, Springfield")
+    assert cells[0] == "Visiting Professor"
+    assert cells[1] == "Northgate Institute, Springfield"
+    assert "raw source line" not in cells[0]
