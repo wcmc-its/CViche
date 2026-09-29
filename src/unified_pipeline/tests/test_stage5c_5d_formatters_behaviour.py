@@ -34,6 +34,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -193,6 +195,19 @@ def test_5c_call_llm_formatter_exception_arm_returns_none_none(monkeypatch):
     text, usage = s5c.call_llm_formatter("raw content", verbose=False)
     assert text is None
     assert usage is None
+
+
+def test_5c_call_llm_formatter_llm_outage_propagates(monkeypatch):
+    """A provider outage past the budget fails the run (#810) instead of
+    taking the (None, None) exception arm above."""
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    def outage(**kw):
+        raise LLMOutageError("provider down", seconds_waited=1800.0)
+
+    monkeypatch.setattr(s5c, "call_llm", outage)
+    with pytest.raises(LLMOutageError):
+        s5c.call_llm_formatter("raw content", verbose=False)
 
 
 # ---------------------------------------------------------------------------

@@ -670,6 +670,44 @@ def test_add_target_names_fallback_from_raw_text():
     assert out[0]["extracted_fields"]["target_name"] == "Smith J"
 
 
+def _d1_entry():
+    return {"text": "Assistant Professor, Ohio State University, 2010-2015",
+            "taxonomy_code": "D1", "element_idx_start": 0}
+
+
+@pytest.mark.parametrize("call", ["recovery", "batch"])
+def test_llm_outage_propagates_but_other_errors_degrade(monkeypatch, call):
+    """A provider outage past the budget fails the run (#810); any other
+    call_llm error still degrades to LLM_PROVIDER_ERROR on the entries."""
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    def run():
+        if call == "recovery":
+            return extraction.attempt_llm_recovery([_d1_entry()])["entries"]
+        return extraction.extract_fields_batch([_d1_entry()], 0, 1)["entries"]
+
+    if call == "batch":
+        # A degraded entry goes on to the recovery pass, whose own re-raise
+        # would otherwise stand in for the batch site's.
+        monkeypatch.setattr(extraction, "attempt_llm_recovery",
+                            lambda entries, cancel_check=None: {"entries": entries, "cost": 0.0, "tokens": 0})
+
+    def outage(**kw):
+        raise LLMOutageError("provider down", seconds_waited=1800.0)
+
+    monkeypatch.setattr(extraction, "call_llm", outage)
+    with pytest.raises(LLMOutageError):
+        run()
+
+    def blip(**kw):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(extraction, "call_llm", blip)
+    entries = run()
+    error_field = "llm_recovery_error" if call == "recovery" else "extraction_error"
+    assert [e[error_field] for e in entries] == [extraction.LLM_PROVIDER_ERROR]
+
+
 @pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
 def test_grant_prompt_names_status_and_notes_in_fields_guide_and_rules(code):
     """#982: the prompt the LLM actually receives for a grant bucket lists

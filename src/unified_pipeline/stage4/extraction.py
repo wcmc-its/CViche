@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm.retry import LLMOutageError
 
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
@@ -461,6 +462,8 @@ def attempt_llm_recovery(
             "cost": llm_result["cost"] if llm_result else 0.0,
             "tokens": llm_result.get("total_tokens", 0) if llm_result else 0,
         }
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception:
         logger.exception("Stage 4 recovery LLM call failed for taxonomy %s", taxonomy_code)
         return {
@@ -818,6 +821,8 @@ def extract_fields_batch(
                     "extraction_success": False,
                     "extraction_error": LLM_RESPONSE_INVALID
                 })
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
         except Exception:
             logger.exception("Stage 4 extraction failed for code %s", code)
             failed_groups += 1
