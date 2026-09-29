@@ -26,7 +26,6 @@ from unified_pipeline.stage4.coercion import (
     coerce_field_value_types,
     normalize_dates,
 )
-from unified_pipeline.stage4.context_headings import stamp_context_headings
 from unified_pipeline.stage4.owner_name import (
     add_target_names,
     extract_cv_owner_name,
@@ -950,7 +949,6 @@ def extract_fields_from_mapped_entries(
         workers: Batches in flight at once (default STAGE4_BATCH_WORKERS).
             1 reproduces the pre-#881 serial loop exactly.
     """
-    mapped_entries = stamp_context_headings(mapped_entries)  # #985: before batching loses document order
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
 

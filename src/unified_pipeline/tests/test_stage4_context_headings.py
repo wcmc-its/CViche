@@ -121,7 +121,7 @@ def test_a_bare_short_non_t_child_does_not_end_the_stamp():
 
 
 def test_a_generic_heading_ends_the_previous_stamp():
-    out = _stamps([_e("Alpha University:", "T"), _e("a1"), _e("Other", "T"), _e("o1")])
+    out = _stamps([_e("Alpha University:", "T"), _e("a1"), _e("Curriculum Vitae", "T"), _e("o1")])
     assert out == [None, "Alpha University", None, None]
 
 
@@ -147,3 +147,61 @@ def test_the_input_is_not_mutated_and_hierarchy_code_and_text_are_unchanged():
         assert {k: new[k] for k in ("text", "taxonomy_code", "hierarchy")} == \
                {k: old[k] for k in ("text", "taxonomy_code", "hierarchy")}
     assert [e["text"] for e in out] == [e["text"] for e in entries]
+
+
+def _dropped(text, code="P", **flags):
+    return {**_e(text, code), "is_fragment": True, **flags}
+
+
+def test_a_dropped_sibling_sub_heading_ends_the_run_and_is_never_stamped():
+    """B1: 3b flags the sibling 'Beta University:' is_fragment; stage 4 filters it
+    out, so the run must already have ended on the FULL list."""
+    out = _stamps([_e("Alpha University:", "T"), _e("a1"), _dropped("Beta University:", "O"), _e("b1")])
+    assert out == [None, "Alpha University", None, None]
+    out = _stamps([_e("Alpha University:", "T"), _e("a1"), _dropped("a2 tail"), _e("a3")])
+    assert out == [None, "Alpha University", None, "Alpha University"]     # a plain dropped line is neutral
+    assert _stamps([_dropped("Gamma University:", "T"), _e("c1")]) == [None, None]  # dropped T is no heading
+
+
+@pytest.mark.parametrize("text", [
+    "Stanford, California", "Connecticut", "And Date", "Between Alpha and Beta Care",
+    "Alpha Beta Gamma Delta Epsilon Zeta Eta", "TLS", "JAMA",
+])
+def test_bare_label_false_positives_are_refused(text):
+    assert _stamps([_e(text, "T"), _e("child")]) == [None, None]
+
+
+def test_a_wrapped_line_tail_is_not_a_bare_heading():
+    tail = {**_e("Northgate School of Medicine", "T"), "element_type": "break"}
+    assert _stamps([tail, _e("child")]) == [None, None]
+    para = {**tail, "element_type": "paragraph"}
+    assert _stamps([para, _e("child")]) == [None, "Northgate School of Medicine"]
+
+
+def test_a_bare_label_inside_a_run_of_t_entries_or_before_one_is_a_list_item():
+    items = [_e(f"Journal {n} Review", "T") for n in "AB"]
+    assert set(_stamps([*items, _e("Last Item Here", "T"), _e("child")])) == {None}     # tail of a T list
+    assert _stamps([_e("Alpha Journal", "T"), _e("Beta Journal", "T"), _e("child")])[0] is None    # next is T
+    assert _stamps([_e("Section Title", "T"), _e("Graduate Students", "T"), _e("child")])[-1] == "Graduate Students"
+
+
+def _flat(text_code_pairs):
+    """Entries under one leaf that spans >= FLAT_HIERARCHY_MIN_LETTERS code letters."""
+    filler = [_e(f"filler {c}", c) for c in "ABCD"[:ch.FLAT_HIERARCHY_MIN_LETTERS]]
+    return filler + [_e(t, c) for t, c in text_code_pairs]
+
+
+def test_in_a_flat_hierarchy_a_run_stops_when_the_code_letter_changes():
+    entries = _flat([("Alpha University:", "T"), ("n1", "N3A"), ("n2", "N3B"), ("s1", "S1"), ("n3", "N3A")])
+    assert _stamps(entries)[-5:] == [None, "Alpha University", "Alpha University", None, None]
+
+
+def test_in_a_coherent_hierarchy_a_run_may_mix_code_letters():
+    entries = [_e("Alpha University:", "T"), _e("p1", "P"), _e("o1", "O")]
+    assert _stamps(entries) == [None, "Alpha University", "Alpha University"]
+
+
+def test_a_bare_label_whose_next_entry_is_t_governs_nothing():
+    entries = [_e("Alpha Journal", "T"), _e("A long list item, with a comma", "T"), _e("child")]
+    assert set(_stamps(entries)) == {None}
+    assert _stamps([_e("Alpha Journal", "T")]) == [None]

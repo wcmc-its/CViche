@@ -20,13 +20,34 @@ HEADING_TAXONOMY_CODE = "T"
 #: Longest raw heading text considered. Corpus-derived (see #985 census).
 MAX_HEADING_CHARS = 70
 
-#: Longest heading in words for the bare-label trigger.
-MAX_LABEL_WORDS = 8
+#: Longest heading in words for the bare-label trigger. Corpus census (#985
+#: round 2): real bare headings top out at 6 words ("University of Maryland
+#: School of Medicine"); 7+ is a table header or a wrapped title fragment.
+MAX_LABEL_WORDS = 6
 
-#: Most entries one heading may govern. Corpus census: the dubious spans are
-#: section titles under a mis-hierarchied flat CV (100+ entries across many
-#: taxonomy codes); every named #985 example is well under this.
-MAX_STAMPED_RUN = 100
+#: Fewest words a bare label needs: a one-word line ("Connecticut",
+#: "Ementorship") is a place or a section title, not a sub-heading.
+MIN_LABEL_WORDS = 2
+
+#: A bare label right after this many T entries is the tail of a list of
+#: journal / organisation names, not a sub-heading ("Welsh Office" after 30).
+MAX_T_STREAK_BEFORE_BARE_LABEL = 1
+
+#: Fewest letters an ALL-CAPS heading needs ("TLS", "JAMA": journal / acronym list items).
+MIN_CAPS_LETTERS = 5
+
+#: stage 3b element_type of a wrapped-line tail ("Maryland School of
+#: Medicine" after "...University of"): never a bare heading.
+WRAPPED_ELEMENT_TYPE = "break"
+
+#: A bare label opening with one of these is a sentence or title fragment
+#: ("And Date", "Between ... and Child Maltreatment", "My achievements include").
+_FRAGMENT_LEAD_WORDS = frozenset({"and", "or", "of", "between", "my", "in", "for", "with", "to", "by"})
+
+#: Most entries one heading may govern. Census (#985 round 2): every named
+#: example is <= 18; the spans above 30 are a section title over a mixed leaf
+#: ("Ongoing reviewer for" into grant study-section rows) or a list item.
+MAX_STAMPED_RUN = 30
 
 #: Leading enumerator on a heading ("IV. ", "B) ", "2. "), stripped before the
 #: no-digit test and from the stamped text.
@@ -97,16 +118,26 @@ def _is_heading_shaped(text: str, strong_only: bool = False) -> bool:
     body = _ENUMERATOR_RE.sub("", raw)
     if any(ch.isdigit() for ch in body) or body.count("(") != body.count(")") or _INTERIOR_BREAK_RE.search(raw.rstrip(":")):
         return False
-    if raw.endswith(":"):
+    if raw.endswith(":") or _is_all_caps(body):
         return True
+    return not strong_only and _is_bare_label(body)
+
+
+def _is_all_caps(body: str) -> bool:
     letters = [c for c in body if c.isalpha()]
-    if letters and body == body.upper():
-        return True
+    return len(letters) >= MIN_CAPS_LETTERS and body == body.upper()
+
+
+def _is_bare_label(body: str) -> bool:
+    """Title-Case label with no colon: 2..MAX_LABEL_WORDS words, no comma or
+    period (places, wrapped sentences), not opening on a connective."""
+    words = body.split()
     return (
-        not strong_only
-        and len(body.split()) <= MAX_LABEL_WORDS
+        MIN_LABEL_WORDS <= len(words) <= MAX_LABEL_WORDS
         and body[:1].isupper()
         and "." not in body
+        and "," not in body
+        and words[0].lower() not in _FRAGMENT_LEAD_WORDS
     )
 
 
@@ -118,30 +149,94 @@ def _is_generic(heading: str, hierarchy: list[str]) -> bool:
     return bool(leaf) and norm == leaf
 
 
-def _is_heading(entry: dict[str, Any]) -> bool:
-    return entry.get("taxonomy_code") == HEADING_TAXONOMY_CODE and _is_heading_shaped(entry.get("text") or "")
+def _is_dropped(entry: dict[str, Any]) -> bool:
+    """Stage 4 does not extract fragments and duplicates; they are neither
+    stamped nor headings, but a heading-shaped one still ends a run."""
+    return bool(entry.get("is_fragment") or entry.get("is_duplicate"))
 
 
-def _heading_runs(entries: list[dict[str, Any]]) -> list[tuple[str, list[int]]]:
-    """(heading, indices of the entries it governs) for every usable heading."""
-    runs: list[tuple[str, list[int]]] = []
-    active: list[int] | None = None
-    active_hierarchy: list[str] | None = None
+def _is_heading(entry: dict[str, Any], t_streak: int, next_entry: dict[str, Any] | None) -> bool:
+    """A T entry that is heading-shaped. A bare label (no colon, not ALL CAPS)
+    must also not be a wrapped-line tail, sit inside a run of T entries (a list
+    of journal / organisation names), or lack a non-T entry right after it."""
+    if entry.get("taxonomy_code") != HEADING_TAXONOMY_CODE:
+        return False
+    text = entry.get("text") or ""
+    if _is_heading_shaped(text, strong_only=True):
+        return True
+    return (
+        t_streak <= MAX_T_STREAK_BEFORE_BARE_LABEL
+        and entry.get("element_type") != WRAPPED_ELEMENT_TYPE
+        and next_entry is not None
+        and next_entry.get("taxonomy_code") != HEADING_TAXONOMY_CODE
+        and _is_heading_shaped(text)
+    )
+
+
+#: A hierarchy leaf whose entries span this many taxonomy letters is a flat /
+#: mis-hierarchied section (web46 'Personal Data' holds A, B, D, I, M, N, P, S;
+#: web204 'BOARDS OF TRUSTEES' holds N, Q, R), so one heading there must not govern children of a different letter.
+#: A coherent leaf ('Institutional Service': P, O) legitimately mixes codes.
+FLAT_HIERARCHY_MIN_LETTERS = 3
+
+
+def _code_family(code: str) -> str:
+    """Leading letter of a taxonomy code ('N3A' -> 'N')."""
+    return code[:1]
+
+
+def _flat_hierarchies(entries: list[dict[str, Any]]) -> set[tuple[str, ...]]:
+    letters: dict[tuple[str, ...], set[str]] = {}
+    for entry in entries:
+        code = entry.get("taxonomy_code") or ""
+        if code and code != HEADING_TAXONOMY_CODE and not _is_dropped(entry):
+            letters.setdefault(tuple(entry.get("hierarchy") or []), set()).add(_code_family(code))
+    return {h for h, found in letters.items() if len(found) >= FLAT_HIERARCHY_MIN_LETTERS}
+
+
+class _Run:
+    """The entries one heading governs; in a flat hierarchy, one code letter."""
+
+    def __init__(self, heading: str, hierarchy: list[str], flat: bool) -> None:
+        self.heading = heading
+        self.hierarchy = hierarchy
+        self.flat = flat
+        self.family: str | None = None
+        self.indices: list[int] = []
+
+    def accepts(self, entry: dict[str, Any]) -> bool:
+        code = entry.get("taxonomy_code") or ""
+        return not self.flat or code == HEADING_TAXONOMY_CODE or self.family in (None, _code_family(code))
+
+    def add(self, idx: int, entry: dict[str, Any]) -> None:
+        code = entry.get("taxonomy_code") or ""
+        if self.family is None and code != HEADING_TAXONOMY_CODE:
+            self.family = _code_family(code)
+        self.indices.append(idx)
+
+
+def _heading_runs(entries: list[dict[str, Any]]) -> list[_Run]:
+    """One run per usable heading, in document order."""
+    runs: list[_Run] = []
+    flat = _flat_hierarchies(entries)
+    active: _Run | None = None
+    t_streak = 0
     for idx, entry in enumerate(entries):
         hierarchy = entry.get("hierarchy") or []
         text = entry.get("text") or ""
-        if _is_heading(entry):
-            heading = _strip_heading(text)
-            if _is_generic(heading, hierarchy):
+        if _is_dropped(entry):
+            if _is_heading_shaped(text, strong_only=True):
                 active = None
-            else:
-                active = []
-                runs.append((heading, active))
-                active_hierarchy = list(hierarchy)
-        elif _is_heading_shaped(text, strong_only=True) or hierarchy != active_hierarchy:
+        elif _is_heading(entry, t_streak, entries[idx + 1] if idx + 1 < len(entries) else None):
+            heading = _strip_heading(text)
+            active = None if _is_generic(heading, hierarchy) else _Run(heading, list(hierarchy), tuple(hierarchy) in flat)
+            if active is not None:
+                runs.append(active)
+        elif _is_heading_shaped(text, strong_only=True) or active is None or hierarchy != active.hierarchy or not active.accepts(entry):
             active = None
-        elif active is not None:
-            active.append(idx)
+        else:
+            active.add(idx, entry)
+        t_streak = t_streak + 1 if entry.get("taxonomy_code") == HEADING_TAXONOMY_CODE else 0
     return runs
 
 
@@ -149,15 +244,17 @@ def stamp_context_headings(entries: list[dict[str, Any]]) -> list[dict[str, Any]
     """Return copies of `entries` with `context_heading` set on the entries
     that follow a heading under the same hierarchy.
 
-    `entries` must be in document order. A stamp stops at the next heading, a
-    hierarchy change, or a non-T entry that is itself strongly heading-shaped.
-    A heading that would govern more than MAX_STAMPED_RUN entries is a section
-    title under a flat hierarchy, not a sub-heading, and stamps nothing.
+    `entries` must be stage 3b's FULL list in document order, fragments and
+    duplicates included: a dropped sibling sub-heading ("University of
+    Maryland:" flagged is_fragment) must still end the run before it. A stamp
+    stops at the next heading, a hierarchy change, a strongly heading-shaped
+    non-T or dropped entry, or a change of taxonomy family among the children.
+    A heading that would govern more than MAX_STAMPED_RUN entries stamps nothing.
     """
     out = [dict(entry) for entry in entries]
-    for heading, indices in _heading_runs(entries):
-        if len(indices) > MAX_STAMPED_RUN:
+    for run in _heading_runs(entries):
+        if len(run.indices) > MAX_STAMPED_RUN:
             continue
-        for idx in indices:
-            out[idx]["context_heading"] = heading
+        for idx in run.indices:
+            out[idx]["context_heading"] = run.heading
     return out

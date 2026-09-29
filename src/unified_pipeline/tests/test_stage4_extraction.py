@@ -748,9 +748,10 @@ def test_the_instruction_says_fill_missing_never_override_and_do_not_misplace():
     assert "do not copy X into a field it does not describe" in text
 
 
-def test_extract_fields_from_mapped_entries_sends_the_stamped_prompt(monkeypatch):
-    """Wire: heading (coded T) -> stamp at the top of the orchestrator -> batching
-    groups by code -> the prompt the LLM receives names the heading."""
+def test_extract_fields_from_mapped_entries_sends_a_stamped_entrys_heading(monkeypatch):
+    """Wire: a `context_heading` already on the entry (process_cv stamps it, over
+    the unfiltered list) survives batching and reaches the prompt. The
+    orchestrator itself does not stamp: it only ever sees the filtered list."""
     _stub_owner(monkeypatch)
     sent = []
 
@@ -759,11 +760,12 @@ def test_extract_fields_from_mapped_entries_sends_the_stamped_prompt(monkeypatch
         return {"content": '{"entries": []}', "cost": 0.0, "total_tokens": 0}
 
     monkeypatch.setattr(extraction, "call_llm", fake_llm)
-    hier = ["Teaching"]
     entries = [
-        {"text": "Northgate University:", "taxonomy_code": "T", "hierarchy": hier, "element_idx_start": 0},
-        {"text": "Survey course, lecturer", "taxonomy_code": "K1", "hierarchy": hier, "element_idx_start": 1},
+        {"text": "Survey course, lecturer", "taxonomy_code": "K1", "hierarchy": ["Teaching"], "element_idx_start": 1,
+         "context_heading": "Northgate University"},
         {"text": "Other course", "taxonomy_code": "K2", "hierarchy": ["Elsewhere"], "element_idx_start": 2},
+        {"text": "Northgate University:", "taxonomy_code": "T", "hierarchy": ["Teaching"], "element_idx_start": 0},
+        {"text": "Third course", "taxonomy_code": "K3", "hierarchy": ["Teaching"], "element_idx_start": 3},
     ]
     before = json.dumps(entries)
     extraction.extract_fields_from_mapped_entries(entries, workers=1)
@@ -771,5 +773,6 @@ def test_extract_fields_from_mapped_entries_sends_the_stamped_prompt(monkeypatch
     k1 = [p for p in sent if "**Classification**: K1" in p]
     assert k1 and "(under: Northgate University):\nSurvey course, lecturer" in k1[0]
     assert extraction.CONTEXT_HEADING_INSTRUCTION in k1[0]
-    k2 = [p for p in sent if "**Classification**: K2" in p]
-    assert k2 and "(under:" not in k2[0] and extraction.CONTEXT_HEADING_INSTRUCTION not in k2[0]
+    for code in ("K2", "K3"):
+        other = [p for p in sent if f"**Classification**: {code}" in p]
+        assert other and "(under:" not in other[0] and extraction.CONTEXT_HEADING_INSTRUCTION not in other[0]
