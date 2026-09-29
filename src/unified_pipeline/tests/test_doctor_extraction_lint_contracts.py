@@ -57,7 +57,8 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_under_extraction,
     lint_wrong_start_date,
 )
-from unified_pipeline.doctor.shared import _haystacks  # noqa: E402
+from unified_pipeline.doctor.shared import (  # noqa: E402
+    _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack)
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
 
 
@@ -340,6 +341,18 @@ def test_entry_rendered_template_piece_matches_inside_a_longer_template_line():
     text = "Percent Effort and Institutional Responsibilities"
     h = _haystacks([("p", "PercentEffortandInstitutionalResponsibilities")])
     assert _entry_rendered(text, h.text, h.tokens) is False
+
+
+def test_template_piece_must_sit_inside_one_template_line():
+    """A piece spanning the end of one template line and the start of the
+    next is not scaffolding: 5 farm pieces match only across a boundary."""
+    lines = _template_haystack().split(_LINE_SENTINEL)
+    spans = [a[-8:] + b[:8] for a, b in zip(lines, lines[1:])
+             if len(a) >= 8 and len(b) >= 8]
+    spans = [p for p in spans
+             if p not in _template_haystack().replace(_LINE_SENTINEL, "|")]
+    assert spans
+    assert not any(_piece_in_template(p) for p in spans)
 
 
 def test_lint_bucket_status_does_not_trust_a_shared_boilerplate_hit():
