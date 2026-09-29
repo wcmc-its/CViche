@@ -406,10 +406,14 @@ class ParsedActivityLine(NamedTuple):
     `activity` is the line with any role/date parenthetical stripped out,
     `roles` holds the parenthetical titles in source order, and `dates` is the
     range the line carried -- or was paired with from the orphaned-date pool.
+    `institution` is the source table's institution/location cell, and is
+    filled only when the caller says the table has that column between the
+    activity and the date (`institution_column=True`, #664); '' otherwise.
     """
     activity: str
     roles: tuple[str, ...]
     dates: str
+    institution: str = ''
 
 
 # Column-header labels that survive table flattening as their own lines.
@@ -422,7 +426,33 @@ _TRAILING_DATE = re.compile(r'(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)\s*$', re
 _PAREN_ROLE_DATE = re.compile(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\s*\)', re.IGNORECASE)
 
 
-def _parse_flattened_committee_lines(lines: list[str]) -> list[ParsedActivityLine]:
+def _parse_pipe_date_row(cells: list[str], pipe_date: str,
+                         institution_column: bool) -> ParsedActivityLine:
+    """One "cell | cell | date" row whose last cell is the date column.
+
+    Without `institution_column` every cell before the date is the activity
+    (joined back with " | ", as before #664). With it, the first cell is the
+    activity and the cells between it and the date are the institution: a
+    Section O row reads "Role | Institution | Dates". Any role+date
+    parenthetical is lifted out of the activity cell either way.
+    """
+    institution = ''
+    if institution_column and len(cells) >= 2:
+        activity, institution = cells[0], ', '.join(cells[1:])
+    else:
+        activity = ' | '.join(cells)
+    paren_match = _PAREN_ROLE_DATE.search(activity)
+    if not paren_match:
+        return ParsedActivityLine(activity, (), pipe_date, institution)
+    role_text = paren_match.group(1).strip().rstrip(',')
+    clean_activity = _PAREN_ROLE_DATE.sub('', activity).strip()
+    roles = (role_text,) if role_text else ()
+    return ParsedActivityLine(clean_activity, roles, pipe_date, institution)
+
+
+def _parse_flattened_committee_lines(
+    lines: list[str], *, institution_column: bool = False,
+) -> list[ParsedActivityLine]:
     """Parse committee/leadership lines flattened out of a source table.
 
     The single line parser behind section O's `_add_multiline_leadership_rows`
@@ -451,6 +481,11 @@ def _parse_flattened_committee_lines(lines: list[str]) -> list[ParsedActivityLin
     A line carrying several parentheticals ("(Vice Chair 2006-2008) (Chair
     2008-2010)") is one role held under changing titles, so it becomes one
     item: the latest date range, with every title collected into `roles`.
+
+    `institution_column=True` (Section O, #664) reads "Role | Institution |
+    Dates" pipe rows into `ParsedActivityLine.institution`; the default keeps
+    every cell in the activity, which is what Section P wants -- its middle
+    column is Role, not institution.
     """
     items: list[ParsedActivityLine] = []
     dates_pool: list[str] = []
@@ -469,19 +504,8 @@ def _parse_flattened_committee_lines(lines: list[str]) -> list[ParsedActivityLin
         if '|' in line:
             parts = [p.strip() for p in line.split('|') if p.strip()]
             if len(parts) >= 2 and _TRAILING_DATE.match(parts[-1]):
-                # Last part is a date, rest is the activity
-                activity = ' | '.join(parts[:-1])
-                pipe_date = parts[-1]
-                # Also extract any parenthetical role+date from the activity
-                paren_match = _PAREN_ROLE_DATE.search(activity)
-                if paren_match:
-                    role_text = paren_match.group(1).strip().rstrip(',')
-                    clean_activity = _PAREN_ROLE_DATE.sub('', activity).strip()
-                    roles = (role_text,) if role_text else ()
-                else:
-                    clean_activity = activity
-                    roles = ()
-                items.append(ParsedActivityLine(clean_activity, roles, pipe_date))
+                items.append(_parse_pipe_date_row(
+                    parts[:-1], parts[-1], institution_column))
                 continue
             elif len(parts) == 1:
                 line = parts[0]
@@ -550,3 +574,43 @@ def _parse_flattened_committee_lines(lines: list[str]) -> list[ParsedActivityLin
         )
 
     return items
+
+
+# A year or a year range at the START of a line ("1999-2010    Committee"): the
+# date-prefixed layout, where every record opens with its own date.
+_LEADING_DATE = re.compile(r'^\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?\b', re.IGNORECASE)
+
+# Two dated lines are the smallest text that can hold two records. One dated
+# line is one record plus, at most, a wrapped description under it.
+_MULTI_RECORD_MIN_DATED_LINES = 2
+
+
+def _line_carries_record_date(line: str) -> bool:
+    """True when `line` carries a date in one of the shapes the flattened-table
+    parser reads -- a role+date parenthetical, or a date at the end of the line
+    (which covers a bare date line and a pipe row whose last cell is the date
+    column) -- or opens with one, which the parser does not read but which
+    marks a record start in a date-prefixed block."""
+    line = line.strip()
+    return bool(_PAREN_ROLE_DATE.search(line) or _TRAILING_DATE.search(line)
+                or _LEADING_DATE.match(line))
+
+
+def _looks_like_multiple_records(lines: list[str]) -> bool:
+    """True when an entry's raw lines hold more than one dated record (#660).
+
+    Counts dated lines, not lines: a single committee whose description wraps
+    over five lines carries one date, a block of merged records carries one per
+    record. Counted line by line rather than from
+    `_parse_flattened_committee_lines`, because that parser drops orphaned
+    date lines when their count disagrees with the undated activities, and a
+    dropped date is exactly the second record this has to see.
+    Ambiguity resolves toward "multiple": a description that itself ends in a
+    year counts as a record, so the caller re-parses the lines instead of
+    trusting a single extracted record that may be one of several. Only a
+    block with at most one dated line is called a single record; undated
+    activity lines are not counted, so a list of undated records with a single
+    dated line reads as one record (judgement call, disclosed on the PR).
+    """
+    dated = sum(1 for line in lines if _line_carries_record_date(line))
+    return dated >= _MULTI_RECORD_MIN_DATED_LINES

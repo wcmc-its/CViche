@@ -85,7 +85,10 @@ from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _extract_name_from_uid,
     _is_structural_label,
     _is_table_header_entry,
+    _looks_like_multiple_records,
+    _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
+    ParsedActivityLine,
 )
 
 
@@ -350,3 +353,67 @@ def test_non_organization_parts_are_still_rejected_on_the_pipe_free_path(junk):
     # by shape: bare years / month-years, punctuation, column-header and filler
     # words. None of them may become an organization.
     assert _parse_multi_membership_entry(["Member", junk, "2010-present"]) == []
+
+
+# --- #664: the institution column of a flattened Section O table -----------
+
+def test_pipe_row_institution_column_lands_in_the_institution_field():
+    lines = ["Chair, Zorblax Board | Quuxville General Hospital | 2001-2005"]
+    assert _parse_flattened_committee_lines(lines, institution_column=True) == [
+        ParsedActivityLine("Chair, Zorblax Board", (), "2001-2005",
+                           "Quuxville General Hospital")]
+
+
+def test_pipe_row_default_keeps_every_cell_in_the_activity():
+    # Section P's middle column is Role, not institution: the default must
+    # read the row exactly as it did before the field existed.
+    lines = ["Zorblax Board | Quuxville General Hospital | 2001-2005"]
+    assert _parse_flattened_committee_lines(lines) == [
+        ParsedActivityLine("Zorblax Board | Quuxville General Hospital", (), "2001-2005")]
+
+
+def test_pipe_row_institution_column_still_lifts_the_role_parenthetical():
+    lines = ["Zorblax Board (Chair 2001-2005) | Quuxville General Hospital | 2001-2005"]
+    assert _parse_flattened_committee_lines(lines, institution_column=True) == [
+        ParsedActivityLine("Zorblax Board", ("Chair",), "2001-2005",
+                           "Quuxville General Hospital")]
+
+
+def test_pipe_row_with_two_cells_has_no_institution_even_when_asked():
+    # "Committee | 1999-2010": nothing sits between the activity and the date.
+    assert _parse_flattened_committee_lines(
+        ["Zorblax Board | 1999-2010"], institution_column=True) == [
+        ParsedActivityLine("Zorblax Board", (), "1999-2010")]
+
+
+def test_pipe_row_with_several_middle_cells_joins_them_as_the_institution():
+    lines = ["Chair | Quuxville General Hospital | Ohio | 2001-2005"]
+    (item,) = _parse_flattened_committee_lines(lines, institution_column=True)
+    assert (item.activity, item.institution) == ("Chair", "Quuxville General Hospital, Ohio")
+
+
+# --- #660: one dated record versus several -----------------------------------
+
+@pytest.mark.parametrize("lines", [
+    ["Zorblax Board (Chair 2001-2005)", "Quux Council (Member 2006-2008)"],   # two parentheticals
+    ["Zorblax Board | 2001-2005", "Quux Council | 2006-2008"],                 # two pipe dates
+    ["Zorblax Board  2001-2005", "Quux Council  2006"],                        # two trailing dates
+    ["2001-2005    Zorblax Board", "2006-2008    Quux Council"],              # date-prefixed records
+    ["Zorblax Board", "Quux Council", "Frob Panel", "2001", "2002", "2003"],   # orphaned date column
+    ["Zorblax Board (Chair 2001-2005)", "Meets monthly", "Reviews budgets",
+     "Quux Council (Member 2006-2008)"],                                       # records split by prose
+])
+def test_two_dated_lines_are_multiple_records(lines):
+    assert _looks_like_multiple_records(lines) is True
+
+
+@pytest.mark.parametrize("lines", [
+    ["Zorblax Board"],
+    ["Zorblax Board (Chair 2001-2005)"],
+    ["Zorblax Board (Chair 2001-2005)", "Meets monthly", "Reviews budgets",
+     "Advises the dean on space", "Reports to the senate"],                    # wrapped description
+    ["Zorblax Board", "Dates", "2001-2005"],                                   # header label + one date
+    ["Zorblax Board | Quuxville General Hospital", "Quuxville, Ohio | 2001-"],
+])
+def test_at_most_one_dated_line_is_a_single_record(lines):
+    assert _looks_like_multiple_records(lines) is False

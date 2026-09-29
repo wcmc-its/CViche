@@ -446,6 +446,47 @@ class TestWrappedRowRendersAsOneRecord:
         assert len(_o_rows(entry)) > 1
 
 
+class TestInstitutionReachesTheMultilineRows:
+    """#664 item 1: the multiline path used to hardcode institution to ''."""
+
+    def test_pipe_rows_keep_their_institution_column(self):
+        text = ("Chair, Alpha Board | Quuxville General Hospital | 2001-2003\n"
+                "Director, Beta Center | Frobnitz Institute | 2004-2006\n"
+                "Member, Gamma Panel | Wibble College | 2007-2009")
+        rows = _o_rows({"text": text, "extracted_fields": {}, "taxonomy_code": "O"})
+        assert rows == [
+            ("Chair, Alpha Board", "Quuxville General Hospital", "2001-2003"),
+            ("Director, Beta Center", "Frobnitz Institute", "2004-2006"),
+            ("Member, Gamma Panel", "Wibble College", "2007-2009"),
+        ]
+
+    def test_three_line_entry_with_complete_fields_is_still_reparsed(self):
+        # O's routing is unchanged by #664: 3+ raw lines re-parse even when the
+        # fields are complete, so no line of the text (location, department)
+        # is dropped by a three-field row.
+        text = ("Director, Zorblax Studies\nQuuxville General Hospital\n"
+                "Quuxville, Ohio | Sept. 1999 - 2010")
+        entry = {"text": text, "taxonomy_code": "O", "extracted_fields": {
+            "leadership_role": "Director, Zorblax Studies",
+            "institution": "Quuxville General Hospital",
+            "start_date": "1999-09", "end_date": "2010-06"}}
+        rendered = " ".join(" ".join(r) for r in _o_rows(entry))
+        assert "Quuxville, Ohio" in rendered
+
+    def test_merged_block_with_complete_fields_is_still_split(self):
+        # Fields describe the first record only; two dated lines mean the text
+        # holds more, so the multiline parser must still see every one.
+        text = ("Chair, Alpha Board (Chair 2001-2003)\n"
+                "Director, Beta Center (Director 2004-2006)\n"
+                "Member, Gamma Panel (Member 2007-2009)")
+        rows = _o_rows({"text": text, "taxonomy_code": "O", "extracted_fields": {
+            "leadership_role": "Chair, Alpha Board", "institution": "Quuxville General Hospital",
+            "start_date": "2001", "end_date": "2003"}})
+        assert [r[0] for r in rows] == [
+            "Chair, Alpha Board (Chair)", "Director, Beta Center (Director)",
+            "Member, Gamma Panel (Member)"]
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
