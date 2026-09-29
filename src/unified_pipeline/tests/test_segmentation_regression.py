@@ -173,6 +173,28 @@ def test_coverage_line_cannot_match_across_entry_boundary():
     assert m["lost_lines"] == ["alpha beta gamma delta epsilon zeta"]
 
 
+def test_template_scaffolding_is_neither_covered_nor_lost():
+    """#815 (976WPY): a CV written on the WCM template keeps the template's
+    prompts, which stage 2 rightly drops. They must not count as lost."""
+    verbatim = "Other Educational Experiences (i.e., certificates, etc)"
+    reworded = "Academic Degree(s) (Bachelor's and higher)"  # near-match only
+    source = [verbatim, reworded, _GRANT_A]
+    m = compute_metrics(source, _STAGE1A, {"entries": [_entry(_GRANT_A, start=1)]})
+    assert m["lost_lines"] == []
+    assert m["text_coverage_pct"] == 100.0
+
+
+def test_short_template_text_and_real_content_still_count_as_lost():
+    """Short template strings double as real values ("Full-time salaried by
+    Weill Cornell" is the Employment Status answer a CV kept), so below the
+    length floor they still count; so does absent real content."""
+    source = ["Full-time salaried by Weill Cornell", "2. Principal Investigator",
+              _GRANT_B, _GRANT_A]
+    m = compute_metrics(source, _STAGE1A, {"entries": [_entry(_GRANT_A, start=1)]})
+    assert m["lost_lines"] == source[:3]
+    assert m["text_coverage_pct"] == 25.0
+
+
 # ------------------------------------------------------------------ compare
 
 _BASE = {
