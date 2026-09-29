@@ -71,7 +71,8 @@ def _make_stub(render):
 
     def run_stage6(input_path, output_path=None, verbose=True, original_doc_path=None, **kw):
         stub.calls.append({"input_path": input_path, "output_path": output_path,
-                           "original_doc_path": original_doc_path})
+                           "original_doc_path": original_doc_path,
+                           "discover_original_doc": kw.get("discover_original_doc")})
         return render(stub, input_path, output_path, original_doc_path)
 
     def WCMTemplateGenerator(*a, **kw):
@@ -444,6 +445,34 @@ def test_a_uids_file_renders_a_trailing_space_uid_and_fails_on_an_unmatched_one(
         assert "not-in-this-arm" in output
 
 
+def test_the_gate_never_lets_stage6_guess_a_source_docx():
+    # #732: with or without --source-dir (and for a uid it has no docx for),
+    # stage 6's SAMPLE_CV_DIR / CWD-relative fallback must be switched off,
+    # or the render depends on where the gate was launched.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        arm = _make_arm(root, ["u1"])
+        sources = root / "sources"
+        sources.mkdir()
+        for label, extra in (("no --source-dir", []),
+                             ("--source-dir without a match", ["--source-dir", str(sources)])):
+            with _stage6(_make_stub(_renders_a_good_docx)) as stub:
+                code, _ = _run_main([str(arm), str(root / "out"), *extra])
+            assert code == 0
+            assert stub.calls[0]["discover_original_doc"] is False, label
+
+
+def test_an_arm_with_no_uids_fails_the_gate():
+    # An empty arm renders nothing; exit 0 would read as a clean A/B arm.
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        arm = _make_arm(root, [])
+        with _stage6(_make_stub(_renders_a_good_docx)):
+            code, output = _run_main([str(arm), str(root / "out")])
+        assert code == 1, "an arm with no uids must fail"
+        assert "empty arm" in output
+
+
 if __name__ == "__main__":
     test_a_successful_render_exits_zero_and_writes_the_docx()
     test_a_raising_renderer_fails_the_gate()
@@ -460,4 +489,6 @@ if __name__ == "__main__":
     test_the_llm_is_disabled_during_the_render()
     test_the_llm_is_restored_after_main_returns()
     test_a_uids_file_renders_a_trailing_space_uid_and_fails_on_an_unmatched_one()
+    test_the_gate_never_lets_stage6_guess_a_source_docx()
+    test_an_arm_with_no_uids_fails_the_gate()
     print("ok")
