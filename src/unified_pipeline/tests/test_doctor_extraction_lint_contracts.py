@@ -425,6 +425,15 @@ def test_lint_classified_unrendered_warns_on_false_plus_none():
     assert "2 classified" in findings[0]["message"]
 
 
+def test_lint_classified_unrendered_skips_m1_the_research_summary_replaces():
+    """YTPMZK: stage 6 renders the research summary in place of M1's own
+    text, so M1 never renders verbatim when the summary does -- and goes to
+    the Appendix, where it IS seen, when it doesn't. The same unrendered text
+    under any other code is still flagged."""
+    assert lint_classified_unrendered(_entries(_UNRENDERED_TEXT, code="M1"), _OUTPUT_BLOCKS) == []
+    assert len(lint_classified_unrendered(_entries(_UNRENDERED_TEXT, code="M2A"), _OUTPUT_BLOCKS)) == 1
+
+
 def test_lint_classified_unrendered_does_not_trust_a_shared_boilerplate_hit():
     """#744 at the lint: two 3b entries share the piece 'Department of
     Medicine'; the output holds only that piece, so neither code's entry has
