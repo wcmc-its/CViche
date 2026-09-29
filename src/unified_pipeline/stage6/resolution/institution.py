@@ -75,26 +75,26 @@ def _location_already_in_institution(location: str, institution: str) -> bool:
     found = re.search(tail, institution, re.IGNORECASE)
     if not found:
         return False
-    # A state or country on BOTH sides must agree: "Rochester, MN" is not
-    # already present in "Mayo Clinic, Rochester, NY" and "Cambridge, MA" is
-    # not in "Cambridge, UK" (#566). Either side without one is a city-only
-    # match, as before.
-    stated, wanted = (found.group(1) or '').strip(), (parts[1] if len(parts) > 1 else '')
-    if stated and wanted:
-        return _state_token(stated) == _state_token(wanted)
-    return True
+    # Keep the location only when BOTH sides name a US state and the states
+    # differ: "Rochester, MN" is not already present in "Mayo Clinic,
+    # Rochester, NY" (#566). Every other pairing -- a country against a
+    # province, "USA" or "England" against a state, "Tex.", a ZIP -- cannot be
+    # judged different from a token alone and keeps the city-only match, so a
+    # place written two ways is not printed twice. Residual: "Cambridge, MA"
+    # against "Cambridge, UK" is still treated as already present.
+    stated, wanted = _us_state(found.group(1) or ''), _us_state(parts[1] if len(parts) > 1 else '')
+    return not (stated and wanted and stated != wanted)
 
 
-def _state_token(text: str) -> str:
-    """Comparable form of a state/country token: a spelt-out US state becomes
-    its abbreviation, and dots drop, so "North Carolina", "NC" and "N.C." compare
-    equal. "United Kingdom" vs "UK" is NOT bridged: no table for it exists, so
-    both render rather than one being dropped."""
-    text = text.replace('.', '').strip()
+def _us_state(token: str) -> str:
+    """The two-letter abbreviation `token` names, or '' when it names no US
+    state. Case, dots and spaces are ignored: "N. Y.", "new york" and "NY"
+    all give "NY"."""
+    squashed = re.sub(r'[\s.]', '', token).lower()
     for name, abbrev in _US_STATE_ABBREVS.items():
-        if name.lower() == text.lower():
+        if squashed in (abbrev.lower(), re.sub(r'\s', '', name).lower()):
             return abbrev
-    return text.upper()
+    return ''
 
 
 def _get_institution_location(entry: dict) -> tuple[str, bool]:
