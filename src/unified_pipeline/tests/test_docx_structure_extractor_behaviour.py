@@ -19,7 +19,7 @@ Document()/add_paragraph/add_table and saved to tmp_path only where a real
 path is required (extract_unified_elements / extract_docx_structure take a
 path, not a Document).
 
-Untestable: main() (argparse + sys.exit + file I/O side effects) and the
+Untestable: the
 `if __name__ == '__main__'` guard -- no network/corpus fixture is available
 and covering it would only re-test print()/json.dump plumbing already
 exercised indirectly through extract_docx_structure/create_simplified_layout_json.
@@ -27,6 +27,7 @@ exercised indirectly through extract_docx_structure/create_simplified_layout_jso
     python3 -m pytest src/unified_pipeline/tests/test_docx_structure_extractor_behaviour.py -p no:cacheprovider
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -1732,3 +1733,22 @@ def test_extract_unified_elements_single_cell_embedded_header_still_splits(tmp_p
     elements = extract_unified_elements(str(docx_path))["elements"]
 
     assert "Education and Degrees" in [e["text"] for e in elements if e["type"] == "table_header"]
+
+
+def test_main_writes_both_json_files_as_readable_utf8(tmp_path, monkeypatch):
+    from unified_pipeline.core import docx_structure_extractor as mod
+
+    doc = Document()
+    doc.add_paragraph("José Muñoz")
+    docx_path = tmp_path / "cv.docx"
+    doc.save(str(docx_path))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["docx_structure_extractor.py", str(docx_path)])
+
+    mod.main()
+
+    for name in ("cv_structure.json", "cv_layout.json"):
+        raw = (tmp_path / name).read_bytes().decode("utf-8")
+        assert "José Muñoz" in raw
+        assert "\\u00e9" not in raw
+        assert json.loads(raw)

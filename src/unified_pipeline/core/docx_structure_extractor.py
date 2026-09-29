@@ -1761,15 +1761,15 @@ def main():
 
     # Save full structure
     output_path = Path(docx_path).stem + "_structure.json"
-    with open(output_path, 'w') as f:
-        json.dump(structure, f, indent=2)
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(structure, f, indent=2, ensure_ascii=False)
     print(f"✓ Full structure saved to: {output_path}")
 
     # Save simplified layout
     simplified = create_simplified_layout_json(structure)
     simplified_path = Path(docx_path).stem + "_layout.json"
-    with open(simplified_path, 'w') as f:
-        json.dump(simplified, f, indent=2)
+    with open(simplified_path, 'w', encoding='utf-8') as f:
+        json.dump(simplified, f, indent=2, ensure_ascii=False)
     print(f"✓ Simplified layout saved to: {simplified_path}")
 
     print(f"\nSummary:")
