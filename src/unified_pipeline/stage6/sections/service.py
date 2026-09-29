@@ -47,7 +47,8 @@ EDITORIAL_BOARD_CODES = ('Q4B', 'Q4C')  # Editorial Board Membership roles
 # own schema names it `organization`; an entry the hierarchy-mismatch reroute
 # (`_correct_mismatch_if_needed`) moves to Q1 still carries the schema of the
 # code it was extracted under -- a Q4B entry names it `journal_name` and a K3
-# entry `program_name` (#946: run ZA1VOV's "Ortho Pearls WoW" section editor).
+# entry `program_name`. No corpus row takes this path today (#972's same-family
+# rule keeps the #946 Q4B entry out of Q1); it guards the reroutes still allowed.
 EXTRAMURAL_ORGANIZATION_FIELDS = ('organization', 'journal_name', 'program_name')
 
 # Q3/Q4/Q4A/Q4B/Q4C -> (WCM template section display name, header search-text candidates)

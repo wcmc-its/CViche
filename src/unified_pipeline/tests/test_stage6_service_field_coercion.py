@@ -952,6 +952,8 @@ def test_q1_organization_field_wins_over_the_aliases(tmp_path):
     ("2001- Fictional Society Treasurer", "Treasurer", "2001", None, "Fictional Society"),
     # A range with no end ("2001-") goes whole, even inside the line.
     ("Fictional 2001- Society Treasurer", "Treasurer", "2001", None, "Fictional Society"),
+    # A lone year removed mid-line leaves no double space behind.
+    ("Fictional 2001 Society Treasurer", "Treasurer", "2001", None, "Fictional Society"),
     # Punctuation the removal leaves at the edges of a segment is trimmed.
     ("Fictional Society, Treasurer.", "Treasurer", None, None, "Fictional Society"),
     # The role is removed whatever its case in the entry text.
