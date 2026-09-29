@@ -117,6 +117,18 @@ def _year_ranges(text: str) -> list[tuple[int, int]]:
     return ranges
 
 
+# "Phase I" / "phase 2": the one mark that tells two trials of the same drug
+# apart (#1106). A one-character numeral is not a significant word, so the
+# token-containment branch below cannot see it.
+_TRIAL_PHASE_RE = re.compile(r'\bphase\s*([1-4]|iv|i{1,3})\b', re.IGNORECASE)
+_ROMAN_PHASE = {'i': '1', 'ii': '2', 'iii': '3', 'iv': '4'}
+
+
+def _trial_phases(text: str) -> set[str]:
+    """Every trial phase the text names, Roman numerals as digits."""
+    return {_ROMAN_PHASE.get(p.lower(), p) for p in _TRIAL_PHASE_RE.findall(text)}
+
+
 def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
     """False when the dropped text states a date the kept text does not carry.
 
@@ -184,6 +196,9 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     if not _dates_compatible(dropped_entry.get('text') or '',
                              kept_entry.get('text') or ''):
         return False  # #666: a different date is a different record
+    if not _trial_phases(dropped_entry.get('text') or '') <= _trial_phases(
+            kept_entry.get('text') or ''):
+        return False  # #1106: a different trial phase is a different trial
     dropped_sig = _entry_signature_words(dropped_entry)
     if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
             and dropped_sig <= _entry_signature_words(kept_entry)
