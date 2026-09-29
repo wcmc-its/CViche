@@ -18,6 +18,7 @@ Date: 2025-11-29
 """
 
 import logging
+import functools
 import os
 import sys
 import json
@@ -490,6 +491,61 @@ _TAXONOMY_WARNED_CONFUSIONS = frozenset({
     ('D3', 'D1'), ('K1', 'K4'), ('K4', 'K1'), ('K5', 'K4'),
     ('Q1', 'Q2'), ('Q2', 'Q3'), ('S1', 'S8'), ('S2', 'S1'),
 })
+
+
+_KEEP_SENTINEL = 'KEEP'
+_TAXONOMY_PATH = Path(__file__).parent / "core" / "taxonomy_v7.json"
+
+
+# Leading markdown list / quote / heading / emphasis markers on a reply line.
+_MD_LINE_PREFIX = re.compile(r'^(?:[\s>#*_\-\u2022]+|\d+[.)]\s+)+')
+
+
+@functools.cache
+def _taxonomy_codes() -> frozenset[str]:
+    """Every code in core/taxonomy_v7.json. A reclassification reply may only
+    name one of these (or KEEP); a shape regex let 'ALL' and 'NOTE' through
+    (#264)."""
+    with open(_TAXONOMY_PATH, encoding="utf-8") as f:
+        return frozenset(entry['code'] for entry in json.load(f)['codes'])
+
+
+def parse_reclassified_segments(
+        result_text: str, original_code: str) -> list[tuple[str, str | None]] | None:
+    """Parse `_reclassify_entry_segments`' "CODE: text" lines.
+
+    Returns [(segment_text, code)], or None when no line is usable. Only a
+    colon-bearing line that opens with a real taxonomy code or KEEP becomes a
+    segment; any other line is model commentary (a "Here is the analysis:"
+    preamble, "**Rationale:**" bullets, "> **Note:** ..."), and folding it in
+    as a segment renders it as a faculty-visible bullet (#264). Such lines are
+    dropped one by one, not the whole reply: live replies routinely carry a
+    preamble around valid code lines, and refusing them sent the entry back
+    to the appendix. A reply with no valid line returns None, so the caller
+    keeps the original entry text (fail closed).
+    """
+    segments: list[tuple[str, str | None]] = []
+    for line in result_text.strip().split('\n'):
+        line = line.strip()
+        if not line or ':' not in line:
+            continue
+        code, segment_text = (part.strip() for part in line.split(':', 1))
+        # A markdown list/emphasis wrapper around a real code ('- K2: ...',
+        # '**K2:** ...', '1. K2: ...') is still a code line, not commentary.
+        code = _MD_LINE_PREFIX.sub('', code).rstrip('*_ ').upper()
+        segment_text = segment_text.lstrip('*_ ')
+        if code != _KEEP_SENTINEL and code not in _taxonomy_codes():
+            logger.warning(
+                "Stage 6 reclassification reply: dropped non-code line "
+                "with prefix %r", code[:40])
+            continue
+        if segment_text and len(segment_text) > 10:
+            # KEEP means "correct as originally coded" -- resolve to the
+            # original code so the caller can route it home instead of
+            # dumping it in the appendix (#209).
+            resolved = (original_code if original_code != '?' else None) if code == _KEEP_SENTINEL else code
+            segments.append((segment_text, resolved))
+    return segments or None
 
 
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
@@ -2358,28 +2414,8 @@ Now analyze the text above:"""
                 max_tokens=4000
             )
 
-            result_text = llm_result["content"].strip()
-
-            # Parse the response
-            segments = []
-            for line in result_text.split('\n'):
-                line = line.strip()
-                if not line or ':' not in line:
-                    continue
-                # Parse "CODE: text" format
-                parts = line.split(':', 1)
-                if len(parts) == 2:
-                    code = parts[0].strip().upper()
-                    segment_text = parts[1].strip()
-                    if segment_text and len(segment_text) > 10:
-                        # KEEP means "correct as originally coded" — resolve to
-                        # the original code so the caller can route it home
-                        # instead of dumping it in the appendix (#209).
-                        if code == 'KEEP':
-                            code = original_code if original_code != '?' else None
-                        segments.append((segment_text, code))
-
-            return segments if segments else None
+            return parse_reclassified_segments(
+                llm_result["content"], original_code)
 
         except Exception as e:
             if self.verbose:
