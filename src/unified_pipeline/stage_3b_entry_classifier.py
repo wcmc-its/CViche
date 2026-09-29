@@ -737,7 +737,7 @@ def run_stage_3b(
     output_doc["meta"]["code_distribution"] = dict(sorted(code_counts.items()))
 
     # Write output
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(output_doc, f, indent=2)
 
     print()

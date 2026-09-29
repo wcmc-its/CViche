@@ -315,6 +315,17 @@ def generate_run_id() -> str:
     existing consumer already accepts the narrower `^[A-Z0-9]{6}$` set --
     steps.py's `_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")` is a
     superset -- so no consumer needed a change.
+
+    Six base-36 characters stay the canonical run id (#797 decision,
+    2026-09-09): a collision now costs a redraw in create_run_archive, never
+    an overwrite, so the id width sets only the redraw rate. With N existing
+    runs a fresh draw collides with probability ~N / 36**6: ~4.6e-5 at 1e5
+    runs, ~4.6e-4 at 1e6, ~4.6e-3 at 1e7. Migration trigger: when the run
+    table approaches ~1e6 rows (redraws near 5e-4 per upload), move to a
+    UUID/ULID canonical id with this 6-char form kept as a display id --
+    widening touches Run.id (String(10)), artifact basenames and download
+    URLs. Exhaustion of every redraw is logged at ERROR by both callers of
+    create_run_archive (upload and restart).
     """
     return "".join(secrets.choice(_RUN_ID_ALPHABET) for _ in range(6))
 
@@ -322,7 +333,8 @@ def generate_run_id() -> str:
 # Bound on how many times a fresh run id may be regenerated after a storage
 # collision before the request is failed outright (#685). Kept small and
 # named rather than inline: at ~2.18e9 uniform ids (see generate_run_id), a
-# single collision is already a ~1-in-2e9 event, so more than a couple of
+# single draw collides with probability ~N / 2.18e9 for N existing runs, so
+# more than a couple of
 # regenerations would only ever fire under a genuine storage fault, not an
 # id collision -- in which case retrying further just delays surfacing it.
 _RUN_ID_ATTEMPTS = 5
