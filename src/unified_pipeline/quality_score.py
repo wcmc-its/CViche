@@ -650,23 +650,23 @@ def _is_placeholder_only_row(text: str | None) -> bool:
     return is_unanswered_prompt("|".join(pieces))
 
 
-def _is_template_text(text: str | None) -> bool:
-    """True when *text* is the WCM template's own words -- an instruction, a
-    near-variant of one from another template revision, or a label-only line
-    -- via the same `core.template_boilerplate` helpers stage 6 uses to drop
-    it. Shared by `score_t_bucket` and `score_field_sparseness` (#822, #427)."""
-    return (is_template_instruction(text) or is_near_template_instruction(text)
-            or is_template_label_line(text))
-
-
 def _has_nothing_to_extract(entry: dict) -> bool:
-    """True when stage 4 had no fields to find in *entry* (#427): a T entry
-    (never sent to extraction), template scaffolding, or a placeholder-only
-    row such as an unanswered "N/A" prompt."""
-    if entry.get("taxonomy_code") == "T":
-        return True
+    """True when stage 4 had no fields to find in *entry* (#427): stage 4
+    skipped it (`extraction_skipped`, too short to extract), or its text is a
+    placeholder-only row or the WCM template's own words -- the same
+    `core.template_boilerplate` helpers `score_t_bucket` uses. Not keyed on
+    taxonomy code: stage 4 does extract T entries, so a T miss still counts."""
     text = entry.get("text")
-    return _is_template_text(text) or _is_placeholder_only_row(text)
+    if not isinstance(text, str):
+        text = None
+    if entry.get("extraction_skipped") or _is_placeholder_only_row(text):
+        return True
+    if is_template_instruction(text) or is_near_template_instruction(text):
+        return True
+    # ponytail: is_template_label_line is Appendix-only and "100%" is a label,
+    # so "Clinical | 100%" (a real J effort record) would match; a label-only
+    # header row carries no digit. Tighten if a digit-free real record appears.
+    return is_template_label_line(text) and not any(c.isdigit() for c in text)
 
 
 def _goal_claimed_row_ids(entries: list[dict]) -> set[int]:
@@ -772,7 +772,8 @@ def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
             text = entry.get("text")
             if id(entry) in goal_claimed_ids:
                 excluded_goal_claim += 1
-            elif _is_template_text(text):
+            elif (is_template_instruction(text) or is_near_template_instruction(text)
+                    or is_template_label_line(text)):
                 excluded_template += 1
             elif _is_placeholder_only_row(text):
                 excluded_placeholder += 1
@@ -1054,8 +1055,8 @@ def score_field_sparseness(outputs_dir: Path) -> tuple[float, str, None]:
     that is the calibration, not a double-count of one failure.
 
     #427: an entry with nothing to extract (`_has_nothing_to_extract`) counts
-    on neither term -- its all-null fields and its skipped extraction are
-    correct output, not a miss. As in `score_t_bucket`, only the numerators
+    on neither term -- its all-null fields or skipped extraction are correct
+    output, not a miss. As in `score_t_bucket`, only the numerators
     shrink; the denominator stays every entry the run produced.
     """
     data, reason = _load_first(outputs_dir, "*_fields.json")
