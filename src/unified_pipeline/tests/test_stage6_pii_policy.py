@@ -1546,3 +1546,56 @@ def test_849_policy_label_inside_a_word_after_a_known_field_is_not_cut(text):
     entries = {"A": [{"text": text, "taxonomy_code": "A", "extracted_fields": {}}]}
     _run(entries)
     assert entries["A"][0]["text"] == text
+
+
+# --------------------------------------------------------------------------
+# #847 residual round 5: child dates the child-item rule did not reach.
+# All names, dates and years synthetic.
+# --------------------------------------------------------------------------
+
+def test_redact_pre_llm_values_children_label_after_a_merged_known_field_still_takes_child_items():
+    # The Children label's span merges into the Marital Status span that
+    # opens the line and keeps ITS category, so the child-item rule never
+    # ran on it: the child's date reached the LLM.
+    text = "Marital Status: Married Children: Ann (01/02/2010)"
+    assert redact_pre_llm_values(text) == f"Marital Status: Married Children: Ann ({PRE_LLM_PLACEHOLDER})"
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A Children label after another known field on its own line is a
+    # Personal Data field, not a title: every whole date it carries is a
+    # child's, whatever the item looks like.
+    ("Marital Status: Married (Jo) Children: (1), Jane Roe, 01/02/94",
+     f"Marital Status: Married (Jo) Children: (1), Jane Roe, {PRE_LLM_PLACEHOLDER}"),
+    ("Citizenship: US Children: Jane, 01/02/2010 and Bob, 03/04/2012",
+     f"Citizenship: US Children: Jane, {PRE_LLM_PLACEHOLDER} and Bob, {PRE_LLM_PLACEHOLDER}"),
+    # ...up to the next known field label only.
+    ("Citizenship: US Children: Jane, 01/02/2010 Date of Appointment: 07/01/2015",
+     f"Citizenship: US Children: Jane, {PRE_LLM_PLACEHOLDER} Date of Appointment: 07/01/2015"),
+    # A bare year is still never a child's date here.
+    ("Marital Status: Married Children: two, since 2010", "Marital Status: Married Children: two, since 2010"),
+    # A known label mid-line is not a Personal Data line: a citation.
+    ("Roe J. Threats to Health: Youth in India. Health of Children: Hazards, Bangkok, 3-7 March 2002",
+     "Roe J. Threats to Health: Youth in India. Health of Children: Hazards, Bangkok, 3-7 March 2002"),
+])
+def test_redact_pre_llm_values_children_label_after_a_known_field_takes_every_whole_date(text, expected):
+    assert redact_pre_llm_values(text) == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A whole date that OPENS a Children label's value is a child's date:
+    # no title opens with one.
+    ("Dependents: 01/02/2010", f"Dependents: {PRE_LLM_PLACEHOLDER}"),
+    ("Children: 01/02/2010, 03/04/2012 and 05/06/2014",
+     f"Children: {PRE_LLM_PLACEHOLDER}, {PRE_LLM_PLACEHOLDER} and {PRE_LLM_PLACEHOLDER}"),
+    ("Children: Ann (01/02/2010), 03/04/2012",
+     f"Children: Ann ({PRE_LLM_PLACEHOLDER}), {PRE_LLM_PLACEHOLDER}"),
+    # A bare date followed by more text is not a list item.
+    ("Children: 01/02/2010 Symposium, Boston", "Children: 01/02/2010 Symposium, Boston"),
+    ("Children: Ann (01/02/2010), 07/01/2015 Appointed",
+     f"Children: Ann ({PRE_LLM_PLACEHOLDER}), 07/01/2015 Appointed"),
+    # A year range is not a whole date.
+    ("Children: 2015-2016 NHANES data brief", "Children: 2015-2016 NHANES data brief"),
+])
+def test_redact_pre_llm_values_a_date_opening_a_children_value_is_a_child_item(text, expected):
+    assert redact_pre_llm_values(text) == expected
