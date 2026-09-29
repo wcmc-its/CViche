@@ -71,6 +71,14 @@ DEFAULT_MAX_TOKENS = 16000
 # gets the request shape it always had.
 NO_SAMPLING_PARAMS_MODELS = frozenset({"anthropic.claude-sonnet-5"})
 
+# Every max_tokens cap in the codebase was sized against Sonnet 4.6's
+# tokenizer. Sonnet 5's tokenizer spends about 1.4x the output tokens on the
+# same English (measured 2026-09-29: stage 4.5's ~170-word summary is ~250
+# tokens on 4.6 and hit its 350 cap at ~140 words on 5), so a fixed cap cuts
+# its output short. Scale the cap per model instead of re-tuning every call
+# site; models absent here keep their caps unchanged.
+MAX_TOKENS_SCALE = {"anthropic.claude-sonnet-5": 1.5}
+
 _bedrock_client = None
 
 
@@ -378,8 +386,9 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     # back to the conservative DEFAULT_MAX_TOKENS floor instead of omitting the
     # field -- omitting it lets Bedrock apply the model's ~64K default ceiling,
     # which is the runaway-generation tail risk this floor exists to bound.
-    call_kwargs["inferenceConfig"]["maxTokens"] = (
-        max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
+    cap = max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
+    call_kwargs["inferenceConfig"]["maxTokens"] = int(
+        cap * MAX_TOKENS_SCALE.get(_normalize_model_id(model), 1)
     )
     # json_schema callers: force a single-tool call whose inputSchema is the
     # caller's schema, so Bedrock constrains the output the way OpenAI does
