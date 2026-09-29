@@ -31,6 +31,7 @@ from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     _is_certification_header_line,
     _is_fused_certification,
     _reconstruct_certification_rows,
+    _split_multi,
 )
 
 
@@ -996,3 +997,58 @@ class TestBoardCellCarriesTheSpecialty:
                                   "certificate_number": "123456", "year_certified": "2010"}},
         ])
         assert _rows_after_board(gen) == [("American Board of Internal Medicine", "123456", "2010")]
+
+
+class TestCertificateNumberSeparatorHeuristic:
+    """#569: the comma/semicolon split that decides whether an entry is fused.
+
+    `_split_multi` treats `,` and `;` as the same separator, so a mixed
+    "111, 222; 333" counts three certifications, exactly like the pure-comma
+    and pure-semicolon neighbours. `_is_fused_certification` then fires on
+    more than one part.
+    """
+
+    def test_pure_comma_splits_into_parts(self):
+        assert _split_multi("111, 222, 333") == ["111", "222", "333"]
+
+    def test_pure_semicolon_splits_into_parts(self):
+        assert _split_multi("111; 222; 333") == ["111", "222", "333"]
+
+    def test_mixed_comma_and_semicolon_splits_into_the_same_parts(self):
+        assert _split_multi("111, 222; 333") == ["111", "222", "333"]
+
+    def test_mixed_separators_drop_empty_parts_and_whitespace(self):
+        assert _split_multi(" 111 ,; 222 ;, ") == ["111", "222"]
+
+    def test_single_number_and_blank_are_not_split(self):
+        assert _split_multi("111") == ["111"]
+        assert _split_multi("") == []
+        assert _split_multi(None) == []
+
+    def test_list_input_is_not_resplit_on_separators(self):
+        assert _split_multi(["111", " 222 ", ""]) == ["111", "222"]
+
+    def test_fusion_detected_for_pure_comma_pure_semicolon_and_mixed(self):
+        for raw in ("111, 222", "111; 222", "111, 222; 333"):
+            parts = _split_multi(raw)
+            assert _is_fused_certification({"certificate_number": raw}, parts) is True, raw
+
+    def test_single_number_is_not_fused(self):
+        assert _is_fused_certification({"certificate_number": "111"}, _split_multi("111")) is False
+
+    def test_mixed_separator_entry_takes_the_multi_cert_path_end_to_end(self):
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "Board A",
+                "certificate_number": "111, 222; 333",
+                "year_certified": "2010",
+            },
+            "text": "Board A | 111 | 2010\nBoard B | 222 | 2012\nBoard C | 333 | 2014",
+        }
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Board A", "111", "2010"),
+            ("Board B", "222", "2012"),
+            ("Board C", "333", "2014"),
+        ]
