@@ -68,6 +68,17 @@ def test_below_the_confidence_floor_does_not_pin():
     assert pinned_header_code(_ctx(meta=_node("INVITED PRESENTATIONS", "R", HEADER_PIN_MIN_CONFIDENCE))) == "R"
 
 
+def test_most_specific_level_must_reach_the_floor_even_if_its_parent_does():
+    ctx = _ctx(meta=_node("INVITED PRESENTATIONS", "R", 1.0), section=_node("Invited talks", "R", 0.6))
+    assert pinned_header_code(ctx) is None
+
+
+def test_subsection_is_the_most_specific_level():
+    ctx = _ctx(meta=_node("INVITED PRESENTATIONS", "R", 1.0), section=_node("Talks", "R", 1.0),
+               subsection=_node("Grand rounds", "R", 0.6))
+    assert pinned_header_code(ctx) is None
+
+
 def test_no_context_does_not_pin():
     assert pinned_header_code(_ctx()) is None
     assert pinned_header_code(_ctx(meta={"title": "X", "taxonomy_options": []})) is None
@@ -126,5 +137,6 @@ def test_unpinnable_group_is_returned_unchanged():
 
 def test_input_entries_are_not_mutated():
     entry = _entry("K4")
+    before = dict(entry)
     apply_header_pin([entry], R_CTX)
-    assert entry["taxonomy_code"] == "K4" and "pre_pin_code" not in entry
+    assert entry == before
