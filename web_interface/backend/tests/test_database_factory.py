@@ -25,6 +25,9 @@ from app.database_factory import (
     DB_AUTH_MODE_IAM,
     DB_AUTH_MODE_PASSWORD,
     DB_CONNECT_TIMEOUT_SECONDS,
+    DB_MAX_OVERFLOW,
+    DB_POOL_SIZE,
+    DB_POOL_TIMEOUT_SECONDS,
     DB_PASSWORD_ENV,
     DEFAULT_DB_AUTH_MODE,
     RDS_CA_PATH,
@@ -364,3 +367,30 @@ def test_password_connect_is_time_bounded(
     )
     capture_engine["kwargs"]["creator"]()
     assert record_pymysql_connect[0]["connect_timeout"] == DB_CONNECT_TIMEOUT_SECONDS
+
+
+def test_engine_pool_sizing_is_explicit(monkeypatch, capture_engine):
+    """pool_size / max_overflow / pool_timeout are passed to create_engine
+    and reach the live pool, not left to SQLAlchemy defaults (#784)."""
+    _password_env(monkeypatch)
+    engine = create_cviche_engine(
+        db_host="db", db_port="3306", db_name="cviche", db_user="root"
+    )
+    kwargs = capture_engine["kwargs"]
+    assert kwargs["pool_size"] == DB_POOL_SIZE
+    assert kwargs["max_overflow"] == DB_MAX_OVERFLOW
+    assert kwargs["pool_timeout"] == DB_POOL_TIMEOUT_SECONDS
+    assert engine.pool.size() == DB_POOL_SIZE
+    assert engine.pool._max_overflow == DB_MAX_OVERFLOW
+    assert engine.pool._timeout == DB_POOL_TIMEOUT_SECONDS
+
+
+def test_pool_budget_fits_rds_max_connections():
+    """maxReplicas x 1 worker x (pool + overflow) leaves headroom under
+    RDS max_connections = 318 (measured 2026-09-29, #784)."""
+    # Pinned literals: changing a pool value must mean re-doing the budget
+    # arithmetic in database_factory.py and updating these together.
+    assert (DB_POOL_SIZE, DB_MAX_OVERFLOW, DB_POOL_TIMEOUT_SECONDS) == (5, 10, 30)
+    max_replicas, workers, max_connections = 4, 1, 318
+    worst_case = max_replicas * workers * (DB_POOL_SIZE + DB_MAX_OVERFLOW)
+    assert worst_case <= max_connections // 2
