@@ -82,6 +82,15 @@ def build_element_index_map(doc_structure: dict) -> dict[int, dict]:
     return element_map
 
 
+def _header_row_count(element: dict) -> int:
+    """Rows at the top of a table element that are a column-label header (#424):
+    1 when the reader flagged row 0, else 0. Those rows never become entries,
+    and stay out of the text a whole-table span is rebuilt from, so a header
+    line cannot leave a whole-table parent looking like it has an uncovered
+    remainder (`remove_subset_delimiters`)."""
+    return 1 if element.get("header_row") else 0
+
+
 def get_element_text(element: dict) -> str:
     """
     Extract text from an element (paragraph, table_header, table_content, table, or empty).
@@ -100,7 +109,7 @@ def get_element_text(element: dict) -> str:
         # stage 6 and the doctor branch on '\t' in this text, and a pipe join
         # turns an all-empty wide row into a separator line the #418 dedup
         # counts as uncovered content.
-        rows = element.get("data", [])
+        rows = element.get("data", [])[_header_row_count(element):]
         row_texts = []
         for row in rows:
             cell_texts = [cell.get("text", "") for cell in row]
@@ -741,7 +750,8 @@ def detect_entries_for_section(
             if isinstance(table_data, list) and len(table_data) > 1:
                 # Multi-row table: break into individual rows for LLM processing
                 # This allows the LLM to identify individual entries (grants, publications, etc.)
-                for row_idx, row in enumerate(table_data):
+                header_rows = _header_row_count(elem)  # #424: never an entry
+                for row_idx, row in enumerate(table_data[header_rows:], start=header_rows):
                     # Check if this row contains merged entries that should be split
                     if isinstance(row, list):
                         pseudo_rows = split_merged_row_into_pseudo_rows(row)
