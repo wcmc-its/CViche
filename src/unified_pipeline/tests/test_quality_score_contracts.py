@@ -1084,6 +1084,46 @@ def test_field_sparseness_saturates_at_ten_percent_both_failing(tmp_path):
     assert one == pytest.approx(1.0) and two == pytest.approx(1.0)
 
 
+# #427: an entry with nothing to extract counts on neither term. YTPMZK's own
+# shapes: T entries (extraction skipped, fields all null), a column-header row,
+# a placeholder-only row.
+@pytest.mark.parametrize("code,text", [
+    ("T", "Chaired the departmental seminar series"),
+    ("N3A", "Site/Position |"),
+    ("K3", "N/A"),
+    ("A", "Please include medical and scientific societies.)"),
+])
+def test_field_sparseness_entry_with_nothing_to_extract_counts_on_neither_term(
+        tmp_path, code, text):
+    entries = [{**_BOTH, "taxonomy_code": code, "text": text}] + [_CLEAN] * 9
+    fraction, detail, _ = _sparseness(tmp_path, entries)
+    assert "nothing_to_extract=1" in detail, detail
+    assert "allnull_or_zerocov=0" in detail, detail
+    assert "success_rate=1.000" in detail, detail   # denominator stays 10
+    assert fraction == 0.0
+
+
+def test_field_sparseness_exclusion_leaves_the_denominator_at_every_entry(tmp_path):
+    t_entry = {**_BOTH, "taxonomy_code": "T", "text": "x"}
+    fraction, detail, _ = _sparseness(tmp_path, [t_entry, _FAILED_ONLY] + [_CLEAN] * 8)
+    assert "success_rate=0.900" in detail, detail   # 1 failure of 10, not of 9
+    assert fraction == pytest.approx(0.5)
+
+
+def test_field_sparseness_missing_success_flag_counts_as_a_failure(tmp_path):
+    no_flag = {"extracted_fields": {"title": "x"}}
+    _, detail, _ = _sparseness(tmp_path, [no_flag] + [_CLEAN] * 9)
+    assert "success_rate=0.900" in detail, detail
+
+
+def test_field_sparseness_real_content_with_null_fields_still_counts(tmp_path):
+    entries = [{**_BOTH, "taxonomy_code": "K3",
+                "text": "Developed curriculum for residents 1995"}] + [_CLEAN] * 9
+    fraction, detail, _ = _sparseness(tmp_path, entries)
+    assert "nothing_to_extract=0" in detail, detail
+    assert fraction == pytest.approx(1.0)
+
+
 # --------------------------------------------------------------------- D20
 # _load_docx catches only what python-docx raises for a present-but-unreadable
 # file (the rule #724 review item 12 set for _load_first, applied to its
