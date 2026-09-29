@@ -3,9 +3,9 @@
 Moved verbatim from `stage_3b_entry_classifier.py`:
 `_CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE` (hoisted out of
 `classify_entries_batch` by #601) and `build_taxonomy_codes_for_prompt`, which
-renders the taxonomy reference that fills the batch-context template's
-`{taxonomy_ref}` slot. Changing a byte of either changes what the model sees on
-every batch; `test_stage3b_prompt_template.py` pins the rendered output.
+renders the taxonomy reference that fills the template's `{taxonomy_ref}`
+slot. Changing a byte of either changes what the model sees on every batch;
+`test_stage3b_prompt_template.py` pins the rendered output.
 """
 
 import logging
@@ -95,8 +95,8 @@ CLASSIFICATION_RULES_VERSION = "2.6.0"
 _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE = """You are an expert at classifying academic CV entries into a standardized taxonomy.
 
 HIERARCHY CONTEXT:
-  Each request includes labels (Top-level, Section, Subsection) drawn directly from the
-  original CV's internal structure. These are *not* authoritative taxonomy codes.
+  The following labels (Top-level, Section, Subsection) come directly from the original CV's
+  internal structure. These are *not* authoritative taxonomy codes.
 
   SUGGESTED CODES: The codes in parentheses (e.g., "P 40%, Q1 30%") are automated
   first-pass suggestions that may be WRONG. They indicate what a heuristic system
@@ -112,11 +112,13 @@ HIERARCHY CONTEXT:
   - When content is ambiguous or could fit multiple codes (e.g., a lecture could be K1
     teaching, K5 community education, or R presentation), use the hierarchy to infer the
     CV author's likely intent and weight your classification accordingly.
-  - Each entry includes its specific CV section path. Use this per-entry context
-    alongside the batch-level hierarchy provided with the request.
+  - Each entry below includes its specific CV section path. Use this per-entry context
+    alongside the batch-level hierarchy above.
 
-  The batch-level hierarchy context and the list of AVAILABLE TAXONOMY CODES (you may use
-  ANY code listed there) follow these rules in the next system block.
+{context_str}
+
+AVAILABLE TAXONOMY CODES (you may use ANY of these):
+{taxonomy_ref}
 
 ════════════════════════════════════════════════════════════════════════════════
 CV TAXONOMY CLASSIFICATION RULES v2.6
@@ -859,18 +861,17 @@ Return a JSON object with a "classifications" array. Each element must have:
 - "reasoning": Brief 1-sentence explanation (optional, only if non-obvious)
 
 Example:
-{"classifications": [
-  {"index": 0, "code": "S1", "confidence": 0.95},
-  {"index": 1, "code": "H", "confidence": 0.85, "reasoning": "Content is clearly an award (H), despite Teaching section placement"}
-]}"""
+{{"classifications": [
+  {{"index": 0, "code": "S1", "confidence": 0.95}},
+  {{"index": 1, "code": "H", "confidence": 0.85, "reasoning": "Content is clearly an award (H), despite Teaching section placement"}}
+]}}"""
 
-# NOTE: despite the legacy `_TEMPLATE` name (kept: it is part of the pinned
-# stage_3b_entry_classifier import surface) this string has NO placeholders and
-# is sent verbatim -- it must stay byte-identical across every call (#50).
 # Tie both in-template version mentions to CLASSIFICATION_RULES_VERSION so they
 # cannot drift apart from each other or from the constant callers read for
 # telemetry. .replace() runs once at import time and reproduces the previous
-# literal text exactly (2.6.0 -> "v2.6" / "2.6.0").
+# literal text exactly (2.6.0 -> "v2.6" / "2.6.0"); it is not a general
+# templating mechanism and does not touch the {context_str}/{taxonomy_ref}
+# str.format() placeholders callers still fill in.
 _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.replace(
     "CV TAXONOMY CLASSIFICATION RULES v2.6",
     f"CV TAXONOMY CLASSIFICATION RULES v{CLASSIFICATION_RULES_VERSION.rsplit('.', 1)[0]}",
@@ -878,30 +879,6 @@ _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.
     "Version: 2.6.0",
     f"Version: {CLASSIFICATION_RULES_VERSION}",
 )
-
-
-# Per-batch variable content (#50). It rides in a SECOND system message after
-# the static rules, so the rules stay a byte-identical prefix across hierarchy
-# groups and the Bedrock cachePoint (llm/bedrock.py, placed after the rules
-# block only) can hit. Anything that varies per group (hierarchy context, the
-# group-filtered taxonomy subset) belongs here, never in the static prompt.
-# It stays in the system role on purpose: a measured run with it in the user
-# message (the shape of PR #53) flipped gold-labelled publication-subtype
-# entries (S6 -> S1/S2) that the system-role placement kept (#50).
-# Closes the per-batch block. That block now follows the ~40K-char rules, so
-# the section headings sit closest to the entries; a live A/B (#1021) showed
-# the model then followed a heading over a specific rule (society talks under
-# an "Invited ..." heading went S8 -> R). Restating precedence here keeps the
-# rules first. Keep it brace-free: it is part of the .format()ed template.
-_RULES_PRECEDENCE_REMINDER = """REMINDER: The hierarchy context above is a hint, not a rule. The CV TAXONOMY CLASSIFICATION RULES in the preceding block take precedence over section headings. A heading such as "Invited Talks" or "Presentations" does not override a specific rule (e.g. rule 35: a presentation at a scientific or society meeting is S8, not R, unless it is a clearly designated keynote or plenary). Use the hierarchy to choose between codes the rules leave ambiguous, or when the heading states a fact about its entries (e.g. a funding status such as "Pending" or "Not Funded")."""
-
-_CLASSIFICATION_BATCH_CONTEXT_TEMPLATE = """HIERARCHY CONTEXT FOR THIS BATCH:
-{context_str}
-
-AVAILABLE TAXONOMY CODES (you may use ANY of these):
-{taxonomy_ref}
-
-""" + _RULES_PRECEDENCE_REMINDER
 
 
 # T-validation gate's system prompt (moved from an inline f-string in

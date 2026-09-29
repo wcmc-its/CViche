@@ -210,23 +210,6 @@ def test_translate_messages_json_hint_appended_to_existing_system() -> None:
     assert system_prompts == [{"text": "sys prompt\n\nRespond with valid JSON only."}]
 
 
-def test_translate_messages_json_hint_goes_on_last_system_block_only() -> None:
-    """#50: with a stable leading system block, the hint must not be appended to
-    it (it would be repeated per block); it lands once, on the last block."""
-    messages = [
-        {"role": "system", "content": "static", "cache_point": True},
-        {"role": "system", "content": "variable"},
-        {"role": "user", "content": "hello"},
-    ]
-    system_prompts, _ = bedrock._translate_messages(
-        messages, response_format={"type": "json_object"}, use_schema_tool=False
-    )
-    assert system_prompts == [
-        {"text": "static"},
-        {"text": "variable\n\nRespond with valid JSON only."},
-    ]
-
-
 def test_translate_messages_json_hint_suppressed_when_schema_tool_used() -> None:
     messages = [
         {"role": "system", "content": "sys prompt"},
@@ -368,65 +351,6 @@ def test_call_bedrock_enable_prompt_caching_appends_cache_point(monkeypatch: pyt
     )
 
     assert fake.calls[0]["system"] == [{"text": "sys"}, {"cachePoint": {"type": "default"}}]
-
-
-def test_call_bedrock_cache_point_marker_caches_only_the_stable_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#50: a system message marked cache_point=True ends the cached prefix; the
-    variable block after it is not cached and no trailing cachePoint is added."""
-    fake = _FakeBedrockClient([_converse_response("hi")])
-    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
-
-    messages = [
-        {"role": "system", "content": "static", "cache_point": True},
-        {"role": "system", "content": "variable"},
-        {"role": "user", "content": "hi"},
-    ]
-    bedrock._call_bedrock(
-        BEDROCK_MODEL, messages, 0.1,
-        response_format=None, max_tokens=None, enable_prompt_caching=True,
-    )
-
-    assert fake.calls[0]["system"] == [
-        {"text": "static"}, {"cachePoint": {"type": "default"}}, {"text": "variable"},
-    ]
-
-
-def test_call_bedrock_last_cache_point_marker_wins(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#50: with two marked system messages the cachePoint follows the LAST one."""
-    fake = _FakeBedrockClient([_converse_response("hi")])
-    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
-
-    messages = [
-        {"role": "system", "content": "first", "cache_point": True},
-        {"role": "system", "content": "second", "cache_point": True},
-        {"role": "system", "content": "third"},
-        {"role": "user", "content": "hi"},
-    ]
-    bedrock._call_bedrock(
-        BEDROCK_MODEL, messages, 0.1,
-        response_format=None, max_tokens=None, enable_prompt_caching=True,
-    )
-
-    assert fake.calls[0]["system"] == [
-        {"text": "first"}, {"text": "second"}, {"cachePoint": {"type": "default"}}, {"text": "third"},
-    ]
-
-
-def test_call_bedrock_cache_point_marker_ignored_when_caching_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = _FakeBedrockClient([_converse_response("hi")])
-    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
-
-    messages = [
-        {"role": "system", "content": "static", "cache_point": True},
-        {"role": "system", "content": "variable"},
-        {"role": "user", "content": "hi"},
-    ]
-    bedrock._call_bedrock(
-        BEDROCK_MODEL, messages, 0.1,
-        response_format=None, max_tokens=None, enable_prompt_caching=False,
-    )
-
-    assert fake.calls[0]["system"] == [{"text": "static"}, {"text": "variable"}]
 
 
 def test_call_bedrock_attaches_forced_tool_config_for_json_schema(monkeypatch: pytest.MonkeyPatch) -> None:
