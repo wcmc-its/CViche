@@ -4,11 +4,13 @@ import io
 import json
 import logging
 from datetime import datetime, timedelta
+from collections.abc import Callable, Iterator
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
-from sqlalchemy.orm import Session, contains_eager
+from sqlalchemy.orm import Query as SAQuery, Session, contains_eager
 
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
@@ -596,7 +598,186 @@ class _SafeCsvWriter:
 
 # ---------------------------------------------------------------------------
 # GET /api/admin/export/{export_type}
+#
+# Streams: rows are fetched in batches of _CSV_CHUNK_ROWS (Query.yield_per, which
+# also turns on a server-side cursor) and each batch is emitted as one chunk, so
+# memory stays bounded by the batch size rather than by the table size (#128).
 # ---------------------------------------------------------------------------
+_CSV_CHUNK_ROWS = 500
+
+
+def _iso(value: datetime | None) -> str:
+    return value.isoformat() if value else ""
+
+
+class _CsvExport(NamedTuple):
+    header: tuple[str, ...]
+    query: Callable[[Session], SAQuery]
+    row: Callable[..., list[object]]
+
+
+_RUN_HEADER = (
+    "run_id", "user_email", "filename", "file_type", "status",
+    "started_at", "completed_at", "total_cost", "total_tokens",
+    "input_tokens", "output_tokens", "submission_type", "error_message",
+)
+_USER_HEADER = (
+    "id", "email", "display_name", "role", "status",
+    "daily_limit", "monthly_limit", "consent_version",
+    "consent_date", "created_at", "last_active_at",
+)
+_CONSENT_HEADER = (
+    "id", "user_id", "user_email", "consent_version",
+    "consent_text_hash", "ip_address", "user_agent", "timestamp",
+)
+_FEEDBACK_HEADER = (
+    "id", "run_id", "user_email", "reviewer_role",
+    "overall_accuracy", "overall_completeness", "overall_usefulness",
+    "manual_conversion_effort", "correction_effort",
+    "enrichment_quality", "summary_generated", "summary_quality",
+    "issue_missing_content", "issue_split_merged", "issue_wrong_section",
+    "issue_inaccurate", "issue_ai_enrichment", "issue_formatting",
+    "issue_locations", "biggest_issue", "likelihood_to_recommend",
+    "submitted_at",
+)
+
+
+def _run_row(run: Run) -> list[object]:
+    return [
+        run.id,
+        run.user.email if run.user else "",
+        run.filename,
+        run.file_type,
+        run.status,
+        _iso(run.started_at),
+        _iso(run.completed_at),
+        run.total_cost,
+        run.total_tokens,
+        run.input_tokens,
+        run.output_tokens,
+        run.submission_type or "",
+        run.error_message or "",
+    ]
+
+
+def _user_row(u: User) -> list[object]:
+    return [
+        u.id,
+        u.email,
+        u.display_name,
+        u.role,
+        u.status,
+        u.daily_limit or "",
+        u.monthly_limit or "",
+        u.consent_version or "",
+        _iso(u.consent_date),
+        _iso(u.created_at),
+        _iso(u.last_active_at),
+    ]
+
+
+def _consent_row(consent: Consent) -> list[object]:
+    return [
+        consent.id,
+        consent.user_id,
+        consent.user.email if consent.user else "",
+        consent.consent_version,
+        consent.consent_text_hash,
+        consent.ip_address or "",
+        consent.user_agent or "",
+        _iso(consent.timestamp),
+    ]
+
+
+def _feedback_row(fb: Feedback) -> list[object]:
+    return [
+        fb.id,
+        fb.run_id,
+        fb.user.email if fb.user else "",
+        fb.reviewer_role,
+        fb.overall_accuracy,
+        fb.overall_completeness,
+        fb.overall_usefulness,
+        fb.manual_conversion_effort,
+        fb.correction_effort,
+        fb.enrichment_quality,
+        fb.summary_generated,
+        fb.summary_quality,
+        fb.issue_missing_content or "",
+        fb.issue_split_merged or "",
+        fb.issue_wrong_section or "",
+        fb.issue_inaccurate or "",
+        fb.issue_ai_enrichment or "",
+        fb.issue_formatting or "",
+        fb.issue_locations or "",
+        fb.biggest_issue or "",
+        fb.likelihood_to_recommend,
+        _iso(fb.submitted_at),
+    ]
+
+
+_CSV_EXPORTS = {
+    "runs": _CsvExport(
+        _RUN_HEADER,
+        lambda db: (
+            db.query(Run).outerjoin(Run.user).options(contains_eager(Run.user))
+            .order_by(Run.started_at.desc())
+        ),
+        _run_row,
+    ),
+    "users": _CsvExport(
+        _USER_HEADER,
+        lambda db: db.query(User).order_by(User.created_at.desc()),
+        _user_row,
+    ),
+    "consent": _CsvExport(
+        _CONSENT_HEADER,
+        lambda db: (
+            db.query(Consent).outerjoin(Consent.user)
+            .options(contains_eager(Consent.user))
+            .order_by(Consent.timestamp.desc())
+        ),
+        _consent_row,
+    ),
+    "feedback": _CsvExport(
+        _FEEDBACK_HEADER,
+        lambda db: (
+            db.query(Feedback).outerjoin(Feedback.user)
+            .options(contains_eager(Feedback.user))
+            .order_by(Feedback.submitted_at.desc())
+        ),
+        _feedback_row,
+    ),
+}
+
+
+def _drain(buffer: io.StringIO) -> str:
+    """Return everything written to `buffer` so far and empty it."""
+    text = buffer.getvalue()
+    buffer.seek(0)
+    buffer.truncate(0)
+    return text
+
+
+def _iter_csv_chunks(export_type: str, db: Session) -> Iterator[str]:
+    """Yield the CSV for `export_type` in chunks of _CSV_CHUNK_ROWS rows.
+
+    The header rides in the first chunk. Bytes are identical to writing the
+    whole table to one buffer: same rows, same order, same csv dialect.
+    """
+    spec = _CSV_EXPORTS[export_type]
+    buffer = io.StringIO()
+    writer = _SafeCsvWriter(buffer)
+    writer.writerow(spec.header)
+    for count, record in enumerate(spec.query(db).yield_per(_CSV_CHUNK_ROWS), 1):
+        writer.writerow(spec.row(record))
+        if count % _CSV_CHUNK_ROWS == 0:
+            yield _drain(buffer)
+    tail = _drain(buffer)
+    if tail:
+        yield tail
+
+
 @router.get("/admin/export/{export_type}")
 async def export_csv(
     export_type: str,
@@ -604,140 +785,15 @@ async def export_csv(
     admin: User = Depends(require_admin),
 ):
     """Export data as CSV. Supported types: runs, users, consent, feedback."""
-    if export_type not in ("runs", "users", "consent", "feedback"):
+    if export_type not in _CSV_EXPORTS:
         raise validation_error(f"Invalid export type: {export_type}. Must be one of: runs, users, consent, feedback.")
 
     logger.info(
         "admin_export: admin=%s export_type=%s", admin.email, export_type
     )
 
-    output = io.StringIO()
-    writer = _SafeCsvWriter(output)
-
-    if export_type == "runs":
-        writer.writerow([
-            "run_id", "user_email", "filename", "file_type", "status",
-            "started_at", "completed_at", "total_cost", "total_tokens",
-            "input_tokens", "output_tokens", "submission_type", "error_message",
-        ])
-        rows = (
-            db.query(Run)
-            .outerjoin(Run.user)
-            .options(contains_eager(Run.user))
-            .order_by(Run.started_at.desc())
-            .all()
-        )
-        for run in rows:
-            writer.writerow([
-                run.id,
-                run.user.email if run.user else "",
-                run.filename,
-                run.file_type,
-                run.status,
-                run.started_at.isoformat() if run.started_at else "",
-                run.completed_at.isoformat() if run.completed_at else "",
-                run.total_cost,
-                run.total_tokens,
-                run.input_tokens,
-                run.output_tokens,
-                run.submission_type or "",
-                run.error_message or "",
-            ])
-
-    elif export_type == "users":
-        writer.writerow([
-            "id", "email", "display_name", "role", "status",
-            "daily_limit", "monthly_limit", "consent_version",
-            "consent_date", "created_at", "last_active_at",
-        ])
-        users = db.query(User).order_by(User.created_at.desc()).all()
-        for u in users:
-            writer.writerow([
-                u.id,
-                u.email,
-                u.display_name,
-                u.role,
-                u.status,
-                u.daily_limit or "",
-                u.monthly_limit or "",
-                u.consent_version or "",
-                u.consent_date.isoformat() if u.consent_date else "",
-                u.created_at.isoformat() if u.created_at else "",
-                u.last_active_at.isoformat() if u.last_active_at else "",
-            ])
-
-    elif export_type == "consent":
-        writer.writerow([
-            "id", "user_id", "user_email", "consent_version",
-            "consent_text_hash", "ip_address", "user_agent", "timestamp",
-        ])
-        rows = (
-            db.query(Consent)
-            .outerjoin(Consent.user)
-            .options(contains_eager(Consent.user))
-            .order_by(Consent.timestamp.desc())
-            .all()
-        )
-        for consent in rows:
-            writer.writerow([
-                consent.id,
-                consent.user_id,
-                consent.user.email if consent.user else "",
-                consent.consent_version,
-                consent.consent_text_hash,
-                consent.ip_address or "",
-                consent.user_agent or "",
-                consent.timestamp.isoformat() if consent.timestamp else "",
-            ])
-
-    elif export_type == "feedback":
-        writer.writerow([
-            "id", "run_id", "user_email", "reviewer_role",
-            "overall_accuracy", "overall_completeness", "overall_usefulness",
-            "manual_conversion_effort", "correction_effort",
-            "enrichment_quality", "summary_generated", "summary_quality",
-            "issue_missing_content", "issue_split_merged", "issue_wrong_section",
-            "issue_inaccurate", "issue_ai_enrichment", "issue_formatting",
-            "issue_locations", "biggest_issue", "likelihood_to_recommend",
-            "submitted_at",
-        ])
-        rows = (
-            db.query(Feedback)
-            .outerjoin(Feedback.user)
-            .options(contains_eager(Feedback.user))
-            .order_by(Feedback.submitted_at.desc())
-            .all()
-        )
-        for fb in rows:
-            writer.writerow([
-                fb.id,
-                fb.run_id,
-                fb.user.email if fb.user else "",
-                fb.reviewer_role,
-                fb.overall_accuracy,
-                fb.overall_completeness,
-                fb.overall_usefulness,
-                fb.manual_conversion_effort,
-                fb.correction_effort,
-                fb.enrichment_quality,
-                fb.summary_generated,
-                fb.summary_quality,
-                fb.issue_missing_content or "",
-                fb.issue_split_merged or "",
-                fb.issue_wrong_section or "",
-                fb.issue_inaccurate or "",
-                fb.issue_ai_enrichment or "",
-                fb.issue_formatting or "",
-                fb.issue_locations or "",
-                fb.biggest_issue or "",
-                fb.likelihood_to_recommend,
-                fb.submitted_at.isoformat() if fb.submitted_at else "",
-            ])
-
-    output.seek(0)
-
     return StreamingResponse(
-        iter([output.getvalue()]),
+        _iter_csv_chunks(export_type, db),
         media_type="text/csv",
         headers={
             "Content-Disposition": f'attachment; filename="cviche_{export_type}_{datetime.now().strftime("%Y%m%d")}.csv"'

@@ -554,3 +554,163 @@ class TestRecordConsent:
         rows = db.query(Consent).filter(Consent.user_id == user.id).all()
         assert len(rows) == 2
         assert user.default_submission_type == "authorized_admin"
+
+
+# ============================================================
+# Admin CSV export streaming (#128)
+# ============================================================
+
+from types import SimpleNamespace
+
+
+def _seed_export_fixture(db):
+    """Synthetic rows covering every export type, incl. a formula-trigger cell,
+    a comma/quote cell, a null user and null optional columns."""
+    from datetime import datetime
+    from app.models import Run, Feedback
+
+    u1 = User(id=1, email="a@example.com", display_name="=Alpha", role="admin",
+              auth_method="simple", daily_limit=5,
+              created_at=datetime(2026, 1, 2, 3, 4, 5),
+              last_active_at=datetime(2026, 1, 3, 3, 4, 5))
+    u2 = User(id=2, email="b@example.com", display_name='Bee, "B"', role="user",
+              auth_method="simple", consent_version="1.0",
+              consent_date=datetime(2026, 2, 3, 4, 5, 6),
+              created_at=datetime(2026, 1, 1, 0, 0, 0),
+              last_active_at=datetime(2026, 1, 1, 0, 0, 0))
+    db.add_all([u1, u2])
+    db.commit()
+    db.add_all([
+        Run(id="R1", user_id=1, filename="one.docx", file_type="docx",
+            status="complete", started_at=datetime(2026, 3, 1, 10, 0, 0),
+            completed_at=datetime(2026, 3, 1, 10, 5, 0), total_cost=1.5,
+            total_tokens=100, input_tokens=60, output_tokens=40,
+            submission_type="own_cv"),
+        Run(id="R2", user_id=2, filename="+two.docx", file_type="docx",
+            status="failed", started_at=datetime(2026, 3, 2, 10, 0, 0),
+            error_message='boom, "bad"'),
+        Run(id="R3", user_id=None, filename="three.docx", file_type="docx",
+            status="running", started_at=datetime(2026, 3, 3, 10, 0, 0)),
+    ])
+    db.add_all([
+        Consent(id=1, user_id=1, consent_version="1.0", consent_text_hash="h1",
+                ip_address="203.0.113.1", timestamp=datetime(2026, 4, 1, 0, 0, 0)),
+        Consent(id=2, user_id=2, consent_version="1.0", consent_text_hash="h2",
+                user_agent="ua", timestamp=datetime(2026, 4, 2, 0, 0, 0)),
+        Consent(id=3, user_id=2, consent_version="1.1", consent_text_hash="h3",
+                timestamp=datetime(2026, 4, 3, 0, 0, 0)),
+    ])
+    db.commit()
+    db.add_all([
+        Feedback(id=1, run_id="R1", user_id=1, reviewer_role="self",
+                 overall_usefulness=4, manual_conversion_effort="low",
+                 correction_effort="low", likelihood_to_recommend=5,
+                 biggest_issue="-dash", submitted_at=datetime(2026, 5, 1, 0, 0, 0)),
+        Feedback(id=2, run_id="R2", user_id=2, reviewer_role="staff",
+                 overall_accuracy=7, overall_usefulness=3,
+                 manual_conversion_effort="high", correction_effort="high",
+                 issue_formatting="bad", likelihood_to_recommend=2,
+                 submitted_at=datetime(2026, 5, 2, 0, 0, 0)),
+        Feedback(id=3, run_id="R3", user_id=2, reviewer_role="staff",
+                 overall_usefulness=1, manual_conversion_effort="high",
+                 correction_effort="high", likelihood_to_recommend=1,
+                 submitted_at=datetime(2026, 5, 3, 0, 0, 0)),
+    ])
+    db.commit()
+
+
+# Captured from the pre-#128 single-buffer implementation on the fixture above.
+_EXPECTED_EXPORTS = {
+    'runs': (
+        'run_id,user_email,filename,file_type,status,started_at,completed_at,total_cost,total_tokens,input_tokens,output_tokens,submission_type,error_message\r\n'
+        'R3,,three.docx,docx,running,2026-03-03T10:00:00,,0.0,0,0,0,,\r\n'
+        'R2,b@example.com,\'+two.docx,docx,failed,2026-03-02T10:00:00,,0.0,0,0,0,,"boom, ""bad"""\r\n'
+        'R1,a@example.com,one.docx,docx,complete,2026-03-01T10:00:00,2026-03-01T10:05:00,1.5,100,60,40,own_cv,\r\n'
+    ),
+    'users': (
+        'id,email,display_name,role,status,daily_limit,monthly_limit,consent_version,consent_date,created_at,last_active_at\r\n'
+        "1,a@example.com,'=Alpha,admin,active,5,,,,2026-01-02T03:04:05,2026-01-03T03:04:05\r\n"
+        '2,b@example.com,"Bee, ""B""",user,active,,,1.0,2026-02-03T04:05:06,2026-01-01T00:00:00,2026-01-01T00:00:00\r\n'
+    ),
+    'consent': (
+        'id,user_id,user_email,consent_version,consent_text_hash,ip_address,user_agent,timestamp\r\n'
+        '3,2,b@example.com,1.1,h3,,,2026-04-03T00:00:00\r\n'
+        '2,2,b@example.com,1.0,h2,,ua,2026-04-02T00:00:00\r\n'
+        '1,1,a@example.com,1.0,h1,203.0.113.1,,2026-04-01T00:00:00\r\n'
+    ),
+    'feedback': (
+        'id,run_id,user_email,reviewer_role,overall_accuracy,overall_completeness,overall_usefulness,manual_conversion_effort,correction_effort,enrichment_quality,summary_generated,summary_quality,issue_missing_content,issue_split_merged,issue_wrong_section,issue_inaccurate,issue_ai_enrichment,issue_formatting,issue_locations,biggest_issue,likelihood_to_recommend,submitted_at\r\n'
+        '3,R3,b@example.com,staff,,,1,high,high,,,,,,,,,,,,1,2026-05-03T00:00:00\r\n'
+        '2,R2,b@example.com,staff,7,,3,high,high,,,,,,,,,bad,,,2,2026-05-02T00:00:00\r\n'
+        "1,R1,a@example.com,self,,,4,low,low,,,,,,,,,,,'-dash,5,2026-05-01T00:00:00\r\n"
+    ),
+}
+
+
+class TestAdminCsvExportStreaming:
+    """#128: the export streams from a generator in bounded chunks instead of
+    buffering the whole table; the bytes are unchanged."""
+
+    def _get(self, client, export_type):
+        from app.main import app
+        from app.auth import require_admin
+
+        app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
+            email="admin@example.com", role="admin")
+        try:
+            return client.get(f"/api/admin/export/{export_type}")
+        finally:
+            app.dependency_overrides.pop(require_admin, None)
+
+    @pytest.mark.parametrize("export_type", ["runs", "users", "consent", "feedback"])
+    def test_output_identical_to_pre_streaming_behavior(self, client, db, export_type, monkeypatch):
+        import app.api.admin_routes as admin_routes
+        _seed_export_fixture(db)
+        # Chunk size 2 with 3 rows forces the multi-chunk path; the body must
+        # still equal what the old single-buffer implementation produced.
+        monkeypatch.setattr(admin_routes, "_CSV_CHUNK_ROWS", 2, raising=False)
+
+        resp = self._get(client, export_type)
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/csv")
+        assert resp.content.decode("utf-8") == _EXPECTED_EXPORTS[export_type]
+
+    @pytest.mark.parametrize("export_type", ["runs", "users", "consent", "feedback"])
+    def test_response_is_produced_in_multiple_chunks(self, db, export_type, monkeypatch):
+        import asyncio
+        import app.api.admin_routes as admin_routes
+        _seed_export_fixture(db)
+        monkeypatch.setattr(admin_routes, "_CSV_CHUNK_ROWS", 1, raising=False)
+
+        async def collect():
+            resp = await admin_routes.export_csv(
+                export_type, db=db, admin=SimpleNamespace(email="admin@example.com"))
+            return [c async for c in resp.body_iterator]
+
+        chunks = asyncio.run(collect())
+
+        assert len(chunks) > 1
+        assert "".join(c if isinstance(c, str) else c.decode() for c in chunks) \
+            == _EXPECTED_EXPORTS[export_type]
+
+    def test_rows_are_fetched_in_bounded_batches_not_all_at_once(self, db, monkeypatch):
+        """The query must carry yield_per, otherwise .all()-style hydration of
+        the whole table returns and only the output side is chunked."""
+        import app.api.admin_routes as admin_routes
+        from sqlalchemy.orm import Query
+        _seed_export_fixture(db)
+        monkeypatch.setattr(admin_routes, "_CSV_CHUNK_ROWS", 1, raising=False)
+        seen = []
+        real = Query.yield_per
+
+        def spy(self, count):
+            seen.append(count)
+            return real(self, count)
+
+        monkeypatch.setattr(Query, "yield_per", spy)
+
+        for export_type in ("runs", "users", "consent", "feedback"):
+            del seen[:]
+            b"".join(c.encode() for c in admin_routes._iter_csv_chunks(export_type, db))
+            assert seen == [1], export_type
