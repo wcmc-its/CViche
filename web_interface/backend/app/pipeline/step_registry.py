@@ -133,7 +133,7 @@ STEP_REGISTRY: tuple[StepDefinition, ...] = (
         name="Institution Enrichment",
         description="Adds institution location data (city, state, country) via batched LLM lookups, "
                     "using CV owner context for disambiguation. "
-                    "Applies to education (B1, B2), training (C, C1, C2), and position (D1, D2, D3) entries.",
+                    "Applies to education (B1, B2), training (C, C1, C2, C3), and position (D1, D2, D3) entries.",
         uses_llm=True,  # calls llm_client.call_llm; the ROR API is retired (#523)
         uses_api=False,
         weight=5.0,  # Fewer calls than PubMed

@@ -62,6 +62,7 @@ never "human-verified correct."
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import re
@@ -85,6 +86,12 @@ if TYPE_CHECKING:
 # imports this module, so this does not create the cycle `quality_score ->
 # run_doctor -> doctor.lints.enrichment -> quality_score` would (run_doctor.py
 # itself is never imported here).
+from unified_pipeline.core.template_boilerplate import (
+    is_near_template_instruction,
+    is_template_instruction,
+    is_template_label_line,
+    is_unanswered_prompt,
+)
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
 from unified_pipeline.doctor.shared import docx_body_blocks
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX, read_stage_errors
@@ -608,8 +615,113 @@ def score_protected_data(outputs_dir: Path) -> tuple[float, str, int | None]:
     return 0.0, "protected_data_hits=0", None
 
 
+#: Same cell split as `core.template_boilerplate._LABEL_PIECE_SPLIT_RE`: a
+#: table row reaches stage 3b joined by "|", and a wrapped source line by a
+#: tab or newline. `is_unanswered_prompt` itself only splits on "|", so a
+#: tab/newline-wrapped row is normalized onto pipes with this before being
+#: handed to it (see `_is_placeholder_only_row`).
+_PLACEHOLDER_CELL_SPLIT_RE = re.compile(r"[|\t\n]")
+
+
+def _is_placeholder_only_row(text: str | None) -> bool:
+    """True when *text* carries no content an editor could act on (#822
+    finding 2, second exclusion): an unfilled template prompt ("N/A",
+    "Not Applicable", a known label whose answer cell is one of those), or
+    every cell is blank -- a bare ``| |`` row (YTPMZK's own example).
+
+    Reuses `core.template_boilerplate.is_unanswered_prompt` for the first
+    case -- the same "answer cell says nothing" check stage 6's own
+    `_appendix_drop_reason` already uses -- rather than a second, narrower
+    token set that would drift from it (an earlier version of this function
+    kept its own ``{"n/a", "not applicable", "none"}`` constant, which
+    already disagreed with `is_unanswered_prompt`'s own vocabulary by
+    missing "na" and "listed above"; CODING_STANDARDS.md #1.5). A bare-
+    separator row has no non-empty cell at all, so it can never satisfy
+    `is_unanswered_prompt`'s own "at least one cell says N/A" guard --
+    that shape is handled by the explicit check below instead, not folded
+    into the reused helper.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    pieces = _PLACEHOLDER_CELL_SPLIT_RE.split(stripped)
+    if all(not p.strip() for p in pieces):
+        return True
+    return is_unanswered_prompt("|".join(pieces))
+
+
+def _goal_claimed_row_ids(entries: list[dict]) -> set[int]:
+    """``id()`` of every T entry stage 6 claims into an M2 grant's table as
+    its major-goals row (#963/#1002; #822 finding 2). Reuses stage 6's
+    `research_support.claim_goal_rows` instead of copying
+    `MAJOR_GOALS_LABEL_RE` (CODING_STANDARDS.md §1.5).
+
+    Not a faithful replay of stage 6, in two ways:
+    - stage 6 first runs `fill_major_goals_from_text` on stage-4
+      `extracted_fields` and skips a row whose goal conflicts with one already
+      set; classified.json grants carry no `extracted_fields`, so that guard
+      never fires here (making it faithful changed 0 of 215 farm files);
+    - it ignores `rendered_grant_ids`, i.e. whether the grant found a
+      template slot. A claimed row is scaffolding either way.
+
+    Layering (CODING_STANDARDS.md §1): this reaches past stage6's public
+    import surface into `stage6/sections/research_support.py`, judged better
+    than a hand-copied regex. The import is function-local because that
+    module needs python-docx, which quality_score treats as optional; without
+    it this exclusion claims nothing and the other dimensions still run.
+    """
+    try:
+        from unified_pipeline.stage6.sections.research_support import (
+            RESEARCH_SUPPORT_SECTIONS,
+            claim_goal_rows,
+            copy_entries_for_render,
+        )
+    except ImportError:
+        return set()
+
+    grant_codes = {code for code, _header in RESEARCH_SUPPORT_SECTIONS}
+    grants = copy_entries_for_render(
+        [e for e in entries if e.get("taxonomy_code") in grant_codes])
+    # Rows are passed uncopied, on purpose: claim_goal_rows never writes
+    # through a row (only through the grant it claims into), and identity
+    # here is what lets the caller map a claim back to the ORIGINAL entry.
+    t_rows = [e for e in entries if e.get("taxonomy_code") == "T"]
+    claimed = claim_goal_rows(grants, t_rows)
+    return {id(row) for row, _grant in claimed}
+
+
 def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
-    """Share of entries in the stage_3b ``T`` catch-all ('nothing else fits')."""
+    """Share of entries in the stage_3b ``T`` catch-all ('nothing else fits').
+
+    #822 finding 2: a T entry the pipeline correctly diverted -- template
+    scaffolding, a placeholder row, or a grant's own goal statement that
+    stage 6 renders into that grant's table -- costs an editor nothing, so it
+    should not count as catch-all OVER-USE. Three exclusions, each matched
+    against the T entry's own text in the classified.json ``entries`` list
+    (not ``meta``, which has no per-entry text to match against):
+
+      1. a grant's own major-goals row that stage 6 claims into that grant's
+         table (`_goal_claimed_row_ids`).
+      2. template instruction / near-template / label-only text, via the
+         same `core.template_boilerplate` helpers stage 6 itself uses to
+         drop this text -- no new phrase list (CODING_STANDARDS.md #1.5).
+      3. a placeholder-only row (`_is_placeholder_only_row`).
+
+    Each T entry is excluded by at most one of the three (checked in the
+    order above -- the goal-claim check runs first because a row can
+    otherwise satisfy both it and the template check at once, e.g. the
+    template's own major-goals LABEL with real goal text appended; see
+    `test_t_bucket_a_row_matching_two_reasons_is_excluded_only_once`), so a
+    row matching more than one reason is not double-subtracted.
+
+    The denominator (`total`) is deliberately UNCHANGED: an excluded entry is
+    still real output the run produced, and total_entries is what the 3%/
+    8%/15% ramp calibrates against as "how much this document contains," not
+    "how much of it needs a human." Only the NUMERATOR -- what counts as
+    unresolved catch-all -- shrinks. Judgement call (#822): re-scoring the
+    farm is what tests whether the ramp still separates good runs from bad
+    under this narrower numerator; see the PR description.
+    """
     data, reason = _load_first(outputs_dir, "*_classified.json")
     if data is None:
         return 1.0, _missing_or_unreadable_detail("classified.json", reason), None
@@ -628,7 +740,26 @@ def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
                 code_distribution_sum=code_dist_sum, total_entries=total_entries_meta)
 
     total = sum(code_dist.values()) or meta.get("total_entries", 1) or 1
-    t_count = code_dist.get("T", 0)
+    t_count_raw = code_dist.get("T", 0)
+
+    entries = data.get("entries")
+    entries = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    excluded_template = excluded_placeholder = excluded_goal_claim = 0
+    if entries:
+        goal_claimed_ids = _goal_claimed_row_ids(entries)
+        for entry in entries:
+            if entry.get("taxonomy_code") != "T":
+                continue
+            text = entry.get("text")
+            if id(entry) in goal_claimed_ids:
+                excluded_goal_claim += 1
+            elif (is_template_instruction(text) or is_near_template_instruction(text)
+                    or is_template_label_line(text)):
+                excluded_template += 1
+            elif _is_placeholder_only_row(text):
+                excluded_placeholder += 1
+
+    t_count = max(t_count_raw - excluded_template - excluded_placeholder - excluded_goal_claim, 0)
     t_ratio = t_count / total
 
     if t_ratio <= 0.03:
@@ -647,8 +778,10 @@ def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
         fraction = clamp(fraction + 0.2)
 
     detail = (
-        f"T_count={t_count}; total={total}; t_ratio={t_ratio:.4f}; "
-        f"t_validation_error={tv_error!r}; fraction={fraction:.3f}"
+        f"T_count_raw={t_count_raw}; T_excluded_template={excluded_template}; "
+        f"T_excluded_placeholder={excluded_placeholder}; "
+        f"T_excluded_goal_claim={excluded_goal_claim}; T_count={t_count}; total={total}; "
+        f"t_ratio={t_ratio:.4f}; t_validation_error={tv_error!r}; fraction={fraction:.3f}"
     )
     return fraction, detail, None
 
@@ -780,6 +913,38 @@ INSTRUCTION_MARKERS = re.compile(
     re.IGNORECASE,
 )
 
+#: The WCM template stage 6 renders every CV into (`TEMPLATE_PATH` in
+#: `stage_6_word_template.py`). Not imported from there: that module
+#: `sys.exit`s at import when python-docx is missing, which would defeat this
+#: scorer's graceful degradation. The 2020/2012 files in `key_files/` are not
+#: render targets, so only this revision's paragraphs are excluded.
+_TEMPLATE_DOCX_PATH = (
+    Path(__file__).resolve().parent.parent.parent
+    / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
+)
+
+
+def _normalize_whitespace(text: str) -> str:
+    """Collapse whitespace runs to one space and strip the ends."""
+    return " ".join(text.split())
+
+
+@functools.cache
+def _template_body_paragraph_texts() -> frozenset[str]:
+    """Whitespace-normalized text of every non-blank body paragraph of the
+    template stage 6 renders into (#822 finding 1).
+
+    Stage 6 keeps the template's own instruction paragraphs on purpose, so a
+    rendered paragraph identical to one of these is not a prompt echo.
+    A missing template raises (python-docx's own FileNotFoundError): it is a
+    checked-in asset, and an empty set would silently undo the exclusion.
+    """
+    from docx import Document
+    template_doc = Document(_TEMPLATE_DOCX_PATH)
+    return frozenset(
+        _normalize_whitespace(p.text) for p in template_doc.paragraphs if p.text.strip()
+    )
+
 
 def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     """Raw-tab and prompt-echo (template instruction) artifacts in the docx.
@@ -814,6 +979,19 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
       versus the instruction markers' dozens of legitimate hits -- so any
       other tab inside a cell is still a meaningful signal of a
       raw-formatting artifact leaking into the docx.
+    - A body paragraph that matches ``INSTRUCTION_MARKERS`` is still not
+      counted as an echo if its whitespace-normalized text exactly equals
+      one of the template's own body paragraphs
+      (`_template_body_paragraph_texts`, #822 finding 1). Stage 6 keeps the
+      template's 20 instruction paragraphs verbatim in every rendered CV on
+      purpose, and every one of them matches ``INSTRUCTION_MARKERS`` by
+      construction (that is how the pattern was narrowed) -- without this
+      exclusion, every run counts the template's own kept text as a defect.
+      A marker hit that is NOT byte-identical to a template paragraph still
+      counts: a marker phrase originating in the template's own table cells
+      (e.g. "Date (yyyy-yyyy)") landing as a body paragraph, or a template
+      instruction line altered by the pipeline before being kept, are both
+      still genuine signals, not the template's own untouched text.
 
     Headers and footers are not scanned either way: stage 6 never writes to
     them.
@@ -822,13 +1000,18 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     if doc is None:
         return 0.5, reason, None
 
-    raw_tab_paragraphs = echo_count = 0
+    template_paragraphs = _template_body_paragraph_texts()
+
+    raw_tab_paragraphs = echo_count = template_echo_excluded = 0
     for p in doc.paragraphs:
         text = p.text
         if "\t" in text:
             raw_tab_paragraphs += 1
         if INSTRUCTION_MARKERS.search(text):
-            echo_count += 1
+            if _normalize_whitespace(text) in template_paragraphs:
+                template_echo_excluded += 1
+            else:
+                echo_count += 1
 
     raw_tab_cells = _count_raw_tab_cells(doc.tables)
     total_raw_tab = raw_tab_paragraphs + raw_tab_cells
@@ -836,7 +1019,8 @@ def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     fraction = clamp(0.6 * (total_raw_tab / 20) + 0.4 * (echo_count / 15))
     detail = (
         f"raw_tab_paragraphs={raw_tab_paragraphs}; raw_tab_cells={raw_tab_cells}; "
-        f"echo_paragraphs={echo_count}; fraction={fraction:.3f}"
+        f"echo_paragraphs={echo_count}; template_echo_excluded={template_echo_excluded}; "
+        f"fraction={fraction:.3f}"
     )
     return fraction, detail, None
 

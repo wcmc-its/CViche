@@ -403,3 +403,35 @@ def test_institution_enrichment_stats_empty_dict_not_counted_as_enriched():
     )
 
     assert stats["entries_enriched"] == 1
+
+
+def test_run_stage5b_enriches_c3_fellowship_entries(monkeypatch, tmp_path):
+    """#626: a C3 (Fellowship Training) entry reaches the LLM lookup and gets
+    institution_enrichment written, like its C/C1/C2 siblings."""
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+    from unified_pipeline.stage5b import cache as s5b_cache
+    from unified_pipeline.stage5b import lookup as s5b_lookup
+
+    monkeypatch.setattr(s5b_cache, "CACHE_FILE", tmp_path / "institution_cache.json")
+    monkeypatch.setattr(s5b_cache, "OLD_CACHE_FILE", tmp_path / "ror_cache.json")
+    monkeypatch.setattr(
+        s5b_lookup, "call_llm",
+        lambda **kw: _fake_llm_result('{"INST-0001": {"city": "Ithaca", "state": "New York"}}'),
+    )
+
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps({
+        "document_uid": "test-uid",
+        "entries": [{
+            "taxonomy_code": "C3",
+            "extracted_fields": {"institution": "Example Fellowship Hospital"},
+        }],
+    }))
+    output_path = tmp_path / "output.json"
+
+    s5b.run_stage5b(str(input_path), output_path=str(output_path), refresh_cache=True)
+
+    out = json.loads(output_path.read_text())
+    assert out["institution_enrichment_stats"]["entries_processed"] == 1
+    assert out["institution_enrichment_stats"]["entries_enriched"] == 1
+    assert out["entries"][0]["institution_enrichment"]["city"] == "Ithaca"

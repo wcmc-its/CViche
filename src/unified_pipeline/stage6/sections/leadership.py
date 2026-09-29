@@ -24,7 +24,7 @@ from ..formatting import _clear_table_data, _set_font, format_date_range
 from ..normalization import _committee_cell_text
 from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.render_check import entry_lines
+from unified_pipeline.core.render_check import CELL_SEPARATOR, entry_lines, wrapped_row_text
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,29 @@ logger = logging.getLogger(__name__)
 # of those would bind this table to the wrong section and silently write
 # leadership rows into someone else's content.
 _LEADERSHIP_SECTION_HEADER = "INSTITUTIONAL LEADERSHIP ACTIVITIES"
+
+# A role/institution/dates cell wraps over a few paragraphs at most (3 in the
+# 126-CV farm). A cell of 20+ lines is a stacked list of committees whose
+# columns simply differ in length, which the multi-line parser must still split.
+_MAX_WRAPPED_CELL_LINES = 3
+
+
+def _wrapped_leadership_row(entry: dict) -> str | None:
+    """The entry's raw text rejoined into ONE line when it is one table row whose
+    cells wrap (#987, `wrapped_row_text`), else None.
+
+    `wrapped_row_text` tells a wrapped row from stacked records by unequal cell
+    line counts only, so a long stacked list with columns of different lengths
+    passes it too; cells longer than `_MAX_WRAPPED_CELL_LINES` are not wrapping
+    and return None here.
+    """
+    row_text = wrapped_row_text(entry)
+    if row_text is None:
+        return None
+    cells = str(entry.get('text') or '').split(CELL_SEPARATOR)
+    if max(len(entry_lines(cell)) for cell in cells) > _MAX_WRAPPED_CELL_LINES:
+        return None
+    return row_text
 
 
 def _looks_like_leadership_table(table) -> bool:
@@ -139,7 +162,15 @@ class LeadershipSection:
             # cannot carry -- #664 item 1, out of scope here -- lost) just
             # because its raw text happens to contain a `|`.
             has_unresolved_pipe = not fields_complete and '|' in original_text
-            if len(lines) >= 3:
+            # #987: a row whose cells merely wrap is ONE role, not several
+            # lines; each branch below that would split it renders the rejoined
+            # text as the one row instead.
+            row_text = _wrapped_leadership_row(entry)
+            would_split = (len(lines) >= 3 or (len(lines) > 1 and not role)
+                           or has_unresolved_pipe)
+            if row_text is not None and would_split:
+                self._add_leadership_row(table, row_text, '', '')
+            elif len(lines) >= 3:
                 # Multiple items merged - split them into separate rows
                 self._add_multiline_leadership_rows(table, lines)
             elif len(lines) > 1 and not role:

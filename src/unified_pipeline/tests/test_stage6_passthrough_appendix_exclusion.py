@@ -247,6 +247,32 @@ def test_n1_n2_entries_render_and_do_not_duplicate_into_the_appendix(tmp_path):
     assert _appendix_diversion_count(sidecar, "N2") == 0
 
 
+def test_n4_entry_renders_under_mentoring_and_does_not_duplicate_into_the_appendix(tmp_path):
+    """#587: `_fill_mentoring` renders N4 outcome lines under the MENTORING
+    header, but N4 was missing from `RENDER_ROUTED_CODES`, so `generate()`'s
+    unmapped-code sweep also handed every N4 entry to the Appendix. Drives
+    the real `generate()` against the real template, with an N3A mentee
+    alongside so the routed-code sweep is exercised for the whole mentoring
+    section, and checks the N4 line exactly once in the document and no
+    `appendix_diversion` warning for it."""
+    entries = [
+        _OWNER_ENTRY,
+        {"text": "DISTINCTIVE_N4_OUTCOME_LINE", "taxonomy_code": "N4",
+         "extracted_fields": {}, "element_idx_start": 5},
+        {"text": "DISTINCTIVE_N3A_MENTEE", "taxonomy_code": "N3A",
+         "extracted_fields": {"name": "DISTINCTIVE_N3A_MENTEE"},
+         "element_idx_start": 6},
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    full, appendix = _full_text(doc), _appendix_text(doc)
+
+    assert full.count("DISTINCTIVE_N4_OUTCOME_LINE") == 1, (
+        "N4 entry must render exactly once (under MENTORING), not zero or two times")
+    assert "DISTINCTIVE_N4_OUTCOME_LINE" not in appendix, (
+        "N4 entry duplicated into the Appendix -- #587 regression")
+    assert _appendix_diversion_count(sidecar, "N4") == 0
+
+
 def _grant_table_cells(doc) -> list[str]:
     """Every value cell of the rendered grant tables (their first label is Award Source)."""
     return [row.cells[1].text for tb in doc.tables

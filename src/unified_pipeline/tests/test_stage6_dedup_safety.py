@@ -20,6 +20,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.dedup import _dates_compatible, _drop_is_safe  # noqa: E402
 from unified_pipeline.stage_6_word_template import deduplicate_entries  # noqa: E402
 
 
@@ -98,7 +99,8 @@ def test_fused_multi_record_sibling_still_dropped():
     kept = {"text": "Member | Committee on Subterranean Balloon Safety "
                     "Standards | Guild of Meandering Auditors | reviews annual "
                     "protocols and certification checklists for subterranean "
-                    "balloon safety inspections across member lodges"}
+                    "balloon safety inspections across member lodges, "
+                    "2013-2016"}
     sibling = {"text": "Member | Committee on Subterranean Balloon Safety "
                        "Standards | Guild of Meandering Auditors\n"
                        "Chair | Panel of Improbable Weights and Measures "
@@ -130,16 +132,8 @@ def test_date_aware_dedup_keeps_distinct_career_progression():
     assert result == [resident, chief]
 
 
-# ------------------------------------------------------- known open gap, #666
+# ------------------------------------------------ #666: dates and dedup
 
-@pytest.mark.xfail(
-    reason="#666: dates are invisible to both the fused-blob fallback in "
-           "_drop_is_safe and the recovery pass's token-overlap check "
-           "(digit-blind _RENDER_TOKEN_RE), so two distinct multi-line "
-           "committee terms differing only by year can be silently dropped. "
-           "Flip to a plain assertion once #666 lands a corpus-verified fix.",
-    strict=True,
-)
 def test_distinct_fused_terms_different_dates_kept():
     kept = {"text": "Chair | Committee on Institutional Research Compliance "
                     "and Ethics Standards Review | Office of Research "
@@ -157,13 +151,33 @@ def test_distinct_fused_terms_different_dates_kept():
     assert result == [kept, dropped]
 
 
+def test_distinct_fused_terms_full_mmddyyyy_dates_kept():
+    # Full MM/DD/YYYY ranges (M2B grant format): the "06/30/2018" end must not
+    # be read as year 2030 and vouch for the later term.
+    kept = {"text": "Chair | Committee on Institutional Research Compliance "
+                    "and Ethics Standards Review | Office of Research "
+                    "Integrity | oversees annual protocol review\n"
+                    "Member | Subcommittee on Data Governance and Ethics "
+                    "Standards Review | Office of Research Integrity | "
+                    "07/01/2015-06/30/2018"}
+    dropped = {"text": "Chair | Committee on Institutional Research "
+                       "Compliance and Ethics Standards Review | Office of "
+                       "Research Integrity | 07/01/2021-06/30/2024\n"
+                       "Member | Subcommittee on Data Governance and Ethics "
+                       "Standards Review | Office of Research Integrity | "
+                       "quarterly meetings"}
+    result = deduplicate_entries([kept, dropped])
+    assert result == [kept, dropped]
+
+
 @pytest.mark.xfail(
-    reason="#666: verbatim-containment branch of _drop_is_safe fires on "
-           "prose with no record-shaped lines at all, so the #221/#225 "
-           "recovery pass never even looks at either entry (0 record lines "
-           "on both sides). Two distinct mentees fused into one un-split "
-           "entry: one mentee's text is a literal substring of the other. "
-           "Flip to a plain assertion once #666 lands a corpus-verified fix.",
+    reason="#666 residual, not a date defect: the verbatim-containment branch "
+           "of _drop_is_safe fires on prose with no record-shaped lines, so "
+           "the #221/#225 recovery pass never looks at either entry. Two "
+           "distinct mentees fused into one un-split entry: one mentee's text "
+           "is a literal substring of the other, and neither states a date "
+           "the date gate could compare. Flip to a plain assertion when the "
+           "fused-kept-entry shape is fixed.",
     strict=True,
 )
 def test_distinct_mentees_fused_into_prose_entry_kept():
@@ -175,18 +189,6 @@ def test_distinct_mentees_fused_into_prose_entry_kept():
     assert result == [smith, fused]
 
 
-@pytest.mark.xfail(
-    reason="#666: subset-containment branch of _drop_is_safe is fooled by "
-           "narrative prose that mentions a prior, distinct record's "
-           "identifying nouns/years in passing (successor-committee "
-           "framing) -- full token subset containment holds even though "
-           "the two DSMB memberships are different trials, different "
-           "terms. Committee/service codes are outside "
-           "DATE_AWARE_DEDUP_CODES, so require_date_overlap doesn't help "
-           "here either. Flip to a plain assertion once #666 lands a "
-           "corpus-verified fix.",
-    strict=True,
-)
 def test_distinct_committee_memberships_mentioned_in_passing_kept():
     prior_term = {"text": "Member, Data Safety Monitoring Board for the ABC "
                           "diabetes trial, 2015-2018"}
@@ -198,6 +200,78 @@ def test_distinct_committee_memberships_mentioned_in_passing_kept():
                             "in 2018."}
     result = deduplicate_entries([prior_term, current_term])
     assert result == [prior_term, current_term]
+
+
+def test_dropped_range_kept_when_kept_entry_states_no_range():
+    # The dropped entry's dates would be lost: the kept one has none.
+    dropped = {"text": "Chair, Committee on Curricular Harmony and Assessment "
+                       "Review, School of Applied Whimsy, 2015-2018"}
+    kept = {"text": "Chair, Committee on Curricular Harmony and Assessment "
+                    "Review, School of Applied Whimsy, oversees annual "
+                    "program review"}
+    assert _drop_is_safe(dropped, kept) is False
+    assert deduplicate_entries([dropped, kept]) == [dropped, kept]
+
+
+def test_same_range_reworded_duplicate_still_dropped():
+    kept = {"text": "Chair, Committee on Curricular Harmony and Assessment "
+                    "Review, School of Applied Whimsy, 2015-2018, oversees "
+                    "annual program review"}
+    dup = {"text": "Chair, Committee on Curricular Harmony and Assessment "
+                   "Review, School of Applied Whimsy, 2015 to 2018"}
+    assert deduplicate_entries([dup, kept]) == [kept]
+
+
+def test_undated_dropped_entry_is_date_compatible():
+    kept = {"text": "Chair, Committee on Curricular Harmony and Assessment "
+                    "Review, School of Applied Whimsy, 2015-2018, oversees "
+                    "annual program review"}
+    dup = {"text": "Chair, Committee on Curricular Harmony and Assessment "
+                   "Review, School of Applied Whimsy"}
+    assert deduplicate_entries([dup, kept]) == [kept]
+
+
+@pytest.mark.parametrize("dropped, kept, compatible", [
+    ("2015-2018", "2015-2018", True),
+    ("2015-2018", "2017-2020", True),            # overlap
+    ("2015-2018", "2021-2024", False),           # disjoint
+    ("2015-18", "2021-24", False),               # two-digit ends
+    ("2015-18", "2016-2019", True),
+    ("07/01/2021-06/30/2024", "07/01/2015-06/30/2018", False),  # full MM/DD/YYYY end is not 20DD
+    ("07/01/2021-06/30/2024", "07/01/2021-06/30/2024", True),
+    ("Jul 2018-Jun 2021", "2018-2021", True),    # month-name ends
+    ("07/2008 - 06/2009", "2008-2009", True),    # month/year ends
+    ("07/2008 - 06/2009", "2010-2012", False),
+    ("2012-present", "2019-2021", True),         # open end reaches everything after
+    ("2012-present", "2001-2004", False),
+    ("2015-2018", "2021-2024 also served 2015 and 2018", False),  # boundary years alone do not vouch
+    # each separator and month form must parse as a RANGE, or the boundary years
+    # would be judged as bare years and pass against the passing mention above
+    ("2015\u20132018", "2021-2024, 2015 and 2018 mentioned", False),
+    ("2015 to 2018", "2021-2024, 2015 and 2018 mentioned", False),
+    ("2015 through 2018", "2021-2024, 2015 and 2018 mentioned", False),
+    ("Jul 2015-Jun 2018", "2021-2024, 2015 and 2018 mentioned", False),
+    ("07/2015 - 06/2018", "2021-2024, 2015 and 2018 mentioned", False),
+    ("May 14, 2031", "October 9, 2029", False),                 # bare year not in kept
+    ("May 14, 2031", "2028-2033", True),                         # bare year inside a kept range
+    ("May 14, 2031", "given again in 2031", True),
+    ("no dates here", "2021-2024", True),
+    ("2015-2018", "no dates here", False),
+])
+def test_dates_compatible(dropped, kept, compatible):
+    assert _dates_compatible(dropped, kept) is compatible
+
+
+def test_distinct_dated_records_of_one_talk_both_kept():
+    # Same title, two series of talks: the first record's tokens are all inside
+    # the second, whose text names its boundary years only in passing. Token
+    # containment approves the drop; only the date gate keeps both.
+    first = {"text": "Grand Rounds: Widgets and Whimsy in Gardening, Department "
+                     "of Applied Daydreams, 2029-2031"}
+    second = {"text": "Grand Rounds: Widgets and Whimsy in Gardening, Department "
+                      "of Applied Daydreams, 2033-2035, invited talk with panel "
+                      "discussion; earlier series ran 2029 and 2031"}
+    assert deduplicate_entries([first, second]) == [first, second]
 
 
 # ----------------------------------------- #983: records fanned out of one entry

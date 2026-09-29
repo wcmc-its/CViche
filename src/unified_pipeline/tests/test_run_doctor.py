@@ -483,12 +483,11 @@ def test_taxonomy_code_coverage_does_not_flag_m1_the_common_routed_case():
     assert lint_taxonomy_code_coverage(stage3b) == []
 
 
-def test_taxonomy_code_coverage_does_not_flag_codes_that_duplicate_instead():
-    # E, G and N4 all render via their own direct dispatch (not the
-    # RENDER_ROUTED_CODES lookup this lint checks) and then ALSO duplicate
-    # into the appendix -- a real defect, but a different one (#294 for G,
-    # #587 for N4) from "no render route at all", which is what this lint
-    # exists to catch. Flagging them here would conflate the two classes.
+def test_taxonomy_code_coverage_does_not_flag_rendered_passthrough_codes_or_n4():
+    # E and G render via the passthrough writer's own heading match (not the
+    # RENDER_ROUTED_CODES lookup this lint checks), so the lint exempts them;
+    # N4 is in RENDER_ROUTED_CODES since #587. Flagging any of them here would
+    # call a rendered code "no render route at all".
     stage3b = {"entries": [
         _entry("Weill Cornell Medicine", taxonomy_code="G", start=1),
         _entry("Full-time", taxonomy_code="E", start=2),

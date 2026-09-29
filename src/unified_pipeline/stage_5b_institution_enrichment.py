@@ -11,7 +11,7 @@ name, eliminating duplication like "Durham, NC, Durham, NC" in Stage 6 output.
 
 Applies to:
 - B1, B2: Education (university locations)
-- C, C1, C2: Postdoctoral Training
+- C, C1, C2, C3: Postdoctoral Training
 - D1, D2, D3: Professional Positions
 
 Input: Stage 5 enriched JSON (or Stage 4 fields JSON)
@@ -59,7 +59,7 @@ from unified_pipeline.stage5b.normalize import (  # noqa: F401  (re-exports)
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5b_institution_enrichment"
 
 # Taxonomy codes that need institution location enrichment
-INSTITUTION_CODES = ['B1', 'B2', 'C', 'C1', 'C2', 'D1', 'D2', 'D3']
+INSTITUTION_CODES = ['B1', 'B2', 'C', 'C1', 'C2', 'C3', 'D1', 'D2', 'D3']
 
 # LLM batch size
 BATCH_SIZE = 10
