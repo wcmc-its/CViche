@@ -149,7 +149,7 @@ class LeadershipSection:
                 self._add_multiline_leadership_rows(table, lines)
             else:
                 if not role and not institution:
-                    role = original_text[:100]
+                    role = original_text
 
                 self._add_leadership_row(table, role, institution, dates)
 

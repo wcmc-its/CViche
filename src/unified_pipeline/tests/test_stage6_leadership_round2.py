@@ -379,6 +379,18 @@ class TestSingleColumnFallback:
         assert gen.stats["entries_inserted"] == 0
 
 
+def test_raw_text_fallback_role_is_not_cut_at_100_characters():
+    """#983: a one-line entry with neither role nor institution renders as its
+    own text; `original_text[:100]` cut it mid-word."""
+    text = ("Chair of the Zorblax Standing Committee on Ferrous Metallurgy and its "
+            "Subcommittee on Ceremonial Bunting Standards and Historical Pennant Practice")
+    assert len(text) > 100
+    gen = _real_template_generator()
+    gen._fill_leadership([{"text": text, "extracted_fields": {}, "taxonomy_code": "O"}])
+    table = gen._find_table_after_paragraph(gen._find_paragraph_exact(CANONICAL_HEADER))
+    assert [row.cells[0].text for row in table.rows[1:]] == [text]
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
