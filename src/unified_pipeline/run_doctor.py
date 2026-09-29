@@ -72,6 +72,11 @@ Lints, ranked by the severity of the failure class they catch:
                           rather than a real licence — the failure class
                           #959 fixed one instance of, generalized to every
                           taxonomy code (A5IZ6Q, #829)
+14c. wrong_start_date     a stage-4 entry whose schema declares both dates,
+                          `end_date` empty, and whose text carries exactly one
+                          closed year range -- it renders "<start>-Present"
+                          (FSMB "2025-2026" extracted as start_date=2026);
+                          report-only, the value is not repaired (#729)
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -193,6 +198,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_invented_records,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
+    lint_wrong_start_date,
     unrouted_code_counts,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
@@ -318,6 +324,7 @@ KNOWN_LINTS = (
     "duplicate_records",
     "protected_data_in_output",
     "invented_records",
+    "wrong_start_date",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -824,6 +831,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("duplicate_records", lint_duplicate_records, ("blocks",)),
     LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",)),
     LintSpec("invented_records", lint_invented_records, ("stage_4", "table_rows")),
+    LintSpec("wrong_start_date", lint_wrong_start_date, ("stage_4",)),
 )
 
 
