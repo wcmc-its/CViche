@@ -731,8 +731,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # filler wiping another's rows when both resolve to the same table (#454).
         self._cleared_tables = set()
         # Body paragraphs `_insert_bulleted_entry` wrote this render. A header
-        # anchor must never resolve to one of them (#548): an ALL-CAPS or bold
-        # bullet would pass `_find_header_paragraph`'s shape test.
+        # anchor must never resolve to one of them (#548): an ALL-CAPS bullet
+        # (the writer does not bold, but the shape test accepts bold too) would pass `_find_header_paragraph`'s shape test.
         self._bullet_paras = set()
         self.stats = {
             'sections_filled': 0,
@@ -1705,8 +1705,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         recoveries mid-Mentoring if plain substring search were used.
 
         Nor may it match a bullet an earlier section inserted (#548): those are
-        skipped by identity, since a bullet can be ALL-CAPS or bold and so pass
-        the shape test below.
+        skipped by identity, since a bullet can be ALL-CAPS and so pass the
+        shape test below (which also accepts a bold run; no bullet writer bolds).
         """
         search = search_text.lower()
         for i, para in enumerate(self.doc.paragraphs):
