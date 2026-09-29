@@ -497,6 +497,10 @@ _KEEP_SENTINEL = 'KEEP'
 _TAXONOMY_PATH = Path(__file__).parent / "core" / "taxonomy_v7.json"
 
 
+# Leading markdown list / quote / heading / emphasis markers on a reply line.
+_MD_LINE_PREFIX = re.compile(r'^(?:[\s>#*_\-\u2022]+|\d+[.)]\s+)+')
+
+
 @functools.cache
 def _taxonomy_codes() -> frozenset[str]:
     """Every code in core/taxonomy_v7.json. A reclassification reply may only
@@ -526,7 +530,10 @@ def parse_reclassified_segments(
         if not line or ':' not in line:
             continue
         code, segment_text = (part.strip() for part in line.split(':', 1))
-        code = code.upper()
+        # A markdown list/emphasis wrapper around a real code ('- K2: ...',
+        # '**K2:** ...', '1. K2: ...') is still a code line, not commentary.
+        code = _MD_LINE_PREFIX.sub('', code).rstrip('*_ ').upper()
+        segment_text = segment_text.lstrip('*_ ')
         if code != _KEEP_SENTINEL and code not in _taxonomy_codes():
             logger.warning(
                 "Stage 6 reclassification reply: dropped non-code line "

@@ -385,7 +385,60 @@ def test_reclassify_live_shape_reply_renders_segments_without_commentary(monkeyp
     for leak in ("Here is the analysis", "Rationale", "If your institution",
                  "clearly", "threshold"):
         assert leak not in joined
-    assert "Synthetic Study of Signaling" in joined
+    # Text only the PARSED segments carry: the fallback that keeps the
+    # original entry text can never produce it, so this pins the call site.
+    assert "R01 XX000000" in joined
+    assert "Associated publications: Doe J et al 2014" in joined
+    assert gen.stats["appendix_segments_reconsidered"] >= 1
+
+
+def test_reclassify_keep_line_routes_under_original_code(monkeypatch):
+    """End to end: a 'KEEP: ...' segment of an M2B entry routes as M2B (the
+    original code), not as '?' / the appendix (#209, #264)."""
+    import unified_pipeline.stage_6_word_template as st6
+
+    monkeypatch.setattr(st6, "call_llm", lambda **kw: {"content": (
+        "KEEP: Synthetic Grant Beta, Example Agency, 2011-2013, completed")})
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._appendix_pending = [({"text": "blob of text", "taxonomy_code": "M2B",
+                               "extracted_fields": {}}, 10.0)]
+    routed = []
+    monkeypatch.setattr(
+        gen, "_insert_reconsidered_segment",
+        lambda text, code: routed.append((text, code)) or True)
+    appended = []
+    monkeypatch.setattr(
+        gen, "_add_remaining_to_appendix", lambda r: appended.extend(r) or [])
+
+    gen._reconsider_appendix_entries()
+
+    assert routed == [
+        ("Synthetic Grant Beta, Example Agency, 2011-2013, completed", "M2B")]
+    assert appended == []
+
+
+@pytest.mark.parametrize("line", [
+    "- K2: Participate in clinical teaching conferences",
+    "* K2: Participate in clinical teaching conferences",
+    "\u2022 K2: Participate in clinical teaching conferences",
+    "> K2: Participate in clinical teaching conferences",
+    "# K2: Participate in clinical teaching conferences",
+    "1. K2: Participate in clinical teaching conferences",
+    "**K2:** Participate in clinical teaching conferences",
+    "- **K2:** Participate in clinical teaching conferences",
+])
+def test_parse_reclassified_segments_strips_markdown_prefix(line):
+    assert parse_reclassified_segments(line, "M2B") == [
+        ("Participate in clinical teaching conferences", "K2")]
+
+
+def test_parse_reclassified_segments_markdown_prefix_commentary_still_dropped():
+    reply = ("- **Note:** everything stays put and details relate.\n"
+             "1. Rationale: grants are complete.\n"
+             "- KEEP: Synthetic Grant Alpha, Example Agency, 2010-2012")
+    assert parse_reclassified_segments(reply, "M2B") == [
+        ("Synthetic Grant Alpha, Example Agency, 2010-2012", "M2B")]
 
 
 def test_all_noise_batch_creates_no_appendix():
