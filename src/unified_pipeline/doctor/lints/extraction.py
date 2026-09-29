@@ -28,6 +28,10 @@ from unified_pipeline.core.template_boilerplate import (
     is_template_instruction,
     is_template_label_line,
 )
+from unified_pipeline.stage4.coercion import (
+    DATE_RANGE_TAXONOMY_CODES,
+    find_single_closed_range,
+)
 from unified_pipeline.segmentation_regression import (
     SUBSTANTIVE_LINE_CHARS,
     _looks_like_record,
@@ -525,4 +529,42 @@ def lint_invented_records(stage4: dict,
                     f"is a known WCM template instruction, not a real "
                     f"licence (#829)",
                     [text[:120]]))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# A wrong start date left beside an empty end date (#729, split from #556).
+
+def lint_wrong_start_date(stage4: dict) -> list[dict]:
+    """An entry whose schema declares both dates, whose `end_date` is empty,
+    and whose own text carries exactly one closed 4-digit range with no
+    present/ongoing marker: the range is in the source but the entry renders
+    "<start>-Present". `reconcile_date_range` repairs the blank-start and
+    agreeing-start shapes; what reaches this lint is the shape it
+    deliberately leaves alone, chiefly the FSMB one (text "2025-2026"
+    extracted as start_date=2026). WARN when the extracted start equals the
+    range's END year (the model took the wrong end of the range), INFO for
+    any other disagreement. Report-only by decision (2026-09-09): the
+    extracted value is never changed."""
+    findings = []
+    for e in stage4.get("entries", []):
+        if e.get("taxonomy_code") not in DATE_RANGE_TAXONOMY_CODES:
+            continue
+        fields = e.get("extracted_fields") or {}
+        if fields.get("end_date"):
+            continue
+        text = str(e.get("text", ""))
+        closed_range = find_single_closed_range(text)
+        if closed_range is None:
+            continue
+        range_start, range_end = closed_range
+        start = str(fields.get("start_date") or "").strip()
+        severity = "WARN" if start == range_end else "INFO"
+        findings.append(_finding(
+            "wrong_start_date", severity,
+            f"entry {e.get('element_idx_start')} ({e.get('taxonomy_code')}): "
+            f"start_date '{start}' with an empty end_date, but the text "
+            f"carries the single closed range {range_start}-{range_end} -- "
+            f"renders '{start}-Present' (#729)",
+            [text[:120]]))
     return findings
