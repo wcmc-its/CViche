@@ -29,6 +29,7 @@ The section is two layers (#739 review):
 paragraph has to be inserted between the heading and the table.
 """
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -83,6 +84,12 @@ N2_INSTRUCTION = ("Duplicate table below as needed. Examples include serving "
 # Spacing paragraph between mentee tables: 6pt before and after, in
 # twentieths of a point (w:spacing units).
 MENTEE_TABLE_SPACING_TWIPS = '120'
+
+#: A "Role: <owner's role>" line on a mentee entry (web202: "Role: MPH
+#: Advisor"). Stage 2 folds it into the mentee's entry (#986, PR #1017), but
+#: the N3A/N3B schema has no role field and the table no role row, so it was
+#: dropped; it now fills Type of Supervision.
+_ROLE_LINE_RE = re.compile(r'(?:^|[\t\n])\s*Role:\s*([^\t\n]+)')
 
 
 @dataclass(frozen=True)
@@ -361,8 +368,12 @@ def _normalize_mentee(entry: Mapping[str, Any]) -> MenteeRecord:
         project = f"{project}\nAwards: {mentee_awards}" if project else f"Awards: {mentee_awards}"
 
     supervision_type = _text(fields.get('supervision_type'))
+    role_match = _ROLE_LINE_RE.search(_text(entry.get('text')))
+    role = role_match.group(1).strip() if role_match else ''
     if not supervision_type:
-        supervision_type = _infer_supervision_type(mentee_level or site_pos_raw)
+        supervision_type = role or _infer_supervision_type(mentee_level or site_pos_raw)
+    elif role and role.casefold() not in supervision_type.casefold():
+        supervision_type = f"{supervision_type} ({role})"
 
     return MenteeRecord(
         name=_text(fields.get('name') or fields.get('mentee_name')),
