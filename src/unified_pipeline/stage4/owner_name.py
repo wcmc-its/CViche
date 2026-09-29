@@ -444,7 +444,7 @@ class _InferredLocation(BaseModel):
 
     @field_validator("institution", "city", "state", "country", mode="before")
     @classmethod
-    def _none_as_empty(cls, v):
+    def _none_as_empty(cls, v: object) -> object:
         # Sonnet 5 writes null for an unknown city/state where Sonnet 4.6
         # writes "" -- the same "not known"; rejecting it failed the whole
         # location inference (web175, 2026-09-29 A/B).
