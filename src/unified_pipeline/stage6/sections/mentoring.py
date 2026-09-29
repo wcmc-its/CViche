@@ -88,7 +88,7 @@ MENTEE_TABLE_SPACING_TWIPS = '120'
 #: A "Role: <owner's role>" line on a mentee entry (web202: "Role: MPH
 #: Advisor"). Stage 2 folds it into the mentee's entry (#986, PR #1017), but
 #: the N3A/N3B schema has no role field and the table no role row, so it was
-#: dropped; it now fills Type of Supervision.
+#: dropped; it now joins Type of Supervision.
 _ROLE_LINE_RE = re.compile(r'(?:^|[\t\n])\s*Role:\s*([^\t\n]+)')
 
 
@@ -371,9 +371,9 @@ def _normalize_mentee(entry: Mapping[str, Any]) -> MenteeRecord:
     role_match = _ROLE_LINE_RE.search(_text(entry.get('text')))
     role = role_match.group(1).strip() if role_match else ''
     if not supervision_type:
-        supervision_type = role or _infer_supervision_type(mentee_level or site_pos_raw)
-    elif role and role.casefold() not in supervision_type.casefold():
-        supervision_type = f"{supervision_type} ({role})"
+        supervision_type = _infer_supervision_type(mentee_level or site_pos_raw)
+    if role and role.casefold() not in supervision_type.casefold():
+        supervision_type = f"{supervision_type} ({role})" if supervision_type else role
 
     return MenteeRecord(
         name=_text(fields.get('name') or fields.get('mentee_name')),

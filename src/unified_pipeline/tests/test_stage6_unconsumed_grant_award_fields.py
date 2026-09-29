@@ -124,11 +124,15 @@ def test_award_already_in_the_project_text_is_not_repeated():
     assert rows["Project/Accomplishments:"] == "Sepsis outcomes, AGS Award 2019"
 
 
-def test_a_role_line_fills_type_of_supervision_when_stage_4_gave_none():
+def test_a_role_line_fills_type_of_supervision_when_nothing_else_does():
     # #983: "Role: MPH Advisor" folded into the mentee entry had no field or row.
-    entry = {"text": "Jane Roe, MPH student, 2019-2021\tRole: MPH Advisor",
-             "extracted_fields": {"mentee_name": "Jane Roe", "mentee_level": "PhD"}}
+    entry = {"text": "Jane Roe, 2019-2021\tRole: MPH Advisor", "extracted_fields": {"mentee_name": "Jane Roe"}}
     assert _normalize_mentee(entry).supervision_type == "MPH Advisor"
+
+
+def test_a_role_line_is_added_to_the_inferred_supervision_type():
+    entry = {"text": "Jane Roe, 2019-2021\tRole: PhD Advisor", "extracted_fields": {"mentee_level": "PhD"}}
+    assert _normalize_mentee(entry).supervision_type == "Research (PhD Advisor)"
 
 
 def test_a_role_line_is_added_to_an_extracted_supervision_type():
