@@ -1006,9 +1006,23 @@ def test_table_shape_flags_org_fabricated_from_the_name():
     """#889: name == org, org + an award word, or org + a year."""
     org = "Association for Educational Research"
     for name in (org, f"{org} Award", f"{org} Fellowship", f"{org} 2019",
-                 f"{org} Prize 2019", f"{org} List"):
+                 f"{org} Prize 2019", f"{org} List", f"{org} Scholarship",
+                 f"{org} Fellow", f"{org}, 2019", f"{org} (2019)"):
         ev = _honors_evidence(name, org)
         assert any("duplicated in name" in e for e in ev), name
+
+
+def test_table_shape_org_check_is_linear_on_runs_of_years():
+    """A starred-alternation fullmatch backtracked ~13x per listed year; eight
+    years plus one more word took minutes. Must stay instant, and the
+    leftover word means the org was not fabricated from the name."""
+    import time
+    org = "Association for Educational Research"
+    name = f"{org} " + ", ".join(str(y) for y in range(1990, 2010)) + " Grant"
+    start = time.monotonic()
+    ev = _honors_evidence(name, org)
+    assert time.monotonic() - start < 1.0
+    assert not any("duplicated in name" in e for e in ev)
 
 
 def test_table_shape_award_word_name_without_the_org_is_not_flagged():

@@ -694,8 +694,11 @@ HONORS_ORG_MIN_CHARS = 8
 
 # What may remain of a name once its org is removed for the org to count as
 # "fabricated from the name" (#889): only an award word and/or digits (a year).
+# Stripped with sub() and tested for emptiness, never fullmatch() over a
+# starred alternation -- that shape backtracks exponentially on runs of years.
 _AWARD_ORG_LEFTOVER_RE = re.compile(
-    r"(?:award|prize|fellow(?:ship)?|scholarship|list|\d+|[\s,.;:()\-\u2013\u2014/&]+)*",
+    r"award|prize|fellow(?:ship)?|scholarship|list"
+    r"|\d+|[\s,.;:()\-\u2013\u2014/&]+",
     re.IGNORECASE)
 
 
@@ -708,7 +711,7 @@ def _org_fabricated_from_name(org: str, name: str) -> bool:
     if org_n not in name_n:
         return False
     leftover = name_n.replace(org_n, " ", 1)
-    return _AWARD_ORG_LEFTOVER_RE.fullmatch(leftover) is not None
+    return not _AWARD_ORG_LEFTOVER_RE.sub("", leftover)
 
 
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
