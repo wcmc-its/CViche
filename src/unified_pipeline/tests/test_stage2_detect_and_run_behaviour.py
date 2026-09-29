@@ -1728,3 +1728,25 @@ def test_flagged_header_row_stays_out_of_a_whole_table_span_and_the_parent_still
     entries, _ = stage2.detect_entries_for_section(["Service"], elements, 50, 50, element_index_map=_idx_map(elements))
     assert [e["element_idx_start"] for e in entries] == ["50.1"]
     assert stage2.get_element_text(elements[0]) == "Example Role\tExample Org"
+
+
+def test_llm_outage_fails_the_section_while_other_errors_skip_the_batch(monkeypatch):
+    # #810: an outage past the budget must propagate out of the batch loop;
+    # any other call_llm error still skips just that batch.
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    elements = [_para(1, "Invented entry text")]
+
+    def outage(**kw):
+        raise LLMOutageError("provider down", seconds_waited=1800.0)
+
+    monkeypatch.setattr(stage2, "call_llm", outage)
+    with pytest.raises(LLMOutageError):
+        stage2.detect_entries_for_section(["S"], elements, 1, 1, element_index_map=_idx_map(elements))
+
+    def blip(**kw):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr(stage2, "call_llm", blip)
+    entries, _ = stage2.detect_entries_for_section(["S"], elements, 1, 1, element_index_map=_idx_map(elements))
+    assert entries == []
