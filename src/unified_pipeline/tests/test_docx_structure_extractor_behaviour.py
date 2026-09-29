@@ -1690,3 +1690,101 @@ def test_extract_unified_elements_single_cell_embedded_header_still_splits(tmp_p
     elements = extract_unified_elements(str(docx_path))["elements"]
 
     assert "Education and Degrees" in [e["text"] for e in elements if e["type"] == "table_header"]
+
+
+# --------------------------------------------------------------------------
+# Column-header row flag (#424). All text below is synthetic.
+# --------------------------------------------------------------------------
+
+
+def _two_row_table(header_cells, data_cells):
+    doc = Document()
+    table = doc.add_table(rows=2, cols=len(header_cells))
+    for col, text in enumerate(header_cells):
+        table.cell(0, col).text = text
+    for col, text in enumerate(data_cells):
+        table.cell(1, col).text = text
+    return doc, table
+
+
+def _mark_repeat_header(table, val=None):
+    attr = "" if val is None else f' w:val="{val}"'
+    tr_pr = table.rows[0]._tr.get_or_add_trPr()
+    tr_pr.append(parse_xml(f"<w:tblHeader {nsdecls('w')}{attr}/>"))
+
+
+def test_column_label_row_is_flagged_as_header_row():
+    _, table = _two_row_table(
+        ["Title", "Institution/Location", "Dates"], ["Example Role", "Example Org", "Example"]
+    )
+    assert extract_table_metadata(table, "t")["header_row"] is True
+
+
+def test_word_repeat_header_row_is_flagged_even_without_label_vocabulary():
+    _, table = _two_row_table(["Alpha", "Beta"], ["Gamma", "Delta"])
+    assert "header_row" not in extract_table_metadata(table, "t")
+    _mark_repeat_header(table)
+    assert extract_table_metadata(table, "t")["header_row"] is True
+
+
+def test_word_repeat_header_switched_off_is_not_a_header_marker():
+    _, table = _two_row_table(["Alpha", "Beta"], ["Gamma", "Delta"])
+    _mark_repeat_header(table, val="0")
+    assert "header_row" not in extract_table_metadata(table, "t")
+
+
+@pytest.mark.parametrize(
+    "header_cells",
+    [
+        ["Role", "Organization", "Dates 2019"],  # a digit means a record
+        ["Name:", "Example"],  # label|value form row: 50% vocabulary, still a value row
+        ["Title", ""],  # a single filled cell
+        ["Example Person", "Example Lab"],  # no label vocabulary
+    ],
+)
+def test_record_like_row_zero_is_not_flagged(header_cells):
+    _, table = _two_row_table(header_cells, ["x"] * len(header_cells))
+    assert "header_row" not in extract_table_metadata(table, "t")
+
+
+def test_two_word_committee_chair_row_zero_is_the_known_false_positive():
+    # 50% column-label vocabulary, two filled cells, no digit: flagged. The same
+    # residual class #736's appendix filter documents; pinned so a change to
+    # the rule is visible.
+    _, table = _two_row_table(["Committee", "Chair"], ["x", "y"])
+    assert extract_table_metadata(table, "t")["header_row"] is True
+
+
+def test_one_row_table_is_never_flagged():
+    doc = Document()
+    table = doc.add_table(rows=1, cols=3)
+    for col, text in enumerate(["Title", "Institution", "Dates"]):
+        table.cell(0, col).text = text
+    assert "header_row" not in extract_table_metadata(table, "t")
+
+
+def test_unified_no_header_table_keeps_flagged_row_zero_unsplit_and_marked(tmp_path):
+    # Row 0 would split on "\n\n" as a data row; flagged, it stays one row at
+    # index 0 so stage 2's skip lands on it. The element carries the flag.
+    doc = Document()
+    t = doc.add_table(rows=2, cols=2)
+    t.cell(0, 0).text = "Title\n\nInstitution"
+    t.cell(0, 1).text = "Dates\n\nLocation"
+    t.cell(1, 0).text = "Example Award"
+    t.cell(1, 1).text = "Example Org"
+    path = tmp_path / "flagged.docx"
+    doc.save(str(path))
+
+    elements = extract_unified_elements(str(path))["elements"]
+
+    assert [e["type"] for e in elements] == ["table"]
+    assert elements[0]["header_row"] is True
+    assert elements[0]["rows"] == 2
+    assert [c["text"] for c in elements[0]["data"][0]] == ["Title\n\nInstitution", "Dates\n\nLocation"]
+
+
+def test_unified_unflagged_table_element_has_no_header_row_key(tmp_path):
+    docx_path = tmp_path / "unified_fixture.docx"
+    _build_unified_fixture_docx(docx_path)
+    elements = extract_unified_elements(str(docx_path))["elements"]
+    assert all("header_row" not in e for e in elements)
