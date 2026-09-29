@@ -230,6 +230,18 @@ _DOB_STEM = (
 )
 _SSN_STEM = r"(?: social \s* security (?: \s* (?: number | no\.? ) )? | ssn )"
 
+# #1071: a template's DOB label can carry a parenthetical before its colon
+# -- a format hint ("Date of Birth (mm/dd/yyyy):") or the value itself
+# ("Birth Date (01/02/1970):", nothing after the colon), which rendered
+# verbatim in the Appendix. Replaces the old `(D.O.B.)`-only parenthetical,
+# which this one subsumes. One bounded character class with no nested
+# quantifier: a match attempt reads at most `_DOB_PAREN_MAX` characters
+# past the stem, so an unclosed "(" cannot make the scan super-linear. Not
+# a newline and not another parenthesis, so it never spans two fragments or
+# pairs an opening parenthesis with a later, unrelated closing one.
+_DOB_PAREN_MAX = 40
+_DOB_LABEL_PARENTHETICAL = r"(?: \s* \( [^()\n]{0,%d} \) )?" % _DOB_PAREN_MAX
+
 
 def _colonless(stem: str, wide_value: str, single_space_value: str) -> str:
     """A colon-less label+value shape: `stem` then either a wide separator
@@ -248,9 +260,10 @@ def _colonless(stem: str, wide_value: str, single_space_value: str) -> str:
 WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     # --- unambiguous as a label: every code -------------------------------
     WithholdRule(CAT_DATE_OF_BIRTH, SCOPE_ALL_CODES, DECIDED_820, label=r"""
-        date \s* of \s* birth (?: \s* \( d\.?o\.?b\.?\) )?
+        date \s* of \s* birth""" + _DOB_LABEL_PARENTHETICAL + r"""
       | date \s+ and \s+ place \s* of \s* birth
-      | birth \s*-? \s* date (?: \s+ and \s+ birth \s*-? \s* place )?
+      | birth \s*-? \s* date""" + _DOB_LABEL_PARENTHETICAL + r"""
+      | birth \s*-? \s* date \s+ and \s+ birth \s*-? \s* place
       | birthdate (?: \s+ and \s+ birthplace )?
       | birthday
       | year \s* of \s* birth
@@ -329,7 +342,15 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     WithholdRule(CAT_AGE, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"age"),
     WithholdRule(CAT_GENDER, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"gender"),
     WithholdRule(CAT_RELIGION, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"religion"),
-    WithholdRule(CAT_ETHNICITY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"ethnicity"),
+    # #1071: "Race/Ethnicity:", "Race / Ethnicity:", "Race and Ethnicity:"
+    # -- the "ethnicity" half alone never opened a label there, because the
+    # boundary rule does not accept "/" or "and" before it. Never a bare
+    # "race": "Race: reporting practices in clinical trials" is a title.
+    WithholdRule(CAT_ETHNICITY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"""
+        ethnicity
+      | race \s* / \s* ethnicity
+      | race \s+ and \s+ ethnicity
+    """),
     WithholdRule(CAT_VETERAN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  label=r"veteran (?: \s* status )?"),
     WithholdRule(CAT_DISABILITY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
@@ -643,9 +664,10 @@ def _boundary_ok(prefix_since_last_delim: str) -> bool:
 # 06/15/2019"), the colon its pattern already requires, and a full date
 # (never a bare year).
 _EXPLICIT_DOB_LABEL_RE = re.compile(r"""
-    (?: date \s* of \s* birth (?: \s* \( d\.?o\.?b\.?\) )?
+    (?: date \s* of \s* birth""" + _DOB_LABEL_PARENTHETICAL + r"""
       | date \s+ and \s+ place \s* of \s* birth
-      | birth \s*-? \s* date (?: \s+ and \s+ birth \s*-? \s* place )?
+      | birth \s*-? \s* date""" + _DOB_LABEL_PARENTHETICAL + r"""
+      | birth \s*-? \s* date \s+ and \s+ birth \s*-? \s* place
       | birthdate (?: \s+ and \s+ birthplace )?
       | d\.?o\.?b\.? (?: \s* / \s* p\.?o\.?b\.? )?
     ) \s* :""", re.X | re.I)
