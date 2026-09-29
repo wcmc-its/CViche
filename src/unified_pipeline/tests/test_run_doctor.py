@@ -509,6 +509,37 @@ def test_output_hygiene_flags_bracket_code_leaks():
     assert any("[M2A]" in line for line in findings[0]["evidence"])
 
 
+def test_output_hygiene_ignores_source_bracket_tokens_that_are_not_codes():
+    # #888: a source-CV bracketed acronym must not be an ERROR.
+    blocks = [("p", "Invented Kelp Study for Nowhere [K9P]; pilot trial"),
+              ("table", "Sensor [CO2] and [AI] tools in [UK] near [X7Z]")]
+    assert lint_output_hygiene(blocks) == []
+
+
+def test_output_hygiene_flags_real_code_next_to_source_token():
+    blocks = [("p", "Invented Kelp Study [K9P] then [D1] leaked")]
+    findings = lint_output_hygiene(blocks)
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "ERROR"
+    assert "1 bracketed" in findings[0]["message"]
+
+
+def test_output_hygiene_flags_retired_invalid_codes():
+    # The `invalid_codes` list in taxonomy_v7.json is not in `codes`; the lint
+    # must still flag it (guards `codes.update(taxonomy["invalid_codes"]...)`).
+    for code in ("S10", "Q5"):
+        findings = lint_output_hygiene([("p", f"[{code}] leaked")])
+        assert len(findings) == 1, code
+        assert findings[0]["severity"] == "ERROR"
+
+
+def test_output_hygiene_flags_every_taxonomy_code_shape():
+    codes = ["A", "B1", "D1", "K5", "M2A", "M4C", "N2", "Q4D", "S0", "T"]
+    findings = lint_output_hygiene([("p", f"• [{c}] leaked") for c in codes])
+    assert findings[0]["severity"] == "ERROR"
+    assert f"{len(codes)} bracketed" in findings[0]["message"]
+
+
 def test_output_hygiene_flags_boilerplate_in_appendix():
     blocks = [
         ("p", "T. APPENDIX"),
