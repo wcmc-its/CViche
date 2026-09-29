@@ -141,9 +141,9 @@ def _organization_left_in_text(text: object, role: object, start_date: object,
     `_fill_extramural_leadership` used to put the whole raw entry line in the
     Organization column when no organization field was set, so the role and the
     dates were printed twice and the source's tab separators came through
-    (#946: "2022-present Ortho Pearls WoW<TAB>Sports Medicine Section Editor").
+    (#946 shape: "2022-present Fictional Gazette<TAB>Section Editor").
     What is left after removing the role text and the dates stage 4 extracted
-    is the organization ("Ortho Pearls WoW"). Nothing else is removed: a year
+    is the organization ("Fictional Gazette"). Nothing else is removed: a year
     that is not in `start_date`/`end_date` (the Dates cell would not show it)
     and every word outside the role stay, so the row never loses text the
     other columns do not carry. When the role is the whole line the result is
