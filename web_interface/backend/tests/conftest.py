@@ -86,6 +86,17 @@ def _reset_estimate_rate_limiter():
     _estimate_rate_limiter.reset()
 
 
+@pytest.fixture(autouse=True)
+def _reset_pod_admission_state():
+    """Every client fixture's teardown runs lifespan shutdown, which puts the
+    pod into one-way draining (#116); undo that and any leaked slot so the
+    next test can start runs."""
+    from app.pipeline import concurrency
+    yield
+    concurrency._draining = False
+    concurrency._active_run_ids.clear()
+
+
 @pytest.fixture
 def db():
     """Provide a test database session."""
@@ -126,8 +137,11 @@ def client(db):
 
     # Patch the SessionLocal used by the lifespan so seed_system_config
     # and check_consent_integrity talk to the test DB, not the real one.
+    # A test that leaves a run slot held would otherwise make the teardown's
+    # lifespan shutdown wait out the full production drain budget (#116).
     with patch("app.database.SessionLocal", TestingSessionLocal), \
-         patch("app.database.engine", engine):
+         patch("app.database.engine", engine), \
+         patch.dict(os.environ, {"CVICHE_SHUTDOWN_DRAIN_SECONDS": "0"}):
         with TestClient(app) as c:
             yield c
 

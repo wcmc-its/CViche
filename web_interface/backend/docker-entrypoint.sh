@@ -45,10 +45,17 @@ echo "==> Starting uvicorn..."
 # (SAML metadata, OIDC redirects) produce https:// URLs. The container is only
 # reachable via the LB in EKS, so --forwarded-allow-ips=* is safe; see
 # docs/PRODUCTION_TLS.md for the contract the LB must honor.
+# --timeout-graceful-shutdown: on SIGTERM uvicorn otherwise waits with no limit
+# for every open request task -- including a /start request whose background
+# pipeline thread runs for 15-20 min -- before it runs lifespan shutdown. Cap
+# that wait so lifespan shutdown's own drain (app.main._drain_runs_before_exit,
+# budget CVICHE_SHUTDOWN_DRAIN_SECONDS) runs, and can fail a run that outlives
+# it, before the process exits (#116).
 exec uvicorn app.main:app \
     --host 0.0.0.0 \
     --port 8000 \
     --log-level info \
     --proxy-headers \
     --forwarded-allow-ips='*' \
+    --timeout-graceful-shutdown 10 \
     "$@"

@@ -211,7 +211,7 @@ async def start_run(
     # Admission control: cap concurrent in-process pipelines per pod. Acquire a
     # slot before marking the run "running" so a rejected start leaves the run
     # in its prior state, retryable once a slot frees.
-    if not concurrency.try_acquire_slot():
+    if not concurrency.try_acquire_slot(run_id):
         raise HTTPException(
             status_code=429,
             detail={
@@ -241,7 +241,7 @@ async def start_run(
     # loser returns its slot and never reaches the pipeline dispatch.
     if not claim_run_as_running(db, run_id, Run.status.in_(STARTABLE_STATUSES)):
         db.rollback()
-        concurrency.release_slot()
+        concurrency.release_slot(run_id)
         raise conflict("This run was already started by another request.")
     db.commit()
 
@@ -258,7 +258,7 @@ async def start_run(
             asyncio.run(orchestrator.execute())
         finally:
             bg_db.close()
-            concurrency.release_slot()
+            concurrency.release_slot(run_id)
 
     background_tasks.add_task(run_pipeline)
 
@@ -499,7 +499,7 @@ async def retry_step(
     # Admission control: a retry resumes a full pipeline and consumes the same
     # per-pod resource as a fresh start, so gate it the same way. Acquire before
     # mutating step/run state so a rejected retry leaves the run untouched.
-    if not concurrency.try_acquire_slot():
+    if not concurrency.try_acquire_slot(run_id):
         raise HTTPException(
             status_code=429,
             detail={
@@ -537,7 +537,7 @@ async def retry_step(
         error_message=None, completed_at=None, started_at=datetime.now(),
     ):
         db.rollback()
-        concurrency.release_slot()
+        concurrency.release_slot(run_id)
         raise conflict("This run is already running.")
 
     downstream_steps = db.query(Step).filter(
@@ -565,7 +565,7 @@ async def retry_step(
             asyncio.run(orchestrator.execute(start_step_number=step_number))
         finally:
             bg_db.close()
-            concurrency.release_slot()
+            concurrency.release_slot(run_id)
 
     background_tasks.add_task(run_pipeline)
 

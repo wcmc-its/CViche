@@ -177,6 +177,70 @@ async def _stale_run_reaper_loop(interval_seconds: int):
             )
 
 
+# How long shutdown waits for this pod's in-flight runs before failing them
+# (#116). Pairs with the backend Deployment's terminationGracePeriodSeconds,
+# which must exceed this plus the preStop sleep and uvicorn's own
+# --timeout-graceful-shutdown, or the kubelet SIGKILLs the pod mid-drain.
+DEFAULT_SHUTDOWN_DRAIN_SECONDS = 1500
+
+
+def _shutdown_drain_seconds() -> int:
+    """Read the drain budget (CVICHE_SHUTDOWN_DRAIN_SECONDS, "llm" section)."""
+    raw, _ = get_config("llm", "CVICHE_SHUTDOWN_DRAIN_SECONDS", default=DEFAULT_SHUTDOWN_DRAIN_SECONDS)
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        return DEFAULT_SHUTDOWN_DRAIN_SECONDS
+
+
+async def _drain_runs_before_exit(budget_seconds: int) -> None:
+    """Let this pod's in-flight runs finish, then fail any still running (#116).
+
+    A run executes in a thread inside this process, so when the process exits
+    the run dies with it and, before this, its row stayed "running" with
+    nothing executing it (runs 6O6Q2V and U2MUQ5 were orphaned by releases on
+    2026-09-29). Stop admitting runs, wait up to ``budget_seconds`` for the
+    ones already going, then mark the rest failed with a deploy message so the
+    user gets a terminal status instead of a timer that climbs forever.
+    """
+    from app.pipeline import concurrency
+    from app.services.run_service import fail_runs_interrupted_by_shutdown
+    from app.database import SessionLocal
+
+    concurrency.begin_draining()
+    active = concurrency.active_run_ids()
+    if not active:
+        logger.info("Shutdown drain: no runs in progress on this pod")
+        return
+    logger.info(
+        "Shutdown drain: waiting up to %ds for %d run(s) in progress: %s",
+        budget_seconds, len(active), ", ".join(active),
+    )
+    remaining = await concurrency.wait_for_drain(budget_seconds)
+    if not remaining:
+        logger.info("Shutdown drain: all runs on this pod finished")
+        return
+
+    def _fail() -> int:
+        db = SessionLocal()
+        try:
+            return fail_runs_interrupted_by_shutdown(db, remaining)
+        finally:
+            db.close()
+
+    try:
+        failed = await asyncio.to_thread(_fail)
+    except Exception:
+        # The rest of shutdown (broker close, notification flush) must still
+        # run; the periodic reaper on a surviving pod fails these runs later.
+        logger.exception("Shutdown drain: could not mark runs failed: %s", ", ".join(remaining))
+        return
+    logger.warning(
+        "Shutdown drain: budget of %ds ran out; marked %d of %d still-running run(s) failed: %s",
+        budget_seconds, failed, len(remaining), ", ".join(remaining),
+    )
+
+
 # Auth modes with a real credential check, allowed on a deployed (S3) instance.
 # Only "saml" is implemented today (see auth_routes.login / auth.py); "oidc" is
 # NOT here yet and is deliberately NOT listed -- allow it only once it exists and
@@ -341,7 +405,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown: cancel the reaper, stop the subscriber loop, close broker conns.
+    # Shutdown: drain this pod's runs first, while the broker and the event
+    # emitter are still up for them to report on; then cancel the reaper, stop
+    # the subscriber loop, close broker conns.
+    await _drain_runs_before_exit(_shutdown_drain_seconds())
     if reaper_task:
         reaper_task.cancel()
         try:

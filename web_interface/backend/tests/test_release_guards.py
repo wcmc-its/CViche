@@ -11,6 +11,8 @@ import io
 import os
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
+import asyncio
+import time
 from datetime import datetime, timedelta
 from unittest.mock import patch, AsyncMock
 
@@ -20,7 +22,9 @@ from docx import Document
 from app.models import Run, Step, User
 from app.pipeline import concurrency
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.services.run_service import reconcile_stale_runs
+from app.services.run_service import (
+    DEPLOY_INTERRUPT_MESSAGE, fail_runs_interrupted_by_shutdown, reconcile_stale_runs,
+)
 from sqlalchemy.orm import object_session
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -106,6 +110,48 @@ class TestReconcileStaleRuns:
         assert reconcile_stale_runs(db) == 1
         db.refresh(run)
         assert run.status == "failed"
+
+
+class TestFailRunsInterruptedByShutdown:
+    def test_still_running_run_is_failed_with_the_deploy_message(self, db):
+        run = Run(id="DPLY01", filename="a.docx", file_type="docx", status="running",
+                  started_at=datetime.now() - timedelta(minutes=30))
+        db.add(run)
+        db.add(Step(run_id="DPLY01", step_number=4, step_name="x", status="running"))
+        db.commit()
+
+        assert fail_runs_interrupted_by_shutdown(db, ["DPLY01"]) == 1
+
+        db.refresh(run)
+        assert run.status == "failed"
+        assert run.error_message == DEPLOY_INTERRUPT_MESSAGE
+        assert run.completed_at is not None
+        assert db.query(Step).filter(Step.run_id == "DPLY01").one().status == "error"
+
+    def test_run_that_finished_meanwhile_is_untouched(self, db):
+        finished_at = datetime.now() - timedelta(minutes=1)
+        run = Run(id="DPLY02", filename="a.docx", file_type="docx", status="complete",
+                  started_at=datetime.now() - timedelta(minutes=20), completed_at=finished_at)
+        db.add(run)
+        db.commit()
+
+        assert fail_runs_interrupted_by_shutdown(db, ["DPLY02"]) == 0
+
+        db.refresh(run)
+        assert run.status == "complete"
+        assert run.error_message is None
+        assert run.completed_at == finished_at
+
+    def test_run_not_on_this_pod_is_untouched(self, db):
+        run = Run(id="DPLY03", filename="a.docx", file_type="docx", status="running",
+                  started_at=datetime.now() - timedelta(minutes=5))
+        db.add(run)
+        db.commit()
+
+        assert fail_runs_interrupted_by_shutdown(db, ["OTHER9"]) == 0
+
+        db.refresh(run)
+        assert run.status == "running"
 
 
 # --- #5  restart quota enforcement ------------------------------------------
@@ -361,24 +407,25 @@ class TestConcurrencyModule:
     @pytest.fixture(autouse=True)
     def _reset(self):
         # The counter is module-global; isolate each test from slot leakage.
-        concurrency._active_runs = 0
+        concurrency._active_run_ids.clear()
         yield
-        concurrency._active_runs = 0
+        concurrency._active_run_ids.clear()
 
     def test_acquire_release_roundtrip(self, monkeypatch):
         monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "2")
-        assert concurrency.try_acquire_slot() is True
-        assert concurrency.try_acquire_slot() is True
+        assert concurrency.try_acquire_slot("PLUM01") is True
+        assert concurrency.try_acquire_slot("PEAR02") is True
         assert concurrency.active_count() == 2
-        assert concurrency.try_acquire_slot() is False   # at cap -> rejected
-        concurrency.release_slot()
+        assert concurrency.try_acquire_slot("FIGS03") is False   # at cap -> rejected
+        concurrency.release_slot("PLUM01")
         assert concurrency.active_count() == 1
-        assert concurrency.try_acquire_slot() is True     # slot freed
+        assert concurrency.active_run_ids() == ["PEAR02"]
+        assert concurrency.try_acquire_slot("FIGS03") is True     # slot freed
 
     def test_env_cap_respected(self, monkeypatch):
         monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "1")
-        assert concurrency.try_acquire_slot() is True
-        assert concurrency.try_acquire_slot() is False
+        assert concurrency.try_acquire_slot("SLOTRUN") is True
+        assert concurrency.try_acquire_slot("SLOTRUN") is False
 
     def test_nonpositive_cap_falls_back_to_default(self, monkeypatch):
         # A 0/negative cap would wedge the pod; we treat it as the default.
@@ -386,8 +433,50 @@ class TestConcurrencyModule:
         assert concurrency.get_max_concurrent_runs() == concurrency.DEFAULT_MAX_CONCURRENT_RUNS
 
     def test_release_never_goes_negative(self):
-        concurrency.release_slot()
+        concurrency.release_slot("SLOTRUN")
         assert concurrency.active_count() == 0
+
+    def test_losing_starter_release_keeps_winner_tracked(self, monkeypatch):
+        # Two starters of the same run both hold a slot until claim_run_as_running
+        # picks one; the loser's release must not untrack the winner's run.
+        monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "3")
+        assert concurrency.try_acquire_slot("TWIN01") is True
+        assert concurrency.try_acquire_slot("TWIN01") is True
+        concurrency.release_slot("TWIN01")
+        assert concurrency.active_run_ids() == ["TWIN01"]
+
+    def test_draining_refuses_new_slots(self, monkeypatch):
+        monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "3")
+        assert concurrency.try_acquire_slot("KEPT01") is True
+        concurrency.begin_draining()
+        assert concurrency.try_acquire_slot("LATE02") is False
+        # The run admitted before the drain keeps its slot.
+        assert concurrency.active_run_ids() == ["KEPT01"]
+
+    def test_wait_for_drain_returns_once_the_active_run_finishes(self, monkeypatch):
+        monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "3")
+        assert concurrency.try_acquire_slot("SLOW01") is True
+
+        async def finish_later():
+            await asyncio.sleep(0.05)
+            concurrency.release_slot("SLOW01")
+
+        async def drain():
+            finisher = asyncio.create_task(finish_later())
+            started = time.monotonic()
+            remaining = await concurrency.wait_for_drain(5, poll_seconds=0.01)
+            await finisher
+            return remaining, time.monotonic() - started
+
+        remaining, waited = asyncio.run(drain())
+        assert remaining == []
+        assert 0.04 < waited < 1   # waited for the run, not for the 5s budget
+
+    def test_wait_for_drain_returns_still_active_runs_at_budget(self, monkeypatch):
+        monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "3")
+        assert concurrency.try_acquire_slot("STUCK1") is True
+        remaining = asyncio.run(concurrency.wait_for_drain(0.05, poll_seconds=0.01))
+        assert remaining == ["STUCK1"]
 
 
 class TestConcurrencyAdmission:
@@ -395,9 +484,9 @@ class TestConcurrencyAdmission:
 
     @pytest.fixture(autouse=True)
     def _reset(self):
-        concurrency._active_runs = 0
+        concurrency._active_run_ids.clear()
         yield
-        concurrency._active_runs = 0
+        concurrency._active_run_ids.clear()
 
     def test_start_rejected_when_at_capacity(self, client, db, seed_simple_mode, monkeypatch):
         from app.api.upload import UPLOAD_DIR
@@ -411,7 +500,7 @@ class TestConcurrencyAdmission:
         upload_file.write_bytes(b"dummy")
 
         monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "1")
-        assert concurrency.try_acquire_slot() is True   # fill the only slot
+        assert concurrency.try_acquire_slot("SLOTRUN") is True   # fill the only slot
         try:
             resp = client.post("/api/run/BUSY01/start")
 
@@ -456,7 +545,7 @@ class TestConcurrencyAdmission:
         upload_file.write_bytes(b"dummy")
 
         monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "1")
-        assert concurrency.try_acquire_slot() is True
+        assert concurrency.try_acquire_slot("SLOTRUN") is True
         try:
             resp = client.post("/api/run/BUSY02/retry/6")
 
@@ -499,9 +588,9 @@ def _stale_read_after_winner_commits(monkeypatch, run_id, stale_status):
 class TestAtomicRunStart:
     @pytest.fixture(autouse=True)
     def _reset(self):
-        concurrency._active_runs = 0
+        concurrency._active_run_ids.clear()
         yield
-        concurrency._active_runs = 0
+        concurrency._active_run_ids.clear()
 
     @pytest.mark.parametrize("status", ["created", "paused"])
     def test_second_starter_loses_with_409_and_dispatches_nothing(

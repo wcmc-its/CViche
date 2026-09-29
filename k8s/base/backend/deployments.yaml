@@ -12,6 +12,13 @@ spec:
       labels:
         app: cviche-backend
     spec:
+      # Drain on deploy (#116): a run executes inside the backend process, so a
+      # pod stopped mid-run used to leave that run "running" forever. On SIGTERM
+      # the app stops admitting runs, waits up to CVICHE_SHUTDOWN_DRAIN_SECONDS
+      # (default 1500) for in-flight ones, then marks the rest failed. Grace =
+      # 15s preStop + 10s uvicorn --timeout-graceful-shutdown + 1500s drain +
+      # 35s to write the failures and exit. Raise it if the drain budget grows.
+      terminationGracePeriodSeconds: 1560
       # Reuses your single IRSA setup to authenticate both database users via IAM
       serviceAccountName: cviche-sa 
       
@@ -31,6 +38,13 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
+          # Keep serving for 15s after the pod is marked terminating so the ALB
+          # (target-type ip) deregisters it before uvicorn stops accepting;
+          # SIGTERM, and with it the run drain, follows this sleep.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "15"]
           env:
             - name: PORT
               value: "8000"
