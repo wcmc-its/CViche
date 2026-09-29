@@ -102,6 +102,10 @@ def test_is_header_match_paragraph_must_be_whole_words_inside_the_header():
     assert is_header_match("state and national committees", "committee", strict=True) is False
     # A whole word inside a multi-word header still matches.
     assert is_header_match("regional and national", "national", strict=True) is True
+    # Regex metacharacters inside the paragraph are literal (re.escape): an
+    # unescaped "(" or "+" would mis-match or raise re.error.
+    assert is_header_match("awards (selected) list and honors", "awards (selected) list", strict=True) is True
+    assert is_header_match("k+ channels research", "k+ channels", strict=True) is True
 
 
 def test_is_header_match_strict_mode_rejects_long_content_paragraph():
