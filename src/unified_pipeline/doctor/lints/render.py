@@ -19,6 +19,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Dict, List, NamedTuple, Tuple
 
+from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
@@ -37,6 +38,7 @@ from ..shared import (
     _finding,
     _haystacks,
     _long_word_tokens,
+    _magnitude_severity,
     _output_section_header,
     _template_haystack,
 )
@@ -1194,3 +1196,53 @@ def lint_duplicate_records(blocks: list[tuple[str, str]]) -> list[dict]:
         f"{len(pairs)} duplicated record(s) — the same enumerated entry "
         f"appears twice within the same output section",
         evidence)]
+
+
+# A rendered paragraph whose whole text is a date ("June 2019", "07/2008 -
+# 06/2013") is a record's date column that the reader split from its payload
+# and stage 6 then emitted as its own bullet (#259: 22 of them under
+# EDUCATIONAL CONTRIBUTIONS on ZXVGAC). Table cells are excluded -- a date
+# column cell is legitimate -- as is the Appendix, which is verbatim by
+# contract. The WARN floor is set from the corpus distribution: see
+# DATE_ONLY_LINES_WARN_COUNT's measurement in the PR body.
+DATE_ONLY_LINES_WARN_COUNT = 5
+
+
+DATE_ONLY_LINES_SAMPLES = 3
+
+
+def _date_only_paragraphs(blocks: list[tuple[str, str]]) -> list[str]:
+    """Body paragraphs outside the Appendix whose whole text (list
+    enumerator dropped) is a date expression, in document order."""
+    found = []
+    in_appendix = False
+    for kind, text in blocks:
+        if kind != "p":
+            continue
+        line = str(text or "").strip()
+        if line == _APPENDIX_HEADER:
+            in_appendix = True
+            continue
+        if _output_section_header(line) is not None:
+            in_appendix = False
+            continue
+        if in_appendix:
+            continue
+        bare = _PASSAGE_ENUMERATOR_RE.sub("", line).strip()
+        if bare and _is_date_only_text(bare):
+            found.append(line)
+    return found
+
+
+def lint_date_only_lines(blocks: list[tuple[str, str]]) -> list[dict]:
+    """Paragraphs that are nothing but a date, outside the Appendix (#259).
+    WARN at DATE_ONLY_LINES_WARN_COUNT or more, INFO below."""
+    lines = _date_only_paragraphs(blocks)
+    if not lines:
+        return []
+    severity = _magnitude_severity(len(lines), DATE_ONLY_LINES_WARN_COUNT)
+    return [_finding(
+        "date_only_lines", severity,
+        f"{len(lines)} body paragraph(s) are only a date -- a record's date "
+        f"column split from its payload and rendered as its own line",
+        [line[:100] for line in lines[:DATE_ONLY_LINES_SAMPLES]])]
