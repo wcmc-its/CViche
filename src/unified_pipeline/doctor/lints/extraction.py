@@ -19,6 +19,7 @@ in `run_doctor.py`, so they move together and stop being module-global.
 docstrings and comments for what changed.
 """
 import re
+from collections import Counter
 from typing import Dict, List, Optional, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
@@ -355,7 +356,7 @@ def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
 # --------------------------------------------------------------------------
 # Stage 6 dedup drops that were not duplicates.
 
-# A dropped entry this well contained (token-wise) in the kept entry is a
+# A dropped entry this well contained (token-multiset-wise, #718) in the kept entry is a
 # true duplicate; anything below carries content the kept entry lacks. On
 # 2Q1_ZQ the one true duplicate scored 1.00 and the seven real losses
 # 0.60-0.89 (#227).
@@ -363,9 +364,11 @@ DEDUP_SAFE_CONTAINMENT = 0.9
 _DEDUP_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def _alphanumeric_tokens(text) -> set:
-    """a-z0-9 token set for one string (lint 11 dedup-containment coverage)."""
-    return set(_DEDUP_TOKEN_RE.findall(_norm(text)))
+def _alphanumeric_tokens(text) -> Counter:
+    """a-z0-9 token multiset for one string (lint 11 dedup-containment
+    coverage). A Counter, not a set, so a dropped passage that repeats a
+    word is not fully covered by a kept passage that says it once (#718)."""
+    return Counter(_DEDUP_TOKEN_RE.findall(_norm(text)))
 
 
 def lint_dedup_drops(report: Dict) -> List[Dict]:
@@ -378,7 +381,7 @@ def lint_dedup_drops(report: Dict) -> List[Dict]:
         kept = _alphanumeric_tokens(d.get("kept_text", ""))
         if not dropped:
             continue
-        coverage = len(dropped & kept) / len(dropped)
+        coverage = sum((dropped & kept).values()) / sum(dropped.values())
         if coverage >= DEDUP_SAFE_CONTAINMENT:
             continue
         suspect.append(
