@@ -391,6 +391,27 @@ def test_call_bedrock_cache_point_marker_caches_only_the_stable_prefix(monkeypat
     ]
 
 
+def test_call_bedrock_last_cache_point_marker_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#50: with two marked system messages the cachePoint follows the LAST one."""
+    fake = _FakeBedrockClient([_converse_response("hi")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    messages = [
+        {"role": "system", "content": "first", "cache_point": True},
+        {"role": "system", "content": "second", "cache_point": True},
+        {"role": "system", "content": "third"},
+        {"role": "user", "content": "hi"},
+    ]
+    bedrock._call_bedrock(
+        BEDROCK_MODEL, messages, 0.1,
+        response_format=None, max_tokens=None, enable_prompt_caching=True,
+    )
+
+    assert fake.calls[0]["system"] == [
+        {"text": "first"}, {"text": "second"}, {"cachePoint": {"type": "default"}}, {"text": "third"},
+    ]
+
+
 def test_call_bedrock_cache_point_marker_ignored_when_caching_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeBedrockClient([_converse_response("hi")])
     monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
