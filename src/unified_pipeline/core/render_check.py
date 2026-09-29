@@ -5,6 +5,9 @@ rendered output by breaking it into fragments; keeping that one splitter here
 stops the two copies drifting apart (they were verbatim-duplicated with no
 enforced sync)."""
 
+from collections.abc import Mapping
+from typing import Any
+
 def entry_fragments(text: str | None) -> list[str]:
     """An entry's fragments: per line, per '|' cell, and per tab cell.
 
@@ -68,3 +71,18 @@ def rejoin_wrapped_row(text: str | None) -> str | None:
     if len({len(cell) for cell in cells if cell}) < 2:
         return None
     return CELL_SEPARATOR.join(" ".join(cell) for cell in cells if cell)
+
+
+def wrapped_row_text(entry: Mapping[str, Any]) -> str | None:
+    """The raw text of ONE table row whose cells wrap over paragraphs, rejoined
+    into a single line (#987); None for any other entry.
+
+    "One row" is a single `table_row` element (`element_idx_start ==
+    element_idx_end`); whether its cells wrap, as opposed to holding several
+    stacked records, is `rejoin_wrapped_row`'s test. Shared by every stage-6
+    section that renders an entry's raw lines one bullet each.
+    """
+    start, end = entry.get('element_idx_start'), entry.get('element_idx_end')
+    if entry.get('element_type') != 'table_row' or start is None or start != end:
+        return None
+    return rejoin_wrapped_row(entry.get('text'))
