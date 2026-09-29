@@ -9,7 +9,7 @@ from saml2 import SAMLError
 from saml2.mdstore import SourceNotFound
 from saml2.metadata import create_metadata_string
 from saml2.sigver import SigverError, CertificateError
-from saml2.response import IncorrectlySigned
+from saml2.response import AuthnResponse, IncorrectlySigned
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -228,7 +228,7 @@ def _parse_saml_assertion(
     return attrs, relay_state, None
 
 
-def _reject_wrong_destination(authn_response) -> RedirectResponse | None:
+def _reject_wrong_destination(authn_response: AuthnResponse) -> RedirectResponse | None:
     """Reject a Response whose Destination is not one of this SP's ACS URLs.
 
     pysaml2 7.5.x only LOGS this mismatch: StatusResponse._verify returns None
