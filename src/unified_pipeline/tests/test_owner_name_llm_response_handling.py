@@ -328,3 +328,16 @@ def test_narrative_body_name_outranks_side_channel_name(monkeypatch, tmp_path):
 
     assert result["full_name"] == body_person
     assert len(prompts) == 1, "the side channel is not reached once the body tier names anyone"
+
+
+def test_location_response_null_city_and_state_read_as_empty():
+    """Sonnet 5 writes null for an unknown city/state where Sonnet 4.6 writes
+    "". Both mean "not known"; rejecting null failed the whole location
+    inference (web175, 2026-09-29 A/B)."""
+    loc = {"institution": "Some Hospital", "city": None, "state": None,
+           "country": "UK", "confidence": 0.9}
+    parsed = owner_name._LocationInferenceResponse.model_validate(
+        {"locations": [loc], "metro_area": "", "primary_location": loc})
+    assert parsed.primary_location.city == "" and parsed.primary_location.state == ""
+    assert parsed.locations[0].state == ""
+    assert parsed.primary_location.country == "UK"
