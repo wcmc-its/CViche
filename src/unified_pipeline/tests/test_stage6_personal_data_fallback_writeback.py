@@ -1436,3 +1436,80 @@ def test_a_seven_digit_local_number_in_the_label_cell_is_a_number(tmp_path):
     _make_label_table_docx(src, rows=[("Business Phone: 555-0100", "Room 4B")])
     rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
     assert rows["office telephone:"] == "555-0100"
+
+
+# #730 round 3: a phone VALUE can carry a home-marked number; drop that
+# segment on both the cell-0 (embedded) and cell-1 paths.
+
+@pytest.mark.parametrize("label,other", [
+    ("Phone: (o) 212-555-0100; (h) 914-555-0111", "Fax: 212-555-0199"),
+    ("Phone: 212-555-0100 (office), 914-555-0111 (home)", "Email: jdoe@example.edu"),
+    ("Telephone: 212-555-0100 / Home 914-555-0111", "Fax: 212-555-0199"),
+    ("Phone:", "(o) 212-555-0100; (h) 914-555-0111"),
+    ("Phone:", "914-555-0111 (home)\n212-555-0100"),
+    ("Phone:", "H: 914-555-0111; O: 212-555-0100"),
+    ("Phone:", "(h) 914-555-0111 / (o) 212-555-0100"),
+])
+def test_a_home_marked_number_inside_a_phone_value_is_dropped(tmp_path, label, other):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[(label, other)])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert "914-555-0111" not in rows.get("office telephone:", "")
+    assert "212-555-0100" in rows["office telephone:"]
+    assert "914-555-0111" not in _docx_texts(tmp_path / "out.docx")
+    assert [i.category for i in gen._pii_result.withheld] == [CAT_HOME_CONTACT]
+
+
+@pytest.mark.parametrize("label,other", [
+    ("Phone: (h) 914-555-0111", "Fax: 212-555-0199"),
+    ("Phone: 914-555-0111 (home)", "Fax: 212-555-0199"),
+    ("Phone:", "(h) 914-555-0111"),
+])
+def test_a_phone_value_that_is_only_a_home_number_leaves_the_slot_empty(tmp_path, label, other):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[(label, other)])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows.get("office telephone:", "") == ""
+    assert "914-555-0111" not in _docx_texts(tmp_path / "out.docx")
+    assert [i.category for i in gen._pii_result.withheld] == [CAT_HOME_CONTACT]
+
+
+@pytest.mark.parametrize("value", [
+    "(hosp) 212-555-0100", "Hospital 212-555-0100", "Homer St 212-555-0100",
+    "Hr: 212-555-0100", "(o) 212-555-0100", "212/555-0100", "(212) 555-0100",
+    "Reserve 212-555-0100", "212-555-0100 ext. 5", "Shh: 212-555-0100",
+    "(o)/(w) 212-555-0100", "212-555-0100,212-555-0199",
+    "212-555-0100 / 212-555-0199",
+])
+def test_phone_values_without_a_home_marker_are_left_untouched(value):
+    withheld = []
+    assert personal_data_module._drop_home_phone_segments(value, withheld) == value
+    assert withheld == []
+
+
+def test_a_bare_extension_in_the_label_cell_does_not_count_toward_the_number(tmp_path):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[("Phone: x1234567", "212-555-0100"),
+                                      ("Phone: ext. 1234567", "212-555-0199")])
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows["office telephone:"] == "212-555-0100"
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("914/555-0111 (home)", None),
+    ("Res. 914-555-0111", None),
+    ("Res: 914-555-0111; 212-555-0100", "212-555-0100"),
+    ("Residence 914-555-0111", None),
+])
+def test_home_segment_edge_shapes(value, expected):
+    assert personal_data_module._drop_home_phone_segments(value, []) == expected
+
+
+def test_a_home_number_inside_a_business_address_cell_phone_line_is_dropped(tmp_path):
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Business Address:", "42 Example Ave\nPhone: (h) 914-555-0111")])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows.get("office telephone:", "") == ""
+    assert "914-555-0111" not in _docx_texts(tmp_path / "out.docx")
+    assert [i.category for i in gen._pii_result.withheld] == [CAT_HOME_CONTACT]

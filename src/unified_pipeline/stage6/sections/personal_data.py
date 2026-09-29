@@ -187,6 +187,17 @@ _OFFICE_QUALIFIER = re.compile(r'\b(?:office|business|work|professional)\b')
 # An embedded office-phone value is only a number when it has this many digits
 # ("Phone: (office) | 212-555-0100" and "Phone: ext. 1234" carry none).
 _MIN_PHONE_DIGITS = 7
+# An extension's digits are not part of the number ("x1234567").
+_EXTENSION = re.compile(r'\b(?:x|ext|extension)\.?\s*\d+', re.IGNORECASE)
+# One recovered phone value can carry several numbers. Separators: ; , newline
+# and a slash with spaces around it (a bare slash is inside "212/555-0100").
+_PHONE_SEGMENT_SPLIT = re.compile(r'[;,\n]|\s/\s')
+# A segment naming a home number: whole-word home / res / residence /
+# residential, "(h)", or a bare "H:" -- not "(hosp)", "Hospital", "Homer St",
+# "Hr:". Personal/cell numbers are not protected by #821 and are kept.
+_HOME_PHONE_MARKER = re.compile(
+    r'\b(?:home|res|residence|residential)\b|\(\s*h\s*\)|(?<![a-z])h\s*:',
+    re.IGNORECASE)
 
 # An allowlist, not a word match, because "name" ends far more metadata labels
 # than person labels. Widening it is a one-line edit when a corpus CV carries
@@ -564,6 +575,31 @@ def _withhold_recovered(value: str | None, source_text: str,
     return None
 
 
+def _phone_digit_count(text: str) -> int:
+    """Digits in `text` outside an extension ("ext. 1234", "x1234567")."""
+    return sum(c.isdigit() for c in _EXTENSION.sub('', text))
+
+
+def _drop_home_phone_segments(value: str | None,
+                              withheld: list[WithheldItem]) -> str | None:
+    """`value` with every home-marked number segment removed (#730, #821),
+    each recorded on `withheld`; None when nothing non-home remains. A value
+    with no home segment is returned untouched, so a well-formed number is
+    never re-joined or reformatted. A segment carrying both an office and a
+    home marker with no separator between them is dropped whole."""
+    if not value:
+        return value
+    segments = _PHONE_SEGMENT_SPLIT.split(value)
+    kept = [seg for seg in segments if not _HOME_PHONE_MARKER.search(seg)]
+    if len(kept) == len(segments):
+        return value
+    for seg in segments:
+        if _HOME_PHONE_MARKER.search(seg):
+            _withhold_home_row(_FIELD_HOME_PHONE, seg, seg, withheld)
+    kept = [seg.strip() for seg in kept if seg.strip()]
+    return '; '.join(kept) or None
+
+
 def _withhold_home_row(field: str, value: str, source_text: str,
                        withheld: list[WithheldItem]) -> None:
     """Record one home-labelled source row as withheld (#730, #821). Nothing
@@ -613,7 +649,7 @@ def _row_label_value_pairs(row: _TableRow) -> list[tuple[str, str]]:
     # holds a whole multi-line block over an empty cell 1 is left as before.
     if embedded and (field in _HOME_FIELDS or (
             field == _FIELD_OFFICE_PHONE and value and '\n' not in embedded
-            and sum(c.isdigit() for c in embedded) >= _MIN_PHONE_DIGITS)):
+            and _phone_digit_count(embedded) >= _MIN_PHONE_DIGITS)):
         pairs = [(label_text, embedded)]
         if ':' in value:
             pairs.append((value, value.partition(':')[2].strip()))
@@ -1163,14 +1199,18 @@ class PersonalDataSection:
                             # one already classified from the A entries is not
                             # this row's to withhold.
                             if not office_phone:
-                                office_phone = _withhold_recovered(block_phone, row_text, withheld)
+                                office_phone = _withhold_recovered(
+                                    _drop_home_phone_segments(block_phone, withheld),
+                                    row_text, withheld)
                             if not work_email:
                                 work_email = _withhold_recovered(block_email, row_text, withheld)
 
                     # Extract phone if not yet found
                     elif field == _FIELD_OFFICE_PHONE and not office_phone:
                         if value and len(value) > 5:
-                            office_phone = _withhold_recovered(value, row_text, withheld)
+                            office_phone = _withhold_recovered(
+                                _drop_home_phone_segments(value, withheld),
+                                row_text, withheld)
                             if self.verbose and office_phone:
                                 logger.debug("  Found phone from table: %s", office_phone)
 
