@@ -172,3 +172,90 @@ def test_wellformed_location_response_is_still_accepted(monkeypatch):
     assert result["inference_success"] is True
     assert result["primary_location"]["city"] == "New York"
     assert result["locations"][0]["institution"] == "Weill Cornell Medicine"
+
+
+# ---------------------------------------------------------------------------
+# extract_cv_owner_name: body-tier window on narrative CVs (#457)
+# ---------------------------------------------------------------------------
+
+_INVENTED_NAME = "Quillon Vantrell"
+_NARRATIVE_FILLER = (
+    " has led a translational program for two decades and describes the work "
+    "in continuous prose rather than in short header lines."
+)
+
+
+def _name_from_prompt_llm(prompts):
+    """Stub call_llm: records each prompt and answers with the invented name
+    only if the prompt's Content block actually contains it."""
+
+    def fake(**kwargs):
+        prompt = kwargs["messages"][0]["content"]
+        prompts.append(prompt)
+        if _INVENTED_NAME in prompt:
+            return _llm_result(json.dumps({
+                "first_name": "Quillon", "last_name": "Vantrell",
+                "full_name": _INVENTED_NAME,
+            }))
+        return _llm_result(json.dumps({}))
+
+    return fake
+
+
+def _narrative_entries():
+    """Every entry is over the 500-char cap, as stage 2 emits for a prose CV."""
+    return [
+        {"text": _INVENTED_NAME + _NARRATIVE_FILLER * 6},
+        {"text": "Later paragraph." + _NARRATIVE_FILLER * 6},
+    ]
+
+
+def test_narrative_cv_with_only_long_entries_still_gets_a_name(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(owner_name, "call_llm", _name_from_prompt_llm(prompts))
+    entries = _narrative_entries()
+    assert all(len(e["text"]) > owner_name.OWNER_NAME_ENTRY_MAX_CHARS for e in entries)
+
+    result = owner_name.extract_cv_owner_name("web000", entries)
+
+    assert len(prompts) == 1, "the body tier must run on a narrative CV"
+    assert result["last_name"] == "Vantrell"
+    assert result["full_name"] == _INVENTED_NAME
+
+
+def test_narrative_window_is_truncated_not_passed_whole(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(owner_name, "call_llm", _name_from_prompt_llm(prompts))
+    entries = _narrative_entries()
+
+    owner_name.extract_cv_owner_name("web000", entries)
+
+    content = prompts[0].split("Content:\n", 1)[1].split("\n\nReturn JSON", 1)[0]
+    assert [len(line) for line in content.split("\n")] == [
+        owner_name.OWNER_NAME_ENTRY_MAX_CHARS
+    ] * len(entries)
+
+
+def test_window_with_a_short_entry_still_skips_long_ones(monkeypatch):
+    """The pre-#457 window is preserved whenever it selects anything."""
+    prompts = []
+    monkeypatch.setattr(owner_name, "call_llm", _name_from_prompt_llm(prompts))
+    entries = [
+        {"text": "Curriculum Vitae"},
+        {"text": "LONGENTRYMARKER" + _NARRATIVE_FILLER * 6},
+    ]
+
+    owner_name.extract_cv_owner_name("web000", entries)
+
+    assert "Curriculum Vitae" in prompts[0]
+    assert "LONGENTRYMARKER" not in prompts[0]
+
+
+def test_only_blank_entries_still_skip_the_llm_call(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(owner_name, "call_llm", _name_from_prompt_llm(prompts))
+
+    result = owner_name.extract_cv_owner_name("web000", [{"text": "  "}, {}])
+
+    assert prompts == []
+    assert result["last_name"] == ""
