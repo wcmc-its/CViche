@@ -113,7 +113,10 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
     # The paragraph is contained in the expected header (header might be longer)
     # e.g., para_text="education" matches expected_header="education and training"
     # Only accept if paragraph is very short (< 2x header length)
-    if para_text in expected_header:
+    # The paragraph must be whole words inside the header: a bare substring made
+    # the sibling header "National" satisfy the expected header "International",
+    # so the geographic sub-label bound to the wrong header paragraph (#429).
+    if re.search(r'\b' + re.escape(para_text) + r'\b', expected_header):
         if len(para_text) <= len(expected_header) * 2:
             return True
 

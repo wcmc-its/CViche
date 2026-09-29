@@ -89,6 +89,17 @@ def test_is_header_match_word_boundary_prevents_false_positive():
     assert is_header_match("presentations", "representations", strict=True) is False
 
 
+def test_is_header_match_paragraph_must_be_whole_words_inside_the_header():
+    # #429: "national" is a substring of "international" but not a word of it,
+    # so the sibling sub-label paragraph "National" must not satisfy the
+    # expected header "International" (nor "regional" satisfy "subregional").
+    assert is_header_match("international", "national", strict=True) is False
+    assert is_header_match("international", "national") is False
+    assert is_header_match("subregional", "regional", strict=True) is False
+    # A whole word inside a multi-word header still matches.
+    assert is_header_match("regional and national", "national", strict=True) is True
+
+
 def test_is_header_match_strict_mode_rejects_long_content_paragraph():
     # A content paragraph that happens to contain the header word, but is far
     # longer than 3x the header -- strict mode (sequence matching) must reject it
@@ -1060,3 +1071,21 @@ def test_run_stage_1b_exits_when_no_hierarchy_json_can_be_found(tmp_path, monkey
     with pytest.raises(SystemExit) as exc_info:
         stage1b.run_stage_1b(str(docx_path))
     assert exc_info.value.code == 1
+
+
+def test_map_hierarchy_node_international_does_not_bind_to_the_national_paragraph():
+    # #429: the flat 1a list carries "International" AFTER an unrelated header,
+    # so the forward search misses it and the wrap-around fallback runs. It
+    # used to land on the earlier "National" paragraph (substring match),
+    # giving both nodes the same element_idx.
+    elements = [
+        _elem(0, "National"),
+        _elem(1, "Table body", "table_content"),
+        _elem(2, "International"),
+        _elem(3, "Publications"),
+    ]
+    national, nxt = map_hierarchy_node({"text": "National", "level": "H1"}, elements, [], 0)
+    _pubs, nxt = map_hierarchy_node({"text": "Publications", "level": "H1"}, elements, [], nxt)
+    international, _ = map_hierarchy_node({"text": "International", "level": "H1"}, elements, [], nxt)
+    assert national["element_idx"] == 0
+    assert international["element_idx"] == 2
