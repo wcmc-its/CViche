@@ -1371,6 +1371,9 @@ def test_placeholder_only_row_helper():
     assert _is_placeholder_only_row("N/A | Teaching") is True
     # Real, non-label content paired with an unanswered cell is still kept.
     assert _is_placeholder_only_row("N/A | Robotic Surgery Outcomes") is False
+    # A real row with a blank cell is not blank: only an ALL-blank row is.
+    assert _is_placeholder_only_row("Robotic Surgery Outcomes | ") is False
+    assert _is_placeholder_only_row("Robotic Surgery | | 2019") is False
 
 
 def test_goal_claimed_row_ids_matches_the_owning_grants_row_only():
@@ -1414,17 +1417,11 @@ def test_goal_claimed_row_ids_ignores_a_non_grant_entry_sharing_the_grants_span(
 
 
 def test_goal_claimed_row_ids_only_considers_t_coded_rows_as_candidates():
-    """`_goal_claimed_row_ids` must build its ROW candidates (`claim_goal_rows`'s
-    second argument, `t_rows`) from ONLY taxonomy_code=='T' entries, not every
-    entry. `claim_goal_rows` claims the FIRST goal-shaped row it sees for a
-    given grant and skips a later one whose goal differs (`existing and
-    existing != goal: continue`) -- so a non-T entry that happens to share the
-    grant's exact `parent_idx` span, states a DIFFERENT goal, and sits earlier
-    in `entries` must never compete for that grant's claim. Stage 6 itself
-    only ever passes `entries_by_code['T']` as candidate rows; a mutant that
-    widens `t_rows` to `list(entries)` lets the earlier non-T row win the
-    claim instead of the real T row, which this pins by asserting on the
-    identity of the row actually claimed, not just that something was."""
+    """Only T-coded entries are claim candidates, as in stage 6
+    (`entries_by_code['T']`). A mutant widening candidates to every entry
+    also claims the non-T goal-shaped row, so the claimed set gains a non-T
+    id; this pins the exact set. (T_count itself would not move under that
+    mutant: the extra id is not a T entry.)"""
     grant = {"taxonomy_code": "M2A", "text": "Some Grant",
               "element_idx_start": 10, "element_idx_end": 10}
     non_t_row = {"taxonomy_code": "A",

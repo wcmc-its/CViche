@@ -651,39 +651,24 @@ def _is_placeholder_only_row(text: str | None) -> bool:
 
 
 def _goal_claimed_row_ids(entries: list[dict]) -> set[int]:
-    """``id()`` of every T entry stage 6 claims into an M2 grant's own table
-    as that grant's major-goals row (#963/#1002; #822 finding 2, third
-    exclusion) -- reusing stage6's own span-matching and goal-parsing logic
-    (`research_support.claim_goal_rows`) rather than a second, drifting copy
-    of `MAJOR_GOALS_LABEL_RE` here (CODING_STANDARDS.md #1.5's one-definition
-    rule). `entries` is the classified.json entries list, read BEFORE stage 4
-    field extraction -- a "grant" here is a plain M2A/M2B/M2C entry with no
-    `extracted_fields` yet, which is exactly the shape `claim_goal_rows`
-    needs: `_spans_element` reads only `element_idx_start`/`element_idx_end`,
-    present on every entry since stage 2.
+    """``id()`` of every T entry stage 6 claims into an M2 grant's table as
+    its major-goals row (#963/#1002; #822 finding 2). Reuses stage 6's
+    `research_support.claim_goal_rows` instead of copying
+    `MAJOR_GOALS_LABEL_RE` (CODING_STANDARDS.md §1.5).
 
-    What this does NOT reproduce is `_fill_research_support`'s
-    `rendered_grant_ids` filter -- whether the owning grant goes on to find a
-    template slot and actually render is a docx-template question this
-    JSON-only scorer has no state to answer. A T row claimed here by a grant
-    that (for an unrelated reason) never renders is still excluded. That is a
-    judgement call, not a bug: the claim itself -- one grant's own
-    source-table row naming that grant's goal -- is what makes the row
-    non-actionable scaffolding, independent of whether stage 6 finds
-    somewhere to put the grant it belongs to.
+    Not a faithful replay of stage 6, in two ways:
+    - stage 6 first runs `fill_major_goals_from_text` on stage-4
+      `extracted_fields` and skips a row whose goal conflicts with one already
+      set; classified.json grants carry no `extracted_fields`, so that guard
+      never fires here (making it faithful changed 0 of 215 farm files);
+    - it ignores `rendered_grant_ids`, i.e. whether the grant found a
+      template slot. A claimed row is scaffolding either way.
 
-    Layering note (CODING_STANDARDS.md #1): `stage6/__init__.py` names
-    `stage_6_word_template.py` as the package's public import surface, and
-    `claim_goal_rows` is not re-exported there
-    (`test_stage6_import_surface.py`'s STAGE6_IMPORT_SURFACE). This reaches
-    past that surface, directly into `stage6/sections/research_support.py`,
-    on the judgement that a second, hand-copied regex is the worse layering
-    violation of the two (#1.5). The import is function-local, not
-    module-level: `research_support.py` raises ImportError at import time
-    when python-docx is absent, and quality_score.py otherwise treats
-    python-docx as optional (`_load_docx`) -- a missing python-docx degrades
-    this one exclusion to "claim nothing" rather than breaking every other
-    dimension's import.
+    Layering (CODING_STANDARDS.md §1): this reaches past stage6's public
+    import surface into `stage6/sections/research_support.py`, judged better
+    than a hand-copied regex. The import is function-local because that
+    module needs python-docx, which quality_score treats as optional; without
+    it this exclusion claims nothing and the other dimensions still run.
     """
     try:
         from unified_pipeline.stage6.sections.research_support import (
