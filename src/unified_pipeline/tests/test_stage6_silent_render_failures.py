@@ -1141,6 +1141,11 @@ def test_reclassify_failure_reaches_the_render_warnings_sidecar(
     assert found[0]['severity'] == 'WARN'
     assert found[0]['evidence'] == [f'{RECLASSIFY_FAILURE_STAT}=1']
     assert found[0]['section'] == 'appendix'
+    # doctor's lint_stage6_warnings copies 'message' verbatim onto the Teams
+    # card, so pin the count and the tail.
+    assert found[0]['message'].startswith(
+        '1 appendix entry reclassification(s) failed')
+    assert 'stayed in the appendix whole' in found[0]['message']
 
 
 def test_reconsider_sends_entry_to_appendix_when_reclassify_fails(monkeypatch):
