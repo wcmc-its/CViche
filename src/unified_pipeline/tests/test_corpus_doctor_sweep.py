@@ -114,6 +114,7 @@ _EXPECTED_SUFFIX_DIRS = {
     "_classified.json": "stage_3b_classified_entries",
     "_fields.json": "stage_4_field_extraction",
     "_enriched.json": "stage_5_enrichment",
+    "_institution_enriched.json": "stage_5b_institution_enrichment",
     "_wcm.docx": "stage_6_wcm_documents",
     "_render_warnings.json": "stage_6_wcm_documents",
 }

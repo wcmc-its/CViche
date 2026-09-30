@@ -373,3 +373,124 @@ def test_a_withheld_entry_is_not_judged_even_when_its_field_values_rendered():
     assert _fields_rendered(entry, h.text.split("\x00"), stage4) is True, "control"
     assert _classified_entry_rendered(entry, h, h.text.split("\x00"),
                                       frozenset(), stage4) is None
+
+
+# --- #890 residual: stage-5b institution names and unwritten category fields --
+
+_TRAINING_TEXT = "1992-1996 Postdoc Res. Assoc., Depts. Alpha, U. of Exampleton & Sample U."
+_TRAINING_FIELDS = {"training_type": "Postdoctoral Research Associate",
+                    "institution": "Depts. Alpha, U. of Exampleton & Sample U.",
+                    "start_date": "1992", "end_date": "1996"}
+_TRAINING_ROW = ("table", "Postdoctoral Research Associate | Departments of Alpha, "
+                          "University of Exampleton and Sample University | 1992-1996")
+_EXPANDED = {"cleaned_name": "Departments of Alpha, University of Exampleton and "
+                             "Sample University", "official_name": "Ignored Official Name"}
+
+
+def _training_inputs(blocks, enrichment):
+    stage3b = {"entries": [_entry(3, "C", _TRAINING_TEXT)]}
+    stage4 = {"entries": [_record(3, "C", _TRAINING_FIELDS)]}
+    stage5b = {"entries": [{**_record(3, "C", _TRAINING_FIELDS),
+                            "institution_enrichment": enrichment}]}
+    return stage3b, blocks, stage4, stage5b
+
+
+def test_the_stage_5b_institution_name_stage_6_wrote_counts_as_the_institution():
+    stage3b, blocks, stage4, stage5b = _training_inputs([_SPACER, _TRAINING_ROW], _EXPANDED)
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1, "control"
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4, None)) == 1, "control"
+    assert lint_classified_unrendered(stage3b, blocks, stage4, stage5b) == []
+
+
+def test_official_name_stands_in_when_stage_5b_returns_no_cleaned_name():
+    official = {"cleaned_name": "", "official_name": _EXPANDED["cleaned_name"]}
+    stage3b, blocks, stage4, stage5b = _training_inputs([_SPACER, _TRAINING_ROW], official)
+    assert lint_classified_unrendered(stage3b, blocks, stage4, stage5b) == []
+
+
+def test_the_stage_5b_name_must_share_a_line_with_the_other_values():
+    # The expanded name on its own line, the title on another: chance, not the row.
+    stage3b, _, stage4, stage5b = _training_inputs([], _EXPANDED)
+    blocks = [_SPACER, ("p", "Postdoctoral Research Associate"),
+              ("p", _EXPANDED["cleaned_name"])]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4, stage5b)) == 1
+
+
+def test_a_stage_5b_name_that_is_boilerplate_shared_by_records_is_not_evidence():
+    # The expanded name is the institution of two other records too: repeated content.
+    stage3b, blocks, stage4, stage5b = _training_inputs([_SPACER, _TRAINING_ROW], _EXPANDED)
+    name = _EXPANDED["cleaned_name"]
+    stage4["entries"] += [_record(8, "C", {"institution": name}),
+                          _record(9, "C", {"institution": name})]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4, stage5b)) == 1
+
+
+def test_stage_5b_records_sharing_a_span_give_no_institution_name():
+    stage3b, blocks, stage4, stage5b = _training_inputs([_SPACER, _TRAINING_ROW], _EXPANDED)
+    stage5b["entries"].append(dict(stage5b["entries"][0]))
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4, stage5b)) == 1
+
+
+def test_stage_5b_alone_is_not_evidence_without_the_title_on_the_row():
+    # Only the institution was written; the training title was lost. One of two
+    # content values is not a majority however the institution is spelled.
+    stage3b, _, stage4, stage5b = _training_inputs([], _EXPANDED)
+    blocks = [_SPACER, ("table", "Departments of Alpha, University of Exampleton "
+                                 "and Sample University | 1992-1996")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4, stage5b)) == 1
+
+
+_MEDIA_TEXT = "January 12, 2015. Example Channel, Sample Researchers Study Effects of Practice"
+_MEDIA_FIELDS = {"authors": None, "year": "2015-01-12", "media_type": "News Broadcast/Online News",
+                 "title": "Sample Researchers Study Effects of Practice",
+                 "venue": "Example Channel", "url": "https://example.org/a?fbclid=x"}
+_MEDIA_LINE = ("p", "1. Sample researchers study effects of practice. Example Channel. 2015 January 12.")
+
+
+def test_an_unwritten_category_field_does_not_outvote_the_values_that_rendered():
+    stage3b = {"entries": [_entry(2, "S9", _MEDIA_TEXT)]}
+    stage4 = {"entries": [_record(2, "S9", _MEDIA_FIELDS)]}
+    assert lint_classified_unrendered(stage3b, [_SPACER, _MEDIA_LINE], stage4) == []
+
+
+def test_the_category_label_alone_is_not_the_entry():
+    # The category rendered nowhere and only the title did: one content value
+    # is not enough, so this falls to the token test and still fires.
+    stage3b = {"entries": [_entry(2, "S9", _UNSHARED_TEXT)]}
+    fields = {**_MEDIA_FIELDS, "venue": None, "url": None}
+    stage4 = {"entries": [_record(2, "S9", fields)]}
+    blocks = [_SPACER, ("p", "Sample researchers study effects of practice.")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_a_category_label_on_the_line_is_not_counted_either():
+    # Excluded both ways: the label beside one real value must not build a
+    # majority (title unrendered; venue and the label on the line: two of the
+    # three values if the label counted, one of two if it does not).
+    stage3b = {"entries": [_entry(2, "S9", _UNSHARED_TEXT)]}
+    stage4 = {"entries": [_record(2, "S9", {**_MEDIA_FIELDS, "url": None})]}
+    blocks = [_SPACER, ("p", "Example Channel. News Broadcast/Online News.")]
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+def test_category_fields_are_written_by_no_section():
+    from unified_pipeline.doctor.lints.extraction import UNWRITTEN_CATEGORY_FIELDS
+    from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+    written = set().union(*_RENDERED_FIELDS.values())
+    assert UNWRITTEN_CATEGORY_FIELDS
+    assert not UNWRITTEN_CATEGORY_FIELDS & written
+
+
+def test_a_stage_5b_record_without_a_name_gives_no_institution_name():
+    # An empty name squashes to "", which a short-value boundary search would
+    # find on every line: it must never become an alias.
+    for enrichment in (None, {}, {"cleaned_name": "", "official_name": ""}):
+        stage3b, blocks, stage4, stage5b = _training_inputs(
+            [_SPACER, ("table", "Postdoctoral Research Associate |  | 1992-1996")], enrichment)
+        assert len(lint_classified_unrendered(stage3b, blocks, stage4, stage5b)) == 1
+
+
+def test_a_stage_5b_record_without_extracted_fields_is_skipped_not_fatal():
+    stage3b, blocks, stage4, stage5b = _training_inputs([_SPACER, _TRAINING_ROW], _EXPANDED)
+    stage5b["entries"][0]["extracted_fields"] = None
+    assert len(lint_classified_unrendered(stage3b, blocks, stage4, stage5b)) == 1

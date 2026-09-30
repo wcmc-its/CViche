@@ -558,7 +558,7 @@ def test_every_json_artifact_kind_declares_its_record_shape():
         assert spec.record_lists or spec.optional_lists, key
     assert set(mod._JSON_ARTIFACTS) == {
         "stage_1a", "stage_2", "stage_3b", "stage_4", "stage_5_enrichment",
-        "stage_6_report"}
+        "stage_5b", "stage_6_report"}
 
 
 def test_ten_of_the_surface_is_private():
@@ -594,7 +594,13 @@ def test_optional_registry_views_are_real_and_never_gate_the_lint(tmp_path, monk
 
     root = _build_clean_run(tmp_path)
     mod.run_doctor(root, _UID)
-    assert len(seen[-1]) == 3 and isinstance(seen[-1][2], dict), "stage 4 not handed over"
+    assert len(seen[-1]) == 4 and isinstance(seen[-1][2], dict), "stage 4 not handed over"
+    assert seen[-1][3] == {"document_uid": _UID, "entries": []}, "stage 5b not handed over"
+    shutil.rmtree(root / "stage_5b_institution_enrichment")
+    payload = mod.run_doctor(root, _UID)
+    assert seen[-1][3] is None, "an absent stage 5b must still run the lint"
+    assert not [f for f in payload["findings"]
+                if f["lint"] == "classified_unrendered" and f["message"].startswith("skipped")]
 
     shutil.rmtree(root / "stage_4_field_extraction")
     payload = mod.run_doctor(root, _UID)
