@@ -793,6 +793,113 @@ class TestPerRowBackfillFromStructuredFields:
         ), [r.message for r in caplog.records]
 
 
+class TestSingleRowBackfillIsLogged:
+    """#696 item 2: the single-row branch of the backfill logs a substitution
+    and a skip, with field name and counts but never the CV's values."""
+
+    _SECRET_NUM = "ZQ-90417"
+
+    def _run(self, caplog, fields, text):
+        gen = _generator()
+        with caplog.at_level(logging.INFO):
+            gen._fill_board_certification(
+                [{"extracted_fields": fields, "text": text}]
+            )
+        return [r for r in caplog.records if "single reparsed row" in r.message]
+
+    def test_substitution_is_logged_without_the_value(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": self._SECRET_NUM,
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+        )
+        assert [r.levelno for r in records] == [logging.INFO]
+        assert "certificate_number" in records[0].getMessage()
+        assert "backfilled" in records[0].getMessage()
+        assert self._SECRET_NUM not in records[0].getMessage()
+
+    def test_skip_of_multi_value_structured_field_is_logged(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "ZQ-1, ZQ-2",
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+        )
+        assert [r.levelno for r in records] == [logging.WARNING]
+        assert "certificate_number" in records[0].getMessage()
+        assert "2 values" in records[0].getMessage()
+        assert "ZQ-1" not in records[0].getMessage()
+
+    def test_year_substitution_is_logged(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+        )
+        assert [r.levelno for r in records] == [logging.INFO]
+        assert "year_certified" in records[0].getMessage()
+
+    def test_year_skip_of_multi_value_structured_field_is_logged(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+                "year_certified": "2015, 2016",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+        )
+        assert [r.levelno for r in records] == [logging.WARNING]
+        assert "year_certified" in records[0].getMessage()
+        assert "2 values" in records[0].getMessage()
+
+    def test_nothing_logged_when_structured_field_is_absent(self, caplog):
+        # No candidate at all is not a skip: there is nothing to attribute.
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+        )
+        assert records == []
+
+    def test_nothing_logged_when_structured_year_is_absent(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+        )
+        assert records == []
+
+    def test_nothing_logged_when_row_needs_no_backfill(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+                "year_certified": "2015",
+            },
+            "Zed Medicine | 555 | 2015",
+        )
+        assert records == []
+
+
 class TestBlankRowGuardIsUniformAcrossColumnBranches:
     """#663 item 8: the too-narrow (<2 column) branch already dropped a row
 
