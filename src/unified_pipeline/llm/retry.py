@@ -139,7 +139,8 @@ def _get_llm_timeout_seconds() -> float:
     reported Stage 4 hang). A bounded timeout turns that hang into a normal
     exception that propagates to the orchestrator, fails the run, and
     surfaces to the user. Generous by default so legitimately slow calls
-    are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS.
+    are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS. This bounds ONE
+    attempt; _get_retry_deadline_seconds bounds the retries (#636).
     """
     return _get_llm_config_float("CVICHE_LLM_TIMEOUT_SECONDS", default=180.0)
 
@@ -152,6 +153,27 @@ def _get_outage_budget_seconds() -> float:
     (#810).
     """
     return _get_llm_config_float("CVICHE_LLM_OUTAGE_BUDGET_SECONDS", default=1800.0)
+
+
+# How many per-attempt timeouts the default ordinary-retry deadline allows.
+_RETRY_DEADLINE_TIMEOUT_MULTIPLE = 2
+
+
+def _get_retry_deadline_seconds() -> float:
+    """Wall-clock ceiling on _call_with_retry's ORDINARY (non-outage) retries
+    (#636). CVICHE_LLM_TIMEOUT_SECONDS bounds one attempt only, so retry_count=3
+    of hung attempts used to run 4 x 180s plus backoff before failing. No new
+    ordinary retry starts once this much time has gone, so the worst case for
+    a call is this deadline plus one attempt's timeout. Default: twice the
+    per-attempt timeout -- a single hung attempt still gets its one retry, and
+    fast failures (5xx, dropped connections) keep all retry_count retries.
+    Tune via CVICHE_LLM_RETRY_DEADLINE_SECONDS. Outage-class pauses have their
+    own budget (CVICHE_LLM_OUTAGE_BUDGET_SECONDS) and do not count against it.
+    """
+    return _get_llm_config_float(
+        "CVICHE_LLM_RETRY_DEADLINE_SECONDS",
+        default=_RETRY_DEADLINE_TIMEOUT_MULTIPLE * _get_llm_timeout_seconds(),
+    )
 
 
 # Backoff cap for an outage-class retry -- longer than the ordinary 30s cap
@@ -254,7 +276,9 @@ def _call_with_retry(
         ValueError: If retry_count is negative
         LLMOutageError: An outage-class error (see _is_outage_error) persisted
             past the outage budget (CVICHE_LLM_OUTAGE_BUDGET_SECONDS, #810).
-        The last error if all (non-outage) retries are exhausted
+        The last error if all (non-outage) retries are exhausted, or if the
+            next backoff would end past the ordinary-retry deadline
+            (CVICHE_LLM_RETRY_DEADLINE_SECONDS, #636)
         Non-retryable errors immediately (including non-retryable ClientError)
     """
     # retry_count is a call-site kwarg passthrough (ultimately from
@@ -278,6 +302,10 @@ def _call_with_retry(
     attempt = 0
     outage_retries = 0
     outage_started: float | None = None
+    # Start of the ordinary-retry deadline window; restarted after each outage
+    # pause so waiting out an outage cannot use up the ordinary budget.
+    window_started = time.monotonic()
+    deadline = _get_retry_deadline_seconds()
     while True:
         try:
             # Bound concurrent in-flight calls per pod. The slot is acquired only
@@ -328,6 +356,7 @@ def _call_with_retry(
                 time.sleep(wait)
                 if cancel_check is not None:
                     cancel_check()
+                window_started = time.monotonic()
                 continue
 
             if attempt < retry_count:
@@ -339,6 +368,13 @@ def _call_with_retry(
                 # lockstep and re-throttle together (a self-inflicted herd).
                 base = min(2 ** attempt, 30)
                 wait = base / 2 + random.uniform(0, base / 2)
+                if time.monotonic() - window_started + wait > deadline:
+                    logger.warning(
+                        "LLM call failed (attempt %d/%d); not retrying: the "
+                        "%.0fs retry deadline passes before a %.1fs backoff ends",
+                        attempt + 1, retry_count + 1, deadline, wait,
+                    )
+                    raise e
                 logger.warning(
                     f"LLM call failed (attempt {attempt + 1}/{retry_count + 1}): {e}. "
                     f"Retrying in {wait:.1f}s..."

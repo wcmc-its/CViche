@@ -20,7 +20,9 @@ default:
   # Separate outage-scale budget (#810): a provider outage (ThrottlingException /
   # ServiceUnavailableException) pauses up to CVICHE_LLM_OUTAGE_BUDGET_SECONDS
   # (env var; default 1800s/30min) before _call_with_retry gives up -- it does
-  # not count against retry_count above.
+  # not count against retry_count above. Ordinary retries stop once
+  # CVICHE_LLM_RETRY_DEADLINE_SECONDS (env var; default 2x
+  # CVICHE_LLM_TIMEOUT_SECONDS) has passed, even with retries left (#636).
   # Global output ceiling for any call that does not pass an explicit
   # max_tokens=. Without it, Bedrock applies the MODEL's own default ceiling
   # (~64,000 tokens for these Claude models), so a misbehaving prompt can run
