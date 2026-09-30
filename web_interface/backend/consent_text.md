@@ -20,7 +20,7 @@ If your CV includes information you consider sensitive (for example, a mobile ph
 
 ## Retention and Removal
 
-Submitted CVs, the intermediate outputs produced during processing, and the AI-generated CV are retained during the pilot; there is no automatic expiry. To have a submission removed, contact the CViche project team. An administrator will delete the run, including your original CV and all generated outputs.
+Submitted CVs, the intermediate outputs produced during processing, and the AI-generated CV are retained during the pilot; there is no automatic expiry. To have a submission removed, contact the CViche project team. An administrator will delete the run's database records and its stored copies of your original CV, intermediate outputs, and generated CV. This does not remove copies held in routine backups or temporary working files on individual application servers.
 
 ## Consent
 

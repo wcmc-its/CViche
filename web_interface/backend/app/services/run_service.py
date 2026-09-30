@@ -195,18 +195,29 @@ def _delete_run_rows(db: Session, run_id: str) -> None:
     db.commit()
 
 
-def _delete_run_storage(storage: RunStorage, run_id: str, email: str | None) -> int:
-    """Best-effort, idempotent removal of a run's storage objects and its
-    by-submitter index entry -- never blocks on the store. Returns objects deleted."""
+def _delete_run_storage(
+    storage: RunStorage, run_id: str, email: str | None, *, best_effort: bool = True
+) -> int:
+    """Idempotent removal of a run's storage objects and its by-submitter index
+    entry. Returns objects deleted.
+
+    best_effort=True (the reaper): log a failure and carry on -- never block on
+    the store. best_effort=False (admin delete): let the exception surface so
+    the caller can fail the request while the DB rows still exist.
+    """
     deleted = 0
     try:
         deleted += storage.delete_run(run_id)
     except Exception as e:
-        logger.warning("Failed to delete storage for reaped run %s: %s", run_id, e)
+        if not best_effort:
+            raise
+        logger.warning("Failed to delete storage for run %s: %s", run_id, e)
     if email is not None:
         try:
             deleted += storage.delete_global_prefix(f"by-submitter/{email}/{run_id}/")
         except Exception as e:
+            if not best_effort:
+                raise
             logger.warning("Failed to delete by-submitter index for run %s: %s", run_id, e)
     return deleted
 
@@ -216,18 +227,21 @@ def find_run(db: Session, run_id: str) -> Run | None:
 
 
 def delete_run_and_artifacts(db: Session, run: Run) -> int:
-    """Hard-delete one run: child rows, the run row, then its storage.
+    """Hard-delete one run: its storage first, then the child rows and the run row.
 
-    Raises if the DB delete fails (after rolling back). Returns the number of
-    storage objects removed.
+    Storage goes first and is strict: if the store fails the exception
+    propagates with the DB untouched, so the admin can retry (the deletes are
+    idempotent). Only once storage is clean are the rows removed; a DB failure
+    rolls back and raises. Returns the number of storage objects removed.
     """
     run_id, email = run.id, _submitter_email(db, run)
+    objects_deleted = _delete_run_storage(get_storage(), run_id, email, best_effort=False)
     try:
         _delete_run_rows(db, run_id)
     except Exception:
         db.rollback()
         raise
-    return _delete_run_storage(get_storage(), run_id, email)
+    return objects_deleted
 
 
 def reap_orphaned_created_runs(

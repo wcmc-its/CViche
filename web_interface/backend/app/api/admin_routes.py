@@ -15,7 +15,7 @@ from sqlalchemy.orm import Query as SAQuery, Session, contains_eager
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
 from app.auth import require_admin, SessionEpochUnreadable
-from app.errors import conflict, not_found, validation_error
+from app.errors import conflict, internal_error, not_found, validation_error
 from app.schemas import (
     AdminStats,
     AdminUser,
@@ -285,14 +285,23 @@ async def delete_run(
 ) -> None:
     """Hard-delete one run (rows, stage artifacts, source CV, by-submitter
     index) -- the removal path for a consent-withdrawal request (#683).
-    404 if unknown; 409 while the run is executing."""
+    404 if unknown; 409 while the run is executing; 500 if storage or the DB
+    delete fails (storage is deleted first, so a retry is safe).
+
+    A 'cancelled' run is deletable: cancellation is a signal the orchestrator
+    honours at its next stage boundary and nothing acknowledges it, so a
+    just-cancelled run may still be writing for a short window (#683)."""
     run = find_run(db, run_id)
     if not run:
         raise not_found("Run not found.")
     if run.status == "running":
         raise conflict("Run is still running; wait for it to finish before deleting.")
 
-    objects_deleted = delete_run_and_artifacts(db, run)
+    try:
+        objects_deleted = delete_run_and_artifacts(db, run)
+    except Exception:
+        logger.exception("Admin delete of run %s failed", run_id)
+        raise internal_error("Run deletion failed; it is safe to retry.")
     logger.info(
         RUN_DELETED,
         extra={"admin": admin.email, "run_id": run_id, "objects_deleted": objects_deleted},
