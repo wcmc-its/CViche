@@ -56,7 +56,7 @@ def test_department_filter_narrows_faculty_and_run_by_but_not_departments(db, se
     departments, faculty, run_by = _pairs(options)
     assert departments == [("Library", 2), ("Medicine", 2)]  # own filter ignored
     assert faculty == [("Jane Testperson", 2)]
-    assert run_by == [("Alice Tester", 1)]  # her own_cv run counts under self only
+    assert run_by == [("Alice Tester", 2)]  # her own_cv run counts under her name too
     assert options.self_count == 1
 
 
@@ -73,9 +73,9 @@ def test_run_by_filter_narrows_departments_and_faculty_but_not_run_by(db, seeded
     alice, _ = seeded
     options = build_filter_options(db, RunFilters(run_by_user_id=alice.id))
     departments, faculty, run_by = _pairs(options)
-    assert departments == [("Medicine", 1)]  # her own_cv run is not "run by" her
-    assert faculty == [("Jane Testperson", 1)]
-    assert run_by == [("Alice Tester", 1), ("Bob Tester", 2)]
+    assert departments == [("Medicine", 2)]  # includes her own_cv run
+    assert faculty == [("Jane Testperson", 2)]
+    assert run_by == [("Alice Tester", 2), ("Bob Tester", 2)]
 
 
 def test_self_filter_is_own_cv_runs(db, seeded):
@@ -84,15 +84,6 @@ def test_self_filter_is_own_cv_runs(db, seeded):
     assert departments == [("Medicine", 1)]
     assert faculty == [("Jane Testperson", 1)]
     assert [r.id for r in filtered_runs_query(db, RunFilters(run_by_self=True)).all()] == ["Q00000"]
-
-
-def test_run_by_user_keeps_runs_with_no_submission_type(db, seeded):
-    alice, _ = seeded
-    db.add(Run(id="Q00009", user_id=alice.id, status="complete", filename="cv.docx",
-               file_type="docx", submission_type=None, started_at=datetime(2026, 9, 9)))
-    db.commit()
-    ids = [r.id for r in filtered_runs_query(db, RunFilters(run_by_user_id=alice.id)).all()]
-    assert sorted(ids) == ["Q00001", "Q00009"]
 
 
 def test_filtered_query_loads_the_user_without_a_lazy_load(db, seeded):

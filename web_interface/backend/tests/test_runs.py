@@ -405,10 +405,10 @@ def test_filter_options_unfiltered(client, db, seed_simple_mode):
     assert body["faculty"] == [{"value": "Jane Testperson", "count": 3},
                                {"value": "Omar Testperson", "count": 2}]
     assert [(o["display_name"], o["count"]) for o in body["run_by"]] == [
-        ("Alice Tester", 1), ("Bob Tester", 2), ("Root Admin", 1)]  # own_cv -> self_count
+        ("Alice Tester", 2), ("Bob Tester", 2), ("Root Admin", 1)]
     assert body["run_by"][0] == {"id": users["alice"].id, "display_name": "Alice Tester",
                                  "cwid": "abc1001", "email": "alice@example.com",
-                                 "department": "Medicine", "count": 1}
+                                 "department": "Medicine", "count": 2}
     assert body["self_count"] == 1
 
 
