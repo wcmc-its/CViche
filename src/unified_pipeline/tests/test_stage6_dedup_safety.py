@@ -20,7 +20,13 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.dedup import _dates_compatible, _drop_is_safe  # noqa: E402
+from unified_pipeline.stage6.dedup import (  # noqa: E402
+    _dates_compatible,
+    _drop_is_safe,
+    _names_record,
+    _record_name,
+)
+from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS  # noqa: E402
 from unified_pipeline.stage_6_word_template import deduplicate_entries  # noqa: E402
 
 
@@ -198,23 +204,40 @@ def test_distinct_fused_terms_full_mmddyyyy_dates_kept():
     assert result == [kept, dropped]
 
 
-@pytest.mark.xfail(
-    reason="#666 residual, not a date defect: the verbatim-containment branch "
-           "of _drop_is_safe fires on prose with no record-shaped lines, so "
-           "the #221/#225 recovery pass never looks at either entry. Two "
-           "distinct mentees fused into one un-split entry: one mentee's text "
-           "is a literal substring of the other, and neither states a date "
-           "the date gate could compare. Flip to a plain assertion when the "
-           "fused-kept-entry shape is fixed.",
-    strict=True,
-)
+# #666: two mentees fused into one un-split prose entry. One mentee's text is
+# a literal substring of the other, so the verbatim branch approves the drop.
+# Whether that loses the mentee depends on what the kept entry renders: the
+# N3B section writes its fields, so the drop is safe only when those fields
+# name the dropped mentee.
+_ONE_MENTEE = "Mentor: Avery Quill, PhD Candidate, Dept of Tinkering"
+_FUSED_MENTEES = (_ONE_MENTEE + " and Blair Sprocket, MS Candidate, Dept of "
+                  "Gadgetry, Harbor Institute, 2019-2023")
+
+
 def test_distinct_mentees_fused_into_prose_entry_kept():
-    smith = {"text": "Mentor: John Smith, PhD Candidate, Dept of Biology"}
-    fused = {"text": "Mentor: John Smith, PhD Candidate, Dept of Biology and "
-                     "Maria Garcia, MS Candidate, Dept of Chemistry, "
-                     "Weill Cornell Medicine, 2019-2023"}
-    result = deduplicate_entries([smith, fused])
-    assert result == [smith, fused]
+    one = {"text": _ONE_MENTEE, "extracted_fields": {"mentee_name": "Avery Quill"}}
+    fused = {"text": _FUSED_MENTEES,
+             "extracted_fields": {"mentee_name": "Blair Sprocket"}}
+    result = deduplicate_entries([one, fused], code="N3B", document=[one, fused])
+    assert result == [one, fused]
+
+
+def test_mentee_the_fused_entry_renders_is_still_dropped():
+    # The kept fields name the dropped mentee: that row is already on the
+    # page, and keeping the copy would print it twice.
+    one = {"text": _ONE_MENTEE, "extracted_fields": {"mentee_name": "Avery Quill"}}
+    fused = {"text": _FUSED_MENTEES,
+             "extracted_fields": {"mentee_name": "Avery Quill"}}
+    assert deduplicate_entries([one, fused], code="N3B",
+                               document=[one, fused]) == [fused]
+
+
+def test_fused_prose_without_fields_is_still_dropped():
+    # With no fields the section writes the kept entry's text, which holds
+    # both mentees, so dropping the verbatim copy loses nothing.
+    one, fused = {"text": _ONE_MENTEE}, {"text": _FUSED_MENTEES}
+    assert deduplicate_entries([one, fused], code="N3B",
+                               document=[one, fused]) == [fused]
 
 
 def test_distinct_committee_memberships_mentioned_in_passing_kept():
@@ -355,3 +378,213 @@ def test_fanned_out_records_with_equal_fields_but_different_text_are_both_kept()
     first = _child("Ana Cruz, Ph.D. | 2013 | Waisman", dict(fields))
     second = _child("Ana Cruz, Ph.D. | 2013 | Ashby", dict(fields), 1)
     assert deduplicate_entries([first, second]) == [first, second]
+
+
+# ------------------------- #666: a record fused into a kept entry's text
+# The verbatim branch proves the dropped text sits inside the kept text, but a
+# field-rendered section prints the kept entry's FIELDS, which describe one of
+# the records it fused. All names, titles and amounts below are invented.
+
+_FUSED_GRANTS = ("Program Lead, Harbor Widget Initiative\t"
+                 "Widget Outreach  PI: Dr Quill (1 of 4 Sites)  $111,111\t"
+                 "Gizmo Clinic  PI: Dr Quill (1 of 2 Sites)  $222,222")
+
+
+def _umbrella(**extra) -> dict:
+    fields = {"title": "Harbor Widget Initiative", "pi_role": "Program Lead",
+              "total_funding": "$333,333"}
+    fields.update(extra)
+    return {"taxonomy_code": "M2A", "text": _FUSED_GRANTS, "extracted_fields": fields}
+
+
+def _sub_grant(**extra) -> dict:
+    fields = {"title": "Gizmo Clinic", "pi_name": "Dr Quill",
+              "total_funding": "$222,222"}
+    fields.update(extra)
+    return {"taxonomy_code": "M2A",
+            "text": "Gizmo Clinic  PI: Dr Quill (1 of 2 Sites)  $222,222",
+            "extracted_fields": fields}
+
+
+def test_record_fused_into_a_kept_row_is_kept():
+    kept, sub = _umbrella(), _sub_grant()
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is False
+    assert deduplicate_entries([kept, sub], code="M2A",
+                               document=[kept, sub]) == [kept, sub]
+
+
+def test_record_the_kept_fields_name_is_still_dropped():
+    kept, sub = _umbrella(title="Gizmo Clinic"), _sub_grant()
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is True
+
+
+def test_name_split_across_kept_rendered_fields_is_dropped():
+    # One record whose fields split the dropped name into committee and
+    # organization: keeping the copy would print that row twice.
+    kept = {"text": "Gadget Committee, Northern Tinkerers Society\t2013-2014\t"
+                    "Sprocket Council, Northern Tinkerers Society\t2013-2014",
+            "extracted_fields": {"committee_name": "Sprocket Council",
+                                 "organization": "Northern Tinkerers Society"}}
+    dropped = {"text": "Gadget Committee, Northern Tinkerers Society\t2013-2014",
+               "extracted_fields": {"committee_name": "Gadget Committee, "
+                                                      "Northern Tinkerers Society"}}
+    assert _drop_is_safe(dropped, kept, "Q2", [kept, dropped]) is False
+    kept["extracted_fields"]["committee_name"] = "Gadget Committee"
+    assert _drop_is_safe(dropped, kept, "Q2", [kept, dropped]) is True
+
+
+def test_a_kept_field_the_section_does_not_write_does_not_vouch():
+    # `sub_awards` (a nested list) and `narrative` hold the name, but no M2A
+    # renderer writes either, so the record still never reaches the page.
+    kept = _umbrella(sub_awards=[{"sub_title": "Gizmo Clinic"}],
+                     narrative="Gizmo Clinic")
+    sub = _sub_grant()
+    assert "narrative" not in _RENDERED_FIELDS["M2A"]
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is False
+
+
+def test_a_stage5_rendering_of_the_kept_entry_vouches():
+    kept = {"text": "2018\tQuill A. Widget safety in harbors. J Gadg 2018;1:1\t"
+                    "Quill A. Sprocket wear in cold water. J Gadg 2018;2:2",
+            "extracted_fields": {"title": "Widget safety in harbors",
+                                 "formatted_citation": "Quill A. Widget safety in "
+                                 "harbors. Sprocket wear in cold water."}}
+    dropped = {"text": "Quill A. Sprocket wear in cold water. J Gadg 2018;2:2",
+               "extracted_fields": {"title": "Sprocket wear in cold water"}}
+    assert _drop_is_safe(dropped, kept, "S1", [kept, dropped]) is True
+    del kept["extracted_fields"]["formatted_citation"]
+    assert _drop_is_safe(dropped, kept, "S1", [kept, dropped]) is False
+
+
+def test_a_text_rendered_code_keeps_its_verbatim_drop():
+    # K4 writes the kept entry's text, which already holds the dropped record.
+    kept, sub = _umbrella(), _sub_grant()
+    assert "K4" not in _RENDERED_FIELDS
+    assert _drop_is_safe(sub, kept, "K4", [kept, sub]) is True
+
+
+def test_without_a_code_the_verbatim_drop_stands():
+    kept, sub = _umbrella(), _sub_grant()
+    assert _drop_is_safe(sub, kept) is True
+    assert deduplicate_entries([kept, sub]) == [kept]
+
+
+def test_a_shared_amount_ties_a_fragment_to_its_record():
+    # A description that stage 4 filed under `title`, carrying the kept
+    # grant's own amount: the same grant, not a second one.
+    kept = _umbrella(total_funding="222222")
+    sub = _sub_grant()
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is True
+
+
+def test_an_id_of_fewer_than_four_digits_ties_nothing():
+    kept = _umbrella(total_funding="$222")
+    sub = _sub_grant(total_funding="$222")
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is False
+
+
+def test_a_record_another_entry_names_is_still_dropped():
+    # The CV lists the sub-grant again elsewhere: that entry carries it, and
+    # keeping this copy could print it twice.
+    kept, sub = _umbrella(), _sub_grant()
+    other = {"taxonomy_code": "T", "text": "Funding list: Gizmo Clinic, 2021"}
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub, other]) is True
+
+
+def test_a_dropped_entry_with_no_name_is_still_dropped():
+    kept, sub = _umbrella(), _sub_grant()
+    del sub["extracted_fields"]["title"]
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is True
+
+
+def test_a_kept_entry_with_no_fields_is_still_dropped():
+    kept, sub = {"text": _FUSED_GRANTS}, _sub_grant()
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is True
+
+
+def test_record_name_skips_a_field_the_section_does_not_write():
+    fields = {"title": "Widget Notes", "journal_name": "Journal of Widgets"}
+    assert _record_name(fields, _RENDERED_FIELDS["Q4D"]) == "Journal of Widgets"
+    assert _record_name(fields, _RENDERED_FIELDS["S1"]) == "Widget Notes"
+    assert _record_name({"title": "  "}, _RENDERED_FIELDS["S1"]) is None
+
+
+@pytest.mark.parametrize("text, named", [
+    # five significant words: four of them (80%) is a mention, three is not
+    ("harbor widget sprocket gizmo repair", True),
+    ("harbor widget sprocket gizmo", True),
+    ("harbor widget sprocket", False),
+])
+def test_a_long_name_is_named_by_most_of_its_words(text, named):
+    assert _names_record(text, "Harbor Widget Sprocket Gizmo Repair") is named
+
+
+@pytest.mark.parametrize("text, named", [
+    ("Funding: GIZMO-CLINIC, 2021", True),
+    ("a clinic for every gizmo", False),
+])
+def test_a_short_name_is_named_only_as_one_run(text, named):
+    assert _names_record(text, "Gizmo Clinic") is named
+
+
+# The field that names a record, per field-rendered code. Stated here, not
+# derived, so a name field dropped from (or added to) the list is a visible
+# change to which records the #666 check can protect.
+_NAME_FIELD_BY_CODE = {
+    "B1": "degree", "B2": "program_name", "C": "specialty", "D1": "title",
+    "D2": "title", "D3": "title", "F1": None, "F2": "specialty", "H": "award_name",
+    "I": None, "K1": "course_title", "L3": "leadership_role", "M2A": "title",
+    "M2B": "title", "M2C": "title", "M2D": "title", "N2": "grant_title",
+    "N3A": "mentee_name", "N3B": "mentee_name", "O": "leadership_role",
+    "P": "committee_name", "Q1": None, "Q2": "committee_name", "Q3": "panel_name",
+    "Q4": "journal_name", "Q4A": "journal_name", "Q4B": "journal_name",
+    "Q4C": "journal_name", "Q4D": "journal_name", "R": "title", "S1": "title",
+    "S2": "title", "S3": "title", "S4": "chapter_title", "S5": "title",
+    "S6": "title", "S7": "title", "S8": "title", "S9": "title",
+}
+
+
+def test_every_field_rendered_code_has_a_stated_name_field():
+    assert set(_NAME_FIELD_BY_CODE) == set(_RENDERED_FIELDS)
+
+
+@pytest.mark.parametrize("code", sorted(_NAME_FIELD_BY_CODE))
+def test_record_name_reads_the_field_that_names_the_code_record(code):
+    # Every key any schema could carry, each holding its own name as value.
+    every_key = {key for keys in _RENDERED_FIELDS.values() for key in keys}
+    every_key |= {"activity_title", "clinical_role", "teaching_role", "project_name",
+                  "research_area", "license_type", "book_title", "role"}
+    assert _record_name({key: key for key in every_key},
+                        _RENDERED_FIELDS[code]) == _NAME_FIELD_BY_CODE[code]
+
+
+@pytest.mark.parametrize("key", [
+    "grant_number", "total_funding", "annual_funding", "doi", "pmid", "pmcid",
+    "isbn", "patent_number", "license_number", "abstract_number"])
+def test_each_shared_id_ties_a_fragment_to_its_record(key):
+    kept = _umbrella(**{key: "ID-4455-01"})
+    sub = _sub_grant(total_funding=None)
+    sub["extracted_fields"][key] = "id 445501"
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is True
+    kept["extracted_fields"][key] = "ID-4455-02"
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is False
+
+
+def test_a_four_digit_shared_id_ties_a_fragment_to_its_record():
+    kept = _umbrella(total_funding="$4,455")
+    sub = _sub_grant(total_funding="4455")
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is True
+
+
+def test_a_rendered_field_holding_a_list_vouches_with_its_words():
+    # A rendered key stage 4 filled with a list still prints its items.
+    kept = _umbrella(pi_name=["Dr Quill", "Gizmo Clinic"])
+    sub = _sub_grant()
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is True
+
+
+def test_an_empty_rendered_field_vouches_for_nothing():
+    # A null field prints nothing; its "None" must not stand for a record.
+    kept = _umbrella(pi_name=None, agency="")
+    sub = _sub_grant(title="None")
+    assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is False
