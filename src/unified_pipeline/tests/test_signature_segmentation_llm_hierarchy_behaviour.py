@@ -1361,6 +1361,16 @@ def test_restore_sub_label_matches_case_colon_and_whitespace():
     assert [t for _, _, t in _shape(result)] == ["Part  One", "INTERNATIONAL:", "Papers"]
 
 
+def test_restore_sub_label_matches_a_space_before_the_colon():
+    # The docx line has a space before its colon; the header does not.
+    hierarchy = [_h("Talks"), _h("Papers"), _h("International:")]
+    lines = ["Talks", "International :", "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert [t for _, _, t in _shape(result)] == ["Talks", "International:", "Papers"]
+
+
 def test_restore_sub_label_an_unfound_header_does_not_advance_the_search():
     hierarchy = [_h("Talks"), _h("Unfound"), _h("National"), _h("Papers"), _h("International")]
     lines = ["Talks", "National", "International", "Papers"]
@@ -1443,13 +1453,26 @@ def test_get_cv_hierarchy_chunked_restores_sub_label_order(monkeypatch):
     # The live stage-1a path: the order repair runs on the final LLM pass's output.
     from unified_pipeline.segmentation import chunked_chat_hierarchy_extractor as cce
     lines = ["Talks", "National", "International", "Papers"]
-    final = [_h("Talks"), _h("National"), _h("Papers"), _h("International")]
     monkeypatch.setattr(cce, "extract_text_from_docx", lambda path: lines)
     monkeypatch.setattr(cce, "extract_headers_from_chunk", lambda chunk, i, n: "")
     monkeypatch.setattr(cce, "ensure_personal_data_first", lambda h: h)
     monkeypatch.setattr(cce, "validate_headers_vs_entries", lambda h: h)
-    monkeypatch.setattr(cce, "normalize_hierarchy_with_llm", lambda h, pass_number: final)
+    pass_1 = [_h("Talks"), _h("Papers"), _h("International")]
+    pass_2 = [_h("Talks"), _h("National"), _h("Papers"), _h("International")]
+    passes = {1: pass_1, 2: pass_2}
+    seen = []
 
-    hierarchy, _ = cce.get_cv_hierarchy_chunked("unused.docx")
+    def fake_normalize(h, pass_number):
+        seen.append((pass_number, h))
+        return passes[pass_number]
 
+    monkeypatch.setattr(cce, "normalize_hierarchy_with_llm", fake_normalize)
+
+    hierarchy, stats = cce.get_cv_hierarchy_chunked("unused.docx")
+
+    # pass 2 reads the validated pass-1 output, and the repair reads pass 2's output
+    assert [p for p, _ in seen] == [1, 2]
+    assert seen[1][1] is pass_1
     assert [n["text"] for n in hierarchy] == ["Talks", "National", "International", "Papers"]
+    assert hierarchy[1] is pass_2[1]
+    assert stats["final_headers"] == len(pass_2)
