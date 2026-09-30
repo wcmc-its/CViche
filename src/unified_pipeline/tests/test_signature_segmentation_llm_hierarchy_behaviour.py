@@ -21,6 +21,7 @@ CLI block (argparse-free but exit()-driven) at the bottom of the module.
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -220,7 +221,7 @@ def test_normalize_hierarchy_with_llm_happy_path_nests_children(monkeypatch):
     assert captured["messages"][1]["content"] == "[H1] Education\n[H1] PhD Program"
 
 
-def test_normalize_hierarchy_with_llm_llm_failure_falls_back_to_original(monkeypatch):
+def test_normalize_hierarchy_with_llm_llm_failure_falls_back_to_original(monkeypatch, caplog):
     headers = [{"text": "Grants", "level": "H1", "paragraph_index": 5, "children": []}]
 
     def raising_call_llm(stage, messages, response_format=None, **kwargs):
@@ -228,10 +229,31 @@ def test_normalize_hierarchy_with_llm_llm_failure_falls_back_to_original(monkeyp
 
     monkeypatch.setattr(sbs, "call_llm", raising_call_llm)
 
-    result = sbs.normalize_hierarchy_with_llm(headers, pass_number=1)
+    with caplog.at_level(logging.INFO, logger=sbs.__name__):
+        result = sbs.normalize_hierarchy_with_llm(headers, pass_number=1)
 
     assert result is headers
     assert result == [{"text": "Grants", "level": "H1", "paragraph_index": 5, "children": []}]
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in errors] == ["GPT normalization failed; using original hierarchy"]
+    assert errors[0].exc_info is not None
+
+
+def test_normalize_hierarchy_with_llm_keeps_cv_text_out_of_info_logs(monkeypatch, caplog):
+    """The hierarchy sent to and returned by the LLM is CV text: debug only,
+    never at the INFO level production logs at."""
+    headers = [{"text": "Zyxwv Qutsr Fellowship", "level": "H1", "paragraph_index": 1, "children": []}]
+
+    def fake_call_llm(stage, messages, response_format=None, **kwargs):
+        return {"content": "[H1] Zyxwv Qutsr Fellowship\n", "total_tokens": 3, "cost": 0.0}
+
+    monkeypatch.setattr(sbs, "call_llm", fake_call_llm)
+
+    with caplog.at_level(logging.INFO, logger=sbs.__name__):
+        sbs.normalize_hierarchy_with_llm(headers, pass_number=1)
+
+    assert caplog.records
+    assert not any("Zyxwv" in r.getMessage() for r in caplog.records)
 
 
 def test_normalize_hierarchy_with_llm_pass_number_changes_system_prompt(monkeypatch):
@@ -413,9 +435,90 @@ def test_parse_normalized_hierarchy_blank_lines_deep_indent_and_fuzzy_colon_matc
     assert child["paragraph_index"] == 8
 
 
+def _flat_originals(*texts: str) -> list[dict]:
+    return [
+        {"text": t, "level": "H1", "paragraph_index": i, "children": [], "format_signature": {}}
+        for i, t in enumerate(texts)
+    ]
+
+
+def test_parse_normalized_hierarchy_unindented_output_nests_by_tag():
+    # #526: the LLM echoed the unindented input format back, so the [Hn] tags were
+    # the only nesting signal; indent-only parsing flattened every header to H1.
+    original = _flat_originals("Part One", "Sub A", "Leaf 1", "Sub B", "Part Two")
+    corrected = "\n".join([
+        "[H1] Part One",
+        "[H2] Sub A",
+        "[H3] Leaf 1",
+        "[H2] Sub B",
+        "[H1] Part Two",
+    ])
+
+    result = sbs.parse_normalized_hierarchy(corrected, original)
+
+    assert [h["text"] for h in result] == ["Part One", "Part Two"]
+    assert [c["text"] for c in result[0]["children"]] == ["Sub A", "Sub B"]
+    assert [c["level"] for c in result[0]["children"]] == ["H2", "H2"]
+    leaf = result[0]["children"][0]["children"][0]
+    assert (leaf["text"], leaf["level"], leaf["paragraph_index"]) == ("Leaf 1", "H3", 2)
+    assert result[1]["children"] == []
+
+
+def test_parse_normalized_hierarchy_unindented_all_h1_stays_flat():
+    original = _flat_originals("Alpha", "Beta", "Gamma")
+
+    result = sbs.parse_normalized_hierarchy("[H1] Alpha\n[H1] Beta\n[H1] Gamma", original)
+
+    assert [(h["text"], h["level"], h["children"]) for h in result] == [
+        ("Alpha", "H1", []), ("Beta", "H1", []), ("Gamma", "H1", []),
+    ]
+
+
+def test_parse_normalized_hierarchy_any_indented_line_keeps_indent_authoritative():
+    # The model DID indent (one line), so the tag fallback must stay off: the
+    # unindented [H2] line remains a top-level H1, exactly as before #526.
+    original = _flat_originals("Part One", "Sub A", "Sub B")
+    corrected = "[H1] Part One\n[H2] Sub A\n  [H2] Sub B"
+
+    result = sbs.parse_normalized_hierarchy(corrected, original)
+
+    assert [h["text"] for h in result] == ["Part One", "Sub A"]
+    assert [h["level"] for h in result] == ["H1", "H1"]
+    assert [c["text"] for c in result[1]["children"]] == ["Sub B"]
+
+
+def test_parse_normalized_hierarchy_tab_indent_counts_as_indented():
+    original = _flat_originals("Part One", "Sub A")
+
+    result = sbs.parse_normalized_hierarchy("[H1] Part One\n\t[H1] Sub A", original)
+
+    assert [h["text"] for h in result] == ["Part One"]  # tab indent stays authoritative
+    assert [c["text"] for c in result[0]["children"]] == ["Sub A"]
+
+
+def test_normalize_hierarchy_with_llm_unindented_reply_is_nested_end_to_end(monkeypatch):
+    # The wire: chunked extractor -> flat input -> LLM echoes tags without indent ->
+    # normalize_hierarchy_with_llm must still return a nested tree (#526).
+    headers = _flat_originals("Research", "Grants", "Publications")
+    for header, level in zip(headers, ("H1", "H2", "H2")):
+        header["level"] = level
+
+    def fake_call_llm(stage, messages, response_format=None, **kwargs):
+        return {"content": "[H1] Research\n[H2] Grants\n[H2] Publications", "total_tokens": 3, "cost": 0.0}
+
+    monkeypatch.setattr(sbs, "call_llm", fake_call_llm)
+
+    result = sbs.normalize_hierarchy_with_llm(headers, pass_number=2)
+
+    assert [h["text"] for h in result] == ["Research"]
+    assert [(c["text"], c["level"]) for c in result[0]["children"]] == [
+        ("Grants", "H2"), ("Publications", "H2"),
+    ]
+
+
 # ============================================================ validate_headers_vs_entries
 
-def test_validate_headers_vs_entries_drops_high_entry_likelihood(monkeypatch):
+def test_validate_headers_vs_entries_drops_high_entry_likelihood(monkeypatch, caplog):
     headers = [
         {"text": "EDUCATION", "level": "H1", "children": [
             {"text": "PhD in Biology, State U, 2010", "level": "H2", "children": []},
@@ -439,10 +542,14 @@ def test_validate_headers_vs_entries_drops_high_entry_likelihood(monkeypatch):
 
     monkeypatch.setattr(sbs, "call_llm", fake_call_llm)
 
-    result = sbs.validate_headers_vs_entries(headers)
+    with caplog.at_level(logging.INFO, logger=sbs.__name__):
+        result = sbs.validate_headers_vs_entries(headers)
 
     assert [h["text"] for h in result] == ["EDUCATION"]
     assert result[0]["children"] == []
+    # The dropped lines are entries (CV content): named at debug only.
+    assert any("2 entries filtered out" in r.getMessage() for r in caplog.records)
+    assert not any("Jane Smith" in r.getMessage() for r in caplog.records)
 
 
 def test_validate_headers_vs_entries_keeps_rescued_headers_without_sending_them(monkeypatch):
@@ -484,7 +591,7 @@ def test_validate_headers_vs_entries_empty_input_short_circuits(monkeypatch):
     assert calls == []
 
 
-def test_validate_headers_vs_entries_llm_failure_returns_unfiltered_headers(monkeypatch):
+def test_validate_headers_vs_entries_llm_failure_returns_unfiltered_headers(monkeypatch, caplog):
     headers = [{"text": "SERVICE", "level": "H1", "children": []}]
 
     def raising_call_llm(stage, messages, response_format=None, **kwargs):
@@ -492,9 +599,13 @@ def test_validate_headers_vs_entries_llm_failure_returns_unfiltered_headers(monk
 
     monkeypatch.setattr(sbs, "call_llm", raising_call_llm)
 
-    result = sbs.validate_headers_vs_entries(headers)
+    with caplog.at_level(logging.INFO, logger=sbs.__name__):
+        result = sbs.validate_headers_vs_entries(headers)
 
     assert result is headers
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert [r.getMessage() for r in errors] == ["Header validation failed; using unfiltered headers"]
+    assert errors[0].exc_info is not None
 
 
 def test_validate_headers_vs_entries_rescued_header_with_children_recurses(monkeypatch):
@@ -1072,3 +1183,85 @@ def test_segment_cv_with_signatures_total_headers_counts_only_header_groups(tmp_
 
     assert result["meta"]["total_paragraphs"] == 10
     assert result["meta"]["total_headers"] == 3
+
+
+@pytest.mark.parametrize("call", ["normalize", "validate"])
+def test_llm_outage_propagates_instead_of_falling_back(monkeypatch, call):
+    """A provider outage past the budget fails the run (#810); the plain-error
+    fallbacks are pinned by the llm_failure tests above."""
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    headers = [{"text": "Grants", "level": "H1", "paragraph_index": 5, "children": []}]
+
+    def outage(stage, messages, response_format=None, **kwargs):
+        raise LLMOutageError("provider down", seconds_waited=1800.0)
+
+    monkeypatch.setattr(sbs, "call_llm", outage)
+    with pytest.raises(LLMOutageError):
+        if call == "normalize":
+            sbs.normalize_hierarchy_with_llm(headers, pass_number=1)
+        else:
+            sbs.validate_headers_vs_entries(headers)
+
+
+# ============================================================ _write_hierarchy (#306)
+
+def _recursive_write_hierarchy_reference(f, nodes, depth=0):
+    """The pre-#306 nested closure, verbatim, as the byte-identity oracle."""
+    for node in nodes:
+        f.write(f"{'  ' * depth}[{node['level']}] {node['text']}\n")
+        if node.get('children'):
+            _recursive_write_hierarchy_reference(f, node['children'], depth + 1)
+
+
+def test_write_hierarchy_is_byte_identical_to_recursive_original():
+    import io
+    hierarchy = [
+        {"level": "H1", "text": "A", "children": [
+            {"level": "H2", "text": "A1", "children": [{"level": "H3", "text": "A1a"}]},
+            {"level": "H2", "text": "A2", "children": []},
+        ]},
+        {"level": "H1", "text": "B"},
+    ]
+    new, ref = io.StringIO(), io.StringIO()
+    sbs._write_hierarchy(new, hierarchy)
+    _recursive_write_hierarchy_reference(ref, hierarchy)
+    assert new.getvalue() == ref.getvalue()
+    assert new.getvalue().startswith("[H1] A\n  [H2] A1\n    [H3] A1a\n")
+
+
+def test_write_hierarchy_honours_starting_depth():
+    import io
+    hierarchy = [
+        {"level": "H1", "text": "A", "children": [{"level": "H2", "text": "A1"}]},
+        {"level": "H1", "text": "B"},
+    ]
+    new, ref = io.StringIO(), io.StringIO()
+    sbs._write_hierarchy(new, hierarchy, depth=1)
+    _recursive_write_hierarchy_reference(ref, hierarchy, depth=1)
+    assert new.getvalue() == ref.getvalue()
+    assert new.getvalue() == "  [H1] A\n    [H2] A1\n  [H1] B\n"
+
+
+def test_write_hierarchy_deep_chain_does_not_recurse():
+    import io
+    root = {"level": "H1", "text": "n0", "children": []}
+    tip = root
+    for i in range(1, 5000):
+        child = {"level": "H2", "text": f"n{i}", "children": []}
+        tip["children"].append(child)
+        tip = child
+    buf = io.StringIO()
+    sbs._write_hierarchy(buf, [root])
+    assert buf.getvalue().count("\n") == 5000
+
+
+def test_parse_normalized_hierarchy_indented_untagged_line_does_not_disable_tag_fallback():
+    # Only an indented OUTLINE line proves the model indented; stray indented
+    # commentary must not switch the #526 tag fallback off.
+    original = _flat_originals("Part One", "Sub A")
+
+    result = sbs.parse_normalized_hierarchy("[H1] Part One\n  (commentary)\n[H2] Sub A", original)
+
+    assert [h["text"] for h in result] == ["Part One"]
+    assert [(c["text"], c["level"]) for c in result[0]["children"]] == [("Sub A", "H2")]

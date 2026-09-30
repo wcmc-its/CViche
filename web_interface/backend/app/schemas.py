@@ -68,7 +68,7 @@ class RunStatus(BaseModel):
     status: str
     started_at: TZDateTime
     completed_at: TZDateTime | None = None
-    total_cost: float
+    total_cost: float | None  # None for non-admins (#1111)
     total_tokens: int
     input_tokens: int = 0
     output_tokens: int = 0
@@ -93,7 +93,7 @@ class StepSummary(BaseModel):
     started_at: TZDateTime | None = None
     completed_at: TZDateTime | None = None
     duration_seconds: int | None = None
-    cost: float
+    cost: float | None  # None for non-admins (#1111)
     output_files: str | None = None  # JSON array as string
 
     class Config:
@@ -107,7 +107,7 @@ class RunSummary(BaseModel):
     status: str
     started_at: TZDateTime
     completed_at: TZDateTime | None = None
-    total_cost: float
+    total_cost: float | None  # None for non-admins (#1111)
     total_duration_seconds: int | None = None
 
     class Config:
@@ -121,6 +121,26 @@ class PaginatedRuns(BaseModel):
     has_more: bool
     offset: int
     limit: int
+
+
+class CapacityResponse(BaseModel):
+    """GET /api/capacity: advisory run-admission snapshot for this pod (#177)."""
+    available: bool
+    active: int
+    limit: int
+
+
+class RunActionResponse(BaseModel):
+    """Body of /start, /cancel and /retry: a human-readable message plus the
+    run's status after the action. Field order is the wire order (#801)."""
+    message: str
+    status: str
+
+
+class RestartRunResponse(BaseModel):
+    """Body of /restart: the id of the newly created run (#801)."""
+    run_id: str
+    message: str
 
 
 # ============================================================
@@ -155,7 +175,7 @@ class StepDetail(BaseModel):
     name: str
     status: str
     duration: int | None = None
-    cost_usd: float
+    cost_usd: float | None  # None for non-admins (#1111)
     input_file: str | None = None
     output_files: list[str]
     logs: list[LogEntry]
@@ -351,6 +371,13 @@ class Settings(BaseModel):
 # Admin Schemas
 # ============================================================
 
+class AdminStepAvg(BaseModel):
+    """Average duration of one pipeline stage over completed runs."""
+    stage_id: str
+    step_name: str
+    avg_seconds: float
+
+
 class AdminStats(BaseModel):
     """Overview statistics for the admin dashboard."""
     total_runs: int
@@ -361,6 +388,8 @@ class AdminStats(BaseModel):
     # there are no completed runs yet.
     avg_duration_seconds: float | None = None
     p95_duration_seconds: int | None = None
+    # Per-stage average duration over completed runs, in pipeline order.
+    step_avg_seconds: list[AdminStepAvg] = []
 
 
 class AdminUser(BaseModel):
@@ -413,6 +442,10 @@ class AdminRunEntry(BaseModel):
     has_feedback: bool = False
     quality_score: int | None = None      # advisory 0-100, None if not computed
     quality_band: str | None = None       # "GREEN (ship)" / "YELLOW ..." / "RED ..."
+    # False when the score was computed with a scored artifact missing or
+    # unreadable (#745); None when not computed or cached before the field existed.
+    quality_data_complete: bool | None = None
+    quality_missing_evidence: list[str] = []
 
     class Config:
         from_attributes = True
@@ -425,6 +458,11 @@ class QualityScoreResult(BaseModel):
     band: str
     dimensionScores: list[dict] = []
     flags: list[str] = []
+    # quality_score.score_run's evidence inventory (#745): data_complete is
+    # False when any scored artifact was missing or unreadable, and
+    # missing_evidence names each one. None only for a pre-#724 result.
+    data_complete: bool | None = None
+    missing_evidence: list[str] = []
 
 
 class AdminRunsResponse(BaseModel):
@@ -434,6 +472,33 @@ class AdminRunsResponse(BaseModel):
     has_more: bool
     offset: int
     limit: int
+
+
+class QueueDbView(BaseModel):
+    """DB side of the run-queue stats (#701): counts and ages by status,
+    matching ``run_service.queue_db_view``'s keys."""
+    queued: int
+    running: int
+    oldest_queued_age_s: float | None = None
+    oldest_running_age_s: float | None = None
+
+
+class QueueStatsResponse(BaseModel):
+    """Run-queue depth and ownership (Valkey), beside the DB view, for the
+    admin dashboard (#701). ``enabled`` is ``dispatch_mode() == "queue"``,
+    independent of whether ``CVICHE_REDIS_URL`` happens to be set (other
+    features share that same URL). ``error`` is a stable code
+    (``valkey_unavailable`` / ``valkey_not_configured``) -- never raw
+    exception text, which can carry a host:port."""
+    enabled: bool
+    db: QueueDbView
+    error: str | None = None
+    stream_length: int | None = None
+    pending: int | None = None
+    lag: int | None = None
+    consumers: int | None = None
+    owners: list[dict] = []
+    dead: int | None = None
 
 
 class AdminConfigResponse(BaseModel):

@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import traceback
+from collections.abc import Callable
 
 
 from fastapi import FastAPI, Request, Depends, Response, status
@@ -97,7 +98,7 @@ def _add_security_headers(response: JSONResponse) -> JSONResponse:
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
         "font-src 'self'; "
-        "connect-src 'self' ws: wss:; "
+        "connect-src 'self'; "
         "frame-ancestors 'none'"
     )
     response.headers["X-Frame-Options"] = "DENY"
@@ -151,23 +152,29 @@ async def _stale_run_reaper_loop(interval_seconds: int):
     in-flight run isn't touched until it passes the stale threshold. The DB
     work runs in a thread so it never blocks the event loop, and one bad sweep
     is logged and the loop keeps going.
+
+    Each sweep also runs ``reconcile_queued_runs`` (#701 queue mode only; a
+    no-op otherwise) -- the DB-side backstop for a "queued" row whose Valkey
+    token was lost, next to the "running" backstop above.
     """
-    from app.services.run_service import reconcile_stale_runs
+    from app.services.run_service import reconcile_stale_runs, reconcile_queued_runs
     from app.database import SessionLocal
 
-    def _sweep() -> int:
+    def _sweep() -> tuple[int, int]:
         db = SessionLocal()
         try:
-            return reconcile_stale_runs(db)
+            return reconcile_stale_runs(db), reconcile_queued_runs(db)
         finally:
             db.close()
 
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            swept = await asyncio.to_thread(_sweep)
-            if swept:
-                logger.info("Periodic reaper marked %d stale run(s) failed", swept)
+            stale_failed, queued_requeued = await asyncio.to_thread(_sweep)
+            if stale_failed:
+                logger.info("Periodic reaper marked %d stale run(s) failed", stale_failed)
+            if queued_requeued:
+                logger.info("Periodic reaper requeued %d stranded queued run(s)", queued_requeued)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -175,6 +182,76 @@ async def _stale_run_reaper_loop(interval_seconds: int):
                 "Periodic stale-run reaper sweep failed; will retry next interval",
                 exc_info=True,
             )
+
+
+# How long shutdown waits for this pod's in-flight runs before failing them
+# (#116). Pairs with the backend Deployment's terminationGracePeriodSeconds,
+# which must exceed this plus the preStop sleep and uvicorn's own
+# --timeout-graceful-shutdown, or the kubelet SIGKILLs the pod mid-drain.
+DEFAULT_SHUTDOWN_DRAIN_SECONDS = 1500
+
+
+def _shutdown_drain_seconds() -> int:
+    """Read the drain budget (CVICHE_SHUTDOWN_DRAIN_SECONDS, "llm" section)."""
+    raw, _ = get_config("llm", "CVICHE_SHUTDOWN_DRAIN_SECONDS", default=DEFAULT_SHUTDOWN_DRAIN_SECONDS)
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        return DEFAULT_SHUTDOWN_DRAIN_SECONDS
+
+
+async def _drain_runs_before_exit(budget_seconds: int) -> None:
+    """Let this pod's in-flight runs finish, then fail any still running (#116).
+
+    A run executes in a thread inside this process, so when the process exits
+    the run dies with it and, before this, its row stayed "running" with
+    nothing executing it (runs 6O6Q2V and U2MUQ5 were orphaned by releases on
+    2026-09-29). Stop admitting runs, wait up to ``budget_seconds`` for the
+    ones already going, then mark the rest failed with a deploy message so the
+    user gets a terminal status instead of a timer that climbs forever.
+    """
+    from app.pipeline import concurrency
+    from app.pipeline.orchestrator import stop_run_locally
+    from app.services.run_service import fail_runs_interrupted_by_shutdown
+    from app.database import SessionLocal
+
+    concurrency.begin_draining()
+    active = concurrency.active_run_ids()
+    if not active:
+        logger.info("Shutdown drain: no runs in progress on this pod")
+        return
+    logger.info(
+        "Shutdown drain: waiting up to %ds for %d run(s) in progress: %s",
+        budget_seconds, len(active), ", ".join(active),
+    )
+    remaining = await concurrency.wait_for_drain(budget_seconds)
+    if not remaining:
+        logger.info("Shutdown drain: all runs on this pod finished")
+        return
+
+    # Stop the leftover runs before failing them, so a run cannot pass its
+    # pre-"complete" cancel check after the failure is written.
+    for run_id in remaining:
+        stop_run_locally(run_id)
+
+    def _fail() -> int:
+        db = SessionLocal()
+        try:
+            return fail_runs_interrupted_by_shutdown(db, remaining)
+        finally:
+            db.close()
+
+    try:
+        failed = await asyncio.to_thread(_fail)
+    except Exception:
+        # The rest of shutdown (broker close, notification flush) must still
+        # run; the periodic reaper on a surviving pod fails these runs later.
+        logger.exception("Shutdown drain: could not mark runs failed: %s", ", ".join(remaining))
+        return
+    logger.warning(
+        "Shutdown drain: budget of %ds ran out; marked %d of %d still-running run(s) failed: %s",
+        budget_seconds, failed, len(remaining), ", ".join(remaining),
+    )
 
 
 # Auth modes with a real credential check, allowed on a deployed (S3) instance.
@@ -231,6 +308,58 @@ def _guard_deployed_auth_mode(auth_mode: str | None, storage_backend: str, allow
         )
 
 
+def _reconcile_queued_runs_at_startup(db: Session, reconcile_queued_runs: Callable[[Session], int]) -> int:
+    """B2: the startup counterpart of ``reconcile_queued_runs``, guarded the
+    same corrective way the periodic sweep (``_stale_run_reaper_loop``) already
+    survives a sweep failure -- log and continue -- narrowed here to
+    ``redis.exceptions.RedisError`` specifically. Unguarded, a Valkey outage
+    during a backend restart raised out of ``reconcile_queued_runs``
+    (queue-mode only) would crash *this sweep* out of startup, taking down
+    every replica at once instead of just leaving queue-mode reconciliation to
+    the periodic reaper, which retries on its own interval. Any other
+    exception (a genuine DB error, say) is deliberately left to propagate
+    here, same as the ``reconcile_stale_runs`` call beside it -- only Valkey
+    unavailability is worth surviving at this specific call site.
+
+    This guards ONLY this one sweep, not backend startup's dependency on
+    Valkey as a whole: ``lifespan`` still hard-depends on Valkey a few lines
+    below, unguarded, via the pre-existing pub/sub broker
+    (``event_emitter.startup()`` -> ``psubscribe`` on the same
+    ``CVICHE_REDIS_URL``, when the broker is enabled). Do not read this
+    function as making the pod resilient to a Valkey outage overall -- it
+    isn't; a Valkey outage still fails startup at that later call.
+
+    ``reconcile_queued_runs`` is passed in rather than imported here so a test
+    can substitute a stub without patching ``app.services.run_service``.
+    """
+    import redis
+    try:
+        return reconcile_queued_runs(db)
+    except redis.exceptions.RedisError:
+        logger.exception(
+            "Startup queued-run reconcile failed (Valkey unavailable); "
+            "continuing -- the periodic reaper will retry it"
+        )
+        return 0
+
+
+def _validate_ed_startup(db: Session) -> None:
+    """Fail fast on a misconfigured ED at boot rather than on the first SAML
+    login (#330). Gated on ed_enabled -- a deployment that doesn't use ED
+    authorization at all shouldn't be refused for an unset
+    ED_LDAP_BIND_PASSWORD it will never read."""
+    from app.config_loader import get_config_value
+    if not get_config_value(db, "ed_enabled"):
+        return
+    from app.ed_group_lookup import validate_startup_config
+    ldap_url, _ = get_config("ldap", "ED_LDAP_URL", default="")
+    bind_dn, _ = get_config("ldap", "ED_LDAP_BIND_DN", default="")
+    bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
+    ed_access_group = get_config_value(db, "ed_access_group") or ""
+    validate_startup_config(ldap_url, bind_dn, bind_password, ed_access_group)
+    logger.info("✅ ED config validated")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -248,7 +377,7 @@ async def lifespan(app: FastAPI):
         logger.info("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
     from app.config_loader import seed_system_config, get_config_value
     from app.consent import load_consent_text, check_consent_integrity
-    from app.services.run_service import reconcile_stale_runs
+    from app.services.run_service import reconcile_stale_runs, reconcile_queued_runs
     from app.database import SessionLocal
     db = SessionLocal()
     try:
@@ -271,6 +400,7 @@ async def lifespan(app: FastAPI):
         from app.saml_replay import check_deployed_posture
         check_deployed_posture(auth_mode, storage_backend)
         logger.info("✅ Auth mode: %s", auth_mode or "simple (default)")
+        _validate_ed_startup(db)
         from app.services.notifications import validate_configuration
         notif_status = validate_configuration()
         logger.info(
@@ -285,6 +415,9 @@ async def lifespan(app: FastAPI):
         swept = reconcile_stale_runs(db)
         if swept:
             logger.info("♻️  Reconciled %d stale run(s) from a previous restart", swept)
+        queued_requeued = _reconcile_queued_runs_at_startup(db, reconcile_queued_runs)
+        if queued_requeued:
+            logger.info("♻️  Requeued %d stranded queued run(s) at startup", queued_requeued)
     finally:
         db.close()
 
@@ -323,7 +456,10 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown: cancel the reaper, stop the subscriber loop, close broker conns.
+    # Shutdown: drain this pod's runs first, while the broker and the event
+    # emitter are still up for them to report on; then cancel the reaper, stop
+    # the subscriber loop, close broker conns.
+    await _drain_runs_before_exit(_shutdown_drain_seconds())
     if reaper_task:
         reaper_task.cancel()
         try:

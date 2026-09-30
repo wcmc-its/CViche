@@ -101,7 +101,7 @@ This pipeline parses academic/faculty CVs (Word documents) and produces structur
 ```
 Stage order: 1a → 1b → 2 → 3a → 3b → 4 → 4.5 → 5 → 5b → 6
 
-LLM stages:         1a, 3a, 3b, 4, 4.5, 5b  (require OpenAI API)
+LLM stages:         1a, 3a, 3b, 4, 4.5, 5b  (require AWS Bedrock; CViche is Bedrock-only)
 Deterministic:      1b, 2               (no API calls)
 External API:       5                   (PubMed/NCBI)
 Document Gen:       6                   (python-docx)
@@ -128,7 +128,7 @@ Word Document (.docx)
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 1a: Hierarchy Extraction     │  LLM (gpt-5.1)
+│  Stage 1a: Hierarchy Extraction     │  LLM
 │  Extract section headers & structure │
 │  Two-pass normalization prompts     │
 └─────────────────────────────────────┘
@@ -143,7 +143,7 @@ Word Document (.docx)
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 2: Entry Extraction          │  No LLM
+│  Stage 2: Entry Extraction          │  LLM
 │  Extract all entries with 100%      │
 │  coverage of document indices       │
 │  Entry types: paragraph, table,     │
@@ -152,21 +152,21 @@ Word Document (.docx)
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 3a: Header Taxonomy Mapping  │  LLM (gpt-5.1)
+│  Stage 3a: Header Taxonomy Mapping  │  LLM
 │  Map CV section headers to taxonomy │
 │  codes with confidence weights      │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 3b: Entry Classification     │  LLM (gpt-5.1)
+│  Stage 3b: Entry Classification     │  LLM
 │  Classify entries using header      │
 │  taxonomy context from Stage 3a     │
 └─────────────────────────────────────┘
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 4: Field Extraction          │  LLM (gpt-5.1 / gpt-4o-mini)
+│  Stage 4: Field Extraction          │  LLM
 │  Extract structured fields from     │
 │  classified entries (authors, dates,│
 │  titles, grant numbers, etc.)       │
@@ -174,7 +174,7 @@ Word Document (.docx)
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 4.5: Research Summary        │  LLM (gpt-5.1)
+│  Stage 4.5: Research Summary        │  LLM
 │  Generate biosketch-style M1        │
 │  research summary statement         │
 └─────────────────────────────────────┘
@@ -286,8 +286,8 @@ CV parsing - AI project/
 
 ### Prerequisites
 - Python 3.14 (matches the backend image, `python:3.14-slim`)
-- OpenAI API key set as `OPENAI_API_KEY` environment variable
-- Dependencies: `pip install openai python-docx tiktoken requests lxml`
+- AWS Bedrock credentials -- CViche is Bedrock-only; see [docs/LLM_MODELS.md](LLM_MODELS.md) for setup
+- Dependencies: `pip install -r requirements.txt`
 - Optional: `NCBI_API_KEY` for faster PubMed lookups in Stage 5
 
 ### Full Pipeline (Recommended)
@@ -295,7 +295,7 @@ CV parsing - AI project/
 ```bash
 cd "CV parsing - AI project"
 
-python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE] [--model MODEL]
+python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE]
 
 # Example - run full pipeline:
 python3 run_full_pipeline.py 2071_Zuschlag_Cv
@@ -303,14 +303,15 @@ python3 run_full_pipeline.py 2071_Zuschlag_Cv
 # Or with full path:
 python3 run_full_pipeline.py 'data/sample_cvs/word/2071_Zuschlag_Cv.docx'
 
-# With specific model:
-python3 run_full_pipeline.py 2071_Zuschlag_Cv --model gpt-4o
+# Override the Bedrock model for this run (default: llm_config.yaml's `default:` block):
+CVICHE_LLM_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0 python3 run_full_pipeline.py 2071_Zuschlag_Cv
 ```
 
 **Arguments:**
 - `cv_path_or_uid`: Path to Word document OR just the document UID (if UID only, looks in `data/sample_cvs/word/`)
 - `--stage`: Run ONLY this stage: `1a`, `1b`, `2`, `3a`, `3b`, `3`, `4`, `4.5`, `5`, `5b`, or `6` (omit for full pipeline)
-- `--model`: OpenAI model to use (default: `gpt-5.1`)
+
+There is no `--model` flag: each stage's model comes from `src/unified_pipeline/config/llm_config.yaml` — see [Model Selection](#model-selection).
 
 ### Single Stage Runs
 
@@ -517,7 +518,7 @@ This is the contract between Stage 2 and Stage 3:
     }
   ],
   "meta": {
-    "model": "gpt-5.1",
+    "model": "us.anthropic.claude-sonnet-4-6",
     "taxonomy_version": "7.2",
     "node_count": 45
   }
@@ -1082,17 +1083,14 @@ See `core/validators/README.md` for the full guide. Quick steps:
 ## Configuration
 
 ### Model Selection
-All LLM calls use `gpt-5.1`. Model is configured directly in each stage script (no central config file):
-- `signature_based_segmentation.py` (Stage 1a) — `model='gpt-5.1'`
-- `stage_3_taxonomy_mapper.py` (Stage 3) — `model='gpt-5.1'`
-- `header_validator.py` — `model='gpt-5.1'`
+Models are configured per stage in `src/unified_pipeline/config/llm_config.yaml`, not in the stage scripts: every `call_llm(stage=...)` resolves its model there (default block, then `stages:` overrides, then the `CVICHE_LLM_MODEL` env var for non-pinned stages). Today every stage runs Claude Sonnet 4.6 on Bedrock except stage 3b (Claude Haiku 4.5). See `docs/LLM_MODELS.md` for the strategy and how to change a stage's model.
 
-Note: Stage 1b and Stage 2 are deterministic (NO LLM calls).
+Note: Stage 1b is deterministic (no LLM calls).
 
 ### Environment Variables
 | Variable | Required | Purpose |
 |----------|----------|---------|
-| `OPENAI_API_KEY` | Yes | OpenAI API authentication |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Yes (unless using an IAM role) | AWS Bedrock authentication -- CViche is Bedrock-only |
 | `NCBI_API_KEY` | No | NCBI/PubMed API key (10 req/s vs 3 req/s without) |
 
 ### Tuning Parameters (in code)
@@ -1114,7 +1112,7 @@ Typical CV (150 entries):
 - **Total: ~$0.11-0.31 per CV (full pipeline)**
 
 **Cost optimization notes:**
-- Stage 4 uses a two-tier strategy: cheap model first (gpt-4o-mini), premium retry for failures
+- Stage 4 is the cost hotspot (30-60+ calls per CV); Bedrock prompt caching cuts its input cost ~80-90% once warm -- see `docs/LLM_MODELS.md`
 - Stages 5/5b/6 are optional enrichment stages; core classification cost is ~$0.08-0.21
 
 ---
@@ -1135,8 +1133,8 @@ Typical CV (150 entries):
 | Re-run after failure | Previous successful stage outputs remain; failed stage re-executes |
 
 **Exception types:**
-- **Retried**: OpenAI rate limits (exponential backoff)
-- **Fatal**: Missing input file, invalid JSON from previous stage, missing API key, malformed .docx
+- **Retried**: Bedrock throttling/timeouts (exponential backoff)
+- **Fatal**: Missing input file, invalid JSON from previous stage, missing AWS credentials, malformed .docx
 
 ### Logging
 - **Console output**: Each stage prints progress to stdout (section names, entry counts, costs)
@@ -1198,7 +1196,7 @@ Prompts are embedded in the stage scripts (not external files):
 Note: Stage 1b and Stage 2 have no prompts (deterministic, no LLM calls).
 
 ### Prompt Conventions
-- **JSON schema enforcement**: Stage 3 uses OpenAI's `response_format` with strict JSON schemas
+- **JSON schema enforcement**: Stage 3 requests structured JSON output (Bedrock enforces it via a forced Converse tool call, see `llm/bedrock.py`)
 - **Temperature**: 0.1-0.2 for deterministic outputs
 - **System/User split**: System prompt contains instructions; user prompt contains CV content
 
@@ -1286,9 +1284,9 @@ python3 -c "import json; from collections import Counter; d=json.load(open('outp
 - Delete intermediate files after processing if not needed
 - Do not commit CVs or outputs to git
 
-### API Key Safety
-- Set `OPENAI_API_KEY` as environment variable, not in code
-- Do not log or print the API key
+### Credential Safety
+- Set AWS credentials as environment variables (or use an IAM role), not in code
+- Do not log or print AWS credentials
 
 ---
 

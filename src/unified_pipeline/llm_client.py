@@ -2,15 +2,15 @@
 Centralized LLM client for CV parsing pipeline.
 
 Provides call_llm() as the single entry point for all LLM API calls.
-Pipeline stages should use this instead of direct OpenAI SDK calls.
+Pipeline stages should use this instead of direct SDK calls.
 
 Supports:
-- Config-driven provider and model selection (via llm_config.yaml)
-- Normalized response format (same dict shape regardless of provider)
+- Config-driven model selection (via llm_config.yaml)
+- Normalized response format (same dict shape across call sites)
 - Built-in retry with exponential backoff on transient errors
 - Automatic cost calculation per call
 - Lazy client initialization (no import-time side effects)
-- OpenAI and AWS Bedrock providers
+- AWS Bedrock, the only supported provider (#953)
 
 Usage:
     from unified_pipeline.llm_client import call_llm
@@ -22,13 +22,13 @@ Usage:
     )
     print(result["content"])   # LLM response text
     print(result["cost"])      # Cost in USD
-    print(result["provider"])  # "openai" or "bedrock"
+    print(result["provider"])  # "bedrock"
 
 The provider-specific call/parse logic lives in unified_pipeline.llm
-(bedrock.py, openai.py, retry.py, #496) -- this module is the thin facade
-every pipeline stage imports, plus the config resolution and cost/provenance
-tracking that don't belong to either provider. A handful of private names
-are re-imported here (not called locally) solely because
+(bedrock.py, retry.py, #496) -- this module is the thin facade every
+pipeline stage imports, plus the config resolution and cost/provenance
+tracking that don't belong to the provider adapter. A handful of private
+names are re-imported here (not called locally) solely because
 web_interface/backend/tests/test_llm_client.py still reaches for them at
 this path -- see that file before renaming or dropping any of them.
 """
@@ -42,7 +42,6 @@ from unified_pipeline.core.prompt_logger import (
     log_prompt_before_call,
     log_prompt_response,
 )
-from unified_pipeline.llm.openai import _handle_openai
 from unified_pipeline.llm.bedrock import (
     _handle_bedrock,
     _schema_tool_config,
@@ -55,7 +54,6 @@ from unified_pipeline.llm.retry import (
     _llm_call_semaphore,
     _get_max_concurrent_llm_calls,
     _get_llm_timeout_seconds,
-    _get_llm_max_attempts,
 )
 
 # `import time` is otherwise unused here: it exists so
@@ -95,7 +93,6 @@ def _resolve_call_config(stage: str, kwargs: dict) -> dict:
 
 
 _PROVIDER_HANDLERS = {
-    "openai": _handle_openai,
     "bedrock": _handle_bedrock,
 }
 
@@ -157,7 +154,7 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
           (priced at 1.25x input). 0 when caching is off or not supported.
         - cost (float): Cost in USD
         - model (str): Model used
-        - provider (str): Provider used ("openai" or "bedrock")
+        - provider (str): Provider used ("bedrock")
         - finish_reason (str): Why generation stopped
         - latency_ms (int): API response time in milliseconds -- the time the
           provider call itself took. Retry backoff sleeps, failed attempts and
@@ -167,8 +164,8 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
 
     Raises:
         ValueError: If provider is not supported
-        openai errors: On non-retryable OpenAI errors or exhausted retries
-        botocore.exceptions.ClientError: On non-retryable Bedrock errors
+        botocore.exceptions.ClientError: On non-retryable Bedrock errors or
+            exhausted retries
     """
     cfg = _resolve_call_config(stage, kwargs)
 

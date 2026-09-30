@@ -64,7 +64,11 @@ investigated and found not safely fixable within this file -- see below.
 
 Items 5-7 (the duplicated date regexes and the positional-reconstruction
 zips in `_parse_multi_membership_entry` and `_parse_flattened_committee_lines`)
-are out of scope for this PR and untouched here.
+were out of scope for that PR; the follow-up (#665) moves the surname strip to
+its one call site (item 1), builds every date recogniser in this module from
+one grammar (item 5), and stops `_parse_multi_membership_entry` pairing types
+and dates to organizations by index when the counts disagree (item 6; the
+committee parser already had that guard).
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_parsing_text.py -p no:cacheprovider
 
@@ -83,21 +87,33 @@ import pytest  # noqa: E402
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _extract_last_name_from_uid,
     _extract_name_from_uid,
+    _extract_year_from_text,
     _is_structural_label,
     _is_table_header_entry,
+    _looks_like_multiple_records,
+    _parse_flattened_committee_lines,
+    _parse_multi_membership_entry,
+    _strip_appended_initials,
+    ParsedActivityLine,
 )
 
 
-# --- item 1: investigated, left unchanged (see module docstring) -----------
+# --- item 1: the strip is a guess and lives at the call site (#665) --------
 
-def test_last_name_still_strips_the_corpus_real_appended_initials_case():
-    # Locks in the actual corpus behaviour this function must keep: the
-    # "2003_Albrechtjs_Cv" pattern still resolves to "Albrecht", matching
-    # the real cited author name in that CV's own bibliography. A change
-    # that "fixes" this by no longer stripping would silently drop that
-    # document's bold-highlighting again -- this is the regression the PR
-    # body's corpus evidence documents.
-    assert _extract_last_name_from_uid("2003_Albrechtjs_Cv") == "Albrecht"
+def test_last_name_from_uid_is_returned_as_written():
+    # "Smithson" ends in a lower-case tail exactly like appended initials; the
+    # uid parser must not shorten it. Whether initials are glued on is decided
+    # against citation text in bibliography.py, not here.
+    assert _extract_last_name_from_uid("2003_Smithson_Cv") == "Smithson"
+    assert _extract_last_name_from_uid("2003_Quennevillejs_Cv") == "Quennevillejs"
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("Quennevillejs", "Quenneville"),   # appended lower-case initials
+    ("Wende", "Wende"),           # too short to be considered
+])
+def test_strip_appended_initials_guess(name, expected):
+    assert _strip_appended_initials(name) == expected
 
 
 # --- item 2: UID prefix strip must be a prefix strip, not a global replace --
@@ -197,6 +213,30 @@ def test_all_caps_content_with_an_empty_extracted_fields_dict_is_not_a_structura
     assert _is_structural_label(entry) is False
 
 
+# --- #757: blank raw text with stage-5c formatted_text is content ----------
+
+def test_blank_text_with_formatted_text_is_not_a_structural_label():
+    entry = {"text": "  \n ", "extracted_fields": {"formatted_text": "Grand rounds"}}
+    assert _is_structural_label(entry) is False
+
+
+def test_blank_text_without_formatted_text_is_still_a_structural_label():
+    assert _is_structural_label({"text": ""}) is True
+    assert _is_structural_label({"text": "  ", "extracted_fields": {}}) is True
+    assert _is_structural_label(
+        {"text": "", "extracted_fields": {"formatted_text": "   "}}) is True
+    assert _is_structural_label(
+        {"text": "", "extracted_fields": {"formatted_text": None}}) is True
+
+
+def test_blank_text_with_formatted_text_and_a_blank_hierarchy_label_is_kept():
+    # A blank hierarchy label must not re-trigger the "text equals its own
+    # hierarchy label" check ('' == '') for an entry that has formatted_text.
+    entry = {"text": "", "hierarchy": [""],
+             "extracted_fields": {"formatted_text": "Grand rounds"}}
+    assert _is_structural_label(entry) is False
+
+
 # --- item 4: header-keyword matching must be token-boundary, not substring -
 
 def test_keyword_count_path_ignores_substring_matches():
@@ -237,7 +277,7 @@ def test_pipe_separated_columns_match_plural_header_word():
     # no trailing "s?"), word-boundary matching stopped matching "Dates"
     # entirely (0 of 2 parts match, below the 50% threshold) rather than
     # just dropping the "candidate" false positive it was meant to fix.
-    text = "Dates|Something"
+    text = "Dates|Journal Title"
     assert _is_table_header_entry(text, ["date"]) is True
 
 
@@ -248,3 +288,237 @@ def test_pipe_separated_columns_still_ignore_substring_inside_a_longer_word():
     # immediately before "date" within that word either way.
     text = "Candidates|Update"
     assert _is_table_header_entry(text, ["date"]) is False
+
+
+# --- #756: a pipe-joined entry is a header only if EVERY cell is header vocabulary
+
+_HONORS_KW = ["award", "honor", "organization", "date", "year", "granting"]
+
+
+@pytest.mark.parametrize("text", [
+    "Best Teaching Award | 2020",
+    "Best Teaching Award | Purdue University",
+    "Award A | 2024 | Award B | 2023 | Award C | 2022",
+    "  Award A   |   2024   |   Award B   |   2023",
+    "2020\tAward A | Award B | 2019",
+    "Award | Purdue University",
+])
+def test_pipe_joined_content_is_not_a_header_row(text):
+    assert _is_table_header_entry(text, _HONORS_KW) is False
+
+
+@pytest.mark.parametrize("text", [
+    "Name of award | Organization | Date awarded (yyyy)",
+    "Year | Title",
+    "Dates | Journal Title",
+    "Year (YYYY) | Person Months (##.##)",
+    "Dates of Role(s) | Title of Role(s)",
+])
+def test_pipe_joined_header_rows_are_still_headers(text):
+    assert _is_table_header_entry(text, _HONORS_KW) is True
+
+
+def test_a_year_in_any_cell_makes_the_entry_data():
+    assert _is_table_header_entry("Year | 2020", _HONORS_KW) is False
+
+
+def test_membership_row_with_member_cell_is_not_a_header():
+    # Corpus shape (web240): the "Member" cell is a header keyword, the
+    # society cell is content.
+    kw = ["organization", "membership", "society", "date", "member"]
+    assert _is_table_header_entry("Society for Neuroscience\tMember", kw) is False
+
+
+def test_a_year_beside_header_words_makes_the_cell_data():
+    # "Awarded 2020" is made of header words plus a year; a header row names
+    # a date column, it never carries a date value.
+    assert _is_table_header_entry("Awarded 2020 | Organization", _HONORS_KW) is False
+
+
+def test_an_entry_of_only_delimiters_is_not_a_header():
+    assert _is_table_header_entry(" | | ", _HONORS_KW) is False
+
+
+# --- #758: short acronym organizations on the pipe-free path ----------------
+
+def test_short_acronym_organizations_are_kept_on_the_pipe_free_path():
+    # `_entry_parts` hands this parser parts with the pipes already removed, so
+    # every part takes the no-pipe branch. AMA/NIH/ASCO/IEEE are real
+    # organizations of five characters or fewer and used to be dropped by a
+    # `len(line) > 5` cutoff.
+    parts = ["Member", "AMA", "2010-present",
+             "Fellow", "ASCO", "2015-present",
+             "Member", "IEEE", "2018-present"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "AMA", "2010-present"),
+        ("Fellow", "ASCO", "2015-present"),
+        ("Member", "IEEE", "2018-present"),
+    ]
+
+
+@pytest.mark.parametrize("junk", [
+    "2005", "(2005)", "May 2005", "3/2010", "-", "--", "7",
+    "Dates", "Role", "Title", "Present", "N/A", "Chair", "Board", "Yes",
+])
+def test_non_organization_parts_are_still_rejected_on_the_pipe_free_path(junk):
+    # What the length cutoff was (accidentally) guarding against, now rejected
+    # by shape: bare years / month-years, punctuation, column-header and filler
+    # words. None of them may become an organization.
+    assert _parse_multi_membership_entry(["Member", junk, "2010-present"]) == []
+
+
+# --- #664: the institution column of a flattened Section O table -----------
+
+def test_pipe_row_institution_column_lands_in_the_institution_field():
+    lines = ["Chair, Zorblax Board | Quuxville General Hospital | 2001-2005"]
+    assert _parse_flattened_committee_lines(lines, institution_column=True) == [
+        ParsedActivityLine("Chair, Zorblax Board", (), "2001-2005",
+                           "Quuxville General Hospital")]
+
+
+def test_pipe_row_default_keeps_every_cell_in_the_activity():
+    # Section P's middle column is Role, not institution: the default must
+    # read the row exactly as it did before the field existed.
+    lines = ["Zorblax Board | Quuxville General Hospital | 2001-2005"]
+    assert _parse_flattened_committee_lines(lines) == [
+        ParsedActivityLine("Zorblax Board | Quuxville General Hospital", (), "2001-2005")]
+
+
+def test_pipe_row_institution_column_still_lifts_the_role_parenthetical():
+    lines = ["Zorblax Board (Chair 2001-2005) | Quuxville General Hospital | 2001-2005"]
+    assert _parse_flattened_committee_lines(lines, institution_column=True) == [
+        ParsedActivityLine("Zorblax Board", ("Chair",), "2001-2005",
+                           "Quuxville General Hospital")]
+
+
+def test_pipe_row_with_two_cells_has_no_institution_even_when_asked():
+    # "Committee | 1999-2010": nothing sits between the activity and the date.
+    assert _parse_flattened_committee_lines(
+        ["Zorblax Board | 1999-2010"], institution_column=True) == [
+        ParsedActivityLine("Zorblax Board", (), "1999-2010")]
+
+
+def test_pipe_row_with_several_middle_cells_joins_them_as_the_institution():
+    lines = ["Chair | Quuxville General Hospital | Ohio | 2001-2005"]
+    (item,) = _parse_flattened_committee_lines(lines, institution_column=True)
+    assert (item.activity, item.institution) == ("Chair", "Quuxville General Hospital, Ohio")
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("Zorblax Board (Chair 2001-2005)", ParsedActivityLine("Zorblax Board", ("Chair",), "2001-2005")),
+    ("Zorblax Board (Chair 2010-present)", ParsedActivityLine("Zorblax Board", ("Chair",), "2010-present")),
+    ("Zorblax Board | 2010-present", ParsedActivityLine("Zorblax Board", (), "2010-present")),
+])
+def test_committee_date_range_may_end_in_present(line, expected):
+    assert _parse_flattened_committee_lines([line]) == [expected]
+
+
+# --- #660: one dated record versus several -----------------------------------
+
+@pytest.mark.parametrize("lines", [
+    ["Zorblax Board (Chair 2001-2005)", "Quux Council (Member 2006-2008)"],   # two parentheticals
+    ["Zorblax Board | 2001-2005", "Quux Council | 2006-2008"],                 # two pipe dates
+    ["Zorblax Board  2001-2005", "Quux Council  2006"],                        # two trailing dates
+    ["2001-2005    Zorblax Board", "2006-2008    Quux Council"],              # date-prefixed records
+    ["Zorblax Board", "Quux Council", "Frob Panel", "2001", "2002", "2003"],   # orphaned date column
+    ["Zorblax Board (Chair 2001-2005)", "Meets monthly", "Reviews budgets",
+     "Quux Council (Member 2006-2008)"],                                       # records split by prose
+])
+def test_two_dated_lines_are_multiple_records(lines):
+    assert _looks_like_multiple_records(lines) is True
+
+
+@pytest.mark.parametrize("lines", [
+    ["Zorblax Board"],
+    ["Zorblax Board (Chair 2001-2005)"],
+    ["Zorblax Board (Chair 2001-2005)", "Meets monthly", "Reviews budgets",
+     "Advises the dean on space", "Reports to the senate"],                    # wrapped description
+    ["Zorblax Board", "Dates", "2001-2005"],                                   # header label + one date
+    ["Zorblax Board | Quuxville General Hospital", "Quuxville, Ohio | 2001-"],
+])
+def test_at_most_one_dated_line_is_a_single_record(lines):
+    assert _looks_like_multiple_records(lines) is False
+
+
+# --- #665 item 6: membership types/dates are paired only when provable ------
+
+def test_membership_pairs_by_position_when_counts_match():
+    parts = ["Member", "Org One", "2010-present",
+             "Fellow", "Org Two", "2015-2018"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", "2010-present"),
+        ("Fellow", "Org Two", "2015-2018"),
+    ]
+
+
+def test_membership_column_layout_pairs_by_position_when_counts_match():
+    # Types, then organizations, then dates, as a flattened table leaves them.
+    parts = ["Member", "Fellow", "Org One", "Org Two", "2010-2012", "2013-2015"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", "2010-2012"),
+        ("Fellow", "Org Two", "2013-2015"),
+    ]
+
+
+def test_membership_leaves_dates_unassigned_when_a_date_is_missing():
+    # Two organizations, one date read after both: index pairing would put it
+    # on the first organization whichever one it really belongs to.
+    parts = ["Member", "Org One", "Member", "Org Two", "2015-2018"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", ""),
+        ("Member", "Org Two", ""),
+    ]
+
+
+def test_membership_keeps_the_type_that_sits_right_before_its_organization():
+    # One type for three organizations: the type read before "Org One" is
+    # still provably Org One's; the later two have none.
+    parts = ["Member", "Org One", "2010-present",
+             "Org Two", "2015-2018", "Org Three", "2018-2020"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", "2010-present"),
+        ("", "Org Two", "2015-2018"),
+        ("", "Org Three", "2018-2020"),
+    ]
+
+
+def test_membership_keeps_a_row_whose_trailing_group_has_no_date():
+    # Source order proves the one date belongs to the first row.
+    parts = ["Member", "Org One", "2015-present", "Fellow", "Org Two"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", "2015-present"),
+        ("Fellow", "Org Two", ""),
+    ]
+
+
+def test_membership_count_mismatch_is_logged(caplog):
+    with caplog.at_level("WARNING"):
+        _parse_multi_membership_entry(
+            ["Member", "Org One", "Member", "Org Two", "2015-2018"])
+    assert "counts disagree" in caplog.text
+
+
+# --- #665 item 5: one date grammar across the module ------------------------
+
+@pytest.mark.parametrize("dash", ["-", "–", "—"])
+def test_membership_date_range_accepts_every_dash(dash):
+    # An en/em-dash range used to fail the membership date test and was then
+    # read as an organization name.
+    parts = ["Member", "Org One", f"2010{dash}present"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", f"2010{dash}present")]
+
+
+@pytest.mark.parametrize("dash", ["-", "–", "—"])
+def test_committee_lines_accept_every_dash(dash):
+    lines = [f"Curriculum Committee    1999{dash}2010",
+             f"Search Committee (Chair 2001{dash}2004)"]
+    assert _parse_flattened_committee_lines(lines) == [
+        ParsedActivityLine("Curriculum Committee", (), f"1999{dash}2010"),
+        ParsedActivityLine("Search Committee", ("Chair",), "2001-2004"),
+    ]
+
+
+@pytest.mark.parametrize("dash", ["-", "–", "—"])
+def test_year_from_text_reads_the_end_of_a_range_for_every_dash(dash):
+    assert _extract_year_from_text(f"served 2019{dash}2021") == "2021"

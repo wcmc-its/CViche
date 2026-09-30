@@ -38,7 +38,7 @@ class _StubGenerator(MembershipsSection):
         self.stats = {"tables_populated": 0, "entries_inserted": 0}
         self._fallback_table = fallback_table
 
-    def _find_paragraph_with_text(self, search_text):
+    def _find_header_paragraph(self, search_text):
         return 0
 
     def _find_table_after_paragraph(self, para_idx):

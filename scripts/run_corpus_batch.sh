@@ -74,7 +74,7 @@ if [ "$DOCTOR" = "1" ]; then
   # T-validation/fragment-reconnection yields), one row per CV, distinct
   # from doctor.tsv's per-run findings. Header created here, same as the
   # two TSVs above; doctor_one.py --metrics-tsv only ever appends.
-  [ -f "$METRICS_TSV" ] || printf 'uid\tappendix_entries\tappendix_share\thonors_malformed_rows\thonors_rows\tunrouted_code_entries\tsource_coverage_pct\tstage3b_fallback_ratio\tt_validation_yield\tfragment_reconnection_yield\n' > "$METRICS_TSV"
+  [ -f "$METRICS_TSV" ] || printf 'uid\tappendix_entries\tappendix_share\thonors_malformed_rows\thonors_rows\tunrouted_code_entries\tsource_coverage_pct\tstage3b_fallback_ratio\tt_validation_yield\tfragment_reconnection_yield\ttotal_post_corrections\n' > "$METRICS_TSV"
 fi
 
 # provenance for this invocation

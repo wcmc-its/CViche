@@ -1,5 +1,4 @@
-import { CheckCircle2, Loader2, XCircle, Circle, ChevronRight } from 'lucide-react'
-import { formatCost } from '../utils'
+import { CheckCircle2, Loader2, XCircle, Circle } from 'lucide-react'
 
 interface StepInfo {
   step_number: number
@@ -7,7 +6,7 @@ interface StepInfo {
   step_name: string
   status: string
   duration_seconds?: number
-  cost: number
+  cost: number | null
 }
 
 interface StepSidebarProps {
@@ -15,20 +14,51 @@ interface StepSidebarProps {
   currentStep: number
   onSelectStep: (stepNumber: number) => void
   stepStartTimes: Record<number, number>
-  stepStartCosts: Record<number, number>
-  totalCost: number
 }
 
-function StatusIcon({ status }: { status: string }) {
+// The pipeline's stages grouped into the six phases shown to the user.
+const PHASE_DEFS: { name: string; stages: string[] }[] = [
+  { name: 'Read structure', stages: ['1a', '1b'] },
+  { name: 'Split entries', stages: ['2'] },
+  { name: 'Classify', stages: ['3a', '3b'] },
+  { name: 'Extract fields', stages: ['4', '4.5'] },
+  { name: 'Enrich', stages: ['5', '5b', '5c', '5d'] },
+  { name: 'Assemble', stages: ['6'] },
+]
+
+export interface Phase<T> {
+  name: string
+  steps: T[]
+}
+
+/**
+ * Group steps (already in pipeline order) into phases. A step whose stage id is
+ * unknown joins the phase of the step before it, or the first phase when it
+ * leads, so nothing is ever dropped. Phases with no steps are omitted.
+ */
+export function groupStepsIntoPhases<T extends { stage_id?: string; step_number: number }>(
+  steps: T[],
+): Phase<T>[] {
+  const buckets: T[][] = PHASE_DEFS.map(() => [])
+  let last = 0
+  for (const step of steps) {
+    const idx = PHASE_DEFS.findIndex((p) => p.stages.includes(step.stage_id ?? String(step.step_number)))
+    if (idx >= 0) last = idx
+    buckets[last].push(step)
+  }
+  return PHASE_DEFS.map((p, i) => ({ name: p.name, steps: buckets[i] })).filter((p) => p.steps.length > 0)
+}
+
+export function StepStatusIcon({ status, className = 'w-5 h-5' }: { status: string; className?: string }) {
   switch (status) {
     case 'complete':
-      return <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0" />
+      return <CheckCircle2 className={`${className} text-green-600 flex-shrink-0`} aria-hidden="true" />
     case 'running':
-      return <Loader2 className="w-5 h-5 text-blue-600 animate-spin flex-shrink-0" />
+      return <Loader2 className={`${className} text-primary-600 animate-spin flex-shrink-0`} aria-hidden="true" />
     case 'error':
-      return <XCircle className="w-5 h-5 text-red-600 flex-shrink-0" />
+      return <XCircle className={`${className} text-red-600 flex-shrink-0`} aria-hidden="true" />
     default:
-      return <Circle className="w-5 h-5 text-gray-400 flex-shrink-0" />
+      return <Circle className={`${className} text-gray-300 flex-shrink-0`} aria-hidden="true" />
   }
 }
 
@@ -37,8 +67,6 @@ export default function StepSidebar({
   currentStep,
   onSelectStep,
   stepStartTimes,
-  stepStartCosts,
-  totalCost,
 }: StepSidebarProps) {
   const formatStepTiming = (step: StepInfo) => {
     if (step.status === 'running' && stepStartTimes[step.step_number]) {
@@ -47,100 +75,53 @@ export default function StepSidebar({
     if (step.duration_seconds) {
       return `${step.duration_seconds}s`
     }
-    return '\u2014'
+    return '—'
   }
 
-  const formatStepCost = (step: StepInfo) => {
-    if (step.status === 'running') {
-      return formatCost((totalCost || 0) - (stepStartCosts[step.step_number] || 0), 3)
-    }
-    return formatCost(step.cost, 3)
-  }
+  const phases = groupStepsIntoPhases(steps)
 
   return (
-    <aside aria-label="Pipeline steps">
-      {/* Desktop sidebar */}
-      <div className="hidden md:block w-80 bg-white border-r border-gray-200 min-h-[calc(100vh-73px)]">
-        <div className="p-4">
-          <h2 className="text-sm font-semibold text-gray-700 mb-4">Pipeline Steps</h2>
-          <nav role="list" className="space-y-2">
-            {steps.map((step) => {
-              const isActive = currentStep === step.step_number
-
-              return (
-                <div key={step.step_number} role="listitem">
-                  <button
-                    onClick={() => onSelectStep(step.step_number)}
-                    style={{ touchAction: 'manipulation' }}
-                    className={`w-full text-left px-3 py-2 rounded-lg transition-colors cursor-pointer focus:ring-2 focus:ring-blue-500 focus:outline-none ${
-                      isActive
-                        ? 'bg-blue-50 border-2 border-blue-500'
-                        : 'border-2 border-transparent hover:bg-gray-50'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <StatusIcon status={step.status} />
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-xs text-gray-900 truncate">
-                          <span className="text-blue-600 font-semibold">
-                            {step.stage_id || step.step_number}
-                          </span>{' '}
-                          {step.step_name}
-                        </div>
-                        <div className="text-xs text-gray-500">
-                          {formatStepTiming(step)} &middot; {formatStepCost(step)}
-                        </div>
-                      </div>
-                      <ChevronRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
-                    </div>
-                  </button>
-                </div>
-              )
-            })}
-          </nav>
-        </div>
-      </div>
-
-      {/* Mobile horizontal scroll strip */}
-      <div className="block md:hidden border-b border-gray-200 bg-white">
-        <div className="px-3 py-2">
-          <h2 className="text-xs font-semibold text-gray-500 mb-2">Pipeline Steps</h2>
-        </div>
-        <nav role="list" className="flex overflow-x-auto gap-2 px-3 pb-3 scrollbar-thin">
-          {steps.map((step) => {
-            const isActive = currentStep === step.step_number
-
-            return (
-              <div key={step.step_number} role="listitem" className="flex-shrink-0">
-                <button
-                  onClick={() => onSelectStep(step.step_number)}
-                  style={{ touchAction: 'manipulation' }}
-                  className={`flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-medium transition-colors cursor-pointer focus:ring-2 focus:ring-blue-500 focus:outline-none whitespace-nowrap ${
-                    isActive
-                      ? 'bg-blue-50 border-2 border-blue-500 text-blue-800'
-                      : 'bg-gray-100 border-2 border-transparent text-gray-700 hover:bg-gray-200'
-                  }`}
-                >
-                  <StatusIcon status={step.status} />
-                  <span className="font-semibold">{step.stage_id || step.step_number}</span>
-                  {isActive && (
-                    <span className="ml-1 text-gray-600 max-w-[120px] truncate">
-                      {step.step_name}
-                    </span>
-                  )}
-                </button>
-
-                {/* Expanded info panel below selected pill */}
-                {isActive && (
-                  <div className="mt-1 px-2 py-1 text-xs text-gray-500 text-center">
-                    {formatStepTiming(step)} &middot; {formatStepCost(step)}
+    <aside
+      aria-label="Pipeline steps"
+      className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-2.5"
+    >
+      <nav role="list" className="flex flex-col gap-0.5">
+        {phases.map((phase) => (
+          <div key={phase.name} role="listitem">
+            <div className="px-2.5 pt-2.5 pb-1 text-xs font-semibold uppercase tracking-[0.03em] text-gray-500">
+              {phase.name}
+            </div>
+            <div role="list" className="flex flex-col gap-0.5">
+              {phase.steps.map((step) => {
+                const isActive = currentStep === step.step_number
+                return (
+                  <div key={step.step_number} role="listitem">
+                    <button
+                      onClick={() => onSelectStep(step.step_number)}
+                      aria-current={isActive ? 'step' : undefined}
+                      style={{ touchAction: 'manipulation' }}
+                      className={`w-full grid grid-cols-[20px_minmax(0,1fr)_auto] items-center gap-2.5 text-left px-2.5 py-2 rounded-lg border-[1.5px] transition-colors cursor-pointer focus:ring-2 focus:ring-primary-500 focus:outline-none ${
+                        isActive
+                          ? 'border-ink bg-primary-50'
+                          : 'border-transparent hover:bg-sand-50'
+                      }`}
+                    >
+                      <StepStatusIcon status={step.status} />
+                      <span className="min-w-0 flex flex-col">
+                        <span className="text-sm font-medium text-gray-900 truncate">{step.step_name}</span>
+                        <span className="text-xs text-gray-400 font-mono">{step.stage_id || step.step_number}</span>
+                      </span>
+                      <span className="text-xs text-gray-500 tabular-nums text-right">
+                        {formatStepTiming(step)}
+                      </span>
+                    </button>
                   </div>
-                )}
-              </div>
-            )
-          })}
-        </nav>
-      </div>
+                )
+              })}
+            </div>
+          </div>
+        ))}
+      </nav>
     </aside>
   )
 }

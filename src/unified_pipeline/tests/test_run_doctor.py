@@ -25,6 +25,7 @@ import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
 from unified_pipeline.quality_score import score_cv_owner  # noqa: E402
+from unified_pipeline.doctor.lints.render import DATE_ONLY_LINES_WARN_COUNT  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     MISSED_HEADERS_WARN_COUNT,
@@ -39,6 +40,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_dead_sections,
     lint_dedup_drops,
     DUPLICATE_PASSAGE_MIN_BLOCKS,
+    lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
     lint_missed_headers,
@@ -47,10 +49,12 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_owner_contact_missing,
     lint_pipe_leaks,
     lint_pipeline_errors,
+    lint_section_lost,
     lint_stage3b_fallback_ratio,
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_stage6_warnings,
+    lint_table_lost,
     lint_table_shape,
     lint_under_extraction,
     lint_unrendered_records,
@@ -126,6 +130,55 @@ def test_segmentation_lint_quiet_on_clean_extraction():
                           _entry(_GRANT_TEMPLETON, start=2),
                           _entry(_GRANT_NBME, start=3)]}
     assert lint_segmentation(source, _STAGE1A, stage2) == []
+
+
+def test_table_lost_lint_is_one_warn_per_run_with_worst_table_evidence():
+    stage2 = {"entries": [_entry(_GRANT_FSMB, start=1)]}
+    small = [f"lost contact line {i} zebra" for i in range(3)]
+    large = [f"lost grant line {i} yak" for i in range(6)]
+    block_lines = ([(0, _GRANT_FSMB)] + [(1, l) for l in small]
+                   + [(2, l) for l in large])
+    findings = lint_table_lost(block_lines, stage2)
+    assert [(f["lint"], f["severity"]) for f in findings] == [("table_lost", "WARN")]
+    assert findings[0]["message"] == "2 source table(s) mostly lost; worst: 6 of 6 lines"
+    assert findings[0]["evidence"] == large[:5]
+
+
+def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
+    """The wire (#539): run_doctor hands stage 4's cv_owner to the lint, so a
+    bare owner-name line is not reported while a real header still is."""
+    root = _build_clean_run(tmp_path)
+    source_path = root / "uploads" / f"{_UID}_cv.docx"
+    source = Document(str(source_path))
+    source.add_paragraph("MIRIAM SHAPIRO").runs[0].bold = True
+    source.add_paragraph("MENTORING").runs[0].bold = True
+    source.save(str(source_path))
+
+    payload = run_doctor(root, _UID)
+    missed = [f["evidence"] for f in payload["findings"] if f["lint"] == "missed_headers"]
+    assert missed == [["MENTORING"]]
+
+
+def test_run_doctor_reports_a_lost_source_table(tmp_path):
+    """The wire: run_doctor reads the source docx once, and both the flat
+    lines (coverage) and the block-tagged lines (table_lost) come from it."""
+    root = _build_clean_run(tmp_path)
+    source_path = root / "uploads" / f"{_UID}_cv.docx"
+    source = Document(str(source_path))
+    table = source.add_table(rows=3, cols=1)
+    for i in range(3):
+        table.rows[i].cells[0].paragraphs[0].text = f"lost contact line {i} zebra"
+    source.save(str(source_path))
+
+    payload = run_doctor(root, _UID)
+    lost = [f for f in payload["findings"] if f["lint"] == "table_lost"]
+    assert [f["message"] for f in lost] == [
+        "1 source table(s) mostly lost; worst: 3 of 3 lines"]
+    assert payload["metrics"]["source_coverage_pct"] == 50.0
+
+
+def test_table_lost_lint_quiet_when_every_table_survives():
+    assert lint_table_lost([(0, _GRANT_FSMB)], {"entries": [_entry(_GRANT_FSMB, start=1)]}) == []
 
 
 # ------------------------------------------------------ lint 2: missed headers
@@ -227,6 +280,71 @@ def test_is_single_column_is_the_logical_cell_count_not_the_grid():
         "what python-docx itself reports for the merged table"
     assert not _is_single_column(title_over_data)
     assert not _is_single_column(data)
+
+
+def test_iter_header_candidates_skips_a_leading_role_marker_name(tmp_path):
+    """#539: 'PI. <Name>' / 'Dr. <Name>' is the owner's name line (marker in
+    FRONT, which the suffix-only credential filter misses); a header that
+    merely starts with a marker, or an ALL-CAPS line, is still a candidate."""
+    doc = Document()
+    doc.add_paragraph("PI. Jane Q. Sample", style="Heading 1")
+    doc.add_paragraph("Dr. Alex Example", style="Heading 1")
+    doc.add_paragraph("Prof. Sam Oneil-Test", style="Heading 1")
+    doc.add_paragraph("PI. RESPONSIBILITIES", style="Heading 1")   # header
+    doc.add_paragraph("Dr. PUBLICATIONS", style="Heading 1")       # header
+    doc.add_paragraph("Ms. Research Support", style="Heading 1")   # name-shaped: exempt
+    doc.add_paragraph("Pi. Notes", style="Heading 1")              # marker case differs
+    doc.add_paragraph("Dr. Jane Sample GRANTS AND AWARDS", style="Heading 1")  # header text follows
+    doc.add_paragraph("Ms. Research Support GRANTS", style="Heading 1")        # header text follows
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert iter_header_candidates(str(path)) == [
+        "PI. RESPONSIBILITIES", "Dr. PUBLICATIONS", "Pi. Notes",
+        "Dr. Jane Sample GRANTS AND AWARDS", "Ms. Research Support GRANTS"]
+
+
+_MH_STAGE4 = {"cv_owner": {"first_name": "Jane", "middle_name": "Q", "last_name": "Sample"}}
+
+
+def test_missed_headers_skips_the_owner_name_only_when_stage4_names_it():
+    stage2 = {"entries": []}
+    bare = ["JANE Q. SAMPLE", "Jane Sample", "SAMPLE JANE"]
+    # Baseline (no stage 4, or an owner with no last name): still reported.
+    assert len(lint_missed_headers(bare, _STAGE1A, stage2)) == 3
+    no_last = {"cv_owner": {"first_name": "Jane", "last_name": ""}}
+    assert len(lint_missed_headers(bare, _STAGE1A, stage2, no_last)) == 3
+    assert lint_missed_headers(bare, _STAGE1A, stage2, _MH_STAGE4) == []
+
+
+def test_missed_headers_owner_name_words_come_from_every_name_field():
+    """Each name field feeds the allowed words; a lone initial is allowed
+    whatever letter it is (not only the middle initial)."""
+    stage2 = {"entries": []}
+
+    def missed(cand, owner):
+        return lint_missed_headers([cand], _STAGE1A, stage2, {"cv_owner": owner})
+
+    base = {"first_name": "Jane", "last_name": "Sample"}
+    # Non-middle initial.
+    assert missed("JANE Z. SAMPLE", {**base, "middle_name": "Q"}) == []
+    # Multi-letter middle name, no full_name.
+    assert missed("JANE QUINCY SAMPLE", {**base, "middle_name": "Quincy"}) == []
+    # Extra word only in full_name, no middle_name.
+    assert missed("JANE QUINCY SAMPLE",
+                  {**base, "full_name": "Jane Quincy Sample"}) == []
+    # Same line with neither field: reported.
+    assert len(missed("JANE QUINCY SAMPLE", base)) == 1
+
+
+def test_missed_headers_owner_exemption_is_subset_by_construction():
+    """Only the owner's name is exempt: a header that shares a word with it,
+    carries an extra word, or has only the first or last name stays reported."""
+    stage2 = {"entries": []}
+    kept = ["SAMPLE PUBLICATIONS", "JANE SAMPLE PUBLICATIONS", "JANE",
+            "SAMPLE", "JANE Q. SMITH"]
+    found = lint_missed_headers(kept, _STAGE1A, stage2, _MH_STAGE4)
+    assert [f["evidence"][0] for f in found] == kept
 
 
 def test_missed_headers_fires_on_demoted_header():
@@ -429,35 +547,34 @@ def test_classified_unrendered_quiet_when_reformatted_downstream():
 # --------------------------------------------------- lint: taxonomy code coverage
 
 def test_taxonomy_code_coverage_fires_for_a_code_with_no_render_route():
-    # N2 was #529's original example; #529 gave it a render route, so this
-    # now uses M4 -- #291's still-parked status-aware-routing gap (see
-    # test_taxonomy_code_render_coverage.py's _KNOWN_GAPS) -- a real,
-    # confidently-classified code stage 6 has no renderer for today.
+    # N2 was #529's original example and M4 the next (#291 gave both a
+    # route), so this uses N3, the parent container code still in
+    # test_taxonomy_code_render_coverage.py's _KNOWN_GAPS.
     stage3b = {"entries": [
-        _entry("Postdoctoral Fellowship $26,000", taxonomy_code="M4", start=1),
-        _entry("Mentored Research Scholar Grant", taxonomy_code="M4", start=2),
+        _entry("Mentored an invented student", taxonomy_code="N3", start=1),
+        _entry("Mentored an invented fellow", taxonomy_code="N3", start=2),
     ]}
     findings = lint_taxonomy_code_coverage(stage3b)
     assert len(findings) == 1
     # #816: always INFO now -- the unrouted-code counts moved to the
     # doctor's `metrics` block (unrouted_code_entries).
     assert findings[0]["severity"] == "INFO"
-    assert "M4" in findings[0]["message"]
+    assert "N3" in findings[0]["message"]
     assert "2 entries" in findings[0]["message"]
 
 
 def test_unrouted_code_counts_matches_the_lints_own_by_code_dict():
     """#816: the doctor's `metrics` block reads this SAME dict the lint
-    above builds its findings from. M4/M4A, not N1/N2: #529 gave N1 and
-    N2 render routes (see test_taxonomy_code_render_coverage.py's
-    _KNOWN_GAPS)."""
+    above builds its findings from. A retired M4 code is NOT unrouted: stage
+    6 renders it as M2A (#291), so it must not be reported as Appendix-bound."""
     stage3b = {"entries": [
-        _entry("Postdoctoral Fellowship", taxonomy_code="M4", start=1),
-        _entry("Mentored Research Scholar Grant", taxonomy_code="M4", start=2),
-        _entry("Another orphan code", taxonomy_code="M4A", start=3),
-        _entry("A grant", taxonomy_code="M2A", start=4),
+        _entry("Mentored an invented student", taxonomy_code="N3", start=1),
+        _entry("Mentored an invented fellow", taxonomy_code="N3", start=2),
+        _entry("Another orphan code", taxonomy_code="ZZ", start=3),
+        _entry("A stored clinical trial", taxonomy_code="M4A", start=4),
+        _entry("A grant", taxonomy_code="M2A", start=5),
     ]}
-    assert unrouted_code_counts(stage3b) == {"M4": 2, "M4A": 1}
+    assert unrouted_code_counts(stage3b) == {"N3": 2, "ZZ": 1}
     assert unrouted_code_counts({"entries": []}) == {}
 
 
@@ -483,12 +600,11 @@ def test_taxonomy_code_coverage_does_not_flag_m1_the_common_routed_case():
     assert lint_taxonomy_code_coverage(stage3b) == []
 
 
-def test_taxonomy_code_coverage_does_not_flag_codes_that_duplicate_instead():
-    # E, G and N4 all render via their own direct dispatch (not the
-    # RENDER_ROUTED_CODES lookup this lint checks) and then ALSO duplicate
-    # into the appendix -- a real defect, but a different one (#294 for G,
-    # #587 for N4) from "no render route at all", which is what this lint
-    # exists to catch. Flagging them here would conflate the two classes.
+def test_taxonomy_code_coverage_does_not_flag_rendered_passthrough_codes_or_n4():
+    # E and G render via the passthrough writer's own heading match (not the
+    # RENDER_ROUTED_CODES lookup this lint checks), so the lint exempts them;
+    # N4 is in RENDER_ROUTED_CODES since #587. Flagging any of them here would
+    # call a rendered code "no render route at all".
     stage3b = {"entries": [
         _entry("Weill Cornell Medicine", taxonomy_code="G", start=1),
         _entry("Full-time", taxonomy_code="E", start=2),
@@ -509,11 +625,41 @@ def test_output_hygiene_flags_bracket_code_leaks():
     assert any("[M2A]" in line for line in findings[0]["evidence"])
 
 
+def test_output_hygiene_ignores_source_bracket_tokens_that_are_not_codes():
+    # #888: a source-CV bracketed acronym must not be an ERROR.
+    blocks = [("p", "Invented Kelp Study for Nowhere [K9P]; pilot trial"),
+              ("table", "Sensor [CO2] and [AI] tools in [UK] near [X7Z]")]
+    assert lint_output_hygiene(blocks) == []
+
+
+def test_output_hygiene_flags_real_code_next_to_source_token():
+    blocks = [("p", "Invented Kelp Study [K9P] then [D1] leaked")]
+    findings = lint_output_hygiene(blocks)
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "ERROR"
+    assert "1 bracketed" in findings[0]["message"]
+
+
+def test_output_hygiene_flags_retired_invalid_codes():
+    # The `invalid_codes` list in taxonomy_v7.json is not in `codes`; the lint
+    # must still flag it (guards `codes.update(taxonomy["invalid_codes"]...)`).
+    for code in ("S10", "Q5"):
+        findings = lint_output_hygiene([("p", f"[{code}] leaked")])
+        assert len(findings) == 1, code
+        assert findings[0]["severity"] == "ERROR"
+
+
+def test_output_hygiene_flags_every_taxonomy_code_shape():
+    codes = ["A", "B1", "D1", "K5", "M2A", "M4C", "N2", "Q4D", "S0", "T"]  # M4C: retired (#291), still a leak
+    findings = lint_output_hygiene([("p", f"• [{c}] leaked") for c in codes])
+    assert findings[0]["severity"] == "ERROR"
+    assert f"{len(codes)} bracketed" in findings[0]["message"]
+
+
 def test_output_hygiene_flags_boilerplate_in_appendix():
     blocks = [
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("p", "• CURRICULUM VITAE"),
         ("p", "1. Page 2 of 9"),
         ("p", "• Real leftover grant content | Role: PI | Amount: $10,000"),
@@ -551,8 +697,7 @@ def test_output_hygiene_flags_a_non_paragraph_block_inside_the_appendix():
     dropped."""
     blocks = [
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("table", "cell text that never gets scanned as an appendix entry"),
         ("p", "• Real leftover grant content | Role: PI | Status: Under review"),
     ]
@@ -568,12 +713,35 @@ def test_output_hygiene_quiet_on_clean_output():
         ("p", "D. GRANTS"),
         ("table", _GRANT_FSMB),
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("p", "• Real leftover grant content | Role: PI | Status: Under review"),
     ]
     findings = lint_output_hygiene(blocks)
     assert all(f["severity"] == "INFO" for f in findings)
+
+
+def test_output_hygiene_warns_on_foreign_template_scaffolding_in_the_appendix():
+    """#530: another institution's instruction line rendered as an appendix
+    entry is boilerplate, same as the WCM template's own (invented text)."""
+    blocks = [
+        ("p", "T. APPENDIX"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
+        ("p", "1. C. Sample Appointments (include institution, title and dates of appointment)"),
+        ("p", "2. Real leftover grant content"),
+    ]
+    findings = lint_output_hygiene(blocks)
+    boiler = [f for f in findings if "boilerplate line" in f["message"]]
+    assert len(boiler) == 1
+    assert boiler[0]["severity"] == "WARN"
+    assert boiler[0]["message"].startswith("1 ")
+
+
+def test_dead_sections_ignores_foreign_template_scaffolding_under_the_header():
+    """#530: a foreign template's instruction line does not make a section
+    count as alive, same as the WCM template's own (invented text)."""
+    scaffolded = [("p", "GRANTS"),
+                  ("p", "1. Sample Sabbatical Leave Arrangements: N/A")]
+    assert lint_dead_sections(_STAGE2_GRANTS, scaffolded)
 
 
 def test_appendix_entry_count_matches_the_lints_own_count():
@@ -746,6 +914,159 @@ def test_unrendered_records_counts_generic_lines_unverifiable_not_missing():
     assert lint_unrendered_records(stage4, blocks) == []
 
 
+# ------------------------------------------------------ lint 8b: section lost
+
+# Synthetic leadership records: every token distinct from the rest of the page.
+_LEAD_ROWS = ("Founding Director, Quillfeather Cellular Therapeutics Institute\t1998-2014",
+              "Chairman, Marbleton Steering Committee on Genomic Medicine\t1992-1997")
+
+
+def _stage4(*pairs):
+    return {"entries": [{"taxonomy_code": code, "text": text} for code, text in pairs]}
+
+
+def _page(*sections):
+    """Blocks for a WCM render: (heading, [paragraph texts]) per section."""
+    return [block for heading, texts in sections
+            for block in [("p", heading)] + [("p", t) for t in texts]]
+
+
+_FILLER = ("EDUCATION", ["Bachelor of Science, Hollowbrook University, 1985"])
+
+
+def test_section_lost_fires_when_section_is_empty_but_words_render_elsewhere():
+    # YME2VA: the leadership section held only its instruction paragraph,
+    # while the same words turned up in lectures -- whole-document matching
+    # (lint 8) called that rendered.
+    blocks = _page(_FILLER,
+                   ("INSTITUTIONAL LEADERSHIP ACTIVITIES", ["Please list activities."]),
+                   ("INVITATIONS TO SPEAK/PRESENT",
+                    ["Quillfeather Cellular Therapeutics Institute lecture, Marbleton Genomic Medicine forum"]))
+    findings = lint_section_lost(_stage4(*[("O", t) for t in _LEAD_ROWS]), blocks)
+    assert [f["lint"] for f in findings] == ["section_lost"]
+    assert findings[0]["message"].startswith("O: 2 entries absent from the INSTITUTIONAL LEADERSHIP")
+
+
+def test_section_lost_fires_when_records_render_only_in_the_appendix():
+    # BYFQBG's N2 training grants rendered, but in the Appendix.
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", []),
+                   ("T. APPENDIX", list(_LEAD_ROWS)))
+    assert lint_section_lost(_stage4(*[("O", t) for t in _LEAD_ROWS]), blocks)
+
+
+def test_section_lost_quiet_when_records_render_in_their_section():
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", list(_LEAD_ROWS)))
+    assert lint_section_lost(_stage4(*[("O", t) for t in _LEAD_ROWS]), blocks) == []
+
+
+def test_section_lost_quiet_when_half_the_role_line_renders_without_its_description():
+    # 4N14RQ: the role renders as a table row, but the long description has
+    # no slot in the table. Half the first line's tokens (the floor) are in
+    # the section, under the per-entry hit floor, so only the first-line
+    # test keeps this quiet.
+    entry = ("Chief Wexcombe\n"
+             "Scope: oversaw scheduling, onboarding, curriculum, wellness, "
+             "recruitment, grievances, orientation, quality dashboards, "
+             "handoffs, simulation, mentoring, budgeting, conferences.")
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", ["Chief | 2022-2023"]))
+    assert lint_section_lost(_stage4(("O", entry)), blocks) == []
+
+
+def test_section_lost_one_token_first_line_cannot_vouch():
+    entry = "Quillfeather\nMarbleton Brambleton Ostrander Pellgrave Halloway Tollbridge"
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", ["Quillfeather"]))
+    assert lint_section_lost(_stage4(("O", entry)), blocks)
+
+
+def test_section_lost_quiet_when_one_entry_has_exactly_the_hit_floor_in_section():
+    # Title reworded at render (first-line test fails) and a long body
+    # (share under 0.25), but exactly three of the entry's own tokens are in
+    # the section: rendered, not lost.
+    entry = ("Wexcombe Pellgrave Ostrander Brambleton\n"
+             "Quorvale Zephyrine Halloway: " + ", ".join(
+                 ["planning", "staffing", "reporting", "auditing", "training",
+                  "hiring", "budgets", "outreach", "grants", "policy", "surveys",
+                  "metrics", "forums", "retreats", "bylaws"]))
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES",
+                             ["Director, Quorvale Zephyrine Halloway"]))
+    assert lint_section_lost(_stage4(("O", entry)), blocks) == []
+
+
+def test_section_lost_quiet_when_code_share_is_high_but_spread_thin():
+    # Each entry has only 2 of its 5 tokens in the section (under the hit
+    # floor, and under half its first line), but together 6 of 15: above
+    # the share threshold.
+    entries = [("P", "Alderwood Quarry Marston Fennick Oakhollow"),
+               ("P", "Birchmoor Quarry Marston Tollbridge Heatherly"),
+               ("P", "Cresswell Quarry Marston Lintwhite Brackenby")]
+    blocks = _page(_FILLER, ("INSTITUTIONAL ADMINISTRATIVE ACTIVITIES",
+                             ["Alderwood Fennick", "Birchmoor Tollbridge", "Cresswell Lintwhite"]))
+    assert lint_section_lost(_stage4(*entries), blocks) == []
+
+
+def test_section_lost_quiet_at_exactly_the_share_threshold():
+    # 2 of 8 tokens (0.25) present: the threshold is strict.
+    entries = [("P", "Alderwood Quarry Marston Oakhollow"),
+               ("P", "Birchmoor Heatherly Tollbridge Lintwhite")]
+    blocks = _page(_FILLER, ("INSTITUTIONAL ADMINISTRATIVE ACTIVITIES",
+                             ["Alderwood", "Birchmoor"]))
+    assert lint_section_lost(_stage4(*entries), blocks) == []
+
+
+def test_section_lost_leaves_codes_of_only_short_entries_unjudged():
+    # Six tokens in all, but no entry has the 3 the per-entry test needs.
+    entries = [("O", "Alderwood Quarry"), ("O", "Birchmoor Heatherly"),
+               ("O", "Cresswell Lintwhite")]
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", []))
+    assert lint_section_lost(_stage4(*entries), blocks) == []
+
+
+def test_section_lost_ignores_codes_outside_the_taxonomy_letters():
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", []))
+    assert lint_section_lost(_stage4(*[("X9", t) for t in _LEAD_ROWS]), blocks) == []
+
+
+def test_section_lost_keeps_the_section_across_its_sub_headings():
+    blocks = _page(_FILLER, ("MENTORING", []), ("PAST MENTEES", list(_LEAD_ROWS)))
+    assert lint_section_lost(_stage4(*[("N3B", t) for t in _LEAD_ROWS]), blocks) == []
+
+
+def test_section_lost_leaves_codes_too_thin_to_judge():
+    # 5 distinctive tokens: under SECTION_LOST_MIN_TOKENS, not judged.
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES", []))
+    entry = "Zephyrine Quorvale Brambleton Ostrander Wexcombe"
+    assert lint_section_lost(_stage4(("O", entry)), blocks) == []
+    assert lint_section_lost(_stage4(("O", entry + " Pellgrave")), blocks)
+
+
+def test_section_lost_discounts_template_labels_every_section_carries():
+    # One-word template labels ('Administrative', 'Awards') sit in every
+    # render; counted, their 3 hits would pass an entry whose own record is gone.
+    entry = ("Zephyrine Quorvale Brambleton Ostrander Wexcombe Pellgrave\n"
+             "Administrative Awards Abstracts")
+    blocks = _page(_FILLER, ("INSTITUTIONAL LEADERSHIP ACTIVITIES",
+                             ["Administrative Awards Abstracts"]))
+    assert lint_section_lost(_stage4(("O", entry)), blocks)
+
+
+def test_section_lost_skips_withheld_summary_and_appendix_codes():
+    blocks = _page(_FILLER, ("PERSONAL DATA", []), ("RESEARCH", []), ("T. APPENDIX", []))
+    stage4 = _stage4(*[(code, t) for code in ("A", "M1", "T") for t in _LEAD_ROWS])
+    assert lint_section_lost(stage4, blocks) == []
+
+
+def test_section_lost_reads_c_under_education_and_k_under_educational_contributions():
+    # EDUCATION is a prefix of EDUCATIONAL CONTRIBUTIONS: a K record rendered
+    # there must not be charged to EDUCATION, nor a C record to K.
+    postdoc = "Postdoctoral Fellowship, Wrenfield Oncology Laboratories, Caldermoor"
+    course = "Course Director, Brightwater Pharmacology Seminar Sequence, Caldermoor"
+    blocks = _page(("EDUCATION", [postdoc]), ("EDUCATIONAL CONTRIBUTIONS", [course]))
+    assert lint_section_lost(_stage4(("C", postdoc), ("K1", course)), blocks) == []
+    swapped = _page(("EDUCATION", [course]), ("EDUCATIONAL CONTRIBUTIONS", [postdoc]))
+    assert {f["message"][:2] for f in lint_section_lost(
+        _stage4(("C", postdoc), ("K1", course)), swapped)} == {"C:", "K1"}
+
+
 # -------------------------------------------------- lint 9: enrichment failures
 
 def _enriched_entry(text, status=None):
@@ -872,6 +1193,68 @@ def test_dedup_drops_quiet_with_no_decisions():
     assert lint_dedup_drops({"warnings": [], "dedup_decisions": []}) == []
 
 
+# ------------------------------------------- lint 14d: date-only lines (#259)
+
+_EDU_HEADER = ("p", "K. EDUCATIONAL CONTRIBUTIONS")
+
+
+def _date_only_blocks(dates):
+    """Level-0 bullets interleaved with activity names -- ZXVGAC's shape."""
+    blocks = [_EDU_HEADER]
+    for i, date in enumerate(dates):
+        blocks += [("p", f"Guest lecture number {i}"), ("p", date)]
+    return blocks
+
+
+def test_date_only_lines_warns_at_threshold_with_three_samples():
+    dates = ["June 2019", "07/2008 \u2013 06/2013", "October Issue 2025",
+             "October 13, 2016", "2024-2025"]
+    assert DATE_ONLY_LINES_WARN_COUNT == 5  # the gap between the corpus's 4 and 7
+    assert len(dates) == DATE_ONLY_LINES_WARN_COUNT
+    findings = lint_date_only_lines(_date_only_blocks(dates))
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "date_only_lines" and f["severity"] == "WARN"
+    assert f["message"].startswith("5 body paragraph(s)")
+    assert f["evidence"] == dates[:3]
+
+
+def test_date_only_lines_info_below_threshold():
+    dates = ["June 2019"] * (DATE_ONLY_LINES_WARN_COUNT - 1)
+    findings = lint_date_only_lines(_date_only_blocks(dates))
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert findings[0]["message"].startswith("4 body paragraph(s)")
+
+
+def test_date_only_lines_ignores_table_cells():
+    blocks = [_EDU_HEADER] + [("table", "June 2019")] * 10
+    assert lint_date_only_lines(blocks) == []
+
+
+def test_date_only_lines_ignores_the_appendix_until_the_next_section():
+    blocks = ([("p", "T. APPENDIX")] + [("p", "\u2022 June 2019")] * 10
+              + [("p", "U. OTHER"), ("p", "March 2020")])
+    findings = lint_date_only_lines(blocks)
+    assert len(findings) == 1
+    assert findings[0]["message"].startswith("1 body paragraph(s)")
+    assert findings[0]["evidence"] == ["March 2020"]
+
+
+def test_date_only_lines_sees_through_a_list_enumerator_but_not_words():
+    blocks = [_EDU_HEADER, ("p", "3. 2009."), ("p", "\u2022 June 2019"),
+              ("p", "Johns Hopkins University, 1991"),
+              ("p", "Course director, June 2019 \u2013 Present")]
+    findings = lint_date_only_lines(blocks)
+    assert findings[0]["evidence"] == ["3. 2009.", "\u2022 June 2019"]
+
+
+def test_date_only_lines_is_a_registered_lint():
+    from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_REGISTRY
+    assert "date_only_lines" in KNOWN_LINTS
+    assert any(spec.lint_id == "date_only_lines" and spec.rule is lint_date_only_lines
+               for spec in LINT_REGISTRY)
+
+
 # ------------------------------------------------------ lint 12: pipe leaks
 
 def test_pipe_leaks_flags_multi_pipe_paragraphs_not_tables():
@@ -932,10 +1315,10 @@ _BLOB = ("Basic Science Innovation in Education Award – Runner-up "
 def test_table_shape_flags_malformed_honors_rows():
     tables = [[_HONORS_HEADER,
                [_BLOB, "MD", ""],
-               ["2020 AECT Outstanding Article Award, Association for "
-                "Educational Communication and Technology (AECT)",
-                "Association for Educational Communication and Technology "
-                "(AECT)", ""],
+               ["Association for Educational Communication and Technology "
+                "Award 2020",
+                "Association for Educational Communication and Technology",
+                "2020"],
                ["Distinguished Teaching Award", "Indiana University", "2013"]]]
     findings = lint_table_shape(tables)
     assert len(findings) == 1
@@ -948,6 +1331,75 @@ def test_table_shape_flags_malformed_honors_rows():
     assert any("blob" in e for e in f["evidence"])
     assert any("empty date" in e for e in f["evidence"])
     assert any("duplicated in name" in e for e in f["evidence"])
+
+
+_GRANTOR_NAMED_AWARDS = [
+    ("American Society for Cell Biology Postdoc Travel Award",
+     "American Society for Cell Biology"),
+    ("APS/NIDDK Minority Travel Fellowship Award", "APS/NIDDK"),
+    ("RSNA R&E Foundation Roentgen Resident/Fellow Research Award",
+     "RSNA R&E Foundation"),
+    ("College of Basic Sciences Dean's List", "College of Basic Sciences"),
+    ("Japanese Government Monbusho Scholarship", "Japanese Government"),
+]
+
+
+def _honors_evidence(name, org, date="2013"):
+    findings = lint_table_shape([[_HONORS_HEADER, [name, org, date]]])
+    return findings[0]["evidence"] if findings else []
+
+
+def test_table_shape_does_not_flag_awards_named_after_their_grantor():
+    """#889: 20/23 batch-4 hits were these -- org legitimately in the name."""
+    for name, org in _GRANTOR_NAMED_AWARDS:
+        assert _honors_evidence(name, org) == [], name
+
+
+def test_table_shape_flags_org_fabricated_from_the_name():
+    """#889: name == org, org + an award word, or org + a year."""
+    org = "Association for Educational Research"
+    for name in (org, f"{org} Award", f"{org} Fellowship", f"{org} 2019",
+                 f"{org} Prize 2019", f"{org} List", f"{org} Scholarship",
+                 f"{org} Fellow", f"{org}, 2019", f"{org} (2019)"):
+        ev = _honors_evidence(name, org)
+        assert any("duplicated in name" in e for e in ev), name
+
+
+def test_table_shape_org_check_is_linear_on_runs_of_years():
+    """A starred-alternation fullmatch backtracked ~13x per listed year; eight
+    years plus one more word took minutes. Must stay instant, and the
+    leftover word means the org was not fabricated from the name."""
+    import time
+    org = "Association for Educational Research"
+    name = f"{org} " + ", ".join(str(y) for y in range(1990, 2010)) + " Grant"
+    start = time.monotonic()
+    ev = _honors_evidence(name, org)
+    assert time.monotonic() - start < 1.0
+    assert not any("duplicated in name" in e for e in ev)
+
+
+def test_table_shape_award_word_name_without_the_org_is_not_flagged():
+    assert _honors_evidence("Award 2019", "Some University") == []
+
+
+def test_table_shape_initials_and_dr_are_not_sentence_boundaries():
+    """#889: 'Dr. Robert D. & Alma W. Moreton ...' is one 64-char name, not a
+    blob; two real sentences still are."""
+    name = "Dr. Robert D. & Alma W. Moreton Original Research Award for 1997"
+    assert _honors_evidence(name, "Southern Medical Association", "1997") == []
+    # each guard alone: Dr. only, and single-letter initials only
+    assert _honors_evidence("Dr. Smith and Dr. Jones Award",
+                            "Some University") == []
+    assert _honors_evidence("R. D. Smith and A. W. Jones Award",
+                            "Some University") == []
+    two = "Best Poster Award. Given at the meeting. Judged by peers."
+    assert any("blob" in e for e in _honors_evidence(two, "Some University"))
+
+
+def test_table_shape_message_does_not_cite_closed_issue():
+    f = lint_table_shape([[_HONORS_HEADER, ["Prize. Given here. Then there.",
+                                            "NY", ""]]])[0]
+    assert "#229" not in f["message"]
 
 
 def test_table_shape_ignores_non_honors_tables_and_clean_rows():
@@ -1373,8 +1825,14 @@ def _build_clean_run(tmp_path, uid=_UID):
                                      "enriched"),
                      _enriched_entry("Sample citation without identifiers",
                                      "no_identifier")]})
+    _write_stage(root, "stage_5b_institution_enrichment",
+                 f"{uid}_cv_institution_enriched.json",
+                 {"document_uid": uid, "entries": []})
 
     output = Document()
+    # Real renders carry grants under RESEARCH (section_lost reads the
+    # section by that heading); "D. GRANTS" is then a sub-heading.
+    output.add_paragraph("RESEARCH")
     output.add_paragraph("D. GRANTS")
     output.add_paragraph("Current Research Funding")
     table = output.add_table(rows=1, cols=1)
@@ -1384,8 +1842,7 @@ def _build_clean_run(tmp_path, uid=_UID):
     for i, grant in enumerate(grants[1:]):
         table.rows[i].cells[0].paragraphs[0].text = grant
     output.add_paragraph("T. APPENDIX")
-    output.add_paragraph("The following content from the original CV was not "
-                         "successfully mapped to this CV format:")
+    output.add_paragraph("These entries from your original CV could not be matched to a section of the WCM format.")
     out_dir = root / "stage_6_wcm_documents"
     out_dir.mkdir(parents=True)
     output.save(out_dir / f"{uid}_cv_wcm.docx")
@@ -1398,12 +1855,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (21), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (27), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 20
+    assert len(payload["findings"]) == 26
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -1433,6 +1890,27 @@ def test_run_doctor_clean_run_end_to_end(tmp_path):
         "appendix_entries": 0, "appendix_share": 0.0, "source_coverage_pct": 100.0}
 
 
+def test_run_doctor_wires_second_pass_error_and_correction_count(tmp_path):
+    """End to end (#818): a stage_3b whose t_validation errored surfaces as
+    the WARN finding through run_doctor(), and total_post_corrections reaches
+    the metrics block -- the wire, not just the helpers."""
+    root = _build_clean_run(tmp_path)
+    path = next((root / "stage_3b_classified_entries").glob("*_classified.json"))
+    data = json.loads(path.read_text())
+    data["meta"] = {"stats": {
+        "t_validation": {"t_entries_reviewed": 4, "t_entries_reclassified": 0,
+                         "error": "'int' object is not iterable"},
+        "total_post_corrections": 7}}
+    path.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"]
+            if f["lint"] == "stage3b_second_pass_error"]
+    assert len(hits) == 1 and hits[0]["severity"] == "WARN"
+    assert payload["metrics"]["total_post_corrections"] == 7
+
+
 # ------------------------------------------------------------- #816: metrics
 
 def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
@@ -1443,7 +1921,7 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
 
     stage3b = {
         "entries": [
-            _entry("Postdoctoral Fellowship", taxonomy_code="M4", start=1),
+            _entry("Mentored an invented student", taxonomy_code="N3", start=1),
             _entry("A grant", taxonomy_code="M2A", start=2),
         ],
         "meta": {"stats": {
@@ -1451,12 +1929,12 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
             "fallback_entries": 510, "entries_classified": 1019,
             "t_validation": {"t_entries_reviewed": 93, "t_entries_reclassified": 28},
             "fragment_reconnection": {"fragments_reviewed": 7, "fragments_reconnected": 3},
+            "total_post_corrections": 5,
         }},
     }
     blocks = [
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("p", "• Unmapped leftover entry one"),
         ("p", "• Unmapped leftover entry two"),
     ]
@@ -1479,11 +1957,64 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
     assert metrics["appendix_share"] == round(2 / 2, 4)
     assert metrics["honors_malformed_rows"] == 1
     assert metrics["honors_rows"] == 2
-    assert metrics["unrouted_code_entries"] == {"M4": 1}  # M4, not N2: #529 routes N2
+    assert metrics["unrouted_code_entries"] == {"N3": 1}  # N3: #529 routes N2, #291 routes M4
     assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
     assert metrics["t_validation_yield"] == round(28 / 93, 4)
     assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)
+    assert metrics["total_post_corrections"] == 5
     assert "source_coverage_pct" in metrics
+
+
+def test_build_metrics_reports_a_zero_post_correction_count_but_omits_an_absent_one():
+    """`total_post_corrections` is a count, so a measured 0 is real ("the
+    corrector ran and changed nothing") and must be reported; an artifact
+    from before the stat existed carries no key and must be omitted (#818)."""
+    from unified_pipeline.run_doctor import _build_metrics
+
+    ran = _build_metrics({"stage_3b": {"meta": {"stats": {"total_post_corrections": 0}}}})
+    assert ran == {"total_post_corrections": 0}
+    assert _build_metrics({"stage_3b": {"meta": {"stats": {}}}}) == {}
+    assert _build_metrics({"stage_3b": {"meta": {"stats": {
+        "total_post_corrections": "n/a"}}}}) == {}
+
+
+@pytest.mark.parametrize("pass_key", ["t_validation", "fragment_reconnection"])
+def test_second_pass_error_lint_names_the_errored_pass(pass_key):
+    """A non-null `error` on either stage-3b second pass is a WARN that names
+    the pass -- including an error text FATAL_ERROR_PATTERN misses (#818)."""
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    stage3b = {"meta": {"stats": {pass_key: {"error": "'int' object is not iterable"}}}}
+    findings = lint_stage3b_second_pass_errors(stage3b)
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "stage3b_second_pass_error"
+    assert findings[0]["severity"] == "WARN"
+    assert any(pass_key in e for e in findings[0]["evidence"])
+
+
+def test_second_pass_error_lint_reports_both_passes_in_one_finding():
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    stage3b = {"meta": {"stats": {
+        "t_validation": {"error": "boom one"},
+        "fragment_reconnection": {"error": "boom two"}}}}
+    findings = lint_stage3b_second_pass_errors(stage3b)
+    assert len(findings) == 1
+    assert len(findings[0]["evidence"]) == 2
+
+
+@pytest.mark.parametrize("stage3b", [
+    {},
+    {"meta": None},
+    {"meta": {"stats": None}},
+    {"meta": {"stats": {"t_validation": {"error": None, "t_entries_reviewed": 3}}}},
+    {"meta": {"stats": {"t_validation": {"error": ""}}}},
+    {"meta": {"stats": {"fragment_reconnection": "not a dict"}}},
+])
+def test_second_pass_error_lint_is_silent_without_an_error(stage3b):
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    assert lint_stage3b_second_pass_errors(stage3b) == []
 
 
 def test_build_metrics_omits_rather_than_reports_a_misleading_zero(tmp_path):
@@ -1691,6 +2222,72 @@ def test_run_doctor_wires_stage3b_fallback_ratio_through_to_the_verdict(tmp_path
                if f["lint"] == "stage3b_fallback_ratio"]
     assert len(fallback) == 1
     assert fallback[0]["severity"] == "ERROR"
+
+
+def test_run_doctor_wires_invented_records_through_to_the_verdict(tmp_path):
+    """A5IZ6Q (#829), driven through run_doctor() end to end -- not just
+    lint_invented_records() in isolation, the way every rule-level test in
+    test_doctor_extraction_lint_contracts.py exercises it.
+
+    lint_invented_records' SECOND positional argument is `table_rows`
+    (read_docx_table_rows' per-table row lists), not `blocks`
+    (read_docx_blocks' paragraph/table text stream) -- the two views share
+    one _VIEW_LABELS loader label ("stage_6_docx") because both read the
+    same file, so a LINT_REGISTRY row wired to the wrong one
+    (`("stage_4", "blocks")` instead of `("stage_4", "table_rows")`) still
+    passes `_ready()` and never raises: `_rendered_row_value_sets` just
+    treats each ("kind", text) tuple in `blocks` as if it were a table row,
+    silently finds nothing that matches, and the WARN never fires. That
+    wiring mistake leaves every rule-level test green (they pass table_rows
+    by hand) while this end-to-end check catches it."""
+    root = _build_clean_run(tmp_path)
+    board_label, cert_label = "Full Name of Board", "Certificate #"
+
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "F2", "element_type": "table_row",
+        "element_idx_start": 99,
+        "text": f"{board_label} | {cert_label}",
+        "extracted_fields": {"certifying_board": board_label,
+                             "certificate_number": cert_label,
+                             "year_certified": None,
+                             "recertification_date": None}})
+    fields.write_text(json.dumps(data))
+
+    docx_path = next((root / "stage_6_wcm_documents").glob(f"{_UID}*_wcm.docx"))
+    doc = Document(str(docx_path))
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].paragraphs[0].text = board_label
+    table.rows[0].cells[1].paragraphs[0].text = cert_label
+    doc.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    invented = [f for f in payload["findings"] if f["lint"] == "invented_records"]
+    assert len(invented) == 1
+    assert invented[0]["severity"] == "WARN"
+    assert "F2" in invented[0]["message"]
+    assert "99" in invented[0]["message"]
+
+
+def test_run_doctor_wires_wrong_start_date_through_to_the_verdict(tmp_path):
+    """#729, end to end: the LINT_REGISTRY row must hand the lint stage 4."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "D1", "element_type": "paragraph",
+        "element_idx_start": 98, "text": "Example Board | 2025-2026",
+        "extracted_fields": {"start_date": "2026", "end_date": None}})
+    fields.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "wrong_start_date"]
+    assert len(hits) == 1
+    assert hits[0]["severity"] == "WARN"
+    assert "98" in hits[0]["message"]
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):

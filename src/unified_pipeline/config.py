@@ -57,40 +57,34 @@ WEB_OUTPUT_BASE = PROJECT_ROOT / "web_interface" / "outputs"
 # LLM Settings
 # ============================================================================
 
-# Model selection
-DEFAULT_MODEL = "gpt-4o-mini"
-SEGMENTATION_MODEL = "gpt-4o-mini"
-TAXONOMY_MODEL = "gpt-4o-mini"
-PARSING_MODEL = "gpt-4o-mini"
+# Model selection is per stage in config/llm_config.yaml (get_stage_config).
+# DEFAULT_MODEL is only calculate_cost()'s pricing fallback, used when that
+# YAML is absent/malformed (get_stage_config layer 1) or a caller omits
+# `model` (calculate_cost, _model_io_rates).
+DEFAULT_MODEL = "us.anthropic.claude-sonnet-5"
 
 # LLM API pricing (per 1M tokens) -- nested by provider
 PRICING = {
-    "openai": {
-        "gpt-4o-mini": {
-            "input": 0.150,   # per 1M tokens
-            "output": 0.600,
-        },
-        "gpt-4o": {
-            "input": 2.50,
-            "output": 10.00,
-        },
-        "gpt-5.1": {
-            "input": 2.50,
-            "output": 10.00,
-        },
-    },
     "bedrock": {
-        # Anthropic Claude models -- per 1M tokens, identical to the direct
-        # Anthropic API. Keyed by the BARE model ID; calculate_cost() strips
-        # region inference-profile prefixes (us./eu./apac./global.) before
-        # lookup, so "us.anthropic.claude-sonnet-4-6" resolves here.
+        # Anthropic Claude models -- per 1M tokens, at Bedrock's REGIONAL
+        # (us. cross-region inference) rates, which are 1.1x the direct
+        # Anthropic API / Bedrock "global." rates. CViche calls us. profiles
+        # only, and the September 2026 AWS bill charged exactly these rates
+        # on every line item (e.g. Sonnet 4.6 input $3.30/M, Haiku 4.5 output
+        # $5.50/M). Keyed by the BARE model ID; calculate_cost() strips region
+        # inference-profile prefixes (us./eu./apac./global.) before lookup, so
+        # "us.anthropic.claude-sonnet-4-6" resolves here.
         "anthropic.claude-sonnet-4-6": {
-            "input": 3.000,
-            "output": 15.000,
+            "input": 3.300,
+            "output": 16.500,
+        },
+        "anthropic.claude-sonnet-5": {
+            "input": 2.200,
+            "output": 11.000,
         },
         "anthropic.claude-haiku-4-5": {
-            "input": 1.000,
-            "output": 5.000,
+            "input": 1.100,
+            "output": 5.500,
         },
         # Bedrock requires the FULL versioned inference-profile id for Haiku 4.5
         # (the bare alias above is rejected by the API), and _normalize_model_id
@@ -99,16 +93,16 @@ PRICING = {
         # Same price as the bare entry; keep both in sync. (Sonnet 4.6 needs no
         # dated variant -- its inference-profile id carries no date.)
         "anthropic.claude-haiku-4-5-20251001-v1:0": {
-            "input": 1.000,
-            "output": 5.000,
+            "input": 1.100,
+            "output": 5.500,
         },
         "anthropic.claude-opus-4-7": {
-            "input": 15.000,
-            "output": 75.000,
+            "input": 5.500,
+            "output": 27.500,
         },
         "anthropic.claude-opus-4-6": {
-            "input": 15.000,
-            "output": 75.000,
+            "input": 5.500,
+            "output": 27.500,
         },
         # Older Claude 3.x generation -- kept for historical cost calculations
         "anthropic.claude-3-haiku-20240307-v1:0": {
@@ -151,9 +145,6 @@ PRICING = {
         },
     },
 }
-
-# Backward compatibility: flat dict for existing pipeline code
-PRICING_FLAT = PRICING["openai"]
 
 # ============================================================================
 # Pipeline Features (Best of Both Worlds)
@@ -230,7 +221,7 @@ CACHE_WRITE_PRICE_MULTIPLIER = 1.25  # cache writes cost 1.25x input
 
 
 def calculate_cost(prompt_tokens: int, completion_tokens: int,
-                   model: str = None, provider: str = "openai",
+                   model: str = None, provider: str = "bedrock",
                    cache_read_tokens: int = 0,
                    cache_write_tokens: int = 0) -> float:
     """
@@ -244,7 +235,7 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
         model: Model name/ID (default: DEFAULT_MODEL). Bedrock region
             inference-profile prefixes (us./eu./apac./global.) are stripped
             before the PRICING lookup.
-        provider: LLM provider name (default: "openai")
+        provider: LLM provider name (default: "bedrock")
         cache_read_tokens: Input tokens served from prompt cache, billed at
             0.1x the input rate. 0 when caching is off or unsupported.
         cache_write_tokens: Input tokens written to prompt cache on this
@@ -256,7 +247,7 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
     """
     model = model or DEFAULT_MODEL
 
-    provider_pricing = PRICING.get(provider, PRICING.get("openai", {}))
+    provider_pricing = PRICING.get(provider, PRICING.get("bedrock", {}))
 
     # Resolve the pricing key: exact match first, then region-prefix-stripped.
     lookup = model if model in provider_pricing else _normalize_model_id(model)
@@ -266,11 +257,11 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
             _warned_missing_pricing.add(model)
             logger.warning(
                 "No PRICING entry for model %r (provider %r); falling back to "
-                "gpt-4o-mini pricing -- reported cost will be inaccurate. Add "
-                "the model to PRICING in config.py.", model, provider,
+                "the Bedrock default model's pricing -- reported cost will be "
+                "inaccurate. Add the model to PRICING in config.py.", model, provider,
             )
-        provider_pricing = PRICING.get("openai", {})
-        lookup = "gpt-4o-mini"
+        provider_pricing = PRICING.get("bedrock", {})
+        lookup = _normalize_model_id(DEFAULT_MODEL)
 
     if lookup not in provider_pricing:
         return 0.0
@@ -293,12 +284,27 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
 # to the currently-configured model, so the estimate tracks llm_config.yaml.
 
 # Historically observed cost per 1,000 *document* tokens for a full 12-stage
-# run, measured when the dominant (highest call volume) stage ran on the
-# anchor model below. Recalibrate from real run-cost data as runs accumulate.
-COST_ESTIMATE_ANCHOR_RATE = 0.075
-COST_ESTIMATE_ANCHOR_MODEL = ("openai", "gpt-4o")
+# run, originally measured when the dominant (highest call volume) stage ran
+# on openai/gpt-4o (rate 0.075 at that anchor). #953 (Bedrock-only) re-anchors
+# this to the Bedrock default model instead of remeasuring: the rate below is
+# 0.075 rescaled by blended(anthropic.claude-sonnet-4-6) / blended(gpt-4o) =
+# 0.075 * (5.4 / 4.0) = 0.10125, so estimate_cost_per_1k_doc_tokens() returns
+# the same value for the default config as it did before the re-anchor.
+# That rescale used Sonnet 4.6's list price; PRICING now holds the us.
+# regional rate CViche is actually billed (1.1x), so the anchor carries the
+# same 1.1x: 0.10125 * 1.1 = 0.111375. Recalibrate from real run-cost data
+# as runs accumulate.
+COST_ESTIMATE_ANCHOR_RATE = 0.111375
+COST_ESTIMATE_ANCHOR_MODEL = ("bedrock", "anthropic.claude-sonnet-4-6")
 # Fraction of pipeline LLM tokens that are input (prompts/schemas dominate).
 COST_ESTIMATE_INPUT_SHARE = 0.8
+# Tokens a model's tokenizer spends on the same text, relative to the anchor
+# model's, as (input, output). A list-price ratio alone would quote Sonnet 5
+# 33% cheaper; the 10-CV A/B (docs/adr/0001) measured 1.43x input / 1.20x
+# output tokens and a real saving of ~16%. Models absent here are 1.0.
+COST_ESTIMATE_TOKEN_INFLATION = {
+    "anthropic.claude-sonnet-5": (1.43, 1.20),
+}
 
 
 def _blended_price_per_million(provider: str, model: str) -> float:
@@ -311,8 +317,9 @@ def _blended_price_per_million(provider: str, model: str) -> float:
                or provider_pricing.get(_normalize_model_id(model)))
     if not pricing:
         return 0.0
-    return (COST_ESTIMATE_INPUT_SHARE * pricing["input"] +
-            (1 - COST_ESTIMATE_INPUT_SHARE) * pricing["output"])
+    in_x, out_x = COST_ESTIMATE_TOKEN_INFLATION.get(_normalize_model_id(model), (1.0, 1.0))
+    return (COST_ESTIMATE_INPUT_SHARE * pricing["input"] * in_x +
+            (1 - COST_ESTIMATE_INPUT_SHARE) * pricing["output"] * out_x)
 
 
 def estimate_cost_per_1k_doc_tokens(model: str = None, provider: str = None) -> float:
@@ -348,38 +355,45 @@ def estimate_cost_per_1k_doc_tokens(model: str = None, provider: str = None) -> 
 # ----------------------------------------------------------------------------
 # The flat per-doc-token rate above (estimate_cost_per_1k_doc_tokens) badly
 # under-predicts entry-dense CVs, because it assumes total cost scales with
-# document LENGTH. It does not. The dominant cost is stage 3b entry
+# document LENGTH. It does not. One large cost is stage 3b entry
 # classification, which re-sends a large, static taxonomy/rules system prompt
 # (~10.7K tokens) on ONE LLM call per hierarchy group (entries batched, max 15
 # per call). That cost scales with entry COUNT, not document length: a compact
 # but entry-dense CV is cheap by tokens yet expensive by calls.
 #
-# Constants are calibrated against a complete run (2026-03-28):
+# The 3b constants were calibrated against a complete run (2026-03-28):
 #   56,372 doc chars / 123 entries / 17 classification calls /
 #   234K input + 19K output tokens / ~$0.99 on Sonnet 4.6.
-# stage 3b alone was 191K of the 234K input tokens (~82%).
-# Recalibrate from real run-cost data as runs accumulate.
 #
-# KNOWN GAP (see issue #50): the current pipeline added a per-section
-# core_taxonomy_mapper stage absent from the 2026-03-28 calibration run, so
-# OTHER_STAGES_INPUT_MULTIPLE can under-count section-dense CVs until a
-# complete current-pipeline run is measured. The min/max band widens to
-# partially absorb this; recalibrate when a current run's logs are available.
+# #538 recalibration: the 2026-03-28 model quoted a maximum BELOW the actual
+# on every one of 24 measured runs (20 corpus CVs from 2026-09-17 at c7daa91,
+# 2 web runs from September, 2 web runs from issue #538), 5K-339K chars. Two
+# terms were missing or low: a fixed per-run load (the 5K-char CVs still cost
+# ~$0.55, not ~$0.12), and the per-document-token multiple for the other
+# stages -- stages 2 and 4 each cost more than 3b on every CV over 100K chars,
+# so 3b no longer dominates on large CVs. BASE_INPUT_TOKENS and
+# OTHER_STAGES_INPUT_MULTIPLE are a least-squares fit of (actual - 3b term) over those runs, priced at the
+# default model's rates. Every measured actual lands at 0.75x-1.32x of the
+# point estimate, inside the 0.7x-1.5x band get_estimated_run_cost quotes.
 COST_ESTIMATE_CHARS_PER_ENTRY = 458            # document chars per classified entry
 COST_ESTIMATE_ENTRIES_PER_3B_CALL = 7.2        # entries per classification call (hierarchy groups, batch <= 15)
 COST_ESTIMATE_3B_INPUT_TOKENS_PER_CALL = 11200  # static taxonomy prompt + batch text, per call
 COST_ESTIMATE_3B_OUTPUT_TOKENS_PER_ENTRY = 155  # classification JSON emitted per entry
 COST_ESTIMATE_3B_EXTRA_PASS_INPUT_TOKENS = 3221  # T-validation (~2906) + fragment reconnection (~315), once/run
-COST_ESTIMATE_OTHER_STAGES_INPUT_MULTIPLE = 2.8  # non-3b input tokens / document tokens
+COST_ESTIMATE_BASE_INPUT_TOKENS = 68000      # fixed per-run prompt load, independent of CV size (#538 fit)
+COST_ESTIMATE_OTHER_STAGES_INPUT_MULTIPLE = 21.9  # non-3b input tokens / document tokens (#538 fit)
 COST_ESTIMATE_OTHER_STAGES_OUTPUT_SHARE = 0.05   # non-3b output tokens / non-3b input tokens
 
 
 def _model_io_rates(provider: str, model: str) -> tuple:
-    """(input, output) USD per 1M tokens for a model, with gpt-4o-mini fallback."""
-    provider_pricing = PRICING.get(provider, PRICING.get("openai", {}))
+    """Effective (input, output) USD per 1M anchor-tokenizer tokens for a model,
+    for the cost estimators only: list rates times COST_ESTIMATE_TOKEN_INFLATION.
+    Falls back to the Bedrock default model's pricing."""
+    provider_pricing = PRICING.get(provider, PRICING.get("bedrock", {}))
     lookup = model if model in provider_pricing else _normalize_model_id(model)
-    pricing = provider_pricing.get(lookup) or PRICING["openai"]["gpt-4o-mini"]
-    return pricing["input"], pricing["output"]
+    pricing = provider_pricing.get(lookup) or PRICING["bedrock"][_normalize_model_id(DEFAULT_MODEL)]
+    in_x, out_x = COST_ESTIMATE_TOKEN_INFLATION.get(_normalize_model_id(model), (1.0, 1.0))
+    return pricing["input"] * in_x, pricing["output"] * out_x
 
 
 def estimate_run_cost_usd(text_char_count: int, model: str = None,
@@ -388,9 +402,10 @@ def estimate_run_cost_usd(text_char_count: int, model: str = None,
 
     Models stage 3b entry classification explicitly (call_count x fixed
     prompt + per-entry output) because it dominates cost and scales with
-    entry count, and treats all other stages as roughly proportional to
-    document tokens. Priced at the active model's input/output rates so the
-    estimate tracks llm_config.yaml. See the calibration constants above.
+    entry count, treats all other stages as roughly proportional to
+    document tokens, and adds a fixed per-run load (#538). Priced at the
+    active model's input/output rates so the estimate tracks llm_config.yaml.
+    See the calibration constants above.
 
     When model/provider are omitted, the effective default config is used.
     """
@@ -415,7 +430,7 @@ def estimate_run_cost_usd(text_char_count: int, model: str = None,
     other_input = doc_tokens * COST_ESTIMATE_OTHER_STAGES_INPUT_MULTIPLE
     other_output = other_input * COST_ESTIMATE_OTHER_STAGES_OUTPUT_SHARE
 
-    total_input = stage3b_input + other_input
+    total_input = COST_ESTIMATE_BASE_INPUT_TOKENS + stage3b_input + other_input
     total_output = stage3b_output + other_output
     return (total_input * in_rate + total_output * out_rate) / 1_000_000
 
@@ -423,6 +438,7 @@ def estimate_run_cost_usd(text_char_count: int, model: str = None,
 # Human-readable names for known model IDs, used by the web UI.
 _FRIENDLY_MODEL_NAMES = {
     "anthropic.claude-sonnet-4-6": "Claude Sonnet 4.6",
+    "anthropic.claude-sonnet-5": "Claude Sonnet 5",
     "anthropic.claude-haiku-4-5": "Claude Haiku 4.5",
     "anthropic.claude-haiku-4-5-20251001-v1:0": "Claude Haiku 4.5",
     "anthropic.claude-opus-4-7": "Claude Opus 4.7",
@@ -460,7 +476,7 @@ def _load_yaml_config() -> dict:
         return _cached_config
 
     try:
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             _cached_config = yaml.safe_load(f) or {}
     except Exception as e:
         logger.warning(f"Failed to load llm_config.yaml: {e}. Using defaults.")
@@ -474,7 +490,7 @@ def get_stage_config(stage: str) -> dict:
     Resolve LLM config for a pipeline stage.
 
     Resolution order (later overrides earlier):
-    1. Hardcoded defaults (openai / gpt-4o-mini / temperature 0)
+    1. Hardcoded defaults (bedrock / DEFAULT_MODEL / temperature 0)
     2. YAML default block
     3. YAML stage-specific overrides
     4. CVICHE_LLM_PROVIDER / CVICHE_LLM_MODEL env vars (only for keys
@@ -490,14 +506,14 @@ def get_stage_config(stage: str) -> dict:
 
     # Layer 1: hardcoded defaults
     effective = {
-        "provider": "openai",
-        "model": "gpt-4o-mini",
+        "provider": "bedrock",
+        "model": DEFAULT_MODEL,
         "temperature": 0,
         "max_tokens": None,
         "retry_count": 3,
-        # Bedrock-only knob; ignored by the OpenAI path. Default false so the
-        # request is byte-identical to pre-caching behavior when the YAML is
-        # absent. The shipping llm_config.yaml sets it to true.
+        # Default false so the request is byte-identical to pre-caching
+        # behavior when the YAML is absent. The shipping llm_config.yaml
+        # sets it to true.
         "enable_prompt_caching": False,
     }
 
@@ -529,6 +545,74 @@ def reload_config():
     """Clear the cached config so the next get_stage_config() re-reads YAML."""
     global _cached_config
     _cached_config = None
+
+
+# ============================================================================
+# LLM Runtime Knobs (env -> web app's auth_config.yaml `llm:` block -> default)
+# ============================================================================
+# Mirrors web_interface/backend/app/config_loader.get_config("llm", key,
+# default)'s resolution order and source file, without the pipeline core
+# importing the web app package (#267). llm/retry.py used to sys.path-insert
+# web_interface/backend and `from app.config_loader import get_config`,
+# coupling LLM infrastructure to the web app's package layout (#620 review).
+# The yaml layer is live in deployment -- buildspec.yaml writes
+# CVICHE_LLM_TIMEOUT_SECONDS into the ConfigMap's
+# `llm:` block (auth_config.yaml) -- so a bare os.environ.get() would
+# silently drop that layer and regress prod.
+
+AUTH_CONFIG_PATH = PROJECT_ROOT / "web_interface" / "backend" / "auth_config.yaml"
+AUTH_CONFIG_EXAMPLE_PATH = PROJECT_ROOT / "web_interface" / "backend" / "auth_config.yaml.example"
+
+
+def get_llm_env_config(key: str, default: object) -> tuple[object, str]:
+    """Resolve one LLM runtime knob: env var, then the `llm:` section of
+    auth_config.yaml (falling back to the tracked .example when the real
+    file is absent, same as app.config_loader.load_yaml_config), then
+    `default`. Not cached -- read infrequently (once per knob, at import),
+    so a fresh read each time is not worth a staleness/parity risk.
+
+    Returns (value, source) with source one of "env", "yaml", "default" --
+    same shape as app.config_loader.get_config.
+    """
+    value = os.environ.get(key)
+    if value:
+        return value, "env"
+
+    path = AUTH_CONFIG_PATH if AUTH_CONFIG_PATH.exists() else AUTH_CONFIG_EXAMPLE_PATH
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        if not isinstance(cfg, dict):
+            # An empty file (None) is ordinary; a list or scalar document is a
+            # misconfiguration. Either way degrade to default, as the backend's
+            # get_config does inside its broad except.
+            if cfg is not None:
+                logger.warning(
+                    "%s is not a mapping (got %s); using default for %s",
+                    path, type(cfg).__name__, key,
+                )
+            cfg = {}
+        llm_cfg = cfg.get("llm")
+        if not isinstance(llm_cfg, dict):
+            # A missing/null `llm:` block (llm_cfg is None) is the ordinary
+            # case and not worth a warning. A present-but-wrong-shaped block
+            # (e.g. `llm: "oops"`) is a misconfiguration -- log it, but still
+            # degrade to default rather than raising (parity with the
+            # backend's app.config_loader.get_config, which catches this
+            # inside its own broad except and returns default too).
+            if llm_cfg is not None:
+                logger.warning(
+                    "auth_config.yaml 'llm' section is not a mapping (got %s); ignoring it for %s",
+                    type(llm_cfg).__name__, key,
+                )
+            llm_cfg = {}
+        value = llm_cfg.get(key)
+        if value:
+            return value, "yaml"
+    except (OSError, yaml.YAMLError):
+        logger.warning("Failed to load %s; using default for %s", path, key, exc_info=True)
+
+    return default, "default"
 
 
 def validate_setup() -> dict:

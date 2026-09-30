@@ -160,6 +160,52 @@ def test_sdt_line_carrying_a_dob_is_scrubbed_before_stage4_ever_sees_it(tmp_path
     assert channel["sdt_lines"] == ["Date of Birth: [withheld]"]
 
 
+def test_sdt_value_in_the_paragraph_after_a_bare_dob_label_is_scrubbed(tmp_path):
+    """#847 residual: a content control whose "Date of Birth:" paragraph is
+    blank and whose value is the NEXT paragraph -- each line was scrubbed
+    alone, so the value reached stage 4's owner-name prompt."""
+    doc = Document()
+    anchor = doc.add_paragraph("after")
+    _splice_body_level_sdt(anchor, ["Jane Roe", "Date of Birth:", "01/02/1970", "Citizenship: US"])
+
+    channel = extract_owner_side_channel(_save(doc, tmp_path))
+
+    assert channel["sdt_lines"] == ["Jane Roe", "Date of Birth:", "[withheld]", "Citizenship: US"]
+
+
+def test_header_value_on_the_line_after_a_bare_dob_label_is_scrubbed(tmp_path):
+    doc = Document()
+    doc.add_paragraph("body")
+    header = doc.sections[0].header
+    header.paragraphs[0].text = "Date of Birth:"
+    header.add_paragraph("January 2, 1970")
+
+    channel = extract_owner_side_channel(_save(doc, tmp_path))
+
+    assert channel["header_lines"] == ["Date of Birth:", "[withheld]"]
+
+
+def test_sdt_next_line_scrub_keeps_a_line_that_does_not_open_with_a_whole_date(tmp_path):
+    """The same cross-boundary rule as the body stream: after a bare
+    "Date of Birth:", a line with its own text before the date, or a bare
+    year, is another field and keeps its value."""
+    doc = Document()
+    anchor = doc.add_paragraph("after")
+    _splice_body_level_sdt(anchor, [
+        "Date of Birth:", "Appointed 07/01/2005",
+        "Date of Birth:", "2001",
+        "Date of Birth:", "Date of Appointment: 07/01/2005",
+    ])
+
+    channel = extract_owner_side_channel(_save(doc, tmp_path))
+
+    assert channel["sdt_lines"] == [
+        "Date of Birth:", "Appointed 07/01/2005",
+        "Date of Birth:", "2001",
+        "Date of Birth:", "Date of Appointment: 07/01/2005",
+    ]
+
+
 def test_header_line_carrying_an_ssn_is_scrubbed(tmp_path):
     doc = Document()
     doc.add_paragraph("body")

@@ -28,6 +28,7 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 from docx import Document
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -244,3 +245,361 @@ def test_n1_n2_entries_render_and_do_not_duplicate_into_the_appendix(tmp_path):
         "N2 entry duplicated into the Appendix -- #529 regression")
     assert _appendix_diversion_count(sidecar, "N1") == 0
     assert _appendix_diversion_count(sidecar, "N2") == 0
+
+
+def test_n4_entry_renders_under_mentoring_and_does_not_duplicate_into_the_appendix(tmp_path):
+    """#587: `_fill_mentoring` renders N4 outcome lines under the MENTORING
+    header, but N4 was missing from `RENDER_ROUTED_CODES`, so `generate()`'s
+    unmapped-code sweep also handed every N4 entry to the Appendix. Drives
+    the real `generate()` against the real template, with an N3A mentee
+    alongside so the routed-code sweep is exercised for the whole mentoring
+    section, and checks the N4 line exactly once in the document and no
+    `appendix_diversion` warning for it."""
+    entries = [
+        _OWNER_ENTRY,
+        {"text": "DISTINCTIVE_N4_OUTCOME_LINE", "taxonomy_code": "N4",
+         "extracted_fields": {}, "element_idx_start": 5},
+        {"text": "DISTINCTIVE_N3A_MENTEE", "taxonomy_code": "N3A",
+         "extracted_fields": {"name": "DISTINCTIVE_N3A_MENTEE"},
+         "element_idx_start": 6},
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    full, appendix = _full_text(doc), _appendix_text(doc)
+
+    assert full.count("DISTINCTIVE_N4_OUTCOME_LINE") == 1, (
+        "N4 entry must render exactly once (under MENTORING), not zero or two times")
+    assert "DISTINCTIVE_N4_OUTCOME_LINE" not in appendix, (
+        "N4 entry duplicated into the Appendix -- #587 regression")
+    assert _appendix_diversion_count(sidecar, "N4") == 0
+
+
+def _grant_table_cells(doc) -> list[str]:
+    """Every value cell of the rendered grant tables (their first label is Award Source)."""
+    return [row.cells[1].text for tb in doc.tables
+            if tb.rows and tb.rows[0].cells[0].text.startswith("Award Source:")
+            for row in tb.rows]
+
+
+def test_g_coded_entry_under_unclaimed_heading_renders_in_g_not_appendix(tmp_path):
+    """#891: a correctly G-classified entry under a heading with no
+    "Affiliation" wording at all ("Institutional" alone, "Past
+    appointments", or a block whose own header was lost to segmentation)
+    used to be refused by the heading-only match and land in the Appendix.
+    `taxonomy_code == 'G'` alone is now enough, provided no OTHER
+    passthrough section's heading claims it (the two conflict tests below)."""
+    entries = [
+        _OWNER_ENTRY,
+        {
+            "text": "2010-present Member, DISTINCTIVE_G3_UNCLAIMED_HEADING Center",
+            "taxonomy_code": "G", "hierarchy": ["Institutional"],
+            "extracted_fields": {}, "element_idx_start": 7,
+        },
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    full, appendix = _full_text(doc), _appendix_text(doc)
+
+    assert "DISTINCTIVE_G3_UNCLAIMED_HEADING" in full, "accepted entry did not render at all"
+    assert "DISTINCTIVE_G3_UNCLAIMED_HEADING" not in appendix, (
+        "#891 regression: a correctly G-classified entry under a "
+        "non-affiliation heading was refused and diverted to the Appendix")
+    assert _appendix_diversion_count(sidecar, "G") == 0
+
+
+def test_g_coded_entry_under_employment_status_heading_is_not_claimed_by_g(tmp_path):
+    """#891's conflict guard, the E half: a G-coded entry filed under E's own
+    Employment Status heading is not pulled into G by the widened match --
+    that heading belongs to a different passthrough section. No colon in the
+    text, so E's own writer does not accept it either (#571's label guard),
+    which isolates the exclusion under test from E's separate acceptance
+    rule: the entry must still reach the Appendix, not vanish."""
+    entries = [
+        _OWNER_ENTRY,
+        {
+            "text": "DISTINCTIVE_G4_EMPLOYMENT_CONFLICT no colon here",
+            "taxonomy_code": "G", "hierarchy": ["EMPLOYMENT STATUS"],
+            "extracted_fields": {}, "element_idx_start": 8,
+        },
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    appendix = _appendix_text(doc)
+
+    assert "DISTINCTIVE_G4_EMPLOYMENT_CONFLICT" in appendix, (
+        "a G-coded entry under E's own heading must not be claimed by G's "
+        "widened match")
+    assert _appendix_diversion_count(sidecar, "G") == 1
+
+
+def test_g_coded_entry_under_percent_effort_heading_is_not_claimed_by_g(tmp_path):
+    """#891's conflict guard, the J half: a G-coded entry filed under J's own
+    PERCENT EFFORT heading keyword is not pulled into G either. Not a
+    parseable percent-effort row, so J's own code-based match does not
+    consume it (`_is_percent_effort_header_row` needs >= 2 pipes) -- the
+    entry must still reach the Appendix."""
+    entries = [
+        _OWNER_ENTRY,
+        {
+            "text": "DISTINCTIVE_G5_PERCENT_CONFLICT not a percent row",
+            "taxonomy_code": "G",
+            "hierarchy": ["PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES"],
+            "extracted_fields": {}, "element_idx_start": 9,
+        },
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    appendix = _appendix_text(doc)
+
+    assert "DISTINCTIVE_G5_PERCENT_CONFLICT" in appendix, (
+        "a G-coded entry under J's own heading must not be claimed by G's "
+        "widened match")
+    assert _appendix_diversion_count(sidecar, "G") == 1
+
+
+def test_g_coded_duplicate_under_two_headings_is_written_once(tmp_path):
+    """#807 must not reopen: two G-coded entries with identical text under
+    different headings (the over-segmentation shape #807 describes) still
+    render once, not twice, once #891 widens which headings G accepts.
+
+    The protection is `generate()`'s own `_dedup_grouped_entries`, called on
+    each taxonomy-code group -- G included -- before `_fill_passthrough_sections`
+    ever sees `all_entries` (see `_fill_hospital_affiliation`'s docstring):
+    it collapses the two entries above to one candidate regardless of which
+    heading survives, so #891's widened match has only one entry to accept
+    no matter which heading that survivor carries. This test pins that
+    composition end to end rather than a mechanism local to this file."""
+    text = "Member, DISTINCTIVE_G6_DUPLICATE Institute"
+    entries = [
+        _OWNER_ENTRY,
+        {  # Matches the pre-#891 affiliation-heading criterion.
+            "text": text, "taxonomy_code": "G",
+            "hierarchy": ["G. INSTITUTIONAL/HOSPITAL AFFILIATION"],
+            "extracted_fields": {}, "element_idx_start": 10,
+        },
+        {  # An over-segmented copy under an unrelated heading -- reachable
+           # only through #891's widened, code-based match if it survived
+           # dedup, which it should not.
+            "text": text, "taxonomy_code": "G",
+            "hierarchy": ["Some Other Section"],
+            "extracted_fields": {}, "element_idx_start": 11,
+        },
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    full, appendix = _full_text(doc), _appendix_text(doc)
+
+    assert full.count("DISTINCTIVE_G6_DUPLICATE") == 1, (
+        "a duplicate G entry surviving under a second heading was written "
+        "twice -- #807 reopened")
+    assert "DISTINCTIVE_G6_DUPLICATE" not in appendix
+    assert _appendix_diversion_count(sidecar, "G") == 0
+
+
+def test_claimed_goals_row_renders_in_its_grant_and_leaves_the_appendix(tmp_path):
+    """#958: a T goals row inside a grant's source-element range is the grant's
+    goal. `_fill_research_support` reports it, and `generate()` must keep it out
+    of the Appendix by identity, like a passthrough-consumed entry. A goals row
+    inside no grant's range is not claimed and still reaches the Appendix."""
+    entries = [
+        _OWNER_ENTRY,
+        {"text": "Award Source: | Example Fund\nProject title: | Example Corridor Study",
+         "taxonomy_code": "M2B", "element_idx_start": 10, "element_idx_end": 12,
+         "extracted_fields": {"agency": "Example Fund", "title": "Example Corridor Study",
+                              "start_date": "01/2019", "end_date": "12/2020"}},
+        {"text": "The major goals of this project are: | DISTINCTIVE_CLAIMED_GOAL",
+         "taxonomy_code": "T", "element_type": "table_row", "recovered_row": True,
+         "parent_idx": 12, "element_idx_start": "12.1", "extracted_fields": {}},
+        {"text": "The major goals of this project are: | DISTINCTIVE_UNCLAIMED_GOAL",
+         "taxonomy_code": "T", "element_type": "table_row", "recovered_row": True,
+         "parent_idx": 40, "element_idx_start": "40.1", "extracted_fields": {}},
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    appendix = _appendix_text(doc)
+
+    assert "DISTINCTIVE_CLAIMED_GOAL" in _grant_table_cells(doc)
+    assert "DISTINCTIVE_CLAIMED_GOAL" not in appendix, (
+        "claimed goals row duplicated into the Appendix -- #958 regression")
+    assert "DISTINCTIVE_UNCLAIMED_GOAL" in appendix
+    assert "DISTINCTIVE_UNCLAIMED_GOAL" not in "\n".join(_grant_table_cells(doc))
+    assert _appendix_diversion_count(sidecar, "T") == 1
+
+
+# --- G table writer: the template's label rows are kept (#891) -------------
+
+_PRIMARY_LABEL = "Primary Hospital Affiliation:"
+_OTHER_HOSPITAL_LABEL = "Other Hospital Affiliations:"
+_OTHER_INSTITUTIONAL_LABEL = "Other Institutional Affiliations:"
+_TEMPLATE_AFFILIATION_LABELS = (_PRIMARY_LABEL, _OTHER_HOSPITAL_LABEL, _OTHER_INSTITUTIONAL_LABEL)
+
+
+def _affiliation_generator(labels=_TEMPLATE_AFFILIATION_LABELS, merge_last=False):
+    """A generator whose document holds just the G header and a 2-column
+    table with one label row per *labels*, like the committed template's.
+    *merge_last* spans the last row's label across both columns."""
+    gen = WCMTemplateGenerator(verbose=False)
+    doc = Document()
+    doc.add_paragraph("G. INSTITUTIONAL/HOSPITAL AFFILIATION")
+    table = doc.add_table(rows=len(labels), cols=2)
+    for row, label in zip(table.rows, labels):
+        row.cells[0].text = label
+    if merge_last:
+        table.rows[-1].cells[0].merge(table.rows[-1].cells[1])
+    gen.doc = doc
+    return gen, table
+
+
+def _g_entry(text: str) -> dict:
+    return {"text": text, "taxonomy_code": "G", "hierarchy": ["Institutional"],
+            "extracted_fields": {}}
+
+
+def _cell_paragraphs(table, row_idx: int) -> list[str]:
+    return [p.text for p in table.rows[row_idx].cells[1].paragraphs]
+
+
+def test_free_form_g_entry_goes_under_other_institutional_never_primary():
+    """A free-form G line (no "Label:") used to be appended as a bare row
+    after `_clear_table_data` deleted the Other Hospital and Other
+    Institutional rows, so it read as the Primary Hospital Affiliation. It
+    belongs under Other Institutional -- even when it mentions a hospital,
+    since only the entry's own label may name a row."""
+    gen, table = _affiliation_generator()
+    entries = [_g_entry("Member, Example Hospital Depression Center")]
+
+    assert gen._fill_hospital_affiliation(entries) == entries
+    assert [r.cells[0].text for r in table.rows] == list(_TEMPLATE_AFFILIATION_LABELS)
+    assert _cell_paragraphs(table, 0) == [""]
+    assert _cell_paragraphs(table, 1) == [""]
+    assert _cell_paragraphs(table, 2) == ["Member, Example Hospital Depression Center"]
+    run = table.rows[2].cells[1].paragraphs[0].runs[0]
+    assert run.font.name == "Arial"
+
+
+def test_labelled_g_entries_fill_the_row_their_label_names():
+    """A known label fills its own row's value cell, a second value for the
+    same row becomes a second paragraph, a bare label writes nothing, and an
+    unknown label goes whole under Other Institutional."""
+    gen, table = _affiliation_generator()
+    entries = [
+        _g_entry("Primary Hospital Affiliation: Example Primary Hospital"),
+        _g_entry("Other Hospital Affiliations: Example Hospital One"),
+        _g_entry("Hospital affiliations: Example Hospital Two"),
+        _g_entry("Other Hospital Affiliations:"),
+        _g_entry("Institutional affiliation: Example Institute"),
+        _g_entry("Favorite Place: Example Library"),
+    ]
+
+    assert gen._fill_hospital_affiliation(entries) == entries
+    assert [r.cells[0].text for r in table.rows] == list(_TEMPLATE_AFFILIATION_LABELS)
+    assert _cell_paragraphs(table, 0) == ["Example Primary Hospital"]
+    assert _cell_paragraphs(table, 1) == ["Example Hospital One", "Example Hospital Two"]
+    assert _cell_paragraphs(table, 2) == ["Example Institute", "Favorite Place: Example Library"]
+
+
+@pytest.mark.parametrize("text", [
+    "2005-2010 Attending Physician, Example Hospital: Department of Medicine",
+    "2010-present Primary Care Physician, Example Hospital: Department of Medicine",
+    "Institutional Review Board: Member",
+    "Chair, Hospital Ethics Committee: 2012-present",
+    "Primary Departmental Affiliation: Department of Medicine",
+])
+def test_label_that_only_mentions_a_row_keyword_is_written_whole(text):
+    """Only an affiliation-shaped label names a row. A label that merely
+    mentions a hospital or an institution must not lose the text before its
+    colon, and must never reach the Primary row."""
+    gen, table = _affiliation_generator()
+
+    assert gen._fill_hospital_affiliation([_g_entry(text)]) == [_g_entry(text)]
+    assert _cell_paragraphs(table, 0) == [""]
+    assert _cell_paragraphs(table, 1) == [""]
+    assert _cell_paragraphs(table, 2) == [text]
+
+
+def test_second_value_in_a_cell_keeps_the_template_paragraph_style():
+    gen, table = _affiliation_generator()
+    cell = table.rows[2].cells[1]
+    cell.paragraphs[0].style = gen.doc.styles["Quote"]
+
+    gen._fill_hospital_affiliation([_g_entry("Member, Example Institute One"),
+                                    _g_entry("Member, Example Institute Two")])
+
+    assert [p.style.name for p in cell.paragraphs] == ["Quote", "Quote"]
+
+
+@pytest.mark.parametrize("merge_last", [False, True], ids=["row-absent", "row-merged"])
+def test_g_table_without_other_institutional_value_cell_appends_rows(merge_last):
+    """With no usable Other Institutional value cell (row absent, or merged
+    across both columns) an entry with no row of its own gets a new row, as
+    holding the whole text -- never the Primary row. A row appended for a
+    free-form line does not capture a later entry."""
+    labels = (_PRIMARY_LABEL, _OTHER_HOSPITAL_LABEL) + (
+        (_OTHER_INSTITUTIONAL_LABEL,) if merge_last else ())
+    gen, table = _affiliation_generator(labels, merge_last=merge_last)
+    entries = [
+        _g_entry("Attending, Example Hospital"),
+        _g_entry("Favorite Place: Example Library"),
+        _g_entry("Other Hospital Affiliations: Example Hospital One"),
+    ]
+
+    assert gen._fill_hospital_affiliation(entries) == entries
+    rows = [[c.text for c in r.cells] for r in table.rows]
+    n = len(labels)
+    assert [r[0] for r in rows[:n]] == list(labels)
+    assert rows[0][1] == ""
+    assert rows[1][1] == "Example Hospital One"
+    if merge_last:
+        assert rows[2] == [_OTHER_INSTITUTIONAL_LABEL, _OTHER_INSTITUTIONAL_LABEL]
+    assert rows[n:] == [["Attending, Example Hospital", ""], ["Favorite Place: Example Library", ""]]
+    assert table.rows[n].cells[0].paragraphs[0].runs[0].font.name == "Arial"
+
+
+def test_g_coded_entry_under_lettered_employment_heading_is_not_claimed_by_g():
+    """`_is_employment_status_heading`'s second branch: a heading with
+    "EMPLOYMENT" and the section letter "H." (no "STATUS") is still E's, so
+    a G-coded entry under it is not written into G."""
+    gen, table = _affiliation_generator()
+    entry = _g_entry("Member, Example Employment Committee")
+    entry["hierarchy"] = ["H. EMPLOYMENT"]
+
+    assert gen._fill_hospital_affiliation([entry]) == []
+    assert all(_cell_paragraphs(table, i) == [""] for i in range(3))
+
+
+def test_e_coded_entry_under_foreign_heading_renders_once_not_in_appendix(tmp_path):
+    """#807 through the real `generate()`: an E-coded entry whose only copy
+    sits under a foreign heading (dedup kept it) fills its template row and
+    is excluded from the Appendix. An E-coded line with no known row label
+    under the same heading still reaches the Appendix."""
+    entries = [
+        _OWNER_ENTRY,
+        {
+            "text": "Name of Current Employer(s): DISTINCTIVE_E807_EMPLOYER",
+            "taxonomy_code": "E", "hierarchy": ["Other Example Activities"],
+            "extracted_fields": {}, "element_idx_start": 20,
+        },
+        {
+            "text": "Favorite Color: DISTINCTIVE_E807_REFUSED",
+            "taxonomy_code": "E", "hierarchy": ["Other Example Activities"],
+            "extracted_fields": {}, "element_idx_start": 21,
+        },
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    full, appendix = _full_text(doc), _appendix_text(doc)
+
+    assert "DISTINCTIVE_E807_EMPLOYER" in full, "E-coded foreign-heading entry did not render"
+    assert "DISTINCTIVE_E807_EMPLOYER" not in appendix, (
+        "#807: consumed E entry duplicated into the Appendix")
+    assert "DISTINCTIVE_E807_REFUSED" in appendix
+    assert _appendix_diversion_count(sidecar, "E") == 1
+
+
+@pytest.mark.parametrize(("heading", "expected"), [
+    ("G. INSTITUTIONAL/HOSPITAL AFFILIATION", True),
+    ("HOSPITAL AFFILIATIONS", True),
+    ("INSTITUTIONAL AFFILIATION", True),
+    ("HOSPITAL PRIVILEGES", False),
+    ("PROFESSIONAL AFFILIATIONS", False),
+    ("INSTITUTIONAL SERVICE", False),
+])
+def test_is_affiliation_heading_needs_both_words_of_a_pair(heading, expected):
+    """The one definition of G's heading (shared with E's code match, #807):
+    each accepted pair needs BOTH words, so a lone HOSPITAL or AFFILIATION
+    heading is not G's."""
+    from unified_pipeline.stage6.sections.passthrough import _is_affiliation_heading
+    assert _is_affiliation_heading(heading) is expected

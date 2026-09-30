@@ -434,12 +434,21 @@ class TestSecurityHeaders:
         assert "default-src 'self'" in csp
 
     def test_csp_allows_websockets(self, client, db, seed_simple_mode):
-        """CSP connect-src allows WebSocket protocols."""
+        """CSP connect-src covers same-origin WebSockets via 'self' alone,
+        with no bare ws:/wss: source that would permit a socket to any host
+        (#773). The frontend's own WebSocket (usePipelineRun.tsx) always
+        connects same-origin, and the backend's CSP only governs its own
+        API/JSON responses -- the SPA document's CSP is nginx's, unaffected
+        by this header."""
         response = client.get("/health")
         csp = response.headers["content-security-policy"]
-        assert "connect-src" in csp
-        assert "ws:" in csp
-        assert "wss:" in csp
+        directives = [d.strip() for d in csp.split(";")]
+        # Exact-directive match, not a substring: `connect-src 'self' *` or
+        # `connect-src 'self' https:` both contain "connect-src 'self'" as a
+        # substring but widen the policy beyond same-origin.
+        assert "connect-src 'self'" in directives
+        assert "ws:" not in csp
+        assert "wss:" not in csp
 
     def test_csp_blocks_inline_scripts(self, client, db, seed_simple_mode):
         """CSP script-src does NOT allow unsafe-inline."""
@@ -624,15 +633,15 @@ class TestDocsGating:
 class TestUploadValidation:
     """SEC-04: Upload validation by magic bytes, size limit, and filename sanitization."""
 
-    def _create_auth_user(self, client, db):
+    def _create_auth_user(self, client, db, email="test@example.com", role="user"):
         """Create a user with consent and set auth cookie."""
         from app.models import User
         from app.auth import create_session_cookie, COOKIE_NAME
 
         user = User(
-            email="test@example.com",
+            email=email,
             display_name="Test User",
-            role="user",
+            role=role,
             consent_version="1.0",
         )
         db.add(user)
@@ -788,6 +797,23 @@ class TestUploadValidation:
         security_logs = [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
         assert len(security_logs) >= 1, "Expected [SECURITY] log for spoofed upload"
 
+    @pytest.mark.parametrize("role, cost_visible", [("admin", True), ("user", False)])
+    def test_estimate_cost_is_admin_only(self, client, db, seed_simple_mode, role, cost_visible):
+        """#1111: a non-admin's estimate carries no dollar figure or pricing
+        model; the time estimate is unaffected."""
+        self._create_auth_user(client, db, role=role)
+        with patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value="x" * 600):
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", b"PK\x03\x04dummy", "application/octet-stream")},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["estimated_time_seconds_min"] > 0
+        for field in ("estimated_cost_min", "estimated_cost_max", "pricing_model"):
+            assert (body[field] is not None) is cost_visible, field
+
     def test_estimate_rejects_spoofed_file(self, client, db, seed_simple_mode):
         """The /estimate endpoint also validates magic bytes."""
         self._create_auth_user(client, db)
@@ -858,6 +884,7 @@ class TestUploadValidation:
             )
         assert response.status_code == 200, response.text
         assert response.json()["text_characters"] == 1000
+        assert response.json()["text_characters_is_guess"] is False
         fallback_logs = [r for r in caplog.records if "fixed char-count guess" in r.getMessage()]
         assert fallback_logs == []  # extraction succeeded -- no fallback warning
 
@@ -883,6 +910,50 @@ class TestUploadValidation:
         fallback_logs = [r for r in caplog.records if "fixed char-count guess" in r.getMessage()]
         assert len(fallback_logs) == 1
         assert "resume.docx" not in fallback_logs[0].getMessage()
+
+    @pytest.mark.parametrize("extracted", [None, "z" * 60_000])
+    def test_upload_and_estimate_size_one_file_the_same(self, client, db, seed_simple_mode, tmp_path, extracted):
+        """#794: one file through /estimate and /upload yields one char count --
+        the quoted time max IS the run's stall-watchdog duration, and an
+        unreadable file is flagged as a guess rather than quoted as measured.
+        /upload's fallback used to be a size heuristic (len(content)//30000),
+        so the two disagreed exactly when extraction failed."""
+        from app.models import Run
+        self._create_auth_user(client, db)
+        content = b"PK\x03\x04" + b"\x00" * 200_000
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path), \
+             patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value=extracted), \
+             patch("app.api.upload.detect_wcm_template", return_value=(False, None)), \
+             patch("app.api.upload.get_storage", return_value=MagicMock()):
+            est = client.post("/api/estimate", files={"file": ("cv.docx", content, "application/octet-stream")})
+            up = client.post(
+                "/api/upload",
+                files={"file": ("cv.docx", content, "application/octet-stream")},
+                data={"submission_type": "own_cv"},
+            )
+        assert est.status_code == 200, est.text
+        assert up.status_code == 200, up.text
+        body = est.json()
+        assert body["text_characters_is_guess"] is (extracted is None)
+        run = db.query(Run).filter(Run.id == up.json()["run_id"]).one()
+        assert run.estimated_duration_seconds == body["estimated_time_seconds_max"]
+
+    @pytest.mark.parametrize("text_chars, actual_seconds", [
+        (3_180, 89), (3_180, 105), (13_130, 188),
+        (16_000, 227), (21_840, 255), (42_770, 330),
+    ])
+    def test_estimate_range_covers_post_parallel_prod_runs(self, text_chars, actual_seconds):
+        """Every completed prod run on dev-206/207 (2026-09-28/29, after the
+        #881 parallel LLM batches shipped) falls inside the quoted range. The
+        old 20 s/stage overhead and 3-min floor put all six below the range's
+        MINIMUM. Char counts are recovered from each run's stored estimate
+        under prod's knobs (30 s/1k tokens, 60 s base)."""
+        from app.api import upload
+        with patch.object(upload, "TIME_PER_1K_TOKENS", 30), \
+             patch.object(upload, "BASE_OVERHEAD_SECONDS", 60):
+            time_min, time_max = upload.estimate_run_seconds(text_chars)
+        assert time_min <= actual_seconds <= time_max
 
     def test_estimate_respects_rate_limit(self, client, db, seed_simple_mode):
         """#795: /estimate is rate-limited the same way /upload is --
@@ -913,6 +984,101 @@ class TestUploadValidation:
         assert response.status_code == 429, response.text
         assert response.json()["detail"] == rate_limit_body
         extract_mock.assert_not_called()
+
+    def test_estimate_per_user_budget_blocks_before_parsing(self, client, db, seed_simple_mode):
+        """#795: a per-pod, in-memory, per-user counter caps /estimate calls
+        on its own, even for a user nowhere near their check_rate_limit run
+        quota. The call that exceeds it gets check_rate_limit's 429 shape,
+        and the body is never read (_read_bounded) or parsed (_extract_text,
+        _validate_docx_magic) -- the budget is spent before either runs."""
+        from unittest.mock import AsyncMock
+        from app.api import upload as upload_module
+        self._create_auth_user(client, db)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        small_limiter = upload_module._EstimatePerUserWindow(max_calls=2, window_seconds=300)
+        with patch("app.api.upload._estimate_rate_limiter", small_limiter), \
+             patch("app.api.upload._validate_docx_magic", return_value=True) as magic_mock, \
+             patch("app.api.upload._extract_text", return_value="x" * 2000) as extract_mock:
+            for _ in range(2):
+                ok_response = client.post(
+                    "/api/estimate",
+                    files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+                )
+                assert ok_response.status_code == 200, ok_response.text
+            magic_mock.reset_mock()
+            extract_mock.reset_mock()
+            with patch("app.api.upload._read_bounded", new_callable=AsyncMock) as read_mock:
+                over_response = client.post(
+                    "/api/estimate",
+                    files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+                )
+        assert over_response.status_code == 429, over_response.text
+        detail = over_response.json()["detail"]
+        # Same {error, message, details} shape check_rate_limit's callers
+        # return (#795) -- not just the error code, so a caller relying on
+        # `message` or `details` for display sees the fields it expects.
+        assert set(detail) == {"error", "message", "details"}
+        assert detail["error"] == "rate_limited"
+        assert isinstance(detail["message"], str) and detail["message"]
+        assert set(detail["details"]) == {"limit_type", "limit", "window_seconds"}
+        assert detail["details"]["limit_type"] == "estimate"
+        read_mock.assert_not_called()
+        magic_mock.assert_not_called()
+        extract_mock.assert_not_called()
+
+    def test_estimate_per_user_budget_resets_after_window(self):
+        """The window genuinely resets rather than banning a user permanently
+        once tripped. Uses an injected clock so the test controls elapsed
+        time directly instead of sleeping or patching the real clock."""
+        from app.api.upload import _EstimatePerUserWindow
+        now = [0.0]
+        limiter = _EstimatePerUserWindow(max_calls=1, window_seconds=300, clock=lambda: now[0])
+        assert limiter.allow(user_id=1) is True
+        assert limiter.allow(user_id=1) is False  # still inside the window
+        now[0] = 299.9
+        assert limiter.allow(user_id=1) is False  # not yet elapsed
+        now[0] = 300.0
+        assert limiter.allow(user_id=1) is True  # window elapsed -- fresh budget
+
+    def test_estimate_per_user_budget_is_per_user(self):
+        """One user hitting their budget must not affect another user's --
+        the window dict is keyed by user id, not shared globally."""
+        from app.api.upload import _EstimatePerUserWindow
+        limiter = _EstimatePerUserWindow(max_calls=1, window_seconds=300)
+        assert limiter.allow(user_id=1) is True
+        assert limiter.allow(user_id=1) is False
+        assert limiter.allow(user_id=2) is True  # a different user is unaffected
+
+    def test_estimate_per_user_budget_is_per_user_through_endpoint(self, client, db, seed_simple_mode):
+        """#795: the per-user check above proves the helper's own keying, but
+        not that the endpoint passes the right user id through. Two real
+        authenticated users against a shared, small-budget limiter: user A
+        spends their whole budget, and user B -- a distinct user id -- still
+        gets a 200, not a 429, on the pod they share."""
+        from app.api import upload as upload_module
+        self._create_auth_user(client, db, email="user-a@example.com")
+        small_limiter = upload_module._EstimatePerUserWindow(max_calls=1, window_seconds=300)
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
+        with patch("app.api.upload._estimate_rate_limiter", small_limiter), \
+             patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value="x" * 2000):
+            first_a = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+            assert first_a.status_code == 200, first_a.text
+            second_a = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+            assert second_a.status_code == 429, second_a.text
+
+            self._create_auth_user(client, db, email="user-b@example.com")
+            first_b = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", docx_content, "application/octet-stream")},
+            )
+        assert first_b.status_code == 200, first_b.text
 
     def test_random_bytes_rejected(self, client, db, seed_simple_mode):
         """A file with random bytes (not matching any format) is rejected."""

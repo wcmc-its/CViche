@@ -19,10 +19,14 @@ from sqlalchemy.orm import Session
 
 from app.models import Log, Step
 from app.schemas import OutputPreview
+from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
-_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Public (#701 run_queue.WorkToken validates a Valkey work token's run_id
+# against this same pattern -- one definition of "what a run_id may look
+# like", CODING STANDARDS section 1.5).
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # Preview bounds (#780 review r3965770586): a large pipeline artifact must not
 # be expanded into an unbounded response. Parsing stops at the row cap -- it
@@ -68,7 +72,7 @@ def validate_run_id(run_id: str) -> None:
     `{run_id:path}` (or a lookup that stops being exact) cannot silently make
     traversal reachable.
     """
-    if not _RUN_ID_RE.match(run_id):
+    if not RUN_ID_RE.match(run_id):
         logger.warning("[SECURITY] Blocked malformed run_id: %r", run_id)
         raise HTTPException(status_code=400, detail="Invalid run ID")
 
@@ -323,6 +327,20 @@ def generate_preview(db: Session, run_id: str, filename: str) -> OutputPreview |
     build `output_dir / filename` directly, bypassing resolve_artifact's
     traversal/ownership checks)."""
     resolved = resolve_artifact(db, run_id, filename)
-    if resolved.local_path is None or not is_json_artifact(resolved.basename):
+    if not is_json_artifact(resolved.basename):
         return None
-    return generate_preview_from_path(resolved.local_path)
+    if resolved.local_path is not None:
+        return generate_preview_from_path(resolved.local_path)
+    # Durable storage fallback, as the JSON viewer does: once the pod that ran
+    # the step is recycled, the artifact exists only in S3. A missing object is
+    # "no preview"; any other storage error propagates (#936 -- an outage must
+    # not read as a missing file).
+    try:
+        raw = get_storage().get_file(run_id, resolved.storage_key)
+    except FileNotFoundError:
+        return None
+    try:
+        return parse_json_to_preview(json.loads(raw))
+    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError, TypeError, KeyError) as exc:
+        logger.warning("Error generating preview from storage %s/%s: %s", run_id, resolved.storage_key, exc)
+        return None

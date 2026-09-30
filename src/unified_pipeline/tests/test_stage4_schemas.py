@@ -162,3 +162,37 @@ def test_f2_asks_the_llm_for_the_specialty():
     fields = schemas_mod.get_field_schema("F2")["fields"]
     assert "specialty" in fields
     assert "certifying_board" in fields
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_buckets_ask_the_llm_for_status_and_notes(code):
+    """#982: web39's three withdrawn grants lost that status because the M2A/M2B/M2C
+    schemas never asked for it. Read off the ACTIVE (config-merged) schema, the
+    list the prompt's "Fields to Extract" line is built from -- and the config
+    file, not the built-in table, is what wins at runtime."""
+    fields = schemas_mod.get_field_schema(code)["fields"]
+    assert "status" in fields and "notes" in fields
+    assert {"status", "notes"} <= set(schemas_mod.FIELD_DESCRIPTIONS[code])
+
+
+def test_invited_presentation_schema_asks_the_llm_for_the_speaker_role():
+    """#475: web160's 11 "Visiting Professor" roles were dropped at stage 4
+    because R had no `role` field. Read off the ACTIVE (config-merged) schema,
+    which is what the prompt's field list is built from."""
+    assert "role" in schemas_mod.get_field_schema("R")["fields"]
+    assert "role" in schemas_mod.FIELD_DESCRIPTIONS["R"]
+
+
+def test_invited_presentation_role_hint_keeps_the_presentation_format_in_event_name():
+    """#475 r3: adding `role` made the LLM drop 'Invited Workshop' (in neither
+    role nor event_name); the description must say where a format goes."""
+    assert "event_name" in schemas_mod.FIELD_DESCRIPTIONS["R"]["role"]
+
+
+def test_b2_guide_covers_every_extracted_field_and_asks_for_the_whole_line():
+    """#1092: a code listed in FIELD_DESCRIPTIONS shows the model only those
+    fields, so the B2 guide must name all of them; and program_name fills the
+    template's Description column, so it must ask for the detail, not only the
+    title."""
+    assert set(schemas_mod.FIELD_DESCRIPTIONS["B2"]) == set(schemas_mod.get_field_schema("B2")["fields"])
+    assert "WHOLE entry" in schemas_mod.FIELD_DESCRIPTIONS["B2"]["program_name"]

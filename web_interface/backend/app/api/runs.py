@@ -2,27 +2,54 @@
 import hashlib
 import json
 import logging
+from collections.abc import Callable
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+import redis
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, selectinload
 from pathlib import Path
 
 from app.database import get_db
-from app.models import Run, Step, User
-from app.schemas import RunStatus, RunSummary, StepSummary, PaginatedRuns
+from app.models import Run, RunState, Step, User
+from app.schemas import (
+    RunStatus, RunSummary, StepSummary, PaginatedRuns,
+    CapacityResponse, RunActionResponse, RestartRunResponse,
+)
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.pipeline import concurrency
-from app.auth import get_current_user
+from app.pipeline import concurrency, run_queue
+from app.auth import get_current_user, visible_cost
 from app.api.upload import UPLOAD_DIR, create_run_archive, commit_run_or_compensate
-from app.services.run_service import check_run_access
+from app.services.run_service import (
+    check_run_access, claim_run_as_running, _materialize_input_if_missing,
+    flip_to_queued, revert_queued, StepSnapshot,
+)
 from app.rate_limiter import check_rate_limit
-from app.errors import not_found, bad_request
+from app.errors import not_found, bad_request, conflict
 from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Run statuses /start may move to "running" (the conditional UPDATE's predicate).
+STARTABLE_STATUSES = ("created", "paused")
+
+# Largest page /runs serves. The run-history UI asks for exactly this many
+# (RunHistory.tsx PAGE_SIZE), so lowering it breaks that page (#801).
+MAX_RUNS_PAGE_SIZE = 100
+
+# web_interface/outputs: where the orchestrator writes each run's stage
+# artifacts (orchestrator.py's web_output_dir). Module-level so tests can
+# point get_data_quality at a tmp dir instead of the real outputs tree.
+_OUTPUTS_ROOT = Path(__file__).parent.parent.parent.parent / "outputs"
+
+# What reading one stage artifact can legitimately raise: an unreadable or
+# vanished file, non-UTF-8 bytes, or truncated/invalid JSON. get_data_quality
+# records these as a per-file warning and carries on; anything else (a shape
+# the code doesn't expect, a TypeError) is a bug and propagates (#801).
+_ARTIFACT_READ_ERRORS = (OSError, UnicodeDecodeError, json.JSONDecodeError)
 
 
 def _run_duration_seconds(run) -> int | None:
@@ -42,40 +69,104 @@ def _run_duration_seconds(run) -> int | None:
     return None
 
 
-def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> None:
-    """Re-fetch a run's original upload from durable storage if the pod-local
-    copy is gone (e.g. after a pod recycle), so start/restart/retry survive.
-    No-op if the local file already exists or storage has no copy — the caller
-    keeps its own missing-file handling.
+def _dispatch_queue(
+    run: Run, db: Session, *, allowed_from: tuple[str, ...], start_step: int | None = None,
+    on_flip: Callable[[], tuple[StepSnapshot, ...]] | None = None,
+) -> JSONResponse:
+    """Queue-mode dispatch (#701): ``run_service.flip_to_queued`` reads the
+    row's live status under a lock and conditionally flips it to ``queued``
+    in one transaction (so two concurrent requests can't both flip), then
+    this XADDs a wake-up token. Three outcomes once the flip returns:
+
+    * Won the flip: XADD the token. A failed XADD (Valkey down) calls the
+      guarded ``run_service.revert_queued`` (``WHERE status='queued'``), so a
+      claim or cancel that landed in between can never be clobbered. If the
+      revert itself matches no row -- the run was already claimed or
+      cancelled -- this answers 202 with the run's live status rather than a
+      misleading 503 "try again". A process death between the flip's own
+      commit and this XADD leaves the row "queued" with no token at all;
+      ``run_service.reconcile_queued_runs`` (the periodic reaper, queue mode
+      only) is the backstop that re-enqueues it, and the already-queued
+      branch below recovers it sooner if the user retries first.
+    * Already queued (no flip attempted): idempotent re-enqueue, guarded by
+      ``run_queue.claim_reenqueue_slot`` so a retry storm on one run adds at
+      most one fresh token per ``REENQUEUE_GUARD_TTL_S`` -- a guard miss just
+      answers 202 without another XADD.
+    * Lost race (the row was neither "queued" nor in ``allowed_from`` by the
+      time the locked read ran -- claimed, cancelled, or started elsewhere
+      since the caller's own read): 409, since the client's view of the run
+      was already stale.
+
+    ``on_flip``, if given, is passed straight through to ``flip_to_queued``,
+    which runs -- and commits -- it in the SAME transaction as the flip
+    itself, only once a fresh flip has actually won (B3): retry_step uses it
+    to reset the downstream Step rows and hand back their prior state as
+    ``StepSnapshot``s, which ``revert_queued`` below restores if the XADD
+    then fails. It must NOT run on a lost race, which ``flip_to_queued``
+    itself guarantees; committing the reset here instead, in a second
+    transaction after the flip's own, left a real window open where a woken
+    worker could claim the row in between and execute against stale step
+    state -- closed by moving the reset inside flip_to_queued's transaction.
+
+    Checks ``run_queue.is_configured()`` before any of that (N3): unconfigured
+    (no ``CVICHE_REDIS_URL``), ``run_queue.enqueue`` would raise a plain
+    RuntimeError -- not a ``redis.exceptions.RedisError`` -- which escapes both
+    ``except`` clauses below uncaught, after ``flip_to_queued`` had already
+    committed the row to "queued" with no worker ever coming for it. Checking
+    first means nothing is committed at all on a misconfigured deployment.
     """
-    if dest.exists():
-        return
-    try:
-        data = get_storage().get_file(run_id, f"input/{run_id}.{file_type}")
-    except FileNotFoundError as e:
-        # The run genuinely has no durable copy (e.g. a legacy run predating the
-        # S3 archive). Expected; the caller keeps its own missing-file handling.
-        logger.info("No durable input copy for run %s (%s); using local only", run_id, e)
-        return
-    except Exception as e:
-        # Anything other than a missing object (S3 AccessDenied, KMS, network)
-        # means durable storage is reachable-but-failing. Surface it at WARNING
-        # so a real outage isn't silently misread as "file simply not there".
-        logger.warning(
-            "Durable input lookup FAILED for run %s (%s); using local copy only. "
-            "May indicate an S3/IAM/KMS problem rather than a missing object.",
-            run_id, e,
+    if not run_queue.is_configured():
+        logger.error("Queue mode is enabled but CVICHE_REDIS_URL is not set; refusing to queue run %s", run.id)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "queue_unavailable",
+                    "message": "The run queue is unavailable right now -- please try again shortly."},
         )
-        return
+
+    prior = flip_to_queued(db, run.id, allowed_from, resume_from_step=start_step, on_flip=on_flip)
+
+    if not prior.flipped and prior.prior_status != RunState.QUEUED:
+        raise conflict(f"Cannot start run in status: {prior.prior_status}")
+
+    if not prior.flipped:
+        if not run_queue.claim_reenqueue_slot(run.id):
+            return JSONResponse(
+                status_code=202,
+                content={"message": f"Run {run.id} already queued", "status": "queued"},
+            )
+        try:
+            run_queue.enqueue(run.id)
+        except redis.exceptions.RedisError as e:
+            logger.exception("Re-enqueue failed for already-queued run %s", run.id)
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "queue_unavailable",
+                        "message": "The run queue is unavailable right now -- please try again shortly."},
+            ) from e
+        return JSONResponse(
+            status_code=202,
+            content={"message": f"Run {run.id} already queued", "status": "queued"},
+        )
+
     try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(data)
-        logger.info("Re-materialized input for run %s from storage (%d bytes)", run_id, len(data))
-    except Exception as e:
-        logger.warning("Failed to write re-materialized input for run %s: %s", run_id, e)
+        run_queue.enqueue(run.id)
+    except redis.exceptions.RedisError as e:
+        logger.exception("Enqueue failed for run %s; reverting the flip", run.id)
+        if not revert_queued(db, run.id, prior):
+            db.refresh(run)
+            return JSONResponse(
+                status_code=202,
+                content={"message": f"Run {run.id} {run.status}", "status": run.status},
+            )
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "queue_unavailable",
+                    "message": "The run queue is unavailable right now -- please try again shortly."},
+        ) from e
+    return JSONResponse(status_code=202, content={"message": f"Run {run.id} queued", "status": "queued"})
 
 
-@router.get("/capacity")
+@router.get("/capacity", response_model=CapacityResponse)
 async def get_capacity(current_user: User = Depends(get_current_user)):
     """Read-only snapshot of this pod's run-admission capacity.
 
@@ -98,8 +189,8 @@ async def get_capacity(current_user: User = Depends(get_current_user)):
 
 @router.get("/runs", response_model=PaginatedRuns)
 async def list_runs(
-    offset: int = 0,
-    limit: int = 20,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=MAX_RUNS_PAGE_SIZE),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -118,7 +209,7 @@ async def list_runs(
             status=run.status,
             started_at=run.started_at,
             completed_at=run.completed_at,
-            total_cost=run.total_cost or 0.0,
+            total_cost=visible_cost(current_user, run.total_cost),
             total_duration_seconds=total_duration_seconds
         ))
 
@@ -152,7 +243,7 @@ async def get_run_status(
             started_at=step.started_at,
             completed_at=step.completed_at,
             duration_seconds=step.duration_seconds,
-            cost=step.cost or 0.0,
+            cost=visible_cost(current_user, step.cost),
             output_files=step.output_files
         )
         for step in sorted(run.steps, key=lambda s: s.step_number)
@@ -168,7 +259,7 @@ async def get_run_status(
         status=run.status,
         started_at=run.started_at,
         completed_at=run.completed_at,
-        total_cost=run.total_cost or 0.0,
+        total_cost=visible_cost(current_user, run.total_cost),
         total_tokens=run.total_tokens or 0,
         input_tokens=run.input_tokens or 0,
         output_tokens=run.output_tokens or 0,
@@ -179,19 +270,29 @@ async def get_run_status(
     )
 
 
-@router.post("/run/{run_id}/start")
-async def start_run(
+@router.post("/run/{run_id}/start", response_model=RunActionResponse)
+def start_run(
     run_id: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Start executing a pipeline run."""
+    """Start executing a pipeline run.
+
+    Plain ``def``, not ``async def`` (#701 run_queue.py point 11 /
+    runs.py point 10): the body has no ``await`` and, in queue mode, calls
+    the synchronous Valkey XADD. FastAPI runs a plain ``def`` route in its
+    threadpool, so a Valkey brownout costs a threadpool slot instead of
+    stalling the event loop for every other request on this pod.
+    """
 
     run = check_run_access(run_id, current_user, db)
 
+    queue_mode = concurrency.dispatch_mode() == "queue"
     # "paused" rows predate the pause endpoint's removal (#115); /start stays their recovery path.
-    if run.status not in ["created", "paused"]:
+    # In queue mode an already-"queued" run is also accepted: _dispatch_queue answers it with an
+    # idempotent re-enqueue (#701).
+    if run.status not in STARTABLE_STATUSES and not (queue_mode and run.status == RunState.QUEUED):
         raise bad_request(f"Cannot start run in status: {run.status}")
 
     # Get the uploaded file path. Use the shared UPLOAD_DIR constant (same path
@@ -205,10 +306,13 @@ async def start_run(
         # predating the archive, whose input cannot be recovered.
         raise not_found("Uploaded file no longer available — please upload again.")
 
+    if queue_mode:
+        return _dispatch_queue(run, db, allowed_from=STARTABLE_STATUSES)
+
     # Admission control: cap concurrent in-process pipelines per pod. Acquire a
     # slot before marking the run "running" so a rejected start leaves the run
     # in its prior state, retryable once a slot frees.
-    if not concurrency.try_acquire_slot():
+    if not concurrency.try_acquire_slot(run_id):
         raise HTTPException(
             status_code=429,
             detail={
@@ -233,8 +337,13 @@ async def start_run(
             headers={"Retry-After": "30"},
         )
 
-    # Update status
-    run.status = "running"
+    # Atomic created/paused -> running (#799). The guard above is only a fast
+    # path: the conditional UPDATE decides which concurrent starter wins. The
+    # loser returns its slot and never reaches the pipeline dispatch.
+    if not claim_run_as_running(db, run_id, Run.status.in_(STARTABLE_STATUSES)):
+        db.rollback()
+        concurrency.release_slot(run_id)
+        raise conflict("This run was already started by another request.")
     db.commit()
 
     # Start pipeline execution in background. The slot acquired above is held
@@ -250,41 +359,33 @@ async def start_run(
             asyncio.run(orchestrator.execute())
         finally:
             bg_db.close()
-            concurrency.release_slot()
+            concurrency.release_slot(run_id)
 
     background_tasks.add_task(run_pipeline)
 
     return {"message": f"Pipeline started for run {run_id}", "status": "running"}
 
 
-@router.post("/run/{run_id}/cancel")
+@router.post("/run/{run_id}/cancel", response_model=RunActionResponse)
 async def cancel_run(
     run_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Cancel a running pipeline."""
-    from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
-
     run = check_run_access(run_id, current_user, db)
 
-    if run.status != "running":
+    # A queued run has no orchestrator yet: the status flip alone cancels it,
+    # because the worker's claim requires status == "queued" (#701).
+    if run.status not in ("running", "queued"):
         raise bad_request(f"Cannot cancel run in status: {run.status}")
 
-    # Signal cancellation to orchestrator
-    orchestrator_cancel(run_id)
-
-    # Update run status
-    run.status = "cancelled"
-    run.error_message = "Cancelled by user"
-    from datetime import datetime
-    run.completed_at = datetime.now()
-    db.commit()
+    _cancel_run_record(db, run)
 
     return {"message": f"Run {run_id} cancelled", "status": "cancelled"}
 
 
-@router.post("/run/{run_id}/restart")
+@router.post("/run/{run_id}/restart", response_model=RestartRunResponse)
 async def restart_run(
     run_id: str,
     db: Session = Depends(get_db),
@@ -413,11 +514,52 @@ async def restart_run(
 
     commit_run_or_compensate(db, new_run_id, current_user.email, new_file_path)
 
+    # #181: restart replaces a still-running original rather than forking a
+    # second copy that keeps spending alongside the new run. Done last, after
+    # the child is committed, so a failed restart (429/404/502 above) leaves
+    # the original running. Refresh first: the orchestrator may have finished
+    # it since check_run_access() read it.
+    db.refresh(original_run)
+    if original_run.status == "running":
+        _cancel_run_record(db, original_run)
+
     return {"run_id": new_run_id, "message": f"New run created from {run_id}"}
 
 
-@router.post("/run/{run_id}/retry/{step_number}")
-async def retry_step(
+def _cancel_run_record(db: Session, run: Run) -> None:
+    """Mark `run` cancelled, then signal the orchestrator to stop it.
+
+    Shared by cancel_run and restart_run (#181); each caller checks that
+    the run is still running first.
+
+    Commit BEFORE signalling, not after: db.commit() can raise (see
+    commit_run_or_compensate's #802 handling above), while orchestrator_cancel
+    cannot -- cancel_run's set.add can't raise, and RedisBroker.request_cancel
+    wraps its body in try/except (redis_broker.py, "best-effort"). A commit
+    failure here leaves the run running with nothing told to stop it --
+    consistent, and the caller's exception surfaces normally. The orchestrator
+    also records a cancel on the row itself, so it does not rely on this write
+    having happened (#591).
+    """
+    from app.pipeline.orchestrator import USER_CANCEL_MESSAGE
+
+    run.status = "cancelled"
+    run.error_message = USER_CANCEL_MESSAGE
+    # Naive, matching every other Run timestamp write (orchestrator.py,
+    # run_service.py, upload.py): pymysql drops tzinfo on write, so an aware
+    # value would round-trip as naive UTC and get mislabelled with the
+    # server's LOCAL offset by schemas.py's _iso_with_offset -- wrong by
+    # that offset (timestamp and duration both) on a non-UTC host.
+    run.completed_at = datetime.now()
+    db.commit()
+
+    from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
+
+    orchestrator_cancel(run.id)
+
+
+@router.post("/run/{run_id}/retry/{step_number}", response_model=RunActionResponse)
+def retry_step(
     run_id: str,
     step_number: int,
     background_tasks: BackgroundTasks,
@@ -434,6 +576,9 @@ async def retry_step(
     pod's filesystem. If the pod recycled since the original run those are gone
     and the resumed stage will fail -- at which point the user falls back to
     "Restart with this file".
+
+    Plain ``def`` (#701 run_queue.py point 11 / runs.py point 10): see
+    start_run's docstring.
     """
 
     run = check_run_access(run_id, current_user, db)
@@ -455,10 +600,12 @@ async def retry_step(
     if not file_path.exists():
         raise not_found("Uploaded file no longer available — please upload again.")
 
+    queue_mode = concurrency.dispatch_mode() == "queue"
+
     # Admission control: a retry resumes a full pipeline and consumes the same
     # per-pod resource as a fresh start, so gate it the same way. Acquire before
     # mutating step/run state so a rejected retry leaves the run untouched.
-    if not concurrency.try_acquire_slot():
+    if not queue_mode and not concurrency.try_acquire_slot(run_id):
         raise HTTPException(
             status_code=429,
             detail={
@@ -490,17 +637,54 @@ async def retry_step(
         Step.run_id == run_id,
         Step.step_number >= step_number,
     ).all()
-    for s in downstream_steps:
-        s.status = "pending"
-        s.error_message = None
-        s.started_at = None
-        s.completed_at = None
-        s.duration_seconds = None
-        s.cost = None
 
-    run.status = "running"
-    run.error_message = None
-    run.completed_at = None
+    def _reset_downstream_steps() -> tuple[StepSnapshot, ...]:
+        # B3: snapshot each step's PRIOR state before resetting it, so a
+        # failed enqueue's revert path can restore it exactly -- otherwise a
+        # step this reset to "pending" is left there with no executor coming
+        # for it, and retry_step's own `status != "error"` guard then
+        # rejects a second retry outright.
+        snapshots = tuple(
+            StepSnapshot(
+                step_id=s.id, status=s.status, error_message=s.error_message,
+                started_at=s.started_at, completed_at=s.completed_at,
+                duration_seconds=s.duration_seconds, cost=s.cost,
+            )
+            for s in downstream_steps
+        )
+        for s in downstream_steps:
+            s.status = "pending"
+            s.error_message = None
+            s.started_at = None
+            s.completed_at = None
+            s.duration_seconds = None
+            s.cost = None
+        return snapshots
+
+    if queue_mode:
+        # Deferred to _dispatch_queue's on_flip, which flip_to_queued runs
+        # (and commits) inside its OWN transaction, only once the flip has
+        # actually won (#701 runs.py point 7, tightened by B3) -- staging
+        # these resets here unconditionally, before the flip, would persist
+        # them on a lost race (a 409) too.
+        return _dispatch_queue(
+            run, db, allowed_from=("failed",), start_step=step_number, on_flip=_reset_downstream_steps,
+        )
+
+    # Atomic -> running (#799): only one of two concurrent retries may claim a
+    # run that is not already running. The step resets below share this
+    # transaction, so the loser changes nothing and returns its slot.
+    # started_at restarts the stale-run clock: reconcile_stale_runs ages runs by
+    # it, so a retry of a run started over an hour ago was reaped mid-run (#145).
+    if not claim_run_as_running(
+        db, run_id, Run.status != "running",
+        error_message=None, completed_at=None, started_at=datetime.now(),
+    ):
+        db.rollback()
+        concurrency.release_slot(run_id)
+        raise conflict("This run is already running.")
+
+    _reset_downstream_steps()
     db.commit()
 
     # Resume pipeline execution in the background, mirroring start_run. The slot
@@ -514,7 +698,7 @@ async def retry_step(
             asyncio.run(orchestrator.execute(start_step_number=step_number))
         finally:
             bg_db.close()
-            concurrency.release_slot()
+            concurrency.release_slot(run_id)
 
     background_tasks.add_task(run_pipeline)
 
@@ -524,7 +708,7 @@ async def retry_step(
 @router.get("/run/{run_id}/quality")
 async def get_data_quality(
     run_id: str,
-    step: int = 3,
+    step: int = Query(3, ge=1, le=len(STEP_REGISTRY)),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -532,7 +716,7 @@ async def get_data_quality(
     Get comprehensive data quality report for a run.
 
     Args:
-        step: Pipeline step number (3 for Stage 3 parsing, 4 for Stage 4 template generation)
+        step: STEP_REGISTRY number, 1..len(STEP_REGISTRY) (contiguous, see validate_registry); else 422
 
     Returns all extraction data including:
     - Raw extracted entries with confidence scores
@@ -544,7 +728,7 @@ async def get_data_quality(
     run = check_run_access(run_id, current_user, db)
 
     # Get output directory for this run
-    outputs_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
+    outputs_dir = _OUTPUTS_ROOT / run_id
 
     if not outputs_dir.exists():
         raise not_found("Run output not available")
@@ -811,7 +995,7 @@ async def get_data_quality(
                             }
                             section_ids_by_type[entity_type].append(section_info)
 
-                except Exception as e:
+                except _ARTIFACT_READ_ERRORS as e:
                     quality_report["warnings"].append({
                         "type": "enriched_read_error",
                         "file": enriched_file.name,
@@ -843,7 +1027,7 @@ async def get_data_quality(
                                     entry['confidence'] = 1.0  # Pre-structured entries
                                 parsed_entries_by_type[entity_type].append(entry)
 
-                        except Exception as e:
+                        except _ARTIFACT_READ_ERRORS as e:
                             quality_report["warnings"].append({
                                 "type": "parsed_read_error",
                                 "file": parsed_file.name,
@@ -864,7 +1048,7 @@ async def get_data_quality(
                 for entity_type, count in records_processed.items():
                     total_by_type[entity_type] = total_by_type.get(entity_type, 0) + count
 
-            except Exception as e:
+            except _ARTIFACT_READ_ERRORS as e:
                 quality_report["warnings"].append({
                     "type": "metadata_read_error",
                     "file": metadata_file.name,
@@ -934,8 +1118,8 @@ async def get_data_quality(
                     quality_report["metrics"]["personal_data_inserted"] = 1
                 break  # Only need to check once
 
-            except Exception:
-                pass
+            except _ARTIFACT_READ_ERRORS as e:  # the loop above already warned
+                logger.warning("quality re-read %s failed (run=%s): %s", metadata_file.name, run_id, e)
 
         # Track unpopulated entries with reasons
         quality_report["unpopulated_data"] = {
@@ -1176,7 +1360,7 @@ async def get_data_quality(
                             "source_file": json_file.name,
                             "included": confidence >= 0.5  # Threshold for inclusion
                         })
-            except Exception as e:
+            except _ARTIFACT_READ_ERRORS as e:
                 quality_report["warnings"].append({
                     "section": section_type,
                     "type": "parse_error",
@@ -1225,7 +1409,7 @@ async def get_data_quality(
 
                     quality_report["metrics"][f"{section_name}_coverage"] = round(avg_conf * 100, 1)
 
-            except Exception as e:
+            except _ARTIFACT_READ_ERRORS as e:
                 quality_report["warnings"].append({
                     "section": section_name if 'section_name' in locals() else section_file.name,
                     "type": "section_read_error",
@@ -1257,7 +1441,7 @@ async def get_data_quality(
                     "count": len(misclassified),
                     "details": misclassified[:10]  # First 10
                 })
-        except Exception as e:
+        except _ARTIFACT_READ_ERRORS as e:
             quality_report["warnings"].append({
                 "type": "taxonomy_read_error",
                 "error": str(e)

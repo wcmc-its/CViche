@@ -39,6 +39,7 @@ document uid when the pipeline never resolved an owner.
 import inspect
 import logging
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -55,7 +56,7 @@ except ImportError as exc:
 
 from ..formatting import _format_citation, _set_font
 from ..normalization import split_fused_citation_entries
-from ..parsing import _extract_last_name_from_uid
+from ..parsing import _extract_last_name_from_uid, _strip_appended_initials
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -136,38 +137,168 @@ class _CitationEnrichment:
         )
 
 
+# One author-token matcher for both bolding paths (#662 item 6). A name is a
+# run of tokens joined by any run of whitespace or hyphen; apostrophes and
+# hyphens each accept their typographic variants; and the match is a whole
+# author token, not a substring: it may not start or end inside a longer name
+# ("Wu" in "Wuertz", "Diaz" in "Alvarez-Diaz", "Neil" in "O'Neil").
+_NAME_APOSTROPHES = "'\u2019\u02bc"
+_NAME_HYPHENS = r"\-\u2010\u2011\u2013"
+_NAME_SEPARATOR = rf"[\s{_NAME_HYPHENS}]+"
+_NAME_CHAR = r"[\w\u0300-\u036f]"
+_NAME_JOIN = rf"[{_NAME_APOSTROPHES}{_NAME_HYPHENS}]"
+_NAME_START_GUARD = rf"(?<!{_NAME_CHAR})(?<!{_NAME_CHAR}{_NAME_JOIN})"
+# A possessive ("Marrow's") still ends the name.
+_NAME_END_GUARD = rf"(?!{_NAME_CHAR}|(?![{_NAME_APOSTROPHES}]s(?!\w)){_NAME_JOIN}\w)"
+_MAX_INITIALS = 3
+_SURNAME_PARTICLES = (
+    "van", "von", "der", "den", "de", "la", "le", "da", "di", "del", "della",
+    "du", "dos", "das", "do", "bin", "ibn", "al", "el", "ter", "ten", "zu", "st",
+)
+# A run of particles that opens an author: at the start of the citation or
+# right after a list separator, so a first name such as "Al" mid-author never
+# gets pulled into the bold run.
+_PARTICLES_BEFORE = re.compile(
+    r"(?:^|(?<=[,;&])\s*|(?<=\band)\s+)"
+    rf"((?:(?:{'|'.join(_SURNAME_PARTICLES)})\.?\s+)+)$",
+    re.IGNORECASE,
+)
+_WHITESPACE_RUN = re.compile(r"\s*")
+
+
+def _name_pattern(name: str) -> str | None:
+    """Regex for `name` as one whole author token, or None if it is blank.
+
+    NFC and NFD spellings are both accepted, so a decomposed accent in the
+    citation still matches a composed one in the owner's name."""
+    forms = []
+    for form in dict.fromkeys(
+            (unicodedata.normalize('NFC', name), unicodedata.normalize('NFD', name))):
+        tokens = [t for t in re.split(_NAME_SEPARATOR, form.strip()) if t]
+        if not tokens:
+            return None
+        forms.append(_NAME_SEPARATOR.join(
+            ''.join(f"[{_NAME_APOSTROPHES}]" if ch in _NAME_APOSTROPHES else re.escape(ch)
+                    for ch in token)
+            for token in tokens))
+    return f"{_NAME_START_GUARD}(?:{'|'.join(forms)}){_NAME_END_GUARD}"
+
+
+def _find_name_span(citation: str, name: str) -> tuple[int, int] | None:
+    """Span of the first whole-token, case-insensitive occurrence of `name`."""
+    pattern = _name_pattern(name)
+    match = re.search(pattern, citation, re.IGNORECASE) if pattern else None
+    return match.span() if match else None
+
+
+def _trailing_initials_end(citation: str, end: int) -> int:
+    """End of the author token after its surname: `end` extended over up to
+    `_MAX_INITIALS` capital initials ("Wende ME"), else `end` unchanged. The
+    initials must be upper case and stand alone, so "Wende and" and "Wende
+    Michael" stop at the surname."""
+    start = _WHITESPACE_RUN.match(citation, end).end()
+    stop = start
+    while stop < len(citation) and citation[stop].isalpha() and citation[stop].isupper():
+        stop += 1
+    if not 0 < stop - start <= _MAX_INITIALS:
+        return end
+    if stop < len(citation) and re.match(_NAME_CHAR, citation[stop]):
+        return end
+    return stop
+
+
+def _find_surname_span(citation: str, surname: str) -> tuple[int, int] | None:
+    """Span of a surname plus trailing initials, widened leftward over
+    surname particles ("de la Cruz M")."""
+    span = _find_name_span(citation, surname)
+    if span is None:
+        return None
+    start, end = span
+    particles = _PARTICLES_BEFORE.search(citation, 0, start)
+    if particles:
+        start = particles.start(1)
+    return start, _trailing_initials_end(citation, end)
+
+
+def _target_surname(target_name: str) -> str:
+    """`target_name` without its trailing capital initials ("Pell-Rowan FM"
+    -> "Pell-Rowan", "Tarn-Ellery, K." -> "Tarn-Ellery"), or unchanged
+    when it does not end in some. Stage 4 records the initials it saw in one
+    citation form; another form of the same author may carry more or fewer."""
+    parts = re.split(r"[\s,]+", target_name.strip())
+    initials = parts[-1].rstrip(".")
+    if len(parts) > 1 and 0 < len(initials) <= _MAX_INITIALS \
+            and initials.isalpha() and initials.isupper():
+        return " ".join(parts[:-1])
+    return target_name
+
+
+# A stage-4 target_name longer than this, or holding a colon, is not an author
+# name (the corpus has a book title there) and is skipped for the owner surname.
+_MAX_TARGET_NAME_TOKENS = 4
+
+
+def _looks_like_author_name(target_name: str | None) -> bool:
+    """False for a blank target_name or one shaped like a title, not a name."""
+    return bool(target_name) and ':' not in target_name \
+        and len(target_name.split()) <= _MAX_TARGET_NAME_TOKENS
+
+
 def _citation_author_split(citation: str, target_name: str | None,
                            cv_owner_last_name: str) -> tuple[str, str, str]:
     """Split a citation around the author name that should render bold.
 
     The one home for the author-matching rule shared by the plain and the
-    tracked-insertion citation writers (#572): a change to the rule (suffixes
-    like "Jr.", hyphenated surnames, particles) must reach both writers, or
-    enriched and non-enriched citations in the same bibliography bold
-    different text.
+    tracked-insertion citation writers (#572): a change to the rule must reach
+    both writers, or enriched and non-enriched citations in the same
+    bibliography bold different text.
 
-    Prefers `target_name` when it appears verbatim in the citation; otherwise
-    falls back to finding `cv_owner_last_name` with trailing initials, e.g.
-    "Wende ME", "Wende M", "Wende M.". The comma form ("Wende, M") is not
-    matched, pinned by test_citation_author_split_additional_dimensions.
+    Both lookups use one matcher (#662 item 6): whole author token, case
+    insensitive, Unicode aware. It rejects a match that starts or ends inside a
+    longer name (including across a hyphen or apostrophe), treats hyphen and
+    space as interchangeable inside a name and typographic apostrophes as
+    equal, and accepts composed or decomposed accents.
 
-    Returns `(before, name_to_bold, after)`. When nothing matches,
-    `name_to_bold` is '' and the whole citation is in `before`.
+    Prefers `target_name` when it appears in the citation as written; then
+    tries its surname alone, so "Quill J" still finds "Quill JD"; otherwise
+    falls back to `cv_owner_last_name`. A `target_name` shaped like a title
+    (a colon, or more than `_MAX_TARGET_NAME_TOKENS` words) is skipped. A surname match takes trailing capital
+    initials, e.g. "Wende ME", "Wende M", and any leading particles ("de la
+    Cruz M"). The comma form ("Wende, M") bolds only the surname, pinned by
+    test_citation_author_split_additional_dimensions.
+
+    Returns `(before, name_to_bold, after)`, where `name_to_bold` is the
+    citation's own text. When nothing matches, `name_to_bold` is '' and the
+    whole citation is in `before`.
     """
-    name_to_bold = None
-    if target_name and target_name in citation:
-        name_to_bold = target_name
-    elif cv_owner_last_name:
-        pattern = rf'\b{re.escape(cv_owner_last_name)}\s*[A-Z]{{0,3}}\.?\b'
-        match = re.search(pattern, citation, re.IGNORECASE)
-        if match:
-            name_to_bold = match.group(0).rstrip('.,')
-
-    if not (name_to_bold and name_to_bold in citation):
+    if not _looks_like_author_name(target_name):
+        target_name = None
+    span = _find_name_span(citation, target_name) if target_name else None
+    if span is None and target_name:
+        span = _find_surname_span(citation, _target_surname(target_name))
+    if span is None and cv_owner_last_name:
+        span = _find_surname_span(citation, cv_owner_last_name)
+    if span is None:
         return citation, '', ''
+    start, end = span
+    return citation[:start], citation[start:end], citation[end:]
 
-    idx = citation.index(name_to_bold)
-    return citation[:idx], name_to_bold, citation[idx + len(name_to_bold):]
+
+def _resolve_uid_owner_surname(uid: str, publications: list[dict]) -> str:
+    """The CV owner's surname as the citations spell it, from the document uid.
+
+    A uid such as "2003_Quennevillejs_Cv" can carry the owner's initials glued to
+    the surname, but "Smith" ends in the same lower-case tail, and no rule on
+    the uid alone can tell the two apart (#665 item 1). So the uid's last name
+    is used as written when any citation names that author, and is stripped of
+    possible appended initials only when it is not found -- the citations are
+    the evidence the uid cannot give.
+    """
+    raw = _extract_last_name_from_uid(uid)
+    citations = (_format_citation(pub, 0)[0] for pub in publications)
+    if not raw or any(_find_surname_span(c, raw) for c in citations):
+        return raw
+    return _strip_appended_initials(raw)
 
 
 class BibliographySection:
@@ -208,16 +339,19 @@ class BibliographySection:
             'S9': 'Other (media, podcasts, etc.):',
         }
 
+        pub_codes = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
+
         # Get CV owner last name for fallback bolding
         cv_owner_last_name = ''
         if cv_owner and cv_owner.get('last_name'):
             cv_owner_last_name = cv_owner['last_name']
         elif document_uid:
             # Fallback: extract from document_uid (e.g., "2015_Wende" -> "Wende")
-            cv_owner_last_name = _extract_last_name_from_uid(document_uid)
+            cv_owner_last_name = _resolve_uid_owner_surname(
+                document_uid,
+                [pub for code in pub_codes for pub in entries_by_code.get(code, [])])
 
         # Count total publications
-        pub_codes = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
         total_pubs = sum(len(entries_by_code.get(code, [])) for code in pub_codes)
 
         logger.info("Filling Bibliography (%d publications)...", total_pubs)

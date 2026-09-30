@@ -3,6 +3,15 @@ export interface Stats {
   active_users: number
   total_cost: number
   feedback_rate: number
+  avg_duration_seconds?: number | null
+  p95_duration_seconds?: number | null
+  step_avg_seconds?: StepAvg[]
+}
+
+export interface StepAvg {
+  stage_id: string
+  step_name: string
+  avg_seconds: number
 }
 
 export interface AdminUser {
@@ -34,6 +43,10 @@ export interface AdminRun {
   has_feedback: boolean
   quality_score: number | null
   quality_band: string | null
+  // false when the score was computed with a scored file missing or unreadable (#745);
+  // null when not scored, or scored before the field existed
+  quality_data_complete: boolean | null
+  quality_missing_evidence: string[]
 }
 
 export interface QualityScoreResult {
@@ -42,6 +55,8 @@ export interface QualityScoreResult {
   band: string
   dimensionScores: Array<{ name: string; score: number; max: number; penalty?: number; detail?: string }>
   flags: string[]
+  data_complete: boolean | null
+  missing_evidence: string[]
 }
 
 export interface AdminRunsResponse {

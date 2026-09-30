@@ -121,9 +121,9 @@ phases:
           MIGRATE_USER: "${MIGRATION_USER}"
         llm:
           CVICHE_LLM_TIMEOUT_SECONDS: "${CVICHE_LLM_TIMEOUT_SECONDS}"
-          CVICHE_LLM_MAX_ATTEMPTS: "${CVICHE_LLM_MAX_ATTEMPTS}"
           CVICHE_STAGE_TIMEOUT_SECONDS: "${CVICHE_STAGE_TIMEOUT_SECONDS}"
           CVICHE_STALE_RUN_MINUTES: "${CVICHE_STALE_RUN_MINUTES}"
+          CVICHE_AUTO_RETRY_ENABLED: "${CVICHE_AUTO_RETRY_ENABLED}"
         redis:
           CVICHE_REDIS_URL: "${CVICHE_REDIS_URL}"
         allowed_users: []
@@ -144,7 +144,6 @@ phases:
        #- echo "DATABASE_URL=${DATABASE_URL}" > k8s/overlays/${ENV_NAME}/db.env
        #- echo "CVICHE_DATABASE_URL=${DATABASE_URL}" >> k8s/overlays/${ENV_NAME}/db.env
        - echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" > k8s/overlays/${ENV_NAME}/db.env
-       - echo "CVICHE_OPENAI_API_KEY=${OPENAI_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
        - echo "PUBMED_API_KEY=${PUBMED_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
        # Teams run-notification webhook (bearer credential -> secret, like the keys above).
        # Optional: unset -> empty value -> notifier no-ops. Set the CVICHE_TEAMS_WEBHOOK_URL
@@ -189,6 +188,10 @@ phases:
       # this, `rollout restart` returns immediately and the deploy reports green
       # even when the new ReplicaSet never rolls out (e.g. a failing migration
       # init container), silently leaving the previous image serving traffic.
-      - kubectl rollout status deployment/cviche-backend -n cviche-${ENV_NAME} --timeout=300s
+      # Backend gets 1800s, not 300s: an old pod now drains in-flight runs for
+      # up to ~26 min on SIGTERM (#116) and keeps its CPU/memory requests while
+      # it does, so on a node group without spare headroom a new pod can stay
+      # Pending until an old one exits.
+      - kubectl rollout status deployment/cviche-backend -n cviche-${ENV_NAME} --timeout=1800s
       - kubectl rollout status deployment/cviche-frontend -n cviche-${ENV_NAME} --timeout=300s
 

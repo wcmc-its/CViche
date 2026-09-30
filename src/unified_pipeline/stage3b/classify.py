@@ -16,13 +16,15 @@ stage3b module.
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import TypedDict
 
+from ..core.retired_taxonomy_codes import live_taxonomy_code
 from ..llm.retry import LLMOutageError
 from ..llm_client import call_llm
 from .context import TaxonomyContext
-from .io import _safe_float
+from .io import _safe_float, taxonomy_code_set
 from .prompt import (
     CLASSIFICATION_RULES_VERSION,
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
@@ -31,6 +33,10 @@ from .prompt import (
 )
 
 logger = logging.getLogger(__name__)
+
+# call_llm kwarg that drops the Bedrock cachePoint for one call (#50). The
+# stage default (llm_config.yaml enable_prompt_caching: true) applies otherwise.
+_NO_PROMPT_CACHE = {"enable_prompt_caching": False}
 
 # Taxonomy code prefixes for duplicate-pair resolution (see docs/CODING_STANDARDS.md §8.2):
 # an "M"-series classification (grants etc.) is preferred over the unclassified "T" (Appendix) fallback.
@@ -93,10 +99,7 @@ def _valid_taxonomy_codes(taxonomy: dict) -> set[str]:
     untrusted input; a code outside this set must not be persisted as a
     real classification.
     """
-    return {
-        c["code"] for c in taxonomy.get("codes", [])
-        if isinstance(c, dict) and isinstance(c.get("code"), str) and c["code"]
-    }
+    return taxonomy_code_set(taxonomy)
 
 
 def _normalize_confidence(value: object, default: float = 0.5) -> float:
@@ -211,6 +214,24 @@ def _index_classifications_by_position(classifications: list[dict], batch_start:
     return class_by_idx
 
 
+def _call_classifier(messages: list[dict], cache_system_prompt: bool) -> dict:
+    """The one classification LLM call of a batch.
+
+    cache_system_prompt=False drops the Bedrock cachePoint for this call.
+    classify_entries_batch passes it for a group that fits in ONE batch: its
+    system prompt (group context + taxonomy_ref) is never re-sent within the
+    group, so the cache write's 1.25x premium buys no read (#50).
+    """
+    return call_llm(
+        stage="stage_3b",
+        messages=messages,
+        response_format={"type": "json_object"},
+        temperature=0.1,
+        max_tokens=2000,
+        **({} if cache_system_prompt else _NO_PROMPT_CACHE),
+    )
+
+
 def _classify_one_batch(
     batch_entries: list[dict],
     batch_start: int,
@@ -218,6 +239,7 @@ def _classify_one_batch(
     all_suggested_codes: list[str],
     taxonomy_ref: str,
     valid_codes: set[str],
+    cache_system_prompt: bool = True,
 ) -> tuple[list[dict], _BatchStats]:
     """Classify a single batch against a taxonomy_ref built once by the caller.
 
@@ -253,7 +275,6 @@ def _classify_one_batch(
 
     # Build prompt
     context_str = taxonomy_context.format_context_string()
-
     system_prompt = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
         context_str=context_str, taxonomy_ref=taxonomy_ref
     )
@@ -280,13 +301,7 @@ Return ONLY valid JSON with the classifications array."""
     # Call LLM
     stats.llm_batches = 1
     try:
-        llm_result = call_llm(
-            stage="stage_3b",
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.1,
-            max_tokens=2000
-        )
+        llm_result = _call_classifier(messages, cache_system_prompt)
 
         # Parse response
         content = llm_result["content"]
@@ -370,7 +385,7 @@ Return ONLY valid JSON with the classifications array."""
             c = class_by_idx.get(orig_idx)
             if c is not None:
                 fallback_code = all_suggested_codes[0] if all_suggested_codes else "T"
-                code = c.get("code")
+                code = live_taxonomy_code(c.get("code"))
                 # isinstance-guard before the set membership check: `code`
                 # is untrusted LLM output and could be any JSON type (e.g. a
                 # list), which would raise TypeError: unhashable type on
@@ -456,13 +471,17 @@ def classify_entries_batch(
     all_suggested_codes, taxonomy_ref = _build_taxonomy_ref_for_batch(taxonomy_context, taxonomy)
     valid_codes = _valid_taxonomy_codes(taxonomy)
 
+    # A group that fits in one batch never re-sends its system prompt, so a
+    # cache write would be paid (1.25x) and never read (#50).
+    multi_batch = len(entries) > batch_size
+
     # Process in batches
     for batch_start in range(0, len(entries), batch_size):
         batch_entries = entries[batch_start:batch_start + batch_size]
 
         batch_results, batch_stats = _classify_one_batch(
             batch_entries, batch_start, taxonomy_context, all_suggested_codes,
-            taxonomy_ref, valid_codes
+            taxonomy_ref, valid_codes, cache_system_prompt=multi_batch
         )
         all_results.extend(batch_results)
         total_input_tokens += batch_stats.input_tokens
@@ -526,6 +545,41 @@ def group_entries_by_hierarchy(entries: list[dict]) -> dict[str, list[dict]]:
         groups[key].append(entry)
 
     return groups
+
+
+def _parse_t_validation_response(content: str) -> list:
+    """Parse the T-validation LLM response into its list of reclassifications."""
+    # Handle both array and object responses
+    result = json.loads(content)
+    if isinstance(result, dict):
+        # If wrapped in an object, try to find the array
+        if "results" in result:
+            reclassifications = result["results"]
+        elif "entries" in result:
+            reclassifications = result["entries"]
+        elif "classifications" in result:
+            reclassifications = result["classifications"]
+        else:
+            # An unrecognized wrapper shape is malformed, not a puzzle to
+            # guess at: reaching for "the first dict value" made an
+            # unexpected response shape look like a valid one instead of
+            # a visible, logged failure.
+            logger.warning(
+                "Stage 3b T-validation: response object has none of "
+                "results/entries/classifications (keys=%s); treating as "
+                "no reclassifications", list(result.keys())
+            )
+            reclassifications = []
+    else:
+        reclassifications = result
+
+    if not isinstance(reclassifications, list):
+        logger.warning(
+            "Stage 3b T-validation: reclassifications was %s, not a "
+            "list; treating as none", type(reclassifications).__name__
+        )
+        reclassifications = []
+    return reclassifications
 
 
 def validate_t_classifications(
@@ -607,36 +661,7 @@ Respond with a JSON array of objects, one per entry:
         # Parse response
         content = llm_result["content"]
 
-        # Handle both array and object responses
-        result = json.loads(content)
-        if isinstance(result, dict):
-            # If wrapped in an object, try to find the array
-            if "results" in result:
-                reclassifications = result["results"]
-            elif "entries" in result:
-                reclassifications = result["entries"]
-            elif "classifications" in result:
-                reclassifications = result["classifications"]
-            else:
-                # An unrecognized wrapper shape is malformed, not a puzzle to
-                # guess at: reaching for "the first dict value" made an
-                # unexpected response shape look like a valid one instead of
-                # a visible, logged failure.
-                logger.warning(
-                    "Stage 3b T-validation: response object has none of "
-                    "results/entries/classifications (keys=%s); treating as "
-                    "no reclassifications", list(result.keys())
-                )
-                reclassifications = []
-        else:
-            reclassifications = result
-
-        if not isinstance(reclassifications, list):
-            logger.warning(
-                "Stage 3b T-validation: reclassifications was %s, not a "
-                "list; treating as none", type(reclassifications).__name__
-            )
-            reclassifications = []
+        reclassifications = _parse_t_validation_response(content)
 
         valid_codes = _valid_taxonomy_codes(taxonomy)
 
@@ -661,7 +686,7 @@ Respond with a JSON array of objects, one per entry:
                 malformed += 1
                 continue
 
-            raw_new_code = reclass.get("new_code") or "T"
+            raw_new_code = live_taxonomy_code(reclass.get("new_code")) or "T"
             # isinstance-guard before the set membership check: `new_code` is
             # untrusted LLM output and could be any JSON type, which would
             # raise TypeError: unhashable type on `in valid_codes` instead of
@@ -720,6 +745,8 @@ Respond with a JSON array of objects, one per entry:
 
         return updated_entries, stats
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception as exc:
         logger.exception(
             "Stage 3b T-validation failed",
@@ -920,6 +947,8 @@ Fragment at index {idx}:
 
         return entries, stats
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception as e:
         logger.exception(
             "Stage 3b fragment reconnection failed",
@@ -929,44 +958,47 @@ Fragment at index {idx}:
         return entries, {"fragments_reviewed": len(fragment_candidates), "fragments_reconnected": locals().get("reconnected_count", 0), "cost": 0.0, "error": str(e)}
 
 
-def detect_duplicates(entries: list[dict], similarity_threshold: float = 0.9) -> tuple[list[dict], list[dict]]:
+def _duplicate_key(text: str) -> str:
+    """The comparison key two entries must share EXACTLY to be duplicates.
+
+    Lowercased, with every non-word character removed -- punctuation AND
+    whitespace. So a case, punctuation, or spacing difference (including a
+    token split or joined: "2013 - present" vs "2013present") still matches,
+    but any change to a letter or digit does not.
     """
-    Detect and flag duplicate entries based on text similarity.
+    return re.sub(r"[^\w]", "", text.lower())
+
+
+def detect_duplicates(entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """
+    Detect and flag duplicate entries: entries whose text is the same once
+    case, punctuation and whitespace are ignored (`_duplicate_key`).
 
     Duplicates occur when the same content appears under multiple CV sections
     (e.g., grants listed under both "Other Publications" and "Grant Support").
 
+    A flagged entry is filtered out by stage 4 before extraction and never
+    reaches the output, so a false positive is a silent content loss. That
+    is why this is key EQUALITY and not a similarity ratio: it used to flag
+    any pair at >= 0.9 SequenceMatcher similarity, and sibling records that
+    share a long template differ by exactly the word or year that identifies
+    them -- "Best Junior ... Award" (2019) vs "Best Senior ... Award" (2020),
+    "... Airway Workshop" vs "... Suture Workshop" -- so the second one of
+    each vanished (#945). A near-duplicate that differs by a real letter or
+    digit (a citation re-typed with an extra initial, a template label left
+    in) is now kept and rendered: a visible repeat the CV owner can delete,
+    instead of a silent drop they never see.
+
     Args:
         entries: List of classified entries
-        similarity_threshold: Minimum similarity ratio to consider duplicate (0-1)
 
     Returns:
         Tuple of (deduplicated_entries, duplicate_info)
         - deduplicated_entries: Entries with duplicates marked
         - duplicate_info: List of detected duplicate pairs
     """
-    import re
-    from difflib import SequenceMatcher
-
-    def normalize_text(text: str) -> str:
-        """Normalize text for comparison."""
-        if not text:
-            return ""
-        # Lowercase, remove extra whitespace, strip punctuation
-        text = text.lower()
-        text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'[^\w\s]', '', text)
-        return text.strip()
-
-    def normalized_similarity(n1: str, n2: str) -> float:
-        """Similarity ratio between two ALREADY-normalized texts."""
-        if not n1 or not n2:
-            return 0.0
-        # Use SequenceMatcher for fuzzy matching
-        return SequenceMatcher(None, n1, n2).ratio()
-
     # Candidates for comparison: entries with enough text to be meaningfully
-    # compared (skip near-empty fragments). normalize_text runs once per
+    # compared (skip near-empty fragments). The key is computed once per
     # candidate here rather than repeatedly inside the comparison loop below.
     candidates = []
     for idx, entry in enumerate(entries):
@@ -979,40 +1011,34 @@ def detect_duplicates(entries: list[dict], similarity_threshold: float = 0.9) ->
         # entry that is merely too short.
         if not isinstance(text, str) or len(text) < 20:  # Skip very short/non-string entries
             continue
-        candidates.append((idx, entry, normalize_text(text)))
+        candidates.append((idx, entry, _duplicate_key(text)))
 
     # Find duplicates
     duplicate_pairs = []
     seen_duplicates = set()  # Track which indices have been marked as duplicates
 
-    # O(n^2) over `candidates`. This used to bucket entries by their first
-    # 100 normalized characters and only compare within a bucket -- a real
-    # correctness bug, not just an optimization: two near-duplicate entries
-    # that diverged in that prefix (different opening wording, a prepended
-    # date/title) landed in different buckets and were NEVER compared,
-    # silently missing real duplicates. Compare every eligible pair instead.
-    # CV entry counts are small (at most a few hundred per document), so the
-    # quadratic comparison is fine in practice; do not reintroduce prefix
-    # bucketing (or any other blocking key) without proving it can't split a
-    # genuinely similar pair the way the prefix key did.
-    for i, (idx1, entry1, norm1) in enumerate(candidates):
-        for idx2, entry2, norm2 in candidates[i + 1:]:
+    # Every eligible pair is compared. O(n^2), but each comparison is a
+    # plain string equality, so even the largest CV in the corpus (~1,150
+    # candidates) costs milliseconds.
+    for i, (idx1, entry1, key1) in enumerate(candidates):
+        for idx2, entry2, key2 in candidates[i + 1:]:
             if idx1 in seen_duplicates and idx2 in seen_duplicates:
                 continue
 
-            sim = normalized_similarity(norm1, norm2)
-            if sim >= similarity_threshold:
+            if key1 == key2:
                 # A duplicate pair is recorded once per (idx1, idx2)
-                # comparison that clears the threshold -- the loop above
-                # only *skips* a pair when BOTH sides are already marked
-                # duplicate, so one entry CAN appear in more than one
-                # recorded pair (e.g. three near-identical entries A/B/C
-                # produce pairs (A,B) and (A,C), both B and C marked
-                # duplicate, A left as the surviving original).
+                # comparison that matches -- the loop above only *skips* a
+                # pair when BOTH sides are already marked duplicate, so one
+                # entry CAN appear in more than one recorded pair (e.g.
+                # three identical entries A/B/C produce pairs (A,B) and
+                # (A,C), both B and C marked duplicate, A left as the
+                # surviving original).
                 duplicate_pairs.append({
                     "entry1_idx": idx1,
                     "entry2_idx": idx2,
-                    "similarity": sim,
+                    # Always 1.0 now (key equality); kept so the
+                    # meta.duplicate_pairs artifact keeps its shape.
+                    "similarity": 1.0,
                     "entry1_hierarchy": entry1.get("hierarchy", []),
                     "entry2_hierarchy": entry2.get("hierarchy", []),
                     "entry1_code": entry1.get("taxonomy_code"),

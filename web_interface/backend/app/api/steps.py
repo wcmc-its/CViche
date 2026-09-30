@@ -1,6 +1,7 @@
 """Step details and data API endpoints."""
 import json
 import logging
+from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.schemas import StepDetail, LogEntry
-from app.auth import get_current_user, require_admin
+from app.auth import get_current_user, require_admin, visible_cost
 from app.services import artifact_service, prompt_log_service
 from app.services.run_service import check_run_access
 from app.storage import get_storage
@@ -67,10 +68,13 @@ def get_step_detail(
             )
             output_files = []
 
-    # Try to load preview of first output file
+    # Try to load preview of first output file. The pipeline stores absolute
+    # paths; the resolver takes basenames only (it 400s on a leading "/"), so
+    # passing the raw path failed every completed step's detail request.
     output_preview = None
     if output_files and step.status == "complete":
-        output_preview = artifact_service.generate_preview(db, run_id, output_files[0])
+        output_preview = artifact_service.generate_preview(
+            db, run_id, Path(output_files[0]).name)
 
     return StepDetail(
         step_id=step.id,
@@ -78,7 +82,7 @@ def get_step_detail(
         name=step.step_name,
         status=step.status,
         duration=step.duration_seconds,
-        cost_usd=step.cost or 0.0,
+        cost_usd=visible_cost(current_user, step.cost),
         input_file=step.input_file,
         output_files=output_files,
         logs=log_entries,
@@ -163,7 +167,7 @@ def download_input_file(
     """Download the ORIGINAL uploaded CV, named as the user uploaded it.
 
     The source is retained in durable storage at input/<run_id>.<ext> because
-    restart/retry re-materialize it (see runs._materialize_input_if_missing),
+    restart/retry re-materialize it (see run_service._materialize_input_if_missing),
     but it was only ever read internally — there was no way to get the original
     file back out. Same owner-or-admin gate as the outputs download.
     """

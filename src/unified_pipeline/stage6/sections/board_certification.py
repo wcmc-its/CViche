@@ -305,11 +305,43 @@ def _backfill_missing_fields_from_structured(
         return rows
 
     specialty, cert_num, year = rows[0]
-    if not cert_num and cert_candidate:
-        cert_num = cert_candidate
-    if not year and date_candidate:
-        year = date_candidate
+    if not cert_num:
+        if cert_candidate:
+            cert_num = cert_candidate
+            _log_single_row_backfill('certificate_number')
+        elif len(cert_candidates) > 1:
+            _log_single_row_backfill_skip('certificate_number', len(cert_candidates))
+    if not year:
+        if date_candidate:
+            year = date_candidate
+            _log_single_row_backfill('year_certified')
+        elif len(year_candidates) > 1:
+            _log_single_row_backfill_skip('year_certified', len(year_candidates))
     return [(specialty, cert_num, year)]
+
+
+def _log_single_row_backfill(field_name: str) -> None:
+    """Record that a single reparsed row took `field_name` from the entry's
+    structured fields, so a rendered value's provenance (backfilled, not
+    reparsed) is auditable (#696). Logs the field name and row count only --
+    never the CV's value (PII)."""
+    logger.info(
+        "board certification: single reparsed row (1 of 1) was missing %s; "
+        "backfilled from the entry's structured field (exactly one candidate)",
+        field_name,
+    )
+
+
+def _log_single_row_backfill_skip(field_name: str, candidate_count: int) -> None:
+    """Record that a single reparsed row's missing `field_name` was NOT
+    backfilled because the structured field lists several values (#696).
+    Count only, never the values (PII)."""
+    logger.warning(
+        "board certification: single reparsed row (1 of 1) is missing %s; "
+        "structured field lists %d values, so none is attributable -- "
+        "leaving blank rather than guessing",
+        field_name, candidate_count,
+    )
 
 
 def _reconstruct_certification_rows(
@@ -384,6 +416,10 @@ _CERTIFICATION_HEADER_CELLS = {
     'full name of board',
     'certificate # (indicate if board eligible)',
     'dates of certification (yyyy–yyyy)',
+    # The same two columns without their parentheticals, as a faculty copy of
+    # an older revision carries them (A5IZ6Q, #829).
+    'certificate #',
+    'dates of certification',
 }
 
 _HEADER_CELL_WHITESPACE_RE = re.compile(r'\s+')
@@ -414,6 +450,28 @@ def _is_certification_header_line(line: str) -> bool:
     if not cells:
         return False
     return all(cell in _CERTIFICATION_HEADER_CELLS for cell in cells)
+
+
+def _is_header_record(fields: dict, text: str) -> bool:
+    """True when an entry is the source table's own header row, extracted as
+    if it were a certification.
+
+    Stage 4 reads "Full Name of Board | Certificate # | ..." like any other
+    row and returns certifying_board="Full Name of Board", which the
+    single-certification path rendered as a certification (A5IZ6Q, #829).
+    Every non-empty extracted value AND every text line must be a known
+    header cell; one real value or line keeps the entry. (An entry with no
+    values and only header lines is skipped too: the text path would render
+    nothing for it anyway.)
+    """
+    values = [str(v) for key in ('certifying_board', 'certificate_number',
+                                 'year_certified', 'recertification_date')
+              for v in (fields.get(key) if isinstance(fields.get(key), list)
+                        else [fields.get(key)])
+              if v and str(v).strip()]
+    lines = entry_lines(text or '')
+    return (all(_is_certification_header_line(v) for v in values)
+            and all(_is_certification_header_line(line) for line in lines))
 
 
 class BoardCertificationSection:
@@ -468,6 +526,8 @@ class BoardCertificationSection:
         for entry in sort_entries_reverse_chronological(entries):
             fields = entry.get('extracted_fields', {}) or {}
             original_text = entry.get('text', '')
+            if _is_header_record(fields, original_text):
+                continue
 
             certifying_board = fields.get('certifying_board', '')
             certificate_number = fields.get('certificate_number', '')

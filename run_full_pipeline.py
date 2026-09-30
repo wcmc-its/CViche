@@ -97,6 +97,7 @@ from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
+from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
 
 logger = logging.getLogger(__name__)
 # "__main__" when this file is run as the CLI, "run_full_pipeline" when a test
@@ -187,6 +188,15 @@ def configure_cli_logging() -> None:
 _COMPOSITE_STAGE = '3'
 # Nothing runs after stage 6, so its failure notice does not promise to continue.
 _FINAL_STAGE = '6'
+
+#: The repo root, taken from this script's own location so no path below
+#: depends on the directory the CLI happens to be launched from (#490). Only
+#: the script's directory is resolved: a worktree's ``outputs`` symlink to a
+#: shared corpus farm is left unresolved, so it still lands on the farm.
+_REPO_ROOT = Path(__file__).resolve().parent
+#: Root the stage_* output dirs (and the #745 stage-error record) live under.
+_OUTPUTS_ROOT = _REPO_ROOT / 'src' / 'unified_pipeline' / 'outputs'
+_STAGE_1A_DIRNAME = 'stage_1a_segmentation'
 # The only stages that open the source document. Everything else works from the
 # JSON artifacts an earlier run left behind -- including stage 4, which reads
 # Path(docx_path).stem and never the file -- so a standalone --stage rerun of
@@ -334,9 +344,9 @@ def get_output_paths(document_uid: str) -> dict[str, Path]:
     Those five modules name their output from the ``document_uid`` carried in
     their input JSON, which every stage propagates unchanged from stage 1a.
     """
-    base = Path('src/unified_pipeline/outputs')
+    base = _OUTPUTS_ROOT
     return {
-        '1a': base / 'stage_1a_segmentation' / f'{document_uid}_segmented.json',
+        '1a': base / _STAGE_1A_DIRNAME / f'{document_uid}_segmented.json',
         '1b': base / 'stage_1b_hierarchy_mapping' / f'{document_uid}_hierarchy_mapped.json',
         '2': base / 'stage_2_entry_extraction' / f'{document_uid}_entries.json',
         '3a': base / 'stage_3a_header_mappings' / f'{document_uid}_header_taxonomy.json',
@@ -550,6 +560,21 @@ def _skipped(stage: str, requirement: str) -> StageResult:
     return StageResult(stage=stage, skipped_reason=f"{requirement} required")
 
 
+def _record_stage_outcome(document_uid: str, stage: str, error: StageError | None) -> None:
+    """Write (or, on success, clear) ``stage``'s entry in the stage-error record
+    quality_score reads for its fatal gate (#745).
+
+    Failing to write it must neither turn a clean stage into a failure nor mask
+    the stage's own exception, which run_stage has already logged and recorded
+    in the summary -- so the write failure is logged with its traceback and the
+    run carries on, the CLI's documented continue-on-error behaviour.
+    """
+    try:
+        record_stage_outcome(stage_errors_path(_OUTPUTS_ROOT, document_uid), stage, error)
+    except (OSError, ValueError):
+        logger.exception("Could not update the stage-error record for stage %s", stage)
+
+
 def run_stage(ctx: PipelineContext, stage: str,
               fn: Callable[[PipelineContext], StageResult]) -> StageResult:
     """Run one stage inside the pipeline's single failure boundary.
@@ -560,6 +585,7 @@ def run_stage(ctx: PipelineContext, stage: str,
     so no summary printed and failed_stages() never ran.
     """
     start = time.perf_counter()
+    stage_error: StageError | None = None
     try:
         result = fn(ctx)
     except Exception as e:
@@ -571,7 +597,10 @@ def run_stage(ctx: PipelineContext, stage: str,
         if stage != _FINAL_STAGE:
             logger.warning("  Continuing with remaining stages...")
         result = StageResult(stage=stage, error=f"{type(e).__name__}: {e}")
+        stage_error = StageError.from_exception(stage, e)
     result = replace(result, duration_seconds=time.perf_counter() - start)
+    if stage_error is not None or result.succeeded:
+        _record_stage_outcome(ctx.document_uid, stage, stage_error)
     if result.succeeded:
         logger.info("  Time: %s", format_duration(result.duration_seconds))
     logger.info("")
@@ -580,22 +609,33 @@ def run_stage(ctx: PipelineContext, stage: str,
 
 
 def _count_headers(nodes: list[dict]) -> int:
-    """Total header nodes in a hierarchy, including every nested child."""
-    count = len(nodes)
-    for node in nodes:
-        count += _count_headers(node.get('children', []))
+    """Total header nodes in a hierarchy, including every nested child.
+
+    Iterative: a deep header chain must not hit the interpreter's recursion limit.
+    """
+    count = 0
+    stack = [nodes]
+    while stack:
+        level = stack.pop()
+        count += len(level)
+        for node in level:
+            stack.append(node.get('children', []))
     return count
 
 
 def _hierarchy_lines(nodes: list[dict], depth: int = 0) -> list[str]:
-    """Indented ``[LEVEL] text`` lines for the human-readable stage 1a dump."""
+    """Indented ``[LEVEL] text`` lines for the human-readable stage 1a dump.
+
+    Iterative pre-order walk (see ``_count_headers``).
+    """
     lines: list[str] = []
-    for node in nodes:
-        indent = "  " * depth
+    stack = [(node, depth) for node in reversed(nodes)]
+    while stack:
+        node, d = stack.pop()
         level = node.get('level', 'H1')
         text = node.get('text', '')
-        lines.append(f"{indent}[{level}] {text}")
-        lines.extend(_hierarchy_lines(node.get('children', []), depth + 1))
+        lines.append(f"{'  ' * d}[{level}] {text}")
+        stack.extend((child, d + 1) for child in reversed(node.get('children', [])))
     return lines
 
 
@@ -614,7 +654,7 @@ def _stage_1a(ctx: PipelineContext) -> StageResult:
 
     hierarchy, stats = get_cv_hierarchy_chunked(cv_path=str(ctx.cv_path))
 
-    output_dir = Path('src/unified_pipeline/outputs/stage_1a_segmentation')
+    output_dir = _OUTPUTS_ROOT / _STAGE_1A_DIRNAME
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / f"{ctx.document_uid}_segmented.json"
     total_headers = _count_headers(hierarchy)

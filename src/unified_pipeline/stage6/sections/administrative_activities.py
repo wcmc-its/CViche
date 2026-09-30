@@ -17,9 +17,11 @@ Three different repairs, in the order the writer tries them:
    2011-2013)" carries both the role and the range; "(2010-present)" carries
    only the range. Either way the parenthetical is stripped back out of the
    activity text so the committee name renders clean.
-3. 3+ lines of raw text, or 2 lines with no extracted activity, means the fields
-   describe one item out of many and `_multiline_committee_rows` re-parses
-   the text per line.
+3. Raw text that holds more than one dated record (`_looks_like_multiple_records`,
+   #660 -- counted per dated line, not per line), or 2+ lines with no extracted
+   activity, means the fields describe one item out of many and
+   `_multiline_committee_rows` re-parses the text per line. A complete
+   activity+dates record over text with at most one date is trusted at any length.
 
 That last helper runs section O's line parser,
 `_parse_flattened_committee_lines` in `stage6.parsing` (#572 -- P used to run
@@ -27,6 +29,9 @@ a drifted copy that had no pipe branch, no trailing-date branch and no
 orphaned-date pairing, so those shapes rendered with an empty Dates column).
 P keeps its own row writer because its table has a Role column O's does not:
 parsed parenthetical titles go there instead of back into the activity text.
+It also leaves the parser's `institution_column` off (#664): a P pipe row reads
+"Activity | Role | Dates", so its middle cell is not an institution -- P's own
+institution comes from the extracted field (`_name_with_institution`, #985).
 
 Two boundary decisions from the #625 review, both local to this file:
 `committee_name`/`committee`/`activity` are three extraction aliases for one
@@ -45,7 +50,7 @@ from typing import List, Tuple, TypedDict
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
 from ..normalization import _committee_cell_text
-from ..parsing import _parse_flattened_committee_lines
+from ..parsing import _looks_like_multiple_records, _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
 
@@ -136,6 +141,7 @@ class _CommitteeRecord:
     role: str = ''
     start_date: str = ''
     end_date: str = ''
+    institution: str = ''
 
     @classmethod
     def from_raw(cls, raw, *, name_fallback: bool = False) -> '_CommitteeRecord':
@@ -158,7 +164,49 @@ class _CommitteeRecord:
             role=_committee_cell_text(raw.get('role')),
             start_date=raw.get('start_date') or '',
             end_date=raw.get('end_date') or '',
+            institution=_committee_cell_text(raw.get('institution')),
         )
+
+
+# Stage 4 sometimes hedges an institution it could not read off the entry:
+# "Duke University (implied)", "Not provided". Those words are the model's
+# own, not the CV's, so they must never reach the rendered cell (#985).
+_HEDGED_INSTITUTION_RE = re.compile(
+    r'\b(?:implied|inferred|not\s+provided)\b', re.IGNORECASE)
+_WORD_RE = re.compile(r'\w+')
+_PARENTHETICAL_RE = re.compile(r'\([^)]*\)')
+# Function words that do not make an institution a different thing ("Department
+# of Genetics" is already in "Genetics Department Faculty Meeting").
+_INSTITUTION_STOPWORDS = frozenset({'of', 'the', 'for', 'and', 'at', 'in'})
+
+
+def _content_words(text: str) -> list[str]:
+    return [w for w in _WORD_RE.findall(text.casefold())
+            if w not in _INSTITUTION_STOPWORDS]
+
+
+def _name_with_institution(activity: str, institution: str) -> str:
+    """Fold the extracted institution into the committee-name cell (#985).
+
+    The P table has no Institution column, so an extracted `institution` had
+    nowhere to render and was dropped. Append it as "Committee, Institution",
+    except (name returned unchanged) when there is no name to attach it to,
+    the institution is a stage-4 hedge rather than CV text, the name already
+    carries every content word of the institution (exact containment and
+    near-duplicates), or the name -- ignoring a parenthetical acronym such as
+    "(CENO)" -- is itself contained in the institution.
+    """
+    if not activity or _HEDGED_INSTITUTION_RE.search(institution):
+        return activity
+    name_words = _content_words(activity)
+    inst_words = _content_words(institution)
+    # An empty institution has no words, so it falls out here too.
+    if set(inst_words) <= set(name_words):
+        return activity
+    core = ' '.join(_content_words(_PARENTHETICAL_RE.sub(' ', activity)))
+    if f" {core} " in f" {' '.join(inst_words)} ":
+        return activity
+    return f"{activity.strip()}, {institution}"
 
 
 class AdministrativeActivitiesSection:
@@ -176,9 +224,9 @@ class AdministrativeActivitiesSection:
             logger.info("Filling Administrative Activities (%s entries)...", len(entries))
 
         # Find Administrative section
-        section_idx = self._find_paragraph_with_text("INSTITUTIONAL ADMINISTRATIVE")
+        section_idx = self._find_header_paragraph("INSTITUTIONAL ADMINISTRATIVE")
         if section_idx is None:
-            section_idx = self._find_paragraph_with_text("ADMINISTRATIVE ACTIVITIES")
+            section_idx = self._find_header_paragraph("ADMINISTRATIVE ACTIVITIES")
         if section_idx is None:
             return
 
@@ -228,9 +276,13 @@ class AdministrativeActivitiesSection:
                 for rec in record_list:
                     record = _CommitteeRecord.from_raw(rec, name_fallback=True)
                     dates = format_date_range(
-                        record.start_date, record.end_date, taxonomy_code) or ''
+                        record.start_date, record.end_date, taxonomy_code,
+                        original_text) or ''
                     if record.activity:
-                        rows.append((record.activity, record.role, dates))
+                        rows.append((
+                            _name_with_institution(
+                                record.activity, record.institution),
+                            record.role, dates))
                 continue
 
             record = _CommitteeRecord.from_raw(fields)
@@ -243,30 +295,30 @@ class AdministrativeActivitiesSection:
             # look at what extraction produced, not at the fallback's
             # rewrite.
             extracted_activity = activity
-            dates = format_date_range(record.start_date, record.end_date, taxonomy_code) or ''
+            dates = format_date_range(record.start_date, record.end_date, taxonomy_code,
+                                      original_text) or ''
 
-            # #660 item 1: extraction alone already produced a complete
+            # #660: extraction alone already produced a complete
             # activity+dates record for this entry. Capture that BEFORE any
             # raw-text fallback below touches `activity`/`dates`, so the
-            # line-count-based rerouting further down can never discard a
-            # fully-populated structured record just because its source text
-            # happens to wrap across a FEW display lines (a wrapped
-            # description under an otherwise clean single committee entry,
-            # say). Capped at <=3 raw lines, not "any line count": corpus
-            # proof (66-CV render gate) that an uncapped version regresses --
-            # a genuine multi-committee mega-block where extraction only
-            # captured ONE of many merged committees (e.g. the first of 25+
-            # blank-line- or date-prefix-delimited entries) also produces a
-            # non-empty activity+dates pair for that one committee, and
-            # trusting it outright silently dropped the other 24. Below the
-            # cap, every corpus case observed was a genuine single record
-            # (extraction legitimately consolidating a multi-line
-            # description); at or above it, every corpus case observed was a
-            # genuine burst extraction only partially captured -- the
-            # existing (safer) reparse below is still correct there. See the
-            # PR description for the exact corpus counter-example.
+            # rerouting further down can never discard a fully-populated
+            # structured record just because its source text wraps across
+            # display lines (a description under an otherwise clean single
+            # committee entry, say).
+            #
+            # Whether the text holds ONE record is read off the text itself,
+            # per dated line (`_looks_like_multiple_records`), not off its
+            # length. PR #714 capped trust at 3 lines because a genuine
+            # multi-committee mega-block, where extraction captured only the
+            # first of 25+ merged committees, also yields a non-empty
+            # activity+dates pair, and trusting it dropped the other 24. A
+            # line count both over-trusted (3 dated lines) and under-trusted
+            # (a 5-line wrapped description with one date); a block with two
+            # or more dated lines is a burst at any length and still reparses.
             lines = entry_lines(original_text)
-            structured_complete = bool(activity) and bool(dates) and len(lines) <= 3
+            structured_complete = (
+                bool(activity) and bool(dates)
+                and not _looks_like_multiple_records(lines))
 
             # If dates not extracted, try to parse from parenthetical patterns in original text
             # Common patterns: "(Chair 2011-2013)", "(2010-present)", "(Member 1999-2012)"
@@ -316,8 +368,9 @@ class AdministrativeActivitiesSection:
 
             # Route through the shared #572 line parser (`_multiline_committee_rows`
             # -> `_parse_flattened_committee_lines`) when:
-            #   - the text contains 3+ lines (a merged multi-record block --
-            #     field extraction only captured one item out of many), or
+            #   - the text contains 3+ lines and no complete structured record
+            #     covers it (a merged multi-record block -- field extraction
+            #     only captured one item out of many), or
             #   - it's 2 lines with nothing extracted, or
             #   - #627: it's a 1- or 2-line entry whose raw text still carries
             #     an unresolved pipe-separated date column (e.g. "Committee
@@ -339,8 +392,10 @@ class AdministrativeActivitiesSection:
                 rows.extend(parsed_rows)
             else:
                 if not activity:
-                    activity = original_text[:150]
-                rows.append((activity, role, dates))
+                    activity = original_text
+                rows.append((
+                    _name_with_institution(activity, record.institution),
+                    role, dates))
 
         return rows
 

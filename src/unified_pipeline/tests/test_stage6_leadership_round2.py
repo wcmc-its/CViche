@@ -379,6 +379,114 @@ class TestSingleColumnFallback:
         assert gen.stats["entries_inserted"] == 0
 
 
+def test_raw_text_fallback_role_is_not_cut_at_100_characters():
+    """#983: a one-line entry with neither role nor institution renders as its
+    own text; `original_text[:100]` cut it mid-word."""
+    text = ("Chair of the Zorblax Standing Committee on Ferrous Metallurgy and its "
+            "Subcommittee on Ceremonial Bunting Standards and Historical Pennant Practice")
+    assert len(text) > 100
+    gen = _real_template_generator()
+    gen._fill_leadership([{"text": text, "extracted_fields": {}, "taxonomy_code": "O"}])
+    table = gen._find_table_after_paragraph(gen._find_paragraph_exact(CANONICAL_HEADER))
+    assert [row.cells[0].text for row in table.rows[1:]] == [text]
+
+
+def _o_rows(entry):
+    gen = _real_template_generator()
+    gen._fill_leadership([entry])
+    table = gen._find_table_after_paragraph(gen._find_paragraph_exact(CANONICAL_HEADER))
+    return [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+
+
+def _table_row_entry(text, **fields):
+    return {"text": text, "extracted_fields": fields, "taxonomy_code": "O",
+            "element_type": "table_row", "element_idx_start": 7, "element_idx_end": 7}
+
+
+class TestWrappedRowRendersAsOneRecord:
+    """#987: one table row whose institution cell wraps is one role."""
+
+    WRAPPED = ("Director, Zorblax Studies | Quuxville General Hospital\n"
+               "Quuxville, Ohio | Sept. 1999 -\nJune 2010")
+
+    def test_wrapped_row_is_one_row_with_every_token(self):
+        rows = _o_rows(_table_row_entry(self.WRAPPED))
+        assert len(rows) == 1
+        text = " ".join(rows[0])
+        for token in self.WRAPPED.replace("|", " ").split():
+            assert token in text
+
+    def test_stacked_row_still_splits(self):
+        # two records stacked in each cell: equal line counts, not wrapped
+        stacked = ("Chair, Alpha Board\nChair, Beta Board | 2001-2003\n2004-2006")
+        rows = _o_rows(_table_row_entry(stacked))
+        assert len(rows) == 2
+
+    def test_long_stacked_list_with_unequal_columns_still_splits(self):
+        names = "\n".join(f"Committee {i}" for i in range(6))
+        rows = _o_rows(_table_row_entry(f"{names} | 2001\n2002"))
+        assert len(rows) > 1
+
+    def test_two_line_wrapped_row_with_complete_fields_keeps_field_columns(self):
+        # would_split is False here (2 lines, role and dates resolved), so the
+        # rejoin must NOT fire: the row stays in its 3 field columns.
+        text = ("Site Chief, Zorblax Studies | Quuxville General Hospital\n"
+                "Quuxville, Ohio | July 2014-June 2017")
+        rows = _o_rows(_table_row_entry(
+            text, leadership_role="Site Chief, Zorblax Studies",
+            institution="Quuxville General Hospital",
+            start_date="2014-07", end_date="2017-06"))
+        assert rows == [("Site Chief, Zorblax Studies", "Quuxville General Hospital",
+                         format_date_range("2014-07", "2017-06", "O"))]
+        assert "|" not in rows[0][0]
+
+    def test_entry_without_table_row_element_is_unchanged(self):
+        entry = _table_row_entry(self.WRAPPED)
+        entry["element_type"] = "paragraph"
+        assert len(_o_rows(entry)) > 1
+
+
+class TestInstitutionReachesTheMultilineRows:
+    """#664 item 1: the multiline path used to hardcode institution to ''."""
+
+    def test_pipe_rows_keep_their_institution_column(self):
+        text = ("Chair, Alpha Board | Quuxville General Hospital | 2001-2003\n"
+                "Director, Beta Center | Frobnitz Institute | 2004-2006\n"
+                "Member, Gamma Panel | Wibble College | 2007-2009")
+        rows = _o_rows({"text": text, "extracted_fields": {}, "taxonomy_code": "O"})
+        assert rows == [
+            ("Chair, Alpha Board", "Quuxville General Hospital", "2001-2003"),
+            ("Director, Beta Center", "Frobnitz Institute", "2004-2006"),
+            ("Member, Gamma Panel", "Wibble College", "2007-2009"),
+        ]
+
+    def test_three_line_entry_with_complete_fields_is_still_reparsed(self):
+        # O's routing is unchanged by #664: 3+ raw lines re-parse even when the
+        # fields are complete, so no line of the text (location, department)
+        # is dropped by a three-field row.
+        text = ("Director, Zorblax Studies\nQuuxville General Hospital\n"
+                "Quuxville, Ohio | Sept. 1999 - 2010")
+        entry = {"text": text, "taxonomy_code": "O", "extracted_fields": {
+            "leadership_role": "Director, Zorblax Studies",
+            "institution": "Quuxville General Hospital",
+            "start_date": "1999-09", "end_date": "2010-06"}}
+        rendered = " ".join(" ".join(r) for r in _o_rows(entry))
+        assert "Quuxville, Ohio" in rendered
+
+    def test_merged_block_with_complete_fields_is_still_split(self):
+        # Fields describe the first record only; two dated lines mean the text
+        # holds more, so the multiline parser must still see every one.
+        text = ("Chair, Alpha Board (Chair 2001-2003)\n"
+                "Director, Beta Center (Director 2004-2006)\n"
+                "Member, Gamma Panel (Member 2007-2009)")
+        rows = _o_rows({"text": text, "taxonomy_code": "O", "extracted_fields": {
+            "leadership_role": "Chair, Alpha Board", "institution": "Quuxville General Hospital",
+            "start_date": "2001", "end_date": "2003"}})
+        assert [r[0] for r in rows] == [
+            "Chair, Alpha Board (Chair)", "Director, Beta Center (Director)",
+            "Member, Gamma Panel (Member)"]
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

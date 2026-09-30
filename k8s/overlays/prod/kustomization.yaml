@@ -28,6 +28,7 @@ secretGenerator:
 patches:
   - path: backend-patch.yaml
   - path: frontend-patch.yaml
+  - path: worker-patch.yaml
   - path: sa-patch.yaml
   - path: ingress-patch.yaml
   - path: hpa-patch.yaml

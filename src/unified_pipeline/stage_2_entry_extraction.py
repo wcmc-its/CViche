@@ -15,6 +15,7 @@ import json
 import logging
 import time
 import bisect
+import re
 from functools import partial
 from pathlib import Path
 from collections.abc import Callable
@@ -25,10 +26,20 @@ from docx import Document
 sys.path.insert(0, str(Path(__file__).parent))
 
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
+from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
 from core.output_manager import OutputManager
-from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
-from core.template_boilerplate import is_template_instruction
+from core.docx_structure_extractor import (
+    extract_docx_structure,
+    extract_unified_elements,
+    join_row_cells,
+    row_cell_texts,
+)
+from core.template_boilerplate import (
+    is_foreign_template_instruction,
+    is_near_template_instruction,
+    is_template_instruction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +87,15 @@ def build_element_index_map(doc_structure: dict) -> dict[int, dict]:
     return element_map
 
 
+def _header_row_count(element: dict) -> int:
+    """Rows at the top of a table element that are a column-label header (#424):
+    1 when the reader flagged row 0, else 0. Those rows never become entries,
+    and stay out of the text a whole-table span is rebuilt from, so a header
+    line cannot leave a whole-table parent looking like it has an uncovered
+    remainder (`remove_subset_delimiters`)."""
+    return 1 if element.get("header_row") else 0
+
+
 def get_element_text(element: dict) -> str:
     """
     Extract text from an element (paragraph, table_header, table_content, table, or empty).
@@ -90,8 +110,11 @@ def get_element_text(element: dict) -> str:
         # Table content already has flattened text
         return element.get("text", "").strip()
     elif elem_type == "table":
-        # Legacy table format - flatten data into text
-        rows = element.get("data", [])
+        # Legacy table format - flatten data into text. Stays tab-joined (#488):
+        # stage 6 and the doctor branch on '\t' in this text, and a pipe join
+        # turns an all-empty wide row into a separator line the #418 dedup
+        # counts as uncovered content.
+        rows = element.get("data", [])[_header_row_count(element):]
         row_texts = []
         for row in rows:
             cell_texts = [cell.get("text", "") for cell in row]
@@ -470,16 +493,60 @@ def remove_subset_delimiters(delimiters: list) -> list:
     return kept
 
 
+def row_range_entry(start_key: str, end_key: str, batch_elem_lookup: dict,
+                    confidence: float) -> tuple[dict | None, list[str]]:
+    """The entry for a delimiter on table sub-rows, and the row keys it claims.
+
+    The model may group several rows of one table into one entry ("80.0" to
+    "80.2"). The entry's text must then hold every row in that span: its span
+    is what remove_subset_delimiters trusts, and a span wider than its text
+    let that drop the #420-recovered rows as "contained" -- AV00TQ's 24
+    teaching lines in row 80.2 vanished behind a header-row-only entry
+    (#1126). When the span can't be resolved row by row (another table, an
+    end before the start -- "80.10" arrives as the float 80.1 -- or a row
+    missing from the batch), the entry shrinks to its start row, so the span
+    stays honest and #420 recovery emits the rest.
+
+    Returns (None, []) when the start row is not in the batch.
+    """
+    if start_key not in batch_elem_lookup:
+        return None, []
+    keys = [start_key]
+    start_parent, _, start_row = start_key.partition(".")
+    end_parent, _, end_row = end_key.partition(".")
+    if (end_key != start_key and start_parent == end_parent
+            and start_row.isdigit() and end_row.isdigit()
+            and int(end_row) > int(start_row)):
+        span = [f"{start_parent}.{r}" for r in range(int(start_row), int(end_row) + 1)]
+        if all(k in batch_elem_lookup for k in span):
+            keys = span
+    elem = batch_elem_lookup[start_key]
+    texts = [str(batch_elem_lookup[k].get("full_text", batch_elem_lookup[k].get("text", "")))
+             for k in keys]
+    entry = {
+        "element_idx_start": start_key,
+        "element_idx_end": keys[-1],
+        "element_type": "table_row",
+        "confidence": confidence,
+        "text": "\n".join(t for t in texts if t.strip()),
+        "table_index": elem.get("table_index"),
+        "row_index": elem.get("row_index"),
+        "parent_idx": elem.get("parent_idx"),
+    }
+    return entry, keys
+
+
 def recover_unclaimed_table_rows(batch_elements: list, claimed_row_keys: set) -> list:
     """Return entries for table rows no delimiter claimed (#420).
 
     The model returns sub-row indices as JSON NUMBERS, so a row index with a
     trailing zero collapses: "114.10" parses to the float 114.1, ``str()``
     renders it back as "114.1", and the lookup lands on row 1 -- row 10 is
-    unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50 exactly this way.
-    Rows the model simply omitted disappear identically. Either way the content
-    survived only inside whatever whole-table entry the model happened to emit,
-    which is what made those blobs load-bearing.
+    unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50 exactly this way,
+    and element 109 lost row 10. Rows the model simply omitted disappear
+    identically. Either way the content survived only inside whatever
+    whole-table entry the model happened to emit, which is what made those
+    blobs load-bearing (and what made #227's dedup drop real content loss).
 
     Recovery is structural, so the entries are marked ``recovered_row`` and given
     a lower confidence than model-attested ones.
@@ -662,7 +729,7 @@ def detect_entries_for_section(
                         if pseudo_rows:
                             # Row contains multiple merged entries - create pseudo-rows
                             for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
-                                row_text = " | ".join(pseudo_row).strip()
+                                row_text = join_row_cells(pseudo_row)
                                 if row_text:
                                     section_elements.append({
                                         "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
@@ -676,10 +743,7 @@ def detect_entries_for_section(
                                     })
                         else:
                             # Normal row - flatten cells to text
-                            row_text = " | ".join(
-                                cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                                for cell in row
-                            ).strip()
+                            row_text = join_row_cells(row_cell_texts(row))
                             if row_text:
                                 section_elements.append({
                                     "idx": f"{idx}.{row_idx}",  # Sub-index for rows
@@ -735,14 +799,15 @@ def detect_entries_for_section(
             if isinstance(table_data, list) and len(table_data) > 1:
                 # Multi-row table: break into individual rows for LLM processing
                 # This allows the LLM to identify individual entries (grants, publications, etc.)
-                for row_idx, row in enumerate(table_data):
+                header_rows = _header_row_count(elem)  # #424: never an entry
+                for row_idx, row in enumerate(table_data[header_rows:], start=header_rows):
                     # Check if this row contains merged entries that should be split
                     if isinstance(row, list):
                         pseudo_rows = split_merged_row_into_pseudo_rows(row)
                         if pseudo_rows:
                             # Row contains multiple merged entries - create pseudo-rows
                             for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
-                                row_text = " | ".join(pseudo_row).strip()
+                                row_text = join_row_cells(pseudo_row)
                                 if row_text:
                                     section_elements.append({
                                         "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
@@ -756,10 +821,7 @@ def detect_entries_for_section(
                                     })
                         else:
                             # Normal row - flatten cells to text
-                            row_text = " | ".join(
-                                cell.get("text", "") if isinstance(cell, dict) else str(cell)
-                                for cell in row
-                            ).strip()
+                            row_text = join_row_cells(row_cell_texts(row))
                             if row_text:
                                 section_elements.append({
                                     "idx": f"{idx}.{row_idx}",  # Sub-index for rows
@@ -998,21 +1060,12 @@ Respond **only** with a JSON array containing the identified entries. If no entr
                     end_idx_str = str(end_idx)
                     if "." in start_idx_str or "." in end_idx_str:
                         # Row sub-index - look up in batch elements by string key
-                        if start_idx_str in batch_elem_lookup:
-                            elem = batch_elem_lookup[start_idx_str]
-                            full_text = elem.get("full_text", elem.get("text", ""))
-                            entry = {
-                                "element_idx_start": start_idx_str,
-                                "element_idx_end": end_idx_str,
-                                "element_type": "table_row",
-                                "confidence": delim.get("confidence", 1.0),
-                                "text": full_text,
-                                "table_index": elem.get("table_index"),
-                                "row_index": elem.get("row_index"),
-                                "parent_idx": elem.get("parent_idx")
-                            }
+                        entry, row_keys = row_range_entry(
+                            start_idx_str, end_idx_str, batch_elem_lookup,
+                            delim.get("confidence", 1.0))
+                        if entry is not None:
                             all_validated_entries.append(entry)
-                            claimed_row_keys.add(start_idx_str)
+                            claimed_row_keys.update(row_keys)
                         continue
 
                     # Handle paragraph indices (integers)
@@ -1042,16 +1095,7 @@ Respond **only** with a JSON array containing the identified entries. If no entr
 
             # Backstop: emit any table row this batch never claimed (#420).
             #
-            # The model returns sub-row indices as JSON NUMBERS, so a row index
-            # with a trailing zero collapses: "114.10" parses to the float 114.1,
-            # str() renders it back as "114.1", and the lookup lands on row 1 --
-            # row 10 is unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50
-            # exactly this way, and element 109 lost row 10. Rows the model simply
-            # omitted disappear identically. Either way the content survived only
-            # inside whatever whole-table entry the model happened to emit, which
-            # is what made those blobs load-bearing (and what made #227's dedup
-            # drop real content loss).
-            #
+            # Why rows go unclaimed: recover_unclaimed_table_rows' docstring (#420).
             # Recovering the rows here is deterministic and costs no extra LLM
             # call. It also runs BEFORE remove_subset_delimiters, so a whole-table
             # blob whose rows are now all present becomes a provable duplicate and
@@ -1067,6 +1111,8 @@ Respond **only** with a JSON array containing the identified entries. If no entr
                 logger.info(f"    Recovered {len(recovered)} unclaimed table row(s) "
                             f"in batch {batch_idx + 1} [{full_hierarchy}]")
 
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
         except Exception as e:
             logger.warning(f"    ⚠ Error in batch {batch_idx + 1}: {e} [{full_hierarchy}]")
             continue
@@ -1082,6 +1128,100 @@ Respond **only** with a JSON array containing the identified entries. If no entr
         "completion_tokens": completion_tokens,
     }
     return all_validated_entries, cost_info
+
+
+# Detail-line fold (#986). A dateless line that opens with one of these labels
+# belongs to the entry above it: left alone, the detector or the unassigned-line
+# fallback makes it a sibling entry that 3b codes and routes away from its
+# parent. Compared lower-cased against the line's start. Indent is deliberately
+# not a trigger: adjacent siblings (a student list, a course list) share an
+# indent, so an indent rule fused separate records on the corpus.
+DETAIL_LINE_LABELS = ("project:", "role:")
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_FOLDABLE_ELEMENT_TYPES = ("paragraph", "break")
+
+
+def _is_foldable_paragraph(entry: dict, element_index_map: dict) -> bool:
+    """A non-empty paragraph/break entry whose start element is a plain paragraph
+    (never a table row or header) -- a boundary the fold must not cross."""
+    return (
+        entry.get("element_type") in _FOLDABLE_ELEMENT_TYPES
+        and isinstance(entry.get("element_idx_end"), int)
+        and bool(entry.get("text"))
+        and element_index_map.get(entry.get("element_idx_start"), {}).get("type") == "paragraph"
+    )
+
+
+def _is_adjacent_dateless_line(prev: dict, cur: dict, element_index_map: dict) -> bool:
+    """``cur`` is a single line with no year of its own, on the line right after
+    ``prev`` (no blank line or header between) in the same section."""
+    return (
+        _is_foldable_paragraph(prev, element_index_map)
+        and _is_foldable_paragraph(cur, element_index_map)
+        and cur["element_idx_start"] == cur["element_idx_end"]
+        and cur["element_idx_start"] == prev["element_idx_end"] + 1
+        and prev.get("hierarchy") == cur.get("hierarchy")
+        and not _YEAR_RE.search(cur["text"])
+    )
+
+
+def _is_template_text(text: str) -> bool:
+    """WCM-template instruction text, exact or reworded. ``_drop_template_instructions``
+    runs after the fold, so folding one into a real entry would drop that entry."""
+    return (is_template_instruction(text) or is_near_template_instruction(text)
+            or is_foreign_template_instruction(text))
+
+
+def _continues_previous_entry(prev: dict, cur: dict, element_index_map: dict) -> bool:
+    """True when ``cur`` is a dateless line that continues ``prev``: it starts
+    with a detail label and has content after it.
+
+    Never for template instruction text on either side, and never for a bare
+    label with nothing after the colon or into a parent whose first line ends
+    in a colon: either one is a sub-header heading the lines after it, not a
+    record the detail line completes.
+    """
+    return (
+        _is_adjacent_dateless_line(prev, cur, element_index_map)
+        and cur["text"].lower().startswith(DETAIL_LINE_LABELS)
+        and cur["text"].strip().lower() not in DETAIL_LINE_LABELS
+        and not prev["text"].split("\t", 1)[0].rstrip().endswith(":")
+        and not _is_template_text(prev["text"])
+        and not _is_template_text(cur["text"])
+    )
+
+
+def fold_labelled_detail_entries(entries: list[dict], element_index_map: dict) -> list[dict]:
+    """Fold each dateless labelled detail line into the entry directly above it (#986).
+
+    Runs on one section's entries (content entries plus the non-empty unassigned
+    lines 3b also classifies) after detection and validation, so it behaves the
+    same whether the detector split a detail line off or missed it. The folded
+    entry keeps the parent's type, confidence and hierarchy; its range extends to
+    the detail line and its text is joined with the tab stage 2 already uses.
+    Returns ``entries`` itself, unsorted and untouched, when nothing folds.
+    """
+    ordered = sorted(
+        entries,
+        key=lambda e: e["element_idx_start"] if isinstance(e["element_idx_start"], int) else float("inf"),
+    )
+    folded: list[dict] = []
+    fold_count = 0
+    for entry in ordered:
+        if folded and _continues_previous_entry(folded[-1], entry, element_index_map):
+            parent = folded[-1]
+            folded[-1] = {
+                **parent,
+                "element_idx_end": entry["element_idx_end"],
+                "text": parent["text"] + "\t" + entry["text"],
+            }
+            fold_count += 1
+        else:
+            folded.append(entry)
+    if fold_count:
+        logger.info(f"    Folded {fold_count} labelled detail line(s) into the entry above")
+        return folded
+    return entries
 
 
 def _bound_coverage_indices(
@@ -1115,7 +1255,7 @@ STAGE2_SECTION_WORKERS = workers_from_config("CVICHE_STAGE2_SECTION_WORKERS")
 class _SectionResult(NamedTuple):
     entries: list[dict]
     cost_info: dict
-    assigned: set
+    assigned: set[int]
     lines: list[str]
 
 
@@ -1131,41 +1271,17 @@ class _DocumentContext(NamedTuple):
 
 
 def _section_progress_printer(hierarchy_paths: list[list[str]]) -> Callable[[int, _SectionResult], None]:
-    """Build a map_in_order ``on_result`` callback: one atomic print per
-    finished section, numbered by completion.
-
-    map_in_order guarantees ``on_result`` fires only on the CALLING thread,
-    one call at a time -- both its serial path and its ``as_completed`` loop
-    invoke it inline, never from a pool thread -- so despite the pool
-    underneath, this closure is single-threaded: no lock, no ``nonlocal``
-    gymnastics beyond the one ``done`` counter needs as a closure variable.
-    The ``[N/M] Processing:`` line is a parsed contract -- orchestrator.py's
-    PROGRESS_PATTERNS read it into the progress bar -- so N counts sections
-    *finished*, which stays monotonic however the pool orders completions,
-    and the whole block goes out in one print so two sections' lines cannot
-    splice (#881).
-
-    ``on_result``'s two arguments are deliberately different orderings:
-    ``index`` is map_in_order's dispatch-order position into the input
-    list (so ``hierarchy_paths[index]`` always names the section that
-    actually finished, whichever order sections complete in), while
-    ``done`` is this closure's own completion counter -- it increments
-    once per call, in call order, so it is always 1, 2, 3... regardless of
-    which ``index`` each call carries. The printed ``[N/M]`` uses ``done``,
-    never ``index``.
+    """``[N/M] Processing: <path>`` then the section's own lines, via the
+    shared make_progress_printer (#923). The ``[N/M]`` line is a parsed
+    contract -- orchestrator.py's PROGRESS_PATTERNS read it into the
+    progress bar; pinned by test_section_progress_line_is_read_by_progress_patterns.
+    N is ``done`` (completion count), never ``index`` (which only names the
+    section that finished).
     """
-    done = 0
-
-    def on_result(index: int, result: _SectionResult) -> None:
-        nonlocal done
-        _, _, _, lines = result
-        done += 1
-        print("\n".join([
-            f"[{done}/{len(hierarchy_paths)}] Processing: {' > '.join(hierarchy_paths[index])}",
-            *lines,
-        ]))
-
-    return on_result
+    return make_progress_printer(lambda done, index, result: [
+        f"[{done}/{len(hierarchy_paths)}] Processing: {' > '.join(hierarchy_paths[index])}",
+        *result.lines,
+    ])
 
 
 def _extract_section(
@@ -1306,9 +1422,52 @@ def _extract_section(
 
     # Combine all entries for this section: headers -> content -> breaks,
     # the same order the pre-#881 loop extended all_entries in.
-    section_entries_in_order = section_headers + entries + break_entries
+    section_entries_in_order = fold_labelled_detail_entries(
+        section_headers + entries + break_entries, context.element_index_map
+    )
 
     return _SectionResult(section_entries_in_order, cost_info, section_assigned, lines)
+
+
+def _drop_template_instructions(entries: list[dict]) -> list[dict]:
+    """Drop WCM-template instruction boilerplate (Layer 1, primary filter).
+
+    Faculty leave the blank template's instruction scaffolding in their CVs;
+    those blocks get parsed as entries and pollute downstream output. The
+    detector is precision-biased (never drops real CV content). Section
+    headers are intentionally NOT dropped here.
+
+    The near-match catches another template revision's rewording of a long
+    instruction; left in, the licensure note ("...must have a New York State
+    license...") was classified as a license and rendered one the faculty
+    member does not hold (#829).
+    """
+    kept = [
+        e for e in entries
+        if not (is_template_instruction(e.get("text", ""))
+                or is_near_template_instruction(e.get("text", "")))
+    ]
+    kept = _drop_foreign_template_instructions(kept)
+    if len(kept) != len(entries):
+        print(f"Filtered {len(entries) - len(kept)} WCM-template instruction entries")
+    return kept
+
+
+# Entry types whose text is structure, not content: a header or break is left
+# for the hierarchy to place even when its text reads like an instruction.
+_STRUCTURAL_ENTRY_TYPES = ("header", "break")
+
+
+def _drop_foreign_template_instructions(entries: list[dict]) -> list[dict]:
+    """Drop another institution's template scaffolding ("C. Appointments
+    (include institution, title, dates)", "1. Sabbatical Leave: N/A") from the
+    content entries (#530). Detected by shape, not phrase; see
+    `core.template_boilerplate.is_foreign_template_instruction`."""
+    return [
+        e for e in entries
+        if e.get("element_type") in _STRUCTURAL_ENTRY_TYPES
+        or not is_foreign_template_instruction(e.get("text", ""))
+    ]
 
 
 def run_stage_2(
@@ -1521,21 +1680,10 @@ def run_stage_2(
     # doc_length's own index space (see _bound_coverage_indices -- #856).
     unaccounted_indices, covered_doc_indices = _bound_coverage_indices(all_assigned_indices, doc_length)
 
-    # Drop WCM-template instruction boilerplate (Layer 1, primary filter).
-    # Faculty leave the blank template's instruction scaffolding in their CVs;
-    # those blocks get parsed as entries and pollute downstream output. The
-    # detector is precision-biased (never drops real CV content). Section
-    # headers are intentionally NOT dropped here. Gated on the user's choice:
-    # when strip_template_instructions is False, the instruction text is kept.
+    # Gated on the user's choice: when strip_template_instructions is False,
+    # the instruction text is kept.
     if strip_template_instructions:
-        _pre_filter_count = len(all_entries)
-        all_entries = [
-            e for e in all_entries
-            if not is_template_instruction(e.get("text", ""))
-        ]
-        _filtered_count = _pre_filter_count - len(all_entries)
-        if _filtered_count:
-            print(f"Filtered {_filtered_count} WCM-template instruction entries")
+        all_entries = _drop_template_instructions(all_entries)
 
     # Drop empty content entries and exact duplicates (#211). Unconditional:
     # unlike the instruction filter above, this never removes real content.

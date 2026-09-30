@@ -400,6 +400,12 @@ def test_render_gate_uid_filter_narrows_the_discovered_uids():
             "an empty filter means every uid in the arm")
         assert rg._discover_uids(arm, {"u2"}) == ["u2"]
         assert rg._discover_uids(arm, {"u2", "u3"}) == ["u2", "u3"]
+        (s4 / "u4 _fields.json").write_text("{}")
+        assert rg._discover_uids(arm, {"u4 "}) == ["u4 "], (
+            "a uid whose filename ends in a space must match its "
+            "--uids-file line verbatim, not silently drop out of the run")
+        assert rg._discover_uids(arm, {"u4"}) == [], (
+            "the space is part of the uid (#732): 'u4' is not 'u4 '")
         assert rg._discover_uids(arm, {"not-in-this-arm"}) == [], (
             "a filter matching nothing must produce nothing -- main() turns "
             "that into a non-zero exit rather than an empty PASS")
@@ -411,9 +417,11 @@ def test_render_gate_uid_file_drops_blank_lines_and_trailing_whitespace():
     # set, match no uid, and quietly narrow the run.
     with tempfile.TemporaryDirectory() as tmp:
         uids_file = Path(tmp) / "uids.txt"
-        uids_file.write_text("u1  \n\n  u2\n\n", encoding="utf-8")
+        uids_file.write_text("u1  \r\n\n   \n  u2\n\n", encoding="utf-8")
 
-        assert rg._uid_filter([], uids_file) == {"u1", "u2"}
+        assert rg._uid_filter([], uids_file) == {"u1  ", "  u2"}, (
+            "only the line terminator is stripped; whitespace-only lines "
+            "are skipped (#732)")
         assert rg._uid_filter(["u9"], None) == {"u9"}, (
             "without --uids-file the positional uids are the filter")
         assert rg._uid_filter([], None) == set(), (

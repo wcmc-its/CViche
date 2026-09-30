@@ -80,7 +80,7 @@ class ResearchSummarySection:
 
         # Find RESEARCH ACTIVITIES section (M1) to insert under. The finder
         # lowercases both sides, so casing of the needle carries no information.
-        activities_idx = self._find_paragraph_with_text("RESEARCH ACTIVITIES")
+        activities_idx = self._find_header_paragraph("RESEARCH ACTIVITIES")
         if activities_idx is None:
             if self.verbose:
                 logger.warning("  Warning: Could not find 'RESEARCH ACTIVITIES' section")

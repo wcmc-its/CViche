@@ -49,9 +49,9 @@ class PresentationsSection:
             logger.info("Filling Invited Presentations (%s entries)...", len(entries))
 
         # Find Presentations section
-        section_idx = self._find_paragraph_with_text("INVITATIONS TO SPEAK")
+        section_idx = self._find_header_paragraph("INVITATIONS TO SPEAK")
         if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Invited Presentations")
+            section_idx = self._find_header_paragraph("Invited Presentations")
         if section_idx is None:
             return
 
@@ -129,8 +129,15 @@ class PresentationsSection:
                 # Format date as yyyy per WCM template requirements
                 formatted_date = format_date_for_section(raw_date, 'R') if raw_date else ''
 
+                # The role never replaces the title: when the LLM empties title
+                # the raw entry text below still renders, and the role leads the
+                # venue.
+                role = str(fields.get('role') or '').strip()
+                if role.lower() == 'none':
+                    role = ''
+
                 if not title:
-                    title = entry.get('text', '')[:150]
+                    title = entry.get('text', '')
 
                 # The R block is Title | Institution/Location | Dates, so the
                 # meeting that hosted the talk has no column of its own and
@@ -141,6 +148,11 @@ class PresentationsSection:
                 event_name = (fields.get('event_name') or '').strip()
                 if event_name and event_name.casefold() not in f"{institution} {title}".casefold():
                     institution = f"{event_name}, {institution}" if institution else event_name
+
+                # The speaker's role ("Visiting Professor") likewise has no
+                # column; stage 4 extracts it as `role` and it leads the venue.
+                if role and role.casefold() not in f"{institution} {title}".casefold():
+                    institution = f"{role}, {institution}" if institution else role
 
                 row = table.add_row()
                 num_cols = len(row.cells)

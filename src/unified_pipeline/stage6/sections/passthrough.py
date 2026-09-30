@@ -11,10 +11,10 @@ what "passthrough" means here and why the three share one module and one entry
 point. `_fill_passthrough_sections` is dispatched once from `generate` and is
 nothing but the three calls.
 
-All three writers select their input by HIERARCHY rather than by taxonomy
-code: none of the three sections has a code of its own on the live path, so
-the only signal that an entry belongs here is the source heading it was found
-under. J is the one exception: it ALSO accepts a bare `taxonomy_code == 'J'`
+The writers select their input by HIERARCHY first: none of the three sections
+has a code of its own on the live path, so the main signal that an entry
+belongs here is the source heading it was found under. E (#807), G (#891) and
+J each ALSO accept a code match, described below; J's is the oldest: it accepts a bare `taxonomy_code == 'J'`
 match regardless of hierarchy, because stage 3b's own per-code dedup can drop
 every correctly-hierarchied copy of an over-segmented source table and leave
 only a copy filed under an unrelated heading (a real S3 run over-segmented one
@@ -28,7 +28,10 @@ E writes into paragraphs, not a table. It matches on the "Label: Value" shape,
 routes each entry to the template row whose label means the same thing as the
 entry's own label (#571), keeps the template's own label, and appends the value
 after a tab -- the template line reads "Name of Current Employer(s):" and must
-keep reading that way. An entry whose label matches no row is logged and NOT
+keep reading that way. An E-coded entry under a FOREIGN heading (an
+over-segmented copy that dedup kept, #807) is admitted under the same shape and
+known-label guards, after the heading-matched entries and never over a row
+they already wrote; a heading owned by G or J is not E's to claim. An entry whose label matches no row is logged and NOT
 written: filing a value under a label that is not its own is a wrong factual
 claim in a delivered CV, worse than an omission. It prefers the employer
 paragraph to the section header as the scan anchor, because the header is a
@@ -37,8 +40,13 @@ heading with nothing to fill.
 G writes into a table, but only after checking that it is the right one.
 `_find_table_after_paragraph` returns whatever table comes next in the document,
 so the first cell is tested for "hospital", "affiliation" or "primary" before
-anything is cleared; a template whose affiliation section has no table falls
+anything is written; a template whose affiliation section has no table falls
 back to bullets under the header instead of writing into a stranger's table.
+The table's own label rows (Primary Hospital, Other Hospital, Other
+Institutional) are kept: an entry fills the row its own label names, and
+anything else goes under Other Institutional -- never under Primary Hospital,
+where a free-form line would read as the faculty member's primary hospital.
+G also accepts a G-coded entry under a heading no other section claims (#891).
 
 J writes into a table too, and the table is fixed-row (Teaching, Clinical,
 Administrative, Research, Total) -- it is never cleared and never grown, only
@@ -60,7 +68,9 @@ import logging
 import re
 from typing import NamedTuple
 
-from ..formatting import _clear_table_data, _set_font
+from docx.table import Table, _Cell
+
+from ..formatting import _set_font
 from ..normalization import _squash
 
 logger = logging.getLogger(__name__)
@@ -93,6 +103,10 @@ _EMPLOYMENT_ROW_KEYWORDS: dict[str, tuple[str, ...]] = {
 # paragraph belonging to a LATER section out of reach.
 _EMPLOYMENT_ROW_SCAN_WINDOW = 12
 
+# The taxonomy code stage 3b gives an Employment Status entry; E also accepts
+# an entry carrying it under a foreign heading (#807).
+_EMPLOYMENT_TAXONOMY_CODE = 'E'
+
 
 def _employment_row_key(label: str) -> str | None:
     """Which Employment Status template row a "Label:" belongs to, or None."""
@@ -101,6 +115,74 @@ def _employment_row_key(label: str) -> str | None:
         if all(keyword in squashed for keyword in keywords):
             return row_key
     return None
+
+
+def _is_employment_status_heading(hierarchy_str: str) -> bool:
+    """Whether `hierarchy_str` (upper-cased, space-joined source hierarchy)
+    names the Employment Status section -- `_fill_employment_status`'s own
+    candidate test, factored out so `_fill_hospital_affiliation`'s
+    heading-conflict check (#891) can recognize the same section without a
+    second, driftable copy of what "Employment Status" means
+    (CODING_STANDARDS 1.5).
+    """
+    return 'EMPLOYMENT STATUS' in hierarchy_str or (
+        'EMPLOYMENT' in hierarchy_str and 'H.' in hierarchy_str
+    )
+
+
+# --- G. Institutional/Hospital Affiliation (#891) -----------------------
+
+
+def _is_affiliation_heading(hierarchy_str: str) -> bool:
+    """Whether `hierarchy_str` (upper-cased, space-joined source hierarchy)
+    names the Institutional/Hospital Affiliation section -- G's own heading
+    test, shared with `_employment_candidates` so E's code-based match can
+    recognize G's heading without a second copy of what "affiliation" means
+    (CODING_STANDARDS 1.5).
+    """
+    return (
+        ('AFFILIATION' in hierarchy_str and 'HOSPITAL' in hierarchy_str) or
+        ('INSTITUTIONAL' in hierarchy_str and 'AFFILIATION' in hierarchy_str)
+    )
+
+# The G template table's label rows, recognized like E's (`_employment_row_key`):
+# every keyword must appear in the _squash()ed label, and the first match in
+# dict order wins, so "Primary Hospital Affiliation" is taken by the primary
+# row before the bare 'hospital' test of the row after it. The same classifier
+# runs on the template's row labels and on an entry's own "Label:", which must
+# itself be affiliation-shaped (end in "Affiliation(s)"): "Chair, Hospital
+# Ethics Committee: 2012-present" names no row and is written whole.
+_AFFILIATION_ROW_KEYWORDS: dict[str, tuple[str, ...]] = {
+    'primary hospital': ('primary', 'hospital'),
+    'other hospital': ('hospital',),
+    'other institutional': ('institution',),
+}
+
+# Where an entry goes when its own label names no template row (free-form
+# text, or an unknown label): never the Primary Hospital row.
+_AFFILIATION_CATCH_ALL_ROW = 'other institutional'
+
+
+def _affiliation_row_key(label: str) -> str | None:
+    """Which G template row a label belongs to, or None."""
+    squashed = _squash(label).rstrip(':s')
+    if not squashed.endswith('affiliation'):
+        return None
+    for row_key, keywords in _AFFILIATION_ROW_KEYWORDS.items():
+        if all(keyword in squashed for keyword in keywords):
+            return row_key
+    return None
+
+
+def _append_cell_paragraph(cell: _Cell, text: str) -> None:
+    """Write `text` into `cell` as its own paragraph: into the cell's empty
+    template paragraph when the cell holds nothing yet, else a new paragraph
+    after the value already there. Empty `text` writes nothing."""
+    if not text:
+        return
+    first = cell.paragraphs[0]
+    para = first if not cell.text.strip() else cell.add_paragraph(style=first.style)
+    _set_font(para.add_run(text))
 
 
 # --- J. Percent Effort (#260) ------------------------------------------
@@ -359,31 +441,16 @@ class PassthroughSection:
     def _fill_employment_status(self, all_entries: list[dict]) -> list[dict]:
         """Fill E. EMPLOYMENT STATUS section.
 
-        Looks for entries with hierarchy containing 'EMPLOYMENT STATUS' and
-        text in 'Label: Value' format (e.g., 'Name of Employer(s): Weill Cornell').
+        Looks for entries with hierarchy containing 'EMPLOYMENT STATUS' (or
+        E-coded under a foreign heading, #807; see `_employment_candidates`)
+        and text in 'Label: Value' format (e.g., 'Name of Employer(s): Weill Cornell').
 
         Returns the entries actually written (#294) -- an entry whose label
         names no known row, or whose row is not found in the template, is
         matched but not written, and is excluded from this list.
         """
-        # Find entries from Employment Status section
-        matching_entries = []
-        for entry in all_entries:
-            hierarchy = entry.get('hierarchy', [])
-            hierarchy_str = ' '.join(hierarchy).upper()
-
-            # Match entries specifically from Employment Status section
-            if 'EMPLOYMENT STATUS' in hierarchy_str or (
-                'EMPLOYMENT' in hierarchy_str and 'H.' in hierarchy_str
-            ):
-                text = entry.get('text', '').strip()
-                # Accept "Label: Value" format entries
-                if text and ':' in text:
-                    parts = text.split(':', 1)
-                    value = parts[1].strip() if len(parts) > 1 else ''
-                    # Must have meaningful value after colon
-                    if len(value) > 2:
-                        matching_entries.append(entry)
+        heading_entries, foreign_entries = self._employment_candidates(all_entries)
+        matching_entries = heading_entries + foreign_entries
 
         if not matching_entries:
             return []
@@ -398,7 +465,7 @@ class PassthroughSection:
 
         if target_idx is None:
             # Fall back to EMPLOYMENT STATUS section header
-            target_idx = self._find_paragraph_with_text('EMPLOYMENT STATUS')
+            target_idx = self._find_header_paragraph('EMPLOYMENT STATUS')
 
         if target_idx is None:
             if self.verbose:
@@ -412,6 +479,8 @@ class PassthroughSection:
         # 'employer' paragraph must not win for every entry -- that files a
         # position or a date under "Name of Current Employer(s):" (#571).
         consumed = []
+        written: dict[str, str] = {}
+        foreign_ids = {id(entry) for entry in foreign_entries}
         for entry in matching_entries:
             text = entry.get('text', '').strip()
             if ':' not in text:
@@ -426,13 +495,61 @@ class PassthroughSection:
                     "Employment Status entry label %r names no known template row; "
                     "entry not written", label)
                 continue
+            if id(entry) in foreign_ids and row_key in written:
+                # An E-coded copy under a foreign heading (#807) never
+                # overwrites a row already written: the same value is a true
+                # duplicate (consumed); a different one is a conflict, left
+                # for the Appendix rather than silently replacing either.
+                if written[row_key] == value:
+                    consumed.append(entry)
+                else:
+                    logger.warning(
+                        "Employment Status row %r already written; conflicting "
+                        "E-coded entry %r under another heading not written",
+                        row_key, label)
+                continue
             if self._write_employment_row(target_idx, row_key, value):
+                written[row_key] = value
                 consumed.append(entry)
             else:
                 logger.warning(
                     "Employment Status entry %r matched no template row near the "
                     "section; entry not written", label)
         return consumed
+
+    @staticmethod
+    def _employment_candidates(all_entries: list[dict]) -> tuple[list[dict], list[dict]]:
+        """E's candidate entries as (under the Employment Status heading,
+        E-coded under some other heading).
+
+        The second list is #807: stage 1b/2 over-segmentation can extract the
+        same rows a second time under a foreign heading, and stage 3b's
+        per-code dedup may keep only that copy, so a heading-only match never
+        sees it. It is admitted only under the same "Label: Value" shape guard
+        as the heading match, and never when the heading belongs to another
+        passthrough section (G's affiliation heading, J's percent-effort
+        keyword) -- refusing on that positive conflict keeps one entry from
+        being written by two writers. The known-label guard in the writer
+        (#571) still applies to both lists, so an E-coded line whose label
+        names no template row stays Appendix-bound.
+        """
+        heading_entries, foreign_entries = [], []
+        for entry in all_entries:
+            hierarchy_str = ' '.join(entry.get('hierarchy', [])).upper()
+            on_heading = _is_employment_status_heading(hierarchy_str)
+            is_e_coded_candidate = (
+                entry.get('taxonomy_code') == _EMPLOYMENT_TAXONOMY_CODE
+                and not _is_affiliation_heading(hierarchy_str)
+                and _PERCENT_EFFORT_HIERARCHY_KEYWORD not in hierarchy_str
+            )
+            if not (on_heading or is_e_coded_candidate):
+                continue
+            text = entry.get('text', '').strip()
+            # Accept "Label: Value" entries with a meaningful value
+            if ':' not in text or len(text.split(':', 1)[1].strip()) <= 2:
+                continue
+            (heading_entries if on_heading else foreign_entries).append(entry)
+        return heading_entries, foreign_entries
 
     def _write_employment_row(self, anchor_idx: int, row_key: str, value: str) -> bool:
         """Write `value` into the Employment Status row that classifies as `row_key`.
@@ -463,6 +580,23 @@ class PassthroughSection:
 
         Looks for dedicated hospital affiliation entries or extracts from D2 positions.
 
+        A candidate is selected by an affiliation-shaped heading (as before),
+        OR by `taxonomy_code == 'G'` when the heading is not one a DIFFERENT
+        passthrough section (Employment Status, Percent Effort) claims for
+        itself (#891, the #808 "Phase 2" that PR deferred) -- refusing only
+        on that positive conflict is what reaches a G entry filed under
+        "Institutional" alone, "Past appointments", or a block whose own
+        header was lost to segmentation, none of which a heading allow-list
+        can name in advance. It also reaches a stage-3b misclassification
+        the same way (a licensure-status line coded G); nothing here judges
+        the classifier's call, same as the un-widened match never did.
+
+        This does not reopen #807: `generate()` runs `_dedup_grouped_entries`
+        on the G group before this method sees `all_entries`, so two G
+        entries with the same content never both reach it. The widened match
+        changes which heading the one survivor may carry, not how many
+        survive.
+
         Returns the entries actually written (#294): every entry that matches
         the section's hierarchy gets a row or a bullet UNLESS the section or
         its table cannot be located at all, in which case nothing is written
@@ -474,8 +608,14 @@ class PassthroughSection:
             hierarchy = entry.get('hierarchy', [])
             hierarchy_str = ' '.join(hierarchy).upper()
 
-            if ('AFFILIATION' in hierarchy_str and 'HOSPITAL' in hierarchy_str) or \
-               ('INSTITUTIONAL' in hierarchy_str and 'AFFILIATION' in hierarchy_str):
+            is_affiliation_heading = _is_affiliation_heading(hierarchy_str)
+            is_unclaimed_g_code = (
+                entry.get('taxonomy_code') == 'G'
+                and not _is_employment_status_heading(hierarchy_str)
+                and _PERCENT_EFFORT_HIERARCHY_KEYWORD not in hierarchy_str
+            )
+
+            if is_affiliation_heading or is_unclaimed_g_code:
                 text = entry.get('text', '').strip()
                 if text and len(text) > 5:
                     matching_entries.append(entry)
@@ -485,9 +625,9 @@ class PassthroughSection:
             return []
 
         # Find the affiliation table
-        section_idx = self._find_paragraph_with_text('INSTITUTIONAL/HOSPITAL AFFILIATION')
+        section_idx = self._find_header_paragraph('INSTITUTIONAL/HOSPITAL AFFILIATION')
         if section_idx is None:
-            section_idx = self._find_paragraph_with_text('HOSPITAL AFFILIATION')
+            section_idx = self._find_header_paragraph('HOSPITAL AFFILIATION')
 
         if section_idx is None:
             if self.verbose:
@@ -509,37 +649,9 @@ class PassthroughSection:
                 table = None
 
             if table:
-                # Clear existing table data and fill with matched entries
-                _clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
-
                 for entry in matching_entries:
-                    text = entry.get('text', '').strip()
-                    fields = entry.get('extracted_fields', {}) or {}
-
-                    # Try to extract structured content
-                    if ':' in text:
-                        # Parse "Label: Value" format
-                        parts = text.split(':', 1)
-                        label = parts[0].strip()
-                        value = parts[1].strip() if len(parts) > 1 else ''
-
-                        # Add as row: [Label, Value]
-                        row = table.add_row()
-                        row.cells[0].text = label
-                        if len(row.cells) > 1:
-                            row.cells[1].text = value
-                    else:
-                        # Add as single-cell row
-                        row = table.add_row()
-                        row.cells[0].text = text
-
-                    # Apply font formatting
-                    for cell in row.cells:
-                        for para in cell.paragraphs:
-                            for run in para.runs:
-                                _set_font(run)
-
+                    self._write_affiliation_entry(table, entry)
                     self.stats['entries_inserted'] += 1
                     consumed.append(entry)
             else:
@@ -551,6 +663,31 @@ class PassthroughSection:
                         self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0), list_level=0)
                         consumed.append(entry)
         return consumed
+
+    def _write_affiliation_entry(self, table: Table, entry: dict) -> None:
+        """Write one G entry into the affiliation table, keeping its label rows.
+
+        A "Label: value" entry whose label names a template row fills that
+        row's value cell; anything else goes into the Other Institutional
+        value cell. Each lands as its own paragraph. Only a table with no
+        Other Institutional value cell gets a new row, holding the whole text.
+        """
+        text = entry.get('text', '').strip()
+        label, sep, value = text.partition(':')
+        value_cells = {}
+        for row in table.rows:
+            cells = row.cells
+            row_key = _affiliation_row_key(cells[0].text)
+            # A merged or one-column row has no value cell of its own.
+            if row_key is not None and cells[-1]._tc is not cells[0]._tc:
+                value_cells.setdefault(row_key, cells[-1])
+        entry_key = _affiliation_row_key(label) if sep else None
+        if entry_key in value_cells:
+            _append_cell_paragraph(value_cells[entry_key], value.strip())
+        elif _AFFILIATION_CATCH_ALL_ROW in value_cells:
+            _append_cell_paragraph(value_cells[_AFFILIATION_CATCH_ALL_ROW], text)
+        else:
+            _append_cell_paragraph(table.add_row().cells[0], text)
 
     def _fill_percent_effort(self, all_entries: list[dict]) -> list[dict]:
         """Fill J. PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES (#260).

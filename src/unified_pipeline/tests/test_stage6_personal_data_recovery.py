@@ -338,6 +338,29 @@ def test_appendix_residual_survives_a_fused_withheld_and_kept_fragment(tmp_path:
     )
 
 
+def test_withheld_comment_names_appendix_when_the_residual_rendered_there(tmp_path: Path) -> None:
+    """#848: the withheld-item Word comment names the section the item's
+    entry actually rendered in. A fused orphan whose residual reached the
+    Appendix is "Appendix" -- not the A code's nominal "Personal Data" --
+    while an item that never had a residual (a bare Date of Birth, nothing
+    left to render) keeps its nominal label."""
+    _render(tmp_path, [
+        _a("Home Phone: 555-123-4567; Citizenship: US"),
+        _a("Date of Birth: 04/01/1958"),
+    ])
+    bodies = [b for _, b in _comments(tmp_path / "out.docx") if " \u2022 " in b]
+    assert len(bodies) == 1
+    lines = [ln for ln in bodies[0].splitlines() if ln.startswith(" \u2022 ")]
+    # Per category, not "any": an off-by-one in the entry index would swap
+    # the two labels and still satisfy an any()-shaped check.
+    phone = [ln for ln in lines if "home address / phone" in ln]
+    dob = [ln for ln in lines if "date of birth" in ln]
+    assert len(phone) == 1 and len(dob) == 1, lines
+    assert phone[0].endswith("Appendix)"), phone
+    assert dob[0].endswith("Personal Data)"), (
+        "the bare Date of Birth has no residual and must keep its label")
+
+
 def test_appendix_residual_is_refused_when_the_value_sits_past_a_hard_delimiter(
         tmp_path: Path) -> None:
     """#821 R2 F3 safety check, corpus-observed: a "Label: |
@@ -605,8 +628,8 @@ def test_withheld_notice_carries_one_word_comment_listing_categories(tmp_path):
     assert author == WITHHELD_COMMENT_AUTHOR
     lines = body.split("\n")
     assert lines[0] == WITHHELD_COMMENT_HEADER
-    assert " • date of birth — 1 item, Personal Data" in lines
-    assert " • visa / immigration status — 1 item, Appendix" in lines
+    assert " • date of birth (1 item, Personal Data)" in lines
+    assert " • visa / immigration status (1 item, Appendix)" in lines
     assert "01/02/1970" not in body and "O-1" not in body, "a withheld value re-leaked into the comment"
 
 
@@ -814,7 +837,7 @@ def test_protected_class_labels_deny_only_the_colon_form():
 # home address followed on the same run by a sibling field had its
 # city/state -- or, for an address with no digits, nearly all of it --
 # left in the residual and rendered into the Appendix. The stop is now a
-# VOCABULARY (`pii_pass.py::_KNOWN_FIELD_LABEL_RE`, built from
+# VOCABULARY (`normalization/pii.py::_KNOWN_FIELD_LABEL_RE`, built from
 # `WITHHOLD_POLICY`'s label rows plus `_RENDER_SET_FIELD_LABELS`), so it
 # can only stop where a field is actually NAMED, and a run with no known
 # label in it is cut whole.

@@ -10,7 +10,13 @@ Run with:
 """
 
 import sys
+from collections import Counter
 from pathlib import Path
+
+import pytest
+
+from unified_pipeline import segmentation_regression
+from unified_pipeline.core import text_norm
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -19,8 +25,17 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 
 from unified_pipeline.segmentation_regression import (  # noqa: E402
+    _COUNT_KEYS,
+    _has_compact_window,
+    BODY_BLOCK,
+    COVERAGE_DROP_TOLERANCE_PTS,
+    COVERAGE_WINDOW_SLACK,
+    MEGA_ENTRY_MIN_RECORDS,
+    SUBSTANTIVE_LINE_CHARS,
     compare_metrics,
     compute_metrics,
+    find_lost_blocks,
+    iter_source_block_lines,
     iter_source_lines,
     lint_metrics,
 )
@@ -173,6 +188,271 @@ def test_coverage_line_cannot_match_across_entry_boundary():
     assert m["lost_lines"] == ["alpha beta gamma delta epsilon zeta"]
 
 
+def test_coverage_words_scattered_through_unrelated_entry_are_lost():
+    """#610: an entry that merely CONTAINS the line's words, far apart and out
+    of order inside an unrelated sentence, does not cover the line."""
+    source = ["Diabetes Research Grant Foundation Award"]
+    stage2 = {"entries": [_entry(
+        "The foundation gave an award to the committee chair after a long "
+        "review of her research on diabetes, and a further grant was pending "
+        "in the spring of the following year", start=1)]}
+    m = compute_metrics(source, _STAGE1A, stage2)
+    assert m["lost_lines"] == ["Diabetes Research Grant Foundation Award"]
+    assert m["text_coverage_pct"] == 0.0
+
+
+def test_coverage_reformatted_line_with_spliced_phrase_is_still_covered():
+    """The mid-line merge the token fallback exists for (web053/web057):
+    stage 2 splices a phrase into the line, so it is no contiguous substring,
+    but every token is present in order and close together."""
+    source = ["\t\t1984-1989\t\t\t\tB.S.\t (Biology)"]
+    stage2 = {"entries": [_entry("1984-1989    B.S. University of Utah (Biology)", start=1)]}
+    m = compute_metrics(source, _STAGE1A, stage2)
+    assert m["lost_lines"] == []
+    assert m["text_coverage_pct"] == 100.0
+
+
+def test_coverage_reordered_but_compact_line_is_still_covered():
+    """Stage 2 can reorder a line's parts inside one cell; nothing is lost."""
+    source = ["Maple Ridge Medical School, Springfield, Freedonia - Visiting Faculty"]
+    stage2 = {"entries": [_entry(
+        "Visiting Faculty Northwind Maple Ridge Medical School, Springfield, "
+        "Freedonia  June 2006", start=1)]}
+    m = compute_metrics(source, _STAGE1A, stage2)
+    assert m["lost_lines"] == []
+
+
+def test_compact_window_slack_boundary():
+    need = Counter(["a", "b"])
+    filler = ["x"] * COVERAGE_WINDOW_SLACK
+    span = 2 + COVERAGE_WINDOW_SLACK
+    assert _has_compact_window(need, ["a"] + filler + ["b"], span)
+    assert not _has_compact_window(need, ["a"] + filler + ["x", "b"], span)
+    # Multiplicity counts: two "a" tokens need two occurrences in the window.
+    assert not _has_compact_window(Counter(["a", "a"]), ["a", "b", "c"], 9)
+    # The window slides: a later compact stretch qualifies.
+    assert _has_compact_window(need, ["a"] + filler + ["x", "a", "b"], span)
+
+    # A surplus repeat of a needed token must not count toward the missing total.
+    assert not _has_compact_window(Counter("ab"), list("aaxxx"), 5)
+    # The left edge advances one token at a time: the window [a, y, b] (span 3)
+    # is reachable only by not skipping the "a" that precedes it.
+    assert _has_compact_window(Counter("ab"), list("xayb"), 3)
+    assert not _has_compact_window(Counter("ab"), list("xayb"), 2)
+
+
+def test_coverage_long_reformatted_line_is_covered_by_its_own_length():
+    """#610: the span budget scales with the line's token count, so a long
+    line (16 tokens) spliced with 2 extra words (window 18, over the bare
+    slack) is still covered."""
+    words = [f"term{c}" for c in "abcdefghijklmnop"]
+    source = [" ".join(words)]
+    entry = " ".join(words[:8] + ["inserted", "words"] + words[8:])
+    m = compute_metrics(source, _STAGE1A, {"entries": [_entry(entry, start=1)]})
+    assert m["lost_lines"] == []
+
+
+def test_coverage_span_budget_counts_repeated_tokens():
+    """#610: the budget is the line's token count WITH multiplicity. A 14-token
+    line over 2 distinct words, spliced with 5 extra tokens (window 19), fits
+    14 + slack but not distinct-count + slack (2 + 12)."""
+    source = [" ".join(["alpha", "beta"] * 7)]
+    entry = " ".join(["alpha", "beta"] * 4 + ["z1", "z2", "z3", "z4", "z5"]
+                     + ["alpha", "beta"] * 3)
+    m = compute_metrics(source, _STAGE1A, {"entries": [_entry(entry, start=1)]})
+    assert m["lost_lines"] == []
+
+
+def test_coverage_span_budget_boundary_at_compute_metrics():
+    """#610: _covered's budget is exactly token count + COVERAGE_WINDOW_SLACK;
+    a window at the budget is covered, one filler token longer is lost."""
+    source = ["alphaword betaword"]
+    for fill, lost in ((COVERAGE_WINDOW_SLACK, []), (COVERAGE_WINDOW_SLACK + 1, source)):
+        entry = " ".join(["alphaword"] + ["filler"] * fill + ["betaword"])
+        m = compute_metrics(source, _STAGE1A, {"entries": [_entry(entry, start=1)]})
+        assert m["lost_lines"] == lost, fill
+
+
+def test_coverage_substantive_line_without_tokens_is_lost():
+    """A long punctuation-only line has no word tokens to match on, so unless
+    it appears verbatim it is lost (not vacuously covered)."""
+    source = ["----------------------------------------"]
+    m = compute_metrics(source, _STAGE1A,
+                        {"entries": [_entry("Some unrelated paragraph text", start=1)]})
+    assert m["lost_lines"] == ["----------------------------------------"]
+
+
+def test_template_scaffolding_is_neither_covered_nor_lost():
+    """#815 (976WPY): a CV written on the WCM template keeps the template's
+    prompts, which stage 2 rightly drops. They must not count as lost."""
+    verbatim = "Other Educational Experiences (i.e., certificates, etc)"
+    reworded = "Academic Degree(s) (Bachelor's and higher)"  # near-match only
+    source = [verbatim, reworded, _GRANT_A]
+    m = compute_metrics(source, _STAGE1A, {"entries": [_entry(_GRANT_A, start=1)]})
+    assert m["lost_lines"] == []
+    assert m["text_coverage_pct"] == 100.0
+
+
+def test_foreign_template_scaffolding_is_neither_covered_nor_lost():
+    """#530: stage 2 drops another institution's instruction lines by shape,
+    so they must not count as lost source content either (invented text)."""
+    foreign = "C. Sample Appointments (include institution, title and dates of appointment)"
+    m = compute_metrics([foreign, _GRANT_A], _STAGE1A, {"entries": [_entry(_GRANT_A, start=1)]})
+    assert m["lost_lines"] == []
+    assert m["text_coverage_pct"] == 100.0
+
+
+def test_short_template_text_and_real_content_still_count_as_lost():
+    """Short template strings double as real values ("Full-time salaried by
+    Weill Cornell" is the Employment Status answer a CV kept), so below the
+    length floor they still count; so does absent real content."""
+    source = ["Full-time salaried by Weill Cornell", "2. Principal Investigator",
+              _GRANT_B, _GRANT_A]
+    m = compute_metrics(source, _STAGE1A, {"entries": [_entry(_GRANT_A, start=1)]})
+    assert m["lost_lines"] == source[:3]
+    assert m["text_coverage_pct"] == 25.0
+
+
+def test_substantive_line_chars_boundary():
+    """A source line of exactly SUBSTANTIVE_LINE_CHARS is substantive (and here
+    lost); one char shorter is ignored by the coverage metric."""
+    at_floor = "a" * SUBSTANTIVE_LINE_CHARS
+    below_floor = "a" * (SUBSTANTIVE_LINE_CHARS - 1)
+    m_at = compute_metrics([at_floor], _STAGE1A, {"entries": []})
+    assert m_at["substantive_lines"] == 1
+    assert m_at["lost_lines"] == [at_floor]
+    assert m_at["text_coverage_pct"] == 0.0
+    m_below = compute_metrics([below_floor], _STAGE1A, {"entries": []})
+    assert m_below["source_lines"] == 1
+    assert m_below["substantive_lines"] == 0
+    assert m_below["lost_lines"] == []
+    assert m_below["text_coverage_pct"] == 100.0
+
+
+def _records(n):
+    return "\n".join([_GRANT_A, _GRANT_B, _GRANT_C][:n])
+
+
+def test_mega_entry_threshold_boundary():
+    """MEGA_ENTRY_MIN_RECORDS - 1 record-like lines is NOT a mega-entry; the
+    threshold count is."""
+    below = MEGA_ENTRY_MIN_RECORDS - 1
+    m_below = compute_metrics([], _STAGE1A, {"entries": [_entry(_records(below))]})
+    assert m_below["mega_entries"] == 0
+    m_at = compute_metrics([], _STAGE1A, {"entries": [_entry(_records(MEGA_ENTRY_MIN_RECORDS))]})
+    assert m_at["mega_entries"] == 1
+
+
+def test_same_text_different_start_is_not_a_duplicate():
+    """Duplicate identity is (type, text, start): identical text at a different
+    element_idx_start (a genuinely repeated line) must not be flagged."""
+    stage2 = {"entries": [_entry(_GRANT_A, start=1), _entry(_GRANT_A, start=2)]}
+    assert compute_metrics([], _STAGE1A, stage2)["duplicate_entries"] == 0
+
+
+def test_header_and_break_entries_excluded_from_content_metrics():
+    stage2 = {"entries": [
+        _entry(_records(MEGA_ENTRY_MIN_RECORDS), etype="header", start=1),
+        _entry(_records(MEGA_ENTRY_MIN_RECORDS), etype="break", start=2),
+        _entry(_GRANT_A, start=3),
+    ]}
+    m = compute_metrics([], _STAGE1A, stage2)
+    assert m["entries_total"] == 3
+    assert m["entries_content"] == 1
+    assert m["mega_entries"] == 0
+    assert m["per_h1_content_counts"] == {"grants": 1}
+
+
+def test_empty_source_reports_full_coverage_and_no_lost_lines():
+    m = compute_metrics([], _STAGE1A, {"entries": [_entry(_GRANT_A, start=1)]})
+    assert m["source_lines"] == 0
+    assert m["text_coverage_pct"] == 100.0
+    assert m["lost_lines"] == []
+
+
+def test_header_titles_exact_and_partial_shapes_tolerated():
+    m = compute_metrics([], _STAGE1A, {"entries": []})
+    assert m["header_titles"] == ["grants", "grants awarded",
+                                  "grants under review & submitted"]
+    # Missing hierarchy / untitled node / entry with no keys: defensive paths.
+    sparse = {"hierarchy": [{"children": [{"text": "Kept"}]}]}
+    m = compute_metrics([], sparse, {"entries": [{}]})
+    assert m["header_titles"] == ["kept"]
+    assert m["empty_content"] == 1
+    assert m["per_h1_content_counts"] == {"(none)": 1}
+    m = compute_metrics([], {}, {})
+    assert m["headers_detected"] == 0
+    assert m["entries_total"] == 0
+
+
+def test_iter_source_block_lines_tags_each_table_and_matches_flat_lines(tmp_path):
+    doc = Document()
+    doc.add_paragraph("A body paragraph outside every table")
+    first = doc.add_table(rows=2, cols=1)
+    first.cell(0, 0).text = "first table row one"
+    first.cell(1, 0).text = "first table row two"
+    second = doc.add_table(rows=1, cols=1)
+    second.cell(0, 0).text = "second table cell"
+    second.cell(0, 0).add_table(rows=1, cols=1).cell(0, 0).text = "nested table cell"
+    path = tmp_path / "blocks.docx"
+    doc.save(path)
+
+    pairs = iter_source_block_lines(str(path))
+    assert pairs == [
+        (BODY_BLOCK, "A body paragraph outside every table"),
+        (0, "first table row one"),
+        (0, "first table row two"),
+        (1, "second table cell"),
+        (2, "nested table cell"),
+    ]
+    assert iter_source_lines(str(path)) == [line for _, line in pairs]
+
+
+def _covered_line(i):
+    return f"covered record line number {i} alpha"
+
+
+def _lost_line(i):
+    return f"lost personal data line {i} zebra"
+
+
+def test_small_table_lost_whole_is_found_despite_high_document_coverage():
+    """#815 (web207): a small table lost whole is a rounding error against
+    the rest of the document, so the document-wide lint stays quiet."""
+    covered = [_covered_line(i) for i in range(200)]
+    lost = [_lost_line(i) for i in range(5)]
+    block_lines = [(0, l) for l in covered] + [(1, l) for l in lost]
+    stage2 = {"entries": [_entry(l, start=i) for i, l in enumerate(covered)]}
+
+    metrics = compute_metrics([l for _, l in block_lines], _STAGE1A, stage2)
+    assert metrics["text_coverage_pct"] >= 97.0
+    assert not any(f.startswith("coverage") for f in lint_metrics(metrics))
+
+    assert find_lost_blocks(block_lines, stage2) == [
+        {"block": 1, "substantive_lines": 5, "lost_lines": lost}]
+    # Exactly half of a table lost is already a lost block.
+    half = [(2, covered[0]), (2, covered[1]), (2, lost[0]), (2, lost[1])]
+    assert find_lost_blocks(half, stage2) == [
+        {"block": 2, "substantive_lines": 4, "lost_lines": lost[:2]}]
+
+
+def test_lost_lines_scattered_across_tables_or_in_body_are_not_a_lost_block():
+    covered = [_covered_line(i) for i in range(50)]
+    lost = [_lost_line(i) for i in range(5)]
+    stage2 = {"entries": [_entry(l, start=i) for i, l in enumerate(covered)]}
+    # One lost line in each of five 10-line tables: 10% per table.
+    scattered = [(i // 10, l) for i, l in enumerate(covered)] + [
+        (i, l) for i, l in enumerate(lost)]
+    assert find_lost_blocks(scattered, stage2) == []
+    # A whole table lost below the size floor, and lost body text.
+    # (Short lines are not substantive, so they do not lift it over the floor.)
+    small = [(0, l) for l in covered] + [
+        (1, lost[0]), (1, lost[1]), (1, "2016"), (1, "PhD")]
+    body = [(0, l) for l in covered] + [(BODY_BLOCK, l) for l in lost]
+    assert find_lost_blocks(small, stage2) == []
+    assert find_lost_blocks(body, stage2) == []
+
+
 # ------------------------------------------------------------------ compare
 
 _BASE = {
@@ -219,6 +499,37 @@ def test_compare_reports_improvement():
     assert any("mega_entries" in r for r in reasons)
 
 
+def test_compare_coverage_drop_exact_tolerance_boundary():
+    """A drop EQUAL to the tolerance is wobble (OK); just above is REGRESSION."""
+    base = _cand(text_coverage_pct=99.0)
+    at = round(99.0 - COVERAGE_DROP_TOLERANCE_PTS, 1)
+    assert compare_metrics(base, _cand(text_coverage_pct=at)) == ("OK", [])
+    above = round(at - 0.1, 1)
+    verdict, reasons = compare_metrics(base, _cand(text_coverage_pct=above))
+    assert verdict == "REGRESSION"
+    assert any("coverage" in r for r in reasons)
+
+
+@pytest.mark.parametrize("key", _COUNT_KEYS)
+def test_compare_count_key_regression_and_improvement(key):
+    base = _cand(**{key: 1})
+    verdict, reasons = compare_metrics(base, _cand(**{key: 2}))
+    assert verdict == "REGRESSION"
+    assert reasons == [f"{key} 1 -> 2"]
+    verdict, reasons = compare_metrics(base, _cand(**{key: 0}))
+    assert verdict == "IMPROVED"
+    assert reasons == [f"{key} 1 -> 0"]
+
+
+def test_compare_reports_every_simultaneous_regression_reason():
+    verdict, reasons = compare_metrics(_BASE, _cand(
+        text_coverage_pct=90.0, lost_lines=["old lost line", "brand new loss"],
+        headers_detected=9, header_titles=["education"],
+        mega_entries=2, duplicate_entries=1, empty_content=1))
+    assert verdict == "REGRESSION"
+    assert len(reasons) == 3 + len(_COUNT_KEYS)  # coverage, lost lines, headers
+
+
 # --------------------------------------------------------------------- lint
 
 def test_lint_flags_and_clean():
@@ -227,3 +538,10 @@ def test_lint_flags_and_clean():
     clean = _cand(text_coverage_pct=99.5, mega_entries=0,
                   duplicate_entries=0, empty_content=0)
     assert lint_metrics(clean) == []
+
+
+def test_segmentation_regression_aliases_are_the_public_functions():
+    assert segmentation_regression._norm is text_norm.norm
+    assert segmentation_regression._squash is text_norm.squash
+    assert segmentation_regression._looks_like_record is text_norm.looks_like_record
+    assert segmentation_regression.SUBSTANTIVE_LINE_CHARS == text_norm.SUBSTANTIVE_LINE_CHARS == 15

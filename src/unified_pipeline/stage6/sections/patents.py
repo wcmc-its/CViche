@@ -247,7 +247,7 @@ class PatentsSection:
         instruction paragraph directly under it on the way."""
         section_idx = None
         for heading_text in PATENT_SECTION_HEADINGS:
-            section_idx = self._find_paragraph_with_text(heading_text)
+            section_idx = self._find_header_paragraph(heading_text)
             if section_idx is not None:
                 break
         if section_idx is None:

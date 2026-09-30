@@ -34,7 +34,7 @@ from app.services import notifications
 def _doctor_payload():
     """A canned run_doctor report with one substantive (WARN) finding."""
     return {
-        "document_uid": "cv",
+        "document_uid": "DOC_ON",
         "root": "unused",
         "artifacts": {},
         "findings": [
@@ -71,7 +71,7 @@ def _orchestrator(monkeypatch, tmp_path, db, run_id):
         [SimpleNamespace(number=1, stage_id="1a", name="Hierarchy Extraction")],
     )
 
-    o = orch.PipelineOrchestrator(run_id, tmp_path / "cv.docx", db)
+    o = orch.PipelineOrchestrator(run_id, tmp_path / f"{run_id}.docx", db)
     monkeypatch.setattr(o, "_copy_to_pipeline_input", lambda: str(tmp_path / "cv.docx"))
     monkeypatch.setattr(o, "execute_step", AsyncMock())
     monkeypatch.setattr(o, "pipeline_output_dir", tmp_path / "outputs")
@@ -139,8 +139,8 @@ def test_doctor_runs_by_default_and_publishes(monkeypatch, tmp_path, db):
     db.expire_all()
     assert db.query(Run).filter(Run.id == "DOC_ON").first().status == "complete"
 
-    # Report written under the pipeline outputs dir (document_uid = "cv").
-    report = tmp_path / "outputs" / "stage_7_doctor" / "cv_doctor.json"
+    # Report written under the pipeline outputs dir (document_uid = run id).
+    report = tmp_path / "outputs" / "stage_7_doctor" / "DOC_ON_doctor.json"
     assert json.loads(report.read_text()) == payload
 
     # Registered on the final step's output_files (what the viewer lists),
@@ -180,3 +180,23 @@ def test_doctor_crash_never_fails_run(monkeypatch, tmp_path, db, caplog):
     notifications.flush()
     assert len(posts) == 2
     assert "Doctor" not in _facts(posts[-1])
+
+
+def test_doctor_source_is_the_runs_private_input_copy(monkeypatch, tmp_path, db):
+    """#299: the doctor reads the same per-run copy _copy_to_pipeline_input wrote."""
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_SRC")
+    copied = o._pipeline_input_path()
+    copied.parent.mkdir(parents=True)
+    copied.write_bytes(b"x")
+
+    seen = {}
+    monkeypatch.setattr(
+        run_doctor_mod, "run_doctor",
+        lambda out_dir, uid, source=None: seen.update(source=source) or _doctor_payload(),
+    )
+    o._doctor_report()
+
+    assert seen["source"] == copied

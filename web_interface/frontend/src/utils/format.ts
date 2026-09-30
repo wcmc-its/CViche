@@ -46,6 +46,18 @@ export function formatDuration(seconds: number | null): string {
  * null/undefined => em dash. Older runs can store a null cost; without this
  * guard `cost.toFixed` throws and, with no error boundary, blanks the page.
  */
+/**
+ * Cost so far of a running step: live run total minus the total when the step
+ * started. Clamped at 0 because the two operands come at different precisions
+ * -- the step-start total is the orchestrator's float64, while a polled run
+ * total is read back from a MySQL FLOAT (~6 significant digits), so before the
+ * step's first COST_UPDATE the difference can be about -0.000005, shown as
+ * "$-0.000".
+ */
+export function runningStepCost(totalCost: number | null | undefined, stepStartCost: number | undefined): number {
+  return Math.max(0, (totalCost || 0) - (stepStartCost || 0))
+}
+
 export function formatCost(cost: number | null | undefined, precision: 2 | 3 = 2): string {
   if (cost === null || cost === undefined) return '—'
   return `$${cost.toFixed(precision)}`

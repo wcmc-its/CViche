@@ -8,10 +8,9 @@ How each secret CViche needs in production gets into the running container, with
 
 | Secret | Used by | Sensitivity |
 |---|---|---|
-| `CVICHE_DATABASE_URL` | `app/database.py` | High — password embedded in the URL |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` (+ `MIGRATE_USER` for the alembic init container) | `app/database.py` via `app/database_factory.py:create_cviche_engine` | High — identifies the production database; under IAM auth no password travels with these |
 | `CVICHE_SESSION_SECRET` | session middleware (`itsdangerous`) | High — anyone with this can forge a session cookie |
-| `OPENAI_API_KEY` | `src/unified_pipeline/llm_client.py` | High — billing impact |
-| AWS credentials | `app/storage/s3_storage.py`, Bedrock client | High — broader blast radius if leaked |
+| AWS credentials | `app/storage/s3_storage.py`, Bedrock client (`src/unified_pipeline/llm/bedrock.py` -- CViche is Bedrock-only) | High — broader blast radius if leaked |
 | `CVICHE_S3_BUCKET` | `app/storage/s3_storage.py` | Low (name, not a credential) |
 | `CVICHE_ALLOWED_ORIGINS` | CORS + CSRF | Low (config, not a credential) |
 | `NCBI_API_KEY` | `src/unified_pipeline/pubmed_*` | Low — rate-limit-only key |
@@ -24,15 +23,21 @@ Single `.env` file in the same directory as `docker-compose.yml`, mode `0600`, o
 
 ```bash
 # /etc/cviche/.env  (or alongside the compose file)
-CVICHE_DATABASE_URL=mysql+pymysql://cviche_user:<password>@cviche-prod.cluster-xxx.us-east-1.rds.amazonaws.com:3306/cviche
+DB_HOST=cviche-prod.cluster-xxx.us-east-1.rds.amazonaws.com
+DB_PORT=3306
+DB_NAME=cviche
+DB_USER=cviche_app
+MIGRATE_USER=cviche_migrate
+# No DB password: create_cviche_engine (database_factory.py) mints an RDS IAM
+# auth token per connection. DB_AUTH_MODE=password + DB_PASSWORD are for the
+# local docker-compose stack only.
 CVICHE_SESSION_SECRET=<64-hex-chars-from-secrets.token_hex(32)>
 CVICHE_ALLOWED_ORIGINS=https://cviche.med.cornell.edu
 CVICHE_S3_BUCKET=wcm-cviche-storage
-OPENAI_API_KEY=sk-...
-# AWS creds via instance profile, NOT here
+# AWS creds (S3 + Bedrock) via instance profile, NOT here
 ```
 
-`docker-compose.prod.yml` already references all of these via `${VAR}` interpolation, so `docker compose --env-file /etc/cviche/.env -f docker-compose.yml -f docker-compose.prod.yml up -d` picks them up.
+`docker-compose.prod.yml` reads all of these via `${VAR}` interpolation (`DB_HOST`, `DB_NAME`, `DB_USER` and `MIGRATE_USER` are required, and compose refuses to start without them) and pins `DB_AUTH_MODE=iam`, so `docker compose --env-file /etc/cviche/.env -f docker-compose.yml -f docker-compose.prod.yml up -d` picks them up. Variables exported in the shell take precedence over `--env-file`.
 
 **Provisioning options:**
 - Fetch the file from AWS Secrets Manager on host boot (cloud-init / Ansible). Don't bake into the AMI.
@@ -64,16 +69,26 @@ spec:
     name: cviche-app-secrets       # creates k8s Secret of the same name
     creationPolicy: Owner
   data:
-    - secretKey: CVICHE_DATABASE_URL
+    - secretKey: DB_HOST
       remoteRef:
-        key: cviche/prod/db_url
+        key: cviche/prod/db_host
+    - secretKey: DB_PORT
+      remoteRef:
+        key: cviche/prod/db_port
+    - secretKey: DB_NAME
+      remoteRef:
+        key: cviche/prod/db_name
+    - secretKey: DB_USER
+      remoteRef:
+        key: cviche/prod/db_user
+    - secretKey: MIGRATE_USER
+      remoteRef:
+        key: cviche/prod/db_migrate_user
     - secretKey: CVICHE_SESSION_SECRET
       remoteRef:
         key: cviche/prod/session_secret
-    - secretKey: OPENAI_API_KEY
-      remoteRef:
-        key: cviche/prod/openai_api_key
 ```
+Bedrock/S3 credentials on EKS come from the pod's IAM role (IRSA), not a k8s Secret.
 
 The backend Deployment then references it:
 
@@ -184,9 +199,15 @@ Same IRSA role, add the Bedrock permissions:
     "bedrock:InvokeModel",
     "bedrock:InvokeModelWithResponseStream" 
   ],
-  "Resource": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6:0"
+  "Resource": [
+    "arn:aws:bedrock:*::foundation-model/*",
+    "arn:aws:bedrock:us-east-1:<account-id>:inference-profile/us.anthropic.claude-sonnet-5",
+    "arn:aws:bedrock:us-east-1:<account-id>:inference-profile/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+  ]
 }
 ```
+
+A `us.` cross-region inference profile needs BOTH its `inference-profile` ARN and the underlying `foundation-model` ARNs (it can route to any US region). Changing `default.model` in `llm_config.yaml` to a new model means adding that model's inference-profile ARN here first, or every call fails with AccessDenied. The live policy is `CvicheBedrockPolicy` on `cviche-bedrock-role`.
 
 Add other model ARNs as needed. Limit to specific model ARNs; do NOT grant `Resource: "*"`.
 
@@ -211,10 +232,10 @@ The S3 bucket itself should:
 ## Verification checklist before go-live
 
 - [ ] `kubectl get secret cviche-app-secrets -o yaml -n cviche` shows base64'd values for every expected key — and only those keys.
-- [ ] `kubectl exec -n cviche <backend-pod> -- printenv | grep -E '(CVICHE_|AWS_|OPENAI)' | sort` shows every expected env var present, none extra.
+- [ ] `kubectl exec -n cviche <backend-pod> -- printenv | grep -E '(CVICHE_|AWS_)' | sort` shows every expected env var present, none extra.
 - [ ] `kubectl exec -n cviche <backend-pod> -- env | grep AWS_ACCESS_KEY_ID` returns nothing (IRSA, not static keys).
 - [ ] `kubectl exec -n cviche <backend-pod> -- env | grep AWS_ROLE_ARN` shows the expected role ARN.
 - [ ] `aws s3 ls s3://<bucket>/<prefix>/` from inside the pod succeeds; the same from a pod in another namespace fails.
 - [ ] Bucket policy denies plain-HTTP requests; verify with `curl http://<bucket>.s3.amazonaws.com/...` returning 403.
 - [ ] `aws s3api get-bucket-versioning --bucket <bucket>` returns `Enabled`.
-- [ ] No grep for `aws_access_key_id`, `aws_secret_access_key`, `OPENAI_API_KEY=sk-` in any committed file (`git grep -i`). The .env.example only shows placeholders.
+- [ ] No grep for `aws_access_key_id`, `aws_secret_access_key` in any committed file (`git grep -i`). The .env.example only shows placeholders.

@@ -59,6 +59,7 @@ from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa:
 def _generator():
     """A generator with just enough state to build one table or fill one section."""
     gen = WCMTemplateGenerator.__new__(WCMTemplateGenerator)
+    gen._bullet_paras = set()
     gen.doc = docx.Document()
     gen.verbose = False
     gen.stats = {"tables_populated": 0, "entries_inserted": 0}
@@ -148,7 +149,7 @@ def test_none_extracted_fields_does_not_raise_through_the_section_filler():
         ("M2B", "Past (Completed) Funding"),
         ("M2C", "Pending Funding"),
     ):
-        gen.doc.add_paragraph(header)
+        gen.doc.add_paragraph().add_run(header).bold = True
 
     entries_by_code = {
         "M2A": [{"text": "Grant with no extracted fields at all",
@@ -182,7 +183,7 @@ def test_verbose_reclassification_message_exercises_the_title_read(caplog):
     # `emit_comments` attribute, which _add_word_comment reads unconditionally.
     gen.emit_comments = False
     for header in ("Current Research Funding", "Past (Completed) Funding", "Pending Funding"):
-        gen.doc.add_paragraph(header)
+        gen.doc.add_paragraph().add_run(header).bold = True
 
     entries_by_code = {
         "M2A": [{"text": "Old grant, already ended", "taxonomy_code": "M2A",

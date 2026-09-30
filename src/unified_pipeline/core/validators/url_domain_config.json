@@ -15,7 +15,7 @@
       "canonical_name": "Research Support (Clinical Trials)",
       "tier": 1,
       "confidence": 0.90,
-      "reasoning": "ClinicalTrials.gov is for clinical trial registrations - now routed to M2A/M2B/M2C based on status"
+      "reasoning": "ClinicalTrials.gov is for clinical trial registrations - now routed to M2A (no end date) or M2B (ended), by end date (#291)"
     },
 
     "patents.google.com": {

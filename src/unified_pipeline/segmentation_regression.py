@@ -38,6 +38,7 @@ outputs/gold_set/segsnap_<label>/ and are likewise never committed.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import logging
 import re
@@ -47,11 +48,24 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
-logger = logging.getLogger(__name__)
+from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
+    is_near_template_instruction,
+    is_template_instruction,
+)
+from unified_pipeline.core.text_norm import (
+    SUBSTANTIVE_LINE_CHARS,
+    looks_like_record,
+    norm,
+    squash,
+)
 
-# Substantive-line threshold: shorter lines ("2016", "PhD", bare bullets)
-# match by accident and only add noise to the coverage metric.
-SUBSTANTIVE_LINE_CHARS = 15
+# Aliases for callers that predate the move to core.text_norm.
+_norm = norm
+_squash = squash
+_looks_like_record = looks_like_record
+
+logger = logging.getLogger(__name__)
 
 # A content entry counts as a mega-entry when it packs this many
 # record-like lines (the layout-table collapse smell, #208).
@@ -184,40 +198,80 @@ def _counts(m: Metrics) -> dict[str, int]:
     }
 
 
-def _norm(text: str) -> str:
-    return " ".join(str(text or "").split()).lower()
-
-
-_TOKEN_RE = re.compile(r"[a-z0-9]+")
+# Unicode letters/digits, no underscore: identical to [a-z0-9]+ on the
+# lowercased ASCII input this used to see (#541).
+_TOKEN_RE = re.compile(r"[^\W_]+")
 
 
 def _tokens(text: str) -> Counter[str]:
     """Word/number token MULTISET for the coverage check (see
     compute_metrics). A set would collapse repeated tokens, so a source line
     repeating an entry's words would read as covered (#T2.3)."""
-    return Counter(_TOKEN_RE.findall(_norm(text)))
+    return Counter(_TOKEN_RE.findall(norm(text)))
 
 
-def _squash(text: str) -> str:
-    """Whitespace-FREE normalization for the coverage check: stage 2 joins
-    text across in-paragraph line breaks with no whitespace at all
-    ('Present position:' + break + 'Attending' -> 'position:Attending'),
-    and tab-joined label/value lines re-emerge with tabs dropped. Comparing
-    with whitespace removed on both sides is immune to all of that."""
-    return re.sub(r"\s+", "", str(text or "")).lower()
+def _token_list(text: str) -> list[str]:
+    """Word/number tokens in document ORDER (`_tokens` drops the order)."""
+    return _TOKEN_RE.findall(norm(text))
+
+
+#: How many tokens beyond the line's own count the smallest stretch of an
+#: entry holding all of the line's tokens may span for the line to still count
+#: as covered by that entry (#610). Stage 2 splices whole phrases into a line
+#: ('B.S.' + 'University of Utah' + '(Biology)') and can reorder its parts;
+#: the same words merely scattered through an unrelated entry span far more.
+COVERAGE_WINDOW_SLACK = 12
+
+
+def _has_compact_window(need: Counter[str], entry_tokens: list[str], max_span: int) -> bool:
+    """True when some run of at most `max_span` consecutive `entry_tokens`
+    holds every token of `need` (with multiplicity), in any order."""
+    have: Counter[str] = Counter()
+    missing = sum(need.values())
+    lo = 0
+    for hi, token in enumerate(entry_tokens):
+        if token in need:
+            have[token] += 1
+            missing -= have[token] <= need[token]
+        while missing == 0:
+            if hi - lo + 1 <= max_span:
+                return True
+            left = entry_tokens[lo]
+            if left in need:
+                have[left] -= 1
+                missing += have[left] < need[left]
+            lo += 1
+    return False
 
 
 # --------------------------------------------------------------- source lines
+
+#: The block id `iter_source_block_lines` gives a body paragraph (one outside
+#: every table). Body text has no container to scope it, so the block view
+#: leaves it to the document-wide coverage figure.
+BODY_BLOCK = -1
+
 
 def iter_source_lines(docx_path: str) -> list[str]:
     """Every text line of the source document, INCLUDING paragraphs inside
     table cells (recursively): CVs routinely use 1×1 layout tables as section
     containers, and a coverage metric that can't see into cells would have
     missed the 89HQVQ grant loss entirely."""
+    return [line for _, line in iter_source_block_lines(docx_path)]
+
+
+def iter_source_block_lines(docx_path: str) -> list[tuple[int, str]]:
+    """`iter_source_lines`, same lines in the same order, each paired with
+    the table it sits in: a per-table id numbered in walk order (a nested
+    table gets its own), or BODY_BLOCK. The block view (#815) scopes coverage
+    to one table, so a small table lost whole is not a rounding error against
+    the rest of the document."""
     from docx import Document  # local import: harness is optional tooling
+    from docx.table import Table
     from unified_pipeline.core.docx_structure_extractor import get_paragraph_text
 
-    lines: list[str] = []
+    lines: list[tuple[int, str]] = []
+    table_ids = itertools.count()
     # python-docx returns the same underlying cell (_tc element) for every grid
     # position a vMerge/hMerge spans, so an unguarded walk counts a merged
     # cell's paragraphs once per spanned row/column. Mirror the identity guard
@@ -228,44 +282,109 @@ def iter_source_lines(docx_path: str) -> list[str]:
     # below covers both entry points into walk_cell (#615 item 1).
     seen_cells: set = set()
 
-    def walk_cell(cell) -> None:
+    def walk_table(tbl: Table) -> None:
+        block = next(table_ids)
+        for row in tbl.rows:
+            for cell in row.cells:
+                walk_cell(cell, block)
+
+    def walk_cell(cell, block: int) -> None:
         if cell._tc in seen_cells:
             return
         seen_cells.add(cell._tc)
         for para in cell.paragraphs:
             text = get_paragraph_text(para, tab_char='\t')
             if text.strip():
-                lines.append(text)
+                lines.append((block, text))
         for tbl in cell.tables:
-            for row in tbl.rows:
-                for c in row.cells:
-                    walk_cell(c)
+            walk_table(tbl)
 
     doc = Document(docx_path)
     for para in doc.paragraphs:
         text = get_paragraph_text(para, tab_char='\t')
         if text.strip():
-            lines.append(text)
+            lines.append((BODY_BLOCK, text))
     for tbl in doc.tables:
-        for row in tbl.rows:
-            for cell in row.cells:
-                walk_cell(cell)
+        walk_table(tbl)
     return lines
 
 
 # ------------------------------------------------------------------- metrics
 
-def _looks_like_record(line: str) -> bool:
-    line = line.strip()
-    return len(line) > 60 and (" | " in line or "\t" in line)
-
-
 def _walk_headers(nodes: list[HierarchyNode] | None, titles: list[str]) -> None:
     for node in nodes or []:
-        title = _norm(node.get("text", ""))
+        title = norm(node.get("text", ""))
         if title:
             titles.append(title)
         _walk_headers(node.get("children"), titles)
+
+
+# Template text shorter than this still counts toward coverage: a short
+# template string is also a real value in a CV. "Full-time salaried by Weill
+# Cornell" (35 chars) is one of the template's Employment Status options and,
+# where a CV keeps only that option, the author's answer -- dev lost it on 12
+# runs. 976WPY's template prompts are 42-55 chars.
+TEMPLATE_SCAFFOLDING_MIN_CHARS = 40
+
+
+def _is_template_scaffolding(line: str) -> bool:
+    """A source line that is WCM template instruction text, verbatim or
+    another revision's rewording, or another institution's instruction
+    scaffolding recognised by shape (#530, the same detector stage 2 drops
+    with), and long enough not to double as a value.
+    Not `is_template_label_line`: a short label ("2. Principal Investigator",
+    "Weill Cornell Medical College") is also a real value in a CV, and its
+    loss must still count."""
+    if len(norm(line)) < TEMPLATE_SCAFFOLDING_MIN_CHARS:
+        return False
+    return (is_template_instruction(line) or is_near_template_instruction(line)
+            or is_foreign_template_instruction(line))
+
+
+def _substantive(source_lines: list[str]) -> list[str]:
+    """The source lines coverage is measured over: long enough not to match
+    by accident, and not WCM template scaffolding. The template's own
+    prompts and column labels (a CV written on the template) are not content
+    stage 2 should keep, so they are neither covered nor lost (#815: 976WPY's
+    64 "lost" lines were its labels)."""
+    return [l for l in source_lines if len(norm(l)) >= SUBSTANTIVE_LINE_CHARS
+            and not _is_template_scaffolding(l)]
+
+
+def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
+    """The substantive lines no entry covers, stripped.
+
+    Whitespace-free comparison (see squash). Checked PER ENTRY, so a line can
+    never be called covered by unrelated content scattered across the document
+    (what the old \\x00-sentinel join enforced).
+
+    Verbatim containment alone is too strict: stage 2 legitimately MERGES
+    adjacent source content into one entry, inserting text mid-line --
+      source: '\\t\\t1984-1989\\t\\t\\t\\tB.S.\\t (Biology)'
+      entry : '1984-1989    B.S. University of Utah (Biology)'
+    Nothing is lost (the entry is a superset), but the source line is no longer
+    a contiguous substring. That alone scored web053 96.0% and web057 67.5%.
+    So a line also counts as covered when one entry holds ALL of its tokens
+    within one COMPACT stretch, at most COVERAGE_WINDOW_SLACK tokens longer
+    than the line (#610: holding the same words scattered through an
+    unrelated entry is not coverage). Both checks are kept: squash catches glued text with no token boundaries,
+    tokens catch mid-line merges. A line is lost only if neither holds."""
+    entry_squash = [squash(e.get("text", "")) for e in entries]
+    entry_tokens = [_tokens(e.get("text", "")) for e in entries]
+    entry_seqs = [_token_list(e.get("text", "")) for e in entries]
+
+    def _covered(line: str) -> bool:
+        squashed = squash(line)
+        if squashed and any(squashed in es for es in entry_squash):
+            return True
+        line_tokens = _tokens(line)
+        if not line_tokens:
+            return False
+        max_span = sum(line_tokens.values()) + COVERAGE_WINDOW_SLACK
+        return any(line_tokens <= et and _has_compact_window(line_tokens, seq, max_span)
+                   for et, seq in zip(entry_tokens, entry_seqs))
+
+    return [l.strip() for l in substantive if not _covered(l)]
 
 
 def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -> Metrics:
@@ -275,31 +394,8 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
     content = [e for e in entries if e.get("element_type") not in ("header", "break")]
 
     # --- text coverage: does each substantive source line survive anywhere?
-    # Whitespace-free comparison (see _squash). Checked PER ENTRY, so a line can
-    # never be called covered by unrelated content scattered across the document
-    # (what the old \x00-sentinel join enforced).
-    #
-    # Verbatim containment alone is too strict: stage 2 legitimately MERGES
-    # adjacent source content into one entry, inserting text mid-line --
-    #   source: '\t\t1984-1989\t\t\t\tB.S.\t (Biology)'
-    #   entry : '1984-1989    B.S. University of Utah (Biology)'
-    # Nothing is lost (the entry is a superset), but the source line is no longer
-    # a contiguous substring. That alone scored web053 96.0% and web057 67.5%.
-    # So a line also counts as covered when one entry holds ALL of its tokens.
-    # Both checks are kept: squash catches glued text with no token boundaries,
-    # tokens catch mid-line merges. A line is lost only if neither holds.
-    entry_squash = [_squash(e.get("text", "")) for e in entries]
-    entry_tokens = [_tokens(e.get("text", "")) for e in entries]
-    substantive = [l for l in source_lines if len(_norm(l)) >= SUBSTANTIVE_LINE_CHARS]
-
-    def _covered(line: str) -> bool:
-        squashed = _squash(line)
-        if squashed and any(squashed in es for es in entry_squash):
-            return True
-        line_tokens = _tokens(line)
-        return bool(line_tokens) and any(line_tokens <= et for et in entry_tokens)
-
-    lost = [l.strip() for l in substantive if not _covered(l)]
+    substantive = _substantive(source_lines)
+    lost = _lost_lines(substantive, entries)
     coverage = 100.0 if not substantive else round(
         100.0 * (len(substantive) - len(lost)) / len(substantive), 1
     )
@@ -309,7 +405,7 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
     dups = 0
     empty = 0
     for e in entries:
-        text = _norm(e.get("text", ""))
+        text = norm(e.get("text", ""))
         if e.get("element_type") not in ("header", "break") and not text:
             empty += 1
             continue
@@ -322,7 +418,7 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
     mega = 0
     for e in content:
         records = sum(1 for line in str(e.get("text", "")).split("\n")
-                      if _looks_like_record(line))
+                      if looks_like_record(line))
         if records >= MEGA_ENTRY_MIN_RECORDS:
             mega += 1
 
@@ -340,7 +436,7 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
         # instead of raising or falling back cleanly (#616 item i).
         hierarchy = e.get("hierarchy")
         if isinstance(hierarchy, list) and hierarchy:
-            top = _norm(hierarchy[0]) or "(none)"
+            top = norm(hierarchy[0]) or "(none)"
         else:
             top = "(none)"
         per_h1[top] = per_h1.get(top, 0) + 1
@@ -362,6 +458,42 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
     }
 
 
+class LostBlock(TypedDict):
+    """One source table that stage 2 mostly lost (#815)."""
+    block: int
+    substantive_lines: int
+    lost_lines: list[str]
+
+
+# A table is a lost block when it holds at least this many substantive lines
+# and at least this share of them is lost. Both calibrated in the PR (#815).
+LOST_BLOCK_MIN_LINES = 3
+LOST_BLOCK_MIN_LOST_SHARE = 0.5
+
+
+def find_lost_blocks(block_lines: list[tuple[int, str]], stage2: Stage2) -> list[LostBlock]:
+    """Pure: the source tables whose own coverage is low, whatever the rest
+    of the document scores. web207 lost its whole personal-data table (name,
+    address, phone) at 99.1% document coverage: five rows against 840
+    entries never moves the percentage (#815). Body paragraphs (BODY_BLOCK)
+    are left to the document-wide figure."""
+    by_block: dict[int, list[str]] = {}
+    for block, line in block_lines:
+        if block != BODY_BLOCK:
+            by_block.setdefault(block, []).append(line)
+    entries = stage2.get("entries", [])
+    found: list[LostBlock] = []
+    for block, lines in by_block.items():
+        substantive = _substantive(lines)
+        if len(substantive) < LOST_BLOCK_MIN_LINES:
+            continue
+        lost = _lost_lines(substantive, entries)
+        if len(lost) >= LOST_BLOCK_MIN_LOST_SHARE * len(substantive):
+            found.append({"block": block, "substantive_lines": len(substantive),
+                          "lost_lines": lost})
+    return found
+
+
 # ------------------------------------------------------------------- compare
 
 def compare_metrics(baseline: Metrics, candidate: Metrics) -> tuple[Verdict, list[str]]:
@@ -379,8 +511,8 @@ def compare_metrics(baseline: Metrics, candidate: Metrics) -> tuple[Verdict, lis
     drop = baseline["text_coverage_pct"] - candidate["text_coverage_pct"]
     if drop > COVERAGE_DROP_TOLERANCE_PTS:
         reasons.append(f"coverage {baseline['text_coverage_pct']}% -> {candidate['text_coverage_pct']}%")
-    lost_before = set(map(_norm, baseline["lost_lines"]))
-    newly_lost = [l for l in candidate["lost_lines"] if _norm(l) not in lost_before]
+    lost_before = set(map(norm, baseline["lost_lines"]))
+    newly_lost = [l for l in candidate["lost_lines"] if norm(l) not in lost_before]
     if newly_lost:
         reasons.append(f"{len(newly_lost)} newly lost line(s), e.g. '{newly_lost[0][:60]}'")
     # Diffed unconditionally (not gated on a headers_detected count drop):

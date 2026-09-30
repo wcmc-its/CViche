@@ -147,11 +147,26 @@ _MONTH_NAMES = (
 # bare year, so the single-space separator below cannot turn "the clinic,
 # born 1970, ..." into a false positive. #820 adds the day-month-year order
 # ("2 January 1970") to the month-day-year order #532 already had.
+# #847: the day may carry an ordinal suffix ("April 1st, 1970", "21st of
+# April 1970"); without it only the year matched and the month and day
+# reached the LLM (run 6TJNBQ).
+_ORDINAL_DAY = r"\d{1,2}(?:st|nd|rd|th)?"
 _FULL_DATE_VALUE = (
     r"(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
-    r"|" + _MONTH_NAMES + r"\s+\d{1,2},?\s*\d{4}"
-    r"|\d{1,2}\s+" + _MONTH_NAMES + r",?\s*\d{4})"
+    r"|" + _MONTH_NAMES + r"\s+" + _ORDINAL_DAY + r",?\s*\d{4}"
+    r"|" + _ORDINAL_DAY + r"\s+(?:of\s+)?" + _MONTH_NAMES + r",?\s*\d{4})"
 )
+
+# ISO (yyyy-mm-dd) and dot-separated (dd.mm.yyyy) date shapes -- #847
+# residual round 3: `_FULL_DATE_VALUE` only accepts `/` or `-` as the
+# separator, so a colonless dotted DOB ("Born 12.03.1970") matched no
+# value shape at all and the whole colonless row failed to fire -- not
+# just the pre-LLM scrub, the render-time match too. Defined here (not
+# only where the pre-LLM scrub used to define them) so both the colonless
+# policy row below and `_PRE_LLM_DATE_RE` share one definition (#1.5).
+_ISO_DATE_VALUE = r"\d{4}-\d{1,2}-\d{1,2}"
+_DOTTED_DATE_VALUE = r"\d{1,2}\.\d{1,2}\.\d{2,4}"
+_WHOLE_DATE_VALUE = _ISO_DATE_VALUE + r"|" + _DOTTED_DATE_VALUE + r"|" + _FULL_DATE_VALUE
 
 # Every SSN spelling #532/#820 catch behind a colon-less separator: dashed,
 # space-grouped, and no-separator-at-all -- "SSN 123-45-6789" and "Social
@@ -215,6 +230,18 @@ _DOB_STEM = (
 )
 _SSN_STEM = r"(?: social \s* security (?: \s* (?: number | no\.? ) )? | ssn )"
 
+# #1071: a template's DOB label can carry a parenthetical before its colon
+# -- a format hint ("Date of Birth (mm/dd/yyyy):") or the value itself
+# ("Birth Date (01/02/1970):", nothing after the colon), which rendered
+# verbatim in the Appendix. Replaces the old `(D.O.B.)`-only parenthetical,
+# which this one subsumes. One bounded character class with no nested
+# quantifier: a match attempt reads at most `_DOB_PAREN_MAX` characters
+# past the stem, so an unclosed "(" cannot make the scan super-linear. Not
+# a newline and not another parenthesis, so it never spans two fragments or
+# pairs an opening parenthesis with a later, unrelated closing one.
+_DOB_PAREN_MAX = 40
+_DOB_LABEL_PARENTHETICAL = r"(?: \s* \( [^()\n]{0,%d} \) )?" % _DOB_PAREN_MAX
+
 
 def _colonless(stem: str, wide_value: str, single_space_value: str) -> str:
     """A colon-less label+value shape: `stem` then either a wide separator
@@ -233,8 +260,10 @@ def _colonless(stem: str, wide_value: str, single_space_value: str) -> str:
 WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     # --- unambiguous as a label: every code -------------------------------
     WithholdRule(CAT_DATE_OF_BIRTH, SCOPE_ALL_CODES, DECIDED_820, label=r"""
-        date \s* of \s* birth (?: \s* \( d\.?o\.?b\.?\) )?
-      | birth \s*-? \s* date (?: \s+ and \s+ birth \s*-? \s* place )?
+        date \s* of \s* birth""" + _DOB_LABEL_PARENTHETICAL + r"""
+      | date \s+ and \s+ place \s* of \s* birth
+      | birth \s*-? \s* date""" + _DOB_LABEL_PARENTHETICAL + r"""
+      | birth \s*-? \s* date \s+ and \s+ birth \s*-? \s* place
       | birthdate (?: \s+ and \s+ birthplace )?
       | birthday
       | year \s* of \s* birth
@@ -245,10 +274,16 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
       | date \s* de \s* naissance
       | geburtsdatum
     """),
+    # #847 residual round 3: `wide_value`/`single_space_value` add
+    # `_DOTTED_DATE_VALUE` so a colonless dotted date ("Born 12.03.1970",
+    # "DOB - 12.03.1970") matches -- before, only `/`/`-` separators
+    # (`_FULL_DATE_VALUE`) were in the union, so this row's `finditer`
+    # never found ANY value after a dotted-date stem and the whole
+    # colonless match silently failed, at render time as well as pre-LLM.
     WithholdRule(CAT_DATE_OF_BIRTH, SCOPE_ALL_CODES, DECIDED_820, shape=_colonless(
         _DOB_STEM,
-        wide_value=_FULL_DATE_VALUE + r"|" + _YEAR_VALUE,
-        single_space_value=_FULL_DATE_VALUE)),
+        wide_value=_FULL_DATE_VALUE + r"|" + _DOTTED_DATE_VALUE + r"|" + _YEAR_VALUE,
+        single_space_value=_FULL_DATE_VALUE + r"|" + _DOTTED_DATE_VALUE)),
     WithholdRule(CAT_PLACE_OF_BIRTH, SCOPE_ALL_CODES, DECIDED_820, label=r"""
         place \s* of \s* birth | birth \s*-? \s* place | birthplace
     """),
@@ -268,10 +303,13 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  label=r"driver.?s? \s* licen[sc]e"),
     WithholdRule(CAT_MARITAL_STATUS, SCOPE_ALL_CODES, DECIDED_820,
                  label=r"marital \s* status"),
+    # #1103: "Name of Spouse & Children:" opened with "Name of" and joined
+    # the children onto the spouse, so neither label matched and the family's
+    # names and birth years rendered in the Appendix.
     WithholdRule(CAT_SPOUSE, SCOPE_ALL_CODES, DECIDED_820, label=r"""
-        spouse (?: [’'] s )? (?: \s* name )?
-      | wife (?: [’'] s )? (?: \s* name )?
-      | husband (?: [’'] s )? (?: \s* name )?
+        (?: names? \s+ of \s+ )?
+        (?: spouse | wife | husband ) (?: [’'] s )? (?: \s* name )?
+        (?: \s* (?: & | and | / | , ) \s* (?: children | child | kids | dependents? ) )?
     """),
     # "Married to <name>" carries no colon and no shaped value -- the phrase
     # is the whole signal, so it is anchored like a label. Guarded like
@@ -291,12 +329,31 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     # --- ambiguous as a title word: A-coded and Appendix-bound only ---------
     WithholdRule(CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"born"),
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
-                 label=r"children (?: [’'] s \s* names? )? | dependents?"),
+                 label=r"(?: names? \s+ of \s+ )? (?: children (?: [’'] s \s* names? )? | dependents? )"),
+    # #1041: a bare child count that is its OWN fragment ("Marital Status:
+    # <status>; <n> Children" -- the `;` hard split leaves it behind the
+    # marital-status cut, and it rendered in the Appendix). The count must
+    # be the WHOLE fragment -- opening right after a hard delimiter
+    # (`_PII_FRAGMENT_SPLIT_RE`) and closing at the next -- so "20 children
+    # and 20 adults" or "20 subjects, 20 children" in a study never matches.
+    WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
+                 shape=r"(?: ^ | (?<= [\n\t|;] ) | (?<= [ ]{3} ) ) [ ]*"
+                       r" \d{1,2} \s+ (?: children | child | kids | sons? | daughters? )"
+                       r" (?= [ \t.]* (?: [\n\t|;] | \s{3,} | $ ) )",
+                 anchored=True),
     WithholdRule(CAT_FAMILY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"family"),
     WithholdRule(CAT_AGE, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"age"),
     WithholdRule(CAT_GENDER, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"gender"),
     WithholdRule(CAT_RELIGION, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"religion"),
-    WithholdRule(CAT_ETHNICITY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"ethnicity"),
+    # #1071: "Race/Ethnicity:", "Race / Ethnicity:", "Race and Ethnicity:"
+    # -- the "ethnicity" half alone never opened a label there, because the
+    # boundary rule does not accept "/" or "and" before it. Never a bare
+    # "race": "Race: reporting practices in clinical trials" is a title.
+    WithholdRule(CAT_ETHNICITY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"""
+        ethnicity
+      | race \s* / \s* ethnicity
+      | race \s+ and \s+ ethnicity
+    """),
     WithholdRule(CAT_VETERAN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  label=r"veteran (?: \s* status )?"),
     WithholdRule(CAT_DISABILITY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
@@ -384,6 +441,97 @@ def _pii_field_key_category(key: str) -> str | None:
     return None
 
 
+#: Field labels this pipeline RENDERS, curated from the code that already
+#: recognises each one -- the second half of `_KNOWN_FIELD_LABEL_RE`'s
+#: vocabulary (the first half is `WITHHOLD_POLICY`'s own label rows).
+#: Verbose-mode alternatives, case-insensitive, no colon (the shared
+#: `\s*:` terminator is appended once, the way `pii.py::_label_pattern`
+#: appends it for a policy row).
+#:
+#: Every entry names a field some renderer or classifier looks for by
+#: name; nothing here is a guess about English word shape. Source per
+#: entry (all on this branch):
+#:
+#: - the six PERSONAL DATA table rows `_write_personal_data_table_cells`
+#:   matches by their own cell text -- 'office address'
+#:   (`sections/personal_data.py:631`), 'office telephone' (`:637`),
+#:   'work email' (`:642`), 'home address' (`:647`), 'cell phone'
+#:   (`:653`), 'personal email' (`:658`). 'home address' also arrives via
+#:   `WITHHOLD_POLICY`'s own home-contact row, which is fine: the
+#:   vocabulary is a union.
+#: - `_classify_contact_label`'s label words -- `_EMAIL_LABEL_WORDS`
+#:   ('e-mail', 'email') `:158`, `_PHONE_LABEL_WORDS` ('phone',
+#:   'telephone') `:159`, `_ADDRESS_LABEL_WORDS` ('address', 'business')
+#:   `:163`, `_PERSON_NAME_LABELS` ('name', 'full name', 'legal name',
+#:   'candidate name', 'applicant name') `:169-172`.
+#: - the phone-type words the entry classifier reads out of the raw text:
+#:   'cell', 'mobile' (`personal_data.py:423`).
+#: - 'fax' -- consumed and deliberately dropped by
+#:   `_parse_address_block` (`personal_data.py:892`) and by
+#:   `normalization/fields.py:174-177`.
+#: - 'citizenship', 'nationality' and 'personal email' -- the #821
+#:   "render" defaults, listed as NOT in the table at
+#:   `normalization/pii.py:304-305`.
+#: - 'npi' -- the same list's public identifier (`pii.py:306`), detected
+#:   by `sections/licensure.py:86` `_NPI_LABEL_RE`.
+#: - 'orcid' -- section S0's own identifier
+#:   (`sections/researcher_profiles.py:1-3`, `sections/__init__.py:29`).
+#: - 'website', 'home page', 'homepage', 'contact' -- the contact nouns
+#:   `core/validators/contact_section.py:90-92` `CONTACT_NOUNS` lists.
+#:
+#: Adding a field is one row. A label NOT here is not leaked: the run is
+#: cut whole (see `_extend_bare_label_span`), so the cost of a gap is a
+#: lost sibling field, never a rendered protected value.
+_RENDER_SET_FIELD_LABELS: tuple[str, ...] = (
+    r"office \s* address",
+    r"office \s* (?: telephone | phone )",
+    r"work \s* e-? \s* mail",
+    r"personal \s* e-? \s* mail",
+    r"cell (?: \s* phone )?",
+    r"mobile (?: \s* phone )?",
+    r"e-? \s* mail (?: \s* address )?",
+    r"telephone",
+    r"phone",
+    r"address",
+    r"business",
+    r"name",
+    r"(?: full | legal | candidate | applicant ) \s* name",
+    r"fax",
+    r"citizenship",
+    r"nationality",
+    r"npi",
+    r"orcid",
+    r"website",
+    r"home \s* page | homepage",
+    r"contact",
+)
+
+#: The ONLY thing a bare-label extension may stop at part-way through a
+#: whitespace run (#821 R4 F-1): a label this codebase actually knows, at
+#: a word start, optionally behind a list marker.
+#:
+#: Built from `WITHHOLD_POLICY`'s label rows PLUS
+#: `_RENDER_SET_FIELD_LABELS`, the same way `pii.py::_PII_LABEL_RE` is
+#: built from those rows -- one source, so the vocabulary cannot drift
+#: from the policy when a row is added.
+#:
+#: The leading `(?<![\w'’-])` is what makes it a FIELD NAME rather than a
+#: substring: without it "MyCitizenship:" inside a value stops the cut and
+#: everything before it renders.
+_KNOWN_FIELD_LABEL_RE = re.compile(
+    r"(?<![\w'’-])"
+    r"(?:(?:[•·*–—-]|\d{1,3}[.)])[ \t]*)?"
+    r"(?:"
+    + "|".join(
+        [r"(?:" + str(rule.label) + r")"
+         for rule in WITHHOLD_POLICY if rule.label is not None]
+        + [r"(?:" + label + r")" for label in _RENDER_SET_FIELD_LABELS]
+    )
+    + r")\s*:",
+    re.X | re.I,
+)
+
+
 # ---------------------------------------------------------------------------
 # The match engine
 # ---------------------------------------------------------------------------
@@ -419,10 +567,31 @@ class PiiMatch(NamedTuple):
     category: str
 
 
+#: #1041: these rows' labels also close on a hyphen or dash followed by
+#: whitespace or the end of the text ("Marital Status-<gap><value>" rendered
+#: its value in a corpus run). A dash glued to the next character
+#: ("Visa-free") is not a terminator.
+#: Every other row keeps the colon only: with a dash, the title-word rows
+#: matched "Age-related ...", "Gender- and ...", "Health- <employer>" across
+#: 24 corpus uids, and spouse/salary open real titles ("Spouse – A
+#: Documentary Film Review", #473's negative controls).
+_DASH_TERMINATED_CATEGORIES = frozenset({
+    CAT_DATE_OF_BIRTH, CAT_PLACE_OF_BIRTH, CAT_SSN, CAT_PASSPORT,
+    CAT_ALIEN_REGISTRATION, CAT_DRIVERS_LICENSE, CAT_MARITAL_STATUS,
+    CAT_EMERGENCY_CONTACT, CAT_VISA,
+})
+_COLON_TERMINATOR = r"\s*:"
+_COLON_OR_DASH_TERMINATOR = r"\s*(?::|[-–—](?=\s|$))"
+
+
 def _label_pattern(rule: WithholdRule) -> re.Pattern:
     """The compiled opener for a label row: the row's alternatives, then
-    the shared `\\s*:` terminator, appended ONCE for the whole group."""
-    return re.compile(r"(?:" + str(rule.label) + r")\s*:", re.X | re.I)
+    its terminator (`_COLON_OR_DASH_TERMINATOR` for a
+    `_DASH_TERMINATED_CATEGORIES` row, else `_COLON_TERMINATOR`), appended
+    ONCE for the whole group."""
+    terminator = (_COLON_OR_DASH_TERMINATOR if rule.category in _DASH_TERMINATED_CATEGORIES
+                  else _COLON_TERMINATOR)
+    return re.compile(r"(?:" + str(rule.label) + r")" + terminator, re.X | re.I)
 
 
 def _shape_pattern(rule: WithholdRule) -> re.Pattern:
@@ -433,6 +602,22 @@ _COMPILED_POLICY: tuple[tuple[WithholdRule, re.Pattern], ...] = tuple(
     (rule, _label_pattern(rule) if rule.label is not None else _shape_pattern(rule))
     for rule in WITHHOLD_POLICY
 )
+
+
+def _is_bare_label_span(text: str, start: int, end: int) -> bool:
+    """True when `text[start:end]` is a label with no value after it: it
+    ends in a colon (the pre-#1041 test, unchanged), or it is a
+    dash-terminated label row's opener followed by nothing but whitespace
+    ("Marital Status -" before a column gap, tab, newline or cell end)."""
+    if text[start:end].rstrip().endswith(":"):
+        return True
+    for rule, pattern in _COMPILED_POLICY:
+        if rule.label is None or rule.category not in _DASH_TERMINATED_CATEGORIES:
+            continue
+        opener = pattern.match(text, start, end)
+        if opener is not None and not text[opener.end():end].strip():
+            return True
+    return False
 
 
 def _rules_for_scope(scope: str) -> tuple[tuple[WithholdRule, re.Pattern], ...]:
@@ -473,17 +658,68 @@ def _boundary_ok(prefix_since_last_delim: str) -> bool:
             or bool(_LIST_MARKER_RE.match(stripped)))
 
 
-def _label_spans(text: str, pattern: re.Pattern) -> list[tuple[int, int]]:
+# #847 residual: an explicit DOB label, its colon, then a WHOLE date right
+# after it is a DOB whatever text precedes the label -- "Jane Doe DOB:
+# 1/12/45", "Name: Jane Doe, MD Birth Date:  01/12/1945" -- so the boundary
+# rule is not asked. ANDed on all three: one of the DOB row's date-of-birth,
+# birth-date or DOB alternatives (`_EXPLICIT_DOB_LABEL_RE` -- never
+# "Birthday", which also names an event: "Dr. Smith's 70th Birthday:
+# 06/15/2019"), the colon its pattern already requires, and a full date
+# (never a bare year).
+_EXPLICIT_DOB_LABEL_RE = re.compile(r"""
+    (?: date \s* of \s* birth""" + _DOB_LABEL_PARENTHETICAL + r"""
+      | date \s+ and \s+ place \s* of \s* birth
+      | birth \s*-? \s* date""" + _DOB_LABEL_PARENTHETICAL + r"""
+      | birth \s*-? \s* date \s+ and \s+ birth \s*-? \s* place
+      | birthdate (?: \s+ and \s+ birthplace )?
+      | d\.?o\.?b\.? (?: \s* / \s* p\.?o\.?b\.? )?
+    ) \s* :""", re.X | re.I)
+_WHOLE_DATE_AFTER_LABEL_RE = re.compile(r"[ \t\xa0]*(?:" + _WHOLE_DATE_VALUE + r")", re.I)
+
+
+def _explicit_dob_label(text: str, m: re.Match) -> bool:
+    """True when `m` (a CAT_DATE_OF_BIRTH label opener, colon included) is a
+    whole word, one of `_EXPLICIT_DOB_LABEL_RE`'s alternatives, and a whole
+    date follows it (`_WHOLE_DATE_AFTER_LABEL_RE`)."""
+    word_start = m.start() == 0 or not text[m.start() - 1].isalnum()
+    return (word_start and _EXPLICIT_DOB_LABEL_RE.fullmatch(m.group()) is not None
+            and _WHOLE_DATE_AFTER_LABEL_RE.match(text, m.end()) is not None)
+
+
+#: A policy label opens at a word start: no letter, digit, apostrophe or
+#: hyphen right before it -- the same guard `_KNOWN_FIELD_LABEL_RE` leads
+#: with. Without it "Language:" matched its tail "age:" and rendered as
+#: "Langu" once a known field sat earlier on the line.
+_LABEL_WORD_START_RE = re.compile(r"(?<![\w'’-])")
+
+
+def _after_known_field(text: str, frag_start: int, label_start: int) -> bool:
+    """True when the policy label at `label_start` starts a word and a
+    KNOWN field label (`_KNOWN_FIELD_LABEL_RE`) opens earlier in the same
+    fragment: a policy label after another field's value ("Citizenship: US
+    Date of Birth: ...") starts that field's successor, wherever the value
+    ends (#849). A vocabulary, never a guess at where a value stops --
+    #821 R4."""
+    return (_LABEL_WORD_START_RE.match(text, label_start) is not None
+            and _KNOWN_FIELD_LABEL_RE.search(text, frag_start, label_start) is not None)
+
+
+def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) -> list[tuple[int, int]]:
     """(start, end) of every fragment `pattern` opens in `text`: from the
     opener's own start to the next hard delimiter (or end of string), kept
-    only where `_boundary_ok` accepts the text since the previous delimiter."""
+    only where `_boundary_ok` accepts the text since the previous delimiter,
+    the opener follows a known field label in the same fragment
+    (`_after_known_field`), or it is an explicit DOB label with a whole date
+    after it."""
     spans = []
     for m in pattern.finditer(text):
         start = m.start()
         prev_delim_end = 0
         for d in _PII_FRAGMENT_SPLIT_RE.finditer(text, 0, start):
             prev_delim_end = d.end()
-        if not _boundary_ok(text[prev_delim_end:start]):
+        if not (_boundary_ok(text[prev_delim_end:start])
+                or _after_known_field(text, prev_delim_end, start)
+                or (category == CAT_DATE_OF_BIRTH and _explicit_dob_label(text, m))):
             continue
         nxt = _PII_FRAGMENT_SPLIT_RE.search(text, start)
         end = nxt.start() if nxt else len(text)
@@ -517,7 +753,7 @@ def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX) -> 
     for rule, pattern in _rules_for_scope(scope):
         if rule.label is not None or rule.anchored:
             found.extend(PiiMatch(s, e, rule.category)
-                         for s, e in _label_spans(text, pattern))
+                         for s, e in _label_spans(text, pattern, rule.category))
         else:
             found.extend(PiiMatch(m.start(), m.end(), rule.category)
                          for m in pattern.finditer(text))
@@ -549,16 +785,6 @@ def _pii_fragments(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX) -
 #: shape itself, so a scrubbed text is idempotent under a second pass.
 PRE_LLM_PLACEHOLDER = "[withheld]"
 
-# ISO (yyyy-mm-dd) and dot-separated (dd.mm.yyyy) date shapes -- #847 round
-# 2: without these, the union below fell through to `_YEAR_VALUE` and took
-# only the last 4 digits of "1970-01-02" or "12.03.1970", leaking the rest
-# of the date next to the placeholder. Listed BEFORE `_FULL_DATE_VALUE` /
-# `_YEAR_VALUE` in the union so the whole-date alternative wins at the
-# value's own start position (plain alternation tries earlier branches
-# first; there is no longest-match preference across `|`).
-_ISO_DATE_VALUE = r"\d{4}-\d{1,2}-\d{1,2}"
-_DOTTED_DATE_VALUE = r"\d{1,2}\.\d{1,2}\.\d{2,4}"
-
 # Value-shape search for the categories #847 scrubs before any LLM stage
 # reads the text. Built from the SAME building blocks the table's DOB/SSN
 # rows already match against (`_FULL_DATE_VALUE`, `_YEAR_VALUE`,
@@ -567,25 +793,134 @@ _DOTTED_DATE_VALUE = r"\d{1,2}\.\d{1,2}\.\d{2,4}"
 # (module docstring, "#1.5"). `CAT_BIRTH` ("Born: ...", no "on"/"in") gets
 # the same date search as `CAT_DATE_OF_BIRTH` -- round 2: pre-LLM there is
 # no taxonomy code yet to route by, so scope (which row applies to which
-# ENTRY) is not a meaningful filter here; category is.
-_PRE_LLM_DATE_RE = re.compile(
-    _ISO_DATE_VALUE + r"|" + _DOTTED_DATE_VALUE + r"|" + _FULL_DATE_VALUE + r"|" + _YEAR_VALUE,
-    re.X | re.I,
-)
+# ENTRY) is not a meaningful filter here; category is. The whole-date
+# alternatives come BEFORE `_YEAR_VALUE` so a whole date wins at its own
+# start position instead of leaking all but its last four digits (round 2:
+# "1970-01-02", "12.03.1970").
+_PRE_LLM_DATE_RE = re.compile(_WHOLE_DATE_VALUE + r"|" + _YEAR_VALUE, re.X | re.I)
+
+# The same whole-date shapes without the bare-year fallback, for a value at
+# a lower-confidence position -- a cell below a label, the next paragraph --
+# where a bare year is as likely an appointment or publication year as a
+# birth year.
+_PRE_LLM_FULL_DATE_ONLY_RE = re.compile(_WHOLE_DATE_VALUE, re.I)
 _PRE_LLM_VALUE_RE: dict[str, re.Pattern] = {
     CAT_DATE_OF_BIRTH: _PRE_LLM_DATE_RE,
     CAT_BIRTH: _PRE_LLM_DATE_RE,
     CAT_SSN: re.compile(_BARE_SSN_SHAPE + r"|" + _SSN_WIDE_VALUE, re.X | re.I),
 }
+# For the two cross-boundary callers in core/docx_structure_extractor.py
+# (`redact_pre_llm_value_of_category(cross_boundary=True)`): a bare "Date of
+# Birth:" above "2001", or followed by "1990-1994 BA, Example College",
+# must leave the year alone.
+_PRE_LLM_VALUE_RE_FULL_DATE_ONLY: dict[str, re.Pattern] = {
+    **_PRE_LLM_VALUE_RE,
+    CAT_DATE_OF_BIRTH: _PRE_LLM_FULL_DATE_ONLY_RE,
+    CAT_BIRTH: _PRE_LLM_FULL_DATE_ONLY_RE,
+}
+
+# A Children/Dependents label names no birth date, and "Children: Research,
+# Practice and Policy. Oxford Press, 03/15/2019" is a book title (module
+# docstring). So a full date after it is withheld only inside a child item:
+# ONE capitalised given-name token, then either the date in parentheses
+# ("Ann (01/02/2010)") or a born/DOB keyword before it ("Ann DOB:
+# 01/02/2010", "Ann, born 01/02/2010"). Items are matched back to back from
+# the label's colon; the first thing that isn't one ends the list, so
+# "Bob (03/04/2012), Appointed 07/01/2015" keeps the appointment date and
+# "A Randomized Trial (03/15/2019)" or "Health Plan, 01/01/2020" is left
+# alone. A whole date with no name before it is an item too when it ENDS
+# its item -- a comma, a semicolon, "and" or the end of the line comes next
+# ("Dependents: 01/02/2010", "Ann (01/02/2010), 03/04/2012"): no title
+# opens with a whole date, and "Children: 01/02/2010 Symposium" or
+# "..., 07/01/2015 Appointed" is left alone.
+_CHILD_BIRTH_KEYWORD = r"(?i:born|b\.|d\.?o\.?b\.?)\s*:?"
+_CHILD_DATE = r"(?i:" + _WHOLE_DATE_VALUE + r")"
+_CHILD_ITEM_END = r"(?=[ \t]*(?:[,;]|and\b|$))"
+# Case-sensitive on purpose: the given name must be capitalised.
+_CHILD_ITEM_RE = re.compile(
+    r"[\s,;]*(?:and\s+)?(?:[A-Z][a-z'’-]+\s*"
+    r"(?:\(\s*(?:" + _CHILD_BIRTH_KEYWORD + r"\s*)?(?P<paren>" + _CHILD_DATE + r")\s*\)"
+    r"|,?\s*" + _CHILD_BIRTH_KEYWORD + r"\s*(?P<keyword>" + _CHILD_DATE + r"))"
+    r"|(?P<bare>" + _CHILD_DATE + r")" + _CHILD_ITEM_END + r")"
+)
+_CHILD_ITEM_GROUPS = ("paren", "keyword", "bare")
+
+#: The one Children/Dependents label row, compiled -- walked on its own
+#: (`_child_label_date_spans`) because `_merge_matches` folds a Children
+#: label that follows another field on its line ("Marital Status: Married
+#: Children: Ann (01/02/2010)") into that field's span and category, and the
+#: child-item rule then never ran on it.
+_CHILDREN_LABEL_RE = next(pattern for rule, pattern in _COMPILED_POLICY
+                          if rule.category == CAT_CHILDREN and rule.label is not None)
+
+
+def _child_list_date_spans(text: str, label_start: int) -> list[tuple[int, int]]:
+    """The date of every child item (`_CHILD_ITEM_RE`) that follows, back to
+    back, the Children label opening at `label_start`, on its own line."""
+    pos = text.index(":", label_start) + 1
+    line_end = text.find("\n", pos)
+    line_end = len(text) if line_end < 0 else line_end
+    spans: list[tuple[int, int]] = []
+    while (item := _CHILD_ITEM_RE.match(text, pos, line_end)) is not None:
+        group = next(g for g in _CHILD_ITEM_GROUPS if item.group(g) is not None)
+        spans.append(item.span(group))
+        pos = item.end()
+    return spans
+
+
+def _fragment_start(text: str, pos: int) -> int:
+    """Where the `_PII_FRAGMENT_SPLIT_RE` fragment holding `pos` begins."""
+    start = 0
+    for delim in _PII_FRAGMENT_SPLIT_RE.finditer(text, 0, pos):
+        start = delim.end()
+    return start
+
+
+def _known_field_child_date_spans(text: str, label_start: int, frag_end: int) -> list[tuple[int, int]]:
+    """Every whole date in the value of the Children label at `label_start`
+    when its fragment OPENS with another known field label
+    (`_KNOWN_FIELD_LABEL_RE`, #849) and the Children label starts a word
+    after it: "Marital Status: Married Children: (1), Jane Roe, 01/02/94" is
+    a Personal Data line, not a title, so the child item shape is not
+    asked. A known label somewhere mid-line is not enough -- "Arora M. ...
+    Threats to Health: ... Health of Children: Hazards, Bangkok, 3-7 March
+    2002" is a citation. Stops at the next colon -- the next field's label,
+    known or not ("... Date of Appointment: 07/01/2015") -- or the
+    fragment's end; never a bare year."""
+    frag_start = _fragment_start(text, label_start)
+    opener = _KNOWN_FIELD_LABEL_RE.match(text, len(text) - len(text[frag_start:].lstrip()))
+    if (opener is None or opener.end() > label_start
+            or _LABEL_WORD_START_RE.match(text, label_start) is None):
+        return []
+    value_start = text.index(":", label_start) + 1
+    next_colon = text.find(":", value_start, frag_end)
+    stop = frag_end if next_colon < 0 else next_colon
+    return [m.span() for m in _PRE_LLM_FULL_DATE_ONLY_RE.finditer(text, value_start, stop)]
+
+
+def _pre_llm_child_date_spans(text: str) -> list[tuple[int, int]]:
+    """Every child's birth date or year `redact_pre_llm_values` withholds:
+    the child items after each Children/Dependents label
+    (`_child_list_date_spans`), every whole date after one that follows
+    another known field (`_known_field_child_date_spans`). A child's birth
+    year in unlabelled prose is not taken: every rule tried also cut years
+    out of publication titles ("... two children born 1998. Clin Pediatr")."""
+    spans: list[tuple[int, int]] = []
+    for label_start, frag_end in _label_spans(text, _CHILDREN_LABEL_RE, CAT_CHILDREN):
+        spans.extend(_child_list_date_spans(text, label_start))
+        spans.extend(_known_field_child_date_spans(text, label_start, frag_end))
+    return spans
 
 
 def _pre_llm_value_span_in_next_run(text: str, frag_end: int, value_re: re.Pattern) -> tuple[int, int] | None:
     """When a bare label's own fragment (`_label_spans`) was cut short at a
     hard delimiter before its value ever started -- a tab, a literal `|`,
-    or a 3+-space column gap (`_PII_FRAGMENT_SPLIT_RE`) -- look for the
-    value in the NEXT non-delimiter run of `text`, starting at `frag_end`
-    (round 2, #847: `Date of Birth:\\t01/02/1970`, three-space and
-    pipe-joined table-row variants all leaked this way).
+    or a 3+-space column gap (`_PII_FRAGMENT_SPLIT_RE`) -- the value that
+    OPENS the NEXT run of `text`, starting at `frag_end` (round 2, #847:
+    `Date of Birth:\\t01/02/1970`, three-space and pipe-joined table-row
+    variants all leaked this way). A run with any text before its value
+    ("Date of Appointment:\\t07/01/2005") carries its own label, so it is
+    left alone.
 
     Mirrors `stage6/pii_pass.py::_extend_bare_label_span`'s own hard stop
     ("it never crosses a newline") rather than importing it: that function
@@ -593,18 +928,33 @@ def _pre_llm_value_span_in_next_run(text: str, frag_end: int, value_re: re.Patte
     it), the opposite of what a value-only scrub needs, and `pii.py`
     importing FROM `pii_pass.py` would reverse pii_pass's existing
     top-level `from .normalization.pii import ...` into a same-package
-    import cycle. The bound here is intentionally narrower: only as far as
-    the delimiter's OWN next run, not to the next known sibling label --
-    correct for a value shape as specific as a date or an SSN, and it
-    never has to recognise a sibling label's vocabulary to stay safe."""
+    import cycle."""
     delim = _PII_FRAGMENT_SPLIT_RE.match(text, frag_end)
     if delim is None or "\n" in delim.group():
         return None
-    run_start = delim.end()
-    nxt = _PII_FRAGMENT_SPLIT_RE.search(text, run_start)
+    nxt = _PII_FRAGMENT_SPLIT_RE.search(text, delim.end())
     run_end = nxt.start() if nxt else len(text)
-    vm = value_re.search(text, run_start, run_end)
+    run = text[delim.end():run_end]
+    vm = value_re.match(text, run_end - len(run.lstrip()), run_end)
     return (vm.start(), vm.end()) if vm else None
+
+
+def _pre_llm_label_value_spans(text: str) -> list[tuple[int, int]]:
+    """The one value each DOB/SSN label fragment of `text` carries: the
+    first value shape inside the fragment, else the value opening the next
+    tab/`|`/column-gap run (`_pre_llm_value_span_in_next_run`)."""
+    spans: list[tuple[int, int]] = []
+    for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX):
+        value_re = _PRE_LLM_VALUE_RE.get(m.category)
+        if value_re is None:
+            continue
+        vm = value_re.search(text, m.start, m.end)
+        span = (vm.start(), vm.end()) if vm else None
+        if span is None and _is_bare_label_span(text, m.start, m.end):
+            span = _pre_llm_value_span_in_next_run(text, m.end, value_re)
+        if span:
+            spans.append(span)
+    return spans
 
 
 def redact_pre_llm_values(text: str | None) -> str:
@@ -623,20 +973,18 @@ def redact_pre_llm_values(text: str | None) -> str:
     (`_PRE_LLM_VALUE_RE`'s keys).
 
     Idempotent: a value already replaced has no digits left for
-    `_PRE_LLM_VALUE_RE` to find, so a second pass is a no-op."""
+    `_PRE_LLM_VALUE_RE` to find, so a second pass is a no-op.
+
+    A DOB/SSN label takes its FIRST value only, so "Date of Birth:
+    01/02/1970, Appointed 2005" keeps 2005 (`_pre_llm_label_value_spans`).
+    Children's dates and birth years come from
+    `_pre_llm_child_date_spans`."""
     text = str(text or "")
     if not text:
         return text
     edits: list[tuple[int, int]] = []
-    for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX):
-        value_re = _PRE_LLM_VALUE_RE.get(m.category)
-        if value_re is None:
-            continue
-        vm = value_re.search(text, m.start, m.end)
-        span = (vm.start(), vm.end()) if vm else None
-        if span is None and text[m.start:m.end].rstrip().endswith(":"):
-            span = _pre_llm_value_span_in_next_run(text, m.end, value_re)
-        if span and (not edits or span[0] >= edits[-1][1]):
+    for span in sorted(_pre_llm_label_value_spans(text) + _pre_llm_child_date_spans(text)):
+        if not edits or span[0] >= edits[-1][1]:
             edits.append(span)
     if not edits:
         return text
@@ -650,18 +998,32 @@ def redact_pre_llm_values(text: str | None) -> str:
     return "".join(out)
 
 
-def redact_pre_llm_value_of_category(text: str | None, category: str) -> str:
+def redact_pre_llm_value_of_category(
+    text: str | None, category: str, *, cross_boundary: bool = False
+) -> str:
     """Replace the FIRST value-shape match for a known pre-LLM `category` in
     `text` with `PRE_LLM_PLACEHOLDER` -- for a value cell whose OWN text
     carries no label at all (round 2, #847 table fix: the label is a
     SIBLING cell, identified separately by `pre_llm_bare_label_category`).
     A no-op if `category` isn't one of `_PRE_LLM_VALUE_RE`'s keys, or no
-    value shape is found."""
+    value shape is found.
+
+    cross_boundary: True at a call site where the label sits in another
+    cell or element (the cell below it, the next paragraph). The value must
+    then OPEN `text` (after leading whitespace) and, for CAT_DATE_OF_BIRTH/
+    CAT_BIRTH, be a whole date, never a bare year
+    (`_PRE_LLM_VALUE_RE_FULL_DATE_ONLY`). So "Date of Appointment:
+    07/01/2005" or "Appointed 07/01/2005" below a blank "Date of Birth:"
+    keeps its date."""
     text = str(text or "")
-    value_re = _PRE_LLM_VALUE_RE.get(category)
+    value_map = _PRE_LLM_VALUE_RE_FULL_DATE_ONLY if cross_boundary else _PRE_LLM_VALUE_RE
+    value_re = value_map.get(category)
     if not text or value_re is None:
         return text
-    vm = value_re.search(text)
+    if cross_boundary:
+        vm = value_re.match(text, len(text) - len(text.lstrip()))
+    else:
+        vm = value_re.search(text)
     if vm is None:
         return text
     return text[:vm.start()] + PRE_LLM_PLACEHOLDER + text[vm.end():]
@@ -680,7 +1042,7 @@ def pre_llm_bare_label_category(text: str | None) -> str | None:
     caller (`core/docx_structure_extractor.py`) uses this to decide
     whether to scrub the VALUE shape out of the NEXT cell in the row."""
     text = str(text or "")
-    if not text or not text.rstrip().endswith(":"):
+    if not text or not _is_bare_label_span(text, 0, len(text)):
         return None
     for m in _pii_matches(text, scope=SCOPE_PERSONAL_AND_APPENDIX):
         if m.category not in _PRE_LLM_VALUE_RE:

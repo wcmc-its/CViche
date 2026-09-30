@@ -120,7 +120,7 @@ class ExtractedFields(TypedDict, total=False):
     mentee_name: Any
     name: Any
     narrative: Any
-    nct_number: Any
+    notes: Any
     npi_number: Any
     orcid: Any
     organization: Any
@@ -146,11 +146,9 @@ class ExtractedFields(TypedDict, total=False):
     setting: Any
     site_position: Any
     specialty: Any
-    sponsor: Any
     start_date: Any
     state_country: Any
     status: Any
-    study_title: Any
     submission_date: Any
     target_journal: Any
     target_name: Any
@@ -160,7 +158,6 @@ class ExtractedFields(TypedDict, total=False):
     total_funding: Any
     total_funding_requested: Any
     training_type: Any
-    trial_title: Any
     unit_program: Any
     url: Any
     venue: Any
@@ -500,7 +497,7 @@ GRANT_EFFORT_TAXONOMY_PREFIX = 'M2'       # grant entries where percent-effort/F
 #: or a code gains both dates.
 DATE_RANGE_TAXONOMY_CODES = (
     'B2', 'C', 'D1', 'D2', 'D3', 'I', 'K1', 'K2', 'K3', 'L1', 'L3',
-    'M2', 'M2A', 'M2B', 'M4A_DEPRECATED', 'M4B', 'N1', 'N2', 'N3', 'N3B',
+    'M2', 'M2A', 'M2B', 'N1', 'N2', 'N3', 'N3B',
     'O', 'P', 'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D',
 )
 
@@ -527,6 +524,24 @@ CLOSED_DATE_RANGE_PATTERN = re.compile(
 #: bounds are widened generously to avoid rejecting a real historical entry.
 _MIN_PLAUSIBLE_YEAR = 1900
 _MAX_PLAUSIBLE_YEAR = 2100
+
+
+def find_single_closed_range(text: str) -> tuple[str, str] | None:
+    """The one plausible closed 4-digit year range in `text` as
+    (start, end) strings, or None when the text has a present/ongoing
+    marker, no range, more than one range, or an implausible one. Shared by
+    `reconcile_date_range` (which repairs from it) and the doctor's
+    `wrong_start_date` lint (which only reports on it, #729) so the two
+    cannot disagree about what "exactly one closed range" means."""
+    if not text or _PRESENT_MARKER_PATTERN.search(text):
+        return None
+    matches = CLOSED_DATE_RANGE_PATTERN.findall(text)
+    if len(matches) != 1:
+        return None
+    range_start, range_end = matches[0]
+    if not (_MIN_PLAUSIBLE_YEAR <= int(range_start) <= int(range_end) <= _MAX_PLAUSIBLE_YEAR):
+        return None
+    return range_start, range_end
 
 
 def reconcile_date_range(
@@ -579,19 +594,10 @@ def reconcile_date_range(
     """
     if updated.get('end_date'):
         return
-    if not original_text:
+    closed_range = find_single_closed_range(original_text)
+    if closed_range is None:
         return
-    if _PRESENT_MARKER_PATTERN.search(original_text):
-        return
-
-    matches = CLOSED_DATE_RANGE_PATTERN.findall(original_text)
-    if len(matches) != 1:
-        return
-
-    range_start, range_end = matches[0]
-    start_year, end_year = int(range_start), int(range_end)
-    if not (_MIN_PLAUSIBLE_YEAR <= start_year <= end_year <= _MAX_PLAUSIBLE_YEAR):
-        return
+    range_start, range_end = closed_range
 
     existing_start = updated.get('start_date')
     if existing_start and str(existing_start).strip() != range_start:

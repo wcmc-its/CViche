@@ -21,7 +21,7 @@ open data/sample_cvs/word/web_harvest/_batch_runs/outputs/   # the *_wcm.docx fi
 
 A single `run_full_pipeline.py` invocation already fans out several concurrent LLM
 calls internally (per-stage batching). Running CVs sequentially keeps total concurrency
-bounded and gentle on the OpenAI/Bedrock rate limits and the local machine. **Do not
+bounded and gentle on Bedrock's rate limits and the local machine. **Do not
 parallelize the loop.** Cost is ~$2–3 per CV; 25 ≈ ~$50–75. Wall-clock scales with CV
 size — a 900–1,600-entry CV takes ~25–30 min, so a 25-CV batch can run several hours.
 
@@ -37,8 +37,9 @@ size — a 900–1,600-entry CV takes ~25–30 min, so a 25-CV batch can run sev
   # inputs can be an absolute path back to the main checkout's web_harvest dir
   git worktree remove ~/worktrees/cviche-run   # when done
   ```
-- **Credentials** in the shell env (`OPENAI_API_KEY`, and `AWS_ACCESS_KEY_ID` /
-  `BEDROCK_API_KEY` if using Bedrock). No repo `.env` — the pipeline reads `os.environ`.
+- **Credentials** in the shell env (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`, or
+  `AWS_BEARER_TOKEN_BEDROCK` -- CViche is Bedrock-only). No repo `.env` — the pipeline
+  reads `os.environ`.
 - **`python3`** (not `python`) with pipeline deps installed globally.
 - **poppler** (`pdftoppm`) only if running `.pdf` inputs (vision segmentation).
 
@@ -128,7 +129,7 @@ PYTHONPATH=src python3 scripts/score_one.py src/unified_pipeline/outputs <cv> \
 ```
 
 Run the next group later with the same command — already-done CVs are skipped automatically.
-To run a specific model: pass it as the 4th arg (e.g. `gpt-5.1`, or a Bedrock model id).
+To run a specific model: pass it as the 4th arg (a Bedrock model id, e.g. `us.anthropic.claude-haiku-4-5-20251001-v1:0`).
 
 ### Running the doctor alongside the batch
 

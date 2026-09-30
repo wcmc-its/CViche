@@ -31,6 +31,7 @@ from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     _is_certification_header_line,
     _is_fused_certification,
     _reconstruct_certification_rows,
+    _split_multi,
 )
 
 
@@ -618,6 +619,55 @@ class TestRealTemplateHeaderCellsAreFilteredWithoutRejectingData:
         ]
 
 
+class TestTheSourceTablesOwnHeaderRowIsNotACertification:
+    """#829 (A5IZ6Q): an older template revision's header row "Full Name of
+    Board | Certificate # | Dates of Certification" reached stage 4, which
+    returned certifying_board="Full Name of Board", and the
+    single-certification path rendered it as the faculty member's
+    certification."""
+
+    HEADER = "Full Name of Board | Certificate # | Dates of Certification"
+
+    def test_a_header_row_extracted_as_fields_renders_no_row(self):
+        gen = _generator()
+        gen._fill_board_certification([{
+            "text": self.HEADER,
+            "extracted_fields": {"certifying_board": "Full Name of Board",
+                                 "certificate_number": "Certificate #"},
+        }])
+        assert _rows_after_board(gen) == []
+
+    def test_a_real_certification_beside_it_still_renders(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": self.HEADER,
+             "extracted_fields": {"certifying_board": "Full Name of Board",
+                                  "certificate_number": "Certificate #"}},
+            {"text": "American Board of Fictional Medicine | 24680 | 2015",
+             "extracted_fields": {"certifying_board": "American Board of Fictional Medicine",
+                                  "certificate_number": "24680", "year_certified": "2015"}},
+        ])
+        assert [row[:2] for row in _rows_after_board(gen)] == [
+            ("American Board of Fictional Medicine", "24680")]
+
+    def test_header_fields_with_a_real_line_in_the_text_are_kept(self):
+        """Header-only fields are not enough: a text line that is real data
+        means stage 4 read the wrong line, not that the entry is a header."""
+        from unified_pipeline.stage6.sections.board_certification import _is_header_record
+        fields = {"certifying_board": "Full Name of Board", "certificate_number": "Certificate #"}
+        assert not _is_header_record(
+            fields, self.HEADER + "\nAmerican Board of Fictional Medicine | 24680 | 2015")
+        assert _is_header_record(fields, self.HEADER)
+        # stage 4 can return certificate_number as a list
+        assert _is_header_record(
+            {"certifying_board": "Full Name of Board", "certificate_number": ["Certificate #"]},
+            self.HEADER)
+
+    def test_older_revision_header_cells_are_header_cells(self):
+        assert _is_certification_header_line(self.HEADER)
+        assert not _is_certification_header_line("Certificate # 24680")
+
+
 class TestRejectedTokenIsLogged:
     """Defect 4 (accuracy gate, 2026-08-25): a token like '123-' or '-'
     classifies to None with no log anywhere (§5.3/§5.10)."""
@@ -741,6 +791,115 @@ class TestPerRowBackfillFromStructuredFields:
         assert any(
             "cannot be attributed to a single row" in r.message for r in caplog.records
         ), [r.message for r in caplog.records]
+
+
+class TestSingleRowBackfillIsLogged:
+    """#696 item 2: the single-row branch of the backfill logs a substitution
+    and a skip, with field name and counts but never the CV's values."""
+
+    _SECRET_NUM = "ZQ-90417"
+
+    def _run(self, caplog, fields, text):
+        gen = self._gen = _generator()
+        with caplog.at_level(logging.INFO):
+            gen._fill_board_certification(
+                [{"extracted_fields": fields, "text": text}]
+            )
+        return [r for r in caplog.records if "single reparsed row" in r.message]
+
+    def test_substitution_is_logged_without_the_value(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": self._SECRET_NUM,
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+        )
+        assert [r.levelno for r in records] == [logging.INFO]
+        assert "certificate_number" in records[0].getMessage()
+        assert "backfilled" in records[0].getMessage()
+        assert self._SECRET_NUM not in records[0].getMessage()
+
+    def test_skip_of_multi_value_structured_field_is_logged(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "ZQ-1, ZQ-2",
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+        )
+        assert [r.levelno for r in records] == [logging.WARNING]
+        assert "certificate_number" in records[0].getMessage()
+        assert "2 values" in records[0].getMessage()
+        assert "ZQ-1" not in records[0].getMessage()
+
+    def test_year_substitution_is_logged(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+        )
+        assert [r.levelno for r in records] == [logging.INFO]
+        assert "year_certified" in records[0].getMessage()
+        # The log claims a backfill: the rendered row must actually carry it.
+        assert _rows_after_board(self._gen)[0][2] == "2015"
+
+    def test_year_skip_of_multi_value_structured_field_is_logged(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+                "year_certified": "2015, 2016",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+        )
+        assert [r.levelno for r in records] == [logging.WARNING]
+        assert "year_certified" in records[0].getMessage()
+        assert "2 values" in records[0].getMessage()
+
+    def test_nothing_logged_when_structured_field_is_absent(self, caplog):
+        # No candidate at all is not a skip: there is nothing to attribute.
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+        )
+        assert records == []
+
+    def test_nothing_logged_when_structured_year_is_absent(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+        )
+        assert records == []
+
+    def test_nothing_logged_when_row_needs_no_backfill(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+                "year_certified": "2015",
+            },
+            "Zed Medicine | 555 | 2015",
+        )
+        assert records == []
 
 
 class TestBlankRowGuardIsUniformAcrossColumnBranches:
@@ -947,3 +1106,58 @@ class TestBoardCellCarriesTheSpecialty:
                                   "certificate_number": "123456", "year_certified": "2010"}},
         ])
         assert _rows_after_board(gen) == [("American Board of Internal Medicine", "123456", "2010")]
+
+
+class TestCertificateNumberSeparatorHeuristic:
+    """#569: the comma/semicolon split that decides whether an entry is fused.
+
+    `_split_multi` treats `,` and `;` as the same separator, so a mixed
+    "111, 222; 333" counts three certifications, exactly like the pure-comma
+    and pure-semicolon neighbours. `_is_fused_certification` then fires on
+    more than one part.
+    """
+
+    def test_pure_comma_splits_into_parts(self):
+        assert _split_multi("111, 222, 333") == ["111", "222", "333"]
+
+    def test_pure_semicolon_splits_into_parts(self):
+        assert _split_multi("111; 222; 333") == ["111", "222", "333"]
+
+    def test_mixed_comma_and_semicolon_splits_into_the_same_parts(self):
+        assert _split_multi("111, 222; 333") == ["111", "222", "333"]
+
+    def test_mixed_separators_drop_empty_parts_and_whitespace(self):
+        assert _split_multi(" 111 ,; 222 ;, ") == ["111", "222"]
+
+    def test_single_number_and_blank_are_not_split(self):
+        assert _split_multi("111") == ["111"]
+        assert _split_multi("") == []
+        assert _split_multi(None) == []
+
+    def test_list_input_is_not_resplit_on_separators(self):
+        assert _split_multi(["111", " 222 ", ""]) == ["111", "222"]
+
+    def test_fusion_detected_for_pure_comma_pure_semicolon_and_mixed(self):
+        for raw in ("111, 222", "111; 222", "111, 222; 333"):
+            parts = _split_multi(raw)
+            assert _is_fused_certification({"certificate_number": raw}, parts) is True, raw
+
+    def test_single_number_is_not_fused(self):
+        assert _is_fused_certification({"certificate_number": "111"}, _split_multi("111")) is False
+
+    def test_mixed_separator_entry_takes_the_multi_cert_path_end_to_end(self):
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "Board A",
+                "certificate_number": "111, 222; 333",
+                "year_certified": "2010",
+            },
+            "text": "Board A | 111 | 2010\nBoard B | 222 | 2012\nBoard C | 333 | 2014",
+        }
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Board A", "111", "2010"),
+            ("Board B", "222", "2012"),
+            ("Board C", "333", "2014"),
+        ]

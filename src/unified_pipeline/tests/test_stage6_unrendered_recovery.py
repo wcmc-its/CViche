@@ -18,7 +18,10 @@ test_stage6_funding_appendix.py does.
 
 import json
 import sys
+import unicodedata
 from pathlib import Path
+
+import pytest
 
 # Ensure the repo's ``src`` directory is importable regardless of cwd/rootdir.
 _SRC = Path(__file__).resolve().parents[2]
@@ -33,6 +36,11 @@ from unified_pipeline.stage_6_word_template import (  # noqa: E402
     _record_lines,
     run_stage6,
     segment_already_rendered,
+)
+from unified_pipeline.stage6.render_check import (  # noqa: E402
+    _RENDER_TOKEN_RE,
+    _norm,
+    _record_rendered,
 )
 
 
@@ -268,6 +276,68 @@ def _f1_entry():
             "expiration_date": "2027-06-30",
         },
     }
+
+
+_CJK_RECORD = ("2015年4月 東京大学医学部附属病院 循環器内科 准教授として心不全の臨床研究に従事 "
+               "한국어로된논문제목입니다 中华人民共和国国家自然科学基金资助项目")
+
+
+def test_cjk_never_forms_a_render_token_so_cjk_lines_are_unverifiable():
+    """#722: CJK has no word boundaries, so the 5-letter floor is not
+    meaningful for it; CJK is excluded, not measured. A CJK-only record line
+    is None (not verifiable), never False, and Latin/Cyrillic words in a
+    mixed-script line still count. Invented text."""
+    assert _RENDER_TOKEN_RE.findall(_norm(_CJK_RECORD)) == []
+    mixed = _norm("東京大学医学部 Cardiology Иванов 心不全の臨床研究 Blorvane")
+    assert set(_RENDER_TOKEN_RE.findall(mixed)) == {
+        "cardiology", "иванов", "blorvane"}
+    other = [set(_RENDER_TOKEN_RE.findall(_norm("Completely unrelated "
+                                                "Cardiology Blorvane line")))]
+    assert _record_rendered(_CJK_RECORD, "", other) is None
+    latin = "Jun 2011, Quexley Cartographer Stairwells Forgotten College"
+    assert _record_rendered(latin, "", other) is False
+
+
+@pytest.mark.parametrize("run", [
+    "ひらがなのことばです",          # Hiragana
+    "カタカナノコトバデス",          # Katakana
+    "ｶﾀｶﾅｶﾅｶﾅｶﾅ",                    # Halfwidth Katakana (raw, pre-NFKD)
+    "한국어한ᄀ",  # Hangul Jamo (NFKD form)
+    "".join(chr(0x3400 + i * 16) for i in range(12)),        # CJK extension A
+    "".join(chr(0x20000 + i * 16) for i in range(12)),       # CJK extension B
+    "ㄱㄲㄴㄷㄹㅁ",                  # Hangul compatibility Jamo
+    "ㇰㇱㇲㇳㇴㇵ",                  # Katakana phonetic extensions
+    "ꥠꥡꥢꥣꥤꥥ",                  # Hangul Jamo extended-A
+    "".join(chr(0xF900 + i) for i in range(6)),              # CJK compatibility ideographs (NFC-unstable literal)
+    "ힰힱힲힳힴힵ",                  # Hangul Jamo extended-B
+])
+def test_every_cjk_block_is_excluded_from_the_token_regex(run):
+    """#722: each range in `_CJK_CLASS` must keep a 5+ run out of the token
+    set on its own (the sentence-level test above hits only Han/Hangul)."""
+    assert _RENDER_TOKEN_RE.findall(run) == []
+
+
+_CJK_NAME_PREFIXES = ("CJK ", "HIRAGANA", "KATAKANA", "HENTAIGANA", "HANGUL",
+                      "HALFWIDTH KATAKANA", "HALFWIDTH HANGUL")
+
+
+def test_cjk_exclusion_matches_unicode_names_across_every_code_point():
+    """#722: pins every `_CJK_CLASS` endpoint at once. A letter whose Unicode
+    name is CJK/kana/Hangul never forms a token, and every other letter does
+    (Bopomofo is the named, deliberate gap: its names start 'BOPOMOFO')."""
+    escaped, over_excluded = [], []
+    for cp in range(sys.maxunicode + 1):
+        ch = chr(cp)
+        if not unicodedata.category(ch).startswith("L"):
+            continue
+        is_cjk = unicodedata.name(ch, "").startswith(_CJK_NAME_PREFIXES)
+        forms_token = _RENDER_TOKEN_RE.fullmatch(ch * 5) is not None
+        if is_cjk and forms_token:
+            escaped.append(hex(cp))
+        elif not is_cjk and not forms_token:
+            over_excluded.append(hex(cp))
+    assert escaped == [], escaped[:20]
+    assert over_excluded == [], over_excluded[:20]
 
 
 def test_f1_dropped_license_recovered_column_header_not():
@@ -671,7 +741,7 @@ def test_deduped_entry_unique_record_still_recovered(tmp_path, monkeypatch):
         "text": ("Member | Committee on Subterranean Balloon Safety Standards"
                  " | Guild of Meandering Auditors | reviews annual protocols "
                  "and certification checklists for subterranean balloon "
-                 "safety inspections across member lodges"),
+                 "safety inspections across member lodges, 2013-2016"),
         "extracted_fields": {
             "role": "Member",
             "committee": "Committee on Subterranean Balloon Safety Standards",
@@ -690,7 +760,9 @@ def test_deduped_entry_unique_record_still_recovered(tmp_path, monkeypatch):
         },
     }
     # Preflight: the fixture must actually trigger the dedup drop (title
-    # containment) so this test exercises the pre-dedup snapshot.
+    # containment) so this test exercises the pre-dedup snapshot. The kept
+    # text states the dropped record's 2013-2016 range: a dropped entry whose
+    # date range the kept one lacks is kept, not dropped (#666).
     from unified_pipeline.stage_6_word_template import deduplicate_entries
     assert deduplicate_entries([kept_entry, dropped_entry],
                                verbose=False) == [kept_entry]
@@ -728,3 +800,68 @@ def test_generate_flag_off_drops_remainder(tmp_path):
     # for a plain substring, not a glyph-prefixed one, since #483 R2 removed
     # the glyph representation the recovery path could have produced.
     assert not any("Quantitative Basketweaving" in t for t in texts)
+
+
+@pytest.mark.parametrize("call", ["geographic_scope", "reclassify"])
+def test_stage6_llm_outage_propagates_but_other_errors_default(monkeypatch, call):
+    """A provider outage past the budget fails the run (#810); any other
+    call_llm error still takes the method's default."""
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    gen = _generator()
+    gen.cv_owner_location = {"primary_location": {"institution": "Example Medical College",
+                                                  "city": "Springfield", "state": "ZZ"}}
+    entry = {"text": "Visiting Lecturer", "extracted_fields": {"organization": "Example Institute"}}
+
+    def run():
+        if call == "geographic_scope":
+            return gen._classify_geographic_scope(entry)
+        return gen._reclassify_entry_segments("Visiting Lecturer, Example Institute, 2010", "P")
+
+    def outage(*args, **kwargs):
+        raise LLMOutageError("provider down", seconds_waited=1800.0)
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm", outage)
+    with pytest.raises(LLMOutageError):
+        run()
+
+    def blip(*args, **kwargs):
+        raise RuntimeError("connection reset")
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm", blip)
+    assert run() == ("National" if call == "geographic_scope" else None)
+
+
+def test_remaining_appendix_intro_is_the_shared_accurate_banner():
+    # #534: the bullet writer creates T. APPENDIX with the same one-line intro
+    # as _fill_appendix -- italic, and never claiming the entries appear
+    # nowhere else (stage 6 cannot prove that).
+    from unified_pipeline.stage6.sections.appendix import APPENDIX_INTRO_TEXT
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen._add_remaining_to_appendix([("Example Leftover Committee, 2019-2021", "T", 0.0)])
+
+    paragraphs = gen.doc.paragraphs
+    header = next(i for i, p in enumerate(paragraphs) if p.text == "T. APPENDIX")
+    intro = paragraphs[header + 1]
+    assert intro.text == APPENDIX_INTRO_TEXT
+    assert all(run.italic for run in intro.runs)
+
+
+# ------------------------------------ #530: foreign scaffolding never recovered
+
+def test_add_remaining_to_appendix_drops_foreign_template_scaffolding():
+    """The bullet writer's own filter (the recovery path, not `_fill_appendix`)
+    drops another institution's instruction line and a "label: N/A" placeholder
+    and still writes the genuine segment."""
+    gen = _generator()
+    written = gen._add_remaining_to_appendix([
+        ("C. Sample Appointments (include institution, title and dates)", "T", 0.0),
+        ("1. Sample Leave: N/A", "T", 0.0),
+        ("Served on the sample review panel for the Example Society", "T", 0.0),
+    ])
+    assert written == ["T"]
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert "Served on the sample review panel for the Example Society" in bullets
+    assert not any("Sample Appointments" in t or "Sample Leave" in t for t in bullets)

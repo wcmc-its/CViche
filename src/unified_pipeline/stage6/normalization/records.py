@@ -26,15 +26,31 @@ from typing import Dict, List, Optional, Tuple
 # code, not config: the words change only when the function beside them does,
 # and any rebucketing change needs a corpus render A/B regardless of where
 # the vocabulary lives.
-_NOT_FUNDED_STATUS_RE = re.compile(r'not\s+funded|unfunded|declined|rejected')
+_NOT_FUNDED_STATUS_RE = re.compile(
+    r'\b(?:(?:not|non)[\s-]?funded|unfunded|declined|rejected)\b')
 _PENDING_STATUS_RE = re.compile(
     # 'awaiting' alone would also match post-award statuses that lack the
     # 'award' substring ("Awaiting contract execution", "Awaiting IRB
     # approval"), so it only counts when a decision is what is awaited.
-    r'under\s+review|in\s+review|submitted|pending'
-    r'|awaiting\s+(?:sponsor\s+)?decision|under\s+consideration'
+    r'\b(?:under\s+review|in\s+review|submitted|pending'
+    r'|awaiting\s+(?:sponsor\s+)?decision|applications?\s+awaiting'
+    r'|under\s+consideration)\b'
 )
-_COMPLETED_STATUS_RE = re.compile(r'\bcompleted?\b|\bclosed\b|\bexpired\b')
+# "Review completed" / "Site visit completed" name a step of the review process,
+# not an ended award, so a "completed" that follows those words is no bucket (#982).
+# Likewise "Enrollment completed" / "Closed to accrual" name a stage of a clinical
+# trial that is still running; only its end date may move it to M2B (#291).
+_COMPLETED_STATUS_RE = re.compile(
+    r'(?<!review )(?<!visit )(?<!enrollment )(?<!enrolment )(?<!accrual )(?<!recruitment )'
+    r'\bcompleted?\b'
+    r'|\bclosed\b(?!\s+to\s+(?:accrual|enrollment|enrolment|recruitment|new\s+patients))'
+    r'|\bexpired\b')
+# A heading that names a current grant as well as a pending or completed one
+# ("Current and Pending Support", "Past and Present") does not say which bucket
+# one grant under it belongs in (#981).
+_ACTIVE_HEADING_RE = re.compile(r'\b(?:current|active|ongoing|present)\b')
+# A heading that files its grants as ended without the word "completed".
+_PAST_HEADING_RE = re.compile(r'\b(?:past|previous(?:ly)?|prior)\b')
 
 def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
     """Un-fuse publication entries whose stage-5d ``formatted_citation`` carries
@@ -81,10 +97,14 @@ def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
     return out
 
 
-def grant_status_rebucket_target(status: str) -> Tuple[Optional[str], Optional[str]]:
+def grant_status_rebucket_target(
+    status: str, label: str = 'Status'
+) -> Tuple[Optional[str], Optional[str]]:
     """Map a grant's extracted status string to the funding bucket it belongs
     in (#210). Returns (target_code, reclassification_note); (None, None)
-    when the status doesn't force a move.
+    when the status doesn't force a move. `label` names where the text came
+    from in the note ('Status', or 'Section heading' for
+    `grant_heading_rebucket_target`).
 
     An explicit status beats date inference: "Under review" / "In review" /
     "Submitted" / "Awaiting sponsor decision" is Pending (M2C) no matter what
@@ -97,11 +117,48 @@ def grant_status_rebucket_target(status: str) -> Tuple[Optional[str], Optional[s
     lowered = status.lower()
     if _NOT_FUNDED_STATUS_RE.search(lowered):
         return 'M2C', (
-            f"Status is '{status}' — kept under Pending Funding rather than "
+            f"{label} is '{status}' — kept under Pending Funding rather than "
             "dropped; confirm whether to keep this entry on the CV"
         )
     if 'award' not in lowered and _PENDING_STATUS_RE.search(lowered):
-        return 'M2C', f"Reclassified to Pending (M2C): status is '{status}'"
+        return 'M2C', f"Reclassified to Pending (M2C): {label.lower()} is '{status}'"
     if _COMPLETED_STATUS_RE.search(lowered):
-        return 'M2B', f"Reclassified to Completed (M2B): status is '{status}'"
+        return 'M2B', f"Reclassified to Completed (M2B): {label.lower()} is '{status}'"
     return None, None
+
+
+def grant_heading_rebucket_target(
+    hierarchy: list[str]
+) -> tuple[str | None, str | None]:
+    """The bucket a grant's own section heading puts it in, for a grant whose
+    record carries no status, or a status the vocabulary does not recognise
+    (#981, #982).
+
+    Stage 4 emitted a `status` field for 3 of 1268 grant records before #982
+    added it to the M2A/M2B/M2C schemas, and it stays absent on any entry that
+    states none, so the heading the CV filed the grant under ("Pending
+    applications", "NOT FUNDED") is the only status signal most grants have.
+    `research_support.explicit_status_target` decides which wins when both name
+    a bucket. Same vocabulary as
+    `grant_status_rebucket_target`; (None, None) when the heading is silent or
+    names more than one bucket ("Current and Pending Support").
+    """
+    heading = ' > '.join(hierarchy or [])
+    lowered = heading.lower()
+    if _ACTIVE_HEADING_RE.search(lowered) and (
+        _NOT_FUNDED_STATUS_RE.search(lowered) or _PENDING_STATUS_RE.search(lowered)
+        or _COMPLETED_STATUS_RE.search(lowered)
+    ):
+        return None, None
+    if _PENDING_STATUS_RE.search(lowered) and _COMPLETED_STATUS_RE.search(lowered):
+        return None, None
+    return grant_status_rebucket_target(heading, label='Section heading')
+
+
+def grant_heading_is_past(hierarchy: list[str]) -> bool:
+    """Whether the heading a grant was filed under says its grants have ended
+    ("Past Grant Support", "Previous Grants"), unless it also names a current
+    bucket ("Past and Present"). Used to keep an end date of "ongoing" from
+    outvoting the heading (#981)."""
+    lowered = ' > '.join(hierarchy or []).lower()
+    return bool(_PAST_HEADING_RE.search(lowered)) and not _ACTIVE_HEADING_RE.search(lowered)

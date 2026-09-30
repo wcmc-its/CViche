@@ -310,8 +310,7 @@ Now output the JSON mapping. Remember: output ONLY valid JSON, no markdown or co
         stage="stage_3a",
         messages=messages,
         response_format={"type": "json_object"},
-        temperature=0.2,
-        max_tokens=8000
+        temperature=0.2
     )
 
     # Parse response
@@ -356,7 +355,6 @@ def run_stage_3a(
         document_uid: Document identifier
         stage_1a_path: Path to Stage 1a output (optional, will auto-detect)
         output_dir: Output directory (optional, will auto-detect)
-        model: OpenAI model to use
 
     Returns:
         Result dict with mappings, stats, and output path

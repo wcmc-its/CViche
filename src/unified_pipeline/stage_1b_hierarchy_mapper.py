@@ -113,7 +113,12 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
     # The paragraph is contained in the expected header (header might be longer)
     # e.g., para_text="education" matches expected_header="education and training"
     # Only accept if paragraph is very short (< 2x header length)
-    if para_text in expected_header:
+    # The paragraph must be whole words inside the header: a bare substring made
+    # the sibling header "National" satisfy the expected header "International",
+    # so the geographic sub-label bound to the wrong header paragraph (#429).
+    # Lookarounds, not \b: \b needs a word char at the phrase end, so a paragraph
+    # ending in a symbol ("research &", "k+") could never match whole-phrase.
+    if re.search(r'(?<!\w)' + re.escape(para_text) + r'(?!\w)', expected_header):
         if len(para_text) <= len(expected_header) * 2:
             return True
 
@@ -135,6 +140,49 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
                 return True
 
     return False
+
+
+def _find_header_element(
+    elements: list[dict[str, Any]],
+    expected_header: str,
+    search_start: int,
+    search_end: int,
+) -> tuple[int, int] | None:
+    """Locate `expected_header` among elements[search_start:search_end].
+
+    Returns (position in `elements`, element index to report), or None. A
+    paragraph whose normalized text IS the header wins over an earlier
+    paragraph that is only a fragment of it (a short whole-word paragraph such
+    as "PhD:" inside the longer header "PhD advisees"). A first match that
+    is longer than the header (the header inside a content-like paragraph)
+    still wins immediately, and with no exact paragraph in range the first
+    fragment wins, as before (#429).
+    """
+    first_partial: tuple[int, int] | None = None
+    for i in range(search_start, search_end):
+        elem = elements[i]
+        elem_text = elem.get('text', '')
+
+        # Search in paragraphs AND table_header elements (from extract_unified_elements)
+        if elem.get('type') not in ('paragraph', 'table_header') or not elem_text:
+            continue
+
+        para_text = normalize_text(elem_text)
+        if not para_text:
+            continue
+
+        # strict=True prevents matching content paragraphs like
+        # "Advanced Health Education Mammography Center" when looking for "Education"
+        found = (i, elem.get('unified_idx', elem.get('idx', i)))
+        if para_text == expected_header:
+            return found
+        if first_partial is None and is_header_match(expected_header, para_text, strict=True):
+            if len(para_text) > len(expected_header):
+                # The header sits inside a longer paragraph: the old
+                # first-match behaviour, no exact paragraph is sought.
+                return found
+            first_partial = found
+    return first_partial
 
 
 def find_header_in_sequence(
@@ -164,36 +212,14 @@ def find_header_in_sequence(
     current_search_idx = start_idx
 
     for expected_header in normalized_sequence:
-        found = False
-
         # Search forward from current position
-        for i in range(current_search_idx, len(elements)):
-            elem = elements[i]
-            elem_text = elem.get('text', '')
-
-            # Search in paragraphs AND table_header elements (from extract_unified_elements)
-            if elem.get('type') not in ('paragraph', 'table_header') or not elem_text:
-                continue
-
-            para_text = normalize_text(elem_text)
-
-            # Skip empty paragraphs
-            if not para_text:
-                continue
-
-            # Check if this paragraph matches the header (using strict word boundary matching)
-            # Strict mode prevents matching content paragraphs like "continuing education program"
-            if is_header_match(expected_header, para_text, strict=True):
-                # Use unified_idx if available (from extract_unified_elements)
-                elem_idx = elem.get('unified_idx', elem.get('idx', i))
-                matches.append((hierarchy_sequence[len(matches)], elem_idx))
-                current_search_idx = i + 1
-                found = True
-                break
-
-        if not found:
+        hit = _find_header_element(elements, expected_header, current_search_idx, len(elements))
+        if hit is None:
             # Sequence broken - return None
             return None
+        i, elem_idx = hit
+        matches.append((hierarchy_sequence[len(matches)], elem_idx))
+        current_search_idx = i + 1
 
     return matches
 
@@ -248,23 +274,8 @@ def map_hierarchy_node(
 
             def search_for_header(search_start: int, search_end: int) -> int | None:
                 """Search for header in a range of elements."""
-                for i in range(search_start, search_end):
-                    elem = elements[i]
-                    elem_text = elem.get('text', '')
-
-                    # Search in paragraphs AND table_header elements
-                    if elem.get('type') not in ('paragraph', 'table_header') or not elem_text:
-                        continue
-
-                    para_text = normalize_text(elem_text)
-
-                    # Use strict word-boundary matching
-                    # strict=True ensures we don't match content paragraphs like
-                    # "Advanced Health Education Mammography Center" when looking for "Education"
-                    if is_header_match(normalized_target, para_text, strict=True):
-                        # Return unified_idx if available
-                        return elem.get('unified_idx', elem.get('idx', i))
-                return None
+                hit = _find_header_element(elements, normalized_target, search_start, search_end)
+                return hit[1] if hit is not None else None
 
             # Try forward search first
             element_idx = search_for_header(start_search_idx, len(elements))

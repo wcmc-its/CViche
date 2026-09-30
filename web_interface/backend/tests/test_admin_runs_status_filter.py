@@ -98,3 +98,197 @@ def test_specific_status_exact_match_still_works(client, db):
     assert resp.status_code == 200
     assert _ids(resp) == {"SF_COMPLETE"}
     assert resp.json()["total"] == 1
+
+
+# --- GET /api/admin/queue/stats (#701) ---------------------------------------
+
+def _seed_queue_view(db):
+    from app.models import Run
+
+    old = datetime.now() - timedelta(minutes=30)
+    # started_at deliberately does NOT match queued_at (it's left at its
+    # original pre-retry value, e.g. hours old): queued_at, not started_at, is
+    # the queued-age source (#701 runs.py point 6 -- started_at is re-stamped
+    # only when a worker claims the run), so a regression back to reading
+    # started_at here would read as hours old, not ~30 minutes.
+    db.add_all([
+        Run(id="QS_QUEUED", filename="a.docx", file_type="docx", status="queued",
+            started_at=datetime.now() - timedelta(hours=5), queued_at=old),
+        Run(id="QS_RUNNING", filename="b.docx", file_type="docx", status="running",
+            started_at=datetime.now() - timedelta(minutes=5)),
+        Run(id="QS_DONE", filename="c.docx", file_type="docx", status="complete", started_at=old),
+    ])
+    db.commit()
+
+
+def test_queue_stats_without_redis_reports_disabled_and_the_db_view(client, db, monkeypatch):
+    monkeypatch.delenv("CVICHE_REDIS_URL", raising=False)
+    monkeypatch.delenv("CVICHE_DISPATCH_MODE", raising=False)
+    _seed_queue_view(db)
+
+    resp = _admin_get(client, "/api/admin/queue/stats")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is False
+    assert (body["db"]["queued"], body["db"]["running"]) == (1, 1)
+    assert 29 * 60 < body["db"]["oldest_queued_age_s"] < 31 * 60
+    assert 4 * 60 < body["db"]["oldest_running_age_s"] < 6 * 60
+
+
+def test_queue_stats_enabled_false_with_url_set_but_mode_in_process(client, db, monkeypatch):
+    """#701 admin_routes.py point 3: 'enabled' is dispatch_mode() == 'queue',
+    not merely whether the (shared) URL is configured -- and a disabled GET
+    must never write to Valkey (point 6)."""
+    import fakeredis
+    from app.pipeline import run_queue
+
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
+    monkeypatch.delenv("CVICHE_DISPATCH_MODE", raising=False)
+    r = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer(), decode_responses=True)
+    monkeypatch.setattr(run_queue, "_client", lambda: r)
+    monkeypatch.setattr(run_queue, "_producer_client", lambda: r)
+
+    resp = _admin_get(client, "/api/admin/queue/stats")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is False
+    assert "error" not in body or body["error"] is None
+    assert r.exists(run_queue.STREAM) == 0, "a disabled GET must not create the stream"
+
+
+def test_queue_stats_reports_valkey_not_configured_in_queue_mode_with_no_url(client, db, monkeypatch):
+    """#701 admin_routes.py point 3: queue mode with no URL must answer 200
+    with a stable error code, never 500 from run_queue._client()'s RuntimeError."""
+    monkeypatch.setenv("CVICHE_DISPATCH_MODE", "queue")
+    monkeypatch.delenv("CVICHE_REDIS_URL", raising=False)
+    _seed_queue_view(db)
+
+    resp = _admin_get(client, "/api/admin/queue/stats")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is True
+    assert body["error"] == "valkey_not_configured"
+    assert (body["db"]["queued"], body["db"]["running"]) == (1, 1)
+
+
+def test_queue_stats_with_redis_merges_stream_depth_and_pending(client, db, monkeypatch):
+    import fakeredis
+    from app.pipeline import run_queue
+
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
+    monkeypatch.setenv("CVICHE_DISPATCH_MODE", "queue")
+    r = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer(), decode_responses=True)
+    monkeypatch.setattr(run_queue, "_client", lambda: r)
+    monkeypatch.setattr(run_queue, "_producer_client", lambda: r)
+    run_queue.ensure_group()
+    run_queue.enqueue("QS_QUEUED")
+    run_queue.read_one("pod-a")
+
+    resp = _admin_get(client, "/api/admin/queue/stats")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is True
+    assert (body["stream_length"], body["pending"], body["dead"]) == (1, 1, 0)
+    assert body["consumers"] == 1
+    assert body["lag"] == 0, "one entry enqueued, one delivered -- nothing outstanding"
+    assert body["owners"] == [{"name": "pod-a", "pending": 1}]
+    assert body["db"] == {"queued": 0, "running": 0, "oldest_queued_age_s": None, "oldest_running_age_s": None}
+
+
+def test_queue_stats_answers_200_when_valkey_is_unreachable(client, db, monkeypatch):
+    """The endpoint that diagnoses a stuck queue must not 500 when Valkey is the
+    problem: the DB view still answers, with a stable error code -- never the
+    exception's own text, which can carry a host:port (#701 admin_routes.py
+    point 2)."""
+    import redis
+    from app.pipeline import run_queue
+
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
+    monkeypatch.setenv("CVICHE_DISPATCH_MODE", "queue")
+    _seed_queue_view(db)
+
+    def down():
+        raise redis.exceptions.ConnectionError("Error 111 connecting to valkey:6379")
+    monkeypatch.setattr(run_queue, "stats", down)
+
+    resp = _admin_get(client, "/api/admin/queue/stats")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is True
+    assert body["error"] == "valkey_unavailable"
+    assert "valkey:6379" not in resp.text
+    assert (body["db"]["queued"], body["db"]["running"]) == (1, 1)
+
+
+def test_queue_stats_requires_admin(client, db):
+    assert client.get("/api/admin/queue/stats").status_code in (401, 403)
+
+
+# --- quality score evidence (#745) ------------------------------------------
+# The runs listing and the compute endpoint carry quality_score.score_run's
+# data_complete / missing_evidence, so the admin view can mark a score that
+# was computed with a scored artifact missing.
+
+_INCOMPLETE_SCORE = {
+    "totalScore": 20,
+    "band": "RED (re-run / do-not-deliver)",
+    "dimensionScores": [],
+    "flags": [],
+    "data_complete": False,
+    "missing_evidence": ["docx: no docx found"],
+}
+
+
+def _admin_post(client, url):
+    from app.main import app
+    from app.auth import require_admin
+
+    app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
+    try:
+        return client.post(url)
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+
+
+def test_runs_listing_carries_score_evidence(client, db, monkeypatch):
+    """A cached incomplete score reaches the row as typed fields; a cache
+    written before data_complete existed reads as unknown (None), and an
+    unscored run carries neither."""
+    from app.api import admin_routes
+
+    _seed_mixed_status_runs(db)
+    legacy = {"totalScore": 90, "band": "GREEN (ship)"}
+    cache = {"SF_COMPLETE": _INCOMPLETE_SCORE, "SF_FAILED": legacy}
+    monkeypatch.setattr(admin_routes, "get_cached_score", cache.get)
+
+    resp = _admin_get(client, "/api/admin/runs")
+
+    assert resp.status_code == 200
+    rows = {r["run_id"]: r for r in resp.json()["runs"]}
+    assert rows["SF_COMPLETE"]["quality_data_complete"] is False
+    assert rows["SF_COMPLETE"]["quality_missing_evidence"] == ["docx: no docx found"]
+    assert rows["SF_FAILED"]["quality_data_complete"] is None
+    assert rows["SF_FAILED"]["quality_missing_evidence"] == []
+    assert rows["SF_RUNNING"]["quality_data_complete"] is None
+    assert rows["SF_RUNNING"]["quality_missing_evidence"] == []
+
+
+def test_compute_score_returns_score_evidence(client, db, monkeypatch):
+    """POST /admin/run/{id}/score returns data_complete and missing_evidence."""
+    from app.api import admin_routes
+
+    _seed_mixed_status_runs(db)
+    monkeypatch.setattr(admin_routes, "compute_and_cache_score", lambda _rid: _INCOMPLETE_SCORE)
+
+    resp = _admin_post(client, "/api/admin/run/SF_COMPLETE/score")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["totalScore"] == 20
+    assert body["data_complete"] is False
+    assert body["missing_evidence"] == ["docx: no docx found"]

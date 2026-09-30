@@ -46,12 +46,19 @@ from unified_pipeline.stage6.render_check import _is_column_header_row  # noqa: 
 from unified_pipeline.stage6.sections import appendix as appendix_module  # noqa: E402
 from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     APPENDIX_MAX_CHARS,
+    DROP_BARE_YEAR,
     DROP_BLANK,
     DROP_COLUMN_HEADER,
+    DROP_CV_TITLE,
+    DROP_DATE_STAMP,
     DROP_NEAR_TEMPLATE_INSTRUCTION,
     DROP_RENDERS_EMPTY,
+    DROP_SECTION_HEADER,
     DROP_SOURCE_BOILERPLATE,
+    DROP_STATUS_MARKER,
     DROP_TEMPLATE_INSTRUCTION,
+    DROP_TEMPLATE_LABEL,
+    DROP_TOC_LINE,
     DROP_UNANSWERED_PROMPT,
     _appendix_drop_reason,
     _describe_dropped,
@@ -208,6 +215,10 @@ def test_documented_false_positive_class_is_pinned(entry):
     ("", DROP_BLANK),
     ("   ", DROP_BLANK),
     ("• Didactic teaching (lectures, seminars, tutorials,)", DROP_TEMPLATE_INSTRUCTION),
+    ("C. Sample Appointments (include institution, title and dates)", DROP_TEMPLATE_INSTRUCTION),
+    ("1. Sample Leave: N/A", DROP_TEMPLATE_INSTRUCTION),
+    ("NOTE: This section includes talks, panels, etc., for which you were invited",
+     DROP_TEMPLATE_INSTRUCTION),
     ("Curriculum Vitae", DROP_SOURCE_BOILERPLATE),
     ("Updated: January 2024", DROP_SOURCE_BOILERPLATE),
     ("|  |  |", DROP_RENDERS_EMPTY),
@@ -219,6 +230,8 @@ def test_documented_false_positive_class_is_pinned(entry):
      DROP_NEAR_TEMPLATE_INSTRUCTION),
     ("N/A", DROP_UNANSWERED_PROMPT),
     ("Not Applicable |  |  |", DROP_UNANSWERED_PROMPT),
+    ("Signature:", DROP_TEMPLATE_LABEL),
+    ("Site/Position |", DROP_TEMPLATE_LABEL),
 ])
 def test_drop_reason_names_the_check_that_fired(text, reason):
     assert _appendix_drop_reason(text, _clean_inline_tabs(text)) == reason
@@ -228,11 +241,134 @@ def test_drop_reason_names_the_check_that_fired(text, reason):
     "Reviewed manuscripts for the Journal of Clinical Oncology on an ad hoc basis.",
     "2019 | Assistant Professor | Weill Cornell Medicine",
     "Chair, Admissions Committee",
+    "Sample Publications (list available upon request)",
+    "3. Sample Training (describe your role) - Major advisor to five students",
     "Is your eligibility to work in the U.S. based on an employment visa?: | No",
     "Grant pending | N/A",
+    "Your role*\toversight",
 ])
 def test_genuine_content_has_no_drop_reason(text):
     assert _appendix_drop_reason(text, _clean_inline_tabs(text)) is None
+
+
+# ------------------------------------- unit-level: the #885 structural checks
+#
+# Root cause of #885: T-validation's own `classification_reasoning` already
+# says these shapes are structural ("[T-validation confirmed] Bare year
+# '2021' is a structural marker"), but that string is free LLM text covering
+# real T content too (a hobby, a career-gap note) -- not a safe drop
+# predicate. These three checks match the entry's TEXT shape instead, and
+# only when `taxonomy_code == "T"` (every other DROP_* check above applies
+# regardless of code).
+
+@pytest.mark.parametrize("text, reason", [
+    ("2021", DROP_BARE_YEAR),
+    ("1991", DROP_BARE_YEAR),
+    ("2016.", DROP_BARE_YEAR),  # trailing period: web228/web26 shape
+    ("  2021  ", DROP_BARE_YEAR),  # padded: kills a `stripped = text` mutant
+    ("Completed", DROP_STATUS_MARKER),
+    ("Scheduled", DROP_STATUS_MARKER),
+    ("In Press", DROP_STATUS_MARKER),
+    ("Published", DROP_STATUS_MARKER),
+    ("Not Funded", DROP_STATUS_MARKER),
+    ("ACTIVE", DROP_STATUS_MARKER),  # case-insensitive
+    ("Completed.", DROP_STATUS_MARKER),  # trailing period: the `.rstrip(".")` call
+    ("  Completed  ", DROP_STATUS_MARKER),  # padded: same `stripped` mutant, 2nd path
+    # One case per remaining `_STATUS_MARKER_WORDS` member, so dropping a word fails.
+    ("Pending", DROP_STATUS_MARKER),
+    ("Funded", DROP_STATUS_MARKER),
+    ("Submitted", DROP_STATUS_MARKER),
+    ("Current", DROP_STATUS_MARKER),
+    ("Withdrawn", DROP_STATUS_MARKER),
+    ("Ongoing", DROP_STATUS_MARKER),
+    ("Honors and Awards       Page 7", DROP_TOC_LINE),  # web181 shape
+    ("Visiting Professorships, Seminars, and Extramural Presentations Page 17",
+     DROP_TOC_LINE),
+    ("Abstracts, Preliminary Communications, Panel Discussions  Page 42-54",
+     DROP_TOC_LINE),  # a page RANGE, not just one number
+])
+def test_structural_shapes_are_dropped_when_t_coded(text, reason):
+    assert _appendix_drop_reason(text, _clean_inline_tabs(text), "T") == reason
+
+
+@pytest.mark.parametrize("text", [
+    "2021", "Completed", "Honors and Awards       Page 7",
+])
+def test_structural_shapes_survive_when_not_t_coded(text):
+    """The taxonomy_code gate: the exact same shapes that #885 confirmed only
+    ever occur T-coded (measured over 37,704 entries of every code in the
+    #885 corpus) are defense-in-depth gated so a non-T code can never lose
+    one, even if some future entry did carry this shape."""
+    for code in (None, "H", "A", "M1"):
+        assert _appendix_drop_reason(text, _clean_inline_tabs(text), code) is None
+
+
+@pytest.mark.parametrize("text", [
+    "2021 Assistant Professor, Weill Cornell Medicine",  # a year NEXT TO text
+    "Class of 2021",
+    "Cooking",  # a genuine single-word T record (a real hobby, #885's own example)
+    "Tabletop role-playing games",
+    "Funded by the NIH",  # contains "Funded" but is not a bare status word
+    "Completed the fellowship in 2019",
+    "See page 7 for details",  # lowercase "page", not the ToC shape
+    "Honors and Awards Page 7 Best Teacher Award 2019",  # real title AFTER
+    # "Page N" -- kills a mutant that drops _TOC_LINE_RE's trailing `\s*$`:
+    # without that end anchor, `.match()` would accept this as a PREFIX match
+    # and drop a real, later-in-the-line award title.
+    "Honors and Awards       page 7",  # lowercase "page": same shape as the
+    # dropped web181 positive above, differing ONLY in case. Pins that the
+    # match is case-sensitive -- unlike "See page 7 for details" above, which
+    # is rejected by its trailing text and would still survive even if the
+    # regex grew `re.I`.
+    #
+    # Real-shaped lines the corpus never exercises, so a widened regex
+    # would otherwise go unnoticed.
+    #
+    # A citation-shaped line over 90 chars ending " Page 12" -- kills a mutant
+    # that widens `_TOC_LINE_RE`'s `.{1,90}?` heading-length cap to `.*?`. The
+    # cap exists because a real, long line (a bibliography citation, here) can
+    # end in "Page N" by coincidence; only a SHORT heading before it is the
+    # source CV's own table of contents.
+    "Anderson RJ, Kim SY, Patel N, Gomez L, Chen W. Long-term outcomes "
+    "following minimally invasive cardiac surgery Page 12",
+    # No space before "Page" -- kills a mutant that drops the `[ \t]` run-in
+    # requirement from `_TOC_LINE_RE`, which would then match "Page" fused
+    # onto the end of any word.
+    "HomePage 7",
+    # A 4-digit number outside 19xx/20xx -- kills a mutant that widens
+    # `_BARE_YEAR_RE` from `(?:19|20)\d{2}` to bare `\d{4}`.
+    "1066",
+    "3021",
+    # A year run into other characters -- kills an unescaped `.?` in
+    # `_BARE_YEAR_RE` (only a literal trailing period is allowed).
+    "2019-",
+    "2019)",
+    "2019a",
+])
+def test_real_content_survives_even_when_t_coded(text):
+    """Never drop anything carrying real content (#885's own gate): a year
+    next to text, a single-word real record, and a sentence that merely
+    contains a status or page word are not the bare shapes above."""
+    assert _appendix_drop_reason(text, _clean_inline_tabs(text), "T") is None
+
+
+def test_filter_counts_the_885_reasons_separately():
+    entries = [
+        {"text": "2021", "taxonomy_code": "T"},
+        {"text": "Completed", "taxonomy_code": "T"},
+        {"text": "Honors and Awards       Page 7", "taxonomy_code": "T"},
+        {"text": "2021 Assistant Professor, Weill Cornell Medicine", "taxonomy_code": "T"},
+        {"text": "2021"},  # no taxonomy_code at all -- must not be dropped
+    ]
+    kept, dropped = _filter_unmapped_entries(entries)
+    assert [text for _, text in kept] == [
+        "2021 Assistant Professor, Weill Cornell Medicine", "2021",
+    ]
+    assert dropped == Counter({
+        DROP_BARE_YEAR: 1,
+        DROP_STATUS_MARKER: 1,
+        DROP_TOC_LINE: 1,
+    })
 
 
 def test_blank_table_row_is_counted_as_renders_empty_not_as_a_header():
@@ -490,3 +626,382 @@ def test_real_source_table_header_row_is_dropped_but_data_row_survives(tmp_path,
     ]
     assert "Year — Degree" not in _output_text(out)
     assert "1 non-content block removed (column-header 1)" in _comment_texts(out)
+
+
+# --------------------------------------------- render-level: #885's own wire
+
+def test_web210_shape_bare_years_and_status_markers_dropped(tmp_path, caplog):
+    """web210 shape (#885): a presentations list is mostly bare years and
+    lone status words, with the genuine titles between them surviving under
+    their original numbers-minus-drops -- the years and statuses are gone,
+    the quoted title is not."""
+    entries = [_NAME_ENTRY,
+               _t_entry("Scheduled", ["PRESENTATIONS"], 1),
+               _t_entry("Completed", ["PRESENTATIONS"], 2),
+               _t_entry("2021", ["PRESENTATIONS"], 3),
+               _t_entry(GENUINE_ONE, ["PRESENTATIONS"], 4),
+               _t_entry("2019", ["PRESENTATIONS"], 5)]
+    out = _render(tmp_path, entries, caplog, emit_comments=True)
+    # Scoped to the appendix section itself, not the whole document: the WCM
+    # template's own boilerplate legitimately contains "Completed" ("Past
+    # (Completed) Funding"), so a whole-document substring check would be
+    # vacuous here.
+    assert _appendix_paragraphs(out) == [
+        'From "PRESENTATIONS":',
+        f"1. {GENUINE_ONE}",
+    ]
+    comment = _appendix_log(caplog)
+    assert "bare-year 2" in comment
+    assert "status-marker 2" in comment
+
+
+def test_web181_shape_toc_lines_dropped(tmp_path, caplog):
+    """web181 shape (#885): the source CV's own table of contents reached the
+    appendix as numbered lines; dropped, with a genuine section title (no
+    'Page N' suffix) surviving."""
+    entries = [_NAME_ENTRY,
+               _t_entry("Honors and Awards       Page 7", ["APPOINTMENTS"], 1),
+               _t_entry("Grants         Page 4", ["APPOINTMENTS"], 2),
+               _t_entry("EDUCATION AND TRAINING", ["APPOINTMENTS"], 3)]
+    out = _render(tmp_path, entries, caplog, emit_comments=True)
+    assert _appendix_paragraphs(out) == [
+        'From "APPOINTMENTS":',
+        "1. EDUCATION AND TRAINING",
+    ]
+    assert "2 non-content blocks removed (toc-line 2)" in _comment_texts(out)
+
+
+def test_a_year_next_to_real_content_is_not_dropped(tmp_path, caplog):
+    """Negative control: #885's own line -- a bare year is structural, a year
+    NEXT TO text is a real (if fragmentary) record and must reach the page."""
+    entries = [_NAME_ENTRY,
+               _t_entry("2021 Assistant Professor, Weill Cornell Medicine",
+                        ["Positions"], 1)]
+    out = _render(tmp_path, entries, caplog, emit_comments=True)
+    assert _appendix_paragraphs(out) == [
+        'From "Positions":',
+        "1. 2021 Assistant Professor, Weill Cornell Medicine",
+    ]
+    assert "removed" not in _appendix_log(caplog)
+
+
+# --- #885 residual: T-validation-confirmed structural shapes ---------------
+# Two signals must agree: the reasoning names the kind, AND the text has the
+# kind's positive shape. Invented text only.
+
+def _confirmed(kind_sentence):
+    return f"[T-validation confirmed] {kind_sentence} It is a structural artifact."
+
+
+def _residual(text, reasoning, code="T"):
+    return _appendix_drop_reason(text, _clean_inline_tabs(text), code, reasoning)
+
+
+@pytest.mark.parametrize("text, kind_sentence, reason", [
+    ("CURRICULUM VITA", "Document title 'CURRICULUM VITA' with no content.", DROP_CV_TITLE),
+    ("Curriculum Vitae & Bibliography", "Document title/header with no content.", DROP_CV_TITLE),
+    ("Sample-legal Curriculum Vitae", "This is a document title/header.", DROP_CV_TITLE),
+    ("Curriculum Vitae\nJune 2014", "Document header with date - pure structural.", DROP_CV_TITLE),
+    ("As of August 10, 2022", "Date stamp 'As of August 10, 2022' is metadata.", DROP_DATE_STAMP),
+    ("Date: July 24, 2022", "This is a date stamp indicating CV version.", DROP_DATE_STAMP),
+    ("DATE Mar 14th, 2023", "Date stamp only - temporal marker.", DROP_DATE_STAMP),
+    ("*Revised June 29, 2018", "This is a revision date stamp.", DROP_DATE_STAMP),
+    ("Date April, 6, 2024", "This is a document date stamp.", DROP_DATE_STAMP),
+    ("Professional Experience", "This is a section header ('Professional Experience').", DROP_SECTION_HEADER),
+    ("Courses Taught:", "Section header 'Courses Taught:' is a structural marker.", DROP_SECTION_HEADER),
+    ("III. SAMPLE EXPERIENCE", "Section header label appearing under another section.", DROP_SECTION_HEADER),
+    ("Graduate", "This is a section subheader categorizing degree type.", DROP_SECTION_HEADER),
+    ("Advisory Boards or Committees", "Section category label that organizes content.", DROP_SECTION_HEADER),
+    ("Years     School     Degree", "This is a column header row (Years, School, Degree).", DROP_COLUMN_HEADER),
+    ("Trainee | Topic | Program | Outcome", "Column header row for table.", DROP_COLUMN_HEADER),
+])
+def test_confirmed_structural_shapes_are_dropped(text, kind_sentence, reason):
+    assert _residual(text, _confirmed(kind_sentence)) == reason
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    # Reasoning says header but the text is a sentence / carries data.
+    ("Professional Experience includes two positions.", "This is a section header."),
+    ("Section 4 overview", "This is a section header."),  # digit
+    ("Professional Experience 2019", "This is a section header."),
+    ("One two three four five six seven eight nine ten eleven", "Section header only."),  # > cap
+    ("Current position: Assistant Professor (as of 2021), Sample University",
+     "This is a date stamp."),
+    ("Date of birth June 3, 1980, Springfield", "This is a date stamp."),
+    ("Curriculum Vitae of Jane Q Sample, Sample University", "Document title/header."),
+    ("Year | Degree | Major\n2001 | BS | Biology", "Column header row with data following."),
+])
+def test_confirmed_kind_without_the_positive_shape_survives(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) is None
+
+
+@pytest.mark.parametrize("text, reasoning", [
+    # Right shape, but stage 3b did not confirm it structural.
+    ("Professional Experience", "This is a section header."),
+    ("Professional Experience", "[T-validation overridden] Section header."),
+    ("Professional Experience", ""),
+    ("Professional Experience", None),
+    # Right shape, confirmed, but the reasoning names a different kind.
+    ("Professional Experience", _confirmed("Personal hobby with no professional content.")),
+    ("Cooking", _confirmed("Personal interest listed under hobbies.")),
+    ("Leverhulme Trust", _confirmed("Funding organization name with no grant details.")),
+    ("Sample Journal of Testing", _confirmed("Orphaned journal title with no article detail.")),
+    # Each shape needs ITS OWN kind named: a date, a title and a label row
+    # under a different confirmed verdict are kept.
+    ("As of August 10, 2022", _confirmed("This is a section header.")),
+    ("Curriculum Vitae & Bibliography", _confirmed("Date stamp only.")),
+    ("Years     School     Degree", _confirmed("Personal hobby with no professional content.")),
+    ("Trainee | Topic | Program", _confirmed("This is a document title/header.")),
+    # A single cell is not a header ROW.
+    ("Assorted", _confirmed("Column header row for table.")),
+    # A cell over the word cap is prose, not a column label.
+    ("Trainee | one two three four five six seven eight nine ten", _confirmed("Column header row.")),
+    # A date followed by more text is not a bare stamp.
+    ("Date May 30, 2020 Springfield General Hospital", _confirmed("This is a date stamp.")),
+    # More than two words before the title is a different sentence.
+    ("One Two Three Curriculum Vitae", _confirmed("This is a document title/header.")),
+    # A looser "structural header" verdict is not a SECTION header verdict:
+    # the corpus used it for a name line and an institution name.
+    ("Sam Q Example MD MPH", _confirmed("This is a name/credentials line and a structural header.")),
+    ("Example Institute of Testing", _confirmed("Standalone institution name; structural header only.")),
+    # "none" says something about the content, so it is not a bare label.
+    ("Patents (none)", _confirmed("Section header 'Patents (none)' is structural notation.")),
+    # Kind word only deep in the prose, past the lead window.
+    ("Professional Experience",
+     "[T-validation confirmed] " + "x" * 120 + " section header"),
+])
+def test_shape_without_confirmed_kind_survives(text, reasoning):
+    assert _residual(text, reasoning) is None
+
+
+@pytest.mark.parametrize("code", [None, "A", "G", "N4", "M1"])
+def test_confirmed_structural_shapes_survive_when_not_t_coded(code):
+    text = "Professional Experience"
+    assert _residual(text, _confirmed("This is a section header."), code) is None
+
+
+# --- #530 residual: bare outline labels and wrapped instruction tails ------
+# Another institution's template numbers its empty category labels ("1. Sample
+# Awards", "b. Sample Scope:"); the marker's own digit used to fail the
+# digit-free shape. Same two-signal rule as above, invented text only.
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    ("1. Sample Awards", "Section header 'Sample Awards' is a structural label."),
+    ("12. Sample Elected Roles, etc.", "Section header describing a category."),
+    ("b. Sample Scope:", "Structural subsection marker with no entry content."),
+    ("iv. Sample Placement Options", "Subsection marker, purely organizational."),
+    ("3) Sample Department-wide", "Structural header/category label, not an entry."),
+    ("2. Sample Review Panels (titles, dates)", "Section header for review panels."),
+])
+def test_confirmed_bare_outline_label_is_dropped(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) == DROP_SECTION_HEADER
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    # A digit past the marker is data, marker or not.
+    ("1. Sample Awards 2019", "Section header."),
+    ("3. Section 4 overview", "Section header."),
+    # A sentence, or an over-long label, is content.
+    ("1. Sample awards were received.", "Section header."),
+    ("1. Sample awards received etc.", "Section header."),  # no comma: not a category label
+    ("1. One two three four five six seven eight nine ten eleven", "Section header."),
+    # The marker is stripped only at the start of the line, and only one of them.
+    ("Sample Awards 2. Foo", "Section header."),
+    ("1. 2. Sample Awards", "Section header."),
+    # A marker is at most two digits, and must be followed by whitespace.
+    ("123. Sample Awards", "Section header."),
+    ("1.Sample Awards", "Section header."),
+    # A marker with nothing behind it is not a label.
+    ("1.", "Section header."),
+    # Confirmed as something else: the organisation name a CV opens with.
+    ("1. Sample Institute of Testing", "Institution name only, structural header/artifact."),
+    ("1. Cooking", "Personal hobby listed under interests."),
+])
+def test_outline_label_without_both_signals_survives(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) is None
+
+
+_TEN_WORDS = " ".join(["Sample"] * 10)  # the label word cap: 10 fits, 11 does not
+
+
+@pytest.mark.parametrize("marker", ["1.", "1)", "1,", "b.", "B.", "iv.", "VIII)"])
+def test_each_outline_marker_form_is_stripped_before_the_word_cap(marker):
+    """Ten words behind the marker is a label; the marker itself must not
+    count as the eleventh word, for every marker form."""
+    assert _residual(f"{marker} {_TEN_WORDS}",
+                     _confirmed("Section header.")) == DROP_SECTION_HEADER
+    assert _residual(f"{marker} {_TEN_WORDS} Sample",
+                     _confirmed("Section header.")) is None
+
+
+def test_bare_outline_label_survives_without_confirmation_or_t_code():
+    label = "1. Sample Awards"
+    assert _residual(label, None) is None
+    assert _residual(label, "This is a section header.") is None
+    assert _residual(label, _confirmed("This is a section header."), "A") is None
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    ("each sample list, preferably in reverse order)", "Structural header/instruction line."),
+    ("presenter, etc.)", "Structural fragment; appears to be a broken header."),
+    ("resulted from sample work; use underline or bold font for your name; number",
+     "Instruction text for CV formatting, not substantive content."),
+])
+def test_confirmed_wrapped_instruction_tail_is_dropped(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) == DROP_TEMPLATE_INSTRUCTION
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    # A wrapped real record carries a year, volume or page: kept.
+    ("Sample Summit, Boston (Aug. 2023)", "Instruction text for CV formatting."),
+    ("7: 10-19.)", "Instruction text for CV formatting."),
+    # A stray ")" that does not end the line is not a wrapped tail.
+    ("sample) tail text follows", "Instruction text for CV formatting."),
+    # Balanced parenthesis and no directive: an ordinary fragment.
+    ("Sample Summit, Boston (annual)", "Instruction text for CV formatting."),
+    # More "(" than ")": the closing paren closes one it opened.
+    ("sample (note (a)", "Instruction text for CV formatting."),
+    # Over the word cap: prose.
+    (" ".join(["word"] * 30) + ")", "Instruction text for CV formatting."),
+    # An author-addressed line the reasoning does not call an instruction.
+    ("use sample font for your name", "Personal hobby listed under interests."),
+    # A directive needs both a verb and "your"; neither alone is enough.
+    ("sample notes about your name", "Instruction text for CV formatting."),
+    ("use sample font", "Instruction text for CV formatting."),
+    # The verb and "your" must sit in one clause: ";" or "." ends the window.
+    ("list sample; see your name", "Instruction text for CV formatting."),
+    ("use sample. see your name", "Instruction text for CV formatting."),
+    # ... and within 40 characters of each other.
+    ("use " + "sample " * 8 + "your name", "Instruction text for CV formatting."),
+])
+def test_wrapped_tail_without_both_signals_survives(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) is None
+
+
+_INSTRUCTION = "Instruction text for CV formatting."
+
+
+@pytest.mark.parametrize("verb", ["use", "please", "list", "include", "provide"])
+def test_each_author_directive_verb_is_pinned(verb):
+    assert _residual(f"{verb} sample font for your name",
+                     _confirmed(_INSTRUCTION)) == DROP_TEMPLATE_INSTRUCTION
+
+
+def _gap_text(gap):
+    """'use' + exactly `gap` characters + 'your name' (digit-free)."""
+    return "use " + "a" * (gap - 2) + " your name"
+
+
+@pytest.mark.parametrize("gap, dropped", [(40, True), (41, False)])
+def test_author_directive_window_is_forty_characters(gap, dropped):
+    assert len(_gap_text(gap).split("your")[0]) - len("use") == gap
+    got = _residual(_gap_text(gap), _confirmed(_INSTRUCTION))
+    assert got == (DROP_TEMPLATE_INSTRUCTION if dropped else None)
+
+
+@pytest.mark.parametrize("words, dropped", [(25, True), (26, False)])
+def test_wrapped_tail_word_cap_is_twenty_five(words, dropped):
+    text = " ".join(["word"] * (words - 1)) + " last)"
+    assert len(text.split()) == words
+    got = _residual(text, _confirmed(_INSTRUCTION))
+    assert got == (DROP_TEMPLATE_INSTRUCTION if dropped else None)
+
+
+@pytest.mark.parametrize("text", [
+    "reuse sample font for your name",       # verb only inside a longer word
+    "used sample font for your name",
+    "use sample font for yourself",          # "your" only inside a longer word
+    "use sample font for yours",
+])
+def test_author_directive_needs_word_boundaries(text):
+    assert _residual(text, _confirmed(_INSTRUCTION)) is None
+
+
+@pytest.mark.parametrize("reasoning_sentence", [
+    "Structural category label.",   # not "header/category label"
+    "Structural marker.",           # not "subsection marker"
+    "Belongs to the subsection.",   # not "subsection marker"
+    "Structural header/category.",  # not "header/category label"
+])
+def test_section_wordings_need_their_full_phrase(reasoning_sentence):
+    assert _residual("3) Sample Department-wide", _confirmed(reasoning_sentence)) is None
+
+
+@pytest.mark.parametrize("reasoning_sentence", [
+    "Structural instruction.",      # not "instruction text/line"
+    "Structural header.",           # not "broken header"
+    "Structural text fragment.",    # "text" without "instruction"
+    "Wrapped line.",                # "line" without "instruction"
+    "Broken fragment.",             # "broken" without "header"
+])
+def test_instruction_wordings_need_their_full_phrase(reasoning_sentence):
+    assert _residual("presenter, etc.)", _confirmed(reasoning_sentence)) is None
+
+
+@pytest.mark.parametrize("text", ["", "   "])
+def test_blank_text_is_not_a_section_label(text):
+    """Zero words would pass the word cap, so blank must be refused first."""
+    assert appendix_module._is_section_label_text(text) is False
+
+
+def test_category_label_etc_is_case_insensitive():
+    assert _residual("1. Sample Roles, Etc.", _confirmed("Section header.")
+                     ) == DROP_SECTION_HEADER
+
+
+def test_author_directive_window_allows_a_comma():
+    """Only ";" and "." end the clause; a comma inside it does not."""
+    assert _residual("use bold, for your name", _confirmed(_INSTRUCTION)
+                     ) == DROP_TEMPLATE_INSTRUCTION
+
+
+def test_author_directive_is_case_insensitive():
+    assert _residual("Use bold font for your name",
+                     _confirmed("Instruction text for CV formatting.")
+                     ) == DROP_TEMPLATE_INSTRUCTION
+
+
+def test_wrapped_tail_needs_its_own_signals_not_just_the_shape():
+    tail = "presenter, etc.)"
+    assert _residual(tail, None) is None
+    assert _residual(tail, "Structural fragment; broken header.") is None
+    assert _residual(tail, _confirmed("Structural fragment; broken header."), "A") is None
+
+
+def test_older_checks_keep_their_drop_over_the_residual_check():
+    """'Education' is a template label AND a confirmed section header; the
+    residual check runs last so the earlier reason still owns the count."""
+    reasoning = _confirmed("This is a section header ('Education').")
+    assert _residual("Education", reasoning) == DROP_TEMPLATE_LABEL
+
+
+def test_filter_reads_reasoning_from_the_entry_and_counts_each_reason():
+    header = _confirmed("This is a section header.")
+    entries = [
+        {"text": "Curriculum Vitae & Bibliography", "taxonomy_code": "T",
+         "classification_reasoning": _confirmed("Document title.")},
+        {"text": "As of May 1, 2020", "taxonomy_code": "T",
+         "classification_reasoning": _confirmed("Date stamp.")},
+        {"text": "Awards", "taxonomy_code": "T", "classification_reasoning": header},
+        {"text": "Awards", "taxonomy_code": "T"},  # no reasoning: kept
+        {"text": "Awards", "taxonomy_code": "A", "classification_reasoning": header},
+    ]
+    kept, dropped = _filter_unmapped_entries(entries)
+    assert [t for _, t in kept] == ["Awards", "Awards"]
+    assert dropped == Counter({DROP_CV_TITLE: 1, DROP_DATE_STAMP: 1, DROP_SECTION_HEADER: 1})
+    assert _describe_dropped(dropped) == (
+        "3 non-content blocks removed (cv-title 1, date-stamp 1, section-header 1)"
+    )
+
+
+def test_appendix_intro_is_the_shared_accurate_banner(tmp_path, caplog):
+    # #534: _fill_appendix writes the shared intro line, italic, and the old
+    # "not successfully mapped" claim is gone.
+    entries = [_t_entry("Example Leftover Society Membership, 2015", ["OTHER"], 7)]
+    doc = Document(str(_render(tmp_path, entries, caplog)))
+    paragraphs = doc.paragraphs
+    header = next(i for i, p in enumerate(paragraphs) if p.text == "T. APPENDIX")
+    intro = paragraphs[header + 1]
+    assert intro.text == appendix_module.APPENDIX_INTRO_TEXT
+    assert all(run.italic for run in intro.runs)
+    assert "successfully mapped" not in _output_text(tmp_path / "out.docx")

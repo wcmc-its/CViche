@@ -12,24 +12,40 @@ import json
 import logging
 import re
 
-from unified_pipeline.config import calculate_cost
+from unified_pipeline.config import _normalize_model_id, calculate_cost
 from unified_pipeline.llm.retry import (
     _call_with_retry,
     _client_init_lock,
     _get_llm_timeout_seconds,
-    _get_llm_max_attempts,
 )
 
 logger = logging.getLogger(__name__)
 
-# Bedrock stopReason -> OpenAI finish_reason mapping
+# Bedrock stopReason -> OpenAI finish_reason mapping, covering all 9 values
+# Bedrock's Converse API documents (#628). The two malformed_* reasons map to
+# "error", which is outside OpenAI's vocabulary; that is safe because nothing
+# branches on finish_reason -- it is only logged and stored (decided on #628).
 STOP_REASON_MAP = {
     "end_turn": "stop",
     "max_tokens": "length",
     "stop_sequence": "stop",
     "tool_use": "tool_calls",
-    "guard_intervened": "content_filter",
+    "guardrail_intervened": "content_filter",  # was "guard_intervened" -- never matched (#628)
+    "content_filtered": "content_filter",
+    "model_context_window_exceeded": "length",
+    "malformed_model_output": "error",
+    "malformed_tool_use": "error",
 }
+
+
+class BedrockToolCallDidNotFireError(RuntimeError):
+    """A forced json_schema tool call did not fire: the schema was not
+    enforced, so the response cannot be trusted as structured output."""
+
+
+class BedrockEmptyResponseError(RuntimeError):
+    """Neither the initial call nor the JSON-repair retry returned any text
+    content (#884), so there is nothing to repair or return."""
 
 # Hard ceiling for any Bedrock call that reaches _call_bedrock without an
 # explicit max_tokens. When `maxTokens` is omitted, Bedrock applies the MODEL's
@@ -46,6 +62,13 @@ STOP_REASON_MAP = {
 # of call-site or YAML discipline. See
 # docs/analysis/HANDOFF-runaway-generation-maxtokens-2026-06-17.md.
 DEFAULT_MAX_TOKENS = 16000
+
+# Models that 400 on any sampling parameter ("`temperature` is deprecated for
+# this model", probed 2026-09-29) and run adaptive thinking unless it is
+# switched off. Thinking adds billed output tokens, so it is disabled
+# explicitly. Keyed by the bare id, as in PRICING. Every model outside this set
+# gets the request shape it always had.
+NO_SAMPLING_PARAMS_MODELS = frozenset({"anthropic.claude-sonnet-5"})
 
 _bedrock_client = None
 
@@ -65,14 +88,18 @@ def _get_bedrock_client():
                 import boto3
                 from botocore.config import Config
                 region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-                # Explicit connect/read timeouts + bounded standard retries so a
-                # wedged Bedrock call can't block the worker thread indefinitely.
-                # botocore's default read_timeout (60s) and retry behavior are left
-                # implicit otherwise; here we make them explicit and tunable.
+                # Explicit connect/read timeouts so a wedged Bedrock call can't
+                # block the worker thread indefinitely. botocore is held to ONE
+                # attempt (total_max_attempts=1, #632): _call_with_retry is the
+                # single retry owner, so a logical call costs retry_count+1 raw
+                # requests, not that times botocore's own attempts. Note
+                # `max_attempts` would be wrong here -- botocore reads it as a
+                # RETRY count and adds one for the initial request; only
+                # `total_max_attempts` counts the initial request.
                 bedrock_config = Config(
                     connect_timeout=10,
                     read_timeout=_get_llm_timeout_seconds(),
-                    retries={"mode": "standard", "max_attempts": _get_llm_max_attempts()},
+                    retries={"mode": "standard", "total_max_attempts": 1},
                 )
                 _bedrock_client = boto3.client(
                     "bedrock-runtime", region_name=region, config=bedrock_config
@@ -144,6 +171,22 @@ def _extract_tool_use_input(response):
     for block in content:
         if "toolUse" in block:
             return block["toolUse"].get("input")
+    return None
+
+
+def _extract_text_content(response: dict) -> str | None:
+    """Return the first text block's text from a Converse response's message
+    content list, or None when the list is empty or has no text block.
+
+    A guardrail intervention or other provider-side condition can return an
+    empty content list (#884); indexing content[0] directly crashes with an
+    unhandled IndexError instead of letting the caller retry or raise a
+    clear, attributable error.
+    """
+    content = response.get("output", {}).get("message", {}).get("content", [])
+    for block in content:
+        if "text" in block:
+            return block["text"]
     return None
 
 
@@ -272,8 +315,17 @@ def _call_bedrock(model, messages, temperature, response_format=None,
         Bedrock Converse response dict
 
     Raises:
+        ValueError: max_tokens was given but is not a positive int.
         botocore.exceptions.ClientError: On non-retryable Bedrock errors
     """
+    # Reject an invalid max_tokens here rather than letting it reach Bedrock
+    # as-is: the API rejects it server-side too, but as an opaque
+    # ParamValidationError deep in the boto3 call instead of a clear,
+    # attributable error at the call site (#631).
+    if max_tokens is not None and (
+        isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0
+    ):
+        raise ValueError(f"Bedrock max_tokens must be a positive int, got {max_tokens!r}")
     client = _get_bedrock_client()
     tool_config = _schema_tool_config(response_format)
     system_prompts, converse_messages = _translate_messages(
@@ -291,8 +343,12 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     call_kwargs = {
         "modelId": model,
         "messages": converse_messages,
-        "inferenceConfig": {"temperature": float(temperature)},
+        "inferenceConfig": {},
     }
+    if _normalize_model_id(model) in NO_SAMPLING_PARAMS_MODELS:
+        call_kwargs["additionalModelRequestFields"] = {"thinking": {"type": "disabled"}}
+    else:
+        call_kwargs["inferenceConfig"]["temperature"] = float(temperature)
     if system_prompts:
         call_kwargs["system"] = system_prompts
     # Always send maxTokens. When the caller (and config) leave it None, fall
@@ -382,6 +438,74 @@ def _finalize_bedrock_result(content, usage, cache_read_tokens, cache_write_toke
     }
 
 
+def _finalize_schema_tool_response(response: dict, usage: dict, cache_read_tokens: int,
+                                   cache_write_tokens: int, model: str,
+                                   api_seconds: float) -> dict:
+    """#46 json_schema path: the forced tool's structured `input` IS the
+    answer. Re-serialize it so every caller's json.loads(content) keeps
+    working, and skip the text-validation/fence-strip of the text path
+    (structured tool output is guaranteed valid JSON). Returns before the
+    JSON-repair branch, so there is only the one dispatch to account for."""
+    stop_reason = response.get("stopReason")
+    tool_input = _extract_tool_use_input(response)
+    if stop_reason != "tool_use" or tool_input is None:
+        # Forced tool call that didn't fire => schema not enforced.
+        # Fail loud rather than silently parsing free text.
+        raise BedrockToolCallDidNotFireError(
+            f"Bedrock forced json_schema tool call did not fire "
+            f"(stopReason={stop_reason!r}, tool_input="
+            f"{'present' if tool_input is not None else 'missing'})"
+        )
+    return _finalize_bedrock_result(
+        json.dumps(tool_input), usage, cache_read_tokens, cache_write_tokens,
+        STOP_REASON_MAP.get(stop_reason, stop_reason), model,
+        int(api_seconds * 1000),
+    )
+
+
+def _call_bedrock_json_repair(messages: list, response_format: dict | None,
+                              cfg: dict) -> tuple[dict, float]:
+    """Re-send the request once with a stronger JSON hint; return the raw
+    Converse response and its API seconds.
+
+    Bedrock Converse enforces strict user/assistant role alternation and
+    raises a fatal ValidationException (not in BEDROCK_RETRYABLE_CODES) on
+    two consecutive turns of the same role. Every call site in this codebase
+    sends a single trailing user turn, so appending a new user turn broke the
+    repair path in the common case (#630). The hint is folded into the
+    existing trailing user turn instead; a fresh turn is appended only for a
+    shape this path doesn't expect (the last turn isn't user -- e.g. a caller
+    with a hanging assistant turn). `messages` and its dicts are never
+    mutated: the repair works on a shallow copy of the list, and the replaced
+    trailing turn is a new dict built with {**last, ...}. A caller holding
+    `messages` still sees the original request, not the repair attempt. Content is always a str here:
+    _translate_messages already raised NotImplementedError on the first call
+    for any list (multimodal) content.
+
+    Goes through _call_with_retry rather than calling _call_bedrock bare:
+    this retry is a live Bedrock request like any other, and a transient
+    throttle on it should back off instead of raising. _call_with_retry
+    acquires _llm_call_semaphore itself, so the call stays bounded without
+    nesting the acquire.
+    """
+    hint = ("Your previous response was not valid JSON. Please respond with "
+            "ONLY valid JSON, no markdown fencing or explanation.")
+    stronger_messages = list(messages)  # shallow copy
+    last = stronger_messages[-1] if stronger_messages else None
+    if last is not None and last["role"] == "user":
+        stronger_messages[-1] = {**last, "content": f'{last["content"]}\n\n{hint}'}
+    else:
+        stronger_messages.append({"role": "user", "content": hint})
+    return _call_with_retry(
+        lambda: _call_bedrock(cfg["model"], stronger_messages, cfg["temperature"],
+                              response_format, cfg["max_tokens"],
+                              enable_prompt_caching=cfg["enable_prompt_caching"],
+                              **cfg["extra_kwargs"]),
+        retry_count=cfg["retry_count"],
+        cancel_check=cfg.get("cancel_check"),
+    )
+
+
 def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
     """Dispatch one Bedrock call and normalize the response.
 
@@ -402,61 +526,54 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
     cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
 
     if _schema_tool_config(response_format) is not None:
-        # #46 json_schema path: the forced tool's structured `input` IS the
-        # answer. Re-serialize it so every caller's json.loads(content)
-        # keeps working, and skip the text-validation/fence-strip below
-        # (structured tool output is guaranteed valid JSON).
-        stop_reason = response.get("stopReason")
-        tool_input = _extract_tool_use_input(response)
-        if stop_reason != "tool_use" or tool_input is None:
-            # Forced tool call that didn't fire => schema not enforced.
-            # Fail loud rather than silently parsing free text.
-            raise RuntimeError(
-                f"Bedrock forced json_schema tool call did not fire "
-                f"(stopReason={stop_reason!r}, tool_input="
-                f"{'present' if tool_input is not None else 'missing'})"
-            )
-        # Returns before the JSON-repair branch, so there is only the one
-        # dispatch to account for.
-        return _finalize_bedrock_result(
-            json.dumps(tool_input), usage, cache_read_tokens, cache_write_tokens,
-            STOP_REASON_MAP.get(stop_reason, stop_reason), model,
-            int(api_seconds * 1000),
-        )
+        return _finalize_schema_tool_response(
+            response, usage, cache_read_tokens, cache_write_tokens, model, api_seconds)
 
-    # Extract and normalize Bedrock response (text / json_object path)
-    content = response["output"]["message"]["content"][0]["text"]
+    # Extract and normalize Bedrock response (text / json_object path). A
+    # guardrail intervention or other provider condition can send back an
+    # empty content list with no text block at all (#884) -- read it through
+    # the same guarded helper the retry branch below re-reads, rather than
+    # indexing content[0] directly.
+    content = _extract_text_content(response)
     stop_reason = response.get("stopReason", "end_turn")
     finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
+    content_missing = content is None
 
-    # D-05: Validate JSON when response_format was requested
-    if not _validate_json_response(content, response_format):
-        logger.warning("Bedrock response is not valid JSON. Retrying with stronger hint...")
-        # Retry once with stronger prompt hint
-        stronger_messages = list(messages)  # shallow copy
-        stronger_messages.append({
-            "role": "user",
-            "content": "Your previous response was not valid JSON. Please respond with ONLY valid JSON, no markdown fencing or explanation.",
-        })
-        # Go through _call_with_retry rather than calling _call_bedrock
-        # bare: this retry is a live Bedrock request like any other, and a
-        # transient throttle on it should back off instead of raising.
-        # _call_with_retry acquires _llm_call_semaphore itself, so this
-        # call stays bounded without nesting the acquire.
-        retry_response, retry_api_seconds = _call_with_retry(
-            lambda: _call_bedrock(model, stronger_messages, cfg["temperature"],
-                                  response_format, cfg["max_tokens"],
-                                  enable_prompt_caching=cfg["enable_prompt_caching"],
-                                  **cfg["extra_kwargs"]),
-            retry_count=cfg["retry_count"],
-            cancel_check=cfg.get("cancel_check"),
+    # D-05: Validate JSON when response_format was requested. An empty
+    # content list is treated the same as invalid JSON -- both need the
+    # one-shot repair retry -- regardless of whether JSON was requested,
+    # since there is no content to return either way (#884).
+    if content_missing:
+        logger.warning(
+            "Bedrock response had no text content (stopReason=%r, usage=%r). "
+            "Retrying with stronger hint...", stop_reason, usage,
         )
+    if content_missing or not _validate_json_response(content, response_format):
+        if not content_missing:
+            logger.warning("Bedrock response is not valid JSON. Retrying with stronger hint...")
+        retry_response, retry_api_seconds = _call_bedrock_json_repair(
+            messages, response_format, cfg)
         # This repair call is a second live Bedrock request, so its API time
         # belongs in latency_ms -- as its tokens already do just below.
         # Previously latency_ms was frozen before this branch ran, so the
         # repair call was billed but never timed.
         api_seconds += retry_api_seconds
-        content = retry_response["output"]["message"]["content"][0]["text"]
+        retry_content = _extract_text_content(retry_response)
+        retry_stop_reason = retry_response.get("stopReason", "end_turn")
+        if content_missing and retry_content is None:
+            # Neither call returned any text -- nothing to repair or return.
+            # Fail loud with both stopReasons so the caller's per-group
+            # except records a real error string instead of an IndexError
+            # with no context (#884).
+            raise BedrockEmptyResponseError(
+                "Bedrock Converse returned no text content on the initial "
+                f"call (stopReason={stop_reason!r}) or the retry "
+                f"(stopReason={retry_stop_reason!r})"
+            )
+        # If the retry also came back empty but the initial call had
+        # (invalid) content, keep the initial content -- let downstream
+        # handle it per D-05, same as the pre-#884 "still invalid" path.
+        content = retry_content if retry_content is not None else content
         retry_usage = retry_response["usage"]
         retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
         # Accumulate token usage from retry. No "totalTokens" key here:
@@ -470,7 +587,7 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
         }
         cache_read_tokens += retry_cache_read
         cache_write_tokens += retry_cache_write
-        stop_reason = retry_response.get("stopReason", "end_turn")
+        stop_reason = retry_stop_reason
         finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
         # If still invalid, return as-is (let downstream handle it per D-05)
 

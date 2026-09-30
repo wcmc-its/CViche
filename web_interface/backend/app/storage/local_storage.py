@@ -14,6 +14,7 @@ from app.storage.base import (
     RunStorage,
     StorageKeyExists,
     StorageKeyNotFound,
+    check_artifact_size,
     validate_key,
     validate_run_id,
     validate_run_key,
@@ -134,11 +135,13 @@ class LocalRunStorage(RunStorage):
         return self._safe_path(run_id, key)
 
     def put_file(self, run_id: str, key: str, data: bytes) -> None:
+        check_artifact_size(data)
         path = self._resolve(run_id, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, data)
 
     def put_file_exclusive(self, run_id: str, key: str, data: bytes) -> None:
+        check_artifact_size(data)
         path = self._resolve(run_id, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -148,6 +151,7 @@ class LocalRunStorage(RunStorage):
             raise StorageKeyExists(f"{run_id}/{key} already exists") from e
 
     def put_global(self, key: str, data: bytes) -> None:
+        check_artifact_size(data)
         validate_key(key)
         path = self._safe_path(key)
         path.parent.mkdir(parents=True, exist_ok=True)

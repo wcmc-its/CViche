@@ -586,11 +586,8 @@ def test_three_memberships_fused_into_one_blind_line_render_three_rows():
     """The same three groups with every newline gone -- the shape this fix
     exists for, and the one where the count could silently cap at two.
 
-    The organization names are long here on purpose:
-    `_parse_multi_membership_entry` only accepts a pipe-free part as an
-    organization when it is over five characters, and `_entry_parts` hands it
-    parts with the pipes already removed, so "Org A" would be dropped on this
-    path even though the multi-line form above keeps it."""
+    Long organization names here; the short-acronym blind form is the next
+    test (#758)."""
     entry = {
         "text": ("Member | State Medical Society | 2010-present | "
                  "Fellow | National Surgical Association | 2015-present | "
@@ -604,6 +601,20 @@ def test_three_memberships_fused_into_one_blind_line_render_three_rows():
         "Fellow, National Surgical Association",
         "Board Member, American Board of Pediatrics",
     ]
+    assert [r[1] for r in rows] == ["2010-Present", "2015-Present", "2020-Present"]
+
+
+def test_three_memberships_with_short_acronym_orgs_on_one_blind_line():
+    """#758: the blind form of the reviewer's three-group example with
+    organizations of five characters or fewer, all of which used to be dropped."""
+    entry = {
+        "text": ("Member | AMA | 2010-present | "
+                 "Fellow | ASCO | 2015-present | "
+                 "Board Member | NIH | 2020-present"),
+        "extracted_fields": {"organization": "AMA"},
+    }
+    rows = _render_memberships([entry])
+    assert [r[0] for r in rows] == ["Member, AMA", "Fellow, ASCO", "Board Member, NIH"]
     assert [r[1] for r in rows] == ["2010-Present", "2015-Present", "2020-Present"]
 
 
@@ -1000,3 +1011,25 @@ def test_the_entrys_own_date_fields_count_as_covered_by_the_date_column():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+@pytest.mark.parametrize("trailer", ["NY", "USA", "(AHA)"])
+def test_short_line_after_an_organization_does_not_become_a_membership(trailer):
+    """#758 follow-up: a short line trailing an organization (a state, a
+    country, the organization's own acronym) is not a second organization.
+    Counting it shifted the next membership's type and date onto it."""
+    entry = {
+        "text": (f"Member\nAmerican Heart Association\n{trailer}\n2010-present\n"
+                 "Fellow\nAmerican College of Cardiology\n2012-present"),
+        "extracted_fields": {},
+    }
+    rows = _render_memberships([entry])
+    assert rows == [["Member, American Heart Association", "2010-Present"],
+                    ["Fellow, American College of Cardiology", "2012-Present"]]
+
+
+def test_short_organization_right_after_a_type_is_kept_on_the_multi_line_path():
+    entry = {"text": "Member\nAMA\n2010-present\nFellow\nACP\n2012-present",
+             "extracted_fields": {}}
+    rows = _render_memberships([entry])
+    assert rows == [["Member, AMA", "2010-Present"], ["Fellow, ACP", "2012-Present"]]

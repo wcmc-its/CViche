@@ -20,7 +20,9 @@ from botocore.stub import Stubber
 from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 
-from app.storage.base import StorageKeyExists, StorageKeyNotFound
+from app.storage import base as storage_base
+from app.storage.base import ArtifactTooLarge, StorageKeyExists, StorageKeyNotFound
+from app.storage.local_storage import LocalRunStorage
 from app.storage.s3_storage import S3RunStorage, StorageDeleteError
 
 
@@ -832,3 +834,46 @@ def test_local_and_s3_list_files_agree_on_the_same_layout(tmp_path):
         for prefix, expected in cases:
             assert sorted(s3.list_files("run1", prefix)) == sorted(expected)
     stub.assert_no_pending_responses()
+
+
+# --- maximum artifact size (#789) -------------------------------------------
+
+_WRITES = {
+    "put_file": lambda st: st.put_file("run1", "a.bin", b"x" * 11),
+    "put_file_exclusive": lambda st: st.put_file_exclusive("run1", "a.bin", b"x" * 11),
+    "put_global": lambda st: st.put_global("idx/a.bin", b"x" * 11),
+}
+
+
+@pytest.fixture
+def ten_byte_limit(monkeypatch):
+    monkeypatch.setattr(storage_base, "MAX_ARTIFACT_BYTES", 10)
+
+
+def test_max_artifact_bytes_is_a_multiple_of_the_upload_cap():
+    assert storage_base.MAX_ARTIFACT_BYTES == (
+        storage_base.ARTIFACT_SIZE_FACTOR * storage_base.MAX_UPLOAD_SIZE
+    )
+    assert storage_base.MAX_ARTIFACT_BYTES > storage_base.MAX_UPLOAD_SIZE
+
+
+@pytest.mark.parametrize("op", sorted(_WRITES))
+def test_s3_oversize_write_raises_before_any_s3_call(ten_byte_limit, op):
+    storage = _storage()
+    stub = Stubber(storage._s3)  # no responses queued: any S3 call fails
+    with stub, pytest.raises(ArtifactTooLarge):
+        _WRITES[op](storage)
+
+
+@pytest.mark.parametrize("op", sorted(_WRITES))
+def test_local_oversize_write_raises_and_stores_nothing(ten_byte_limit, tmp_path, op):
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+    with pytest.raises(ArtifactTooLarge):
+        _WRITES[op](storage)
+    assert list(tmp_path.rglob("*")) == []
+
+
+def test_write_of_exactly_the_limit_is_accepted(ten_byte_limit, tmp_path):
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+    storage.put_file("run1", "a.bin", b"x" * 10)
+    assert storage.get_file("run1", "a.bin") == b"x" * 10

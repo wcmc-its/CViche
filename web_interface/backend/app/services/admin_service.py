@@ -3,8 +3,8 @@ from datetime import datetime
 from sqlalchemy import func, case
 from sqlalchemy.orm import Session
 
-from app.models import User, Run, Feedback
-from app.schemas import AdminUser
+from app.models import User, Run, Step, Feedback
+from app.schemas import AdminStepAvg, AdminUser
 
 
 def get_users_with_stats(db: Session) -> list[AdminUser]:
@@ -122,3 +122,31 @@ def get_single_user_stats(user: User, db: Session) -> dict:
         "feedback_count": feedback_count,
         "completed_run_count": completed_run_count,
     }
+
+
+def get_step_avg_seconds(db: Session) -> list[AdminStepAvg]:
+    """Average duration per pipeline stage over the steps of completed runs.
+
+    Failed runs are excluded so a stage that died early doesn't skew the
+    average. One grouped query, ordered by the pipeline's step order.
+    """
+    step_rows = (
+        db.query(
+            Step.stage_id,
+            func.min(Step.step_name),
+            func.avg(Step.duration_seconds),
+        )
+        .join(Run, Run.id == Step.run_id)
+        .filter(
+            Run.status == "complete",
+            Step.duration_seconds.isnot(None),
+            Step.stage_id.isnot(None),
+        )
+        .group_by(Step.stage_id)
+        .order_by(func.min(Step.step_number))
+        .all()
+    )
+    return [
+        AdminStepAvg(stage_id=stage_id, step_name=name, avg_seconds=round(float(avg), 1))
+        for stage_id, name, avg in step_rows
+    ]

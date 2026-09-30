@@ -18,6 +18,10 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code  # noqa: E402
+from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    reclassify_past_m2a_grants,
+)
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     RETIRED_TAXONOMY_CODES,
     TAXONOMY_TO_SECTION,
@@ -32,14 +36,34 @@ def test_m3_normalizes_to_m2d_and_preserves_original():
     assert entry["taxonomy_code_original"] == "M3"
 
 
-def test_clinical_trial_codes_are_not_remapped():
-    # M4A/M4B/M4C are trial TYPES; M2A/M2B/M2C are funding STATUS. Renaming
-    # type->status files completed trials under "Current Research Funding".
-    # They must stay out of the map until status-aware routing exists.
-    for code in ("M4A", "M4B", "M4C"):
+def test_clinical_trial_codes_file_as_current_research_support():
+    # #291 decision: the WCM CV has no trials section. A trial is research
+    # support; it files as M2A and the date rule below moves a finished one.
+    for code in ("M4", "M4A", "M4B", "M4C"):
         e = {"taxonomy_code": code, "text": "Phase I trial ..."}
-        assert normalize_retired_code(e) == code
-        assert "taxonomy_code_original" not in e
+        assert normalize_retired_code(e) == "M2A"
+        assert e["taxonomy_code_original"] == code
+
+
+def test_a_finished_trial_ends_up_in_past_funding_not_current():
+    # The reason M4A->M2A was once refused: a 1990s trial rendered under
+    # "Current Research Funding". The remap is safe only with the date rule.
+    trial = {"taxonomy_code": "M4A", "extracted_fields": {
+        "title": "Phase I trial of an invented compound", "end_date": "1996"}}
+    # Stage 6 buckets by the normalized code, so the trial must reach M2A
+    # first; the date rule only ever sees the M2A bucket.
+    assert normalize_retired_code(trial) == "M2A"
+    current, past, _ = reclassify_past_m2a_grants([trial], [], current_year=2026)
+    assert current == []
+    assert past == [trial]
+
+
+def test_live_taxonomy_code_passes_non_strings_through():
+    # Stage 3b feeds it raw LLM JSON; the caller's own type check rejects these.
+    assert live_taxonomy_code("M4B") == "M2A"
+    assert live_taxonomy_code("S1") == "S1"
+    assert live_taxonomy_code(["M4A"]) == ["M4A"]
+    assert live_taxonomy_code(None) is None
 
 
 def test_live_code_is_untouched():

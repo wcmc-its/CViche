@@ -7,6 +7,8 @@ import os
 import secrets
 import string
 import tempfile
+import threading
+import time
 import zipfile
 import zlib
 from pathlib import Path
@@ -25,16 +27,18 @@ from app.database import get_db
 from app.models import Run, Step, User
 from app.schemas import UploadResponse
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.auth import get_current_user
+from app.auth import can_see_cost, get_current_user, visible_cost
 from app.rate_limiter import check_rate_limit
 from app.config_loader import get_config_value
 from app.services.config_service import (
     MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
+    ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
     get_estimated_run_cost, get_estimate_model_name,
 )
 from app.errors import bad_request, internal_error
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
+from app.services.run_service import UPLOAD_DIR
 from app.services.template_warning import detect_wcm_template
 
 logger = logging.getLogger(__name__)
@@ -58,6 +62,18 @@ MIN_EXTRACTED_CHARS = 500
 # suspiciously cheap nor alarmingly expensive while the real content is
 # unknown. Distinct from MIN_EXTRACTED_CHARS above, which gates /upload.
 _ESTIMATE_FALLBACK_CHAR_COUNT = 5000
+# Floor on the char count an estimate is sized from: a readable-but-blank
+# document still costs a run's fixed per-stage overhead.
+_ESTIMATE_MIN_CHAR_COUNT = 1000
+
+
+def _estimate_char_count(extracted: str | None) -> int:
+    """The char count both /estimate's quote and /upload's stall-watchdog
+    duration are sized from, so one file gets one number (#794). ``None``
+    (unreadable) takes the fixed fallback; /estimate flags that to the user."""
+    if extracted is None:
+        return _ESTIMATE_FALLBACK_CHAR_COUNT
+    return max(len(extracted), _ESTIMATE_MIN_CHAR_COUNT)
 
 
 # Expansion bound checked before python-docx parses (#793). zipfile stops
@@ -155,6 +171,83 @@ async def _read_bounded(file: UploadFile, max_size: int) -> bytes:
     return b"".join(chunks)
 
 
+class _EstimatePerUserWindow:
+    """Per-pod, in-memory, fixed-window call counter, one window per user id.
+
+    Distinct from check_rate_limit's DB-backed run quota (#795): this counts
+    calls directly, not Run rows, so it catches a user who never goes over
+    their run quota but calls /estimate repeatedly. `clock` is injectable so
+    tests can control window elapsing without sleeping or patching the real
+    clock.
+
+    ponytail: the count is per POD and resets on restart -- it does not
+    share state across the up to 3 backend pods in prod, so a user's real
+    ceiling is close to max_calls * pod_count per window, not max_calls.
+    Upgrade path: back this with the same Valkey URL LoginThrottle
+    (app/login_throttle.py) uses, CVICHE_REDIS_URL, if a pod-shared bound is
+    ever needed.
+    """
+
+    def __init__(
+        self,
+        max_calls: int,
+        window_seconds: int,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._max_calls = max_calls
+        self._window_seconds = window_seconds
+        self._clock = clock
+        # user_id -> (window_start, count_in_window)
+        self._windows: dict[int, tuple[float, int]] = {}
+        # estimate_processing is async, so today allow() runs on the event
+        # loop; the lock keeps the read-modify-write safe if it is ever
+        # called from a threadpool.
+        self._lock = threading.Lock()
+
+    def allow(self, user_id: int) -> bool:
+        """Record one call for user_id and return whether it is within the
+        current window's budget. A window that has fully elapsed since the
+        user's last call starts fresh rather than carrying its count over."""
+        now = self._clock()
+        with self._lock:
+            window_start, count = self._windows.get(user_id, (now, 0))
+            if now - window_start >= self._window_seconds:
+                window_start, count = now, 0
+            if count >= self._max_calls:
+                return False
+            self._windows[user_id] = (window_start, count + 1)
+            return True
+
+    def reset(self) -> None:
+        """Test-only: clear every user's window."""
+        with self._lock:
+            self._windows.clear()
+
+
+_estimate_rate_limiter = _EstimatePerUserWindow(
+    ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS
+)
+
+
+def _check_estimate_rate_limit(user_id: int) -> dict | None:
+    """Same {error, message, details} shape check_rate_limit returns, so
+    estimate_processing raises the identical 429 either way (#795)."""
+    if _estimate_rate_limiter.allow(user_id):
+        return None
+    return {
+        "error": "rate_limited",
+        "message": (
+            f"Estimate limit of {ESTIMATE_RATE_LIMIT_MAX} calls per "
+            f"{ESTIMATE_RATE_LIMIT_WINDOW_SECONDS} seconds reached."
+        ),
+        "details": {
+            "limit_type": "estimate",
+            "limit": ESTIMATE_RATE_LIMIT_MAX,
+            "window_seconds": ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
+        },
+    }
+
+
 router = APIRouter()
 
 
@@ -162,18 +255,27 @@ class EstimateResponse(BaseModel):
     """Response model for cost/time estimation."""
     document_tokens: int
     text_characters: int
-    estimated_cost_min: float
-    estimated_cost_max: float
+    # Cost fields are None for non-admins (#1111).
+    estimated_cost_min: float | None
+    estimated_cost_max: float | None
     estimated_time_seconds_min: int
     estimated_time_seconds_max: int
     num_steps: int
     filename: str
     file_size_kb: float
-    pricing_model: str
+    pricing_model: str | None
+    # True when the document's text couldn't be read and text_characters is
+    # the fixed fallback guess, not a measurement (#794).
+    text_characters_is_guess: bool = False
 
-# Upload directory
-UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Recalibrated after the #881 parallel LLM batches went live (dev-207): the old
+# 20 s/stage overhead and 3-min floor quoted ~2.5x the real wall time on every
+# post-parallel prod run (e.g. estimate max 421 s vs actual 89-105 s). With 5 s
+# and a 1-min floor, all six runs from 2026-09-28/29 land inside [min, max].
+_PER_STAGE_OVERHEAD_SECONDS = 5
+_MIN_ESTIMATE_SECONDS = 60
+_MIN_ESTIMATE_SPREAD_SECONDS = 60
 
 
 def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
@@ -188,9 +290,9 @@ def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
     text_char_count = max(text_char_count, 1000)
     estimated_tokens = text_char_count // 4
     base_time = BASE_OVERHEAD_SECONDS + (estimated_tokens / 1000) * TIME_PER_1K_TOKENS
-    total_time = base_time + len(STEP_REGISTRY) * 20  # ~20s/stage init + API overhead
-    time_min = max(int(total_time * 0.6), 180)        # at least 3 min
-    time_max = max(int(total_time * 1.3), time_min + 180)
+    total_time = base_time + len(STEP_REGISTRY) * _PER_STAGE_OVERHEAD_SECONDS
+    time_min = max(int(total_time * 0.6), _MIN_ESTIMATE_SECONDS)
+    time_max = max(int(total_time * 1.3), time_min + _MIN_ESTIMATE_SPREAD_SECONDS)
     return time_min, time_max
 
 
@@ -211,6 +313,17 @@ def generate_run_id() -> str:
     existing consumer already accepts the narrower `^[A-Z0-9]{6}$` set --
     steps.py's `_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")` is a
     superset -- so no consumer needed a change.
+
+    Six base-36 characters stay the canonical run id (#797 decision,
+    2026-09-09): a collision now costs a redraw in create_run_archive, never
+    an overwrite, so the id width sets only the redraw rate. With N existing
+    runs a fresh draw collides with probability ~N / 36**6: ~4.6e-5 at 1e5
+    runs, ~4.6e-4 at 1e6, ~4.6e-3 at 1e7. Migration trigger: when the run
+    table approaches ~1e6 rows (redraws near 5e-4 per upload), move to a
+    UUID/ULID canonical id with this 6-char form kept as a display id --
+    widening touches Run.id (String(10)), artifact basenames and download
+    URLs. Exhaustion of every redraw is logged at ERROR by both callers of
+    create_run_archive (upload and restart).
     """
     return "".join(secrets.choice(_RUN_ID_ALPHABET) for _ in range(6))
 
@@ -218,7 +331,8 @@ def generate_run_id() -> str:
 # Bound on how many times a fresh run id may be regenerated after a storage
 # collision before the request is failed outright (#685). Kept small and
 # named rather than inline: at ~2.18e9 uniform ids (see generate_run_id), a
-# single collision is already a ~1-in-2e9 event, so more than a couple of
+# single draw collides with probability ~N / 2.18e9 for N existing runs, so
+# more than a couple of
 # regenerations would only ever fire under a genuine storage fault, not an
 # id collision -- in which case retrying further just delays surfacing it.
 _RUN_ID_ATTEMPTS = 5
@@ -543,10 +657,8 @@ async def upload_cv(
     # Input-scaled wall-clock estimate, stored so the client stall watchdog can
     # scale its "taking longer than expected" threshold to this CV instead of a
     # fixed constant (large CVs were false-positiving as "may be stuck"). Same
-    # helper as /estimate. extracted is None only when text extraction couldn't
-    # run; fall back to a size-based char estimate then.
-    est_char_count = len(extracted) if extracted else max(1, len(content) // 30000) * 2000
-    _, estimated_duration_seconds = estimate_run_seconds(est_char_count)
+    # helper and char count as /estimate.
+    _, estimated_duration_seconds = estimate_run_seconds(_estimate_char_count(extracted))
 
     # Create run record. Persist the user's output-rendering choices (issue
     # #153) as the truthy ints the Stage 6 generator reads at render time.
@@ -616,10 +728,18 @@ async def estimate_processing(
             "Please convert your file to .docx before uploading."
         )
 
-    # Rate-limited the same as /upload (#795): estimation parses a full
-    # document, the same expensive work /upload is already limited for. This
-    # reuses /upload's per-run quota rather than a dedicated estimate budget
-    # -- see the T-UP report for the residual gap that leaves open.
+    # Per-pod, per-user in-memory budget (#795), checked first since it's
+    # cheaper than the DB-backed check below -- a user already over it never
+    # costs a query. Both checks run before the body is read (_read_bounded)
+    # or parsed (_extract_text).
+    estimate_limit_error = _check_estimate_rate_limit(current_user.id)
+    if estimate_limit_error:
+        raise HTTPException(status_code=429, detail=estimate_limit_error)
+
+    # Also rate-limited the same as /upload (#795): reuses /upload's
+    # DB-backed per-run quota, which on its own only blocks a user already
+    # over their run quota -- an estimate creates no Run row. The budget
+    # above is what actually caps /estimate's own call volume.
     rate_limit_error = check_rate_limit(current_user, db)
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
@@ -641,20 +761,12 @@ async def estimate_processing(
     # event loop, same as /upload (#793).
     extracted = await run_in_threadpool(_extract_text, content, file_ext)
     if extracted is None:
-        # _extract_text already logged the specific read failure (§5.4) --
-        # this used to be a bare `except Exception` that set 5000 with no
-        # log line at all. The fallback value itself is unchanged; see the
-        # T-UP report for the residual gap (EstimateResponse still has no
-        # field to signal it). No filename here (CODING_STANDARDS §4.7): CV
-        # filenames usually carry the owner's name, and every log line
-        # already carries the request id via RequestIDFilter.
+        # _extract_text already logged the specific read failure (§5.4). No
+        # filename here (CODING_STANDARDS §4.7): CV filenames usually carry
+        # the owner's name, and every log line already carries the request id
+        # via RequestIDFilter.
         logger.warning("Estimate falling back to a fixed char-count guess")
-        text_char_count = _ESTIMATE_FALLBACK_CHAR_COUNT
-    else:
-        text_char_count = len(extracted)
-
-    # Ensure we have a reasonable minimum
-    text_char_count = max(text_char_count, 1000)
+    text_char_count = _estimate_char_count(extracted)
 
     # Estimate tokens (roughly 4 characters per token for English text)
     estimated_tokens = text_char_count // 4
@@ -679,12 +791,13 @@ async def estimate_processing(
     return EstimateResponse(
         document_tokens=estimated_tokens,
         text_characters=text_char_count,
-        estimated_cost_min=round(cost_min, 3),
-        estimated_cost_max=round(cost_max, 3),
+        estimated_cost_min=visible_cost(current_user, round(cost_min, 3)),
+        estimated_cost_max=visible_cost(current_user, round(cost_max, 3)),
         estimated_time_seconds_min=time_min,
         estimated_time_seconds_max=time_max,
         num_steps=num_stages,
         filename=file.filename,
         file_size_kb=round(file_size_kb, 1),
-        pricing_model=get_estimate_model_name(),
+        pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
+        text_characters_is_guess=extracted is None,
     )

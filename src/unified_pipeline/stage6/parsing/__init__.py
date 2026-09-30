@@ -33,6 +33,8 @@ from .text import (  # noqa: F401
     _extract_year_from_text,
     _is_structural_label,
     _is_table_header_entry,
+    _looks_like_multiple_records,
     _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
+    _strip_appended_initials,
 )

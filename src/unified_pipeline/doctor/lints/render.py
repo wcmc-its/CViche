@@ -11,19 +11,25 @@ module, so they move together and stop being module-global.
 
 Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 """
+import functools
+import json
 import re
-from collections import Counter
+from collections import Counter, defaultdict
+from pathlib import Path
+from types import MappingProxyType
 from typing import Dict, List, NamedTuple, Tuple
 
+from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
 )
-from unified_pipeline.segmentation_regression import (
+from unified_pipeline.core.text_norm import (
     SUBSTANTIVE_LINE_CHARS,
-    _looks_like_record,
-    _norm,
+    looks_like_record,
+    norm,
 )
 
 from ..shared import (
@@ -33,7 +39,9 @@ from ..shared import (
     _finding,
     _haystacks,
     _long_word_tokens,
+    _magnitude_severity,
     _output_section_header,
+    _template_haystack,
 )
 
 
@@ -43,7 +51,7 @@ DEAD_SECTION_MIN_LINES = 3
 
 
 # Lint 8: an entry is a fused multi-record candidate at this many record-like
-# lines. _looks_like_record only sees pipe/tab rows; employment/appointment
+# lines. looks_like_record only sees pipe/tab rows; employment/appointment
 # records are date-range-prefixed comma lines ("Jun 2020-Jun 2025, Assistant
 # Professor"), caught by `_is_date_record_line` when the line carries a
 # payload beyond the bare date range. A bare date line (`_is_bare_date_line`)
@@ -165,7 +173,28 @@ def _is_bare_date_line(line: str) -> bool:
 
 
 # '• [M2A] ...' style taxonomy-code leak (the pre-#214 appendix format).
-_BRACKET_CODE_RE = re.compile(r"\[[A-Z]\d?[A-Z]?\d?\]")
+# The shape alone also matches the source CV's own text ("[H2O]", "[CO2]",
+# "[AI]"), so a hit only counts when the token is a real taxonomy code (#888).
+_BRACKET_CODE_RE = re.compile(r"\[([A-Z]\d?[A-Z]?\d?)\]")
+
+_TAXONOMY_PATH = Path(__file__).resolve().parents[2] / "core" / "taxonomy_v7.json"
+
+
+def _load_taxonomy_codes() -> frozenset[str]:
+    """Every code a leak could carry: the live v7 codes plus the retired
+    `invalid_codes` stage 3b must never emit."""
+    taxonomy = json.loads(_TAXONOMY_PATH.read_text(encoding="utf-8"))
+    codes = {entry["code"] for entry in taxonomy["codes"]}
+    codes.update(taxonomy["invalid_codes"]["codes"])
+    return frozenset(codes)
+
+
+_TAXONOMY_CODES = _load_taxonomy_codes()
+
+
+def _has_taxonomy_code_leak(line: str) -> bool:
+    return any(m.group(1) in _TAXONOMY_CODES
+               for m in _BRACKET_CODE_RE.finditer(line))
 
 
 _APPENDIX_HEADER = "T. APPENDIX"
@@ -179,7 +208,7 @@ def _is_appendix_noise(text: str) -> bool:
     normed = " ".join(str(text or "").split())
     if not normed:
         return True
-    if is_template_instruction(normed):
+    if is_template_instruction(normed) or is_foreign_template_instruction(normed):
         return True
     return is_source_boilerplate(normed)
 
@@ -249,7 +278,7 @@ def lint_output_hygiene(blocks: list[tuple[str, str]]) -> list[dict]:
     leaks = []
     for _, text in blocks:
         for line in str(text).split("\n"):
-            if _BRACKET_CODE_RE.search(line):
+            if _has_taxonomy_code_leak(line):
                 leaks.append(line.strip())
     if leaks:
         findings.append(_finding(
@@ -291,11 +320,11 @@ def lint_output_hygiene(blocks: list[tuple[str, str]]) -> list[dict]:
 _NAME_LABEL_RE = re.compile(r"^[A-Za-z0-9]{1,3}[.)]\s+")
 
 
-_NAME_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_NAME_TOKEN_RE = re.compile(r"[^\W_]+")
 
 
 def _name_tokens(text: str) -> set[str]:
-    stripped = _NAME_LABEL_RE.sub("", _norm(text))
+    stripped = _NAME_LABEL_RE.sub("", norm(text))
     return {tok for tok in _NAME_TOKEN_RE.findall(stripped) if len(tok) > 1}
 
 
@@ -361,9 +390,9 @@ def lint_dead_sections(stage2: dict,
     for e in stage2.get("entries", []):
         if e.get("element_type") in ("header", "break"):
             continue
-        top = _norm((e.get("hierarchy") or ["(none)"])[0]) or "(none)"
+        top = norm((e.get("hierarchy") or ["(none)"])[0]) or "(none)"
         lines = sum(1 for line in str(e.get("text", "")).split("\n")
-                    if len(_norm(line)) >= SUBSTANTIVE_LINE_CHARS)
+                    if len(norm(line)) >= SUBSTANTIVE_LINE_CHARS)
         per_h1[top] = per_h1.get(top, 0) + lines
 
     sections: List[List] = []  # [raw title, normalized name, substantive lines]
@@ -383,12 +412,12 @@ def lint_dead_sections(stage2: dict,
         # non-blank table line counts as rendered content on its own, while
         # a paragraph line still needs the length floor.
         for line in str(text).split("\n"):
-            if is_template_instruction(line):
+            if is_template_instruction(line) or is_foreign_template_instruction(line):
                 continue
             if kind == "table":
-                if _norm(line):
+                if norm(line):
                     current[2] += 1
-            elif len(_norm(line)) >= SUBSTANTIVE_LINE_CHARS:
+            elif len(norm(line)) >= SUBSTANTIVE_LINE_CHARS:
                 current[2] += 1
 
     findings = []
@@ -414,7 +443,7 @@ def _record_lines(text: object) -> list[str]:
     """Record-like lines of an entry: pipe/tab rows, plus date-prefixed lines
     that pass `_is_date_record_line` (a record, not prose or a bare range)."""
     return [line.strip() for line in str(text or "").split("\n")
-            if _looks_like_record(line) or _is_date_record_line(line.strip())]
+            if looks_like_record(line) or _is_date_record_line(line.strip())]
 
 
 def _bare_date_lines(text: object) -> int:
@@ -553,6 +582,135 @@ def lint_unrendered_records(stage4: dict,
     return findings
 
 
+# Lint 8b, section_lost (#817): a taxonomy code whose stage-4 entries leave
+# no trace in the code's OWN output section -- lost at render (YME2VA's 5
+# institutional-leadership records, section empty) or routed elsewhere
+# (BYFQBG's 11 training grants, all in the Appendix). Lint 8 cannot see
+# either: it checks only multi-record entries, against the WHOLE document,
+# where the same words in lectures or mentee job titles vouch for the lost
+# record. Calibrated 2026-09-29 on 126 corpus renders from dev plus the 12
+# score-vs-autopsy runs, every flag hand-labelled: each test below alone was
+# 15-29% precise; the three together flag 19 codes on stage-4 input, 13 real.
+SECTION_LOST_SHARE = 0.25       # the code's tokens present in its section
+SECTION_LOST_MIN_TOKENS = 6     # a code with fewer tokens is too thin to judge
+SECTION_LOST_ENTRY_HITS = 3     # tokens one entry needs in the section to count as rendered
+SECTION_LOST_HEAD_SHARE = 0.5   # share of an entry's first-line tokens that counts as rendered
+SECTION_LOST_HEAD_MIN_TOKENS = 2  # a one-token first line matches by coincidence too easily
+
+#: Output section heading prefixes by taxonomy letter, in stage 6's
+#: wording. C renders under EDUCATION and L under EDUCATIONAL CONTRIBUTIONS,
+#: so neither has a heading of its own.
+_SECTION_HEADING_PREFIXES = MappingProxyType({
+    "A": "PERSONAL DATA", "B": "EDUCATION", "D": "PROFESSIONAL POSITIONS",
+    "E": "EMPLOYMENT STATUS", "F": "LICENSURE", "G": "INSTITUTIONAL/HOSPITAL",
+    "H": "HONORS", "I": "PROFESSIONAL ORGANIZATIONS", "J": "PERCENT EFFORT",
+    "K": "EDUCATIONAL CONTRIBUTIONS", "M": "RESEARCH", "N": "MENTORING",
+    "O": "INSTITUTIONAL LEADERSHIP", "P": "INSTITUTIONAL ADMINISTRATIVE",
+    "Q": "EXTRAMURAL", "R": "INVITATIONS TO SPEAK", "S": "BIBLIOGRAPHY",
+})
+_SECTION_SHARED_WITH = MappingProxyType({"C": "B", "L": "K"})
+_SECTION_LETTERS = frozenset(_SECTION_HEADING_PREFIXES) | frozenset(_SECTION_SHARED_WITH)
+
+#: A is withheld by design (protected data), M1 is replaced by the research
+#: summary, T is the Appendix catch-all.
+_SECTION_LOST_SKIP_CODES = frozenset({"A", "M1", "T"})
+
+
+@functools.cache
+def _template_label_tokens() -> frozenset[str]:
+    """Tokens of the template's one-word lines ("Awards", "Institution"):
+    the squashed template haystack joins every multi-word line into one
+    long run, so only single-word labels come out as real words. They are
+    column and section labels every render carries, so they vouch for no
+    entry. The calibration measured exactly this set; the template's full
+    vocabulary instead doubled the flags at lower precision."""
+    return frozenset(_long_word_tokens(_template_haystack()))
+
+
+def _section_letter(header: str) -> str | None:
+    """Taxonomy letter of an output section header ("T" for the Appendix);
+    None for a sub-heading, which stays in the section above it. Longest
+    prefix first: EDUCATION is a prefix of EDUCATIONAL CONTRIBUTIONS."""
+    head = header.strip().upper()
+    if head.startswith(_APPENDIX_HEADER):
+        return "T"
+    for letter, prefix in sorted(_SECTION_HEADING_PREFIXES.items(),
+                                 key=lambda item: -len(item[1])):
+        if head.startswith(prefix):
+            return letter
+    return None
+
+
+def _section_tokens(blocks: list[tuple[str, str]]) -> defaultdict[str | None, set[str]]:
+    """Distinctive-token set of each output section, keyed by letter (None
+    for anything above the first recognized heading)."""
+    tokens: dict[str | None, set[str]] = defaultdict(set)
+    letter = None
+    for kind, text in blocks:
+        if kind == "p" and _output_section_header(text):
+            letter = _section_letter(text) or letter
+        tokens[letter] |= _long_word_tokens(text)
+    for code_letter, host in _SECTION_SHARED_WITH.items():
+        tokens[code_letter] = tokens[host]
+    return tokens
+
+
+def _code_absent_from_section(texts: list[str], section: set[str],
+                              ubiquitous: frozenset[str]) -> bool:
+    """Whether a code's entries leave no trace in its section. All three
+    must hold: under SECTION_LOST_SHARE of the code's distinctive tokens are
+    there; no entry has SECTION_LOST_ENTRY_HITS of its tokens there; and no
+    entry's first line (the record's title/role) is there by
+    SECTION_LOST_HEAD_SHARE. The first-line test keeps a rendered role row
+    whose long description the section's table has no slot for.
+
+    Not judged at all: a code with under SECTION_LOST_MIN_TOKENS tokens, or
+    whose entries all have under SECTION_LOST_ENTRY_HITS (nothing substantial
+    enough to call lost). A first line with under
+    SECTION_LOST_HEAD_MIN_TOKENS tokens cannot vouch for its entry."""
+    union: set[str] = set()
+    entry_hits = []
+    for text in texts:
+        tokens = _long_word_tokens(text) - ubiquitous
+        union |= tokens
+        if len(tokens) >= SECTION_LOST_ENTRY_HITS:
+            entry_hits.append(len(tokens & section))
+        first = next((line for line in text.split("\n") if line.strip()), "")
+        head = _long_word_tokens(first) - ubiquitous
+        if (len(head) >= SECTION_LOST_HEAD_MIN_TOKENS
+                and len(head & section) / len(head) >= SECTION_LOST_HEAD_SHARE):
+            return False
+    return (len(union) >= SECTION_LOST_MIN_TOKENS
+            and len(union & section) / len(union) < SECTION_LOST_SHARE
+            and bool(entry_hits) and max(entry_hits) < SECTION_LOST_ENTRY_HITS)
+
+
+def lint_section_lost(stage4: dict,
+                      blocks: list[tuple[str, str]]) -> list[dict]:
+    """One WARN per taxonomy code whose entries are absent from the code's
+    own output section (see `_code_absent_from_section`): lost at render,
+    or rendered in another section or the Appendix."""
+    texts: dict[str, list[str]] = defaultdict(list)
+    for e in stage4.get("entries", []):
+        code = e.get("taxonomy_code") or ""
+        if code and code not in _SECTION_LOST_SKIP_CODES and code[0] in _SECTION_LETTERS:
+            texts[code].append(str(e.get("text") or ""))
+    sections = _section_tokens(blocks)
+    ubiquitous = _rendered_lines(blocks).ubiquitous | _template_label_tokens()
+    findings = []
+    for code, entry_texts in texts.items():
+        if not _code_absent_from_section(entry_texts, sections[code[0]], ubiquitous):
+            continue
+        heading = _SECTION_HEADING_PREFIXES.get(
+            _SECTION_SHARED_WITH.get(code[0], code[0]), code[0])
+        findings.append(_finding(
+            "section_lost", "WARN",
+            f"{code}: {len(entry_texts)} entr{'y' if len(entry_texts) == 1 else 'ies'} "
+            f"absent from the {heading} section (lost, or rendered elsewhere)",
+            [t.strip().split("\n")[0][:100] for t in entry_texts[:5]]))
+    return findings
+
+
 # Severities a sidecar warning may carry (#565's section_render_failed
 # records add "ERROR"; every pre-existing self-check record has no severity
 # key at all). Anything else -- an unrecognized string, or the key present
@@ -659,7 +817,36 @@ def lint_pipe_leaks(blocks: List[Tuple[str, str]]) -> List[Dict]:
 HONORS_NAME_BLOB_CHARS = 150
 
 
-_SENTENCE_BOUNDARY_RE = re.compile(r"\.\s+[A-Z]")
+# A period only ends a sentence when it is not the dot of a "Dr." title or of
+# a single-letter initial ("Robert D. & Alma W. Moreton ...", #889).
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<!\bDr)(?<!\b[A-Z])\.\s+[A-Z]")
+
+
+# Orgs of at most this many characters are not compared against the name
+# (too short to be a reliable fabrication signal).
+HONORS_ORG_MIN_CHARS = 8
+
+
+# What may remain of a name once its org is removed for the org to count as
+# "fabricated from the name" (#889): only an award word and/or digits (a year).
+# Stripped with sub() and tested for emptiness, never fullmatch() over a
+# starred alternation -- that shape backtracks exponentially on runs of years.
+_AWARD_ORG_LEFTOVER_RE = re.compile(
+    r"award|prize|fellow(?:ship)?|scholarship|list"
+    r"|\d+|[\s,.;:()\-\u2013\u2014/&]+",
+    re.IGNORECASE)
+
+
+def _org_fabricated_from_name(org: str, name: str) -> bool:
+    """True when `name` is `org` plus nothing but an award word and/or a
+    year -- the org column was copied out of the name (#229/#889). An award
+    merely NAMED AFTER its grantor ("<org> Postdoc Travel Award") has other
+    words left over and is legitimate."""
+    org_n, name_n = norm(org), norm(name)
+    if org_n not in name_n:
+        return False
+    leftover = name_n.replace(org_n, " ", 1)
+    return not _AWARD_ORG_LEFTOVER_RE.sub("", leftover)
 
 
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
@@ -717,7 +904,7 @@ def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
     'malformed'."""
     if len(tbl) < 2 or not tbl[0]:
         return None
-    header = [_norm(cell) for cell in tbl[0]]
+    header = [norm(cell) for cell in tbl[0]]
     header_all = " ".join(header)
     if "name of award" not in header_all and "date awarded" not in header_all:
         return None
@@ -753,7 +940,8 @@ def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
             flag(rn, f"empty date but year in name: {name[:80]}")
         if org in _US_STATE_ABBREVS:
             flag(rn, f"organization is a bare state abbrev: '{org}'")
-        elif org and len(org) > 8 and _norm(org) in _norm(name):
+        elif (org and len(org) > HONORS_ORG_MIN_CHARS
+                and _org_fabricated_from_name(org, name)):
             flag(rn, f"organization duplicated in name: {org[:60]}")
     return _HonorsTableShape(defects, defective_rows, non_blank_rows)
 
@@ -792,7 +980,7 @@ def lint_table_shape(tables: list[list[list[str]]]) -> list[dict]:
         findings.append(_finding(
             "table_shape", "INFO",
             f"honors table: {len(shape.defective_rows)}/{shape.non_blank_rows} "
-            f"row(s) malformed ({len(shape.defects)} defect(s)) — #229",
+            f"row(s) malformed ({len(shape.defects)} defect(s))",
             shape.defects[:6]))
     return findings
 
@@ -834,7 +1022,7 @@ DUPLICATE_PASSAGE_WARN_COUNT = 1
 _PASSAGE_ENUMERATOR_RE = re.compile(r"^\s*(?:\(?\d{1,3}[.)]|[•·▪◦*]|[-–—](?=\s))\s*")
 
 
-_PASSAGE_PUNCT_RE = re.compile(r"[^a-z0-9]+")
+_PASSAGE_PUNCT_RE = re.compile(r"[\W_]+")
 
 
 def _passage_key(text) -> str:
@@ -844,7 +1032,7 @@ def _passage_key(text) -> str:
     a spacer can neither match another spacer nor break a run."""
     lines = [_PASSAGE_ENUMERATOR_RE.sub("", line)
              for line in str(text or "").split("\n")]
-    return " ".join(_PASSAGE_PUNCT_RE.sub(" ", _norm("\n".join(lines))).split())
+    return " ".join(_PASSAGE_PUNCT_RE.sub(" ", norm("\n".join(lines))).split())
 
 
 def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
@@ -1009,3 +1197,56 @@ def lint_duplicate_records(blocks: list[tuple[str, str]]) -> list[dict]:
         f"{len(pairs)} duplicated record(s) — the same enumerated entry "
         f"appears twice within the same output section",
         evidence)]
+
+
+# A rendered paragraph whose whole text is a date ("June 2019", "07/2008 -
+# 06/2013") is a record's date column that the reader split from its payload
+# and stage 6 then emitted as its own bullet (#259: 28 of them under
+# EDUCATIONAL CONTRIBUTIONS on ZXVGAC). Table cells are excluded -- a date
+# column cell is legitimate -- as is the Appendix, which is verbatim by
+# contract. The WARN floor comes from the corpus distribution: over the 126
+# fresh dev renders (farm + 2026-09-11/-17 batches) plus ZXVGAC, 33 renders
+# fire; 30 of them carry 1-4 lines (the isolated "N. 2009." / a two-stint
+# date pair shape) and only 7, 8 and 28 lines follow, so 5 sits in the empty
+# gap and WARNs on the three runs where the shape is systematic (#259).
+DATE_ONLY_LINES_WARN_COUNT = 5
+
+
+DATE_ONLY_LINES_SAMPLES = 3
+
+
+def _date_only_paragraphs(blocks: list[tuple[str, str]]) -> list[str]:
+    """Body paragraphs outside the Appendix whose whole text (list
+    enumerator dropped) is a date expression, in document order."""
+    found = []
+    in_appendix = False
+    for kind, text in blocks:
+        if kind != "p":
+            continue
+        line = str(text or "").strip()
+        if line == _APPENDIX_HEADER:
+            in_appendix = True
+            continue
+        if _output_section_header(line) is not None:
+            in_appendix = False
+            continue
+        if in_appendix:
+            continue
+        bare = _PASSAGE_ENUMERATOR_RE.sub("", line).strip()
+        if bare and _is_date_only_text(bare):
+            found.append(line)
+    return found
+
+
+def lint_date_only_lines(blocks: list[tuple[str, str]]) -> list[dict]:
+    """Paragraphs that are nothing but a date, outside the Appendix (#259).
+    WARN at DATE_ONLY_LINES_WARN_COUNT or more, INFO below."""
+    lines = _date_only_paragraphs(blocks)
+    if not lines:
+        return []
+    severity = _magnitude_severity(len(lines), DATE_ONLY_LINES_WARN_COUNT)
+    return [_finding(
+        "date_only_lines", severity,
+        f"{len(lines)} body paragraph(s) are only a date -- a record's date "
+        f"column split from its payload and rendered as its own line",
+        [line[:100] for line in lines[:DATE_ONLY_LINES_SAMPLES]])]

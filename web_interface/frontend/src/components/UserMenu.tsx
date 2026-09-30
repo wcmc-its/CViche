@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { UserCircle, LogOut } from 'lucide-react'
+import { LogOut } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 
 interface UserMenuProps {
@@ -41,6 +41,14 @@ export default function UserMenu({ className }: UserMenuProps) {
 
   if (!user) return null
 
+  const initials = user.display_name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase()
+
   const handleLogout = async () => {
     setSigningOut(true)
     try {
@@ -62,9 +70,18 @@ export default function UserMenu({ className }: UserMenuProps) {
         aria-haspopup="menu"
         aria-expanded={open}
         title={user.email}
-        className="rounded p-1 text-gray-500 hover:text-primary-600 transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none"
+        className="flex items-center gap-2.5 rounded-lg p-1 text-left focus:ring-2 focus:ring-primary-500 focus:outline-none"
       >
-        <UserCircle className="h-5 w-5" aria-hidden="true" />
+        <span
+          aria-hidden="true"
+          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full bg-ink text-xs font-semibold text-sand-100"
+        >
+          {initials || '?'}
+        </span>
+        <span className="hidden md:block leading-tight">
+          <span className="block text-sm font-medium text-gray-900">{user.display_name}</span>
+          {user.role === 'admin' && <span className="block text-xs text-gray-500">Admin</span>}
+        </span>
       </button>
 
       {open && (

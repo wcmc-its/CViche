@@ -155,3 +155,104 @@ def test_flag_on_at_cap_is_failed_not_retried(db, monkeypatch):
     db.refresh(run)
     assert run.status == "failed"
     assert run.attempt_count == at_cap       # untouched
+
+
+# --- a resumed run is not re-reaped (#145, 2026-09-29 U2MUQ5) ---------------
+
+def _patch_launch(monkeypatch, calls):
+    monkeypatch.setattr(
+        run_service, "_launch_resume",
+        lambda run_id, file_path, start_step_number: calls.append(run_id) or True,
+    )
+
+
+def test_resumed_run_is_not_stale_on_the_next_sweep(db, monkeypatch):
+    """The resume restarts started_at, so a second sweep (another pod's startup
+    reconcile, or the next periodic pass) leaves the resumed run alone instead
+    of retrying it again or failing it while it executes."""
+    monkeypatch.setenv("CVICHE_AUTO_RETRY_ENABLED", "1")
+    calls = []
+    _patch_launch(monkeypatch, calls)
+    run = _seed_stale_running_run(db, run_id="RSWEEP", attempt_count=1)
+
+    assert run_service.reconcile_stale_runs(db) == 0
+    assert run_service.reconcile_stale_runs(db) == 0
+
+    assert calls == ["RSWEEP"]              # launched once, not twice
+    db.refresh(run)
+    assert run.status == "running"
+    assert run.attempt_count == 2
+    assert run.started_at > datetime.now() - timedelta(minutes=1)
+
+
+def test_sweep_with_a_stale_snapshot_loses_the_claim(db, monkeypatch):
+    """Two pods read the same stale run. The first resumes it; the second still
+    holds the started_at it read, so both its retry and its fail path lose the
+    atomic claim and change nothing."""
+    monkeypatch.setenv("CVICHE_AUTO_RETRY_ENABLED", "1")
+    calls = []
+    _patch_launch(monkeypatch, calls)
+    run = _seed_stale_running_run(db, run_id="RRACE1", attempt_count=1)
+    seen_by_second_pod = run.started_at
+
+    assert run_service.reconcile_stale_runs(db) == 0     # first pod resumes
+
+    assert run_service._transition_run_for_retry(
+        run, db, 6, seen_by_second_pod
+    ) is False
+    assert run_service._claim_stale_run(
+        db, run, seen_by_second_pod, status="failed"
+    ) is False
+    db.commit()
+
+    db.refresh(run)
+    assert run.status == "running"
+    assert run.attempt_count == 2
+    assert calls == ["RRACE1"]
+
+
+def test_sweep_does_not_fail_a_run_a_sibling_resumed_mid_sweep(db, monkeypatch):
+    """The fail path claims too: if a sibling pod resumes the run after this
+    sweep's query but before its write, the sweep leaves the run running."""
+    real_resume_info = run_service._resume_info_for_run
+
+    def sibling_resumes_first(run, session):
+        session.query(Run).filter(Run.id == run.id).update(
+            {"started_at": datetime.now(), "attempt_count": 2},
+            synchronize_session=False,
+        )
+        session.commit()
+        return real_resume_info(run, session)
+
+    monkeypatch.setattr(run_service, "_resume_info_for_run", sibling_resumes_first)
+    run = _seed_stale_running_run(db, run_id="RRACE2", attempt_count=1)
+
+    assert run_service.reconcile_stale_runs(db) == 0
+
+    db.refresh(run)
+    assert run.status == "running"
+    assert run.completed_at is None
+
+
+def test_launch_resume_releases_the_slot_it_took_for_the_run(db, monkeypatch, tmp_path):
+    """The resumed pipeline's thread must release the slot held for *this* run:
+    the shutdown drain (#116) waits on slot-holding run ids, so a slot left
+    behind would hold every deploy for the full drain budget."""
+    import time
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.pipeline import concurrency
+    from tests.conftest import TestingSessionLocal
+
+    monkeypatch.setattr("app.database.SessionLocal", TestingSessionLocal)
+    orchestrator_cls = MagicMock()
+    orchestrator_cls.return_value.execute = AsyncMock(return_value=None)
+    monkeypatch.setattr("app.pipeline.orchestrator.PipelineOrchestrator", orchestrator_cls)
+
+    assert run_service._launch_resume("RSUME1", tmp_path / "cv.docx", 4) is True
+
+    deadline = time.monotonic() + 5
+    while concurrency.active_run_ids() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert concurrency.active_run_ids() == []
+    orchestrator_cls.return_value.execute.assert_awaited_once_with(start_step_number=4)

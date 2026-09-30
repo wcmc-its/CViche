@@ -45,6 +45,8 @@ from core.validators.wcm_table_corrector import apply_wcm_table_corrections
 from core.validators.prose_mentee_corrector import apply_prose_mentee_corrections
 from core.validators.template_scaffold import apply_template_scaffold_corrections
 from core.validators.block_coherence_corrector import apply_block_coherence_corrections
+from core.validators.appointment_funding_corrector import apply_appointment_funding_corrections
+from core.validators.event_volunteer_corrector import apply_event_volunteer_corrections
 
 # Every name below is re-exported from this module by being imported here: it
 # is the public import surface of stage 3b, pinned by
@@ -75,7 +77,8 @@ from unified_pipeline.stage3b.prompt import (  # noqa: F401
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     build_taxonomy_codes_for_prompt,
 )
-from unified_pipeline.core.batch_pool import map_in_order, workers_from_config
+from unified_pipeline.stage3b.header_pin import apply_header_pin
+from unified_pipeline.core.batch_pool import make_progress_printer, map_in_order, workers_from_config
 from unified_pipeline.stage3b.classify import (  # noqa: F401
     _BatchStats,
     _build_taxonomy_ref_for_batch,
@@ -101,29 +104,15 @@ _GroupResult = tuple[list[dict], ClassificationStats, list[str]]
 
 
 def _group_progress_printer(hierarchy_keys: list[str]) -> Callable[[int, _GroupResult], None]:
-    """Build a map_in_order ``on_result`` callback: one atomic print per
-    finished group, numbered by completion.
-
-    map_in_order guarantees ``on_result`` fires only on the CALLING thread,
-    one call at a time -- both its serial path and its ``as_completed`` loop
-    invoke it inline, never from a pool thread -- so despite the pool
-    underneath, this closure is single-threaded: no lock, no ``nonlocal``
-    gymnastics beyond the one ``done`` counter needs as a closure variable.
-    The ``[N/M]`` line is a parsed contract -- orchestrator.py's
-    PROGRESS_PATTERNS read it into the progress bar -- so N counts groups
-    *finished*, which stays monotonic however the pool orders completions,
-    and the whole block goes out in one print so two groups' lines cannot
-    splice (#881).
+    """``[N/M] <key>...`` then the group's own lines, via the shared
+    make_progress_printer (#923). The ``[N/M]`` line is a parsed contract --
+    orchestrator.py's PROGRESS_PATTERNS read it into the progress bar;
+    pinned by test_group_progress_line_is_read_by_progress_patterns.
     """
-    done = 0
-
-    def on_result(index: int, result: _GroupResult) -> None:
-        nonlocal done
-        _, _, lines = result
-        done += 1
-        print("\n".join([f"[{done}/{len(hierarchy_keys)}] {hierarchy_keys[index][:60]}...", *lines]))
-
-    return on_result
+    return make_progress_printer(lambda done, index, result: [
+        f"[{done}/{len(hierarchy_keys)}] {hierarchy_keys[index][:60]}...",
+        *result[2],
+    ])
 
 
 def _classify_group(
@@ -148,6 +137,7 @@ def _classify_group(
     primary_codes = context.get_primary_codes()
 
     classified, stats = classify_entries_batch(group_entries, context, taxonomy)
+    classified, _pinned = apply_header_pin(classified, context)
 
     lines = [f"    Entries: {len(group_entries)}"]
     if primary_codes:
@@ -157,6 +147,24 @@ def _classify_group(
         lines.append(f"    Suggested codes: {codes_display}")
     lines.append(f"    ✓ Classified {stats['entries_classified']} entries (${stats['cost']:.4f})")
     return classified, stats, lines
+
+
+def _resolve_stage_input(stage_label: str, given: str | None, default: Path) -> Path:
+    """The given input path, else the stage's default artifact path; raise if it does not exist."""
+    path = default if given is None else Path(given)
+    if not path.exists():
+        raise FileNotFoundError(f"{stage_label} output not found: {path}")
+    return path
+
+
+def _person_name_from_uid(document_uid: str | None) -> str | None:
+    """Owner name for structural-header name matching, from a uid like "2071_LastName_FirstName_CV"."""
+    name_parts = (document_uid or "").split('_')
+    if len(name_parts) < 3:
+        return None
+    # Skip the numeric prefix and CV/vita/resume suffixes.
+    name_parts_clean = [p for p in name_parts if not p.isdigit() and p.lower() not in ('cv', 'vita', 'resume')]
+    return ' '.join(name_parts_clean)
 
 
 def run_stage_3b(
@@ -193,23 +201,10 @@ def run_stage_3b(
 
     base_dir = Path(__file__).parent / "outputs"
 
-    # Find Stage 2 input
-    if stage_2_path is None:
-        stage_2_path = base_dir / "stage_2_entry_extraction" / f"{document_uid}_entries.json"
-    else:
-        stage_2_path = Path(stage_2_path)
-
-    if not stage_2_path.exists():
-        raise FileNotFoundError(f"Stage 2 output not found: {stage_2_path}")
-
-    # Find Stage 3a input
-    if stage_3a_path is None:
-        stage_3a_path = base_dir / "stage_3a_header_mappings" / f"{document_uid}_header_taxonomy.json"
-    else:
-        stage_3a_path = Path(stage_3a_path)
-
-    if not stage_3a_path.exists():
-        raise FileNotFoundError(f"Stage 3a output not found: {stage_3a_path}")
+    stage_2_path = _resolve_stage_input(
+        "Stage 2", stage_2_path, base_dir / "stage_2_entry_extraction" / f"{document_uid}_entries.json")
+    stage_3a_path = _resolve_stage_input(
+        "Stage 3a", stage_3a_path, base_dir / "stage_3a_header_mappings" / f"{document_uid}_header_taxonomy.json")
 
     print(f"Stage 2 entries: {stage_2_path}")
     print(f"Stage 3a mappings: {stage_3a_path}")
@@ -381,15 +376,7 @@ def run_stage_3b(
     post_correction_stats = {}
 
     # 1. Structural header corrections (CV title, page numbers, etc. → T)
-    # Extract person name from document_uid for name-matching
-    # Format: "2071_LastName_FirstName_CV" or similar
-    name_parts = document_uid.split('_')
-    if len(name_parts) >= 3:
-        # Try to extract name (skip numeric prefix)
-        name_parts_clean = [p for p in name_parts if not p.isdigit() and p.lower() not in ('cv', 'vita', 'resume')]
-        person_name = ' '.join(name_parts_clean)
-    else:
-        person_name = None
+    person_name = _person_name_from_uid(document_uid)
 
     print()
     print("1. Structural header corrections...")
@@ -444,6 +431,13 @@ def run_stage_3b(
             print(f"     - {corr['from']} → {corr['to']}: {corr['position_match'][:40]}...")
     else:
         print("   ✓ No grant-to-position corrections needed")
+
+    # 4b. (#946 item 5) M2 under an appointments heading with no funding evidence → T.
+    #     BEFORE step 5, which rewrites only M2 codes and so cannot route it back.
+    all_classified, appointment_funding_stats = apply_appointment_funding_corrections(all_classified)
+    post_correction_stats['appointment_funding'] = appointment_funding_stats
+    logger.info("Stage 3b: %d appointment row(s) without funding evidence M2 -> T",
+                appointment_funding_stats['corrections_applied'])
 
     # 5. Grant status corrections (date-based M2A/M2B/M2C override)
     print()
@@ -526,6 +520,13 @@ def run_stage_3b(
             print(f"     - P → B2: {corr['reason'][:60]}...")
     else:
         print("   ✓ No training/compliance corrections needed")
+
+    # 9b. (#946 item 4) Extramural event medical volunteering P → T. After every
+    #     corrector that can produce P (2: D → P, 7: O → P).
+    all_classified, event_volunteer_stats = apply_event_volunteer_corrections(all_classified)
+    post_correction_stats['event_volunteer'] = event_volunteer_stats
+    logger.info("Stage 3b: %d event medical-volunteer row(s) P -> T",
+                event_volunteer_stats['corrections_applied'])
 
     # 10. Invited talk corrections (S8 → R for invited conference talks)
     print()
@@ -630,6 +631,8 @@ def run_stage_3b(
         committee_stats['corrections_made'] +
         reasoning_stats['corrections_made'] +
         grant_stats['corrections_applied'] +
+        appointment_funding_stats['corrections_applied'] +
+        event_volunteer_stats['corrections_applied'] +
         teaching_stats['corrections_applied'] +
         leadership_stats['corrections_applied'] +
         adjunct_stats['corrections_applied'] +
@@ -720,7 +723,7 @@ def run_stage_3b(
     output_doc["meta"]["code_distribution"] = dict(sorted(code_counts.items()))
 
     # Write output
-    with open(output_path, 'w') as f:
+    with open(output_path, 'w', encoding='utf-8') as f:
         json.dump(output_doc, f, indent=2)
 
     print()

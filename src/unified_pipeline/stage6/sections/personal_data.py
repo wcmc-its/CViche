@@ -57,6 +57,7 @@ docstring, `scripts/render_gate.py`'s module docstring and
 """
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, NamedTuple
@@ -68,6 +69,7 @@ try:
     # `original_doc` parameter without shadowing the factory import (#820 R3).
     from docx.document import Document as _WordDocument
     from docx.opc.exceptions import PackageNotFoundError
+    from docx.table import _Row as _TableRow
     from lxml.etree import XMLSyntaxError
 except ImportError as exc:
     raise ImportError(
@@ -147,15 +149,57 @@ _PHONE_NUMBER_PATTERN = (
 # the address branch taking a second copy.
 _FIELD_NAME = 'name'
 _FIELD_OFFICE_ADDRESS = 'office_address'
+# Home-labelled rows (#730): never a candidate for an Office/Work slot.
+# Address and phone are withheld by policy (#821, `CAT_HOME_CONTACT`); a home
+# email is NOT withheld (#821: personal email renders) but this scan has no
+# personal-email slot, so it is skipped rather than rendered as Work email.
+_FIELD_HOME_ADDRESS = 'home_address'
+_FIELD_HOME_PHONE = 'home_phone'
+_FIELD_HOME_EMAIL = 'home_email'
+_HOME_FIELDS = frozenset({_FIELD_HOME_ADDRESS, _FIELD_HOME_PHONE,
+                          _FIELD_HOME_EMAIL})
 _FIELD_OFFICE_PHONE = 'office_phone'
 _FIELD_WORK_EMAIL = 'work_email'
 
 _EMAIL_LABEL_WORDS = ('e-mail', 'email')
+# An email line inside an address cell (#730). "Email address:" is included:
+# with a home row now skipped, web198's Business Address cell is reached and
+# opens with that line, which would otherwise render as the Office address.
+_EMAIL_LINE_MARKERS = ('e-mail:', 'email:', 'e-mail\t', 'email address:',
+                       'e-mail address:')
 _PHONE_LABEL_WORDS = ('phone', 'telephone')
 # 'business' stays an address word: a bare "BUSINESS:" cell holding the whole
 # business-address block is a real corpus shape. It is reached only after the
 # email and phone words have been ruled out, which is what makes it safe.
 _ADDRESS_LABEL_WORDS = ('address', 'business')
+# Whole words only: "Homepage address" and "Homeland Security address" are not
+# home addresses. "Home" wins over "business"/"office" in the same label
+# ("Home/Office Address:"): an ambiguous label costs an empty Office cell, the
+# opposite mistake renders a home address. "Permanent" is a home qualifier for
+# an ADDRESS only (US CV convention); "Permanent email" is an alumni address.
+_FAX_LABEL = re.compile(r'\bfax\b')
+_HOME_LABEL = re.compile(r'\b(?:home|residence|residential)\b')
+_HOME_ADDRESS_LABEL = re.compile(r'\b(?:home|residence|residential)\b')
+_PERMANENT_LABEL = re.compile(r'\bpermanent\b')
+# "Permanent Office/Business/Work Address:" is an office address: those words
+# outrank "permanent" (but not "home": "Home/Office Address:" stays home).
+_OFFICE_QUALIFIER = re.compile(r'\b(?:office|business|work|professional)\b')
+# An embedded office-phone value is only a number when it has this many digits
+# ("Phone: (office) | 212-555-0100" and "Phone: ext. 1234" carry none).
+_MIN_PHONE_DIGITS = 7
+# An extension's digits are not part of the number ("x1234567").
+_EXTENSION = re.compile(r'\b(?:x|ext|extension)\.?\s*\d+', re.IGNORECASE)
+# One recovered phone value can carry several numbers. Separators: ; , newline
+# and a slash with spaces around it (a bare slash is inside "212/555-0100").
+_PHONE_SEGMENT_SPLIT = re.compile(r'[;,\n]|\s/\s')
+# A segment naming a home number: whole-word home / res / residence /
+# residential, "(h)" / "(h/o)" (a shared home line is still a home number),
+# or a bare "H:" -- not "(hosp)", "Hospital", "Homer St",
+# "Hr:". Personal/cell numbers are not protected by #821 and are kept.
+_HOME_PHONE_MARKER = re.compile(
+    r'\b(?:home|res|residence|residential)\b|\(\s*(?:h|h\s*/\s*o|o\s*/\s*h)\s*\)'
+    r'|(?<![a-z])h\s*:',
+    re.IGNORECASE)
 
 # An allowlist, not a word match, because "name" ends far more metadata labels
 # than person labels. Widening it is a one-line edit when a corpus CV carries
@@ -188,12 +232,22 @@ def _classify_contact_label(label: str) -> str | None:
     text = ' '.join(label.strip().lower().split())
     head = text.split(':', 1)[0].strip()
     if any(word in head for word in _EMAIL_LABEL_WORDS):
-        return _FIELD_WORK_EMAIL
+        return (_FIELD_HOME_EMAIL if _HOME_LABEL.search(head)
+                else _FIELD_WORK_EMAIL)
     if ':' not in text:
         return None
     if any(word in head for word in _PHONE_LABEL_WORDS):
-        return _FIELD_OFFICE_PHONE
+        return (_FIELD_HOME_PHONE if _HOME_LABEL.search(head)
+                else _FIELD_OFFICE_PHONE)
+    if _FAX_LABEL.search(head):
+        # No slot takes a fax number; "Business Fax:" must not reach the
+        # address branch through its 'business' word (#730, web198).
+        return None
     if any(word in head for word in _ADDRESS_LABEL_WORDS):
+        if _HOME_ADDRESS_LABEL.search(head) or (
+                _PERMANENT_LABEL.search(head)
+                and not _OFFICE_QUALIFIER.search(head)):
+            return _FIELD_HOME_ADDRESS
         return _FIELD_OFFICE_ADDRESS
     if head in _PERSON_NAME_LABELS:
         return _FIELD_NAME
@@ -226,6 +280,214 @@ def _label_word_present(word: str, text: str, pii_fragments: list[str]) -> bool:
     if word in text:
         return True
     return any(word in frag.lower() for frag in pii_fragments)
+
+
+# #946: the label written IMMEDIATELY before a phone number, which outranks
+# the block heading the number sits under. The block-level tests below read
+# only whole words ('cell', 'mobile', 'home') anywhere in the entry, so a
+# "HOME ADDRESS" block carrying "(c) 212.555.0100" routed its cell number to
+# home_phone, which #821 withholds -- the owner's own Cell phone row stayed
+# empty. Single letters count only in the two shapes that make them a label,
+# "(c)" or "c:"/"c." -- a bare "c" or "m" is too often an initial, a suite or
+# a unit to route on, and even "m:"/"c." is not a label straight after a word
+# ("room m:", "building c."), so a single letter must not follow a letter or
+# a word and one space. A combined "cell/home" label is a cell label, as it
+# was before #946. Only cell and home are recognised here: cell because it
+# is the row the block heading was hiding, home because a number labelled
+# "(h)" must stay withheld even inside a block that also says "cell".
+#
+# Built from named parts so each rule above is one line to read or change.
+# A single letter is a label only when it does not follow a letter, or a
+# word and one space ("room m:", "building c.").
+_NOT_AFTER_A_WORD = r'(?<![a-z])(?<![a-z] )'
+_CELL_LETTER_LABEL = rf'\([cm]\):?|{_NOT_AFTER_A_WORD}[cm][:.]'
+_HOME_LETTER_LABEL = rf'\(h\):?|{_NOT_AFTER_A_WORD}h[:.]'
+_CELL_WORDS = r'cell(?:ular)?|mobile'
+# "cell/home" and "mobile/work" are still cell labels.
+_COMBINED_WITH_ANOTHER_KIND = r'(?:\s*/\s*(?:home|work|office))?'
+_CELL_NOUN = r'(?:\s*(?:phone|tel|no))?'
+_HOME_NOUN = r'(?:\s*(?:phone|telephone|tel|no))?'
+_LABEL_PUNCTUATION = r'\.?:?'
+_CELL_WORD_LABEL = (rf'\b(?:{_CELL_WORDS}|mob)\b{_COMBINED_WITH_ANOTHER_KIND}'
+                    rf'{_CELL_NOUN}{_LABEL_PUNCTUATION}')
+_HOME_WORD_LABEL = rf'\bhome\b{_HOME_NOUN}{_LABEL_PUNCTUATION}'
+_CELL_LABEL_BEFORE_NUMBER = rf'(?:{_CELL_LETTER_LABEL}|{_CELL_WORD_LABEL})'
+_HOME_LABEL_BEFORE_NUMBER = rf'(?:{_HOME_LETTER_LABEL}|{_HOME_WORD_LABEL})'
+_LABELLED_NUMBER_RE = re.compile(
+    rf'(?:(?P<cell>{_CELL_LABEL_BEFORE_NUMBER})|(?P<home>{_HOME_LABEL_BEFORE_NUMBER}))'
+    rf'\s*(?P<number>{_PHONE_NUMBER_PATTERN})',
+    re.IGNORECASE,
+)
+# A cell label written AFTER the number, "212-555-0100 (cell)". It outranks a
+# home label before the number, as the block-level 'cell' word did before
+# #946. Words only, and never when another number follows: in
+# "(o) 212-555-0100 (c) 917-555-0101" the "(c)" labels the number after it.
+_NO_NUMBER_FOLLOWS = r'(?!\s*[+(]?\d)'
+_CELL_LABEL_AFTER_NUMBER_RE = re.compile(
+    rf'(?P<number>{_PHONE_NUMBER_PATTERN})\s*\((?:{_CELL_WORDS})\){_NO_NUMBER_FOLLOWS}',
+    re.IGNORECASE,
+)
+_PHONE_LABEL_CELL = 'cell'
+_PHONE_LABEL_HOME = 'home'
+# A number found in the text is the extracted one when the two digit strings
+# agree once a country prefix (at most three digits, ITU E.164) is ignored.
+# Below the minimum the suffix test could pair two unrelated short numbers;
+# without the prefix bound a value holding two numbers would pair with the
+# second one it ends in.
+_MIN_PHONE_DIGITS_TO_PAIR = 7
+_MAX_COUNTRY_CODE_DIGITS = 3
+_NON_DIGIT_RE = re.compile(r'\D')
+
+# One stage-4 field value. `coerce_field_value_types` joins a list of scalars
+# into a string and leaves everything else as the LLM wrote it: a JSON number,
+# a dict naming its own slots (#450), a list of dicts.
+type _JsonValue = str | int | float | bool | list[_JsonValue] | dict[str, _JsonValue]
+
+
+def _digits(value: str) -> str:
+    """`value` with every non-digit removed."""
+    return _NON_DIGIT_RE.sub('', value)
+
+
+@dataclass(frozen=True, slots=True)
+class _PhoneNumber:
+    """One phone number by its digits -- what two spellings of the same
+    number share ("212.555.0142" and "+1 (212) 555-0142")."""
+    digits: str
+
+    @classmethod
+    def parse(cls, value: _JsonValue) -> _PhoneNumber:
+        """A dict or list value stringifies whole, so one holding several
+        numbers pairs with no single number in the text."""
+        return cls(_digits(str(value)))
+
+    def is_same_number(self, other: _PhoneNumber) -> bool:
+        """Whether both are the same number once a country prefix on either
+        side is ignored."""
+        return (len(self.digits) >= _MIN_PHONE_DIGITS_TO_PAIR
+                and len(other.digits) >= _MIN_PHONE_DIGITS_TO_PAIR
+                and abs(len(self.digits) - len(other.digits)) <= _MAX_COUNTRY_CODE_DIGITS
+                and (self.digits.endswith(other.digits)
+                     or other.digits.endswith(self.digits)))
+
+
+def _nearest_phone_label(phone: _PhoneNumber, text: str) -> str | None:
+    """`_PHONE_LABEL_CELL` or `_PHONE_LABEL_HOME` when that label sits
+    immediately before `phone`'s number in `text`, else None.
+
+    None means "no label at the number", not "not a cell": the caller then
+    falls back to the block-level words. A phone value holding several
+    numbers pairs with no single number in the text and returns None."""
+    if any(phone.is_same_number(_PhoneNumber.parse(match.group('number')))
+           for match in _CELL_LABEL_AFTER_NUMBER_RE.finditer(text)):
+        return _PHONE_LABEL_CELL
+    for match in _LABELLED_NUMBER_RE.finditer(text):
+        if phone.is_same_number(_PhoneNumber.parse(match.group('number'))):
+            return _PHONE_LABEL_CELL if match.group('cell') else _PHONE_LABEL_HOME
+    return None
+
+
+def _cell_and_home_signals(phone: _JsonValue, text: str,
+                           pii_fragments: list[str]) -> tuple[bool, bool]:
+    """(is cell, is home) for one stage-4 phone value -- the label nearest
+    the number when there is one (#946), else the entry's block-level words."""
+    nearest = _nearest_phone_label(_PhoneNumber.parse(phone), text)
+    if nearest is not None:
+        return nearest == _PHONE_LABEL_CELL, nearest == _PHONE_LABEL_HOME
+    return (('cell' in text or 'mobile' in text),
+            _label_word_present('home', text, pii_fragments))
+
+
+# #946: consumer mail domains. An address at one of these is the owner's
+# personal email whatever block it sits in, unless the label right before it
+# says it is a work address -- the only thing that routed to Personal email
+# before was the literal word "personal", so a Gmail address in a HOME
+# ADDRESS block rendered as the owner's Work email. #821 decided personal
+# email RENDERS, so this moves a value between two rendered rows and
+# withholds nothing. Exact domains, not a prefix match: "outlook.office365"
+# style tenant domains and a university's own "mail." hosts are institutional.
+_CONSUMER_EMAIL_DOMAINS = frozenset({
+    'gmail.com', 'googlemail.com',
+    'yahoo.com', 'ymail.com', 'yahoo.co.uk',
+    'hotmail.com', 'hotmail.co.uk', 'outlook.com', 'live.com', 'msn.com',
+    'icloud.com', 'me.com', 'mac.com',
+    'aol.com', 'protonmail.com', 'proton.me',
+    'comcast.net', 'verizon.net', 'att.net',
+})
+_WORK_EMAIL_LABEL_WORDS = ('work', 'office', 'business', 'institution')
+# Where the label that owns an email can start: the entry's own separators.
+_EMAIL_LABEL_BOUNDARY_RE = re.compile(r'[\t\n;|]')
+# A work label written after the address, "jdoe@gmail.com (work)". Only a
+# parenthetical right after it: ", Office: ..." after an address is the next
+# field's label, not this one's.
+_WORK_LABEL_AFTER_EMAIL_RE = re.compile(
+    r'\s*\((?:' + '|'.join(_WORK_EMAIL_LABEL_WORDS) + r')\b')
+# The stage-4 fields an email is read from, in precedence order. A
+# `work_email` key outranks the domain rule. A `personal_email` key does not:
+# stage 4 reads it off the block heading, the same mistake as #946's -- the
+# corpus has an institutional .edu address keyed `personal_email` because it
+# sits in a Home block.
+_FIELD_PERSONAL_EMAIL = 'personal_email'
+_EMAIL_FIELD_KEYS = ('email', 'primary_email', 'institutional_email',
+                     _FIELD_WORK_EMAIL, _FIELD_PERSONAL_EMAIL)
+
+
+@dataclass(frozen=True, slots=True)
+class _EmailAddress:
+    """An email address stripped and lowercased -- the form the entry's
+    lowercased text carries it in."""
+    address: str
+
+    @classmethod
+    def parse(cls, value: _JsonValue) -> _EmailAddress:
+        return cls(str(value).strip().lower())
+
+    @property
+    def is_consumer(self) -> bool:
+        """Whether the address is at a consumer mail domain (#946)."""
+        return self.address.rsplit('@', 1)[-1] in _CONSUMER_EMAIL_DOMAINS
+
+
+def _is_personal_email(email: _EmailAddress, text: str, field_key: str | None) -> bool:
+    """Whether an email belongs in the Personal email row.
+
+    `text` is the entry's lowercased text and `field_key` the stage-4 field
+    the email came from (None for one found in the text). A `work_email` key
+    decides. Otherwise the word "personal" anywhere in the text still
+    decides, as before; otherwise a consumer-domain address does, unless a
+    work word labels it (#946)."""
+    if field_key == _FIELD_WORK_EMAIL:
+        return False
+    if 'personal' in text:
+        return True
+    if not email.is_consumer:
+        return False
+    return not _work_label_owns_email(email.address, text)
+
+
+def _work_label_owns_email(address: str, text: str) -> bool:
+    """Whether a work word labels `address`: in the text between the
+    previous separator and the address, or in a parenthetical right after
+    it. An address missing from the text is judged on the whole text."""
+    at = text.find(address)
+    if at < 0:
+        return any(word in text for word in _WORK_EMAIL_LABEL_WORDS)
+    before = text[:at]
+    boundaries = list(_EMAIL_LABEL_BOUNDARY_RE.finditer(before))
+    if boundaries:
+        before = before[boundaries[-1].end():]
+    return (any(word in before for word in _WORK_EMAIL_LABEL_WORDS)
+            or _WORK_LABEL_AFTER_EMAIL_RE.match(text, at + len(address)) is not None)
+
+
+def _route_email(email: str, text: str, field_key: str | None,
+                 work_email: str | None,
+                 personal_email: str | None) -> tuple[str | None, str | None]:
+    """(work_email, personal_email) once `email` is offered to its row. A
+    row that is already filled keeps its first value."""
+    if _is_personal_email(_EmailAddress.parse(email), text, field_key):
+        return work_email, personal_email or email
+    return work_email or email, personal_email
 
 
 class _VisaAnswers(NamedTuple):
@@ -313,6 +575,88 @@ def _withhold_recovered(value: str | None, source_text: str,
         return value
     withheld.append(WithheldItem(category, _PERSONAL_DATA_SECTION_LABEL, None))
     return None
+
+
+def _phone_digit_count(text: str) -> int:
+    """Digits in `text` outside an extension ("ext. 1234", "x1234567")."""
+    return sum(c.isdigit() for c in _EXTENSION.sub('', text))
+
+
+def _drop_home_phone_segments(value: str | None,
+                              withheld: list[WithheldItem]) -> str | None:
+    """`value` with every home-marked number segment removed (#730, #821),
+    each recorded on `withheld`; None when nothing non-home remains. A value
+    with no home segment is returned untouched, so a well-formed number is
+    never re-joined or reformatted. A segment carrying both an office and a
+    home marker with no separator between them is dropped whole."""
+    if not value:
+        return value
+    segments = _PHONE_SEGMENT_SPLIT.split(value)
+    kept = [seg for seg in segments if not _HOME_PHONE_MARKER.search(seg)]
+    if len(kept) == len(segments):
+        return value
+    for seg in segments:
+        if _HOME_PHONE_MARKER.search(seg):
+            _withhold_home_row(_FIELD_HOME_PHONE, seg, seg, withheld)
+    kept = [seg.strip() for seg in kept if seg.strip()]
+    return '; '.join(kept) or None
+
+
+def _withhold_home_row(field: str, value: str, source_text: str,
+                       withheld: list[WithheldItem]) -> None:
+    """Record one home-labelled source row as withheld (#730, #821). Nothing
+    is returned: the row never fills a slot. The category is the row's own
+    protected-data category when the value carries one (a "Home Address:" label
+    over a birth-place value stays a birth-place withhold), else home contact.
+    A home email records nothing (#821 renders personal email).
+
+    A home-contact item is recorded once per document: the stage-4 entry pass
+    has usually withheld the same home address already, and the docx row
+    repeating it would double the notice's count. `WithheldItem` carries no
+    value, so this dedups by category, not by value -- a home phone that only
+    the docx carries is folded into the same item."""
+    if not value or field == _FIELD_HOME_EMAIL:
+        return
+    category = _pii_category_of(value, source_text) or CAT_HOME_CONTACT
+    if category == CAT_HOME_CONTACT and any(
+            item.category == category
+            and item.section_label == _PERSONAL_DATA_SECTION_LABEL
+            for item in withheld):
+        return
+    withheld.append(WithheldItem(category, _PERSONAL_DATA_SECTION_LABEL, None))
+
+
+def _row_label_value_pairs(row: _TableRow) -> list[tuple[str, str]]:
+    """The (label text, value) pairs one source-table row carries.
+
+    Normally one: label in cell 0, value in the first later cell that differs
+    from it (a gridSpan label cell repeats itself across `row.cells` --
+    NSUJZG_2027_Eil_Robert's "Professional Address:" row is label merged over
+    columns 0-1 with the value in column 2). A HOME-labelled cell 0 that
+    carries its own value ("Home Address: 12 Elm St | Business Phone: ...")
+    is a side-by-side layout: cell 0 is the home pair, and the next cell is a
+    second, unrelated label/value pair, so skipping the home row skips only
+    its own cell (#730)."""
+    label_text = row.cells[0].text
+    value_cell = row.cells[1]
+    for candidate_cell in row.cells[1:]:
+        if candidate_cell.text.strip() != label_text.strip():
+            value_cell = candidate_cell
+            break
+    value = value_cell.text.strip()
+    embedded = label_text.partition(':')[2].strip()
+    field = _classify_contact_label(label_text)
+    # An office phone takes its embedded number only in a real side-by-side
+    # row (cell 1 non-empty) and only when it is one line: a label cell that
+    # holds a whole multi-line block over an empty cell 1 is left as before.
+    if embedded and (field in _HOME_FIELDS or (
+            field == _FIELD_OFFICE_PHONE and value and '\n' not in embedded
+            and _phone_digit_count(embedded) >= _MIN_PHONE_DIGITS)):
+        pairs = [(label_text, embedded)]
+        if ':' in value:
+            pairs.append((value, value.partition(':')[2].strip()))
+        return pairs
+    return [(label_text, value)]
 
 
 def _withhold_recovered_lines(block: str | None, source_text: str,
@@ -430,11 +774,8 @@ class PersonalDataSection:
             # Determine type based on original text labels
             extracted_phone = fields.get('phone')
             extracted_address = fields.get('address')
-            extracted_email = (fields.get('email') or
-                              fields.get('primary_email') or
-                              fields.get('institutional_email') or
-                              fields.get('work_email') or
-                              fields.get('personal_email'))
+            email_key = next((key for key in _EMAIL_FIELD_KEYS if fields.get(key)), None)
+            extracted_email = fields.get(email_key) if email_key else None
 
             if pii_fragments:
                 if _from_pii_fragment(extracted_phone, pii_fragments):
@@ -448,9 +789,8 @@ class PersonalDataSection:
             # Handle case where multiple phones are in one entry (e.g., "Mobile: X  Work: Y")
             if extracted_phone:
                 # Check if text contains multiple phone type labels
-                has_mobile = 'cell' in text or 'mobile' in text
+                has_mobile, has_home = _cell_and_home_signals(extracted_phone, text, pii_fragments)
                 has_work = 'office' in text or 'work' in text
-                has_home = _label_word_present('home', text, pii_fragments)
 
                 if _labels_its_own_phone_slots(extracted_phone):
                     # A structured phone names its own halves, so trust those
@@ -520,18 +860,16 @@ class PersonalDataSection:
 
             # Classify email by type
             if extracted_email:
-                if 'personal' in text:
-                    if not personal_email:
-                        personal_email = extracted_email
-                elif not work_email:
-                    work_email = extracted_email
+                work_email, personal_email = _route_email(
+                    extracted_email, text, email_key, work_email, personal_email)
 
             # Also check entry text for email pattern (fallback)
             if not work_email and not personal_email:
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', entry.get('text', ''))
                 if email_match and not _from_pii_fragment(email_match.group(0),
                                                           pii_fragments):
-                    work_email = email_match.group(0)
+                    work_email, personal_email = _route_email(
+                        email_match.group(0), text, None, work_email, personal_email)
 
             # home_phone is deliberately absent from this tuple: it is written
             # and never read (the template has no home-phone row), so an entry
@@ -820,75 +1158,72 @@ class PersonalDataSection:
             for row in table.rows:
                 if len(row.cells) < 2:
                     continue
-                label_cell = row.cells[0]
-                # A gridSpan label cell repeats itself across row.cells:
-                # python-docx hands back the SAME cell object for every column
-                # a merge spans, so cells[1] can equal cells[0] instead of
-                # holding the value. NSUJZG_2027_Eil_Robert's "Professional
-                # Address:" row is exactly this (label merged across columns
-                # 0-1, value in column 2) -- read past however many duplicate
-                # cells the merge produced to the first one that differs.
-                value_cell = row.cells[1]
-                for candidate_cell in row.cells[1:]:
-                    if candidate_cell.text.strip() != label_cell.text.strip():
-                        value_cell = candidate_cell
-                        break
-                value = value_cell.text.strip()
-                field = _classify_contact_label(label_cell.text)
-                # The row as one text, for the protected-data gate below:
-                # a value is denied by provenance against the fragments of
-                # the line it came from, exactly as the entry path does.
-                row_text = f"{label_cell.text}\t{value}"
+                for label_text, value in _row_label_value_pairs(row):
+                    field = _classify_contact_label(label_text)
+                    # The row as one text, for the protected-data gate below:
+                    # a value is denied by provenance against the fragments of
+                    # the line it came from, exactly as the entry path does.
+                    row_text = f"{label_text}\t{value}"
 
-                # Extract name if not yet found (or only have last name)
-                if field == _FIELD_NAME and not name_is_complete:
-                    if value and len(value) > 2:
-                        recovered_name = _withhold_recovered(value, row_text, withheld)
-                        if recovered_name is not None:
-                            name = recovered_name
-                            name_is_complete = True
-                            if self.verbose:
-                                logger.debug("  Found name from table: %s", name)
+                    # Extract name if not yet found (or only have last name)
+                    if field == _FIELD_NAME and not name_is_complete:
+                        if value and len(value) > 2:
+                            recovered_name = _withhold_recovered(value, row_text, withheld)
+                            if recovered_name is not None:
+                                name = recovered_name
+                                name_is_complete = True
+                                if self.verbose:
+                                    logger.debug("  Found name from table: %s", name)
 
-                # Extract address if not yet found
-                # Note: Business address cells often contain embedded phone/fax/email
-                elif (field == _FIELD_OFFICE_ADDRESS and not office_address
-                        and not office_address_withheld):
-                    if value and len(value) > 5:
-                        block_address, block_phone, block_email = (
-                            self._parse_address_block(
-                                value, office_phone, work_email))
-                        withheld_before = len(withheld)
-                        office_address = _withhold_recovered_lines(
-                            block_address, row_text, withheld)
-                        if not office_address and len(withheld) > withheld_before:
-                            # Every address line this row supplied was
-                            # policy-denied -- stop, don't let a later
-                            # office_address row fill the slot instead.
-                            office_address_withheld = True
-                        # Only a value the block itself supplied is gated:
-                        # one already classified from the A entries is not
-                        # this row's to withhold.
-                        if not office_phone:
-                            office_phone = _withhold_recovered(block_phone, row_text, withheld)
-                        if not work_email:
-                            work_email = _withhold_recovered(block_email, row_text, withheld)
+                    # A home-labelled row is withheld and skipped (#730): it
+                    # neither fills Office address nor counts as a withheld
+                    # Office row, so a business row after it still fills the slot.
+                    elif field in _HOME_FIELDS:
+                        _withhold_home_row(field, value, row_text, withheld)
 
-                # Extract phone if not yet found
-                elif field == _FIELD_OFFICE_PHONE and not office_phone:
-                    if value and len(value) > 5:
-                        office_phone = _withhold_recovered(value, row_text, withheld)
-                        if self.verbose and office_phone:
-                            logger.debug("  Found phone from table: %s", office_phone)
+                    # Extract address if not yet found
+                    # Note: Business address cells often contain embedded phone/fax/email
+                    elif (field == _FIELD_OFFICE_ADDRESS and not office_address
+                            and not office_address_withheld):
+                        if value and len(value) > 5:
+                            block_address, block_phone, block_email = (
+                                self._parse_address_block(
+                                    value, office_phone, work_email))
+                            withheld_before = len(withheld)
+                            office_address = _withhold_recovered_lines(
+                                block_address, row_text, withheld)
+                            if not office_address and len(withheld) > withheld_before:
+                                # Every address line this row supplied was
+                                # policy-denied -- stop, don't let a later
+                                # office_address row fill the slot instead.
+                                office_address_withheld = True
+                            # Only a value the block itself supplied is gated:
+                            # one already classified from the A entries is not
+                            # this row's to withhold.
+                            if not office_phone:
+                                office_phone = _withhold_recovered(
+                                    _drop_home_phone_segments(block_phone, withheld),
+                                    row_text, withheld)
+                            if not work_email:
+                                work_email = _withhold_recovered(block_email, row_text, withheld)
 
-                # Extract email if not yet found
-                elif field == _FIELD_WORK_EMAIL and not work_email:
-                    email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', value)
-                    if email_match:
-                        work_email = _withhold_recovered(
-                            email_match.group(0), row_text, withheld)
-                        if self.verbose and work_email:
-                            logger.debug("  Found email from table: %s", work_email)
+                    # Extract phone if not yet found
+                    elif field == _FIELD_OFFICE_PHONE and not office_phone:
+                        if value and len(value) > 5:
+                            office_phone = _withhold_recovered(
+                                _drop_home_phone_segments(value, withheld),
+                                row_text, withheld)
+                            if self.verbose and office_phone:
+                                logger.debug("  Found phone from table: %s", office_phone)
+
+                    # Extract email if not yet found
+                    elif field == _FIELD_WORK_EMAIL and not work_email:
+                        email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', value)
+                        if email_match:
+                            work_email = _withhold_recovered(
+                                email_match.group(0), row_text, withheld)
+                            if self.verbose and work_email:
+                                logger.debug("  Found email from table: %s", work_email)
 
         return name, name_is_complete, work_email, office_phone, office_address
 
@@ -923,8 +1258,7 @@ class PersonalDataSection:
                 continue
 
             # Extract email if embedded in address
-            if ('e-mail:' in line_lower or 'email:' in line_lower
-                    or 'e-mail\t' in line_lower):
+            if any(marker in line_lower for marker in _EMAIL_LINE_MARKERS):
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', line)
                 if email_match and not work_email:
                     work_email = email_match.group(0)

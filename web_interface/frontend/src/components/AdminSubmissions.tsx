@@ -25,29 +25,55 @@ function bandClasses(band: string | null | undefined): string {
   return 'bg-red-100 text-red-700'
 }
 
+// The score the runs listing already carries (cached at run end), or null.
+function cachedScoreView(run: AdminRun): ScoreView | null {
+  if (run.quality_score == null) return null
+  return {
+    score: run.quality_score,
+    band: run.quality_band ?? '',
+    dataComplete: run.quality_data_complete,
+    missingEvidence: run.quality_missing_evidence,
+  }
+}
+
+interface ScoreView {
+  score: number
+  band: string
+  // false when the score was computed with a scored file missing or unreadable (#745)
+  dataComplete: boolean | null
+  missingEvidence: string[]
+}
+
 // Advisory run-quality score (provisional — bands not yet calibrated). Shows the
-// cached score as a colored badge, or a "Score" button to compute/backfill.
+// cached score as a colored badge, or a "Score" button to compute/backfill. A
+// score computed with a file missing or unreadable is marked "incomplete" with
+// a dashed border, and its tooltip lists what was missing (#745).
 function QualityCell({
   run,
-  score,
-  band,
+  view,
   onScored,
 }: {
   run: AdminRun
-  score: number | null
-  band: string | null
-  onScored: (s: { score: number; band: string }) => void
+  view: ScoreView | null
+  onScored: (s: ScoreView) => void
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  if (score != null) {
+  if (view) {
+    const incomplete = view.dataComplete === false
+    const title = incomplete
+      ? `${view.band} — score computed without: ${view.missingEvidence.join('; ') || 'unknown files'}`
+      : `${view.band} — provisional/diagnostic quality score`
     return (
       <span
-        title={`${band ?? ''} — provisional/diagnostic quality score`}
-        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${bandClasses(band)}`}
+        title={title}
+        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${bandClasses(view.band)}${
+          incomplete ? ' border border-dashed border-current' : ''
+        }`}
       >
-        {score}
+        {view.score}
+        {incomplete && <span className="font-normal">incomplete</span>}
       </span>
     )
   }
@@ -63,7 +89,12 @@ function QualityCell({
         setError(null)
         try {
           const r = await computeRunScore(run.run_id)
-          onScored({ score: r.totalScore, band: r.band })
+          onScored({
+            score: r.totalScore,
+            band: r.band,
+            dataComplete: r.data_complete,
+            missingEvidence: r.missing_evidence,
+          })
         } catch (err) {
           console.error(`Failed to score run ${run.run_id}:`, err)
           setError(err instanceof Error ? err.message : 'Scoring failed')
@@ -103,7 +134,7 @@ export default function AdminSubmissions() {
   const [sortField, setSortField] = useState<SortField>('started_at')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   // On-demand scores computed this session, keyed by run_id (overlays fetched data).
-  const [computedScores, setComputedScores] = useState<Record<string, { score: number; band: string }>>({})
+  const [computedScores, setComputedScores] = useState<Record<string, ScoreView>>({})
 
   const fetchRuns = useCallback(async (offset: number, append: boolean) => {
     const params = new URLSearchParams({
@@ -224,10 +255,10 @@ export default function AdminSubmissions() {
           <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
         </div>
       ) : (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+        <div className="bg-white rounded-lg shadow-sm border border-sand-300 overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-sand-200">
+              <thead className="bg-sand-50">
                 <tr>
                   <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Run ID
@@ -282,7 +313,7 @@ export default function AdminSubmissions() {
                   </th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-white divide-y divide-sand-200">
                 {sortedRuns.map((run) => (
                   <tr
                     key={run.run_id}
@@ -325,8 +356,7 @@ export default function AdminSubmissions() {
                     <td className="px-4 py-3 whitespace-nowrap text-center">
                       <QualityCell
                         run={run}
-                        score={run.quality_score ?? computedScores[run.run_id]?.score ?? null}
-                        band={run.quality_band ?? computedScores[run.run_id]?.band ?? null}
+                        view={cachedScoreView(run) ?? computedScores[run.run_id] ?? null}
                         onScored={(s) => setComputedScores((prev) => ({ ...prev, [run.run_id]: s }))}
                       />
                     </td>
@@ -360,7 +390,7 @@ export default function AdminSubmissions() {
           )}
 
           {hasMore && (
-            <div className="border-t border-gray-200 px-4 py-3">
+            <div className="border-t border-sand-200 px-4 py-3">
               <button
                 onClick={handleShowMore}
                 disabled={loadingMore}

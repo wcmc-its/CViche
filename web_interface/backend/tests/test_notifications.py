@@ -140,6 +140,50 @@ def test_payload_renders_na_on_failure_without_score(monkeypatch):
     assert _title(payload)["color"] == "attention"
 
 
+def test_payload_marks_score_computed_on_missing_evidence(monkeypatch):
+    """#745: a score computed with a scored artifact missing says so on the
+    card and in the summary, with the count only -- never the
+    missing_evidence strings, which can name CV files."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    score = {
+        "totalScore": 20,
+        "band": "RED (re-run / do-not-deliver)",
+        "data_complete": False,
+        "missing_evidence": ["docx: no docx found", "no entries.json found"],
+    }
+
+    payload = notifications.build_teams_payload(_run_facts(), score)
+
+    expected = "20 (RED (re-run / do-not-deliver)) — incomplete: 2 file(s) missing or unreadable"
+    assert _facts(payload)["Quality score"] == expected
+    assert f"score {expected}" in payload["summary"]
+    assert "no docx found" not in str(payload)
+
+
+def test_payload_score_incomplete_without_evidence_list(monkeypatch):
+    """data_complete False with no usable list still reads as incomplete."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    score = {"totalScore": 70, "band": "YELLOW (review)", "data_complete": False}
+
+    payload = notifications.build_teams_payload(_run_facts(), score)
+
+    assert _facts(payload)["Quality score"] == "70 (YELLOW (review)) — incomplete"
+
+
+@pytest.mark.parametrize("data_complete", [True, None])
+def test_payload_score_unmarked_when_complete_or_unknown(monkeypatch, data_complete):
+    """A complete score, or a cache written before data_complete existed,
+    renders as the plain number -- unknown is not incomplete."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    score = {"totalScore": 87, "band": "GREEN (ship)", "missing_evidence": ["x"]}
+    if data_complete is not None:
+        score["data_complete"] = data_complete
+
+    payload = notifications.build_teams_payload(_run_facts(), score)
+
+    assert _facts(payload)["Quality score"] == "87 (GREEN (ship))"
+
+
 def test_payload_run_link_uses_first_allowed_origin(monkeypatch):
     monkeypatch.setenv(
         "CVICHE_ALLOWED_ORIGINS",
@@ -169,7 +213,7 @@ def test_terminal_payload_has_fallback_and_summary(monkeypatch):
         {"severity": "ERROR", "lint": "grants_dropped"}]}
 
     payload = notifications.build_teams_payload(
-        _run_facts(), {"totalScore": 87, "band": "GREEN"}, doctor=doctor)
+        _run_facts(), {"totalScore": 87, "band": "GREEN"}, doctor_report=doctor)
 
     # message summary and card fallbackText both present, useful, and identical.
     summary = payload["summary"]
@@ -253,7 +297,7 @@ def test_payload_includes_doctor_summary(monkeypatch):
         ],
     }
 
-    facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor=doctor))
+    facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor_report=doctor))
 
     # 3 substantive findings (INFO excluded); the most severe names the lint.
     assert facts["Doctor"] == "3 findings (top: segmentation)"
@@ -263,7 +307,7 @@ def test_payload_doctor_reports_zero_findings_when_clean(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
     doctor = {"counts": {"ERROR": 0, "WARN": 0, "INFO": 7}, "findings": []}
 
-    facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor=doctor))
+    facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor_report=doctor))
 
     assert facts["Doctor"] == "0 findings"
 
@@ -292,7 +336,7 @@ def test_payload_doctor_line_omitted_and_warned_on_malformed_report(
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
     with caplog.at_level(logging.WARNING):
-        facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor=doctor))
+        facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor_report=doctor))
 
     assert "Doctor" not in facts
     assert any(
@@ -313,7 +357,7 @@ def test_doctor_lint_control_chars_stripped_and_bounded(monkeypatch):
     doctor = {"counts": {"ERROR": 1, "WARN": 0}, "findings": [
         {"severity": "ERROR", "lint": bad_lint}]}
 
-    payload = notifications.build_teams_payload(_run_facts(), None, doctor=doctor)
+    payload = notifications.build_teams_payload(_run_facts(), None, doctor_report=doctor)
     facts = _facts(payload)
 
     assert "\x07" not in facts["Doctor"]
@@ -1178,3 +1222,26 @@ def test_notify_feedback_submitted_swallows_raising_id_property(caplog):
 # test_feedback_notification.py's
 # test_submit_feedback_succeeds_even_if_notification_raises additionally pins
 # this at the route call-site.
+
+
+@pytest.mark.parametrize(
+    ("status_code", "success", "retryable"),
+    [(200, True, False), (404, False, False), (429, False, True), (503, False, True)],
+)
+def test_do_post_uses_an_injected_session_and_classifies_the_status(status_code, success, retryable):
+    # #310: a test hands _do_post its own session instead of monkeypatching
+    # the module-global _SESSION.
+    session = MagicMock()
+    session.post.return_value = SimpleNamespace(status_code=status_code)
+
+    attempt = notifications._do_post("https://example.invalid/hook", {"k": "v"}, session=session)
+
+    session.post.assert_called_once_with(
+        "https://example.invalid/hook", json={"k": "v"}, timeout=notifications._POST_TIMEOUT,
+    )
+    assert (attempt.success, attempt.retryable, attempt.detail) == (success, retryable, f"HTTP {status_code}")
+
+
+def test_every_card_carries_the_named_adaptive_card_version():
+    card = notifications.build_teams_payload(_run_facts())
+    assert card["attachments"][0]["content"]["version"] == notifications.ADAPTIVE_CARD_VERSION == "1.5"

@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import logging
 
+import pytest
+
 import app.services.artifact_service as artifact_service_mod
 from app.models import User, Run, Step
 from app.auth import create_session_cookie, COOKIE_NAME
@@ -84,6 +86,37 @@ class TestStepDetailAuthorization:
         _, run = _user_and_run(db, suffix="-step-u")
         resp = client.get(f"/api/run/{run.id}/step/1")
         assert resp.status_code == 401
+
+    @pytest.mark.parametrize("role, expected", [("admin", 0.42), ("user", None)])
+    def test_step_cost_is_admin_only(self, client, db, seed_simple_mode, role, expected):
+        """#1111: the owner sees a step's cost only when they are an admin."""
+        user, run = _user_and_run(db, role=role, suffix=f"-step-cost-{role}")
+        db.add(Step(run_id=run.id, step_number=1, stage_id="1a", step_name="Hierarchy",
+                    status="complete", cost=0.42))
+        db.commit()
+        _auth(client, user)
+        resp = client.get(f"/api/run/{run.id}/step/1")
+        assert resp.status_code == 200
+        assert resp.json()["cost_usd"] == expected
+
+
+class TestStepDetailPreview:
+    def test_absolute_output_path_still_gets_200_and_a_preview(
+            self, client, db, seed_simple_mode, monkeypatch, tmp_path):
+        """The orchestrator stores absolute paths in Step.output_files (every
+        completed prod step checked, 2026-09-28). The preview must resolve the
+        basename, not 400 the whole step-detail request on the leading "/"."""
+        user, run = _user_and_run(db, suffix="-step-abs")
+        _seed_local_file(monkeypatch, tmp_path, run.id, "cv_entries.json",
+                         content=json.dumps({"entries": [{"text": "x"}]}).encode())
+        db.add(Step(run_id=run.id, step_number=3, stage_id="2", step_name="Entries",
+                    status="complete", output_files=json.dumps(
+                        ["/app/src/unified_pipeline/outputs/stage_2_entry_extraction/cv_entries.json"])))
+        db.commit()
+        _auth(client, user)
+        resp = client.get(f"/api/run/{run.id}/step/3")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["output_preview"] is not None
 
 
 class TestDataFileAuthorization:

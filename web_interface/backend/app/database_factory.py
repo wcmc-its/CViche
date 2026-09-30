@@ -102,6 +102,24 @@ _TAMPERED_CA_BUNDLE_MSG = (
 # plus handshake, so it cannot trip on a healthy RDS.
 DB_CONNECT_TIMEOUT_SECONDS = 3
 
+# Connection-pool sizing (#784). Set explicitly so a SQLAlchemy default change
+# cannot silently move the connection budget; the values equal the defaults
+# (5 / 10 / 30) that production has been running.
+#
+# Budget (one engine per uvicorn process; docker-entrypoint.sh passes no
+# --workers and no k8s manifest overrides it, so 1 worker per pod):
+#   maxReplicas (4, k8s/overlays/{dev,prod}/hpa-patch.yaml) x 1 worker
+#   x (POOL_SIZE + MAX_OVERFLOW = 15) = 60 connections worst case
+# against RDS max_connections = 318, leaving 258 for the db-migration init
+# container / alembic, admin sessions and rolling-deploy surge pods.
+# Measured 2026-09-29 on the production RDS instance (namespace cviche-dev):
+# SHOW VARIABLES LIKE 'max_connections' = 318, Max_used_connections = 15,
+# Threads_connected = 8. Raising any value or the worker count means
+# re-doing this arithmetic.
+DB_POOL_SIZE = 5
+DB_MAX_OVERFLOW = 10
+DB_POOL_TIMEOUT_SECONDS = 30
+
 
 def _resolve_db_auth_mode() -> str:
     """Resolve DB_AUTH_MODE to a member of DB_AUTH_MODES, or raise.
@@ -281,6 +299,9 @@ def create_cviche_engine(db_host: str, db_port: str, db_name: str, db_user: str)
         # Comfortably under RDS's default 8h wait_timeout; pool_pre_ping is the
         # backstop for anything that dies sooner.
         "pool_recycle": 1800,
+        "pool_size": DB_POOL_SIZE,
+        "max_overflow": DB_MAX_OVERFLOW,
+        "pool_timeout": DB_POOL_TIMEOUT_SECONDS,
         "creator": _connect,
     }
 

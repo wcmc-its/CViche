@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-worker
+spec:
+  # replicas = the global run-concurrency cap: worker.py's docstring is
+  # explicit that one pod executes one run at a time, so queue wait grows
+  # roughly linearly with backlog (~15-20 min per queued run per replica).
+  # Deliberately NOT behind any HPA -- a CPU-based autoscaler would scale in
+  # a pod mid-run and kill it; see safe-to-evict below for the same reason
+  # applied to Cluster Autoscaler. A consumer-group-lag scaler (KEDA) is a
+  # listed #701 follow-up, not this PR (#701 rework, mrj4001 review).
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cviche-worker
+  # minReadySeconds gives main()'s startup checks (config + a live Valkey
+  # ping via ensure_group()) time to fail before the rollout treats a new
+  # pod as available -- otherwise maxUnavailable 0 / maxSurge 1 would already
+  # be draining the old, healthy pod. Paired with readinessProbe below.
+  minReadySeconds: 30
+  # A run takes 15-20 min; never let a deploy or scale-in drop capacity while
+  # one is in flight (see terminationGracePeriodSeconds below).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: cviche-worker
+      annotations:
+        # AWS facts checked 2026-09-23: cviche-al2023-nodes is a fixed-size
+        # (min=max=desired=2) ON_DEMAND nodegroup, so Cluster Autoscaler
+        # (kube-system, no Karpenter) cannot scale it in or out today anyway
+        # -- this is defense-in-depth against that ever changing, not a
+        # response to an observed eviction.
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      # Same IRSA setup as the backend to authenticate DB users via IAM.
+      serviceAccountName: cviche-sa
+
+      containers:
+        - name: worker
+          image: backend # Dynamically updated by Kustomize via CodeBuild
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "docker-entrypoint.sh"]
+          args: ["worker"]
+          env:
+            - name: CVICHE_RUN_MIGRATIONS
+              value: "0" # Alembic owns schema; the backend's initContainer runs migrations
+            - name: CVICHE_INIT_DB
+              value: "0" # No metadata.create_all() DDL at boot (#191)
+          # Readiness: main() touches READY_FILE only after every startup
+          # check (config presence, ensure_group()'s live Valkey ping) has
+          # passed, so a bad rollout or an unreachable Valkey holds the pod
+          # NotReady instead of counting as available. `sh -c test -f` is a
+          # POSIX shell builtin -- no findutils dependency, and no new
+          # binary beyond /bin/sh, which docker-entrypoint.sh already needs.
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/worker-ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          # Liveness: loop() touches HEARTBEAT_FILE every iteration (idle
+          # block or in-flight run alike -- see _heartbeat_while_running),
+          # at worst every HEARTBEAT_INTERVAL_S=15s, so a wedged process
+          # (a stage thread the RUN_TIMEOUT_S watchdog somehow missed, a
+          # deadlock) stops touching it and gets restarted instead of idling
+          # forever. python3 -c does the mtime-age check rather than `find
+          # -mmin` or a `stat -c`/`date` sh one-liner: the image is Debian
+          # (findutils IS present -- the Dockerfile's deps stage already
+          # runs `find`) but GNU stat/date flags are an extra thing to keep
+          # portable, and python3 is already a hard requirement of this
+          # image, so this is one more interpreter fork per period, not a
+          # new dependency. N6: 90s below is only the in-script staleness
+          # threshold a SINGLE probe run checks (heartbeat age < 90s = ok) --
+          # it is not the restart time. k8s still needs failureThreshold (3)
+          # consecutive failing probes, periodSeconds (30s) apart, before it
+          # restarts the pod, so the real wall-clock time from "process
+          # wedged" to "pod restarted" is the 90s staleness threshold PLUS
+          # failureThreshold x periodSeconds more: ~150-180s, not 90s alone.
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - "import os,sys,time; sys.exit(0 if time.time() - os.stat('/tmp/worker-heartbeat').st_mtime < 90 else 1)"
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      # SIGTERM stops new claims; an in-flight run finishes and ACKs before
+      # exit. Must clear RUN_TIMEOUT_S (the worker's own run watchdog,
+      # web_interface/backend/app/worker.py, default 5400s) plus margin for
+      # the watchdog's own mark-failed/ACK/exit tail: 5400 + 300 = 5700
+      # (#701 rework, mrj4001 review). AWS facts checked 2026-09-23:
+      # cviche-al2023-nodes is ON_DEMAND t3.medium with min=max=desired=2
+      # (a fixed-size nodegroup -- no spot interruption to race, and Cluster
+      # Autoscaler, which runs in kube-system with no Karpenter, has no room
+      # to scale it in or out). safe-to-evict=false above is kept anyway as
+      # defense-in-depth if that nodegroup sizing ever changes.
+      terminationGracePeriodSeconds: 5700

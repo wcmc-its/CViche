@@ -27,6 +27,14 @@ over-fired on three shapes round 1's own test suite never exercised:
 Also covers the round-1 test-coverage gap where a whitespace-only trailing
 cell was never distinguished from a genuinely blank one.
 
+Also covers #886, the row-0 header-left/content-right residual #811/#832
+deliberately scoped out: a row 0 that is itself a real (non-colon) header
+with a genuine distinct value in a trailing cell -- most visibly a one-row
+"Role | date-range" table, where row 0 IS the whole table -- now keeps its
+`table_header` AND recovers that trailing content, the same treatment a
+sub-header row at index >= 1 already got. A genuine header-only row 0
+(blank or duplicate trailing cells) is unaffected.
+
 Deterministic, no LLM, no DB, no network, no PII (synthetic values only).
 Run with:
 
@@ -270,11 +278,11 @@ def test_row_zero_form_label_is_content_not_table_header(tmp_path):
 
 def _build_row0_header_left_content_right_docx(path: str) -> None:
     """Row 0 is itself a real, non-colon section header with distinct
-    content on the right ("STAFF POSITION" | title, confidence 0.6) -- out
-    of this ticket's scope (only row-0 FORM LABELS get the new content
-    treatment). It must keep today's existing table-level header behavior
-    unchanged: table_header emitted for row 0, its own trailing content not
-    separately recovered."""
+    content on the right ("STAFF POSITION" | title, confidence 0.6). #886
+    closes the residual #811/#832 scoped out here: row 0 now keeps its
+    table_header AND has this trailing content recovered, the same
+    HEADER_KEPT_PLUS_CONTENT treatment a sub-header row at index >= 1
+    already gets."""
     doc = Document()
     table = doc.add_table(rows=2, cols=2)
 
@@ -287,18 +295,21 @@ def _build_row0_header_left_content_right_docx(path: str) -> None:
     doc.save(path)
 
 
-def test_row_zero_header_left_content_right_shape_is_unaffected(tmp_path):
-    """Negative case: row 0 being a real (non-colon, high-confidence)
+def test_row_zero_header_left_content_right_row_recovers_content(tmp_path):
+    """Positive case (#886): row 0 being a real (non-colon, high-confidence)
     section header with distinct trailing content must NOT be reclassified
-    as a form label -- it stays a table_header exactly as before this
-    ticket, since row-0 header-left/content-right recovery is out of scope."""
+    as a form label -- it stays a table_header, exactly as before -- but its
+    own trailing content is now ALSO recovered instead of silently dropped."""
     docx_path = str(tmp_path / "row0_header_left_content_right.docx")
     _build_row0_header_left_content_right_docx(docx_path)
 
     elements = extract_unified_elements(docx_path)["elements"]
     table_headers = [e for e in elements if e.get("type") == "table_header"]
+    table_contents = [e for e in elements if e.get("type") == "table_content"]
+    content_text = "\n".join(e["text"] for e in table_contents)
 
     assert any(e["text"] == "STAFF POSITION" for e in table_headers)
+    assert "Distinguished Fellow" in content_text
 
 
 def _build_row0_multiline_embedded_header_docx(path: str) -> None:
@@ -459,3 +470,97 @@ def test_row_zero_colon_label_blank_value_keeps_table_header(tmp_path):
 
     assert any(e["text"] == "Certification:" for e in table_headers)
     assert "Board certified in Synthetic Medicine with additional detail here:" in content_text
+
+
+def _build_one_row_role_date_table_docx(path: str) -> None:
+    """#886: a single-row, two-cell "Role | date-range" table -- the shape
+    the fix targets (web206's RESEARCH EXPERIENCE positions, reproduced here
+    with a synthetic role and date). Row 0 IS the whole table: no row 1
+    exists for the per-row walk to recover the date cell from."""
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+
+    table.cell(0, 0).text = "Research Fellow"
+    table.cell(0, 1).text = "Jan 2019-Dec 2020"
+
+    doc.save(path)
+
+
+def test_one_row_role_date_table_recovers_the_date_cell(tmp_path):
+    """Positive case (#886): a one-row table whose single row is a genuine
+    role+date record must keep the role as a table_header AND recover the
+    date cell as table_content, instead of dropping it -- there is no row 1
+    for the per-row walk to fall back on."""
+    docx_path = str(tmp_path / "one_row_role_date.docx")
+    _build_one_row_role_date_table_docx(docx_path)
+
+    elements = extract_unified_elements(docx_path)["elements"]
+    table_headers = [e for e in elements if e.get("type") == "table_header"]
+    table_contents = [e for e in elements if e.get("type") == "table_content"]
+    content_text = "\n".join(e["text"] for e in table_contents)
+
+    assert any(e["text"] == "Research Fellow" for e in table_headers)
+    assert "Jan 2019-Dec 2020" in content_text
+
+
+def _build_one_row_genuine_header_table_docx(path: str) -> None:
+    """Positive shape guard for #886: a one-row table whose second cell is
+    BLANK -- a genuine section header, not a role+date record. Must stay a
+    table_header with nothing recovered as content."""
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+
+    table.cell(0, 0).text = "PRESENTATIONS"
+    table.cell(0, 1).text = ""
+
+    doc.save(path)
+
+
+def test_one_row_genuine_header_table_stays_header_only(tmp_path):
+    """Negative case (#886 positive shape guard): a one-row table with a
+    blank second cell is a genuine header, not a role+date record --
+    `row_has_nonblank_value_cells` must keep it header-only, with no
+    table_content element emitted for the table at all."""
+    docx_path = str(tmp_path / "one_row_genuine_header.docx")
+    _build_one_row_genuine_header_table_docx(docx_path)
+
+    elements = extract_unified_elements(docx_path)["elements"]
+    table_headers = [e for e in elements if e.get("type") == "table_header"]
+    table_contents = [e for e in elements if e.get("type") == "table_content"]
+
+    assert any(e["text"] == "PRESENTATIONS" for e in table_headers)
+    assert table_contents == []
+
+
+def _build_one_row_role_two_dates_table_docx(path: str) -> None:
+    """#886: row 0's recovered value cell goes through
+    `split_merged_cells_in_row` -- the SAME primitive an ordinary content
+    row already uses -- not a raw, unsplit copy of the cell. A value cell
+    with its own "\\n\\n"-separated entries (e.g. two stints in the same
+    role) must still come out as two content rows, not one row carrying an
+    embedded double-newline."""
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+
+    table.cell(0, 0).text = "Research Fellow"
+    table.cell(0, 1).text = "2019-2020\n\n2021-2022"
+
+    doc.save(path)
+
+
+def test_one_row_role_date_table_splits_a_merged_date_cell(tmp_path):
+    """Positive case (#886): recovering row 0's value cell uses
+    `split_merged_cells_in_row`, so a "\\n\\n"-merged value cell still
+    splits into two content rows -- proves the fix reuses the existing
+    per-row splitting primitive rather than pushing row 0's raw cells
+    through unsplit."""
+    docx_path = str(tmp_path / "one_row_role_two_dates.docx")
+    _build_one_row_role_two_dates_table_docx(docx_path)
+
+    elements = extract_unified_elements(docx_path)["elements"]
+    table_contents = [e for e in elements if e.get("type") == "table_content"]
+
+    assert len(table_contents) == 1
+    assert table_contents[0]["rows"] == 2
+    dates = [row[-1]["text"] for row in table_contents[0]["data"]]
+    assert dates == ["2019-2020", "2021-2022"]

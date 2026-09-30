@@ -77,7 +77,7 @@ Modules at the same level of a package — most importantly `stage6/sections/*` 
 
 **1.4 The pipeline core does not import the web backend. [gate]**
 `src/unified_pipeline/` is a library. It knows nothing about FastAPI, the DB, or `web_interface/`.
-*Why:* `llm_client.py:50-61` injects `sys.path` so the pipeline core can import `app.config_loader` **from the web backend**, at import time, for 43 downstream modules. That arrow is backwards, and it means the CLI cannot run without the web app's config layout.
+*Why:* `llm/retry.py` (moved out of `llm_client.py:50-61` by #496) used to inject `sys.path` so the pipeline core could import `app.config_loader` **from the web backend**, at import time, for 43 downstream modules. That arrow was backwards, and meant the CLI could not run without the web app's config layout — fixed by #267, which reads the same `auth_config.yaml` `llm:` block through `unified_pipeline/config.py`'s own resolver instead.
 *Check:* `grep -rn 'web_interface\|from app\.' src/unified_pipeline/` returns nothing.
 
 **1.5 A shared vocabulary has exactly one definition. [gate]**
@@ -179,7 +179,7 @@ Where the simple implementation is knowingly not the general one, say so at the 
 
 ```python
 # ponytail: fixed window; expire only on the first hit. Orphan key ...
-# ponytail: pure renames ONLY -- old code and target must mean the same thing.
+# ponytail: the M4 codes are a re-route, not a rename -- a trial TYPE lands ...
 ```
 
 It marks intent, not ignorance: the reader can tell a considered trade-off from an oversight, which is the difference between leaving it alone and "fixing" it into something more complex. Distinct from `TODO`, which means unfinished — a labelled shortcut may be finished and correct at its stated scale, permanently.
@@ -216,7 +216,7 @@ A section renderer receives its region and its entries, and returns what it prod
 *Why:* this is §3.4's rule stated as state rather than as lookup, and together they are what make section bleed structurally impossible instead of defensively guarded. §1.3 (peers don't import peers) is this rule's structural half and *is* a gate; the state half — no appends to shared instance lists — is AST-checkable in principle (the same shape as §4.1's scan) but nobody's built it, so this stays a review question with §1.3 as its mechanical floor.
 
 **4.5 Lazy singletons are locked. [gate — check pending]**
-*Why:* `llm_client.py:176-180` uses a double-checked lock and documents the exact boto3 hazard — `llm_client.py` has exactly 2 lazy singletons (the OpenAI and Bedrock clients), both locked by the same `_client_init_lock`. `storage/factory.py:18` constructs the same kind of client unlocked. §9's row previously said "4 locked, 1 unlocked"; a fresh sweep for the same shape (module-level `None` sentinel, populated by a function under `global`, re-checked inside a lock) found 6 locked and 5 unlocked repo-wide, not 4 and 1 — including one not previously documented: `core/async_rate_limiter.py`'s `get_rate_limiter_sync()` shares the module-level `_rate_limiter` global with the locked async getter but has no lock of its own around its check-and-init. Real hazard, currently zero blast radius — the module has no importers anywhere in the repo and no test references it (one commit total, the initial one), the same orphan shape already on record for `core/cv_pipeline.py` (§2.2). Filed as #653 rather than left as a doc footnote.
+*Why:* `llm/bedrock.py`'s `_get_bedrock_client` uses a double-checked lock (`_client_init_lock`, defined in `llm/retry.py`) and documents the exact boto3 hazard. `storage/factory.py:18` constructs the same kind of client unlocked. §9's row previously said "4 locked, 1 unlocked"; a fresh sweep for the same shape (module-level `None` sentinel, populated by a function under `global`, re-checked inside a lock) found 6 locked and 5 unlocked repo-wide, not 4 and 1 — including one not previously documented: `core/async_rate_limiter.py`'s `get_rate_limiter_sync()` shares the module-level `_rate_limiter` global with the locked async getter but has no lock of its own around its check-and-init. Real hazard, currently zero blast radius — the module has no importers anywhere in the repo and no test references it (one commit total, the initial one), the same orphan shape already on record for `core/cv_pipeline.py` (§2.2). Filed as #653 rather than left as a doc footnote. #953 (Bedrock-only) removed `llm/openai.py`'s client singleton, dropping the locked count from 6 to 5.
 *Check:* an AST scan — module-level `Name = None`, then a function with `global <name>` containing `if <name> is None:` that reassigns it, flagged unless that block is nested inside a `with` whose context resolves to a `threading.Lock`/`RLock`/`asyncio.Lock` instantiation guarding a second, identical check. Not implemented yet — the pattern is confirmed detectable (grep alone isn't reliable enough; the check needs the AST shape) but no script exists; see §9.
 
 *(§4.6 retired — folded into this rule.)*
@@ -251,11 +251,10 @@ A validator, gate or script exits non-zero when it could not do its job. "Nothin
 *Why:* `render_gate.py` (then `gate_render.py`) used to never clear its output directory and never call `sys.exit`. Re-rendering into a reused directory after a code change that crashed every render left the previous arm's files in place — a run where **all 100 CVs failed** reported `compared 100 / identical 100 / CHANGED 0 / PASS`, exit 0. Fixed in #589 (closing #584): the script now clears its output directory before every run and exits non-zero on any comparison failure or crash.
 
 **5.6 Retries live in exactly one stated layer: the LLM client, and nowhere else. [gate]**
-A stage never wraps its own retry loop around a `call_llm` call; `_call_with_retry` (`llm_client.py:230-295`) is the one place a transient LLM fault gets a second attempt.
-*Why:* true today — checked all 9 `call_llm`-calling stage modules for `for attempt in`/`retry_count=`/`@retry`/`_call_with_retry`, zero hits — but worth stating because the failure mode is cheap to introduce and expensive to notice: a stage-level retry stacked on the client's own would compound silently. It already compounds once, underneath this layer and outside this file's control: both providers' SDKs retry on their own defaults (OpenAI's client `max_retries=2`, botocore's `max_attempts=3`), so one logical `call_llm()` call can cost up to 4×3=12 raw requests today, and up to 24 when a Bedrock JSON-repair cycle also fires (`llm_client.py:727-765`) — a multiplier nothing here currently documents or caps.
+A stage never wraps its own retry loop around a `call_llm` call; `_call_with_retry` (in `llm/retry.py`) is the one place a transient LLM fault gets a second attempt.
+*Why:* true today — checked all 9 `call_llm`-calling stage modules for `for attempt in`/`retry_count=`/`@retry`/`_call_with_retry`, zero hits — but worth stating because the failure mode is cheap to introduce and expensive to notice: a stage-level retry stacked on the client's own would compound silently. It used to compound underneath this layer: `_call_with_retry`'s outer loop (default `retry_count=3`) sat on top of botocore's own retries, so one logical `call_llm()` call could cost up to 4×4=16 raw requests. #632 closed that: the Bedrock client is built with `total_max_attempts=1`, so botocore makes one attempt and `_call_with_retry` alone decides on a retry. One logical call now costs at most `retry_count+1` raw requests (double that when a Bedrock JSON-repair cycle also fires), outage-class errors aside.
 *Check:* `grep -rn 'for attempt in\|retry_count=\|@retry\|_call_with_retry' src/unified_pipeline/stage_*.py` returns nothing.
-*Also:* the compounded ceiling itself — up to 12 raw requests per logical call today, 24 with a Bedrock JSON-repair cycle — is stated once, next to the code that produces it, not only in this paragraph. Neither `_call_with_retry`'s docstring nor the JSON-repair branch (`llm_client.py:727-765`) currently names the number; a provider SDK's own `max_retries`/`max_attempts` default changing is a real change to this ceiling and should be visible at the call site, not just here.
-*Check, this half:* `llm_client.py` states the current worst case as a comment or constant next to `_call_with_retry`, and it agrees with the number in this paragraph. Unmet today — no such comment exists yet. Too fiddly a shape (a product across two SDK defaults and one conditional repair branch) for an AST scan to gate on; a human re-reading both sites is the check.
+*Also:* the ceiling is stated once, next to the code that produces it (`_call_with_retry`'s docstring and the comment in `_get_bedrock_client`), and pinned by `test_raw_request_count_is_retry_count_plus_one`, which counts real HTTP sends through a real client. A provider SDK default changing is caught by that test rather than by a human re-reading two sites.
 
 **5.7 A retry is recorded, not silent. [gate — check pending]**
 An attempt count belongs in the metrics dict a stage returns, not only in a log line.
@@ -281,7 +280,7 @@ The taxonomy-code half is tracked at #651.
 **5.12 A stage artifact records the prompt template hash, the call params, and the model id the call actually used. [gate — check pending]**
 Every LLM-calling stage's returned metrics include three fields: `prompt_template_hash` (the system prompt, user template, and any tool/response-schema definition, hashed *before* CV content is interpolated in — it identifies the template and call shape, not the per-call, per-CV text), `params` (temperature, max_tokens, schema version), and `model_id`.
 *Why:* `"gpt-5.1"` is a repeated default-parameter literal in `taxonomy_mapper_v2.py` that disagreed with the model `llm_config.yaml` actually resolved (§8.2, #377) — a 96-CV batch was stamped with a model it did not use, in both the CLI banner (#444) and the stage artifacts themselves (#459). Separately, §5.11's own rule has no way to fire without this: a prompt or parameter change is a behaviour change under §6.3's table, but nothing in a corpus run today makes one *visible*, so there is no artifact-level basis for the A/B §6.3 asks for. `prompt_template_hash` is exactly that basis — hashed pre-interpolation so it fingerprints the template, not the CV content flowing through it, which keeps this rule clear of §4.7's PII scope. This is the checkable half of §5.11's determinism policy; where prompts live and how they're diffed is a separate, unscoped design question this rule doesn't answer.
-*Check:* each LLM-calling stage's returned metrics dict includes `prompt_template_hash`, `params`, and `model_id`. `model_id` is read from the provider's response where one is returned — both OpenAI's and Bedrock's responses carry a model identifier that can be more specific than the request — and falls back to the request/config value only where no response-side field exists. Not implemented yet — this is a target, not a measured state; see §9.
+*Check:* each LLM-calling stage's returned metrics dict includes `prompt_template_hash`, `params`, and `model_id`. `model_id` is read from the provider's response where one is returned — Bedrock's response carries a model identifier that can be more specific than the request — and falls back to the request/config value only where no response-side field exists. Not implemented yet — this is a target, not a measured state; see §9.
 
 ## 6. Testing expectations
 
@@ -351,7 +350,7 @@ Progress is a callback. Metrics are a returned dict. `print()` is for humans.
 
 **7.2 One configuration source per consumer. [gate — check pending]**
 Do not add a mechanism; use the one that exists, or delete one first.
-*Why:* nine distinct mechanisms exist today: (1) root `config.yaml`, dead — **no Python reader** anywhere in the tree, yet the backend Dockerfile still copies it in; (2) `auth_config.yaml` + `config_loader.py`'s `get_config()`, also reached from the pipeline core via §1.4's `sys.path` backdoor, plus a DB-backed layer (`SystemConfig`) on top of the same file; (3) `llm_config.yaml` + `unified_pipeline/config.py`'s own, structurally separate loader; (4) `app/config/pipeline_config.py`, a hardcoded class, confirmed dead (its one importer is itself unimported); (5) `core/llm_config.py`, a second differently-named "llm config" module, zero importers, name-collides with (3); (6) the hardcoded `known_institutions` dict now at `stage6/resolution/institution.py:39-40` still claiming to mirror `config.yaml` (moved from the stale `stage_6_word_template.py:2507` this doc used to cite — see §9); (7) the `PRICING` dict in `unified_pipeline/config.py`; (8) `Settings.pricing` in `web_interface/backend/app/schemas.py`, a second hand-maintained pricing table in different units, itself dead but still there to trip over — plus two documentation copies, making model pricing defined four times total; (9) scattered direct `os.environ.get()`/`os.getenv()` reads outside both loaders, each hardcoding its own default inline.
+*Why:* nine distinct mechanisms exist today: (1) root `config.yaml`, dead — **no Python reader** anywhere in the tree, yet the backend Dockerfile still copies it in; (2) `auth_config.yaml` + `config_loader.py`'s `get_config()`, formerly also reached from the pipeline core via §1.4's `sys.path` backdoor (removed by #267 — the pipeline core now reads the same file through its own `unified_pipeline/config.py` resolver, not `app.config_loader`), plus a DB-backed layer (`SystemConfig`) on top of the same file; (3) `llm_config.yaml` + `unified_pipeline/config.py`'s own, structurally separate loader; (4) `app/config/pipeline_config.py`, a hardcoded class, confirmed dead (its one importer is itself unimported); (5) `core/llm_config.py`, a second differently-named "llm config" module, zero importers, name-collides with (3); (6) the hardcoded `known_institutions` dict now at `stage6/resolution/institution.py:39-40` still claiming to mirror `config.yaml` (moved from the stale `stage_6_word_template.py:2507` this doc used to cite — see §9); (7) the `PRICING` dict in `unified_pipeline/config.py`; (8) `Settings.pricing` in `web_interface/backend/app/schemas.py`, a second hand-maintained pricing table in different units, itself dead but still there to trip over — plus two documentation copies, making model pricing defined four times total; (9) scattered direct `os.environ.get()`/`os.getenv()` reads outside both loaders, each hardcoding its own default inline.
 *Check:* the mechanism inventory above (nine, enumerated with file:line by category) is recounted at each review; a ninth-plus-one mechanism or an eleventh pricing copy fails the count. Trends to 2 (one backend, one pipeline-core). Not implemented yet — no script counts this, the inventory above is hand-kept; see §9.
 
 **7.3 A produced field is rendered or explicitly declared unrendered — and a stage validates the shape of what it consumes, the same as what it produces. [gate — check pending]**
@@ -425,39 +424,20 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 |---|---|---|---|
 | 1.2 pure layers import no `docx` | 0 | 0 | ✓ |
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
-| 1.4 core does not import the web backend | 0 | 1 | ✗ |
+| 1.4 core does not import the web backend | 0 | 0 | ✓ |
 | 2.1 no `db.query(` in `api/` | falling | 30 | ratchet |
-| 3.x oversized-function debt (excess lines) | falling | 2219 | ratchet |
+| 3.x oversized-function debt (excess lines) | falling | 2098 | ratchet |
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 6 | ratchet |
-| 5.4 bare swallows (`except Exception: pass`) | falling | 3 | ratchet |
-| 5.4 blind `except Exception` (BLE001) | falling | 96 | ratchet |
+| 5.4 bare swallows (`except Exception: pass`) | falling | 2 | ratchet |
+| 5.4 blind `except Exception` (BLE001) | falling | 82 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
-| 7.1 print() in library code (T201) | falling | 700 | ratchet |
+| 7.1 print() in library code (T201) | falling | 676 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
 | 8.3 typing syntax (UP*, RUF013) | falling | 222 | ratchet |
-| 8.3 missing annotations (ANN*, RUF012) | falling | 542 | ratchet |
+| 8.3 missing annotations (ANN*, RUF012) | falling | 526 | ratchet |
 
 <!-- check_standards:auto:end -->
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 ### Requires judgment
 
@@ -474,7 +454,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 4.2a ownership checked on artifact-read endpoints | 0 gaps | holds at 15 of 16 run-scoped routes (14 via `check_run_access`, 1 websocket via the same call); the 16th (`/admin/run/{run_id}/score`) is intentionally `require_admin`-only, not a gap. Hand-verified, not yet a standing test | ✓ |
 | 4.3 complete cache keys | 0 | **0 — fixed.** `_institution_cache_key()` folds a hash of the owner context into the cache key, closing #582 (PR #585); now at `stage5b/cache.py:122` after the stage-5b split | ✓ |
 | 4.4 own your region | per-section | shared `_overflow_entries`, `_appendix_pending`, `_cleared_tables` still declared and written only in `stage_6_word_template.py`, but `_cleared_tables` is now read cross-file from `stage6/sections/service.py:790`. Sections are mixins, so all 23 reach all three by construction; no section module mutates them today | ✗ |
-| 4.5 lazy singletons locked | all | 6 locked (`llm/openai.py:14` and `llm/bedrock.py:50`, both under `llm/retry.py:137`'s shared lock; `async_rate_limiter.py`, `session_idle.py`, `saml_replay.py`, `login_throttle.py`), **7** unlocked (`storage/factory.py:18`, `stage4/schemas.py:609`, `taxonomy_mapper_v2.py` ×2, `config.py:450`, `consent.py:19-20`, and `async_rate_limiter.py`'s own `get_rate_limiter_sync()` sharing state with its locked sibling — orphaned module, #653). Revised upward twice now (4/1 → 6/5 → 6/7), the last two both pre-existing and simply missed — build the check rather than hand-count a fourth time | ~ |
+| 4.5 lazy singletons locked | all | 5 locked (`llm/bedrock.py:50`, under `llm/retry.py:137`'s shared lock; `async_rate_limiter.py`, `session_idle.py`, `saml_replay.py`, `login_throttle.py` — `llm/openai.py:14`'s client singleton removed by #953, Bedrock-only), **7** unlocked (`storage/factory.py:18`, `stage4/schemas.py:609`, `taxonomy_mapper_v2.py` ×2, `config.py:450`, `consent.py:19-20`, and `async_rate_limiter.py`'s own `get_rate_limiter_sync()` sharing state with its locked sibling — orphaned module, #653). Revised upward twice, then down once (4/1 → 6/5 → 6/7 → 5/7 on #953) — build the check rather than hand-count a fifth time | ~ |
 | 5.1 error policy owned by the driver | 1 policy | 2 opposite policies — CLI catches at 11 sites, orchestrator raises, now pinned by a regression test on each side (#647, merged, §5.1); the policies themselves are still not unified | ✗ |
 | 5.2 never report success on failure | enforced | met, with a regression test (`test_run_full_pipeline_exit_status.py`) | ✓ |
 | 5.3 degradation visible in the artifact | all paths | 2 silent LLM fallbacks in stage 6, both still present (`stage_6_word_template.py:1098`, `:2034`); a third, in stage 3b, was made visible this round — a rejected taxonomy code now records `classification_source: llm_invalid_code` plus an `invalid_code_entries` stat (c6402bf) | ✗ |

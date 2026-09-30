@@ -21,8 +21,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.core.template_boilerplate import (  # noqa: E402
+    is_foreign_template_instruction,
     is_near_template_instruction,
     is_template_instruction,
+    is_template_label_line,
     is_unanswered_prompt,
     filter_template_instructions,
 )
@@ -166,8 +168,10 @@ NEAR_MATCHES = [
     # an extra comma, plus the faculty member's "N/A" answer appended
     "Include year(s), leadership role, and description of activity/program, i.e., "
     "director/head of service/clinic or procedure area.: N/A",
-    # "YES or NO" answered "N/A": 0.934, just over the threshold
-    "Have you passed the examination for foreign medical school graduates? N/A",
+    # the 2022 label without "as teacher": 0.933, just over the threshold. (The
+    # fixture here used to be "Have you passed the examination ...? N/A",
+    # which the 2020 revision now matches exactly -- #829.)
+    "Continuing education and professional education (role and scope of activity)",
 ]
 
 
@@ -231,6 +235,77 @@ def test_an_answered_or_unrecognised_line_is_not_unanswered(text):
     assert not is_unanswered_prompt(text)
 
 
+# --- #829: the phrase set covers every tracked template revision ---
+
+def test_the_committed_phrase_set_is_what_the_generator_produces(tmp_path, monkeypatch):
+    """template_boilerplate_phrases.json is generated, never hand-edited:
+    regenerating it from key_files/ must reproduce the committed file."""
+    import importlib.util
+    import json
+    root = Path(__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location(
+        "gen_template_boilerplate", root / "scripts" / "gen_template_boilerplate.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    out = tmp_path / "phrases.json"
+    monkeypatch.setattr(gen, "OUTPUT_PATH", out)
+    gen.main()
+    committed = root / "src" / "unified_pipeline" / "core" / "template_boilerplate_phrases.json"
+    assert json.loads(out.read_text()) == json.loads(committed.read_text())
+
+
+@pytest.mark.parametrize("text", [
+    # 2020 revision only: its licensure note (not in the 2022 file at all)
+    "Licensure: Every physician appointed to the Hospital staff, except interns, "
+    "and aliens in the US via non-immigrant visas, must have a New York State "
+    "license or a temporary certificate in lieu of the license.",
+    # 2012 revision only
+    "(Every doctor appointed to the Hospital staff, except interns and aliens in "
+    "the US via non-immigrant visas, must have a New York State license or a "
+    "temporary certificate in lieu of the license.)",
+])
+def test_older_revisions_instructions_are_boilerplate(text):
+    assert is_template_instruction(text)
+
+
+@pytest.mark.parametrize("header", [
+    "B. EDUCATIONAL BACKGROUND",               # 2012
+    "PROFESSIONAL POSITIONS AND EMPLOYMENT",   # 2012 and 2020
+    "LICENSURE, BOARD CERTIFICATION, MALPRACTICE",
+])
+def test_older_revisions_section_headers_are_never_dropped(header):
+    assert not is_template_instruction(header)
+    assert not is_near_template_instruction(header)
+# --- #829: a line of nothing but template labels (Appendix only) ---
+
+@pytest.mark.parametrize("text", [
+    "Signature:",                        # short: below is_template_instruction's floor
+    "If no license:",
+    "Site/Position |",
+    "Research |  |",                     # an unfilled effort-table row
+    "Duration of support:\n(mm/yyyy-mm/yyyy) |",   # label split over two lines
+    "DEA number: (optional)\t\nNPI number: (optional)\t",
+    "Signature:\tIf no license:",        # two labels on one line, tab-separated
+    # a section header alone (protected, and in no instruction phrase)
+    "CLINICAL PRACTICE, INNOVATION, and LEADERSHIP",
+])
+def test_a_line_of_only_template_labels(text):
+    assert not is_template_instruction(text)  # the gap: too short for the floor
+    assert is_template_label_line(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Your role*\toversight",             # one real piece keeps the line
+    "Site/Position | Fictional Assistant Director, Imaginary Library",
+    "Signature: Jane Q. Fictional",
+    "Worked with the fictional outreach team",
+    "",
+    " |  | ",
+])
+def test_a_line_with_any_real_piece_is_not_label_only(text):
+    assert not is_template_label_line(text)
+
+
 def test_layer1_integration_filter():
     """Mirror the Layer 1 (stage 2) filter on a synthesized mixed entries list."""
     def layer1(entries):
@@ -277,3 +352,85 @@ def test_entries_without_text_key_do_not_crash():
     kept = layer1(entries)
     # The entry lacking "text" is treated as empty -> kept; header kept too.
     assert len(kept) == 2
+
+
+# --- Another institution's template scaffolding (#530). Every line below is
+# synthetic: it reproduces a SHAPE, and no line is copied from a real CV. ---
+FOREIGN_POSITIVES = [
+    "C. Sample Appointments (include institution, title and dates of appointment)",
+    "a) Sample Honors (please list newest first)",
+    "iv. Sample Service (specify committee and role)",
+    "3.  Sample Positions (list titles, dates of employment): N/A",
+    "1.  Courses Taught (include number of hours):",
+    # The template's own line wrapped: the parenthetical never closes.
+    "C. Sample Publications (provide complete citation for each item; number",
+    "1. Sample Leave: N/A",
+    "2. Sample Leave: Not applicable",
+    "b. Local: N/A",
+    "5, Other Activities: N/A",
+    "Sample Support To Be Transferred (if applicable): N/A",
+    "NOTE: This section includes talks and panels for which you were invited",
+    "NOTE: This category should list only items you presented, please",
+    "(include information about outcomes, where applicable): N/A",
+    "(please describe your role)",
+    "newsletters, blogs, podcasts, etc.): N/A",
+    "F. Sample Lectures (provide citation; list in II.B.5\tand posters)",
+    # Interior whitespace runs do not count against the length cap.
+    "C. Sample" + " " * 150 + "Appointments" + " " * 150 + "(include dates)",
+]
+
+FOREIGN_NEGATIVES = [
+    # Real headings and entries the shape must not touch.
+    "Education",
+    "Sample Publications",
+    "b. National:",
+    "2. Review Panels",
+    "Conflicts of interest: None",
+    "Grant Number: N/A",
+    # Rule 1 needs an outline marker: an unmarked label with a parenthetical is
+    # a real entry.
+    "Staff Physician (provide inpatient consultation services)",
+    "Sample Support (provide the following information for each project)",
+    "Sample Books: (Indicate authors or editor.)",
+    # A protected WCM header is never matched, even numbered.
+    "Postdoctoral Training (include residency/fellowships)",
+    "1. Postdoctoral Training (include residency/fellowships)",
+    # "None" is a real answer, not a placeholder (rule 2).
+    "1. Board Certification: None",
+    "1. Sample Conflicts of Interest: none",
+    # Anything after the closing parenthesis is faculty text.
+    "3. Sample Training (describe your role; provide information) - Major advisor to five students",
+    "Sample lecture (include slides) at Example University",
+    # "list" as a noun, not a directive.
+    "Sample Publications (list available upon request)",
+    "Sample Papers (list of selected papers below)",
+    "C. Sample Publications (list available upon request)",
+    "C. Sample Papers (list of selected papers below)",
+    "(list available upon request)",
+    # A filled record: digits, or a second colon, in the label.
+    "1. Technical Title: Sample Study Name of Funding Agency: Sample Foundation Grant Number: N/A",
+    "2019 Sample Award (include in annual report): N/A",
+    "1. Sample 2019 Study: N/A",
+    # An author's own note addresses no one.
+    "NOTE: This section includes only work done at the Example Institute",
+    # A table row is left to the WCM detector's per-cell rule.
+    "Sample Label | (include dates)",
+    "1. Sample Label (include dates | Example Society",
+    "",
+]
+
+
+@pytest.mark.parametrize("text", FOREIGN_POSITIVES)
+def test_foreign_template_instruction_positives(text):
+    assert is_foreign_template_instruction(text), text
+
+
+@pytest.mark.parametrize("text", FOREIGN_NEGATIVES)
+def test_foreign_template_instruction_negatives(text):
+    assert not is_foreign_template_instruction(text), text
+
+
+def test_foreign_template_instruction_length_cap():
+    long_line = "C. Sample Publications (provide " + "complete citation; " * 40 + ")"
+    assert len(long_line) > 400
+    assert not is_foreign_template_instruction(long_line)

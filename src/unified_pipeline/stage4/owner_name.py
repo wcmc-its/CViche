@@ -13,11 +13,11 @@ from typing import Any, NamedTuple
 from zipfile import BadZipFile
 
 from docx.opc.exceptions import PackageNotFoundError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from unified_pipeline.core.docx_structure_extractor import extract_owner_side_channel
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.llm.retry import RETRYABLE_ERRORS
+from unified_pipeline.llm.retry import RETRYABLE_ERRORS, LLMOutageError
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +27,11 @@ logger = logging.getLogger(__name__)
 # the body tier is already capped (first_entries[:10] below).
 OWNER_SIDE_CHANNEL_MAX_LINES = 20
 OWNER_SIDE_CHANNEL_MAX_CHARS = 200
+
+# #457: the body tier's window over the document's leading entries. An entry at
+# or over the char cap is not a header-style line; see `_owner_name_window`.
+OWNER_NAME_WINDOW_ENTRIES = 12
+OWNER_NAME_ENTRY_MAX_CHARS = 500
 
 
 class _OwnerNameResponse(BaseModel):
@@ -109,9 +114,8 @@ def _run_owner_name_llm(content_lines: list[str]) -> dict[str, str] | None:
     # e.g. a null-valued field, which a plain dict.get(key, '').strip() would
     # raise AttributeError on instead of degrading to fallback_from_uid()),
     # and the LLM client's own documented failure types (RETRYABLE_ERRORS --
-    # openai's RateLimitError/APITimeoutError/APIConnectionError/
-    # InternalServerError plus botocore's ClientError for Bedrock, raised by
-    # call_llm once its own internal retries are exhausted). A bare `except
+    # botocore's ClientError for Bedrock, raised by call_llm once its own
+    # internal retries are exhausted). A bare `except
     # Exception` here would also swallow a real bug (a future TypeError in
     # this file, or inside call_llm) and misreport it as an ordinary LLM
     # hiccup, silently falling back to a fabricated surname instead of
@@ -167,6 +171,27 @@ def _owner_side_channel_content_lines(document_uid: str, docx_path: str) -> tupl
     return lines, first_channel
 
 
+def _owner_name_window(mapped_entries: list[dict[str, Any]]) -> list[str]:
+    """The body tier's input: the text of the first OWNER_NAME_WINDOW_ENTRIES
+    entries that is short enough to be a header-style line (under
+    OWNER_NAME_ENTRY_MAX_CHARS).
+
+    When that filter selects nothing -- a narrative CV whose stage 2 output is
+    a few very long entries -- return each of those entries truncated to
+    OWNER_NAME_ENTRY_MAX_CHARS instead of dropping them (#457): the owner's
+    name sits at the top of the document, so a prefix is usable where an empty
+    window meant name extraction never ran. A CV with at least one short entry
+    keeps the pre-#457 window exactly, so no CV that already had a window sees
+    its prompt change.
+    """
+    texts = [entry.get('text', '').strip() for entry in mapped_entries[:OWNER_NAME_WINDOW_ENTRIES]]
+    texts = [text for text in texts if text]
+    short = [text for text in texts if len(text) < OWNER_NAME_ENTRY_MAX_CHARS]
+    if short:
+        return short
+    return [text[:OWNER_NAME_ENTRY_MAX_CHARS] for text in texts]
+
+
 def extract_cv_owner_name(
     document_uid: str,
     mapped_entries: list[dict[str, Any]],
@@ -205,11 +230,7 @@ def extract_cv_owner_name(
     }
 
     # Gather first ~10 entries to give LLM context
-    first_entries = []
-    for entry in mapped_entries[:12]:
-        text = entry.get('text', '').strip()
-        if text and len(text) < 500:  # Skip very long entries
-            first_entries.append(text)
+    first_entries = _owner_name_window(mapped_entries)
 
     # Helper to extract last name from document_uid as fallback.
     #
@@ -421,6 +442,14 @@ class _InferredLocation(BaseModel):
     country: str = ''
     confidence: float = 0.0
 
+    @field_validator("institution", "city", "state", "country", mode="before")
+    @classmethod
+    def _none_as_empty(cls, v: object) -> object:
+        # Sonnet 5 writes null for an unknown city/state where Sonnet 4.6
+        # writes "" -- the same "not known"; rejecting it failed the whole
+        # location inference (web175, 2026-09-29 A/B).
+        return "" if v is None else v
+
 
 class _LocationInferenceResponse(BaseModel):
     """Expected shape of the location-inference LLM response.
@@ -575,8 +604,7 @@ Return ONLY valid JSON, no explanation."""
                     {"role": "system", "content": "You extract location information from CV data. Return only valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,
-                max_tokens=500
+                temperature=0.1
             )
 
             response_text = llm_result["content"].strip()
@@ -588,6 +616,8 @@ Return ONLY valid JSON, no explanation."""
 
             parsed = json.loads(response_text)
 
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
         except json.JSONDecodeError as e:
             logger.warning("Could not parse location inference response: %s", e)
             return False

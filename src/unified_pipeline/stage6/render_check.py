@@ -26,31 +26,15 @@ RECORD_DATE_LINE_MIN_CHARS, _RECORD_DATE_PREFIX_RE), and its `_record_lines`/
 comment above them.
 """
 import re
-from types import MappingProxyType
 
 from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.core.retired_taxonomy_codes import RETIRED_TAXONOMY_CODES
 
 from .normalization import _squash
 
 
-# Retired taxonomy codes that were pure renames of a still-live code. Stage-3b
-# occasionally still emits the old code (e.g. patents tagged as the retired M3),
-# which has no render route and gets silently dropped. Normalize to the live code
-# at grouping time so the existing renderer picks them up.
-# ponytail: pure renames only. Codes with NO live equivalent (N4, M4C) need a
-# real render route instead — see #261; don't add them here.
-RETIRED_TAXONOMY_CODES = MappingProxyType({
-    'M3': 'M2D',  # Patents & Innovations — former M3 renamed to M2D (taxonomy v7)
-})
-# ponytail: pure renames ONLY — old code and target must mean the same thing.
-# Deliberately NOT here:
-#   M4A/M4B/M4C (clinical trials). update_m4_to_m2.py suggests M4A->M2A/M4B->M2B,
-#   but that mapping is WRONG against the live taxonomy: M4A/M4B/M4C are trial
-#   TYPES (Interventional / Observational / Device), while M2A/M2B/M2C are funding
-#   STATUS (Current / Past / Pending). Renaming type->status files completed trials
-#   under "Current Research Funding" (verified on web059). Trials need status-aware
-#   routing, not a static map — see the clinical-trials issue.
-#   N4/M4C have no live equivalent and need real render routes — see #261.
+# The retired-code map lives in core so stage 3b and this module share one
+# list (#291 added the M4 clinical-trial codes to it).
 
 
 def normalize_retired_code(entry: dict) -> str:
@@ -177,7 +161,39 @@ def segment_already_rendered(segment_text: str, extracted_fields: dict) -> bool:
 
 RENDER_TOKEN_MIN_COUNT = 3
 RENDER_TOKEN_OVERLAP = 0.7
-_RENDER_TOKEN_RE = re.compile(r"[a-z]{5,}")
+# Unicode letters only (no digits/underscore): [a-z]{5,} on ASCII input (#541).
+#
+# CJK is EXCLUDED, not measured (#722). The 5-letter floor and
+# RENDER_TOKEN_MIN_COUNT were never tuned against CJK text (the local farm has
+# 0 CJK CVs). Chinese and Japanese have no whitespace word delimiters, so a
+# run of their letters is a clause, not a word. Korean does use spaces, but
+# its words are counted in syllables and rarely reach 5; the floor was never
+# tuned for that unit either, so Korean is excluded with the rest of CJK.
+# CJK characters therefore never form a token: a chunk that is all CJK has
+# too few tokens, so every render-overlap check returns None ("not
+# verifiable"), never False ("missing"). Latin/Cyrillic/Greek words inside a
+# mixed-script chunk still count. A script-aware floor needs real CJK data.
+#
+# Coverage is pinned by a walk over every code point: each letter whose
+# Unicode name is CJK/Hiragana/Katakana/Hentaigana/Hangul (incl. halfwidth)
+# is excluded, and no other letter is. Known gap, NOT excluded: Bopomofo
+# (U+3100-312F, U+31A0-31BF).
+_CJK_CLASS = (
+    "\u1100-\u11ff"          # Hangul Jamo
+    "\u3040-\u30ff"          # Hiragana, Katakana
+    "\u3130-\u318f"          # Hangul compatibility Jamo
+    "\u31f0-\u31ff"          # Katakana phonetic extensions
+    "\u3400-\u4dbf"          # CJK extension A
+    "\u4e00-\u9fff"          # CJK unified ideographs
+    "\ua960-\ua97f"          # Hangul Jamo extended-A
+    "\uac00-\ud7ff"          # Hangul syllables, Jamo extended-B
+    "\uf900-\ufaff"          # CJK compatibility ideographs
+    "\uff66-\uff9f"          # Halfwidth Katakana
+    "\uffa0-\uffdc"          # Halfwidth Hangul
+    "\U0001aff0-\U0001b16f"  # Kana extended-B, supplement, extended-A, small
+    "\U00020000-\U0003ffff"  # CJK extensions B and later
+)
+_RENDER_TOKEN_RE = re.compile(rf"(?:(?![{_CJK_CLASS}])[^\W\d_]){{5,}}")
 RENDER_PIECE_MIN_CHARS = 15
 RENDER_PIECE_WINDOW = 40
 

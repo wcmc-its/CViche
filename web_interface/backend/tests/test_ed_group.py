@@ -8,6 +8,11 @@ from unittest.mock import patch, MagicMock
 from uuid import uuid4
 
 import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, StaticPool
+from sqlalchemy.orm import sessionmaker
+
+from app.database import Base, get_db
 
 from app.ed_group_lookup import (
     check_ed_membership,
@@ -27,6 +32,7 @@ from app.ed_group_lookup import (
     _user_matches_memberurl,
     _dn_in_scope,
     _validate_ldap_url,
+    validate_startup_config,
     _group_cache,
     _stale_cache,
     _MAX_MEMBERURL_SEARCHES,
@@ -422,11 +428,18 @@ class TestDnInScope:
     def test_base_scope_requires_exact_match(self):
         assert _dn_in_scope(self.CHILD, self.CHILD, BASE) is True
         assert _dn_in_scope(self.CHILD, self.BASE_DN, BASE) is False
+        # Shares the leftmost RDN with CHILD but differs deeper -- a
+        # comparison that only checks the leftmost component (u[:1] ==
+        # b[:1]) would wrongly call this BASE-in-scope.
+        sibling_same_leftmost_rdn = "uid=paa2013,ou=other,dc=weill,dc=cornell,dc=edu"
+        assert _dn_in_scope(sibling_same_leftmost_rdn, self.CHILD, BASE) is False
 
     def test_level_scope_direct_child_only(self):
         assert _dn_in_scope(self.CHILD, self.BASE_DN, LEVEL) is True
         assert _dn_in_scope(self.GRANDCHILD, self.BASE_DN, LEVEL) is False
         assert _dn_in_scope(self.BASE_DN, self.BASE_DN, LEVEL) is False
+        # Right depth, wrong parent: depth alone must not satisfy LEVEL.
+        assert _dn_in_scope("uid=x,ou=other,dc=weill,dc=cornell,dc=edu", self.BASE_DN, LEVEL) is False
 
     def test_subtree_scope_at_or_below(self):
         assert _dn_in_scope(self.CHILD, self.BASE_DN, SUBTREE) is True
@@ -436,6 +449,62 @@ class TestDnInScope:
 
     def test_case_insensitive(self):
         assert _dn_in_scope(self.CHILD.upper(), self.BASE_DN, LEVEL) is True
+
+    def test_case_insensitive_on_base_dn_too(self):
+        """Case-folding must apply to BOTH sides of the comparison, not just
+        the user DN -- a mutation that only lowers user_rdns (or only
+        base_rdns) survives test_case_insensitive alone."""
+        assert _dn_in_scope(self.CHILD, self.BASE_DN.upper(), LEVEL) is True
+
+    def test_subtree_is_a_positional_suffix_not_a_set_membership(self):
+        """SUBTREE must check that base_dn's RDNs are the exact rightmost
+        SLICE of user_dn's, in order -- not merely that every RDN of base_dn
+        appears somewhere in user_dn (#331). A DN with the same RDN
+        components in a different position/order must not match."""
+        base = "dc=weill,dc=cornell,dc=edu"
+        reordered = "ou=x,dc=cornell,dc=weill,dc=edu"
+        assert _dn_in_scope(reordered, base, SUBTREE) is False
+
+    def test_escaped_comma_in_rdn_value_is_one_component(self):
+        """A comma inside an RDN's value (escaped per RFC 4514) must not be
+        read as a component boundary -- the old partition(',') implementation
+        split on it and missed this direct child (#331)."""
+        child = r"cn=Smith\, John,ou=people,dc=weill,dc=cornell,dc=edu"
+        assert _dn_in_scope(child, self.BASE_DN, LEVEL) is True
+
+    def test_whitespace_after_comma_is_normalized(self):
+        spaced = "uid=abc, ou=people, dc=weill, dc=cornell, dc=edu"
+        assert _dn_in_scope(spaced, self.BASE_DN, LEVEL) is True
+
+    def test_unparseable_escaped_comma_dn_is_not_in_scope(self):
+        """The old string-suffix check read this DN as ending in base_dn and
+        accepted it under SUBTREE (#331). ldap3 refuses to parse it (the
+        unescaped "=" after the escaped comma), so it now lands on the
+        malformed-DN branch and is out of scope."""
+        widened = r"uid=x,ou=a\,ou=people,dc=weill,dc=cornell,dc=edu"
+        assert _dn_in_scope(widened, self.BASE_DN, SUBTREE) is False
+
+    def test_malformed_user_dn_is_not_in_scope_and_warns_without_the_dn(self, caplog):
+        """A user DN ldap3 cannot parse returns False (fail-closed), never
+        raises, and logs a warning that leaves the DN itself out."""
+        with caplog.at_level("WARNING", logger="app.ed_group_lookup"):
+            assert _dn_in_scope("not a dn at all ===", self.BASE_DN, SUBTREE) is False
+        assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+            ("WARNING", "user DN does not parse; treating as not in scope")]
+
+    def test_malformed_base_dn_is_not_in_scope_and_logs_an_error(self, caplog):
+        """A memberURL base that won't parse is a broken group definition:
+        still not in scope, but logged at ERROR and named, unlike a bad user DN."""
+        with caplog.at_level("WARNING", logger="app.ed_group_lookup"):
+            assert _dn_in_scope(self.CHILD, "=bad base", SUBTREE) is False
+        assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
+            ("ERROR", "memberURL base DN '=bad base' does not parse; treating as not in scope")]
+
+    def test_escaped_trailing_space_is_not_in_scope(self):
+        """parse_dn(strip=True) rejects a value ending in an escaped space,
+        which lands on the fail-closed side rather than widening scope."""
+        assert _dn_in_scope(r"uid=x\ ,ou=people,dc=weill,dc=cornell,dc=edu",
+                            self.BASE_DN, SUBTREE) is False
 
 
 class TestGroupOfURLsMembership:
@@ -1105,6 +1174,7 @@ def _mock_saml_client(identity_dict):
     mock_client = MagicMock()
     mock_response = MagicMock()
     mock_response.get_identity.return_value = identity_dict
+    mock_response.response.destination = None  # absent Destination is allowed (#672)
     # A real pysaml2 response always carries an assertion ID; give this stub
     # one too so the replay gate's fail-closed default (a missing ID) doesn't
     # fire on tests that aren't exercising that path.
@@ -1358,6 +1428,249 @@ class TestLdapUrlValidation:
         with pytest.raises(EdUnavailableError):
             check_ed_membership("badurl01", ACCESS_GROUP, ADMIN_GROUP, cfg=cfg)
         mock_server.assert_not_called()
+
+
+class TestValidateStartupConfig:
+    """validate_startup_config fails a deployment at boot on a misconfigured
+    ED, instead of on the first SAML login (#330)."""
+
+    _GOOD_URL = "ldaps://ed.weill.cornell.edu:636"
+    _GOOD_DN = "cn=svc-cviche,ou=ServiceAccounts,dc=weill,dc=cornell,dc=edu"
+    _GOOD_PASSWORD = "test-password"  # synthetic test literal, not a real credential
+    _GOOD_GROUP = "cn=cviche-access,ou=Groups,dc=weill,dc=cornell,dc=edu"
+
+    def test_accepts_a_complete_config(self):
+        validate_startup_config(
+            self._GOOD_URL, self._GOOD_DN, self._GOOD_PASSWORD, self._GOOD_GROUP,
+        )  # must not raise
+
+    def test_rejects_empty_bind_password(self):
+        """The one field no call site ever checked (#330's residual gap)."""
+        with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_PASSWORD"):
+            validate_startup_config(
+                self._GOOD_URL, self._GOOD_DN, "", self._GOOD_GROUP,
+            )
+
+    def test_rejects_whitespace_only_bind_password(self):
+        with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_PASSWORD"):
+            validate_startup_config(
+                self._GOOD_URL, self._GOOD_DN, "   ", self._GOOD_GROUP,
+            )
+
+    def test_rejects_whitespace_only_bind_dn(self):
+        with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_DN"):
+            validate_startup_config(
+                self._GOOD_URL, "   ", self._GOOD_PASSWORD, self._GOOD_GROUP,
+            )
+
+    def test_rejects_whitespace_only_access_group(self):
+        with pytest.raises(EdConfigurationError, match="ed_access_group"):
+            validate_startup_config(
+                self._GOOD_URL, self._GOOD_DN, self._GOOD_PASSWORD, "   ",
+            )
+
+    def test_rejects_missing_bind_dn(self):
+        with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_DN"):
+            validate_startup_config(
+                self._GOOD_URL, "", self._GOOD_PASSWORD, self._GOOD_GROUP,
+            )
+
+    def test_rejects_missing_access_group(self):
+        with pytest.raises(EdConfigurationError, match="ed_access_group"):
+            validate_startup_config(
+                self._GOOD_URL, self._GOOD_DN, self._GOOD_PASSWORD, "",
+            )
+
+    def test_rejects_bad_ldap_url(self):
+        with pytest.raises(EdConfigurationError, match="Invalid ED LDAP URL"):
+            validate_startup_config(
+                "http://ed.weill.cornell.edu", self._GOOD_DN, self._GOOD_PASSWORD,
+                self._GOOD_GROUP,
+            )
+
+    def test_reports_every_missing_field_at_once(self):
+        """One restart should surface every problem, not one field per boot."""
+        with pytest.raises(EdConfigurationError) as excinfo:
+            validate_startup_config("", "", "", "")
+        message = str(excinfo.value)
+        assert "ED_LDAP_BIND_DN" in message
+        assert "ED_LDAP_BIND_PASSWORD" in message
+        assert "ed_access_group" in message
+
+
+class TestValidateStartupConfigWiring:
+    """The lifespan WIRE from `if get_config_value(db, "ed_enabled")` (main.py)
+    through to validate_startup_config() actually refusing app startup (#330).
+
+    TestValidateStartupConfig above exhaustively covers the helper as a pure
+    function, but never calls through main.py's lifespan -- so a mutation that
+    drops the `ed_enabled` gate, no-ops the validate_startup_config() call, or
+    hardcodes the bind password survives every one of those tests. This class
+    boots a real TestClient(app) (running the real lifespan) against an
+    isolated in-memory DB, so those call-site mutations are caught.
+
+    Seeding SystemConfig directly is not enough: lifespan's own
+    seed_system_config() reconciles file-managed keys (including ed_enabled)
+    from YAML on every boot, so a pre-seeded DB row is overwritten before the
+    gate is even checked. `load_yaml_config` is patched instead, the same way
+    the app itself reads `ed.enabled` from a rendered auth_config.yaml.
+    """
+
+    @staticmethod
+    def _fresh_engine_and_sessionmaker():
+        engine = create_engine(
+            "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool,
+        )
+        Session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+        Base.metadata.create_all(bind=engine)
+        return engine, Session
+
+    def _boot(self, yaml_cfg):
+        """Boot the app against yaml_cfg; returns (app, cleanup)."""
+        from app.main import app
+        engine, Session = self._fresh_engine_and_sessionmaker()
+        session = Session()
+
+        def override_get_db():
+            try:
+                yield session
+            finally:
+                pass
+
+        app.dependency_overrides[get_db] = override_get_db
+        patches = [
+            patch("app.database.SessionLocal", Session),
+            patch("app.database.engine", engine),
+            patch("app.config_loader.load_yaml_config", return_value=yaml_cfg),
+        ]
+        for p in patches:
+            p.__enter__()
+
+        def cleanup():
+            for p in reversed(patches):
+                p.__exit__(None, None, None)
+            app.dependency_overrides.clear()
+            session.close()
+
+        return app, cleanup
+
+    def test_startup_refuses_when_ed_enabled_and_ldap_unset(self, monkeypatch):
+        monkeypatch.delenv("ED_LDAP_URL", raising=False)
+        monkeypatch.delenv("ED_LDAP_BIND_DN", raising=False)
+        monkeypatch.delenv("ED_LDAP_BIND_PASSWORD", raising=False)
+        app, cleanup = self._boot({"ed": {
+            "enabled": True,
+            "access_group": "cn=g,ou=groups,dc=example,dc=org",
+        }})
+        try:
+            with pytest.raises(EdConfigurationError):
+                with TestClient(app):
+                    pass
+        finally:
+            cleanup()
+
+    def test_startup_succeeds_when_ed_enabled_and_ldap_configured(self, monkeypatch):
+        monkeypatch.setenv("ED_LDAP_URL", "ldaps://ed.example.org:636")
+        monkeypatch.setenv("ED_LDAP_BIND_DN", "cn=svc,dc=example,dc=org")
+        monkeypatch.setenv("ED_LDAP_BIND_PASSWORD", "test-password")
+        app, cleanup = self._boot({"ed": {
+            "enabled": True,
+            "access_group": "cn=g,ou=groups,dc=example,dc=org",
+        }})
+        try:
+            with TestClient(app) as c:
+                assert c.get("/health").status_code == 200
+        finally:
+            cleanup()
+
+    def test_startup_refuses_when_only_bind_password_env_is_unset(self, monkeypatch):
+        """Isolates ED_LDAP_BIND_PASSWORD: URL/bind_dn/access_group are all
+        valid, only the password is missing -- catches a mutation that reads
+        the wire's bind_password from anywhere other than the real env var
+        (e.g. hardcoding a non-empty placeholder), which the
+        all-fields-unset case above can't isolate."""
+        monkeypatch.setenv("ED_LDAP_URL", "ldaps://ed.example.org:636")
+        monkeypatch.setenv("ED_LDAP_BIND_DN", "cn=svc,dc=example,dc=org")
+        monkeypatch.delenv("ED_LDAP_BIND_PASSWORD", raising=False)
+        app, cleanup = self._boot({"ed": {
+            "enabled": True,
+            "access_group": "cn=g,ou=groups,dc=example,dc=org",
+        }})
+        try:
+            with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_PASSWORD"):
+                with TestClient(app):
+                    pass
+        finally:
+            cleanup()
+
+    def test_startup_refuses_when_only_ldap_url_env_is_unset(self, monkeypatch):
+        """Isolates ED_LDAP_URL: bind_dn/bind_password/access_group are all
+        valid, only the URL is missing -- catches a mutation that reads the
+        wire's ldap_url from anywhere other than the real env/yaml config
+        (e.g. hardcoding a valid placeholder), which a case that leaves every
+        field unset can't isolate."""
+        monkeypatch.delenv("ED_LDAP_URL", raising=False)
+        monkeypatch.setenv("ED_LDAP_BIND_DN", "cn=svc,dc=example,dc=org")
+        monkeypatch.setenv("ED_LDAP_BIND_PASSWORD", "test-password")
+        app, cleanup = self._boot({"ed": {
+            "enabled": True,
+            "access_group": "cn=g,ou=groups,dc=example,dc=org",
+        }})
+        try:
+            with pytest.raises(EdConfigurationError, match="Invalid ED LDAP URL"):
+                with TestClient(app):
+                    pass
+        finally:
+            cleanup()
+
+    def test_startup_refuses_when_only_bind_dn_env_is_unset(self, monkeypatch):
+        """Isolates ED_LDAP_BIND_DN: url/bind_password/access_group are all
+        valid, only bind_dn is missing -- catches a mutation that reads the
+        wire's bind_dn from anywhere other than the real env config (e.g.
+        hardcoding a valid placeholder)."""
+        monkeypatch.setenv("ED_LDAP_URL", "ldaps://ed.example.org:636")
+        monkeypatch.delenv("ED_LDAP_BIND_DN", raising=False)
+        monkeypatch.setenv("ED_LDAP_BIND_PASSWORD", "test-password")
+        app, cleanup = self._boot({"ed": {
+            "enabled": True,
+            "access_group": "cn=g,ou=groups,dc=example,dc=org",
+        }})
+        try:
+            with pytest.raises(EdConfigurationError, match="ED_LDAP_BIND_DN"):
+                with TestClient(app):
+                    pass
+        finally:
+            cleanup()
+
+    def test_startup_refuses_when_only_access_group_is_unset(self, monkeypatch):
+        """Isolates ed_access_group: url/bind_dn/bind_password are all valid,
+        only access_group is missing from the yaml config -- catches a
+        mutation that reads the wire's ed_access_group from anywhere other
+        than the real DB config (e.g. hardcoding a valid placeholder)."""
+        monkeypatch.setenv("ED_LDAP_URL", "ldaps://ed.example.org:636")
+        monkeypatch.setenv("ED_LDAP_BIND_DN", "cn=svc,dc=example,dc=org")
+        monkeypatch.setenv("ED_LDAP_BIND_PASSWORD", "test-password")
+        app, cleanup = self._boot({"ed": {"enabled": True}})
+        try:
+            with pytest.raises(EdConfigurationError, match="ed_access_group"):
+                with TestClient(app):
+                    pass
+        finally:
+            cleanup()
+
+    def test_startup_skips_validation_when_ed_disabled(self, monkeypatch):
+        """Even with LDAP config fully unset, ed_enabled=False must not refuse
+        to start -- a deployment that doesn't use ED authorization shouldn't be
+        punished for an ED_LDAP_BIND_PASSWORD it will never read."""
+        monkeypatch.delenv("ED_LDAP_URL", raising=False)
+        monkeypatch.delenv("ED_LDAP_BIND_DN", raising=False)
+        monkeypatch.delenv("ED_LDAP_BIND_PASSWORD", raising=False)
+        app, cleanup = self._boot({"ed": {"enabled": False}})
+        try:
+            with TestClient(app) as c:
+                assert c.get("/health").status_code == 200
+        finally:
+            cleanup()
 
 
 # ---------------------------------------------------------------------------

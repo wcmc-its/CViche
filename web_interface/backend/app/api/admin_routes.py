@@ -4,16 +4,19 @@ import io
 import json
 import logging
 from datetime import datetime, timedelta
+from collections.abc import Callable, Iterator
+from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+import redis
 from sqlalchemy import func
-from sqlalchemy.orm import Session, contains_eager
+from sqlalchemy.orm import Query as SAQuery, Session, contains_eager
 
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
 from app.auth import require_admin, SessionEpochUnreadable
-from app.errors import not_found, validation_error
+from app.errors import conflict, internal_error, not_found, validation_error
 from app.schemas import (
     AdminStats,
     AdminUser,
@@ -23,10 +26,15 @@ from app.schemas import (
     AdminConfigUpdate,
     AdminUserUpdate,
     QualityScoreResult,
+    QueueDbView,
+    QueueStatsResponse,
 )
-from app.services.admin_service import get_users_with_stats, get_single_user_stats
+from app.services.admin_service import get_step_avg_seconds, get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import get_cached_score, compute_and_cache_score
-from app.services.run_service import reap_orphaned_created_runs
+from app.audit_events import RUN_DELETED
+from app.services.run_service import delete_run_and_artifacts, find_run, reap_orphaned_created_runs, queue_db_view
+from app.config_loader import get_config as read_config  # a route below is named get_config
+from app.pipeline import concurrency, run_queue
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -93,6 +101,8 @@ async def get_stats(
         if durations else None
     )
 
+    step_avg_seconds = get_step_avg_seconds(db)
+
     return AdminStats(
         total_runs=total_runs,
         active_users=active_users,
@@ -100,6 +110,7 @@ async def get_stats(
         feedback_rate=round(feedback_rate, 1),
         avg_duration_seconds=avg_duration_seconds,
         p95_duration_seconds=p95_duration_seconds,
+        step_avg_seconds=step_avg_seconds,
     )
 
 
@@ -272,6 +283,87 @@ async def reap_orphan_runs(
 
 
 # ---------------------------------------------------------------------------
+# GET /api/admin/queue/stats
+# ---------------------------------------------------------------------------
+@router.get("/admin/queue/stats", response_model=QueueStatsResponse)
+def get_queue_stats(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> QueueStatsResponse:
+    """Run-queue depth and ownership (Valkey) beside the DB view of queued and
+    running runs (#701). ``enabled`` reflects ``dispatch_mode() == "queue"``,
+    not merely whether ``CVICHE_REDIS_URL`` is set -- that URL is shared with
+    the event broker, the idle-session store, the login throttle and SAML
+    replay, so in_process mode can still see it configured.
+
+    A queued row older than ``CVICHE_QUEUED_RECONCILE_MINUTES`` while stream
+    ``lag`` and ``pending`` are both 0 has lost its Valkey token; the
+    queued-run reconciler (``run_service.reconcile_queued_runs``) requeues it
+    on its next sweep, and the user's own /start does the same sooner. ``lag``
+    also counts stale tokens -- an idempotent re-enqueue of an
+    already-queued run, or a run cancelled while queued whose token nothing
+    has claimed yet -- so a non-zero lag does not by itself rule stranding
+    out.
+
+    Plain ``def``: both ``queue_db_view`` (sync Session) and ``run_queue``'s
+    Valkey calls (sync redis-py) are blocking, so FastAPI runs this in the
+    threadpool instead of stalling the event loop (#701 admin_routes.py
+    point 1 / run_queue.py point 11).
+    """
+    db_view = QueueDbView(**queue_db_view(db))
+    if concurrency.dispatch_mode() != "queue":
+        return QueueStatsResponse(enabled=False, db=db_view)
+
+    url, _ = read_config("redis", "CVICHE_REDIS_URL", default="")
+    if not url:
+        return QueueStatsResponse(enabled=True, db=db_view, error="valkey_not_configured")
+    try:
+        stats = run_queue.stats()
+    except redis.exceptions.RedisError as e:
+        # The endpoint that diagnoses a stuck queue must still answer when
+        # Valkey itself is the problem. The exception's own text can carry a
+        # host:port (e.g. "Error 111 connecting to valkey:6379") -- that goes
+        # only to the log, never the response.
+        logger.warning("Queue stats unavailable: %s: %s", type(e).__name__, e)
+        return QueueStatsResponse(enabled=True, db=db_view, error="valkey_unavailable")
+    return QueueStatsResponse(enabled=True, db=db_view, **stats)
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/admin/runs/{run_id}
+# ---------------------------------------------------------------------------
+@router.delete("/admin/runs/{run_id}", status_code=204)
+async def delete_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> None:
+    """Hard-delete one run (rows, stage artifacts, source CV, by-submitter
+    index) -- the removal path for a consent-withdrawal request (#683).
+    404 if unknown; 409 while the run is executing; 500 if storage or the DB
+    delete fails (storage is deleted first, so a retry is safe).
+
+    A 'cancelled' run is deletable: cancellation is a signal the orchestrator
+    honours at its next stage boundary and nothing acknowledges it, so a
+    just-cancelled run may still be writing for a short window (#683)."""
+    run = find_run(db, run_id)
+    if not run:
+        raise not_found("Run not found.")
+    if run.status == "running":
+        raise conflict("Run is still running; wait for it to finish before deleting.")
+
+    try:
+        objects_deleted = delete_run_and_artifacts(db, run)
+    except Exception:
+        logger.exception("Admin delete of run %s failed", run_id)
+        raise internal_error("Run deletion failed; it is safe to retry.")
+    logger.info(
+        RUN_DELETED,
+        extra={"admin": admin.email, "run_id": run_id, "objects_deleted": objects_deleted},
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /api/admin/runs
 # ---------------------------------------------------------------------------
 @router.get("/admin/runs", response_model=AdminRunsResponse)
@@ -363,6 +455,8 @@ async def get_runs(
                 has_feedback=run.id in feedback_run_ids,
                 quality_score=score.get("totalScore") if score else None,
                 quality_band=score.get("band") if score else None,
+                quality_data_complete=score.get("data_complete") if score else None,
+                quality_missing_evidence=(score.get("missing_evidence") or []) if score else [],
             )
         )
 
@@ -403,6 +497,8 @@ def compute_run_score(
         band=result.get("band", ""),
         dimensionScores=result.get("dimensionScores", []),
         flags=result.get("flags", []),
+        data_complete=result.get("data_complete"),
+        missing_evidence=result.get("missing_evidence", []),
     )
 
 
@@ -592,7 +688,186 @@ class _SafeCsvWriter:
 
 # ---------------------------------------------------------------------------
 # GET /api/admin/export/{export_type}
+#
+# Streams: rows are fetched in batches of _CSV_CHUNK_ROWS (Query.yield_per, which
+# also turns on a server-side cursor) and each batch is emitted as one chunk, so
+# memory stays bounded by the batch size rather than by the table size (#128).
 # ---------------------------------------------------------------------------
+_CSV_CHUNK_ROWS = 500
+
+
+def _iso(value: datetime | None) -> str:
+    return value.isoformat() if value else ""
+
+
+class _CsvExport(NamedTuple):
+    header: tuple[str, ...]
+    query: Callable[[Session], SAQuery]
+    row: Callable[..., list[object]]
+
+
+_RUN_HEADER = (
+    "run_id", "user_email", "filename", "file_type", "status",
+    "started_at", "completed_at", "total_cost", "total_tokens",
+    "input_tokens", "output_tokens", "submission_type", "error_message",
+)
+_USER_HEADER = (
+    "id", "email", "display_name", "role", "status",
+    "daily_limit", "monthly_limit", "consent_version",
+    "consent_date", "created_at", "last_active_at",
+)
+_CONSENT_HEADER = (
+    "id", "user_id", "user_email", "consent_version",
+    "consent_text_hash", "ip_address", "user_agent", "timestamp",
+)
+_FEEDBACK_HEADER = (
+    "id", "run_id", "user_email", "reviewer_role",
+    "overall_accuracy", "overall_completeness", "overall_usefulness",
+    "manual_conversion_effort", "correction_effort",
+    "enrichment_quality", "summary_generated", "summary_quality",
+    "issue_missing_content", "issue_split_merged", "issue_wrong_section",
+    "issue_inaccurate", "issue_ai_enrichment", "issue_formatting",
+    "issue_locations", "biggest_issue", "likelihood_to_recommend",
+    "submitted_at",
+)
+
+
+def _run_row(run: Run) -> list[object]:
+    return [
+        run.id,
+        run.user.email if run.user else "",
+        run.filename,
+        run.file_type,
+        run.status,
+        _iso(run.started_at),
+        _iso(run.completed_at),
+        run.total_cost,
+        run.total_tokens,
+        run.input_tokens,
+        run.output_tokens,
+        run.submission_type or "",
+        run.error_message or "",
+    ]
+
+
+def _user_row(u: User) -> list[object]:
+    return [
+        u.id,
+        u.email,
+        u.display_name,
+        u.role,
+        u.status,
+        u.daily_limit or "",
+        u.monthly_limit or "",
+        u.consent_version or "",
+        _iso(u.consent_date),
+        _iso(u.created_at),
+        _iso(u.last_active_at),
+    ]
+
+
+def _consent_row(consent: Consent) -> list[object]:
+    return [
+        consent.id,
+        consent.user_id,
+        consent.user.email if consent.user else "",
+        consent.consent_version,
+        consent.consent_text_hash,
+        consent.ip_address or "",
+        consent.user_agent or "",
+        _iso(consent.timestamp),
+    ]
+
+
+def _feedback_row(fb: Feedback) -> list[object]:
+    return [
+        fb.id,
+        fb.run_id,
+        fb.user.email if fb.user else "",
+        fb.reviewer_role,
+        fb.overall_accuracy,
+        fb.overall_completeness,
+        fb.overall_usefulness,
+        fb.manual_conversion_effort,
+        fb.correction_effort,
+        fb.enrichment_quality,
+        fb.summary_generated,
+        fb.summary_quality,
+        fb.issue_missing_content or "",
+        fb.issue_split_merged or "",
+        fb.issue_wrong_section or "",
+        fb.issue_inaccurate or "",
+        fb.issue_ai_enrichment or "",
+        fb.issue_formatting or "",
+        fb.issue_locations or "",
+        fb.biggest_issue or "",
+        fb.likelihood_to_recommend,
+        _iso(fb.submitted_at),
+    ]
+
+
+_CSV_EXPORTS = {
+    "runs": _CsvExport(
+        _RUN_HEADER,
+        lambda db: (
+            db.query(Run).outerjoin(Run.user).options(contains_eager(Run.user))
+            .order_by(Run.started_at.desc())
+        ),
+        _run_row,
+    ),
+    "users": _CsvExport(
+        _USER_HEADER,
+        lambda db: db.query(User).order_by(User.created_at.desc()),
+        _user_row,
+    ),
+    "consent": _CsvExport(
+        _CONSENT_HEADER,
+        lambda db: (
+            db.query(Consent).outerjoin(Consent.user)
+            .options(contains_eager(Consent.user))
+            .order_by(Consent.timestamp.desc())
+        ),
+        _consent_row,
+    ),
+    "feedback": _CsvExport(
+        _FEEDBACK_HEADER,
+        lambda db: (
+            db.query(Feedback).outerjoin(Feedback.user)
+            .options(contains_eager(Feedback.user))
+            .order_by(Feedback.submitted_at.desc())
+        ),
+        _feedback_row,
+    ),
+}
+
+
+def _drain(buffer: io.StringIO) -> str:
+    """Return everything written to `buffer` so far and empty it."""
+    text = buffer.getvalue()
+    buffer.seek(0)
+    buffer.truncate(0)
+    return text
+
+
+def _iter_csv_chunks(export_type: str, db: Session) -> Iterator[str]:
+    """Yield the CSV for `export_type` in chunks of _CSV_CHUNK_ROWS rows.
+
+    The header rides in the first chunk. Bytes are identical to writing the
+    whole table to one buffer: same rows, same order, same csv dialect.
+    """
+    spec = _CSV_EXPORTS[export_type]
+    buffer = io.StringIO()
+    writer = _SafeCsvWriter(buffer)
+    writer.writerow(spec.header)
+    for count, record in enumerate(spec.query(db).yield_per(_CSV_CHUNK_ROWS), 1):
+        writer.writerow(spec.row(record))
+        if count % _CSV_CHUNK_ROWS == 0:
+            yield _drain(buffer)
+    tail = _drain(buffer)
+    if tail:
+        yield tail
+
+
 @router.get("/admin/export/{export_type}")
 async def export_csv(
     export_type: str,
@@ -600,140 +875,15 @@ async def export_csv(
     admin: User = Depends(require_admin),
 ):
     """Export data as CSV. Supported types: runs, users, consent, feedback."""
-    if export_type not in ("runs", "users", "consent", "feedback"):
+    if export_type not in _CSV_EXPORTS:
         raise validation_error(f"Invalid export type: {export_type}. Must be one of: runs, users, consent, feedback.")
 
     logger.info(
         "admin_export: admin=%s export_type=%s", admin.email, export_type
     )
 
-    output = io.StringIO()
-    writer = _SafeCsvWriter(output)
-
-    if export_type == "runs":
-        writer.writerow([
-            "run_id", "user_email", "filename", "file_type", "status",
-            "started_at", "completed_at", "total_cost", "total_tokens",
-            "input_tokens", "output_tokens", "submission_type", "error_message",
-        ])
-        rows = (
-            db.query(Run)
-            .outerjoin(Run.user)
-            .options(contains_eager(Run.user))
-            .order_by(Run.started_at.desc())
-            .all()
-        )
-        for run in rows:
-            writer.writerow([
-                run.id,
-                run.user.email if run.user else "",
-                run.filename,
-                run.file_type,
-                run.status,
-                run.started_at.isoformat() if run.started_at else "",
-                run.completed_at.isoformat() if run.completed_at else "",
-                run.total_cost,
-                run.total_tokens,
-                run.input_tokens,
-                run.output_tokens,
-                run.submission_type or "",
-                run.error_message or "",
-            ])
-
-    elif export_type == "users":
-        writer.writerow([
-            "id", "email", "display_name", "role", "status",
-            "daily_limit", "monthly_limit", "consent_version",
-            "consent_date", "created_at", "last_active_at",
-        ])
-        users = db.query(User).order_by(User.created_at.desc()).all()
-        for u in users:
-            writer.writerow([
-                u.id,
-                u.email,
-                u.display_name,
-                u.role,
-                u.status,
-                u.daily_limit or "",
-                u.monthly_limit or "",
-                u.consent_version or "",
-                u.consent_date.isoformat() if u.consent_date else "",
-                u.created_at.isoformat() if u.created_at else "",
-                u.last_active_at.isoformat() if u.last_active_at else "",
-            ])
-
-    elif export_type == "consent":
-        writer.writerow([
-            "id", "user_id", "user_email", "consent_version",
-            "consent_text_hash", "ip_address", "user_agent", "timestamp",
-        ])
-        rows = (
-            db.query(Consent)
-            .outerjoin(Consent.user)
-            .options(contains_eager(Consent.user))
-            .order_by(Consent.timestamp.desc())
-            .all()
-        )
-        for consent in rows:
-            writer.writerow([
-                consent.id,
-                consent.user_id,
-                consent.user.email if consent.user else "",
-                consent.consent_version,
-                consent.consent_text_hash,
-                consent.ip_address or "",
-                consent.user_agent or "",
-                consent.timestamp.isoformat() if consent.timestamp else "",
-            ])
-
-    elif export_type == "feedback":
-        writer.writerow([
-            "id", "run_id", "user_email", "reviewer_role",
-            "overall_accuracy", "overall_completeness", "overall_usefulness",
-            "manual_conversion_effort", "correction_effort",
-            "enrichment_quality", "summary_generated", "summary_quality",
-            "issue_missing_content", "issue_split_merged", "issue_wrong_section",
-            "issue_inaccurate", "issue_ai_enrichment", "issue_formatting",
-            "issue_locations", "biggest_issue", "likelihood_to_recommend",
-            "submitted_at",
-        ])
-        rows = (
-            db.query(Feedback)
-            .outerjoin(Feedback.user)
-            .options(contains_eager(Feedback.user))
-            .order_by(Feedback.submitted_at.desc())
-            .all()
-        )
-        for fb in rows:
-            writer.writerow([
-                fb.id,
-                fb.run_id,
-                fb.user.email if fb.user else "",
-                fb.reviewer_role,
-                fb.overall_accuracy,
-                fb.overall_completeness,
-                fb.overall_usefulness,
-                fb.manual_conversion_effort,
-                fb.correction_effort,
-                fb.enrichment_quality,
-                fb.summary_generated,
-                fb.summary_quality,
-                fb.issue_missing_content or "",
-                fb.issue_split_merged or "",
-                fb.issue_wrong_section or "",
-                fb.issue_inaccurate or "",
-                fb.issue_ai_enrichment or "",
-                fb.issue_formatting or "",
-                fb.issue_locations or "",
-                fb.biggest_issue or "",
-                fb.likelihood_to_recommend,
-                fb.submitted_at.isoformat() if fb.submitted_at else "",
-            ])
-
-    output.seek(0)
-
     return StreamingResponse(
-        iter([output.getvalue()]),
+        _iter_csv_chunks(export_type, db),
         media_type="text/csv",
         headers={
             "Content-Disposition": f'attachment; filename="cviche_{export_type}_{datetime.now().strftime("%Y%m%d")}.csv"'
