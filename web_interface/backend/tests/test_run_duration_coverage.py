@@ -482,7 +482,7 @@ def test_admin_stats_counts_zero_second_run(client, db):
 
 def _run_cancelled_execute(monkeypatch, tmp_path, db, run_id, status, prepare=None):
     """Seed a run in ``status`` and execute() it with a stage that raises the
-    cancel exception, as a Redis-delivered cancel would (no API write happened)."""
+    cancel exception (no API write happened)."""
     from app.pipeline import orchestrator as orch
     from app.models import Run
 
@@ -506,8 +506,8 @@ def _run_cancelled_execute(monkeypatch, tmp_path, db, run_id, status, prepare=No
 
 
 def test_execute_cancel_without_api_write_records_cancelled_on_the_row(monkeypatch, tmp_path, db):
-    """#591: a cancel that reached the pipeline without the API having flipped
-    the row (e.g. over Redis) must still leave the run 'cancelled'."""
+    """#591: the handler must not assume the API flipped the row; a cancel
+    that reaches the pipeline with the row still 'running' leaves it 'cancelled'."""
     row, emitter = _run_cancelled_execute(monkeypatch, tmp_path, db, "CNCL01", "running")
     assert row.status == "cancelled"
     assert row.error_message == "Cancelled by user"
@@ -544,3 +544,12 @@ def test_execute_stopped_by_shutdown_is_left_for_the_drain_to_fail(monkeypatch, 
         monkeypatch, tmp_path, db, "CNCL04", "running",
         prepare=lambda orch: orch.stop_run_locally("CNCL04"))
     assert row.status == "running"
+
+
+def test_execute_local_user_cancel_is_persisted_unlike_a_shutdown_stop(monkeypatch, tmp_path, db):
+    """cancel_run (user cancel) on a still-running row is recorded; only
+    stop_run_locally is exempt, which is why _stopped_locally exists."""
+    row, _ = _run_cancelled_execute(
+        monkeypatch, tmp_path, db, "CNCL05", "running",
+        prepare=lambda orch: orch.cancel_run("CNCL05"))
+    assert row.status == "cancelled"

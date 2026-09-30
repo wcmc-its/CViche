@@ -435,8 +435,8 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     wraps its body in try/except (redis_broker.py, "best-effort"). A commit
     failure here leaves the run running with nothing told to stop it --
     consistent, and the caller's exception surfaces normally. The orchestrator
-    also records a cancel on the row itself if this write never happened, e.g.
-    a cancel that arrived over Redis (#591).
+    also records a cancel on the row itself, so it does not rely on this write
+    having happened (#591).
     """
     from app.pipeline.orchestrator import USER_CANCEL_MESSAGE
 

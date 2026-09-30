@@ -874,10 +874,10 @@ class PipelineOrchestrator:
     def _persist_cancelled(self) -> None:
         """Record the cancel on the run row unless it is already terminal.
 
-        The API endpoint normally wrote "cancelled" first, but a cancel that
-        arrived over Redis has not, and a shutdown stop leaves the row for the
-        drain to fail. A conditional UPDATE keeps this idempotent and never
-        overwrites another terminal status (#591).
+        The API endpoint normally wrote "cancelled" first, but this does not
+        assume it did, and a shutdown stop leaves the row for the drain to
+        fail. A conditional UPDATE keeps this idempotent and never overwrites
+        another terminal status (#591).
         """
         with _cancelled_lock:
             stopped_by_shutdown = self.run_id in _stopped_locally
@@ -891,7 +891,7 @@ class PipelineOrchestrator:
                 "error_message": USER_CANCEL_MESSAGE,
                 "completed_at": datetime.now(),
             },
-            synchronize_session="evaluate",
+            synchronize_session=False,
         )
         self.db.commit()
         if updated:
