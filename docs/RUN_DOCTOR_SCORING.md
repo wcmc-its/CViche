@@ -88,11 +88,11 @@ the ones that fire many times, so they consumed half the report.
 `src/unified_pipeline/quality_score.py`
 
 Each dimension returns a penalty fraction in `[0, 1]`. Weighted, normalized
-against total weight (95), so a fully-penalized run scores 0 and a clean run
+against total weight (100), so a fully-penalized run scores 0 and a clean run
 scores 100:
 
 ```python
-raw   = 100 * (1 - sum(weight_i * fraction_i) / 95)
+raw   = 100 * (1 - sum(weight_i * fraction_i) / 100)
 final = min(raw, *hard_fail_caps)     # caps only ever lower it
 score = round(max(0, final))
 ```
@@ -107,7 +107,7 @@ score = round(max(0, final))
 | 12 | Sparse tables in output docx | `0.6*(sparse_table_ratio/0.25) + 0.4*((global_empty_ratio-0.10)/0.40)`, over tables carrying CV content only: a table whose every non-empty cell is template text is skipped, and 0 if none remain (#452) |
 | 10 | Duplicate-entry ratio | 0 at ≤0.10, linear to 0.4 at 0.30, to 0.8 at 0.50, 1.0 above; +0.1 if entries coverage >130% |
 | 10 | Raw-tab / prompt-echo artifacts | `0.6*(raw_tab_paragraphs/20) + 0.4*(echo_paragraphs/15)` |
-| 8 | Field-extraction sparseness | `0.5*((allnull_or_zerocov/total)/0.10) + 0.5*((1-success_rate)/0.10)` |
+| 13 | Field-extraction sparseness | `0.5*((allnull_or_zerocov/total)/0.10) + 0.5*((1-success_rate)/0.10)` |
 
 All fractions clamp to `[0, 1]`. A dimension whose artifact is missing scores
 1.0 (full penalty); a missing docx scores 0.5.
