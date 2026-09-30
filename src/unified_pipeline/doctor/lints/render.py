@@ -22,6 +22,7 @@ from typing import Dict, List, NamedTuple, Tuple
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
 )
@@ -207,7 +208,7 @@ def _is_appendix_noise(text: str) -> bool:
     normed = " ".join(str(text or "").split())
     if not normed:
         return True
-    if is_template_instruction(normed):
+    if is_template_instruction(normed) or is_foreign_template_instruction(normed):
         return True
     return is_source_boilerplate(normed)
 
@@ -411,7 +412,7 @@ def lint_dead_sections(stage2: dict,
         # non-blank table line counts as rendered content on its own, while
         # a paragraph line still needs the length floor.
         for line in str(text).split("\n"):
-            if is_template_instruction(line):
+            if is_template_instruction(line) or is_foreign_template_instruction(line):
                 continue
             if kind == "table":
                 if norm(line):

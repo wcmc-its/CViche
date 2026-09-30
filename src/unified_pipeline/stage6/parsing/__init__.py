@@ -36,4 +36,5 @@ from .text import (  # noqa: F401
     _looks_like_multiple_records,
     _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
+    _strip_appended_initials,
 )

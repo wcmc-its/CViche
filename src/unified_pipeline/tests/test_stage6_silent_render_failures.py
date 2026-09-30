@@ -65,6 +65,7 @@ from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
 import unified_pipeline.stage_6_word_template as s6  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     GEO_SCOPE_FAILURE_STAT,
+    RECLASSIFY_FAILURE_STAT,
     WCMTemplateGenerator,
 )
 
@@ -830,7 +831,7 @@ def test_patents_detached_cursor_logs_warning_counts_misplaced_and_holds_cursor(
     == 1`, with a spacing paragraph between Widget B and Widget C that must
     not exist here."""
     gen = _new_generator()
-    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph().add_run("Patents & Inventions").bold = True
 
     real_insert = gen.doc.element.body.insert
     calls = {'n': 0}
@@ -880,7 +881,7 @@ def test_patents_detached_cursor_logs_warning_counts_misplaced_and_holds_cursor(
 
 def test_patents_success_stats_have_no_misplaced_count():
     gen = _new_generator()
-    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph().add_run("Patents & Inventions").bold = True
 
     gen._fill_patents([_patent('a', title='Widget A', year='2021'),
                        _patent('b', title='Widget B', year='2020')])
@@ -908,7 +909,7 @@ def test_patents_render_twice_replaces_the_first_render():
     second set of tables; the previously rendered tables (and the spacing
     between them) are now cleared first, so the body shape is identical."""
     gen = _new_generator()
-    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph().add_run("Patents & Inventions").bold = True
     gen.doc.add_paragraph("Please include inventors, title of invention and patent number.")
     gen.doc.add_paragraph("MENTORING")
     entries = [_patent('a', title='Widget A', year='2021'),
@@ -1070,31 +1071,83 @@ def test_geo_scope_failure_reaches_the_render_warnings_sidecar(
 _RECLASSIFY_TEXT = 'Visiting Lecturer, Example Institute, 2010'
 
 
-def test_reclassify_failure_returns_none_and_warns_when_verbose(
+def test_reclassify_failure_warns_counts_and_returns_none_when_verbose(
         monkeypatch, caplog):
     """The `except Exception` arm of `_reclassify_entry_segments` returns
-    None and, under verbose, records the failure."""
+    None, logs, and counts the failure."""
     monkeypatch.setattr(s6, 'call_llm', _raising_llm)
     gen = WCMTemplateGenerator(verbose=True)
     with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
         assert gen._reclassify_entry_segments(_RECLASSIFY_TEXT, 'P') is None
     warnings = _warnings(caplog, S6_LOGGER)
     assert len(warnings) == 1
-    assert 'LLM reclassification failed' in warnings[0].getMessage()
-    assert 'simulated LLM outage' in warnings[0].getMessage()
+    assert warnings[0].getMessage() == (
+        'LLM reclassification failed; entry stays in the appendix unsplit')
+    assert warnings[0].exc_info and warnings[0].exc_info[0] is RuntimeError
+    assert gen.stats[RECLASSIFY_FAILURE_STAT] == 1
 
 
-def test_reclassify_failure_is_silent_when_not_verbose(monkeypatch, caplog):
-    """Pins today's behaviour for #652: outside verbose the fallback leaves
-    no log line and no stat (a CODING_STANDARDS 5.3 gap -- production runs
-    are not verbose). Update this test when the fallback is made visible."""
+def test_reclassify_failure_warns_and_counts_when_not_verbose(
+        monkeypatch, caplog):
+    """#652: production runs are not verbose, so the fallback must be visible
+    without it (CODING_STANDARDS 5.3): a warning with the traceback and a
+    stat. The None return is unchanged."""
     monkeypatch.setattr(s6, 'call_llm', _raising_llm)
     gen = WCMTemplateGenerator(verbose=False)
-    stats_before = dict(gen.stats)
     with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
         assert gen._reclassify_entry_segments(_RECLASSIFY_TEXT, 'P') is None
+    warnings = _warnings(caplog, S6_LOGGER)
+    assert len(warnings) == 1
+    assert warnings[0].getMessage() == (
+        'LLM reclassification failed; entry stays in the appendix unsplit')
+    assert warnings[0].exc_info and warnings[0].exc_info[0] is RuntimeError
+    assert gen.stats[RECLASSIFY_FAILURE_STAT] == 1
+
+
+def test_reclassify_success_does_not_count_a_failure(monkeypatch, caplog):
+    monkeypatch.setattr(
+        s6, 'call_llm', lambda *a, **k: {'content': 'P: Committee member'})
+    gen = WCMTemplateGenerator(verbose=False)
+    with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
+        assert gen._reclassify_entry_segments(_RECLASSIFY_TEXT, 'P')
     assert not _warnings(caplog, S6_LOGGER)
-    assert dict(gen.stats) == stats_before
+    assert gen.stats[RECLASSIFY_FAILURE_STAT] == 0
+    assert gen._reclassify_failure_warnings() == []
+
+
+def test_reclassify_failure_reaches_the_render_warnings_sidecar(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(s6, 'call_llm', _raising_llm)
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    real_reconsider = gen._reconsider_appendix_entries
+
+    def seed_then_reconsider():
+        # Queue one overflow entry, then run the REAL reconsideration so the
+        # real _reclassify_entry_segments except-arm fires inside generate().
+        gen._appendix_pending = [({'text': _RECLASSIFY_TEXT,
+                                   'taxonomy_code': 'P',
+                                   'extracted_fields': {}}, 40)]
+        return real_reconsider()
+
+    gen._reconsider_appendix_entries = seed_then_reconsider
+    input_path = tmp_path / 'in.json'
+    input_path.write_text(json.dumps({
+        'document_uid': 'T652G',
+        'entries': [{'text': 'Name: Jane Q. Public, MD', 'taxonomy_code': 'A',
+                     'extracted_fields': {}, 'element_idx_start': 0}]}))
+    gen.generate(str(input_path), str(tmp_path / 'out.docx'))
+    sidecar = json.loads((tmp_path / 'T652G_render_warnings.json').read_text())
+    found = [w for w in sidecar['warnings']
+             if w.get('check') == RECLASSIFY_FAILURE_STAT]
+    assert len(found) == 1
+    assert found[0]['severity'] == 'WARN'
+    # Literals, not the constant: lint_stage6_warnings copies evidence and
+    # message verbatim into the doctor report and onto the Teams card.
+    assert found[0]['evidence'] == ['segment_reclassification_failures=1']
+    assert found[0]['section'] == 'appendix'
+    assert found[0]['message'] == (
+        '1 appendix entry reclassification(s) failed; those entries stayed in '
+        'the appendix whole instead of being split and routed to their sections')
 
 
 def test_reconsider_sends_entry_to_appendix_when_reclassify_fails(monkeypatch):

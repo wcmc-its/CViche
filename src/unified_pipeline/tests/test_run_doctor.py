@@ -720,6 +720,30 @@ def test_output_hygiene_quiet_on_clean_output():
     assert all(f["severity"] == "INFO" for f in findings)
 
 
+def test_output_hygiene_warns_on_foreign_template_scaffolding_in_the_appendix():
+    """#530: another institution's instruction line rendered as an appendix
+    entry is boilerplate, same as the WCM template's own (invented text)."""
+    blocks = [
+        ("p", "T. APPENDIX"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
+        ("p", "1. C. Sample Appointments (include institution, title and dates of appointment)"),
+        ("p", "2. Real leftover grant content"),
+    ]
+    findings = lint_output_hygiene(blocks)
+    boiler = [f for f in findings if "boilerplate line" in f["message"]]
+    assert len(boiler) == 1
+    assert boiler[0]["severity"] == "WARN"
+    assert boiler[0]["message"].startswith("1 ")
+
+
+def test_dead_sections_ignores_foreign_template_scaffolding_under_the_header():
+    """#530: a foreign template's instruction line does not make a section
+    count as alive, same as the WCM template's own (invented text)."""
+    scaffolded = [("p", "GRANTS"),
+                  ("p", "1. Sample Sabbatical Leave Arrangements: N/A")]
+    assert lint_dead_sections(_STAGE2_GRANTS, scaffolded)
+
+
 def test_appendix_entry_count_matches_the_lints_own_count():
     blocks = [
         ("p", "T. APPENDIX"),
@@ -1801,6 +1825,9 @@ def _build_clean_run(tmp_path, uid=_UID):
                                      "enriched"),
                      _enriched_entry("Sample citation without identifiers",
                                      "no_identifier")]})
+    _write_stage(root, "stage_5b_institution_enrichment",
+                 f"{uid}_cv_institution_enriched.json",
+                 {"document_uid": uid, "entries": []})
 
     output = Document()
     # Real renders carry grants under RESEARCH (section_lost reads the

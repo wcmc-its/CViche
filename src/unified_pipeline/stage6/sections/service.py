@@ -753,7 +753,7 @@ class ServiceSection:
             return
 
         # Find the Service on Boards section
-        service_idx = self._find_paragraph_with_text("Service on Boards")
+        service_idx = self._find_header_paragraph("Service on Boards")
         if service_idx is None:
             logger.warning(
                 "Service on Boards: section not found in template; "
@@ -892,9 +892,9 @@ class ServiceSection:
             return
 
         # Find Leadership in Extramural Organizations section
-        section_idx = self._find_paragraph_with_text("Leadership in Extramural Organizations")
+        section_idx = self._find_header_paragraph("Leadership in Extramural Organizations")
         if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Leadership in Extramural")
+            section_idx = self._find_header_paragraph("Leadership in Extramural")
         if section_idx is None:
             return
 

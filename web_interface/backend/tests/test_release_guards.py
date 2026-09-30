@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from unittest.mock import patch, AsyncMock
 
 import pytest
+import redis
 from docx import Document
 
 from app.models import Run, Step, User
@@ -336,6 +337,62 @@ class TestRetryStep:
         resp = client.post("/api/run/RETRY3/retry/6")
 
         assert resp.status_code == 404
+
+
+class TestRetryStepQueueModeEnqueueFailure:
+    """B3: a failed enqueue during a queue-mode retry must leave the run AND
+    its reset step retryable -- not the run reverted to "failed" while its
+    step is stuck "pending" with no executor coming and retry_step's own
+    `status != "error"` guard rejecting a second attempt outright."""
+
+    def test_failed_enqueue_reverts_the_step_too_then_a_second_retry_succeeds(
+        self, client, db, seed_simple_mode, monkeypatch,
+    ):
+        from app.pipeline import run_queue
+
+        user = _make_user(db)
+        _auth_cookie(client, user)
+        _seed_failed_run(db, user, run_id="RETRYQ1", failed_at=6)
+        monkeypatch.setenv("CVICHE_DISPATCH_MODE", "queue")
+        monkeypatch.setenv("CVICHE_REDIS_URL", "redis://fake-valkey:6379/0")
+
+        from app.api.upload import UPLOAD_DIR
+        upload_file = UPLOAD_DIR / "RETRYQ1.docx"
+        upload_file.write_bytes(b"dummy")
+
+        def enqueue_fails(run_id):
+            raise redis.exceptions.ConnectionError("valkey unreachable")
+        monkeypatch.setattr(run_queue, "enqueue", enqueue_fails)
+
+        try:
+            resp = client.post("/api/run/RETRYQ1/retry/6")
+
+            assert resp.status_code == 503
+
+            db.expire_all()
+            run = db.query(Run).filter(Run.id == "RETRYQ1").one()
+            assert run.status == "failed"
+            step6 = db.query(Step).filter(Step.run_id == "RETRYQ1", Step.step_number == 6).one()
+            assert step6.status == "error", "must stay retryable, not stranded pending with no executor"
+            assert step6.error_message == "boom"
+            step12 = db.query(Step).filter(Step.run_id == "RETRYQ1", Step.step_number == 12).one()
+            assert step12.status == "pending", "unaffected downstream step: reset then reverted back to pending"
+
+            # Second retry: enqueue now works.
+            enqueued = []
+            monkeypatch.setattr(run_queue, "enqueue", lambda run_id: enqueued.append(run_id) or "1-0")
+
+            resp2 = client.post("/api/run/RETRYQ1/retry/6")
+
+            assert resp2.status_code == 202
+            assert enqueued == ["RETRYQ1"]
+            db.expire_all()
+            run = db.query(Run).filter(Run.id == "RETRYQ1").one()
+            assert run.status == "queued"
+            step6 = db.query(Step).filter(Step.run_id == "RETRYQ1", Step.step_number == 6).one()
+            assert step6.status == "pending"
+        finally:
+            upload_file.unlink(missing_ok=True)
 
 
 # --- #2  orchestrator resume bookkeeping ------------------------------------
@@ -674,7 +731,7 @@ class TestAtomicRunStart:
 def test_orchestrator_rejects_unsafe_document_uid(db, tmp_path, stem):
     from app.pipeline.orchestrator import PipelineOrchestrator
 
-    with pytest.raises(ValueError, match="document_uid"):
+    with pytest.raises(ValueError, match="Invalid document_uid"):
         PipelineOrchestrator("REJ299", tmp_path / f"{stem}.docx", db)
     # A rejected constructor must not leave its output dir behind.
     assert not (Path(__file__).parent.parent.parent / "outputs" / "REJ299").exists()
@@ -686,6 +743,16 @@ def test_orchestrator_rejects_unsafe_run_id(db, tmp_path, run_id):
 
     with pytest.raises(ValueError, match="run_id"):
         PipelineOrchestrator(run_id, tmp_path / "cv.docx", db)
+
+
+def test_orchestrator_rejects_document_uid_that_differs_from_run_id(db, tmp_path):
+    from app.pipeline.orchestrator import PipelineOrchestrator
+
+    with pytest.raises(ValueError, match="must equal run_id"):
+        PipelineOrchestrator("MATCH1", tmp_path / "OTHER1.docx", db)
+    with pytest.raises(ValueError, match="must equal run_id"):
+        PipelineOrchestrator("ABC1", tmp_path / "abc1.docx", db)
+    PipelineOrchestrator("MATCH2", tmp_path / "MATCH2.docx", db)
 
 
 def test_copy_to_pipeline_input_is_per_run_and_overwrites(db, tmp_path, monkeypatch):

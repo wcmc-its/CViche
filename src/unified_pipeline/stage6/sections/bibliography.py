@@ -56,7 +56,7 @@ except ImportError as exc:
 
 from ..formatting import _format_citation, _set_font
 from ..normalization import split_fused_citation_entries
-from ..parsing import _extract_last_name_from_uid
+from ..parsing import _extract_last_name_from_uid, _strip_appended_initials
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -284,6 +284,23 @@ def _citation_author_split(citation: str, target_name: str | None,
     return citation[:start], citation[start:end], citation[end:]
 
 
+def _resolve_uid_owner_surname(uid: str, publications: list[dict]) -> str:
+    """The CV owner's surname as the citations spell it, from the document uid.
+
+    A uid such as "2003_Quennevillejs_Cv" can carry the owner's initials glued to
+    the surname, but "Smith" ends in the same lower-case tail, and no rule on
+    the uid alone can tell the two apart (#665 item 1). So the uid's last name
+    is used as written when any citation names that author, and is stripped of
+    possible appended initials only when it is not found -- the citations are
+    the evidence the uid cannot give.
+    """
+    raw = _extract_last_name_from_uid(uid)
+    citations = (_format_citation(pub, 0)[0] for pub in publications)
+    if not raw or any(_find_surname_span(c, raw) for c in citations):
+        return raw
+    return _strip_appended_initials(raw)
+
+
 class BibliographySection:
     """Section S writers, mixed into `WCMTemplateGenerator`."""
 
@@ -322,16 +339,19 @@ class BibliographySection:
             'S9': 'Other (media, podcasts, etc.):',
         }
 
+        pub_codes = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
+
         # Get CV owner last name for fallback bolding
         cv_owner_last_name = ''
         if cv_owner and cv_owner.get('last_name'):
             cv_owner_last_name = cv_owner['last_name']
         elif document_uid:
             # Fallback: extract from document_uid (e.g., "2015_Wende" -> "Wende")
-            cv_owner_last_name = _extract_last_name_from_uid(document_uid)
+            cv_owner_last_name = _resolve_uid_owner_surname(
+                document_uid,
+                [pub for code in pub_codes for pub in entries_by_code.get(code, [])])
 
         # Count total publications
-        pub_codes = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
         total_pubs = sum(len(entries_by_code.get(code, [])) for code in pub_codes)
 
         logger.info("Filling Bibliography (%d publications)...", total_pubs)

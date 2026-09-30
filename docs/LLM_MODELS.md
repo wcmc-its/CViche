@@ -6,7 +6,7 @@
 ## TL;DR
 
 - **Provider:** AWS Bedrock — the only supported provider (#953). CViche is Bedrock-only, and all LLM traffic stays in AWS Bedrock; see [docs/BEDROCK_DATA_PROTECTION.md](BEDROCK_DATA_PROTECTION.md) for what AWS states about that boundary.
-- **Model:** Claude Sonnet 4.6 (`us.anthropic.claude-sonnet-4-6`) for **every** live pipeline stage.
+- **Model:** Claude Sonnet 5 (`us.anthropic.claude-sonnet-5`) for every live pipeline stage except 3b, which runs on Haiku 4.5. Decision and evidence: `docs/adr/0001-sonnet-5-default-model.md`.
 - Configured in [`src/unified_pipeline/config/llm_config.yaml`](../src/unified_pipeline/config/llm_config.yaml).
 - Bedrock bills Claude models at the **same per-token price as Anthropic's direct API** — there is no cost penalty for staying on Bedrock.
 
@@ -70,12 +70,12 @@ The largest single lever is `stage_4` (the 30–60+ call hotspot). Before changi
 
 All LLM calls go through `call_llm(stage="...", ...)` in `src/unified_pipeline/llm_client.py`. The model is resolved by `get_stage_config()` in `src/unified_pipeline/config.py`, with this precedence (later wins):
 
-1. Hardcoded defaults (`bedrock` / `us.anthropic.claude-sonnet-4-6`).
+1. Hardcoded defaults (`bedrock` / `us.anthropic.claude-sonnet-5`).
 2. The `default` block in `llm_config.yaml`.
 3. A per-stage override under `stages:` in `llm_config.yaml`.
 4. The `CVICHE_LLM_PROVIDER` / `CVICHE_LLM_MODEL` environment variables — these override the `default` block **only**, never an explicit per-stage override. `bedrock` is the only supported value for `CVICHE_LLM_PROVIDER`.
 
-> **Operational caveat — check your deployment environment.** Because env vars override the YAML `default`, a `CVICHE_LLM_MODEL` set in a deployment (Docker, EKS, a `.env` file) silently wins over this repo's `llm_config.yaml`. If a stale `CVICHE_LLM_MODEL` points at a Claude 3-era model, that is what runs regardless of this file. **Verify those env vars** point at `us.anthropic.claude-sonnet-4-6` (or are unset) when rolling this out.
+> **Operational caveat — check your deployment environment.** Because env vars override the YAML `default`, a `CVICHE_LLM_MODEL` set in a deployment (Docker, EKS, a `.env` file) silently wins over this repo's `llm_config.yaml`. If a stale `CVICHE_LLM_MODEL` points at a Claude 3-era model, that is what runs regardless of this file. **Verify those env vars** point at `us.anthropic.claude-sonnet-5` (or are unset) when rolling this out.
 
 `llm_config.yaml` is the single source of truth. No stage function takes a `model` argument and no CLI takes `--model` — the last inert ones (5b, 5c, 5d, the candidate surfacer) were removed in #954; the orchestrator carries no `self.model` field. Stage artifacts record the model that actually served the call (`null` if none did).
 

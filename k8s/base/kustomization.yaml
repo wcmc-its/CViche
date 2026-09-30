@@ -4,6 +4,7 @@ kind: Kustomization
 resources:
   - backend/   # This looks for backend/kustomization.yaml
   - frontend/  # This looks for frontend/kustomization.yaml
+  - worker/    # This looks for worker/kustomization.yaml
   - ingress.yaml
 images:
   - name: backend # Make sure this matches the image name in your base deployment yaml

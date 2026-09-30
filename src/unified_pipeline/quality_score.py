@@ -88,6 +88,7 @@ if TYPE_CHECKING:
 # run_doctor -> doctor.lints.enrichment -> quality_score` would (run_doctor.py
 # itself is never imported here).
 from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
@@ -662,7 +663,8 @@ def _has_nothing_to_extract(entry: dict) -> bool:
         text = None
     if entry.get("extraction_skipped") or _is_placeholder_only_row(text):
         return True
-    if is_template_instruction(text) or is_near_template_instruction(text):
+    if (is_template_instruction(text) or is_near_template_instruction(text)
+            or is_foreign_template_instruction(text)):
         return True
     # ponytail: is_template_label_line is Appendix-only and "100%" is a label,
     # so "Clinical | 100%" (a real J effort record) would match; a label-only
@@ -774,6 +776,7 @@ def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
             if id(entry) in goal_claimed_ids:
                 excluded_goal_claim += 1
             elif (is_template_instruction(text) or is_near_template_instruction(text)
+                    or is_foreign_template_instruction(text)
                     or is_template_label_line(text)):
                 excluded_template += 1
             elif _is_placeholder_only_row(text):

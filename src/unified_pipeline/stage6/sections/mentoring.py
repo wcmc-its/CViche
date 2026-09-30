@@ -572,7 +572,7 @@ class MentoringSection:
             return current, past
         fallback_idx = self._find_paragraph_exact(MENTORING_HEADING)
         if fallback_idx is None:
-            fallback_idx = self._find_paragraph_with_text(MENTEES_FALLBACK_TEXT)
+            fallback_idx = self._find_header_paragraph(MENTEES_FALLBACK_TEXT)
         fallback = self._paragraph_element(fallback_idx)
         return fallback, fallback
 

@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
     is_near_template_instruction,
     is_template_instruction,
 )
@@ -328,13 +329,16 @@ TEMPLATE_SCAFFOLDING_MIN_CHARS = 40
 
 def _is_template_scaffolding(line: str) -> bool:
     """A source line that is WCM template instruction text, verbatim or
-    another revision's rewording, and long enough not to double as a value.
+    another revision's rewording, or another institution's instruction
+    scaffolding recognised by shape (#530, the same detector stage 2 drops
+    with), and long enough not to double as a value.
     Not `is_template_label_line`: a short label ("2. Principal Investigator",
     "Weill Cornell Medical College") is also a real value in a CV, and its
     loss must still count."""
     if len(norm(line)) < TEMPLATE_SCAFFOLDING_MIN_CHARS:
         return False
-    return is_template_instruction(line) or is_near_template_instruction(line)
+    return (is_template_instruction(line) or is_near_template_instruction(line)
+            or is_foreign_template_instruction(line))
 
 
 def _substantive(source_lines: list[str]) -> list[str]:

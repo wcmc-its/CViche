@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import traceback
+from collections.abc import Callable
 
 
 from fastapi import FastAPI, Request, Depends, Response, status
@@ -151,23 +152,29 @@ async def _stale_run_reaper_loop(interval_seconds: int):
     in-flight run isn't touched until it passes the stale threshold. The DB
     work runs in a thread so it never blocks the event loop, and one bad sweep
     is logged and the loop keeps going.
+
+    Each sweep also runs ``reconcile_queued_runs`` (#701 queue mode only; a
+    no-op otherwise) -- the DB-side backstop for a "queued" row whose Valkey
+    token was lost, next to the "running" backstop above.
     """
-    from app.services.run_service import reconcile_stale_runs
+    from app.services.run_service import reconcile_stale_runs, reconcile_queued_runs
     from app.database import SessionLocal
 
-    def _sweep() -> int:
+    def _sweep() -> tuple[int, int]:
         db = SessionLocal()
         try:
-            return reconcile_stale_runs(db)
+            return reconcile_stale_runs(db), reconcile_queued_runs(db)
         finally:
             db.close()
 
     while True:
         await asyncio.sleep(interval_seconds)
         try:
-            swept = await asyncio.to_thread(_sweep)
-            if swept:
-                logger.info("Periodic reaper marked %d stale run(s) failed", swept)
+            stale_failed, queued_requeued = await asyncio.to_thread(_sweep)
+            if stale_failed:
+                logger.info("Periodic reaper marked %d stale run(s) failed", stale_failed)
+            if queued_requeued:
+                logger.info("Periodic reaper requeued %d stranded queued run(s)", queued_requeued)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -301,6 +308,41 @@ def _guard_deployed_auth_mode(auth_mode: str | None, storage_backend: str, allow
         )
 
 
+def _reconcile_queued_runs_at_startup(db: Session, reconcile_queued_runs: Callable[[Session], int]) -> int:
+    """B2: the startup counterpart of ``reconcile_queued_runs``, guarded the
+    same corrective way the periodic sweep (``_stale_run_reaper_loop``) already
+    survives a sweep failure -- log and continue -- narrowed here to
+    ``redis.exceptions.RedisError`` specifically. Unguarded, a Valkey outage
+    during a backend restart raised out of ``reconcile_queued_runs``
+    (queue-mode only) would crash *this sweep* out of startup, taking down
+    every replica at once instead of just leaving queue-mode reconciliation to
+    the periodic reaper, which retries on its own interval. Any other
+    exception (a genuine DB error, say) is deliberately left to propagate
+    here, same as the ``reconcile_stale_runs`` call beside it -- only Valkey
+    unavailability is worth surviving at this specific call site.
+
+    This guards ONLY this one sweep, not backend startup's dependency on
+    Valkey as a whole: ``lifespan`` still hard-depends on Valkey a few lines
+    below, unguarded, via the pre-existing pub/sub broker
+    (``event_emitter.startup()`` -> ``psubscribe`` on the same
+    ``CVICHE_REDIS_URL``, when the broker is enabled). Do not read this
+    function as making the pod resilient to a Valkey outage overall -- it
+    isn't; a Valkey outage still fails startup at that later call.
+
+    ``reconcile_queued_runs`` is passed in rather than imported here so a test
+    can substitute a stub without patching ``app.services.run_service``.
+    """
+    import redis
+    try:
+        return reconcile_queued_runs(db)
+    except redis.exceptions.RedisError:
+        logger.exception(
+            "Startup queued-run reconcile failed (Valkey unavailable); "
+            "continuing -- the periodic reaper will retry it"
+        )
+        return 0
+
+
 def _validate_ed_startup(db: Session) -> None:
     """Fail fast on a misconfigured ED at boot rather than on the first SAML
     login (#330). Gated on ed_enabled -- a deployment that doesn't use ED
@@ -335,7 +377,7 @@ async def lifespan(app: FastAPI):
         logger.info("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
     from app.config_loader import seed_system_config, get_config_value
     from app.consent import load_consent_text, check_consent_integrity
-    from app.services.run_service import reconcile_stale_runs
+    from app.services.run_service import reconcile_stale_runs, reconcile_queued_runs
     from app.database import SessionLocal
     db = SessionLocal()
     try:
@@ -373,6 +415,9 @@ async def lifespan(app: FastAPI):
         swept = reconcile_stale_runs(db)
         if swept:
             logger.info("♻️  Reconciled %d stale run(s) from a previous restart", swept)
+        queued_requeued = _reconcile_queued_runs_at_startup(db, reconcile_queued_runs)
+        if queued_requeued:
+            logger.info("♻️  Requeued %d stranded queued run(s) at startup", queued_requeued)
     finally:
         db.close()
 

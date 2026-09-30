@@ -743,10 +743,14 @@ def _make_original(db, user, run_id, **overrides):
 @contextlib.contextmanager
 def _restart_env(original, storage, upload_dir, materialize=True, extra=()):
     """The restart_run harness shared by (h): the access gate and rate limit
-    stubbed, storage and UPLOAD_DIR redirected on BOTH modules (runs.py reads
-    the original through its own import; create_run_archive lives in
-    upload.py). `_materialize_input_if_missing` stays REAL unless
-    materialize=False -- it is a no-op when the local file exists.
+    stubbed, storage and UPLOAD_DIR redirected on every module that reads its
+    own copy (runs.py and upload.py each import the name into their own
+    namespace; `_materialize_input_if_missing`/`UPLOAD_DIR` themselves live in
+    app.services.run_service (#701) -- see runs.py's own get_storage patch
+    below, which covers restart_run's archive-the-new-run's-input call, a
+    separate get_storage() reached directly from runs.py, not through
+    _materialize_input_if_missing). `_materialize_input_if_missing` stays REAL
+    unless materialize=False -- it is a no-op when the local file exists.
     """
     from app.api import runs as runs_api
 
@@ -756,6 +760,7 @@ def _restart_env(original, storage, upload_dir, materialize=True, extra=()):
         if not materialize:
             stack.enter_context(patch.object(runs_api, "_materialize_input_if_missing", return_value=None))
         stack.enter_context(patch.object(runs_api, "get_storage", return_value=storage))
+        stack.enter_context(patch("app.services.run_service.get_storage", return_value=storage))
         stack.enter_context(patch.object(runs_api, "UPLOAD_DIR", upload_dir))
         stack.enter_context(patch("app.api.upload.UPLOAD_DIR", upload_dir))
         stack.enter_context(patch("app.api.upload.get_storage", return_value=storage))

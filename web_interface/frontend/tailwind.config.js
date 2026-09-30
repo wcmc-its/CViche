@@ -7,6 +7,17 @@ export default {
   theme: {
     extend: {
       colors: {
+        // Warm page chrome from the 2026 redesign (#1112). Ordered light to dark.
+        sand: {
+          50: '#FAF6EE',   // table header, sunken panel
+          100: '#F3EAD7',  // page background
+          150: '#EFE2C8',  // top bar
+          200: '#EDE3CF',  // rule inside a card
+          300: '#E6DAC1',  // card border
+          350: '#E2D3B4',  // top bar rule
+          400: '#DCCFB3',  // input / chip border
+        },
+        ink: '#1F2328',    // active tab rule, dark chip, avatar
         primary: {
           50: '#eff6ff',
           100: '#dbeafe',

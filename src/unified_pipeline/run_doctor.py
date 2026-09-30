@@ -167,6 +167,10 @@ from unified_pipeline.segmentation_regression import compute_metrics, iter_sourc
 # that is not re-exported fails at IMPORT time -- which reads as a lost fix.
 # test_run_doctor_contract.py pins that surface.
 from unified_pipeline.doctor.shared import (  # noqa: F401,E402
+    FINDING_STATUSES,
+    STATUS_RAN,
+    STATUS_SKIPPED,
+    STATUS_UNREADABLE,
     Haystack,
     RENDER_PIECE_MIN_CHARS,
     RENDER_PIECE_WINDOW,
@@ -639,6 +643,8 @@ _ARTIFACTS = {
                             record_lists=("entries",), object_fields=("cv_owner",)),
     "stage_5_enrichment": ArtifactSpec("stage_5_enrichment", "_enriched.json",
                                        record_lists=("entries",)),
+    "stage_5b": ArtifactSpec("stage_5b_institution_enrichment",
+                             "_institution_enriched.json", record_lists=("entries",)),
     "stage_6_docx": ArtifactSpec("stage_6_wcm_documents", "_wcm.docx"),
     "stage_6_report": ArtifactSpec("stage_6_wcm_documents", "_render_warnings.json",
                                    optional_lists=("warnings", "dedup_decisions")),
@@ -794,11 +800,13 @@ def _ready(lint_id: str, *, unreadable: Dict[str, str], findings: List[Dict],
     absent = [name for name in missing if name not in unreadable]
     if absent:
         findings.append(_finding(
-            lint_id, "INFO", "skipped: missing " + ", ".join(absent)))
+            lint_id, "INFO", "skipped: missing " + ", ".join(absent),
+            status=STATUS_SKIPPED, reason=", ".join(absent)))
     if broken:
         findings.append(_finding(
             lint_id, "ERROR", "skipped: unreadable " + ", ".join(
-                f"{name} ({unreadable[name]})" for name in broken)))
+                f"{name} ({unreadable[name]})" for name in broken),
+            status=STATUS_UNREADABLE, reason=", ".join(broken)))
     return False
 
 
@@ -844,6 +852,7 @@ _VIEW_LABELS = {
     "stage_3b": "stage_3b",
     "stage_4": "stage_4",
     "stage_5_enrichment": "stage_5_enrichment",
+    "stage_5b": "stage_5b",
     "stage_6_report": "stage_6_report",
     "blocks": "stage_6_docx",
     "table_rows": "stage_6_docx",
@@ -867,7 +876,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("bucket_status", lint_bucket_status, ("stage_4", "blocks")),
     LintSpec("under_extraction", lint_under_extraction, ("stage_4",)),
     LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks"),
-             optional=("stage_4",)),
+             optional=("stage_4", "stage_5b")),
     LintSpec("taxonomy_code_coverage", lint_taxonomy_code_coverage, ("stage_3b",)),
     LintSpec("stage3b_fallback_ratio", lint_stage3b_fallback_ratio, ("stage_3b",)),
     LintSpec("output_hygiene", lint_output_hygiene, ("blocks",)),

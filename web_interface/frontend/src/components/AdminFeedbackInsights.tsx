@@ -69,6 +69,95 @@ function formatAnswer(key: keyof FeedbackData, value: string | number | null): s
   return String(value)
 }
 
+export function parseFeedbackCsv(csv: string): FeedbackData[] {
+  // Split into rows on newlines that are NOT inside a quoted field — the
+  // free-text biggest_issue column can contain embedded newlines, which a
+  // naive split('\n') would shatter into bogus rows.
+  const lines = splitCSVRows(csv).filter((l) => l.trim())
+  if (lines.length <= 1) return []
+
+  const headers = lines[0].split(',')
+  return lines.slice(1).map((line) => {
+    const values = parseCSVLine(line)
+    const row: Record<string, string> = {}
+    headers.forEach((h, i) => {
+      row[h.trim()] = (values[i] || '').trim()
+    })
+    const intOrNull = (k: string) => (row[k] ? parseInt(row[k]) : null)
+    return {
+      id: parseInt(row['id']) || 0,
+      run_id: row['run_id'] || '',
+      user_email: row['user_email'] || '',
+      reviewer_role: row['reviewer_role'] || '',
+      overall_accuracy: intOrNull('overall_accuracy'),
+      overall_completeness: intOrNull('overall_completeness'),
+      overall_usefulness: parseInt(row['overall_usefulness']) || 0,
+      manual_conversion_effort: row['manual_conversion_effort'] || '',
+      correction_effort: row['correction_effort'] || '',
+      enrichment_quality: intOrNull('enrichment_quality'),
+      summary_generated: intOrNull('summary_generated'),
+      summary_quality: intOrNull('summary_quality'),
+      issue_missing_content: row['issue_missing_content'] || '',
+      issue_split_merged: row['issue_split_merged'] || '',
+      issue_wrong_section: row['issue_wrong_section'] || '',
+      issue_inaccurate: row['issue_inaccurate'] || '',
+      issue_ai_enrichment: row['issue_ai_enrichment'] || '',
+      issue_formatting: row['issue_formatting'] || '',
+      issue_locations: row['issue_locations'] || '',
+      biggest_issue: row['biggest_issue'] || '',
+      likelihood_to_recommend: parseInt(row['likelihood_to_recommend']) || 0,
+      submitted_at: row['submitted_at'] || '',
+    }
+  })
+}
+
+function splitCSVRows(csv: string): string[] {
+  const rows: string[] = []
+  let current = ''
+  let inQuotes = false
+  for (let i = 0; i < csv.length; i++) {
+    const ch = csv[i]
+    if (ch === '"') {
+      inQuotes = !inQuotes
+      current += ch
+    } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
+      // Treat \r\n as a single break; don't emit an empty row for the \n.
+      if (ch === '\r' && csv[i + 1] === '\n') i++
+      rows.push(current)
+      current = ''
+    } else {
+      current += ch
+    }
+  }
+  if (current) rows.push(current)
+  return rows
+}
+
+function parseCSVLine(line: string): string[] {
+  const result: string[] = []
+  let current = ''
+  let inQuotes = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === '"') {
+      // A doubled quote ("") inside a quoted field is an escaped literal quote.
+      if (inQuotes && line[i + 1] === '"') {
+        current += '"'
+        i++
+      } else {
+        inQuotes = !inQuotes
+      }
+    } else if (ch === ',' && !inQuotes) {
+      result.push(current)
+      current = ''
+    } else {
+      current += ch
+    }
+  }
+  result.push(current)
+  return result
+}
+
 export default function AdminFeedbackInsights() {
   const [feedback, setFeedback] = useState<FeedbackData[]>([])
   const [loading, setLoading] = useState(true)
@@ -86,7 +175,7 @@ export default function AdminFeedbackInsights() {
       const res = await exportFeedbackCsv()
       if (res.ok) {
         const csvText = await res.text()
-        const parsed = parseCSV(csvText)
+        const parsed = parseFeedbackCsv(csvText)
         setFeedback(parsed)
       }
     } catch (err) {
@@ -116,95 +205,6 @@ export default function AdminFeedbackInsights() {
     }
   }
 
-  const parseCSV = (csv: string): FeedbackData[] => {
-    // Split into rows on newlines that are NOT inside a quoted field — the
-    // free-text biggest_issue column can contain embedded newlines, which a
-    // naive split('\n') would shatter into bogus rows.
-    const lines = splitCSVRows(csv).filter((l) => l.trim())
-    if (lines.length <= 1) return []
-
-    const headers = lines[0].split(',')
-    return lines.slice(1).map((line) => {
-      const values = parseCSVLine(line)
-      const row: Record<string, string> = {}
-      headers.forEach((h, i) => {
-        row[h.trim()] = (values[i] || '').trim()
-      })
-      const intOrNull = (k: string) => (row[k] ? parseInt(row[k]) : null)
-      return {
-        id: parseInt(row['id']) || 0,
-        run_id: row['run_id'] || '',
-        user_email: row['user_email'] || '',
-        reviewer_role: row['reviewer_role'] || '',
-        overall_accuracy: intOrNull('overall_accuracy'),
-        overall_completeness: intOrNull('overall_completeness'),
-        overall_usefulness: parseInt(row['overall_usefulness']) || 0,
-        manual_conversion_effort: row['manual_conversion_effort'] || '',
-        correction_effort: row['correction_effort'] || '',
-        enrichment_quality: intOrNull('enrichment_quality'),
-        summary_generated: intOrNull('summary_generated'),
-        summary_quality: intOrNull('summary_quality'),
-        issue_missing_content: row['issue_missing_content'] || '',
-        issue_split_merged: row['issue_split_merged'] || '',
-        issue_wrong_section: row['issue_wrong_section'] || '',
-        issue_inaccurate: row['issue_inaccurate'] || '',
-        issue_ai_enrichment: row['issue_ai_enrichment'] || '',
-        issue_formatting: row['issue_formatting'] || '',
-        issue_locations: row['issue_locations'] || '',
-        biggest_issue: row['biggest_issue'] || '',
-        likelihood_to_recommend: parseInt(row['likelihood_to_recommend']) || 0,
-        submitted_at: row['submitted_at'] || '',
-      }
-    })
-  }
-
-  const splitCSVRows = (csv: string): string[] => {
-    const rows: string[] = []
-    let current = ''
-    let inQuotes = false
-    for (let i = 0; i < csv.length; i++) {
-      const ch = csv[i]
-      if (ch === '"') {
-        inQuotes = !inQuotes
-        current += ch
-      } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
-        // Treat \r\n as a single break; don't emit an empty row for the \n.
-        if (ch === '\r' && csv[i + 1] === '\n') i++
-        rows.push(current)
-        current = ''
-      } else {
-        current += ch
-      }
-    }
-    if (current) rows.push(current)
-    return rows
-  }
-
-  const parseCSVLine = (line: string): string[] => {
-    const result: string[] = []
-    let current = ''
-    let inQuotes = false
-    for (let i = 0; i < line.length; i++) {
-      const ch = line[i]
-      if (ch === '"') {
-        // A doubled quote ("") inside a quoted field is an escaped literal quote.
-        if (inQuotes && line[i + 1] === '"') {
-          current += '"'
-          i++
-        } else {
-          inQuotes = !inQuotes
-        }
-      } else if (ch === ',' && !inQuotes) {
-        result.push(current)
-        current = ''
-      } else {
-        current += ch
-      }
-    }
-    result.push(current)
-    return result
-  }
-
   const handleExport = () => {
     window.open(adminRoutes.exportFeedback(), '_blank')
   }
@@ -219,7 +219,7 @@ export default function AdminFeedbackInsights() {
 
   if (feedback.length === 0) {
     return (
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-12 text-center">
+      <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-12 text-center">
         <MessageSquare className="h-12 w-12 text-gray-300 mx-auto mb-4" aria-hidden="true" />
         <h3 className="text-lg font-medium text-gray-900 mb-2">No feedback collected yet</h3>
         <p className="text-sm text-gray-500 max-w-md mx-auto">
@@ -254,7 +254,7 @@ export default function AdminFeedbackInsights() {
       </div>
 
       {/* Average Scores */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+      <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-4">Average Scores</h3>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
           <ScoreCard
@@ -286,7 +286,7 @@ export default function AdminFeedbackInsights() {
 
       {/* Time Savings Analysis */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
           <h3 className="text-sm font-semibold text-gray-900 mb-4">
             Manual Conversion Effort
           </h3>
@@ -295,7 +295,7 @@ export default function AdminFeedbackInsights() {
           </p>
           <EffortBars distribution={manualEffortDist} total={feedback.length} />
         </div>
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
           <h3 className="text-sm font-semibold text-gray-900 mb-4">
             Correction Effort
           </h3>
@@ -307,7 +307,7 @@ export default function AdminFeedbackInsights() {
       </div>
 
       {/* Summary stats */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+      <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-2">
           Total Responses: {feedback.length}
         </h3>
@@ -319,7 +319,7 @@ export default function AdminFeedbackInsights() {
 
       {/* Individual submissions — lets an admin purge a garbage/abusive
           response that would otherwise pollute the aggregates above. */}
-      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+      <div className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-4">
           Individual Submissions
         </h3>

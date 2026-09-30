@@ -9,6 +9,7 @@ from typing import NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+import redis
 from sqlalchemy import func
 from sqlalchemy.orm import Query as SAQuery, Session, contains_eager
 
@@ -25,11 +26,15 @@ from app.schemas import (
     AdminConfigUpdate,
     AdminUserUpdate,
     QualityScoreResult,
+    QueueDbView,
+    QueueStatsResponse,
 )
-from app.services.admin_service import get_users_with_stats, get_single_user_stats
+from app.services.admin_service import get_step_avg_seconds, get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import get_cached_score, compute_and_cache_score
 from app.audit_events import RUN_DELETED
-from app.services.run_service import delete_run_and_artifacts, find_run, reap_orphaned_created_runs
+from app.services.run_service import delete_run_and_artifacts, find_run, reap_orphaned_created_runs, queue_db_view
+from app.config_loader import get_config as read_config  # a route below is named get_config
+from app.pipeline import concurrency, run_queue
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -96,6 +101,8 @@ async def get_stats(
         if durations else None
     )
 
+    step_avg_seconds = get_step_avg_seconds(db)
+
     return AdminStats(
         total_runs=total_runs,
         active_users=active_users,
@@ -103,6 +110,7 @@ async def get_stats(
         feedback_rate=round(feedback_rate, 1),
         avg_duration_seconds=avg_duration_seconds,
         p95_duration_seconds=p95_duration_seconds,
+        step_avg_seconds=step_avg_seconds,
     )
 
 
@@ -272,6 +280,53 @@ async def reap_orphan_runs(
         admin.email, dry_run, result["candidates"], result["reaped"], result["objects_deleted"],
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/queue/stats
+# ---------------------------------------------------------------------------
+@router.get("/admin/queue/stats", response_model=QueueStatsResponse)
+def get_queue_stats(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> QueueStatsResponse:
+    """Run-queue depth and ownership (Valkey) beside the DB view of queued and
+    running runs (#701). ``enabled`` reflects ``dispatch_mode() == "queue"``,
+    not merely whether ``CVICHE_REDIS_URL`` is set -- that URL is shared with
+    the event broker, the idle-session store, the login throttle and SAML
+    replay, so in_process mode can still see it configured.
+
+    A queued row older than ``CVICHE_QUEUED_RECONCILE_MINUTES`` while stream
+    ``lag`` and ``pending`` are both 0 has lost its Valkey token; the
+    queued-run reconciler (``run_service.reconcile_queued_runs``) requeues it
+    on its next sweep, and the user's own /start does the same sooner. ``lag``
+    also counts stale tokens -- an idempotent re-enqueue of an
+    already-queued run, or a run cancelled while queued whose token nothing
+    has claimed yet -- so a non-zero lag does not by itself rule stranding
+    out.
+
+    Plain ``def``: both ``queue_db_view`` (sync Session) and ``run_queue``'s
+    Valkey calls (sync redis-py) are blocking, so FastAPI runs this in the
+    threadpool instead of stalling the event loop (#701 admin_routes.py
+    point 1 / run_queue.py point 11).
+    """
+    db_view = QueueDbView(**queue_db_view(db))
+    if concurrency.dispatch_mode() != "queue":
+        return QueueStatsResponse(enabled=False, db=db_view)
+
+    url, _ = read_config("redis", "CVICHE_REDIS_URL", default="")
+    if not url:
+        return QueueStatsResponse(enabled=True, db=db_view, error="valkey_not_configured")
+    try:
+        stats = run_queue.stats()
+    except redis.exceptions.RedisError as e:
+        # The endpoint that diagnoses a stuck queue must still answer when
+        # Valkey itself is the problem. The exception's own text can carry a
+        # host:port (e.g. "Error 111 connecting to valkey:6379") -- that goes
+        # only to the log, never the response.
+        logger.warning("Queue stats unavailable: %s: %s", type(e).__name__, e)
+        return QueueStatsResponse(enabled=True, db=db_view, error="valkey_unavailable")
+    return QueueStatsResponse(enabled=True, db=db_view, **stats)
 
 
 # ---------------------------------------------------------------------------

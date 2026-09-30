@@ -18,7 +18,7 @@ export default function PromptLogViewer({
   if (promptLogs.length === 0) {
     return (
       <div
-        className="flex items-center justify-center bg-gray-50 rounded-lg border border-gray-200 text-gray-500 text-sm"
+        className="flex items-center justify-center bg-sand-50 rounded-[10px] border border-sand-200 text-gray-500 text-sm"
         style={{ height: '60vh' }}
       >
         <p>{promptLogsMessage || 'No prompt logs available for this stage.'}</p>
@@ -33,7 +33,7 @@ export default function PromptLogViewer({
     >
       {/* Left sidebar - file list */}
       <nav
-        className="w-full md:w-64 flex-shrink-0 bg-gray-100 rounded-lg p-2 overflow-y-auto"
+        className="w-full md:w-64 flex-shrink-0 bg-sand-50 border border-sand-200 rounded-[10px] p-2 overflow-y-auto"
         aria-label="Prompt log files"
       >
         <ul className="space-y-1" role="list">
@@ -41,10 +41,10 @@ export default function PromptLogViewer({
             <li key={i}>
               <button
                 onClick={() => onSelectPromptLog(log.filename)}
-                className={`w-full text-left px-3 py-2 rounded text-xs truncate transition-colors focus:ring-2 focus:ring-blue-500 focus:outline-none ${
+                className={`w-full text-left px-3 py-2 rounded text-xs truncate transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none ${
                   selectedPromptLog === log.filename
-                    ? 'bg-blue-500 text-white'
-                    : 'bg-white hover:bg-gray-200 text-gray-700'
+                    ? 'bg-primary-600 text-white'
+                    : 'bg-white hover:bg-sand-100 text-gray-700'
                 }`}
                 title={log.filename}
                 aria-current={
@@ -59,9 +59,9 @@ export default function PromptLogViewer({
       </nav>
 
       {/* Right panel - content display */}
-      <div className="flex-1 min-w-0 bg-white rounded-lg border-2 border-gray-300 overflow-hidden flex flex-col">
+      <div className="flex-1 min-w-0 bg-white rounded-[10px] border border-sand-300 overflow-hidden flex flex-col">
         {/* Browser-chrome-style titlebar */}
-        <div className="bg-gray-200 px-4 py-2 text-xs font-semibold text-gray-600 border-b border-gray-300 flex items-center gap-2">
+        <div className="bg-sand-50 px-4 py-2 text-xs font-semibold text-gray-600 border-b border-sand-200 flex items-center gap-2">
           <div
             className="w-3 h-3 rounded-full bg-red-400"
             aria-hidden="true"
@@ -82,7 +82,7 @@ export default function PromptLogViewer({
         </div>
 
         {/* Content area */}
-        <div className="flex-1 overflow-auto p-4 bg-gray-50">
+        <div className="flex-1 overflow-auto p-4 bg-sand-50">
           {selectedPromptLog ? (
             <pre className="text-xs font-mono whitespace-pre-wrap text-gray-800">
               <code>{selectedContent || 'No content available'}</code>

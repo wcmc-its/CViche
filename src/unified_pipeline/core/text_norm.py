@@ -13,7 +13,7 @@ def _fold_marks(text: str) -> str:
     """Drop combining marks ('Müller' -> 'Muller', Greek tonos, Cyrillic
     breve) so an accented word tokenizes the same as its base letters (#541).
     NFKD then NFC: NFC recomposes Hangul jamo so a CJK string keeps its
-    character count (the CJK floor is deferred, #722). Pure-ASCII input is
+    character count (CJK is excluded from render tokens, #722). Pure-ASCII input is
     returned untouched, byte-identical."""
     if text.isascii():
         return text

@@ -208,13 +208,13 @@ def test_mentee_guard_rejects_a_row_with_no_cells():
 def test_wrong_shaped_table_after_current_funding_is_untouched_and_the_grant_still_renders():
     gen = WCMTemplateGenerator(verbose=False)
     doc = Document()
-    doc.add_paragraph(CURRENT)
+    doc.add_paragraph().add_run(CURRENT).bold = True
     sentinel_table = doc.add_table(rows=1, cols=3)
     sentinel_table.rows[0].cells[0].text = 'SENTINEL-DO-NOT-TOUCH'
     sentinel_table.rows[0].cells[1].text = 'Role'
     sentinel_table.rows[0].cells[2].text = 'Dates'
-    doc.add_paragraph(COMPLETED)
-    doc.add_paragraph(PENDING)
+    doc.add_paragraph().add_run(COMPLETED).bold = True
+    doc.add_paragraph().add_run(PENDING).bold = True
     gen.doc = doc
 
     gen._fill_research_support(
@@ -231,11 +231,11 @@ def test_wrong_shaped_table_after_current_funding_is_untouched_and_the_grant_sti
 def test_n2s_exact_label_after_past_funding_is_not_removed():
     gen = WCMTemplateGenerator(verbose=False)
     doc = Document()
-    doc.add_paragraph(CURRENT)
-    doc.add_paragraph(COMPLETED)
+    doc.add_paragraph().add_run(CURRENT).bold = True
+    doc.add_paragraph().add_run(COMPLETED).bold = True
     n2_table = doc.add_table(rows=1, cols=2)
     n2_table.rows[0].cells[0].text = N2_LABEL
-    doc.add_paragraph(PENDING)
+    doc.add_paragraph().add_run(PENDING).bold = True
     gen.doc = doc
 
     gen._fill_research_support({'M2A': [], 'M2B': [], 'M2C': []}, current_year=2026)
@@ -309,9 +309,9 @@ def test_guard_is_safe_on_an_empty_table_in_the_render_flow():
     # nothing of its own shape and moves on.
     gen = WCMTemplateGenerator(verbose=False)
     doc = Document()
-    doc.add_paragraph(CURRENT)
-    doc.add_paragraph(COMPLETED)
-    doc.add_paragraph(PENDING)
+    doc.add_paragraph().add_run(CURRENT).bold = True
+    doc.add_paragraph().add_run(COMPLETED).bold = True
+    doc.add_paragraph().add_run(PENDING).bold = True
     gen.doc = doc
 
     # Splice a rowless table element directly into the body (python-docx's

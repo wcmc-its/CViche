@@ -351,6 +351,13 @@ class Settings(BaseModel):
 # Admin Schemas
 # ============================================================
 
+class AdminStepAvg(BaseModel):
+    """Average duration of one pipeline stage over completed runs."""
+    stage_id: str
+    step_name: str
+    avg_seconds: float
+
+
 class AdminStats(BaseModel):
     """Overview statistics for the admin dashboard."""
     total_runs: int
@@ -361,6 +368,8 @@ class AdminStats(BaseModel):
     # there are no completed runs yet.
     avg_duration_seconds: float | None = None
     p95_duration_seconds: int | None = None
+    # Per-stage average duration over completed runs, in pipeline order.
+    step_avg_seconds: list[AdminStepAvg] = []
 
 
 class AdminUser(BaseModel):
@@ -443,6 +452,33 @@ class AdminRunsResponse(BaseModel):
     has_more: bool
     offset: int
     limit: int
+
+
+class QueueDbView(BaseModel):
+    """DB side of the run-queue stats (#701): counts and ages by status,
+    matching ``run_service.queue_db_view``'s keys."""
+    queued: int
+    running: int
+    oldest_queued_age_s: float | None = None
+    oldest_running_age_s: float | None = None
+
+
+class QueueStatsResponse(BaseModel):
+    """Run-queue depth and ownership (Valkey), beside the DB view, for the
+    admin dashboard (#701). ``enabled`` is ``dispatch_mode() == "queue"``,
+    independent of whether ``CVICHE_REDIS_URL`` happens to be set (other
+    features share that same URL). ``error`` is a stable code
+    (``valkey_unavailable`` / ``valkey_not_configured``) -- never raw
+    exception text, which can carry a host:port."""
+    enabled: bool
+    db: QueueDbView
+    error: str | None = None
+    stream_length: int | None = None
+    pending: int | None = None
+    lag: int | None = None
+    consumers: int | None = None
+    owners: list[dict] = []
+    dead: int | None = None
 
 
 class AdminConfigResponse(BaseModel):
