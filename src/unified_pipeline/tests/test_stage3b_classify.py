@@ -682,6 +682,15 @@ def test_multi_batch_group_keeps_stage_default_cache_point(monkeypatch):
     assert all("enable_prompt_caching" not in c for c in calls)
 
 
+def test_group_one_over_batch_size_is_multi_batch(monkeypatch):
+    """The smallest real multi-batch group: batch_size + 1 entries is two
+    calls, and both keep the cachePoint (the second reads the first's)."""
+    calls = _capture_calls(monkeypatch)
+    classify.classify_entries_batch(_entries(3), _context(), _taxonomy(), batch_size=2)
+    assert len(calls) == 2
+    assert all("enable_prompt_caching" not in c for c in calls)
+
+
 def test_cache_opt_out_leaves_prompt_text_byte_identical(monkeypatch):
     """The opt-out is a call kwarg only: the system message equals the
     unchanged template rendering, and matches the split-batch call's."""
