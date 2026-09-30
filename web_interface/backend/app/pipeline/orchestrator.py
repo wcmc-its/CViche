@@ -360,7 +360,7 @@ class StreamingStdoutCapture:
     """
 
     def __init__(self, orchestrator, step_number: int, event_loop: asyncio.AbstractEventLoop,
-                 guard: "_StageGuard | None" = None):
+                 guard: _StageGuard | None = None):
         self.orchestrator = orchestrator
         self.guard = guard
         self.step_number = step_number
@@ -1249,6 +1249,7 @@ class PipelineOrchestrator:
             return result
         finally:
             _STDOUT_ROUTER.unregister()
+            guard.exit()  # pairs with guard.enter() in _run_with_stdout_capture (#590)
 
     async def _run_with_stdout_capture(self, func, step_number: int, *args, **kwargs):
         """Run a function in a thread pool while capturing stdout and streaming logs in real-time.
@@ -1259,15 +1260,10 @@ class PipelineOrchestrator:
         event_loop = asyncio.get_running_loop()
         guard = self._stage_guard
         guard.enter()  # before the thread starts, so a timeout can never miss it (#590)
-
-        def job():
-            try:
-                return self._run_with_stdout_capture_sync(
-                    func, step_number, event_loop, guard, *args, **kwargs)
-            finally:
-                guard.exit()
-
-        return await asyncio.to_thread(job)
+        return await asyncio.to_thread(
+            self._run_with_stdout_capture_sync,
+            func, step_number, event_loop, guard, *args, **kwargs
+        )
 
     def _render_options(self) -> tuple[bool, bool, bool]:
         """(emit_track_changes, emit_comments, strip_template_instructions) for stage 6.
