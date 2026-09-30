@@ -13,11 +13,12 @@ from sqlalchemy import func
 from sqlalchemy.orm import Query as SAQuery, Session, contains_eager
 
 from app.database import get_db
-from app.models import User, Run, Feedback, SystemConfig, Consent
+from app.models import User, Run, Step, Feedback, SystemConfig, Consent
 from app.auth import require_admin, SessionEpochUnreadable
 from app.errors import not_found, validation_error
 from app.schemas import (
     AdminStats,
+    AdminStepAvg,
     AdminUser,
     AdminRunEntry,
     AdminRunsResponse,
@@ -95,6 +96,30 @@ async def get_stats(
         if durations else None
     )
 
+    # Average duration per pipeline stage over the steps of completed runs (failed
+    # runs are excluded so a stage that died early doesn't skew the average).
+    # One grouped query, ordered by the pipeline's step order.
+    step_rows = (
+        db.query(
+            Step.stage_id,
+            func.min(Step.step_name),
+            func.avg(Step.duration_seconds),
+        )
+        .join(Run, Run.id == Step.run_id)
+        .filter(
+            Run.status == "complete",
+            Step.duration_seconds.isnot(None),
+            Step.stage_id.isnot(None),
+        )
+        .group_by(Step.stage_id)
+        .order_by(func.min(Step.step_number))
+        .all()
+    )
+    step_avg_seconds = [
+        AdminStepAvg(stage_id=stage_id, step_name=name, avg_seconds=round(float(avg), 1))
+        for stage_id, name, avg in step_rows
+    ]
+
     return AdminStats(
         total_runs=total_runs,
         active_users=active_users,
@@ -102,6 +127,7 @@ async def get_stats(
         feedback_rate=round(feedback_rate, 1),
         avg_duration_seconds=avg_duration_seconds,
         p95_duration_seconds=p95_duration_seconds,
+        step_avg_seconds=step_avg_seconds,
     )
 
 
