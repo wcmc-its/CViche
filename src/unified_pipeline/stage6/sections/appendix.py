@@ -136,6 +136,16 @@ _TRUNCATION_MARKER = "..."
 # Group label for an entry that carries no source hierarchy at all.
 _UNKNOWN_SECTION = "Unknown Section"
 
+# The one explanatory line under "T. APPENDIX", written by both appendix
+# writers. It must not claim the entries appear nowhere else: stage 6 cannot
+# prove that (#534 -- some numbered lines repeat content a section rendered,
+# and some carry content a renderer dropped).
+APPENDIX_INTRO_TEXT = (
+    "These entries from your original CV could not be matched to a section of "
+    "the WCM format. Some may repeat content shown in the sections above; "
+    "please review before relying on it."
+)
+
 # Why an entry did not reach the appendix, named for the check that caught it.
 # These are the words the summary Word comment and the log line report, in
 # `DROP_REASONS` order, so a reader can tell two dropped header rows from two
@@ -756,9 +766,9 @@ class AppendixSection:
 
         intro_para = self.doc.add_paragraph()
         run = intro_para.add_run(
-            "The following content from the original CV was not successfully mapped to this CV format:"
+            APPENDIX_INTRO_TEXT
         )
-        _set_font(run)
+        _set_font(run, italic=True)
         if dropped:
             self._add_word_comment(
                 intro_para, _describe_dropped(dropped), author="Template Filter"
