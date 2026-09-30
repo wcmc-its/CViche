@@ -293,6 +293,7 @@ import sys
 sys.path.insert(0, {root!r})
 sys.argv = ["run_full_pipeline.py", "2097_Upton_Cv", "--stage", "1a"]
 import run_full_pipeline as r
+r._OUTPUTS_ROOT = r.Path('src/unified_pipeline/outputs')  # keep artifacts under the cwd (#490)
 r.get_cv_hierarchy_chunked = lambda *, cv_path: (
     [{{"level": "H1", "text": "Education", "children": []}}],
     {{"extraction_cost": 0.01}})

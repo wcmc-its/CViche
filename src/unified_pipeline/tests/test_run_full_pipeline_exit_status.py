@@ -89,6 +89,17 @@ def _configure_cli_logging_keeping_pytests_handlers():
             root.addHandler(handler)
 
 
+def _enter_tmp_repo(tmp_path, monkeypatch):
+    """Run from an empty directory whose outputs tree is its own.
+
+    The CLI anchors _OUTPUTS_ROOT on the script's location (#490), so chdir
+    alone no longer isolates a test from the real repo's outputs. Pinning the
+    root back to the cwd-relative spelling keeps every artifact under tmp_path.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(run_full_pipeline, '_OUTPUTS_ROOT', _OUT)
+
+
 def _result(stage, **kwargs):
     return StageResult(stage=stage, **kwargs)
 
@@ -333,7 +344,7 @@ def _run_main_streams(tmp_path, monkeypatch, capsys, fail=(), stage5b_writer=Non
     stale artifact from a previous run. ``make_docx=False`` leaves the source
     document off disk, for the stages that never open it.
     """
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     (tmp_path / 'data/sample_cvs/word').mkdir(parents=True)
     if make_docx:
         (tmp_path / _DOCX).write_bytes(b'PK\x03\x04fake')
@@ -422,7 +433,7 @@ def test_a_rerun_that_succeeds_clears_the_stage_error(tmp_path, monkeypatch, cap
     from unified_pipeline.stage_errors import read_stage_errors
     _run_main(tmp_path, monkeypatch, capsys, fail={'4'})
     assert [e.stage for e in read_stage_errors(tmp_path / _STAGE_ERRORS)] == ['4']
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     capsys.readouterr()
     _install_stubs(monkeypatch, _Calls(), set(), None, None, tmp_path)
     assert run_full_pipeline.main() == 0
@@ -435,7 +446,7 @@ def test_a_rerun_that_skips_a_stage_keeps_its_earlier_failure(tmp_path, monkeypa
     run whose stage 4 still has not produced output."""
     from unified_pipeline.stage_errors import read_stage_errors
     _run_main(tmp_path, monkeypatch, capsys, fail={'4'})
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     capsys.readouterr()
     _install_stubs(monkeypatch, _Calls(), {'3b'}, None, None, tmp_path)
     run_full_pipeline.main()
@@ -498,7 +509,7 @@ def test_a_stage_1a_failure_skips_everything_downstream(tmp_path, monkeypatch, c
     ("4.5", "4"), ("5", "4"), ("5b", "4"), ("5c", "4"), ("5d", "4"), ("6", "4"),
 ])
 def test_every_stage_names_its_missing_prerequisite(stage, prerequisite, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     ok, missing_file, required_stage = run_full_pipeline.check_prerequisites(stage, UID)
     assert ok is False, f"--stage {stage} validated nothing with an empty outputs tree"
     assert required_stage == prerequisite
@@ -513,6 +524,44 @@ def test_the_dependency_registry_covers_every_stage():
         if stage == '3':
             continue  # the --stage 3 alias has no output of its own
         assert stage in paths, f"no expected output path for stage {stage}"
+
+
+# -- #490: output paths do not depend on the launch directory ----------------
+# Mutant that kills these: _OUTPUTS_ROOT = Path('src/unified_pipeline/outputs')
+# (the cwd-relative spelling), or the literal path back in _stage_1a.
+
+_SCRIPT_DIR = Path(run_full_pipeline.__file__).resolve().parent
+
+
+def test_output_paths_stay_under_the_repo_from_any_launch_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    paths = run_full_pipeline.get_output_paths(UID)
+    for stage, path in paths.items():
+        assert path.is_absolute(), f"stage {stage} path follows the cwd: {path}"
+        assert _SCRIPT_DIR in path.parents, f"stage {stage} left the repo: {path}"
+        assert tmp_path not in path.parents
+
+
+def test_the_outputs_root_is_not_resolved_through_a_worktree_symlink():
+    """A worktree symlinks src/unified_pipeline/outputs at a shared farm; only
+    the script's own directory may be resolved, or the farm link is bypassed."""
+    assert run_full_pipeline._OUTPUTS_ROOT == _SCRIPT_DIR / 'src' / 'unified_pipeline' / 'outputs'
+
+
+def test_stage_1a_writes_under_the_outputs_root_not_the_cwd(tmp_path, monkeypatch):
+    launch_dir, root = tmp_path / 'elsewhere', tmp_path / 'root'
+    launch_dir.mkdir()
+    monkeypatch.chdir(launch_dir)
+    monkeypatch.setattr(run_full_pipeline, '_OUTPUTS_ROOT', root)
+    monkeypatch.setattr(run_full_pipeline, 'get_cv_hierarchy_chunked',
+                        lambda *, cv_path: ([], {'extraction_cost': 0}))
+    ctx = run_full_pipeline.PipelineContext(cv_path=Path(f'{UID}.docx'), document_uid=UID)
+
+    result = run_full_pipeline._stage_1a(ctx)
+
+    assert Path(result.output_file) == root / 'stage_1a_segmentation' / f'{UID}_segmented.json'
+    assert Path(result.output_file).is_file()
+    assert list(launch_dir.iterdir()) == [], "stage 1a wrote into the launch directory"
 
 
 # -- r3960618825 / r3965516071: stage 4 gets the resolved path ---------------
@@ -981,7 +1030,7 @@ def test_resolve_cv_path_for_run_scopes_prompt_logger_to_a_hashed_id(
     """The scope id is a hash of document_uid, not document_uid itself --
     see the next test for why."""
     assert prompt_logger._current_run_id.get() is None, "leaked from another test"
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     (tmp_path / "data/sample_cvs/word").mkdir(parents=True)
     (tmp_path / _DOCX).write_bytes(b"PK\x03\x04fake")
 
@@ -1010,7 +1059,7 @@ def test_resolve_cv_path_for_run_survives_a_document_uid_too_long_for_the_regex(
     with pytest.raises(ValueError):
         prompt_logger.set_current_run_id(long_uid)
 
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
 
     def _check():
         cv_path, document_uid = run_full_pipeline.resolve_cv_path_for_run(long_uid)
@@ -1059,7 +1108,7 @@ def test_prompt_logger_resets_when_main_raises(tmp_path, monkeypatch, capsys):
     set_current_run_id() in main()'s own context.
     """
     assert prompt_logger._current_run_id.get() is None, "leaked from another test"
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     (tmp_path / 'data/sample_cvs/word').mkdir(parents=True)
     (tmp_path / _DOCX).write_bytes(b'PK\x03\x04fake')
 
