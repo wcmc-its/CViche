@@ -162,6 +162,11 @@ def test_extract_tool_use_input_none_for_text_only_response() -> None:
     assert bedrock._extract_tool_use_input({}) is None
 
 
+def test_extract_tool_use_input_none_when_tool_block_has_no_input() -> None:
+    response = {"output": {"message": {"content": [{"toolUse": {"name": "extract"}}]}}}
+    assert bedrock._extract_tool_use_input(response) is None
+
+
 def test_extract_text_content_finds_text_block() -> None:
     response = {"output": {"message": {"content": [{"toolUse": {}}, {"text": "hi"}]}}}
     assert bedrock._extract_text_content(response) == "hi"
