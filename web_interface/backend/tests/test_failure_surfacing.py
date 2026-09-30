@@ -227,9 +227,15 @@ def test_timed_out_stage_thread_stops_at_next_callback_before_terminal(monkeypat
         finally:
             exited.set()
 
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "STAGE_WORKER_EXIT_GRACE_SECONDS", 3)  # bounds a regression
+    errors = []
+    monkeypatch.setattr(orch.logger, "error", lambda *a, **k: errors.append(a))
     o, emitter = _timeout_orchestrator(monkeypatch, tmp_path, chatty_stage)
     with pytest.raises(TimeoutError, match="timed out"):
         asyncio.run(o.execute_step(6, "4", "cv.docx"))
+    assert errors == []  # the thread exited inside the grace period: nothing to shout about
 
     # (1) the thread unwound at its next callback, and had exited by the time
     # execute_step raised (so the run cannot go terminal underneath it)
@@ -298,6 +304,7 @@ def test_stage_thread_that_outlives_grace_is_logged_and_its_callbacks_stay_dead(
     logs_before = emitter.emit_log.await_count
     release.set()
     assert exited.wait(timeout=5)
+    assert o._stage_guard.wait_idle(5)  # the sink's final flush() runs after the stage returns
     assert late_write == []  # the write raised StageAbandoned
     assert emitter.emit_log.await_count == logs_before
 
