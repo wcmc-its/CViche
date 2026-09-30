@@ -353,3 +353,36 @@ def test_a_run_loop_write_goes_to_real_stdout_and_a_stage_write_streams(monkeypa
     assert streamed == ["from the stage"]
     assert kept == "partial"
     assert "on the run loop\n" in real_stdout.getvalue()
+
+
+def test_a_stage_printing_from_its_own_event_loop_still_streams():
+    """Only the capture's own run loop is exempt. A stage that runs its own
+    asyncio.run() (an async client inside a stage) and prints from inside it
+    is still the stage talking: its lines, and the progress parsed from them,
+    must stream."""
+    import asyncio
+
+    streamed, progress = [], []
+
+    class _Run:
+        async def log(self, step, message, level="INFO"):
+            streamed.append(message)
+
+        async def update_progress(self, step, current, total, message=""):
+            progress.append((current, total))
+
+    async def stage_async():
+        print("Processing 2 of 5 sections")
+
+    def stage():
+        asyncio.run(stage_async())
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        await asyncio.to_thread(
+            orch_mod.PipelineOrchestrator._run_with_stdout_capture_sync, _Run(), stage, 1, loop)
+
+    asyncio.run(run())
+
+    assert streamed == ["Processing 2 of 5 sections"]
+    assert progress == [(2, 5)]
