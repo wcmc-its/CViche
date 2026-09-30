@@ -79,6 +79,7 @@
         "institution": {"extract": true, "category": "template", "wcm_column": "Institution, city and state"},
         "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (mm/yy - mm/yy)"},
         "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "role": {"extract": true, "category": "optional", "notes": "A role held within the training ('Chief Resident'); the template has no role column, so it is appended to the training-type cell (#946)"},
         "department": {"extract": false, "category": "optional"},
         "mentor": {"extract": false, "category": "optional"},
         "narrative": {"extract": false, "category": "optional"}
