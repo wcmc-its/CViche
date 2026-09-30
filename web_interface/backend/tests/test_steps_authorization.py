@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import logging
 
+import pytest
+
 import app.services.artifact_service as artifact_service_mod
 from app.models import User, Run, Step
 from app.auth import create_session_cookie, COOKIE_NAME
@@ -84,6 +86,18 @@ class TestStepDetailAuthorization:
         _, run = _user_and_run(db, suffix="-step-u")
         resp = client.get(f"/api/run/{run.id}/step/1")
         assert resp.status_code == 401
+
+    @pytest.mark.parametrize("role, expected", [("admin", 0.42), ("user", None)])
+    def test_step_cost_is_admin_only(self, client, db, seed_simple_mode, role, expected):
+        """#1111: the owner sees a step's cost only when they are an admin."""
+        user, run = _user_and_run(db, role=role, suffix=f"-step-cost-{role}")
+        db.add(Step(run_id=run.id, step_number=1, stage_id="1a", step_name="Hierarchy",
+                    status="complete", cost=0.42))
+        db.commit()
+        _auth(client, user)
+        resp = client.get(f"/api/run/{run.id}/step/1")
+        assert resp.status_code == 200
+        assert resp.json()["cost_usd"] == expected
 
 
 class TestStepDetailPreview:

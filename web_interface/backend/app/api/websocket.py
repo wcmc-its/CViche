@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 
 from app.models import Run
-from app.auth import authenticate_session_cookie, COOKIE_NAME
+from app.auth import authenticate_session_cookie, COOKIE_NAME, visible_cost
 from app.origins import origin_permitted
 from app.pipeline.event_emitter import event_emitter
 from app.services.run_service import check_run_access
@@ -63,11 +63,13 @@ class _StreamAuth:
     A record rather than a bare tuple so the close code and its reason cannot be
     swapped at a call site (CODING_STANDARDS.md 8.1). When ``ok`` is True the
     close fields are unused; when it is False ``user_id`` is None.
+    ``hide_cost`` defaults to True so a verdict built without it fails closed.
     """
     ok: bool
     close_code: int
     reason: str
     user_id: int | None
+    hide_cost: bool = True
 
 
 def _terminal_event_for_run(run: Run) -> dict | None:
@@ -131,7 +133,8 @@ def _authorize_stream(cookie_value: str | None, run_id: str) -> _StreamAuth:
     try:
         user, _identity = authenticate_session_cookie(cookie_value, db, touch_idle=True)
         check_run_access(run_id, user, db)
-        return _StreamAuth(ok=True, close_code=_NO_CLOSE_CODE, reason="", user_id=user.id)
+        return _StreamAuth(ok=True, close_code=_NO_CLOSE_CODE, reason="", user_id=user.id,
+                           hide_cost=visible_cost(user, 0.0) is None)
     except HTTPException as exc:
         close_code, reason = _close_for(exc)
         return _StreamAuth(ok=False, close_code=close_code, reason=reason, user_id=None)
@@ -267,7 +270,7 @@ async def websocket_stream(websocket: WebSocket, run_id: str):
         await _close_quietly(websocket, auth.close_code, auth.reason)
         return
 
-    await event_emitter.connect(run_id, websocket)
+    await event_emitter.connect(run_id, websocket, hide_cost=auth.hide_cost)
     try:
         await _replay_terminal_event(run_id, websocket)
         await _stream_until_closed(websocket, cookie_value)
