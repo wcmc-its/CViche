@@ -38,6 +38,7 @@ from app.services.config_service import (
 from app.errors import bad_request, internal_error
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
+from app.services.run_service import UPLOAD_DIR
 from app.services.template_warning import detect_wcm_template
 
 logger = logging.getLogger(__name__)
@@ -266,10 +267,6 @@ class EstimateResponse(BaseModel):
     # True when the document's text couldn't be read and text_characters is
     # the fixed fallback guess, not a measurement (#794).
     text_characters_is_guess: bool = False
-
-# Upload directory
-UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
-UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # Recalibrated after the #881 parallel LLM batches went live (dev-207): the old

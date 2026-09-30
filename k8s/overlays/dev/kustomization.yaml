@@ -11,6 +11,19 @@ configMapGenerator:
   - name: cviche-auth-config
     files:
       - auth_config.yaml
+  # Pipeline-behaviour flags shared by BOTH drivers (the backend's
+  # in-process path and the worker's queue path) -- one source so the two
+  # container envs cannot drift apart the way CVICHE_BLOCK_COHERENCE_REPAIR
+  # did (#701 rework, mrj4001 review point 4070646335#1). Add any new flag
+  # literal here; never duplicate one directly in backend-patch.yaml or
+  # worker-patch.yaml. Both patches consume this via envFrom.configMapRef.
+  - name: cviche-pipeline-flags
+    literals:
+      # Dev-first rollout of the #198 block-coherence repair (off by
+      # default in code). Replays passed: fixes misrouted mentees/staff,
+      # zero subject-own rows touched. Watch the "10c." log line + Bedrock
+      # cost here before enabling in prod.
+      - CVICHE_BLOCK_COHERENCE_REPAIR=1
 
 # 1. Your existing database secrets configuration
 secretGenerator:
@@ -28,6 +41,7 @@ secretGenerator:
 patches:
   - path: backend-patch.yaml
   - path: frontend-patch.yaml
+  - path: worker-patch.yaml
   - path: sa-patch.yaml
   - path: ingress-patch.yaml
   - path: hpa-patch.yaml

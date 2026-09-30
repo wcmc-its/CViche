@@ -191,7 +191,7 @@ export default function PipelineHeader({
             )}
             {tokenStat('Tokens in', inputTokens)}
             {tokenStat('Tokens out', outputTokens)}
-            {isRunning && (
+            {(isRunning || status === 'queued') && (
               <button
                 onClick={onCancel}
                 disabled={isCancelling}
