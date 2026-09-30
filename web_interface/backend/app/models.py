@@ -49,6 +49,9 @@ class User(Base):
     daily_limit = Column(Integer, nullable=True)
     monthly_limit = Column(Integer, nullable=True)
     default_submission_type = Column(String(50), nullable=True)
+    # Department name from the Enterprise Directory, refreshed at SAML login.
+    # NULL for simple-auth users and when ED carries no department attribute.
+    department = Column(String(255), nullable=True)
     auth_method = Column(String(20), nullable=True, server_default="simple")  # "simple" or "saml"
     consent_version = Column(String(50), nullable=True)
     consent_date = Column(DateTime, nullable=True)
@@ -193,6 +196,11 @@ class Run(Base):
     # Auth-related fields
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     submission_type = Column(String(50), nullable=True)
+    # CV owner's name as inferred by stage 4 (cv_owner in *_fields.json), kept on
+    # the run so the admin runs list can filter and group by faculty member
+    # without opening each run's JSON. NULL until stage 4 completes or when no
+    # owner was inferred.
+    cv_owner_name = Column(String(255), nullable=True, index=True)
     show_track_changes = Column(Integer, default=1)
     show_pipeline_comments = Column(Integer, default=0)
     strip_template_instructions = Column(Integer, default=1, server_default="1", nullable=False)
