@@ -588,3 +588,9 @@ def test_an_empty_rendered_field_vouches_for_nothing():
     kept = _umbrella(pi_name=None, agency="")
     sub = _sub_grant(title="None")
     assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is False
+
+
+def test_postdoc_training_role_vouches_for_a_fused_record():
+    """#946: `role` renders on the C type line, so dedup's rendered-words set for C
+    includes it (the field is consumed here as well as by the section renderer)."""
+    assert "role" in _RENDERED_FIELDS["C"]

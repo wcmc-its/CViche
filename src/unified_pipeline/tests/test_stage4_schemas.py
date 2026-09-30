@@ -215,3 +215,14 @@ def test_postdoc_training_guide_describes_every_extracted_field():
     training section. The C guide must therefore name every field the C prompt
     lists, not just the new one."""
     assert set(schemas_mod.FIELD_DESCRIPTIONS["C"]) == set(schemas_mod.get_field_schema("C")["fields"])
+
+
+def test_postdoc_training_guide_keeps_the_program_in_training_type():
+    """#946 live A/B (blind verifier, 4 runs per arm on ZA1VOV): a guide asking
+    training_type 'as the CV words it' turned 'Fellowship' into 'Fellow physician'
+    4 of 4 runs. training_type is the program; the trainee title is not its value,
+    and the plain title stays out of `role` too."""
+    guide = schemas_mod.FIELD_DESCRIPTIONS["C"]
+    assert "not the trainee's position title" in guide["training_type"]
+    assert "as the CV words it" not in guide["training_type"]
+    assert "plain trainee title" in guide["role"]
