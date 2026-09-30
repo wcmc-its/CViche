@@ -3,12 +3,13 @@ import { Link } from 'react-router-dom'
 import { runRoutes } from '../api/routes'
 import { formatCost } from '../utils'
 import UserMenu from './UserMenu'
+import { useCanSeeCost } from '../contexts/AuthContext'
 
 interface PipelineHeaderProps {
   runId: string
   filename: string
   status: string
-  totalCost: number
+  totalCost: number | null
   inputTokens: number
   outputTokens: number
   elapsedSeconds: number
@@ -44,6 +45,7 @@ export default function PipelineHeader({
   onCancel,
   onBack,
 }: PipelineHeaderProps) {
+  const showCost = useCanSeeCost()
   const badgeClass = statusColors[status] || 'bg-gray-100 text-gray-800'
 
   return (
@@ -95,10 +97,12 @@ export default function PipelineHeader({
             <span className="font-semibold text-gray-900">{formatTotalTime(elapsedSeconds)}</span>
           </div>
 
-          <div>
-            <span className="text-gray-700">Cost:</span>{' '}
-            <span className="font-semibold text-gray-900">{formatCost(totalCost, 3)}</span>
-          </div>
+          {showCost && (
+            <div>
+              <span className="text-gray-700">Cost:</span>{' '}
+              <span className="font-semibold text-gray-900">{formatCost(totalCost, 3)}</span>
+            </div>
+          )}
 
           {/* Token metrics - hidden below lg */}
           <div className="hidden lg:block">

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { AlertTriangle } from 'lucide-react'
+import { useCanSeeCost } from '../contexts/AuthContext'
 
 interface CancelConfirmModalProps {
   isOpen: boolean
@@ -19,6 +20,7 @@ export default function CancelConfirmModal({
   onConfirm,
   onClose,
 }: CancelConfirmModalProps) {
+  const showCost = useCanSeeCost()
   // Default focus to the dismissive ("Keep running") action so an accidental
   // Enter press doesn't tear down a run; cancelling should be deliberate.
   const keepRunningButtonRef = useRef<HTMLButtonElement>(null)
@@ -110,10 +112,12 @@ export default function CancelConfirmModal({
               Any output produced so far will be <strong>partial and likely unusable</strong> —
               the document is only complete once every stage finishes.
             </li>
-            <li>
-              The cost already incurred for the stages that have run is{' '}
-              <strong>not refunded</strong>.
-            </li>
+            {showCost && (
+              <li>
+                The cost already incurred for the stages that have run is{' '}
+                <strong>not refunded</strong>.
+              </li>
+            )}
             <li>
               Cancellation <strong>takes a moment to take effect</strong>; the run stops at the
               next safe point rather than instantly.

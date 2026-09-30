@@ -4,6 +4,7 @@ import { Clock, FileText, CheckCircle2, Loader2, XCircle, AlertCircle, ChevronDo
 import { formatRelativeDate } from '../utils'
 import { getRuns, getFeedbackStatuses } from '../api/runs'
 import ErrorBanner from './ErrorBanner'
+import { useCanSeeCost } from '../contexts/AuthContext'
 
 interface RunSummary {
   run_id: string
@@ -11,7 +12,7 @@ interface RunSummary {
   status: string
   started_at: string
   completed_at: string | null
-  total_cost: number
+  total_cost: number | null
   total_duration_seconds: number | null
 }
 
@@ -107,6 +108,7 @@ function getPageNumbers(currentPage: number, totalPages: number): (number | 'ell
 }
 
 export default function RunHistory({ onSelectRun }: RunHistoryProps) {
+  const showCost = useCanSeeCost()
   const navigate = useNavigate()
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -183,7 +185,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
         cmp = (a.total_duration_seconds ?? 0) - (b.total_duration_seconds ?? 0)
         break
       case 'total_cost':
-        cmp = a.total_cost - b.total_cost
+        cmp = (a.total_cost ?? 0) - (b.total_cost ?? 0)
         break
       case 'feedback': {
         const valA = feedbackMap[a.run_id] === true ? 2 : (feedbackMap[a.run_id] === false ? 1 : 0)
@@ -299,16 +301,18 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       <SortIcon field="total_duration_seconds" />
                     </button>
                   </th>
-                  <th className="px-2 py-3 text-right w-[56px]" aria-sort={getAriaSortValue('total_cost')}>
-                    <button
-                      type="button"
-                      onClick={() => handleSort('total_cost')}
-                      className="group flex items-center gap-1 justify-end text-xs font-normal text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 w-full"
-                    >
-                      Cost
-                      <SortIcon field="total_cost" />
-                    </button>
-                  </th>
+                  {showCost && (
+                    <th className="px-2 py-3 text-right w-[56px]" aria-sort={getAriaSortValue('total_cost')}>
+                      <button
+                        type="button"
+                        onClick={() => handleSort('total_cost')}
+                        className="group flex items-center gap-1 justify-end text-xs font-normal text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 w-full"
+                      >
+                        Cost
+                        <SortIcon field="total_cost" />
+                      </button>
+                    </th>
+                  )}
                   <th className="px-2 py-3 text-center w-[110px]" aria-sort={getAriaSortValue('feedback')}>
                     <button
                       type="button"
@@ -353,9 +357,11 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                     <td className="px-2 py-3 text-right text-sm text-gray-500">
                       {formatDuration(run.total_duration_seconds)}
                     </td>
-                    <td className="px-2 py-3 text-right text-sm text-gray-700">
-                      {run.total_cost > 0 ? `$${run.total_cost.toFixed(2)}` : '\u2014'}
-                    </td>
+                    {showCost && (
+                      <td className="px-2 py-3 text-right text-sm text-gray-700">
+                        {run.total_cost ? `$${run.total_cost.toFixed(2)}` : '\u2014'}
+                      </td>
+                    )}
                     <td className="px-2 py-3 text-center">
                       {run.status === 'complete' && feedbackMap[run.run_id] === true && (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[11px] font-medium">

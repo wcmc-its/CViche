@@ -118,8 +118,7 @@ export default function HelpPage() {
                 publications. You don't need to keep the page open; processing continues on the server.
               </p>
               <p>
-                The estimated cost per run is displayed before you confirm the upload. This is the AI processing cost
-                only and is covered by the Library{'\u2014'}there is no charge to you.
+                AI processing is covered by the Library{'\u2014'}there is no charge to you.
               </p>
             </div>
           </section>
@@ -140,8 +139,7 @@ export default function HelpPage() {
                 correctly.
               </p>
               <p>
-                Duration and cost are shown in the run header. Duration is the total wall-clock time from start to
-                finish. Cost is the AI processing cost for that run.
+                Duration is shown in the run header. It is the total wall-clock time from start to finish.
               </p>
               <p>
                 If something looks wrong in your results{'\u2014'}missing publications, entries in the wrong section, or
@@ -219,8 +217,7 @@ export default function HelpPage() {
               <div>
                 <p className="text-sm font-semibold text-gray-900 mb-1">Does it cost me anything?</p>
                 <p>
-                  No. The AI processing costs are covered by the Library. The cost shown on your run page
-                  is for informational purposes only.
+                  No. The AI processing costs are covered by the Library.
                 </p>
               </div>
               <div>

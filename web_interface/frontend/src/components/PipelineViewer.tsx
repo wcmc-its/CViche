@@ -14,6 +14,7 @@ import JsonViewerModal from './JsonViewerModal'
 import CancelConfirmModal from './CancelConfirmModal'
 import ErrorBanner from './ErrorBanner'
 import FeedbackForm from './FeedbackForm'
+import { useCanSeeCost } from '../contexts/AuthContext'
 
 interface PipelineViewerProps {
   runId: string
@@ -53,6 +54,7 @@ const STEP_WEIGHTS: Record<string, { weight: number; estimated_seconds: number }
 const TOTAL_WEIGHT = Object.values(STEP_WEIGHTS).reduce((sum, s) => sum + s.weight, 0)
 
 export default function PipelineViewer({ runId, onBack, onNavigateToRun }: PipelineViewerProps) {
+  const showCost = useCanSeeCost()
   // Extract clean state and background engine processing mechanisms out of the custom hook
   const {
     runStatus,
@@ -410,8 +412,12 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                   <span>Status: <strong>{currentStepData.status}</strong></span>
                   <span className="hidden md:inline">·</span>
                   <span>Duration: <strong>{currentStepData.status === 'running' && stepStartTimes[currentStep] ? `${Math.floor((Date.now() - stepStartTimes[currentStep]) / 1000)}s` : currentStepData.duration_seconds ? `${currentStepData.duration_seconds}s` : '—'}</strong></span>
-                  <span className="hidden md:inline">·</span>
-                  <span>Cost: <strong>{currentStepData.status === 'running' ? formatCost(runningStepCost(runStatus.total_cost, stepStartCosts[currentStep]), 3) : formatCost(currentStepData.cost, 3)}</strong></span>
+                  {showCost && (
+                    <>
+                      <span className="hidden md:inline">·</span>
+                      <span>Cost: <strong>{currentStepData.status === 'running' ? formatCost(runningStepCost(runStatus.total_cost, stepStartCosts[currentStep]), 3) : formatCost(currentStepData.cost, 3)}</strong></span>
+                    </>
+                  )}
                 </div>
 
                 {currentStepData.status === 'running' && stepProgress[currentStep] && stepProgress[currentStep].total > 0 && (
