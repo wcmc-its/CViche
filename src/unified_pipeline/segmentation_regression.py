@@ -205,7 +205,8 @@ def _fold_marks(text: str) -> str:
 
 
 def _norm(text: str) -> str:
-    return _fold_marks(" ".join(str(text or "").split()).lower())
+    # Lowercase AFTER folding: NFKD can yield uppercase ("™" -> "TM").
+    return _fold_marks(" ".join(str(text or "").split())).lower()
 
 
 # Unicode letters/digits, no underscore: identical to [a-z0-9]+ on the

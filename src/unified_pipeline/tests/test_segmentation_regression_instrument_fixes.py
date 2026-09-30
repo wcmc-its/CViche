@@ -750,6 +750,7 @@ def test_norm_folds_accents_and_keeps_ascii_byte_identical():
     assert segreg._norm("Zoë  Brändström") == "zoe brandstrom"
     ascii_text = "Plain  ASCII\tText, 2019 (x)_y"
     assert segreg._norm("\ufb01nal") == "final"  # NFKD compat, not NFD
+    assert segreg._norm("Epic\u2122") == "epictm"  # lower() after the fold
     assert segreg._norm(ascii_text) == " ".join(ascii_text.split()).lower()
 
 
