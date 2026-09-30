@@ -1161,6 +1161,7 @@ def test_field_sparseness_saturates_at_ten_percent_both_failing(tmp_path):
     {"taxonomy_code": "K3", "text": "N/A"},
     {"taxonomy_code": "A", "text": "_CONTAINMENT_ONLY_TEMPLATE_TEXT"},
     {"taxonomy_code": "A", "text": "_NEAR_TEMPLATE_INSTRUCTION_TEXT"},
+    {"taxonomy_code": "A", "text": "_FOREIGN_TEMPLATE_INSTRUCTION_TEXT"},
 ])
 def test_field_sparseness_entry_with_nothing_to_extract_counts_on_neither_term(
         tmp_path, extra):
@@ -1472,6 +1473,27 @@ _CONTAINMENT_ONLY_TEMPLATE_TEXT = "See attached: " + _REAL_TEMPLATE_INSTRUCTION_
 # (the Appendix-only case its docstring describes: an unfilled field, a
 # column-header row). Isolates that helper from the other two OR-branches.
 _LABEL_ONLY_LINE_TEXT = "Degree"
+
+# Another institution's template instruction (#530): invented, and False under
+# all three WCM-only helpers, so only `is_foreign_template_instruction` claims it.
+_FOREIGN_TEMPLATE_INSTRUCTION_TEXT = (
+    "C. Sample Appointments (include institution, title and dates of appointment)")
+
+
+def test_t_bucket_excludes_foreign_template_instruction_text(tmp_path):
+    """The WCM-only helpers do not match this text, so a mutant dropping
+    `is_foreign_template_instruction(text)` from score_t_bucket's OR-condition
+    counts it as a real T entry."""
+    entries = [
+        {"taxonomy_code": "A", "text": "Real content",
+         "element_idx_start": 1, "element_idx_end": 1},
+        {"taxonomy_code": "T", "text": _FOREIGN_TEMPLATE_INSTRUCTION_TEXT,
+         "element_idx_start": 2, "element_idx_end": 2},
+    ]
+    _write_json(tmp_path, "X_classified.json", _classified_with_entries(entries))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "T_excluded_template=1" in detail, detail
+    assert "T_count=0" in detail, detail
 
 
 def test_placeholder_only_row_helper():

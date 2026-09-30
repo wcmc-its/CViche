@@ -27,6 +27,7 @@ from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.core.template_boilerplate import (
     _MIN_EXACT_LEN,
+    is_foreign_template_instruction,
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
@@ -789,7 +790,8 @@ def lint_invented_records(stage4: dict,
                     [f"{k}: {v}" for k, v in fields.items() if v]))
         if code == INVENTED_RECORD_LICENSURE_CODE:
             text = str(e.get("text", ""))
-            if is_template_instruction(text) or is_near_template_instruction(text):
+            if (is_template_instruction(text) or is_near_template_instruction(text)
+                    or is_foreign_template_instruction(text)):
                 findings.append(_finding(
                     "invented_records", "WARN",
                     f"entry {e.get('element_idx_start')} (F1): source text "
