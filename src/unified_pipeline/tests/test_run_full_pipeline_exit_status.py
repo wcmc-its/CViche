@@ -100,6 +100,23 @@ def _enter_tmp_repo(tmp_path, monkeypatch):
     monkeypatch.setattr(run_full_pipeline, '_OUTPUTS_ROOT', _OUT)
 
 
+def _repo_outputs_snapshot():
+    """Every path under the real repo outputs tree (a worktree's is a symlink
+    to the shared corpus farm), so a test can prove it wrote nothing there."""
+    root = _ROOT / 'src' / 'unified_pipeline' / 'outputs'
+    return sorted(os.path.join(d, n) for d, dirs, files in os.walk(root, followlinks=True)
+                  for n in dirs + files)
+
+
+@pytest.fixture(scope='module', autouse=True)
+def nothing_in_this_module_writes_the_real_outputs_tree():
+    """#490: the CLI's root is script-anchored, so chdir no longer isolates a
+    test. Any test here that forgets to redirect it lands in the real tree."""
+    before = _repo_outputs_snapshot()
+    yield
+    assert _repo_outputs_snapshot() == before
+
+
 def _result(stage, **kwargs):
     return StageResult(stage=stage, **kwargs)
 
@@ -542,10 +559,51 @@ def test_output_paths_stay_under_the_repo_from_any_launch_directory(tmp_path, mo
         assert tmp_path not in path.parents
 
 
-def test_the_outputs_root_is_not_resolved_through_a_worktree_symlink():
+def test_the_outputs_root_is_not_resolved_through_a_worktree_symlink(tmp_path):
     """A worktree symlinks src/unified_pipeline/outputs at a shared farm; only
-    the script's own directory may be resolved, or the farm link is bypassed."""
-    assert run_full_pipeline._OUTPUTS_ROOT == _SCRIPT_DIR / 'src' / 'unified_pipeline' / 'outputs'
+    the script's own directory may be resolved, or the farm link is bypassed.
+
+    Built for real: a copy of the script under a tmp repo whose outputs dir is
+    a symlink, run in a subprocess, so the root must keep the link.
+
+    Mutant that kills this: `.resolve()` on the joined outputs path.
+    """
+    farm = tmp_path / 'farm'
+    farm.mkdir()
+    repo = tmp_path / 'repo'
+    (repo / 'src' / 'unified_pipeline').mkdir(parents=True)
+    (repo / 'src' / 'unified_pipeline' / 'outputs').symlink_to(farm)
+    script = repo / 'run_full_pipeline.py'
+    script.write_text((_SCRIPT_DIR / 'run_full_pipeline.py').read_text())
+    probe = ('import sys; sys.path.insert(0, %r); '
+             'import run_full_pipeline as r; print(r._OUTPUTS_ROOT)' % str(_SCRIPT_DIR / 'src'))
+
+    proc = subprocess.run([sys.executable, '-c', probe], cwd=repo, capture_output=True,
+                          text=True, timeout=120,
+                          env={**os.environ, 'PYTHONPATH': str(repo)})
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    root = Path(proc.stdout.strip().splitlines()[-1])
+    assert root == repo.resolve() / 'src' / 'unified_pipeline' / 'outputs'
+    assert root.is_symlink() and root.resolve() == farm.resolve()
+
+
+def test_the_stage_error_record_is_under_the_anchored_root_not_the_cwd(tmp_path, monkeypatch):
+    """Mutant that kills this: stage_errors_path(Path('src/unified_pipeline/outputs'), ...)
+    (the cwd-relative spelling) in the failure recorder."""
+    launch_dir, root = tmp_path / 'elsewhere', tmp_path / 'root'
+    launch_dir.mkdir()
+    monkeypatch.chdir(launch_dir)
+    monkeypatch.setattr(run_full_pipeline, '_OUTPUTS_ROOT', root)
+    ctx = run_full_pipeline.PipelineContext(cv_path=Path(f'{UID}.docx'), document_uid=UID)
+
+    def _crash(_ctx):
+        raise RuntimeError('boom')
+
+    run_full_pipeline.run_stage(ctx, '4', _crash)
+
+    assert (root / 'stage_errors' / f'{UID}_stage_errors.json').is_file()
+    assert list(launch_dir.iterdir()) == [], "the stage-error record followed the cwd"
 
 
 def test_stage_1a_writes_under_the_outputs_root_not_the_cwd(tmp_path, monkeypatch):
@@ -898,14 +956,37 @@ def test_the_reported_total_cost_matches_the_stage_lines(tmp_path, monkeypatch, 
 # -- r3960726469 #7: the OS-level exit status -------------------------------
 
 
+# A driver rather than the script: the outputs root is anchored on the script's
+# own location (#490), so cwd=tmp_path alone would write into the real repo
+# tree. Redirecting it needs a hook before main(); the driver takes the same
+# route the stdout-contract harness does, and repeats __main__'s two calls
+# (the `sys.exit(main())` wire is pinned structurally by
+# test_entrypoint_propagates_the_return_value_to_the_exit_status). Chosen over
+# an env-var override so production gains no new configuration surface.
+_CLI_DRIVER = '''
+import sys
+sys.path.insert(0, {root!r})
+sys.argv = ["run_full_pipeline.py", *{args!r}]
+import run_full_pipeline as r
+r._OUTPUTS_ROOT = r.Path('src/unified_pipeline/outputs')  # under the cwd (#490)
+r.configure_cli_logging()
+sys.exit(r.main())
+'''
+
+
 def _run_cli(tmp_path, *args):
-    """Run the real CLI as a subprocess, with every LLM credential stripped from
-    its environment so it cannot reach a model even if a stage tried."""
+    """Run the CLI as a subprocess, with every LLM credential stripped from
+    its environment so it cannot reach a model even if a stage tried, and its
+    outputs root redirected under tmp_path."""
     env = {k: v for k, v in os.environ.items()
            if not (k.startswith('AWS_') or k in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY'))}
-    return subprocess.run(
-        [sys.executable, str(_ROOT / "run_full_pipeline.py"), *args],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    driver = tmp_path / 'cli_driver.py'
+    driver.write_text(_CLI_DRIVER.format(root=str(_ROOT), args=list(args)))
+    before = _repo_outputs_snapshot()
+    proc = subprocess.run([sys.executable, str(driver)],
+                          cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert _repo_outputs_snapshot() == before, "the subprocess wrote into the real outputs tree"
+    return proc
 
 
 def test_the_cli_exits_non_zero_as_a_subprocess(tmp_path):
