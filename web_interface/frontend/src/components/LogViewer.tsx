@@ -9,7 +9,7 @@ export default function LogViewer({ logs, logsEndRef }: LogViewerProps) {
   return (
     <section aria-label="Step logs">
       <div
-        className="bg-gray-900 rounded-lg p-4 text-sm font-mono text-gray-100 overflow-y-auto"
+        className="bg-gray-900 rounded-[10px] p-4 text-sm font-mono text-gray-100 overflow-y-auto"
         style={{ height: '60vh' }}
       >
         {logs.length > 0 ? (

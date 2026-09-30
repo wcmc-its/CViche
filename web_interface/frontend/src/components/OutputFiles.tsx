@@ -11,9 +11,38 @@ interface OutputFilesProps {
     output_files?: string
   }
   onOpenJson: (filename: string) => void
+  /** Set false when the finished document is offered elsewhere (the run header). */
+  showFinalOutput?: boolean
 }
 
-export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProps) {
+/** Sand panel with a DOCX tile, the file name and a primary Download button. */
+export function DocxDownloadCard({ runId, filename }: { runId: string; filename: string }) {
+  return (
+    <div className="flex flex-wrap items-center gap-4 p-4 rounded-[10px] bg-sand-50 border border-sand-200">
+      <div
+        aria-hidden="true"
+        className="w-11 h-[52px] flex-none rounded-md bg-white border border-sand-400 flex items-end justify-center pb-1.5 text-[10px] font-bold text-primary-700"
+      >
+        DOCX
+      </div>
+      <div className="flex-1 min-w-[200px]">
+        <div className="font-semibold text-gray-900 break-all">{filename}</div>
+        <div className="text-[13px] text-gray-500">WCM institutional format Word document</div>
+      </div>
+      <a
+        href={runRoutes.dataFile(runId, filename)}
+        download
+        aria-label={`Download final output file ${filename}`}
+        className="inline-flex items-center gap-2 px-5 py-2.5 bg-primary-600 hover:bg-primary-700 text-white font-semibold rounded-lg transition-colors focus:ring-2 focus:ring-primary-500 focus:ring-offset-2 focus:outline-none"
+      >
+        <Download className="w-4 h-4" aria-hidden="true" />
+        <span>Download</span>
+      </a>
+    </div>
+  )
+}
+
+export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput = true }: OutputFilesProps) {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
 
@@ -44,37 +73,14 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
   ).filter(f => isAdmin || !isJsonName(f))
 
   return (
-    <section className="mt-6" aria-label="Output files">
+    <section aria-label="Output files">
       {/* Final Output — only for stage 6 with a .docx */}
-      {isFinalStep && docxFile && (() => {
-        const filename = docxFile.split('/').pop() || docxFile
-
-        return (
-          <div className="mb-6">
-            <h3 className="text-sm font-semibold text-gray-700 mb-2">Final Output</h3>
-            <div className="bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-lg p-6">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4">
-                  <FileText className="w-10 h-10 text-blue-600" aria-hidden="true" />
-                  <div>
-                    <div className="font-semibold text-lg text-gray-900">WCM Template Document</div>
-                    <div className="text-sm text-gray-600">{filename}</div>
-                  </div>
-                </div>
-                <a
-                  href={runRoutes.dataFile(runId, filename)}
-                  download
-                  aria-label={`Download final output file ${filename}`}
-                  className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-md transition-colors flex items-center gap-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                >
-                  <Download className="w-5 h-5" aria-hidden="true" />
-                  <span>Download</span>
-                </a>
-              </div>
-            </div>
-          </div>
-        )
-      })()}
+      {showFinalOutput && isFinalStep && docxFile && (
+        <div className="mb-6">
+          <h3 className="text-sm font-semibold text-gray-700 mb-2">Final Output</h3>
+          <DocxDownloadCard runId={runId} filename={docxFile.split('/').pop() || docxFile} />
+        </div>
+      )}
 
       {/* Additional / Output Files list — skip if no files remain after filtering */}
       {additionalFiles.length > 0 && (
@@ -82,7 +88,7 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
           <h3 className="text-sm font-semibold text-gray-700 mb-2">
             {isFinalStep ? 'Additional Files' : 'Output Files'}
           </h3>
-          <div className="bg-gray-50 rounded-lg p-4 space-y-2">
+          <div className="bg-sand-50 border border-sand-200 rounded-[10px] p-4 space-y-2">
             {additionalFiles.map((file, idx) => {
               const filename = file.split('/').pop() || file
               const isJson = filename.endsWith('.json')
@@ -95,7 +101,7 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
                       <button
                         onClick={() => onOpenJson(filename)}
                         aria-label={`View JSON file ${filename}`}
-                        className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1.5 focus:ring-2 focus:ring-blue-500 focus:outline-none rounded"
+                        className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1.5 focus:ring-2 focus:ring-primary-500 focus:outline-none rounded"
                       >
                         <FileText className="w-4 h-4" aria-hidden="true" />
                         {filename}
@@ -104,7 +110,7 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
                         href={runRoutes.dataFile(runId, filename)}
                         download
                         aria-label={`Download ${filename}`}
-                        className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 focus:ring-2 focus:ring-blue-500 focus:outline-none rounded"
+                        className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 focus:ring-2 focus:ring-primary-500 focus:outline-none rounded"
                       >
                         <Download className="w-3 h-3" aria-hidden="true" />
                         Download
@@ -115,7 +121,7 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
                       href={runRoutes.dataFile(runId, filename)}
                       download
                       aria-label={`Download ${filename}`}
-                      className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1.5 focus:ring-2 focus:ring-blue-500 focus:outline-none rounded"
+                      className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1.5 focus:ring-2 focus:ring-primary-500 focus:outline-none rounded"
                     >
                       <FileText className="w-4 h-4" aria-hidden="true" />
                       {filename}
@@ -124,7 +130,7 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
                     <a
                       href={runRoutes.dataFile(runId, filename)}
                       aria-label={`Open ${filename}`}
-                      className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1.5 focus:ring-2 focus:ring-blue-500 focus:outline-none rounded"
+                      className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1.5 focus:ring-2 focus:ring-primary-500 focus:outline-none rounded"
                       target="_blank"
                       rel="noopener noreferrer"
                     >
