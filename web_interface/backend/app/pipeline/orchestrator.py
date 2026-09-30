@@ -604,9 +604,14 @@ class PipelineOrchestrator:
         cancel key expires after 300s, shorter than one stage can take, and a
         worker pod never sees the backend's in-process set. One SELECT per
         stage boundary is the price of not finishing a cancelled run.
+
+        The read goes through its own pooled connection, not ``self.db``: stage
+        2 passes this method as ``cancel_check`` and calls it from its parallel
+        section threads, and a Session is not safe to share across threads.
         """
         self._stage_guard.raise_if_stopped()  # stage 2's intra-stage callback (#590)
-        status = self.db.execute(select(Run.status).where(Run.id == self.run_id)).scalar()
+        with self.db.get_bind().connect() as conn:
+            status = conn.execute(select(Run.status).where(Run.id == self.run_id)).scalar()
         if status == "cancelled" or is_cancelled(self.run_id):
             raise CancelledException(f"Run {self.run_id} was cancelled by user")
 

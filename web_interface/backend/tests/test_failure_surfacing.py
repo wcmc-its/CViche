@@ -199,6 +199,22 @@ def test_check_cancelled_reads_the_db_status_not_only_the_process_local_flag(db,
         o.check_cancelled()
 
 
+def test_check_cancelled_does_not_use_the_shared_session(db, tmp_path, monkeypatch):
+    """Stage 2 calls check_cancelled from its parallel section threads, so the
+    DB read must not go through the orchestrator's Session, which is not
+    thread-safe."""
+    from app.models import Run
+    from app.pipeline import orchestrator as orch
+
+    db.add(Run(id="CANCTS", filename="cv.docx", file_type="docx", status="cancelled"))
+    db.commit()
+    o = orch.PipelineOrchestrator("CANCTS", tmp_path / "CANCTS.docx", db)
+    monkeypatch.setattr(db, "execute", lambda *a, **k: pytest.fail("check_cancelled used the shared Session"))
+
+    with pytest.raises(orch.CancelledException):
+        o.check_cancelled()
+
+
 # ---------------------------------------------------------------------------
 # #590: a timed-out stage's worker thread stops at its next callback
 # ---------------------------------------------------------------------------
