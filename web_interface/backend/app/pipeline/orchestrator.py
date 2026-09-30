@@ -197,6 +197,55 @@ class CancelledException(Exception):
     pass
 
 
+# How long a timed-out stage's worker thread gets to reach its next callback
+# and unwind before the run is failed anyway (#590). Generous enough for one
+# in-flight LLM call's log/progress round trip; a thread still alive after this
+# is logged loudly, and every later callback it makes still raises.
+STAGE_WORKER_EXIT_GRACE_SECONDS = 30
+
+
+class StageAbandoned(BaseException):
+    """Raised inside a stage worker thread once its stage timed out (#590).
+
+    BaseException on purpose: stage code and the LLM retry loop wrap calls in
+    ``except Exception`` and carry on, which would swallow a cooperative stop
+    and let the thread keep working after the run was failed.
+    """
+
+
+class _StageGuard:
+    """Per-stage stop flag plus a count of live worker threads (#590).
+
+    ``stop`` is set by the orchestrator when the stage times out; the worker
+    thread notices it at its next callback (stdout sink, progress, cancel
+    check). ``wait_idle`` lets the orchestrator hold off the terminal status
+    until the thread has actually exited.
+    """
+
+    def __init__(self) -> None:
+        self.stop = threading.Event()
+        self._live = 0
+        self._cond = threading.Condition()
+
+    def enter(self) -> None:
+        with self._cond:
+            self._live += 1
+
+    def exit(self) -> None:
+        with self._cond:
+            self._live -= 1
+            self._cond.notify_all()
+
+    def raise_if_stopped(self) -> None:
+        if self.stop.is_set():
+            raise StageAbandoned("stage timed out; worker stopped at next callback")
+
+    def wait_idle(self, timeout: float) -> bool:
+        """True once no worker thread is live, False if ``timeout`` elapsed first."""
+        with self._cond:
+            return self._cond.wait_for(lambda: self._live == 0, timeout)
+
+
 def _get_stage_timeout_seconds() -> int:
     """Per-stage wall-clock ceiling, in seconds (0 disables it).
 
@@ -310,8 +359,10 @@ class StreamingStdoutCapture:
     from the synchronous context where stage functions run.
     """
 
-    def __init__(self, orchestrator, step_number: int, event_loop: asyncio.AbstractEventLoop):
+    def __init__(self, orchestrator, step_number: int, event_loop: asyncio.AbstractEventLoop,
+                 guard: "_StageGuard | None" = None):
         self.orchestrator = orchestrator
+        self.guard = guard
         self.step_number = step_number
         self.event_loop = event_loop
         self.buffer = ""
@@ -335,6 +386,8 @@ class StreamingStdoutCapture:
 
     def _emit_log_sync(self, line: str):
         """Emit a log line synchronously by scheduling it on the event loop."""
+        if self.guard is not None and self.guard.stop.is_set():
+            return  # stage abandoned (#590): nothing may land after the terminal status
         try:
             future = asyncio.run_coroutine_threadsafe(
                 self.orchestrator.log(self.step_number, line, "INFO"),
@@ -360,6 +413,8 @@ class StreamingStdoutCapture:
 
     def write(self, text: str):
         """Capture stdout writes and stream them to the database."""
+        if self.guard is not None:
+            self.guard.raise_if_stopped()  # cooperative stop point (#590)
         if text:
             # Also write to original stdout for debugging
             if self._original_stdout:
@@ -458,6 +513,10 @@ class PipelineOrchestrator:
         # can attribute RUN_FAILED to the stage the user was watching.
         self.failed_step_number: int | None = None
 
+        # Stop flag + live-thread count for the stage being executed (#590);
+        # replaced at the start of every execute_step.
+        self._stage_guard = _StageGuard()
+
     async def log(self, step_number: int, message: str, level: str = "INFO"):
         """Log a message to database and emit via WebSocket."""
         log_entry = Log(run_id=self.run_id, step_number=step_number, level=level, message=message)
@@ -514,6 +573,7 @@ class PipelineOrchestrator:
 
     def check_cancelled(self):
         """Check if this run has been cancelled and raise exception if so."""
+        self._stage_guard.raise_if_stopped()  # stage 2's intra-stage callback (#590)
         if is_cancelled(self.run_id):
             raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
@@ -1001,6 +1061,7 @@ class PipelineOrchestrator:
             await self.log(step_number, f"Starting Stage {stage_id}: {step_def.name}")
 
             start_time = _now()
+            self._stage_guard = _StageGuard()
 
             # Execute the actual stage logic, bounded by a coarse per-stage
             # wall-clock ceiling. A hung stage (e.g. a wedged provider call)
@@ -1017,6 +1078,7 @@ class PipelineOrchestrator:
                 else:
                     result = await self._execute_stage_logic(stage_id, cv_path)
             except (asyncio.TimeoutError, TimeoutError) as exc:
+                await self._stop_stage_worker(step_number, stage_id)
                 raise TimeoutError(
                     f"Stage {stage_id} ({step_def.name}) timed out after "
                     f"{stage_timeout}s and was stopped."
@@ -1073,6 +1135,28 @@ class PipelineOrchestrator:
             await self.log(step_number, f"Error in Stage {stage_id}: {str(e)}", "ERROR")
             await event_emitter.emit_step_error(self.run_id, step_number, str(e))
             raise
+
+    async def _stop_stage_worker(self, step_number: int, stage_id: str) -> None:
+        """Stop a timed-out stage's worker thread before the run goes terminal (#590).
+
+        asyncio.wait_for cancels only the awaiting task; the thread underneath
+        keeps running. Set the stop flag so it raises at its next callback, then
+        wait up to STAGE_WORKER_EXIT_GRACE_SECONDS for it to exit. If it is
+        still alive after that, say so loudly and fail the run anyway: its
+        callbacks stay dead, but artifact writes it makes itself cannot be
+        stopped without process isolation.
+        """
+        guard = self._stage_guard
+        guard.stop.set()
+        if await asyncio.to_thread(guard.wait_idle, STAGE_WORKER_EXIT_GRACE_SECONDS):
+            return
+        message = (
+            f"Stage {stage_id} worker thread is still running "
+            f"{STAGE_WORKER_EXIT_GRACE_SECONDS}s after its timeout; failing the run "
+            "anyway. Its progress and log callbacks are disabled."
+        )
+        logger.error("Run %s: %s", self.run_id, message)
+        await self.log(step_number, message, "ERROR")
 
     def _sync_prompt_logs_to_storage(
         self, since: datetime | None, step_number: int
@@ -1140,7 +1224,7 @@ class PipelineOrchestrator:
                 stack.append(node.get('children', []))
         return count
 
-    def _run_with_stdout_capture_sync(self, func, step_number: int, event_loop: asyncio.AbstractEventLoop, *args, **kwargs):
+    def _run_with_stdout_capture_sync(self, func, step_number: int, event_loop: asyncio.AbstractEventLoop, guard: _StageGuard, *args, **kwargs):
         """Run a function while capturing stdout and streaming logs in real-time.
 
         This runs in a thread pool, so the event loop remains free to process log emissions.
@@ -1155,7 +1239,7 @@ class PipelineOrchestrator:
         spawned from inside func() (see core/batch_pool.map_in_order) still
         routes to this run's capture instead of falling through to real stdout.
         """
-        capture = StreamingStdoutCapture(self, step_number, event_loop)
+        capture = StreamingStdoutCapture(self, step_number, event_loop, guard)
         sys.stdout = _STDOUT_ROUTER  # idempotent; defends against anything else having swapped it
         _STDOUT_ROUTER.register(capture)
         try:
@@ -1173,10 +1257,17 @@ class PipelineOrchestrator:
         keeping the event loop free to process log emissions.
         """
         event_loop = asyncio.get_running_loop()
-        return await asyncio.to_thread(
-            self._run_with_stdout_capture_sync,
-            func, step_number, event_loop, *args, **kwargs
-        )
+        guard = self._stage_guard
+        guard.enter()  # before the thread starts, so a timeout can never miss it (#590)
+
+        def job():
+            try:
+                return self._run_with_stdout_capture_sync(
+                    func, step_number, event_loop, guard, *args, **kwargs)
+            finally:
+                guard.exit()
+
+        return await asyncio.to_thread(job)
 
     def _render_options(self) -> tuple[bool, bool, bool]:
         """(emit_track_changes, emit_comments, strip_template_instructions) for stage 6.

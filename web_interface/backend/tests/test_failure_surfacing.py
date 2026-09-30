@@ -185,6 +185,124 @@ def test_execute_step_timeout_surfaces_error(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #590: a timed-out stage's worker thread stops at its next callback
+# ---------------------------------------------------------------------------
+
+def _timeout_orchestrator(monkeypatch, tmp_path, stage_fn):
+    """Orchestrator whose stage logic runs ``stage_fn`` in the real worker thread."""
+    monkeypatch.setenv("CVICHE_STAGE_TIMEOUT_SECONDS", "1")
+    from app.pipeline import orchestrator as orch
+
+    emitter = AsyncMock()
+    monkeypatch.setattr(orch, "event_emitter", emitter)
+    fake_db = MagicMock()
+    fake_db.query.return_value.filter.return_value.first.return_value = MagicMock()
+    o = orch.PipelineOrchestrator("run-590-quill", tmp_path / "cv590.docx", fake_db)
+    monkeypatch.setattr(o, "_record_stage_outcome", lambda *a: None)
+
+    async def stage_logic(stage_id, cv_path):
+        return await o._run_with_stdout_capture(stage_fn, 6)
+
+    monkeypatch.setattr(o, "_execute_stage_logic", stage_logic)
+    return o, emitter
+
+
+@pytest.mark.parametrize("callback", ["stdout", "cancel_check"])
+def test_timed_out_stage_thread_stops_at_next_callback_before_terminal(monkeypatch, tmp_path, callback):
+    import threading
+    import time
+
+    ticks = []
+    exited = threading.Event()
+
+    def chatty_stage():
+        try:
+            while True:
+                if callback == "stdout":
+                    print(f"Processing {len(ticks) % 9 + 1} of 10")
+                else:
+                    o.check_cancelled()  # stage 2's intra-stage callback
+                ticks.append(1)
+                time.sleep(0.02)
+        finally:
+            exited.set()
+
+    o, emitter = _timeout_orchestrator(monkeypatch, tmp_path, chatty_stage)
+    with pytest.raises(TimeoutError, match="timed out"):
+        asyncio.run(o.execute_step(6, "4", "cv.docx"))
+
+    # (1) the thread unwound at its next callback, and had exited by the time
+    # execute_step raised (so the run cannot go terminal underneath it)
+    assert exited.is_set()
+    # (2) nothing lands after that point: no new log/progress emits, no new ticks
+    logs_before = emitter.emit_log.await_count
+    progress_before = emitter.emit_progress.await_count
+    ticks_before = len(ticks)
+    time.sleep(0.2)
+    assert emitter.emit_log.await_count == logs_before
+    assert emitter.emit_progress.await_count == progress_before
+    assert len(ticks) == ticks_before
+    assert callback != "stdout" or logs_before > 0
+
+
+def test_each_stage_starts_with_a_fresh_stop_flag(monkeypatch, tmp_path):
+    o, _ = _timeout_orchestrator(
+        monkeypatch, tmp_path,
+        lambda: print("Processing 1 of 2") or {"cost": 0.0, "output_files": []})
+    monkeypatch.setattr(o, "_persist_outputs_to_storage", lambda files: None)
+    monkeypatch.setattr(o, "_sync_prompt_logs_to_storage", lambda *a: None)
+    o._stage_guard.stop.set()  # left over from an earlier timed-out stage
+    asyncio.run(o.execute_step(6, "4", "cv.docx"))  # would raise StageAbandoned if reused
+
+
+@pytest.mark.parametrize("late_print", [True, False])
+def test_stage_thread_that_outlives_grace_is_logged_and_its_callbacks_stay_dead(monkeypatch, tmp_path, late_print):
+    import threading
+
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "STAGE_WORKER_EXIT_GRACE_SECONDS", 0.2)
+    release = threading.Event()
+    exited = threading.Event()
+    late_write = []
+
+    def wedged_stage():
+        try:
+            print("unfinished line", end="")  # buffered by the sink, not yet emitted
+            release.wait(timeout=10)  # ignores the stop flag: no callback while wedged
+            if late_print:
+                print("late line after the terminal status")
+                late_write.append(1)  # only reached if the sink failed to raise
+            # else: returns normally, so the sink's final flush() must not emit
+        finally:
+            exited.set()
+
+    o, emitter = _timeout_orchestrator(monkeypatch, tmp_path, wedged_stage)
+    errors = []
+    monkeypatch.setattr(orch.logger, "error", lambda *a, **k: errors.append(a))
+    # asyncio.run() would join the still-running executor thread on exit;
+    # drive the loop by hand so the wedged thread outlives execute_step.
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(TimeoutError, match="timed out"):
+            loop.run_until_complete(o.execute_step(6, "4", "cv.docx"))
+    finally:
+        loop.close()  # shutdown(wait=False) on the default executor
+
+    # (3) still running past the grace period: logged loudly, run failed anyway
+    assert not exited.is_set()
+    assert any("still running" in str(a[-1]) for a in errors)
+    error_logs = [c for c in emitter.emit_log.await_args_list if c.args[3] == "ERROR"]
+    assert any("still running" in c.args[2] for c in error_logs)
+
+    logs_before = emitter.emit_log.await_count
+    release.set()
+    assert exited.wait(timeout=5)
+    assert late_write == []  # the write raised StageAbandoned
+    assert emitter.emit_log.await_count == logs_before
+
+
+# ---------------------------------------------------------------------------
 # #745: a failed stage leaves a structured stage-error record for the scorer
 # ---------------------------------------------------------------------------
 
