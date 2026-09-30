@@ -27,6 +27,29 @@ logger = logging.getLogger(__name__)
 # `.replace('CV_', '')` would also eat "CV_" occurring mid-string in a name
 # part, which `removeprefix` cannot do.
 _UID_PREFIX = 'CV_'
+# A uid part shorter than this is a stray token ("Cv"), not a name.
+_UID_NAME_PART_MIN_CHARS = 3
+# One date grammar for this module (#665 item 5). Every recogniser below --
+# the year extractor, the membership date parts, the committee date lines --
+# is built from these pieces, so a change to a dash or to how a range ends
+# reaches all of them.
+_DATE_DASH = r'[-–—]'
+_YEAR = r'\d{4}'
+_RANGE_END = rf'(?:{_YEAR}|present)'
+_YEAR_SPAN = rf'{_YEAR}\s*{_DATE_DASH}\s*{_RANGE_END}'
+_YEAR_OR_SPAN = rf'{_YEAR}(?:\s*{_DATE_DASH}\s*{_RANGE_END})?'
+_MONTH_YEAR_DATE = r'\d{1,2}/?\d{0,4}'
+_MONTH_YEAR_SPAN = rf'{_MONTH_YEAR_DATE}\s*{_DATE_DASH}\s*(?:present|{_MONTH_YEAR_DATE})'
+_MEMBERSHIP_DATE_RE = re.compile(
+    rf'^(?:{_MONTH_YEAR_SPAN}|{_YEAR_SPAN})$', re.IGNORECASE)
+_MONTH_NAMES = (r'January|February|March|April|May|June|July|August|'
+                r'September|October|November|December')
+
+# Appended-initials guess: only names longer than this are considered, the
+# initials are 2 or 3 characters, and at least this many characters must remain.
+_APPENDED_INITIALS_MIN_NAME_CHARS = 5
+_APPENDED_INITIALS_LENGTHS = (2, 3)
+_APPENDED_INITIALS_MIN_BASE_CHARS = 3
 
 
 def _extract_name_from_uid(uid: str) -> str:
@@ -46,58 +69,42 @@ def _extract_name_from_uid(uid: str) -> str:
 
 
 def _extract_last_name_from_uid(uid: str) -> str:
-    """Extract last name from document UID for author matching."""
-    # Remove year prefix (e.g., "2015_Wende" -> "Wende")
+    """Extract last name from document UID for author matching.
+
+    Returns the uid's last name part as written. It does NOT guess whether the
+    part carries appended initials ("Quennevillejs"): no case rule can tell those
+    from the tail of an ordinary surname ("Smith"), so the guess lives at the
+    one call site that can check it against real citation text --
+    `_resolve_uid_owner_surname` in sections/bibliography.py, which uses
+    `_strip_appended_initials` below (#665 item 1).
+    """
     parts = uid.removeprefix(_UID_PREFIX).split('_')
 
     # Filter out years and very short parts
-    parts = [p for p in parts if not p.isdigit() and len(p) > 2]
+    parts = [p for p in parts if not p.isdigit() and len(p) >= _UID_NAME_PART_MIN_CHARS]
 
     if parts:
         # Last part is typically the last name
-        last_name = parts[-1]
-        # Handle cases like "Albrechtjs" -> "Albrecht" (initials appended).
-        #
-        # #665 item 1 flags this as unsound: `suffix.islower() or
-        # suffix.isupper()` matches the tail of almost any Title Case word,
-        # so no case-based rule can tell "appended initials" apart from
-        # "the end of an ordinary surname" (its own stated conclusion).
-        # Deliberately left in place rather than "fixed" by deletion: this
-        # exact case is corpus-real (uid "2003_Albrechtjs_Cv") and the
-        # owner's real surname genuinely is "Albrecht" -- confirmed by
-        # "Albrecht JS"/"Albrecht J" as the cited author in every one of
-        # that CV's own bibliography entries. `bibliography.py:176` uses
-        # this function's return value to decide which citation author to
-        # bold as the CV owner, so removing the strip does not fix a false
-        # positive here -- render_gate_compare over the full 66-CV corpus
-        # showed it silently drops bold-highlighting from 12 of the 98
-        # paragraphs in that document's bibliography citing "Albrecht": the
-        # 12 formatted as bare "Albrecht J"/"Albrecht JS" (which the
-        # stripped "Albrechtjs" no longer matches), not the other 86, whose
-        # bolding must key off something else (full-name or first-name
-        # matching) unaffected by this function's return value. 12 matches
-        # what commit 6935094's body and PR_BODY.md already said; this
-        # comment (and the test docstring) previously said 10, an error
-        # caught in review and corrected here after re-running the
-        # python-docx run-level bold diff directly (ref arm vs a probe
-        # render with this strip disabled) rather than trusting either
-        # number. With zero corresponding case in-corpus where the strip
-        # was itself the bug, no signal available inside this function
-        # (case pattern, part count, the filtered-out non-name parts)
-        # distinguishes the two cases; a real
-        # fix belongs at the call site (matching both the raw and stripped
-        # candidates against actual citation text) rather than a blind guess
-        # made here. See PR body for the corpus evidence in full; #665 item
-        # 1 stays open.
-        if len(last_name) > 5:
-            for suffix_len in [2, 3]:
-                suffix = last_name[-suffix_len:]
-                if suffix.islower() or suffix.isupper():
-                    base = last_name[:-suffix_len]
-                    if len(base) >= 3:
-                        return base.title()
-        return last_name.title()
+        return parts[-1].title()
     return ''
+
+
+def _strip_appended_initials(last_name: str) -> str:
+    """`last_name` without 2-3 trailing characters that might be appended
+    initials ("Quennevillejs" -> "Quenneville"), or unchanged when none qualify.
+
+    A guess, not a fact: the tail of "Smith" passes the same case test and
+    would become "Smi". Callers must confirm the result against text that
+    names the person (a citation) before trusting it.
+    """
+    if len(last_name) > _APPENDED_INITIALS_MIN_NAME_CHARS:
+        for suffix_len in _APPENDED_INITIALS_LENGTHS:
+            suffix = last_name[-suffix_len:]
+            if suffix.islower() or suffix.isupper():
+                base = last_name[:-suffix_len]
+                if len(base) >= _APPENDED_INITIALS_MIN_BASE_CHARS:
+                    return base.title()
+    return last_name.title()
 
 
 def _extract_year_from_text(text: str) -> str | None:
@@ -114,17 +121,17 @@ def _extract_year_from_text(text: str) -> str | None:
         return None
 
     # Pattern 1: Month Year (e.g., "August 2021", "December 2017")
-    month_year = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})', text)
+    month_year = re.search(rf'({_MONTH_NAMES})\s+({_YEAR})', text)
     if month_year:
         return month_year.group(2)
 
     # Pattern 2: Year in parentheses at end (e.g., "(2021)")
-    paren_year = re.search(r'\((\d{4})\)\s*$', text)
+    paren_year = re.search(rf'\(({_YEAR})\)\s*$', text)
     if paren_year:
         return paren_year.group(1)
 
     # Pattern 3: Year range - take the end year (e.g., "2019-2021")
-    year_range = re.search(r'(\d{4})\s*[-–—]\s*(\d{4})', text)
+    year_range = re.search(rf'({_YEAR})\s*{_DATE_DASH}\s*({_YEAR})', text)
     if year_range:
         return year_range.group(2)
 
@@ -350,14 +357,12 @@ def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]
     Returns:
         List of (membership_type, organization, dates) tuples
     """
-    memberships = []
-    membership_types = []
-    organizations = []
-    dates = []
+    membership_types: list[_PlacedValue] = []
+    organizations: list[str] = []
+    dates: list[_PlacedValue] = []
 
     # Common membership type indicators
     membership_keywords = ['member', 'fellow', 'diplomat', 'associate', 'elected', 'honorary']
-    date_pattern = re.compile(r'^(\d{1,2}/?\d{0,4}\s*-\s*(?:present|\d{1,2}/?\d{0,4}))$|^(\d{4}\s*-\s*(?:present|\d{4}))$', re.IGNORECASE)
 
     after_type = False
     for line in lines:
@@ -372,32 +377,73 @@ def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]
                 if not part:
                     continue
                 if any(kw in part.lower() for kw in membership_keywords) and len(part.split()) <= 3:
-                    membership_types.append(part)
-                elif date_pattern.match(part) or re.match(r'^\d{1,2}/\d{4}', part):
-                    dates.append(part)
+                    membership_types.append(_PlacedValue(part, len(organizations)))
+                elif _MEMBERSHIP_DATE_RE.match(part) or re.match(r'^\d{1,2}/\d{4}', part):
+                    dates.append(_PlacedValue(part, len(organizations)))
                 else:
                     organizations.append(part)
         else:
             # No pipe - classify by content
             if any(kw in line.lower() for kw in membership_keywords) and len(line.split()) <= 3:
-                membership_types.append(line)
+                membership_types.append(_PlacedValue(line, len(organizations)))
                 after_type = True
                 continue
-            if date_pattern.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
-                dates.append(line)
+            if _MEMBERSHIP_DATE_RE.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
+                dates.append(_PlacedValue(line, len(organizations)))
             elif _looks_like_organization(line) and (
                     after_type or len(line) > _SHORT_ORGANIZATION_MAX_CHARS):
                 organizations.append(line)
             after_type = False
 
-    # Match up memberships - pair organizations with types and dates
-    if organizations:
-        for i, org in enumerate(organizations):
-            mem_type = membership_types[i] if i < len(membership_types) else ''
-            date = dates[i] if i < len(dates) else ''
-            memberships.append((mem_type, org, date))
+    return _pair_memberships(membership_types, organizations, dates)
 
-    return memberships
+
+class _PlacedValue(NamedTuple):
+    """A membership type or date, and how many organizations had been seen
+    when it was read -- the only evidence of where in the source it sat."""
+    value: str
+    organizations_before: int
+
+
+def _placed_or_blank(placed: list[_PlacedValue], organization_count: int,
+                     organizations_before_own: int, what: str) -> list[str]:
+    """One value per organization; a value is kept only where position proves it.
+
+    Types and dates are collected as separate lists and used to be matched to
+    the organizations by index. That is only sound while each list has one
+    entry per organization. When the counts agree the column layout is
+    trusted, as before. When they disagree (a wrapped line, a missing date, an
+    extra header) a value is kept only if the source order backs it: value `j`
+    sat after `organizations_before_own + j` organizations, i.e. right where a
+    "type | organization | date" row puts it. Every other value is left off
+    rather than shifted onto a neighbouring row -- a wrong value looks as
+    confident as a right one in the document. Mismatches are logged (same rule
+    as `_parse_flattened_committee_lines`, #665 item 6).
+    """
+    if len(placed) == organization_count:
+        return [p.value for p in placed]
+    if placed:
+        logger.warning(
+            "membership %s alignment: %d value(s) for %d organization(s) -- "
+            "counts disagree, keeping only values whose source position "
+            "matches their organization", what, len(placed), organization_count)
+    aligned = [''] * organization_count
+    for j, p in enumerate(placed[:organization_count]):
+        if p.organizations_before == organizations_before_own + j:
+            aligned[j] = p.value
+    return aligned
+
+
+def _pair_memberships(membership_types: list[_PlacedValue], organizations: list[str],
+                      dates: list[_PlacedValue]) -> list[tuple[str, str, str]]:
+    """(type, organization, dates) per organization; see `_placed_or_blank`.
+
+    A type is read before its organization in a row, a date after it.
+    """
+    count = len(organizations)
+    types = _placed_or_blank(membership_types, count, 0, 'type')
+    paired_dates = _placed_or_blank(dates, count, 1, 'date')
+    return list(zip(types, organizations, paired_dates))
 
 
 class ParsedActivityLine(NamedTuple):
@@ -419,11 +465,12 @@ class ParsedActivityLine(NamedTuple):
 # Column-header labels that survive table flattening as their own lines.
 _COMMITTEE_HEADER_LABELS = ('dates', 'role', 'committee', 'institution')
 # A line that is nothing but a year or a year range ("1999", "1999-2010").
-_DATE_ONLY_LINE = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)$', re.IGNORECASE)
+_DATE_ONLY_LINE = re.compile(rf'^({_YEAR_OR_SPAN})$', re.IGNORECASE)
 # A year or a year range at the end of a line ("Committee    1999-2010").
-_TRAILING_DATE = re.compile(r'(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)\s*$', re.IGNORECASE)
+_TRAILING_DATE = re.compile(rf'({_YEAR_OR_SPAN})\s*$', re.IGNORECASE)
 # Parenthetical role+date: "(Chair 1999-2010)" or "(Vice Chair 2006-2008 )".
-_PAREN_ROLE_DATE = re.compile(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\s*\)', re.IGNORECASE)
+_PAREN_ROLE_DATE = re.compile(
+    rf'\(([^)]*?)({_YEAR})\s*{_DATE_DASH}\s*({_RANGE_END})\s*\)', re.IGNORECASE)
 
 
 def _parse_pipe_date_row(cells: list[str], pipe_date: str,
@@ -578,7 +625,7 @@ def _parse_flattened_committee_lines(
 
 # A year or a year range at the START of a line ("1999-2010    Committee"): the
 # date-prefixed layout, where every record opens with its own date.
-_LEADING_DATE = re.compile(r'^\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?\b', re.IGNORECASE)
+_LEADING_DATE = re.compile(rf'^{_YEAR_OR_SPAN}\b', re.IGNORECASE)
 
 # Two dated lines are the smallest text that can hold two records. One dated
 # line is one record plus, at most, a wrapped description under it.
