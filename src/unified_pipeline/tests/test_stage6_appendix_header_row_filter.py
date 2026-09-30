@@ -931,6 +931,12 @@ def test_instruction_wordings_need_their_full_phrase(reasoning_sentence):
     assert _residual("presenter, etc.)", _confirmed(reasoning_sentence)) is None
 
 
+@pytest.mark.parametrize("text", ["", "   "])
+def test_blank_text_is_not_a_section_label(text):
+    """Zero words would pass the word cap, so blank must be refused first."""
+    assert appendix_module._is_section_label_text(text) is False
+
+
 def test_category_label_etc_is_case_insensitive():
     assert _residual("1. Sample Roles, Etc.", _confirmed("Section header.")
                      ) == DROP_SECTION_HEADER
