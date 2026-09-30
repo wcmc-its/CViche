@@ -106,6 +106,45 @@ def lint_stage3b_fallback_ratio(stage_3b: dict) -> list[dict]:
 
 
 # --------------------------------------------------------------------------
+# Stage 3b's two second-pass LLM stages that degrade silently (#818).
+
+#: `meta.stats` keys of the two stage-3b second passes, in pipeline order.
+#: Both stages catch their own exception, return the entries untouched and
+#: record `error` -- the run continues, so the failure is a WARN, not a gate.
+STAGE3B_SECOND_PASS_KEYS = ("t_validation", "fragment_reconnection")
+
+
+def lint_stage3b_second_pass_errors(stage_3b: dict) -> list[dict]:
+    """A stage-3b second pass (`t_validation`, `fragment_reconnection`)
+    recorded a non-null `error` in `meta.stats`: it failed and left every
+    entry as the first pass classified it, so the T entries it should have
+    reclassified or reconnected are still T. `lint_pipeline_errors` only sees
+    such an error when its text matches FATAL_ERROR_PATTERN (a raw
+    `'int' object is not iterable` does not -- #745), and even then only as a
+    score cap, never naming the pass. WARN: the run completes and the first
+    pass's output is intact (the error blocks nothing the scorer already
+    penalises through t_ratio). Error text is truncated like
+    `lint_pipeline_errors`'s evidence."""
+    meta = stage_3b.get("meta") if isinstance(stage_3b, dict) else None
+    stats = meta.get("stats") if isinstance(meta, dict) else None
+    if not isinstance(stats, dict):
+        return []
+    errored = []
+    for key in STAGE3B_SECOND_PASS_KEYS:
+        section = stats.get(key)
+        error = section.get("error") if isinstance(section, dict) else None
+        if error:
+            errored.append(f"meta.stats.{key}.error: {str(error)[:120]}")
+    if not errored:
+        return []
+    return [_finding(
+        "stage3b_second_pass_error", "WARN",
+        f"{len(errored)} stage-3b second pass(es) errored and left their "
+        f"entries unchanged (T entries stay T / fragments stay unreconnected)",
+        errored)]
+
+
+# --------------------------------------------------------------------------
 # The cap-20 HARD-FAIL gate: no stage-6 output at all (#745).
 
 

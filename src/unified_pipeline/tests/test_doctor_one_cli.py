@@ -144,7 +144,7 @@ def test_metrics_tsv_appends_a_row_without_changing_stdout(tmp_path, monkeypatch
     assert len(rows) == 1
     fields = rows[0].split("\t")
     assert fields[0] == "web05"
-    assert fields == ["web05", "3", "0.026", "", "", "N1=8;N2=14", "", "0.0", "", ""]
+    assert fields == ["web05", "3", "0.026", "", "", "N1=8;N2=14", "", "0.0", "", "", ""]
 
 
 def test_metrics_tsv_appends_rather_than_overwrites(tmp_path, monkeypatch):
@@ -179,7 +179,7 @@ def test_metrics_tsv_empty_metrics_is_an_empty_row_not_a_crash(tmp_path, monkeyp
                      "--metrics-tsv", str(metrics_tsv)]) == 0
 
     row = metrics_tsv.read_text(encoding="utf-8").splitlines()[0]
-    assert row == "web05\t\t\t\t\t\t\t\t\t"
+    assert row == "web05" + "\t" * 10
 
 
 def test_metrics_tsv_dir_is_validated_before_doctoring(tmp_path, monkeypatch):

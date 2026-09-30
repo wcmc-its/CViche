@@ -1748,12 +1748,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (26), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (27), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 25
+    assert len(payload["findings"]) == 26
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -1783,6 +1783,27 @@ def test_run_doctor_clean_run_end_to_end(tmp_path):
         "appendix_entries": 0, "appendix_share": 0.0, "source_coverage_pct": 100.0}
 
 
+def test_run_doctor_wires_second_pass_error_and_correction_count(tmp_path):
+    """End to end (#818): a stage_3b whose t_validation errored surfaces as
+    the WARN finding through run_doctor(), and total_post_corrections reaches
+    the metrics block -- the wire, not just the helpers."""
+    root = _build_clean_run(tmp_path)
+    path = next((root / "stage_3b_classified_entries").glob("*_classified.json"))
+    data = json.loads(path.read_text())
+    data["meta"] = {"stats": {
+        "t_validation": {"t_entries_reviewed": 4, "t_entries_reclassified": 0,
+                         "error": "'int' object is not iterable"},
+        "total_post_corrections": 7}}
+    path.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"]
+            if f["lint"] == "stage3b_second_pass_error"]
+    assert len(hits) == 1 and hits[0]["severity"] == "WARN"
+    assert payload["metrics"]["total_post_corrections"] == 7
+
+
 # ------------------------------------------------------------- #816: metrics
 
 def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
@@ -1801,6 +1822,7 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
             "fallback_entries": 510, "entries_classified": 1019,
             "t_validation": {"t_entries_reviewed": 93, "t_entries_reclassified": 28},
             "fragment_reconnection": {"fragments_reviewed": 7, "fragments_reconnected": 3},
+            "total_post_corrections": 5,
         }},
     }
     blocks = [
@@ -1832,7 +1854,60 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
     assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
     assert metrics["t_validation_yield"] == round(28 / 93, 4)
     assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)
+    assert metrics["total_post_corrections"] == 5
     assert "source_coverage_pct" in metrics
+
+
+def test_build_metrics_reports_a_zero_post_correction_count_but_omits_an_absent_one():
+    """`total_post_corrections` is a count, so a measured 0 is real ("the
+    corrector ran and changed nothing") and must be reported; an artifact
+    from before the stat existed carries no key and must be omitted (#818)."""
+    from unified_pipeline.run_doctor import _build_metrics
+
+    ran = _build_metrics({"stage_3b": {"meta": {"stats": {"total_post_corrections": 0}}}})
+    assert ran == {"total_post_corrections": 0}
+    assert _build_metrics({"stage_3b": {"meta": {"stats": {}}}}) == {}
+    assert _build_metrics({"stage_3b": {"meta": {"stats": {
+        "total_post_corrections": "n/a"}}}}) == {}
+
+
+@pytest.mark.parametrize("pass_key", ["t_validation", "fragment_reconnection"])
+def test_second_pass_error_lint_names_the_errored_pass(pass_key):
+    """A non-null `error` on either stage-3b second pass is a WARN that names
+    the pass -- including an error text FATAL_ERROR_PATTERN misses (#818)."""
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    stage3b = {"meta": {"stats": {pass_key: {"error": "'int' object is not iterable"}}}}
+    findings = lint_stage3b_second_pass_errors(stage3b)
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "stage3b_second_pass_error"
+    assert findings[0]["severity"] == "WARN"
+    assert any(pass_key in e for e in findings[0]["evidence"])
+
+
+def test_second_pass_error_lint_reports_both_passes_in_one_finding():
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    stage3b = {"meta": {"stats": {
+        "t_validation": {"error": "boom one"},
+        "fragment_reconnection": {"error": "boom two"}}}}
+    findings = lint_stage3b_second_pass_errors(stage3b)
+    assert len(findings) == 1
+    assert len(findings[0]["evidence"]) == 2
+
+
+@pytest.mark.parametrize("stage3b", [
+    {},
+    {"meta": None},
+    {"meta": {"stats": None}},
+    {"meta": {"stats": {"t_validation": {"error": None, "t_entries_reviewed": 3}}}},
+    {"meta": {"stats": {"t_validation": {"error": ""}}}},
+    {"meta": {"stats": {"fragment_reconnection": "not a dict"}}},
+])
+def test_second_pass_error_lint_is_silent_without_an_error(stage3b):
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    assert lint_stage3b_second_pass_errors(stage3b) == []
 
 
 def test_build_metrics_omits_rather_than_reports_a_misleading_zero(tmp_path):

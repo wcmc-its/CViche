@@ -86,6 +86,11 @@ Lints, ranked by the severity of the failure class they catch:
                           own bullet (#259: ZXVGAC, 28 under EDUCATIONAL
                           CONTRIBUTIONS); WARN at a corpus-derived count
 
+14e. stage3b_second_pass_error a stage-3b second pass (t_validation,
+                          fragment_reconnection) recorded `error` in
+                          meta.stats: it failed and left its entries
+                          unchanged; WARN, the run completes (#818)
+
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
 construction lints, because each one on its own caps quality_score.py's final
@@ -272,6 +277,7 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_no_output,
     lint_pipeline_errors,
     lint_stage3b_fallback_ratio,
+    lint_stage3b_second_pass_errors,
 )
 
 
@@ -339,6 +345,7 @@ KNOWN_LINTS = (
     "wrong_start_date",
     "table_lost",
     "date_only_lines",
+    "stage3b_second_pass_error",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -381,6 +388,10 @@ LINT_PREVALENCE = {
     "bucket_status": 0.014,
     "under_extraction": 0.014,
     "pipeline_errors_present": 0.001,
+    # #818: 6 of 183 stored stage-3b artifacts (farm25 + outputs99 + the
+    # 2026-09-11/-17 batches, measured 2026-09-29) carry a second-pass
+    # `error`; all 6 are older builds -- 0 of the 60 batch artifacts do.
+    "stage3b_second_pass_error": 0.033,
     # #810: zero of the 2026-09-11 batch's 40 uids tripped the gate -- every
     # ratio stayed under STAGE3B_FALLBACK_RATIO_THRESHOLD (max observed
     # 0.0004, three orders of magnitude under it). The only known real
@@ -865,6 +876,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     # ranking ties, so a new lint appends rather than shifting every other.
     LintSpec("table_lost", lint_table_lost, ("source_block_lines", "stage_2")),
     LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
+    LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
 )
 
 
@@ -879,7 +891,7 @@ def _build_metrics(views: dict) -> dict:
     information (#438's class) -- their lints now report those numbers here
     instead of in a WARN, alongside three metrics with no lint of their own
     yet (`stage3b_fallback_ratio` from #810, `t_validation_yield` and
-    `fragment_reconnection_yield` from #818).
+    `fragment_reconnection_yield` and `total_post_corrections` from #818).
 
     Corpus-outlier promotion (the p75/p90 convention #438 introduced for
     `missed_headers`) is explicitly OUT of scope here -- that is a batch-
@@ -942,6 +954,9 @@ def _build_metrics(views: dict) -> dict:
             if reviewed:
                 metrics["t_validation_yield"] = round(
                     tv.get("t_entries_reclassified", 0) / reviewed, 4)
+            corrections = stats.get("total_post_corrections")
+            if isinstance(corrections, int) and not isinstance(corrections, bool):
+                metrics["total_post_corrections"] = corrections
             fr = stats.get("fragment_reconnection") or {}
             f_reviewed = fr.get("fragments_reviewed") if isinstance(fr, dict) else None
             if f_reviewed:
