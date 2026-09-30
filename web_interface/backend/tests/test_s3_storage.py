@@ -1,7 +1,11 @@
 """S3RunStorage.get_file error mapping.
 
-A genuinely-absent object (NoSuchKey / 404 / NoSuchBucket) must raise
-FileNotFoundError so callers treat it as an expected miss and fall back. A 403
+A genuinely-absent object (NoSuchKey / 404) must raise StorageKeyNotFound
+(which subclasses FileNotFoundError, so callers that catch FileNotFoundError
+keep working) so callers treat it as an expected miss and fall back.
+NoSuchBucket must NOT be treated as a missing object -- a missing or
+misconfigured bucket is an infrastructure fault, and converting it to
+FileNotFoundError would hide an outage as a user-facing 404 (#790). A 403
 AccessDenied must PROPAGATE -- it is a real IAM/KMS fault, not a missing file,
 and masking it as "missing" would hide an outage (and is also what a missing
 key looks like without s3:ListBucket -- that wants an IAM fix, not a code one).
@@ -17,7 +21,7 @@ from botocore.exceptions import ClientError
 from botocore.response import StreamingBody
 
 from app.storage import base as storage_base
-from app.storage.base import ArtifactTooLarge, StorageKeyExists
+from app.storage.base import ArtifactTooLarge, StorageKeyExists, StorageKeyNotFound
 from app.storage.local_storage import LocalRunStorage
 from app.storage.s3_storage import S3RunStorage, StorageDeleteError
 
@@ -56,6 +60,43 @@ def test_get_file_accessdenied_propagates():
     stub.add_client_error("get_object", service_error_code="AccessDenied", http_status_code=403)
     with stub, pytest.raises(ClientError):
         storage.get_file("run1", "input/cv.docx")
+
+
+def test_get_file_nosuchbucket_does_not_become_filenotfound():
+    """#790: a missing/misconfigured bucket is an infrastructure fault, not
+    a missing artifact. Before this fix, NoSuchBucket was in the same
+    not-found tuple as NoSuchKey/404 and got reported as FileNotFoundError,
+    which every caller (app/api/steps.py, app/api/runs.py) turns into a
+    user-facing 404 instead of logging an outage."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("get_object", service_error_code="NoSuchBucket", http_status_code=404)
+    with stub, pytest.raises(ClientError) as ei:
+        storage.get_file("run1", "input/cv.docx")
+    assert not isinstance(ei.value, FileNotFoundError)
+
+
+def test_get_file_nosuchkey_raises_storagekeynotfound_not_bare_filenotfound():
+    """#790 acceptance criterion 3: the concrete exception is
+    StorageKeyNotFound (a FileNotFoundError subclass), not a bare
+    FileNotFoundError -- callers that want to distinguish a storage-contract
+    miss from an unrelated FileNotFoundError elsewhere in the call stack
+    can now do so."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("get_object", service_error_code="NoSuchKey", http_status_code=404)
+    with stub, pytest.raises(StorageKeyNotFound):
+        storage.get_file("run1", "input/cv.docx")
+
+
+def test_exists_nosuchbucket_propagates_not_false():
+    """#790, the exists() half: a NoSuchBucket-shaped ClientError must not
+    be swallowed into a plain False the way a genuine 404 is."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("head_object", service_error_code="NoSuchBucket", http_status_code=404)
+    with stub, pytest.raises(ClientError):
+        storage.exists("run1", "input/cv.docx")
 
 
 def test_put_file_exclusive_sends_if_none_match_and_maps_412(monkeypatch):
@@ -628,6 +669,171 @@ def test_aws_region_takes_precedence_over_default_region(monkeypatch):
     monkeypatch.setenv("AWS_REGION", "us-west-2")
     monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
     assert _storage()._s3.meta.region_name == "us-west-2"
+
+
+# ---------------------------------------------------------------------------
+# #791: explicit prefix handling and bounded timeouts/retries
+# ---------------------------------------------------------------------------
+
+def test_prefix_empty_string_is_preserved_not_replaced_by_default(monkeypatch):
+    """prefix="" is a real, distinct choice (an explicit no-prefix store) and
+    must not be silently replaced by CVICHE_S3_PREFIX's default -- unlike
+    self._bucket, which deliberately keeps `or` for the #109 guard."""
+    monkeypatch.setenv("CVICHE_S3_PREFIX", "should-not-be-used")
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    assert storage._prefix == ""
+
+
+def test_prefix_defaults_when_omitted(monkeypatch):
+    """prefix=None (the default, distinct from "") still resolves from
+    CVICHE_S3_PREFIX -- only an explicit "" is preserved as empty."""
+    monkeypatch.setenv("CVICHE_S3_PREFIX", "cviche-env-value")
+    storage = S3RunStorage(bucket="test-bucket")
+    assert storage._prefix == "cviche-env-value"
+
+
+def test_prefix_empty_string_produces_keys_without_leading_slash():
+    """#791: naively joining f"{prefix}/runs/..." with an
+    empty prefix produces a key with a leading "/". Pinned choice: an empty
+    prefix means "no prefix segment", so the key is plain "runs/...", not
+    "/runs/...", matching what a caller who deliberately chose no-prefix
+    would expect."""
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    assert storage._s3_key("run1", "input/cv.docx") == "runs/run1/input/cv.docx"
+    assert storage._s3_key("run1", "", allow_empty=True) == "runs/run1/"
+
+
+def test_delete_run_uses_key_prefix_when_store_prefix_is_empty():
+    """#791: delete_run's listing/delete prefix must route through
+    _key_prefix(), not raw self._prefix directly -- a no-prefix store must
+    query "runs/run1/", not "/runs/run1/" (which would list nothing and
+    silently delete 0 objects instead of the run's own artifacts)."""
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    stub = Stubber(storage._s3)
+    key = "runs/run1/input/cv.docx"
+    _stub_listing(stub, [key], prefix="runs/run1/")
+    stub.add_response(
+        "delete_objects",
+        {"Deleted": [{"Key": key}]},
+        expected_params=_delete_params([key]),
+    )
+    with stub:
+        assert storage.delete_run("run1") == 1
+    stub.assert_no_pending_responses()
+
+
+def test_delete_global_prefix_uses_key_prefix_when_store_prefix_is_empty():
+    """#791: delete_global_prefix must route through _key_prefix(), not raw
+    self._prefix directly -- a no-prefix store must query the caller's
+    prefix verbatim ("by-submitter/..."), not "/by-submitter/..."."""
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    stub = Stubber(storage._s3)
+    key = "by-submitter/e@x.edu/R1/manifest.json"
+    _stub_listing(stub, [key], prefix="by-submitter/e@x.edu/R1/")
+    stub.add_response(
+        "delete_objects",
+        {"Deleted": [{"Key": key}]},
+        expected_params=_delete_params([key]),
+    )
+    with stub:
+        assert storage.delete_global_prefix("by-submitter/e@x.edu/R1/") == 1
+    stub.assert_no_pending_responses()
+
+
+def test_put_global_writes_without_leading_slash_when_store_prefix_is_empty():
+    """#791: put_global must route through _key_prefix(), not raw
+    self._prefix directly -- a no-prefix store must write "manifest.json",
+    not "/manifest.json"."""
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "put_object",
+        {},
+        expected_params={"Bucket": "test-bucket", "Key": "manifest.json", "Body": b"data"},
+    )
+    with stub:
+        storage.put_global("manifest.json", b"data")
+    stub.assert_no_pending_responses()
+
+
+def test_list_files_strips_run_prefix_when_store_prefix_is_empty():
+    """#791: list_files must strip the SAME run-level prefix it queried
+    with, via _key_prefix() -- not raw self._prefix directly, which for a
+    no-prefix store would build "/runs/run1/" (leading slash), fail to
+    match the returned "runs/run1/..." keys, and silently fall through to
+    the else branch, returning the full key instead of the relative one."""
+    storage = S3RunStorage(bucket="test-bucket", prefix="")
+    stub = Stubber(storage._s3)
+    _stub_listing(stub, ["runs/run1/input/cv.docx"], prefix="runs/run1/")
+    with stub:
+        assert storage.list_files("run1") == ["input/cv.docx"]
+    stub.assert_no_pending_responses()
+
+
+def test_client_has_bounded_connect_read_timeout_and_retries():
+    """#791: the client must carry explicit, named timeout/retry values
+    instead of inheriting boto3's own defaults, so a degraded S3 fails
+    within a stated bound instead of compounding silently across the
+    upload endpoint's up-to-10 sequential put_object calls.
+
+    Asserts the LITERAL numbers (decided on #791), not the module constants:
+    comparing the built config back to those constants would still pass if
+    they were reset to botocore's defaults. Worst case: 10 sequential calls
+    x 3 attempts x 13s = ~390s, under the ALB's 500s idle timeout."""
+    config = _storage()._s3.meta.config
+    assert config.connect_timeout == 3
+    assert config.read_timeout == 10
+    assert config.retries["mode"] == "standard"
+    assert config.retries["total_max_attempts"] == 3
+
+
+# ---------------------------------------------------------------------------
+# #792: LocalRunStorage.list_files literal-prefix parity with S3
+# ---------------------------------------------------------------------------
+
+def test_local_and_s3_list_files_agree_on_the_same_layout(tmp_path):
+    """S3's Prefix is a literal byte prefix, not a directory match (#792).
+    The same layout, run through LocalRunStorage (real filesystem) and a
+    stubbed S3RunStorage, returns the same keys for: an existing-directory
+    prefix that is also a literal prefix of a sibling key ("input" /
+    "input_extra.txt"), an absent prefix, a partial-path prefix that must
+    not pull in a sibling directory ("input/man" vs input/deep/manifest.json,
+    which the old recursive basename glob returned), and an exact-file
+    prefix. The S3 side is stubbed with the expected keys, so on S3 it proves
+    the Prefix sent and the run-prefix stripping, not the server's match."""
+    from app.storage.local_storage import LocalRunStorage
+
+    layout = {
+        "input/cv.docx": b"cv-bytes",
+        "input/deep/manifest.json": b"{}",
+        "input/manual.txt": b"x",
+        "input_extra.txt": b"sibling-bytes",
+        "steps/3a/output.json": b"[]",
+    }
+
+    local = LocalRunStorage(base_dir=str(tmp_path))
+    for key, data in layout.items():
+        local.put_file("run1", key, data)
+
+    cases = (
+        ("input", ["input/cv.docx", "input/deep/manifest.json", "input/manual.txt",
+                   "input_extra.txt"]),
+        ("does/not/exist", []),
+        ("steps/3a/", ["steps/3a/output.json"]),
+        ("input/man", ["input/manual.txt"]),
+        ("input/cv.docx", ["input/cv.docx"]),
+    )
+    for prefix, expected in cases:
+        assert sorted(local.list_files("run1", prefix)) == sorted(expected)
+
+    s3 = _storage()
+    stub = Stubber(s3._s3)
+    for prefix, expected in cases:
+        _stub_listing(stub, [RUN_PREFIX + k for k in expected], prefix=RUN_PREFIX + prefix)
+    with stub:
+        for prefix, expected in cases:
+            assert sorted(s3.list_files("run1", prefix)) == sorted(expected)
+    stub.assert_no_pending_responses()
 
 
 # --- maximum artifact size (#789) -------------------------------------------

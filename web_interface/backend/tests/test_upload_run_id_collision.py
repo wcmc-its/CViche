@@ -16,10 +16,12 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
 import logging
 import re
 import threading
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,7 +30,7 @@ from sqlalchemy.orm import object_session
 
 from app.models import Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.storage.base import StorageKeyExists
+from app.storage.base import StorageError, StorageKeyExists, StorageKeyNotFound
 from app.storage.local_storage import LocalRunStorage
 from app.api import upload as upload_module
 from app.api.upload import generate_run_id
@@ -136,6 +138,175 @@ def test_local_put_file_exclusive_is_atomic_under_concurrency(tmp_path):
     assert losers == _RACING_WRITERS - 1
     # And the stored bytes are the winner's, whole -- not a mix of two writers.
     assert storage.get_file("RACE01", "input/cv.docx") == winners[0]
+
+
+# --- (a1) get_file's shared exception contract (#790) -----------------------
+
+def test_local_get_file_missing_key_raises_storagekeynotfound_not_bare_filenotfound(tmp_path):
+    """LocalRunStorage is the other half of the StorageKeyNotFound contract
+    that base.py documents (the S3 half is
+    test_s3_storage.py::test_get_file_nosuchkey_raises_storagekeynotfound_not_bare_filenotfound).
+    StorageKeyNotFound subclasses FileNotFoundError, so a regression to a
+    bare FileNotFoundError here still passes any test that only checks
+    pytest.raises(FileNotFoundError) -- this one pins the specific type."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+
+    with pytest.raises(StorageKeyNotFound):
+        storage.get_file("R1", "input/missing.txt")
+
+
+def test_storage_exceptions_are_storageerror_subclasses():
+    """base.py's exception contract (#790 acceptance criterion 3) is that a
+    caller can catch the single base StorageError instead of enumerating
+    StorageKeyExists and StorageKeyNotFound separately -- pinned directly
+    against the class hierarchy, not inferred from a raise site."""
+    assert issubclass(StorageKeyExists, StorageError)
+    assert issubclass(StorageKeyNotFound, StorageError)
+    assert issubclass(StorageKeyNotFound, FileNotFoundError)
+
+
+# --- (a2) put_file / put_global atomic-write contract (#787) ---------------
+#
+# put_file and put_global used to end in path.write_bytes(data): a process
+# interrupted mid-write left a truncated file readable under the final key,
+# which a later read consumed as if it were complete. The fix writes to a
+# temp file in the same directory and os.replace()s it into place.
+# put_file_exclusive is untouched -- its exclusive-create semantics
+# (test_local_put_file_exclusive_raises_on_second_write above) are already
+# atomic and out of scope here.
+
+def _boom(*_args, **_kwargs):
+    raise OSError("simulated crash before rename")
+
+
+def _boom_keyboard_interrupt(*_args, **_kwargs):
+    raise KeyboardInterrupt("simulated interrupt before rename")
+
+
+def test_local_put_file_interrupted_replace_leaves_previous_content_intact(tmp_path, monkeypatch):
+    """A crash between the temp-file write and the rename must not corrupt
+    the previously-stored artifact, and must not leave the temp file
+    behind."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+    storage.put_file("R1", "data.json", b"original-complete-bytes")
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _boom)
+    with pytest.raises(OSError):
+        storage.put_file("R1", "data.json", b"new-bytes-that-must-never-land")
+    monkeypatch.undo()
+
+    assert storage.get_file("R1", "data.json") == b"original-complete-bytes"
+    leftover = [n for n in os.listdir(tmp_path / "R1") if n != "data.json"]
+    assert leftover == [], f"temp file leaked: {leftover}"
+
+
+def test_local_put_file_interrupted_write_leaves_no_file_at_new_key(tmp_path, monkeypatch):
+    """Same interruption, but the key never existed before: the destination
+    must stay absent, not hold a partial write."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _boom)
+    with pytest.raises(OSError):
+        storage.put_file("R2", "data.json", b"partial-bytes")
+    monkeypatch.undo()
+
+    assert storage.exists("R2", "data.json") is False
+    run_dir = tmp_path / "R2"
+    leftover = os.listdir(run_dir) if run_dir.exists() else []
+    assert leftover == [], f"temp file leaked: {leftover}"
+
+
+def test_local_put_file_interrupted_by_keyboardinterrupt_still_cleans_up(tmp_path, monkeypatch):
+    """_atomic_write's cleanup catches BaseException, not just Exception, so
+    a KeyboardInterrupt (or SystemExit) during the write still removes the
+    temp file instead of leaking it. The interrupted-write tests above only
+    exercise OSError, which `except Exception` alone would already catch --
+    this pins the broader clause specifically, so narrowing it to Exception
+    would fail this test rather than pass silently."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _boom_keyboard_interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        storage.put_file("R6", "data.json", b"partial-bytes")
+    monkeypatch.undo()
+
+    assert storage.exists("R6", "data.json") is False
+    run_dir = tmp_path / "R6"
+    leftover = os.listdir(run_dir) if run_dir.exists() else []
+    assert leftover == [], f"temp file leaked: {leftover}"
+
+
+def test_local_put_file_failed_cleanup_keeps_the_original_error(tmp_path, monkeypatch, caplog):
+    """If removing the temp file also fails, the write's own error still
+    propagates and the cleanup failure is logged, not raised in its place."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+
+    def _unlink_denied(*_args, **_kwargs):
+        raise PermissionError("simulated cleanup failure")
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _boom)
+    monkeypatch.setattr("app.storage.local_storage.os.unlink", _unlink_denied)
+    with caplog.at_level("WARNING", logger="app.storage.local_storage"):
+        with pytest.raises(OSError, match="simulated crash before rename"):
+            storage.put_file("R7", "data.json", b"partial-bytes")
+
+    assert any("failed to clean up temp file" in r.getMessage() for r in caplog.records)
+
+
+def test_local_put_file_restores_standard_readable_mode(tmp_path):
+    """mkstemp() creates the temp file at 0o600 (owner-only); os.replace()
+    preserves the SOURCE's mode, not the destination's, so without an
+    explicit chmod the final file would regress from the pre-#787
+    path.write_bytes() default (0o644 under the standard umask) to
+    owner-only."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+    storage.put_file("R7", "data.json", b"bytes")
+    mode = (tmp_path / "R7" / "data.json").stat().st_mode & 0o777
+    assert mode == 0o644
+
+
+def test_local_put_global_interrupted_replace_leaves_no_temp_file(tmp_path, monkeypatch):
+    """put_global goes through the same _atomic_write helper as put_file;
+    pin it independently since it writes outside the run namespace."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _boom)
+    with pytest.raises(OSError):
+        storage.put_global("by-submitter/e@x.edu/R1/manifest.json", b"partial")
+    monkeypatch.undo()
+
+    target_dir = tmp_path / "by-submitter" / "e@x.edu" / "R1"
+    leftover = os.listdir(target_dir) if target_dir.exists() else []
+    assert leftover == [], f"temp file leaked: {leftover}"
+
+
+def test_local_put_file_leaves_no_temp_file_on_success(tmp_path):
+    """The success path cleans up after itself: only the final key exists,
+    never a stray temp file beside it."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+    storage.put_file("R3", "data.json", b"bytes")
+    assert os.listdir(tmp_path / "R3") == ["data.json"]
+
+
+def test_local_put_file_temp_file_is_created_in_destination_directory(tmp_path, monkeypatch):
+    """The temp file mkstemp() creates must live in path.parent -- the
+    destination's own directory -- not the platform default temp dir.
+    os.replace() is only an atomic same-filesystem rename when both sides
+    share a filesystem; a store mounted on a different filesystem than the
+    default temp dir would turn every put_file into a cross-device (EXDEV)
+    error if this ever regressed to mkstemp(dir=None) (#787)."""
+    storage = LocalRunStorage(base_dir=str(tmp_path))
+    real_replace = os.replace
+    seen_src_parents = []
+
+    def _spy_replace(src, dst):
+        seen_src_parents.append(Path(src).parent)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr("app.storage.local_storage.os.replace", _spy_replace)
+    storage.put_file("R4", "data.json", b"bytes")
+
+    assert seen_src_parents == [tmp_path / "R4"]
 
 
 # --- (b2) key/run-id validation is a storage invariant ----------------------

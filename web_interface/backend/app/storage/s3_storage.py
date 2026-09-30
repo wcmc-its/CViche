@@ -16,7 +16,9 @@ import yaml
 
 from app.storage.base import (
     RunStorage,
+    StorageError,
     StorageKeyExists,
+    StorageKeyNotFound,
     check_artifact_size,
     validate_key,
     validate_run_id,
@@ -24,6 +26,47 @@ from app.storage.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# S3 error codes that mean "the object is absent" for GetObject/HeadObject.
+# NoSuchBucket is deliberately excluded: a missing or misconfigured bucket is
+# an infrastructure fault, not a missing artifact, and must propagate so it
+# surfaces as an outage rather than a user-facing 404 (#790).
+_NOT_FOUND_CODES = frozenset({"NoSuchKey", "404"})
+
+# boto3's own defaults (~60s connect, ~60s read, botocore's own retry policy)
+# are effectively unbounded relative to the request budget that actually
+# matters: create_run_archive (app/api/upload.py) issues up to 2 put_object
+# calls per run-id attempt for up to _RUN_ID_ATTEMPTS=5 attempts, all inside
+# ONE synchronous upload request (#791). Worst case at these values: 10
+# sequential calls x 3 total attempts x (3s + 10s) = ~390s, under the ALB's
+# 500s idle timeout, so the client sees an error rather than a dropped
+# connection. Values decided on #791.
+S3_CONNECT_TIMEOUT_S = 3
+S3_READ_TIMEOUT_S = 10
+# Total attempts per call, the initial one included (botocore's
+# `total_max_attempts`; its `max_attempts` would count retries only).
+S3_TOTAL_ATTEMPTS = 3
+
+
+def _translate_client_error(code: str, context: str) -> StorageError | None:
+    """Map a known AWS error code to the application exception it means.
+
+    One place for put_file_exclusive, get_file and exists to agree on what
+    a code means, instead of each interpreting it independently (PR #779
+    review, s3_storage.py item 8; #790 acceptance criterion 2). HeadObject's
+    real error responses carry only a bare "404" for a missing key, never
+    the modeled "NoSuchKey"/"PreconditionFailed" codes GetObject and
+    PutObject-with-precondition use -- but "404" is in _NOT_FOUND_CODES, so
+    routing exists() through this helper still maps it correctly. Returns
+    None for a code this store attaches no meaning to, so the caller
+    re-raises the original ClientError unchanged -- an outage or permissions
+    fault, not a storage-contract event.
+    """
+    if code == "PreconditionFailed":
+        return StorageKeyExists(f"{context} already exists")
+    if code in _NOT_FOUND_CODES:
+        return StorageKeyNotFound(f"No such S3 object: {context}")
+    return None
 
 
 class StorageDeleteError(RuntimeError):
@@ -78,8 +121,12 @@ class S3RunStorage(RunStorage):
                 "S3 bucket not configured. Set CVICHE_S3_BUCKET environment variable."
             )
         s3_bucket_prefix, source = get_config("s3", "CVICHE_S3_PREFIX", default="cviche")
-        
-        self._prefix = prefix or s3_bucket_prefix
+
+        # Unlike self._bucket above (which deliberately keeps `or` for the
+        # #109 guard), an explicit prefix="" is a real, distinct choice -- it
+        # means "no prefix segment" -- and must not be silently replaced by
+        # the configured default (PR #779 review, s3_storage.py item 5; #791).
+        self._prefix = prefix if prefix is not None else s3_bucket_prefix
 
         # Force Signature Version 4. Without it, botocore falls back to the
         # global s3.amazonaws.com endpoint and signs presigned URLs with SigV2,
@@ -92,8 +139,22 @@ class S3RunStorage(RunStorage):
         self._s3 = boto3.client(
             "s3",
             region_name=region,
-            config=Config(signature_version="s3v4"),
+            config=Config(
+                signature_version="s3v4",
+                connect_timeout=S3_CONNECT_TIMEOUT_S,
+                read_timeout=S3_READ_TIMEOUT_S,
+                retries={"mode": "standard", "total_max_attempts": S3_TOTAL_ATTEMPTS},
+            ),
         )
+
+    def _key_prefix(self) -> str:
+        """The store-root segment before "runs/..." or a global key.
+
+        Empty when self._prefix is "" (an explicit no-prefix store, #791),
+        so a caller-supplied empty prefix does not produce a key with a
+        leading "/" -- "" plus "runs/..." is "runs/...", not "/runs/...".
+        """
+        return f"{self._prefix}/" if self._prefix else ""
 
     def _s3_key(self, run_id: str, key: str, *, allow_empty: bool = False) -> str:
         """Build the full S3 key for a run artifact.
@@ -110,7 +171,7 @@ class S3RunStorage(RunStorage):
         """
         validate_run_key(run_id, key)
         _validate_s3_key_text(key, allow_empty=allow_empty)
-        return f"{self._prefix}/runs/{run_id}/{key}"
+        return f"{self._key_prefix()}runs/{run_id}/{key}"
 
     def put_file(self, run_id: str, key: str, data: bytes) -> None:
         check_artifact_size(data)
@@ -132,8 +193,9 @@ class S3RunStorage(RunStorage):
             # outage/permissions fault and must propagate, not be mistaken for
             # a collision.
             code = e.response.get("Error", {}).get("Code", "")
-            if code == "PreconditionFailed":
-                raise StorageKeyExists(f"{run_id}/{key} already exists") from e
+            translated = _translate_client_error(code, f"{run_id}/{key}")
+            if translated is not None:
+                raise translated from e
             raise
         logger.debug(
             "Uploaded s3://%s/%s (%d bytes, exclusive)", self._bucket, s3_key, len(data),
@@ -143,7 +205,7 @@ class S3RunStorage(RunStorage):
         check_artifact_size(data)
         validate_key(key)
         _validate_s3_key_text(key, allow_empty=False)
-        s3_key = f"{self._prefix}/{key}"
+        s3_key = f"{self._key_prefix()}{key}"
         self._s3.put_object(Bucket=self._bucket, Key=s3_key, Body=data)
         logger.debug("Uploaded s3://%s/%s (%d bytes)", self._bucket, s3_key, len(data))
 
@@ -199,36 +261,44 @@ class S3RunStorage(RunStorage):
         # otherwise inherit the boundary check -- and a malformed id turns a
         # routing bug into a bulk delete of the wrong namespace.
         validate_run_id(run_id)
-        return self._delete_by_prefix(f"{self._prefix}/runs/{run_id}/")
+        return self._delete_by_prefix(f"{self._key_prefix()}runs/{run_id}/")
 
     def delete_global_prefix(self, prefix: str) -> int:
         # Same reasoning as delete_run: a destructive prefix built outside
         # _s3_key needs the boundary check spelled out.
         validate_key(prefix)
-        # An empty prefix would resolve to "{self._prefix}/" and pass the
-        # non-empty check in _delete_by_prefix, wiping the whole store; the
-        # base contract says the backend refuses it (PR #779 review, item 9).
+        # An empty prefix would resolve to "{self._key_prefix()}" and pass
+        # the non-empty check in _delete_by_prefix, wiping the whole store;
+        # the base contract says the backend refuses it (PR #779 review,
+        # item 9).
         _validate_s3_key_text(prefix, allow_empty=False)
-        return self._delete_by_prefix(f"{self._prefix}/{prefix}")
+        return self._delete_by_prefix(f"{self._key_prefix()}{prefix}")
 
     def get_file(self, run_id: str, key: str) -> bytes:
         s3_key = self._s3_key(run_id, key)
         try:
             response = self._s3.get_object(Bucket=self._bucket, Key=s3_key)
             return response["Body"].read()
-        except self._s3.exceptions.NoSuchKey:
-            raise FileNotFoundError(f"No such S3 object: s3://{self._bucket}/{s3_key}")
+        except self._s3.exceptions.NoSuchKey as e:
+            raise StorageKeyNotFound(
+                f"No such S3 object: s3://{self._bucket}/{s3_key}"
+            ) from e
         except self._s3.exceptions.ClientError as e:
-            # A genuinely-absent object can surface as a 404 ClientError (or
-            # NoSuchBucket) rather than the modeled NoSuchKey -- map those to
-            # FileNotFoundError so callers treat it as an expected miss. A 403
-            # AccessDenied is deliberately NOT mapped: it signals a real
-            # IAM/KMS problem the caller should log as an outage. (It is also
-            # what a missing key looks like without s3:ListBucket -- grant
-            # ListBucket to get a clean 404 here instead of a 403.)
+            # A genuinely-absent object can surface as a plain 404 ClientError
+            # rather than the modeled NoSuchKey -- mapped to StorageKeyNotFound
+            # so callers treat it as an expected miss. NoSuchBucket is
+            # deliberately NOT mapped (#790): a missing/misconfigured bucket
+            # is an infrastructure fault, not a missing artifact, and must
+            # propagate so it surfaces as an outage rather than a
+            # user-facing 404. A 403 AccessDenied is likewise NOT mapped: it
+            # signals a real IAM/KMS problem the caller should log as an
+            # outage. (It is also what a missing key looks like without
+            # s3:ListBucket -- grant ListBucket to get a clean 404 here
+            # instead of a 403.)
             code = e.response.get("Error", {}).get("Code", "")
-            if code in ("NoSuchKey", "404", "NoSuchBucket"):
-                raise FileNotFoundError(f"No such S3 object: s3://{self._bucket}/{s3_key}")
+            translated = _translate_client_error(code, f"s3://{self._bucket}/{s3_key}")
+            if translated is not None:
+                raise translated from e
             raise
 
     def list_files(self, run_id: str, prefix: str = "") -> list[str]:
@@ -240,7 +310,7 @@ class S3RunStorage(RunStorage):
             for obj in page.get("Contents", []):
                 # Strip the run-level prefix to return a relative key
                 full_key = obj["Key"]
-                run_prefix = f"{self._prefix}/runs/{run_id}/"
+                run_prefix = f"{self._key_prefix()}runs/{run_id}/"
                 if full_key.startswith(run_prefix):
                     keys.append(full_key[len(run_prefix):])
                 else:
@@ -278,6 +348,14 @@ class S3RunStorage(RunStorage):
             self._s3.head_object(Bucket=self._bucket, Key=s3_key)
             return True
         except self._s3.exceptions.ClientError as e:
-            if e.response["Error"]["Code"] == "404":
+            # Routed through the same translation helper put_file_exclusive
+            # and get_file use (#790 acceptance criterion 2), instead of
+            # exists() interpreting the "404" code on its own. A translated
+            # StorageKeyNotFound means the object is absent; anything else
+            # (AccessDenied, an outage, ...) is not a storage-contract event
+            # and must propagate.
+            code = e.response.get("Error", {}).get("Code", "")
+            translated = _translate_client_error(code, f"s3://{self._bucket}/{s3_key}")
+            if isinstance(translated, StorageKeyNotFound):
                 return False
             raise
