@@ -1449,6 +1449,27 @@ def test_restore_sub_label_matches_a_docx_line_with_a_footnote_marker(docx_label
     assert [t for _, _, t in _shape(result)] == ["Talks", "International", "Papers"]
 
 
+@pytest.mark.parametrize("text, key", [
+    ("Regional1*", "regional"),          # a number, then a marker
+    ("Grants 2020", "grants 2020"),      # a number after a space is part of the header
+    ("Section 100", "section 100"),
+    ("R01 Grants", "r01 grants"),        # only a trailing number is a footnote
+    ("International :", "international"),
+])
+def test_document_line_key_strips_only_a_trailing_footnote_marker(text, key):
+    assert sbs._document_line_key(text) == key
+
+
+def test_restore_sub_label_logs_the_docx_line_it_moved_to(caplog):
+    hierarchy = [_h("Talks"), _h("Papers"), _h("International")]
+    lines = ["Talks", "x", "International", "Papers"]
+
+    with caplog.at_level(logging.INFO, logger=sbs.logger.name):
+        sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert "back to document line 2 (#429)" in caplog.text
+
+
 def test_restore_sub_label_keeps_a_number_after_a_space_in_the_key():
     # "Part 3" is not the docx's "Part 1": nothing is found before the label, so
     # there is no anchor and nothing moves.
@@ -1507,13 +1528,14 @@ def test_chunk_prompt_names_the_geographic_sub_labels(monkeypatch):
 def test_get_cv_hierarchy_chunked_restores_sub_label_order(monkeypatch):
     # The live stage-1a path: the order repair runs on the final LLM pass's output.
     from unified_pipeline.segmentation import chunked_chat_hierarchy_extractor as cce
-    lines = ["Talks", "National", "International", "Papers"]
+    lines = ["Talks", "International", "Papers"]
     monkeypatch.setattr(cce, "extract_text_from_docx", lambda path: lines)
     monkeypatch.setattr(cce, "extract_headers_from_chunk", lambda chunk, i, n: "")
     monkeypatch.setattr(cce, "ensure_personal_data_first", lambda h: h)
     monkeypatch.setattr(cce, "validate_headers_vs_entries", lambda h: h)
     pass_1 = [_h("Talks"), _h("Papers"), _h("International")]
-    pass_2 = [_h("Talks"), _h("National"), _h("Papers"), _h("International")]
+    pass_2 = [_h("Talks"), _h("Papers"), _h("International")]
+    label = pass_2[2]
     passes = {1: pass_1, 2: pass_2}
     seen = []
 
@@ -1528,6 +1550,7 @@ def test_get_cv_hierarchy_chunked_restores_sub_label_order(monkeypatch):
     # pass 2 reads the validated pass-1 output, and the repair reads pass 2's output
     assert [p for p, _ in seen] == [1, 2]
     assert seen[1][1] is pass_1
-    assert [n["text"] for n in hierarchy] == ["Talks", "National", "International", "Papers"]
-    assert hierarchy[1] is pass_2[1]
+    # the repair moved pass 2's label, anchored on the first docx line
+    assert [n["text"] for n in hierarchy] == ["Talks", "International", "Papers"]
+    assert hierarchy[1] is label
     assert stats["final_headers"] == len(pass_2)

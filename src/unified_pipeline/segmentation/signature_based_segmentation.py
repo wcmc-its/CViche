@@ -1417,7 +1417,7 @@ def _document_line_key(text: str) -> str:
 
     Whitespace-collapsed, no trailing colon, no trailing footnote marker, casefolded.
     """
-    key = ' '.join(text.split()).rstrip(':').strip()
+    key = ' '.join(text.split()).rstrip(':')
     key = _ATTACHED_FOOTNOTE_NUMBER.sub('', _TRAILING_FOOTNOTE_MARKERS.sub('', key))
     return key.casefold()
 
@@ -1463,13 +1463,15 @@ def _misplaced_sub_label(
     for prev, cur, key in zip(placed, placed[1:], outline_keys[1:]):
         if key not in _GEOGRAPHIC_SUB_LABEL_KEYS or prev.line is None or outline_keys.count(key) != 1:
             continue
-        hits = [i for i, k in enumerate(keys) if k == key]
-        if len(hits) != 1 or hits[0] >= prev.line:
+        if keys.count(key) != 1:
             continue
-        anchor = max((p for p in placed if p.line is not None and p.line < hits[0]),
+        line = keys.index(key)
+        if line >= prev.line:
+            continue
+        anchor = max((p for p in placed if p.line is not None and p.line < line),
                      key=lambda p: p.line, default=None)
         if anchor is not None:
-            return cur, hits[0], anchor
+            return cur, line, anchor
     return None
 
 
