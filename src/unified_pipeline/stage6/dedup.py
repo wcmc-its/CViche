@@ -388,6 +388,23 @@ def _alnum(text: str) -> str:
     return re.sub(r'[^a-z0-9]', '', text.lower())
 
 
+# A mentee "name" that names nobody: template placeholders the CV left unfilled.
+_PLACEHOLDER_NAMES = frozenset({'', 'na', 'none', 'tbd', 'tba'})
+
+
+def _different_mentees(dropped_entry: dict, kept_entry: dict) -> bool:
+    """#1181: True when both entries name a mentee and the names differ.
+
+    WCM mentee tables repeat the same field labels for every mentee, so two
+    residents at one site score as near-duplicates whatever their names
+    (jaccard 0.92 on FINSIS). A person's name is not reworded between two
+    copies of one record the way a title is, so a different name is a
+    different mentee."""
+    names = {_alnum(str((entry.get('extracted_fields') or {}).get('mentee_name') or ''))
+             for entry in (dropped_entry, kept_entry)}
+    return len(names) == 2 and not names & _PLACEHOLDER_NAMES
+
+
 def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
                   code: str | None = None,
                   document: list[dict] | None = None,
@@ -438,6 +455,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     if verbatim:
         return not _record_would_be_lost(dropped_entry, kept_entry, code,
                                          document, True, dropped_ids or set())
+    if _different_mentees(dropped_entry, kept_entry):
+        return False  # #1181: a different mentee is a different record
     if not _dates_compatible(dropped_entry.get('text') or '',
                              kept_entry.get('text') or ''):
         return False  # #666: a different date is a different record
