@@ -9,7 +9,10 @@ export default function RunsPage() {
   return (
     <main className="max-w-6xl mx-auto px-4 md:px-7 py-8">
       <div className="flex flex-wrap items-end justify-between gap-4">
-        <h1 className="text-[26px] font-semibold text-gray-900">Runs</h1>
+        <div>
+          <h1 className="text-[26px] font-semibold text-gray-900">Runs</h1>
+          <p className="mt-1 text-sm text-gray-500">Reruns of the same faculty member's CV are grouped together.</p>
+        </div>
         <Link
           to="/"
           className="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2"

@@ -1,0 +1,323 @@
+import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Clock, CheckCircle2, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronRight, MessageSquare } from 'lucide-react'
+import { formatRelativeDate } from '../../utils'
+import type { RunSummary } from '../../types'
+import { OWNER_UNKNOWN_LABEL, runByFilterValue, runByLabel } from './runGroups'
+import type { RunGroup, SortDir, SortField } from './runGroups'
+import type { RunFilterKey } from './runFilters'
+
+const CELL = 'px-2 first:pl-5 last:pr-5 py-3'
+const WRAP = 'break-words [overflow-wrap:anywhere]'
+const LINK_HOVER = 'hover:underline underline-offset-[3px] cursor-pointer'
+
+function StatusIcon({ status }: { status: string }) {
+  switch (status) {
+    case 'complete':
+      return <CheckCircle2 className="w-4 h-4 text-green-600" aria-hidden="true" />
+    case 'running':
+      return <Loader2 className="w-4 h-4 text-blue-600 animate-spin" aria-hidden="true" />
+    case 'failed':
+      return <XCircle className="w-4 h-4 text-red-600" aria-hidden="true" />
+    case 'cancelled':
+      return <AlertCircle className="w-4 h-4 text-orange-600" aria-hidden="true" />
+    default:
+      return <Clock className="w-4 h-4 text-gray-400" aria-hidden="true" />
+  }
+}
+
+function statusLabelColor(status: string): string {
+  switch (status) {
+    case 'complete':
+      return 'text-green-600'
+    case 'running':
+      return 'text-blue-600'
+    case 'failed':
+      return 'text-red-600'
+    case 'cancelled':
+      return 'text-orange-600'
+    default:
+      return 'text-gray-500'
+  }
+}
+
+function statusLabel(status: string): string {
+  switch (status) {
+    case 'complete':
+      return 'Complete'
+    case 'running':
+      return 'Running'
+    case 'queued':
+      return 'Queued'
+    case 'failed':
+      return 'Failed'
+    case 'cancelled':
+      return 'Cancelled'
+    default:
+      return 'Pending'
+  }
+}
+
+function formatDuration(seconds: number | null): string {
+  if (seconds === null) return '—'
+  const mins = Math.floor(seconds / 60)
+  const secs = seconds % 60
+  if (mins > 0) return `${mins}m ${secs}s`
+  return `${secs}s`
+}
+
+interface RunTableProps {
+  groups: RunGroup[]
+  isAdmin: boolean
+  showCost: boolean
+  feedbackMap: Record<string, boolean>
+  currentUserId: number | undefined
+  sortField: SortField
+  sortDir: SortDir
+  onSort: (field: SortField) => void
+  onSelectRun: (runId: string) => void
+  onFilter: (key: RunFilterKey, value: string) => void
+}
+
+interface SortHeaderProps {
+  field: SortField
+  label: string
+  align?: 'left' | 'right' | 'center'
+  width?: string
+  sortField: SortField
+  sortDir: SortDir
+  onSort: (field: SortField) => void
+}
+
+function SortHeader({ field, label, align = 'left', width = '', sortField, sortDir, onSort }: SortHeaderProps) {
+  const active = sortField === field
+  const ariaSort = active ? (sortDir === 'asc' ? 'ascending' : 'descending') : 'none'
+  const justify = align === 'right' ? 'justify-end' : align === 'center' ? 'justify-center' : ''
+  return (
+    <th className={`${CELL} text-${align} ${width}`} aria-sort={ariaSort}>
+      <button
+        type="button"
+        onClick={() => onSort(field)}
+        className={`group flex items-center gap-1 ${justify} text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full`}
+      >
+        {label}
+        {active ? (
+          sortDir === 'asc' ? (
+            <ChevronUp className="w-3 h-3 text-primary-600" aria-hidden="true" />
+          ) : (
+            <ChevronDown className="w-3 h-3 text-primary-600" aria-hidden="true" />
+          )
+        ) : (
+          <ChevronDown className="w-3 h-3 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
+        )}
+      </button>
+    </th>
+  )
+}
+
+function FeedbackCell({ run, feedbackMap }: { run: RunSummary; feedbackMap: Record<string, boolean> }) {
+  const navigate = useNavigate()
+  if (run.status !== 'complete') return null
+  if (feedbackMap[run.run_id] === true) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[11px] font-medium">
+        <MessageSquare className="w-3 h-3" aria-hidden="true" />
+        Feedback given
+      </span>
+    )
+  }
+  if (feedbackMap[run.run_id] === false) {
+    return (
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); navigate(`/run/${run.run_id}#feedback`) }}
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[11px] font-medium hover:bg-amber-200 transition-colors cursor-pointer"
+        title="Go to feedback form"
+      >
+        <MessageSquare className="w-3 h-3" aria-hidden="true" />
+        Needs feedback
+      </button>
+    )
+  }
+  return null
+}
+
+interface RowProps extends Omit<RunTableProps, 'groups' | 'sortField' | 'sortDir' | 'onSort'> {
+  run: RunSummary
+  /** The cell shown first: faculty name + filename for a group row, filename for an earlier run. */
+  firstCell: React.ReactNode
+  earlier?: boolean
+}
+
+function RunRow({ run, firstCell, earlier = false, isAdmin, showCost, feedbackMap, currentUserId, onSelectRun, onFilter }: RowProps) {
+  const { display, tooltip } = formatRelativeDate(run.started_at)
+  const muted = earlier ? 'text-gray-500' : ''
+  const runBy = runByLabel(run, currentUserId)
+  const runByValue = runByFilterValue(run)
+  const bg = run.status === 'running' ? 'bg-primary-50' : earlier ? 'bg-sand-50' : 'bg-white'
+  return (
+    <tr
+      onClick={() => onSelectRun(run.run_id)}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelectRun(run.run_id) } }}
+      tabIndex={0}
+      role="link"
+      className={`cursor-pointer transition-colors border-b border-sand-200 last:border-b-0 hover:bg-sand-50 ${bg}`}
+    >
+      <td className={`${CELL} text-left`}>{firstCell}</td>
+      {isAdmin && (
+        <td className={`${CELL} text-left text-sm ${earlier ? 'text-gray-500' : 'text-gray-700'}`}>
+          {runBy && runByValue ? (
+            <button
+              type="button"
+              title="Show only runs by this person"
+              onClick={(e) => { e.stopPropagation(); onFilter('runBy', runByValue) }}
+              className={`text-left ${WRAP} ${LINK_HOVER}`}
+            >
+              {runBy}
+            </button>
+          ) : (
+            <span className="text-gray-400">{'—'}</span>
+          )}
+        </td>
+      )}
+      <td className={`${CELL} text-left`}>
+        <span className="inline-flex items-center gap-1">
+          <StatusIcon status={run.status} />
+          <span className={`text-sm ${statusLabelColor(run.status)}`}>{statusLabel(run.status)}</span>
+        </span>
+      </td>
+      <td className={`${CELL} text-left text-sm text-gray-500`}>
+        <span title={tooltip}>{display}</span>
+      </td>
+      <td className={`${CELL} text-right text-sm text-gray-500`}>{formatDuration(run.total_duration_seconds)}</td>
+      {showCost && (
+        <td className={`${CELL} text-right text-sm ${earlier ? 'text-gray-500' : 'text-gray-700'}`}>
+          {run.total_cost ? `$${run.total_cost.toFixed(2)}` : '—'}
+        </td>
+      )}
+      <td className={`${CELL} text-center ${muted}`}>
+        <FeedbackCell run={run} feedbackMap={feedbackMap} />
+      </td>
+    </tr>
+  )
+}
+
+interface GroupCellProps {
+  group: RunGroup
+  expanded: boolean
+  isAdmin: boolean
+  onToggle: () => void
+  onFilter: (key: RunFilterKey, value: string) => void
+}
+
+function GroupCell({ group, expanded, isAdmin, onToggle, onFilter }: GroupCellProps) {
+  const { owner, latest, older } = group
+  const runCount = older.length + 1
+  return (
+    <div className="flex items-center gap-2.5 min-w-0">
+      {older.length > 0 ? (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onToggle() }}
+          aria-expanded={expanded}
+          aria-label={`${expanded ? 'Hide' : 'Show'} ${older.length} earlier ${older.length === 1 ? 'run' : 'runs'}`}
+          title="Show earlier runs"
+          className="flex h-[22px] w-[22px] flex-none items-center justify-center rounded-md text-gray-500 hover:bg-sand-200"
+        >
+          <ChevronRight className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-90' : ''}`} aria-hidden="true" />
+        </button>
+      ) : (
+        <span className="w-[22px] flex-none" aria-hidden="true" />
+      )}
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          {owner ? (
+            isAdmin ? (
+              <button
+                type="button"
+                title="Show only this faculty member"
+                onClick={(e) => { e.stopPropagation(); onFilter('faculty', owner) }}
+                className={`text-left text-sm font-semibold text-gray-900 ${WRAP} ${LINK_HOVER}`}
+              >
+                {owner}
+              </button>
+            ) : (
+              <span className={`text-sm font-semibold text-gray-900 ${WRAP}`}>{owner}</span>
+            )
+          ) : (
+            <span className={`text-sm text-gray-900 ${WRAP}`}>{latest.filename}</span>
+          )}
+          {runCount > 1 && (
+            <span className="rounded-full bg-sand-100 px-2 py-px text-xs text-gray-500">{runCount} runs</span>
+          )}
+        </div>
+        <div className={`text-[13px] text-gray-500 ${WRAP}`}>{owner ? latest.filename : OWNER_UNKNOWN_LABEL}</div>
+      </div>
+    </div>
+  )
+}
+
+/** Runs grouped by faculty member: latest run per row, earlier reruns behind a chevron. */
+export default function RunTable(props: RunTableProps) {
+  const { groups, isAdmin, showCost, sortField, sortDir, onSort } = props
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const toggle = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  const header = { sortField, sortDir, onSort }
+  const rowProps = {
+    isAdmin,
+    showCost,
+    feedbackMap: props.feedbackMap,
+    currentUserId: props.currentUserId,
+    onSelectRun: props.onSelectRun,
+    onFilter: props.onFilter,
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className={`w-full table-fixed ${isAdmin ? 'min-w-[900px]' : 'min-w-[640px]'}`}>
+        <thead className="sticky top-0 z-header bg-sand-50 border-b border-sand-200">
+          <tr>
+            <SortHeader field="cv" label={isAdmin ? 'Faculty (subject)' : 'CV'} {...header} />
+            {isAdmin && <th className={`${CELL} text-left text-xs font-medium text-gray-500 w-[170px]`}>Run by</th>}
+            <SortHeader field="status" label="Status" width="w-[120px]" {...header} />
+            <SortHeader field="started_at" label={isAdmin ? 'Started' : 'Date'} width="w-[130px]" {...header} />
+            <SortHeader field="total_duration_seconds" label="Duration" align="right" width="w-[72px]" {...header} />
+            {showCost && <SortHeader field="total_cost" label="Cost" align="right" width="w-[56px]" {...header} />}
+            <SortHeader field="feedback" label="Feedback" align="center" width="w-[110px]" {...header} />
+          </tr>
+        </thead>
+        <tbody>
+          {groups.map((group) => {
+            const isOpen = expanded.has(group.key)
+            return [
+              <RunRow
+                key={group.latest.run_id}
+                run={group.latest}
+                firstCell={
+                  <GroupCell group={group} expanded={isOpen} isAdmin={isAdmin} onToggle={() => toggle(group.key)} onFilter={props.onFilter} />
+                }
+                {...rowProps}
+              />,
+              ...(isOpen
+                ? group.older.map((run) => (
+                    <RunRow
+                      key={run.run_id}
+                      run={run}
+                      earlier
+                      firstCell={<div className={`pl-8 text-[13px] text-gray-500 ${WRAP}`}>{run.filename}</div>}
+                      {...rowProps}
+                    />
+                  ))
+                : []),
+            ]
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}

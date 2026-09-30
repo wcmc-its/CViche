@@ -1,83 +1,20 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Clock, FileText, CheckCircle2, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react'
-import { formatRelativeDate } from '../utils'
-import { getRuns, getFeedbackStatuses } from '../api/runs'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
+import { FileText, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { getRuns, getFeedbackStatuses, getRunFilterOptions } from '../api/runs'
+import type { FeedbackStatus, RunFilterOptions, RunSummary } from '../types'
 import ErrorBanner from './ErrorBanner'
-import { useCanSeeCost } from '../contexts/AuthContext'
-
-interface RunSummary {
-  run_id: string
-  filename: string
-  status: string
-  started_at: string
-  completed_at: string | null
-  total_cost: number | null
-  total_duration_seconds: number | null
-}
-
-interface FeedbackStatus {
-  run_id: string
-  has_feedback: boolean
-}
+import { useAuth } from '../contexts/AuthContext'
+import RunTable from './runs/RunTable'
+import { ActiveFilterChips, RunFilterCombos } from './runs/RunFilterBar'
+import { toListParams, useRunFilters } from './runs/runFilters'
+import { compareRuns, groupRuns } from './runs/runGroups'
+import type { SortDir, SortField } from './runs/runGroups'
 
 interface RunHistoryProps {
   onSelectRun: (runId: string) => void
 }
 
-type SortField = 'status' | 'filename' | 'started_at' | 'total_duration_seconds' | 'total_cost' | 'feedback'
-type SortDir = 'asc' | 'desc'
-
 const PAGE_SIZE = 100
-
-function StatusIcon({ status }: { status: string }) {
-  switch (status) {
-    case 'complete':
-      return <CheckCircle2 className="w-4 h-4 text-green-600" aria-hidden="true" />
-    case 'running':
-      return <Loader2 className="w-4 h-4 text-blue-600 animate-spin" aria-hidden="true" />
-    case 'failed':
-      return <XCircle className="w-4 h-4 text-red-600" aria-hidden="true" />
-    case 'cancelled':
-      return <AlertCircle className="w-4 h-4 text-orange-600" aria-hidden="true" />
-    default:
-      return <Clock className="w-4 h-4 text-gray-400" aria-hidden="true" />
-  }
-}
-
-function statusLabelColor(status: string): string {
-  switch (status) {
-    case 'complete':
-      return 'text-green-600'
-    case 'running':
-      return 'text-blue-600'
-    case 'queued':
-      return 'text-gray-500'
-    case 'failed':
-      return 'text-red-600'
-    case 'cancelled':
-      return 'text-orange-600'
-    default:
-      return 'text-gray-500'
-  }
-}
-
-function statusLabel(status: string): string {
-  switch (status) {
-    case 'complete':
-      return 'Complete'
-    case 'running':
-      return 'Running'
-    case 'queued':
-      return 'Queued'
-    case 'failed':
-      return 'Failed'
-    case 'cancelled':
-      return 'Cancelled'
-    default:
-      return 'Pending'
-  }
-}
 
 function getPageNumbers(currentPage: number, totalPages: number): (number | 'ellipsis')[] {
   if (totalPages <= 7) {
@@ -112,17 +49,31 @@ function getPageNumbers(currentPage: number, totalPages: number): (number | 'ell
 }
 
 export default function RunHistory({ onSelectRun }: RunHistoryProps) {
-  const showCost = useCanSeeCost()
-  const navigate = useNavigate()
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'admin'
+  const showCost = isAdmin
+  const controls = useRunFilters(isAdmin)
+  const { filters } = controls
+  const listParams = useMemo(() => (isAdmin ? toListParams(filters) : undefined), [isAdmin, filters])
+  const filterKey = JSON.stringify(listParams ?? {})
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [total, setTotal] = useState(0)
   const [feedbackMap, setFeedbackMap] = useState<Record<string, boolean>>({})
+  const [filterOptions, setFilterOptions] = useState<RunFilterOptions | null>(null)
   const [currentPage, setCurrentPage] = useState(0)
+  const [pageFilterKey, setPageFilterKey] = useState(filterKey)
   const [sortField, setSortField] = useState<SortField>('started_at')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
   const [error, setError] = useState<string | null>(null)
   const containerRef = useRef<HTMLElement>(null)
+  const requestSeq = useRef(0)
+
+  // A changed filter restarts paging; done during render so no fetch runs at the stale page.
+  if (pageFilterKey !== filterKey) {
+    setPageFilterKey(filterKey)
+    setCurrentPage(0)
+  }
 
   const fetchFeedbackStatus = async () => {
     try {
@@ -136,30 +87,35 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   }
 
   const fetchRuns = useCallback(async (offset: number) => {
+    const seq = ++requestSeq.current
     try {
       setError(null)
-      const data = await getRuns(offset, PAGE_SIZE)
-      const runsList = data.runs
-      setRuns(runsList)
-      setTotal(data.total || runsList.length)
+      const data = await getRuns(offset, PAGE_SIZE, listParams)
+      if (seq !== requestSeq.current) return
+      setRuns(data.runs)
+      setTotal(data.total || data.runs.length)
     } catch (err) {
+      if (seq !== requestSeq.current) return
       console.error('Error fetching runs:', err)
       setError('Unable to load run history. Please refresh the page to try again.')
     }
-  }, [])
+  }, [listParams])
+
+  useEffect(() => { fetchFeedbackStatus() }, [])
 
   useEffect(() => {
-    const load = async () => {
-      await Promise.all([fetchRuns(0), fetchFeedbackStatus()])
-      setLoading(false)
-    }
-    load()
-  }, [fetchRuns])
+    if (!isAdmin) return
+    let cancelled = false
+    getRunFilterOptions(toListParams(filters))
+      .then((data) => { if (!cancelled) setFilterOptions(data) })
+      .catch((err) => console.error('Error fetching run filter options:', err))
+    return () => { cancelled = true }
+  }, [isAdmin, filters])
 
   useEffect(() => {
-    if (currentPage === 0) return
     fetchRuns(currentPage * PAGE_SIZE).then(() => {
-      containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      setLoading(false)
+      if (currentPage > 0) containerRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     })
   }, [currentPage, fetchRuns])
 
@@ -173,59 +129,16 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
     setCurrentPage(0)
   }
 
-  const sortedRuns = [...runs].sort((a, b) => {
-    let cmp = 0
-    switch (sortField) {
-      case 'status':
-        cmp = a.status.localeCompare(b.status)
-        break
-      case 'filename':
-        cmp = a.filename.localeCompare(b.filename)
-        break
-      case 'started_at':
-        cmp = (a.started_at ?? '').localeCompare(b.started_at ?? '')
-        break
-      case 'total_duration_seconds':
-        cmp = (a.total_duration_seconds ?? 0) - (b.total_duration_seconds ?? 0)
-        break
-      case 'total_cost':
-        cmp = (a.total_cost ?? 0) - (b.total_cost ?? 0)
-        break
-      case 'feedback': {
-        const valA = feedbackMap[a.run_id] === true ? 2 : (feedbackMap[a.run_id] === false ? 1 : 0)
-        const valB = feedbackMap[b.run_id] === true ? 2 : (feedbackMap[b.run_id] === false ? 1 : 0)
-        cmp = valA - valB
-        break
-      }
-    }
+  // Grouping is per loaded page: reruns of the same faculty member that fall on
+  // another page are not merged into this page's group.
+  const groups = groupRuns(runs).sort((a, b) => {
+    const cmp = compareRuns(a.latest, b.latest, sortField, feedbackMap)
     return sortDir === 'asc' ? cmp : -cmp
   })
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
   const startIndex = currentPage * PAGE_SIZE
   const endIndex = Math.min(startIndex + PAGE_SIZE, total)
-
-  const formatDuration = (seconds: number | null) => {
-    if (seconds === null) return '\u2014'
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    if (mins > 0) return `${mins}m ${secs}s`
-    return `${secs}s`
-  }
-
-  const getAriaSortValue = (field: SortField): 'ascending' | 'descending' | 'none' => {
-    if (sortField !== field) return 'none'
-    return sortDir === 'asc' ? 'ascending' : 'descending'
-  }
-
-  const SortIcon = ({ field }: { field: SortField }) => {
-    if (sortField === field) {
-      return sortDir === 'asc'
-        ? <ChevronUp className="w-3 h-3 text-primary-600" aria-hidden="true" />
-        : <ChevronDown className="w-3 h-3 text-primary-600" aria-hidden="true" />
-    }
-    return <ChevronDown className="w-3 h-3 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" aria-hidden="true" />
-  }
 
   if (loading) {
     return (
@@ -236,7 +149,9 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
     )
   }
 
-  if (runs.length === 0 && !error) {
+  const filterBarProps = { controls, options: filterOptions, runs, currentUserId: user?.user_id }
+
+  if (runs.length === 0 && !error && !controls.filters.department && !controls.filters.faculty && !controls.filters.runBy) {
     return (
       <section ref={containerRef} aria-label="Previous runs" className="mt-6 bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-6">
         <div className="flex flex-col items-center justify-center py-12">
@@ -249,190 +164,88 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   }
 
   return (
-    <section ref={containerRef} aria-label="Previous runs" className="mt-6 bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] overflow-hidden">
-
-      {error && (
-        <div className="mb-4">
-          <ErrorBanner message={error} onDismiss={() => { setError(null); fetchRuns(currentPage * PAGE_SIZE) }} />
+    <>
+      {isAdmin && (
+        <div className="mt-6">
+          <div className="flex flex-wrap items-center gap-2">
+            <RunFilterCombos {...filterBarProps} currentUserEmail={user?.email} />
+          </div>
+          <ActiveFilterChips {...filterBarProps} />
         </div>
       )}
+      <section ref={containerRef} aria-label="Previous runs" className="mt-4 bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] overflow-hidden">
 
-      {runs.length > 0 && (
-        <>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] table-fixed">
-              <thead className="sticky top-0 z-header bg-sand-50 border-b border-sand-200">
-                <tr>
-                  <th className="px-2 first:pl-5 last:pr-5 py-3 text-left w-[120px]" aria-sort={getAriaSortValue('status')}>
-                    <button
-                      type="button"
-                      onClick={() => handleSort('status')}
-                      className="group flex items-center gap-1 text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
-                    >
-                      Status
-                      <SortIcon field="status" />
-                    </button>
-                  </th>
-                  <th className="px-2 first:pl-5 last:pr-5 py-3 text-left" aria-sort={getAriaSortValue('filename')}>
-                    <button
-                      type="button"
-                      onClick={() => handleSort('filename')}
-                      className="group flex items-center gap-1 text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
-                    >
-                      File
-                      <SortIcon field="filename" />
-                    </button>
-                  </th>
-                  <th className="px-2 first:pl-5 last:pr-5 py-3 text-left w-[130px]" aria-sort={getAriaSortValue('started_at')}>
-                    <button
-                      type="button"
-                      onClick={() => handleSort('started_at')}
-                      className="group flex items-center gap-1 text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
-                    >
-                      Date
-                      <SortIcon field="started_at" />
-                    </button>
-                  </th>
-                  <th className="px-2 first:pl-5 last:pr-5 py-3 text-right w-[72px]" aria-sort={getAriaSortValue('total_duration_seconds')}>
-                    <button
-                      type="button"
-                      onClick={() => handleSort('total_duration_seconds')}
-                      className="group flex items-center gap-1 justify-end text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
-                    >
-                      Duration
-                      <SortIcon field="total_duration_seconds" />
-                    </button>
-                  </th>
-                  {showCost && (
-                    <th className="px-2 first:pl-5 last:pr-5 py-3 text-right w-[56px]" aria-sort={getAriaSortValue('total_cost')}>
-                      <button
-                        type="button"
-                        onClick={() => handleSort('total_cost')}
-                        className="group flex items-center gap-1 justify-end text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
-                      >
-                        Cost
-                        <SortIcon field="total_cost" />
-                      </button>
-                    </th>
-                  )}
-                  <th className="px-2 first:pl-5 last:pr-5 py-3 text-center w-[110px]" aria-sort={getAriaSortValue('feedback')}>
-                    <button
-                      type="button"
-                      onClick={() => handleSort('feedback')}
-                      className="group flex items-center gap-1 justify-center text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
-                    >
-                      Feedback
-                      <SortIcon field="feedback" />
-                    </button>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedRuns.map((run) => (
-                  <tr
-                    key={run.run_id}
-                    onClick={() => onSelectRun(run.run_id)}
-                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelectRun(run.run_id) } }}
-                    tabIndex={0}
-                    role="link"
-                    className={`
-                      cursor-pointer transition-colors border-b border-sand-200 last:border-b-0
-                      ${run.status === 'running' ? 'bg-primary-50' : 'bg-white'}
-                      hover:bg-sand-50
-                    `}
-                  >
-                    <td className="px-2 first:pl-5 last:pr-5 py-3 text-left">
-                      <span className="inline-flex items-center gap-1">
-                        <StatusIcon status={run.status} />
-                        <span className={`text-sm ${statusLabelColor(run.status)}`}>{statusLabel(run.status)}</span>
-                      </span>
-                    </td>
-                    <td className="px-2 first:pl-5 last:pr-5 py-3 text-left text-sm text-gray-900 truncate" title={run.filename}>
-                      {run.filename}
-                    </td>
-                    <td className="px-2 first:pl-5 last:pr-5 py-3 text-left text-sm text-gray-500">
-                      {(() => {
-                        const { display, tooltip } = formatRelativeDate(run.started_at)
-                        return <span title={tooltip}>{display}</span>
-                      })()}
-                    </td>
-                    <td className="px-2 first:pl-5 last:pr-5 py-3 text-right text-sm text-gray-500">
-                      {formatDuration(run.total_duration_seconds)}
-                    </td>
-                    {showCost && (
-                      <td className="px-2 first:pl-5 last:pr-5 py-3 text-right text-sm text-gray-700">
-                        {run.total_cost ? `$${run.total_cost.toFixed(2)}` : '\u2014'}
-                      </td>
-                    )}
-                    <td className="px-2 first:pl-5 last:pr-5 py-3 text-center">
-                      {run.status === 'complete' && feedbackMap[run.run_id] === true && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[11px] font-medium">
-                          <MessageSquare className="w-3 h-3" aria-hidden="true" />
-                          Feedback given
-                        </span>
-                      )}
-                      {run.status === 'complete' && feedbackMap[run.run_id] === false && (
-                        <button
-                          type="button"
-                          onClick={(e) => { e.stopPropagation(); navigate(`/run/${run.run_id}#feedback`) }}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[11px] font-medium hover:bg-amber-200 transition-colors cursor-pointer"
-                          title="Go to feedback form"
-                        >
-                          <MessageSquare className="w-3 h-3" aria-hidden="true" />
-                          Needs feedback
-                        </button>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {error && (
+          <div className="mb-4">
+            <ErrorBanner message={error} onDismiss={() => { setError(null); fetchRuns(currentPage * PAGE_SIZE) }} />
           </div>
+        )}
 
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between px-5 py-3 border-t border-sand-200">
-              <span className="text-sm text-gray-500">
-                Showing {startIndex + 1}{'\u2013'}{endIndex} of {total} runs
-              </span>
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
-                  disabled={currentPage === 0}
-                  aria-label="Previous page"
-                  className={`p-1 rounded-md ${currentPage === 0 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
-                >
-                  <ChevronLeft className="w-4 h-4" aria-hidden="true" />
-                </button>
-                {getPageNumbers(currentPage, totalPages).map((page, i) =>
-                  page === 'ellipsis' ? (
-                    <span key={`ellipsis-${i}`} className="px-2 text-sm text-gray-400">&hellip;</span>
-                  ) : (
-                    <button
-                      key={page}
-                      onClick={() => setCurrentPage(page)}
-                      className={`min-w-[32px] h-8 px-3 py-1 rounded-md text-sm ${
-                        page === currentPage
-                          ? 'bg-primary-600 text-white'
-                          : 'text-gray-600 hover:bg-gray-100'
-                      }`}
-                    >
-                      {page + 1}
-                    </button>
-                  )
-                )}
-                <button
-                  onClick={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
-                  disabled={currentPage === totalPages - 1}
-                  aria-label="Next page"
-                  className={`p-1 rounded-md ${currentPage === totalPages - 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
-                >
-                  <ChevronRight className="w-4 h-4" aria-hidden="true" />
-                </button>
+        {runs.length === 0 && !error && (
+          <p className="px-5 py-8 text-center text-sm text-gray-500">No runs match these filters.</p>
+        )}
+
+        {runs.length > 0 && (
+          <>
+            <RunTable
+              groups={groups}
+              isAdmin={isAdmin}
+              showCost={showCost}
+              feedbackMap={feedbackMap}
+              currentUserId={user?.user_id}
+              sortField={sortField}
+              sortDir={sortDir}
+              onSort={handleSort}
+              onSelectRun={onSelectRun}
+              onFilter={controls.setFilter}
+            />
+
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between px-5 py-3 border-t border-sand-200">
+                <span className="text-sm text-gray-500">
+                  Showing {startIndex + 1}{'\u2013'}{endIndex} of {total} runs
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
+                    disabled={currentPage === 0}
+                    aria-label="Previous page"
+                    className={`p-1 rounded-md ${currentPage === 0 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
+                  >
+                    <ChevronLeft className="w-4 h-4" aria-hidden="true" />
+                  </button>
+                  {getPageNumbers(currentPage, totalPages).map((page, i) =>
+                    page === 'ellipsis' ? (
+                      <span key={`ellipsis-${i}`} className="px-2 text-sm text-gray-400">&hellip;</span>
+                    ) : (
+                      <button
+                        key={page}
+                        onClick={() => setCurrentPage(page)}
+                        className={`min-w-[32px] h-8 px-3 py-1 rounded-md text-sm ${
+                          page === currentPage
+                            ? 'bg-primary-600 text-white'
+                            : 'text-gray-600 hover:bg-gray-100'
+                        }`}
+                      >
+                        {page + 1}
+                      </button>
+                    )
+                  )}
+                  <button
+                    onClick={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
+                    disabled={currentPage === totalPages - 1}
+                    aria-label="Next page"
+                    className={`p-1 rounded-md ${currentPage === totalPages - 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
+                  >
+                    <ChevronRight className="w-4 h-4" aria-hidden="true" />
+                  </button>
+                </div>
               </div>
-            </div>
-          )}
-        </>
-      )}
-    </section>
+            )}
+
+          </>
+        )}
+      </section>
+    </>
   )
 }
