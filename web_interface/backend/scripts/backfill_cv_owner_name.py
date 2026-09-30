@@ -85,8 +85,9 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         db.close()
     mode = "APPLIED" if args.apply else "DRY RUN (pass --apply to write)"
-    print(f"{mode}: candidates={summary.candidates} resolved={summary.resolved} "
-          f"no_owner={summary.no_owner} failed={summary.failed} written={summary.written}")
+    sys.stdout.write(
+        f"{mode}: candidates={summary.candidates} resolved={summary.resolved} "
+        f"no_owner={summary.no_owner} failed={summary.failed} written={summary.written}\n")
     return 1 if summary.failed else 0
 
 
