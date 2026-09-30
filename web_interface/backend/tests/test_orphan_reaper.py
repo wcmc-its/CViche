@@ -301,6 +301,7 @@ def test_admin_delete_storage_failure_is_500_and_rows_survive_then_retry_succeed
     with patch("app.services.run_service.get_storage", return_value=flaky):
         resp = _as_admin(client, lambda: client.delete("/api/admin/runs/BAD683"))
         assert resp.status_code == 500
+        assert "safe to retry" in resp.text
         db.rollback()
         assert db.query(Run).filter(Run.id == "BAD683").first() is not None
         assert _child_counts(db, "BAD683") == before
