@@ -1350,19 +1350,21 @@ class _FakeRaw:
         yield self._body
 
 
-def _count_raw_requests_for_500s(client, monkeypatch: pytest.MonkeyPatch, retry_count: int) -> int:
-    """Answer every HTTP send with a 500 InternalServerException and return
-    how many raw requests the client + _call_with_retry made in total."""
+def _count_raw_requests(
+    client, monkeypatch: pytest.MonkeyPatch, retry_count: int,
+    status: int = 500, headers: dict | None = None, body: bytes = b'{"message": "boom"}',
+) -> int:
+    """Answer every HTTP send with the given response and return how many raw
+    requests the client + _call_with_retry made in total."""
     from botocore.awsrequest import AWSResponse
 
+    if headers is None:
+        headers = {"x-amzn-errortype": "InternalServerException"}
     sent: list[str] = []
 
     def fake_send(request, **kwargs):
         sent.append(request.url)
-        return AWSResponse(
-            request.url, 500, {"x-amzn-errortype": "InternalServerException"},
-            _FakeRaw(b'{"message": "boom"}'),
-        )
+        return AWSResponse(request.url, status, dict(headers), _FakeRaw(body))
 
     client.meta.events.register("before-send.bedrock-runtime.Converse", fake_send)
     monkeypatch.setattr(retry.time, "sleep", lambda s: None)
@@ -1378,7 +1380,38 @@ def test_raw_request_count_is_retry_count_plus_one(
     monkeypatch: pytest.MonkeyPatch, retry_count: int
 ) -> None:
     client = _fresh_bedrock_client(monkeypatch)
-    assert _count_raw_requests_for_500s(client, monkeypatch, retry_count) == retry_count + 1
+    assert _count_raw_requests(client, monkeypatch, retry_count) == retry_count + 1
+
+
+@pytest.mark.parametrize(
+    "label,status,headers,body",
+    [
+        # Modeled `retryable`-trait error botocore used to retry (4 sends).
+        ("ModelNotReady429", 429, {"x-amzn-errortype": "ModelNotReadyException"}, b'{"message": "warming"}'),
+        # Bare load-balancer 502: no modeled code, botocore used to retry it.
+        ("bare502", 502, {}, b"<html>Bad Gateway</html>"),
+    ],
+)
+def test_raw_request_count_is_retry_count_plus_one_for_formerly_botocore_retried_errors(
+    monkeypatch: pytest.MonkeyPatch, label: str, status: int, headers: dict, body: bytes
+) -> None:
+    client = _fresh_bedrock_client(monkeypatch)
+    assert _count_raw_requests(client, monkeypatch, 2, status, headers, body) == 3
+
+
+def test_bedrock_retryable_codes_cover_the_service_model() -> None:
+    """A botocore bump that marks another Bedrock error `retryable` must fail
+    here: botocore no longer retries it (#632), so _call_with_retry has to."""
+    from botocore.loaders import Loader
+
+    model = Loader().load_service_model("bedrock-runtime", "service-2")
+    modeled = {
+        name
+        for name, shape in model["shapes"].items()
+        if shape.get("exception") and shape.get("retryable")
+    }
+    assert modeled, "service model no longer lists any retryable error; re-check this test"
+    assert modeled <= retry.BEDROCK_RETRYABLE_CODES
 
 
 @pytest.mark.parametrize(
