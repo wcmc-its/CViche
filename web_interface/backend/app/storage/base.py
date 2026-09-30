@@ -119,8 +119,7 @@ class RunStorage(ABC):
     Maximum artifact size: every artifact is held whole in memory as bytes (no
     streaming API), so put_file, put_file_exclusive and put_global raise
     ArtifactTooLarge for data longer than MAX_ARTIFACT_BYTES, before anything
-    is stored. That is ARTIFACT_SIZE_FACTOR (5) times the upload cap, 50 MB by
-    default (#789).
+    is stored. That is ARTIFACT_SIZE_FACTOR (5) times the upload cap (#789).
     """
 
     @abstractmethod
