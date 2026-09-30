@@ -149,11 +149,12 @@ TAB_OUTLIER_RATIO = 2.0
 #: or two gaps the median is the gap itself, so nothing could be an outlier).
 TAB_FEW_GAPS_MAX = 2
 #: A line that starts with a list marker begins a new entry, never a
-#: wrapped continuation: "12." / "3)" (1-3 digits, then whitespace), "[12]",
+#: wrapped continuation: "12." / "3)" (1-3 digits, then whitespace or an
+#: uppercase letter: "12.Smith", while "1.5 mg" is not a marker), "[12]",
 #: a bullet glyph (U+F0B7 is Word's Symbol-font bullet), or a
 #: dash/asterisk/hyphen followed by whitespace. Exceptions below.
 LIST_MARKER_RE = re.compile(
-    r"^(?:\d{1,3}[.)]\s|\[\d{1,3}\]|[•▪◦‣●○■□─]|[–—*-]\s)")
+    r"^(?:\d{1,3}[.)](?:\s|(?=[A-Z]))|\[\d{1,3}\]|[•▪◦‣●○■□\uf0b7\u2500]|[–—*-]\s)")
 #: The dash/asterisk markers, captured. A lone "- present" is a wrapped
 #: range, so these only veto a merge when the paragraph itself began with
 #: the same marker (a real dash list is consistent).
@@ -162,6 +163,21 @@ DASH_MARKER_RE = re.compile(r"^([–—*-])\s")
 #: "529-" / "45.", a date range, "and"): the next line continues it even if
 #: it looks like a marker.
 CONNECTOR_END_RE = re.compile(r"(?:[-–—,(:&]|\b(?:and|of|the|in))$", re.IGNORECASE)
+#: A line ending like this finished a sentence or an entry: the next
+#: line's first word not fitting after it is no evidence of a wrap
+#: (a short entry above a long surname), unless it also ends like a
+#: connector (CONNECTOR_END_RE, which includes ":").
+SENTENCE_END_RE = re.compile(r"[.;:)]$")
+_MONTH = (r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?"
+          r"|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)")
+_DATE = rf"(?:{_MONTH}\.?,?\s+|\d{{1,2}}/(?:\d{{1,2}}/)?)?(?:19|20)\d{{2}}"
+#: A tabbed line's label is a LEADING label (so the next line may hang
+#: under the text after its tab) only if it is a list number ("12", "3.",
+#: "4)"), a year or date ("2019", "Jan 2019", "05/2019"), or a date range
+#: ("2019-2020", "Jan 2019 - present", or open: "2019 -").
+LEADING_LABEL_RE = re.compile(
+    rf"^(?:\d{{1,3}}[.)]?|{_DATE}(?:\s*[-–—]\s*(?:{_DATE}|present|current|now)?)?)[.:,]?$",
+    re.IGNORECASE)
 #: A line ending in a hyphen or dash is broken mid-word/mid-range ("1895-" /
 #: "1904."), so it wraps on even though it stops short of the right margin.
 WRAP_DASH_RE = re.compile(r"[-–—]$")
@@ -465,10 +481,13 @@ def _widest_gutter(lines: list[_Line]) -> tuple[float, float] | None:
     return best
 
 
-def _split_at(line: _Line, middle: float) -> tuple[_Line | None, _Line | None]:
-    """The line's words left and right of `middle`, as two lines."""
-    left = [w for w in line.words if w["x1"] <= middle]
-    right = [w for w in line.words if w["x0"] >= middle]
+def _split_at(line: _Line, gutter: tuple[float, float]) -> tuple[_Line | None, _Line | None]:
+    """The line's left-column and right-column words, as two lines. The right
+    column starts where the gutter ends, so a left-column word that pokes
+    into the gutter (even past its middle) stays in the left column."""
+    edge = gutter[1] - OUTDENT_TOLERANCE_PT
+    left = [w for w in line.words if w["x0"] < edge]
+    right = [w for w in line.words if w["x0"] >= edge]
     return (_build_line(left) if left else None), (_build_line(right) if right else None)
 
 
@@ -496,10 +515,9 @@ def _find_gutter(lines: list[_Line], height: float) -> tuple[float, float] | Non
     gutter = _widest_gutter(body)
     if gutter is None:
         return None
-    middle = (gutter[0] + gutter[1]) / 2
     # A full-width line belongs to neither column: its halves would skew
     # both the balance and the row-alignment tests.
-    halves = [_split_at(ln, middle) for ln in body if not _crosses(ln, middle)]
+    halves = [_split_at(ln, gutter) for ln in body if not _crosses(ln, gutter)]
     left = [a for a, _ in halves if a is not None]
     right = [b for _, b in halves if b is not None]
     fewer, more = sorted((len(left), len(right)))
@@ -510,15 +528,15 @@ def _find_gutter(lines: list[_Line], height: float) -> tuple[float, float] | Non
     return gutter
 
 
-def _crosses(line: _Line, middle: float) -> bool:
-    """A full-width line: a word spans the gutter's middle, or the line runs
-    on across it with less than a gutter's gap. A column line that merely
-    pokes into the gutter strip does not cross it."""
-    left = [w["x1"] for w in line.words if w["x1"] <= middle]
-    right = [w["x0"] for w in line.words if w["x0"] >= middle]
-    if len(left) + len(right) < len(line.words):
-        return True
-    return bool(left and right) and min(right) - max(left) < GUTTER_MIN_WIDTH_PT
+def _crosses(line: _Line, gutter: tuple[float, float]) -> bool:
+    """A full-width line: a word spans the gutter's middle and the text runs
+    on into the right column, but not as a right-column line (no word
+    starts on the right column's edge). A sidebar line that pokes into the
+    gutter, alone or beside a right-column line, does not cross it."""
+    middle = (gutter[0] + gutter[1]) / 2
+    return (any(w["x0"] < middle < w["x1"] for w in line.words)
+            and line.x1 > gutter[1] + OUTDENT_TOLERANCE_PT
+            and not any(abs(w["x0"] - gutter[1]) <= OUTDENT_TOLERANCE_PT for w in line.words))
 
 
 def _flush_region(out: list[_Line], left: list[_Line], right: list[_Line]) -> None:
@@ -531,27 +549,34 @@ def _flush_region(out: list[_Line], left: list[_Line], right: list[_Line]) -> No
     right.clear()
 
 
+def _set_bounds(column: list[_Line]) -> None:
+    """Give each line of a column the column's text edges."""
+    if column:
+        edges = (min(ln.x0 for ln in column), max(ln.x1 for ln in column))
+        for ln in column:
+            ln.bounds = edges
+
+
 def _column_order(lines: list[_Line], gutter: tuple[float, float]) -> list[_Line]:
     """Reading order for a two-column page: between full-width lines (which
     cross the gutter), the left column's lines, then the right column's.
     Each column line carries its column's text edges as `bounds`."""
-    middle = (gutter[0] + gutter[1]) / 2
     out: list[_Line] = []
     left: list[_Line] = []
     right: list[_Line] = []
+    columns: tuple[list[_Line], list[_Line]] = ([], [])
     for ln in lines:
-        if _crosses(ln, middle):
+        if _crosses(ln, gutter):
             _flush_region(out, left, right)
             out.append(ln)
             continue
-        a, b = _split_at(ln, middle)
-        left.extend([a] if a else [])
-        right.extend([b] if b else [])
+        for part, region, column in zip(_split_at(ln, gutter), (left, right), columns):
+            if part is not None:
+                region.append(part)
+                column.append(part)
     _flush_region(out, left, right)
-    for column in ([ln for ln in out if ln.x1 <= middle], [ln for ln in out if ln.x0 >= middle]):
-        edges = (min(ln.x0 for ln in column), max(ln.x1 for ln in column)) if column else None
-        for ln in column:
-            ln.bounds = edges
+    for column in columns:
+        _set_bounds(column)
     return out
 
 
@@ -570,52 +595,100 @@ def _cell_anchors(line: _Line) -> list[float] | None:
     return [line.words[0]["x0"]] + [line.words[i + 1]["x0"] for i in line.tabs]
 
 
-def _continues_row(prev: _Line, line: _Line, anchors: list[float]) -> bool:
-    """`line` carries wrapped cell text of the row above: within paragraph
-    spacing, and nothing in the first cell."""
-    return (not line.block_start
-            and line.top - prev.bottom <= PARAGRAPH_GAP_EM * prev.size
-            and line.x0 > anchors[0] + OUTDENT_TOLERANCE_PT)
+def _cell_of(word: dict, anchors: list[float]) -> int:
+    """Index of the cell whose anchor range contains the word's x0."""
+    return max(i for i, a in enumerate(anchors) if i == 0 or a - OUTDENT_TOLERANCE_PT <= word["x0"])
+
+
+def _near(prev: _Line, line: _Line) -> bool:
+    return not line.block_start and line.top - prev.bottom <= PARAGRAPH_GAP_EM * prev.size
+
+
+def _in_one_cell(line: _Line, anchors: list[float]) -> bool:
+    """`line` is wrapped text of one cell: no column gap of its own, and
+    every word inside that one cell's x-range."""
+    if line.has_tab:
+        return False
+    cell = _cell_of(line.words[0], anchors)  # its words run left to right from here
+    return cell + 1 == len(anchors) or line.x1 <= anchors[cell + 1] - OUTDENT_TOLERANCE_PT
+
+
+def _is_cell_row(line: _Line, anchors: list[float]) -> bool:
+    """`line` is the table's next row with an empty first cell (a
+    vertically merged cell): its own column gaps, and every cell it starts
+    sits on one of the row's later anchors."""
+    if not line.tabs:
+        return False
+    starts = [line.words[0]["x0"]] + [line.words[i + 1]["x0"] for i in line.tabs]
+    return all(any(abs(x - a) <= OUTDENT_TOLERANCE_PT for a in anchors[1:]) for x in starts)
 
 
 def _row_line(lines: list[_Line], anchors: list[float]) -> _Line:
     """One tab-separated line from a row's printed lines: each word goes to
-    the cell whose anchor range contains its x0. Cells are the first line's,
-    so none is empty and none is guessed (a vertically merged cell that
-    printed once on an earlier row is simply absent)."""
+    the cell whose anchor range contains its x0. An empty cell stays empty
+    (a leading empty cell is a leading tab); nothing is guessed into it."""
     cells: list[list[dict]] = [[] for _ in anchors]
     for ln in lines:
         for w in ln.words:
-            # Every word is right of anchors[0]: a row line starts the row,
-            # a continuation starts right of it (`_continues_row`).
-            cells[max(i for i, a in enumerate(anchors) if a - OUTDENT_TOLERANCE_PT <= w["x0"])].append(w)
-    words = [w for cell in cells for w in cell]
+            cells[_cell_of(w, anchors)].append(w)
+    words: list[dict] = []
     seps: list[str] = []
+    tabs: list[int] = []
+    empty = lead = 0
     for cell in cells:
-        seps.extend([" "] * (len(cell) - 1) + ["\t"])
-    tabs = [i for i, sep in enumerate(seps[:-1]) if sep == "\t"]
-    row = _make_line(words, seps[:-1], tabs)
+        if not cell:
+            empty += 1
+            continue
+        if words:
+            seps.append("\t" * (empty + 1))
+            tabs.append(len(words) - 1)
+        else:
+            lead = empty
+        empty = 0
+        seps.extend([" "] * (len(cell) - 1))
+        words.extend(cell)
+    row = _make_line(words, seps, tabs)
+    row.runs[0].text = "\t" * lead + row.runs[0].text
     row.is_row = True
+    row.block_start = lines[0].block_start
     return row
+
+
+def _emit_row(out: list[_Line], row: list[_Line], anchors: list[float]) -> None:
+    """A row printed on one line from its first cell is kept as printed;
+    anything else is reassembled."""
+    if len(row) == 1 and row[0].x0 <= anchors[0] + OUTDENT_TOLERANCE_PT:
+        out.append(row[0])
+    else:
+        out.append(_row_line(row, anchors))
 
 
 def _join_table_rows(lines: list[_Line]) -> list[_Line]:
     """Reassemble table rows whose cells wrapped onto several printed lines
-    into one `cell\\tcell` line per row."""
+    into one `cell\\tcell` line per row. After a line with at least two
+    column gaps, a close line that fits inside one cell continues its row;
+    a close line whose own cells sit on the row's anchors is the next row
+    (first cell empty); anything else ends the table."""
     out: list[_Line] = []
-    index = 0
-    while index < len(lines):
-        anchors = _cell_anchors(lines[index])
-        end = index + 1
-        while anchors and end < len(lines) and _continues_row(lines[end - 1], lines[end], anchors):
-            end += 1
-        if end - index > 1:
-            row = _row_line(lines[index:end], anchors)
-            row.block_start = lines[index].block_start
-            out.append(row)
-        else:
-            out.append(lines[index])
-        index = end
+    row: list[_Line] = []
+    anchors: list[float] | None = None
+    for line in lines:
+        if anchors and _near(row[-1], line):
+            if _in_one_cell(line, anchors):
+                row.append(line)
+                continue
+            if _is_cell_row(line, anchors):
+                _emit_row(out, row, anchors)
+                row = [line]
+                continue
+        if anchors:
+            _emit_row(out, row, anchors)
+        anchors = _cell_anchors(line)
+        row = [line]
+        if anchors is None:
+            out.append(line)
+    if anchors:
+        _emit_row(out, row, anchors)
     return out
 
 
@@ -672,12 +745,24 @@ def _next_word_would_not_fit(prev: _Line, line: _Line, right: float) -> bool:
     return prev.x1 + WRAP_SPACE_EM * prev.size + (first["x1"] - first["x0"]) > right
 
 
+def _ragged_wrap(prev: _Line, line: _Line, right: float) -> bool:
+    """`line`'s first word would not have fitted on `prev`, and `prev` did
+    not end a sentence or entry (or ends like a connector)."""
+    text = prev.text.rstrip()
+    ended = SENTENCE_END_RE.search(text) is not None and CONNECTOR_END_RE.search(text) is None
+    return not ended and _next_word_would_not_fit(prev, line, right)
+
+
 def _hangs_from_label(prev: _Line, line: _Line, left: float, right: float) -> bool:
-    """`prev`'s tab follows a leading label (a number or a date ending in
-    the first LEADING_LABEL_MAX_FRAC of the width) and `line` starts under
-    the text after it: a hanging indent. (`prev` has one tab: a line with
-    two is a table row, whose wraps `_join_table_rows` already took.)"""
+    """`prev`'s tab follows a leading label (LEADING_LABEL_RE: a list number,
+    a year, a date or a date range, ending in the first
+    LEADING_LABEL_MAX_FRAC of the width) and `line` starts under the text
+    after it: a hanging indent. (`prev` has one tab: a line with two is a
+    table row, whose wraps `_join_table_rows` already took.)"""
     tab = prev.tabs[-1]
+    label = " ".join(w["text"] for w in prev.words[:tab + 1])
+    if LEADING_LABEL_RE.match(label) is None:
+        return False
     if prev.words[tab]["x1"] > left + LEADING_LABEL_MAX_FRAC * (right - left):
         return False
     return abs(line.x0 - prev.words[tab + 1]["x0"]) <= OUTDENT_TOLERANCE_PT
@@ -735,7 +820,7 @@ def _continues(prev: _Line, line: _Line, left: float, right: float,
         return False
     if prev.all_bold != line.all_bold or abs(prev.size - line.size) > MERGE_SIZE_TOLERANCE_PT:
         return False
-    return (_is_full_line(prev, left, right) or _next_word_would_not_fit(prev, line, right)
+    return (_is_full_line(prev, left, right) or _ragged_wrap(prev, line, right)
             or _dash_wraps(prev, line))
 
 

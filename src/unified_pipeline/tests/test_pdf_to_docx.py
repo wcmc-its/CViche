@@ -427,7 +427,8 @@ def _run_cli(*args):
     ("", "[4] Second entry", True), ("", "\\267 Second entry", True),
     ("- ", "- Second entry", True), ("* ", "* Second entry", True),
     ("\\261 ", "\\261 Second entry", True),
-    ("", "1.5 mg is the dose", False), ("", "-5 units of it", False),
+    ("", "12.Smith and colleagues", True), ("", "3\\)Second entry", True),
+    ("", "1.5 mg is the dose", False), ("", "12.smith lower case", False), ("", "-5 units of it", False),
     ("", "2019 was the year", False), ("", "1234. long number", False),
     ("", "- present", False), ("", "* present", False),
     ("", "\\261 present", False), ("", "\\320 present", False), ("- ", "* Second entry", False)])
@@ -769,17 +770,29 @@ def test_rows_offset_under_a_line_height_still_split_into_columns(tmp_path):
 
 
 def test_full_width_line_splits_the_columns_into_regions(tmp_path):
-    """Between full-width lines each region reads left column, then right.
-    The heading's word gap sits on the gutter's middle: it still crosses."""
-    middle = _gutter_middle(tmp_path)
-    head_a, head_b = "Full width heading", "that crosses"
-    heading = [(False, 10, middle - 5 - _width(tmp_path, head_a), 520, head_a),
-               (False, 10, middle + 5, 520, head_b)]
+    """Between full-width lines each region reads left column, then right."""
+    heading = (False, 10, _gutter_middle(tmp_path) - 60, 520, "Fullwidthheadingthatcrossesthegutter")
     below = [(False, 10, 72, 500 - 14 * i, f"Low {i}") for i in range(6)] + \
             [(False, 10, 260, 495 - 14 * i, f"Deep {i}") for i in range(6)]
-    _, doc = _convert(tmp_path, [_two_column_page(right_offset=5) + heading + below])
-    assert _order(doc, "Side", "Main", "Full", "Low", "Deep") == (
+    _, doc = _convert(tmp_path, [_two_column_page(right_offset=5) + [heading] + below])
+    words = [w[:4] for w in " ".join(_texts(doc)).split()]
+    assert [w for w in words if w in ("Side", "Main", "Full", "Low", "Deep")] == (
         ["Side"] * 8 + ["Main"] * 8 + ["Full"] + ["Low"] * 6 + ["Deep"] * 6)
+
+
+@pytest.mark.parametrize("clustered", [False, True])
+def test_long_sidebar_line_ending_near_the_main_column_is_a_sidebar_line(tmp_path, clustered):
+    """A sidebar at x=50 with one long line ending 8pt short of the main
+    column at x=240 (on its own row, or on a main line's row): not full
+    width, so the main column still reads as one paragraph after the
+    whole sidebar."""
+    long_side = "Sidebar line that runs on"
+    side = [(False, 10, 50, 650 - 14 * i, f"Side {i}") for i in range(8)]
+    side[2] = (False, 10, 232 - _width(tmp_path, long_side), side[2][3] - (3 if clustered else 0), long_side)
+    main = [(False, 10, 240, 645 - 14 * i, _MAIN.format(i)) for i in range(8)]
+    _, doc = _convert(tmp_path, [side + main])
+    assert _order(doc, "Side", "Sidebar", "Main")[-8:] == ["Main"] * 8
+    assert " ".join(_MAIN.format(i) for i in range(8)) in _texts(doc)
 
 
 def test_gutter_tolerates_exactly_a_tenth_of_the_lines_crossing(tmp_path):
@@ -824,6 +837,15 @@ def test_edge_band_lines_do_not_count_against_the_gutter(tmp_path):
     header = [(False, 10, 72, 760 - 12 * i, "Header line " * 20) for i in range(3)]
     _, doc = _convert(tmp_path, [header + _two_column_page(right_offset=5)])
     assert _order(doc, "Side", "Main") == ["Side"] * 8 + ["Main"] * 8
+
+
+def test_indented_main_column_line_is_not_full_width(tmp_path):
+    """A main-column line indented 20pt starts off the column's edge but
+    spans nothing across the gutter: still a main-column line."""
+    page = _two_column_page(right_offset=5)
+    page[11] = (False, 10, 280, page[11][3], "Indented main line")
+    _, doc = _convert(tmp_path, [page])
+    assert _order(doc, "Side", "Main", "Indented") == ["Side"] * 8 + ["Main"] * 3 + ["Indented"] + ["Main"] * 4
 
 
 def test_narrow_gap_is_not_a_gutter(tmp_path):
@@ -994,6 +1016,16 @@ def test_wrap_after_a_label_must_align_with_the_text_column(tmp_path, x, merges)
     assert (len(doc.paragraphs) == 1) is merges
 
 
+@pytest.mark.parametrize("label, merges", [
+    ("12.", True), ("3\\)", True), ("Sept. 2011 - Dec 2012", True), ("05/2019 - present", True),
+    ("2004 -", True), ("Note", False), ("Boston", False), ("1234", False)])
+def test_only_a_number_or_date_label_is_a_leading_label(tmp_path, label, merges):
+    page = [(False, 10, 72, 700, label), (False, 10, 200, 700, _LONG),
+            (False, 10, 200, 688, "tail words")]
+    _, doc = _convert(tmp_path, [page])
+    assert (len(doc.paragraphs) == 1) is merges
+
+
 def test_label_past_a_fifth_of_the_width_is_not_a_leading_label(tmp_path):
     """The label ends past 20% of the text width: a label/value line, whose
     next line is its own entry even when aligned under the value."""
@@ -1016,6 +1048,25 @@ def test_ragged_right_wrap_merges_when_the_next_word_would_not_fit(tmp_path):
     page = [(False, 10, 72, 400, _LONG), (False, 10, x, 700, short), (False, 10, x, 688, word)]
     _, doc = _convert(tmp_path, [page])
     assert f"{short} {word}" in _texts(doc)
+
+
+_SURNAME = "Abcdefghijklmnopqrstuvwxy"  # 25 letters
+
+
+@pytest.mark.parametrize("ending, merges", [
+    (".", False), (";", False), ("\\)", False), (",", True), (" and", True), (":", True)])
+def test_entry_ending_a_sentence_does_not_absorb_a_long_surname(tmp_path, ending, merges):
+    """An entry ending ~40pt short of the margin, then an entry starting
+    with a 25-letter surname that would not have fitted there: a finished
+    entry (. ; or )) is not wrapped; a comma, a connector or a colon is."""
+    right = 72 + _width(tmp_path, _LONG)
+    entry = "Smith J, Jones K. A short title" + ending
+    x = right - 40 - _width(tmp_path, entry)
+    assert _width(tmp_path, _SURNAME) > 40
+    page = [(False, 10, 72, 400, _LONG), (False, 10, x, 700, entry),
+            (False, 10, x, 688, _SURNAME + " L, Other M.")]
+    _, doc = _convert(tmp_path, [page])
+    assert (entry.replace("\\)", ")") in _texts(doc)) is not merges
 
 
 def test_ragged_right_line_whose_next_word_fits_is_not_a_wrap(tmp_path):
@@ -1045,11 +1096,72 @@ def _table_row(y, cells):
 
 def test_wrapped_table_cells_reassemble_into_one_row(tmp_path):
     page = (_table_row(700, [(72, "2019"), (150, "Title of"), (400, "Boston")])
-            + _table_row(688, [(150, "the award"), (400, "MA")])
-            + _table_row(676, [(400, "USA")])
+            + _table_row(688, [(150, "the award")])
+            + _table_row(676, [(400, "MA USA")])
             + _table_row(664, [(72, "2020"), (150, "Next title"), (400, "Paris")]) + [_FILL])
     _, doc = _convert(tmp_path, [page])
     assert _texts(doc)[:2] == ["2019\tTitle of the award\tBoston MA USA", "2020\tNext title\tParis"]
+
+
+def test_row_with_an_empty_first_cell_is_its_own_row(tmp_path):
+    """A vertically merged first cell prints once (its own text wrapped:
+    "Inst"): the next row starts in cell 2. It is a row of its own, its
+    first cell left empty, not absorbed into the row above."""
+    page = (_table_row(700, [(72, "Alpha"), (150, "Professor"), (400, "2001-2005")])
+            + _table_row(688, [(72, "Inst")])
+            + _table_row(676, [(150, "Lecturer"), (400, "1998-2001")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["Alpha Inst\tProfessor\t2001-2005", "\tLecturer\t1998-2001"]
+
+
+def test_indented_note_across_cells_is_not_spread_into_them(tmp_path):
+    """A note under a row, indented but running across several cells with
+    no column gap, is its own paragraph."""
+    note = "Note: this appointment was held jointly with the partner institution"
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(90, note)]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle\tBoston", note]
+
+
+def test_cell_continuation_must_end_before_the_next_cell(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(360, "Internationalization")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle\tBoston", "Internationalization"]
+
+
+def test_line_with_a_gap_inside_one_cell_ends_the_row(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(400, "MA"), (440, "USA")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle\tBoston", "MA\tUSA"]
+
+
+def test_gapless_line_from_a_later_anchor_across_cells_is_not_a_row(tmp_path):
+    line = "A remark that starts under the title and runs on across the city column"
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(150, line)]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle\tBoston", line]
+
+
+def test_line_with_its_own_first_cell_is_not_a_merged_cell_row(tmp_path):
+    """One column gap, from the first anchor to the third: not a row of the
+    table above (that needs an empty first cell), so what follows it is not
+    a cell continuation."""
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(72, "2020"), (400, "Paris")])
+            + _table_row(676, [(400, "France")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:3] == ["2019\tTitle\tBoston", "2020\tParis", "France"]
+
+
+def test_empty_middle_cell_keeps_its_tab(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (280, "Dept"), (380, "Boston")])
+            + _table_row(688, [(150, "Lecturer"), (380, "Paris")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle\tDept\tBoston", "\tLecturer\t\tParis"]
 
 
 def test_row_needs_two_column_gaps_and_close_spacing(tmp_path):
