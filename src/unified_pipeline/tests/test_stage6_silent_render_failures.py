@@ -1081,7 +1081,8 @@ def test_reclassify_failure_warns_counts_and_returns_none_when_verbose(
         assert gen._reclassify_entry_segments(_RECLASSIFY_TEXT, 'P') is None
     warnings = _warnings(caplog, S6_LOGGER)
     assert len(warnings) == 1
-    assert 'LLM reclassification failed' in warnings[0].getMessage()
+    assert warnings[0].getMessage() == (
+        'LLM reclassification failed; entry stays in the appendix unsplit')
     assert warnings[0].exc_info and warnings[0].exc_info[0] is RuntimeError
     assert gen.stats[RECLASSIFY_FAILURE_STAT] == 1
 
@@ -1097,7 +1098,8 @@ def test_reclassify_failure_warns_and_counts_when_not_verbose(
         assert gen._reclassify_entry_segments(_RECLASSIFY_TEXT, 'P') is None
     warnings = _warnings(caplog, S6_LOGGER)
     assert len(warnings) == 1
-    assert 'LLM reclassification failed' in warnings[0].getMessage()
+    assert warnings[0].getMessage() == (
+        'LLM reclassification failed; entry stays in the appendix unsplit')
     assert warnings[0].exc_info and warnings[0].exc_info[0] is RuntimeError
     assert gen.stats[RECLASSIFY_FAILURE_STAT] == 1
 
@@ -1139,13 +1141,13 @@ def test_reclassify_failure_reaches_the_render_warnings_sidecar(
              if w.get('check') == RECLASSIFY_FAILURE_STAT]
     assert len(found) == 1
     assert found[0]['severity'] == 'WARN'
-    assert found[0]['evidence'] == [f'{RECLASSIFY_FAILURE_STAT}=1']
+    # Literals, not the constant: lint_stage6_warnings copies evidence and
+    # message verbatim into the doctor report and onto the Teams card.
+    assert found[0]['evidence'] == ['segment_reclassification_failures=1']
     assert found[0]['section'] == 'appendix'
-    # doctor's lint_stage6_warnings copies 'message' verbatim onto the Teams
-    # card, so pin the count and the tail.
-    assert found[0]['message'].startswith(
-        '1 appendix entry reclassification(s) failed')
-    assert 'stayed in the appendix whole' in found[0]['message']
+    assert found[0]['message'] == (
+        '1 appendix entry reclassification(s) failed; those entries stayed in '
+        'the appendix whole instead of being split and routed to their sections')
 
 
 def test_reconsider_sends_entry_to_appendix_when_reclassify_fails(monkeypatch):
