@@ -168,3 +168,26 @@ def test_unregister_resets_the_context_var(monkeypatch):
 
     assert capture.written == []
     assert fake_real.written == ["after-unregister\n"]
+
+
+def test_emit_progress_failure_is_logged_not_swallowed(caplog):
+    """A programming error in update_progress must be visible at debug level (#307)."""
+    import asyncio
+    import logging
+
+    class _BrokenOrchestrator:
+        async def update_progress(self, *args):
+            raise RuntimeError("bad progress call")
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        capture = orch_mod.StreamingStdoutCapture(_BrokenOrchestrator(), 3, loop)
+        with caplog.at_level(logging.DEBUG, logger=orch_mod.logger.name):
+            capture._emit_progress_sync(1, 2, "Processing 1 of 2")
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()
+    assert "Progress emit skipped for step 3: bad progress call" in caplog.text
