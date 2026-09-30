@@ -25,7 +25,6 @@ export interface UploadResult {
 // per-upload role attestation. Track changes is not an option any more: the
 // backend Form default (ON) applies.
 export interface UploadOptions {
-  includeClassificationComments: boolean
   stripWcmInstructions: boolean
   submissionType: 'own_cv' | 'authorized_admin'
 }
@@ -36,7 +35,6 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
   formData.append('submission_type', options.submissionType)
   // FastAPI bool Form parsing accepts 'true'/'false' (and 1/0). Send explicit
   // strings so an unchecked box is transmitted as false rather than omitted.
-  formData.append('include_classification_comments', String(options.includeClassificationComments))
   formData.append('strip_wcm_instructions', String(options.stripWcmInstructions))
   return api.post<UploadResult>(uploadRoutes.upload(), formData)
 }
