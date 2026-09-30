@@ -109,7 +109,6 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     user?.default_submission_type === 'authorized_admin' ? 'authorized_admin' : 'own_cv',
   )
   const [attested, setAttested] = useState(false)
-  const [showTerms, setShowTerms] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const removeFile = () => {
@@ -413,36 +412,18 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
             {/* 4 - Data handling */}
             <h2 className={`${H2} mt-2`}>4 &middot; Data handling</h2>
             <div className="flex flex-col gap-2 rounded-[10px] border border-sand-200 bg-sand-50 px-4 py-3.5 text-[13px] text-gray-700">
-              <div className="flex gap-2.5"><span aria-hidden="true" className="text-[#8A7A58]">&bull;</span><span>CV text is sent to Anthropic&apos;s Claude on Amazon Bedrock. It is not shared with model providers or used to train models.</span></div>
-              <div className="flex gap-2.5"><span aria-hidden="true" className="text-[#8A7A58]">&bull;</span><span>Dates of birth and Social Security numbers are removed before sending. Some formats can be missed.</span></div>
-              <div className="flex gap-2.5"><span aria-hidden="true" className="text-[#8A7A58]">&bull;</span><span>The original, intermediate outputs, and final output are retained.{' '}
-                <a href="/help#data-retention" target="_blank" rel="noopener" className="text-primary-600 hover:underline">Data retention policy</a>
-              </span></div>
-              <button
-                type="button"
-                onClick={() => setShowTerms((v) => !v)}
-                aria-expanded={showTerms}
-                aria-controls="full-terms"
-                className="self-start rounded text-[13px] text-primary-700 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
-              >
-                {showTerms ? 'Hide full terms' : 'Read full terms'}
-              </button>
-              {showTerms && (
-                <div id="full-terms" className="flex flex-col gap-1.5 border-t border-sand-200 pt-2.5 text-gray-500">
-                  <p>
-                    The text of the CV is sent to a third-party AI service: Anthropic&apos;s Claude, running on Amazon
-                    Bedrock. AWS states that Bedrock does not share CV text or AI output with Anthropic or any other
-                    model provider, and does not use it to train models. Before the text is sent, CViche removes the
-                    dates of birth and Social Security numbers it recognizes. It can miss some formats, so you should
-                    not include anything you would not want these systems to see.
-                  </p>
-                  <p>
-                    The original CV, intermediate outputs, and final output are retained to improve CViche and test
-                    proposed changes. See the{' '}
-                    <a href="/help#data-retention" target="_blank" rel="noopener" className="text-primary-600 hover:underline">data retention policy</a>.
-                  </p>
-                </div>
-              )}
+              <p>
+                The text of the CV is sent to a third-party AI service: Anthropic&apos;s Claude, running on Amazon
+                Bedrock. AWS states that Bedrock does not share CV text or AI output with Anthropic or any other
+                model provider, and does not use it to train models. Before the text is sent, CViche removes the
+                dates of birth and Social Security numbers it recognizes. It can miss some formats, so you should
+                not include anything you would not want these systems to see.
+              </p>
+              <p>
+                The original CV, intermediate outputs, and final output are retained to improve CViche and test
+                proposed changes. See the{' '}
+                <a href="/help#data-retention" target="_blank" rel="noopener" className="text-primary-600 hover:underline">data retention policy</a>.
+              </p>
             </div>
 
             <CheckBox checked={attested} onChange={setAttested}>
