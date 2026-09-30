@@ -144,6 +144,21 @@ def test_table_lost_lint_is_one_warn_per_run_with_worst_table_evidence():
     assert findings[0]["evidence"] == large[:5]
 
 
+def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
+    """The wire (#539): run_doctor hands stage 4's cv_owner to the lint, so a
+    bare owner-name line is not reported while a real header still is."""
+    root = _build_clean_run(tmp_path)
+    source_path = root / "uploads" / f"{_UID}_cv.docx"
+    source = Document(str(source_path))
+    source.add_paragraph("MIRIAM SHAPIRO").runs[0].bold = True
+    source.add_paragraph("MENTORING").runs[0].bold = True
+    source.save(str(source_path))
+
+    payload = run_doctor(root, _UID)
+    missed = [f["evidence"] for f in payload["findings"] if f["lint"] == "missed_headers"]
+    assert missed == [["MENTORING"]]
+
+
 def test_run_doctor_reports_a_lost_source_table(tmp_path):
     """The wire: run_doctor reads the source docx once, and both the flat
     lines (coverage) and the block-tagged lines (table_lost) come from it."""
@@ -265,6 +280,71 @@ def test_is_single_column_is_the_logical_cell_count_not_the_grid():
         "what python-docx itself reports for the merged table"
     assert not _is_single_column(title_over_data)
     assert not _is_single_column(data)
+
+
+def test_iter_header_candidates_skips_a_leading_role_marker_name(tmp_path):
+    """#539: 'PI. <Name>' / 'Dr. <Name>' is the owner's name line (marker in
+    FRONT, which the suffix-only credential filter misses); a header that
+    merely starts with a marker, or an ALL-CAPS line, is still a candidate."""
+    doc = Document()
+    doc.add_paragraph("PI. Jane Q. Sample", style="Heading 1")
+    doc.add_paragraph("Dr. Alex Example", style="Heading 1")
+    doc.add_paragraph("Prof. Sam Oneil-Test", style="Heading 1")
+    doc.add_paragraph("PI. RESPONSIBILITIES", style="Heading 1")   # header
+    doc.add_paragraph("Dr. PUBLICATIONS", style="Heading 1")       # header
+    doc.add_paragraph("Ms. Research Support", style="Heading 1")   # name-shaped: exempt
+    doc.add_paragraph("Pi. Notes", style="Heading 1")              # marker case differs
+    doc.add_paragraph("Dr. Jane Sample GRANTS AND AWARDS", style="Heading 1")  # header text follows
+    doc.add_paragraph("Ms. Research Support GRANTS", style="Heading 1")        # header text follows
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert iter_header_candidates(str(path)) == [
+        "PI. RESPONSIBILITIES", "Dr. PUBLICATIONS", "Pi. Notes",
+        "Dr. Jane Sample GRANTS AND AWARDS", "Ms. Research Support GRANTS"]
+
+
+_MH_STAGE4 = {"cv_owner": {"first_name": "Jane", "middle_name": "Q", "last_name": "Sample"}}
+
+
+def test_missed_headers_skips_the_owner_name_only_when_stage4_names_it():
+    stage2 = {"entries": []}
+    bare = ["JANE Q. SAMPLE", "Jane Sample", "SAMPLE JANE"]
+    # Baseline (no stage 4, or an owner with no last name): still reported.
+    assert len(lint_missed_headers(bare, _STAGE1A, stage2)) == 3
+    no_last = {"cv_owner": {"first_name": "Jane", "last_name": ""}}
+    assert len(lint_missed_headers(bare, _STAGE1A, stage2, no_last)) == 3
+    assert lint_missed_headers(bare, _STAGE1A, stage2, _MH_STAGE4) == []
+
+
+def test_missed_headers_owner_name_words_come_from_every_name_field():
+    """Each name field feeds the allowed words; a lone initial is allowed
+    whatever letter it is (not only the middle initial)."""
+    stage2 = {"entries": []}
+
+    def missed(cand, owner):
+        return lint_missed_headers([cand], _STAGE1A, stage2, {"cv_owner": owner})
+
+    base = {"first_name": "Jane", "last_name": "Sample"}
+    # Non-middle initial.
+    assert missed("JANE Z. SAMPLE", {**base, "middle_name": "Q"}) == []
+    # Multi-letter middle name, no full_name.
+    assert missed("JANE QUINCY SAMPLE", {**base, "middle_name": "Quincy"}) == []
+    # Extra word only in full_name, no middle_name.
+    assert missed("JANE QUINCY SAMPLE",
+                  {**base, "full_name": "Jane Quincy Sample"}) == []
+    # Same line with neither field: reported.
+    assert len(missed("JANE QUINCY SAMPLE", base)) == 1
+
+
+def test_missed_headers_owner_exemption_is_subset_by_construction():
+    """Only the owner's name is exempt: a header that shares a word with it,
+    carries an extra word, or has only the first or last name stays reported."""
+    stage2 = {"entries": []}
+    kept = ["SAMPLE PUBLICATIONS", "JANE SAMPLE PUBLICATIONS", "JANE",
+            "SAMPLE", "JANE Q. SMITH"]
+    found = lint_missed_headers(kept, _STAGE1A, stage2, _MH_STAGE4)
+    assert [f["evidence"][0] for f in found] == kept
 
 
 def test_missed_headers_fires_on_demoted_header():

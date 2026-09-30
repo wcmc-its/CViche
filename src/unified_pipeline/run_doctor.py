@@ -464,6 +464,17 @@ _NAME_CREDENTIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: A person line with the role marker in FRONT ('PI. Jane Q. Sample', 'Dr.
+#: John Example'; #539). Both halves must hold, so a header that merely
+#: starts with a marker ('PI. RESPONSIBILITIES') is not swallowed: an exact
+#: marker token, then a run of Title-case name words / initials that ends on a
+#: real (multi-letter, lower-case-bearing) name word. ALL-CAPS text is never
+#: matched -- a caps line after a marker reads as a header, not a name.
+_LEADING_ROLE_NAME_RE = re.compile(
+    r"^(?:PI|Dr|Prof|Mr|Mrs|Ms)\.\s+(?:[A-Z]\.?\s+){0,2}"
+    r"[A-Z][a-z][\w'’-]*(?:\s+(?:[A-Z]\.?|[A-Z][a-z][\w'’-]*)){0,3}$"
+)
+
 
 def _logical_cells(row) -> list:
     """The row's distinct cells. python-docx's ``row.cells`` repeats one
@@ -525,7 +536,7 @@ def iter_header_candidates(docx_path: str) -> list[str]:
         # CPE', 'CURRICULUM VITAE - JEFFREY R OLSEN, MD'. Anchored on the
         # comma-suffix position so real headers that merely contain a comma
         # ('ADMINISTRATIVE APPOINTMENTS, SCHOOL OF MEDICINE, CU:') survive.
-        if _NAME_CREDENTIAL_RE.search(text):
+        if _NAME_CREDENTIAL_RE.search(text) or _LEADING_ROLE_NAME_RE.match(text):
             return
         style = getattr(para.style, "name", "") or ""
         if style.startswith("Heading"):
@@ -840,7 +851,8 @@ _VIEW_LABELS = {
 #: row shape that could express both would be a second dispatch language.
 LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("segmentation", lint_segmentation, ("source_lines", "stage_1a", "stage_2")),
-    LintSpec("missed_headers", lint_missed_headers, ("candidates", "stage_1a", "stage_2")),
+    LintSpec("missed_headers", lint_missed_headers, ("candidates", "stage_1a", "stage_2"),
+             optional=("stage_4",)),
     LintSpec("bucket_status", lint_bucket_status, ("stage_4", "blocks")),
     LintSpec("under_extraction", lint_under_extraction, ("stage_4",)),
     LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks"),
