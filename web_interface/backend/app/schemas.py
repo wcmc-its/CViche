@@ -123,6 +123,26 @@ class PaginatedRuns(BaseModel):
     limit: int
 
 
+class CapacityResponse(BaseModel):
+    """GET /api/capacity: advisory run-admission snapshot for this pod (#177)."""
+    available: bool
+    active: int
+    limit: int
+
+
+class RunActionResponse(BaseModel):
+    """Body of /start, /cancel and /retry: a human-readable message plus the
+    run's status after the action. Field order is the wire order (#801)."""
+    message: str
+    status: str
+
+
+class RestartRunResponse(BaseModel):
+    """Body of /restart: the id of the newly created run (#801)."""
+    run_id: str
+    message: str
+
+
 # ============================================================
 # Step Detail Schemas
 # ============================================================

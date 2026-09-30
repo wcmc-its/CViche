@@ -5,14 +5,17 @@ import logging
 from collections.abc import Callable
 from datetime import datetime
 import redis
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, selectinload
 from pathlib import Path
 
 from app.database import get_db
 from app.models import Run, RunState, Step, User
-from app.schemas import RunStatus, RunSummary, StepSummary, PaginatedRuns
+from app.schemas import (
+    RunStatus, RunSummary, StepSummary, PaginatedRuns,
+    CapacityResponse, RunActionResponse, RestartRunResponse,
+)
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency, run_queue
@@ -32,6 +35,21 @@ router = APIRouter()
 
 # Run statuses /start may move to "running" (the conditional UPDATE's predicate).
 STARTABLE_STATUSES = ("created", "paused")
+
+# Largest page /runs serves. The run-history UI asks for exactly this many
+# (RunHistory.tsx PAGE_SIZE), so lowering it breaks that page (#801).
+MAX_RUNS_PAGE_SIZE = 100
+
+# web_interface/outputs: where the orchestrator writes each run's stage
+# artifacts (orchestrator.py's web_output_dir). Module-level so tests can
+# point get_data_quality at a tmp dir instead of the real outputs tree.
+_OUTPUTS_ROOT = Path(__file__).parent.parent.parent.parent / "outputs"
+
+# What reading one stage artifact can legitimately raise: an unreadable or
+# vanished file, non-UTF-8 bytes, or truncated/invalid JSON. get_data_quality
+# records these as a per-file warning and carries on; anything else (a shape
+# the code doesn't expect, a TypeError) is a bug and propagates (#801).
+_ARTIFACT_READ_ERRORS = (OSError, UnicodeDecodeError, json.JSONDecodeError)
 
 
 def _run_duration_seconds(run) -> int | None:
@@ -148,7 +166,7 @@ def _dispatch_queue(
     return JSONResponse(status_code=202, content={"message": f"Run {run.id} queued", "status": "queued"})
 
 
-@router.get("/capacity")
+@router.get("/capacity", response_model=CapacityResponse)
 async def get_capacity(current_user: User = Depends(get_current_user)):
     """Read-only snapshot of this pod's run-admission capacity.
 
@@ -171,8 +189,8 @@ async def get_capacity(current_user: User = Depends(get_current_user)):
 
 @router.get("/runs", response_model=PaginatedRuns)
 async def list_runs(
-    offset: int = 0,
-    limit: int = 20,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=MAX_RUNS_PAGE_SIZE),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -252,7 +270,7 @@ async def get_run_status(
     )
 
 
-@router.post("/run/{run_id}/start")
+@router.post("/run/{run_id}/start", response_model=RunActionResponse)
 def start_run(
     run_id: str,
     background_tasks: BackgroundTasks,
@@ -348,7 +366,7 @@ def start_run(
     return {"message": f"Pipeline started for run {run_id}", "status": "running"}
 
 
-@router.post("/run/{run_id}/cancel")
+@router.post("/run/{run_id}/cancel", response_model=RunActionResponse)
 async def cancel_run(
     run_id: str,
     db: Session = Depends(get_db),
@@ -367,7 +385,7 @@ async def cancel_run(
     return {"message": f"Run {run_id} cancelled", "status": "cancelled"}
 
 
-@router.post("/run/{run_id}/restart")
+@router.post("/run/{run_id}/restart", response_model=RestartRunResponse)
 async def restart_run(
     run_id: str,
     db: Session = Depends(get_db),
@@ -540,7 +558,7 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     orchestrator_cancel(run.id)
 
 
-@router.post("/run/{run_id}/retry/{step_number}")
+@router.post("/run/{run_id}/retry/{step_number}", response_model=RunActionResponse)
 def retry_step(
     run_id: str,
     step_number: int,
@@ -690,7 +708,7 @@ def retry_step(
 @router.get("/run/{run_id}/quality")
 async def get_data_quality(
     run_id: str,
-    step: int = 3,
+    step: int = Query(3, ge=1, le=len(STEP_REGISTRY)),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -698,7 +716,7 @@ async def get_data_quality(
     Get comprehensive data quality report for a run.
 
     Args:
-        step: Pipeline step number (3 for Stage 3 parsing, 4 for Stage 4 template generation)
+        step: STEP_REGISTRY number, 1..len(STEP_REGISTRY) (contiguous, see validate_registry); else 422
 
     Returns all extraction data including:
     - Raw extracted entries with confidence scores
@@ -710,7 +728,7 @@ async def get_data_quality(
     run = check_run_access(run_id, current_user, db)
 
     # Get output directory for this run
-    outputs_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
+    outputs_dir = _OUTPUTS_ROOT / run_id
 
     if not outputs_dir.exists():
         raise not_found("Run output not available")
@@ -977,7 +995,7 @@ async def get_data_quality(
                             }
                             section_ids_by_type[entity_type].append(section_info)
 
-                except Exception as e:
+                except _ARTIFACT_READ_ERRORS as e:
                     quality_report["warnings"].append({
                         "type": "enriched_read_error",
                         "file": enriched_file.name,
@@ -1009,7 +1027,7 @@ async def get_data_quality(
                                     entry['confidence'] = 1.0  # Pre-structured entries
                                 parsed_entries_by_type[entity_type].append(entry)
 
-                        except Exception as e:
+                        except _ARTIFACT_READ_ERRORS as e:
                             quality_report["warnings"].append({
                                 "type": "parsed_read_error",
                                 "file": parsed_file.name,
@@ -1030,7 +1048,7 @@ async def get_data_quality(
                 for entity_type, count in records_processed.items():
                     total_by_type[entity_type] = total_by_type.get(entity_type, 0) + count
 
-            except Exception as e:
+            except _ARTIFACT_READ_ERRORS as e:
                 quality_report["warnings"].append({
                     "type": "metadata_read_error",
                     "file": metadata_file.name,
@@ -1100,8 +1118,8 @@ async def get_data_quality(
                     quality_report["metrics"]["personal_data_inserted"] = 1
                 break  # Only need to check once
 
-            except Exception:
-                pass
+            except _ARTIFACT_READ_ERRORS as e:  # the loop above already warned
+                logger.warning("quality re-read %s failed (run=%s): %s", metadata_file.name, run_id, e)
 
         # Track unpopulated entries with reasons
         quality_report["unpopulated_data"] = {
@@ -1342,7 +1360,7 @@ async def get_data_quality(
                             "source_file": json_file.name,
                             "included": confidence >= 0.5  # Threshold for inclusion
                         })
-            except Exception as e:
+            except _ARTIFACT_READ_ERRORS as e:
                 quality_report["warnings"].append({
                     "section": section_type,
                     "type": "parse_error",
@@ -1391,7 +1409,7 @@ async def get_data_quality(
 
                     quality_report["metrics"][f"{section_name}_coverage"] = round(avg_conf * 100, 1)
 
-            except Exception as e:
+            except _ARTIFACT_READ_ERRORS as e:
                 quality_report["warnings"].append({
                     "section": section_name if 'section_name' in locals() else section_file.name,
                     "type": "section_read_error",
@@ -1423,7 +1441,7 @@ async def get_data_quality(
                     "count": len(misclassified),
                     "details": misclassified[:10]  # First 10
                 })
-        except Exception as e:
+        except _ARTIFACT_READ_ERRORS as e:
             quality_report["warnings"].append({
                 "type": "taxonomy_read_error",
                 "error": str(e)
