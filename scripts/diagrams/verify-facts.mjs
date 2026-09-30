@@ -86,19 +86,18 @@ export function verifyFacts(items) {
   else if (port.value !== "8000") problems.push(`port: backend runs on ${port.value}, diagrams say 8000`);
   if (!has("8000")) problems.push(`port: "8000" not shown in any diagram`);
 
-  // (4) Prod backend replicas + HPA bounds — prod overlay.
-  const reps = srcMatch("k8s/overlays/prod/backend-patch.yaml", /replicas:\s*(\d+)/, "prod replicas");
-  if (reps.err) problems.push(`replicas: ${reps.err}`);
-  else if (reps.value !== "2") problems.push(`replicas: prod backend is ${reps.value}, diagrams say 2`);
-
-  const hmin = srcMatch("k8s/overlays/prod/backend-hpa.yaml", /minReplicas:\s*(\d+)/, "HPA minReplicas");
-  const hmax = srcMatch("k8s/overlays/prod/backend-hpa.yaml", /maxReplicas:\s*(\d+)/, "HPA maxReplicas");
+  // (4) Prod backend replicas + HPA bounds. The prod overlay sets no `replicas:`
+  //     field; the HPA patch (min/max) drives the pod count. The CPU target is
+  //     inherited from the base HPA, so it is read from there.
+  const HPA_PATCH = "k8s/overlays/prod/hpa-patch.yaml";
+  const hmin = srcMatch(HPA_PATCH, /minReplicas:\s*(\d+)/, "HPA minReplicas");
+  const hmax = srcMatch(HPA_PATCH, /maxReplicas:\s*(\d+)/, "HPA maxReplicas");
   if (hmin.err) problems.push(`hpa: ${hmin.err}`);
-  else if (hmin.value !== "2") problems.push(`hpa: minReplicas is ${hmin.value}, diagrams say 2`);
+  else if (hmin.value !== "2") problems.push(`replicas: prod backend floor (HPA minReplicas) is ${hmin.value}, diagrams say 2`);
   if (hmax.err) problems.push(`hpa: ${hmax.err}`);
   else if (hmax.value !== "4") problems.push(`hpa: maxReplicas is ${hmax.value}, diagrams say 4`);
 
-  const cpu = srcMatch("k8s/overlays/prod/backend-hpa.yaml", /averageUtilization:\s*(\d+)/, "HPA CPU target");
+  const cpu = srcMatch("k8s/base/backend/hpa.yaml", /name:\s*cpu[\s\S]*?averageUtilization:\s*(\d+)/, "HPA CPU target");
   if (cpu.err) problems.push(`hpa: ${cpu.err}`);
   else if (cpu.value !== "70") problems.push(`hpa: CPU target is ${cpu.value}, diagrams say 70`);
 
@@ -133,7 +132,8 @@ export function verifyFacts(items) {
     ["2", "src/unified_pipeline/stage_2_entry_extraction.py"],
     ["3a", "src/unified_pipeline/stage_3a_header_taxonomy_mapper.py"],
     ["3b", "src/unified_pipeline/stage_3b_entry_classifier.py"],
-    ["4", "src/unified_pipeline/stage_4_field_extractor.py"],
+    // Stage 4's call_llm site moved to stage4/extraction.py in the stage-4 split.
+    ["4", "src/unified_pipeline/stage4/extraction.py"],
     ["4.5", "src/unified_pipeline/stage_4_5_research_summary.py"],
     ["5", "src/unified_pipeline/stage_5_pubmed_enrichment.py"],
     // 5b's call_llm site moved to stage5b/lookup.py in the #523 split; the

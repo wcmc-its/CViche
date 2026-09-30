@@ -215,6 +215,10 @@ def test_documented_false_positive_class_is_pinned(entry):
     ("", DROP_BLANK),
     ("   ", DROP_BLANK),
     ("• Didactic teaching (lectures, seminars, tutorials,)", DROP_TEMPLATE_INSTRUCTION),
+    ("C. Sample Appointments (include institution, title and dates)", DROP_TEMPLATE_INSTRUCTION),
+    ("1. Sample Leave: N/A", DROP_TEMPLATE_INSTRUCTION),
+    ("NOTE: This section includes talks, panels, etc., for which you were invited",
+     DROP_TEMPLATE_INSTRUCTION),
     ("Curriculum Vitae", DROP_SOURCE_BOILERPLATE),
     ("Updated: January 2024", DROP_SOURCE_BOILERPLATE),
     ("|  |  |", DROP_RENDERS_EMPTY),
@@ -237,6 +241,8 @@ def test_drop_reason_names_the_check_that_fired(text, reason):
     "Reviewed manuscripts for the Journal of Clinical Oncology on an ad hoc basis.",
     "2019 | Assistant Professor | Weill Cornell Medicine",
     "Chair, Admissions Committee",
+    "Sample Publications (list available upon request)",
+    "3. Sample Training (describe your role) - Major advisor to five students",
     "Is your eligibility to work in the U.S. based on an employment visa?: | No",
     "Grant pending | N/A",
     "Your role*\toversight",
@@ -798,3 +804,16 @@ def test_filter_reads_reasoning_from_the_entry_and_counts_each_reason():
     assert _describe_dropped(dropped) == (
         "3 non-content blocks removed (cv-title 1, date-stamp 1, section-header 1)"
     )
+
+
+def test_appendix_intro_is_the_shared_accurate_banner(tmp_path, caplog):
+    # #534: _fill_appendix writes the shared intro line, italic, and the old
+    # "not successfully mapped" claim is gone.
+    entries = [_t_entry("Example Leftover Society Membership, 2015", ["OTHER"], 7)]
+    doc = Document(str(_render(tmp_path, entries, caplog)))
+    paragraphs = doc.paragraphs
+    header = next(i for i, p in enumerate(paragraphs) if p.text == "T. APPENDIX")
+    intro = paragraphs[header + 1]
+    assert intro.text == appendix_module.APPENDIX_INTRO_TEXT
+    assert all(run.italic for run in intro.runs)
+    assert "successfully mapped" not in _output_text(tmp_path / "out.docx")

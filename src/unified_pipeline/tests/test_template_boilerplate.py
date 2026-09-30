@@ -21,6 +21,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.core.template_boilerplate import (  # noqa: E402
+    is_foreign_template_instruction,
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
@@ -351,3 +352,85 @@ def test_entries_without_text_key_do_not_crash():
     kept = layer1(entries)
     # The entry lacking "text" is treated as empty -> kept; header kept too.
     assert len(kept) == 2
+
+
+# --- Another institution's template scaffolding (#530). Every line below is
+# synthetic: it reproduces a SHAPE, and no line is copied from a real CV. ---
+FOREIGN_POSITIVES = [
+    "C. Sample Appointments (include institution, title and dates of appointment)",
+    "a) Sample Honors (please list newest first)",
+    "iv. Sample Service (specify committee and role)",
+    "3.  Sample Positions (list titles, dates of employment): N/A",
+    "1.  Courses Taught (include number of hours):",
+    # The template's own line wrapped: the parenthetical never closes.
+    "C. Sample Publications (provide complete citation for each item; number",
+    "1. Sample Leave: N/A",
+    "2. Sample Leave: Not applicable",
+    "b. Local: N/A",
+    "5, Other Activities: N/A",
+    "Sample Support To Be Transferred (if applicable): N/A",
+    "NOTE: This section includes talks and panels for which you were invited",
+    "NOTE: This category should list only items you presented, please",
+    "(include information about outcomes, where applicable): N/A",
+    "(please describe your role)",
+    "newsletters, blogs, podcasts, etc.): N/A",
+    "F. Sample Lectures (provide citation; list in II.B.5\tand posters)",
+    # Interior whitespace runs do not count against the length cap.
+    "C. Sample" + " " * 150 + "Appointments" + " " * 150 + "(include dates)",
+]
+
+FOREIGN_NEGATIVES = [
+    # Real headings and entries the shape must not touch.
+    "Education",
+    "Sample Publications",
+    "b. National:",
+    "2. Review Panels",
+    "Conflicts of interest: None",
+    "Grant Number: N/A",
+    # Rule 1 needs an outline marker: an unmarked label with a parenthetical is
+    # a real entry.
+    "Staff Physician (provide inpatient consultation services)",
+    "Sample Support (provide the following information for each project)",
+    "Sample Books: (Indicate authors or editor.)",
+    # A protected WCM header is never matched, even numbered.
+    "Postdoctoral Training (include residency/fellowships)",
+    "1. Postdoctoral Training (include residency/fellowships)",
+    # "None" is a real answer, not a placeholder (rule 2).
+    "1. Board Certification: None",
+    "1. Sample Conflicts of Interest: none",
+    # Anything after the closing parenthesis is faculty text.
+    "3. Sample Training (describe your role; provide information) - Major advisor to five students",
+    "Sample lecture (include slides) at Example University",
+    # "list" as a noun, not a directive.
+    "Sample Publications (list available upon request)",
+    "Sample Papers (list of selected papers below)",
+    "C. Sample Publications (list available upon request)",
+    "C. Sample Papers (list of selected papers below)",
+    "(list available upon request)",
+    # A filled record: digits, or a second colon, in the label.
+    "1. Technical Title: Sample Study Name of Funding Agency: Sample Foundation Grant Number: N/A",
+    "2019 Sample Award (include in annual report): N/A",
+    "1. Sample 2019 Study: N/A",
+    # An author's own note addresses no one.
+    "NOTE: This section includes only work done at the Example Institute",
+    # A table row is left to the WCM detector's per-cell rule.
+    "Sample Label | (include dates)",
+    "1. Sample Label (include dates | Example Society",
+    "",
+]
+
+
+@pytest.mark.parametrize("text", FOREIGN_POSITIVES)
+def test_foreign_template_instruction_positives(text):
+    assert is_foreign_template_instruction(text), text
+
+
+@pytest.mark.parametrize("text", FOREIGN_NEGATIVES)
+def test_foreign_template_instruction_negatives(text):
+    assert not is_foreign_template_instruction(text), text
+
+
+def test_foreign_template_instruction_length_cap():
+    long_line = "C. Sample Publications (provide " + "complete citation; " * 40 + ")"
+    assert len(long_line) > 400
+    assert not is_foreign_template_instruction(long_line)

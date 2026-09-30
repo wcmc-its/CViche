@@ -27,7 +27,17 @@ BEDROCK_RETRYABLE_CODES = frozenset({
     "ModelTimeoutException",
     "InternalServerException",
     "ServiceUnavailableException",
+    # Carries the service model's `retryable` trait (HTTP 429); botocore's
+    # standard mode retried it, so dropping it would fail it at once (#632).
+    # test_bedrock_retryable_codes_cover_the_service_model pins this set
+    # against the installed service model.
+    "ModelNotReadyException",
 })
+
+# A bare HTTP 5xx that carries no modeled Bedrock error code (e.g. a load
+# balancer's 502): botocore reports Error.Code as the status string. Botocore's
+# standard mode retried these, so _call_with_retry must too (#632).
+BEDROCK_BARE_HTTP_RETRYABLE_CODES = frozenset({"500", "502", "503", "504"})
 
 # Subset of BEDROCK_RETRYABLE_CODES that means the PROVIDER is down or
 # shedding load, not an ordinary transient blip (a wedged connection, a slow
@@ -46,8 +56,18 @@ BEDROCK_OUTAGE_CODES = frozenset({
 # try/except ImportError fallback here could never actually trigger and was
 # dead defensive code (PR #620 review).
 from botocore.exceptions import ClientError as _BotoClientError
+from botocore.exceptions import ConnectionError as _BotoConnectionError
+from botocore.exceptions import HTTPClientError as _BotoHTTPClientError
 
-RETRYABLE_ERRORS = (_BotoClientError,)
+# _call_with_retry is the single retry owner (#632): the Bedrock client is
+# configured for one botocore attempt, so the transport-level failures botocore
+# used to retry itself must be retried here or they would become a
+# first-attempt failure. Three of botocore's standard-mode checkers are
+# replaced: TransientRetryableChecker's exception classes (connect/read
+# timeouts, dropped connections: the two non-ClientError classes below),
+# ServiceErrorCodeChecker's modeled-retryable codes (BEDROCK_RETRYABLE_CODES),
+# and the bare HTTP 5xx status check (BEDROCK_BARE_HTTP_RETRYABLE_CODES).
+RETRYABLE_ERRORS = (_BotoClientError, _BotoConnectionError, _BotoHTTPClientError)
 
 T = TypeVar("T")
 
@@ -122,17 +142,6 @@ def _get_llm_timeout_seconds() -> float:
     are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS.
     """
     return _get_llm_config_float("CVICHE_LLM_TIMEOUT_SECONDS", default=180.0)
-
-
-def _get_llm_max_attempts() -> int:
-    """Total botocore attempts (initial + retries) for Bedrock calls.
-
-    botocore's standard retry mode retries connect/read timeouts and
-    throttling up to this many attempts, then raises -- so a persistently
-    wedged Bedrock endpoint fails deterministically instead of hanging.
-    Tune via CVICHE_LLM_MAX_ATTEMPTS.
-    """
-    return _get_llm_config_int("CVICHE_LLM_MAX_ATTEMPTS", default=3)
 
 
 def _get_outage_budget_seconds() -> float:
@@ -222,6 +231,9 @@ def _call_with_retry(
     Args:
         call_fn: Zero-argument callable that makes the API call
         retry_count: Max number of retries (total attempts = retry_count + 1)
+            This is the ONLY retry layer: the Bedrock client is built with one
+            botocore attempt (#632), so retry_count + 1 is also the raw request
+            count (outage-class errors excluded, see below).
         cancel_check: Optional zero-arg callable invoked between retry
             attempts; see above.
 
@@ -283,7 +295,10 @@ def _call_with_retry(
             # etc.) should propagate immediately.
             if isinstance(e, _BotoClientError):
                 error_code = e.response.get("Error", {}).get("Code", "")
-                if error_code not in BEDROCK_RETRYABLE_CODES:
+                if (
+                    error_code not in BEDROCK_RETRYABLE_CODES
+                    and error_code not in BEDROCK_BARE_HTTP_RETRYABLE_CODES
+                ):
                     raise
 
             if _is_outage_error(e):

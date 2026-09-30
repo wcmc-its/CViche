@@ -144,6 +144,21 @@ def test_table_lost_lint_is_one_warn_per_run_with_worst_table_evidence():
     assert findings[0]["evidence"] == large[:5]
 
 
+def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
+    """The wire (#539): run_doctor hands stage 4's cv_owner to the lint, so a
+    bare owner-name line is not reported while a real header still is."""
+    root = _build_clean_run(tmp_path)
+    source_path = root / "uploads" / f"{_UID}_cv.docx"
+    source = Document(str(source_path))
+    source.add_paragraph("MIRIAM SHAPIRO").runs[0].bold = True
+    source.add_paragraph("MENTORING").runs[0].bold = True
+    source.save(str(source_path))
+
+    payload = run_doctor(root, _UID)
+    missed = [f["evidence"] for f in payload["findings"] if f["lint"] == "missed_headers"]
+    assert missed == [["MENTORING"]]
+
+
 def test_run_doctor_reports_a_lost_source_table(tmp_path):
     """The wire: run_doctor reads the source docx once, and both the flat
     lines (coverage) and the block-tagged lines (table_lost) come from it."""
@@ -265,6 +280,71 @@ def test_is_single_column_is_the_logical_cell_count_not_the_grid():
         "what python-docx itself reports for the merged table"
     assert not _is_single_column(title_over_data)
     assert not _is_single_column(data)
+
+
+def test_iter_header_candidates_skips_a_leading_role_marker_name(tmp_path):
+    """#539: 'PI. <Name>' / 'Dr. <Name>' is the owner's name line (marker in
+    FRONT, which the suffix-only credential filter misses); a header that
+    merely starts with a marker, or an ALL-CAPS line, is still a candidate."""
+    doc = Document()
+    doc.add_paragraph("PI. Jane Q. Sample", style="Heading 1")
+    doc.add_paragraph("Dr. Alex Example", style="Heading 1")
+    doc.add_paragraph("Prof. Sam Oneil-Test", style="Heading 1")
+    doc.add_paragraph("PI. RESPONSIBILITIES", style="Heading 1")   # header
+    doc.add_paragraph("Dr. PUBLICATIONS", style="Heading 1")       # header
+    doc.add_paragraph("Ms. Research Support", style="Heading 1")   # name-shaped: exempt
+    doc.add_paragraph("Pi. Notes", style="Heading 1")              # marker case differs
+    doc.add_paragraph("Dr. Jane Sample GRANTS AND AWARDS", style="Heading 1")  # header text follows
+    doc.add_paragraph("Ms. Research Support GRANTS", style="Heading 1")        # header text follows
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert iter_header_candidates(str(path)) == [
+        "PI. RESPONSIBILITIES", "Dr. PUBLICATIONS", "Pi. Notes",
+        "Dr. Jane Sample GRANTS AND AWARDS", "Ms. Research Support GRANTS"]
+
+
+_MH_STAGE4 = {"cv_owner": {"first_name": "Jane", "middle_name": "Q", "last_name": "Sample"}}
+
+
+def test_missed_headers_skips_the_owner_name_only_when_stage4_names_it():
+    stage2 = {"entries": []}
+    bare = ["JANE Q. SAMPLE", "Jane Sample", "SAMPLE JANE"]
+    # Baseline (no stage 4, or an owner with no last name): still reported.
+    assert len(lint_missed_headers(bare, _STAGE1A, stage2)) == 3
+    no_last = {"cv_owner": {"first_name": "Jane", "last_name": ""}}
+    assert len(lint_missed_headers(bare, _STAGE1A, stage2, no_last)) == 3
+    assert lint_missed_headers(bare, _STAGE1A, stage2, _MH_STAGE4) == []
+
+
+def test_missed_headers_owner_name_words_come_from_every_name_field():
+    """Each name field feeds the allowed words; a lone initial is allowed
+    whatever letter it is (not only the middle initial)."""
+    stage2 = {"entries": []}
+
+    def missed(cand, owner):
+        return lint_missed_headers([cand], _STAGE1A, stage2, {"cv_owner": owner})
+
+    base = {"first_name": "Jane", "last_name": "Sample"}
+    # Non-middle initial.
+    assert missed("JANE Z. SAMPLE", {**base, "middle_name": "Q"}) == []
+    # Multi-letter middle name, no full_name.
+    assert missed("JANE QUINCY SAMPLE", {**base, "middle_name": "Quincy"}) == []
+    # Extra word only in full_name, no middle_name.
+    assert missed("JANE QUINCY SAMPLE",
+                  {**base, "full_name": "Jane Quincy Sample"}) == []
+    # Same line with neither field: reported.
+    assert len(missed("JANE QUINCY SAMPLE", base)) == 1
+
+
+def test_missed_headers_owner_exemption_is_subset_by_construction():
+    """Only the owner's name is exempt: a header that shares a word with it,
+    carries an extra word, or has only the first or last name stays reported."""
+    stage2 = {"entries": []}
+    kept = ["SAMPLE PUBLICATIONS", "JANE SAMPLE PUBLICATIONS", "JANE",
+            "SAMPLE", "JANE Q. SMITH"]
+    found = lint_missed_headers(kept, _STAGE1A, stage2, _MH_STAGE4)
+    assert [f["evidence"][0] for f in found] == kept
 
 
 def test_missed_headers_fires_on_demoted_header():
@@ -579,8 +659,7 @@ def test_output_hygiene_flags_every_taxonomy_code_shape():
 def test_output_hygiene_flags_boilerplate_in_appendix():
     blocks = [
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("p", "• CURRICULUM VITAE"),
         ("p", "1. Page 2 of 9"),
         ("p", "• Real leftover grant content | Role: PI | Amount: $10,000"),
@@ -618,8 +697,7 @@ def test_output_hygiene_flags_a_non_paragraph_block_inside_the_appendix():
     dropped."""
     blocks = [
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("table", "cell text that never gets scanned as an appendix entry"),
         ("p", "• Real leftover grant content | Role: PI | Status: Under review"),
     ]
@@ -635,8 +713,7 @@ def test_output_hygiene_quiet_on_clean_output():
         ("p", "D. GRANTS"),
         ("table", _GRANT_FSMB),
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("p", "• Real leftover grant content | Role: PI | Status: Under review"),
     ]
     findings = lint_output_hygiene(blocks)
@@ -1738,8 +1815,7 @@ def _build_clean_run(tmp_path, uid=_UID):
     for i, grant in enumerate(grants[1:]):
         table.rows[i].cells[0].paragraphs[0].text = grant
     output.add_paragraph("T. APPENDIX")
-    output.add_paragraph("The following content from the original CV was not "
-                         "successfully mapped to this CV format:")
+    output.add_paragraph("These entries from your original CV could not be matched to a section of the WCM format.")
     out_dir = root / "stage_6_wcm_documents"
     out_dir.mkdir(parents=True)
     output.save(out_dir / f"{uid}_cv_wcm.docx")
@@ -1752,12 +1828,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (26), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (27), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 25
+    assert len(payload["findings"]) == 26
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -1787,6 +1863,27 @@ def test_run_doctor_clean_run_end_to_end(tmp_path):
         "appendix_entries": 0, "appendix_share": 0.0, "source_coverage_pct": 100.0}
 
 
+def test_run_doctor_wires_second_pass_error_and_correction_count(tmp_path):
+    """End to end (#818): a stage_3b whose t_validation errored surfaces as
+    the WARN finding through run_doctor(), and total_post_corrections reaches
+    the metrics block -- the wire, not just the helpers."""
+    root = _build_clean_run(tmp_path)
+    path = next((root / "stage_3b_classified_entries").glob("*_classified.json"))
+    data = json.loads(path.read_text())
+    data["meta"] = {"stats": {
+        "t_validation": {"t_entries_reviewed": 4, "t_entries_reclassified": 0,
+                         "error": "'int' object is not iterable"},
+        "total_post_corrections": 7}}
+    path.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"]
+            if f["lint"] == "stage3b_second_pass_error"]
+    assert len(hits) == 1 and hits[0]["severity"] == "WARN"
+    assert payload["metrics"]["total_post_corrections"] == 7
+
+
 # ------------------------------------------------------------- #816: metrics
 
 def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
@@ -1805,12 +1902,12 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
             "fallback_entries": 510, "entries_classified": 1019,
             "t_validation": {"t_entries_reviewed": 93, "t_entries_reclassified": 28},
             "fragment_reconnection": {"fragments_reviewed": 7, "fragments_reconnected": 3},
+            "total_post_corrections": 5,
         }},
     }
     blocks = [
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("p", "• Unmapped leftover entry one"),
         ("p", "• Unmapped leftover entry two"),
     ]
@@ -1837,7 +1934,60 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
     assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
     assert metrics["t_validation_yield"] == round(28 / 93, 4)
     assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)
+    assert metrics["total_post_corrections"] == 5
     assert "source_coverage_pct" in metrics
+
+
+def test_build_metrics_reports_a_zero_post_correction_count_but_omits_an_absent_one():
+    """`total_post_corrections` is a count, so a measured 0 is real ("the
+    corrector ran and changed nothing") and must be reported; an artifact
+    from before the stat existed carries no key and must be omitted (#818)."""
+    from unified_pipeline.run_doctor import _build_metrics
+
+    ran = _build_metrics({"stage_3b": {"meta": {"stats": {"total_post_corrections": 0}}}})
+    assert ran == {"total_post_corrections": 0}
+    assert _build_metrics({"stage_3b": {"meta": {"stats": {}}}}) == {}
+    assert _build_metrics({"stage_3b": {"meta": {"stats": {
+        "total_post_corrections": "n/a"}}}}) == {}
+
+
+@pytest.mark.parametrize("pass_key", ["t_validation", "fragment_reconnection"])
+def test_second_pass_error_lint_names_the_errored_pass(pass_key):
+    """A non-null `error` on either stage-3b second pass is a WARN that names
+    the pass -- including an error text FATAL_ERROR_PATTERN misses (#818)."""
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    stage3b = {"meta": {"stats": {pass_key: {"error": "'int' object is not iterable"}}}}
+    findings = lint_stage3b_second_pass_errors(stage3b)
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "stage3b_second_pass_error"
+    assert findings[0]["severity"] == "WARN"
+    assert any(pass_key in e for e in findings[0]["evidence"])
+
+
+def test_second_pass_error_lint_reports_both_passes_in_one_finding():
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    stage3b = {"meta": {"stats": {
+        "t_validation": {"error": "boom one"},
+        "fragment_reconnection": {"error": "boom two"}}}}
+    findings = lint_stage3b_second_pass_errors(stage3b)
+    assert len(findings) == 1
+    assert len(findings[0]["evidence"]) == 2
+
+
+@pytest.mark.parametrize("stage3b", [
+    {},
+    {"meta": None},
+    {"meta": {"stats": None}},
+    {"meta": {"stats": {"t_validation": {"error": None, "t_entries_reviewed": 3}}}},
+    {"meta": {"stats": {"t_validation": {"error": ""}}}},
+    {"meta": {"stats": {"fragment_reconnection": "not a dict"}}},
+])
+def test_second_pass_error_lint_is_silent_without_an_error(stage3b):
+    from unified_pipeline.doctor.lints.runtime import lint_stage3b_second_pass_errors
+
+    assert lint_stage3b_second_pass_errors(stage3b) == []
 
 
 def test_build_metrics_omits_rather_than_reports_a_misleading_zero(tmp_path):

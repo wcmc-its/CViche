@@ -34,6 +34,10 @@ from .prompt import (
 
 logger = logging.getLogger(__name__)
 
+# call_llm kwarg that drops the Bedrock cachePoint for one call (#50). The
+# stage default (llm_config.yaml enable_prompt_caching: true) applies otherwise.
+_NO_PROMPT_CACHE = {"enable_prompt_caching": False}
+
 # Taxonomy code prefixes for duplicate-pair resolution (see docs/CODING_STANDARDS.md §8.2):
 # an "M"-series classification (grants etc.) is preferred over the unclassified "T" (Appendix) fallback.
 APPENDIX_TAXONOMY_PREFIX = "T"
@@ -210,6 +214,24 @@ def _index_classifications_by_position(classifications: list[dict], batch_start:
     return class_by_idx
 
 
+def _call_classifier(messages: list[dict], cache_system_prompt: bool) -> dict:
+    """The one classification LLM call of a batch.
+
+    cache_system_prompt=False drops the Bedrock cachePoint for this call.
+    classify_entries_batch passes it for a group that fits in ONE batch: its
+    system prompt (group context + taxonomy_ref) is never re-sent within the
+    group, so the cache write's 1.25x premium buys no read (#50).
+    """
+    return call_llm(
+        stage="stage_3b",
+        messages=messages,
+        response_format={"type": "json_object"},
+        temperature=0.1,
+        max_tokens=2000,
+        **({} if cache_system_prompt else _NO_PROMPT_CACHE),
+    )
+
+
 def _classify_one_batch(
     batch_entries: list[dict],
     batch_start: int,
@@ -217,6 +239,7 @@ def _classify_one_batch(
     all_suggested_codes: list[str],
     taxonomy_ref: str,
     valid_codes: set[str],
+    cache_system_prompt: bool = True,
 ) -> tuple[list[dict], _BatchStats]:
     """Classify a single batch against a taxonomy_ref built once by the caller.
 
@@ -278,13 +301,7 @@ Return ONLY valid JSON with the classifications array."""
     # Call LLM
     stats.llm_batches = 1
     try:
-        llm_result = call_llm(
-            stage="stage_3b",
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.1,
-            max_tokens=2000
-        )
+        llm_result = _call_classifier(messages, cache_system_prompt)
 
         # Parse response
         content = llm_result["content"]
@@ -454,13 +471,17 @@ def classify_entries_batch(
     all_suggested_codes, taxonomy_ref = _build_taxonomy_ref_for_batch(taxonomy_context, taxonomy)
     valid_codes = _valid_taxonomy_codes(taxonomy)
 
+    # A group that fits in one batch never re-sends its system prompt, so a
+    # cache write would be paid (1.25x) and never read (#50).
+    multi_batch = len(entries) > batch_size
+
     # Process in batches
     for batch_start in range(0, len(entries), batch_size):
         batch_entries = entries[batch_start:batch_start + batch_size]
 
         batch_results, batch_stats = _classify_one_batch(
             batch_entries, batch_start, taxonomy_context, all_suggested_codes,
-            taxonomy_ref, valid_codes
+            taxonomy_ref, valid_codes, cache_system_prompt=multi_batch
         )
         all_results.extend(batch_results)
         total_input_tokens += batch_stats.input_tokens

@@ -478,3 +478,78 @@ def test_admin_stats_counts_zero_second_run(client, db):
     # Durations sorted: [0, 10]. If 0 were dropped, avg would be 10.0.
     assert data["avg_duration_seconds"] == 5.0
     assert data["p95_duration_seconds"] == 10
+
+
+def _run_cancelled_execute(monkeypatch, tmp_path, db, run_id, status, prepare=None):
+    """Seed a run in ``status`` and execute() it with a stage that raises the
+    cancel exception (no API write happened)."""
+    from app.pipeline import orchestrator as orch
+    from app.models import Run
+
+    db.add(Run(
+        id=run_id, filename="cv.docx", file_type="docx", status=status,
+        started_at=datetime(2026, 6, 4, 12, 0, 0),
+    ))
+    db.commit()
+    emitter = AsyncMock()
+    monkeypatch.setattr(orch, "event_emitter", emitter)
+    monkeypatch.setattr(orch, "STEP_REGISTRY", _single_step_registry())
+    o = orch.PipelineOrchestrator(run_id, tmp_path / "cv.docx", db)
+    monkeypatch.setattr(o, "_copy_to_pipeline_input", lambda: str(tmp_path / "cv.docx"))
+    monkeypatch.setattr(o, "execute_step", AsyncMock(side_effect=orch.CancelledException("x")))
+    monkeypatch.setattr(o, "log", AsyncMock())  # log() commits too and would mask a missing commit
+    if prepare:
+        prepare(orch)
+    asyncio.run(o.execute())
+    db.rollback()  # anything the handler left uncommitted is lost here
+    return db.query(Run).filter(Run.id == run_id).first(), emitter
+
+
+def test_execute_cancel_without_api_write_records_cancelled_on_the_row(monkeypatch, tmp_path, db):
+    """#591: the handler must not assume the API flipped the row; a cancel
+    that reaches the pipeline with the row still 'running' leaves it 'cancelled'."""
+    row, emitter = _run_cancelled_execute(monkeypatch, tmp_path, db, "CNCL01", "running")
+    assert row.status == "cancelled"
+    assert row.error_message == "Cancelled by user"
+    assert row.completed_at is not None
+    emitter.emit.assert_awaited_with("CNCL01", {"event": "RUN_CANCELLED"})
+
+
+def test_execute_cancel_is_idempotent_when_api_already_cancelled(monkeypatch, tmp_path, db):
+    """The API's own write stays untouched: completed_at is not rewritten."""
+    from app.models import Run
+
+    def api_cancel(_orch):
+        db.query(Run).filter(Run.id == "CNCL02").update(
+            {"status": "cancelled", "error_message": "Cancelled by user",
+             "completed_at": datetime(2026, 6, 4, 12, 5, 0)})
+        db.commit()
+
+    row, _ = _run_cancelled_execute(
+        monkeypatch, tmp_path, db, "CNCL02", "running", prepare=api_cancel)
+    assert row.status == "cancelled"
+    assert row.completed_at == datetime(2026, 6, 4, 12, 5, 0)
+
+
+def test_execute_cancel_does_not_overwrite_another_terminal_status(monkeypatch, tmp_path, db):
+    row, _ = _run_cancelled_execute(monkeypatch, tmp_path, db, "CNCL03", "failed")
+    assert row.status == "failed"
+    assert row.error_message is None
+
+
+def test_execute_stopped_by_shutdown_is_left_for_the_drain_to_fail(monkeypatch, tmp_path, db):
+    """stop_run_locally (#116) flags the run but the drain fails it with the
+    deploy message; the cancel handler must not claim it as a user cancel."""
+    row, _ = _run_cancelled_execute(
+        monkeypatch, tmp_path, db, "CNCL04", "running",
+        prepare=lambda orch: orch.stop_run_locally("CNCL04"))
+    assert row.status == "running"
+
+
+def test_execute_local_user_cancel_is_persisted_unlike_a_shutdown_stop(monkeypatch, tmp_path, db):
+    """cancel_run (user cancel) on a still-running row is recorded; only
+    stop_run_locally is exempt, which is why _stopped_locally exists."""
+    row, _ = _run_cancelled_execute(
+        monkeypatch, tmp_path, db, "CNCL05", "running",
+        prepare=lambda orch: orch.cancel_run("CNCL05"))
+    assert row.status == "cancelled"

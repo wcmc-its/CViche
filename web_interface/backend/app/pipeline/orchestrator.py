@@ -86,6 +86,16 @@ def _record_total_duration(run: Run, elapsed: int, resumed: bool) -> None:
         run.total_duration_seconds = elapsed
 
 
+# run_id and document_uid become path components (output dir, input copy).
+UID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _require_safe_uid(name: str, value: str) -> str:
+    if not UID_PATTERN.fullmatch(value):
+        raise ValueError(f"Invalid {name} {value!r}: must match {UID_PATTERN.pattern}")
+    return value
+
+
 # run.error_message is shown verbatim to the (non-technical) user, so it
 # never carries str(exc): exception text can hold filesystem paths, provider
 # request ids and API detail (#592). The raw text stays in the ERROR log line
@@ -145,8 +155,16 @@ def user_facing_error(exc: BaseException, resuming: bool) -> str:
 # enabled, cancels also round-trip through Redis so a cancel received by one
 # worker/replica reaches the worker actually running the pipeline. The broker's
 # cancel ops use a sync client, so is_cancelled() stays synchronous and the
-# stage-boundary check (check_cancelled) needs no async change.
+# stage-boundary check (check_cancelled) needs no async change. Both signals
+# are only low-latency hints: the run row's status is the durable record, and
+# execute() writes "cancelled" to it if no API request already has (#591).
 _cancelled_runs: set = set()
+# Runs stopped by shutdown (stop_run_locally). Their row is failed by the drain,
+# so execute() must not record them as user cancels.
+_stopped_locally: set = set()
+# Guards both sets: cancel_run runs on request threads, is_cancelled and
+# clear_cancelled on pipeline threads (#307).
+_cancelled_lock = threading.Lock()
 _broker = None
 
 
@@ -158,7 +176,8 @@ def set_broker(broker):
 
 def cancel_run(run_id: str):
     """Signal a run to be cancelled."""
-    _cancelled_runs.add(run_id)
+    with _cancelled_lock:
+        _cancelled_runs.add(run_id)
     if _broker is not None and _broker.enabled:
         _broker.request_cancel(run_id)
 
@@ -173,13 +192,16 @@ def stop_run_locally(run_id: str) -> None:
     Redis flag outlives this pod by CANCEL_TTL_SECONDS and would cancel a retry
     of the same run that another pod starts inside that window.
     """
-    _cancelled_runs.add(run_id)
+    with _cancelled_lock:
+        _cancelled_runs.add(run_id)
+        _stopped_locally.add(run_id)
 
 
 def is_cancelled(run_id: str) -> bool:
     """Check if a run has been cancelled (locally or via the broker)."""
-    if run_id in _cancelled_runs:
-        return True
+    with _cancelled_lock:
+        if run_id in _cancelled_runs:
+            return True
     if _broker is not None and _broker.enabled:
         return _broker.is_cancelled(run_id)
     return False
@@ -187,9 +209,14 @@ def is_cancelled(run_id: str) -> bool:
 
 def clear_cancelled(run_id: str):
     """Clear cancellation flag for a run."""
-    _cancelled_runs.discard(run_id)
+    with _cancelled_lock:
+        _cancelled_runs.discard(run_id)
+        _stopped_locally.discard(run_id)
     if _broker is not None and _broker.enabled:
         _broker.clear_cancel(run_id)
+
+
+USER_CANCEL_MESSAGE = "Cancelled by user"
 
 
 class CancelledException(Exception):
@@ -408,8 +435,9 @@ class StreamingStdoutCapture:
                 self.event_loop
             )
             future.result(timeout=1.0)
-        except Exception:
-            pass  # Progress updates are less critical
+        except Exception as exc:
+            # Progress is best-effort, but a programming error must be visible.
+            logger.debug("Progress emit skipped for step %d: %s", self.step_number, exc)
 
     def write(self, text: str):
         """Capture stdout writes and stream them to the database."""
@@ -481,8 +509,12 @@ class PipelineOrchestrator:
     """Orchestrates the execution of all 12 pipeline stages."""
 
     def __init__(self, run_id: str, file_path: Path, db: Session):
-        self.run_id = run_id
+        self.run_id = _require_safe_uid("run_id", run_id)
         self.file_path = file_path
+        # Document UID extracted from filename. == run_id at every current
+        # call site (upload.py and restart_run() name the stored file
+        # f"{run_id}.{ext}"). It keys output paths, so it must be path-safe.
+        self.document_uid = _require_safe_uid("document_uid", Path(file_path).stem)
         self.db = db
 
         # Output directory for this run (in the unified_pipeline outputs)
@@ -491,17 +523,6 @@ class PipelineOrchestrator:
         # Web interface output directory (for tracking)
         self.web_output_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
         self.web_output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Document UID extracted from filename. == run_id at every current
-        # call site: upload.py names the stored file f"{run_id}.{ext}", and
-        # restart_run() does the same with the *new* run's id (never the
-        # original's) -- see _copy_to_pipeline_input and _get_output_paths
-        # below, which key input/artifact paths off this. Review on #586
-        # raised input/artifact collision across concurrent runs sharing a
-        # document_uid; verified against every PipelineOrchestrator(...)
-        # call site that this can't currently happen. A future caller that
-        # reuses one file_path across multiple runs would reopen it.
-        self.document_uid = Path(file_path).stem
 
         # Track outputs between stages
         self.stage_outputs: dict[str, str] = {}
@@ -577,16 +598,16 @@ class PipelineOrchestrator:
         if is_cancelled(self.run_id):
             raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
+    def _pipeline_input_path(self) -> Path:
+        """This run's private copy of the upload: word/<run_id>/<uid>.docx."""
+        return (PARENT_DIR / 'data' / 'sample_cvs' / 'word'
+                / self.run_id / f"{self.document_uid}.docx")
+
     def _copy_to_pipeline_input(self) -> str:
-        """Copy uploaded file to pipeline input directory and return the path."""
-        # Copy to data/sample_cvs/word/ for the pipeline to find
-        input_dir = PARENT_DIR / 'data' / 'sample_cvs' / 'word'
-        input_dir.mkdir(parents=True, exist_ok=True)
-
-        dest_path = input_dir / f"{self.document_uid}.docx"
-        if not dest_path.exists():
-            shutil.copy2(self.file_path, dest_path)
-
+        """Copy the uploaded file into this run's input directory; return its path."""
+        dest_path = self._pipeline_input_path()
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.file_path, dest_path)
         return str(dest_path)
 
     def _get_output_paths(self) -> dict[str, Path]:
@@ -871,7 +892,7 @@ class PipelineOrchestrator:
             await self._notify_terminal(run, score, doctor)
 
         except CancelledException:
-            # Run was cancelled - status already updated by API endpoint
+            self._persist_cancelled()
             await self.log(0, "Pipeline cancelled by user", "WARNING")
             await event_emitter.emit(self.run_id, {"event": "RUN_CANCELLED"})
 
@@ -912,6 +933,32 @@ class PipelineOrchestrator:
                 reset_current_run_id(run_id_token)
             # Clean up cancellation flag
             clear_cancelled(self.run_id)
+
+    def _persist_cancelled(self) -> None:
+        """Record the cancel on the run row unless it is already terminal.
+
+        The API endpoint normally wrote "cancelled" first, but this does not
+        assume it did, and a shutdown stop leaves the row for the drain to
+        fail. A conditional UPDATE keeps this idempotent and never overwrites
+        another terminal status (#591).
+        """
+        with _cancelled_lock:
+            stopped_by_shutdown = self.run_id in _stopped_locally
+        if stopped_by_shutdown:
+            return
+        updated = self.db.query(Run).filter(
+            Run.id == self.run_id, Run.status == "running"
+        ).update(
+            {
+                "status": "cancelled",
+                "error_message": USER_CANCEL_MESSAGE,
+                "completed_at": datetime.now(),
+            },
+            synchronize_session=False,
+        )
+        self.db.commit()
+        if updated:
+            logger.info("Run %s marked cancelled by the orchestrator", self.run_id)
 
     def _cached_score(self):
         """Best-effort read of the run's cached quality score (or None).
@@ -1019,7 +1066,7 @@ class PipelineOrchestrator:
         """Run the doctor lints and write the JSON report; returns (payload, path)."""
         from unified_pipeline.run_doctor import run_doctor
 
-        source = PARENT_DIR / 'data' / 'sample_cvs' / 'word' / f'{self.document_uid}.docx'
+        source = self._pipeline_input_path()
         payload = run_doctor(
             self.pipeline_output_dir,
             self.document_uid,

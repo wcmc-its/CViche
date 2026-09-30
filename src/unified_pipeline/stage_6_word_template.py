@@ -201,12 +201,14 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     TeachingSection,
 )
 from unified_pipeline.stage6.sections.appendix import (
+    APPENDIX_INTRO_TEXT,
     UnmappedEntry,
     build_appendix_diversion_warnings,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 
 from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
 )
@@ -2634,6 +2636,7 @@ Now analyze the text above:"""
             (text, code, cov) for text, code, cov in remaining
             if text and text.strip()
             and not is_template_instruction(text)
+            and not is_foreign_template_instruction(text)
             and not is_source_boilerplate(text)
         ]
         if not remaining:
@@ -2651,10 +2654,8 @@ Now analyze the text above:"""
             run.underline = True
 
             intro_para = self.doc.add_paragraph()
-            run = intro_para.add_run(
-                "The following content from the original CV was not successfully mapped to this CV format:"
-            )
-            _set_font(run)
+            run = intro_para.add_run(APPENDIX_INTRO_TEXT)
+            _set_font(run, italic=True)
             self.doc.add_paragraph()
 
         # Add each remaining segment. The taxonomy code is an internal

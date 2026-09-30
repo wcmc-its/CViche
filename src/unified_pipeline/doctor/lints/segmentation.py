@@ -164,11 +164,40 @@ def _key_matches_title(key: str, titles: set[str]) -> bool:
     return False
 
 
+def _name_words(text: object) -> list[str]:
+    return re.findall(r"[^\W\d_]+", str(text or "").lower())
+
+
+def _owner_name_words(stage4: dict | None) -> tuple[set[str], set[str]]:
+    """(every word of the stage-4 ``cv_owner`` name, the first+last words a
+    match must carry). Both empty unless the block has a first AND last name."""
+    owner = (stage4 or {}).get("cv_owner") or {}
+    first = _name_words(owner.get("first_name"))
+    last = _name_words(owner.get("last_name"))
+    if not (first and last):
+        return set(), set()
+    allowed = {*first, *last, *_name_words(owner.get("middle_name")),
+               *_name_words(owner.get("full_name"))}
+    return allowed, {first[0], last[-1]}
+
+
+def _is_owner_name(cand: str, allowed: set[str], required: set[str]) -> bool:
+    """Is this candidate the CV owner's own name (document furniture, #539)?
+    Subset by construction: a line is exempt only when every word is an
+    owner-name word or a single-letter initial AND it carries the owner's
+    first and last name; anything else keeps the baseline verdict."""
+    words = _name_words(cand)
+    return bool(required) and required <= set(words) and all(
+        w in allowed or len(w) == 1 for w in words)
+
+
 def lint_missed_headers(candidates: list[str], stage1a: dict,
-                        stage2: dict) -> list[dict]:
+                        stage2: dict, stage4: dict | None = None) -> list[dict]:
     """Header-looking source lines absent from the 1a hierarchy AND from
     every entry hierarchy path: a header demoted to content misroutes
-    everything filed under it."""
+    everything filed under it. The CV owner's own name (optional stage-4
+    ``cv_owner``) is document furniture, not a header (#539)."""
+    allowed, required = _owner_name_words(stage4)
     known = {_header_key(t) for t in _hierarchy_titles(stage1a)}
     paths = {_header_key(h) for e in stage2.get("entries", [])
              for h in (e.get("hierarchy") or [])}
@@ -202,6 +231,8 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
 
         seen.add(normed)
         if normed in titles or _key_matches_title(normed, known):
+            continue
+        if _is_owner_name(cand, allowed, required):
             continue
         findings.append(_finding(
             "missed_headers", "WARN",
