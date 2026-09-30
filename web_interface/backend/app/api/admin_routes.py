@@ -29,7 +29,7 @@ from app.schemas import (
 from app.services.admin_service import get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import get_cached_score, compute_and_cache_score
 from app.audit_events import RUN_DELETED
-from app.services.run_service import delete_run_by_id, find_run, reap_orphaned_created_runs
+from app.services.run_service import delete_run_and_artifacts, find_run, reap_orphaned_created_runs
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -292,7 +292,7 @@ async def delete_run(
     if run.status == "running":
         raise conflict("Run is still running; wait for it to finish before deleting.")
 
-    objects_deleted = delete_run_by_id(db, run)
+    objects_deleted = delete_run_and_artifacts(db, run)
     logger.info(
         RUN_DELETED,
         extra={"admin": admin.email, "run_id": run_id, "objects_deleted": objects_deleted},

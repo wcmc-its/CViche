@@ -215,7 +215,7 @@ def find_run(db: Session, run_id: str) -> Run | None:
     return db.query(Run).filter(Run.id == run_id).first()
 
 
-def delete_run_by_id(db: Session, run: Run) -> int:
+def delete_run_and_artifacts(db: Session, run: Run) -> int:
     """Hard-delete one run: child rows, the run row, then its storage.
 
     Raises if the DB delete fails (after rolling back). Returns the number of

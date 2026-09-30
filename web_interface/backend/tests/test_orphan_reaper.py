@@ -244,6 +244,7 @@ def test_admin_delete_complete_run_removes_rows_storage_and_logs_audit(client, d
             caplog.at_level(logging.INFO, logger="app.api.admin_routes"):
         resp = _as_admin(client, lambda: client.delete("/api/admin/runs/DONE683"))
     assert resp.status_code == 204
+    db.rollback()  # discard uncommitted state: only a committed delete survives
     assert db.query(Run).filter(Run.id == "DONE683").first() is None
     for child in (Step, Log, LLMUsage, Feedback, RunMetrics):
         assert db.query(child).filter(child.run_id == "DONE683").count() == 0
@@ -254,3 +255,21 @@ def test_admin_delete_complete_run_removes_rows_storage_and_logs_audit(client, d
     assert audit[0].run_id == "DONE683"
     assert audit[0].admin == "admin@example.com"
     assert audit[0].objects_deleted == 3
+
+
+def test_delete_run_and_artifacts_rolls_back_and_skips_storage_on_db_failure(db):
+    from app.models import Run
+    from app.services.run_service import delete_run_and_artifacts
+    _seed_run(db, "FAIL683", "complete", datetime.now())
+    run = db.query(Run).filter(Run.id == "FAIL683").first()
+
+    fake = _FakeStorage()
+    with patch("app.services.run_service.get_storage", return_value=fake), \
+            patch("app.services.run_service._delete_run_rows",
+                  side_effect=RuntimeError("db down")), \
+            patch.object(db, "rollback", wraps=db.rollback) as rollback:
+        with pytest.raises(RuntimeError, match="db down"):
+            delete_run_and_artifacts(db, run)
+    rollback.assert_called_once()
+    assert fake.deleted_runs == []
+    assert db.query(Run).filter(Run.id == "FAIL683").first() is not None
