@@ -305,11 +305,43 @@ def _backfill_missing_fields_from_structured(
         return rows
 
     specialty, cert_num, year = rows[0]
-    if not cert_num and cert_candidate:
-        cert_num = cert_candidate
-    if not year and date_candidate:
-        year = date_candidate
+    if not cert_num:
+        if cert_candidate:
+            cert_num = cert_candidate
+            _log_single_row_backfill('certificate_number')
+        elif len(cert_candidates) > 1:
+            _log_single_row_backfill_skip('certificate_number', len(cert_candidates))
+    if not year:
+        if date_candidate:
+            year = date_candidate
+            _log_single_row_backfill('year_certified')
+        elif len(year_candidates) > 1:
+            _log_single_row_backfill_skip('year_certified', len(year_candidates))
     return [(specialty, cert_num, year)]
+
+
+def _log_single_row_backfill(field_name: str) -> None:
+    """Record that a single reparsed row took `field_name` from the entry's
+    structured fields, so a rendered value's provenance (backfilled, not
+    reparsed) is auditable (#696). Logs the field name and row count only --
+    never the CV's value (PII)."""
+    logger.info(
+        "board certification: single reparsed row (1 of 1) was missing %s; "
+        "backfilled from the entry's structured field (exactly one candidate)",
+        field_name,
+    )
+
+
+def _log_single_row_backfill_skip(field_name: str, candidate_count: int) -> None:
+    """Record that a single reparsed row's missing `field_name` was NOT
+    backfilled because the structured field lists several values (#696).
+    Count only, never the values (PII)."""
+    logger.warning(
+        "board certification: single reparsed row (1 of 1) is missing %s; "
+        "structured field lists %d values, so none is attributable -- "
+        "leaving blank rather than guessing",
+        field_name, candidate_count,
+    )
 
 
 def _reconstruct_certification_rows(
