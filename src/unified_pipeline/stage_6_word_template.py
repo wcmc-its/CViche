@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 # stats key counting _classify_geographic_scope LLM failures (#547).
 GEO_SCOPE_FAILURE_STAT = 'geographic_classification_failures'
 
+# stats key counting _reclassify_entry_segments LLM failures (#652).
+RECLASSIFY_FAILURE_STAT = 'segment_reclassification_failures'
+
 try:
     from docx import Document
     from docx.shared import Pt, RGBColor, Inches, Twips
@@ -751,6 +754,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             'appendix_segments_reconsidered': 0,
             'unrendered_records_recovered': 0,
             GEO_SCOPE_FAILURE_STAT: 0,
+            RECLASSIFY_FAILURE_STAT: 0,
         }
 
     def _find_template(self, template_path: str = None) -> str:
@@ -1277,7 +1281,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         validation_issues = _merge_appendix_diversion_warnings(
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
-        all_warnings = self._section_failures + validation_issues + self._geo_scope_failure_warnings()
+        all_warnings = self._section_failures + validation_issues + self._llm_fallback_warnings()
         _log_validation_warnings(all_warnings)
 
         self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
@@ -1315,6 +1319,27 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                         "and defaulted to National; the Regional/National/"
                         "International split may be wrong"),
             "evidence": [f"{GEO_SCOPE_FAILURE_STAT}={failures}"],
+            "severity": "WARN",
+        }]
+
+    def _llm_fallback_warnings(self) -> list[dict[str, Any]]:
+        """Sidecar WARNs for every counted LLM-fallback stat (#547, #652)."""
+        return self._geo_scope_failure_warnings() + self._reclassify_failure_warnings()
+
+    def _reclassify_failure_warnings(self) -> list[dict[str, Any]]:
+        """One sidecar WARN when any appendix-entry segment reclassification
+        failed (#652), so the run doctor sees it. Empty when none failed."""
+        failures = self.stats.get(RECLASSIFY_FAILURE_STAT, 0)
+        if not failures:
+            return []
+        return [{
+            "check": RECLASSIFY_FAILURE_STAT,
+            "code": None,
+            "section": "appendix",
+            "message": (f"{failures} appendix entry reclassification(s) failed; "
+                        "those entries stayed in the appendix whole instead of "
+                        "being split and routed to their sections"),
+            "evidence": [f"{RECLASSIFY_FAILURE_STAT}={failures}"],
             "severity": "WARN",
         }]
 
@@ -2472,10 +2497,17 @@ Now analyze the text above:"""
 
         except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
             raise
-        except Exception as e:
-            if self.verbose:
-                logger.warning(f"  Warning: LLM reclassification failed: {e}")
+        except Exception:
+            self._record_reclassify_failure()
             return None
+
+    def _record_reclassify_failure(self) -> None:
+        """Log and count one reclassification failure. Never gated on
+        verbose (#652): production runs are not verbose, and an LLM outage
+        would otherwise leave every appendix entry unsplit with no record."""
+        logger.warning("LLM reclassification failed; entry stays in "
+                       "the appendix unsplit", exc_info=True)
+        self.stats[RECLASSIFY_FAILURE_STAT] += 1
 
     def _insert_reconsidered_segment(self, text: str, taxonomy_code: str,
                                      comment: str = None) -> bool:
