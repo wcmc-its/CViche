@@ -640,5 +640,74 @@ def test_taxonomy_code_set_skips_malformed_code_entries():
     assert taxonomy_code_set(taxonomy) == {"A", "T"}
 
 
+# ---------------------------------------------------------------------------
+# #50: a single-batch group must not pay a cache write it never reads
+# ---------------------------------------------------------------------------
+
+def _capture_calls(monkeypatch):
+    calls = []
+
+    def fake(**kw):
+        calls.append(kw)
+        return _llm_response([])
+
+    monkeypatch.setattr(classify, "call_llm", fake)
+    return calls
+
+
+def _entries(n):
+    return [_entry(f"Synthetic entry {i}") for i in range(n)]
+
+
+def test_single_batch_group_sends_no_cache_point(monkeypatch):
+    calls = _capture_calls(monkeypatch)
+    classify.classify_entries_batch(_entries(3), _context(), _taxonomy(), batch_size=15)
+    assert len(calls) == 1
+    assert calls[0]["enable_prompt_caching"] is False
+
+
+def test_group_exactly_batch_size_is_still_single_batch(monkeypatch):
+    calls = _capture_calls(monkeypatch)
+    classify.classify_entries_batch(_entries(4), _context(), _taxonomy(), batch_size=4)
+    assert len(calls) == 1
+    assert calls[0]["enable_prompt_caching"] is False
+
+
+def test_multi_batch_group_keeps_stage_default_cache_point(monkeypatch):
+    """No enable_prompt_caching kwarg at all: call_llm falls back to the
+    stage's llm_config.yaml value (true), i.e. the cachePoint is kept."""
+    calls = _capture_calls(monkeypatch)
+    classify.classify_entries_batch(_entries(5), _context(), _taxonomy(), batch_size=2)
+    assert len(calls) == 3
+    assert all("enable_prompt_caching" not in c for c in calls)
+
+
+def test_cache_opt_out_leaves_prompt_text_byte_identical(monkeypatch):
+    """The opt-out is a call kwarg only: the system message equals the
+    unchanged template rendering, and matches the split-batch call's."""
+    calls = _capture_calls(monkeypatch)
+    ents = _entries(2)
+    classify.classify_entries_batch(ents, _context(), _taxonomy(), batch_size=15)
+    classify.classify_entries_batch(ents, _context(), _taxonomy(), batch_size=1)
+    single, split_first = calls[0], calls[1]
+    assert single["messages"][0] == split_first["messages"][0]
+    _, ref = classify._build_taxonomy_ref_for_batch(_context(), _taxonomy())
+    expected = classify._CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str=_context().format_context_string(), taxonomy_ref=ref)
+    assert single["messages"][0] == {"role": "system", "content": expected}
+    assert set(single) - {"enable_prompt_caching"} == set(split_first)
+
+
+def test_cache_opt_out_kwarg_is_consumed_by_call_llm():
+    """enable_prompt_caching is an explicit call_llm kwarg: consumed there,
+    never forwarded to a provider SDK, and the stage default stays on."""
+    from unified_pipeline import llm_client
+    assert "enable_prompt_caching" in llm_client._EXPLICIT_KWARGS
+    cfg = llm_client._resolve_call_config("stage_3b", {"enable_prompt_caching": False})
+    assert cfg["enable_prompt_caching"] is False
+    assert "enable_prompt_caching" not in cfg["extra_kwargs"]
+    assert llm_client._resolve_call_config("stage_3b", {})["enable_prompt_caching"] is True
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
