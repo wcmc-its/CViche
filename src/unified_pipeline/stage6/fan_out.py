@@ -89,7 +89,7 @@ _TOKEN_RE = re.compile(r'[a-z0-9]+')
 _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'B1': frozenset({'degree', 'institution', 'year'}),
     'B2': frozenset({'institution', 'program_name', 'year'}),
-    'C': frozenset({'end_date', 'institution', 'specialty', 'start_date', 'training_type'}),
+    'C': frozenset({'end_date', 'institution', 'role', 'specialty', 'start_date', 'training_type'}),
     'D1': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),
     'D2': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),
     'D3': frozenset({'department', 'end_date', 'organization', 'start_date', 'title'}),

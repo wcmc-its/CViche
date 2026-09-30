@@ -855,6 +855,20 @@ def test_missing_training_type_uses_taxonomy_default():
     assert "Postdoctoral" not in types
 
 
+def test_c_role_trails_the_training_type_cell():
+    """#946: "Chief Resident '20-21" was on the source line and never reached
+    the residency row. Rendered end to end through the Word table."""
+    rows = _render_postdoc({
+        "C": [{"taxonomy_code": "C", "text": "residency",
+               "extracted_fields": {"training_type": "Residency",
+                                    "specialty": "Emergency Medicine",
+                                    "role": "Chief Resident '20-21",
+                                    "institution": "Zorblax Hospital",
+                                    "start_date": "2017", "end_date": "2021"}}],
+    })
+    assert rows[0][0] == "Residency, Emergency Medicine, Chief Resident '20-21"
+
+
 # ---------------------------------------------------------------------------
 # 3b. Postdoc training: the normalization step, pinned on its own
 #
@@ -1201,3 +1215,45 @@ def test_normalize_keeps_the_location_of_a_city_named_institution():
                                     "country_code": "US"}}, "C")
     assert dup.institution == "Norvale General Hospital, Crab Hollow, NY"
     assert dup.location == ""
+
+
+def test_normalize_appends_role_after_the_specialty():
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Residency", "specialty": "Surgery",
+                              "role": "Chief Resident"}},
+        "C").training_type == "Residency, Surgery, Chief Resident"
+
+
+def test_normalize_role_falls_through_empty_none_and_repeats():
+    """No role, an empty role, the string "None" (the extractor's null) and a
+    role the cell already says all leave the cell exactly as it was."""
+    for role in (None, "", "  ", "None", "none", [], "residency", "SURGERY"):
+        assert _normalize_training_entry(
+            {"extracted_fields": {"training_type": "Residency", "specialty": "Surgery",
+                                  "role": role}},
+            "C").training_type == "Residency, Surgery", role
+
+
+def test_normalize_role_alone_when_no_type_is_extracted():
+    """A C entry with only a role must not render the taxonomy default twice
+    or lose the role: the default is the type, the role trails it."""
+    assert _normalize_training_entry(
+        {"extracted_fields": {"role": "Chief Fellow"}},
+        "C3").training_type == "Fellowship, Chief Fellow"
+
+
+def test_normalize_joins_a_fused_entry_role_list():
+    """A fused multi-record entry can extract role as a list."""
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Residency",
+                              "role": ["Chief Resident", "Teaching Fellow"]}},
+        "C2").training_type == "Residency, Chief Resident, Teaching Fellow"
+
+
+def test_normalize_role_stands_alone_when_the_tab_join_empties_the_type():
+    """A training_type that is only tabs is truthy, so the taxonomy default never
+    replaces it, and the tab join then leaves it empty: the role must not render
+    behind a leading comma."""
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "\t", "role": "Chief Resident"}},
+        "C2").training_type == "Chief Resident"

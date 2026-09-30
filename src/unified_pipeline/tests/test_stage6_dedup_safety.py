@@ -593,6 +593,12 @@ def test_an_empty_rendered_field_vouches_for_nothing():
     assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is False
 
 
+def test_postdoc_training_role_vouches_for_a_fused_record():
+    """#946: `role` renders on the C type line, so dedup's rendered-words set for C
+    includes it (the field is consumed here as well as by the section renderer)."""
+    assert "role" in _RENDERED_FIELDS["C"]
+
+
 # ------------- #666: two identical standalone copies of a fused record
 # Each copy used to count as "another entry naming the record" for the other,
 # so both dropped against the kept row that fused the record.

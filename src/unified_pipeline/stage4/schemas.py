@@ -140,7 +140,7 @@ FIELD_SCHEMAS = {
     # Postdoctoral Training (C)
     # -------------------------------------------------------------------------
     "C": {  # Postdoctoral Training (residency, fellowship, postdoc, graduate assistantship)
-        "fields": ["training_type", "specialty", "institution", "department", "mentor", "start_date", "end_date", "narrative"],
+        "fields": ["training_type", "specialty", "institution", "department", "mentor", "start_date", "end_date", "role", "narrative"],
     },
 
     # -------------------------------------------------------------------------
@@ -391,6 +391,19 @@ GRANT_NOTES_DESCRIPTION = (
 )
 
 FIELD_DESCRIPTIONS = {
+    # A role held during the training ("Chief Resident") survived only in entry
+    # text and was dropped from the residency row (#946). The whole C guide is
+    # written, not `role` alone: a guide that names one field of five made the
+    # model null training_type/specialty/institution on degree lines that the
+    # section holds (live A/B, #946).
+    "C": {
+        "training_type": "The kind of training program (e.g., 'Residency', 'Fellowship', 'Postdoctoral Research Fellow'), not the trainee's position title; for a degree line, the degree",
+        "specialty": "The area of training (e.g., 'Emergency Medicine', 'Biostatistics')",
+        "institution": "Where the training took place",
+        "start_date": "When the training started",
+        "end_date": "When the training ended",
+        "role": "A distinct role held during the training, worded as the CV words it (e.g., 'Chief Resident', 'Chief Fellow'); an empty string when the text names none, and for the plain trainee title ('Resident Physician', 'Fellow physician'), which training_type already covers",
+    },
     # `program_name` fills the template's "Description" column and no other B2
     # field holds detail text, so a title-only extraction drops the rest of the
     # line silently (#1092).
