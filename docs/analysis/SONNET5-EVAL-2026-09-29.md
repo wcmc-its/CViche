@@ -102,7 +102,11 @@ Sonnet stages only. Tokens are total input (uncached, cache read and cache write
 | web206 | A vs B3 | A worse: it loses a professorship and its 6 courses and 2 of 3 grants. B misplaces duty bullets and invents one "Present" date. |
 
 - **Research summaries:** none of the three spot-read CVs has a research summary in the source.
-- **Found in passing, not model-related:** on web206, both arms drop the same 13 of about 18 source articles. This looks untracked (only #886, closed, covers web206). It is not filed yet.
+- **Correction (2026-09-30), publication counts.** An earlier version of this doc said both arms drop the same 13 of about 18 web206 articles. That was wrong.
+  - All 20 publication records render.
+  - `_fill_bibliography` writes enriched citations as tracked insertions (`w:ins`), and the spot-read agents counted with python-docx `paragraph.text`, which skips those. 14 web206 bibliography paragraphs carry their only text inside `w:ins`.
+  - The publication counts in the spot-reads undercount in absolute terms, for both arms equally. Both arms render through the same stage-6 code, so the A-vs-B verdicts are unaffected.
+- **Found in passing, not model-related:** web206's published dissertations are classified S7 and render under the template's "In review" header in both arms. S7 means "gray literature" to stage 3b but "In review" to stage 6. Filed as #1166.
 
 ## Caveats
 
