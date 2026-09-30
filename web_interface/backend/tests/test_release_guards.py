@@ -688,6 +688,14 @@ def test_orchestrator_rejects_unsafe_run_id(db, tmp_path, run_id):
         PipelineOrchestrator(run_id, tmp_path / "cv.docx", db)
 
 
+def test_orchestrator_rejects_document_uid_that_differs_from_run_id(db, tmp_path):
+    from app.pipeline.orchestrator import PipelineOrchestrator
+
+    with pytest.raises(ValueError, match="must equal run_id"):
+        PipelineOrchestrator("MATCH1", tmp_path / "OTHER1.docx", db)
+    PipelineOrchestrator("MATCH2", tmp_path / "MATCH2.docx", db)
+
+
 def test_copy_to_pipeline_input_is_per_run_and_overwrites(db, tmp_path, monkeypatch):
     import shutil
     from app.pipeline import orchestrator as orch

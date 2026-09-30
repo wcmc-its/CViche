@@ -158,7 +158,7 @@ def test_execute_step_timeout_surfaces_error(monkeypatch, tmp_path):
     fake_db = MagicMock()
     fake_db.query.return_value.filter.return_value.first.return_value = fake_step
 
-    o = orch.PipelineOrchestrator("test-timeout-run", tmp_path / "cv.docx", fake_db)
+    o = orch.PipelineOrchestrator("test-timeout-run", tmp_path / "test-timeout-run.docx", fake_db)
 
     async def hang(stage_id, cv_path):
         await asyncio.sleep(5)  # longer than the 1s ceiling
@@ -183,7 +183,7 @@ def _orchestrator_for_step(monkeypatch, tmp_path, stage_logic):
     monkeypatch.setattr(orch, "event_emitter", AsyncMock())
     fake_db = MagicMock()
     fake_db.query.return_value.filter.return_value.first.return_value = MagicMock()
-    o = orch.PipelineOrchestrator("test-745-run", tmp_path / "cv745.docx", fake_db)
+    o = orch.PipelineOrchestrator("test-745-run", tmp_path / "test-745-run.docx", fake_db)
     o.pipeline_output_dir = tmp_path / "outputs"
     persisted: list[list[str]] = []
     monkeypatch.setattr(o, "_persist_outputs_to_storage", persisted.append)
@@ -205,7 +205,7 @@ def test_execute_step_failure_writes_and_mirrors_a_stage_error_record(monkeypatc
     with pytest.raises(TypeError):
         asyncio.run(o.execute_step(6, "4", "cv.docx"))
 
-    path = stage_errors_path(o.pipeline_output_dir, "cv745")
+    path = stage_errors_path(o.pipeline_output_dir, "test-745-run")
     assert read_stage_errors(path) == [
         StageError("4", "TypeError", "'int' object is not iterable", fatal=True)]
     assert [str(path)] in persisted
@@ -221,7 +221,7 @@ def test_execute_step_success_clears_an_earlier_stage_error(monkeypatch, tmp_pat
         return {"cost": 0.0, "output_files": []}
 
     o, persisted = _orchestrator_for_step(monkeypatch, tmp_path, ok)
-    path = stage_errors_path(o.pipeline_output_dir, "cv745")
+    path = stage_errors_path(o.pipeline_output_dir, "test-745-run")
     record_stage_outcome(path, "4", StageError("4", "TypeError", "x", fatal=True))
 
     asyncio.run(o.execute_step(6, "4", "cv.docx"))
@@ -238,7 +238,7 @@ def test_execute_step_success_without_a_record_writes_none(monkeypatch, tmp_path
 
     o, persisted = _orchestrator_for_step(monkeypatch, tmp_path, ok)
     asyncio.run(o.execute_step(6, "4", "cv.docx"))
-    assert not stage_errors_path(o.pipeline_output_dir, "cv745").exists()
+    assert not stage_errors_path(o.pipeline_output_dir, "test-745-run").exists()
     assert persisted == [[]]
 
 
