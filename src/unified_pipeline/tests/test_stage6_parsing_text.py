@@ -64,7 +64,11 @@ investigated and found not safely fixable within this file -- see below.
 
 Items 5-7 (the duplicated date regexes and the positional-reconstruction
 zips in `_parse_multi_membership_entry` and `_parse_flattened_committee_lines`)
-are out of scope for this PR and untouched here.
+were out of scope for that PR; the follow-up (#665) moves the surname strip to
+its one call site (item 1), builds every date recogniser in this module from
+one grammar (item 5), and stops `_parse_multi_membership_entry` pairing types
+and dates to organizations by index when the counts disagree (item 6; the
+committee parser already had that guard).
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_parsing_text.py -p no:cacheprovider
 
@@ -83,25 +87,33 @@ import pytest  # noqa: E402
 from unified_pipeline.stage6.parsing.text import (  # noqa: E402
     _extract_last_name_from_uid,
     _extract_name_from_uid,
+    _extract_year_from_text,
     _is_structural_label,
     _is_table_header_entry,
     _looks_like_multiple_records,
     _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
+    _strip_appended_initials,
     ParsedActivityLine,
 )
 
 
-# --- item 1: investigated, left unchanged (see module docstring) -----------
+# --- item 1: the strip is a guess and lives at the call site (#665) --------
 
-def test_last_name_still_strips_the_corpus_real_appended_initials_case():
-    # Locks in the actual corpus behaviour this function must keep: the
-    # "2003_Albrechtjs_Cv" pattern still resolves to "Albrecht", matching
-    # the real cited author name in that CV's own bibliography. A change
-    # that "fixes" this by no longer stripping would silently drop that
-    # document's bold-highlighting again -- this is the regression the PR
-    # body's corpus evidence documents.
-    assert _extract_last_name_from_uid("2003_Albrechtjs_Cv") == "Albrecht"
+def test_last_name_from_uid_is_returned_as_written():
+    # "Smithson" ends in a lower-case tail exactly like appended initials; the
+    # uid parser must not shorten it. Whether initials are glued on is decided
+    # against citation text in bibliography.py, not here.
+    assert _extract_last_name_from_uid("2003_Smithson_Cv") == "Smithson"
+    assert _extract_last_name_from_uid("2003_Quennevillejs_Cv") == "Quennevillejs"
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("Quennevillejs", "Quenneville"),   # appended lower-case initials
+    ("Wende", "Wende"),           # too short to be considered
+])
+def test_strip_appended_initials_guess(name, expected):
+    assert _strip_appended_initials(name) == expected
 
 
 # --- item 2: UID prefix strip must be a prefix strip, not a global replace --
@@ -392,6 +404,15 @@ def test_pipe_row_with_several_middle_cells_joins_them_as_the_institution():
     assert (item.activity, item.institution) == ("Chair", "Quuxville General Hospital, Ohio")
 
 
+@pytest.mark.parametrize("line, expected", [
+    ("Zorblax Board (Chair 2001-2005)", ParsedActivityLine("Zorblax Board", ("Chair",), "2001-2005")),
+    ("Zorblax Board (Chair 2010-present)", ParsedActivityLine("Zorblax Board", ("Chair",), "2010-present")),
+    ("Zorblax Board | 2010-present", ParsedActivityLine("Zorblax Board", (), "2010-present")),
+])
+def test_committee_date_range_may_end_in_present(line, expected):
+    assert _parse_flattened_committee_lines([line]) == [expected]
+
+
 # --- #660: one dated record versus several -----------------------------------
 
 @pytest.mark.parametrize("lines", [
@@ -417,3 +438,87 @@ def test_two_dated_lines_are_multiple_records(lines):
 ])
 def test_at_most_one_dated_line_is_a_single_record(lines):
     assert _looks_like_multiple_records(lines) is False
+
+
+# --- #665 item 6: membership types/dates are paired only when provable ------
+
+def test_membership_pairs_by_position_when_counts_match():
+    parts = ["Member", "Org One", "2010-present",
+             "Fellow", "Org Two", "2015-2018"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", "2010-present"),
+        ("Fellow", "Org Two", "2015-2018"),
+    ]
+
+
+def test_membership_column_layout_pairs_by_position_when_counts_match():
+    # Types, then organizations, then dates, as a flattened table leaves them.
+    parts = ["Member", "Fellow", "Org One", "Org Two", "2010-2012", "2013-2015"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", "2010-2012"),
+        ("Fellow", "Org Two", "2013-2015"),
+    ]
+
+
+def test_membership_leaves_dates_unassigned_when_a_date_is_missing():
+    # Two organizations, one date read after both: index pairing would put it
+    # on the first organization whichever one it really belongs to.
+    parts = ["Member", "Org One", "Member", "Org Two", "2015-2018"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", ""),
+        ("Member", "Org Two", ""),
+    ]
+
+
+def test_membership_keeps_the_type_that_sits_right_before_its_organization():
+    # One type for three organizations: the type read before "Org One" is
+    # still provably Org One's; the later two have none.
+    parts = ["Member", "Org One", "2010-present",
+             "Org Two", "2015-2018", "Org Three", "2018-2020"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", "2010-present"),
+        ("", "Org Two", "2015-2018"),
+        ("", "Org Three", "2018-2020"),
+    ]
+
+
+def test_membership_keeps_a_row_whose_trailing_group_has_no_date():
+    # Source order proves the one date belongs to the first row.
+    parts = ["Member", "Org One", "2015-present", "Fellow", "Org Two"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", "2015-present"),
+        ("Fellow", "Org Two", ""),
+    ]
+
+
+def test_membership_count_mismatch_is_logged(caplog):
+    with caplog.at_level("WARNING"):
+        _parse_multi_membership_entry(
+            ["Member", "Org One", "Member", "Org Two", "2015-2018"])
+    assert "counts disagree" in caplog.text
+
+
+# --- #665 item 5: one date grammar across the module ------------------------
+
+@pytest.mark.parametrize("dash", ["-", "–", "—"])
+def test_membership_date_range_accepts_every_dash(dash):
+    # An en/em-dash range used to fail the membership date test and was then
+    # read as an organization name.
+    parts = ["Member", "Org One", f"2010{dash}present"]
+    assert _parse_multi_membership_entry(parts) == [
+        ("Member", "Org One", f"2010{dash}present")]
+
+
+@pytest.mark.parametrize("dash", ["-", "–", "—"])
+def test_committee_lines_accept_every_dash(dash):
+    lines = [f"Curriculum Committee    1999{dash}2010",
+             f"Search Committee (Chair 2001{dash}2004)"]
+    assert _parse_flattened_committee_lines(lines) == [
+        ParsedActivityLine("Curriculum Committee", (), f"1999{dash}2010"),
+        ParsedActivityLine("Search Committee", ("Chair",), "2001-2004"),
+    ]
+
+
+@pytest.mark.parametrize("dash", ["-", "–", "—"])
+def test_year_from_text_reads_the_end_of_a_range_for_every_dash(dash):
+    assert _extract_year_from_text(f"served 2019{dash}2021") == "2021"
