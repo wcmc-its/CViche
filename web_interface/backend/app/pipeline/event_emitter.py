@@ -52,6 +52,19 @@ _TERMINAL_EVENTS = frozenset({"RUN_COMPLETE", "RUN_FAILED", "RUN_CANCELLED"})
 _COST_KEYS = frozenset({"total_cost", "cost", "cost_delta"})
 
 
+def _log_outside_run(level: int, msg: str, *args: object, **kwargs: object) -> None:
+    """Log from a run's loop without the line landing in that run's stdout capture.
+
+    App logging writes through sys.stdout, and orchestrator's stdout router
+    sends a write to the capture named by the caller's context. An emit that
+    came from a stage print() runs in that capture's context, so a plain
+    logger call here would be streamed back as a log line of the run -- with
+    the capture waiting on the run's own loop -- and each such line emits
+    again (#116). An empty context routes the line to the real stdout.
+    """
+    contextvars.Context().run(logger.log, level, msg, *args, **kwargs)
+
+
 def _stamp(event: dict) -> dict:
     """Add the fields every emitted event carries, in place.
 
@@ -295,18 +308,19 @@ class EventEmitter:
                 asyncio.run_coroutine_threadsafe, coro, loop)
         except RuntimeError:
             coro.close()
-            logger.info("Event for run %s dropped: the socket loop is closed", run_id)
+            _log_outside_run(logging.INFO, "Event for run %s dropped: the socket loop is closed", run_id)
             return
         done, _ = await asyncio.wait({asyncio.wrap_future(future)},
                                      timeout=CROSS_LOOP_EMIT_WAIT_SECONDS)
         if not done:
-            logger.warning("Event for run %s not delivered within %.1fs; not waiting further",
-                           run_id, CROSS_LOOP_EMIT_WAIT_SECONDS)
+            _log_outside_run(logging.WARNING,
+                             "Event for run %s not delivered within %.1fs; not waiting further",
+                             run_id, CROSS_LOOP_EMIT_WAIT_SECONDS)
         elif future.cancelled():
-            logger.warning("Event delivery for run %s was cancelled", run_id)
+            _log_outside_run(logging.WARNING, "Event delivery for run %s was cancelled", run_id)
         elif future.exception() is not None:
-            logger.warning("Event delivery for run %s failed", run_id,
-                           exc_info=future.exception())
+            _log_outside_run(logging.WARNING, "Event delivery for run %s failed", run_id,
+                             exc_info=future.exception())
 
     async def emit_run_start(self, run_id: str):
         await self.emit(run_id, {"event": "RUN_START"})

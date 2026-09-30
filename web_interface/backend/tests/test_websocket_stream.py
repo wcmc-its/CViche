@@ -23,9 +23,11 @@ What is pinned here:
 """
 import asyncio
 import contextvars
+import io
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -598,7 +600,7 @@ def _in_run_thread(coro_fn):
 
     worker = threading.Thread(target=target)
     worker.start()
-    worker.join(10)
+    worker.join(30)
     return outcome["seconds"], outcome.get("error")
 
 
@@ -644,22 +646,49 @@ def test_a_slow_socket_does_not_hold_the_run(monkeypatch):
     assert _event_names(socket) == ["LOG"]
 
 
-def test_an_emit_after_the_server_loop_closed_does_not_raise():
+def test_an_emit_after_the_server_loop_closed_does_not_raise(monkeypatch):
     """At shutdown the server loop can be gone while a run thread is still
-    emitting (#1095 drain); the event is dropped, the run is not failed."""
+    emitting (#1095 drain); the event is dropped, the run is not failed, and
+    the delivery coroutine that never ran is closed rather than left to warn
+    'never awaited'."""
     emitter = EventEmitter()
     socket = _LoopBoundSocket()
+    made = []
+    real_deliver = emitter._deliver_local
+
+    def tracking_deliver(run_id, message):
+        made.append(real_deliver(run_id, message))
+        return made[-1]
 
     with _server_loop() as server:
         _on(server, emitter.connect("R1", socket))
         server.call_soon_threadsafe(server.stop)
         time.sleep(0.1)
         server.close()
+        monkeypatch.setattr(emitter, "_deliver_local", tracking_deliver)
         seconds, error = _in_run_thread(lambda: emitter.emit_run_failed("R1", "deploy"))
 
     assert error is None
     assert seconds < 0.5
     assert socket.sent == []
+    assert len(made) == 1 and made[0].cr_frame is None
+
+
+def test_a_new_server_loop_replaces_a_closed_one():
+    """Sockets belong to the loop that accepted them most recently; a
+    process whose first loop is gone (a TestClient portal, a restarted
+    server) must deliver on the live one."""
+    emitter = EventEmitter()
+    old_socket, new_socket = _LoopBoundSocket(), _LoopBoundSocket()
+
+    with _server_loop() as old:
+        _on(old, emitter.connect("OLD", old_socket))
+    with _server_loop() as new:
+        _on(new, emitter.connect("R1", new_socket))
+        _, error = _in_run_thread(lambda: emitter.emit_log("R1", 1, "x"))
+
+    assert error is None
+    assert _event_names(new_socket) == ["LOG"]
 
 
 @pytest.mark.parametrize("failure", [asyncio.CancelledError, ValueError])
@@ -738,3 +767,55 @@ def test_an_emit_on_the_server_loop_itself_writes_before_returning(monkeypatch):
         return list(socket.sent)
 
     assert [m["event"] for m in asyncio.run(scenario())] == ["LOG"]
+
+
+def test_a_slow_socket_does_not_feed_the_runs_own_log(monkeypatch):
+    """The real stdout capture and router, with app logging written through
+    sys.stdout as configure_logging sets it up. A stage print() reaches log()
+    in the capture's context; if the emitter's own "not delivered" warning
+    were logged in that context, the router would stream it back into the
+    run's log, the capture would wait 2s on the run's own loop per line, and
+    each such line would emit and warn again. Also pins the emit wait under
+    the capture's 2s: past it, the capture gives up and prints an error."""
+    from app.logging_config import _DYNAMIC_STDOUT
+    from app.pipeline import orchestrator as orch
+
+    real_stdout_side = io.StringIO()
+    monkeypatch.setattr(sys, "__stdout__", real_stdout_side)
+    handler = logging.StreamHandler(_DYNAMIC_STDOUT)
+    emitter_module.logger.addHandler(handler)
+    emitter = EventEmitter()
+    socket = _LoopBoundSocket(slow={"LOG": 1.5})
+    logged = []
+
+    class _Run:
+        """Stands in for PipelineOrchestrator's log()/update_progress()."""
+
+        async def log(self, step, message, level="INFO"):
+            logged.append(message)
+            await emitter.emit_log("R1", step, message, level)
+
+        async def update_progress(self, step, current, total, message=""):
+            await emitter.emit_progress("R1", step, current, total, message)
+
+    def stage():
+        print("Processing 1 of 2 sections")
+        print("Processing 2 of 2 sections")
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        await asyncio.to_thread(
+            orch.PipelineOrchestrator._run_with_stdout_capture_sync, _Run(), stage, 1, loop)
+        await asyncio.sleep(0.5)  # room for any line fed back to play out
+
+    try:
+        with _server_loop() as server:
+            _on(server, emitter.connect("R1", socket))
+            seconds, error = _in_run_thread(run)
+    finally:
+        emitter_module.logger.removeHandler(handler)
+
+    assert error is None
+    assert logged == ["Processing 1 of 2 sections", "Processing 2 of 2 sections"]
+    assert "[Log emit error" not in real_stdout_side.getvalue()
+    assert seconds < 4
