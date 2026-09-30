@@ -118,6 +118,69 @@ def test_admin_stats_duration_aggregates_null_when_no_completed_runs(client, db)
     assert data["p95_duration_seconds"] is None
 
 
+def test_admin_stats_step_avg_seconds_completed_runs_only_in_pipeline_order(client, db):
+    """step_avg_seconds averages Step.duration_seconds per stage over completed
+    runs only, ordered by step_number; failed runs and null durations are excluded."""
+    from app.main import app
+    from app.auth import require_admin
+    from app.models import Run, Step
+
+    base = datetime(2026, 6, 4, 12, 0, 0)
+    db.add_all([
+        Run(id="STP001", filename="a.docx", file_type="docx", status="complete", started_at=base),
+        Run(id="STP002", filename="b.docx", file_type="docx", status="complete", started_at=base),
+        Run(id="STP003", filename="c.docx", file_type="docx", status="failed", started_at=base),
+    ])
+    db.flush()
+    db.add_all([
+        # Inserted out of pipeline order on purpose.
+        Step(run_id="STP001", step_number=2, stage_id="2", step_name="Entry Extraction",
+             status="complete", duration_seconds=40),
+        Step(run_id="STP001", step_number=1, stage_id="1a", step_name="Hierarchy Extraction",
+             status="complete", duration_seconds=10),
+        Step(run_id="STP002", step_number=1, stage_id="1a", step_name="Hierarchy Extraction",
+             status="complete", duration_seconds=20),
+        Step(run_id="STP002", step_number=2, stage_id="2", step_name="Entry Extraction",
+             status="complete", duration_seconds=61),
+        # Null duration on a completed run: ignored.
+        Step(run_id="STP002", step_number=3, stage_id="3b", step_name="Entry Classification",
+             status="complete", duration_seconds=None),
+        # Failed run: excluded even though it has durations.
+        Step(run_id="STP003", step_number=1, stage_id="1a", step_name="Hierarchy Extraction",
+             status="complete", duration_seconds=1000),
+        Step(run_id="STP003", step_number=5, stage_id="5", step_name="PubMed Enrichment",
+             status="error", duration_seconds=500),
+    ])
+    db.commit()
+
+    app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
+    try:
+        resp = client.get("/api/admin/stats")
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["step_avg_seconds"] == [
+        {"stage_id": "1a", "step_name": "Hierarchy Extraction", "avg_seconds": 15.0},
+        {"stage_id": "2", "step_name": "Entry Extraction", "avg_seconds": 50.5},
+    ]
+
+
+def test_admin_stats_step_avg_seconds_empty_without_completed_runs(client, db):
+    """No completed runs -> step_avg_seconds is an empty list, not null or a 500."""
+    from app.main import app
+    from app.auth import require_admin
+
+    app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
+    try:
+        resp = client.get("/api/admin/stats")
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+
+    assert resp.status_code == 200
+    assert resp.json()["step_avg_seconds"] == []
+
+
 def test_admin_runs_table_prefers_persisted_duration(client, db):
     """The admin submissions table's Duration column uses the persisted value,
     falling back to wall-clock for older rows -- consistent with the run API."""
