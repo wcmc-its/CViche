@@ -17,7 +17,6 @@ from unified_pipeline.llm.retry import (
     _call_with_retry,
     _client_init_lock,
     _get_llm_timeout_seconds,
-    _get_llm_max_attempts,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,14 +88,18 @@ def _get_bedrock_client():
                 import boto3
                 from botocore.config import Config
                 region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-                # Explicit connect/read timeouts + bounded standard retries so a
-                # wedged Bedrock call can't block the worker thread indefinitely.
-                # botocore's default read_timeout (60s) and retry behavior are left
-                # implicit otherwise; here we make them explicit and tunable.
+                # Explicit connect/read timeouts so a wedged Bedrock call can't
+                # block the worker thread indefinitely. botocore is held to ONE
+                # attempt (total_max_attempts=1, #632): _call_with_retry is the
+                # single retry owner, so a logical call costs retry_count+1 raw
+                # requests, not that times botocore's own attempts. Note
+                # `max_attempts` would be wrong here -- botocore reads it as a
+                # RETRY count and adds one for the initial request; only
+                # `total_max_attempts` counts the initial request.
                 bedrock_config = Config(
                     connect_timeout=10,
                     read_timeout=_get_llm_timeout_seconds(),
-                    retries={"mode": "standard", "max_attempts": _get_llm_max_attempts()},
+                    retries={"mode": "standard", "total_max_attempts": 1},
                 )
                 _bedrock_client = boto3.client(
                     "bedrock-runtime", region_name=region, config=bedrock_config

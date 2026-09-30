@@ -719,11 +719,6 @@ def test_get_llm_timeout_seconds_reads_env(monkeypatch: pytest.MonkeyPatch) -> N
     assert retry._get_llm_timeout_seconds() == 99.5
 
 
-def test_get_llm_max_attempts_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("CVICHE_LLM_MAX_ATTEMPTS", "6")
-    assert retry._get_llm_max_attempts() == 6
-
-
 def test_get_llm_timeout_seconds_reads_yaml_when_env_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -739,16 +734,16 @@ def test_get_llm_timeout_seconds_reads_yaml_when_env_unset(
     assert retry._get_llm_timeout_seconds() == 240.0
 
 
-def test_get_llm_max_attempts_reads_yaml_when_env_unset(
+def test_get_max_concurrent_llm_calls_reads_yaml_when_env_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#267 verify r2 BLOCKING: same as the timeout test above, for the int
-    reader (_get_llm_config_int) and CVICHE_LLM_MAX_ATTEMPTS."""
-    monkeypatch.delenv("CVICHE_LLM_MAX_ATTEMPTS", raising=False)
+    reader (_get_llm_config_int) via CVICHE_MAX_CONCURRENT_LLM_CALLS."""
+    monkeypatch.delenv("CVICHE_MAX_CONCURRENT_LLM_CALLS", raising=False)
     yaml_path = tmp_path / "auth_config.yaml"
-    _write_llm_yaml(yaml_path, CVICHE_LLM_MAX_ATTEMPTS="5")
+    _write_llm_yaml(yaml_path, CVICHE_MAX_CONCURRENT_LLM_CALLS="5")
     monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
-    assert retry._get_llm_max_attempts() == 5
+    assert retry._get_max_concurrent_llm_calls() == 5
 
 
 # ---------------------------------------------------------------------------
@@ -903,18 +898,16 @@ def test_llm_config_readers_survive_non_mapping_llm_block_at_import(
     line calls _get_max_concurrent_llm_calls at import time). retry.py is
     already imported by the time this test runs, so call its readers
     directly -- they must still resolve to the documented defaults
-    (180.0, 3, 8), not raise."""
+    (180.0, 8), not raise."""
     yaml_path = tmp_path / "auth_config.yaml"
     yaml_path.write_text('llm: "oops"\n')
     monkeypatch.setattr(pipeline_config, "AUTH_CONFIG_PATH", yaml_path)
     for key in (
         "CVICHE_LLM_TIMEOUT_SECONDS",
-        "CVICHE_LLM_MAX_ATTEMPTS",
         "CVICHE_MAX_CONCURRENT_LLM_CALLS",
     ):
         monkeypatch.delenv(key, raising=False)
     assert retry._get_llm_timeout_seconds() == 180.0
-    assert retry._get_llm_max_attempts() == 3
     assert retry._get_max_concurrent_llm_calls() == 8
 
 
@@ -1323,3 +1316,91 @@ def test_call_with_retry_outage_cancel_check_propagates(monkeypatch: pytest.Monk
     assert checks["n"] == 1
     assert sleeps == [1.0]  # the outage-branch wait (base=1, jitter pinned to hi)
 
+
+
+# ---------------------------------------------------------------------------
+# #632 -- _call_with_retry is the SINGLE retry owner: the Bedrock client makes
+# exactly one botocore attempt, so retry_count+1 is the true request count.
+# ---------------------------------------------------------------------------
+
+
+def _fresh_bedrock_client(monkeypatch: pytest.MonkeyPatch):
+    """Build the REAL client through _get_bedrock_client (real botocore Config,
+    real retry handlers), with dummy credentials and no cached singleton."""
+    monkeypatch.setattr(bedrock, "_bedrock_client", None)
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    return bedrock._get_bedrock_client()
+
+
+def test_bedrock_client_config_is_a_single_botocore_attempt(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _fresh_bedrock_client(monkeypatch)
+    # botocore rewrites the retries dict into total_max_attempts at client
+    # build; 1 means the initial request only, i.e. botocore retries nothing.
+    assert client.meta.config.retries["total_max_attempts"] == 1
+    assert client.meta.config.retries["mode"] == "standard"
+
+
+class _FakeRaw:
+    def __init__(self, body: bytes) -> None:
+        self._body = body
+
+    def stream(self, *args, **kwargs):
+        yield self._body
+
+
+def _count_raw_requests_for_500s(client, monkeypatch: pytest.MonkeyPatch, retry_count: int) -> int:
+    """Answer every HTTP send with a 500 InternalServerException and return
+    how many raw requests the client + _call_with_retry made in total."""
+    from botocore.awsrequest import AWSResponse
+
+    sent: list[str] = []
+
+    def fake_send(request, **kwargs):
+        sent.append(request.url)
+        return AWSResponse(
+            request.url, 500, {"x-amzn-errortype": "InternalServerException"},
+            _FakeRaw(b'{"message": "boom"}'),
+        )
+
+    client.meta.events.register("before-send.bedrock-runtime.Converse", fake_send)
+    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
+    with pytest.raises(ClientError):
+        retry._call_with_retry(
+            lambda: client.converse(modelId="m", messages=[]), retry_count=retry_count
+        )
+    return len(sent)
+
+
+@pytest.mark.parametrize("retry_count", [0, 2, 3])
+def test_raw_request_count_is_retry_count_plus_one(
+    monkeypatch: pytest.MonkeyPatch, retry_count: int
+) -> None:
+    client = _fresh_bedrock_client(monkeypatch)
+    assert _count_raw_requests_for_500s(client, monkeypatch, retry_count) == retry_count + 1
+
+
+@pytest.mark.parametrize(
+    "exc_name", ["ConnectTimeoutError", "ReadTimeoutError", "EndpointConnectionError"]
+)
+def test_call_with_retry_retries_transport_errors_botocore_no_longer_retries(
+    monkeypatch: pytest.MonkeyPatch, exc_name: str
+) -> None:
+    """With botocore held to one attempt, connect/read timeouts and dropped
+    connections must be retried by _call_with_retry, else they regress to a
+    first-attempt failure."""
+    import botocore.exceptions as bexc
+
+    monkeypatch.setattr(retry.time, "sleep", lambda s: None)
+    calls: list[int] = []
+
+    def flaky() -> str:
+        calls.append(1)
+        if len(calls) <= 2:
+            raise getattr(bexc, exc_name)(endpoint_url="u")
+        return "ok"
+
+    result, _ = retry._call_with_retry(flaky, retry_count=3)
+    assert result == "ok"
+    assert len(calls) == 3

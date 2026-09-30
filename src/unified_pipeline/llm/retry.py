@@ -46,8 +46,15 @@ BEDROCK_OUTAGE_CODES = frozenset({
 # try/except ImportError fallback here could never actually trigger and was
 # dead defensive code (PR #620 review).
 from botocore.exceptions import ClientError as _BotoClientError
+from botocore.exceptions import ConnectionError as _BotoConnectionError
+from botocore.exceptions import HTTPClientError as _BotoHTTPClientError
 
-RETRYABLE_ERRORS = (_BotoClientError,)
+# _call_with_retry is the single retry owner (#632): the Bedrock client is
+# configured for one botocore attempt, so the transport-level failures botocore
+# used to retry itself (connect/read timeouts, dropped connections -- exactly
+# the classes botocore's standard-mode TransientRetryableChecker retries) must
+# be retried here or they would become a first-attempt failure.
+RETRYABLE_ERRORS = (_BotoClientError, _BotoConnectionError, _BotoHTTPClientError)
 
 T = TypeVar("T")
 
@@ -122,17 +129,6 @@ def _get_llm_timeout_seconds() -> float:
     are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS.
     """
     return _get_llm_config_float("CVICHE_LLM_TIMEOUT_SECONDS", default=180.0)
-
-
-def _get_llm_max_attempts() -> int:
-    """Total botocore attempts (initial + retries) for Bedrock calls.
-
-    botocore's standard retry mode retries connect/read timeouts and
-    throttling up to this many attempts, then raises -- so a persistently
-    wedged Bedrock endpoint fails deterministically instead of hanging.
-    Tune via CVICHE_LLM_MAX_ATTEMPTS.
-    """
-    return _get_llm_config_int("CVICHE_LLM_MAX_ATTEMPTS", default=3)
 
 
 def _get_outage_budget_seconds() -> float:
