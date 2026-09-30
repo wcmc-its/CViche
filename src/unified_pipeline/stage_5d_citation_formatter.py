@@ -28,6 +28,7 @@ from datetime import datetime
 from typing import NamedTuple
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
 
 logger = logging.getLogger(__name__)
@@ -220,8 +221,7 @@ def call_llm_formatter(raw_content: str) -> tuple:
             stage="stage_5d",
             messages=messages,
             temperature=0.2,
-            response_format={"type": "json_object"},
-            max_tokens=8000
+            response_format={"type": "json_object"}
         )
 
         result_text = llm_result["content"]
@@ -241,6 +241,8 @@ def call_llm_formatter(raw_content: str) -> tuple:
 
         return result_text, usage
 
+    except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+        raise
     except Exception as e:
         # call_llm_formatter can run on a pool thread (#881 step 6), so this
         # log call is the only trace a swallowed batch (#810) leaves in the

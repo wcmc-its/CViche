@@ -33,6 +33,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Indent width the normalization prompts ask for: [H2] = 2 spaces, [H3] = 4.
+OUTLINE_INDENT_WIDTH = 2
+
+_OUTLINE_LINE_RE = re.compile(r'\[H([123])\]\s+(.+)')
+
 
 # ============================================================================
 # Helper: Extract All Paragraphs (Including Tables)
@@ -1273,6 +1278,22 @@ No commentary."""
         return headers
 
 
+def _llm_dropped_indentation(lines: list[str]) -> bool:
+    """True when no outline line is indented, so the [Hn] tags are the only signal.
+
+    The chunked extractor feeds the normalizer an unindented list, and the
+    model sometimes echoes that format back with correct [H2]/[H3] tags but
+    zero indentation. Indentation is the parser's nesting signal, so without
+    this fallback every header collapses to H1 (#526). Any indented line
+    means the model did indent, so its indentation stays authoritative. An
+    all-[H1] reply maps to indent 0 either way, so it needs no special case.
+    """
+    return not any(
+        line.startswith((' ', '\t')) and _OUTLINE_LINE_RE.match(line.lstrip())
+        for line in lines
+    )
+
+
 def parse_normalized_hierarchy(corrected_text: str, original_headers: list[dict]) -> list[dict]:
     """
     Parse the GPT-corrected hierarchy text back into our data structure.
@@ -1290,6 +1311,8 @@ def parse_normalized_hierarchy(corrected_text: str, original_headers: list[dict]
                 map_headers(h['children'])
     map_headers(original_headers)
 
+    tags_are_only_signal = _llm_dropped_indentation(lines)
+
     # Parse the corrected structure
     result = []
     stack = [(result, -1)]  # (current_list, indent_level)
@@ -1303,10 +1326,14 @@ def parse_normalized_hierarchy(corrected_text: str, original_headers: list[dict]
         indent = len(line) - len(stripped)
 
         # Extract level and text
-        import re
-        match = re.match(r'\[H([123])\]\s+(.+)', stripped)
+        match = _OUTLINE_LINE_RE.match(stripped)
         if not match:
             continue
+
+        if tags_are_only_signal:
+            # The LLM echoed the flat input format with no indentation at all,
+            # so the [Hn] tag is the only nesting signal left (#526).
+            indent = (int(match.group(1)) - 1) * OUTLINE_INDENT_WIDTH
 
         # Derive level from indentation depth, NOT from LLM's level tag
         # The LLM sometimes outputs wrong level tags (e.g., [H1] with 2-space indent)
@@ -1728,6 +1755,20 @@ def build_hierarchy_from_classifications(
 # MAIN PIPELINE
 # ============================================================================
 
+def _write_hierarchy(f, nodes: list[dict], depth: int = 0) -> None:
+    """Write ``[LEVEL] text`` lines, indented two spaces per depth, to ``f``.
+
+    Iterative pre-order walk so a deep header chain cannot hit the recursion limit.
+    """
+    stack = [(node, depth) for node in reversed(nodes)]
+    while stack:
+        node, d = stack.pop()
+        f.write(f"{'  ' * d}[{node['level']}] {node['text']}\n")
+        children = node.get('children')
+        if children:
+            stack.extend((child, d + 1) for child in reversed(children))
+
+
 def segment_cv_with_signatures(docx_path: str, output_path: str | None = None) -> dict:
     """
     Complete signature-based segmentation pipeline.
@@ -1884,15 +1925,7 @@ def segment_cv_with_signatures(docx_path: str, output_path: str | None = None) -
         f.write("INFERRED HEADER HIERARCHY:\n")
         f.write("-" * 80 + "\n\n")
 
-        def write_hierarchy(nodes, depth=0):
-            for node in nodes:
-                indent = "  " * depth
-                level_marker = f"[{node['level']}]"
-                f.write(f"{indent}{level_marker} {node['text']}\n")
-                if node.get('children'):
-                    write_hierarchy(node['children'], depth + 1)
-
-        write_hierarchy(hierarchy)
+        _write_hierarchy(f, hierarchy)
 
         f.write("\n" + "=" * 80 + "\n")
         f.write("SIGNATURE GROUPS SUMMARY:\n")

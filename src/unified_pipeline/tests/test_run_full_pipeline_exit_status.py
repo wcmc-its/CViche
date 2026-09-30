@@ -89,6 +89,34 @@ def _configure_cli_logging_keeping_pytests_handlers():
             root.addHandler(handler)
 
 
+def _enter_tmp_repo(tmp_path, monkeypatch):
+    """Run from an empty directory whose outputs tree is its own.
+
+    The CLI anchors _OUTPUTS_ROOT on the script's location (#490), so chdir
+    alone no longer isolates a test from the real repo's outputs. Pinning the
+    root back to the cwd-relative spelling keeps every artifact under tmp_path.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(run_full_pipeline, '_OUTPUTS_ROOT', _OUT)
+
+
+def _repo_outputs_snapshot():
+    """Every path under the real repo outputs tree (a worktree's is a symlink
+    to the shared corpus farm), so a test can prove it wrote nothing there."""
+    root = _ROOT / 'src' / 'unified_pipeline' / 'outputs'
+    return sorted(os.path.join(d, n) for d, dirs, files in os.walk(root, followlinks=True)
+                  for n in dirs + files)
+
+
+@pytest.fixture(scope='module', autouse=True)
+def nothing_in_this_module_writes_the_real_outputs_tree():
+    """#490: the CLI's root is script-anchored, so chdir no longer isolates a
+    test. Any test here that forgets to redirect it lands in the real tree."""
+    before = _repo_outputs_snapshot()
+    yield
+    assert _repo_outputs_snapshot() == before
+
+
 def _result(stage, **kwargs):
     return StageResult(stage=stage, **kwargs)
 
@@ -333,7 +361,7 @@ def _run_main_streams(tmp_path, monkeypatch, capsys, fail=(), stage5b_writer=Non
     stale artifact from a previous run. ``make_docx=False`` leaves the source
     document off disk, for the stages that never open it.
     """
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     (tmp_path / 'data/sample_cvs/word').mkdir(parents=True)
     if make_docx:
         (tmp_path / _DOCX).write_bytes(b'PK\x03\x04fake')
@@ -422,7 +450,7 @@ def test_a_rerun_that_succeeds_clears_the_stage_error(tmp_path, monkeypatch, cap
     from unified_pipeline.stage_errors import read_stage_errors
     _run_main(tmp_path, monkeypatch, capsys, fail={'4'})
     assert [e.stage for e in read_stage_errors(tmp_path / _STAGE_ERRORS)] == ['4']
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     capsys.readouterr()
     _install_stubs(monkeypatch, _Calls(), set(), None, None, tmp_path)
     assert run_full_pipeline.main() == 0
@@ -435,7 +463,7 @@ def test_a_rerun_that_skips_a_stage_keeps_its_earlier_failure(tmp_path, monkeypa
     run whose stage 4 still has not produced output."""
     from unified_pipeline.stage_errors import read_stage_errors
     _run_main(tmp_path, monkeypatch, capsys, fail={'4'})
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     capsys.readouterr()
     _install_stubs(monkeypatch, _Calls(), {'3b'}, None, None, tmp_path)
     run_full_pipeline.main()
@@ -498,7 +526,7 @@ def test_a_stage_1a_failure_skips_everything_downstream(tmp_path, monkeypatch, c
     ("4.5", "4"), ("5", "4"), ("5b", "4"), ("5c", "4"), ("5d", "4"), ("6", "4"),
 ])
 def test_every_stage_names_its_missing_prerequisite(stage, prerequisite, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     ok, missing_file, required_stage = run_full_pipeline.check_prerequisites(stage, UID)
     assert ok is False, f"--stage {stage} validated nothing with an empty outputs tree"
     assert required_stage == prerequisite
@@ -513,6 +541,85 @@ def test_the_dependency_registry_covers_every_stage():
         if stage == '3':
             continue  # the --stage 3 alias has no output of its own
         assert stage in paths, f"no expected output path for stage {stage}"
+
+
+# -- #490: output paths do not depend on the launch directory ----------------
+# Mutant that kills these: _OUTPUTS_ROOT = Path('src/unified_pipeline/outputs')
+# (the cwd-relative spelling), or the literal path back in _stage_1a.
+
+_SCRIPT_DIR = Path(run_full_pipeline.__file__).resolve().parent
+
+
+def test_output_paths_stay_under_the_repo_from_any_launch_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    paths = run_full_pipeline.get_output_paths(UID)
+    for stage, path in paths.items():
+        assert path.is_absolute(), f"stage {stage} path follows the cwd: {path}"
+        assert _SCRIPT_DIR in path.parents, f"stage {stage} left the repo: {path}"
+        assert tmp_path not in path.parents
+
+
+def test_the_outputs_root_is_not_resolved_through_a_worktree_symlink(tmp_path):
+    """A worktree symlinks src/unified_pipeline/outputs at a shared farm; only
+    the script's own directory may be resolved, or the farm link is bypassed.
+
+    Built for real: a copy of the script under a tmp repo whose outputs dir is
+    a symlink, run in a subprocess, so the root must keep the link.
+
+    Mutant that kills this: `.resolve()` on the joined outputs path.
+    """
+    farm = tmp_path / 'farm'
+    farm.mkdir()
+    repo = tmp_path / 'repo'
+    (repo / 'src' / 'unified_pipeline').mkdir(parents=True)
+    (repo / 'src' / 'unified_pipeline' / 'outputs').symlink_to(farm)
+    script = repo / 'run_full_pipeline.py'
+    script.write_text((_SCRIPT_DIR / 'run_full_pipeline.py').read_text())
+    probe = ('import sys; sys.path.insert(0, %r); '
+             'import run_full_pipeline as r; print(r._OUTPUTS_ROOT)' % str(_SCRIPT_DIR / 'src'))
+
+    proc = subprocess.run([sys.executable, '-c', probe], cwd=repo, capture_output=True,
+                          text=True, timeout=120,
+                          env={**os.environ, 'PYTHONPATH': str(repo)})
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    root = Path(proc.stdout.strip().splitlines()[-1])
+    assert root == repo.resolve() / 'src' / 'unified_pipeline' / 'outputs'
+    assert root.is_symlink() and root.resolve() == farm.resolve()
+
+
+def test_the_stage_error_record_is_under_the_anchored_root_not_the_cwd(tmp_path, monkeypatch):
+    """Mutant that kills this: stage_errors_path(Path('src/unified_pipeline/outputs'), ...)
+    (the cwd-relative spelling) in the failure recorder."""
+    launch_dir, root = tmp_path / 'elsewhere', tmp_path / 'root'
+    launch_dir.mkdir()
+    monkeypatch.chdir(launch_dir)
+    monkeypatch.setattr(run_full_pipeline, '_OUTPUTS_ROOT', root)
+    ctx = run_full_pipeline.PipelineContext(cv_path=Path(f'{UID}.docx'), document_uid=UID)
+
+    def _crash(_ctx):
+        raise RuntimeError('boom')
+
+    run_full_pipeline.run_stage(ctx, '4', _crash)
+
+    assert (root / 'stage_errors' / f'{UID}_stage_errors.json').is_file()
+    assert list(launch_dir.iterdir()) == [], "the stage-error record followed the cwd"
+
+
+def test_stage_1a_writes_under_the_outputs_root_not_the_cwd(tmp_path, monkeypatch):
+    launch_dir, root = tmp_path / 'elsewhere', tmp_path / 'root'
+    launch_dir.mkdir()
+    monkeypatch.chdir(launch_dir)
+    monkeypatch.setattr(run_full_pipeline, '_OUTPUTS_ROOT', root)
+    monkeypatch.setattr(run_full_pipeline, 'get_cv_hierarchy_chunked',
+                        lambda *, cv_path: ([], {'extraction_cost': 0}))
+    ctx = run_full_pipeline.PipelineContext(cv_path=Path(f'{UID}.docx'), document_uid=UID)
+
+    result = run_full_pipeline._stage_1a(ctx)
+
+    assert Path(result.output_file) == root / 'stage_1a_segmentation' / f'{UID}_segmented.json'
+    assert Path(result.output_file).is_file()
+    assert list(launch_dir.iterdir()) == [], "stage 1a wrote into the launch directory"
 
 
 # -- r3960618825 / r3965516071: stage 4 gets the resolved path ---------------
@@ -849,14 +956,37 @@ def test_the_reported_total_cost_matches_the_stage_lines(tmp_path, monkeypatch, 
 # -- r3960726469 #7: the OS-level exit status -------------------------------
 
 
+# A driver rather than the script: the outputs root is anchored on the script's
+# own location (#490), so cwd=tmp_path alone would write into the real repo
+# tree. Redirecting it needs a hook before main(); the driver takes the same
+# route the stdout-contract harness does, and repeats __main__'s two calls
+# (the `sys.exit(main())` wire is pinned structurally by
+# test_entrypoint_propagates_the_return_value_to_the_exit_status). Chosen over
+# an env-var override so production gains no new configuration surface.
+_CLI_DRIVER = '''
+import sys
+sys.path.insert(0, {root!r})
+sys.argv = ["run_full_pipeline.py", *{args!r}]
+import run_full_pipeline as r
+r._OUTPUTS_ROOT = r.Path('src/unified_pipeline/outputs')  # under the cwd (#490)
+r.configure_cli_logging()
+sys.exit(r.main())
+'''
+
+
 def _run_cli(tmp_path, *args):
-    """Run the real CLI as a subprocess, with every LLM credential stripped from
-    its environment so it cannot reach a model even if a stage tried."""
+    """Run the CLI as a subprocess, with every LLM credential stripped from
+    its environment so it cannot reach a model even if a stage tried, and its
+    outputs root redirected under tmp_path."""
     env = {k: v for k, v in os.environ.items()
            if not (k.startswith('AWS_') or k in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY'))}
-    return subprocess.run(
-        [sys.executable, str(_ROOT / "run_full_pipeline.py"), *args],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    driver = tmp_path / 'cli_driver.py'
+    driver.write_text(_CLI_DRIVER.format(root=str(_ROOT), args=list(args)))
+    before = _repo_outputs_snapshot()
+    proc = subprocess.run([sys.executable, str(driver)],
+                          cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    assert _repo_outputs_snapshot() == before, "the subprocess wrote into the real outputs tree"
+    return proc
 
 
 def test_the_cli_exits_non_zero_as_a_subprocess(tmp_path):
@@ -981,7 +1111,7 @@ def test_resolve_cv_path_for_run_scopes_prompt_logger_to_a_hashed_id(
     """The scope id is a hash of document_uid, not document_uid itself --
     see the next test for why."""
     assert prompt_logger._current_run_id.get() is None, "leaked from another test"
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     (tmp_path / "data/sample_cvs/word").mkdir(parents=True)
     (tmp_path / _DOCX).write_bytes(b"PK\x03\x04fake")
 
@@ -1010,7 +1140,7 @@ def test_resolve_cv_path_for_run_survives_a_document_uid_too_long_for_the_regex(
     with pytest.raises(ValueError):
         prompt_logger.set_current_run_id(long_uid)
 
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
 
     def _check():
         cv_path, document_uid = run_full_pipeline.resolve_cv_path_for_run(long_uid)
@@ -1059,7 +1189,7 @@ def test_prompt_logger_resets_when_main_raises(tmp_path, monkeypatch, capsys):
     set_current_run_id() in main()'s own context.
     """
     assert prompt_logger._current_run_id.get() is None, "leaked from another test"
-    monkeypatch.chdir(tmp_path)
+    _enter_tmp_repo(tmp_path, monkeypatch)
     (tmp_path / 'data/sample_cvs/word').mkdir(parents=True)
     (tmp_path / _DOCX).write_bytes(b'PK\x03\x04fake')
 
@@ -1076,3 +1206,67 @@ def test_prompt_logger_resets_when_main_raises(tmp_path, monkeypatch, capsys):
 
     assert prompt_logger._current_run_id.get() is None, (
         "an exception left prompt_logger scoped to a finished run")
+
+
+# ---- #306: hierarchy walkers must be iterative -----------------------------------
+
+def _nested_hierarchy():
+    return [
+        {"level": "H1", "text": "A", "children": [
+            {"level": "H2", "text": "A1", "children": [{"level": "H3", "text": "A1a"}]},
+            {"level": "H2", "text": "A2", "children": []},
+        ]},
+        {"level": "H1", "text": "B"},
+        {"level": "H1", "text": "C", "children": [{"level": "H2", "text": "C1", "children": []}]},
+        {"text": "no-level"},  # level defaults to H1
+        {"level": "H2", "children": []},  # text defaults to ""
+    ]
+
+
+def _deep_chain(depth):
+    root = {"level": "H1", "text": "n0", "children": []}
+    tip = root
+    for i in range(1, depth):
+        child = {"level": "H2", "text": f"n{i}", "children": []}
+        tip["children"].append(child)
+        tip = child
+    return [root]
+
+
+def _recursive_count(nodes):
+    return len(nodes) + sum(_recursive_count(n.get("children", [])) for n in nodes)
+
+
+def _recursive_lines(nodes, depth=0):
+    out = []
+    for n in nodes:
+        out.append(f"{'  ' * depth}[{n.get('level', 'H1')}] {n.get('text', '')}")
+        out.extend(_recursive_lines(n.get("children", []), depth + 1))
+    return out
+
+
+def test_count_headers_matches_recursive_reference():
+    h = _nested_hierarchy()
+    assert run_full_pipeline._count_headers(h) == _recursive_count(h) == 9
+    assert run_full_pipeline._count_headers([]) == 0
+
+
+def test_count_headers_deep_chain_does_not_recurse():
+    assert run_full_pipeline._count_headers(_deep_chain(5000)) == 5000
+
+
+def test_hierarchy_lines_match_recursive_reference():
+    h = _nested_hierarchy()
+    assert run_full_pipeline._hierarchy_lines(h) == _recursive_lines(h)
+
+
+def test_hierarchy_lines_honours_starting_depth():
+    h = _nested_hierarchy()
+    assert run_full_pipeline._hierarchy_lines(h, depth=1) == _recursive_lines(h, depth=1)
+    assert run_full_pipeline._hierarchy_lines(h, depth=1)[0] == "  [H1] A"
+
+
+def test_hierarchy_lines_deep_chain_does_not_recurse():
+    lines = run_full_pipeline._hierarchy_lines(_deep_chain(5000))
+    assert len(lines) == 5000
+    assert lines[-1].endswith("[H2] n4999")

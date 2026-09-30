@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 # stats key counting _classify_geographic_scope LLM failures (#547).
 GEO_SCOPE_FAILURE_STAT = 'geographic_classification_failures'
 
+# stats key counting _reclassify_entry_segments LLM failures (#652).
+RECLASSIFY_FAILURE_STAT = 'segment_reclassification_failures'
+
 try:
     from docx import Document
     from docx.shared import Pt, RGBColor, Inches, Twips
@@ -171,6 +174,7 @@ from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
     PiiPassResult,
+    relocate_withheld,
     run_pii_pass,
     withheld_comment_text,
 )
@@ -200,12 +204,14 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     TeachingSection,
 )
 from unified_pipeline.stage6.sections.appendix import (
+    APPENDIX_INTRO_TEXT,
     UnmappedEntry,
     build_appendix_diversion_warnings,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 
 from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
 )
@@ -697,6 +703,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # What the #820 pre-render pass withheld this run -- set by generate();
         # empty means no notice and no comment. Per-instance, never shared.
         self._pii_result = PiiPassResult()
+        # Entry indexes whose non-withheld residual rendered in the Appendix
+        # (#848); the withheld comment names "Appendix" for their items.
+        self._appendix_withheld_entry_indexes: set[int] = set()
 
         # Content overflow tracking: entries where extraction lost significant content
         self._overflow_entries = []  # List of (entry, para, taxonomy_code) tuples
@@ -747,6 +756,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             'appendix_segments_reconsidered': 0,
             'unrendered_records_recovered': 0,
             GEO_SCOPE_FAILURE_STAT: 0,
+            RECLASSIFY_FAILURE_STAT: 0,
         }
 
     def _find_template(self, template_path: str = None) -> str:
@@ -919,7 +929,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         return cv_owner_location
 
     def _resolve_original_doc_path(
-            self, document_uid: str, original_doc_path: str | None
+            self, document_uid: str, original_doc_path: str | None,
+            discover_original_doc: bool = True,
     ) -> str | None:
         """The original document path if not already given, or None.
 
@@ -928,10 +939,15 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         `SAMPLE_CV_DIR` constant plus the process CWD, instead of a stack of
         brittle '..'/.parent chains that broke silently on any restructure.
 
-        Split out of `generate()` as a PURE move (#820 R3, §3.2): identical
-        body, no behaviour change.
+        `discover_original_doc=False` skips the guess entirely (#732): the
+        result is then exactly what the caller passed, so the render cannot
+        depend on the launch directory or checkout. Default True keeps every
+        other caller unchanged.
+
+        Split out of `generate()` as a PURE move (#820 R3, §3.2); the
+        `discover_original_doc` early return is the only addition.
         """
-        if original_doc_path:
+        if original_doc_path or not discover_original_doc:
             return original_doc_path
         possible_paths = [
             SAMPLE_CV_DIR / f"{document_uid}.docx",
@@ -1066,9 +1082,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._pii_result = run_pii_pass(
             entries_by_code, routed_codes=RENDER_ROUTED_CODES,
             section_names=TAXONOMY_TO_SECTION)
+        self._appendix_withheld_entry_indexes = set()
 
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
-                 original_doc_path: str = None) -> str:
+                 original_doc_path: str = None, discover_original_doc: bool = True) -> str:
         """
         Main entry point: Generate WCM document from pipeline output.
 
@@ -1114,7 +1131,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # are lifted out to their own helpers (#820 R3, pure moves -- §3.2):
         # identical bodies, no behaviour change.
         original_doc_path = self._resolve_original_doc_path(
-            document_uid, original_doc_path)
+            document_uid, original_doc_path, discover_original_doc)
         research_summary_data = self._load_research_summary_data(
             research_summary_path, input_path, document_uid)
 
@@ -1266,7 +1283,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         validation_issues = _merge_appendix_diversion_warnings(
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
-        all_warnings = self._section_failures + validation_issues + self._geo_scope_failure_warnings()
+        all_warnings = self._section_failures + validation_issues + self._llm_fallback_warnings()
         _log_validation_warnings(all_warnings)
 
         self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
@@ -1304,6 +1321,27 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                         "and defaulted to National; the Regional/National/"
                         "International split may be wrong"),
             "evidence": [f"{GEO_SCOPE_FAILURE_STAT}={failures}"],
+            "severity": "WARN",
+        }]
+
+    def _llm_fallback_warnings(self) -> list[dict[str, Any]]:
+        """Sidecar WARNs for every counted LLM-fallback stat (#547, #652)."""
+        return self._geo_scope_failure_warnings() + self._reclassify_failure_warnings()
+
+    def _reclassify_failure_warnings(self) -> list[dict[str, Any]]:
+        """One sidecar WARN when any appendix-entry segment reclassification
+        failed (#652), so the run doctor sees it. Empty when none failed."""
+        failures = self.stats.get(RECLASSIFY_FAILURE_STAT, 0)
+        if not failures:
+            return []
+        return [{
+            "check": RECLASSIFY_FAILURE_STAT,
+            "code": None,
+            "section": "appendix",
+            "message": (f"{failures} appendix entry reclassification(s) failed; "
+                        "those entries stayed in the appendix whole instead of "
+                        "being split and routed to their sections"),
+            "evidence": [f"{RECLASSIFY_FAILURE_STAT}={failures}"],
             "severity": "WARN",
         }]
 
@@ -2137,7 +2175,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # instead of routing to appendix.
                 if taxonomy_code.startswith('K') or taxonomy_code.startswith('L'):
                     section_header = self._get_wcm_section_header(taxonomy_code)
-                    header_idx = self._find_paragraph_with_text(section_header)
+                    header_idx = self._find_header_paragraph(section_header)
                     if header_idx is not None:
                         section_end_idx = self._find_section_end_paragraph_idx(header_idx)
                         if section_end_idx is not None:
@@ -2450,10 +2488,10 @@ Now analyze the text above:"""
                     {"role": "system", "content": "You are an expert at analyzing academic CV content and classifying it into standard CV taxonomy categories."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.3,
-                # Generous cap: a truncated segment list silently loses the
-                # trailing records (#209) — never tighten this back down.
-                max_tokens=4000
+                temperature=0.3
+                # No call-site cap: a truncated segment list silently loses the
+                # trailing records (#209); the 16K DEFAULT_MAX_TOKENS floor still
+                # bounds a runaway. Never add a tighter cap back.
             )
 
             return parse_reclassified_segments(
@@ -2461,10 +2499,17 @@ Now analyze the text above:"""
 
         except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
             raise
-        except Exception as e:
-            if self.verbose:
-                logger.warning(f"  Warning: LLM reclassification failed: {e}")
+        except Exception:
+            self._record_reclassify_failure()
             return None
+
+    def _record_reclassify_failure(self) -> None:
+        """Log and count one reclassification failure. Never gated on
+        verbose (#652): production runs are not verbose, and an LLM outage
+        would otherwise leave every appendix entry unsplit with no record."""
+        logger.warning("LLM reclassification failed; entry stays in "
+                       "the appendix unsplit", exc_info=True)
+        self.stats[RECLASSIFY_FAILURE_STAT] += 1
 
     def _insert_reconsidered_segment(self, text: str, taxonomy_code: str,
                                      comment: str = None) -> bool:
@@ -2482,7 +2527,7 @@ Now analyze the text above:"""
         # heads echo source section names and would swallow content meant for
         # the real section (the appendix always sits at document end, and
         # _fill_appendix runs before this).
-        appendix_idx = self._find_paragraph_with_text("T. APPENDIX")
+        appendix_idx = self._find_header_paragraph("T. APPENDIX")
 
         # Use precise subsection search to avoid matching main section headers
         header_idx = self._find_subsection_header(section_header,
@@ -2623,13 +2668,14 @@ Now analyze the text above:"""
             (text, code, cov) for text, code, cov in remaining
             if text and text.strip()
             and not is_template_instruction(text)
+            and not is_foreign_template_instruction(text)
             and not is_source_boilerplate(text)
         ]
         if not remaining:
             return []
 
         # Find or create the T. APPENDIX section
-        appendix_idx = self._find_paragraph_with_text("T. APPENDIX")
+        appendix_idx = self._find_header_paragraph("T. APPENDIX")
 
         if appendix_idx is None:
             # Create the appendix section
@@ -2640,10 +2686,8 @@ Now analyze the text above:"""
             run.underline = True
 
             intro_para = self.doc.add_paragraph()
-            run = intro_para.add_run(
-                "The following content from the original CV was not successfully mapped to this CV format:"
-            )
-            _set_font(run)
+            run = intro_para.add_run(APPENDIX_INTRO_TEXT)
+            _set_font(run, italic=True)
             self.doc.add_paragraph()
 
         # Add each remaining segment. The taxonomy code is an internal
@@ -2660,7 +2704,9 @@ Now analyze the text above:"""
                 # sections, never a value. Not a classification comment, so
                 # it is emitted whatever `emit_comments` says (#153).
                 self._add_word_comment(
-                    entry_para, withheld_comment_text(self._pii_result.withheld),
+                    entry_para, withheld_comment_text(relocate_withheld(
+                        self._pii_result.withheld,
+                        self._appendix_withheld_entry_indexes)),
                     author=WITHHELD_COMMENT_AUTHOR, always=True)
                 continue
             self._add_word_comment(
@@ -2908,6 +2954,9 @@ Now analyze the text above:"""
                     text = _strip_dangling_separators(text).strip()
                     if text and _squash(text) not in haystack:
                         batch.append((text, 'A', 0))
+                        index = entry.get('_pii_entry_index')
+                        if index is not None:
+                            self._appendix_withheld_entry_indexes.add(index)
                         continue
                 continue
             if not text:
@@ -3485,7 +3534,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
                emit_track_changes: bool = True, emit_comments: bool = False,
                strip_template_instructions: bool = True,
                recover_unrendered_records: bool = True,
-               original_doc_path: str | None = None) -> str:
+               original_doc_path: str | None = None,
+               discover_original_doc: bool = True) -> str:
     r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -3552,6 +3602,9 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
             by constructing its own generator, so the gate measures the
             production entry point. Without it generate() falls back to the
             SAMPLE_CV_DIR guess.
+        discover_original_doc: False renders with no source document when
+            original_doc_path is None, skipping that guess (#732). Only
+            scripts/render_gate.py passes it; default True.
 
     Returns:
         Path to generated document
@@ -3563,7 +3616,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         strip_template_instructions=strip_template_instructions,
         recover_unrendered_records=recover_unrendered_records,
     )
-    return generator.generate(input_path, output_path, original_doc_path=original_doc_path)
+    return generator.generate(input_path, output_path, original_doc_path=original_doc_path,
+                              discover_original_doc=discover_original_doc)
 
 
 def main():

@@ -87,6 +87,16 @@ def _record_total_duration(run: Run, elapsed: int, resumed: bool) -> None:
         run.total_duration_seconds = elapsed
 
 
+# run_id and document_uid become path components (output dir, input copy).
+UID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _require_safe_uid(name: str, value: str) -> str:
+    if not UID_PATTERN.fullmatch(value):
+        raise ValueError(f"Invalid {name} {value!r}: must match {UID_PATTERN.pattern}")
+    return value
+
+
 # run.error_message is shown verbatim to the (non-technical) user, so it
 # never carries str(exc): exception text can hold filesystem paths, provider
 # request ids and API detail (#592). The raw text stays in the ERROR log line
@@ -146,8 +156,16 @@ def user_facing_error(exc: BaseException, resuming: bool) -> str:
 # enabled, cancels also round-trip through Redis so a cancel received by one
 # worker/replica reaches the worker actually running the pipeline. The broker's
 # cancel ops use a sync client, so is_cancelled() stays synchronous and the
-# stage-boundary check (check_cancelled) needs no async change.
+# stage-boundary check (check_cancelled) needs no async change. Both signals
+# are only low-latency hints: the run row's status is the durable record, and
+# execute() writes "cancelled" to it if no API request already has (#591).
 _cancelled_runs: set = set()
+# Runs stopped by shutdown (stop_run_locally). Their row is failed by the drain,
+# so execute() must not record them as user cancels.
+_stopped_locally: set = set()
+# Guards both sets: cancel_run runs on request threads, is_cancelled and
+# clear_cancelled on pipeline threads (#307).
+_cancelled_lock = threading.Lock()
 _broker = None
 
 
@@ -159,15 +177,32 @@ def set_broker(broker):
 
 def cancel_run(run_id: str):
     """Signal a run to be cancelled."""
-    _cancelled_runs.add(run_id)
+    with _cancelled_lock:
+        _cancelled_runs.add(run_id)
     if _broker is not None and _broker.enabled:
         _broker.request_cancel(run_id)
 
 
+def stop_run_locally(run_id: str) -> None:
+    """Make this process's executor of ``run_id`` stop at its next cancel check.
+
+    For shutdown (#116), which fails the runs it could not drain: the flag stops
+    the run's pipeline thread at its next stage boundary and, if the process
+    somehow outlives the drain, keeps the pre-"complete" check from writing
+    complete over the failure. Deliberately not sent through the broker: the
+    Redis flag outlives this pod by CANCEL_TTL_SECONDS and would cancel a retry
+    of the same run that another pod starts inside that window.
+    """
+    with _cancelled_lock:
+        _cancelled_runs.add(run_id)
+        _stopped_locally.add(run_id)
+
+
 def is_cancelled(run_id: str) -> bool:
     """Check if a run has been cancelled (locally or via the broker)."""
-    if run_id in _cancelled_runs:
-        return True
+    with _cancelled_lock:
+        if run_id in _cancelled_runs:
+            return True
     if _broker is not None and _broker.enabled:
         return _broker.is_cancelled(run_id)
     return False
@@ -175,14 +210,68 @@ def is_cancelled(run_id: str) -> bool:
 
 def clear_cancelled(run_id: str):
     """Clear cancellation flag for a run."""
-    _cancelled_runs.discard(run_id)
+    with _cancelled_lock:
+        _cancelled_runs.discard(run_id)
+        _stopped_locally.discard(run_id)
     if _broker is not None and _broker.enabled:
         _broker.clear_cancel(run_id)
+
+
+USER_CANCEL_MESSAGE = "Cancelled by user"
 
 
 class CancelledException(Exception):
     """Exception raised when a pipeline run is cancelled."""
     pass
+
+
+# How long a timed-out stage's worker thread gets to reach its next callback
+# and unwind before the run is failed anyway (#590). Generous enough for one
+# in-flight LLM call's log/progress round trip; a thread still alive after this
+# is logged loudly, and every later callback it makes still raises.
+STAGE_WORKER_EXIT_GRACE_SECONDS = 30
+
+
+class StageAbandoned(BaseException):
+    """Raised inside a stage worker thread once its stage timed out (#590).
+
+    BaseException on purpose: stage code and the LLM retry loop wrap calls in
+    ``except Exception`` and carry on, which would swallow a cooperative stop
+    and let the thread keep working after the run was failed.
+    """
+
+
+class _StageGuard:
+    """Per-stage stop flag plus a count of live worker threads (#590).
+
+    ``stop`` is set by the orchestrator when the stage times out; the worker
+    thread notices it at its next callback (stdout sink, progress, cancel
+    check). ``wait_idle`` lets the orchestrator hold off the terminal status
+    until the thread has actually exited.
+    """
+
+    def __init__(self) -> None:
+        self.stop = threading.Event()
+        self._live = 0
+        self._cond = threading.Condition()
+
+    def enter(self) -> None:
+        with self._cond:
+            self._live += 1
+
+    def exit(self) -> None:
+        with self._cond:
+            self._live -= 1
+            self._cond.notify_all()
+
+    def raise_if_stopped(self) -> None:
+        if self.stop.is_set():
+            raise StageAbandoned("stage timed out; worker stopped at next callback")
+
+    def wait_idle(self, timeout: float) -> bool:
+        """True once no worker thread is live, False if ``timeout`` elapsed first."""
+        with self._cond:
+            return self._cond.wait_for(lambda: self._live == 0, timeout)
 
 
 def _get_stage_timeout_seconds() -> int:
@@ -298,8 +387,10 @@ class StreamingStdoutCapture:
     from the synchronous context where stage functions run.
     """
 
-    def __init__(self, orchestrator, step_number: int, event_loop: asyncio.AbstractEventLoop):
+    def __init__(self, orchestrator, step_number: int, event_loop: asyncio.AbstractEventLoop,
+                 guard: _StageGuard | None = None):
         self.orchestrator = orchestrator
+        self.guard = guard
         self.step_number = step_number
         self.event_loop = event_loop
         self.buffer = ""
@@ -323,6 +414,8 @@ class StreamingStdoutCapture:
 
     def _emit_log_sync(self, line: str):
         """Emit a log line synchronously by scheduling it on the event loop."""
+        if self.guard is not None and self.guard.stop.is_set():
+            return  # stage abandoned (#590): nothing may land after the terminal status
         try:
             future = asyncio.run_coroutine_threadsafe(
                 self.orchestrator.log(self.step_number, line, "INFO"),
@@ -343,11 +436,14 @@ class StreamingStdoutCapture:
                 self.event_loop
             )
             future.result(timeout=1.0)
-        except Exception:
-            pass  # Progress updates are less critical
+        except Exception as exc:
+            # Progress is best-effort, but a programming error must be visible.
+            logger.debug("Progress emit skipped for step %d: %s", self.step_number, exc)
 
     def write(self, text: str):
         """Capture stdout writes and stream them to the database."""
+        if self.guard is not None:
+            self.guard.raise_if_stopped()  # cooperative stop point (#590)
         if text:
             # Also write to original stdout for debugging
             if self._original_stdout:
@@ -396,12 +492,34 @@ _capture_var: contextvars.ContextVar[StreamingStdoutCapture | None] = contextvar
 )
 
 
+def _write_hierarchy(f, nodes, depth: int = 0) -> None:
+    """Write ``[LEVEL] text`` lines, indented two spaces per depth, to ``f``.
+
+    Iterative pre-order walk so a deep header chain cannot hit the recursion limit.
+    """
+    stack = [(node, depth) for node in reversed(nodes)]
+    while stack:
+        node, d = stack.pop()
+        f.write(f"{'  ' * d}[{node.get('level', 'H1')}] {node.get('text', '')}\n")
+        children = node.get('children')
+        if children:
+            stack.extend((child, d + 1) for child in reversed(children))
+
+
 class PipelineOrchestrator:
     """Orchestrates the execution of all 12 pipeline stages."""
 
     def __init__(self, run_id: str, file_path: Path, db: Session):
-        self.run_id = run_id
+        self.run_id = _require_safe_uid("run_id", run_id)
         self.file_path = file_path
+        # Output and input-copy paths are keyed by document_uid alone, so two
+        # runs sharing one would silently reuse each other's artifacts (#597).
+        # Every caller names the stored file f"{run_id}.{ext}"; enforce it.
+        self.document_uid = _require_safe_uid("document_uid", Path(file_path).stem)
+        if self.document_uid != self.run_id:
+            raise ValueError(
+                f"document_uid {self.document_uid!r} must equal run_id {self.run_id!r}"
+            )
         self.db = db
 
         # Output directory for this run (in the unified_pipeline outputs)
@@ -410,17 +528,6 @@ class PipelineOrchestrator:
         # Web interface output directory (for tracking)
         self.web_output_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
         self.web_output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Document UID extracted from filename. == run_id at every current
-        # call site: upload.py names the stored file f"{run_id}.{ext}", and
-        # restart_run() does the same with the *new* run's id (never the
-        # original's) -- see _copy_to_pipeline_input and _get_output_paths
-        # below, which key input/artifact paths off this. Review on #586
-        # raised input/artifact collision across concurrent runs sharing a
-        # document_uid; verified against every PipelineOrchestrator(...)
-        # call site that this can't currently happen. A future caller that
-        # reuses one file_path across multiple runs would reopen it.
-        self.document_uid = Path(file_path).stem
 
         # Track outputs between stages
         self.stage_outputs: dict[str, str] = {}
@@ -431,6 +538,10 @@ class PipelineOrchestrator:
         # Step number of the stage that raised, so the run-level failure handler
         # can attribute RUN_FAILED to the stage the user was watching.
         self.failed_step_number: int | None = None
+
+        # Stop flag + live-thread count for the stage being executed (#590);
+        # replaced at the start of every execute_step.
+        self._stage_guard = _StageGuard()
 
     async def log(self, step_number: int, message: str, level: str = "INFO"):
         """Log a message to database and emit via WebSocket."""
@@ -494,20 +605,21 @@ class PipelineOrchestrator:
         worker pod never sees the backend's in-process set. One SELECT per
         stage boundary is the price of not finishing a cancelled run.
         """
+        self._stage_guard.raise_if_stopped()  # stage 2's intra-stage callback (#590)
         status = self.db.execute(select(Run.status).where(Run.id == self.run_id)).scalar()
         if status == "cancelled" or is_cancelled(self.run_id):
             raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
+    def _pipeline_input_path(self) -> Path:
+        """This run's private copy of the upload: word/<run_id>/<uid>.docx."""
+        return (PARENT_DIR / 'data' / 'sample_cvs' / 'word'
+                / self.run_id / f"{self.document_uid}.docx")
+
     def _copy_to_pipeline_input(self) -> str:
-        """Copy uploaded file to pipeline input directory and return the path."""
-        # Copy to data/sample_cvs/word/ for the pipeline to find
-        input_dir = PARENT_DIR / 'data' / 'sample_cvs' / 'word'
-        input_dir.mkdir(parents=True, exist_ok=True)
-
-        dest_path = input_dir / f"{self.document_uid}.docx"
-        if not dest_path.exists():
-            shutil.copy2(self.file_path, dest_path)
-
+        """Copy the uploaded file into this run's input directory; return its path."""
+        dest_path = self._pipeline_input_path()
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.file_path, dest_path)
         return str(dest_path)
 
     def _get_output_paths(self) -> dict[str, Path]:
@@ -792,7 +904,7 @@ class PipelineOrchestrator:
             await self._notify_terminal(run, score, doctor)
 
         except CancelledException:
-            # Run was cancelled - status already updated by API endpoint
+            self._persist_cancelled()
             await self.log(0, "Pipeline cancelled by user", "WARNING")
             await event_emitter.emit(self.run_id, {"event": "RUN_CANCELLED"})
 
@@ -833,6 +945,32 @@ class PipelineOrchestrator:
                 reset_current_run_id(run_id_token)
             # Clean up cancellation flag
             clear_cancelled(self.run_id)
+
+    def _persist_cancelled(self) -> None:
+        """Record the cancel on the run row unless it is already terminal.
+
+        The API endpoint normally wrote "cancelled" first, but this does not
+        assume it did, and a shutdown stop leaves the row for the drain to
+        fail. A conditional UPDATE keeps this idempotent and never overwrites
+        another terminal status (#591).
+        """
+        with _cancelled_lock:
+            stopped_by_shutdown = self.run_id in _stopped_locally
+        if stopped_by_shutdown:
+            return
+        updated = self.db.query(Run).filter(
+            Run.id == self.run_id, Run.status == "running"
+        ).update(
+            {
+                "status": "cancelled",
+                "error_message": USER_CANCEL_MESSAGE,
+                "completed_at": datetime.now(),
+            },
+            synchronize_session=False,
+        )
+        self.db.commit()
+        if updated:
+            logger.info("Run %s marked cancelled by the orchestrator", self.run_id)
 
     def _cached_score(self):
         """Best-effort read of the run's cached quality score (or None).
@@ -940,7 +1078,7 @@ class PipelineOrchestrator:
         """Run the doctor lints and write the JSON report; returns (payload, path)."""
         from unified_pipeline.run_doctor import run_doctor
 
-        source = PARENT_DIR / 'data' / 'sample_cvs' / 'word' / f'{self.document_uid}.docx'
+        source = self._pipeline_input_path()
         payload = run_doctor(
             self.pipeline_output_dir,
             self.document_uid,
@@ -982,6 +1120,7 @@ class PipelineOrchestrator:
             await self.log(step_number, f"Starting Stage {stage_id}: {step_def.name}")
 
             start_time = _now()
+            self._stage_guard = _StageGuard()
 
             # Execute the actual stage logic, bounded by a coarse per-stage
             # wall-clock ceiling. A hung stage (e.g. a wedged provider call)
@@ -998,6 +1137,7 @@ class PipelineOrchestrator:
                 else:
                     result = await self._execute_stage_logic(stage_id, cv_path)
             except (asyncio.TimeoutError, TimeoutError) as exc:
+                await self._stop_stage_worker(step_number, stage_id)
                 raise TimeoutError(
                     f"Stage {stage_id} ({step_def.name}) timed out after "
                     f"{stage_timeout}s and was stopped."
@@ -1055,6 +1195,28 @@ class PipelineOrchestrator:
             await event_emitter.emit_step_error(self.run_id, step_number, str(e))
             raise
 
+    async def _stop_stage_worker(self, step_number: int, stage_id: str) -> None:
+        """Stop a timed-out stage's worker thread before the run goes terminal (#590).
+
+        asyncio.wait_for cancels only the awaiting task; the thread underneath
+        keeps running. Set the stop flag so it raises at its next callback, then
+        wait up to STAGE_WORKER_EXIT_GRACE_SECONDS for it to exit. If it is
+        still alive after that, say so loudly and fail the run anyway: its
+        callbacks stay dead, but artifact writes it makes itself cannot be
+        stopped without process isolation.
+        """
+        guard = self._stage_guard
+        guard.stop.set()
+        if await asyncio.to_thread(guard.wait_idle, STAGE_WORKER_EXIT_GRACE_SECONDS):
+            return
+        message = (
+            f"Stage {stage_id} worker thread is still running "
+            f"{STAGE_WORKER_EXIT_GRACE_SECONDS}s after its timeout; failing the run "
+            "anyway. Its progress and log callbacks are disabled."
+        )
+        logger.error("Run %s: %s", self.run_id, message)
+        await self.log(step_number, message, "ERROR")
+
     def _sync_prompt_logs_to_storage(
         self, since: datetime | None, step_number: int
     ) -> None:
@@ -1108,13 +1270,20 @@ class PipelineOrchestrator:
             )
 
     def _count_headers(self, nodes) -> int:
-        """Count total headers in hierarchy."""
-        count = len(nodes)
-        for node in nodes:
-            count += self._count_headers(node.get('children', []))
+        """Count total headers in hierarchy.
+
+        Iterative: a deep header chain must not hit the interpreter's recursion limit.
+        """
+        count = 0
+        stack = [nodes]
+        while stack:
+            level = stack.pop()
+            count += len(level)
+            for node in level:
+                stack.append(node.get('children', []))
         return count
 
-    def _run_with_stdout_capture_sync(self, func, step_number: int, event_loop: asyncio.AbstractEventLoop, *args, **kwargs):
+    def _run_with_stdout_capture_sync(self, func, step_number: int, event_loop: asyncio.AbstractEventLoop, guard: _StageGuard, *args, **kwargs):
         """Run a function while capturing stdout and streaming logs in real-time.
 
         This runs in a thread pool, so the event loop remains free to process log emissions.
@@ -1129,7 +1298,7 @@ class PipelineOrchestrator:
         spawned from inside func() (see core/batch_pool.map_in_order) still
         routes to this run's capture instead of falling through to real stdout.
         """
-        capture = StreamingStdoutCapture(self, step_number, event_loop)
+        capture = StreamingStdoutCapture(self, step_number, event_loop, guard)
         sys.stdout = _STDOUT_ROUTER  # idempotent; defends against anything else having swapped it
         _STDOUT_ROUTER.register(capture)
         try:
@@ -1139,6 +1308,7 @@ class PipelineOrchestrator:
             return result
         finally:
             _STDOUT_ROUTER.unregister()
+            guard.exit()  # pairs with guard.enter() in _run_with_stdout_capture (#590)
 
     async def _run_with_stdout_capture(self, func, step_number: int, *args, **kwargs):
         """Run a function in a thread pool while capturing stdout and streaming logs in real-time.
@@ -1147,9 +1317,11 @@ class PipelineOrchestrator:
         keeping the event loop free to process log emissions.
         """
         event_loop = asyncio.get_running_loop()
+        guard = self._stage_guard
+        guard.enter()  # before the thread starts, so a timeout can never miss it (#590)
         return await asyncio.to_thread(
             self._run_with_stdout_capture_sync,
-            func, step_number, event_loop, *args, **kwargs
+            func, step_number, event_loop, guard, *args, **kwargs
         )
 
     def _render_options(self) -> tuple[bool, bool, bool]:
@@ -1213,15 +1385,7 @@ class PipelineOrchestrator:
                 with open(txt_file, 'w') as f:
                     f.write(f"CV Hierarchy: {self.document_uid}\n")
                     f.write("=" * 80 + "\n\n")
-                    def write_hierarchy(nodes, depth=0):
-                        for node in nodes:
-                            indent = "  " * depth
-                            level = node.get('level', 'H1')
-                            text = node.get('text', '')
-                            f.write(f"{indent}[{level}] {text}\n")
-                            if node.get('children'):
-                                write_hierarchy(node['children'], depth + 1)
-                    write_hierarchy(hierarchy)
+                    _write_hierarchy(f, hierarchy)
 
                 cost = stats.get('extraction_cost', 0)
                 # Stage 1a returns 'extraction_input_tokens' and 'extraction_output_tokens'

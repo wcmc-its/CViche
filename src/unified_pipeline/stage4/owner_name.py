@@ -13,7 +13,7 @@ from typing import Any, NamedTuple
 from zipfile import BadZipFile
 
 from docx.opc.exceptions import PackageNotFoundError
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from unified_pipeline.core.docx_structure_extractor import extract_owner_side_channel
 from unified_pipeline.llm_client import call_llm
@@ -442,6 +442,14 @@ class _InferredLocation(BaseModel):
     country: str = ''
     confidence: float = 0.0
 
+    @field_validator("institution", "city", "state", "country", mode="before")
+    @classmethod
+    def _none_as_empty(cls, v: object) -> object:
+        # Sonnet 5 writes null for an unknown city/state where Sonnet 4.6
+        # writes "" -- the same "not known"; rejecting it failed the whole
+        # location inference (web175, 2026-09-29 A/B).
+        return "" if v is None else v
+
 
 class _LocationInferenceResponse(BaseModel):
     """Expected shape of the location-inference LLM response.
@@ -596,8 +604,7 @@ Return ONLY valid JSON, no explanation."""
                     {"role": "system", "content": "You extract location information from CV data. Return only valid JSON."},
                     {"role": "user", "content": prompt}
                 ],
-                temperature=0.1,
-                max_tokens=500
+                temperature=0.1
             )
 
             response_text = llm_result["content"].strip()

@@ -21,6 +21,7 @@ import re
 from unified_pipeline.segmentation_regression import (
     _norm,
     compute_metrics,
+    find_lost_blocks,
     lint_metrics,
 )
 
@@ -42,6 +43,24 @@ def lint_segmentation(source_lines: list[str], stage1a: dict,
                     if flag.startswith("coverage") else [])
         findings.append(_finding("segmentation", "WARN", flag, evidence))
     return findings
+
+
+def lint_table_lost(source_block_lines: list[tuple[int, str]],
+                    stage2: dict) -> list[dict]:
+    """Source tables stage 2 mostly lost, however well the rest of the
+    document covered (#815): web207 lost its whole personal-data table at
+    99.1% document coverage. One finding per run, not per table -- a run
+    whose stage 2 failed loses dozens of tables, and a per-table count
+    would double as severity (#438). Evidence is the worst table's lines."""
+    lost_blocks = find_lost_blocks(source_block_lines, stage2)
+    if not lost_blocks:
+        return []
+    worst = max(lost_blocks, key=lambda b: len(b["lost_lines"]))
+    return [_finding(
+        "table_lost", "WARN",
+        f"{len(lost_blocks)} source table(s) mostly lost; worst: "
+        f"{len(worst['lost_lines'])} of {worst['substantive_lines']} lines",
+        [line[:100] for line in worst["lost_lines"][:5]])]
 
 
 # --------------------------------------------------------------------------
@@ -145,11 +164,40 @@ def _key_matches_title(key: str, titles: set[str]) -> bool:
     return False
 
 
+def _name_words(text: object) -> list[str]:
+    return re.findall(r"[^\W\d_]+", str(text or "").lower())
+
+
+def _owner_name_words(stage4: dict | None) -> tuple[set[str], set[str]]:
+    """(every word of the stage-4 ``cv_owner`` name, the first+last words a
+    match must carry). Both empty unless the block has a first AND last name."""
+    owner = (stage4 or {}).get("cv_owner") or {}
+    first = _name_words(owner.get("first_name"))
+    last = _name_words(owner.get("last_name"))
+    if not (first and last):
+        return set(), set()
+    allowed = {*first, *last, *_name_words(owner.get("middle_name")),
+               *_name_words(owner.get("full_name"))}
+    return allowed, {first[0], last[-1]}
+
+
+def _is_owner_name(cand: str, allowed: set[str], required: set[str]) -> bool:
+    """Is this candidate the CV owner's own name (document furniture, #539)?
+    Subset by construction: a line is exempt only when every word is an
+    owner-name word or a single-letter initial AND it carries the owner's
+    first and last name; anything else keeps the baseline verdict."""
+    words = _name_words(cand)
+    return bool(required) and required <= set(words) and all(
+        w in allowed or len(w) == 1 for w in words)
+
+
 def lint_missed_headers(candidates: list[str], stage1a: dict,
-                        stage2: dict) -> list[dict]:
+                        stage2: dict, stage4: dict | None = None) -> list[dict]:
     """Header-looking source lines absent from the 1a hierarchy AND from
     every entry hierarchy path: a header demoted to content misroutes
-    everything filed under it."""
+    everything filed under it. The CV owner's own name (optional stage-4
+    ``cv_owner``) is document furniture, not a header (#539)."""
+    allowed, required = _owner_name_words(stage4)
     known = {_header_key(t) for t in _hierarchy_titles(stage1a)}
     paths = {_header_key(h) for e in stage2.get("entries", [])
              for h in (e.get("hierarchy") or [])}
@@ -183,6 +231,8 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
 
         seen.add(normed)
         if normed in titles or _key_matches_title(normed, known):
+            continue
+        if _is_owner_name(cand, allowed, required):
             continue
         findings.append(_finding(
             "missed_headers", "WARN",

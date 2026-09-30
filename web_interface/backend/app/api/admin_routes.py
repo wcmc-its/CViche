@@ -16,7 +16,7 @@ from sqlalchemy.orm import Query as SAQuery, Session, contains_eager
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
 from app.auth import require_admin, SessionEpochUnreadable
-from app.errors import not_found, validation_error
+from app.errors import conflict, internal_error, not_found, validation_error
 from app.schemas import (
     AdminStats,
     AdminUser,
@@ -29,9 +29,10 @@ from app.schemas import (
     QueueDbView,
     QueueStatsResponse,
 )
-from app.services.admin_service import get_users_with_stats, get_single_user_stats
+from app.services.admin_service import get_step_avg_seconds, get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import get_cached_score, compute_and_cache_score
-from app.services.run_service import reap_orphaned_created_runs, queue_db_view
+from app.audit_events import RUN_DELETED
+from app.services.run_service import delete_run_and_artifacts, find_run, reap_orphaned_created_runs, queue_db_view
 from app.config_loader import get_config as read_config  # a route below is named get_config
 from app.pipeline import concurrency, run_queue
 from concurrent.futures import ThreadPoolExecutor
@@ -100,6 +101,8 @@ async def get_stats(
         if durations else None
     )
 
+    step_avg_seconds = get_step_avg_seconds(db)
+
     return AdminStats(
         total_runs=total_runs,
         active_users=active_users,
@@ -107,6 +110,7 @@ async def get_stats(
         feedback_rate=round(feedback_rate, 1),
         avg_duration_seconds=avg_duration_seconds,
         p95_duration_seconds=p95_duration_seconds,
+        step_avg_seconds=step_avg_seconds,
     )
 
 
@@ -323,6 +327,40 @@ def get_queue_stats(
         logger.warning("Queue stats unavailable: %s: %s", type(e).__name__, e)
         return QueueStatsResponse(enabled=True, db=db_view, error="valkey_unavailable")
     return QueueStatsResponse(enabled=True, db=db_view, **stats)
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/admin/runs/{run_id}
+# ---------------------------------------------------------------------------
+@router.delete("/admin/runs/{run_id}", status_code=204)
+async def delete_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> None:
+    """Hard-delete one run (rows, stage artifacts, source CV, by-submitter
+    index) -- the removal path for a consent-withdrawal request (#683).
+    404 if unknown; 409 while the run is executing; 500 if storage or the DB
+    delete fails (storage is deleted first, so a retry is safe).
+
+    A 'cancelled' run is deletable: cancellation is a signal the orchestrator
+    honours at its next stage boundary and nothing acknowledges it, so a
+    just-cancelled run may still be writing for a short window (#683)."""
+    run = find_run(db, run_id)
+    if not run:
+        raise not_found("Run not found.")
+    if run.status == "running":
+        raise conflict("Run is still running; wait for it to finish before deleting.")
+
+    try:
+        objects_deleted = delete_run_and_artifacts(db, run)
+    except Exception:
+        logger.exception("Admin delete of run %s failed", run_id)
+        raise internal_error("Run deletion failed; it is safe to retry.")
+    logger.info(
+        RUN_DELETED,
+        extra={"admin": admin.email, "run_id": run_id, "objects_deleted": objects_deleted},
+    )
 
 
 # ---------------------------------------------------------------------------

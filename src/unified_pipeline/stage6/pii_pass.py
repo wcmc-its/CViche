@@ -43,7 +43,7 @@ entry dict, not this module.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -619,6 +619,9 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             entry["_pii_fragments"] = [raw_text[m.start:s.end]
                                        for m, s in zip(matches, spans)]
             entry["_pii_withheld"] = True
+            # #848: the entry's position, so the residual's rendered location
+            # (known only post-render) can be joined back to its WithheldItems.
+            entry["_pii_entry_index"] = index
             # Whether any of those extensions was refused with the label's
             # own value left uncut in the residual (#821 R3 F-D): the one
             # verdict the Appendix path cannot recompute for itself.
@@ -649,6 +652,18 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
                             WithheldItem(category, section, index))
 
     return result
+
+
+def relocate_withheld(withheld: Sequence[WithheldItem],
+                      appendix_entry_indexes: Collection[int]
+                      ) -> list[WithheldItem]:
+    """`withheld` with every item of an entry whose residual rendered in the
+    Appendix renamed to "Appendix" (#848). An item naming no entry
+    (`entry_index` None, recovered straight from the docx) keeps its label."""
+    return [
+        item._replace(section_label=APPENDIX_SECTION_LABEL)
+        if item.entry_index in appendix_entry_indexes else item
+        for item in withheld]
 
 
 def withheld_comment_text(withheld: Sequence[WithheldItem]) -> str:

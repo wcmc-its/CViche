@@ -487,7 +487,7 @@ def test_start_in_process_mode_is_untouched(client, db, monkeypatch, as_user_wit
     monkeypatch.delenv("CVICHE_DISPATCH_MODE", raising=False)
     add_task = MagicMock()
     monkeypatch.setattr(BackgroundTasks, "add_task", add_task)
-    monkeypatch.setattr(concurrency, "try_acquire_slot", lambda: True)
+    monkeypatch.setattr(concurrency, "try_acquire_slot", lambda run_id: True)
     user, _ = _seed(db)
     as_user_with_input(user)
     resp = client.post("/api/run/RUNQ01/start")
@@ -595,7 +595,7 @@ def test_start_on_terminal_run_is_still_400_in_queue_mode(client, db, fake_redis
 
 def test_start_in_queue_mode_never_acquires_a_pod_slot(client, db, fake_redis, queue_mode, monkeypatch, as_user_with_input):
     from app.pipeline import concurrency
-    monkeypatch.setattr(concurrency, "try_acquire_slot", lambda: pytest.fail("slot acquired in queue mode"))
+    monkeypatch.setattr(concurrency, "try_acquire_slot", lambda run_id: pytest.fail("slot acquired in queue mode"))
     user, _ = _seed(db)
     as_user_with_input(user)
     assert client.post("/api/run/RUNQ01/start").status_code == 202

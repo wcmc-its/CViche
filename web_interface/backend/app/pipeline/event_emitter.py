@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 # with websocket._terminal_event_for_run, which builds these same three.
 _TERMINAL_EVENTS = frozenset({"RUN_COMPLETE", "RUN_FAILED", "RUN_CANCELLED"})
 
+# Dollar fields any event may carry. Processing cost is admin-only (#1111), so
+# these are removed from every message sent to a non-admin's socket.
+_COST_KEYS = frozenset({"total_cost", "cost", "cost_delta"})
+
 
 def _stamp(event: dict) -> dict:
     """Add the fields every emitted event carries, in place.
@@ -50,6 +54,14 @@ def _stamp(event: dict) -> dict:
     event.setdefault("timestamp", datetime.now().isoformat())
     event.setdefault("event_id", uuid.uuid4().hex)
     return event
+
+
+def _without_cost(message: str) -> str:
+    """The serialized event with its _COST_KEYS removed."""
+    event = json.loads(message)
+    for key in _COST_KEYS:
+        event.pop(key, None)
+    return json.dumps(event)
 
 
 def _event_name(message: str) -> str | None:
@@ -79,6 +91,8 @@ class EventEmitter:
         # per run: two clients watching one run each need their own copy, and a
         # reconnecting client is a new socket and gets told again.
         self._terminal_delivered: set[WebSocket] = set()
+        # Sockets whose user may not see cost; _send_one strips it for them.
+        self._cost_hidden: set[WebSocket] = set()
         self._broker = broker
         self._pubsub = None
         self._subscriber_task: asyncio.Task | None = None
@@ -161,6 +175,8 @@ class EventEmitter:
                 logger.debug("Terminal event already delivered to this socket; skipping")
                 return True
             self._terminal_delivered.add(websocket)
+        if websocket in self._cost_hidden:
+            message = _without_cost(message)
         try:
             await websocket.send_text(message)
         except Exception:
@@ -196,9 +212,12 @@ class EventEmitter:
             logger.info("Direct send for run %s failed; dropping socket", run_id)
             self.disconnect(run_id, websocket)
 
-    async def connect(self, run_id: str, websocket: WebSocket):
-        """Register a new WebSocket connection."""
+    async def connect(self, run_id: str, websocket: WebSocket, *, hide_cost: bool = True):
+        """Register a new WebSocket connection. ``hide_cost`` defaults to True
+        so a caller that forgets it fails closed."""
         await websocket.accept()
+        if hide_cost:
+            self._cost_hidden.add(websocket)
         if run_id not in self.connections:
             self.connections[run_id] = set()
         self.connections[run_id].add(websocket)
@@ -208,6 +227,7 @@ class EventEmitter:
         # Drop the dedup mark with the socket, or the set grows for the life of
         # the process and a reused object could inherit another socket's mark.
         self._terminal_delivered.discard(websocket)
+        self._cost_hidden.discard(websocket)
         if run_id in self.connections:
             self.connections[run_id].discard(websocket)
             if not self.connections[run_id]:

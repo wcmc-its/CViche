@@ -1162,3 +1162,25 @@ def test_5d_empty_llm_text_with_usage_prints_no_parsed_line_and_logs_nothing(tmp
     assert serial["stage_5d"]["prompt_tokens"] == 11 * len(_MANY_CITATIONS)
     assert serial["stage_5d"]["completion_tokens"] == 7 * len(_MANY_CITATIONS)
     assert serial["stage_5d"]["total_tokens"] == 18 * len(_MANY_CITATIONS)
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_5d_llm_outage_fails_the_stage_while_other_errors_still_degrade(tmp_path, monkeypatch, workers):
+    # #810: an outage past the budget must fail the run, serial and on the
+    # pool; any other call_llm error is still swallowed to an unformatted batch.
+    from unified_pipeline.llm.retry import LLMOutageError
+
+    def flaky(**kwargs):
+        idx = _citation_index_from_prompt(kwargs["messages"][0]["content"], _MANY_CITATIONS)
+        if idx == 2:
+            raise LLMOutageError("provider down", seconds_waited=1800.0)
+        return _llm_result(json.dumps({"CIT-0001": {"formatted_citation": f"cite {idx}"}}))
+
+    input_path = _write_json(tmp_path / "in.json", _many_citations_input("OUTAGE5D"))
+    monkeypatch.setattr(s5d, "call_llm", flaky)
+    with pytest.raises(LLMOutageError):
+        s5d.run_stage_5d(input_path, output_path=str(tmp_path / "out.json"),
+                         verbose=False, batch_size=1, workers=workers)
+
+    monkeypatch.setattr(s5d, "call_llm", lambda **kw: (_ for _ in ()).throw(RuntimeError("connection reset")))
+    assert s5d.call_llm_formatter("raw") == (None, None)

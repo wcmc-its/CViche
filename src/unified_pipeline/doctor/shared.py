@@ -91,10 +91,20 @@ def _output_section_header(text: str) -> str | None:
     return None
 
 
+# Whether a lint ran, or why not (#750). Consumers read this field instead of
+# parsing "skipped: missing ..." out of the human-readable message.
+STATUS_RAN = "ran"
+STATUS_SKIPPED = "skipped"          # an input artifact is absent
+STATUS_UNREADABLE = "unreadable"    # an input artifact exists but won't load
+FINDING_STATUSES = (STATUS_RAN, STATUS_SKIPPED, STATUS_UNREADABLE)
+
+
 def _finding(lint: str, severity: str, message: str,
-             evidence: list[str] | None = None) -> dict:
+             evidence: list[str] | None = None, *,
+             status: str = STATUS_RAN, reason: str = "") -> dict:
+    """`reason` names the input artifact(s) behind a skip; empty when ran."""
     return {"lint": lint, "severity": severity, "message": message,
-            "evidence": evidence or []}
+            "evidence": evidence or [], "status": status, "reason": reason}
 
 
 def _magnitude_severity(observed: float, threshold: float) -> str:

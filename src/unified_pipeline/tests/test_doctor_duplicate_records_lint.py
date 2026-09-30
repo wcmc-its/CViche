@@ -708,6 +708,17 @@ def test_record_rendered_accepts_a_reformatted_same_year_or_undated_line():
     assert _record_rendered(_RECORD_2019, "", undated) is True
 
 
+def test_record_rendered_cjk_line_is_unverifiable_not_absent():
+    """#722: CJK is excluded from the token check (no word boundaries, floor
+    never measured), so a CJK record absent from the output is None, not a
+    False that lint 8 would report as a dropped record. Latin absence stays
+    False. Invented text."""
+    out = _rendered_lines([("p", "Completely unrelated Cardiology Blorvane line")])
+    cjk = "2015年4月 東京大学医学部附属病院 循環器内科 准教授として心不全の臨床研究に従事"
+    assert _record_rendered(cjk, "", out) is None
+    assert _record_rendered(_RECORD_2019, "", out) is False
+
+
 def test_record_rendered_farm_case_different_course_with_the_same_title_words():
     """T1.5, the farm's own instance (2054_Opresko_Cv): a 2008 course record
     was vouched for by the CV's 2006 course line, which shares 4 of its 5
@@ -744,3 +755,21 @@ def test_record_rendered_ignores_tokens_ubiquitous_in_the_output():
     assert _record_rendered(record, "", out) is False
     short = "Bostwick S, Weill Cornell Medicine. Sleep apnea."
     assert _record_rendered(short, "", out) is None
+
+
+def test_passage_key_keeps_non_ascii_letters_and_ascii_unchanged():
+    """#541: non-ASCII letters no longer fold to whitespace; ASCII keys are
+    byte-identical to the old [^a-z0-9] fold."""
+    from unified_pipeline.doctor.lints.render import _passage_key
+    assert _passage_key("1. Zoë Brändström, Иван") == "zoe brandstrom иван"
+    assert _passage_key("• Plain_text: A-B (2019)") == "plain text a b 2019"
+
+
+def test_name_tokens_are_unicode_aware_and_split_on_underscore():
+    """#541: Cyrillic/Greek names produce tokens (the ASCII regex gave an
+    empty set); '_' still separates, as in the old [a-z0-9]+."""
+    from unified_pipeline.doctor.lints.render import _name_tokens
+    assert _name_tokens("1. Иван Петров") == {"иван", "петров"}
+    assert _name_tokens("Ελένη Παπαδοπούλου") == {"ελενη", "παπαδοπουλου"}
+    assert _name_tokens("Zoë Brändström") == {"zoe", "brandstrom"}
+    assert _name_tokens("ab_cd ef") == {"ab", "cd", "ef"}

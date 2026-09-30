@@ -181,7 +181,7 @@ class _PassthroughProbe(PassthroughSection):
         self.bullets: list[str] = []
         self._table = table
 
-    def _find_paragraph_with_text(self, text):
+    def _find_header_paragraph(self, text):
         return 0
 
     def _find_table_after_paragraph(self, idx):
@@ -261,7 +261,7 @@ class _MentoringProbe(MentoringSection):
     def _find_paragraph_exact(self, text):
         return 0 if text == "MENTORING" else None
 
-    def _find_paragraph_with_text(self, text):
+    def _find_header_paragraph(self, text):
         return None
 
     def _find_table_after_paragraph(self, idx):

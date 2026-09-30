@@ -605,6 +605,17 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
+def can_see_cost(user: User) -> bool:
+    """Processing cost is admin-only (#1111). The UI hides it by role too; the
+    API withholding it is what keeps it out of the network tab."""
+    return user.role == "admin"
+
+
+def visible_cost(user: User, cost: float | None) -> float | None:
+    """A dollar figure as this user may see it: the value, or None."""
+    return (cost or 0.0) if can_see_cost(user) else None
+
+
 def require_admin(user: User = Depends(get_current_user)) -> User:
     if user.role != "admin":
         raise HTTPException(

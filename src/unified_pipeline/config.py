@@ -61,7 +61,7 @@ WEB_OUTPUT_BASE = PROJECT_ROOT / "web_interface" / "outputs"
 # DEFAULT_MODEL is only calculate_cost()'s pricing fallback, used when that
 # YAML is absent/malformed (get_stage_config layer 1) or a caller omits
 # `model` (calculate_cost, _model_io_rates).
-DEFAULT_MODEL = "us.anthropic.claude-sonnet-4-6"
+DEFAULT_MODEL = "us.anthropic.claude-sonnet-5"
 
 # LLM API pricing (per 1M tokens) -- nested by provider
 PRICING = {
@@ -77,6 +77,10 @@ PRICING = {
         "anthropic.claude-sonnet-4-6": {
             "input": 3.300,
             "output": 16.500,
+        },
+        "anthropic.claude-sonnet-5": {
+            "input": 2.200,
+            "output": 11.000,
         },
         "anthropic.claude-haiku-4-5": {
             "input": 1.100,
@@ -294,6 +298,13 @@ COST_ESTIMATE_ANCHOR_RATE = 0.111375
 COST_ESTIMATE_ANCHOR_MODEL = ("bedrock", "anthropic.claude-sonnet-4-6")
 # Fraction of pipeline LLM tokens that are input (prompts/schemas dominate).
 COST_ESTIMATE_INPUT_SHARE = 0.8
+# Tokens a model's tokenizer spends on the same text, relative to the anchor
+# model's, as (input, output). A list-price ratio alone would quote Sonnet 5
+# 33% cheaper; the 10-CV A/B (docs/adr/0001) measured 1.43x input / 1.20x
+# output tokens and a real saving of ~16%. Models absent here are 1.0.
+COST_ESTIMATE_TOKEN_INFLATION = {
+    "anthropic.claude-sonnet-5": (1.43, 1.20),
+}
 
 
 def _blended_price_per_million(provider: str, model: str) -> float:
@@ -306,8 +317,9 @@ def _blended_price_per_million(provider: str, model: str) -> float:
                or provider_pricing.get(_normalize_model_id(model)))
     if not pricing:
         return 0.0
-    return (COST_ESTIMATE_INPUT_SHARE * pricing["input"] +
-            (1 - COST_ESTIMATE_INPUT_SHARE) * pricing["output"])
+    in_x, out_x = COST_ESTIMATE_TOKEN_INFLATION.get(_normalize_model_id(model), (1.0, 1.0))
+    return (COST_ESTIMATE_INPUT_SHARE * pricing["input"] * in_x +
+            (1 - COST_ESTIMATE_INPUT_SHARE) * pricing["output"] * out_x)
 
 
 def estimate_cost_per_1k_doc_tokens(model: str = None, provider: str = None) -> float:
@@ -374,12 +386,14 @@ COST_ESTIMATE_OTHER_STAGES_OUTPUT_SHARE = 0.05   # non-3b output tokens / non-3b
 
 
 def _model_io_rates(provider: str, model: str) -> tuple:
-    """(input, output) USD per 1M tokens for a model, with the Bedrock default
-    model's pricing as fallback."""
+    """Effective (input, output) USD per 1M anchor-tokenizer tokens for a model,
+    for the cost estimators only: list rates times COST_ESTIMATE_TOKEN_INFLATION.
+    Falls back to the Bedrock default model's pricing."""
     provider_pricing = PRICING.get(provider, PRICING.get("bedrock", {}))
     lookup = model if model in provider_pricing else _normalize_model_id(model)
     pricing = provider_pricing.get(lookup) or PRICING["bedrock"][_normalize_model_id(DEFAULT_MODEL)]
-    return pricing["input"], pricing["output"]
+    in_x, out_x = COST_ESTIMATE_TOKEN_INFLATION.get(_normalize_model_id(model), (1.0, 1.0))
+    return pricing["input"] * in_x, pricing["output"] * out_x
 
 
 def estimate_run_cost_usd(text_char_count: int, model: str = None,
@@ -424,6 +438,7 @@ def estimate_run_cost_usd(text_char_count: int, model: str = None,
 # Human-readable names for known model IDs, used by the web UI.
 _FRIENDLY_MODEL_NAMES = {
     "anthropic.claude-sonnet-4-6": "Claude Sonnet 4.6",
+    "anthropic.claude-sonnet-5": "Claude Sonnet 5",
     "anthropic.claude-haiku-4-5": "Claude Haiku 4.5",
     "anthropic.claude-haiku-4-5-20251001-v1:0": "Claude Haiku 4.5",
     "anthropic.claude-opus-4-7": "Claude Opus 4.7",
@@ -541,7 +556,7 @@ def reload_config():
 # web_interface/backend and `from app.config_loader import get_config`,
 # coupling LLM infrastructure to the web app's package layout (#620 review).
 # The yaml layer is live in deployment -- buildspec.yaml writes
-# CVICHE_LLM_TIMEOUT_SECONDS / CVICHE_LLM_MAX_ATTEMPTS into the ConfigMap's
+# CVICHE_LLM_TIMEOUT_SECONDS into the ConfigMap's
 # `llm:` block (auth_config.yaml) -- so a bare os.environ.get() would
 # silently drop that layer and regress prod.
 

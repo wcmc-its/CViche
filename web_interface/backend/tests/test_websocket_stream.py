@@ -230,10 +230,13 @@ def test_store_outage_at_upgrade_closes_1013(client, db, seed_simple_mode, monke
     assert exc.code == 1013
 
 
-def test_authorized_socket_receives_the_terminal_replay(client, db, seed_simple_mode, idle_store):
+@pytest.mark.parametrize("role, expected_cost", [("admin", 1.25), ("user", None)])
+def test_authorized_socket_receives_the_terminal_replay(
+        client, db, seed_simple_mode, idle_store, role, expected_cost):
     """Happy path: an authenticated owner gets an open socket, and the run's
-    terminal status is replayed to it on connect."""
-    user = _make_user(db)
+    terminal status is replayed to it on connect. The cost in it reaches an
+    admin only (#1111)."""
+    user = _make_user(db, role=role)
     _make_run(db, "DONE01", user.id, status="complete", total_cost=1.25, total_tokens=42)
     _authenticate(client, db, user)
 
@@ -241,7 +244,7 @@ def test_authorized_socket_receives_the_terminal_replay(client, db, seed_simple_
         message = ws.receive_json()
 
     assert message["event"] == "RUN_COMPLETE"
-    assert message["total_cost"] == 1.25
+    assert message.get("total_cost") == expected_cost
     assert message["total_tokens"] == 42
     # Stamped like every other emitted event (thread 7).
     assert message["event_id"]
@@ -491,3 +494,40 @@ def test_every_event_carries_a_distinct_event_id():
     ids = [m["event_id"] for m in socket.sent]
     assert all(ids)
     assert len(set(ids)) == 2
+
+
+def test_cost_fields_reach_only_sockets_that_may_see_cost():
+    """#1111: one run, an admin's socket and a non-admin's socket. Every cost
+    field is stripped for the non-admin; the rest of each event is intact."""
+    emitter = EventEmitter()
+    admin, user = _RecordingSocket(), _RecordingSocket()
+
+    async def scenario():
+        await emitter.connect("R1", admin, hide_cost=False)
+        await emitter.connect("R1", user, hide_cost=True)
+        await emitter.emit_step_start("R1", 1, total_cost=0.5)
+        await emitter.emit_cost_update("R1", 1, 0.1, 0.6, tokens_delta=7, total_tokens=70)
+        await emitter.emit_step_complete("R1", 1, 3, 0.6, [])
+        await emitter.emit_run_complete("R1", 0.6, 70, 3)
+
+    _run(scenario)
+
+    cost_keys = {"total_cost", "cost", "cost_delta"}
+    assert _event_names(admin) == _event_names(user)
+    assert all(cost_keys & message.keys() for message in admin.sent)
+    assert not any(cost_keys & message.keys() for message in user.sent)
+    assert user.sent[1]["total_tokens"] == 70
+
+
+def test_connect_hides_cost_unless_told_otherwise():
+    """A caller that omits hide_cost fails closed."""
+    emitter = EventEmitter()
+    socket = _RecordingSocket()
+
+    async def scenario():
+        await emitter.connect("R1", socket)
+        await emitter.emit_run_complete("R1", 0.6, 70, 3)
+
+    _run(scenario)
+
+    assert "total_cost" not in socket.sent[0]

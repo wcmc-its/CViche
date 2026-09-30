@@ -741,3 +741,33 @@ def test_compute_metrics_single_occurrence_line_still_covered():
 
     assert m["lost_lines"] == []
     assert m["text_coverage_pct"] == 100.0
+
+
+# ------------------------------------------------------------------ #541
+# _norm folds combining marks; _tokens is Unicode-aware. Invented names only.
+
+def test_norm_folds_accents_and_keeps_ascii_byte_identical():
+    assert segreg._norm("Zoë  Brändström") == "zoe brandstrom"
+    ascii_text = "Plain  ASCII\tText, 2019 (x)_y"
+    assert segreg._norm("\ufb01nal") == "final"  # NFKD compat, not NFD
+    assert segreg._norm("Epic\u2122") == "epictm"  # lower() after the fold
+    assert segreg._norm(ascii_text) == " ".join(ascii_text.split()).lower()
+
+
+def test_tokens_keep_accented_latin_words_whole():
+    assert segreg._tokens("Zoë Brändström") == {"zoe": 1, "brandstrom": 1}
+
+
+def test_tokens_produce_cyrillic_and_greek_words():
+    assert segreg._tokens("Иван Петров") == {"иван": 1, "петров": 1}
+    assert segreg._tokens("Ελένη Παπαδοπούλου") == {"ελενη": 1, "παπαδοπουλου": 1}
+
+
+def test_tokens_ascii_unchanged():
+    assert segreg._tokens("Dr. Ann-Lee 3rd_floor 2019") == {
+        "dr": 1, "ann": 1, "lee": 1, "3rd": 1, "floor": 1, "2019": 1}
+
+
+def test_norm_keeps_hangul_character_count():
+    # NFKD would triple these into jamo; the CJK floor is deferred (#722).
+    assert len(segreg._norm("김민준")) == 3

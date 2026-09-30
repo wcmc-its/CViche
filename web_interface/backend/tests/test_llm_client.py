@@ -171,6 +171,29 @@ def test_call_llm_unsupported_provider():
             call_llm("stage_2", [{"role": "user", "content": "test"}])
 
 
+def test_call_llm_propagates_config_error():
+    """An unknown stage's config error reaches the caller untouched."""
+    from unified_pipeline.llm_client import call_llm
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               side_effect=ValueError("unknown stage")):
+        with pytest.raises(ValueError, match="unknown stage"):
+            call_llm("invalid_stage", [{"role": "user", "content": "test"}])
+
+
+def test_call_llm_missing_provider_raises_keyerror():
+    """A stage config without 'provider' fails loud on the key lookup rather
+    than falling through to the unsupported-provider path."""
+    from unified_pipeline.llm_client import call_llm
+
+    config = _bedrock_config()
+    del config["provider"]
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=config):
+        with pytest.raises(KeyError, match="provider"):
+            call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+
 # ---------------------------------------------------------------------------
 # Bedrock provider (BED-01, TEST-01)
 # ---------------------------------------------------------------------------
@@ -889,6 +912,24 @@ def test_bedrock_json_schema_hard_fails_when_tool_not_used():
                      response_format=_JSON_SCHEMA_RF)
 
 
+def test_bedrock_json_schema_tool_block_without_input_hard_fails():
+    """A toolUse block that carries no `input` counts as the tool not firing."""
+    from unified_pipeline.llm_client import call_llm
+
+    resp = _make_bedrock_tool_response({})
+    del resp["output"]["message"]["content"][0]["toolUse"]["input"]
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = resp
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(RuntimeError, match="tool_input=missing"):
+            call_llm("parser_grants", [{"role": "user", "content": "x"}],
+                     response_format=_JSON_SCHEMA_RF)
+
+
 def test_bedrock_json_object_still_uses_prompt_hint_not_toolconfig():
     """json_object (non-schema) callers keep the prompt-hint path -- no
     toolConfig -- so the fallback is unchanged."""
@@ -1118,3 +1159,39 @@ def test_translate_messages_rejects_multimodal_list_content():
     ]
     with pytest.raises(NotImplementedError, match="multimodal"):
         _translate_messages([{"role": "user", "content": multimodal}])
+
+
+def _converse_kwargs_for(model):
+    """Run one plain call_llm against `model` and return the converse kwargs."""
+    from unified_pipeline.llm_client import call_llm
+
+    cfg = _bedrock_config()
+    cfg["model"] = model
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=cfg), \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = _make_bedrock_response()
+        mock_get_client.return_value = mock_client
+        call_llm("stage_2", [{"role": "user", "content": "test"}])
+        return mock_client.converse.call_args.kwargs
+
+
+@pytest.mark.parametrize("model", ["us.anthropic.claude-sonnet-5", "anthropic.claude-sonnet-5"])
+def test_bedrock_sonnet_5_omits_temperature_and_disables_thinking(model):
+    """Sonnet 5 400s on any sampling parameter and thinks unless told not to."""
+    passed = _converse_kwargs_for(model)
+    assert "temperature" not in passed["inferenceConfig"]
+    assert passed["inferenceConfig"]["maxTokens"] > 0
+    assert passed["additionalModelRequestFields"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.parametrize("model", [
+    "us.anthropic.claude-sonnet-4-6",
+    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+    "us.anthropic.claude-sonnet-5-5",
+])
+def test_bedrock_other_models_keep_temperature_and_no_thinking_field(model):
+    """Every model outside the no-sampling set keeps the old request shape."""
+    passed = _converse_kwargs_for(model)
+    assert passed["inferenceConfig"]["temperature"] == 0.0
+    assert "additionalModelRequestFields" not in passed

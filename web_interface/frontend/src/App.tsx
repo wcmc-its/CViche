@@ -6,6 +6,8 @@ import UploadPage from './components/UploadPage'
 import PipelineViewer from './components/PipelineViewer'
 import LoginPage from './components/LoginPage'
 import ConsentPage from './components/ConsentPage'
+import AppHeader from './components/AppHeader'
+import RunsPage from './components/RunsPage'
 import AdminDashboard from './components/AdminDashboard'
 import HelpPage from './components/HelpPage'
 import ErrorBoundary from './components/ErrorBoundary'
@@ -84,6 +86,16 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
+/** A signed-in page under the shared top bar. */
+function WithHeader({ children }: { children: React.ReactNode }) {
+  return (
+    <>
+      <AppHeader />
+      {children}
+    </>
+  )
+}
+
 function UploadRoute() {
   const navigate = useNavigate()
   return (
@@ -100,7 +112,7 @@ function PipelineRoute() {
   return (
     <PipelineViewer
       runId={runId}
-      onBack={() => navigate('/')}
+      onBack={() => navigate('/runs')}
       onNavigateToRun={(newRunId) => navigate(`/run/${newRunId}`)}
     />
   )
@@ -170,7 +182,7 @@ function App() {
   return (
     <BrowserRouter>
       <AuthErrorHandler />
-      <div className="min-h-screen bg-surface-muted">
+      <div className="min-h-screen">
         <RoutedErrorBoundary>
         <Routes>
           <Route
@@ -194,7 +206,21 @@ function App() {
             element={
               <RequireAuth>
                 <RequireConsent>
-                  <UploadRoute />
+                  <WithHeader>
+                    <UploadRoute />
+                  </WithHeader>
+                </RequireConsent>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/runs"
+            element={
+              <RequireAuth>
+                <RequireConsent>
+                  <WithHeader>
+                    <RunsPage />
+                  </WithHeader>
                 </RequireConsent>
               </RequireAuth>
             }
@@ -204,7 +230,9 @@ function App() {
             element={
               <RequireAuth>
                 <RequireConsent>
-                  <PipelineRoute />
+                  <WithHeader>
+                    <PipelineRoute />
+                  </WithHeader>
                 </RequireConsent>
               </RequireAuth>
             }
@@ -214,7 +242,9 @@ function App() {
             element={
               <RequireAuth>
                 <RequireConsent>
-                  <HelpPage />
+                  <WithHeader>
+                    <HelpPage />
+                  </WithHeader>
                 </RequireConsent>
               </RequireAuth>
             }
@@ -224,7 +254,9 @@ function App() {
             element={
               <RequireAuth>
                 <RequireAdmin>
-                  <AdminDashboard />
+                  <WithHeader>
+                    <AdminDashboard />
+                  </WithHeader>
                 </RequireAdmin>
               </RequireAuth>
             }

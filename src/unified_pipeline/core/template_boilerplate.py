@@ -283,6 +283,63 @@ def is_template_label_line(text: str) -> bool:
     return bool(pieces) and all(p in _INSTRUCTION_SET or p in _PROTECTED for p in pieces)
 
 
+# Instruction scaffolding of a template that is NOT the tracked WCM one (#530).
+# CViche's inputs are mostly other institutions' CVs, so there is no phrase list
+# to generate; foreign templates share a SHAPE instead. Each rule is a whole
+# line, anchored so a real entry with the same words plus anything else is kept:
+#   1. an OUTLINE-MARKED short label whose parenthetical opens with an
+#      imperative verb ("C. Academic Appointments (include institution, title
+#      and dates)"). The marker is required: without it "Attending Physician
+#      (provide inpatient consultation services)" is a real entry. The
+#      parenthetical may be unclosed: the template's own line wrapped.
+#   2. an outline-numbered label answered only "N/A" ("1. Formal Sabbatical
+#      Leave: N/A").
+#   3. the wrapped tail of an instruction: "...video media): N/A", or a line
+#      that is nothing but an imperative parenthetical "(include ...): N/A".
+#   4. a "NOTE: This section includes ..." directive that addresses the author
+#      ("you", "your", "please", "should"); an author's own note does not.
+# A bare outline label with no signal of its own ("b. National:", "2. Review
+# Panels") is NOT matched: real CVs use the same shape for their own headings.
+# A line with a table cell separator is left to `is_template_instruction`'s
+# per-cell rule. "None" is NOT a placeholder here: "Conflicts of interest:
+# None" is a real disclosure (`is_unanswered_prompt` handles it for known labels).
+_FOREIGN_MAX_LEN = 400
+_FOREIGN_LABEL_MAX = 80
+_FOREIGN_PLACEHOLDER_LABEL_MAX = 160
+_FOREIGN_OUTLINE_MARKER = r"(?:\d{1,2}|[A-Za-z]|[ivxIVX]{1,4})[.,)]"
+_FOREIGN_LABEL = r"(?:[^()\d]|\(s\))"
+_FOREIGN_VERBS = r"(?:include|list|provide|indicate|describe|specify|give|enter)"
+# "(list available upon request)" is a real line, not a directive.
+_FOREIGN_NOT_A_DIRECTIVE = r"(?!\s+(?:of|available|upon|on\s+request|below|above)\b)"
+_FOREIGN_UNANSWERED = r"(?:n/?a|not\s+applicable)"
+_FOREIGN_DIRECTIVE_OPEN = rf"\(\s*(?:please\s+)?{_FOREIGN_VERBS}\b{_FOREIGN_NOT_A_DIRECTIVE}"
+_FOREIGN_INSTRUCTION_RULES = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        rf"^{_FOREIGN_OUTLINE_MARKER}\s+{_FOREIGN_LABEL}{{3,{_FOREIGN_LABEL_MAX}}}?"
+        rf"{_FOREIGN_DIRECTIVE_OPEN}[^()]*(?:\)\s*:?\s*(?:{_FOREIGN_UNANSWERED}\.?)?)?$",
+        rf"^{_FOREIGN_OUTLINE_MARKER}\s+[^\d:]{{3,{_FOREIGN_PLACEHOLDER_LABEL_MAX}}}:\s*{_FOREIGN_UNANSWERED}\.?$",
+        rf"^[^\d:]{{3,{_FOREIGN_PLACEHOLDER_LABEL_MAX}}}\)\s*:\s*{_FOREIGN_UNANSWERED}\.?$",
+        rf"^{_FOREIGN_DIRECTIVE_OPEN}[^()]*\)\s*:?\s*(?:{_FOREIGN_UNANSWERED}\.?)?$",
+        r"^note\s*:\s*this\s+(?:section|category|table)\s+"
+        r"(?:includes?|should|is\s+for|is\s+to|lists?)\b.*\b(?:you|your|please|should)\b",
+    )
+)
+
+
+def is_foreign_template_instruction(text: str) -> bool:
+    """True if *text* is a whole line of another institution's template
+    instruction scaffolding, recognised by shape (see above). Precision-biased:
+    a protected header, a table row, or a line with anything after the closing
+    parenthesis is never matched."""
+    if not text or "|" in text:
+        return False
+    line = re.sub(r"\s+", " ", text).strip()
+    if not line or len(line) > _FOREIGN_MAX_LEN or _normalize(line) in _PROTECTED:
+        return False
+    return any(rule.match(line) for rule in _FOREIGN_INSTRUCTION_RULES)
+
+
 def filter_template_instructions(texts: list[str]) -> list[str]:
     """Convenience: return only the texts that are NOT template instructions."""
     return [t for t in texts if not is_template_instruction(t)]

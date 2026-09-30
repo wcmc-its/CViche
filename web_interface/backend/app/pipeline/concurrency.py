@@ -19,9 +19,11 @@ and memory -- is itself per-pod. Cross-pod admission would need shared state
 and only becomes meaningful once replicas > 1 (see
 docs/proposals/issue-4-redis-broker.md and concurrency-and-load-readiness.md).
 """
+import asyncio
 import logging
 import os
 import threading
+from collections import Counter
 from typing import Literal
 
 from app.config_loader import get_config
@@ -43,8 +45,16 @@ _VALID_DISPATCH_MODES: tuple[DispatchMode, ...] = ("in_process", "queue")
 # so we keep this low. Raise via env once the pod is sized larger.
 DEFAULT_MAX_CONCURRENT_RUNS = 2
 
+# How often wait_for_drain re-checks whether this pod's runs have finished.
+DRAIN_POLL_SECONDS = 5
+
+# Per-pod state, not per-run state (CODING_STANDARDS §4.1): which runs hold a
+# slot on this pod, and whether the pod is shutting down. A Counter rather than
+# a set because two concurrent starters of the same run both hold a slot until
+# the loser of claim_run_as_running releases its own.
 _lock = threading.Lock()
-_active_runs = 0
+_active_run_ids: Counter[str] = Counter()
+_draining = False
 
 
 def get_max_concurrent_runs() -> int:
@@ -60,32 +70,65 @@ def get_max_concurrent_runs() -> int:
     return value if value > 0 else DEFAULT_MAX_CONCURRENT_RUNS
 
 
-def try_acquire_slot() -> bool:
-    """Atomically reserve a run slot. Returns True if a slot was free (caller
-    must call release_slot() when the run finishes), False if the pod is at
-    capacity and the caller should reject the request."""
-    global _active_runs
+def try_acquire_slot(run_id: str) -> bool:
+    """Atomically reserve a run slot for ``run_id``. Returns True if a slot was
+    free (caller must call release_slot(run_id) when the run finishes), False
+    if the pod is at capacity or draining for shutdown and the caller should
+    reject the request."""
     max_concurrent = get_max_concurrent_runs()
     with _lock:
-        if _active_runs >= max_concurrent:
+        if _draining or _active_run_ids.total() >= max_concurrent:
             return False
-        _active_runs += 1
+        _active_run_ids[run_id] += 1
         return True
 
 
-def release_slot() -> None:
-    """Release a previously-acquired run slot. Safe to call once per successful
-    try_acquire_slot(); never drops below zero."""
-    global _active_runs
+def release_slot(run_id: str) -> None:
+    """Release a slot previously acquired for ``run_id``. Releasing a run that
+    holds no slot is a no-op, so the count never drops below zero."""
     with _lock:
-        if _active_runs > 0:
-            _active_runs -= 1
+        _active_run_ids[run_id] -= 1
+        if _active_run_ids[run_id] <= 0:
+            del _active_run_ids[run_id]
 
 
 def active_count() -> int:
     """Current number of executing runs on this pod (for diagnostics)."""
     with _lock:
-        return _active_runs
+        return _active_run_ids.total()
+
+
+def active_run_ids() -> list[str]:
+    """IDs of the runs currently holding a slot on this pod."""
+    with _lock:
+        return sorted(_active_run_ids)
+
+
+def begin_draining() -> None:
+    """Stop admitting runs on this pod: every later try_acquire_slot() returns
+    False, so a start or retry gets the normal "at capacity" 429. One-way --
+    only process shutdown calls this."""
+    global _draining
+    with _lock:
+        _draining = True
+
+
+async def wait_for_drain(budget_seconds: float, poll_seconds: float | None = None) -> list[str]:
+    """Wait until no run holds a slot on this pod, or ``budget_seconds`` pass.
+
+    Returns the IDs still running when the budget ran out (empty when the pod
+    drained in time). Sleeps on the event loop rather than blocking it, so an
+    in-flight run's streamed-log coroutines, which are scheduled onto this loop,
+    keep running during the wait.
+    """
+    poll_seconds = DRAIN_POLL_SECONDS if poll_seconds is None else poll_seconds
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + budget_seconds
+    remaining = active_run_ids()
+    while remaining and loop.time() < deadline:
+        await asyncio.sleep(min(poll_seconds, max(deadline - loop.time(), 0)))
+        remaining = active_run_ids()
+    return remaining
 
 
 def dispatch_mode() -> DispatchMode:

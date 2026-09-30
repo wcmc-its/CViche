@@ -251,11 +251,10 @@ A validator, gate or script exits non-zero when it could not do its job. "Nothin
 *Why:* `render_gate.py` (then `gate_render.py`) used to never clear its output directory and never call `sys.exit`. Re-rendering into a reused directory after a code change that crashed every render left the previous arm's files in place — a run where **all 100 CVs failed** reported `compared 100 / identical 100 / CHANGED 0 / PASS`, exit 0. Fixed in #589 (closing #584): the script now clears its output directory before every run and exits non-zero on any comparison failure or crash.
 
 **5.6 Retries live in exactly one stated layer: the LLM client, and nowhere else. [gate]**
-A stage never wraps its own retry loop around a `call_llm` call; `_call_with_retry` (`llm_client.py:230-295`) is the one place a transient LLM fault gets a second attempt.
-*Why:* true today — checked all 9 `call_llm`-calling stage modules for `for attempt in`/`retry_count=`/`@retry`/`_call_with_retry`, zero hits — but worth stating because the failure mode is cheap to introduce and expensive to notice: a stage-level retry stacked on the client's own would compound silently. It already compounds once, underneath this layer and outside this file's control: `_call_with_retry`'s own outer loop (default `retry_count=3`, so up to 4 attempts) sits on top of botocore's own internal retries on its own default (`max_attempts=3`), so one logical `call_llm()` call can cost up to 4×3=12 raw requests today, and up to 24 when a Bedrock JSON-repair cycle also fires (`llm_client.py:727-765`) — a multiplier nothing here currently documents or caps.
+A stage never wraps its own retry loop around a `call_llm` call; `_call_with_retry` (in `llm/retry.py`) is the one place a transient LLM fault gets a second attempt.
+*Why:* true today — checked all 9 `call_llm`-calling stage modules for `for attempt in`/`retry_count=`/`@retry`/`_call_with_retry`, zero hits — but worth stating because the failure mode is cheap to introduce and expensive to notice: a stage-level retry stacked on the client's own would compound silently. It used to compound underneath this layer: `_call_with_retry`'s outer loop (default `retry_count=3`) sat on top of botocore's own retries, so one logical `call_llm()` call could cost up to 4×4=16 raw requests. #632 closed that: the Bedrock client is built with `total_max_attempts=1`, so botocore makes one attempt and `_call_with_retry` alone decides on a retry. One logical call now costs at most `retry_count+1` raw requests (double that when a Bedrock JSON-repair cycle also fires), outage-class errors aside.
 *Check:* `grep -rn 'for attempt in\|retry_count=\|@retry\|_call_with_retry' src/unified_pipeline/stage_*.py` returns nothing.
-*Also:* the compounded ceiling itself — up to 12 raw requests per logical call today, 24 with a Bedrock JSON-repair cycle — is stated once, next to the code that produces it, not only in this paragraph. Neither `_call_with_retry`'s docstring nor the JSON-repair branch (`llm_client.py:727-765`) currently names the number; a provider SDK's own `max_retries`/`max_attempts` default changing is a real change to this ceiling and should be visible at the call site, not just here.
-*Check, this half:* `llm_client.py` states the current worst case as a comment or constant next to `_call_with_retry`, and it agrees with the number in this paragraph. Unmet today — no such comment exists yet. Too fiddly a shape (a product across two SDK defaults and one conditional repair branch) for an AST scan to gate on; a human re-reading both sites is the check.
+*Also:* the ceiling is stated once, next to the code that produces it (`_call_with_retry`'s docstring and the comment in `_get_bedrock_client`), and pinned by `test_raw_request_count_is_retry_count_plus_one`, which counts real HTTP sends through a real client. A provider SDK default changing is caught by that test rather than by a human re-reading two sites.
 
 **5.7 A retry is recorded, not silent. [gate — check pending]**
 An attempt count belongs in the metrics dict a stage returns, not only in a log line.
@@ -427,16 +426,16 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
 | 1.4 core does not import the web backend | 0 | 0 | ✓ |
 | 2.1 no `db.query(` in `api/` | falling | 30 | ratchet |
-| 3.x oversized-function debt (excess lines) | falling | 2129 | ratchet |
+| 3.x oversized-function debt (excess lines) | falling | 2098 | ratchet |
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 6 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 3 | ratchet |
-| 5.4 blind `except Exception` (BLE001) | falling | 91 | ratchet |
+| 5.4 blind `except Exception` (BLE001) | falling | 89 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
 | 7.1 print() in library code (T201) | falling | 676 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
 | 8.3 typing syntax (UP*, RUF013) | falling | 222 | ratchet |
-| 8.3 missing annotations (ANN*, RUF012) | falling | 529 | ratchet |
+| 8.3 missing annotations (ANN*, RUF012) | falling | 526 | ratchet |
 
 <!-- check_standards:auto:end -->
 

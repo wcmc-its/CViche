@@ -4,6 +4,7 @@ import { Clock, FileText, CheckCircle2, Loader2, XCircle, AlertCircle, ChevronDo
 import { formatRelativeDate } from '../utils'
 import { getRuns, getFeedbackStatuses } from '../api/runs'
 import ErrorBanner from './ErrorBanner'
+import { useCanSeeCost } from '../contexts/AuthContext'
 
 interface RunSummary {
   run_id: string
@@ -11,7 +12,7 @@ interface RunSummary {
   status: string
   started_at: string
   completed_at: string | null
-  total_cost: number
+  total_cost: number | null
   total_duration_seconds: number | null
 }
 
@@ -111,6 +112,7 @@ function getPageNumbers(currentPage: number, totalPages: number): (number | 'ell
 }
 
 export default function RunHistory({ onSelectRun }: RunHistoryProps) {
+  const showCost = useCanSeeCost()
   const navigate = useNavigate()
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -187,7 +189,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
         cmp = (a.total_duration_seconds ?? 0) - (b.total_duration_seconds ?? 0)
         break
       case 'total_cost':
-        cmp = a.total_cost - b.total_cost
+        cmp = (a.total_cost ?? 0) - (b.total_cost ?? 0)
         break
       case 'feedback': {
         const valA = feedbackMap[a.run_id] === true ? 2 : (feedbackMap[a.run_id] === false ? 1 : 0)
@@ -236,20 +238,18 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
 
   if (runs.length === 0 && !error) {
     return (
-      <section ref={containerRef} aria-label="Previous runs" className="mt-6 bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6">
-        <h2 className="text-sm font-semibold text-gray-700 mb-3">Previous Runs</h2>
+      <section ref={containerRef} aria-label="Previous runs" className="mt-6 bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-6">
         <div className="flex flex-col items-center justify-center py-12">
           <FileText className="w-12 h-12 text-gray-300 mb-3" aria-hidden="true" />
           <p className="text-sm font-semibold text-gray-900">No runs yet</p>
-          <p className="text-sm text-gray-500 text-center max-w-[280px] mt-1">Upload a CV above to start your first pipeline run.</p>
+          <p className="text-sm text-gray-500 text-center max-w-[280px] mt-1">Start a new run to process your first CV.</p>
         </div>
       </section>
     )
   }
 
   return (
-    <section ref={containerRef} aria-label="Previous runs" className="mt-6 bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6">
-      <h2 className="text-sm font-semibold text-gray-700 mb-3">Previous Runs</h2>
+    <section ref={containerRef} aria-label="Previous runs" className="mt-6 bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] overflow-hidden">
 
       {error && (
         <div className="mb-4">
@@ -260,64 +260,66 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
       {runs.length > 0 && (
         <>
           <div className="overflow-x-auto">
-            <table className="w-full table-fixed">
-              <thead className="sticky top-0 z-header bg-white border-b-2 border-gray-200">
+            <table className="w-full min-w-[640px] table-fixed">
+              <thead className="sticky top-0 z-header bg-sand-50 border-b border-sand-200">
                 <tr>
-                  <th className="px-2 py-3 text-left w-[90px]" aria-sort={getAriaSortValue('status')}>
+                  <th className="px-2 first:pl-5 last:pr-5 py-3 text-left w-[120px]" aria-sort={getAriaSortValue('status')}>
                     <button
                       type="button"
                       onClick={() => handleSort('status')}
-                      className="group flex items-center gap-1 text-xs font-normal text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 w-full"
+                      className="group flex items-center gap-1 text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
                     >
                       Status
                       <SortIcon field="status" />
                     </button>
                   </th>
-                  <th className="px-2 py-3 text-left" aria-sort={getAriaSortValue('filename')}>
+                  <th className="px-2 first:pl-5 last:pr-5 py-3 text-left" aria-sort={getAriaSortValue('filename')}>
                     <button
                       type="button"
                       onClick={() => handleSort('filename')}
-                      className="group flex items-center gap-1 text-xs font-normal text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 w-full"
+                      className="group flex items-center gap-1 text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
                     >
                       File
                       <SortIcon field="filename" />
                     </button>
                   </th>
-                  <th className="px-2 py-3 text-left w-[130px]" aria-sort={getAriaSortValue('started_at')}>
+                  <th className="px-2 first:pl-5 last:pr-5 py-3 text-left w-[130px]" aria-sort={getAriaSortValue('started_at')}>
                     <button
                       type="button"
                       onClick={() => handleSort('started_at')}
-                      className="group flex items-center gap-1 text-xs font-normal text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 w-full"
+                      className="group flex items-center gap-1 text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
                     >
                       Date
                       <SortIcon field="started_at" />
                     </button>
                   </th>
-                  <th className="px-2 py-3 text-right w-[72px]" aria-sort={getAriaSortValue('total_duration_seconds')}>
+                  <th className="px-2 first:pl-5 last:pr-5 py-3 text-right w-[72px]" aria-sort={getAriaSortValue('total_duration_seconds')}>
                     <button
                       type="button"
                       onClick={() => handleSort('total_duration_seconds')}
-                      className="group flex items-center gap-1 justify-end text-xs font-normal text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 w-full"
+                      className="group flex items-center gap-1 justify-end text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
                     >
                       Duration
                       <SortIcon field="total_duration_seconds" />
                     </button>
                   </th>
-                  <th className="px-2 py-3 text-right w-[56px]" aria-sort={getAriaSortValue('total_cost')}>
-                    <button
-                      type="button"
-                      onClick={() => handleSort('total_cost')}
-                      className="group flex items-center gap-1 justify-end text-xs font-normal text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 w-full"
-                    >
-                      Cost
-                      <SortIcon field="total_cost" />
-                    </button>
-                  </th>
-                  <th className="px-2 py-3 text-center w-[110px]" aria-sort={getAriaSortValue('feedback')}>
+                  {showCost && (
+                    <th className="px-2 first:pl-5 last:pr-5 py-3 text-right w-[56px]" aria-sort={getAriaSortValue('total_cost')}>
+                      <button
+                        type="button"
+                        onClick={() => handleSort('total_cost')}
+                        className="group flex items-center gap-1 justify-end text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
+                      >
+                        Cost
+                        <SortIcon field="total_cost" />
+                      </button>
+                    </th>
+                  )}
+                  <th className="px-2 first:pl-5 last:pr-5 py-3 text-center w-[110px]" aria-sort={getAriaSortValue('feedback')}>
                     <button
                       type="button"
                       onClick={() => handleSort('feedback')}
-                      className="group flex items-center gap-1 justify-center text-xs font-normal text-gray-500 uppercase tracking-wider cursor-pointer select-none hover:text-gray-700 w-full"
+                      className="group flex items-center gap-1 justify-center text-xs font-medium text-gray-500 cursor-pointer select-none hover:text-gray-700 w-full"
                     >
                       Feedback
                       <SortIcon field="feedback" />
@@ -326,7 +328,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                 </tr>
               </thead>
               <tbody>
-                {sortedRuns.map((run, index) => (
+                {sortedRuns.map((run) => (
                   <tr
                     key={run.run_id}
                     onClick={() => onSelectRun(run.run_id)}
@@ -334,33 +336,35 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                     tabIndex={0}
                     role="link"
                     className={`
-                      cursor-pointer transition-colors border-b border-gray-100
-                      ${run.status === 'running' ? 'bg-primary-50' : index % 2 === 0 ? 'bg-white' : 'bg-gray-50'}
-                      hover:bg-gray-100
+                      cursor-pointer transition-colors border-b border-sand-200 last:border-b-0
+                      ${run.status === 'running' ? 'bg-primary-50' : 'bg-white'}
+                      hover:bg-sand-50
                     `}
                   >
-                    <td className="px-2 py-3 text-left">
+                    <td className="px-2 first:pl-5 last:pr-5 py-3 text-left">
                       <span className="inline-flex items-center gap-1">
                         <StatusIcon status={run.status} />
                         <span className={`text-sm ${statusLabelColor(run.status)}`}>{statusLabel(run.status)}</span>
                       </span>
                     </td>
-                    <td className="px-2 py-3 text-left text-sm text-gray-900 truncate" title={run.filename}>
+                    <td className="px-2 first:pl-5 last:pr-5 py-3 text-left text-sm text-gray-900 truncate" title={run.filename}>
                       {run.filename}
                     </td>
-                    <td className="px-2 py-3 text-left text-sm text-gray-500">
+                    <td className="px-2 first:pl-5 last:pr-5 py-3 text-left text-sm text-gray-500">
                       {(() => {
                         const { display, tooltip } = formatRelativeDate(run.started_at)
                         return <span title={tooltip}>{display}</span>
                       })()}
                     </td>
-                    <td className="px-2 py-3 text-right text-sm text-gray-500">
+                    <td className="px-2 first:pl-5 last:pr-5 py-3 text-right text-sm text-gray-500">
                       {formatDuration(run.total_duration_seconds)}
                     </td>
-                    <td className="px-2 py-3 text-right text-sm text-gray-700">
-                      {run.total_cost > 0 ? `$${run.total_cost.toFixed(2)}` : '\u2014'}
-                    </td>
-                    <td className="px-2 py-3 text-center">
+                    {showCost && (
+                      <td className="px-2 first:pl-5 last:pr-5 py-3 text-right text-sm text-gray-700">
+                        {run.total_cost ? `$${run.total_cost.toFixed(2)}` : '\u2014'}
+                      </td>
+                    )}
+                    <td className="px-2 first:pl-5 last:pr-5 py-3 text-center">
                       {run.status === 'complete' && feedbackMap[run.run_id] === true && (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[11px] font-medium">
                           <MessageSquare className="w-3 h-3" aria-hidden="true" />
@@ -386,7 +390,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
           </div>
 
           {totalPages > 1 && (
-            <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-100">
+            <div className="flex items-center justify-between px-5 py-3 border-t border-sand-200">
               <span className="text-sm text-gray-500">
                 Showing {startIndex + 1}{'\u2013'}{endIndex} of {total} runs
               </span>

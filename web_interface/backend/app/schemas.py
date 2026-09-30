@@ -68,7 +68,7 @@ class RunStatus(BaseModel):
     status: str
     started_at: TZDateTime
     completed_at: TZDateTime | None = None
-    total_cost: float
+    total_cost: float | None  # None for non-admins (#1111)
     total_tokens: int
     input_tokens: int = 0
     output_tokens: int = 0
@@ -93,7 +93,7 @@ class StepSummary(BaseModel):
     started_at: TZDateTime | None = None
     completed_at: TZDateTime | None = None
     duration_seconds: int | None = None
-    cost: float
+    cost: float | None  # None for non-admins (#1111)
     output_files: str | None = None  # JSON array as string
 
     class Config:
@@ -107,7 +107,7 @@ class RunSummary(BaseModel):
     status: str
     started_at: TZDateTime
     completed_at: TZDateTime | None = None
-    total_cost: float
+    total_cost: float | None  # None for non-admins (#1111)
     total_duration_seconds: int | None = None
 
     class Config:
@@ -155,7 +155,7 @@ class StepDetail(BaseModel):
     name: str
     status: str
     duration: int | None = None
-    cost_usd: float
+    cost_usd: float | None  # None for non-admins (#1111)
     input_file: str | None = None
     output_files: list[str]
     logs: list[LogEntry]
@@ -351,6 +351,13 @@ class Settings(BaseModel):
 # Admin Schemas
 # ============================================================
 
+class AdminStepAvg(BaseModel):
+    """Average duration of one pipeline stage over completed runs."""
+    stage_id: str
+    step_name: str
+    avg_seconds: float
+
+
 class AdminStats(BaseModel):
     """Overview statistics for the admin dashboard."""
     total_runs: int
@@ -361,6 +368,8 @@ class AdminStats(BaseModel):
     # there are no completed runs yet.
     avg_duration_seconds: float | None = None
     p95_duration_seconds: int | None = None
+    # Per-stage average duration over completed runs, in pipeline order.
+    step_avg_seconds: list[AdminStepAvg] = []
 
 
 class AdminUser(BaseModel):

@@ -893,5 +893,50 @@ def test_citation_author_split_target_matches_its_own_token_not_a_longer_initial
     assert (before, bold, after) == ("Doe A, Harlan JG, Roe B, ", "Harlan J", _TAIL)
 
 
+def test_fill_bibliography_bolds_the_owner_from_a_uid_with_appended_initials():
+    # #665 item 1, call-site wire: with no cv_owner last_name the fill falls
+    # back to the uid, whose "Quennevillejs" carries the initials; the citation
+    # spells the surname "Quenneville", so only the confirmed/stripped resolver bolds it.
+    entry = _citation_entry("Quenneville JS, Roe B. A study. J Med. 2020;1:1-2.", None, 2020)
+    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=False)
+    gen.doc = Document(gen.template_path)
+
+    gen._fill_bibliography({"S1": [entry]}, cv_owner={}, document_uid="2001_Quennevillejs_Cv")
+
+    header_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S1"])
+    para = gen.doc.paragraphs[header_idx + 2]
+    assert [r.text for r in para.runs if r.bold is True] == ["Quenneville JS"]
+
+
+def test_fill_bibliography_bolds_a_whole_uid_surname_the_citation_spells_in_full():
+    # #665 item 1, call-site wire: the uid surname has no appended initials, so
+    # the resolver must see the publications to keep it whole; with none passed
+    # the strip would clip it and the owner would go unbolded.
+    entry = _citation_entry("Smithsonwright AB, Roe B. A study. J Med. 2020;1:1-2.", None, 2020)
+    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=False)
+    gen.doc = Document(gen.template_path)
+
+    gen._fill_bibliography({"S1": [entry]}, cv_owner={}, document_uid="2001_Smithsonwright_Cv")
+
+    header_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S1"])
+    para = gen.doc.paragraphs[header_idx + 2]
+    assert [r.text for r in para.runs if r.bold is True] == ["Smithsonwright AB"]
+
+
+# --- #665 item 1: the uid surname strip is confirmed against citations ------
+def test_uid_owner_surname_kept_whole_when_a_citation_names_it():
+    pubs = [_citation_entry("Smithson AB, Doe J. A study. J Med. 2020.", None, 2020)]
+    assert bibliography._resolve_uid_owner_surname("2003_Smithson_Cv", pubs) == "Smithson"
+
+
+def test_uid_owner_surname_strips_appended_initials_when_no_citation_names_it():
+    pubs = [_citation_entry("Quenneville JS, Doe J. A study. J Med. 2020.", None, 2020)]
+    assert bibliography._resolve_uid_owner_surname("2003_Quennevillejs_Cv", pubs) == "Quenneville"
+
+
+def test_uid_owner_surname_with_no_publications_falls_back_to_the_guess():
+    assert bibliography._resolve_uid_owner_surname("2003_Quennevillejs_Cv", []) == "Quenneville"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q", "-p", "no:cacheprovider"]))

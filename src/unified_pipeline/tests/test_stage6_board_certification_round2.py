@@ -31,6 +31,7 @@ from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     _is_certification_header_line,
     _is_fused_certification,
     _reconstruct_certification_rows,
+    _split_multi,
 )
 
 
@@ -792,6 +793,115 @@ class TestPerRowBackfillFromStructuredFields:
         ), [r.message for r in caplog.records]
 
 
+class TestSingleRowBackfillIsLogged:
+    """#696 item 2: the single-row branch of the backfill logs a substitution
+    and a skip, with field name and counts but never the CV's values."""
+
+    _SECRET_NUM = "ZQ-90417"
+
+    def _run(self, caplog, fields, text):
+        gen = self._gen = _generator()
+        with caplog.at_level(logging.INFO):
+            gen._fill_board_certification(
+                [{"extracted_fields": fields, "text": text}]
+            )
+        return [r for r in caplog.records if "single reparsed row" in r.message]
+
+    def test_substitution_is_logged_without_the_value(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": self._SECRET_NUM,
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+        )
+        assert [r.levelno for r in records] == [logging.INFO]
+        assert "certificate_number" in records[0].getMessage()
+        assert "backfilled" in records[0].getMessage()
+        assert self._SECRET_NUM not in records[0].getMessage()
+
+    def test_skip_of_multi_value_structured_field_is_logged(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "ZQ-1, ZQ-2",
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+        )
+        assert [r.levelno for r in records] == [logging.WARNING]
+        assert "certificate_number" in records[0].getMessage()
+        assert "2 values" in records[0].getMessage()
+        assert "ZQ-1" not in records[0].getMessage()
+
+    def test_year_substitution_is_logged(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+        )
+        assert [r.levelno for r in records] == [logging.INFO]
+        assert "year_certified" in records[0].getMessage()
+        # The log claims a backfill: the rendered row must actually carry it.
+        assert _rows_after_board(self._gen)[0][2] == "2015"
+
+    def test_year_skip_of_multi_value_structured_field_is_logged(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+                "year_certified": "2015, 2016",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+        )
+        assert [r.levelno for r in records] == [logging.WARNING]
+        assert "year_certified" in records[0].getMessage()
+        assert "2 values" in records[0].getMessage()
+
+    def test_nothing_logged_when_structured_field_is_absent(self, caplog):
+        # No candidate at all is not a skip: there is nothing to attribute.
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "year_certified": "2015",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed\n2015",
+        )
+        assert records == []
+
+    def test_nothing_logged_when_structured_year_is_absent(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+            },
+            "Zed Medicine, Sub-board of the American Board of Zed | 555",
+        )
+        assert records == []
+
+    def test_nothing_logged_when_row_needs_no_backfill(self, caplog):
+        records = self._run(
+            caplog,
+            {
+                "certifying_board": "Sub-board of the American Board of Zed",
+                "certificate_number": "555",
+                "year_certified": "2015",
+            },
+            "Zed Medicine | 555 | 2015",
+        )
+        assert records == []
+
+
 class TestBlankRowGuardIsUniformAcrossColumnBranches:
     """#663 item 8: the too-narrow (<2 column) branch already dropped a row
 
@@ -996,3 +1106,58 @@ class TestBoardCellCarriesTheSpecialty:
                                   "certificate_number": "123456", "year_certified": "2010"}},
         ])
         assert _rows_after_board(gen) == [("American Board of Internal Medicine", "123456", "2010")]
+
+
+class TestCertificateNumberSeparatorHeuristic:
+    """#569: the comma/semicolon split that decides whether an entry is fused.
+
+    `_split_multi` treats `,` and `;` as the same separator, so a mixed
+    "111, 222; 333" counts three certifications, exactly like the pure-comma
+    and pure-semicolon neighbours. `_is_fused_certification` then fires on
+    more than one part.
+    """
+
+    def test_pure_comma_splits_into_parts(self):
+        assert _split_multi("111, 222, 333") == ["111", "222", "333"]
+
+    def test_pure_semicolon_splits_into_parts(self):
+        assert _split_multi("111; 222; 333") == ["111", "222", "333"]
+
+    def test_mixed_comma_and_semicolon_splits_into_the_same_parts(self):
+        assert _split_multi("111, 222; 333") == ["111", "222", "333"]
+
+    def test_mixed_separators_drop_empty_parts_and_whitespace(self):
+        assert _split_multi(" 111 ,; 222 ;, ") == ["111", "222"]
+
+    def test_single_number_and_blank_are_not_split(self):
+        assert _split_multi("111") == ["111"]
+        assert _split_multi("") == []
+        assert _split_multi(None) == []
+
+    def test_list_input_is_not_resplit_on_separators(self):
+        assert _split_multi(["111", " 222 ", ""]) == ["111", "222"]
+
+    def test_fusion_detected_for_pure_comma_pure_semicolon_and_mixed(self):
+        for raw in ("111, 222", "111; 222", "111, 222; 333"):
+            parts = _split_multi(raw)
+            assert _is_fused_certification({"certificate_number": raw}, parts) is True, raw
+
+    def test_single_number_is_not_fused(self):
+        assert _is_fused_certification({"certificate_number": "111"}, _split_multi("111")) is False
+
+    def test_mixed_separator_entry_takes_the_multi_cert_path_end_to_end(self):
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "Board A",
+                "certificate_number": "111, 222; 333",
+                "year_certified": "2010",
+            },
+            "text": "Board A | 111 | 2010\nBoard B | 222 | 2012\nBoard C | 333 | 2014",
+        }
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("Board A", "111", "2010"),
+            ("Board B", "222", "2012"),
+            ("Board C", "333", "2014"),
+        ]

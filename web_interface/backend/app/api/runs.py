@@ -16,10 +16,10 @@ from app.schemas import RunStatus, RunSummary, StepSummary, PaginatedRuns
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency, run_queue
-from app.auth import get_current_user
-from app.api.upload import create_run_archive, commit_run_or_compensate
+from app.auth import get_current_user, visible_cost
+from app.api.upload import UPLOAD_DIR, create_run_archive, commit_run_or_compensate
 from app.services.run_service import (
-    check_run_access, claim_run_as_running, UPLOAD_DIR, _materialize_input_if_missing,
+    check_run_access, claim_run_as_running, _materialize_input_if_missing,
     flip_to_queued, revert_queued, StepSnapshot,
 )
 from app.rate_limiter import check_rate_limit
@@ -191,7 +191,7 @@ async def list_runs(
             status=run.status,
             started_at=run.started_at,
             completed_at=run.completed_at,
-            total_cost=run.total_cost or 0.0,
+            total_cost=visible_cost(current_user, run.total_cost),
             total_duration_seconds=total_duration_seconds
         ))
 
@@ -225,7 +225,7 @@ async def get_run_status(
             started_at=step.started_at,
             completed_at=step.completed_at,
             duration_seconds=step.duration_seconds,
-            cost=step.cost or 0.0,
+            cost=visible_cost(current_user, step.cost),
             output_files=step.output_files
         )
         for step in sorted(run.steps, key=lambda s: s.step_number)
@@ -241,7 +241,7 @@ async def get_run_status(
         status=run.status,
         started_at=run.started_at,
         completed_at=run.completed_at,
-        total_cost=run.total_cost or 0.0,
+        total_cost=visible_cost(current_user, run.total_cost),
         total_tokens=run.total_tokens or 0,
         input_tokens=run.input_tokens or 0,
         output_tokens=run.output_tokens or 0,
@@ -294,7 +294,7 @@ def start_run(
     # Admission control: cap concurrent in-process pipelines per pod. Acquire a
     # slot before marking the run "running" so a rejected start leaves the run
     # in its prior state, retryable once a slot frees.
-    if not concurrency.try_acquire_slot():
+    if not concurrency.try_acquire_slot(run_id):
         raise HTTPException(
             status_code=429,
             detail={
@@ -324,7 +324,7 @@ def start_run(
     # loser returns its slot and never reaches the pipeline dispatch.
     if not claim_run_as_running(db, run_id, Run.status.in_(STARTABLE_STATUSES)):
         db.rollback()
-        concurrency.release_slot()
+        concurrency.release_slot(run_id)
         raise conflict("This run was already started by another request.")
     db.commit()
 
@@ -341,7 +341,7 @@ def start_run(
             asyncio.run(orchestrator.execute())
         finally:
             bg_db.close()
-            concurrency.release_slot()
+            concurrency.release_slot(run_id)
 
     background_tasks.add_task(run_pipeline)
 
@@ -517,18 +517,16 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     Commit BEFORE signalling, not after: db.commit() can raise (see
     commit_run_or_compensate's #802 handling above), while orchestrator_cancel
     cannot -- cancel_run's set.add can't raise, and RedisBroker.request_cancel
-    wraps its body in try/except (redis_broker.py, "best-effort"). Signalling
-    first would leave a window where the pipeline is told to stop but the row
-    never reflects it if the commit then raises: check_cancelled's
-    CancelledException handler does not touch the DB (orchestrator.py,
-    "status already updated by API endpoint"), so the row would stay
-    "running" until reconcile_stale_runs sweeps it up to an hour later with a
-    misleading "server restarted" message. Committing first means a commit
+    wraps its body in try/except (redis_broker.py, "best-effort"). A commit
     failure here leaves the run running with nothing told to stop it --
-    consistent, and the caller's exception surfaces normally.
+    consistent, and the caller's exception surfaces normally. The orchestrator
+    also records a cancel on the row itself, so it does not rely on this write
+    having happened (#591).
     """
+    from app.pipeline.orchestrator import USER_CANCEL_MESSAGE
+
     run.status = "cancelled"
-    run.error_message = "Cancelled by user"
+    run.error_message = USER_CANCEL_MESSAGE
     # Naive, matching every other Run timestamp write (orchestrator.py,
     # run_service.py, upload.py): pymysql drops tzinfo on write, so an aware
     # value would round-trip as naive UTC and get mislabelled with the
@@ -589,7 +587,7 @@ def retry_step(
     # Admission control: a retry resumes a full pipeline and consumes the same
     # per-pod resource as a fresh start, so gate it the same way. Acquire before
     # mutating step/run state so a rejected retry leaves the run untouched.
-    if not queue_mode and not concurrency.try_acquire_slot():
+    if not queue_mode and not concurrency.try_acquire_slot(run_id):
         raise HTTPException(
             status_code=429,
             detail={
@@ -665,7 +663,7 @@ def retry_step(
         error_message=None, completed_at=None, started_at=datetime.now(),
     ):
         db.rollback()
-        concurrency.release_slot()
+        concurrency.release_slot(run_id)
         raise conflict("This run is already running.")
 
     _reset_downstream_steps()
@@ -682,7 +680,7 @@ def retry_step(
             asyncio.run(orchestrator.execute(start_step_number=step_number))
         finally:
             bg_db.close()
-            concurrency.release_slot()
+            concurrency.release_slot(run_id)
 
     background_tasks.add_task(run_pipeline)
 

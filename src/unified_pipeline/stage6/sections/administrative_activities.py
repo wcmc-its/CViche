@@ -224,9 +224,9 @@ class AdministrativeActivitiesSection:
             logger.info("Filling Administrative Activities (%s entries)...", len(entries))
 
         # Find Administrative section
-        section_idx = self._find_paragraph_with_text("INSTITUTIONAL ADMINISTRATIVE")
+        section_idx = self._find_header_paragraph("INSTITUTIONAL ADMINISTRATIVE")
         if section_idx is None:
-            section_idx = self._find_paragraph_with_text("ADMINISTRATIVE ACTIVITIES")
+            section_idx = self._find_header_paragraph("ADMINISTRATIVE ACTIVITIES")
         if section_idx is None:
             return
 

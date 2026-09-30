@@ -243,3 +243,60 @@ def test_orchestrator_cancel_falls_back_to_local_set():
         assert orch.is_cancelled("RUN1") is False
     finally:
         orch._cancelled_runs.clear()
+
+
+def test_stop_run_locally_sets_only_the_in_process_flag():
+    """Shutdown's stop (#116) must not leave a Redis cancel key behind: it
+    would outlive the pod by CANCEL_TTL_SECONDS and cancel a retry of the same
+    run started on another pod in that window."""
+    from app.pipeline import orchestrator as orch
+    broker, _ = _fakeredis_broker()
+    try:
+        orch.set_broker(broker)
+        orch._cancelled_runs.clear()
+        orch.stop_run_locally("RUN1")
+        assert orch.is_cancelled("RUN1") is True
+        orch._cancelled_runs.clear()
+        assert broker.is_cancelled("RUN1") is False
+    finally:
+        orch.set_broker(None)
+        orch._cancelled_runs.clear()
+
+
+class _CountingLock:
+    """Stand-in for _cancelled_lock that counts acquisitions (#307)."""
+
+    def __init__(self):
+        self.acquired = 0
+
+    def __enter__(self):
+        self.acquired += 1
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize("mutate", ["cancel_run", "stop_run_locally", "clear_cancelled", "is_cancelled"])
+def test_cancel_state_access_takes_the_lock(monkeypatch, mutate):
+    from app.pipeline import orchestrator as orch
+    lock = _CountingLock()
+    monkeypatch.setattr(orch, "_cancelled_lock", lock)
+    monkeypatch.setattr(orch, "_broker", None)
+    try:
+        getattr(orch, mutate)("RUNLOCK")
+        assert lock.acquired == 1
+    finally:
+        orch._cancelled_runs.clear()
+        orch._stopped_locally.clear()
+
+
+def test_clear_cancelled_forgets_a_local_stop():
+    from app.pipeline import orchestrator as orch
+    try:
+        orch.stop_run_locally("RUN1")
+        assert "RUN1" in orch._stopped_locally
+        orch.clear_cancelled("RUN1")
+        assert "RUN1" not in orch._stopped_locally
+    finally:
+        orch._cancelled_runs.clear()
+        orch._stopped_locally.clear()

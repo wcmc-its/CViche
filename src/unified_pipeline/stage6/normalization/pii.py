@@ -303,10 +303,13 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  label=r"driver.?s? \s* licen[sc]e"),
     WithholdRule(CAT_MARITAL_STATUS, SCOPE_ALL_CODES, DECIDED_820,
                  label=r"marital \s* status"),
+    # #1103: "Name of Spouse & Children:" opened with "Name of" and joined
+    # the children onto the spouse, so neither label matched and the family's
+    # names and birth years rendered in the Appendix.
     WithholdRule(CAT_SPOUSE, SCOPE_ALL_CODES, DECIDED_820, label=r"""
-        spouse (?: [’'] s )? (?: \s* name )?
-      | wife (?: [’'] s )? (?: \s* name )?
-      | husband (?: [’'] s )? (?: \s* name )?
+        (?: names? \s+ of \s+ )?
+        (?: spouse | wife | husband ) (?: [’'] s )? (?: \s* name )?
+        (?: \s* (?: & | and | / | , ) \s* (?: children | child | kids | dependents? ) )?
     """),
     # "Married to <name>" carries no colon and no shaped value -- the phrase
     # is the whole signal, so it is anchored like a label. Guarded like
@@ -326,7 +329,7 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     # --- ambiguous as a title word: A-coded and Appendix-bound only ---------
     WithholdRule(CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"born"),
     WithholdRule(CAT_CHILDREN, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
-                 label=r"children (?: [’'] s \s* names? )? | dependents?"),
+                 label=r"(?: names? \s+ of \s+ )? (?: children (?: [’'] s \s* names? )? | dependents? )"),
     # #1041: a bare child count that is its OWN fragment ("Marital Status:
     # <status>; <n> Children" -- the `;` hard split leaves it behind the
     # marital-status cut, and it rendered in the Appendix). The count must

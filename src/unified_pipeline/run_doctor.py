@@ -10,7 +10,9 @@ Lints, ranked by the severity of the failure class they catch:
 
 1. segmentation           coverage / lost lines / mega-entries / dups via the
                           segmentation_regression metrics (8 grants fused
-                          into one table-cell entry)
+                          into one table-cell entry); its sibling
+                          `table_lost` scopes the same coverage to each
+                          source table (web207's lost personal-data table)
 2. missed_headers         ALL-CAPS bold header-like source lines absent from
                           the 1a hierarchy AND every entry hierarchy path
                           ('PROFESSIONAL EXPERIENCE' demoted to content)
@@ -77,6 +79,17 @@ Lints, ranked by the severity of the failure class they catch:
                           closed year range -- it renders "<start>-Present"
                           (FSMB "2025-2026" extracted as start_date=2026);
                           report-only, the value is not repaired (#729)
+
+14d. date_only_lines      body paragraphs (outside the Appendix, never table
+                          cells) whose whole text is a date -- a record's date
+                          column split from its payload and rendered as its
+                          own bullet (#259: ZXVGAC, 28 under EDUCATIONAL
+                          CONTRIBUTIONS); WARN at a corpus-derived count
+
+14e. stage3b_second_pass_error a stage-3b second pass (t_validation,
+                          fragment_reconnection) recorded `error` in
+                          meta.stats: it failed and left its entries
+                          unchanged; WARN, the run completes (#818)
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -146,7 +159,7 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.quality_score import stage3b_fallback_ratios
-from unified_pipeline.segmentation_regression import compute_metrics, iter_source_lines
+from unified_pipeline.segmentation_regression import compute_metrics, iter_source_block_lines
 
 # Lint rules and their primitives now live in the doctor/ package (#493).
 # Re-exported here rather than updating callers: five files import 33 names
@@ -154,6 +167,10 @@ from unified_pipeline.segmentation_regression import compute_metrics, iter_sourc
 # that is not re-exported fails at IMPORT time -- which reads as a lost fix.
 # test_run_doctor_contract.py pins that surface.
 from unified_pipeline.doctor.shared import (  # noqa: F401,E402
+    FINDING_STATUSES,
+    STATUS_RAN,
+    STATUS_SKIPPED,
+    STATUS_UNREADABLE,
     Haystack,
     RENDER_PIECE_MIN_CHARS,
     RENDER_PIECE_WINDOW,
@@ -239,6 +256,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     appendix_entry_count,
     honors_table_totals,
     lint_dead_sections,
+    lint_date_only_lines,
     lint_duplicate_passages,
     lint_duplicate_records,
     lint_output_hygiene,
@@ -254,6 +272,7 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     _hierarchy_titles,
     lint_missed_headers,
     lint_segmentation,
+    lint_table_lost,
 )
 from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
     lint_protected_data_in_output,
@@ -262,6 +281,7 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_no_output,
     lint_pipeline_errors,
     lint_stage3b_fallback_ratio,
+    lint_stage3b_second_pass_errors,
 )
 
 
@@ -327,6 +347,9 @@ KNOWN_LINTS = (
     "protected_data_in_output",
     "invented_records",
     "wrong_start_date",
+    "table_lost",
+    "date_only_lines",
+    "stage3b_second_pass_error",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -346,9 +369,16 @@ LINT_PREVALENCE = {
     "table_shape": 0.562,
     "missed_headers": 0.288,
     "classified_unrendered": 0.288,
+    # 32 of 126 corpus renders fired at any severity (33 with prod run
+    # ZXVGAC), from a fresh dev render of the same farm + 2026-09-11/-17
+    # batches section_lost was calibrated on (#259).
+    "date_only_lines": 0.254,
     "stage6_render_warnings": 0.123,
     "dedup_drops": 0.110,
     "segmentation": 0.082,
+    # 30 of 165 corpus runs (farm + 2026-09-11/-17 batches, stored stage-2
+    # artifacts, measured 2026-09-29); 19 of the 30 also trip `segmentation`.
+    "table_lost": 0.182,
     "enrichment_failures": 0.082,
     # 9 of 126 corpus renders from dev (farm + 2026-09-11/-17 batches,
     # re-rendered 2026-09-29), the corpus section_lost was calibrated on.
@@ -362,6 +392,10 @@ LINT_PREVALENCE = {
     "bucket_status": 0.014,
     "under_extraction": 0.014,
     "pipeline_errors_present": 0.001,
+    # #818: 6 of 183 stored stage-3b artifacts (farm25 + outputs99 + the
+    # 2026-09-11/-17 batches, measured 2026-09-29) carry a second-pass
+    # `error`; all 6 are older builds -- 0 of the 60 batch artifacts do.
+    "stage3b_second_pass_error": 0.033,
     # #810: zero of the 2026-09-11 batch's 40 uids tripped the gate -- every
     # ratio stayed under STAGE3B_FALLBACK_RATIO_THRESHOLD (max observed
     # 0.0004, three orders of magnitude under it). The only known real
@@ -445,6 +479,17 @@ _NAME_CREDENTIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+#: A person line with the role marker in FRONT ('PI. Jane Q. Sample', 'Dr.
+#: John Example'; #539). Both halves must hold, so a header that merely
+#: starts with a marker ('PI. RESPONSIBILITIES') is not swallowed: an exact
+#: marker token, then a run of Title-case name words / initials that ends on a
+#: real (multi-letter, lower-case-bearing) name word. ALL-CAPS text is never
+#: matched -- a caps line after a marker reads as a header, not a name.
+_LEADING_ROLE_NAME_RE = re.compile(
+    r"^(?:PI|Dr|Prof|Mr|Mrs|Ms)\.\s+(?:[A-Z]\.?\s+){0,2}"
+    r"[A-Z][a-z][\w'’-]*(?:\s+(?:[A-Z]\.?|[A-Z][a-z][\w'’-]*)){0,3}$"
+)
+
 
 def _logical_cells(row) -> list:
     """The row's distinct cells. python-docx's ``row.cells`` repeats one
@@ -506,7 +551,7 @@ def iter_header_candidates(docx_path: str) -> list[str]:
         # CPE', 'CURRICULUM VITAE - JEFFREY R OLSEN, MD'. Anchored on the
         # comma-suffix position so real headers that merely contain a comma
         # ('ADMINISTRATIVE APPOINTMENTS, SCHOOL OF MEDICINE, CU:') survive.
-        if _NAME_CREDENTIAL_RE.search(text):
+        if _NAME_CREDENTIAL_RE.search(text) or _LEADING_ROLE_NAME_RE.match(text):
             return
         style = getattr(para.style, "name", "") or ""
         if style.startswith("Heading"):
@@ -598,6 +643,8 @@ _ARTIFACTS = {
                             record_lists=("entries",), object_fields=("cv_owner",)),
     "stage_5_enrichment": ArtifactSpec("stage_5_enrichment", "_enriched.json",
                                        record_lists=("entries",)),
+    "stage_5b": ArtifactSpec("stage_5b_institution_enrichment",
+                             "_institution_enriched.json", record_lists=("entries",)),
     "stage_6_docx": ArtifactSpec("stage_6_wcm_documents", "_wcm.docx"),
     "stage_6_report": ArtifactSpec("stage_6_wcm_documents", "_render_warnings.json",
                                    optional_lists=("warnings", "dedup_decisions")),
@@ -753,11 +800,13 @@ def _ready(lint_id: str, *, unreadable: Dict[str, str], findings: List[Dict],
     absent = [name for name in missing if name not in unreadable]
     if absent:
         findings.append(_finding(
-            lint_id, "INFO", "skipped: missing " + ", ".join(absent)))
+            lint_id, "INFO", "skipped: missing " + ", ".join(absent),
+            status=STATUS_SKIPPED, reason=", ".join(absent)))
     if broken:
         findings.append(_finding(
             lint_id, "ERROR", "skipped: unreadable " + ", ".join(
-                f"{name} ({unreadable[name]})" for name in broken)))
+                f"{name} ({unreadable[name]})" for name in broken),
+            status=STATUS_UNREADABLE, reason=", ".join(broken)))
     return False
 
 
@@ -780,10 +829,12 @@ def _run_lint(lint_id: str, rule: Callable[..., list[dict]],
 class LintSpec(NamedTuple):
     """One row of the lint registry: the key the lint emits, the rule that
     emits it, and the loaded-input views it takes, in the rule's positional
-    order."""
+    order. `optional` views are passed after `inputs` and may be None: the lint
+    has a fallback without them, so their absence is not a skip (#890)."""
     lint_id: str
     rule: Callable[..., list[dict]]
     inputs: tuple[str, ...]
+    optional: tuple[str, ...] = ()
 
 
 #: The loader LABEL each input view is checked under by `_ready` -- the key
@@ -794,12 +845,14 @@ class LintSpec(NamedTuple):
 #: can fail alone.
 _VIEW_LABELS = {
     "source_lines": "source",
+    "source_block_lines": "source",
     "candidates": "candidates",
     "stage_1a": "stage_1a",
     "stage_2": "stage_2",
     "stage_3b": "stage_3b",
     "stage_4": "stage_4",
     "stage_5_enrichment": "stage_5_enrichment",
+    "stage_5b": "stage_5b",
     "stage_6_report": "stage_6_report",
     "blocks": "stage_6_docx",
     "table_rows": "stage_6_docx",
@@ -818,10 +871,12 @@ _VIEW_LABELS = {
 #: row shape that could express both would be a second dispatch language.
 LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("segmentation", lint_segmentation, ("source_lines", "stage_1a", "stage_2")),
-    LintSpec("missed_headers", lint_missed_headers, ("candidates", "stage_1a", "stage_2")),
+    LintSpec("missed_headers", lint_missed_headers, ("candidates", "stage_1a", "stage_2"),
+             optional=("stage_4",)),
     LintSpec("bucket_status", lint_bucket_status, ("stage_4", "blocks")),
     LintSpec("under_extraction", lint_under_extraction, ("stage_4",)),
-    LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks")),
+    LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks"),
+             optional=("stage_4", "stage_5b")),
     LintSpec("taxonomy_code_coverage", lint_taxonomy_code_coverage, ("stage_3b",)),
     LintSpec("stage3b_fallback_ratio", lint_stage3b_fallback_ratio, ("stage_3b",)),
     LintSpec("output_hygiene", lint_output_hygiene, ("blocks",)),
@@ -838,6 +893,11 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",)),
     LintSpec("invented_records", lint_invented_records, ("stage_4", "table_rows")),
     LintSpec("wrong_start_date", lint_wrong_start_date, ("stage_4",)),
+    # Last row, not beside `segmentation`: this order breaks the sweep's
+    # ranking ties, so a new lint appends rather than shifting every other.
+    LintSpec("table_lost", lint_table_lost, ("source_block_lines", "stage_2")),
+    LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
+    LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
 )
 
 
@@ -852,7 +912,7 @@ def _build_metrics(views: dict) -> dict:
     information (#438's class) -- their lints now report those numbers here
     instead of in a WARN, alongside three metrics with no lint of their own
     yet (`stage3b_fallback_ratio` from #810, `t_validation_yield` and
-    `fragment_reconnection_yield` from #818).
+    `fragment_reconnection_yield` and `total_post_corrections` from #818).
 
     Corpus-outlier promotion (the p75/p90 convention #438 introduced for
     `missed_headers`) is explicitly OUT of scope here -- that is a batch-
@@ -915,6 +975,9 @@ def _build_metrics(views: dict) -> dict:
             if reviewed:
                 metrics["t_validation_yield"] = round(
                     tv.get("t_entries_reclassified", 0) / reviewed, 4)
+            corrections = stats.get("total_post_corrections")
+            if isinstance(corrections, int) and not isinstance(corrections, bool):
+                metrics["total_post_corrections"] = corrections
             fr = stats.get("fragment_reconnection") or {}
             f_reviewed = fr.get("fragments_reviewed") if isinstance(fr, dict) else None
             if f_reviewed:
@@ -1008,8 +1071,13 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
     views: dict[str, object] = {
         key: _load_json(paths[key], key, _note, _ARTIFACTS[key])
         for key in _JSON_ARTIFACTS}
-    views["source_lines"] = (_try(lambda: iter_source_lines(str(source_path)), "source", _note)
-                             if source_path else None)
+    # One read of the source docx feeds both views: the flat lines are the
+    # block-tagged lines with the tag dropped.
+    source_block_lines = (_try(lambda: iter_source_block_lines(str(source_path)), "source", _note)
+                          if source_path else None)
+    views["source_block_lines"] = source_block_lines
+    views["source_lines"] = (None if source_block_lines is None
+                             else [line for _, line in source_block_lines])
     views["candidates"] = (_try(lambda: iter_header_candidates(str(source_path)), "candidates", _note)
                            if source_path else None)
     views["blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note)
@@ -1024,7 +1092,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
         inputs = {_VIEW_LABELS[view]: views[view] for view in spec.inputs}
         if ready(spec.lint_id, **inputs):
             _run_lint(spec.lint_id, spec.rule,
-                      [views[view] for view in spec.inputs], findings)
+                      [views[view] for view in spec.inputs + spec.optional], findings)
 
     _run_hand_dispatched_gates(views, paths, uid, unreadable, findings, ready)
 

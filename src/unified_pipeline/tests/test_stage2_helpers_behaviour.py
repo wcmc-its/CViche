@@ -866,6 +866,34 @@ def test_fold_never_folds_a_template_instruction_child_into_a_real_entry():
         assert stage2._drop_template_instructions(_fold(entries, els))[0]["text"] == parent
 
 
+def test_drop_foreign_template_instructions_by_entry_type(capsys):
+    """#530: another institution's scaffolding is dropped from content entries
+    but a header or break entry with the same text stays for the hierarchy, and
+    a line with faculty text after the parenthetical is kept."""
+    scaffold = "C. Sample Appointments (include institution, title and dates)"
+    placeholder = "1. Sample Leave: N/A"
+    real = "3. Sample Training (describe your role) - Major advisor to five students"
+    entries = [
+        _fold_entry(1, text=scaffold),
+        _fold_entry(2, text=placeholder),
+        _fold_entry(3, text=scaffold, etype="header"),
+        _fold_entry(4, text=scaffold, etype="break"),
+        _fold_entry(5, text=real),
+    ]
+    kept = stage2._drop_template_instructions(entries)
+    assert [(e["element_idx_start"], e["element_type"]) for e in kept] == [
+        (3, "header"), (4, "break"), (5, "paragraph")]
+    assert "Filtered 2 WCM-template instruction entries" in capsys.readouterr().out
+
+
+def test_fold_never_folds_foreign_template_instruction_into_a_real_entry():
+    parent = "2010-present Society of Example Medicine, member"
+    child = "C. Role (include title, dates of service)"
+    assert stage2._is_template_text(child)
+    entries = [_fold_entry(3, text=parent), _fold_entry(4, text=child)]
+    assert _spans(_fold(entries, [_fold_el(3), _fold_el(4)])) == [(3, 3), (4, 4)]
+
+
 def test_fold_never_folds_a_label_line_into_a_template_instruction_parent():
     parent = "Role (i.e., officer, secretary, chair, etc.)"
     entries = [_fold_entry(3, text=parent), _fold_entry(4, text="Role: Chair")]

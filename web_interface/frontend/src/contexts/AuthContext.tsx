@@ -139,3 +139,8 @@ export function useAuth() {
   if (!ctx) throw new Error('useAuth must be used within AuthProvider')
   return ctx
 }
+
+/** Processing cost is admin-only (#1111); the API sends null to everyone else. */
+export function useCanSeeCost(): boolean {
+  return useAuth().user?.role === 'admin'
+}

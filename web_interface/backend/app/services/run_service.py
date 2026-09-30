@@ -15,6 +15,7 @@ from app.errors import not_found, forbidden
 from app.config_loader import get_config
 from app.pipeline import concurrency, run_queue
 from app.storage import get_storage
+from app.storage.base import RunStorage
 from app.services import auto_retry
 
 logger = logging.getLogger(__name__)
@@ -96,7 +97,21 @@ def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> No
         logger.warning("Failed to write re-materialized input for run %s: %s", run_id, e)
 
 
-def _mark_run_failed(run: Run, db: Session, now: datetime) -> None:
+RESTART_INTERRUPT_MESSAGE = (
+    "Run interrupted — the server restarted while this run was in "
+    "progress. Please restart it with the same file."
+)
+
+# Shown on a run still executing when a deploy's drain budget ran out (#116).
+DEPLOY_INTERRUPT_MESSAGE = (
+    "Run interrupted — the server was shut down for a deploy while this run "
+    "was in progress. Please restart it with the same file."
+)
+
+
+def _mark_run_failed(
+    run: Run, db: Session, now: datetime, message: str = RESTART_INTERRUPT_MESSAGE
+) -> None:
     """Mark an orphaned "running" run (and any still-running steps) failed.
 
     This is the pre-#145 behaviour, factored out so both the default path and
@@ -104,10 +119,7 @@ def _mark_run_failed(run: Run, db: Session, now: datetime) -> None:
     """
     run.status = "failed"
     run.completed_at = now
-    run.error_message = (
-        "Run interrupted — the server restarted while this run was in "
-        "progress. Please restart it with the same file."
-    )
+    run.error_message = message
     running_steps = (
         db.query(Step)
         .filter(Step.run_id == run.id, Step.status == "running")
@@ -364,6 +376,74 @@ def queue_db_view(db: Session) -> dict[str, int | float | None]:
     }
 
 
+def _submitter_email(db: Session, run: Run) -> str | None:
+    """Lower-cased submitter email, or None. Run.user is lazy="raise_on_sql",
+    so resolve it before the row is deleted."""
+    if run.user_id is None:
+        return None
+    u = db.query(User).filter(User.id == run.user_id).first()
+    return u.email.lower() if u and u.email else None
+
+
+def _delete_run_rows(db: Session, run_id: str) -> None:
+    """Delete a run and its children in one commit. Children first -- the
+    run_id FKs are bare (no ON DELETE CASCADE). Raises on failure; the caller
+    rolls back."""
+    for child in (Step, Log, LLMUsage, Feedback, RunMetrics):
+        db.query(child).filter(child.run_id == run_id).delete(synchronize_session=False)
+    db.query(Run).filter(Run.id == run_id).delete(synchronize_session=False)
+    db.commit()
+
+
+def _delete_run_storage(
+    storage: RunStorage, run_id: str, email: str | None, *, best_effort: bool = True
+) -> int:
+    """Idempotent removal of a run's storage objects and its by-submitter index
+    entry. Returns objects deleted.
+
+    best_effort=True (the reaper): log a failure and carry on -- never block on
+    the store. best_effort=False (admin delete): let the exception surface so
+    the caller can fail the request while the DB rows still exist.
+    """
+    deleted = 0
+    try:
+        deleted += storage.delete_run(run_id)
+    except Exception as e:
+        if not best_effort:
+            raise
+        logger.warning("Failed to delete storage for run %s: %s", run_id, e)
+    if email is not None:
+        try:
+            deleted += storage.delete_global_prefix(f"by-submitter/{email}/{run_id}/")
+        except Exception as e:
+            if not best_effort:
+                raise
+            logger.warning("Failed to delete by-submitter index for run %s: %s", run_id, e)
+    return deleted
+
+
+def find_run(db: Session, run_id: str) -> Run | None:
+    return db.query(Run).filter(Run.id == run_id).first()
+
+
+def delete_run_and_artifacts(db: Session, run: Run) -> int:
+    """Hard-delete one run: its storage first, then the child rows and the run row.
+
+    Storage goes first and is strict: if the store fails the exception
+    propagates with the DB untouched, so the admin can retry (the deletes are
+    idempotent). Only once storage is clean are the rows removed; a DB failure
+    rolls back and raises. Returns the number of storage objects removed.
+    """
+    run_id, email = run.id, _submitter_email(db, run)
+    objects_deleted = _delete_run_storage(get_storage(), run_id, email, best_effort=False)
+    try:
+        _delete_run_rows(db, run_id)
+    except Exception:
+        db.rollback()
+        raise
+    return objects_deleted
+
+
 def reap_orphaned_created_runs(
     db: Session,
     *,
@@ -417,12 +497,7 @@ def reap_orphaned_created_runs(
     # the rows are deleted, so we can also remove the by-submitter index entry.
     targets = []  # list of (run_id, submitter_email_or_None)
     for run in orphans:
-        email = None
-        if run.user_id is not None:
-            u = db.query(User).filter(User.id == run.user_id).first()
-            if u and u.email:
-                email = u.email.lower()
-        targets.append((run.id, email))
+        targets.append((run.id, _submitter_email(db, run)))
 
     result = {
         "candidates": len(targets),
@@ -437,32 +512,13 @@ def reap_orphaned_created_runs(
     storage = get_storage()
     for run_id, email in targets:
         try:
-            # Children first -- bare FKs (no ON DELETE CASCADE).
-            db.query(Step).filter(Step.run_id == run_id).delete(synchronize_session=False)
-            db.query(Log).filter(Log.run_id == run_id).delete(synchronize_session=False)
-            db.query(LLMUsage).filter(LLMUsage.run_id == run_id).delete(synchronize_session=False)
-            db.query(Feedback).filter(Feedback.run_id == run_id).delete(synchronize_session=False)
-            db.query(RunMetrics).filter(RunMetrics.run_id == run_id).delete(synchronize_session=False)
-            db.query(Run).filter(Run.id == run_id).delete(synchronize_session=False)
-            db.commit()
+            _delete_run_rows(db, run_id)
         except Exception as e:
             db.rollback()
             logger.warning("Failed to reap orphan run %s from DB: %s", run_id, e)
             continue
         result["reaped"] += 1
-
-        # Best-effort, idempotent storage cleanup -- never block on the store.
-        try:
-            result["objects_deleted"] += storage.delete_run(run_id)
-        except Exception as e:
-            logger.warning("Failed to delete storage for reaped run %s: %s", run_id, e)
-        if email is not None:
-            try:
-                result["objects_deleted"] += storage.delete_global_prefix(
-                    f"by-submitter/{email}/{run_id}/"
-                )
-            except Exception as e:
-                logger.warning("Failed to delete by-submitter index for run %s: %s", run_id, e)
+        result["objects_deleted"] += _delete_run_storage(storage, run_id, email)
 
     logger.info(
         "Reaped %d/%d orphaned 'created' run(s) older than %dh (%d storage objects removed)",
@@ -555,7 +611,7 @@ def _launch_resume(run_id: str, file_path, start_step_number: int) -> bool:
         from app.pipeline import concurrency
         from app.pipeline.orchestrator import PipelineOrchestrator
 
-        if not concurrency.try_acquire_slot():
+        if not concurrency.try_acquire_slot(run_id):
             logger.warning(
                 "Auto-retry for run %s deferred: pod at concurrency capacity "
                 "(%d active). Will be retried on a later reaper pass.",
@@ -572,7 +628,7 @@ def _launch_resume(run_id: str, file_path, start_step_number: int) -> bool:
                 asyncio.run(orchestrator.execute(start_step_number=start_step_number))
             finally:
                 bg_db.close()
-                concurrency.release_slot()
+                concurrency.release_slot(run_id)
 
         import threading
         threading.Thread(target=run_pipeline, daemon=True).start()
@@ -635,6 +691,25 @@ def _schedule_auto_retry(
         db.commit()
         return False
     return True
+
+
+def fail_runs_interrupted_by_shutdown(db: Session, run_ids: list[str]) -> int:
+    """Mark the given runs failed because this pod is exiting mid-run (#116).
+
+    Called once at shutdown, after the drain budget ran out, with the runs that
+    still hold a slot on this pod. Each is claimed with the same conditional
+    UPDATE the reaper uses, so a run that finished (or was cancelled) since the
+    drain last looked is left alone. Returns the count marked failed.
+    """
+    now = datetime.now()
+    failed_count = 0
+    for run in db.query(Run).filter(Run.id.in_(run_ids)).all():
+        if not _claim_stale_run(db, run, run.started_at, status="failed"):
+            continue
+        _mark_run_failed(run, db, now, message=DEPLOY_INTERRUPT_MESSAGE)
+        failed_count += 1
+    db.commit()
+    return failed_count
 
 
 def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set) -> bool:

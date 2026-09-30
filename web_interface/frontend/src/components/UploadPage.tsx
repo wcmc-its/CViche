@@ -1,14 +1,12 @@
-import { useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
-import { Upload, FileText, Loader2, Shield, HelpCircle, AlertTriangle } from 'lucide-react'
-import { useAuth } from '../contexts/AuthContext'
+import { useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Upload, FileText, Loader2, AlertTriangle, X, Check } from 'lucide-react'
+import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 import type { Estimate } from '../types'
 import { getEstimate, uploadFile } from '../api/upload'
 import { startRun, getCapacity } from '../api/runs'
 import { formatDuration, formatCost } from '../utils'
 import ErrorBanner from './ErrorBanner'
-import RunHistory from './RunHistory'
-import UserMenu from './UserMenu'
 
 type SubmissionType = 'own_cv' | 'authorized_admin'
 
@@ -26,11 +24,61 @@ const ATTESTATIONS: Record<SubmissionType, { role: string; text: string }> = {
   },
 }
 
+const WHO_LABELS: Record<SubmissionType, string> = {
+  own_cv: 'My own CV',
+  authorized_admin: 'On behalf of faculty',
+}
+
+const WHO_HELP: Record<SubmissionType, string> = {
+  own_cv: 'You are the faculty member whose CV this is.',
+  authorized_admin: 'You are an administrator uploading on behalf of a faculty member.',
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+const H2 = 'text-base font-semibold text-gray-900'
+
+// Drawn checkbox: the native input stays (sr-only) for keyboard and aria.
+function CheckBox({
+  checked,
+  onChange,
+  children,
+}: {
+  checked: boolean
+  onChange: (v: boolean) => void
+  children: React.ReactNode
+}) {
+  return (
+    <label className="flex cursor-pointer items-start gap-3">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="peer sr-only"
+      />
+      <span
+        aria-hidden="true"
+        className={`mt-px flex h-[18px] w-[18px] flex-none items-center justify-center rounded-[4px] border-[1.5px] peer-focus-visible:ring-2 peer-focus-visible:ring-primary-500 peer-focus-visible:ring-offset-1 ${
+          checked ? 'border-primary-600 bg-primary-600' : 'border-sand-400 bg-white'
+        }`}
+      >
+        {checked && <Check className="h-3 w-3 text-white" strokeWidth={3.5} />}
+      </span>
+      <span className="min-w-0">{children}</span>
+    </label>
+  )
+}
+
 interface UploadPageProps {
   onUploadSuccess: (runId: string) => void
 }
 
 export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
+  const showCost = useCanSeeCost()
   const navigate = useNavigate()
   const { user } = useAuth()
   const [file, setFile] = useState<File | null>(null)
@@ -61,6 +109,16 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     user?.default_submission_type === 'authorized_admin' ? 'authorized_admin' : 'own_cv',
   )
   const [attested, setAttested] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const removeFile = () => {
+    setFile(null)
+    setEstimate(null)
+    setPendingWarning(null)
+    setAcknowledged(false)
+    setPendingStart(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
 
   // Shared selection path for both the file picker and drag-and-drop.
   const processFile = async (selectedFile: File) => {
@@ -234,149 +292,143 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     }
   }
 
+
+  const startDisabled =
+    !file || !attested || uploading || estimating || (pendingWarning !== null && !acknowledged)
+  const missing: string[] = []
+  if (!file) missing.push('Add a CV')
+  if (!attested) missing.push('Agree to the upload terms')
+
   return (
-    <main
-      className="flex items-center justify-center min-h-screen p-4"
-      style={{
-        backgroundImage: 'url(/headerbg.png)',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        backgroundRepeat: 'no-repeat'
-      }}
-    >
-      <div className="w-full max-w-3xl">
-        {/* Logo */}
-        <div className="flex justify-center mb-6">
-          <img
-            src="/header-logo.png"
-            alt="CViche - CV Processing Pipeline"
-            className="h-16 object-contain"
-          />
-        </div>
+    <main className="px-4 py-8">
+      <div className="w-full max-w-[760px] mx-auto">
+        <h1 className="text-[26px] font-semibold text-gray-900">New run</h1>
+        <p className="text-sm text-gray-600 italic mt-1 mb-5">Upload a CV as a Word document. Get back a document in WCM institutional format.</p>
 
-        <section className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8 relative max-w-md mx-auto">
-          <div className="absolute top-4 right-4 flex items-center gap-1">
-            <Link
-              to="/help"
-              aria-label="Help and support"
-              title="Help and support"
-              className="text-gray-400 hover:text-primary-600 transition-colors"
-            >
-              <HelpCircle className="h-5 w-5" />
-            </Link>
-            <UserMenu />
-          </div>
-          <h1 className="sr-only">Upload CV for Processing</h1>
-          <p className="text-gray-600 mb-8 italic">Upload a CV in any format. Get back a document in WCM institutional format.</p>
-
-          <div className="space-y-6">
-            <div>
-              <label htmlFor="file-upload" className="block text-sm font-semibold text-gray-900 mb-2">
-                Upload Your CV
-              </label>
+        <section className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-5 sm:p-6">
+          <div className="flex flex-col gap-4">
+            {/* 1 - Whose CV */}
+            <div className="flex flex-wrap items-baseline justify-between gap-3">
+              <h2 className={H2} id="who-heading">1 &middot; Whose CV is this?</h2>
               <div
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                onDrop={handleDrop}
-                className={`border-2 border-dashed rounded-lg p-6 text-center focus-within:border-primary-500 focus-within:ring-2 focus-within:ring-primary-500 transition-colors ${
-                  isDragging
-                    ? 'border-primary-500 bg-primary-50'
-                    : 'border-gray-300 hover:border-primary-500 bg-white'
-                }`}
+                role="radiogroup"
+                aria-labelledby="who-heading"
+                className="flex rounded-lg bg-sand-50 p-[3px]"
               >
-                <input
-                  type="file"
-                  onChange={handleFileChange}
-                  className="sr-only"
-                  id="file-upload"
-                  aria-describedby="file-type-hint"
-                />
-                <label htmlFor="file-upload" className="cursor-pointer block">
-                  <div className="text-gray-600">
-                    {file ? (
-                      <FileText className="mx-auto h-12 w-12 text-primary-600" aria-hidden="true" />
-                    ) : (
-                      <Upload className="mx-auto h-12 w-12 text-gray-400" aria-hidden="true" />
-                    )}
-                    <p className="mt-2 font-medium">
-                      {file ? file.name : 'Click to select or drag a file here'}
-                    </p>
-                    <p className="text-xs text-gray-500 mt-1" id="file-type-hint">
-                      .docx only
-                    </p>
-                  </div>
-                </label>
+                {(['authorized_admin', 'own_cv'] as SubmissionType[]).map((value) => {
+                  const selected = submissionType === value
+                  return (
+                    <label
+                      key={value}
+                      className={`cursor-pointer rounded-md px-3 py-1.5 text-[13px] font-medium has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-primary-500 ${
+                        selected
+                          ? 'bg-white text-gray-900 shadow-[0_1px_2px_rgba(60,40,10,0.12)]'
+                          : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="submission-type"
+                        value={value}
+                        checked={selected}
+                        onChange={() => { setSubmissionType(value); setAttested(false) }}
+                        className="sr-only"
+                        aria-label={ATTESTATIONS[value].role}
+                      />
+                      {WHO_LABELS[value]}
+                    </label>
+                  )
+                })}
               </div>
             </div>
+            <p className="text-[13px] text-gray-500">{WHO_HELP[submissionType]}</p>
 
-            {/* Output-rendering options (issue #153) */}
-            <fieldset className="space-y-2">
-              <legend className="block text-sm font-semibold text-gray-900 mb-1">Output options</legend>
-              <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={includeClassificationComments}
-                  onChange={(e) => setIncludeClassificationComments(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                />
-                <span>
-                  Include classification comments
-                  <span className="block text-xs text-gray-500">Add Word comments explaining how each entry was classified.</span>
+            {/* 2 - CV file */}
+            <h2 className={`${H2} mt-2`}>2 &middot; CV file</h2>
+            <div
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
+              className={`relative flex items-center gap-4 rounded-lg border-[1.5px] border-dashed p-5 transition-colors focus-within:ring-2 focus-within:ring-primary-500 ${
+                isDragging
+                  ? 'border-primary-500 bg-primary-50'
+                  : 'border-sand-400 bg-sand-50/40 hover:bg-sand-50 hover:border-[#B8A67F]'
+              }`}
+            >
+              <input
+                ref={fileInputRef}
+                type="file"
+                onChange={handleFileChange}
+                className="sr-only"
+                id="file-upload"
+                aria-describedby="file-type-hint"
+              />
+              <div className="flex h-10 w-10 flex-none items-center justify-center rounded-[10px] bg-sand-200 text-[#6B5E45]">
+                <Upload className="h-5 w-5" aria-hidden="true" />
+              </div>
+              <label htmlFor="file-upload" className="block min-w-0 cursor-pointer after:absolute after:inset-0 after:content-['']">
+                <span className="block font-medium text-gray-900">
+                  Drop a .docx file here or <span className="text-primary-700">browse</span>
+                </span>
+                <span className="block text-[13px] text-gray-500" id="file-type-hint">
+                  .docx only. One file per run.
                 </span>
               </label>
-              <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
-                <input
-                  type="checkbox"
-                  checked={stripWcmInstructions}
-                  onChange={(e) => setStripWcmInstructions(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                />
-                <span>
-                  Strip WCM template instructions
-                  <span className="block text-xs text-gray-500">Remove the WCM CV template&apos;s instructional text (e.g. &quot;When preparing the WCM CV template&hellip;&quot;) from the output. On by default.</span>
-                </span>
-              </label>
+            </div>
+
+            {file && (
+              <div className="flex items-center gap-3 rounded-lg border border-sand-200 px-3.5 py-3">
+                <FileText className="h-5 w-5 flex-none text-primary-600" aria-hidden="true" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate font-medium text-gray-900">{file.name}</div>
+                  <div className="text-xs text-gray-500">{formatFileSize(file.size)}</div>
+                </div>
+                <button
+                  type="button"
+                  onClick={removeFile}
+                  disabled={uploading}
+                  aria-label={`Remove ${file.name}`}
+                  title="Remove"
+                  className="flex h-7 w-7 flex-none items-center justify-center rounded-md text-gray-500 hover:bg-sand-100 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+                >
+                  <X className="h-3.5 w-3.5" strokeWidth={2.2} aria-hidden="true" />
+                </button>
+              </div>
+            )}
+
+            {/* 3 - Output options (issue #153) */}
+            <fieldset className="mt-2 flex flex-col gap-3">
+              <legend className={`${H2} mb-3`}>3 &middot; Output options</legend>
+              <CheckBox checked={includeClassificationComments} onChange={setIncludeClassificationComments}>
+                <span className="block font-semibold text-gray-900">Include classification comments</span>
+                <span className="block text-[13px] text-gray-500">Add Word comments explaining how each entry was classified.</span>
+              </CheckBox>
+              <CheckBox checked={stripWcmInstructions} onChange={setStripWcmInstructions}>
+                <span className="block font-semibold text-gray-900">Strip WCM template instructions</span>
+                <span className="block text-[13px] text-gray-500">Remove the WCM CV template&apos;s instructional text (e.g. &quot;When preparing the WCM CV template&hellip;&quot;) from the output. On by default.</span>
+              </CheckBox>
             </fieldset>
 
-            <fieldset className="space-y-2">
-              <legend className="block text-sm font-semibold text-gray-900 mb-1">Who is uploading this CV?</legend>
-              {(Object.keys(ATTESTATIONS) as SubmissionType[]).map((value) => (
-                <label key={value} className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
-                  <input
-                    type="radio"
-                    name="submission-type"
-                    value={value}
-                    checked={submissionType === value}
-                    onChange={() => { setSubmissionType(value); setAttested(false) }}
-                    className="mt-0.5 h-4 w-4 border-gray-300 text-primary-600 focus:ring-primary-500"
-                  />
-                  <span>{ATTESTATIONS[value].role}</span>
-                </label>
-              ))}
-              <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700 pt-2">
-                <input
-                  type="checkbox"
-                  checked={attested}
-                  onChange={(e) => setAttested(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                />
-                <span>
-                  {ATTESTATIONS[submissionType].text}{' '}
-                  <span className="block text-xs text-gray-500 mt-1">
-                    The text of the CV is sent to a third-party AI service: Anthropic&apos;s Claude, running on Amazon
-                    Bedrock. AWS states that Bedrock does not share CV text or AI output with Anthropic or any other
-                    model provider, and does not use it to train models. Before the text is sent, CViche removes the
-                    dates of birth and Social Security numbers it recognizes. It can miss some formats, so you should
-                    not include anything you would not want these systems to see.
-                  </span>
-                  <span className="block text-xs text-gray-500 mt-1">
-                    The original CV, intermediate outputs, and final output are retained to improve CViche and test
-                    proposed changes. See the{' '}
-                    <a href="/help#data-retention" target="_blank" rel="noopener" className="text-primary-600 hover:underline">data retention policy</a>.
-                  </span>
-                </span>
-              </label>
-            </fieldset>
+            {/* 4 - Data handling */}
+            <h2 className={`${H2} mt-2`}>4 &middot; Data handling</h2>
+            <div className="flex flex-col gap-2 rounded-[10px] border border-sand-200 bg-sand-50 px-4 py-3.5 text-[13px] text-gray-700">
+              <p>
+                The text of the CV is sent to a third-party AI service: Anthropic&apos;s Claude, running on Amazon
+                Bedrock. AWS states that Bedrock does not share CV text or AI output with Anthropic or any other
+                model provider, and does not use it to train models. Before the text is sent, CViche removes the
+                dates of birth and Social Security numbers it recognizes. It can miss some formats, so you should
+                not include anything you would not want these systems to see.
+              </p>
+              <p>
+                The original CV, intermediate outputs, and final output are retained to improve CViche and test
+                proposed changes. See the{' '}
+                <a href="/help#data-retention" target="_blank" rel="noopener" className="text-primary-600 hover:underline">data retention policy</a>.
+              </p>
+            </div>
+
+            <CheckBox checked={attested} onChange={setAttested}>
+              <span className="block font-medium text-gray-900">{ATTESTATIONS[submissionType].text}</span>
+            </CheckBox>
 
             {estimating && (
               <div className="bg-primary-50 border border-primary-200 rounded-lg p-4" role="status" aria-live="polite">
@@ -385,49 +437,6 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                   <span className="text-primary-700">Analyzing document...</span>
                 </div>
               </div>
-            )}
-
-            {estimate && !estimating && (
-              <section className="bg-gradient-to-br from-primary-50 to-indigo-50 border border-primary-200 rounded-lg p-6" aria-label="Processing estimate">
-                <h2 className="font-semibold text-gray-900 mb-3">Processing Estimate</h2>
-                <dl className="space-y-2 text-sm">
-                  <div className="flex justify-between">
-                    <dt className="text-gray-600">Document content:</dt>
-                    <dd className="font-medium">
-                      {estimate.text_characters_is_guess
-                        ? 'Unknown'
-                        : `${estimate.text_characters.toLocaleString()} chars (~${estimate.document_tokens.toLocaleString()} tokens)`}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between">
-                    <dt className="text-gray-600">Pipeline steps:</dt>
-                    <dd className="font-medium">{estimate.num_steps} stages</dd>
-                  </div>
-                  <div className="flex justify-between">
-                    <dt className="text-gray-600">Estimated time:</dt>
-                    <dd className="font-medium">
-                      {formatDuration(estimate.estimated_time_seconds_min)} - {formatDuration(estimate.estimated_time_seconds_max)}
-                    </dd>
-                  </div>
-                  <div className="flex justify-between">
-                    <dt className="text-gray-600">Estimated cost:</dt>
-                    <dd className="font-medium text-success-700">
-                      {formatCost(estimate.estimated_cost_min)} - {formatCost(estimate.estimated_cost_max)}
-                    </dd>
-                  </div>
-                </dl>
-                <p className="text-xs text-gray-500 mt-3">
-                  Cost estimated for {estimate.pricing_model}.
-                </p>
-                {estimate.text_characters_is_guess && (
-                  <p className="text-xs text-amber-700 mt-1">
-                    We couldn't read this document's text, so the time and cost above are a rough guess, not based on its length.
-                  </p>
-                )}
-                <p className="text-sm text-gray-700 mt-3">
-                  You don't need to wait on this page. Processing continues if you close it, and your results will be in Run History below.
-                </p>
-              </section>
             )}
 
             {pendingWarning && (
@@ -464,50 +473,65 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
               <ErrorBanner message={error} onDismiss={() => setError(null)} />
             )}
 
-            <button
-              onClick={handleUpload}
-              disabled={!file || !attested || uploading || estimating || (pendingWarning !== null && !acknowledged)}
-              className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none"
-              style={{ touchAction: 'manipulation' }}
-            >
-              {uploading ? (
-                <span className="flex items-center justify-center gap-2">
-                  <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
-                  Starting Pipeline...
-                </span>
-              ) : pendingWarning ? (
-                'Process Anyway'
-              ) : pendingStart ? (
-                'Retry Processing'
-              ) : estimate ? (
-                'Start Processing'
-              ) : (
-                'Start Pipeline'
-              )}
-            </button>
-
-            {!estimate && !file && (
-              <p className="text-xs text-gray-500 text-center">
-                Select a file to see processing estimates
-              </p>
-            )}
-          </div>
-
-          {user?.role === 'admin' && (
-            <div className="mt-6 pt-4 border-t border-gray-200">
+            {/* Footer */}
+            <div className="mt-1 flex flex-wrap items-center justify-between gap-4 border-t border-sand-200 pt-[18px]">
+              <div className="flex min-w-0 flex-col gap-0.5 text-[13px] text-gray-500">
+                {estimate && !estimating && (
+                  <div aria-label="Processing estimate">
+                    <span className="font-medium text-gray-900">
+                      Estimated time: {formatDuration(estimate.estimated_time_seconds_min)} - {formatDuration(estimate.estimated_time_seconds_max)}
+                      {showCost && (
+                        <>
+                          {' '}&middot; Estimated cost: {formatCost(estimate.estimated_cost_min)} - {formatCost(estimate.estimated_cost_max)}
+                        </>
+                      )}
+                    </span>
+                    {showCost && (
+                      <span className="block text-xs">Cost estimated for {estimate.pricing_model}.</span>
+                    )}
+                    {estimate.text_characters_is_guess && (
+                      <span className="block text-xs text-amber-700">
+                        We couldn&apos;t read this document&apos;s text, so the {showCost ? 'time and cost' : 'time'} above {showCost ? 'are' : 'is'} a rough guess, not based on its length.
+                      </span>
+                    )}
+                    <span className="block text-xs">
+                      You don&apos;t need to wait on this page. Processing continues if you close it, and your results will appear in Runs.
+                    </span>
+                  </div>
+                )}
+                {missing.length > 0 && (
+                  <ul className="flex flex-col gap-0.5">
+                    {missing.map((m) => (
+                      <li key={m} className="flex items-center gap-1.5">
+                        <span aria-hidden="true" className="h-[5px] w-[5px] rounded-full bg-[#C2410C]" />
+                        {m}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
               <button
-                onClick={() => navigate('/admin')}
-                className="inline-flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 rounded"
+                onClick={handleUpload}
+                disabled={startDisabled}
+                className="rounded-lg bg-primary-600 px-5 py-[11px] font-semibold text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 max-sm:w-full"
+                style={{ touchAction: 'manipulation' }}
               >
-                <Shield className="w-3.5 h-3.5" aria-hidden="true" />
-                Admin Dashboard
+                {uploading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+                    Starting run...
+                  </span>
+                ) : pendingWarning ? (
+                  'Process anyway'
+                ) : pendingStart ? (
+                  'Retry'
+                ) : (
+                  'Start run'
+                )}
               </button>
             </div>
-          )}
+          </div>
         </section>
-
-        {/* Run History — RunHistory returns null when empty, so no wrapper needed */}
-        <RunHistory onSelectRun={(runId) => navigate(`/run/${runId}`)} />
       </div>
     </main>
   )

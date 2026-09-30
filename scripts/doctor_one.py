@@ -44,7 +44,7 @@ METRICS_TSV_COLUMNS = (
     "honors_malformed_rows", "honors_rows",
     "unrouted_code_entries", "source_coverage_pct",
     "stage3b_fallback_ratio", "t_validation_yield",
-    "fragment_reconnection_yield",
+    "fragment_reconnection_yield", "total_post_corrections",
 )
 
 

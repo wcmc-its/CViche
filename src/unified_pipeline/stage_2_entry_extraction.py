@@ -26,6 +26,7 @@ from docx import Document
 sys.path.insert(0, str(Path(__file__).parent))
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import (
@@ -34,7 +35,11 @@ from core.docx_structure_extractor import (
     join_row_cells,
     row_cell_texts,
 )
-from core.template_boilerplate import is_near_template_instruction, is_template_instruction
+from core.template_boilerplate import (
+    is_foreign_template_instruction,
+    is_near_template_instruction,
+    is_template_instruction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -488,16 +493,60 @@ def remove_subset_delimiters(delimiters: list) -> list:
     return kept
 
 
+def row_range_entry(start_key: str, end_key: str, batch_elem_lookup: dict,
+                    confidence: float) -> tuple[dict | None, list[str]]:
+    """The entry for a delimiter on table sub-rows, and the row keys it claims.
+
+    The model may group several rows of one table into one entry ("80.0" to
+    "80.2"). The entry's text must then hold every row in that span: its span
+    is what remove_subset_delimiters trusts, and a span wider than its text
+    let that drop the #420-recovered rows as "contained" -- AV00TQ's 24
+    teaching lines in row 80.2 vanished behind a header-row-only entry
+    (#1126). When the span can't be resolved row by row (another table, an
+    end before the start -- "80.10" arrives as the float 80.1 -- or a row
+    missing from the batch), the entry shrinks to its start row, so the span
+    stays honest and #420 recovery emits the rest.
+
+    Returns (None, []) when the start row is not in the batch.
+    """
+    if start_key not in batch_elem_lookup:
+        return None, []
+    keys = [start_key]
+    start_parent, _, start_row = start_key.partition(".")
+    end_parent, _, end_row = end_key.partition(".")
+    if (end_key != start_key and start_parent == end_parent
+            and start_row.isdigit() and end_row.isdigit()
+            and int(end_row) > int(start_row)):
+        span = [f"{start_parent}.{r}" for r in range(int(start_row), int(end_row) + 1)]
+        if all(k in batch_elem_lookup for k in span):
+            keys = span
+    elem = batch_elem_lookup[start_key]
+    texts = [str(batch_elem_lookup[k].get("full_text", batch_elem_lookup[k].get("text", "")))
+             for k in keys]
+    entry = {
+        "element_idx_start": start_key,
+        "element_idx_end": keys[-1],
+        "element_type": "table_row",
+        "confidence": confidence,
+        "text": "\n".join(t for t in texts if t.strip()),
+        "table_index": elem.get("table_index"),
+        "row_index": elem.get("row_index"),
+        "parent_idx": elem.get("parent_idx"),
+    }
+    return entry, keys
+
+
 def recover_unclaimed_table_rows(batch_elements: list, claimed_row_keys: set) -> list:
     """Return entries for table rows no delimiter claimed (#420).
 
     The model returns sub-row indices as JSON NUMBERS, so a row index with a
     trailing zero collapses: "114.10" parses to the float 114.1, ``str()``
     renders it back as "114.1", and the lookup lands on row 1 -- row 10 is
-    unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50 exactly this way.
-    Rows the model simply omitted disappear identically. Either way the content
-    survived only inside whatever whole-table entry the model happened to emit,
-    which is what made those blobs load-bearing.
+    unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50 exactly this way,
+    and element 109 lost row 10. Rows the model simply omitted disappear
+    identically. Either way the content survived only inside whatever
+    whole-table entry the model happened to emit, which is what made those
+    blobs load-bearing (and what made #227's dedup drop real content loss).
 
     Recovery is structural, so the entries are marked ``recovered_row`` and given
     a lower confidence than model-attested ones.
@@ -1011,21 +1060,12 @@ Respond **only** with a JSON array containing the identified entries. If no entr
                     end_idx_str = str(end_idx)
                     if "." in start_idx_str or "." in end_idx_str:
                         # Row sub-index - look up in batch elements by string key
-                        if start_idx_str in batch_elem_lookup:
-                            elem = batch_elem_lookup[start_idx_str]
-                            full_text = elem.get("full_text", elem.get("text", ""))
-                            entry = {
-                                "element_idx_start": start_idx_str,
-                                "element_idx_end": end_idx_str,
-                                "element_type": "table_row",
-                                "confidence": delim.get("confidence", 1.0),
-                                "text": full_text,
-                                "table_index": elem.get("table_index"),
-                                "row_index": elem.get("row_index"),
-                                "parent_idx": elem.get("parent_idx")
-                            }
+                        entry, row_keys = row_range_entry(
+                            start_idx_str, end_idx_str, batch_elem_lookup,
+                            delim.get("confidence", 1.0))
+                        if entry is not None:
                             all_validated_entries.append(entry)
-                            claimed_row_keys.add(start_idx_str)
+                            claimed_row_keys.update(row_keys)
                         continue
 
                     # Handle paragraph indices (integers)
@@ -1055,16 +1095,7 @@ Respond **only** with a JSON array containing the identified entries. If no entr
 
             # Backstop: emit any table row this batch never claimed (#420).
             #
-            # The model returns sub-row indices as JSON NUMBERS, so a row index
-            # with a trailing zero collapses: "114.10" parses to the float 114.1,
-            # str() renders it back as "114.1", and the lookup lands on row 1 --
-            # row 10 is unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50
-            # exactly this way, and element 109 lost row 10. Rows the model simply
-            # omitted disappear identically. Either way the content survived only
-            # inside whatever whole-table entry the model happened to emit, which
-            # is what made those blobs load-bearing (and what made #227's dedup
-            # drop real content loss).
-            #
+            # Why rows go unclaimed: recover_unclaimed_table_rows' docstring (#420).
             # Recovering the rows here is deterministic and costs no extra LLM
             # call. It also runs BEFORE remove_subset_delimiters, so a whole-table
             # blob whose rows are now all present becomes a provable duplicate and
@@ -1080,6 +1111,8 @@ Respond **only** with a JSON array containing the identified entries. If no entr
                 logger.info(f"    Recovered {len(recovered)} unclaimed table row(s) "
                             f"in batch {batch_idx + 1} [{full_hierarchy}]")
 
+        except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
+            raise
         except Exception as e:
             logger.warning(f"    ⚠ Error in batch {batch_idx + 1}: {e} [{full_hierarchy}]")
             continue
@@ -1135,7 +1168,8 @@ def _is_adjacent_dateless_line(prev: dict, cur: dict, element_index_map: dict) -
 def _is_template_text(text: str) -> bool:
     """WCM-template instruction text, exact or reworded. ``_drop_template_instructions``
     runs after the fold, so folding one into a real entry would drop that entry."""
-    return is_template_instruction(text) or is_near_template_instruction(text)
+    return (is_template_instruction(text) or is_near_template_instruction(text)
+            or is_foreign_template_instruction(text))
 
 
 def _continues_previous_entry(prev: dict, cur: dict, element_index_map: dict) -> bool:
@@ -1413,9 +1447,27 @@ def _drop_template_instructions(entries: list[dict]) -> list[dict]:
         if not (is_template_instruction(e.get("text", ""))
                 or is_near_template_instruction(e.get("text", "")))
     ]
+    kept = _drop_foreign_template_instructions(kept)
     if len(kept) != len(entries):
         print(f"Filtered {len(entries) - len(kept)} WCM-template instruction entries")
     return kept
+
+
+# Entry types whose text is structure, not content: a header or break is left
+# for the hierarchy to place even when its text reads like an instruction.
+_STRUCTURAL_ENTRY_TYPES = ("header", "break")
+
+
+def _drop_foreign_template_instructions(entries: list[dict]) -> list[dict]:
+    """Drop another institution's template scaffolding ("C. Appointments
+    (include institution, title, dates)", "1. Sabbatical Leave: N/A") from the
+    content entries (#530). Detected by shape, not phrase; see
+    `core.template_boilerplate.is_foreign_template_instruction`."""
+    return [
+        e for e in entries
+        if e.get("element_type") in _STRUCTURAL_ENTRY_TYPES
+        or not is_foreign_template_instruction(e.get("text", ""))
+    ]
 
 
 def run_stage_2(

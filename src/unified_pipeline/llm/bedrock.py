@@ -12,12 +12,11 @@ import json
 import logging
 import re
 
-from unified_pipeline.config import calculate_cost
+from unified_pipeline.config import _normalize_model_id, calculate_cost
 from unified_pipeline.llm.retry import (
     _call_with_retry,
     _client_init_lock,
     _get_llm_timeout_seconds,
-    _get_llm_max_attempts,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,6 +63,13 @@ class BedrockEmptyResponseError(RuntimeError):
 # docs/analysis/HANDOFF-runaway-generation-maxtokens-2026-06-17.md.
 DEFAULT_MAX_TOKENS = 16000
 
+# Models that 400 on any sampling parameter ("`temperature` is deprecated for
+# this model", probed 2026-09-29) and run adaptive thinking unless it is
+# switched off. Thinking adds billed output tokens, so it is disabled
+# explicitly. Keyed by the bare id, as in PRICING. Every model outside this set
+# gets the request shape it always had.
+NO_SAMPLING_PARAMS_MODELS = frozenset({"anthropic.claude-sonnet-5"})
+
 _bedrock_client = None
 
 
@@ -82,14 +88,18 @@ def _get_bedrock_client():
                 import boto3
                 from botocore.config import Config
                 region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-                # Explicit connect/read timeouts + bounded standard retries so a
-                # wedged Bedrock call can't block the worker thread indefinitely.
-                # botocore's default read_timeout (60s) and retry behavior are left
-                # implicit otherwise; here we make them explicit and tunable.
+                # Explicit connect/read timeouts so a wedged Bedrock call can't
+                # block the worker thread indefinitely. botocore is held to ONE
+                # attempt (total_max_attempts=1, #632): _call_with_retry is the
+                # single retry owner, so a logical call costs retry_count+1 raw
+                # requests, not that times botocore's own attempts. Note
+                # `max_attempts` would be wrong here -- botocore reads it as a
+                # RETRY count and adds one for the initial request; only
+                # `total_max_attempts` counts the initial request.
                 bedrock_config = Config(
                     connect_timeout=10,
                     read_timeout=_get_llm_timeout_seconds(),
-                    retries={"mode": "standard", "max_attempts": _get_llm_max_attempts()},
+                    retries={"mode": "standard", "total_max_attempts": 1},
                 )
                 _bedrock_client = boto3.client(
                     "bedrock-runtime", region_name=region, config=bedrock_config
@@ -333,8 +343,12 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     call_kwargs = {
         "modelId": model,
         "messages": converse_messages,
-        "inferenceConfig": {"temperature": float(temperature)},
+        "inferenceConfig": {},
     }
+    if _normalize_model_id(model) in NO_SAMPLING_PARAMS_MODELS:
+        call_kwargs["additionalModelRequestFields"] = {"thinking": {"type": "disabled"}}
+    else:
+        call_kwargs["inferenceConfig"]["temperature"] = float(temperature)
     if system_prompts:
         call_kwargs["system"] = system_prompts
     # Always send maxTokens. When the caller (and config) leave it None, fall

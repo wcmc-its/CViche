@@ -413,7 +413,7 @@ def _render_service(q2_entries):
     Returns (board_rows, journal_rows)."""
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document()
-    gen.doc.add_paragraph("Service on Boards and/or Committees")
+    gen.doc.add_paragraph().add_run("Service on Boards and/or Committees").bold = True
     boards_table = gen.doc.add_table(rows=1, cols=4)
     for i, header in enumerate(["Name of Committee", "Role", "Organization",
                                 "Dates"]):

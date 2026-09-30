@@ -27,7 +27,17 @@ BEDROCK_RETRYABLE_CODES = frozenset({
     "ModelTimeoutException",
     "InternalServerException",
     "ServiceUnavailableException",
+    # Carries the service model's `retryable` trait (HTTP 429); botocore's
+    # standard mode retried it, so dropping it would fail it at once (#632).
+    # test_bedrock_retryable_codes_cover_the_service_model pins this set
+    # against the installed service model.
+    "ModelNotReadyException",
 })
+
+# A bare HTTP 5xx that carries no modeled Bedrock error code (e.g. a load
+# balancer's 502): botocore reports Error.Code as the status string. Botocore's
+# standard mode retried these, so _call_with_retry must too (#632).
+BEDROCK_BARE_HTTP_RETRYABLE_CODES = frozenset({"500", "502", "503", "504"})
 
 # Subset of BEDROCK_RETRYABLE_CODES that means the PROVIDER is down or
 # shedding load, not an ordinary transient blip (a wedged connection, a slow
@@ -46,8 +56,18 @@ BEDROCK_OUTAGE_CODES = frozenset({
 # try/except ImportError fallback here could never actually trigger and was
 # dead defensive code (PR #620 review).
 from botocore.exceptions import ClientError as _BotoClientError
+from botocore.exceptions import ConnectionError as _BotoConnectionError
+from botocore.exceptions import HTTPClientError as _BotoHTTPClientError
 
-RETRYABLE_ERRORS = (_BotoClientError,)
+# _call_with_retry is the single retry owner (#632): the Bedrock client is
+# configured for one botocore attempt, so the transport-level failures botocore
+# used to retry itself must be retried here or they would become a
+# first-attempt failure. Three of botocore's standard-mode checkers are
+# replaced: TransientRetryableChecker's exception classes (connect/read
+# timeouts, dropped connections: the two non-ClientError classes below),
+# ServiceErrorCodeChecker's modeled-retryable codes (BEDROCK_RETRYABLE_CODES),
+# and the bare HTTP 5xx status check (BEDROCK_BARE_HTTP_RETRYABLE_CODES).
+RETRYABLE_ERRORS = (_BotoClientError, _BotoConnectionError, _BotoHTTPClientError)
 
 T = TypeVar("T")
 
@@ -119,20 +139,10 @@ def _get_llm_timeout_seconds() -> float:
     reported Stage 4 hang). A bounded timeout turns that hang into a normal
     exception that propagates to the orchestrator, fails the run, and
     surfaces to the user. Generous by default so legitimately slow calls
-    are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS.
+    are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS. This bounds ONE
+    attempt; _get_retry_deadline_seconds bounds the retries (#636).
     """
     return _get_llm_config_float("CVICHE_LLM_TIMEOUT_SECONDS", default=180.0)
-
-
-def _get_llm_max_attempts() -> int:
-    """Total botocore attempts (initial + retries) for Bedrock calls.
-
-    botocore's standard retry mode retries connect/read timeouts and
-    throttling up to this many attempts, then raises -- so a persistently
-    wedged Bedrock endpoint fails deterministically instead of hanging.
-    Tune via CVICHE_LLM_MAX_ATTEMPTS.
-    """
-    return _get_llm_config_int("CVICHE_LLM_MAX_ATTEMPTS", default=3)
 
 
 def _get_outage_budget_seconds() -> float:
@@ -143,6 +153,27 @@ def _get_outage_budget_seconds() -> float:
     (#810).
     """
     return _get_llm_config_float("CVICHE_LLM_OUTAGE_BUDGET_SECONDS", default=1800.0)
+
+
+# How many per-attempt timeouts the default ordinary-retry deadline allows.
+_RETRY_DEADLINE_TIMEOUT_MULTIPLE = 2
+
+
+def _get_retry_deadline_seconds() -> float:
+    """Wall-clock ceiling on _call_with_retry's ORDINARY (non-outage) retries
+    (#636). CVICHE_LLM_TIMEOUT_SECONDS bounds one attempt only, so retry_count=3
+    of hung attempts used to run 4 x 180s plus backoff before failing. No new
+    ordinary retry starts once this much time has gone, so the worst case for
+    a call is this deadline plus one attempt's timeout. Default: twice the
+    per-attempt timeout -- a single hung attempt still gets its one retry, and
+    fast failures (5xx, dropped connections) keep all retry_count retries.
+    Tune via CVICHE_LLM_RETRY_DEADLINE_SECONDS. Outage-class pauses have their
+    own budget (CVICHE_LLM_OUTAGE_BUDGET_SECONDS) and do not count against it.
+    """
+    return _get_llm_config_float(
+        "CVICHE_LLM_RETRY_DEADLINE_SECONDS",
+        default=_RETRY_DEADLINE_TIMEOUT_MULTIPLE * _get_llm_timeout_seconds(),
+    )
 
 
 # Backoff cap for an outage-class retry -- longer than the ordinary 30s cap
@@ -222,6 +253,9 @@ def _call_with_retry(
     Args:
         call_fn: Zero-argument callable that makes the API call
         retry_count: Max number of retries (total attempts = retry_count + 1)
+            This is the ONLY retry layer: the Bedrock client is built with one
+            botocore attempt (#632), so retry_count + 1 is also the raw request
+            count (outage-class errors excluded, see below).
         cancel_check: Optional zero-arg callable invoked between retry
             attempts; see above.
 
@@ -242,7 +276,9 @@ def _call_with_retry(
         ValueError: If retry_count is negative
         LLMOutageError: An outage-class error (see _is_outage_error) persisted
             past the outage budget (CVICHE_LLM_OUTAGE_BUDGET_SECONDS, #810).
-        The last error if all (non-outage) retries are exhausted
+        The last error if all (non-outage) retries are exhausted, or if the
+            next backoff would end past the ordinary-retry deadline
+            (CVICHE_LLM_RETRY_DEADLINE_SECONDS, #636)
         Non-retryable errors immediately (including non-retryable ClientError)
     """
     # retry_count is a call-site kwarg passthrough (ultimately from
@@ -266,6 +302,10 @@ def _call_with_retry(
     attempt = 0
     outage_retries = 0
     outage_started: float | None = None
+    # Start of the ordinary-retry deadline window; restarted after each outage
+    # pause so waiting out an outage cannot use up the ordinary budget.
+    window_started = time.monotonic()
+    deadline = _get_retry_deadline_seconds()
     while True:
         try:
             # Bound concurrent in-flight calls per pod. The slot is acquired only
@@ -283,7 +323,10 @@ def _call_with_retry(
             # etc.) should propagate immediately.
             if isinstance(e, _BotoClientError):
                 error_code = e.response.get("Error", {}).get("Code", "")
-                if error_code not in BEDROCK_RETRYABLE_CODES:
+                if (
+                    error_code not in BEDROCK_RETRYABLE_CODES
+                    and error_code not in BEDROCK_BARE_HTTP_RETRYABLE_CODES
+                ):
                     raise
 
             if _is_outage_error(e):
@@ -313,6 +356,7 @@ def _call_with_retry(
                 time.sleep(wait)
                 if cancel_check is not None:
                     cancel_check()
+                window_started = time.monotonic()
                 continue
 
             if attempt < retry_count:
@@ -324,6 +368,13 @@ def _call_with_retry(
                 # lockstep and re-throttle together (a self-inflicted herd).
                 base = min(2 ** attempt, 30)
                 wait = base / 2 + random.uniform(0, base / 2)
+                if time.monotonic() - window_started + wait > deadline:
+                    logger.warning(
+                        "LLM call failed (attempt %d/%d); not retrying: the "
+                        "%.0fs retry deadline passes before a %.1fs backoff ends",
+                        attempt + 1, retry_count + 1, deadline, wait,
+                    )
+                    raise e
                 logger.warning(
                     f"LLM call failed (attempt {attempt + 1}/{retry_count + 1}): {e}. "
                     f"Retrying in {wait:.1f}s..."
