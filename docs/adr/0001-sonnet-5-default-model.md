@@ -44,7 +44,7 @@ With those fixes, the evidence is:
 
 We adopt on cost plus non-regression, and **assume** better accuracy rather than claiming it.
 
-The full evaluation is in `docs/analysis/SONNET5-EVAL-2026-09-29.md`, a local analysis file that is not committed.
+The full evaluation, with per-CV tables, is in `docs/analysis/SONNET5-EVAL-2026-09-29.md`.
 
 ## Consequences
 
