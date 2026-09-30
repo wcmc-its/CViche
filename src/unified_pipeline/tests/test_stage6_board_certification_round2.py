@@ -800,7 +800,7 @@ class TestSingleRowBackfillIsLogged:
     _SECRET_NUM = "ZQ-90417"
 
     def _run(self, caplog, fields, text):
-        gen = _generator()
+        gen = self._gen = _generator()
         with caplog.at_level(logging.INFO):
             gen._fill_board_certification(
                 [{"extracted_fields": fields, "text": text}]
@@ -849,6 +849,8 @@ class TestSingleRowBackfillIsLogged:
         )
         assert [r.levelno for r in records] == [logging.INFO]
         assert "year_certified" in records[0].getMessage()
+        # The log claims a backfill: the rendered row must actually carry it.
+        assert _rows_after_board(self._gen)[0][2] == "2015"
 
     def test_year_skip_of_multi_value_structured_field_is_logged(self, caplog):
         records = self._run(
