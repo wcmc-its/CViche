@@ -983,18 +983,21 @@ def test_wrong_start_date_leaves_the_extracted_value_alone():
     assert entry["extracted_fields"] == {"start_date": "2026", "end_date": None}
 
 
-if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
-
-
 def test_dedup_and_render_tokens_are_unicode_aware():
     """#541: accented Latin stays whole, Cyrillic/Greek produce tokens,
     ASCII is unchanged. Invented names."""
     from unified_pipeline.doctor.shared import _long_word_tokens
     assert _alphanumeric_tokens("Zoë Brändström") == Counter(
         {"zoe": 1, "brandstrom": 1})
+    assert _alphanumeric_tokens("report_2019") == Counter(
+        {"report": 1, "2019": 1})
     assert _alphanumeric_tokens("Иван Петров") == Counter(
         {"иван": 1, "петров": 1})
     assert _long_word_tokens("Zoë Brändström") == {"brandstrom"}
     assert _long_word_tokens("Ελένη Παπαδοπούλου") == {"ελενη", "παπαδοπουλου"}
     assert _long_word_tokens("Alpha beta gamma12") == {"alpha", "gamma"}
+    assert _long_word_tokens("hello_world") == {"hello", "world"}
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-q"]))
