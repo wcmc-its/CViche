@@ -203,6 +203,14 @@ def test_emit_progress_failure_is_logged_not_swallowed(caplog):
 # each one blocked the run loop 2s waiting on itself and emitted again.
 # ---------------------------------------------------------------------------
 
+
+def _entered_guard(orch_module):
+    """A stage guard entered the way _run_with_stdout_capture enters it (#590);
+    _run_with_stdout_capture_sync exits it."""
+    guard = orch_module._StageGuard()
+    guard.enter()
+    return guard
+
 def _stream_through_real_capture(emitter, prints, loggers, timeout=20.0):
     """Run a stage that print()s ``prints`` lines through the real capture and
     router, with ``loggers`` writing through sys.stdout the way
@@ -232,7 +240,8 @@ def _stream_through_real_capture(emitter, prints, loggers, timeout=20.0):
     async def run():
         loop = asyncio.get_running_loop()
         await asyncio.to_thread(
-            orch_mod.PipelineOrchestrator._run_with_stdout_capture_sync, _Run(), stage, 1, loop)
+            orch_mod.PipelineOrchestrator._run_with_stdout_capture_sync, _Run(), stage, 1, loop,
+            _entered_guard(orch_mod))
         gc.collect()  # surface any never-retrieved future now, on this loop
         await asyncio.sleep(0.3)
 
@@ -380,9 +389,29 @@ def test_a_stage_printing_from_its_own_event_loop_still_streams():
     async def run():
         loop = asyncio.get_running_loop()
         await asyncio.to_thread(
-            orch_mod.PipelineOrchestrator._run_with_stdout_capture_sync, _Run(), stage, 1, loop)
+            orch_mod.PipelineOrchestrator._run_with_stdout_capture_sync, _Run(), stage, 1, loop,
+            _entered_guard(orch_mod))
 
     asyncio.run(run())
 
     assert streamed == ["Processing 2 of 5 sections"]
     assert progress == [(2, 5)]
+
+
+def test_a_run_loop_write_after_a_stage_timeout_does_not_raise(monkeypatch):
+    """#590's stop point is for the stage thread. A log line written on the
+    run loop after the stage was abandoned (the timeout path logs there) must
+    not raise StageAbandoned into that logging call."""
+    import asyncio
+
+    real_stdout = io.StringIO()
+    monkeypatch.setattr(sys, "__stdout__", real_stdout)
+    guard = orch_mod._StageGuard()
+    guard.stop.set()
+
+    async def scenario():
+        capture = orch_mod.StreamingStdoutCapture(object(), 1, asyncio.get_running_loop(), guard)
+        return capture.write("stage 4 timed out\n")
+
+    assert asyncio.run(scenario()) == len("stage 4 timed out\n")
+    assert "stage 4 timed out\n" in real_stdout.getvalue()

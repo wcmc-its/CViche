@@ -29,7 +29,7 @@ if str(_SRC) not in sys.path:
 # The REAL finding builder every doctor lint goes through -- fixtures below
 # are built with it so they are the production shape by construction, not a
 # hand-copy that can drift from it.
-from unified_pipeline.doctor.shared import _finding  # noqa: E402
+from unified_pipeline.doctor.shared import STATUS_SKIPPED, _finding  # noqa: E402
 
 
 def _load_cli():
@@ -114,6 +114,7 @@ _EXPECTED_SUFFIX_DIRS = {
     "_classified.json": "stage_3b_classified_entries",
     "_fields.json": "stage_4_field_extraction",
     "_enriched.json": "stage_5_enrichment",
+    "_institution_enriched.json": "stage_5b_institution_enrichment",
     "_wcm.docx": "stage_6_wcm_documents",
     "_render_warnings.json": "stage_6_wcm_documents",
 }
@@ -284,7 +285,8 @@ def test_finding_contract_matches_doctor_shared_finding():
     assert set(cli.Finding.__annotations__) == set(real)
 
 
-@pytest.mark.parametrize("missing", ["lint", "severity", "message", "evidence"])
+@pytest.mark.parametrize("missing", ["lint", "severity", "message", "evidence",
+                                     "status", "reason"])
 def test_aggregate_raises_on_missing_required_field(missing):
     """Every `Finding` key is required -- including `evidence`, which
     `_finding()` always sets, so its absence means the finding did not
@@ -301,6 +303,14 @@ def test_aggregate_raises_on_unknown_severity():
     cli = _load_cli()
     reports = {"r1": {"findings": [_finding("pipe_leaks", "CRITICAL", "x")]}}
     with pytest.raises(cli.MalformedFindingError, match=r"run_id='r1'.*CRITICAL"):
+        cli.aggregate(reports)
+
+
+def test_aggregate_raises_on_unknown_status():
+    cli = _load_cli()
+    reports = {"r1": {"findings": [_finding("pipe_leaks", "INFO", "x",
+                                            status="maybe")]}}
+    with pytest.raises(cli.MalformedFindingError, match=r"run_id='r1'.*maybe"):
         cli.aggregate(reports)
 
 
@@ -350,7 +360,8 @@ def test_aggregate_ranks_by_affected_count_and_tracks_skip_vs_ran():
     reports = {
         "A": {"findings": [
             _finding("pipe_leaks", "WARN", "x"),
-            _finding("segmentation", "INFO", "skipped: missing source"),
+            _finding("segmentation", "INFO", "skipped: missing source",
+                     status=STATUS_SKIPPED, reason="source"),
         ]},
         "B": {"findings": [
             _finding("pipe_leaks", "ERROR", "y"),
@@ -366,11 +377,10 @@ def test_aggregate_ranks_by_affected_count_and_tracks_skip_vs_ran():
 
 
 def test_skip_detection_matches_what_run_doctor_actually_emits(tmp_path):
-    """T1.7/T2.5: a finding has no structured skip status (#750), so
-    aggregate() depends on the wording `_ready()` in run_doctor.py emits.
-    This runs the REAL run_doctor on an empty root -- every registered lint
-    skips -- through aggregate(), so a rewording on either side fails here
-    instead of silently counting every skipped lint as 'ran clean'.
+    """T1.7/T2.5: aggregate() reads the structured `status` field `_ready()`
+    in run_doctor.py sets (#750). This runs the REAL run_doctor on an empty
+    root -- every registered lint skips -- through aggregate(), so the two
+    sides cannot drift into counting every skipped lint as 'ran clean'.
 
     no_output (#745) is the one exception, not a rewording drift: it is
     dispatched by hand on artifact PATHS rather than `_ready()`-checked
@@ -391,8 +401,8 @@ def test_skip_detection_matches_what_run_doctor_actually_emits(tmp_path):
     assert {f["lint"] for f in rep["findings"]} == real_lints, (
         "every registered lint but no_output must skip on an empty root")
     assert {f["severity"] for f in rep["findings"]} == {"INFO"}
-    assert all(f["message"].startswith(cli.SKIPPED_MISSING_PREFIX)
-               for f in rep["findings"]), "the sweep's prefix must be what _ready() emits"
+    assert {f["status"] for f in rep["findings"]} == {STATUS_SKIPPED}, (
+        "every skip must carry the status aggregate() reads")
     assert rep["artifacts"]["stage_4"] is None, "an empty root never reached stage 4"
 
     rows = cli.aggregate({"r1": rep})
@@ -424,18 +434,18 @@ def test_no_output_counts_as_ran_once_stage_4_actually_happened(tmp_path):
     assert ran["segmentation"] == 1
 
 
-def test_skip_detection_requires_prefix_not_mere_substring():
-    """Pins SKIPPED_MISSING_PREFIX matching to `.startswith`, not `in`: a
-    message that merely CONTAINS the prefix mid-string is not a skip.
-    """
+def test_skip_detection_reads_status_not_message_wording():
+    """#750: the message is for humans. A skip-worded message with status
+    'ran' is a lint that ran, and a skip is a skip whatever its wording."""
     cli = _load_cli()
     reports = {"r1": {"findings": [
-        _finding("pipe_leaks", "INFO", "not skipped: missing anything, ran fine"),
+        _finding("pipe_leaks", "INFO", "skipped: missing source"),
+        _finding("segmentation", "INFO", "reworded", status=STATUS_SKIPPED,
+                 reason="source"),
     ]}}
     rank = {r["lint"]: r for r in cli.aggregate(reports)}
-    assert rank["pipe_leaks"]["cvs_ran"] == 1, (
-        "a message carrying the prefix mid-string must not be counted as skipped")
-    assert rank["pipe_leaks"]["cvs_affected"] == 0
+    assert rank["pipe_leaks"]["cvs_ran"] == 1
+    assert rank["segmentation"]["cvs_ran"] == 0
 
 
 def test_resolve_outputs_dir_tolerates_nested_and_flat_layouts_and_never_raises(tmp_path):

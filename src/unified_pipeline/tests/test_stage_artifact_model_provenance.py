@@ -151,3 +151,44 @@ def test_stage_3b_model_parameter_was_removed_not_deprioritized():
     import inspect
     from unified_pipeline import stage_3b_entry_classifier as s3b
     assert "model" not in inspect.signature(s3b.run_stage_3b).parameters
+
+
+def test_3b_artifact_records_observed_model_not_a_default(monkeypatch, tmp_path):
+    """run_stage_3b() must WRITE the model that served the call into the
+    artifact (``meta.model``, mirrored in ``meta.stats.model``). The helper
+    tests elsewhere prove classify_entries_batch() returns the observed
+    model; only this one covers the artifact-writing layer, where a
+    regression to a hard-coded or configured default would pass the rest of
+    this file (#699, review of #642)."""
+    from unified_pipeline import stage_3b_entry_classifier as s3b
+    from unified_pipeline.stage3b import classify as s3b_classify
+
+    classification = {"classifications": [{"index": 0, "code": "H", "confidence": 0.9}]}
+    monkeypatch.setattr(s3b_classify, "call_llm",
+                        lambda **kw: _fake_llm_result(json.dumps(classification)))
+
+    stage_2 = tmp_path / "entries.json"
+    stage_2.write_text(json.dumps({"entries": [{
+        "element_type": "text",
+        "text": "Synthetic Award for Synthetic Work, 2015",
+        "hierarchy": ["HONORS AND AWARDS"],
+    }]}))
+    stage_3a = tmp_path / "header_taxonomy.json"
+    stage_3a.write_text(json.dumps({"mappings": [{
+        "title": "HONORS AND AWARDS",
+        "taxonomy_options": [{"code": "H", "confidence": 0.9}],
+        "children": [],
+    }]}))
+    out_dir = tmp_path / "out"
+
+    s3b.run_stage_3b("0000_Test_Synthetic_CV", stage_2_path=str(stage_2),
+                     stage_3a_path=str(stage_3a), output_dir=str(out_dir))
+
+    written = json.loads((out_dir / "0000_Test_Synthetic_CV_classified.json").read_text())
+    assert written["entries"][0]["classification_source"] == "llm", \
+        "the sentinel call must have classified the entry, not fallen back"
+    recorded_model = written["meta"]["model"]
+    assert recorded_model == SENTINEL, (
+        f"artifact recorded model={recorded_model!r}, expected the observed SENTINEL")
+    assert written["meta"]["stats"]["model"] == SENTINEL
+    assert recorded_model != "gpt-5.1", "recorded the stale default, not the observed model"

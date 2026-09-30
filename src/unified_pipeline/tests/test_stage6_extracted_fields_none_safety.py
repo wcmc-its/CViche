@@ -297,7 +297,7 @@ def test_patents_none_extracted_fields_does_not_raise():
     at patents.py:80. With no title and no patent number it is sparse, so
     no table is built."""
     gen = _new_generator()
-    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph().add_run("Patents & Inventions").bold = True
 
     entries = [{'taxonomy_code': 'M2D', 'text': 'A patent with no fields',
                 'extracted_fields': None}]
@@ -418,7 +418,7 @@ def _patent(text: str, **fields) -> dict:
 
 def _patents_doc() -> WCMTemplateGenerator:
     gen = _new_generator()
-    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph().add_run("Patents & Inventions").bold = True
     gen.doc.add_paragraph("MENTORING")
     return gen
 
@@ -497,7 +497,7 @@ def test_patents_multiple_records_keep_order_and_add_no_trailing_spacing():
 
 def test_patents_instruction_paragraph_is_blanked_and_left_below_the_tables():
     gen = _new_generator()
-    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph().add_run("Patents & Inventions").bold = True
     instruction = gen.doc.add_paragraph(
         "Please include inventors, title of invention and patent number.")
     gen.doc.add_paragraph("MENTORING")

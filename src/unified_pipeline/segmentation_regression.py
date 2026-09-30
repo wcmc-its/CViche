@@ -50,6 +50,7 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
     is_near_template_instruction,
     is_template_instruction,
 )
@@ -195,7 +196,7 @@ def _fold_marks(text: str) -> str:
     """Drop combining marks ('Müller' -> 'Muller', Greek tonos, Cyrillic
     breve) so an accented word tokenizes the same as its base letters (#541).
     NFKD then NFC: NFC recomposes Hangul jamo so a CJK string keeps its
-    character count (the CJK floor is deferred, #722). Pure-ASCII input is
+    character count (CJK is excluded from render tokens, #722). Pure-ASCII input is
     returned untouched, byte-identical."""
     if text.isascii():
         return text
@@ -354,13 +355,16 @@ TEMPLATE_SCAFFOLDING_MIN_CHARS = 40
 
 def _is_template_scaffolding(line: str) -> bool:
     """A source line that is WCM template instruction text, verbatim or
-    another revision's rewording, and long enough not to double as a value.
+    another revision's rewording, or another institution's instruction
+    scaffolding recognised by shape (#530, the same detector stage 2 drops
+    with), and long enough not to double as a value.
     Not `is_template_label_line`: a short label ("2. Principal Investigator",
     "Weill Cornell Medical College") is also a real value in a CV, and its
     loss must still count."""
     if len(_norm(line)) < TEMPLATE_SCAFFOLDING_MIN_CHARS:
         return False
-    return is_template_instruction(line) or is_near_template_instruction(line)
+    return (is_template_instruction(line) or is_near_template_instruction(line)
+            or is_foreign_template_instruction(line))
 
 
 def _substantive(source_lines: list[str]) -> list[str]:

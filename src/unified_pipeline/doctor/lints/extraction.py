@@ -27,6 +27,7 @@ from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import live_taxonomy_code
 from unified_pipeline.core.template_boilerplate import (
     _MIN_EXACT_LEN,
+    is_foreign_template_instruction,
     is_near_template_instruction,
     is_template_instruction,
     is_template_label_line,
@@ -40,6 +41,9 @@ from unified_pipeline.segmentation_regression import (
     _looks_like_record,
     _norm,
     _squash,
+)
+from unified_pipeline.stage6.normalization.institutions import (
+    _get_cleaned_institution_name,
 )
 from unified_pipeline.stage6.normalization.pii import (
     CAT_HOME_CONTACT,
@@ -315,6 +319,14 @@ RENDERED_FIELDS_MAJORITY = 0.5
 #: ("MA", "Ohio") matches on word/cell boundaries only, since raw containment
 #: finds "ma" inside "pharmacology".
 RENDERED_FIELDS_MIN_VALUE_CHARS = 6
+#: Stage-4 fields whose value is a category label, not a piece of the entry,
+#: and that no section writes: S9's `media_type` ("News Broadcast/Online
+#: News") is in no `stage6.fan_out._RENDERED_FIELDS` set and on no rendered
+#: line (web225 S9), so counting it lets one unwritten label outvote the title
+#: and venue that DID render. Dropped from the content values, never from the
+#: record: what is left must still be a majority on one line. Pinned against
+#: the renderer's field sets by `test_category_fields_are_written_by_no_section`.
+UNWRITTEN_CATEGORY_FIELDS = frozenset({"media_type"})
 
 #: The colon-less opener of the policy's home-address/phone row. A source line
 #: reads "Home Phone (914) ..." with no colon, so `_pii_matches` (whose label
@@ -339,6 +351,12 @@ class Stage4Evidence(NamedTuple):
     by many records and are still evidence beside a distinctive value."""
     records: dict
     shared_values: frozenset
+    #: span -> {squashed stage-4 `institution` -> squashed name stage 6 writes
+    #: for it} (`_get_cleaned_institution_name`, from the stage-5b artifact).
+    #: Stage 5b turns "Depts. Neurology, U. of Iowa" into "Departments of
+    #: Neurology, University of Iowa ...", after which the raw string is on
+    #: no rendered line (web196 C).
+    institution_names: dict
 
 
 def _span(entry: dict) -> tuple:
@@ -352,9 +370,27 @@ def _record_values(record: dict) -> set[str]:
         record.get("extracted_fields") or {})} - {""}
 
 
-def _stage4_evidence(stage4: dict | None) -> Stage4Evidence | None:
+def _institution_names(stage5b: dict | None) -> dict:
+    """{span: {squashed raw institution: squashed name stage 6 writes}} for the
+    stage-5b records that carry a name. A span two 5b records share is dropped,
+    as in `_stage4_evidence`."""
+    entries = (stage5b or {}).get("entries", [])
+    span_counts = Counter(_span(e) for e in entries)
+    names = {}
+    for e in entries:
+        fields = e.get("extracted_fields")
+        raw = _squash(fields.get("institution")) if isinstance(fields, dict) else ""
+        written = _squash(_get_cleaned_institution_name(e))
+        if span_counts[_span(e)] == 1 and written:
+            names[_span(e)] = {raw: written}
+    return names
+
+
+def _stage4_evidence(stage4: dict | None,
+                     stage5b: dict | None = None) -> Stage4Evidence | None:
     """Index stage 4 for the field-value test; None when stage 4 is absent,
-    which keeps the pre-#890 behaviour exactly."""
+    which keeps the pre-#890 behaviour exactly. `stage5b` (optional) adds the
+    institution names stage 6 writes in place of stage 4's raw ones."""
     if not stage4:
         return None
     entries = stage4.get("entries", [])
@@ -364,7 +400,8 @@ def _stage4_evidence(stage4: dict | None) -> Stage4Evidence | None:
     records = {_span(e): e for e in entries if span_counts[_span(e)] == 1}
     counts = Counter(v for r in entries for v in _record_values(r)
                      if len(v) >= RENDERED_FIELDS_MIN_VALUE_CHARS)
-    return Stage4Evidence(records, frozenset(v for v, n in counts.items() if n > 1))
+    return Stage4Evidence(records, frozenset(v for v, n in counts.items() if n > 1),
+                          _institution_names(stage5b))
 
 
 def _value_on_line(value: str, line: str) -> bool:
@@ -381,7 +418,9 @@ def _content_values(record: dict, evidence: Stage4Evidence) -> set[str]:
     """The record's squashed values that say WHAT the entry is: not a date
     ("1987-07", "May 2019 - Present"), not boilerplate shared with other
     records, not a scaffolding phrase of the output template."""
-    raw = _nonempty_field_values(record.get("extracted_fields") or {})
+    fields = {k: v for k, v in (record.get("extracted_fields") or {}).items()
+              if k not in UNWRITTEN_CATEGORY_FIELDS}
+    raw = _nonempty_field_values(fields)
     values = {_squash(v) for v in raw if not _is_date_only_text(v)} - {""}
     return {v for v in values - evidence.shared_values
             if len(v) < RENDERED_FIELDS_MIN_VALUE_CHARS or not _piece_in_template(v)}
@@ -393,14 +432,26 @@ def _fields_rendered(entry: dict, lines: list[str], evidence: Stage4Evidence) ->
     `_table_lines`) carries a majority of its content values (#890).
     Co-location is the point: a state name can turn up on any line of the
     document, but a record's title and its book on the same line is that
-    record. False also when the record has too few content values to judge."""
-    record = evidence.records.get(_span(entry))
+    record. False also when the record has too few content values to judge.
+    An institution value counts as on a line when the name stage 5b gave it
+    is (`Stage4Evidence.institution_names`), unless that name is boilerplate
+    shared across records."""
+    span = _span(entry)
+    record = evidence.records.get(span)
     if not record or not record.get("extraction_success"):
         return False
     values = _content_values(record, evidence)
     if len(values) < RENDERED_FIELDS_MIN_VALUES:
         return False
-    return any(sum(1 for v in values if _value_on_line(v, line))
+    names = {raw: written
+             for raw, written in evidence.institution_names.get(span, {}).items()
+             if written not in evidence.shared_values}
+
+    def on_line(value: str, line: str) -> bool:
+        return (_value_on_line(value, line)
+                or (value in names and _value_on_line(names[value], line)))
+
+    return any(sum(1 for v in values if on_line(v, line))
                > RENDERED_FIELDS_MAJORITY * len(values) for line in lines)
 
 
@@ -437,7 +488,8 @@ def _classified_entry_rendered(entry: dict, haystacks: Haystack, lines: list[str
 
 def lint_classified_unrendered(stage3b: Dict,
                                blocks: List[Tuple[str, str]],
-                               stage4: dict | None = None) -> List[Dict]:
+                               stage4: dict | None = None,
+                               stage5b: dict | None = None) -> List[Dict]:
     """Taxonomy codes classified at 3b none of whose entries appear anywhere
     in the stage-6 output (paragraphs or tables). Skipped: 'T' (appendix
     catch-all) and 'M1', which stage 6 never renders verbatim when a research
@@ -447,10 +499,12 @@ def lint_classified_unrendered(stage3b: Dict,
 
     `stage4` (optional; absent keeps the old behaviour) lets an entry count as
     rendered when its extracted field values did, and lets a Personal Data
-    entry the withhold policy removes stay out of the verdict (#890)."""
+    entry the withhold policy removes stay out of the verdict (#890).
+    `stage5b` (optional, read only beside `stage4`) supplies the institution
+    names stage 6 writes in place of stage 4's abbreviated ones."""
     h = _haystacks(blocks)
     shared = _shared_entry_pieces(stage3b.get("entries", []))
-    evidence = _stage4_evidence(stage4)
+    evidence = _stage4_evidence(stage4, stage5b)
     lines = h.text.split(_LINE_SENTINEL)
     by_code: Dict[str, List[Dict]] = {}
     for e in stage3b.get("entries", []):
@@ -736,7 +790,8 @@ def lint_invented_records(stage4: dict,
                     [f"{k}: {v}" for k, v in fields.items() if v]))
         if code == INVENTED_RECORD_LICENSURE_CODE:
             text = str(e.get("text", ""))
-            if is_template_instruction(text) or is_near_template_instruction(text):
+            if (is_template_instruction(text) or is_near_template_instruction(text)
+                    or is_foreign_template_instruction(text)):
                 findings.append(_finding(
                     "invented_records", "WARN",
                     f"entry {e.get('element_idx_start')} (F1): source text "

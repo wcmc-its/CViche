@@ -465,7 +465,7 @@ class PassthroughSection:
 
         if target_idx is None:
             # Fall back to EMPLOYMENT STATUS section header
-            target_idx = self._find_paragraph_with_text('EMPLOYMENT STATUS')
+            target_idx = self._find_header_paragraph('EMPLOYMENT STATUS')
 
         if target_idx is None:
             if self.verbose:
@@ -625,9 +625,9 @@ class PassthroughSection:
             return []
 
         # Find the affiliation table
-        section_idx = self._find_paragraph_with_text('INSTITUTIONAL/HOSPITAL AFFILIATION')
+        section_idx = self._find_header_paragraph('INSTITUTIONAL/HOSPITAL AFFILIATION')
         if section_idx is None:
-            section_idx = self._find_paragraph_with_text('HOSPITAL AFFILIATION')
+            section_idx = self._find_header_paragraph('HOSPITAL AFFILIATION')
 
         if section_idx is None:
             if self.verbose:

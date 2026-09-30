@@ -1,14 +1,24 @@
-import { ArrowLeft, HelpCircle, Download } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
+import { ArrowLeft, Ban, CheckCircle2, Download, Loader2, XCircle } from 'lucide-react'
 import { runRoutes } from '../api/routes'
-import { formatCost } from '../utils'
-import UserMenu from './UserMenu'
+import { formatCost, formatDuration } from '../utils'
 import { useCanSeeCost } from '../contexts/AuthContext'
+import { groupStepsIntoPhases } from './StepSidebar'
+
+interface HeaderStep {
+  step_number: number
+  stage_id?: string
+  status: string
+}
 
 interface PipelineHeaderProps {
   runId: string
   filename: string
   status: string
+  steps: HeaderStep[]
+  stepProgress: Record<number, { current: number; total: number; message: string }>
+  displayProgress: number
   totalCost: number | null
   inputTokens: number
   outputTokens: number
@@ -16,6 +26,11 @@ interface PipelineHeaderProps {
   isCancelling: boolean
   onCancel: () => void
   onBack: () => void
+  /** Complete runs: shows the "Pipeline details" toggle. */
+  detailsOpen?: boolean
+  onToggleDetails?: () => void
+  /** Rendered at the bottom of the card (the download panel for a finished run). */
+  children?: ReactNode
 }
 
 const formatTotalTime = (seconds: number) => {
@@ -26,17 +41,49 @@ const formatTotalTime = (seconds: number) => {
   return `${mins}:${secs.toString().padStart(2, '0')}`
 }
 
-const statusColors: Record<string, string> = {
-  complete: 'bg-green-100 text-green-800',
-  running: 'bg-blue-100 text-blue-800',
-  cancelled: 'bg-orange-100 text-orange-800',
-  failed: 'bg-red-100 text-red-800',
+function StatusPill({ status }: { status: string }) {
+  const base = 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-[3px] text-[13px] font-medium'
+  switch (status) {
+    case 'running':
+      return (
+        <span className={`${base} bg-primary-50 text-primary-700`}>
+          <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+          Running
+        </span>
+      )
+    case 'complete':
+      return (
+        <span className={`${base} bg-[#ECFDF3] text-success-700`}>
+          <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+          Complete
+        </span>
+      )
+    case 'failed':
+      return (
+        <span className={`${base} bg-error-50 text-error-700`}>
+          <XCircle className="h-3.5 w-3.5" aria-hidden="true" />
+          Failed
+        </span>
+      )
+    case 'cancelled':
+      return (
+        <span className={`${base} bg-orange-50 text-orange-800`}>
+          <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+          Cancelled
+        </span>
+      )
+    default:
+      return <span className={`${base} bg-gray-100 text-gray-700 capitalize`}>{status}</span>
+  }
 }
 
 export default function PipelineHeader({
   runId,
   filename,
   status,
+  steps,
+  stepProgress,
+  displayProgress,
   totalCost,
   inputTokens,
   outputTokens,
@@ -44,111 +91,184 @@ export default function PipelineHeader({
   isCancelling,
   onCancel,
   onBack,
+  detailsOpen,
+  onToggleDetails,
+  children,
 }: PipelineHeaderProps) {
   const showCost = useCanSeeCost()
-  const badgeClass = statusColors[status] || 'bg-gray-100 text-gray-800'
+  const isRunning = status === 'running'
+
+  // The API gives elapsed time but no start timestamp, so the start is derived
+  // once from the first elapsed reading of a live run.
+  const [startedAt, setStartedAt] = useState<number | null>(null)
+  useEffect(() => {
+    setStartedAt(null)
+  }, [runId])
+  useEffect(() => {
+    if (isRunning && startedAt === null && elapsedSeconds > 0) {
+      setStartedAt(Date.now() - elapsedSeconds * 1000)
+    }
+  }, [isRunning, startedAt, elapsedSeconds])
+
+  const phases = groupStepsIntoPhases(steps)
+  const bars = phases.map((phase) => {
+    const total = phase.steps.length
+    const done = phase.steps.filter((s) => s.status === 'complete').length
+    const running = phase.steps.find((s) => s.status === 'running')
+    const failed = phase.steps.some((s) => s.status === 'error')
+    let runningFrac = 0
+    if (running) {
+      const prog = stepProgress[running.step_number]
+      runningFrac = prog && prog.total > 0 ? prog.current / prog.total : 0.5
+    }
+    const fill = failed ? 1 : Math.min(1, (done + runningFrac) / total)
+    return {
+      name: phase.name,
+      total,
+      state: failed ? 'error' : done === total ? 'done' : running ? 'active' : 'pending',
+      fill,
+    }
+  })
+
+  const tokenStat = (label: string, value: number) => (
+    <div className="hidden lg:flex flex-col">
+      <span>{label}</span>
+      <span className="text-gray-900 font-semibold text-[15px] tabular-nums">{value.toLocaleString()}</span>
+    </div>
+  )
 
   return (
-    <header
-      role="banner"
-      className="border-b border-gray-200 px-4 py-3 md:px-6"
-      style={{
-        backgroundImage: 'url(/headerbg.png)',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-      }}
-    >
-      <div className="flex items-center gap-4">
-        {/* Left: Back button + Run ID / filename */}
-        <div className="flex items-center gap-3 min-w-0 shrink-0">
-          <button
-            onClick={onBack}
-            aria-label="Back to upload"
-            className="shrink-0 rounded p-1 text-gray-700 hover:text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none"
-          >
-            <ArrowLeft className="h-5 w-5" />
-          </button>
+    <>
+      <button
+        onClick={onBack}
+        aria-label="Back to runs"
+        className="self-start inline-flex items-center gap-1.5 rounded text-[13px] text-gray-600 hover:text-gray-900 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+      >
+        <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+        Runs
+      </button>
+
+      <section className="flex flex-col gap-[18px] bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] px-4 py-5 sm:px-6">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0">
-            <h1 className="text-lg font-bold text-gray-900 truncate">Run #{runId}</h1>
-            <a
-              href={runRoutes.inputFile(runId)}
-              download
-              title="Download the original uploaded CV"
-              className="group inline-flex items-center gap-1 max-w-full text-sm text-gray-700 hover:text-primary-600 hover:underline"
-            >
-              <span className="truncate">{filename}</span>
-              <Download className="h-3.5 w-3.5 shrink-0 opacity-60 group-hover:opacity-100" />
-            </a>
-          </div>
-        </div>
-
-        {/* Center: Logo — hidden on small screens */}
-        <div className="hidden md:flex flex-1 justify-center">
-          <img src="/header-logo.png" alt="CViche" className="h-10" />
-        </div>
-
-        {/* Spacer when logo is hidden */}
-        <div className="flex-1 md:hidden" />
-
-        {/* Right: Metrics + Status + Cancel */}
-        <div className="flex items-center gap-3 lg:gap-5 text-sm shrink-0">
-          <div>
-            <span className="text-gray-700">Time:</span>{' '}
-            <span className="font-semibold text-gray-900">{formatTotalTime(elapsedSeconds)}</span>
-          </div>
-
-          {showCost && (
-            <div>
-              <span className="text-gray-700">Cost:</span>{' '}
-              <span className="font-semibold text-gray-900">{formatCost(totalCost, 3)}</span>
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="m-0 min-w-0 break-all text-[22px] font-semibold text-gray-900">{filename}</h1>
+              <StatusPill status={status} />
             </div>
-          )}
-
-          {/* Token metrics - hidden below lg */}
-          <div className="hidden lg:block">
-            <span className="text-gray-700">In:</span>{' '}
-            <span className="font-semibold text-gray-900">{inputTokens.toLocaleString()}</span>
+            <div className="mt-1 flex flex-wrap items-center gap-x-3.5 gap-y-1 text-[13px] text-gray-500">
+              <a
+                href={runRoutes.inputFile(runId)}
+                download
+                title="Download the original uploaded CV"
+                className="group inline-flex items-center gap-1.5 text-gray-700 hover:text-primary-600 hover:underline"
+              >
+                Original file
+                <Download className="h-3.5 w-3.5 shrink-0 opacity-60 group-hover:opacity-100" aria-hidden="true" />
+              </a>
+              <span>Run {runId}</span>
+              {isRunning && startedAt !== null && (
+                <span>Started {new Date(startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
+              )}
+              {!isRunning && elapsedSeconds > 0 && <span>{formatDuration(elapsedSeconds)}</span>}
+              {!isRunning && showCost && totalCost !== null && <span>{formatCost(totalCost, 2)}</span>}
+            </div>
           </div>
-          <div className="hidden lg:block">
-            <span className="text-gray-700">Out:</span>{' '}
-            <span className="font-semibold text-gray-900">{outputTokens.toLocaleString()}</span>
+
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-3 text-[13px] text-gray-500">
+            {isRunning && (
+              <>
+                <div className="flex flex-col">
+                  <span>Elapsed</span>
+                  <span className="text-gray-900 font-semibold text-[15px] tabular-nums">{formatTotalTime(elapsedSeconds)}</span>
+                </div>
+                {showCost && (
+                  <div className="flex flex-col">
+                    <span>Cost so far</span>
+                    <span className="text-gray-900 font-semibold text-[15px] tabular-nums">{formatCost(totalCost, 3)}</span>
+                  </div>
+                )}
+              </>
+            )}
+            {tokenStat('Tokens in', inputTokens)}
+            {tokenStat('Tokens out', outputTokens)}
+            {isRunning && (
+              <button
+                onClick={onCancel}
+                disabled={isCancelling}
+                aria-label="Cancel pipeline run"
+                className={`rounded-lg border px-3.5 py-2 text-[13px] font-medium transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none ${
+                  isCancelling
+                    ? 'border-gray-200 bg-gray-100 text-gray-500 cursor-not-allowed'
+                    : 'border-red-300 text-red-700 hover:bg-red-50'
+                }`}
+              >
+                {isCancelling ? 'Cancelling...' : 'Cancel run'}
+              </button>
+            )}
+            {onToggleDetails && (
+              <button
+                onClick={onToggleDetails}
+                aria-expanded={detailsOpen}
+                className="rounded-lg border border-sand-400 px-3.5 py-2 text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+              >
+                Pipeline details
+              </button>
+            )}
           </div>
-
-          {/* Help link */}
-          <Link
-            to="/help"
-            aria-label="Help and support"
-            title="Help and support"
-            className="text-gray-500 hover:text-primary-600 transition-colors"
-          >
-            <HelpCircle className="h-5 w-5" />
-          </Link>
-
-          {/* Status badge */}
-          <span className={`px-3 py-1 rounded-full text-xs font-medium ${badgeClass}`}>
-            {status}
-          </span>
-
-          {/* Cancel button - only when running */}
-          {status === 'running' && (
-            <button
-              onClick={onCancel}
-              disabled={isCancelling}
-              aria-label="Cancel pipeline run"
-              className={`rounded-full px-3 py-1 text-xs font-medium transition-colors focus:ring-2 focus:ring-blue-500 focus:outline-none ${
-                isCancelling
-                  ? 'bg-gray-200 text-gray-500 cursor-not-allowed'
-                  : 'bg-red-100 text-red-800 hover:bg-red-200'
-              }`}
-            >
-              {isCancelling ? 'Cancelling...' : 'Cancel'}
-            </button>
-          )}
-
-          {/* Account / sign out */}
-          <UserMenu />
         </div>
-      </div>
-    </header>
+
+        {bars.length > 0 && (status === 'running' || status === 'failed' || status === 'cancelled') && (
+          <div className="flex flex-col gap-2">
+            <div
+              className="flex gap-1 h-2.5"
+              role="progressbar"
+              aria-label="Pipeline progress"
+              aria-valuenow={displayProgress}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
+              {bars.map((bar) => (
+                <div
+                  key={bar.name}
+                  style={{ flex: bar.total }}
+                  className="relative overflow-hidden rounded-[3px] bg-[#E8E1D2]"
+                >
+                  <div
+                    className={`absolute inset-y-0 left-0 transition-all duration-300 ${
+                      bar.state === 'error'
+                        ? 'bg-red-500'
+                        : bar.state === 'active'
+                          ? 'bg-primary-600 bg-stripe-animation'
+                          : 'bg-primary-600'
+                    }`}
+                    style={{ width: `${bar.fill * 100}%` }}
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-1">
+              {bars.map((bar) => (
+                <div
+                  key={bar.name}
+                  style={{ flex: bar.total }}
+                  className={`min-w-0 truncate text-xs ${
+                    bar.state === 'active' ? 'font-semibold text-primary-600' : 'text-gray-500'
+                  }`}
+                >
+                  {bar.name}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+        {isRunning && (
+          <p className="m-0 text-[13px] text-gray-500">
+            You can close this page. Processing continues, and the result will appear in Runs.
+          </p>
+        )}
+
+        {children}
+      </section>
+    </>
   )
 }

@@ -775,6 +775,14 @@ def test_an_emit_on_the_server_loop_itself_writes_before_returning(monkeypatch):
     assert [m["event"] for m in asyncio.run(scenario())] == ["LOG"]
 
 
+
+def _entered_guard(orch_module):
+    """A stage guard entered the way _run_with_stdout_capture enters it (#590);
+    _run_with_stdout_capture_sync exits it."""
+    guard = orch_module._StageGuard()
+    guard.enter()
+    return guard
+
 def test_a_slow_socket_does_not_feed_the_runs_own_log(monkeypatch):
     """The real stdout capture and router, with app logging written through
     sys.stdout as configure_logging sets it up. A stage print() reaches log()
@@ -813,7 +821,8 @@ def test_a_slow_socket_does_not_feed_the_runs_own_log(monkeypatch):
     async def run():
         loop = asyncio.get_running_loop()
         await asyncio.to_thread(
-            orch.PipelineOrchestrator._run_with_stdout_capture_sync, _Run(), stage, 1, loop)
+            orch.PipelineOrchestrator._run_with_stdout_capture_sync, _Run(), stage, 1, loop,
+            _entered_guard(orch))
         await asyncio.sleep(0.5)  # room for any line fed back to play out
 
     try:

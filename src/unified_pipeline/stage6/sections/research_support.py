@@ -1060,7 +1060,7 @@ class ResearchSupportSection:
         # Process each category - find the corresponding section in the template
         for code, section_header, entries in categories:
             # Find the section header in the template
-            section_idx = self._find_paragraph_with_text(section_header)
+            section_idx = self._find_header_paragraph(section_header)
             if section_idx is None:
                 if self.verbose:
                     logger.warning("  Warning: Could not find section header '%s'", section_header)
@@ -1295,7 +1295,7 @@ class ResearchSupportSection:
             insert_element = insert_after_element
         else:
             # Fallback: find RESEARCH SUPPORT
-            support_idx = self._find_paragraph_with_text("RESEARCH SUPPORT")
+            support_idx = self._find_header_paragraph("RESEARCH SUPPORT")
             if support_idx is None:
                 return table
             insert_element = self.doc.paragraphs[support_idx]._element

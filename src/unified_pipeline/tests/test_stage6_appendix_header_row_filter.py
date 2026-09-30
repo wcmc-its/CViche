@@ -780,6 +780,194 @@ def test_confirmed_structural_shapes_survive_when_not_t_coded(code):
     assert _residual(text, _confirmed("This is a section header."), code) is None
 
 
+# --- #530 residual: bare outline labels and wrapped instruction tails ------
+# Another institution's template numbers its empty category labels ("1. Sample
+# Awards", "b. Sample Scope:"); the marker's own digit used to fail the
+# digit-free shape. Same two-signal rule as above, invented text only.
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    ("1. Sample Awards", "Section header 'Sample Awards' is a structural label."),
+    ("12. Sample Elected Roles, etc.", "Section header describing a category."),
+    ("b. Sample Scope:", "Structural subsection marker with no entry content."),
+    ("iv. Sample Placement Options", "Subsection marker, purely organizational."),
+    ("3) Sample Department-wide", "Structural header/category label, not an entry."),
+    ("2. Sample Review Panels (titles, dates)", "Section header for review panels."),
+])
+def test_confirmed_bare_outline_label_is_dropped(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) == DROP_SECTION_HEADER
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    # A digit past the marker is data, marker or not.
+    ("1. Sample Awards 2019", "Section header."),
+    ("3. Section 4 overview", "Section header."),
+    # A sentence, or an over-long label, is content.
+    ("1. Sample awards were received.", "Section header."),
+    ("1. Sample awards received etc.", "Section header."),  # no comma: not a category label
+    ("1. One two three four five six seven eight nine ten eleven", "Section header."),
+    # The marker is stripped only at the start of the line, and only one of them.
+    ("Sample Awards 2. Foo", "Section header."),
+    ("1. 2. Sample Awards", "Section header."),
+    # A marker is at most two digits, and must be followed by whitespace.
+    ("123. Sample Awards", "Section header."),
+    ("1.Sample Awards", "Section header."),
+    # A marker with nothing behind it is not a label.
+    ("1.", "Section header."),
+    # Confirmed as something else: the organisation name a CV opens with.
+    ("1. Sample Institute of Testing", "Institution name only, structural header/artifact."),
+    ("1. Cooking", "Personal hobby listed under interests."),
+])
+def test_outline_label_without_both_signals_survives(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) is None
+
+
+_TEN_WORDS = " ".join(["Sample"] * 10)  # the label word cap: 10 fits, 11 does not
+
+
+@pytest.mark.parametrize("marker", ["1.", "1)", "1,", "b.", "B.", "iv.", "VIII)"])
+def test_each_outline_marker_form_is_stripped_before_the_word_cap(marker):
+    """Ten words behind the marker is a label; the marker itself must not
+    count as the eleventh word, for every marker form."""
+    assert _residual(f"{marker} {_TEN_WORDS}",
+                     _confirmed("Section header.")) == DROP_SECTION_HEADER
+    assert _residual(f"{marker} {_TEN_WORDS} Sample",
+                     _confirmed("Section header.")) is None
+
+
+def test_bare_outline_label_survives_without_confirmation_or_t_code():
+    label = "1. Sample Awards"
+    assert _residual(label, None) is None
+    assert _residual(label, "This is a section header.") is None
+    assert _residual(label, _confirmed("This is a section header."), "A") is None
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    ("each sample list, preferably in reverse order)", "Structural header/instruction line."),
+    ("presenter, etc.)", "Structural fragment; appears to be a broken header."),
+    ("resulted from sample work; use underline or bold font for your name; number",
+     "Instruction text for CV formatting, not substantive content."),
+])
+def test_confirmed_wrapped_instruction_tail_is_dropped(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) == DROP_TEMPLATE_INSTRUCTION
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    # A wrapped real record carries a year, volume or page: kept.
+    ("Sample Summit, Boston (Aug. 2023)", "Instruction text for CV formatting."),
+    ("7: 10-19.)", "Instruction text for CV formatting."),
+    # A stray ")" that does not end the line is not a wrapped tail.
+    ("sample) tail text follows", "Instruction text for CV formatting."),
+    # Balanced parenthesis and no directive: an ordinary fragment.
+    ("Sample Summit, Boston (annual)", "Instruction text for CV formatting."),
+    # More "(" than ")": the closing paren closes one it opened.
+    ("sample (note (a)", "Instruction text for CV formatting."),
+    # Over the word cap: prose.
+    (" ".join(["word"] * 30) + ")", "Instruction text for CV formatting."),
+    # An author-addressed line the reasoning does not call an instruction.
+    ("use sample font for your name", "Personal hobby listed under interests."),
+    # A directive needs both a verb and "your"; neither alone is enough.
+    ("sample notes about your name", "Instruction text for CV formatting."),
+    ("use sample font", "Instruction text for CV formatting."),
+    # The verb and "your" must sit in one clause: ";" or "." ends the window.
+    ("list sample; see your name", "Instruction text for CV formatting."),
+    ("use sample. see your name", "Instruction text for CV formatting."),
+    # ... and within 40 characters of each other.
+    ("use " + "sample " * 8 + "your name", "Instruction text for CV formatting."),
+])
+def test_wrapped_tail_without_both_signals_survives(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) is None
+
+
+_INSTRUCTION = "Instruction text for CV formatting."
+
+
+@pytest.mark.parametrize("verb", ["use", "please", "list", "include", "provide"])
+def test_each_author_directive_verb_is_pinned(verb):
+    assert _residual(f"{verb} sample font for your name",
+                     _confirmed(_INSTRUCTION)) == DROP_TEMPLATE_INSTRUCTION
+
+
+def _gap_text(gap):
+    """'use' + exactly `gap` characters + 'your name' (digit-free)."""
+    return "use " + "a" * (gap - 2) + " your name"
+
+
+@pytest.mark.parametrize("gap, dropped", [(40, True), (41, False)])
+def test_author_directive_window_is_forty_characters(gap, dropped):
+    assert len(_gap_text(gap).split("your")[0]) - len("use") == gap
+    got = _residual(_gap_text(gap), _confirmed(_INSTRUCTION))
+    assert got == (DROP_TEMPLATE_INSTRUCTION if dropped else None)
+
+
+@pytest.mark.parametrize("words, dropped", [(25, True), (26, False)])
+def test_wrapped_tail_word_cap_is_twenty_five(words, dropped):
+    text = " ".join(["word"] * (words - 1)) + " last)"
+    assert len(text.split()) == words
+    got = _residual(text, _confirmed(_INSTRUCTION))
+    assert got == (DROP_TEMPLATE_INSTRUCTION if dropped else None)
+
+
+@pytest.mark.parametrize("text", [
+    "reuse sample font for your name",       # verb only inside a longer word
+    "used sample font for your name",
+    "use sample font for yourself",          # "your" only inside a longer word
+    "use sample font for yours",
+])
+def test_author_directive_needs_word_boundaries(text):
+    assert _residual(text, _confirmed(_INSTRUCTION)) is None
+
+
+@pytest.mark.parametrize("reasoning_sentence", [
+    "Structural category label.",   # not "header/category label"
+    "Structural marker.",           # not "subsection marker"
+    "Belongs to the subsection.",   # not "subsection marker"
+    "Structural header/category.",  # not "header/category label"
+])
+def test_section_wordings_need_their_full_phrase(reasoning_sentence):
+    assert _residual("3) Sample Department-wide", _confirmed(reasoning_sentence)) is None
+
+
+@pytest.mark.parametrize("reasoning_sentence", [
+    "Structural instruction.",      # not "instruction text/line"
+    "Structural header.",           # not "broken header"
+    "Structural text fragment.",    # "text" without "instruction"
+    "Wrapped line.",                # "line" without "instruction"
+    "Broken fragment.",             # "broken" without "header"
+])
+def test_instruction_wordings_need_their_full_phrase(reasoning_sentence):
+    assert _residual("presenter, etc.)", _confirmed(reasoning_sentence)) is None
+
+
+@pytest.mark.parametrize("text", ["", "   "])
+def test_blank_text_is_not_a_section_label(text):
+    """Zero words would pass the word cap, so blank must be refused first."""
+    assert appendix_module._is_section_label_text(text) is False
+
+
+def test_category_label_etc_is_case_insensitive():
+    assert _residual("1. Sample Roles, Etc.", _confirmed("Section header.")
+                     ) == DROP_SECTION_HEADER
+
+
+def test_author_directive_window_allows_a_comma():
+    """Only ";" and "." end the clause; a comma inside it does not."""
+    assert _residual("use bold, for your name", _confirmed(_INSTRUCTION)
+                     ) == DROP_TEMPLATE_INSTRUCTION
+
+
+def test_author_directive_is_case_insensitive():
+    assert _residual("Use bold font for your name",
+                     _confirmed("Instruction text for CV formatting.")
+                     ) == DROP_TEMPLATE_INSTRUCTION
+
+
+def test_wrapped_tail_needs_its_own_signals_not_just_the_shape():
+    tail = "presenter, etc.)"
+    assert _residual(tail, None) is None
+    assert _residual(tail, "Structural fragment; broken header.") is None
+    assert _residual(tail, _confirmed("Structural fragment; broken header."), "A") is None
+
+
 def test_older_checks_keep_their_drop_over_the_residual_check():
     """'Education' is a template label AND a confirmed section header; the
     residual check runs last so the earlier reason still owns the count."""

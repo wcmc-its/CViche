@@ -162,6 +162,11 @@ def test_extract_tool_use_input_none_for_text_only_response() -> None:
     assert bedrock._extract_tool_use_input({}) is None
 
 
+def test_extract_tool_use_input_none_when_tool_block_has_no_input() -> None:
+    response = {"output": {"message": {"content": [{"toolUse": {"name": "extract"}}]}}}
+    assert bedrock._extract_tool_use_input(response) is None
+
+
 def test_extract_text_content_finds_text_block() -> None:
     response = {"output": {"message": {"content": [{"toolUse": {}}, {"text": "hi"}]}}}
     assert bedrock._extract_text_content(response) == "hi"
@@ -1037,6 +1042,76 @@ def test_call_with_retry_exhausts_attempts_and_raises_last_error(monkeypatch: py
     assert exc_info.value.response["Error"]["Code"] == "ModelTimeoutException"
     assert attempts["n"] == 3  # retry_count + 1 total attempts
     assert len(sleeps) == 2  # a backoff between each pair of attempts, none after the last
+
+
+def test_call_with_retry_stops_ordinary_retries_at_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    # #636: each hung attempt costs a full per-attempt timeout, so retry_count
+    # alone let 4 x 180s pass before failing. A 362s deadline allows the first
+    # retry (180s + 1s backoff) and refuses the second: 361s alone fits, but
+    # not with its 2s backoff added.
+    clock = {"t": 0.0}
+    sleeps: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        clock["t"] += s
+
+    monkeypatch.setattr(retry.time, "sleep", fake_sleep)
+    monkeypatch.setattr(retry.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(retry.random, "uniform", lambda lo, hi: hi)
+    monkeypatch.setenv("CVICHE_LLM_RETRY_DEADLINE_SECONDS", "362")
+    # Far-off default, so only the explicit deadline above can stop the retries.
+    monkeypatch.setenv("CVICHE_LLM_TIMEOUT_SECONDS", "1000")
+    attempts = {"n": 0}
+
+    def hangs_then_times_out() -> str:
+        attempts["n"] += 1
+        clock["t"] += 180.0
+        raise ClientError({"Error": {"Code": "ModelTimeoutException", "Message": "x"}}, "Converse")
+
+    with pytest.raises(ClientError):
+        retry._call_with_retry(hangs_then_times_out, retry_count=3)
+
+    assert attempts["n"] == 2
+    assert sleeps == [1.0]
+
+
+def test_retry_deadline_defaults_to_twice_the_attempt_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CVICHE_LLM_RETRY_DEADLINE_SECONDS", raising=False)
+    monkeypatch.setenv("CVICHE_LLM_TIMEOUT_SECONDS", "100")
+
+    assert retry._get_retry_deadline_seconds() == 200.0
+
+
+def test_call_with_retry_outage_pause_does_not_use_up_the_retry_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A 60s outage pause (Retry-After) is longer than the 10s ordinary
+    # deadline; the ordinary error after it must still get its retry.
+    clock = {"t": 0.0}
+
+    def fake_sleep(s: float) -> None:
+        clock["t"] += s
+
+    monkeypatch.setattr(retry.time, "sleep", fake_sleep)
+    monkeypatch.setattr(retry.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(retry.random, "uniform", lambda lo, hi: hi)
+    monkeypatch.setenv("CVICHE_LLM_RETRY_DEADLINE_SECONDS", "10")
+    attempts = {"n": 0}
+
+    def outage_then_blip_then_ok() -> str:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ClientError({
+                "Error": {"Code": "ServiceUnavailableException", "Message": "down"},
+                "ResponseMetadata": {"HTTPHeaders": {"retry-after": "60"}},
+            }, "Converse")
+        if attempts["n"] == 2:
+            raise ClientError({"Error": {"Code": "InternalServerException", "Message": "x"}}, "Converse")
+        return "recovered"
+
+    result, _ = retry._call_with_retry(outage_then_blip_then_ok, retry_count=1)
+
+    assert result == "recovered"
+    assert attempts["n"] == 3
 
 
 def test_call_with_retry_rejects_non_int_retry_count() -> None:

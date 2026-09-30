@@ -1021,9 +1021,9 @@ class HonorsSection:
             logger.info("Filling Honors (%s entries)...", len(entries))
 
         # Find the HONORS section
-        honors_idx = self._find_paragraph_with_text("HONORS")
+        honors_idx = self._find_header_paragraph("HONORS")
         if honors_idx is None:
-            honors_idx = self._find_paragraph_with_text("AWARDS")
+            honors_idx = self._find_header_paragraph("AWARDS")
         if honors_idx is None:
             return
 

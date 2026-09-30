@@ -290,6 +290,15 @@ def test_template_scaffolding_is_neither_covered_nor_lost():
     assert m["text_coverage_pct"] == 100.0
 
 
+def test_foreign_template_scaffolding_is_neither_covered_nor_lost():
+    """#530: stage 2 drops another institution's instruction lines by shape,
+    so they must not count as lost source content either (invented text)."""
+    foreign = "C. Sample Appointments (include institution, title and dates of appointment)"
+    m = compute_metrics([foreign, _GRANT_A], _STAGE1A, {"entries": [_entry(_GRANT_A, start=1)]})
+    assert m["lost_lines"] == []
+    assert m["text_coverage_pct"] == 100.0
+
+
 def test_short_template_text_and_real_content_still_count_as_lost():
     """Short template strings double as real values ("Full-time salaried by
     Weill Cornell" is the Employment Status answer a CV kept), so below the

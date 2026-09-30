@@ -289,9 +289,9 @@ class PostdocTrainingSection:
         logger.info("Filling Postdoctoral Training (%d entries)...", len(training_entries))
 
         # Try to find the POSTDOCTORAL section
-        training_idx = self._find_paragraph_with_text("POSTDOCTORAL")
+        training_idx = self._find_header_paragraph("POSTDOCTORAL")
         if training_idx is None:
-            training_idx = self._find_paragraph_with_text("TRAINING")
+            training_idx = self._find_header_paragraph("TRAINING")
         if training_idx is None:
             logger.warning(
                 "Postdoctoral Training: section heading not found in "

@@ -194,7 +194,7 @@ class OtherEducationSection:
 
         section_idx = None
         for heading in B2_SECTION_HEADINGS:
-            section_idx = self._find_paragraph_with_text(heading)
+            section_idx = self._find_header_paragraph(heading)
             if section_idx is not None:
                 break
         if section_idx is None:

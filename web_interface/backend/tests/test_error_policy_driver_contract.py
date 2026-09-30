@@ -36,7 +36,7 @@ def _orchestrator(monkeypatch, tmp_path, db, run_id):
          SimpleNamespace(number=2, stage_id="2", name="Entry Extraction")],
     )
 
-    o = orch.PipelineOrchestrator(run_id, tmp_path / "cv.docx", db)
+    o = orch.PipelineOrchestrator(run_id, tmp_path / f"{run_id}.docx", db)
     monkeypatch.setattr(o, "_copy_to_pipeline_input", lambda: str(tmp_path / "cv.docx"))
     monkeypatch.setattr(o, "pipeline_output_dir", tmp_path / "outputs")
     return o

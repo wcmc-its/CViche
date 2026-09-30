@@ -351,6 +351,13 @@ class Settings(BaseModel):
 # Admin Schemas
 # ============================================================
 
+class AdminStepAvg(BaseModel):
+    """Average duration of one pipeline stage over completed runs."""
+    stage_id: str
+    step_name: str
+    avg_seconds: float
+
+
 class AdminStats(BaseModel):
     """Overview statistics for the admin dashboard."""
     total_runs: int
@@ -361,6 +368,8 @@ class AdminStats(BaseModel):
     # there are no completed runs yet.
     avg_duration_seconds: float | None = None
     p95_duration_seconds: int | None = None
+    # Per-stage average duration over completed runs, in pipeline order.
+    step_avg_seconds: list[AdminStepAvg] = []
 
 
 class AdminUser(BaseModel):

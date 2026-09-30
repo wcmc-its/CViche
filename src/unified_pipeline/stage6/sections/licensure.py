@@ -461,9 +461,9 @@ class LicensureSection:
             logger.info("Filling Licensure (%s entries)...", len(entries))
 
         # Find Licensure section
-        section_idx = self._find_paragraph_with_text("Licensure")
+        section_idx = self._find_header_paragraph("Licensure")
         if section_idx is None:
-            section_idx = self._find_paragraph_with_text("LICENSURE")
+            section_idx = self._find_header_paragraph("LICENSURE")
         if section_idx is None:
             return
 

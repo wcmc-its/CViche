@@ -217,7 +217,7 @@ def test_a_run_the_drain_failed_is_not_flipped_to_complete_by_its_executor(monke
 
     monkeypatch.setattr(orch, "event_emitter", AsyncMock())
     monkeypatch.setattr(orch, "STEP_REGISTRY", [SimpleNamespace(number=1, stage_id="1a", name="x")])
-    executor = orch.PipelineOrchestrator("FLIP01", tmp_path / "cv.docx", db)
+    executor = orch.PipelineOrchestrator("FLIP01", tmp_path / "FLIP01.docx", db)
     monkeypatch.setattr(executor, "_copy_to_pipeline_input", lambda: str(tmp_path / "cv.docx"))
 
     async def last_stage_outlives_the_drain(*args):

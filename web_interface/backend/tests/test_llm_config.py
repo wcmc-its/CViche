@@ -21,6 +21,7 @@ from unified_pipeline.config import (
     PRICING,
     calculate_cost,
     estimate_cost_per_1k_doc_tokens,
+    estimate_run_cost_usd,
     get_stage_config,
     reload_config,
 )
@@ -217,15 +218,15 @@ def test_calculate_cost_backward_compat():
     """calculate_cost still works without model/provider args (falls back to
     DEFAULT_MODEL on the bedrock provider)."""
     cost = calculate_cost(1_000_000, 1_000_000)
-    # DEFAULT_MODEL is us.anthropic.claude-sonnet-4-6: 3.300 + 16.500 = 19.800
-    assert cost == pytest.approx(19.800)
+    # DEFAULT_MODEL is us.anthropic.claude-sonnet-5: 2.200 + 11.000 = 13.200
+    assert cost == pytest.approx(13.200)
 
 
 def test_calculate_cost_unknown_model_fallback():
     """Unknown model falls back to the Bedrock default model's pricing without error."""
     cost = calculate_cost(1_000_000, 1_000_000, model="unknown-model", provider="bedrock")
-    # Should fall back to DEFAULT_MODEL (Sonnet 4.6): 3.300 + 16.500 = 19.800
-    assert cost == pytest.approx(19.800)
+    # Should fall back to DEFAULT_MODEL (Sonnet 5): 2.200 + 11.000 = 13.200
+    assert cost == pytest.approx(13.200)
 
 
 def test_bedrock_region_prefix_is_stripped():
@@ -241,7 +242,7 @@ def test_bedrock_region_prefix_is_stripped():
         model="us.anthropic.claude-haiku-4-5-20251001-v1:0", provider="bedrock",
     )
     # Haiku 4.5: 1.100 + 5.500 = 6.600, via the region-prefix-stripped match
-    # -- not the Sonnet-4.6 DEFAULT_MODEL fallback (19.800), which the
+    # -- not the Sonnet 5 DEFAULT_MODEL fallback (13.200), which the
     # previous version of this test could not distinguish from a real fix.
     assert cost == pytest.approx(6.600)
 
@@ -264,9 +265,9 @@ def test_dated_haiku_4_5_id_prices_as_haiku_not_fallback():
     misstated."""
     model = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
     cost = calculate_cost(1_000_000, 1_000_000, model=model, provider="bedrock")
-    # Haiku 4.5: 1.100 + 5.500 = 6.600; the Sonnet-4-6 fallback would be 19.800.
+    # Haiku 4.5: 1.100 + 5.500 = 6.600; the Sonnet 5 fallback would be 13.200.
     assert cost == pytest.approx(6.600)
-    assert cost != pytest.approx(19.800)
+    assert cost != pytest.approx(13.200)
 
 
 def test_sonnet_5_prices_as_sonnet_5_not_fallback():
@@ -274,3 +275,29 @@ def test_sonnet_5_prices_as_sonnet_5_not_fallback():
     and every recorded cost is overstated by 50% (the #76 failure mode)."""
     cost = calculate_cost(1_000_000, 1_000_000, model="us.anthropic.claude-sonnet-5", provider="bedrock")
     assert cost == pytest.approx(2.200 + 11.000)
+
+
+def test_estimate_for_sonnet_5_carries_its_tokenizer_inflation():
+    """A list-price rescale alone would quote Sonnet 5 at 0.667x of Sonnet 4.6;
+    its tokenizer spends 1.43x input / 1.20x output tokens, so the quote must be
+    ~0.87x -- close to the 0.842x real cost the A/B measured (docs/adr/0001)."""
+    s46 = estimate_cost_per_1k_doc_tokens(model="us.anthropic.claude-sonnet-4-6", provider="bedrock")
+    s5 = estimate_cost_per_1k_doc_tokens(model="us.anthropic.claude-sonnet-5", provider="bedrock")
+    assert s5 / s46 == pytest.approx((0.8 * 2.2 * 1.43 + 0.2 * 11.0 * 1.20) / (0.8 * 3.3 + 0.2 * 16.5))
+    assert 0.84 < s5 / s46 < 0.90
+
+
+def test_run_estimate_for_sonnet_5_carries_its_tokenizer_inflation():
+    """The run-cost estimator behind /estimate prices through the same
+    inflation. Without it, switching the default to Sonnet 5 would cut the
+    quote by the 33% list-price gap, far below the ~0.86x whole-run cost the
+    A/B measured -- the under-quote #538 fixed. With it the quote is cheaper
+    than Sonnet 4.6's but never below that measured ratio."""
+    s46 = estimate_run_cost_usd(40_000, model="us.anthropic.claude-sonnet-4-6", provider="bedrock")
+    s5 = estimate_run_cost_usd(40_000, model="us.anthropic.claude-sonnet-5", provider="bedrock")
+    assert _SONNET_5_MEASURED_WHOLE_RUN_RATIO <= s5 / s46 < 1.0
+
+
+# Whole-run Sonnet 5 / Sonnet 4.6 cost on the 2026-09-29 10-CV A/B: the
+# Sonnet stages at 0.842x, with stage 3b (Haiku, unchanged) carried over.
+_SONNET_5_MEASURED_WHOLE_RUN_RATIO = 0.86

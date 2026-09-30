@@ -434,7 +434,7 @@ class ClinicalPracticeSection:
         if not l2_entries:
             return
 
-        section_idx = self._find_paragraph_with_text("Clinical Innovations")
+        section_idx = self._find_header_paragraph("Clinical Innovations")
         if section_idx is not None:
             table = self._find_table_after_paragraph(section_idx)
 
@@ -519,7 +519,7 @@ class ClinicalPracticeSection:
         if not l3_entries:
             return
 
-        section_idx = self._find_paragraph_with_text("Clinical Leadership")
+        section_idx = self._find_header_paragraph("Clinical Leadership")
         if section_idx is not None:
             table = self._find_table_after_paragraph(section_idx)
 

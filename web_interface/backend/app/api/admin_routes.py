@@ -26,7 +26,7 @@ from app.schemas import (
     AdminUserUpdate,
     QualityScoreResult,
 )
-from app.services.admin_service import get_users_with_stats, get_single_user_stats
+from app.services.admin_service import get_step_avg_seconds, get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import get_cached_score, compute_and_cache_score
 from app.audit_events import RUN_DELETED
 from app.services.run_service import delete_run_and_artifacts, find_run, reap_orphaned_created_runs
@@ -96,6 +96,8 @@ async def get_stats(
         if durations else None
     )
 
+    step_avg_seconds = get_step_avg_seconds(db)
+
     return AdminStats(
         total_runs=total_runs,
         active_users=active_users,
@@ -103,6 +105,7 @@ async def get_stats(
         feedback_rate=round(feedback_rate, 1),
         avg_duration_seconds=avg_duration_seconds,
         p95_duration_seconds=p95_duration_seconds,
+        step_avg_seconds=step_avg_seconds,
     )
 
 

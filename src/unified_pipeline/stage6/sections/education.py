@@ -137,7 +137,7 @@ class EducationSection:
         if self.verbose:
             logger.info("Filling Education (%s entries)...", len(entries))
 
-        edu_idx = self._find_paragraph_with_text("EDUCATION")
+        edu_idx = self._find_header_paragraph("EDUCATION")
         if edu_idx is None:
             return
 

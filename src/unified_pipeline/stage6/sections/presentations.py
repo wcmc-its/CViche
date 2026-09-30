@@ -49,9 +49,9 @@ class PresentationsSection:
             logger.info("Filling Invited Presentations (%s entries)...", len(entries))
 
         # Find Presentations section
-        section_idx = self._find_paragraph_with_text("INVITATIONS TO SPEAK")
+        section_idx = self._find_header_paragraph("INVITATIONS TO SPEAK")
         if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Invited Presentations")
+            section_idx = self._find_header_paragraph("Invited Presentations")
         if section_idx is None:
             return
 

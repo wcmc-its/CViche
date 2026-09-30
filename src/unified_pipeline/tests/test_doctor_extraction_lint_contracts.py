@@ -75,7 +75,8 @@ def test_lint_dedup_drops_returns_structured_findings():
     finding = result[0]
     assert isinstance(finding, dict)
     # Shape per doctor/shared.py's _finding().
-    assert set(finding.keys()) == {"lint", "severity", "message", "evidence"}
+    assert set(finding.keys()) == {"lint", "severity", "message", "evidence",
+                                   "status", "reason"}
     assert finding["lint"] == "dedup_drops"
     assert finding["severity"] == "WARN"
     assert isinstance(finding["message"], str)
@@ -778,7 +779,8 @@ def test_lint_invented_records_warns_on_a_rendered_header_record():
     findings = lint_invented_records(stage4, table_rows)
     assert len(findings) == 1
     finding = findings[0]
-    assert set(finding.keys()) == {"lint", "severity", "message", "evidence"}
+    assert set(finding.keys()) == {"lint", "severity", "message", "evidence",
+                                   "status", "reason"}
     assert finding["lint"] == "invented_records"
     assert finding["severity"] == "WARN"
     assert "F2" in finding["message"] and "7" in finding["message"]
@@ -872,6 +874,19 @@ def test_lint_invented_records_warns_on_an_f1_entry_matching_a_known_instruction
     # assertion above. `known_instruction` is 207 chars, so this also pins
     # the truncation, not just that evidence is non-empty.
     assert findings[0]["evidence"] == [known_instruction[:120]]
+
+
+def test_lint_invented_records_warns_on_an_f1_entry_with_foreign_template_instruction_text():
+    # #530: another institution's instruction line (invented text) is False
+    # under both WCM-only helpers, so only the foreign detector claims it.
+    text = "D. Sample Licensure (list state, license number and dates of issue)"
+    assert not is_template_instruction(text)
+    assert not is_near_template_instruction(text)
+    findings = lint_invented_records({"entries": [_invented_licensure_entry(text=text)]}, [])
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "invented_records"
+    assert "F1" in findings[0]["message"]
+    assert findings[0]["evidence"] == [text]
 
 
 def test_lint_invented_records_warns_on_an_f1_entry_matching_via_the_pipe_split_path_only():
@@ -997,6 +1012,9 @@ def test_dedup_and_render_tokens_are_unicode_aware():
     assert _long_word_tokens("Ελένη Παπαδοπούλου") == {"ελενη", "παπαδοπουλου"}
     assert _long_word_tokens("Alpha beta gamma12") == {"alpha", "gamma"}
     assert _long_word_tokens("hello_world") == {"hello", "world"}
+    # #722: CJK never forms a token (excluded, not measured).
+    assert _long_word_tokens("東京大学医学部教授 한국어로된논문제목") == set()
+    assert _long_word_tokens("東京大学医学部 Blorvane") == {"blorvane"}
 
 
 if __name__ == "__main__":
