@@ -1047,6 +1047,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         dedup_decisions: list[dict[str, Any]] = []
         document = [entry for group in pre_dedup_entries_by_code.values()
                     for entry in group]
+        dropped_ids: set[int] = set()
         for code in list(entries_by_code.keys()):
             before = len(entries_by_code[code])
             date_aware = code in _DATE_AWARE_DEDUP_CODES
@@ -1054,7 +1055,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             entries_by_code[code] = deduplicate_entries(
                 entries_by_code[code], verbose=self.verbose,
                 require_date_overlap=date_aware,
-                decisions=group_decisions, code=code, document=document)
+                decisions=group_decisions, code=code, document=document,
+                dropped_ids=dropped_ids)
             for decision in group_decisions:
                 decision["code"] = code
             dedup_decisions.extend(group_decisions)

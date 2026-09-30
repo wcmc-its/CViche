@@ -220,29 +220,109 @@ def _rendered_words(fields: dict, rendered: frozenset[str]) -> set[str]:
                          if (key in rendered or key in _FORMATTED_KEYS) and value))
 
 
-def _fused_record_would_be_lost(dropped_entry: dict, kept_entry: dict,
-                                code: str | None,
-                                document: list[dict] | None) -> bool:
-    """True when dropping a verbatim-contained entry would lose its record.
+def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
+                          code: str | None, document: list[dict] | None,
+                          verbatim: bool, dropped_ids: set[int]) -> bool:
+    """True when dropping a contained entry would lose its record.
 
-    It would when the dropped entry names a record (`_record_name`) whose
-    words the kept entry's rendered fields do not all carry, no shared id ties
-    the two together, and the name appears in no other entry of `document`.
-    That last clause keeps the check from creating a duplicate: a record the
-    CV also lists somewhere else is already rendered, or rides on that entry,
-    and keeping this copy could print it twice. Doubt drops, as it did before.
+    It can when the dropped entry names a record (`_record_name`), the kept
+    entry has fields, and no shared id ties the two together. Then it would
+    in three shapes:
+
+    - verbatim, and the kept entry's rendered fields do not carry every word
+      of the name: the kept text fused it, the kept fields describe another;
+    - either branch, and the kept text names the record as a run of words
+      outside every value its section writes (`_names_a_sibling`): a fused
+      row whose sibling the kept fields leave out, reworded or not;
+    - either branch, and both entries are bare names that differ
+      (`_distinct_bare_names`): "Widgets" is not "Widgets Quarterly".
+
+    Each shape also needs that no other entry of `document` carries the
+    record, so keeping this copy cannot print it twice. Entries in
+    `dropped_ids` (dropped already, this group or an earlier one) carry
+    nothing: two identical copies must not each vouch for the other's drop.
+    Doubt drops, as it did before.
     """
     rendered = _RENDERED_FIELDS.get(code or '', frozenset())
     dropped_fields = dropped_entry.get('extracted_fields') or {}
     kept_fields = kept_entry.get('extracted_fields') or {}
     name = _record_name(dropped_fields, rendered)
     if (not name or not kept_fields
-            or _shares_record_id(dropped_fields, kept_fields)
-            or _significant_words(name) <= _rendered_words(kept_fields, rendered)):
+            or _shares_record_id(dropped_fields, kept_fields)):
         return False
-    return not any(_names_record(entry.get('text') or '', name)
-                   for entry in document or ()
-                   if entry is not dropped_entry and entry is not kept_entry)
+    others = [entry for entry in document or ()
+              if entry is not dropped_entry and entry is not kept_entry
+              and id(entry) not in dropped_ids]
+    if ((verbatim and not _significant_words(name) <= _rendered_words(kept_fields, rendered))
+            or _names_a_sibling(kept_entry, kept_fields, rendered, name)):
+        return not any(_names_record(entry.get('text') or '', name)
+                       for entry in others)
+    if _distinct_bare_names(dropped_entry, kept_entry,
+                            name, _record_name(kept_fields, rendered)):
+        return not any(_lists_name(entry, name) for entry in others)
+    return False
+
+
+def _word_run_pattern(text: str) -> str | None:
+    """A regex matching the words of `text` in order, any punctuation or
+    spacing between them, never part of a longer word; None for no words."""
+    words = re.findall(r'[a-z0-9]+', text.lower())
+    if not words:
+        return None
+    return r'(?<![a-z0-9])' + r'[^a-z0-9]+'.join(words) + r'(?![a-z0-9])'
+
+
+def _names_a_sibling(kept_entry: dict, kept_fields: dict,
+                     rendered: frozenset[str], name: str) -> bool:
+    """True when the kept text names the record `name` outside every value
+    the kept entry's section writes (the `_rendered_words` fields).
+
+    A fused row ("Chair, Gadget Committee<TAB>Member, Sprocket Council") keeps
+    its sibling's name once the written values are cut out; a same-record
+    rewording ("Northern Tinkerers, Gadget Committee" against a kept
+    "Gadget Committee<TAB>Northern Tinkerers") does not, because its words
+    never stand together in the kept text.
+    """
+    name_pattern = _word_run_pattern(name)
+    written = [str(value).lower() for key, value in kept_fields.items()
+               if value and (key in rendered or key in _FORMATTED_KEYS)]
+    if not name_pattern or any(re.search(name_pattern, value) for value in written):
+        return False
+    residual = (kept_entry.get('text') or '').lower()
+    for value in written:
+        value_pattern = _word_run_pattern(value)
+        if value_pattern:
+            residual = re.sub(value_pattern, '\x00', residual)
+    return bool(re.search(name_pattern, residual))
+
+
+def _distinct_bare_names(dropped_entry: dict, kept_entry: dict,
+                         name: str, kept_name: str | None) -> bool:
+    """True when each entry's text is nothing but its record's name and the
+    names differ in a significant word: a journal list's "Widgets" is
+    contained in "Widgets Quarterly" and is still another journal. Any other
+    text (a date, a role, a venue) is a record a name alone cannot tell
+    apart, and "The Widgets" is still "Widgets"."""
+    return bool(kept_name
+                and _alnum(dropped_entry.get('text') or '') == _alnum(name)
+                and _alnum(kept_entry.get('text') or '') == _alnum(kept_name)
+                and _significant_words(name) != _significant_words(kept_name))
+
+
+# `_lists_name`: the separators between the items of a listed text.
+_LIST_ITEM_SEPARATOR_RE = re.compile(r'[,;:|\t\n]')
+
+
+def _lists_name(entry: dict, name: str) -> bool:
+    """True when `entry` carries the record called `name` itself: a
+    `_RECORD_NAME_FIELDS` value or an item of its text is exactly that
+    name. A longer name holding it ("Widgets Quarterly") is another record."""
+    target = _alnum(name)
+    fields = entry.get('extracted_fields') or {}
+    return (any(_alnum(str(fields.get(key) or '')) == target
+                for key in _RECORD_NAME_FIELDS)
+            or any(_alnum(item) == target
+                   for item in _LIST_ITEM_SEPARATOR_RE.split(entry.get('text') or '')))
 
 
 # `_names_record`: a long name counts as named by a text that holds this share
@@ -274,7 +354,8 @@ def _alnum(text: str) -> str:
 
 def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
                   code: str | None = None,
-                  document: list[dict] | None = None) -> bool:
+                  document: list[dict] | None = None,
+                  dropped_ids: set[int] | None = None) -> bool:
     """#227 guard: only drop an entry when the loss is provably recoverable.
 
     Safe when the dropped text is verbatim-contained in the kept entry, or
@@ -293,13 +374,12 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     a dropped entry that states a date range the kept entry does not carry is a
     different record (a second committee term, a second grant), and no text
     similarity signal can see that. For a `code` whose section renders
-    fields, the verbatim branch also requires that the kept entry's rendered
-    fields carry the dropped record's name, unless another entry of
-    `document` (every pre-dedup entry of the run) names it
-    (`_fused_record_would_be_lost`). Still open: the token-containment branch
-    against a kept entry that fused the dropped record with a sibling (gating
-    it the same way duplicated reworded rows on the corpus), and a short name
-    inside a longer kept name ("Widgets" in "Widgets Quarterly") on either branch;
+    fields, the verbatim and token-containment branches also refuse a drop
+    that would lose the dropped record (`_record_would_be_lost`): one the
+    kept text fused beside the record its fields describe, or a bare name
+    inside a longer bare name ("Widgets" in "Widgets Quarterly"), unless
+    another entry of `document` (every pre-dedup entry of the run, less the
+    `dropped_ids` dedup has already dropped) carries it.
     `_record_lines()` finds no line in prose for the #221/#225 recovery pass
     to re-verify."""
     dropped_squashed = _squash(dropped_entry.get('text', ''))
@@ -320,8 +400,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return verbatim and (dropped_entry.get('extracted_fields')
                              == kept_entry.get('extracted_fields'))
     if verbatim:
-        return not _fused_record_would_be_lost(dropped_entry, kept_entry,
-                                               code, document)
+        return not _record_would_be_lost(dropped_entry, kept_entry, code,
+                                         document, True, dropped_ids or set())
     if not _dates_compatible(dropped_entry.get('text') or '',
                              kept_entry.get('text') or ''):
         return False  # #666: a different date is a different record
@@ -332,7 +412,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
             and dropped_sig <= _entry_signature_words(kept_entry)
             and len(_record_lines(kept_entry.get('text', ''))) < DEDUP_FUSED_BLOB_RECORD_LINES):
-        return True
+        return not _record_would_be_lost(dropped_entry, kept_entry, code,
+                                         document, False, dropped_ids or set())
     return len(_record_lines(dropped_entry.get('text', ''))) >= UNRENDERED_MIN_RECORD_LINES
 
 
@@ -340,7 +421,8 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         require_date_overlap: bool = False,
                         decisions: list[dict] | None = None,
                         code: str | None = None,
-                        document: list[dict] | None = None) -> list[dict]:
+                        document: list[dict] | None = None,
+                        dropped_ids: set[int] | None = None) -> list[dict]:
     """Remove near-duplicate entries within a code group.
 
     Uses two metrics to catch duplicates:
@@ -365,6 +447,10 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
     `_drop_is_safe` reads the code's rendered fields and searches the
     document for another mention of a record before refusing a drop. With no
     code that check never refuses; with no document no other entry is known.
+    `dropped_ids` holds the `id()` of every entry of `document` dedup has
+    dropped so far; this call adds its own drops, so a caller that shares one
+    set across its groups keeps a dropped entry from vouching for another
+    drop in any later group, and two identical copies keep exactly one.
 
     Pairwise and order-dependent by design, not clustered: entries are
     compared left-to-right and a drop removes that index from further
@@ -378,6 +464,8 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
     if len(entries) <= 1:
         return entries
 
+    if dropped_ids is None:
+        dropped_ids = set()
     sigs = [_entry_signature_words(e) for e in entries]
     titles = [_entry_title_words(e) for e in entries]
     drop_indices = set()
@@ -439,7 +527,7 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
                 drop = j if len_i >= len_j else i
                 kept = i if drop == j else j
                 if not _drop_is_safe(entries[drop], entries[kept],
-                                     code, document):
+                                     code, document, dropped_ids):
                     if verbose:
                         print(f"    Dedup: skipping (similar but not "
                               f"verbatim-contained, single record — keeping "
@@ -465,6 +553,7 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         "kept_text": entries[kept].get('text', '')[:500],
                     })
                 drop_indices.add(drop)
+                dropped_ids.add(id(entries[drop]))
                 if drop == i:
                     # i is gone: it must not keep vouching to drop later j's
                     # (observed over-drop vector in the 2Q1_ZQ S8 trace, #227)
