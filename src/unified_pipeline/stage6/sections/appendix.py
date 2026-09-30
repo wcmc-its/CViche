@@ -114,6 +114,7 @@ from collections.abc import Sequence
 from typing import TypedDict
 
 from ...core.template_boilerplate import (
+    is_foreign_template_instruction,
     is_near_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
@@ -135,6 +136,16 @@ _TRUNCATION_MARKER = "..."
 
 # Group label for an entry that carries no source hierarchy at all.
 _UNKNOWN_SECTION = "Unknown Section"
+
+# The one explanatory line under "T. APPENDIX", written by both appendix
+# writers. It must not claim the entries appear nowhere else: stage 6 cannot
+# prove that (#534 -- some numbered lines repeat content a section rendered,
+# and some carry content a renderer dropped).
+APPENDIX_INTRO_TEXT = (
+    "These entries from your original CV could not be matched to a section of "
+    "the WCM format. Some may repeat content shown in the sections above; "
+    "please review before relying on it."
+)
 
 # Why an entry did not reach the appendix, named for the check that caught it.
 # These are the words the summary Word comment and the log line report, in
@@ -615,7 +626,7 @@ def _appendix_drop_reason(
     """
     if not text.strip():
         return DROP_BLANK
-    if is_template_instruction(text):
+    if is_template_instruction(text) or is_foreign_template_instruction(text):
         return DROP_TEMPLATE_INSTRUCTION
     if is_source_boilerplate(text):
         return DROP_SOURCE_BOILERPLATE
@@ -756,9 +767,9 @@ class AppendixSection:
 
         intro_para = self.doc.add_paragraph()
         run = intro_para.add_run(
-            "The following content from the original CV was not successfully mapped to this CV format:"
+            APPENDIX_INTRO_TEXT
         )
-        _set_font(run)
+        _set_font(run, italic=True)
         if dropped:
             self._add_word_comment(
                 intro_para, _describe_dropped(dropped), author="Template Filter"

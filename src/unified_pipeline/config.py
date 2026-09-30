@@ -546,7 +546,7 @@ def reload_config():
 # web_interface/backend and `from app.config_loader import get_config`,
 # coupling LLM infrastructure to the web app's package layout (#620 review).
 # The yaml layer is live in deployment -- buildspec.yaml writes
-# CVICHE_LLM_TIMEOUT_SECONDS / CVICHE_LLM_MAX_ATTEMPTS into the ConfigMap's
+# CVICHE_LLM_TIMEOUT_SECONDS into the ConfigMap's
 # `llm:` block (auth_config.yaml) -- so a bare os.environ.get() would
 # silently drop that layer and regress prod.
 

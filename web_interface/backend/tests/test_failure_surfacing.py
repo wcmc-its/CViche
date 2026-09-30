@@ -127,17 +127,6 @@ def test_llm_timeout_env_override(monkeypatch):
     assert mod._get_llm_timeout_seconds() == 180.0
 
 
-def test_llm_max_attempts_env_override(monkeypatch):
-    import unified_pipeline.llm_client as mod
-
-    monkeypatch.setenv("CVICHE_LLM_MAX_ATTEMPTS", "5")
-    assert mod._get_llm_max_attempts() == 5
-    monkeypatch.setenv("CVICHE_LLM_MAX_ATTEMPTS", "0")
-    assert mod._get_llm_max_attempts() == 3
-    monkeypatch.setenv("CVICHE_LLM_MAX_ATTEMPTS", "garbage")
-    assert mod._get_llm_max_attempts() == 3
-
-
 def test_stage_timeout_env_override(monkeypatch):
     from app.pipeline import orchestrator as orch
 

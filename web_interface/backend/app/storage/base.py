@@ -3,6 +3,8 @@
 import re
 from abc import ABC, abstractmethod
 
+from app.services.config_service import MAX_UPLOAD_SIZE
+
 
 class StorageKeyExists(Exception):
     """Raised by put_file_exclusive when the target key already has an object.
@@ -13,6 +15,10 @@ class StorageKeyExists(Exception):
     """
 
 
+class ArtifactTooLarge(ValueError):
+    """Raised by put_file, put_file_exclusive and put_global on an oversize write."""
+
+
 # The widest run-id shape any existing Run.id row can hold -- the same pattern
 # api/steps.py validates request run ids with. Deliberately NOT "^[A-Z0-9]{6}$":
 # the previous generator (secrets.token_urlsafe(4)[:6].upper()) could emit "-"
@@ -20,6 +26,13 @@ class StorageKeyExists(Exception):
 # would reject, and every read, download and reaper delete of those legacy runs
 # would start raising.
 RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# Largest single artifact any write may store. Uploads are capped at
+# MAX_UPLOAD_SIZE before they reach storage; generated Word documents, stage
+# JSON and prompt-log transcripts are the other writers, so the ceiling is a
+# multiple of the upload cap and follows CVICHE_MAX_UPLOAD_MB (#789).
+ARTIFACT_SIZE_FACTOR = 5
+MAX_ARTIFACT_BYTES = ARTIFACT_SIZE_FACTOR * MAX_UPLOAD_SIZE
 
 # Key path components that would walk out of the namespace the key is joined
 # onto. An EMPTY component is deliberately allowed: callers legitimately pass
@@ -66,6 +79,18 @@ def validate_key(key: str) -> None:
             )
 
 
+def check_artifact_size(data: bytes) -> None:
+    """Refuse a write larger than MAX_ARTIFACT_BYTES.
+
+    Raises:
+        ArtifactTooLarge: If len(data) exceeds MAX_ARTIFACT_BYTES.
+    """
+    if len(data) > MAX_ARTIFACT_BYTES:
+        raise ArtifactTooLarge(
+            f"artifact is {len(data)} bytes; the limit is {MAX_ARTIFACT_BYTES}"
+        )
+
+
 def validate_run_key(run_id: str, key: str) -> None:
     """The check every run-scoped operation makes: both of the above."""
     validate_run_id(run_id)
@@ -90,6 +115,11 @@ class RunStorage(ABC):
     backends call). A backend on a hierarchical namespace must additionally
     guarantee containment after symlink resolution, not just by inspecting the
     string.
+
+    Maximum artifact size: every artifact is held whole in memory as bytes (no
+    streaming API), so put_file, put_file_exclusive and put_global raise
+    ArtifactTooLarge for data longer than MAX_ARTIFACT_BYTES, before anything
+    is stored. That is ARTIFACT_SIZE_FACTOR (5) times the upload cap (#789).
     """
 
     @abstractmethod

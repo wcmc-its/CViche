@@ -35,7 +35,11 @@ from core.docx_structure_extractor import (
     join_row_cells,
     row_cell_texts,
 )
-from core.template_boilerplate import is_near_template_instruction, is_template_instruction
+from core.template_boilerplate import (
+    is_foreign_template_instruction,
+    is_near_template_instruction,
+    is_template_instruction,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1164,7 +1168,8 @@ def _is_adjacent_dateless_line(prev: dict, cur: dict, element_index_map: dict) -
 def _is_template_text(text: str) -> bool:
     """WCM-template instruction text, exact or reworded. ``_drop_template_instructions``
     runs after the fold, so folding one into a real entry would drop that entry."""
-    return is_template_instruction(text) or is_near_template_instruction(text)
+    return (is_template_instruction(text) or is_near_template_instruction(text)
+            or is_foreign_template_instruction(text))
 
 
 def _continues_previous_entry(prev: dict, cur: dict, element_index_map: dict) -> bool:
@@ -1442,9 +1447,27 @@ def _drop_template_instructions(entries: list[dict]) -> list[dict]:
         if not (is_template_instruction(e.get("text", ""))
                 or is_near_template_instruction(e.get("text", "")))
     ]
+    kept = _drop_foreign_template_instructions(kept)
     if len(kept) != len(entries):
         print(f"Filtered {len(entries) - len(kept)} WCM-template instruction entries")
     return kept
+
+
+# Entry types whose text is structure, not content: a header or break is left
+# for the hierarchy to place even when its text reads like an instruction.
+_STRUCTURAL_ENTRY_TYPES = ("header", "break")
+
+
+def _drop_foreign_template_instructions(entries: list[dict]) -> list[dict]:
+    """Drop another institution's template scaffolding ("C. Appointments
+    (include institution, title, dates)", "1. Sabbatical Leave: N/A") from the
+    content entries (#530). Detected by shape, not phrase; see
+    `core.template_boilerplate.is_foreign_template_instruction`."""
+    return [
+        e for e in entries
+        if e.get("element_type") in _STRUCTURAL_ENTRY_TYPES
+        or not is_foreign_template_instruction(e.get("text", ""))
+    ]
 
 
 def run_stage_2(

@@ -54,7 +54,6 @@ from unified_pipeline.llm.retry import (
     _llm_call_semaphore,
     _get_max_concurrent_llm_calls,
     _get_llm_timeout_seconds,
-    _get_llm_max_attempts,
 )
 
 # `import time` is otherwise unused here: it exists so

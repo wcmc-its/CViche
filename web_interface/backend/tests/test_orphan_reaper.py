@@ -192,3 +192,172 @@ def test_local_storage_delete_guards_empty_prefix(tmp_path):
         s.delete_global_prefix("")
     with pytest.raises(ValueError):
         s.delete_global_prefix("/")
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/admin/runs/{run_id} (#683)
+# ---------------------------------------------------------------------------
+
+def test_non_admin_cannot_delete_run(client, db):
+    resp = _as_user(client, lambda: client.delete("/api/admin/runs/ANYRUN"))
+    assert resp.status_code == 403
+
+
+def test_admin_delete_unknown_run_is_404(client, db):
+    resp = _as_admin(client, lambda: client.delete("/api/admin/runs/NOSUCH"))
+    assert resp.status_code == 404
+
+
+def test_admin_delete_running_run_is_409_and_untouched(client, db):
+    from app.models import Run
+    _seed_run(db, "RUN683", "running", datetime.now())
+
+    fake = _FakeStorage()
+    with patch("app.services.run_service.get_storage", return_value=fake):
+        resp = _as_admin(client, lambda: client.delete("/api/admin/runs/RUN683"))
+    assert resp.status_code == 409
+    assert db.query(Run).filter(Run.id == "RUN683").first() is not None
+    assert fake.deleted_runs == []
+
+
+def _seed_children(db, run_id, user_id):
+    from app.models import Feedback, LLMUsage, Log, RunMetrics
+    db.add_all([
+        Log(run_id=run_id, message="m"),
+        LLMUsage(run_id=run_id, step_number=1, model="m", prompt_tokens=1,
+                 completion_tokens=1, total_tokens=2, cost=0.0),
+        Feedback(run_id=run_id, user_id=user_id, reviewer_role="self",
+                 overall_usefulness=3, manual_conversion_effort="1 hour",
+                 correction_effort="1 hour", biggest_issue="none",
+                 likelihood_to_recommend=3),
+        RunMetrics(run_id=run_id),
+    ])
+    db.commit()
+
+
+_CHILD_MODELS = ("Step", "Log", "LLMUsage", "Feedback", "RunMetrics")
+
+
+def _child_counts(db, run_id):
+    import app.models as m
+    return {n: db.query(getattr(m, n)).filter(getattr(m, n).run_id == run_id).count()
+            for n in _CHILD_MODELS}
+
+
+def test_admin_delete_complete_run_removes_only_target_and_logs_audit(client, db, caplog):
+    import logging
+    from app.audit_events import RUN_DELETED
+    from app.models import Run
+    user = _seed_user(db, email="Withdraw@Example.com")
+    other = _seed_user(db, email="keeper@example.com")
+    # Two other runs sit on either side of the target so a find_run that
+    # ignores run_id (first(), last()) cannot pass by luck of ordering.
+    for rid, uid in (("AAA683", other.id), ("DONE683", user.id), ("ZZZ683", other.id)):
+        _seed_run(db, rid, "complete", datetime.now() - timedelta(days=30),
+                  user_id=uid, steps=2)
+        _seed_children(db, rid, uid)
+    before_other = _child_counts(db, "AAA683")
+    assert set(before_other.values()) == {2, 1} and before_other["Step"] == 2
+
+    fake = _FakeStorage()
+    with patch("app.services.run_service.get_storage", return_value=fake), \
+            caplog.at_level(logging.INFO, logger="app.api.admin_routes"):
+        resp = _as_admin(client, lambda: client.delete("/api/admin/runs/DONE683"))
+    assert resp.status_code == 204
+    db.rollback()  # discard uncommitted state: only a committed delete survives
+    assert db.query(Run).filter(Run.id == "DONE683").first() is None
+    assert _child_counts(db, "DONE683") == dict.fromkeys(_CHILD_MODELS, 0)
+    for rid in ("AAA683", "ZZZ683"):
+        assert db.query(Run).filter(Run.id == rid).first() is not None
+        assert _child_counts(db, rid) == before_other
+    assert fake.deleted_runs == ["DONE683"]
+    assert fake.deleted_prefixes == ["by-submitter/withdraw@example.com/DONE683/"]
+    audit = [r for r in caplog.records if r.getMessage() == RUN_DELETED]
+    assert len(audit) == 1
+    assert audit[0].run_id == "DONE683"
+    assert audit[0].admin == "admin@example.com"
+    assert audit[0].objects_deleted == 3
+
+
+class _FlakyStorage(_FakeStorage):
+    """delete_run raises until .healthy is set."""
+    healthy = False
+
+    def delete_run(self, run_id):
+        if not self.healthy:
+            raise OSError("store unavailable")
+        return super().delete_run(run_id)
+
+
+def test_admin_delete_storage_failure_is_500_and_rows_survive_then_retry_succeeds(client, db):
+    from app.models import Run
+    user = _seed_user(db)
+    for rid in ("BAD683", "OTHER683"):
+        _seed_run(db, rid, "complete", datetime.now(), user_id=user.id, steps=2)
+        _seed_children(db, rid, user.id)
+    before = _child_counts(db, "BAD683")
+
+    flaky = _FlakyStorage()
+    with patch("app.services.run_service.get_storage", return_value=flaky):
+        resp = _as_admin(client, lambda: client.delete("/api/admin/runs/BAD683"))
+        assert resp.status_code == 500
+        assert "safe to retry" in resp.text
+        db.rollback()
+        assert db.query(Run).filter(Run.id == "BAD683").first() is not None
+        assert _child_counts(db, "BAD683") == before
+
+        flaky.healthy = True  # storage recovers: the same request now succeeds
+        resp = _as_admin(client, lambda: client.delete("/api/admin/runs/BAD683"))
+    assert resp.status_code == 204
+    db.rollback()
+    assert db.query(Run).filter(Run.id == "BAD683").first() is None
+    assert _child_counts(db, "BAD683") == dict.fromkeys(_CHILD_MODELS, 0)
+    assert db.query(Run).filter(Run.id == "OTHER683").first() is not None
+    assert flaky.deleted_runs == ["BAD683"]
+
+
+def test_admin_delete_index_prefix_failure_is_500_and_rows_survive(client, db):
+    from app.models import Run
+    user = _seed_user(db)
+    _seed_run(db, "IDX683", "complete", datetime.now(), user_id=user.id)
+
+    class _PrefixFails(_FakeStorage):
+        def delete_global_prefix(self, prefix):
+            raise OSError("index unavailable")
+
+    with patch("app.services.run_service.get_storage", return_value=_PrefixFails()):
+        resp = _as_admin(client, lambda: client.delete("/api/admin/runs/IDX683"))
+    assert resp.status_code == 500
+    db.rollback()
+    assert db.query(Run).filter(Run.id == "IDX683").first() is not None
+
+
+def test_reaper_stays_best_effort_when_storage_fails(db):
+    """The reaper must keep logging-and-continuing: rows go, the sweep reports
+    the run reaped, and the storage error does not propagate."""
+    from app.models import Run
+    from app.services.run_service import reap_orphaned_created_runs
+    user = _seed_user(db)
+    _seed_run(db, "ORPH683", "created", datetime.now() - timedelta(hours=48),
+              user_id=user.id)
+    with patch("app.services.run_service.get_storage", return_value=_FlakyStorage()):
+        result = reap_orphaned_created_runs(db, older_than_hours=24)
+    assert result["reaped"] == 1
+    assert db.query(Run).filter(Run.id == "ORPH683").first() is None
+
+
+def test_delete_run_and_artifacts_rolls_back_on_db_failure(db):
+    from app.models import Run
+    from app.services.run_service import delete_run_and_artifacts
+    _seed_run(db, "FAIL683", "complete", datetime.now())
+    run = db.query(Run).filter(Run.id == "FAIL683").first()
+
+    fake = _FakeStorage()
+    with patch("app.services.run_service.get_storage", return_value=fake), \
+            patch("app.services.run_service._delete_run_rows",
+                  side_effect=RuntimeError("db down")), \
+            patch.object(db, "rollback", wraps=db.rollback) as rollback:
+        with pytest.raises(RuntimeError, match="db down"):
+            delete_run_and_artifacts(db, run)
+    rollback.assert_called_once()
+    assert db.query(Run).filter(Run.id == "FAIL683").first() is not None

@@ -13,6 +13,7 @@ os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 import asyncio
 import time
+from pathlib import Path
 from datetime import datetime, timedelta
 from unittest.mock import patch, AsyncMock
 
@@ -665,3 +666,43 @@ class TestAtomicRunStart:
             assert step6.status == "error"   # the loser did not reset it
         finally:
             upload_file.unlink(missing_ok=True)
+
+
+# --- #299  document_uid validation and per-run input copy --------------------
+
+@pytest.mark.parametrize("stem", ["bad name", "a.b", "x" * 129, "\u00e9vil", "abc\n"])
+def test_orchestrator_rejects_unsafe_document_uid(db, tmp_path, stem):
+    from app.pipeline.orchestrator import PipelineOrchestrator
+
+    with pytest.raises(ValueError, match="document_uid"):
+        PipelineOrchestrator("REJ299", tmp_path / f"{stem}.docx", db)
+    # A rejected constructor must not leave its output dir behind.
+    assert not (Path(__file__).parent.parent.parent / "outputs" / "REJ299").exists()
+
+
+@pytest.mark.parametrize("run_id", ["../evil", "a/b", ""])
+def test_orchestrator_rejects_unsafe_run_id(db, tmp_path, run_id):
+    from app.pipeline.orchestrator import PipelineOrchestrator
+
+    with pytest.raises(ValueError, match="run_id"):
+        PipelineOrchestrator(run_id, tmp_path / "cv.docx", db)
+
+
+def test_copy_to_pipeline_input_is_per_run_and_overwrites(db, tmp_path, monkeypatch):
+    import shutil
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
+    src = tmp_path / "COPY01.docx"
+    src.write_bytes(b"first")
+    o = orch.PipelineOrchestrator("COPY01", src, db)
+    try:
+        dest = o._copy_to_pipeline_input()
+        assert dest == str(tmp_path / "repo/data/sample_cvs/word/COPY01/COPY01.docx")
+        assert Path(dest).read_bytes() == b"first"
+
+        src.write_bytes(b"second")
+        o._copy_to_pipeline_input()
+        assert Path(dest).read_bytes() == b"second"
+    finally:
+        shutil.rmtree(o.web_output_dir, ignore_errors=True)
