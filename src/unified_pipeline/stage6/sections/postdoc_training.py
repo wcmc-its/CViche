@@ -45,6 +45,8 @@ A tab inside `training_type` is the extractor having flattened a table cell
 boundary, so tabs become ", " rather than rendering as a run of whitespace.
 `field_of_study` is appended only when it is not already contained in the type,
 which is common once the tab join has run.
+A stage-4 `role` ("Chief Resident") trails the type cell the same way: the template has
+no role column, and the field was dropped from the row until #946.
 """
 import logging
 from collections.abc import Mapping, Sequence
@@ -170,6 +172,13 @@ def _normalize_training_entry(
     if field_of_study and field_of_study.casefold() not in training_type.casefold():
         training_type = (f"{training_type}, {field_of_study}"
                          if training_type else field_of_study)
+    # A role held within the training ("Chief Resident") has no template
+    # column, so it trails the type cell. Skipped when the cell already says
+    # it, and when the extractor wrote the string "None" for no role (#946).
+    role = _join_if_list(fields.get('role')).strip()
+    if (role and role.casefold() != 'none'
+            and role.casefold() not in training_type.casefold()):
+        training_type = f"{training_type}, {role}" if training_type else role
 
     # Institution: stage-5b cleaned name (strips embedded location), then the
     # raw field, then the neighbouring entries of the source CV.

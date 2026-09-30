@@ -26,7 +26,10 @@ import tiktoken
 
 # Add parent directory to path to import from signature_based_segmentation
 sys.path.insert(0, os.path.dirname(__file__))
-from signature_based_segmentation import normalize_hierarchy_with_llm, validate_headers_vs_entries, ensure_personal_data_first
+from signature_based_segmentation import (
+    GEOGRAPHIC_SUB_LABELS, ensure_personal_data_first, normalize_hierarchy_with_llm,
+    restore_sub_label_document_order, validate_headers_vs_entries,
+)
 
 
 def format_hierarchy_outline(hierarchy: list[dict]) -> str:
@@ -185,7 +188,7 @@ Rules:
 
 HIERARCHY CONSISTENCY:
 - These terms are NEVER [H1] - they are always [H2] or [H3] subsections:
-  * Geographic: International, National, Regional, Local, State, Institutional
+  * Geographic: """ + ", ".join(GEOGRAPHIC_SUB_LABELS) + """
   * Time-based: Current, Past, Completed, Active, Pending, Ongoing
   * Role-based: Principal Investigator, Co-Investigator, Consultant, Mentor, Student
 - If you see "Regional" or "National" as a header, it belongs under a parent section.
@@ -338,6 +341,10 @@ def get_cv_hierarchy_chunked(cv_path: str, max_chunk_tokens: int = 10000) -> tup
     print(f"\nStep 7: Applying Step 9 normalization (final cleanup)...")
     normalized_pass2 = normalize_hierarchy_with_llm(validated_hierarchy, pass_number=2)
     print(f"  ✓ After normalization pass 2: {len(normalized_pass2)} headers")
+
+    # Step 8: deterministic, no LLM: a geographic sub-label listed after a later
+    # section goes back into document order (#429).
+    normalized_pass2 = restore_sub_label_document_order(normalized_pass2, paragraphs)
 
     # Calculate stats
     stats = {

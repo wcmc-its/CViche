@@ -80,9 +80,12 @@ def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> No
         # S3 archive). Expected; the caller keeps its own missing-file handling.
         logger.info("No durable input copy for run %s (%s); using local only", run_id, e)
         return
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 -- see below
         # Anything other than a missing object (S3 AccessDenied, KMS, network)
-        # means durable storage is reachable-but-failing. Surface it at WARNING
+        # means durable storage is reachable-but-failing. Deliberately broad
+        # (#801): S3RunStorage.get_file re-raises an outage as the raw botocore
+        # ClientError / BotoCoreError (#936), which this backend-agnostic
+        # service cannot name without importing botocore. Surface it at WARNING
         # so a real outage isn't silently misread as "file simply not there".
         logger.warning(
             "Durable input lookup FAILED for run %s (%s); using local copy only. "
@@ -94,7 +97,7 @@ def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> No
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(data)
         logger.info("Re-materialized input for run %s from storage (%d bytes)", run_id, len(data))
-    except Exception as e:
+    except OSError as e:
         logger.warning("Failed to write re-materialized input for run %s: %s", run_id, e)
 
 

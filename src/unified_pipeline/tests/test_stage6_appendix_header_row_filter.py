@@ -834,6 +834,64 @@ def test_each_outline_marker_form_is_stripped_before_the_word_cap(marker):
                      _confirmed("Section header.")) is None
 
 
+_LONG_QUALIFIER = "(e.g., list each sample item or\tsample record in any sample form)"
+# Stage-4 entry text keeps the source's line breaks, so a qualifier can wrap.
+_WRAPPED_QUALIFIER = "(e.g., list each sample item or\nsample record in any sample form)"
+
+
+@pytest.mark.parametrize("text", [
+    # The e.g. qualifier would be the eleventh-plus word; it is not counted.
+    f"3. Sample Record of Sample Reach {_LONG_QUALIFIER}",
+    f"3. Sample Record of Sample Reach {_WRAPPED_QUALIFIER}",
+    "3.  Sample Placement (sample, sample/sample role, etc.; sample sample, sample, if applicable)",
+    f"b. {_TEN_WORDS} (sample sample sample)",
+    f"b. {_TEN_WORDS} ()",
+    # A qualifier far longer than any length bound (130 characters).
+    "2. Sample Placement (" + ", ".join(["sample"] * 16) + ", if applicable)",
+    # A qualifier glued to the word before it, with no space.
+    # Ten label words, then the qualifier: counted, it would be the eleventh+.
+    "b. one two three four five six seven eight nine ten(sample sample sample)",
+    # A marker and a parenthetical alone: the parenthetical is the label, as before.
+    f"1. ({_TEN_WORDS})",
+])
+def test_outline_label_qualifier_does_not_count_toward_the_word_cap(text):
+    assert _residual(text, _confirmed("Subsection header describing a category.")) == DROP_SECTION_HEADER
+
+
+@pytest.mark.parametrize("text", [
+    # Without an outline marker the qualifier counts: a template marks its labels.
+    f"Sample Record of Sample Reach {_LONG_QUALIFIER}",
+    # The label before the qualifier is still capped at ten words.
+    f"1. {_TEN_WORDS} Sample (x)",
+    # A digit or "none" inside the qualifier still keeps the entry.
+    "1. Sample Placement (e.g., sample one through sample 3 sample sample sample)",
+    "1. Sample Patents (none so far, sample sample sample sample sample sample)",
+    # Only a CLOSING parenthetical is a qualifier.
+    "1. Sample (sample sample sample sample sample sample) Placement sample sample sample",
+    "1. Sample (sample sample sample sample sample sample sample sample sample) Placement (x)",
+    # The qualifier must close, and hold no parenthesis of its own.
+    "1. Sample Record (e.g., sample sample sample sample sample sample sample sample sample",
+    "1. Sample (sample sample sample sample sample sample sample sample sample sample (x)",
+    "1. Sample sample sample sample sample sample sample sample sample (x) y)",
+    # A marker followed by nothing but a long parenthetical has no label to cap.
+    "1. (sample sample sample sample sample sample sample sample sample sample sample)",
+])
+def test_outline_label_qualifier_is_not_a_blanket_exemption(text):
+    assert _residual(text, _confirmed("Subsection header describing a category.")) is None
+
+
+def test_outline_label_qualifier_is_found_past_trailing_whitespace():
+    text = f"3. Sample Record of Sample Reach {_LONG_QUALIFIER}  \n"
+    assert appendix_module._is_section_label_text(text) is True
+
+
+def test_outline_label_qualifier_needs_the_confirmed_section_verdict():
+    text = f"3. Sample Record of Sample Reach {_LONG_QUALIFIER}"
+    assert _residual(text, None) is None
+    assert _residual(text, _confirmed("Personal hobby with no professional content.")) is None
+    assert _residual(text, _confirmed("Subsection header."), "A") is None
+
+
 def test_bare_outline_label_survives_without_confirmation_or_t_code():
     label = "1. Sample Awards"
     assert _residual(label, None) is None

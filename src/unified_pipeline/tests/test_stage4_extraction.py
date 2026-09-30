@@ -931,3 +931,14 @@ def test_invalid_code_entries_stat_sums_repeats_of_the_same_bad_code(monkeypatch
     out = extraction.extract_fields_from_mapped_entries(entries, batch_size=10, workers=1)
     assert out["stats"]["invalid_code_entries"] == 3
     assert out["stats"]["invalid_taxonomy_codes"] == {"'ZZ9'": 3}
+
+
+def test_postdoc_training_prompt_asks_for_a_role_and_keeps_the_other_fields():
+    """#946: the C prompt names `role` in its field list and guide, and the five
+    fields it already extracted stay in their old order ahead of it (the config
+    marks department, mentor and narrative extract=false)."""
+    prompt = _prompt("C", [{"text": "2017-2021 Zorblax Hospital Residency\tChief Resident"}])
+    field_line = prompt.split("**Fields to Extract**:")[1].splitlines()[0]
+    listed = [name.strip() for name in field_line.split(",")]
+    assert listed == ["training_type", "specialty", "institution", "start_date", "end_date", "role"]
+    assert "- role: " in prompt

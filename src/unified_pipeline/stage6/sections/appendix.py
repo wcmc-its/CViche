@@ -93,6 +93,8 @@ covers (#530). A bare OUTLINE label ("1. Honors or Awards", "b. National:")
 failed the digit-free label shape on the marker's own digit; one leading marker
 is now stripped first (`_OUTLINE_MARKER_RE`), and stage 3b's "header/category
 label" and "subsection marker" wordings count as the section-header verdict.
+A marked label's closing parenthetical ("(e.g., ...)", "(... if applicable)")
+is the template's qualifier and does not count toward the label's word cap.
 A wrapped instruction tail ("...reverse chronological order)", "use underline
 or bold font for your name") is dropped as `template-instruction` when the
 reasoning calls it instruction text and the text closes a parenthesis it never
@@ -293,20 +295,29 @@ _KIND_REASONING = {
 # anywhere else still means data.
 _OUTLINE_MARKER_RE = re.compile(r"^(?:\d{1,2}|[A-Za-z]|[ivxIVX]{1,4})[.,)]\s+")
 _LABEL_ETC = ", etc."
+# The parenthetical that closes an OUTLINE-MARKED label is the template's
+# qualifier on it ("3. Sample Placement (e.g., ... if applicable)"), not part of
+# the label, so it does not count toward the word cap (#530). It is still
+# checked for digits and "none" with the rest of the line.
+_TRAILING_QUALIFIER_RE = re.compile(r"\([^()]*\)$")
 
 
 def _is_section_label_text(text: str) -> bool:
     """A short, digit-free, non-sentence line: what a section heading looks
     like on the page. Trailing colon allowed; a terminal period is a sentence
     unless it closes "etc." (a category label: "Professional Societies, etc.").
-    One leading outline marker ("1.", "b.") is not part of the label."""
-    body = _OUTLINE_MARKER_RE.sub("", text.strip())
+    One leading outline marker ("1.", "b.") is not part of the label, nor is
+    the parenthetical qualifier that ends a marked label."""
+    stripped = text.strip()
+    body = _OUTLINE_MARKER_RE.sub("", stripped)
     if not body or any(ch.isdigit() for ch in body):
         return False
     if body.endswith(".") and not body.lower().endswith(_LABEL_ETC):
         return False
     if _NONE_WORD_RE.search(body):  # "Patents (none)": says something about content
         return False
+    if body != stripped:
+        body = _TRAILING_QUALIFIER_RE.sub("", body) or body
     return len(body.split()) <= _SECTION_HEADER_MAX_WORDS
 
 

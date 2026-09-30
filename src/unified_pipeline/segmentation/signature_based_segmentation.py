@@ -1391,6 +1391,134 @@ def parse_normalized_hierarchy(corrected_text: str, original_headers: list[dict]
     return result
 
 
+# The bare geographic sub-labels the chunk prompt says are never [H1] (#429).
+# Single definition: the chunk extraction prompt interpolates this tuple.
+GEOGRAPHIC_SUB_LABELS = ('International', 'National', 'Regional', 'Local', 'State', 'Institutional')
+
+
+@dataclass
+class _PlacedHeader:
+    """One header of a hierarchy walk: the node, the list holding it, and its docx line."""
+    node: dict
+    siblings: list
+    depth: int
+    line: int | None
+
+
+# A footnote marker a docx puts after a header ("Regional*", "National†",
+# "International¹") and the LLM drops from the outline (#429).
+_TRAILING_FOOTNOTE_MARKERS = re.compile(r'[\s*†‡§¹²³⁰⁴-⁹]+$')
+# A plain footnote number run straight onto a word ("Regional1"); "Section 2" keeps its number.
+_ATTACHED_FOOTNOTE_NUMBER = re.compile(r'(?<=[^\W\d_])\d{1,2}$')
+
+
+def _document_line_key(text: str) -> str:
+    """Compare key for a header vs a docx line.
+
+    Whitespace-collapsed, no trailing colon, no trailing footnote marker, casefolded.
+    """
+    key = ' '.join(text.split()).rstrip(':')
+    key = _ATTACHED_FOOTNOTE_NUMBER.sub('', _TRAILING_FOOTNOTE_MARKERS.sub('', key))
+    return key.casefold()
+
+
+_GEOGRAPHIC_SUB_LABEL_KEYS = frozenset(_document_line_key(label) for label in GEOGRAPHIC_SUB_LABELS)
+
+
+def _place_headers(hierarchy: list[dict], keys: list[str]) -> list[_PlacedHeader]:
+    """Pre-order walk giving each header the first docx line key equal to it after the previous header's line.
+
+    A header with no such line (renamed, synthetic, or listed after a header that
+    follows it in the document) gets None and does not advance the search.
+    """
+    placed: list[_PlacedHeader] = []
+    stack = [(node, hierarchy, 0) for node in reversed(hierarchy)]
+    cursor = -1
+    while stack:
+        node, siblings, depth = stack.pop()
+        key = _document_line_key(node['text'])
+        line = next((i for i in range(cursor + 1, len(keys)) if keys[i] == key), None)
+        if line is not None:
+            cursor = line
+        placed.append(_PlacedHeader(node, siblings, depth, line))
+        children = node.get('children') or []
+        stack.extend((child, children, depth + 1) for child in reversed(children))
+    return placed
+
+
+def _misplaced_sub_label(
+    placed: list[_PlacedHeader], keys: list[str],
+) -> tuple[_PlacedHeader, int, _PlacedHeader] | None:
+    """The first geographic sub-label listed after a header that follows it in the document.
+
+    Returns the label, its docx line, and the anchor: the header found nearest
+    before that line. Only acts when the label's text is once in the outline and
+    on exactly one docx line, the header listed just before it was found at a
+    later line, and an anchor exists. A label that is merely unfound, or whose
+    text the outline repeats (a second group the docx spells differently), is
+    left alone. (A label found by the forward walk is past its predecessor's
+    line, so it never qualifies.)
+    """
+    outline_keys = [_document_line_key(p.node['text']) for p in placed]
+    for prev, cur, key in zip(placed, placed[1:], outline_keys[1:]):
+        if key not in _GEOGRAPHIC_SUB_LABEL_KEYS or prev.line is None or outline_keys.count(key) != 1:
+            continue
+        if keys.count(key) != 1:
+            continue
+        line = keys.index(key)
+        if line >= prev.line:
+            continue
+        anchor = max((p for p in placed if p.line is not None and p.line < line),
+                     key=lambda p: p.line, default=None)
+        if anchor is not None:
+            return cur, line, anchor
+    return None
+
+
+def _index_of(nodes: list, node: dict) -> int:
+    """Position of `node` in `nodes` by identity, not equality."""
+    return next(i for i, candidate in enumerate(nodes) if candidate is node)
+
+
+def _set_levels(node: dict, depth: int) -> None:
+    """Retag a moved subtree's levels ([H1] at depth 0) to its new depth."""
+    stack = [(node, depth)]
+    while stack:
+        current, d = stack.pop()
+        current['level'] = f'H{d + 1}'
+        stack.extend((child, d + 1) for child in current.get('children') or [])
+
+
+def restore_sub_label_document_order(hierarchy: list[dict], lines: list[str]) -> list[dict]:
+    """Move a geographic sub-label the LLM listed after a later section back into document order (#429).
+
+    The normalisation passes may not reorder, but a bare "International" has come
+    back after the section that follows it in the docx, where downstream stages
+    nest or order it under the wrong parent. The label moves to directly after the
+    header found nearest before its own docx line: as that header's first child
+    when it has children (the label's sibling run), else as its next sibling.
+    Mutates and returns `hierarchy`.
+    """
+    keys = [_document_line_key(line) for line in lines]
+    for _ in range(len(keys)):
+        placed = _place_headers(hierarchy, keys)
+        found = _misplaced_sub_label(placed, keys)
+        if found is None:
+            break
+        label, line, anchor = found
+        # By equality is safe here: an equal dict has the same text, and a label
+        # whose text the outline repeats is never moved.
+        label.siblings.remove(label.node)
+        if anchor.node.get('children'):
+            anchor.node['children'].insert(0, label.node)
+            _set_levels(label.node, anchor.depth + 1)
+        else:
+            anchor.siblings.insert(_index_of(anchor.siblings, anchor.node) + 1, label.node)
+            _set_levels(label.node, anchor.depth)
+        logger.info("  Moved a geographic sub-label back to document line %d (#429)", line)
+    return hierarchy
+
+
 def validate_headers_vs_entries(headers: list[dict]) -> list[dict]:
     """
     Validate each header to assess confidence that it's truly a header vs an entry.

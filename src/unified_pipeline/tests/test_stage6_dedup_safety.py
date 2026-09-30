@@ -22,7 +22,10 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.dedup import (  # noqa: E402
     _dates_compatible,
+    _distinct_bare_names,
     _drop_is_safe,
+    _lists_name,
+    _names_a_sibling,
     _names_record,
     _record_name,
 )
@@ -588,3 +591,229 @@ def test_an_empty_rendered_field_vouches_for_nothing():
     kept = _umbrella(pi_name=None, agency="")
     sub = _sub_grant(title="None")
     assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is False
+
+
+def test_postdoc_training_role_vouches_for_a_fused_record():
+    """#946: `role` renders on the C type line, so dedup's rendered-words set for C
+    includes it (the field is consumed here as well as by the section renderer)."""
+    assert "role" in _RENDERED_FIELDS["C"]
+
+
+# ------------- #666: two identical standalone copies of a fused record
+# Each copy used to count as "another entry naming the record" for the other,
+# so both dropped against the kept row that fused the record.
+
+@pytest.mark.parametrize("order", [(0, 1, 2), (1, 2, 0), (1, 0, 2), (2, 0, 1)])
+def test_identical_copies_of_a_fused_record_keep_exactly_one(order):
+    kept, first, second = _umbrella(), _sub_grant(), _sub_grant()
+    entries = [(kept, first, second)[i] for i in order]
+    survivors = deduplicate_entries(entries, code="M2A", document=list(entries))
+    assert any(e is kept for e in survivors)
+    assert sum(e is first or e is second for e in survivors) == 1
+
+
+def test_an_entry_dropped_already_does_not_vouch_for_another_drop():
+    kept, sub, copy = _umbrella(), _sub_grant(), _sub_grant()
+    document = [kept, sub, copy]
+    assert _drop_is_safe(sub, kept, "M2A", document) is True
+    assert _drop_is_safe(sub, kept, "M2A", document, {id(copy)}) is False
+    shared = {id(copy)}
+    assert deduplicate_entries([kept, sub], code="M2A", document=document,
+                               dropped_ids=shared) == [kept, sub]
+    assert shared == {id(copy)}, "a kept entry was recorded as dropped"
+
+
+def test_dedup_records_every_entry_it_drops_in_the_shared_set():
+    kept, sub = _umbrella(), _sub_grant()
+    shared: set[int] = set()
+    deduplicate_entries([kept, sub], dropped_ids=shared)
+    assert shared == {id(sub)}
+
+
+# ------ #666: the token-containment branch against a fused kept entry
+# A kept Q2 row fused two committee records; its fields describe the first.
+
+_FUSED_COMMITTEES = ("Chair, Gadget Committee, Harbor Tinkerers Guild\t"
+                     "Member, Sprocket Council, Harbor Tinkerers Guild")
+
+
+def _fused_committee_row() -> dict:
+    return {"text": _FUSED_COMMITTEES,
+            "extracted_fields": {"committee_name": "Gadget Committee", "role": "Chair",
+                                 "organization": "Harbor Tinkerers Guild"}}
+
+
+def _reworded_sibling() -> dict:
+    # Not a verbatim copy of the sibling row: token containment approves it.
+    return {"text": "Harbor Tinkerers Guild Sprocket Council (Member)",
+            "extracted_fields": {"committee_name": "Sprocket Council", "role": "Member",
+                                 "organization": "Harbor Tinkerers Guild"}}
+
+
+def test_reworded_sibling_of_a_fused_kept_row_is_kept():
+    kept, sibling = _fused_committee_row(), _reworded_sibling()
+    assert _drop_is_safe(sibling, kept, "Q2", [kept, sibling]) is False
+    assert deduplicate_entries([kept, sibling], code="Q2",
+                               document=[kept, sibling]) == [kept, sibling]
+
+
+def test_reworded_sibling_another_entry_names_is_still_dropped():
+    kept, sibling = _fused_committee_row(), _reworded_sibling()
+    other = {"text": "Service list: Sprocket Council, 2019"}
+    assert _drop_is_safe(sibling, kept, "Q2", [kept, sibling, other]) is True
+    # ...unless dedup has dropped that entry already.
+    assert _drop_is_safe(sibling, kept, "Q2", [kept, sibling, other], {id(other)}) is False
+
+
+def test_reworded_copy_of_the_kept_record_itself_is_still_dropped():
+    # The kept row's own committee, the organization folded into the name:
+    # its words never stand together in the kept text, so no sibling row.
+    kept = {"text": "Gadget Committee\t\t2012-2014\tHarbor Tinkerers Guild",
+            "extracted_fields": {"committee_name": "Gadget Committee",
+                                 "start_date": "2012", "end_date": "2014"}}
+    dropped = {"text": "Harbor Tinkerers Guild, Gadget Committee\t2012-2014",
+               "extracted_fields": {"committee_name": "Harbor Tinkerers Guild, Gadget Committee",
+                                    "start_date": "2012", "end_date": "2014"}}
+    assert _drop_is_safe(dropped, kept, "P", [kept, dropped]) is True
+
+
+def test_token_drop_without_a_code_stands():
+    kept, sibling = _fused_committee_row(), _reworded_sibling()
+    assert _drop_is_safe(sibling, kept) is True
+
+
+@pytest.mark.parametrize("text,sibling", [
+    ("Chair, Gadget Committee\tMember, Sprocket Council", True),
+    ("Chair, Gadget Committee (Sprocket Council liaison)", True),
+    ("Chair, Gadget Committee, Sprocket Councils", False),   # a longer word
+    ("Chair, Gadget Committee, Minisprocket Council", False),  # a longer word
+    ("Chair, Gadget Committee, Sprocketcouncil", False),     # one word
+    ("Chair, Gadget Committee\tSprocket, Council", True),     # punctuation between
+    ("Chair, Gadget Committee\tCouncil Sprocket", False),     # the words reordered
+    ("Chair, Gadget Committee", False),
+])
+def test_names_a_sibling_needs_the_name_as_a_run_outside_written_values(text, sibling):
+    fields = {"committee_name": "Gadget Committee", "role": "Chair"}
+    kept = {"text": text, "extracted_fields": fields}
+    assert _names_a_sibling(kept, fields, _RENDERED_FIELDS["Q2"], "Sprocket Council") is sibling
+
+
+def test_a_written_value_holding_the_name_is_no_sibling():
+    fields = {"committee_name": "Gadget Committee", "role": "Chair of Sprocket Council"}
+    kept = {"text": "Gadget Committee\tSprocket Council", "extracted_fields": fields}
+    assert _names_a_sibling(kept, fields, _RENDERED_FIELDS["Q2"], "Sprocket Council") is False
+
+
+def test_a_value_the_section_does_not_write_is_not_cut_out():
+    # `notes` is not a Q2 field the section writes: the name it holds is
+    # still a sibling the page never shows.
+    fields = {"committee_name": "Gadget Committee", "notes": "Sprocket Council"}
+    kept = {"text": "Gadget Committee\tSprocket Council", "extracted_fields": fields}
+    assert "notes" not in _RENDERED_FIELDS["Q2"]
+    assert _names_a_sibling(kept, fields, _RENDERED_FIELDS["Q2"], "Sprocket Council") is True
+
+
+def test_a_stage5_rendering_is_cut_out_of_the_kept_text():
+    fields = {"committee_name": "Gadget Committee",
+              "formatted_text": "Gadget Committee; Sprocket Council"}
+    kept = {"text": "Gadget Committee; Sprocket Council", "extracted_fields": fields}
+    assert _names_a_sibling(kept, fields, _RENDERED_FIELDS["Q2"], "Sprocket Council") is False
+
+
+def test_a_name_split_across_written_values_is_no_sibling():
+    # The kept record itself, its name split into committee and organization.
+    fields = {"committee_name": "Gadget Committee", "role": "-",
+              "organization": "Northern Tinkerers Society"}
+    kept = {"text": "Gadget Committee, Northern Tinkerers Society\t2013",
+            "extracted_fields": fields}
+    name = "Gadget Committee, Northern Tinkerers Society"
+    assert _names_a_sibling(kept, fields, _RENDERED_FIELDS["Q2"], name) is False
+
+
+def test_a_null_written_field_cuts_nothing_out():
+    fields = {"committee_name": "Gadget Committee", "role": None}
+    kept = {"text": "Gadget Committee\tNone Society", "extracted_fields": fields}
+    assert _names_a_sibling(kept, fields, _RENDERED_FIELDS["Q2"], "None Society") is True
+
+
+def test_a_name_without_words_names_no_sibling():
+    fields = {"committee_name": "Gadget Committee"}
+    kept = {"text": "Gadget Committee\t--", "extracted_fields": fields}
+    assert _names_a_sibling(kept, fields, _RENDERED_FIELDS["Q2"], "--") is False
+
+
+# ------------ #666: a short name inside a longer kept name
+# A reviewer list of bare journal names: "Widgets" is contained in "Widgets
+# Quarterly", and it is another journal.
+
+def _journal(name: str) -> dict:
+    return {"taxonomy_code": "Q4D", "text": name, "extracted_fields": {"journal_name": name}}
+
+
+def test_bare_short_name_inside_a_longer_bare_name_is_kept():
+    kept, short = _journal("Widgets Quarterly"), _journal("Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is False
+    assert deduplicate_entries([kept, short], code="Q4D",
+                               document=[kept, short]) == [kept, short]
+
+
+def test_bare_name_differing_only_in_a_stop_word_is_still_dropped():
+    kept, short = _journal("The Widgets"), _journal("Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is True
+
+
+def test_bare_name_another_entry_lists_exactly_is_still_dropped():
+    kept, short = _journal("Widgets Quarterly"), _journal("Widgets")
+    listed = {"text": "Ad hoc reviewer: Gizmo Review; Widgets"}
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short, listed]) is True
+
+
+def test_a_longer_name_elsewhere_does_not_list_the_short_one():
+    kept, short = _journal("Widgets Quarterly"), _journal("Widgets")
+    other = _journal("Annals of Widgets Research")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short, other]) is False
+
+
+def test_a_dropped_bare_name_listed_elsewhere_vouches_for_nothing():
+    kept, short, copy = _journal("Widgets Quarterly"), _journal("Widgets"), _journal("Widgets")
+    document = [kept, short, copy]
+    assert _drop_is_safe(short, kept, "Q4D", document) is True
+    assert _drop_is_safe(short, kept, "Q4D", document, {id(copy)}) is False
+
+
+def test_short_name_in_a_text_rendered_code_is_still_dropped():
+    kept, short = _journal("Widgets Quarterly"), _journal("Widgets")
+    assert "K4" not in _RENDERED_FIELDS
+    assert _drop_is_safe(short, kept, "K4", [kept, short]) is True
+
+
+@pytest.mark.parametrize("dropped_text,kept_text,kept_name,distinct", [
+    ("Widgets", "Widgets Quarterly", "Widgets Quarterly", True),
+    ("Ad hoc Widgets", "Widgets Quarterly", "Widgets Quarterly", False),  # dropped holds more
+    ("Widgets", "Advisory Panel, Widgets Quarterly", "Widgets Quarterly", False),  # kept too
+    ("Widgets", "The Widgets", "The Widgets", False),  # same significant words
+    ("WIDGETS.", "Widgets Quarterly", "Widgets Quarterly", True),  # case, punctuation
+    ("Widgets", "", None, False),  # no kept name
+])
+def test_distinct_bare_names(dropped_text, kept_text, kept_name, distinct):
+    assert _distinct_bare_names({"text": dropped_text}, {"text": kept_text},
+                                "Widgets", kept_name) is distinct
+
+
+@pytest.mark.parametrize("entry,listed", [
+    ({"text": "Widgets"}, True),
+    ({"text": "Reviewer: Gizmo Review, Widgets | 2019"}, True),
+    ({"text": "Gizmo Review\nWidgets"}, True),
+    ({"text": "Gizmo Review\tWidgets"}, True),
+    ({"text": "Gizmo Review; widgets."}, True),
+    ({"text": "Reviewer: Widgets"}, True),
+    ({"text": "Widgets Quarterly"}, False),
+    ({"text": "Reviewer for Widgets"}, False),
+    ({"text": "", "extracted_fields": {"journal_name": "Widgets"}}, True),
+    ({"text": "", "extracted_fields": {"committee_name": "Widgets"}}, True),
+    ({"text": "", "extracted_fields": {"journal_name": "Widgets Quarterly"}}, False),
+    ({"text": "", "extracted_fields": {"notes": "Widgets"}}, False),  # not a name field
+    ({"text": None, "extracted_fields": None}, False),
+])
+def test_lists_name_needs_the_exact_name(entry, listed):
+    assert _lists_name(entry, "Widgets") is listed
