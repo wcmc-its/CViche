@@ -312,3 +312,22 @@ def test_the_kept_record_renders_once_in_the_grant_table(tmp_path) -> None:
 
     assert sum("Gizmo Clinic" in text(p) for p in in_table) == 1, "missing or rendered twice"
     assert not any("Gizmo Clinic" in text(p) for p in outside), "restored as a stray paragraph"
+
+
+def test_dedup_keeps_one_of_two_identical_copies_of_the_fused_record() -> None:
+    umbrella, sub = _fused_grant_entries()
+    copy = json.loads(json.dumps(sub))
+    assert _m2a_titles([umbrella, sub, copy]) == ["Harbor Widget Initiative", "Gizmo Clinic"]
+
+
+def test_a_copy_dropped_in_an_earlier_group_does_not_vouch_for_the_record() -> None:
+    # Invented. The T group comes first: its copy of the sub-grant is dropped
+    # against a longer T entry whose words are reordered, so that entry does
+    # not name the record. The dropped copy must not then let the M2A group
+    # drop the sub-grant too.
+    longer = {"taxonomy_code": "T", "element_idx_start": 1, "extracted_fields": {},
+              "text": "Clinic Gizmo PI Dr Quill 1 of 2 Sites $222,222 renewed twice"}
+    copy = {"taxonomy_code": "T", "element_idx_start": 2, "extracted_fields": {},
+            "text": "Gizmo Clinic  PI: Dr Quill (1 of 2 Sites)  $222,222"}
+    assert _m2a_titles([longer, copy] + _fused_grant_entries()) == [
+        "Harbor Widget Initiative", "Gizmo Clinic"]
