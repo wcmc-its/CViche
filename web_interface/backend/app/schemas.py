@@ -100,6 +100,15 @@ class StepSummary(BaseModel):
         from_attributes = True
 
 
+class RunBySummary(BaseModel):
+    """Who ran a run, as the admin "all runs" view shows it."""
+    id: int
+    display_name: str
+    cwid: str | None = None
+    email: str | None = None
+    department: str | None = None
+
+
 class RunSummary(BaseModel):
     """Summary of a run for the history list."""
     run_id: str
@@ -109,9 +118,32 @@ class RunSummary(BaseModel):
     completed_at: TZDateTime | None = None
     total_cost: float | None  # None for non-admins (#1111)
     total_duration_seconds: int | None = None
+    cv_owner_name: str | None = None
+    submission_type: str | None = None
+    # Only populated by GET /runs?scope=all (admin); null for runs without a
+    # user and always null under scope=mine.
+    run_by: RunBySummary | None = None
 
     class Config:
         from_attributes = True
+
+
+class FilterCount(BaseModel):
+    """One option of a runs filter and how many runs it matches."""
+    value: str
+    count: int
+
+
+class RunByOption(RunBySummary):
+    count: int
+
+
+class RunFilterOptions(BaseModel):
+    """GET /runs/filter-options: the options each admin runs filter offers."""
+    departments: list[FilterCount]
+    faculty: list[FilterCount]
+    run_by: list[RunByOption]
+    self_count: int
 
 
 class PaginatedRuns(BaseModel):

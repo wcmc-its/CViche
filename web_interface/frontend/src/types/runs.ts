@@ -24,6 +24,15 @@ export interface RunStatus {
   steps: StepSummary[]
 }
 
+/** Who ran a run; only sent by GET /api/runs?scope=all (admin). */
+export interface RunBy {
+  id: number
+  display_name: string
+  cwid: string | null
+  email: string | null
+  department: string | null
+}
+
 export interface RunSummary {
   run_id: string
   filename: string
@@ -32,6 +41,40 @@ export interface RunSummary {
   completed_at: string | null
   total_cost: number | null
   total_duration_seconds: number | null
+  /** CV owner inferred by stage 4; null until stage 4 completes or if none was inferred. */
+  cv_owner_name?: string | null
+  /** "own_cv" (faculty uploaded their own CV) or "authorized_admin". */
+  submission_type?: string | null
+  /** Populated only with scope=all; null for runs without a user. */
+  run_by?: RunBy | null
+}
+
+export type RunListScope = 'mine' | 'all'
+
+/** Query params for GET /api/runs and /api/runs/filter-options. The filters are
+ *  honoured only with scope 'all' (admin); `run_by` is a user id or 'self'. */
+export interface RunListParams {
+  scope?: RunListScope
+  run_by?: number | 'self'
+  faculty?: string
+  department?: string
+}
+
+export interface FilterCount {
+  value: string
+  count: number
+}
+
+export interface RunByOption extends RunBy {
+  count: number
+}
+
+export interface RunFilterOptions {
+  departments: FilterCount[]
+  faculty: FilterCount[]
+  run_by: RunByOption[]
+  /** Runs where the faculty member uploaded their own CV (run_by = 'self'). */
+  self_count: number
 }
 
 export interface FeedbackStatus {

@@ -13,13 +13,13 @@ from pathlib import Path
 from app.database import get_db
 from app.models import Run, RunState, Step, User
 from app.schemas import (
-    RunStatus, RunSummary, StepSummary, PaginatedRuns,
+    RunFilterOptions, RunStatus, RunSummary, StepSummary, PaginatedRuns,
     CapacityResponse, RunActionResponse, RestartRunResponse,
 )
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency, run_queue
-from app.auth import get_current_user, visible_cost
+from app.auth import get_current_user, require_admin, visible_cost
 from app.api.upload import UPLOAD_DIR, create_run_archive, commit_run_or_compensate
 from app.services.run_service import (
     check_run_access, claim_run_as_running, _materialize_input_if_missing,
@@ -27,6 +27,10 @@ from app.services.run_service import (
 )
 from app.rate_limiter import check_rate_limit
 from app.errors import not_found, bad_request, conflict
+from app.services.runs_admin_query import (
+    RunScope, build_filter_options, filtered_runs_query, parse_run_filters,
+    run_by_summary,
+)
 from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
@@ -187,15 +191,47 @@ async def get_capacity(current_user: User = Depends(get_current_user)):
     }
 
 
+@router.get("/runs/filter-options", response_model=RunFilterOptions)
+def get_run_filter_options(
+    scope: RunScope = Query(RunScope.ALL),
+    run_by: str | None = Query(None),
+    faculty: str | None = Query(None),
+    department: str | None = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+) -> RunFilterOptions:
+    """Options and run counts for the admin runs filters (scope=all, admin only).
+
+    Each list's counts apply the other two filters but not its own."""
+    if scope != RunScope.ALL:
+        raise bad_request("filter-options is only available with scope=all")
+    return build_filter_options(db, parse_run_filters(run_by, faculty, department))
+
+
 @router.get("/runs", response_model=PaginatedRuns)
 async def list_runs(
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=MAX_RUNS_PAGE_SIZE),
+    scope: RunScope = Query(RunScope.MINE),
+    run_by: str | None = Query(None),
+    faculty: str | None = Query(None),
+    department: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List pipeline runs for the current user, most recent first."""
-    query = db.query(Run).filter(Run.user_id == current_user.id)
+    """List pipeline runs, most recent first.
+
+    scope=mine (default): the current user's runs. scope=all (admin only): every
+    user's runs, optionally filtered by run_by (user id or "self"), faculty (the
+    CV owner's name) and department (the running user's ED department); the
+    filters are ignored under scope=mine.
+    """
+    all_scope = scope == RunScope.ALL
+    if all_scope:
+        require_admin(current_user)
+        query = filtered_runs_query(db, parse_run_filters(run_by, faculty, department))
+    else:
+        query = db.query(Run).filter(Run.user_id == current_user.id)
     total = query.count()
     runs = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()
 
@@ -210,7 +246,10 @@ async def list_runs(
             started_at=run.started_at,
             completed_at=run.completed_at,
             total_cost=visible_cost(current_user, run.total_cost),
-            total_duration_seconds=total_duration_seconds
+            total_duration_seconds=total_duration_seconds,
+            cv_owner_name=run.cv_owner_name,
+            submission_type=run.submission_type,
+            run_by=run_by_summary(run.user) if all_scope else None,
         ))
 
     return PaginatedRuns(
