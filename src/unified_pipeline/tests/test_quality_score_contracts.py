@@ -28,6 +28,7 @@ from unified_pipeline import quality_score as qs  # noqa: E402
 from unified_pipeline.quality_score import (  # noqa: E402
     FATAL_ERROR_PATTERN,
     SCORED_ARTIFACT_COUNT,
+    TOTAL_WEIGHT,
     VALID_GATE_MODES,
     _goal_claimed_row_ids,
     _is_placeholder_only_row,
@@ -1412,6 +1413,12 @@ def test_stage3b_fallback_ratio_quiet_when_classified_json_is_absent(tmp_path):
     fraction, detail, cap = score_stage3b_fallback_ratio(tmp_path)
     assert fraction == 0.0 and cap is None
     assert "no classified.json found" in detail
+
+
+def test_dimension_weights_sum_to_100():
+    """Whole-number points per dimension: a dimension of weight w loses exactly
+    w * fraction points, with no normalization."""
+    assert TOTAL_WEIGHT == 100
 
 
 def test_new_hard_fail_dimensions_do_not_move_a_clean_runs_score(tmp_path):
