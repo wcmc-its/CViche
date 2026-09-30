@@ -34,7 +34,7 @@ from app.services import notifications
 def _doctor_payload():
     """A canned run_doctor report with one substantive (WARN) finding."""
     return {
-        "document_uid": "cv",
+        "document_uid": "DOC_ON",
         "root": "unused",
         "artifacts": {},
         "findings": [
@@ -71,7 +71,7 @@ def _orchestrator(monkeypatch, tmp_path, db, run_id):
         [SimpleNamespace(number=1, stage_id="1a", name="Hierarchy Extraction")],
     )
 
-    o = orch.PipelineOrchestrator(run_id, tmp_path / "cv.docx", db)
+    o = orch.PipelineOrchestrator(run_id, tmp_path / f"{run_id}.docx", db)
     monkeypatch.setattr(o, "_copy_to_pipeline_input", lambda: str(tmp_path / "cv.docx"))
     monkeypatch.setattr(o, "execute_step", AsyncMock())
     monkeypatch.setattr(o, "pipeline_output_dir", tmp_path / "outputs")
@@ -139,8 +139,8 @@ def test_doctor_runs_by_default_and_publishes(monkeypatch, tmp_path, db):
     db.expire_all()
     assert db.query(Run).filter(Run.id == "DOC_ON").first().status == "complete"
 
-    # Report written under the pipeline outputs dir (document_uid = "cv").
-    report = tmp_path / "outputs" / "stage_7_doctor" / "cv_doctor.json"
+    # Report written under the pipeline outputs dir (document_uid = run id).
+    report = tmp_path / "outputs" / "stage_7_doctor" / "DOC_ON_doctor.json"
     assert json.loads(report.read_text()) == payload
 
     # Registered on the final step's output_files (what the viewer lists),

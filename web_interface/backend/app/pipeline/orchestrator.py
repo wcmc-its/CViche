@@ -456,10 +456,14 @@ class PipelineOrchestrator:
     def __init__(self, run_id: str, file_path: Path, db: Session):
         self.run_id = _require_safe_uid("run_id", run_id)
         self.file_path = file_path
-        # Document UID extracted from filename. == run_id at every current
-        # call site (upload.py and restart_run() name the stored file
-        # f"{run_id}.{ext}"). It keys output paths, so it must be path-safe.
+        # Output and input-copy paths are keyed by document_uid alone, so two
+        # runs sharing one would silently reuse each other's artifacts (#597).
+        # Every caller names the stored file f"{run_id}.{ext}"; enforce it.
         self.document_uid = _require_safe_uid("document_uid", Path(file_path).stem)
+        if self.document_uid != self.run_id:
+            raise ValueError(
+                f"document_uid {self.document_uid!r} must equal run_id {self.run_id!r}"
+            )
         self.db = db
 
         # Output directory for this run (in the unified_pipeline outputs)
