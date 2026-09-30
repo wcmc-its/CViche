@@ -260,6 +260,16 @@ def test_coverage_span_budget_counts_repeated_tokens():
     assert m["lost_lines"] == []
 
 
+def test_coverage_span_budget_boundary_at_compute_metrics():
+    """#610: _covered's budget is exactly token count + COVERAGE_WINDOW_SLACK;
+    a window at the budget is covered, one filler token longer is lost."""
+    source = ["alphaword betaword"]
+    for fill, lost in ((COVERAGE_WINDOW_SLACK, []), (COVERAGE_WINDOW_SLACK + 1, source)):
+        entry = " ".join(["alphaword"] + ["filler"] * fill + ["betaword"])
+        m = compute_metrics(source, _STAGE1A, {"entries": [_entry(entry, start=1)]})
+        assert m["lost_lines"] == lost, fill
+
+
 def test_coverage_substantive_line_without_tokens_is_lost():
     """A long punctuation-only line has no word tokens to match on, so unless
     it appears verbatim it is lost (not vacuously covered)."""
