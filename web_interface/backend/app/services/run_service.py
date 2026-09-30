@@ -3,6 +3,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.models import Run, Step, User, Log, LLMUsage, Feedback, RunMetrics
 from app.errors import not_found, forbidden
@@ -518,8 +519,17 @@ def fail_runs_interrupted_by_shutdown(db: Session, run_ids: list[str]) -> int:
     # could send it. The run cannot send a second one -- stop_run_locally makes
     # its next check raise CancelledException, whose handler sends nothing.
     # Queued only; the lifespan's notifications flush() posts it before exit.
+    # Per run and best-effort: the rows are already committed, so a failed
+    # submitter lookup must neither skip the other runs' cards nor reach the
+    # caller, which would report these runs as not marked failed.
     for run in failed:
-        notifications.notify_run_terminal(run, submitter=_submitter_email(db, run))
+        try:
+            submitter = _submitter_email(db, run)
+        except SQLAlchemyError:
+            logger.warning("Submitter lookup failed for run %s; sending its card without one",
+                           run.id, exc_info=True)
+            submitter = None
+        notifications.notify_run_terminal(run, submitter=submitter)
     return len(failed)
 
 

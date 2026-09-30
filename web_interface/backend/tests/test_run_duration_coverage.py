@@ -497,18 +497,19 @@ def _run_cancelled_execute(monkeypatch, tmp_path, db, run_id, status, prepare=No
     o = orch.PipelineOrchestrator(run_id, tmp_path / "cv.docx", db)
     monkeypatch.setattr(o, "_copy_to_pipeline_input", lambda: str(tmp_path / "cv.docx"))
     monkeypatch.setattr(o, "execute_step", AsyncMock(side_effect=orch.CancelledException("x")))
-    monkeypatch.setattr(o, "log", AsyncMock())  # log() commits too and would mask a missing commit
+    log = AsyncMock()  # log() commits too and would mask a missing commit
+    monkeypatch.setattr(o, "log", log)
     if prepare:
         prepare(orch)
     asyncio.run(o.execute())
     db.rollback()  # anything the handler left uncommitted is lost here
-    return db.query(Run).filter(Run.id == run_id).first(), emitter
+    return db.query(Run).filter(Run.id == run_id).first(), emitter, log
 
 
 def test_execute_cancel_without_api_write_records_cancelled_on_the_row(monkeypatch, tmp_path, db):
     """#591: the handler must not assume the API flipped the row; a cancel
     that reaches the pipeline with the row still 'running' leaves it 'cancelled'."""
-    row, emitter = _run_cancelled_execute(monkeypatch, tmp_path, db, "CNCL01", "running")
+    row, emitter, _ = _run_cancelled_execute(monkeypatch, tmp_path, db, "CNCL01", "running")
     assert row.status == "cancelled"
     assert row.error_message == "Cancelled by user"
     assert row.completed_at is not None
@@ -525,14 +526,14 @@ def test_execute_cancel_is_idempotent_when_api_already_cancelled(monkeypatch, tm
              "completed_at": datetime(2026, 6, 4, 12, 5, 0)})
         db.commit()
 
-    row, _ = _run_cancelled_execute(
+    row, _, _ = _run_cancelled_execute(
         monkeypatch, tmp_path, db, "CNCL02", "running", prepare=api_cancel)
     assert row.status == "cancelled"
     assert row.completed_at == datetime(2026, 6, 4, 12, 5, 0)
 
 
 def test_execute_cancel_does_not_overwrite_another_terminal_status(monkeypatch, tmp_path, db):
-    row, _ = _run_cancelled_execute(monkeypatch, tmp_path, db, "CNCL03", "failed")
+    row, _, _ = _run_cancelled_execute(monkeypatch, tmp_path, db, "CNCL03", "failed")
     assert row.status == "failed"
     assert row.error_message is None
 
@@ -540,16 +541,22 @@ def test_execute_cancel_does_not_overwrite_another_terminal_status(monkeypatch, 
 def test_execute_stopped_by_shutdown_is_left_for_the_drain_to_fail(monkeypatch, tmp_path, db):
     """stop_run_locally (#116) flags the run but the drain fails it with the
     deploy message; the cancel handler must not claim it as a user cancel."""
-    row, _ = _run_cancelled_execute(
+    row, emitter, log = _run_cancelled_execute(
         monkeypatch, tmp_path, db, "CNCL04", "running",
         prepare=lambda orch: orch.stop_run_locally("CNCL04"))
     assert row.status == "running"
+    # Nor report it as one: the drain writes the run's log row and card, and
+    # a "cancelled by user" row written while its card posts contradicts them.
+    log.assert_not_awaited()
+    emitter.emit.assert_not_awaited()
 
 
 def test_execute_local_user_cancel_is_persisted_unlike_a_shutdown_stop(monkeypatch, tmp_path, db):
     """cancel_run (user cancel) on a still-running row is recorded; only
     stop_run_locally is exempt, which is why _stopped_locally exists."""
-    row, _ = _run_cancelled_execute(
+    row, emitter, log = _run_cancelled_execute(
         monkeypatch, tmp_path, db, "CNCL05", "running",
         prepare=lambda orch: orch.cancel_run("CNCL05"))
     assert row.status == "cancelled"
+    log.assert_awaited_once_with(0, "Pipeline cancelled by user", "WARNING")
+    emitter.emit.assert_awaited_once_with("CNCL05", {"event": "RUN_CANCELLED"})

@@ -17,7 +17,10 @@ runner has done to the ambient sys.stdout.
 from __future__ import annotations
 
 import contextvars
+import io
+import sys
 import threading
+import time
 
 from app.pipeline import orchestrator as orch_mod
 from unified_pipeline.core.batch_pool import map_in_order
@@ -191,3 +194,162 @@ def test_emit_progress_failure_is_logged_not_swallowed(caplog):
         thread.join(timeout=5)
         loop.close()
     assert "Progress emit skipped for step 3: bad progress call" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# #116: a log line written on the run's own loop never streams back into the
+# run's capture. Those lines happen while the capture is the context's stdout
+# (inside log(), the emitter, the broker, asyncio's error reporting); streamed,
+# each one blocked the run loop 2s waiting on itself and emitted again.
+# ---------------------------------------------------------------------------
+
+def _stream_through_real_capture(emitter, prints, loggers, timeout=20.0):
+    """Run a stage that print()s ``prints`` lines through the real capture and
+    router, with ``loggers`` writing through sys.stdout the way
+    configure_logging sets app logging up. Returns (seconds or None if the
+    stage did not finish within ``timeout``, lines recorded as run log)."""
+    import asyncio
+    import gc
+    import logging
+    from app.logging_config import _DYNAMIC_STDOUT
+
+    logged = []
+
+    class _Run:
+        """Stands in for PipelineOrchestrator's log()/update_progress()."""
+
+        async def log(self, step, message, level="INFO"):
+            logged.append(message)
+            await emitter.emit_log("R1", step, message, level)
+
+        async def update_progress(self, step, current, total, message=""):
+            await emitter.emit_progress("R1", step, current, total, message)
+
+    def stage():
+        for n in range(1, prints + 1):
+            print(f"Processing {n} of {prints} sections")
+
+    async def run():
+        loop = asyncio.get_running_loop()
+        await asyncio.to_thread(
+            orch_mod.PipelineOrchestrator._run_with_stdout_capture_sync, _Run(), stage, 1, loop)
+        gc.collect()  # surface any never-retrieved future now, on this loop
+        await asyncio.sleep(0.3)
+
+    outcome = {}
+
+    def target():
+        started = time.monotonic()
+        asyncio.run(run())
+        outcome["seconds"] = time.monotonic() - started
+
+    handler = logging.StreamHandler(_DYNAMIC_STDOUT)
+    for name in loggers:
+        logging.getLogger(name).addHandler(handler)
+    try:
+        worker = threading.Thread(target=target, daemon=True)  # may hang on a regression
+        worker.start()
+        worker.join(timeout)
+    finally:
+        for name in loggers:
+            logging.getLogger(name).removeHandler(handler)
+    return outcome.get("seconds"), logged
+
+
+def test_a_broker_outage_during_a_stage_does_not_stall_the_run(monkeypatch):
+    """Valkey unreachable: every publish logs "Redis publish failed" on the run
+    loop, inside the capture's context (prod, dev-210: a 2-print stage never
+    finished in 60s)."""
+    from app.pipeline.event_emitter import EventEmitter
+    from app.pipeline.redis_broker import RedisBroker
+
+    real_stdout = io.StringIO()
+    monkeypatch.setattr(sys, "__stdout__", real_stdout)
+    emitter = EventEmitter(broker=RedisBroker("redis://127.0.0.1:1/0"))
+
+    seconds, logged = _stream_through_real_capture(
+        emitter, 2, ["app.pipeline.redis_broker"])
+
+    assert seconds is not None and seconds < 5
+    assert logged == ["Processing 1 of 2 sections", "Processing 2 of 2 sections"]
+    assert "Redis publish failed" in real_stdout.getvalue()  # still logged, just not streamed
+
+
+def test_a_failed_delivery_does_not_stall_the_run_or_leak_a_future(monkeypatch):
+    """A delivery that fails on the server loop: its exception is retrieved (no
+    "Future exception was never retrieved" from the run loop), and the
+    warnings it causes stay out of the capture (a 3-print stage did not
+    finish in 90s)."""
+    import asyncio
+    import logging
+    from app.pipeline import event_emitter as emitter_module
+
+    real_stdout = io.StringIO()
+    monkeypatch.setattr(sys, "__stdout__", real_stdout)
+    records = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    keep = _Keep()
+    logging.getLogger("asyncio").addHandler(keep)
+
+    class _Socket:
+        async def accept(self):
+            return None
+
+    async def broken(run_id, message):
+        raise ValueError("send failed")
+
+    server = asyncio.new_event_loop()
+    thread = threading.Thread(target=server.run_forever, daemon=True)
+    thread.start()
+    emitter = emitter_module.EventEmitter()
+    try:
+        asyncio.run_coroutine_threadsafe(emitter.connect("R1", _Socket()), server).result(5)
+        monkeypatch.setattr(emitter, "_deliver_local", broken)
+        seconds, logged = _stream_through_real_capture(
+            emitter, 3, ["asyncio", emitter_module.__name__])
+    finally:
+        logging.getLogger("asyncio").removeHandler(keep)
+        server.call_soon_threadsafe(server.stop)
+        thread.join(5)
+        server.close()
+
+    assert seconds is not None and seconds < 5
+    assert logged == [f"Processing {n} of 3 sections" for n in (1, 2, 3)]
+    assert not any("never retrieved" in message for message in records)
+    assert "[Log emit error" not in real_stdout.getvalue()
+
+
+def test_a_run_loop_write_goes_to_real_stdout_and_a_stage_write_streams(monkeypatch):
+    """The guard's two sides, directly: a write made on the capture's event
+    loop is passed to the real stdout and never streamed; a write from any
+    other thread is streamed as before."""
+    import asyncio
+
+    real_stdout = io.StringIO()
+    monkeypatch.setattr(sys, "__stdout__", real_stdout)
+    streamed = []
+
+    class _Run:
+        async def log(self, step, message, level="INFO"):
+            streamed.append(message)
+
+    async def scenario():
+        loop = asyncio.get_running_loop()
+        capture = orch_mod.StreamingStdoutCapture(_Run(), 1, loop)
+        capture.write("on the run loop\n")
+        capture.buffer = "partial"
+        capture.flush()  # a handler's flush on the run loop: no streaming either
+        kept = capture.buffer
+        capture.buffer = ""
+        await asyncio.to_thread(capture.write, "from the stage\n")
+        return kept
+
+    kept = asyncio.run(scenario())
+
+    assert streamed == ["from the stage"]
+    assert kept == "partial"
+    assert "on the run loop\n" in real_stdout.getvalue()

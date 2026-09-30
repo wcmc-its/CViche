@@ -147,6 +147,26 @@ class TestFailRunsInterruptedByShutdown:
             == [("ERROR", DEPLOY_INTERRUPT_MESSAGE)]
         assert notified == [("DPLY01", "failed", "owner@example.com")]
 
+    def test_a_failed_submitter_lookup_still_sends_every_card(self, db, notified, monkeypatch):
+        """The rows are committed before the cards go out; one run's lookup
+        failing must not cost the other its card, nor raise to the drain."""
+        from sqlalchemy.exc import OperationalError
+        for run_id in ("DPLY04", "DPLY05"):
+            db.add(Run(id=run_id, filename="a.docx", file_type="docx", status="running",
+                       started_at=datetime.now() - timedelta(minutes=30)))
+        db.commit()
+
+        def lookup(db_, run):
+            if run.id == "DPLY04":
+                raise OperationalError("SELECT", {}, Exception("database gone"))
+            return "owner@example.com"
+
+        monkeypatch.setattr("app.services.run_service._submitter_email", lookup)
+
+        assert fail_runs_interrupted_by_shutdown(db, ["DPLY04", "DPLY05"]) == 2
+        assert sorted(notified) == [("DPLY04", "failed", None),
+                                    ("DPLY05", "failed", "owner@example.com")]
+
     def test_run_that_finished_meanwhile_is_untouched(self, db, notified):
         finished_at = datetime.now() - timedelta(minutes=1)
         run = Run(id="DPLY02", filename="a.docx", file_type="docx", status="complete",

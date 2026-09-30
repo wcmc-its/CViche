@@ -701,14 +701,20 @@ def test_a_failed_delivery_does_not_raise_into_the_run(monkeypatch, caplog, fail
     async def broken(run_id, message):
         raise failure()
 
+    async def run():
+        await emitter.emit_log("R1", 1, "x")
+        await asyncio.sleep(0.05)  # let the delivery future's done callbacks run
+
     with _server_loop() as server:
         _on(server, emitter.connect("R1", socket))
         monkeypatch.setattr(emitter, "_deliver_local", broken)
-        with caplog.at_level(logging.WARNING, logger=emitter_module.__name__):
-            _, error = _in_run_thread(lambda: emitter.emit_log("R1", 1, "x"))
+        with caplog.at_level(logging.WARNING):
+            _, error = _in_run_thread(run)
 
     assert error is None
     assert any("R1" in record.getMessage() for record in caplog.records)
+    # Its outcome is retrieved cleanly, cancelled or not: no callback error.
+    assert not any(record.name == "asyncio" for record in caplog.records)
 
 
 def test_a_run_nobody_watches_skips_the_hop_to_the_server_loop():
