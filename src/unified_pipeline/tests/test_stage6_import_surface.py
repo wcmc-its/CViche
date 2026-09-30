@@ -345,8 +345,8 @@ def _tracked_python_files() -> list[str]:
     return out.split()
 
 
-def _dotted_module_of(rel_path: str) -> tuple[list[str], bool]:
-    """(dotted parts, is_package) for a repo-relative .py path.
+def _dotted_module_of(rel_path: str) -> list[str]:
+    """Dotted parts of a repo-relative .py path (`__init__` stays last).
 
     Files under `src/` are importable relative to it; anything else keeps its
     full path, which only matters for resolving that file's relative imports.
@@ -354,15 +354,18 @@ def _dotted_module_of(rel_path: str) -> tuple[list[str], bool]:
     parts = Path(rel_path).with_suffix("").parts
     if parts and parts[0] == _SRC_DIR_NAME:
         parts = parts[1:]
-    is_package = bool(parts) and parts[-1] == "__init__"
-    return list(parts[:-1] if is_package else parts), is_package
+    return list(parts)
 
 
-def _target_module(node: ast.ImportFrom, file_parts: list[str], is_package: bool) -> str:
-    """Absolute dotted module a `from ... import` node targets."""
+def _target_module(node: ast.ImportFrom, file_parts: list[str]) -> str:
+    """Absolute dotted module a `from ... import` node targets.
+
+    The last part is the module's own name (or `__init__`), so dropping it
+    yields the containing package for a plain module and a package alike.
+    """
     if not node.level:
         return node.module or ""
-    package = file_parts if is_package else file_parts[:-1]
+    package = file_parts[:-1]
     base = package[: len(package) - (node.level - 1)]
     return ".".join([*base, *(node.module.split(".") if node.module else [])])
 
@@ -378,12 +381,12 @@ def _in_scope_imports(
     access (`s6.name`, `from unified_pipeline import stage_6_word_template as
     s6`) are OUT OF SCOPE: only `ImportFrom` names are collected.
     """
-    file_parts, is_package = _dotted_module_of(rel)
+    file_parts = _dotted_module_of(rel)
     found = set()
     for node in ast.walk(tree):
         if not isinstance(node, ast.ImportFrom):
             continue
-        target = _target_module(node, file_parts, is_package)
+        target = _target_module(node, file_parts)
         if target in LIVE_WALK_MANIFESTS:
             found.update((rel, target, alias.name) for alias in node.names)
     return found
@@ -439,6 +442,14 @@ def test_live_walk_flags_unpinned_aliased_relative_and_wildcard_imports():
         ("stage_6_word_template", WILDCARD),
         ("stage_6_word_template", "another_new"),
         ("stage_6_word_template", "brand_new"),
+    ]
+    # A package's own `__init__.py`: `.dedup` is a sibling submodule of the package.
+    init_found = _in_scope_imports(
+        ast.parse("from .dedup import fresh_x\n"),
+        "src/unified_pipeline/stage6/__init__.py",
+    )
+    assert _unpinned(init_found) == [
+        ("src/unified_pipeline/stage6/__init__.py", "unified_pipeline.stage6.dedup", "fresh_x")
     ]
 
 
