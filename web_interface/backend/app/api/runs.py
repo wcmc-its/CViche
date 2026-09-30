@@ -432,18 +432,16 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     Commit BEFORE signalling, not after: db.commit() can raise (see
     commit_run_or_compensate's #802 handling above), while orchestrator_cancel
     cannot -- cancel_run's set.add can't raise, and RedisBroker.request_cancel
-    wraps its body in try/except (redis_broker.py, "best-effort"). Signalling
-    first would leave a window where the pipeline is told to stop but the row
-    never reflects it if the commit then raises: check_cancelled's
-    CancelledException handler does not touch the DB (orchestrator.py,
-    "status already updated by API endpoint"), so the row would stay
-    "running" until reconcile_stale_runs sweeps it up to an hour later with a
-    misleading "server restarted" message. Committing first means a commit
+    wraps its body in try/except (redis_broker.py, "best-effort"). A commit
     failure here leaves the run running with nothing told to stop it --
-    consistent, and the caller's exception surfaces normally.
+    consistent, and the caller's exception surfaces normally. The orchestrator
+    also records a cancel on the row itself if this write never happened, e.g.
+    a cancel that arrived over Redis (#591).
     """
+    from app.pipeline.orchestrator import USER_CANCEL_MESSAGE
+
     run.status = "cancelled"
-    run.error_message = "Cancelled by user"
+    run.error_message = USER_CANCEL_MESSAGE
     # Naive, matching every other Run timestamp write (orchestrator.py,
     # run_service.py, upload.py): pymysql drops tzinfo on write, so an aware
     # value would round-trip as naive UTC and get mislabelled with the

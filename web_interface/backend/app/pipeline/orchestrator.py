@@ -145,8 +145,16 @@ def user_facing_error(exc: BaseException, resuming: bool) -> str:
 # enabled, cancels also round-trip through Redis so a cancel received by one
 # worker/replica reaches the worker actually running the pipeline. The broker's
 # cancel ops use a sync client, so is_cancelled() stays synchronous and the
-# stage-boundary check (check_cancelled) needs no async change.
+# stage-boundary check (check_cancelled) needs no async change. Both signals
+# are only low-latency hints: the run row's status is the durable record, and
+# execute() writes "cancelled" to it if no API request already has (#591).
 _cancelled_runs: set = set()
+# Runs stopped by shutdown (stop_run_locally). Their row is failed by the drain,
+# so execute() must not record them as user cancels.
+_stopped_locally: set = set()
+# Guards both sets: cancel_run runs on request threads, is_cancelled and
+# clear_cancelled on pipeline threads (#307).
+_cancelled_lock = threading.Lock()
 _broker = None
 
 
@@ -158,7 +166,8 @@ def set_broker(broker):
 
 def cancel_run(run_id: str):
     """Signal a run to be cancelled."""
-    _cancelled_runs.add(run_id)
+    with _cancelled_lock:
+        _cancelled_runs.add(run_id)
     if _broker is not None and _broker.enabled:
         _broker.request_cancel(run_id)
 
@@ -173,13 +182,16 @@ def stop_run_locally(run_id: str) -> None:
     Redis flag outlives this pod by CANCEL_TTL_SECONDS and would cancel a retry
     of the same run that another pod starts inside that window.
     """
-    _cancelled_runs.add(run_id)
+    with _cancelled_lock:
+        _cancelled_runs.add(run_id)
+        _stopped_locally.add(run_id)
 
 
 def is_cancelled(run_id: str) -> bool:
     """Check if a run has been cancelled (locally or via the broker)."""
-    if run_id in _cancelled_runs:
-        return True
+    with _cancelled_lock:
+        if run_id in _cancelled_runs:
+            return True
     if _broker is not None and _broker.enabled:
         return _broker.is_cancelled(run_id)
     return False
@@ -187,9 +199,14 @@ def is_cancelled(run_id: str) -> bool:
 
 def clear_cancelled(run_id: str):
     """Clear cancellation flag for a run."""
-    _cancelled_runs.discard(run_id)
+    with _cancelled_lock:
+        _cancelled_runs.discard(run_id)
+        _stopped_locally.discard(run_id)
     if _broker is not None and _broker.enabled:
         _broker.clear_cancel(run_id)
+
+
+USER_CANCEL_MESSAGE = "Cancelled by user"
 
 
 class CancelledException(Exception):
@@ -355,8 +372,9 @@ class StreamingStdoutCapture:
                 self.event_loop
             )
             future.result(timeout=1.0)
-        except Exception:
-            pass  # Progress updates are less critical
+        except Exception as exc:
+            # Progress is best-effort, but a programming error must be visible.
+            logger.debug("Progress emit skipped for step %d: %s", self.step_number, exc)
 
     def write(self, text: str):
         """Capture stdout writes and stream them to the database."""
@@ -811,7 +829,7 @@ class PipelineOrchestrator:
             await self._notify_terminal(run, score, doctor)
 
         except CancelledException:
-            # Run was cancelled - status already updated by API endpoint
+            self._persist_cancelled()
             await self.log(0, "Pipeline cancelled by user", "WARNING")
             await event_emitter.emit(self.run_id, {"event": "RUN_CANCELLED"})
 
@@ -852,6 +870,32 @@ class PipelineOrchestrator:
                 reset_current_run_id(run_id_token)
             # Clean up cancellation flag
             clear_cancelled(self.run_id)
+
+    def _persist_cancelled(self) -> None:
+        """Record the cancel on the run row unless it is already terminal.
+
+        The API endpoint normally wrote "cancelled" first, but a cancel that
+        arrived over Redis has not, and a shutdown stop leaves the row for the
+        drain to fail. A conditional UPDATE keeps this idempotent and never
+        overwrites another terminal status (#591).
+        """
+        with _cancelled_lock:
+            stopped_by_shutdown = self.run_id in _stopped_locally
+        if stopped_by_shutdown:
+            return
+        updated = self.db.query(Run).filter(
+            Run.id == self.run_id, Run.status == "running"
+        ).update(
+            {
+                "status": "cancelled",
+                "error_message": USER_CANCEL_MESSAGE,
+                "completed_at": datetime.now(),
+            },
+            synchronize_session="evaluate",
+        )
+        self.db.commit()
+        if updated:
+            logger.info("Run %s marked cancelled by the orchestrator", self.run_id)
 
     def _cached_score(self):
         """Best-effort read of the run's cached quality score (or None).
