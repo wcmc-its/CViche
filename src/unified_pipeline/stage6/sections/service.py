@@ -1103,9 +1103,9 @@ class ServiceSection:
             return
 
         # Find the Journal Reviewing section
-        section_idx = self._find_paragraph_with_text("Journal Reviewing")
+        section_idx = self._find_template_label("Journal Reviewing")
         if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Ad hoc Reviewing")
+            section_idx = self._find_template_label("Ad hoc Reviewing")
 
         if section_idx is None:
             logger.warning(
@@ -1205,7 +1205,7 @@ class ServiceSection:
 
             section_idx = None
             for search_text in search_texts:
-                section_idx = self._find_paragraph_with_text(search_text)
+                section_idx = self._find_template_label(search_text)
                 if section_idx is not None:
                     break
 
