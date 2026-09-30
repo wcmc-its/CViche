@@ -388,6 +388,10 @@ LINT_PREVALENCE = {
     "bucket_status": 0.014,
     "under_extraction": 0.014,
     "pipeline_errors_present": 0.001,
+    # #818: 6 of 183 stored stage-3b artifacts (farm25 + outputs99 + the
+    # 2026-09-11/-17 batches, measured 2026-09-29) carry a second-pass
+    # `error`; all 6 are older builds -- 0 of the 60 batch artifacts do.
+    "stage3b_second_pass_error": 0.033,
     # #810: zero of the 2026-09-11 batch's 40 uids tripped the gate -- every
     # ratio stayed under STAGE3B_FALLBACK_RATIO_THRESHOLD (max observed
     # 0.0004, three orders of magnitude under it). The only known real
