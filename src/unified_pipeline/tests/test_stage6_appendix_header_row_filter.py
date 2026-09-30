@@ -835,11 +835,14 @@ def test_each_outline_marker_form_is_stripped_before_the_word_cap(marker):
 
 
 _LONG_QUALIFIER = "(e.g., list each sample item or\tsample record in any sample form)"
+# Stage-4 entry text keeps the source's line breaks, so a qualifier can wrap.
+_WRAPPED_QUALIFIER = "(e.g., list each sample item or\nsample record in any sample form)"
 
 
 @pytest.mark.parametrize("text", [
     # The e.g. qualifier would be the eleventh-plus word; it is not counted.
     f"3. Sample Record of Sample Reach {_LONG_QUALIFIER}",
+    f"3. Sample Record of Sample Reach {_WRAPPED_QUALIFIER}",
     "3.  Sample Placement (sample, sample/sample role, etc.; sample sample, sample, if applicable)",
     f"b. {_TEN_WORDS} (sample sample sample)",
     f"b. {_TEN_WORDS} ()",
