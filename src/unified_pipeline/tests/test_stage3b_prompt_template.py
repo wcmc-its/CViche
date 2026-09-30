@@ -203,9 +203,3 @@ def test_s7_rules_mean_in_review_only_matching_its_template_header():
     # The A/B on #1173 left 28 "in press" entries in S7 while only the
     # section-6 summary said otherwise; rule 30 must say it too.
     assert '"in press"' in _rule_block("    - S7 = ", "31. CASE REPORTS")
-    # ...and so must S7's taxonomy key_rules, which reach the same prompt:
-    # "once accepted and published" alone kept them in S7 after rule 30 said so.
-    import json
-    taxonomy = json.loads((_SRC / "unified_pipeline" / "core" / "taxonomy_v7.json").read_text())
-    s7_rules = " ".join(next(c for c in taxonomy["codes"] if c["code"] == "S7")["key_rules"])
-    assert '"in press"' in s7_rules

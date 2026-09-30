@@ -1681,7 +1681,7 @@
       ],
       "key_rules": [
         "Not yet accepted → S7.",
-        "Move entries to S1–S6 once accepted: \"accepted\" and \"in press\" leave S7 even before print.",
+        "Move entries to S1–S6 once accepted and published.",
         "Use S7 for manuscripts; other types of in-progress outputs may belong elsewhere or not be listed."
       ]
     },
