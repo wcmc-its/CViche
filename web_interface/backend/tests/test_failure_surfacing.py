@@ -186,7 +186,7 @@ def _timeout_orchestrator(monkeypatch, tmp_path, stage_fn):
     monkeypatch.setattr(orch, "event_emitter", emitter)
     fake_db = MagicMock()
     fake_db.query.return_value.filter.return_value.first.return_value = MagicMock()
-    o = orch.PipelineOrchestrator("run-590-quill", tmp_path / "cv590.docx", fake_db)
+    o = orch.PipelineOrchestrator("run-590-quill", tmp_path / "run-590-quill.docx", fake_db)
     monkeypatch.setattr(o, "_record_stage_outcome", lambda *a: None)
 
     async def stage_logic(stage_id, cv_path):
