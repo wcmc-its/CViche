@@ -824,7 +824,7 @@ def test_outline_label_without_both_signals_survives(text, kind_sentence):
 _TEN_WORDS = " ".join(["Sample"] * 10)  # the label word cap: 10 fits, 11 does not
 
 
-@pytest.mark.parametrize("marker", ["1.", "1)", "1,", "b.", "iv.", "VIII)"])
+@pytest.mark.parametrize("marker", ["1.", "1)", "1,", "b.", "B.", "iv.", "VIII)"])
 def test_each_outline_marker_form_is_stripped_before_the_word_cap(marker):
     """Ten words behind the marker is a label; the marker itself must not
     count as the eleventh word, for every marker form."""
@@ -859,6 +859,8 @@ def test_confirmed_wrapped_instruction_tail_is_dropped(text, kind_sentence):
     ("sample) tail text follows", "Instruction text for CV formatting."),
     # Balanced parenthesis and no directive: an ordinary fragment.
     ("Sample Summit, Boston (annual)", "Instruction text for CV formatting."),
+    # More "(" than ")": the closing paren closes one it opened.
+    ("sample (note (a)", "Instruction text for CV formatting."),
     # Over the word cap: prose.
     (" ".join(["word"] * 30) + ")", "Instruction text for CV formatting."),
     # An author-addressed line the reasoning does not call an instruction.
@@ -918,6 +920,8 @@ def test_author_directive_needs_word_boundaries(text):
 @pytest.mark.parametrize("reasoning_sentence", [
     "Structural category label.",   # not "header/category label"
     "Structural marker.",           # not "subsection marker"
+    "Belongs to the subsection.",   # not "subsection marker"
+    "Structural header/category.",  # not "header/category label"
 ])
 def test_section_wordings_need_their_full_phrase(reasoning_sentence):
     assert _residual("3) Sample Department-wide", _confirmed(reasoning_sentence)) is None
@@ -926,6 +930,9 @@ def test_section_wordings_need_their_full_phrase(reasoning_sentence):
 @pytest.mark.parametrize("reasoning_sentence", [
     "Structural instruction.",      # not "instruction text/line"
     "Structural header.",           # not "broken header"
+    "Structural text fragment.",    # "text" without "instruction"
+    "Wrapped line.",                # "line" without "instruction"
+    "Broken fragment.",             # "broken" without "header"
 ])
 def test_instruction_wordings_need_their_full_phrase(reasoning_sentence):
     assert _residual("presenter, etc.)", _confirmed(reasoning_sentence)) is None
@@ -940,6 +947,12 @@ def test_blank_text_is_not_a_section_label(text):
 def test_category_label_etc_is_case_insensitive():
     assert _residual("1. Sample Roles, Etc.", _confirmed("Section header.")
                      ) == DROP_SECTION_HEADER
+
+
+def test_author_directive_window_allows_a_comma():
+    """Only ";" and "." end the clause; a comma inside it does not."""
+    assert _residual("use bold, for your name", _confirmed(_INSTRUCTION)
+                     ) == DROP_TEMPLATE_INSTRUCTION
 
 
 def test_author_directive_is_case_insensitive():
