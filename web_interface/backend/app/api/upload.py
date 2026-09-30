@@ -27,7 +27,7 @@ from app.database import get_db
 from app.models import Run, Step, User
 from app.schemas import UploadResponse
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.auth import get_current_user, visible_cost
+from app.auth import can_see_cost, get_current_user, visible_cost
 from app.rate_limiter import check_rate_limit
 from app.config_loader import get_config_value
 from app.services.config_service import (
@@ -801,6 +801,6 @@ async def estimate_processing(
         num_steps=num_stages,
         filename=file.filename,
         file_size_kb=round(file_size_kb, 1),
-        pricing_model=get_estimate_model_name() if current_user.role == "admin" else None,
+        pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
         text_characters_is_guess=extracted is None,
     )
