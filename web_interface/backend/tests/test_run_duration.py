@@ -142,6 +142,10 @@ def test_admin_stats_step_avg_seconds_completed_runs_only_in_pipeline_order(clie
              status="complete", duration_seconds=20),
         Step(run_id="STP002", step_number=2, stage_id="2", step_name="Entry Extraction",
              status="complete", duration_seconds=61),
+        # A stage id that sorts before "1a" as a string but runs last: the
+        # result must follow step_number, not stage_id.
+        Step(run_id="STP001", step_number=13, stage_id="10", step_name="Synthetic Late Stage",
+             status="complete", duration_seconds=7),
         # Null duration on a completed run: ignored.
         Step(run_id="STP002", step_number=3, stage_id="3b", step_name="Entry Classification",
              status="complete", duration_seconds=None),
@@ -163,6 +167,7 @@ def test_admin_stats_step_avg_seconds_completed_runs_only_in_pipeline_order(clie
     assert resp.json()["step_avg_seconds"] == [
         {"stage_id": "1a", "step_name": "Hierarchy Extraction", "avg_seconds": 15.0},
         {"stage_id": "2", "step_name": "Entry Extraction", "avg_seconds": 50.5},
+        {"stage_id": "10", "step_name": "Synthetic Late Stage", "avg_seconds": 7.0},
     ]
 
 

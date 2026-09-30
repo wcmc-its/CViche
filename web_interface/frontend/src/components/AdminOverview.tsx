@@ -5,6 +5,7 @@ import type { AdminRun, FeedbackData, Stats } from '../types'
 import { exportFeedbackCsv, getAdminRuns } from '../api/admin'
 import { formatCost, formatDate, formatDuration } from '../utils'
 import { parseFeedbackCsv } from './AdminFeedbackInsights'
+import { useCanSeeCost } from '../contexts/AuthContext'
 
 const CARD = 'bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)]'
 const MAX_ATTENTION_ROWS = 5
@@ -216,12 +217,15 @@ export default function AdminOverview({
   stats: Stats | null
   onOpenFeedback: () => void
 }) {
+  const showCost = useCanSeeCost()
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <StatTile label="Total runs" value={stats?.total_runs.toLocaleString() ?? '0'} sublabel="All time" />
         <StatTile label="Active users" value={stats?.active_users.toLocaleString() ?? '0'} sublabel="Last 30 days" />
-        <StatTile label="Total cost" value={stats ? formatCost(stats.total_cost) : '$0.00'} sublabel="All time" />
+        {showCost && (
+          <StatTile label="Total cost" value={stats ? formatCost(stats.total_cost) : '$0.00'} sublabel="All time" />
+        )}
         <StatTile
           label="Feedback rate"
           value={`${stats?.feedback_rate.toFixed(1) ?? '0.0'}%`}

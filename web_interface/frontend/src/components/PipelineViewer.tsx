@@ -9,12 +9,12 @@ import PipelineHeader from './PipelineHeader'
 import StepSidebar, { StepStatusIcon } from './StepSidebar'
 import LogViewer from './LogViewer'
 import PromptLogViewer from './PromptLogViewer'
-import OutputFiles, { DocxDownloadCard } from './OutputFiles'
+import OutputFiles, { DocxDownloadCard, visibleOutputFiles } from './OutputFiles'
 import JsonViewerModal from './JsonViewerModal'
 import CancelConfirmModal from './CancelConfirmModal'
 import ErrorBanner from './ErrorBanner'
 import FeedbackForm from './FeedbackForm'
-import { useCanSeeCost } from '../contexts/AuthContext'
+import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 
 interface PipelineViewerProps {
   runId: string
@@ -55,6 +55,7 @@ const TOTAL_WEIGHT = Object.values(STEP_WEIGHTS).reduce((sum, s) => sum + s.weig
 
 export default function PipelineViewer({ runId, onBack, onNavigateToRun }: PipelineViewerProps) {
   const showCost = useCanSeeCost()
+  const isAdmin = useAuth().user?.role === 'admin'
   // Extract clean state and background engine processing mechanisms out of the custom hook
   const {
     runStatus,
@@ -275,10 +276,13 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const isComplete = runStatus.status === 'complete'
   const showDetails = detailsOverride ?? !isComplete
 
-  let currentOutputCount = 0
-  try {
-    currentOutputCount = currentStepData?.output_files ? JSON.parse(currentStepData.output_files).length : 0
-  } catch { currentOutputCount = 0 }
+  // Count only what the Summary tab will list for this user: stage JSON is
+  // admin-only, and on a finished run the final .docx sits in the download card.
+  const currentOutputCount = currentStepData
+    ? visibleOutputFiles(currentStepData, isAdmin).filter(
+        f => !(isComplete && currentStepData.stage_id === '6' && f.endsWith('.docx')),
+      ).length
+    : 0
   const showInsights = !!(cvInsights && cvInsights.cv_owner_location?.inference_success)
   const hasSummary = currentStepData?.status === 'complete' && (currentOutputCount > 0 || showInsights)
   const activeTab: 'summary' | 'logs' | 'prompts' = showPromptLogs
@@ -406,6 +410,10 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           detailsOpen={isComplete ? showDetails : undefined}
           onToggleDetails={isComplete ? () => setDetailsOverride(!showDetails) : undefined}
         >
+          {/* Always mounted so screen readers announce the change when the run finishes. */}
+          <p role="status" aria-live="polite" className="sr-only">
+            {isComplete ? 'Your CV is ready to download.' : ''}
+          </p>
           {isComplete && finalDocxName && <DocxDownloadCard runId={runId} filename={finalDocxName} />}
         </PipelineHeader>
 

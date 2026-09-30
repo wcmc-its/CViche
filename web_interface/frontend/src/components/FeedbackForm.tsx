@@ -440,14 +440,10 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
 
   // ---- render: form ----
 
+  // A <section>, not a <form>: Enter in a text box must not submit a
+  // half-finished review.
   return (
-    <form
-      className={CARD}
-      onSubmit={(e) => {
-        e.preventDefault()
-        if (canSubmit && !submitting) handleSubmit()
-      }}
-    >
+    <section className={CARD} aria-label="Review this output">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h2 className="text-[17px] font-semibold text-gray-900">Review this output</h2>
         <span className="text-[13px] text-gray-500">
@@ -665,7 +661,8 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           {canSubmit ? '' : 'Answer the questions marked Required to submit.'}
         </span>
         <button
-          type="submit"
+          type="button"
+          onClick={handleSubmit}
           disabled={!canSubmit || submitting}
           className="px-5 py-2.5 rounded-lg bg-primary-600 text-white text-sm font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
         >
@@ -679,6 +676,6 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           )}
         </button>
       </div>
-    </form>
+    </section>
   )
 }

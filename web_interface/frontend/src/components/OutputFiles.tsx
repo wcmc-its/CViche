@@ -42,16 +42,27 @@ export function DocxDownloadCard({ runId, filename }: { runId: string; filename:
   )
 }
 
+// Stage JSON files are internal pipeline artifacts -- admin-only (the backend
+// enforces this too). Hide them entirely from non-admins; the final .docx and
+// other outputs stay visible to the run owner.
+const isJsonName = (f: string) => (f.split('/').pop() || f).endsWith('.json')
+
+/** The step's output files this user will actually see listed. */
+export function visibleOutputFiles(step: Pick<OutputFilesProps['step'], 'output_files'>, isAdmin: boolean): string[] {
+  let files: string[] = []
+  try {
+    files = step.output_files ? JSON.parse(step.output_files) : []
+  } catch {
+    files = []
+  }
+  return files.filter(f => isAdmin || !isJsonName(f))
+}
+
 export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput = true }: OutputFilesProps) {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
 
-  let outputFiles: string[] = []
-  try {
-    outputFiles = step.output_files ? JSON.parse(step.output_files) : []
-  } catch {
-    outputFiles = []
-  }
+  const outputFiles = visibleOutputFiles(step, isAdmin)
 
   if (step.status !== 'complete' || outputFiles.length === 0) {
     return null
@@ -60,17 +71,11 @@ export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput =
   const isFinalStep = step.stage_id === '6'
   const docxFile = outputFiles.find(f => f.endsWith('.docx'))
 
-  // Stage JSON files are internal pipeline artifacts -- admin-only (the backend
-  // enforces this too). Hide them entirely from non-admins; the final .docx and
-  // other outputs stay visible to the run owner.
-  const isJsonName = (f: string) => (f.split('/').pop() || f).endsWith('.json')
-
   // For the final step, exclude the docx from the additional files list
   // since it's already shown prominently in the Final Output section
-  const additionalFiles = (isFinalStep && docxFile
+  const additionalFiles = isFinalStep && docxFile
     ? outputFiles.filter(f => f !== docxFile)
     : outputFiles
-  ).filter(f => isAdmin || !isJsonName(f))
 
   return (
     <section aria-label="Output files">
