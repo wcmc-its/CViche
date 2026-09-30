@@ -1439,7 +1439,9 @@ def test_restore_sub_label_leaves_a_label_the_outline_repeats_more_than_the_docx
 
 
 @pytest.mark.parametrize("docx_label", ["International*", "International \u2020", "International\u00b9",
-                                        "International\u2074", "International2", "International12"])
+                                        "International\u2074", "International2", "International12",
+                                        "International\u2021", "International\u00a7", "International\u00b2",
+                                        "International\u00b3", "International\u2070", "International\u2079"])
 def test_restore_sub_label_matches_a_docx_line_with_a_footnote_marker(docx_label):
     hierarchy = [_h("Talks"), _h("Papers"), _h("International")]
     lines = ["Talks", docx_label, "Papers"]
@@ -1455,6 +1457,9 @@ def test_restore_sub_label_matches_a_docx_line_with_a_footnote_marker(docx_label
     ("Section 100", "section 100"),
     ("R01 Grants", "r01 grants"),        # only a trailing number is a footnote
     ("International :", "international"),
+    ("International100", "international100"),  # three attached digits are not a footnote
+    ("Sample_2", "sample_2"),            # an underscore is not a word letter
+    ("Stra\u00dfe", "strasse"),          # casefold, not lower
 ])
 def test_document_line_key_strips_only_a_trailing_footnote_marker(text, key):
     assert sbs._document_line_key(text) == key
