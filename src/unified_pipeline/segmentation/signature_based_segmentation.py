@@ -1405,9 +1405,21 @@ class _PlacedHeader:
     line: int | None
 
 
+# A footnote marker a docx puts after a header ("Regional*", "National†",
+# "International¹") and the LLM drops from the outline (#429).
+_TRAILING_FOOTNOTE_MARKERS = re.compile(r'[\s*†‡§¹²³⁰⁴-⁹]+$')
+# A plain footnote number run straight onto a word ("Regional1"); "Section 2" keeps its number.
+_ATTACHED_FOOTNOTE_NUMBER = re.compile(r'(?<=[^\W\d_])\d{1,2}$')
+
+
 def _document_line_key(text: str) -> str:
-    """Compare key for a header vs a docx line: whitespace-collapsed, no trailing colon, casefolded."""
-    return ' '.join(text.split()).rstrip(':').strip().casefold()
+    """Compare key for a header vs a docx line.
+
+    Whitespace-collapsed, no trailing colon, no trailing footnote marker, casefolded.
+    """
+    key = ' '.join(text.split()).rstrip(':').strip()
+    key = _ATTACHED_FOOTNOTE_NUMBER.sub('', _TRAILING_FOOTNOTE_MARKERS.sub('', key))
+    return key.casefold()
 
 
 _GEOGRAPHIC_SUB_LABEL_KEYS = frozenset(_document_line_key(label) for label in GEOGRAPHIC_SUB_LABELS)
@@ -1434,21 +1446,30 @@ def _place_headers(hierarchy: list[dict], keys: list[str]) -> list[_PlacedHeader
     return placed
 
 
-def _misplaced_sub_label(placed: list[_PlacedHeader], keys: list[str]) -> tuple[_PlacedHeader, int] | None:
+def _misplaced_sub_label(
+    placed: list[_PlacedHeader], keys: list[str],
+) -> tuple[_PlacedHeader, int, _PlacedHeader] | None:
     """The first geographic sub-label listed after a header that follows it in the document.
 
-    Returns the header and its docx line. Only acts when the label's text sits on
-    exactly one docx line and the header listed just before it was found at a
-    later line: a label that is merely unfound is left alone. (A label found by
-    the forward walk is past its predecessor's line, so it never qualifies.)
+    Returns the label, its docx line, and the anchor: the header found nearest
+    before that line. Only acts when the label's text is once in the outline and
+    on exactly one docx line, the header listed just before it was found at a
+    later line, and an anchor exists. A label that is merely unfound, or whose
+    text the outline repeats (a second group the docx spells differently), is
+    left alone. (A label found by the forward walk is past its predecessor's
+    line, so it never qualifies.)
     """
-    for prev, cur in zip(placed, placed[1:]):
-        key = _document_line_key(cur.node['text'])
-        if key not in _GEOGRAPHIC_SUB_LABEL_KEYS or prev.line is None:
+    outline_keys = [_document_line_key(p.node['text']) for p in placed]
+    for prev, cur, key in zip(placed, placed[1:], outline_keys[1:]):
+        if key not in _GEOGRAPHIC_SUB_LABEL_KEYS or prev.line is None or outline_keys.count(key) != 1:
             continue
         hits = [i for i, k in enumerate(keys) if k == key]
-        if len(hits) == 1 and hits[0] < prev.line:
-            return cur, hits[0]
+        if len(hits) != 1 or hits[0] >= prev.line:
+            continue
+        anchor = max((p for p in placed if p.line is not None and p.line < hits[0]),
+                     key=lambda p: p.line, default=None)
+        if anchor is not None:
+            return cur, hits[0], anchor
     return None
 
 
@@ -1482,13 +1503,10 @@ def restore_sub_label_document_order(hierarchy: list[dict], lines: list[str]) ->
         found = _misplaced_sub_label(placed, keys)
         if found is None:
             break
-        label, line = found
-        anchor = max((p for p in placed if p.line is not None and p.line < line),
-                     key=lambda p: p.line, default=None)
-        if anchor is None:
-            break
-        # By identity: two header dicts can compare equal.
-        del label.siblings[_index_of(label.siblings, label.node)]
+        label, line, anchor = found
+        # By equality is safe here: an equal dict has the same text, and a label
+        # whose text the outline repeats is never moved.
+        label.siblings.remove(label.node)
         if anchor.node.get('children'):
             anchor.node['children'].insert(0, label.node)
             _set_levels(label.node, anchor.depth + 1)

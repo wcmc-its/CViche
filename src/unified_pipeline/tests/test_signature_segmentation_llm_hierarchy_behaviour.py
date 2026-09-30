@@ -1414,15 +1414,70 @@ def test_restore_sub_label_does_not_move_a_label_repeated_right_after_itself():
     assert [n.get("tag") for n in result] == [None, "first", "second"]
 
 
-def test_restore_sub_label_removes_the_moved_node_by_identity():
-    # An equal dict earlier in the label's own list must not be the one removed.
-    twin, label = _h("International"), _h("International")
-    hierarchy = [_h("Talks"), twin, _h("Papers"), label]
+def test_restore_sub_label_leaves_a_second_group_the_docx_marks_with_a_footnote():
+    # Two same-text label groups; the docx marks the second group "Regional*" and
+    # the outline drops the "*". Both groups are already in document order.
+    hierarchy = [_h("Service", "H1", _h("Regional", "H2"), _h("National", "H2"), _h("International", "H2")),
+                 _h("Talks", "H1", _h("Regional", "H2"), _h("National", "H2"), _h("International", "H2")),
+                 _h("Papers")]
+    lines = ["Service", "Regional", "a", "National", "b", "International", "c",
+             "Talks", "Regional*", "d", "National*", "e", "International*", "f", "Papers", "g"]
+    before = _shape(hierarchy)
 
-    result = sbs.restore_sub_label_document_order(hierarchy, ["Talks", "International", "Papers"])
+    assert _shape(sbs.restore_sub_label_document_order(hierarchy, lines)) == before
 
-    assert [n["text"] for n in result] == ["Talks", "International", "International", "Papers"]
-    assert result[1] is label and result[2] is twin
+
+def test_restore_sub_label_leaves_a_label_the_outline_repeats_more_than_the_docx():
+    # The docx spells the second group differently from the outline, so each
+    # "Regional" has one docx line for two outline headers: ambiguous, left alone.
+    hierarchy = [_h("Service", "H1", _h("Regional", "H2")), _h("Talks", "H1", _h("Regional", "H2")),
+                 _h("Papers")]
+    lines = ["Service", "Regional", "a", "Talks", "Regional (continued)", "b", "Papers"]
+    before = _shape(hierarchy)
+
+    assert _shape(sbs.restore_sub_label_document_order(hierarchy, lines)) == before
+
+
+@pytest.mark.parametrize("docx_label", ["International*", "International \u2020", "International\u00b9",
+                                        "International\u2074", "International2", "International12"])
+def test_restore_sub_label_matches_a_docx_line_with_a_footnote_marker(docx_label):
+    hierarchy = [_h("Talks"), _h("Papers"), _h("International")]
+    lines = ["Talks", docx_label, "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert [t for _, _, t in _shape(result)] == ["Talks", "International", "Papers"]
+
+
+def test_restore_sub_label_keeps_a_number_after_a_space_in_the_key():
+    # "Part 3" is not the docx's "Part 1": nothing is found before the label, so
+    # there is no anchor and nothing moves.
+    hierarchy = [_h("Part 3"), _h("Papers"), _h("International")]
+    lines = ["Part 1", "International", "Papers"]
+    before = _shape(hierarchy)
+
+    assert _shape(sbs.restore_sub_label_document_order(hierarchy, lines)) == before
+
+
+def test_restore_sub_label_an_unanchored_label_does_not_stop_later_moves():
+    # "National" precedes every found header (no anchor) and stays; the later
+    # misplaced "International" still moves.
+    hierarchy = [_h("Talks"), _h("National"), _h("Awards"), _h("Papers"), _h("International")]
+    lines = ["National", "x", "Talks", "Awards", "International", "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert [t for _, _, t in _shape(result)] == ["Talks", "National", "Awards", "International", "Papers"]
+
+
+def test_restore_sub_label_leaves_a_label_found_on_the_last_docx_line():
+    # The label's text is also on an earlier line, but the forward walk finds it
+    # on the last line, in order: two docx lines, so it is not moved.
+    hierarchy = [_h("Service"), _h("National"), _h("Teaching"), _h("International")]
+    lines = ["Service", "International", "National", "Teaching", "International"]
+    before = _shape(hierarchy)
+
+    assert _shape(sbs.restore_sub_label_document_order(hierarchy, lines)) == before
 
 
 def test_restore_sub_label_inserts_after_the_anchor_by_identity():
