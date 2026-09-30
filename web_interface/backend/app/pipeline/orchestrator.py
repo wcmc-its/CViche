@@ -86,6 +86,16 @@ def _record_total_duration(run: Run, elapsed: int, resumed: bool) -> None:
         run.total_duration_seconds = elapsed
 
 
+# run_id and document_uid become path components (output dir, input copy).
+UID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def _require_safe_uid(name: str, value: str) -> str:
+    if not UID_PATTERN.fullmatch(value):
+        raise ValueError(f"Invalid {name} {value!r}: must match {UID_PATTERN.pattern}")
+    return value
+
+
 # run.error_message is shown verbatim to the (non-technical) user, so it
 # never carries str(exc): exception text can hold filesystem paths, provider
 # request ids and API detail (#592). The raw text stays in the ERROR log line
@@ -444,8 +454,12 @@ class PipelineOrchestrator:
     """Orchestrates the execution of all 12 pipeline stages."""
 
     def __init__(self, run_id: str, file_path: Path, db: Session):
-        self.run_id = run_id
+        self.run_id = _require_safe_uid("run_id", run_id)
         self.file_path = file_path
+        # Document UID extracted from filename. == run_id at every current
+        # call site (upload.py and restart_run() name the stored file
+        # f"{run_id}.{ext}"). It keys output paths, so it must be path-safe.
+        self.document_uid = _require_safe_uid("document_uid", Path(file_path).stem)
         self.db = db
 
         # Output directory for this run (in the unified_pipeline outputs)
@@ -454,17 +468,6 @@ class PipelineOrchestrator:
         # Web interface output directory (for tracking)
         self.web_output_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
         self.web_output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Document UID extracted from filename. == run_id at every current
-        # call site: upload.py names the stored file f"{run_id}.{ext}", and
-        # restart_run() does the same with the *new* run's id (never the
-        # original's) -- see _copy_to_pipeline_input and _get_output_paths
-        # below, which key input/artifact paths off this. Review on #586
-        # raised input/artifact collision across concurrent runs sharing a
-        # document_uid; verified against every PipelineOrchestrator(...)
-        # call site that this can't currently happen. A future caller that
-        # reuses one file_path across multiple runs would reopen it.
-        self.document_uid = Path(file_path).stem
 
         # Track outputs between stages
         self.stage_outputs: dict[str, str] = {}
@@ -535,16 +538,16 @@ class PipelineOrchestrator:
         if is_cancelled(self.run_id):
             raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
+    def _pipeline_input_path(self) -> Path:
+        """This run's private copy of the upload: word/<run_id>/<uid>.docx."""
+        return (PARENT_DIR / 'data' / 'sample_cvs' / 'word'
+                / self.run_id / f"{self.document_uid}.docx")
+
     def _copy_to_pipeline_input(self) -> str:
-        """Copy uploaded file to pipeline input directory and return the path."""
-        # Copy to data/sample_cvs/word/ for the pipeline to find
-        input_dir = PARENT_DIR / 'data' / 'sample_cvs' / 'word'
-        input_dir.mkdir(parents=True, exist_ok=True)
-
-        dest_path = input_dir / f"{self.document_uid}.docx"
-        if not dest_path.exists():
-            shutil.copy2(self.file_path, dest_path)
-
+        """Copy the uploaded file into this run's input directory; return its path."""
+        dest_path = self._pipeline_input_path()
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(self.file_path, dest_path)
         return str(dest_path)
 
     def _get_output_paths(self) -> dict[str, Path]:
@@ -1003,7 +1006,7 @@ class PipelineOrchestrator:
         """Run the doctor lints and write the JSON report; returns (payload, path)."""
         from unified_pipeline.run_doctor import run_doctor
 
-        source = PARENT_DIR / 'data' / 'sample_cvs' / 'word' / f'{self.document_uid}.docx'
+        source = self._pipeline_input_path()
         payload = run_doctor(
             self.pipeline_output_dir,
             self.document_uid,

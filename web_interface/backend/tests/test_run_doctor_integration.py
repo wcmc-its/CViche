@@ -180,3 +180,23 @@ def test_doctor_crash_never_fails_run(monkeypatch, tmp_path, db, caplog):
     notifications.flush()
     assert len(posts) == 2
     assert "Doctor" not in _facts(posts[-1])
+
+
+def test_doctor_source_is_the_runs_private_input_copy(monkeypatch, tmp_path, db):
+    """#299: the doctor reads the same per-run copy _copy_to_pipeline_input wrote."""
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_SRC")
+    copied = o._pipeline_input_path()
+    copied.parent.mkdir(parents=True)
+    copied.write_bytes(b"x")
+
+    seen = {}
+    monkeypatch.setattr(
+        run_doctor_mod, "run_doctor",
+        lambda out_dir, uid, source=None: seen.update(source=source) or _doctor_payload(),
+    )
+    o._doctor_report()
+
+    assert seen["source"] == copied
