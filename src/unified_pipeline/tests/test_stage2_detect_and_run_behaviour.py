@@ -282,6 +282,46 @@ def test_normal_table_row_claimed_and_unclaimed_sibling_row_recovered(monkeypatc
     assert by_idx["9.0"]["recovered_row"] is True
 
 
+def _texts(entries):
+    return "\n".join(e["text"] for e in entries)
+
+
+def test_multi_row_entry_keeps_every_row_of_its_span(monkeypatch):
+    """#1126 (AV00TQ): the model grouped a table's rows into one entry,
+    80.0-80.2. The entry held row 0's text only, and remove_subset_delimiters
+    then dropped the #420-recovered rows as inside its span -- the 24 courses
+    in row 80.2 vanished."""
+    rows = [[{"text": "Teaching (list courses and your role)"}, {"text": "Dates"}],
+            [{"text": ""}, {"text": ""}],
+            [{"text": "Human Structure and Function Course PBL Tutor\nGenetics Course PBL Tutor"},
+             {"text": "2000-2006"}]]
+    elements = [{"unified_idx": 80, "type": "table_content", "table_index": 14, "data": rows, "rows": 3, "cols": 2}]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result(
+        [{"element_idx_start": 80.0, "element_idx_end": 80.2, "element_type": "table", "confidence": 0.85}]
+    ))
+    entries, _ = stage2.detect_entries_for_section(["Teaching"], elements, 80, 80, element_index_map=_idx_map(elements))
+    assert [(e["element_idx_start"], e["element_idx_end"]) for e in entries] == [("80.0", "80.2")]
+    assert "Genetics Course PBL Tutor" in entries[0]["text"]
+    assert "recovered_row" not in entries[0]
+
+
+@pytest.mark.parametrize("end", [9.1, 12, 10.3, 9.5])
+def test_unresolvable_row_span_shrinks_to_its_start_and_recovers_the_rest(monkeypatch, end):
+    """An end before the start ("9.10" arrives as the float 9.1), a bare
+    element, another table's row, or a row the batch doesn't hold: the span
+    can't be read row by row, so the entry keeps only its start row and #420
+    recovers the rest."""
+    rows = [[{"text": f"record number {i} for the award table"}] for i in range(4)]
+    elements = [{"unified_idx": 9, "type": "table_content", "table_index": 2, "data": rows, "rows": 4, "cols": 1}]
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result(
+        [{"element_idx_start": 9.2, "element_idx_end": end, "element_type": "table_row"}]
+    ))
+    entries, _ = stage2.detect_entries_for_section(["Awards"], elements, 9, 9, element_index_map=_idx_map(elements))
+    by_idx = {e["element_idx_start"]: e for e in entries}
+    assert by_idx["9.2"]["element_idx_end"] == "9.2"
+    assert all(f"record number {i} " in _texts(entries) for i in range(4))
+
+
 @pytest.mark.parametrize("elem_type", ["table_content", "table"])
 def test_multi_paragraph_cell_zero_takes_trailing_columns_on_its_entry_line(monkeypatch, elem_type):
     # #488: the row's date/institution columns attach to cell 0's FIRST
