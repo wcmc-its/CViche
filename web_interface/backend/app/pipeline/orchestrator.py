@@ -440,8 +440,29 @@ class StreamingStdoutCapture:
             # Progress is best-effort, but a programming error must be visible.
             logger.debug("Progress emit skipped for step %d: %s", self.step_number, exc)
 
+    def _writer_is_the_run_loop(self) -> bool:
+        """True when this write comes from the run's own event loop thread.
+
+        A capture's lines come from the stage thread (and pools it spawns).
+        A write on the run loop's thread is a side effect of streaming -- a
+        log call inside log(), the emitter or the broker, or asyncio's own
+        error reporting -- made while this capture is still the context's
+        stdout. Streaming it would block that loop in _emit_log_sync waiting
+        on itself, and its own emit could write again (#116).
+        """
+        try:
+            return asyncio.get_running_loop() is self.event_loop
+        except RuntimeError:
+            return False
+
     def write(self, text: str):
         """Capture stdout writes and stream them to the database."""
+        if text and self._writer_is_the_run_loop():
+            # Checked before the stop point: a run-loop write is a logging
+            # side effect, not the stage, so it must not raise StageAbandoned.
+            if self._original_stdout:
+                self._original_stdout.write(text)
+            return len(text)
         if self.guard is not None:
             self.guard.raise_if_stopped()  # cooperative stop point (#590)
         if text:
@@ -468,6 +489,12 @@ class StreamingStdoutCapture:
 
     def flush(self):
         """Flush any remaining buffer content."""
+        if self._writer_is_the_run_loop():
+            # A logging handler's flush after a run-loop write lands here too;
+            # streaming the buffer from this thread would block like write().
+            if self._original_stdout:
+                self._original_stdout.flush()
+            return
         if self.buffer.strip():
             line = self.buffer.strip()
             self.captured_lines.append(line)
@@ -909,9 +936,15 @@ class PipelineOrchestrator:
             await self._notify_terminal(run, score, doctor)
 
         except CancelledException:
-            self._persist_cancelled()
-            await self.log(0, "Pipeline cancelled by user", "WARNING")
-            await event_emitter.emit(self.run_id, {"event": "RUN_CANCELLED"})
+            if self._stopped_by_shutdown():
+                # The drain fails this run and writes its log row and failure
+                # card itself (#116). Nothing to emit: uvicorn has already
+                # closed every socket before the drain runs.
+                logger.info("Run %s stopped by shutdown; the drain records its failure", self.run_id)
+            else:
+                self._persist_cancelled()
+                await self.log(0, "Pipeline cancelled by user", "WARNING")
+                await event_emitter.emit(self.run_id, {"event": "RUN_CANCELLED"})
 
         except Exception as e:
             run.status = "failed"
@@ -951,18 +984,20 @@ class PipelineOrchestrator:
             # Clean up cancellation flag
             clear_cancelled(self.run_id)
 
+    def _stopped_by_shutdown(self) -> bool:
+        """True when this run was stopped by the shutdown drain (stop_run_locally),
+        not cancelled by a user."""
+        with _cancelled_lock:
+            return self.run_id in _stopped_locally
+
     def _persist_cancelled(self) -> None:
-        """Record the cancel on the run row unless it is already terminal.
+        """Record a user cancel on the run row unless it is already terminal.
 
         The API endpoint normally wrote "cancelled" first, but this does not
-        assume it did, and a shutdown stop leaves the row for the drain to
-        fail. A conditional UPDATE keeps this idempotent and never overwrites
-        another terminal status (#591).
+        assume it did. A conditional UPDATE keeps this idempotent and never
+        overwrites another terminal status (#591). A shutdown stop never gets
+        here: the drain fails that row instead.
         """
-        with _cancelled_lock:
-            stopped_by_shutdown = self.run_id in _stopped_locally
-        if stopped_by_shutdown:
-            return
         updated = self.db.query(Run).filter(
             Run.id == self.run_id, Run.status == "running"
         ).update(
