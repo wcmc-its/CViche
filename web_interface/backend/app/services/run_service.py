@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics
@@ -16,7 +17,7 @@ from app.config_loader import get_config
 from app.pipeline import concurrency, run_queue
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.services import auto_retry
+from app.services import auto_retry, notifications
 
 logger = logging.getLogger(__name__)
 
@@ -699,17 +700,35 @@ def fail_runs_interrupted_by_shutdown(db: Session, run_ids: list[str]) -> int:
     Called once at shutdown, after the drain budget ran out, with the runs that
     still hold a slot on this pod. Each is claimed with the same conditional
     UPDATE the reaper uses, so a run that finished (or was cancelled) since the
-    drain last looked is left alone. Returns the count marked failed.
+    drain last looked is left alone. Each run marked failed also gets a Log
+    row and a Teams failure card. Returns the count marked failed.
     """
     now = datetime.now()
-    failed_count = 0
+    failed = []
     for run in db.query(Run).filter(Run.id.in_(run_ids)).all():
         if not _claim_stale_run(db, run, run.started_at, status="failed"):
             continue
         _mark_run_failed(run, db, now, message=DEPLOY_INTERRUPT_MESSAGE)
-        failed_count += 1
+        db.add(Log(run_id=run.id, step_number=0, level="ERROR", message=DEPLOY_INTERRUPT_MESSAGE))
+        failed.append(run)
     db.commit()
-    return failed_count
+    # The failure card is sent from here, not by the run: the process exits
+    # right after the drain, before the run's thread reaches a handler that
+    # could send it. The run cannot send a second one -- stop_run_locally makes
+    # its next check raise CancelledException, whose handler sends nothing.
+    # Queued only; the lifespan's notifications flush() posts it before exit.
+    # Per run and best-effort: the rows are already committed, so a failed
+    # submitter lookup must neither skip the other runs' cards nor reach the
+    # caller, which would report these runs as not marked failed.
+    for run in failed:
+        try:
+            submitter = _submitter_email(db, run)
+        except SQLAlchemyError:
+            logger.warning("Submitter lookup failed for run %s; sending its card without one",
+                           run.id, exc_info=True)
+            submitter = None
+        notifications.notify_run_terminal(run, submitter=submitter)
+    return len(failed)
 
 
 def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set) -> bool:

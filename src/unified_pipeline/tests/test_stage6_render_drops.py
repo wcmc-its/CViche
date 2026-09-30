@@ -252,3 +252,63 @@ if __name__ == "__main__":
             fn()
             print(f"ok  {name}")
     print("all checks passed")
+
+
+# --- #666: a record fused into a kept entry's text reaches the page -------------
+# Invented values. A kept M2A row fused two sub-grants and its fields name only
+# the umbrella; the sub-grant stage 2 also extracted on its own is kept by dedup
+# and rendered by the grant section itself, once.
+
+_UMBRELLA_TEXT = ("Program Lead, Harbor Widget Initiative\t"
+                  "Widget Outreach  PI: Dr Quill (1 of 4 Sites)  $111,111\t"
+                  "Gizmo Clinic  PI: Dr Quill (1 of 2 Sites)  $222,222")
+
+
+def _fused_grant_entries() -> list[dict]:
+    umbrella = {"taxonomy_code": "M2A", "element_idx_start": 10, "text": _UMBRELLA_TEXT,
+                "extracted_fields": {"title": "Harbor Widget Initiative",
+                                     "pi_role": "Program Lead", "total_funding": "$333,333"}}
+    sub = {"taxonomy_code": "M2A", "element_idx_start": 11,
+           "text": "Gizmo Clinic  PI: Dr Quill (1 of 2 Sites)  $222,222",
+           "extracted_fields": {"title": "Gizmo Clinic", "pi_name": "Dr Quill",
+                                "total_funding": "$222,222"}}
+    return [umbrella, sub]
+
+
+def _m2a_titles(entries: list[dict]) -> list[str]:
+    grouped, _, _ = WCMTemplateGenerator(verbose=False)._dedup_grouped_entries(
+        WCMTemplateGenerator(verbose=False)._group_entries_by_code(entries))
+    return [e["extracted_fields"]["title"] for e in grouped["M2A"]]
+
+
+def test_dedup_keeps_a_record_only_the_kept_entry_text_carries() -> None:
+    assert _m2a_titles(_fused_grant_entries()) == ["Harbor Widget Initiative", "Gizmo Clinic"]
+
+
+def test_dedup_drops_that_record_when_an_entry_of_another_code_names_it() -> None:
+    other = {"taxonomy_code": "T", "element_idx_start": 30,
+             "text": "Program funding also lists Gizmo Clinic, 2021", "extracted_fields": {}}
+    assert _m2a_titles(_fused_grant_entries() + [other]) == ["Harbor Widget Initiative"]
+
+
+def test_the_kept_record_renders_once_in_the_grant_table(tmp_path) -> None:
+    from docx import Document
+    from docx.oxml.ns import qn
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None  # no LLM, deterministic
+    source = tmp_path / "in.json"
+    source.write_text(json.dumps({"document_uid": "TESTAA", "entries": [
+        {"taxonomy_code": "A", "element_idx_start": 0, "text": "Name: Pat Example, MD",
+         "extracted_fields": {}}] + _fused_grant_entries()}))
+    out = tmp_path / "out.docx"
+    gen.generate(str(source), str(out), research_summary_path=None)
+    body = Document(str(out)).element.body
+    in_table = [p for p in body.iter(qn("w:p")) if p.xpath("ancestor::w:tc")]
+    outside = [p for p in body.iter(qn("w:p")) if not p.xpath("ancestor::w:tc")]
+
+    def text(p) -> str:
+        return "".join(t.text or "" for t in p.iter(qn("w:t")))
+
+    assert sum("Gizmo Clinic" in text(p) for p in in_table) == 1, "missing or rendered twice"
+    assert not any("Gizmo Clinic" in text(p) for p in outside), "restored as a stray paragraph"

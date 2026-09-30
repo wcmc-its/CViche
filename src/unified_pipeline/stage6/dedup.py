@@ -9,11 +9,14 @@ and are the spec.
 
 Depends one level down on `render_check` (`_record_lines` and its
 fused-multi-record threshold) because "is this a fused blob" is the same
-question both answer. Nothing here may import `stage_6_word_template`.
+question both answer, and on `fan_out` for the fields each section renderer
+writes (`_RENDERED_FIELDS`, `_FORMATTED_KEYS`), because "would this record
+reach the page" is the question #983's fan-out answers too. Nothing here may
+import `stage_6_word_template`.
 """
 import re
 
-from .fan_out import FANNED_OUT_FROM
+from .fan_out import _FORMATTED_KEYS, _RENDERED_FIELDS, FANNED_OUT_FROM
 from .normalization import _squash
 from .parsing import _dates_overlap_or_match
 from .render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines
@@ -157,7 +160,121 @@ def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
     return True
 
 
-def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
+# #666: the verbatim branch below proves the dropped TEXT sits inside the kept
+# entry's text, but most sections render the kept entry from its extracted
+# FIELDS (`_RENDERED_FIELDS`, read off each renderer), and those describe one
+# record. When the kept text fused several records (a row of grants, board
+# memberships or citations captured as one entry), the others never reached
+# the page: web26 lost two M2A sub-grants and an S1 citation that way. So a
+# verbatim drop also needs the kept entry's rendered fields to carry the
+# dropped record's name: the one of these fields the code's section writes
+# (its title-like FIELD_SCHEMAS key; no field-rendered code writes two). A code
+# whose section renders the entry's text is not in `_RENDERED_FIELDS`, and its
+# verbatim drops stand; F1, I and Q1 write no name field, and theirs stand too.
+_RECORD_NAME_FIELDS = (
+    'title', 'chapter_title', 'grant_title', 'course_title', 'award_name',
+    'leadership_role', 'committee_name', 'panel_name', 'program_name',
+    'mentee_name', 'journal_name', 'degree', 'specialty')
+# A grant whose amount or number the kept entry also carries is the same grant,
+# whatever its title field holds (a description can land in `title`).
+_RECORD_ID_FIELDS = (
+    'grant_number', 'total_funding', 'annual_funding', 'doi', 'pmid', 'pmcid',
+    'isbn', 'patent_number', 'license_number', 'abstract_number')
+# Fewer digits than this is a year or a volume, not an identifier.
+_RECORD_ID_MIN_DIGITS = 4
+
+
+def _record_name(fields: dict, rendered: frozenset[str]) -> str | None:
+    """The record's name: its first filled `_RECORD_NAME_FIELDS` value the
+    section renders, or None when it fills none."""
+    for key in _RECORD_NAME_FIELDS:
+        value = fields.get(key)
+        if key in rendered and isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _shares_record_id(dropped_fields: dict, kept_fields: dict) -> bool:
+    """True when both entries carry the same amount, grant number, DOI or other id."""
+    for key in _RECORD_ID_FIELDS:
+        dropped_id = re.sub(r'\D', '', str(dropped_fields.get(key) or ''))
+        if (len(dropped_id) >= _RECORD_ID_MIN_DIGITS
+                and dropped_id == re.sub(r'\D', '', str(kept_fields.get(key) or ''))):
+            return True
+    return False
+
+
+def _rendered_words(fields: dict, rendered: frozenset[str]) -> set[str]:
+    """Every significant word the section writes for an entry with `fields`.
+
+    All rendered fields together, not one: "X Committee, Y Society" is the
+    kept record when its fields split it into committee "X Committee" and
+    organization "Y Society", and keeping the dropped copy would print that
+    row twice. A stage-5 rendering of the whole entry (`_FORMATTED_KEYS`)
+    counts as written too. A rendered key holding a list or number vouches
+    with the words of its printed form: over-vouching only lets a drop stand,
+    as it did before #666, where under-vouching could print a record twice.
+    """
+    return set().union(*(_significant_words(str(value))
+                         for key, value in fields.items()
+                         if (key in rendered or key in _FORMATTED_KEYS) and value))
+
+
+def _fused_record_would_be_lost(dropped_entry: dict, kept_entry: dict,
+                                code: str | None,
+                                document: list[dict] | None) -> bool:
+    """True when dropping a verbatim-contained entry would lose its record.
+
+    It would when the dropped entry names a record (`_record_name`) whose
+    words the kept entry's rendered fields do not all carry, no shared id ties
+    the two together, and the name appears in no other entry of `document`.
+    That last clause keeps the check from creating a duplicate: a record the
+    CV also lists somewhere else is already rendered, or rides on that entry,
+    and keeping this copy could print it twice. Doubt drops, as it did before.
+    """
+    rendered = _RENDERED_FIELDS.get(code or '', frozenset())
+    dropped_fields = dropped_entry.get('extracted_fields') or {}
+    kept_fields = kept_entry.get('extracted_fields') or {}
+    name = _record_name(dropped_fields, rendered)
+    if (not name or not kept_fields
+            or _shares_record_id(dropped_fields, kept_fields)
+            or _significant_words(name) <= _rendered_words(kept_fields, rendered)):
+        return False
+    return not any(_names_record(entry.get('text') or '', name)
+                   for entry in document or ()
+                   if entry is not dropped_entry and entry is not kept_entry)
+
+
+# `_names_record`: a long name counts as named by a text that holds this share
+# of its significant words. A CV that lists one abstract twice rewords its
+# title the second time (a qualifier added, an acronym spelled out): web228
+# had two such pairs, and keeping the dropped copy printed each twice.
+_NAMED_ELSEWHERE_WORD_SHARE = 0.8
+
+
+def _names_record(text: str, name: str) -> bool:
+    """True when `text` mentions the record called `name`.
+
+    A name of `DEDUP_FULL_CONTAINMENT_MIN_TOKENS` or more significant words is
+    mentioned when the text holds `_NAMED_ELSEWHERE_WORD_SHARE` of them; a
+    shorter one only as a run of the same letters and digits, since two
+    common words ("Widget Services") are in many unrelated entries.
+    """
+    name_words = _significant_words(name)
+    if len(name_words) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS:
+        shared = len(name_words & _significant_words(text))
+        return shared >= _NAMED_ELSEWHERE_WORD_SHARE * len(name_words)
+    return _alnum(name) in _alnum(text)
+
+
+def _alnum(text: str) -> str:
+    """Lowercased letters and digits only: punctuation and spacing ignored."""
+    return re.sub(r'[^a-z0-9]', '', text.lower())
+
+
+def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
+                  code: str | None = None,
+                  document: list[dict] | None = None) -> bool:
     """#227 guard: only drop an entry when the loss is provably recoverable.
 
     Safe when the dropped text is verbatim-contained in the kept entry, or
@@ -175,11 +292,16 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     #666: the two non-verbatim branches also require `_dates_compatible` --
     a dropped entry that states a date range the kept entry does not carry is a
     different record (a second committee term, a second grant), and no text
-    similarity signal can see that. Still open, and NOT a date defect: the
-    verbatim branch, and both others when the dropped entry is undated, approve
-    dropping a record that sits inside a longer kept entry which fused it with
-    a sibling (two mentees in one un-split entry), and `_record_lines()` finds
-    no line in prose for the #221/#225 recovery pass to re-verify."""
+    similarity signal can see that. For a `code` whose section renders
+    fields, the verbatim branch also requires that the kept entry's rendered
+    fields carry the dropped record's name, unless another entry of
+    `document` (every pre-dedup entry of the run) names it
+    (`_fused_record_would_be_lost`). Still open: the token-containment branch
+    against a kept entry that fused the dropped record with a sibling (gating
+    it the same way duplicated reworded rows on the corpus), and a short name
+    inside a longer kept name ("Widgets" in "Widgets Quarterly") on either branch;
+    `_record_lines()` finds no line in prose for the #221/#225 recovery pass
+    to re-verify."""
     dropped_squashed = _squash(dropped_entry.get('text', ''))
     verbatim = bool(dropped_squashed
                     and dropped_squashed in _squash(kept_entry.get('text', '')))
@@ -198,7 +320,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
         return verbatim and (dropped_entry.get('extracted_fields')
                              == kept_entry.get('extracted_fields'))
     if verbatim:
-        return True
+        return not _fused_record_would_be_lost(dropped_entry, kept_entry,
+                                               code, document)
     if not _dates_compatible(dropped_entry.get('text') or '',
                              kept_entry.get('text') or ''):
         return False  # #666: a different date is a different record
@@ -215,7 +338,9 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
 
 def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         require_date_overlap: bool = False,
-                        decisions: list[dict] | None = None) -> list[dict]:
+                        decisions: list[dict] | None = None,
+                        code: str | None = None,
+                        document: list[dict] | None = None) -> list[dict]:
     """Remove near-duplicate entries within a code group.
 
     Uses two metrics to catch duplicates:
@@ -234,6 +359,12 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
     values plus dropped/kept text) so the caller can persist the decision
     trail for the run doctor (#227: at these thresholds a drop is not always
     a true duplicate).
+
+    `code` is the group's taxonomy code and `document` every entry of the
+    run, all codes, before dedup: the #666 fused-record check in
+    `_drop_is_safe` reads the code's rendered fields and searches the
+    document for another mention of a record before refusing a drop. With no
+    code that check never refuses; with no document no other entry is known.
 
     Pairwise and order-dependent by design, not clustered: entries are
     compared left-to-right and a drop removes that index from further
@@ -307,7 +438,8 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
                 len_j = len(entries[j].get('text', ''))
                 drop = j if len_i >= len_j else i
                 kept = i if drop == j else j
-                if not _drop_is_safe(entries[drop], entries[kept]):
+                if not _drop_is_safe(entries[drop], entries[kept],
+                                     code, document):
                     if verbose:
                         print(f"    Dedup: skipping (similar but not "
                               f"verbatim-contained, single record — keeping "
