@@ -245,6 +245,39 @@ def test_fused_prose_without_fields_is_still_dropped():
                                document=[one, fused]) == [fused]
 
 
+# #1181: WCM label|value mentee tables share every label, so two residents at
+# one site with overlapping periods score as duplicates. Synthetic names.
+def _mentee_table(name: str, period: str) -> dict:
+    text = (f"Name | {name}\nSite/Position | Harbor Institute - Resident\n"
+            f"Expected Mentoring Period (mm/yyyy-mm/yyyy) | {period}\n"
+            "Project/Accomplishments** | Case report on widget toxicity\n"
+            "Goals/expected Outcomes | Abstract submission, Poster Presentation\n"
+            "Type of Supervision (Research, clinical, teaching, leadership) | Research")
+    return {"text": text, "extracted_fields": {"mentee_name": name}}
+
+
+def test_distinct_mentees_in_label_value_tables_kept():
+    first = _mentee_table("Avery Quill", "11/2024 – 11/2026")
+    second = _mentee_table("Blair Sprocket", "01/2025 – 06/2026")
+    document = [first, second]
+    assert deduplicate_entries(document, code="N3A", document=document) == document
+
+
+def test_same_mentee_written_two_ways_still_dropped():
+    # Case and punctuation are not a different person.
+    first = _mentee_table("Avery O'Quill", "11/2024 – 11/2026")
+    second = _mentee_table("avery o’ quill", "11/2024 – 11/2026")
+    assert len(deduplicate_entries([first, second], code="N3A",
+                                   document=[first, second])) == 1
+
+
+def test_placeholder_mentee_table_still_dropped():
+    first = _mentee_table("Avery Quill", "11/2024 – 11/2026")
+    blank = _mentee_table("N/A", "11/2024 – 11/2026")
+    assert deduplicate_entries([first, blank], code="N3A",
+                               document=[first, blank]) == [first]
+
+
 def test_distinct_committee_memberships_mentioned_in_passing_kept():
     prior_term = {"text": "Member, Data Safety Monitoring Board for the ABC "
                           "diabetes trial, 2015-2018"}
