@@ -3,8 +3,11 @@
 Delivery has two modes, selected by whether a Redis broker is enabled:
 
   - Broker disabled (no CVICHE_REDIS_URL): events are written directly to this
-    process's local WebSocket connections. Correct for a single worker/replica;
-    this is the historical behavior.
+    process's local WebSocket connections. Correct for a single worker/replica.
+    The write always happens on the loop the sockets were accepted on: a run
+    emits from its own asyncio.run loop in a worker thread, so emit() hands the
+    delivery to the socket-owning loop rather than writing from the wrong one
+    (#116).
   - Broker enabled: emit() only *publishes* to Redis; a per-worker subscriber
     loop (started at app startup) receives every run's events and delivers them
     to whatever sockets that worker holds locally. This lets events reach a
@@ -13,6 +16,7 @@ Delivery has two modes, selected by whether a Redis broker is enabled:
     the sockets live, delivery is on the correct loop.
 """
 import asyncio
+import contextvars
 import json
 import logging
 import uuid
@@ -26,6 +30,11 @@ from app.pipeline.redis_broker import EVENTS_CHANNEL
 SUBSCRIBER_POLL_SECONDS = 1.0
 # Pause before resubscribing after an error, so a down Valkey isn't hammered.
 SUBSCRIBER_RETRY_SECONDS = 1.0
+# How long a run thread's emit waits for its event to be written on the socket
+# loop. Waiting keeps a run's events in order; the cap keeps a slow client from
+# stalling the pipeline, and stays under the 2s a streamed stdout line waits
+# for its whole log() call (orchestrator.StreamingStdoutCapture).
+CROSS_LOOP_EMIT_WAIT_SECONDS = 1.0
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +105,9 @@ class EventEmitter:
         self._broker = broker
         self._pubsub = None
         self._subscriber_task: asyncio.Task | None = None
+        # The loop that accepted this process's sockets -- the server's main
+        # loop. Only it may write to them; set by connect().
+        self._socket_loop: asyncio.AbstractEventLoop | None = None
 
     def set_broker(self, broker) -> None:
         """Attach the Redis broker (called at app startup)."""
@@ -216,6 +228,7 @@ class EventEmitter:
         """Register a new WebSocket connection. ``hide_cost`` defaults to True
         so a caller that forgets it fails closed."""
         await websocket.accept()
+        self._socket_loop = asyncio.get_running_loop()
         if hide_cost:
             self._cost_hidden.add(websocket)
         if run_id not in self.connections:
@@ -235,7 +248,8 @@ class EventEmitter:
 
     async def emit(self, run_id: str, event: dict):
         """Broadcast an event. Publishes via Redis when enabled, else delivers
-        directly to this process's local connections."""
+        directly to this process's local connections, on the loop that owns
+        them (see _deliver_on_socket_loop)."""
         _stamp(event)
 
         if self._enabled:
@@ -245,7 +259,54 @@ class EventEmitter:
             self._broker.publish_event(run_id, event)
             return
 
-        await self._deliver_local(run_id, json.dumps(event))
+        # Nobody watching this run on this process: skip the hop to the socket
+        # loop (most LOG events of an unwatched run end here).
+        if not self.connections.get(run_id):
+            return
+        message = json.dumps(event)
+        loop = self._socket_loop
+        if loop is None or loop is asyncio.get_running_loop():
+            # Already on the socket loop; awaiting a hop back onto it would
+            # deadlock, so write directly.
+            await self._deliver_local(run_id, message)
+        else:
+            await self._deliver_on_socket_loop(loop, run_id, message)
+
+    async def _deliver_on_socket_loop(self, loop: asyncio.AbstractEventLoop,
+                                      run_id: str, message: str) -> None:
+        """Deliver from another thread's loop by running _deliver_local on the
+        loop that owns the sockets, and wait for it (up to
+        CROSS_LOOP_EMIT_WAIT_SECONDS) without blocking the caller's loop.
+
+        Never raises: the caller is a pipeline run, and an event it cannot
+        deliver -- the server loop already gone at shutdown (#1095 drain), or a
+        client too slow to take it -- must not fail the run. A delivery still
+        running at the timeout is left to finish, not cancelled mid-write.
+
+        The delivery task starts from an empty context, not a copy of the
+        run's. The run's context can carry its stdout capture (_capture_var),
+        and app logging writes through sys.stdout: a log line from inside the
+        delivery would be routed into the capture, whose synchronous log
+        emit then blocks the server loop for up to 2s per line.
+        """
+        coro = self._deliver_local(run_id, message)
+        try:
+            future = contextvars.Context().run(
+                asyncio.run_coroutine_threadsafe, coro, loop)
+        except RuntimeError:
+            coro.close()
+            logger.info("Event for run %s dropped: the socket loop is closed", run_id)
+            return
+        done, _ = await asyncio.wait({asyncio.wrap_future(future)},
+                                     timeout=CROSS_LOOP_EMIT_WAIT_SECONDS)
+        if not done:
+            logger.warning("Event for run %s not delivered within %.1fs; not waiting further",
+                           run_id, CROSS_LOOP_EMIT_WAIT_SECONDS)
+        elif future.cancelled():
+            logger.warning("Event delivery for run %s was cancelled", run_id)
+        elif future.exception() is not None:
+            logger.warning("Event delivery for run %s failed", run_id,
+                           exc_info=future.exception())
 
     async def emit_run_start(self, run_id: str):
         await self.emit(run_id, {"event": "RUN_START"})

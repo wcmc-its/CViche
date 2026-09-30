@@ -17,11 +17,18 @@ What is pinned here:
   - A terminal event reaches any one socket at most once, whichever of the two
     routes (live broadcast / connect-time replay) gets there first (thread 6),
     and every event carries an event_id (thread 7).
+  - Without a broker, a run's events -- emitted from its own asyncio.run loop in
+    a worker thread -- are written on the loop that owns the sockets, in order,
+    and an undeliverable event never raises into the run (#116).
 """
 import asyncio
+import contextvars
 import json
+import logging
 import os
 import threading
+import time
+from contextlib import contextmanager
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
@@ -32,6 +39,7 @@ import redis.exceptions
 from starlette.websockets import WebSocketDisconnect
 
 import app.api.websocket as ws_module
+import app.pipeline.event_emitter as emitter_module
 import app.session_idle as session_idle
 from app.models import Run, SystemConfig, User
 from app.pipeline.event_emitter import EventEmitter
@@ -531,3 +539,202 @@ def test_connect_hides_cost_unless_told_otherwise():
     _run(scenario)
 
     assert "total_cost" not in socket.sent[0]
+
+
+# ---------------------------------------------------------------------------
+# Emitter: a run's events cross from its own loop to the socket loop (#116)
+# ---------------------------------------------------------------------------
+
+class _LoopBoundSocket(_RecordingSocket):
+    """A socket that, like a real one, can only be written from the loop that
+    accepted it. ``slow`` maps an event name to seconds its send takes."""
+
+    def __init__(self, slow=None):
+        super().__init__()
+        self.slow = slow or {}
+        self.loop = None
+
+    async def accept(self):
+        self.loop = asyncio.get_running_loop()
+
+    async def send_text(self, message: str):
+        if asyncio.get_running_loop() is not self.loop:
+            raise RuntimeError("written from a loop that does not own the socket")
+        await asyncio.sleep(self.slow.get(json.loads(message)["event"], 0))
+        await super().send_text(message)
+
+
+@contextmanager
+def _server_loop():
+    """An event loop running in its own thread: uvicorn's main loop."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        yield loop
+    finally:
+        if not loop.is_closed():
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join(5)
+            loop.close()
+
+
+def _on(loop, coro):
+    return asyncio.run_coroutine_threadsafe(coro, loop).result(5)
+
+
+def _in_run_thread(coro_fn):
+    """Run coro_fn the way a pipeline run does: asyncio.run in a worker thread.
+    Returns (seconds taken, exception raised or None)."""
+    outcome = {}
+
+    def target():
+        started = time.monotonic()
+        try:
+            asyncio.run(coro_fn())
+        except BaseException as exc:  # reported to the test, not swallowed
+            outcome["error"] = exc
+        outcome["seconds"] = time.monotonic() - started
+
+    worker = threading.Thread(target=target)
+    worker.start()
+    worker.join(10)
+    return outcome["seconds"], outcome.get("error")
+
+
+def test_a_runs_events_reach_the_server_loops_socket_in_order():
+    """The orchestrator emits from its own asyncio.run loop; the socket belongs
+    to the server loop. Every event must arrive, in emission order, even when
+    one write is slower than the next."""
+    emitter = EventEmitter()
+    socket = _LoopBoundSocket(slow={"RUN_START": 0.05})
+
+    async def run():
+        await emitter.emit_run_start("R1")
+        for n in range(5):
+            await emitter.emit_log("R1", 1, f"line {n}")
+        await emitter.emit_run_complete("R1", 0.1, 5, 2)
+
+    with _server_loop() as server:
+        _on(server, emitter.connect("R1", socket))
+        _, error = _in_run_thread(run)
+
+    assert error is None
+    assert _event_names(socket) == ["RUN_START"] + ["LOG"] * 5 + ["RUN_COMPLETE"]
+    assert [m["message"] for m in socket.sent[1:6]] == [f"line {n}" for n in range(5)]
+    assert emitter.connections == {"R1": {socket}}
+
+
+def test_a_slow_socket_does_not_hold_the_run(monkeypatch):
+    """The run waits a bounded time for a delivery, then goes on; the delivery
+    itself is not cancelled mid-write and still lands."""
+    monkeypatch.setattr(emitter_module, "CROSS_LOOP_EMIT_WAIT_SECONDS", 0.05)
+    emitter = EventEmitter()
+    socket = _LoopBoundSocket(slow={"LOG": 0.5})
+
+    with _server_loop() as server:
+        _on(server, emitter.connect("R1", socket))
+        seconds, error = _in_run_thread(lambda: emitter.emit_log("R1", 1, "slow"))
+        deadline = time.monotonic() + 3
+        while not socket.sent and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+    assert error is None
+    assert seconds < 0.4
+    assert _event_names(socket) == ["LOG"]
+
+
+def test_an_emit_after_the_server_loop_closed_does_not_raise():
+    """At shutdown the server loop can be gone while a run thread is still
+    emitting (#1095 drain); the event is dropped, the run is not failed."""
+    emitter = EventEmitter()
+    socket = _LoopBoundSocket()
+
+    with _server_loop() as server:
+        _on(server, emitter.connect("R1", socket))
+        server.call_soon_threadsafe(server.stop)
+        time.sleep(0.1)
+        server.close()
+        seconds, error = _in_run_thread(lambda: emitter.emit_run_failed("R1", "deploy"))
+
+    assert error is None
+    assert seconds < 0.5
+    assert socket.sent == []
+
+
+@pytest.mark.parametrize("failure", [asyncio.CancelledError, ValueError])
+def test_a_failed_delivery_does_not_raise_into_the_run(monkeypatch, caplog, failure):
+    """A delivery that is cancelled on the server loop (its tasks are cancelled
+    at loop shutdown) or errors is logged, never raised into the run."""
+    emitter = EventEmitter()
+    socket = _LoopBoundSocket()
+
+    async def broken(run_id, message):
+        raise failure()
+
+    with _server_loop() as server:
+        _on(server, emitter.connect("R1", socket))
+        monkeypatch.setattr(emitter, "_deliver_local", broken)
+        with caplog.at_level(logging.WARNING, logger=emitter_module.__name__):
+            _, error = _in_run_thread(lambda: emitter.emit_log("R1", 1, "x"))
+
+    assert error is None
+    assert any("R1" in record.getMessage() for record in caplog.records)
+
+
+def test_a_run_nobody_watches_skips_the_hop_to_the_server_loop():
+    """No socket for this run on this process: nothing to deliver, so the run
+    must not wait on the server loop at all (here it is not even running)."""
+    emitter = EventEmitter()
+    idle = asyncio.new_event_loop()
+    emitter._socket_loop = idle
+    emitter.connections["OTHER"] = {_LoopBoundSocket()}
+    try:
+        seconds, error = _in_run_thread(lambda: emitter.emit_log("R1", 1, "x"))
+    finally:
+        idle.close()
+
+    assert error is None
+    assert seconds < 0.5
+
+
+_RUN_SCOPED = contextvars.ContextVar("run_scoped", default=None)
+
+
+def test_a_delivery_does_not_inherit_the_runs_context():
+    """A run's context carries its stdout capture; a delivery running with it
+    on the server loop would route the server loop's own log output into
+    that run's capture, which blocks the loop on every line."""
+    emitter = EventEmitter()
+    seen = []
+
+    class _ContextRecordingSocket(_LoopBoundSocket):
+        async def send_text(self, message: str):
+            seen.append(_RUN_SCOPED.get())
+            await super().send_text(message)
+
+    async def run():
+        _RUN_SCOPED.set("capture of run R1")
+        await emitter.emit_log("R1", 1, "x")
+
+    with _server_loop() as server:
+        _on(server, emitter.connect("R1", _ContextRecordingSocket()))
+        _, error = _in_run_thread(run)
+
+    assert error is None
+    assert seen == [None]
+
+
+def test_an_emit_on_the_server_loop_itself_writes_before_returning(monkeypatch):
+    """A caller already on the socket loop writes directly: no hop, so no
+    timeout that could return before its event is written."""
+    monkeypatch.setattr(emitter_module, "CROSS_LOOP_EMIT_WAIT_SECONDS", 0.01)
+    emitter = EventEmitter()
+    socket = _LoopBoundSocket(slow={"LOG": 0.1})
+
+    async def scenario():
+        await emitter.connect("R1", socket)
+        await emitter.emit_log("R1", 1, "x")
+        return list(socket.sent)
+
+    assert [m["event"] for m in asyncio.run(scenario())] == ["LOG"]

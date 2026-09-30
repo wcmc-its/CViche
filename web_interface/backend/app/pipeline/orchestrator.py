@@ -20,6 +20,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import Any
 from collections.abc import Iterator
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -147,6 +148,9 @@ def user_facing_error(exc: BaseException, resuming: bool) -> str:
 # cancel ops use a sync client, so is_cancelled() stays synchronous and the
 # stage-boundary check (check_cancelled) needs no async change.
 _cancelled_runs: set = set()
+# The subset stopped by this pod's shutdown drain (stop_run_locally), not by a
+# user: their stop is reported as the deploy failure the drain writes (#116).
+_stopped_for_shutdown: set[str] = set()
 _broker = None
 
 
@@ -173,6 +177,7 @@ def stop_run_locally(run_id: str) -> None:
     Redis flag outlives this pod by CANCEL_TTL_SECONDS and would cancel a retry
     of the same run that another pod starts inside that window.
     """
+    _stopped_for_shutdown.add(run_id)
     _cancelled_runs.add(run_id)
 
 
@@ -188,6 +193,7 @@ def is_cancelled(run_id: str) -> bool:
 def clear_cancelled(run_id: str):
     """Clear cancellation flag for a run."""
     _cancelled_runs.discard(run_id)
+    _stopped_for_shutdown.discard(run_id)
     if _broker is not None and _broker.enabled:
         _broker.clear_cancel(run_id)
 
@@ -811,9 +817,12 @@ class PipelineOrchestrator:
             await self._notify_terminal(run, score, doctor)
 
         except CancelledException:
-            # Run was cancelled - status already updated by API endpoint
-            await self.log(0, "Pipeline cancelled by user", "WARNING")
-            await event_emitter.emit(self.run_id, {"event": "RUN_CANCELLED"})
+            if self.run_id in _stopped_for_shutdown:
+                await self._report_shutdown_stop(run)
+            else:
+                # Run was cancelled - status already updated by API endpoint
+                await self.log(0, "Pipeline cancelled by user", "WARNING")
+                await event_emitter.emit(self.run_id, {"event": "RUN_CANCELLED"})
 
         except Exception as e:
             run.status = "failed"
@@ -852,6 +861,27 @@ class PipelineOrchestrator:
                 reset_current_run_id(run_id_token)
             # Clean up cancellation flag
             clear_cancelled(self.run_id)
+
+    async def _report_shutdown_stop(self, run: Run) -> None:
+        """Report a run the shutdown drain stopped as the failure it is.
+
+        The drain stops the run (stop_run_locally) and then marks it failed
+        with DEPLOY_INTERRUPT_MESSAGE on its own session (#1095). Reporting
+        that stop as a user cancel would log and emit the wrong outcome and
+        skip the failure notification. The refresh picks up the drain's write
+        when it has landed; the notification skips itself if it has not.
+        """
+        from app.services.run_service import DEPLOY_INTERRUPT_MESSAGE
+
+        await self.log(0, f"Pipeline stopped: {DEPLOY_INTERRUPT_MESSAGE}", "ERROR")
+        await event_emitter.emit_run_failed(
+            self.run_id, DEPLOY_INTERRUPT_MESSAGE, self.failed_step_number
+        )
+        try:
+            self.db.refresh(run)
+        except SQLAlchemyError as e:
+            logger.warning("Could not re-read run %s after a shutdown stop: %s", self.run_id, e)
+        await self._notify_terminal(run, self._cached_score())
 
     def _cached_score(self):
         """Best-effort read of the run's cached quality score (or None).
