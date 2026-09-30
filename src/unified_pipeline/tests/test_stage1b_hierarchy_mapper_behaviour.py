@@ -1101,3 +1101,62 @@ def test_map_hierarchy_node_international_does_not_bind_to_the_national_paragrap
     international, _ = map_hierarchy_node({"text": "International", "level": "H1"}, elements, [], nxt)
     assert national["element_idx"] == 0
     assert international["element_idx"] == 2
+
+
+def test_find_header_in_sequence_prefers_the_exact_paragraph_over_an_earlier_fragment():
+    # #429 residual: "Doctoral:" is whole words inside the header "Doctoral
+    # advisees", so it satisfied is_header_match and won as the first match
+    # even though the verbatim header paragraph comes later.
+    elements = [
+        _elem(0, "Mentoring"),
+        _elem(1, "Doctoral:"),
+        _elem(2, "one entry line"),
+        _elem(3, "Doctoral advisees"),
+    ]
+    assert find_header_in_sequence(elements, ["Mentoring", "Doctoral advisees"]) == [
+        ("Mentoring", 0),
+        ("Doctoral advisees", 3),
+    ]
+
+
+def test_find_header_in_sequence_keeps_the_first_fragment_when_no_paragraph_is_exact():
+    elements = [_elem(0, "Doctoral:"), _elem(1, "one entry line"), _elem(2, "Advisees")]
+    assert find_header_in_sequence(elements, ["Doctoral advisees"]) == [("Doctoral advisees", 0)]
+
+
+def test_find_header_in_sequence_first_paragraph_longer_than_the_header_still_wins():
+    # The header inside a longer paragraph (a table-of-contents line) keeps the
+    # old first-match behaviour: only a SHORTER fragment yields to a later exact
+    # paragraph, so this change cannot pull a header past a real paragraph.
+    elements = [_elem(0, "Education and training"), _elem(1, "Education")]
+    assert find_header_in_sequence(elements, ["Education"]) == [("Education", 0)]
+
+
+def test_map_hierarchy_node_child_binds_to_the_exact_paragraph_not_an_earlier_fragment():
+    elements = [
+        _elem(0, "Mentoring"),
+        _elem(1, "Doctoral:"),
+        _elem(2, "one entry line"),
+        _elem(3, "Doctoral advisees"),
+    ]
+    node = {
+        "text": "Mentoring",
+        "level": "H1",
+        "children": [{"text": "Doctoral advisees", "level": "H2"}],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["element_idx"] == 0
+    assert mapped["children"][0]["element_idx"] == 3
+
+
+def test_map_hierarchy_node_fallback_search_prefers_the_exact_paragraph():
+    # The parent is not in the document, so the sequence match fails and the
+    # single-header fallback (search_for_header) runs.
+    elements = [_elem(0, "Doctoral:"), _elem(1, "one entry line"), _elem(2, "Doctoral advisees")]
+    node = {
+        "text": "Absent parent",
+        "level": "H1",
+        "children": [{"text": "Doctoral advisees", "level": "H2"}],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["children"][0]["element_idx"] == 2
