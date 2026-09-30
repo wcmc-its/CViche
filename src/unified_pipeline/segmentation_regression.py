@@ -48,15 +48,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+from unified_pipeline.core.template_boilerplate import (
+    is_near_template_instruction,
+    is_template_instruction,
+)
 from unified_pipeline.core.text_norm import (
     SUBSTANTIVE_LINE_CHARS,
     looks_like_record,
     norm,
     squash,
-)
-from unified_pipeline.core.template_boilerplate import (
-    is_near_template_instruction,
-    is_template_instruction,
 )
 
 # Aliases for callers that predate the move to core.text_norm.

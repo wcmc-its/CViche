@@ -1,7 +1,5 @@
-"""core.text_norm: the public helpers, and the segmentation_regression
-aliases that keep pre-move importers working."""
+"""core.text_norm: the public helpers."""
 
-from unified_pipeline import segmentation_regression as segreg
 from unified_pipeline.core import text_norm
 
 
@@ -20,10 +18,5 @@ def test_looks_like_record_needs_length_and_a_delimiter():
     assert text_norm.looks_like_record("x" * 60 + "\ty")
     assert not text_norm.looks_like_record("x" * 70)
     assert not text_norm.looks_like_record("a | b")
+    assert not text_norm.looks_like_record("  " + "x" * 56 + " | y  ")  # 60 stripped
 
-
-def test_segmentation_regression_aliases_are_the_public_functions():
-    assert segreg._norm is text_norm.norm
-    assert segreg._squash is text_norm.squash
-    assert segreg._looks_like_record is text_norm.looks_like_record
-    assert segreg.SUBSTANTIVE_LINE_CHARS == text_norm.SUBSTANTIVE_LINE_CHARS == 15
