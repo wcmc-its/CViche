@@ -2150,7 +2150,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # instead of routing to appendix.
                 if taxonomy_code.startswith('K') or taxonomy_code.startswith('L'):
                     section_header = self._get_wcm_section_header(taxonomy_code)
-                    header_idx = self._find_paragraph_with_text(section_header)
+                    header_idx = self._find_header_paragraph(section_header)
                     if header_idx is not None:
                         section_end_idx = self._find_section_end_paragraph_idx(header_idx)
                         if section_end_idx is not None:
@@ -2495,7 +2495,7 @@ Now analyze the text above:"""
         # heads echo source section names and would swallow content meant for
         # the real section (the appendix always sits at document end, and
         # _fill_appendix runs before this).
-        appendix_idx = self._find_paragraph_with_text("T. APPENDIX")
+        appendix_idx = self._find_header_paragraph("T. APPENDIX")
 
         # Use precise subsection search to avoid matching main section headers
         header_idx = self._find_subsection_header(section_header,
@@ -2643,7 +2643,7 @@ Now analyze the text above:"""
             return []
 
         # Find or create the T. APPENDIX section
-        appendix_idx = self._find_paragraph_with_text("T. APPENDIX")
+        appendix_idx = self._find_header_paragraph("T. APPENDIX")
 
         if appendix_idx is None:
             # Create the appendix section

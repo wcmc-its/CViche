@@ -140,7 +140,7 @@ def _positions_generator(anchor="Hospital Appointments"):
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document()
     gen.doc.add_paragraph("D. POSITIONS")
-    gen.doc.add_paragraph(anchor)
+    gen.doc.add_paragraph().add_run(anchor).bold = True
     table = gen.doc.add_table(rows=1, cols=3)
     for i, header in enumerate(["Title", "Institution/Location", "Dates"]):
         table.rows[0].cells[i].text = header

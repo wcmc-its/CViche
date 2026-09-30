@@ -601,11 +601,11 @@ class MembershipsSection:
             logger.info("Filling Memberships (%s entries)...", len(entries))
 
         # Find the MEMBERSHIPS section
-        memberships_idx = self._find_paragraph_with_text("PROFESSIONAL ORGANIZATIONS")
+        memberships_idx = self._find_header_paragraph("PROFESSIONAL ORGANIZATIONS")
         if memberships_idx is None:
-            memberships_idx = self._find_paragraph_with_text("SOCIETY MEMBERSHIPS")
+            memberships_idx = self._find_header_paragraph("SOCIETY MEMBERSHIPS")
         if memberships_idx is None:
-            memberships_idx = self._find_paragraph_with_text("MEMBERSHIPS")
+            memberships_idx = self._find_header_paragraph("MEMBERSHIPS")
         if memberships_idx is None:
             return
 

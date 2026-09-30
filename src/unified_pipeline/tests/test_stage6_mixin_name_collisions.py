@@ -395,5 +395,112 @@ def test_sections_logger_severity_contract_is_not_silently_empty():
 
 
 
+# --- #548: content-insertion anchors are header-only ------------------------
+#
+# `_find_paragraph_with_text` is a substring scan over every body paragraph, so
+# a bullet an earlier section wrote can capture a later section's anchor.
+# `_find_header_paragraph` (header-shaped paragraphs only, and never a bullet
+# stage 6 wrote itself) is the anchor finder for everything that inserts
+# content. These are the call sites that still use the substring scan, each
+# with the reason it cannot move yet. A new entry here needs a reason too.
+#
+#   bibliography `_fill_bibliography`, researcher_profiles, service
+#   `_fill_journal_reviewing` / `_fill_other_service` (Q4A-Q4C routing): the
+#     template's sub-labels ("Books:", "Journal Reviewing", "Editor/Co-Editor",
+#     ...) are plain, non-bold, mixed-case paragraphs, so the header shape test
+#     finds nothing and the section would stop rendering.
+#   `_fill_personal_data`: locates the "Name:" / "Date of preparation" labels,
+#     and runs before any bullet exists.
+#   `_fill_percent_effort`: the loose lookup is the documented fallback after
+#     `_find_header_paragraph` misses.
+#   `_validate_output`: reads the document to warn, inserts nothing.
+REMAINING_SUBSTRING_ANCHOR_CALLS = {
+    ("bibliography.py", "_fill_bibliography"): 1,
+    ("passthrough.py", "_fill_percent_effort"): 1,
+    ("personal_data.py", "_fill_personal_data"): 2,
+    ("researcher_profiles.py", "_fill_researcher_profiles"): 2,
+    ("service.py", "_fill_journal_reviewing"): 2,
+    ("service.py", "_fill_other_service"): 1,
+    ("stage_6_word_template.py", "_validate_output"): 2,
+}
+
+
+def _finder_calls():
+    """{finder name: [(file, enclosing function, first-arg literal or None)]}
+    for every `self._find_paragraph_with_text` / `self._find_header_paragraph`
+    call under `stage6/sections/` and in the monolith."""
+    root = _SRC / "unified_pipeline"
+    paths = sorted((root / "stage6" / "sections").glob("*.py")) + [root / "stage_6_word_template.py"]
+    calls: dict[str, list[tuple[str, str, str | None]]] = {
+        "_find_paragraph_with_text": [],
+        "_find_header_paragraph": [],
+    }
+    for path in paths:
+        stack: list[str] = []
+
+        class _Visitor(ast.NodeVisitor):
+            def visit_FunctionDef(self, node):  # noqa: N802
+                stack.append(node.name)
+                self.generic_visit(node)
+                stack.pop()
+
+            def visit_Call(self, node):  # noqa: N802
+                if isinstance(node.func, ast.Attribute) and node.func.attr in calls:
+                    first = node.args[0] if node.args else None
+                    literal = first.value if isinstance(first, ast.Constant) else None
+                    calls[node.func.attr].append((path.name, stack[-1] if stack else "<module>", literal))
+                self.generic_visit(node)
+
+        _Visitor().visit(ast.parse(path.read_text(), filename=str(path)))
+    return calls
+
+
+def test_remaining_substring_anchor_calls_are_the_documented_set():
+    """Reverting any swapped anchor to the substring scan adds a call site the
+    table above does not list, and fails here."""
+    remaining = Counter((f, fn) for f, fn, _ in _finder_calls()["_find_paragraph_with_text"])
+    assert dict(remaining) == REMAINING_SUBSTRING_ANCHOR_CALLS
+
+
+def _header_anchor_literals():
+    return sorted({lit for _, _, lit in _finder_calls()["_find_header_paragraph"] if lit is not None})
+
+
+def _template_generator():
+    from docx import Document
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    return gen
+
+
+def _anchors_present_in_template():
+    gen = _template_generator()
+    return [n for n in _header_anchor_literals() if gen._find_header_paragraph(n) is not None]
+
+
+def test_the_header_anchor_census_is_not_silently_empty():
+    literals = _header_anchor_literals()
+    present = _anchors_present_in_template()
+    assert len(literals) >= 30 and len(present) >= 25
+    # Anchors the shipped template has no header for: fallbacks for a template
+    # revision, harmless while absent.
+    assert sorted(set(literals) - set(present)) == ["Invited Presentations", "T. APPENDIX"]
+
+
+@pytest.mark.parametrize("needle", _anchors_present_in_template())
+def test_a_body_paragraph_naming_the_anchor_does_not_capture_it(needle):
+    """Each literal anchor resolves to the same template paragraph with or
+    without an earlier plain paragraph that contains its text -- while the
+    substring scan is captured by that paragraph (the hazard)."""
+    gen = _template_generator()
+    real = gen.doc.paragraphs[gen._find_header_paragraph(needle)]._p
+
+    decoy = gen.doc.paragraphs[0].insert_paragraph_before(f"see {needle} below")
+
+    assert gen.doc.paragraphs[gen._find_paragraph_with_text(needle)]._p is decoy._p
+    assert gen.doc.paragraphs[gen._find_header_paragraph(needle)]._p is real
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
