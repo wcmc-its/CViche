@@ -8,6 +8,7 @@ from app.models import Run, Step, User, Log, LLMUsage, Feedback, RunMetrics
 from app.errors import not_found, forbidden
 from app.config_loader import get_config
 from app.storage import get_storage
+from app.storage.base import RunStorage
 from app.services import auto_retry
 
 logger = logging.getLogger(__name__)
@@ -175,6 +176,60 @@ def reconcile_stale_runs(db: Session) -> int:
     return failed_count
 
 
+def _submitter_email(db: Session, run: Run) -> str | None:
+    """Lower-cased submitter email, or None. Run.user is lazy="raise_on_sql",
+    so resolve it before the row is deleted."""
+    if run.user_id is None:
+        return None
+    u = db.query(User).filter(User.id == run.user_id).first()
+    return u.email.lower() if u and u.email else None
+
+
+def _delete_run_rows(db: Session, run_id: str) -> None:
+    """Delete a run and its children in one commit. Children first -- the
+    run_id FKs are bare (no ON DELETE CASCADE). Raises on failure; the caller
+    rolls back."""
+    for child in (Step, Log, LLMUsage, Feedback, RunMetrics):
+        db.query(child).filter(child.run_id == run_id).delete(synchronize_session=False)
+    db.query(Run).filter(Run.id == run_id).delete(synchronize_session=False)
+    db.commit()
+
+
+def _delete_run_storage(storage: RunStorage, run_id: str, email: str | None) -> int:
+    """Best-effort, idempotent removal of a run's storage objects and its
+    by-submitter index entry -- never blocks on the store. Returns objects deleted."""
+    deleted = 0
+    try:
+        deleted += storage.delete_run(run_id)
+    except Exception as e:
+        logger.warning("Failed to delete storage for reaped run %s: %s", run_id, e)
+    if email is not None:
+        try:
+            deleted += storage.delete_global_prefix(f"by-submitter/{email}/{run_id}/")
+        except Exception as e:
+            logger.warning("Failed to delete by-submitter index for run %s: %s", run_id, e)
+    return deleted
+
+
+def find_run(db: Session, run_id: str) -> Run | None:
+    return db.query(Run).filter(Run.id == run_id).first()
+
+
+def delete_run_by_id(db: Session, run: Run) -> int:
+    """Hard-delete one run: child rows, the run row, then its storage.
+
+    Raises if the DB delete fails (after rolling back). Returns the number of
+    storage objects removed.
+    """
+    run_id, email = run.id, _submitter_email(db, run)
+    try:
+        _delete_run_rows(db, run_id)
+    except Exception:
+        db.rollback()
+        raise
+    return _delete_run_storage(get_storage(), run_id, email)
+
+
 def reap_orphaned_created_runs(
     db: Session,
     *,
@@ -228,12 +283,7 @@ def reap_orphaned_created_runs(
     # the rows are deleted, so we can also remove the by-submitter index entry.
     targets = []  # list of (run_id, submitter_email_or_None)
     for run in orphans:
-        email = None
-        if run.user_id is not None:
-            u = db.query(User).filter(User.id == run.user_id).first()
-            if u and u.email:
-                email = u.email.lower()
-        targets.append((run.id, email))
+        targets.append((run.id, _submitter_email(db, run)))
 
     result = {
         "candidates": len(targets),
@@ -248,32 +298,13 @@ def reap_orphaned_created_runs(
     storage = get_storage()
     for run_id, email in targets:
         try:
-            # Children first -- bare FKs (no ON DELETE CASCADE).
-            db.query(Step).filter(Step.run_id == run_id).delete(synchronize_session=False)
-            db.query(Log).filter(Log.run_id == run_id).delete(synchronize_session=False)
-            db.query(LLMUsage).filter(LLMUsage.run_id == run_id).delete(synchronize_session=False)
-            db.query(Feedback).filter(Feedback.run_id == run_id).delete(synchronize_session=False)
-            db.query(RunMetrics).filter(RunMetrics.run_id == run_id).delete(synchronize_session=False)
-            db.query(Run).filter(Run.id == run_id).delete(synchronize_session=False)
-            db.commit()
+            _delete_run_rows(db, run_id)
         except Exception as e:
             db.rollback()
             logger.warning("Failed to reap orphan run %s from DB: %s", run_id, e)
             continue
         result["reaped"] += 1
-
-        # Best-effort, idempotent storage cleanup -- never block on the store.
-        try:
-            result["objects_deleted"] += storage.delete_run(run_id)
-        except Exception as e:
-            logger.warning("Failed to delete storage for reaped run %s: %s", run_id, e)
-        if email is not None:
-            try:
-                result["objects_deleted"] += storage.delete_global_prefix(
-                    f"by-submitter/{email}/{run_id}/"
-                )
-            except Exception as e:
-                logger.warning("Failed to delete by-submitter index for run %s: %s", run_id, e)
+        result["objects_deleted"] += _delete_run_storage(storage, run_id, email)
 
     logger.info(
         "Reaped %d/%d orphaned 'created' run(s) older than %dh (%d storage objects removed)",

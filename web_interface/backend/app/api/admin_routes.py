@@ -15,7 +15,7 @@ from sqlalchemy.orm import Query as SAQuery, Session, contains_eager
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
 from app.auth import require_admin, SessionEpochUnreadable
-from app.errors import not_found, validation_error
+from app.errors import conflict, not_found, validation_error
 from app.schemas import (
     AdminStats,
     AdminUser,
@@ -28,7 +28,8 @@ from app.schemas import (
 )
 from app.services.admin_service import get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import get_cached_score, compute_and_cache_score
-from app.services.run_service import reap_orphaned_created_runs
+from app.audit_events import RUN_DELETED
+from app.services.run_service import delete_run_by_id, find_run, reap_orphaned_created_runs
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -271,6 +272,31 @@ async def reap_orphan_runs(
         admin.email, dry_run, result["candidates"], result["reaped"], result["objects_deleted"],
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/admin/runs/{run_id}
+# ---------------------------------------------------------------------------
+@router.delete("/admin/runs/{run_id}", status_code=204)
+async def delete_run(
+    run_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> None:
+    """Hard-delete one run (rows, stage artifacts, source CV, by-submitter
+    index) -- the removal path for a consent-withdrawal request (#683).
+    404 if unknown; 409 while the run is executing."""
+    run = find_run(db, run_id)
+    if not run:
+        raise not_found("Run not found.")
+    if run.status == "running":
+        raise conflict("Run is still running; wait for it to finish before deleting.")
+
+    objects_deleted = delete_run_by_id(db, run)
+    logger.info(
+        RUN_DELETED,
+        extra={"admin": admin.email, "run_id": run_id, "objects_deleted": objects_deleted},
+    )
 
 
 # ---------------------------------------------------------------------------

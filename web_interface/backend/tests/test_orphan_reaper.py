@@ -192,3 +192,65 @@ def test_local_storage_delete_guards_empty_prefix(tmp_path):
         s.delete_global_prefix("")
     with pytest.raises(ValueError):
         s.delete_global_prefix("/")
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/admin/runs/{run_id} (#683)
+# ---------------------------------------------------------------------------
+
+def test_non_admin_cannot_delete_run(client, db):
+    resp = _as_user(client, lambda: client.delete("/api/admin/runs/ANYRUN"))
+    assert resp.status_code == 403
+
+
+def test_admin_delete_unknown_run_is_404(client, db):
+    resp = _as_admin(client, lambda: client.delete("/api/admin/runs/NOSUCH"))
+    assert resp.status_code == 404
+
+
+def test_admin_delete_running_run_is_409_and_untouched(client, db):
+    from app.models import Run
+    _seed_run(db, "RUN683", "running", datetime.now())
+
+    fake = _FakeStorage()
+    with patch("app.services.run_service.get_storage", return_value=fake):
+        resp = _as_admin(client, lambda: client.delete("/api/admin/runs/RUN683"))
+    assert resp.status_code == 409
+    assert db.query(Run).filter(Run.id == "RUN683").first() is not None
+    assert fake.deleted_runs == []
+
+
+def test_admin_delete_complete_run_removes_rows_storage_and_logs_audit(client, db, caplog):
+    import logging
+    from app.audit_events import RUN_DELETED
+    from app.models import Feedback, LLMUsage, Log, Run, RunMetrics, Step
+    user = _seed_user(db, email="Withdraw@Example.com")
+    _seed_run(db, "DONE683", "complete", datetime.now() - timedelta(days=30),
+              user_id=user.id, steps=2)
+    db.add_all([
+        Log(run_id="DONE683", message="m"),
+        LLMUsage(run_id="DONE683", step_number=1, model="m", prompt_tokens=1,
+                 completion_tokens=1, total_tokens=2, cost=0.0),
+        Feedback(run_id="DONE683", user_id=user.id, reviewer_role="self",
+                 overall_usefulness=3, manual_conversion_effort="1 hour",
+                 correction_effort="1 hour", biggest_issue="none",
+                 likelihood_to_recommend=3),
+        RunMetrics(run_id="DONE683"),
+    ])
+    db.commit()
+
+    fake = _FakeStorage()
+    with patch("app.services.run_service.get_storage", return_value=fake), \
+            caplog.at_level(logging.INFO, logger="app.api.admin_routes"):
+        resp = _as_admin(client, lambda: client.delete("/api/admin/runs/DONE683"))
+    assert resp.status_code == 204
+    assert db.query(Run).filter(Run.id == "DONE683").first() is None
+    for child in (Step, Log, LLMUsage, Feedback, RunMetrics):
+        assert db.query(child).filter(child.run_id == "DONE683").count() == 0
+    assert fake.deleted_runs == ["DONE683"]
+    assert fake.deleted_prefixes == ["by-submitter/withdraw@example.com/DONE683/"]
+    audit = [r for r in caplog.records if r.getMessage() == RUN_DELETED]
+    assert len(audit) == 1
+    assert audit[0].run_id == "DONE683"
+    assert audit[0].admin == "admin@example.com"
+    assert audit[0].objects_deleted == 3

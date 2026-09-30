@@ -18,6 +18,10 @@ Because CVs vary widely in structure and formatting, the AI-generated output may
 
 If your CV includes information you consider sensitive (for example, a mobile phone number, personal address, or other personal details), you may remove or omit that information before submission. Participation does not require inclusion of personal contact information.
 
+## Retention and Removal
+
+Submitted CVs, the intermediate outputs produced during processing, and the AI-generated CV are retained during the pilot; there is no automatic expiry. To have a submission removed, contact the CViche project team. An administrator will delete the run, including your original CV and all generated outputs.
+
 ## Consent
 
 Participation is voluntary. You may choose not to participate by closing this page. By checking the box below and proceeding, you acknowledge that:
