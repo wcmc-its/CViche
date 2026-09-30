@@ -18,6 +18,7 @@ test_stage6_funding_appendix.py does.
 
 import json
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -314,6 +315,29 @@ def test_every_cjk_block_is_excluded_from_the_token_regex(run):
     """#722: each range in `_CJK_CLASS` must keep a 5+ run out of the token
     set on its own (the sentence-level test above hits only Han/Hangul)."""
     assert _RENDER_TOKEN_RE.findall(run) == []
+
+
+_CJK_NAME_PREFIXES = ("CJK ", "HIRAGANA", "KATAKANA", "HENTAIGANA", "HANGUL",
+                      "HALFWIDTH KATAKANA", "HALFWIDTH HANGUL")
+
+
+def test_cjk_exclusion_matches_unicode_names_across_every_code_point():
+    """#722: pins every `_CJK_CLASS` endpoint at once. A letter whose Unicode
+    name is CJK/kana/Hangul never forms a token, and every other letter does
+    (Bopomofo is the named, deliberate gap: its names start 'BOPOMOFO')."""
+    escaped, over_excluded = [], []
+    for cp in range(sys.maxunicode + 1):
+        ch = chr(cp)
+        if not unicodedata.category(ch).startswith("L"):
+            continue
+        is_cjk = unicodedata.name(ch, "").startswith(_CJK_NAME_PREFIXES)
+        forms_token = _RENDER_TOKEN_RE.fullmatch(ch * 5) is not None
+        if is_cjk and forms_token:
+            escaped.append(hex(cp))
+        elif not is_cjk and not forms_token:
+            over_excluded.append(hex(cp))
+    assert escaped == [], escaped[:20]
+    assert over_excluded == [], over_excluded[:20]
 
 
 def test_f1_dropped_license_recovered_column_header_not():

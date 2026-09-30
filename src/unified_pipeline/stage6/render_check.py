@@ -166,22 +166,20 @@ RENDER_TOKEN_OVERLAP = 0.7
 # CJK is EXCLUDED, not measured (#722). The 5-letter floor and
 # RENDER_TOKEN_MIN_COUNT were never tuned against CJK text (the local farm has
 # 0 CJK CVs). Chinese and Japanese have no whitespace word delimiters, so a
-# run of their letters is a clause, not a word. Korean does use spaces; it is
-# excluded because the floor counts different units on the two paths: stage
-# 6's _norm has no NFKD, so it counts syllables, while the doctor's _norm does
-# NFKD, so it counts Jamo (a 2-syllable word becomes 5 or more Jamo). CJK
-# characters therefore never form a token: a chunk that is all CJK has too few
-# tokens, so every render-overlap check returns None ("not verifiable"), never
-# False ("missing"). Latin/Cyrillic/Greek words inside a mixed-script chunk
-# still count. A script-aware floor needs real CJK data.
+# run of their letters is a clause, not a word. Korean does use spaces, but
+# its words are counted in syllables and rarely reach 5; the floor was never
+# tuned for that unit either, so Korean is excluded with the rest of CJK.
+# CJK characters therefore never form a token: a chunk that is all CJK has
+# too few tokens, so every render-overlap check returns None ("not
+# verifiable"), never False ("missing"). Latin/Cyrillic/Greek words inside a
+# mixed-script chunk still count. A script-aware floor needs real CJK data.
 #
-# Known gaps, NOT excluded: Bopomofo (U+3100-312F, U+31A0-31BF), halfwidth
-# Hangul (U+FFA0-FFDC; still forms tokens on the stage-6 path, which has no
-# NFKD) and Kana Supplement/Extended (U+1B000-1B16F). The CJK radicals block
-# (U+2E80-2FDF) is not listed: its characters are So, never letters, so
-# [^\W\d_] cannot match them anyway.
+# Coverage is pinned by a walk over every code point: each letter whose
+# Unicode name is CJK/Hiragana/Katakana/Hentaigana/Hangul (incl. halfwidth)
+# is excluded, and no other letter is. Known gap, NOT excluded: Bopomofo
+# (U+3100-312F, U+31A0-31BF).
 _CJK_CLASS = (
-    "\u1100-\u11ff"          # Hangul Jamo (what NFKD turns syllables into)
+    "\u1100-\u11ff"          # Hangul Jamo
     "\u3040-\u30ff"          # Hiragana, Katakana
     "\u3130-\u318f"          # Hangul compatibility Jamo
     "\u31f0-\u31ff"          # Katakana phonetic extensions
@@ -191,6 +189,8 @@ _CJK_CLASS = (
     "\uac00-\ud7ff"          # Hangul syllables, Jamo extended-B
     "\uf900-\ufaff"          # CJK compatibility ideographs
     "\uff66-\uff9f"          # Halfwidth Katakana
+    "\uffa0-\uffdc"          # Halfwidth Hangul
+    "\U0001aff0-\U0001b16f"  # Kana extended-B, supplement, extended-A, small
     "\U00020000-\U0003ffff"  # CJK extensions B and later
 )
 _RENDER_TOKEN_RE = re.compile(rf"(?:(?![{_CJK_CLASS}])[^\W\d_]){{5,}}")
