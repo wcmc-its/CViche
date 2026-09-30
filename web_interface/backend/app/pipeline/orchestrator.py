@@ -438,6 +438,10 @@ class PipelineOrchestrator:
     def __init__(self, run_id: str, file_path: Path, db: Session):
         self.run_id = _require_safe_uid("run_id", run_id)
         self.file_path = file_path
+        # Document UID extracted from filename. == run_id at every current
+        # call site (upload.py and restart_run() name the stored file
+        # f"{run_id}.{ext}"). It keys output paths, so it must be path-safe.
+        self.document_uid = _require_safe_uid("document_uid", Path(file_path).stem)
         self.db = db
 
         # Output directory for this run (in the unified_pipeline outputs)
@@ -446,11 +450,6 @@ class PipelineOrchestrator:
         # Web interface output directory (for tracking)
         self.web_output_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
         self.web_output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Document UID extracted from filename. == run_id at every current
-        # call site (upload.py and restart_run() name the stored file
-        # f"{run_id}.{ext}"). It keys output paths, so it must be path-safe.
-        self.document_uid = _require_safe_uid("document_uid", Path(file_path).stem)
 
         # Track outputs between stages
         self.stage_outputs: dict[str, str] = {}

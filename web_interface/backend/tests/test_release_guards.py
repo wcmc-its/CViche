@@ -670,12 +670,14 @@ class TestAtomicRunStart:
 
 # --- #299  document_uid validation and per-run input copy --------------------
 
-@pytest.mark.parametrize("stem", ["bad name", "a.b", "x" * 129, "\u00e9vil"])
+@pytest.mark.parametrize("stem", ["bad name", "a.b", "x" * 129, "\u00e9vil", "abc\n"])
 def test_orchestrator_rejects_unsafe_document_uid(db, tmp_path, stem):
     from app.pipeline.orchestrator import PipelineOrchestrator
 
     with pytest.raises(ValueError, match="document_uid"):
-        PipelineOrchestrator("SAFE01", tmp_path / f"{stem}.docx", db)
+        PipelineOrchestrator("REJ299", tmp_path / f"{stem}.docx", db)
+    # A rejected constructor must not leave its output dir behind.
+    assert not (Path(__file__).parent.parent.parent / "outputs" / "REJ299").exists()
 
 
 @pytest.mark.parametrize("run_id", ["../evil", "a/b", ""])
