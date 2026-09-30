@@ -88,6 +88,16 @@ names that carry the same confirmation tag survive. It runs last, so no older
 check loses a drop to it. Reasons: `cv-title`, `date-stamp`, `section-header`,
 and the existing `column-header`.
 
+Another institution's template adds two shapes the same two-signal rule now
+covers (#530). A bare OUTLINE label ("1. Honors or Awards", "b. National:")
+failed the digit-free label shape on the marker's own digit; one leading marker
+is now stripped first (`_OUTLINE_MARKER_RE`), and stage 3b's "header/category
+label" and "subsection marker" wordings count as the section-header verdict.
+A wrapped instruction tail ("...reverse chronological order)", "use underline
+or bold font for your name") is dropped as `template-instruction` when the
+reasoning calls it instruction text and the text closes a parenthesis it never
+opened or addresses the author (`_is_wrapped_instruction_tail`).
+
 What was dropped is reported ONCE, as a single Word comment on the introductory
 paragraph, rather than per entry -- N comments saying so is itself noise.
 
@@ -269,15 +279,31 @@ _KIND_REASONING = {
         # "structural header" (which also described a name line, an
         # institution name and a career-gap explanation in the corpus).
         r"(?:sub)?section (?:header|heading|subheader|subheading|category|label|title)"
+        # Stage 3b's other wordings for the same verdict on a bare outline
+        # label (#530): "structural header/category label", "subsection marker".
+        r"|header/category label|subsection marker"
     ),
+    DROP_TEMPLATE_INSTRUCTION: re.compile(r"instruction (?:text|line)|broken header"),
 }
+
+
+# The outline marker a template puts before a label ("1. ", "b. ", "iv. ",
+# "3) "). Stripped once before the digit-free test so "1. Honors or Awards"
+# reads as the label "Honors or Awards" (#530); a digit anywhere else still
+# means data.
+_OUTLINE_MARKER_RE = re.compile(r"^(?:\d{1,2}|[A-Za-z]|[ivxIVX]{1,4})[.,)]\s+")
+_LABEL_ETC = ", etc."
 
 
 def _is_section_label_text(text: str) -> bool:
     """A short, digit-free, non-sentence line: what a section heading looks
-    like on the page. Trailing colon allowed; a terminal period is a sentence."""
-    body = text.strip()
-    if not body or body.endswith(".") or any(ch.isdigit() for ch in body):
+    like on the page. Trailing colon allowed; a terminal period is a sentence
+    unless it closes "etc." (a category label: "Professional Societies, etc.").
+    One leading outline marker ("1.", "b.") is not part of the label."""
+    body = _OUTLINE_MARKER_RE.sub("", text.strip(), count=1)
+    if not body or any(ch.isdigit() for ch in body):
+        return False
+    if body.endswith(".") and not body.lower().endswith(_LABEL_ETC):
         return False
     if _NONE_WORD_RE.search(body):  # "Patents (none)": says something about content
         return False
@@ -294,7 +320,30 @@ def _is_label_only_row(text: str) -> bool:
     return all(len(c.split()) <= _HEADER_ROW_MAX_CELL_WORDS for c in cells)
 
 
+# A wrapped instruction tail: the second line of a template's own directive
+# ("...preferably in reverse chronological order)", "presenter, etc.)"), or a
+# directive that addresses the author ("use underline or bold font for your
+# name"). Digit-free and short, so a wrapped real record (which carries a
+# year, volume or page) never matches (#530).
+_WRAPPED_TAIL_MAX_WORDS = 25
+_AUTHOR_DIRECTIVE_RE = re.compile(
+    r"\b(?:use|please|list|include|provide)\b[^;.]{0,40}\byour\b", re.IGNORECASE)
+
+
+def _is_wrapped_instruction_tail(text: str) -> bool:
+    """A short digit-free line that closes a parenthesis it never opened, or
+    tells the author what to do (#530)."""
+    body = text.strip()
+    if not body or any(ch.isdigit() for ch in body):
+        return False
+    if len(body.split()) > _WRAPPED_TAIL_MAX_WORDS:
+        return False
+    closes_unopened = body.endswith(")") and body.count(")") > body.count("(")
+    return closes_unopened or bool(_AUTHOR_DIRECTIVE_RE.search(body))
+
+
 _KIND_SHAPE = {
+    DROP_TEMPLATE_INSTRUCTION: _is_wrapped_instruction_tail,
     DROP_CV_TITLE: lambda t: bool(_CV_TITLE_RE.match(t)),
     DROP_DATE_STAMP: lambda t: bool(_DATE_STAMP_RE.match(t)),
     DROP_COLUMN_HEADER: _is_label_only_row,

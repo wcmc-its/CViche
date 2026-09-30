@@ -874,6 +874,19 @@ def test_lint_invented_records_warns_on_an_f1_entry_matching_a_known_instruction
     assert findings[0]["evidence"] == [known_instruction[:120]]
 
 
+def test_lint_invented_records_warns_on_an_f1_entry_with_foreign_template_instruction_text():
+    # #530: another institution's instruction line (invented text) is False
+    # under both WCM-only helpers, so only the foreign detector claims it.
+    text = "D. Sample Licensure (list state, license number and dates of issue)"
+    assert not is_template_instruction(text)
+    assert not is_near_template_instruction(text)
+    findings = lint_invented_records({"entries": [_invented_licensure_entry(text=text)]}, [])
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "invented_records"
+    assert "F1" in findings[0]["message"]
+    assert findings[0]["evidence"] == [text]
+
+
 def test_lint_invented_records_warns_on_an_f1_entry_matching_via_the_pipe_split_path_only():
     # A table-row-shaped F1 text ("... | ") reaches `is_template_instruction`
     # via its pipe-split rule (b), not the whole-string exact match in rule

@@ -780,6 +780,82 @@ def test_confirmed_structural_shapes_survive_when_not_t_coded(code):
     assert _residual(text, _confirmed("This is a section header."), code) is None
 
 
+# --- #530 residual: bare outline labels and wrapped instruction tails ------
+# Another institution's template numbers its empty category labels ("1. Sample
+# Awards", "b. Sample Scope:"); the marker's own digit used to fail the
+# digit-free shape. Same two-signal rule as above, invented text only.
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    ("1. Sample Awards", "Section header 'Sample Awards' is a structural label."),
+    ("12. Sample Elected Roles, etc.", "Section header describing a category."),
+    ("b. Sample Scope:", "Structural subsection marker with no entry content."),
+    ("iv. Sample Placement Options", "Subsection marker, purely organizational."),
+    ("3) Sample Department-wide", "Structural header/category label, not an entry."),
+    ("2. Sample Review Panels (titles, dates)", "Section header for review panels."),
+])
+def test_confirmed_bare_outline_label_is_dropped(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) == DROP_SECTION_HEADER
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    # A digit past the marker is data, marker or not.
+    ("1. Sample Awards 2019", "Section header."),
+    ("3. Section 4 overview", "Section header."),
+    # A sentence, or an over-long label, is content.
+    ("1. Sample awards were received.", "Section header."),
+    ("1. Sample awards received etc.", "Section header."),  # no comma: not a category label
+    ("1. One two three four five six seven eight nine ten eleven", "Section header."),
+    # A marker with nothing behind it is not a label.
+    ("1.", "Section header."),
+    # Confirmed as something else: the organisation name a CV opens with.
+    ("1. Sample Institute of Testing", "Institution name only, structural header/artifact."),
+    ("1. Cooking", "Personal hobby listed under interests."),
+])
+def test_outline_label_without_both_signals_survives(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) is None
+
+
+def test_bare_outline_label_survives_without_confirmation_or_t_code():
+    label = "1. Sample Awards"
+    assert _residual(label, None) is None
+    assert _residual(label, "This is a section header.") is None
+    assert _residual(label, _confirmed("This is a section header."), "A") is None
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    ("each sample list, preferably in reverse order)", "Structural header/instruction line."),
+    ("presenter, etc.)", "Structural fragment; appears to be a broken header."),
+    ("resulted from sample work; use underline or bold font for your name; number",
+     "Instruction text for CV formatting, not substantive content."),
+])
+def test_confirmed_wrapped_instruction_tail_is_dropped(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) == DROP_TEMPLATE_INSTRUCTION
+
+
+@pytest.mark.parametrize("text, kind_sentence", [
+    # A wrapped real record carries a year, volume or page: kept.
+    ("Sample Summit, Boston (Aug. 2023)", "Instruction text for CV formatting."),
+    ("16: 1727-1736.)", "Instruction text for CV formatting."),
+    # A stray ")" that does not end the line is not a wrapped tail.
+    ("sample) tail text follows", "Instruction text for CV formatting."),
+    # Balanced parenthesis and no directive: an ordinary fragment.
+    ("Sample Summit, Boston (annual)", "Instruction text for CV formatting."),
+    # Over the word cap: prose.
+    (" ".join(["word"] * 30) + ")", "Instruction text for CV formatting."),
+    # An author-addressed line the reasoning does not call an instruction.
+    ("use sample font for your name", "Personal hobby listed under interests."),
+])
+def test_wrapped_tail_without_both_signals_survives(text, kind_sentence):
+    assert _residual(text, _confirmed(kind_sentence)) is None
+
+
+def test_wrapped_tail_needs_its_own_signals_not_just_the_shape():
+    tail = "presenter, etc.)"
+    assert _residual(tail, None) is None
+    assert _residual(tail, "Structural fragment; broken header.") is None
+    assert _residual(tail, _confirmed("Structural fragment; broken header."), "A") is None
+
+
 def test_older_checks_keep_their_drop_over_the_residual_check():
     """'Education' is a template label AND a confirmed section header; the
     residual check runs last so the earlier reason still owns the count."""
