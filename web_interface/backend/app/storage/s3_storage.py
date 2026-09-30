@@ -17,6 +17,7 @@ import yaml
 from app.storage.base import (
     RunStorage,
     StorageKeyExists,
+    check_artifact_size,
     validate_key,
     validate_run_id,
     validate_run_key,
@@ -112,11 +113,13 @@ class S3RunStorage(RunStorage):
         return f"{self._prefix}/runs/{run_id}/{key}"
 
     def put_file(self, run_id: str, key: str, data: bytes) -> None:
+        check_artifact_size(data)
         s3_key = self._s3_key(run_id, key)
         self._s3.put_object(Bucket=self._bucket, Key=s3_key, Body=data)
         logger.debug("Uploaded s3://%s/%s (%d bytes)", self._bucket, s3_key, len(data))
 
     def put_file_exclusive(self, run_id: str, key: str, data: bytes) -> None:
+        check_artifact_size(data)
         s3_key = self._s3_key(run_id, key)
         try:
             self._s3.put_object(
@@ -137,6 +140,7 @@ class S3RunStorage(RunStorage):
         )
 
     def put_global(self, key: str, data: bytes) -> None:
+        check_artifact_size(data)
         validate_key(key)
         _validate_s3_key_text(key, allow_empty=False)
         s3_key = f"{self._prefix}/{key}"
