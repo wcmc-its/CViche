@@ -167,7 +167,7 @@ export default function AdminConfig() {
       )}
 
       {/* Allowed Users */}
-      <section className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+      <section className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-4">Allowed Users</h3>
         <div className="space-y-2 mb-4">
           {config.allowed_users.map((email) => {
@@ -248,7 +248,7 @@ export default function AdminConfig() {
       </section>
 
       {/* Rate Limits */}
-      <section className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+      <section className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-4">Default Rate Limits</h3>
         <p className="text-xs text-gray-500 mb-4">
           System-wide defaults. Individual user overrides can be set in the Users tab.
@@ -296,7 +296,7 @@ export default function AdminConfig() {
       </section>
 
       {/* Consent Version */}
-      <section className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+      <section className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-4">Consent Version</h3>
         <p className="text-xs text-gray-500 mb-4">
           Bumping the version will require all users to re-consent on their next visit.
@@ -330,7 +330,7 @@ export default function AdminConfig() {
       </section>
 
       {/* Export Data */}
-      <section className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+      <section className="bg-white rounded-lg shadow-sm border border-sand-300 p-6">
         <h3 className="text-sm font-semibold text-gray-900 mb-4">Export Data</h3>
         <p className="text-xs text-gray-500 mb-4">
           Download data as CSV files for analysis.

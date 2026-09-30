@@ -255,10 +255,10 @@ export default function AdminSubmissions() {
           <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
         </div>
       ) : (
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden">
+        <div className="bg-white rounded-lg shadow-sm border border-sand-300 overflow-hidden">
           <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-gray-200">
-              <thead className="bg-gray-50">
+            <table className="min-w-full divide-y divide-sand-200">
+              <thead className="bg-sand-50">
                 <tr>
                   <th scope="col" className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Run ID
@@ -313,7 +313,7 @@ export default function AdminSubmissions() {
                   </th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-white divide-y divide-sand-200">
                 {sortedRuns.map((run) => (
                   <tr
                     key={run.run_id}
@@ -390,7 +390,7 @@ export default function AdminSubmissions() {
           )}
 
           {hasMore && (
-            <div className="border-t border-gray-200 px-4 py-3">
+            <div className="border-t border-sand-200 px-4 py-3">
               <button
                 onClick={handleShowMore}
                 disabled={loadingMore}
