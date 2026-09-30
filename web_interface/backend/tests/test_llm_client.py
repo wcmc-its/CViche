@@ -171,6 +171,29 @@ def test_call_llm_unsupported_provider():
             call_llm("stage_2", [{"role": "user", "content": "test"}])
 
 
+def test_call_llm_propagates_config_error():
+    """An unknown stage's config error reaches the caller untouched."""
+    from unified_pipeline.llm_client import call_llm
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               side_effect=ValueError("unknown stage")):
+        with pytest.raises(ValueError, match="unknown stage"):
+            call_llm("invalid_stage", [{"role": "user", "content": "test"}])
+
+
+def test_call_llm_missing_provider_raises_keyerror():
+    """A stage config without 'provider' fails loud on the key lookup rather
+    than falling through to the unsupported-provider path."""
+    from unified_pipeline.llm_client import call_llm
+
+    config = _bedrock_config()
+    del config["provider"]
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=config):
+        with pytest.raises(KeyError, match="provider"):
+            call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+
 # ---------------------------------------------------------------------------
 # Bedrock provider (BED-01, TEST-01)
 # ---------------------------------------------------------------------------
@@ -885,6 +908,24 @@ def test_bedrock_json_schema_hard_fails_when_tool_not_used():
         mock_get_client.return_value = mock_client
 
         with pytest.raises(RuntimeError, match="tool call did not fire"):
+            call_llm("parser_grants", [{"role": "user", "content": "x"}],
+                     response_format=_JSON_SCHEMA_RF)
+
+
+def test_bedrock_json_schema_tool_block_without_input_hard_fails():
+    """A toolUse block that carries no `input` counts as the tool not firing."""
+    from unified_pipeline.llm_client import call_llm
+
+    resp = _make_bedrock_tool_response({})
+    del resp["output"]["message"]["content"][0]["toolUse"]["input"]
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = resp
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(RuntimeError, match="tool_input=missing"):
             call_llm("parser_grants", [{"role": "user", "content": "x"}],
                      response_format=_JSON_SCHEMA_RF)
 
