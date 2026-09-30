@@ -336,6 +336,167 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     return len(_record_lines(dropped_entry.get('text', ''))) >= UNRENDERED_MIN_RECORD_LINES
 
 
+# A recovered table row's cell separator, as `recover_unclaimed_table_rows`
+# (stage_2_entry_extraction.py, #420) always renders one: " | " when a
+# physical table row's cells are joined, or a bare "\t" on the
+# tab-separated fallback path. A row with more than two physical columns
+# (Label, StartDate, EndDate) survives as one string with MORE than one
+# separator in it -- `_recovered_row_value_cells` below relies on that to
+# split every value cell out on its own, not just the first.
+_CELL_SEPARATOR_RE = re.compile(r'[|\t]')
+
+
+def _recovered_row_value_cells(text: str) -> list[str]:
+    """Every VALUE cell of a stage-2 structurally recovered table row's raw
+    text (`recover_unclaimed_table_rows`, #420): every cell after the row's
+    own first cell (its label), split on `_CELL_SEPARATOR_RE`.
+
+    A recovered row is usually one label and one value ("Award Source: |
+    Fictional Research Foundation"), but `recover_unclaimed_table_rows`
+    joins the WHOLE physical table row regardless of column count -- a
+    3-column row (Label, StartDate, EndDate) survives as one string with
+    TWO separators in it ("Duration of support: | 00/2021 | 00/2022"), and
+    both halves of that date range are their own value cell, checked
+    independently by `recovered_row_already_rendered` below rather than
+    rejoined into one string: a rejoined "00/2021 | 00/2022" can never match
+    the rendered document verbatim, since nothing renders the raw separator
+    character, so treating it as a single cell would only ever hide a real
+    match, never produce a false one.
+
+    A row with no separator at all (malformed -- `recover_unclaimed_table_rows`
+    always emits label|value) has no label to split off, so the whole text
+    is itself the one value cell: there is no safer fallback, and returning
+    no cells at all would make the caller treat the row as vacuously safe to
+    drop (see `recovered_row_already_rendered`'s own `if not cells` guard).
+    """
+    cells = [c.strip() for c in _CELL_SEPARATOR_RE.split(text or '')]
+    return cells[1:] if len(cells) > 1 else cells
+
+
+def _is_trivial_value_cell(cell: str) -> bool:
+    """A value cell with no alphanumeric character (blank, or
+    separator/punctuation-only -- e.g. the empty second cell of
+    "Non-financial support: | ") carries no content that dropping the row
+    could lose, so it never has to be found rendered anywhere. Symmetrically,
+    it must never by itself justify a drop either: a row whose every cell is
+    trivial has nothing confirmed rendered and stays (the `if not cells`
+    guard in `recovered_row_already_rendered`)."""
+    return not any(ch.isalnum() for ch in cell)
+
+
+def _collapse_and_fold(text: str) -> str:
+    """Casefold + whitespace-COLLAPSED (never whitespace-deleted)
+    normalization for `recovered_row_already_rendered`'s containment check.
+
+    Deliberately not this module's own `_squash` (whitespace-FREE, used by
+    `_drop_is_safe` above): `recovered_row_already_rendered` joins every
+    already-rendered line of the document into ONE string before searching
+    it, and a `_squash`-style join would delete the very whitespace that
+    keeps two unrelated adjacent lines apart -- gluing "...Foundation" and
+    "1%..." into "...Foundation1%..." risks a match that never existed as
+    contiguous rendered text. Collapsing each run of whitespace to a single
+    space keeps a real word boundary at every line join instead of removing
+    it. Kept as its own small copy rather than importing
+    `normalization/pii.py`'s near-identical `_collapse_whitespace`, for the
+    same reason `_value_contained_in_text` below doesn't import that
+    module's containment helper either: that module decides whether a value
+    is PROTECTED personal data, a data-governance question; this one decides
+    whether a value RENDERED, a content-loss question, and the two must stay
+    free to diverge (module docstring: nothing here may import
+    `stage_6_word_template`, and the same boundary applies one level down to
+    the PII module).
+    """
+    return re.sub(r'\s+', ' ', str(text or '')).strip().casefold()
+
+
+def _value_contained_in_text(value: str, text: str) -> bool:
+    """Whitespace-collapsed, case-folded containment of `value` in `text`,
+    aligned on a word boundary at BOTH ends: an alphanumeric edge of `value`
+    may not sit against another alphanumeric character in `text`.
+
+    Without the boundary, '5%' is a literal substring of '25%', and '2021'
+    is a literal substring of '20215' at the TRAILING edge -- a short value
+    from one record could read as "already rendered" merely because a
+    longer, unrelated value happens to contain the same characters, at
+    either end. Same shape as `normalization/pii.py`'s
+    `_pii_containment_pattern`, kept as its own copy for the reason
+    `_collapse_and_fold` above gives.
+    """
+    folded_value = _collapse_and_fold(value)
+    if not folded_value:
+        return False
+    folded_text = _collapse_and_fold(text)
+    body = re.escape(folded_value)
+    lead = r'(?<![a-z0-9])' if folded_value[0].isalnum() else ''
+    trail = r'(?![a-z0-9])' if folded_value[-1].isalnum() else ''
+    return re.search(lead + body + trail, folded_text) is not None
+
+
+def recovered_row_already_rendered(entry: dict, rendered_lines: list[str]) -> bool:
+    """True when a stage-2 structurally-recovered table row (#420,
+    `recover_unclaimed_table_rows`) is safe to drop from the Appendix because
+    EVERY non-trivial value cell of its own raw text already appears,
+    verbatim (word-boundary, whitespace-collapsed, case-folded), somewhere
+    in the document's ALREADY-RENDERED body -- never the Appendix itself,
+    which has not been written yet when this runs (`_drop_recovered_row_duplicates`,
+    stage_6_word_template.py, always calls this before
+    `_add_remaining_to_appendix`).
+
+    A row with zero non-trivial value cells (its only content is a bare
+    label) is never dropped by this: there is no value to confirm, so
+    "confirmed rendered" cannot be true, and the row stays. Because this
+    only ever REQUIRES more matches before allowing a drop, it can never
+    treat an unrendered value as rendered -- the one failure mode that
+    would actually lose content.
+
+    Deliberately provenance-blind (round 3): earlier rounds required a
+    row's raw text to ALSO be a verbatim substring of one specific parent
+    entry (`recovered_row_duplicates_parent`, now removed), then scoped the
+    render check to that one parent's own rendered block
+    (`_parent_rendered_block`, also removed) -- both meant to stop an
+    unrelated entry's render from vouching for a row it had nothing to do
+    with. That scoping was itself the bug: it picked the first rendered
+    block carrying ANY one of a parent's identifying field values, and a
+    value shared across records -- most commonly a funding agency, shared
+    across a faculty member's own grants -- resolved two different parents
+    to the SAME block. A grant whose own table rendered nothing for a field
+    could still have its recovered row dropped because a same-agency
+    sibling's block happened to match: real content loss, the exact failure
+    this function exists to prevent, and no content-keyed scoping is safe
+    against it, because `extracted_fields` carries no way to tell two
+    records' shared values apart.
+
+    The fix drops the identity question entirely: this never asks WHICH
+    entry rendered a value, only whether the value is somewhere in the
+    document the reader will already see. That is also the actual guarantee
+    an Appendix drop needs -- a duplicate line adds noise, a missing one
+    loses content, and "printed by a different record" is still printed.
+    A row can therefore be dropped even when the match is coincidental (two
+    grants that happen to share one field's exact text); the trade is a
+    little provenance precision for a rule that is unconditionally simpler
+    and unconditionally content-safe. The inverse case -- a value stage 6
+    REFORMATS on the way to a render slot (a raw "00/2021" cell rendered as
+    "2021") -- will not verbatim-match and so is correctly NOT confirmed:
+    the row stays, printed once more than strictly necessary. Content
+    duplication, never content loss, is the only direction this function is
+    allowed to be wrong in.
+
+    `entry.get('recovered_row')` gates this exactly as every earlier round
+    did: only stage 2's structural backstop sets that flag, so an ordinary
+    model-attested entry that happens to be a text subset of another still
+    goes through `deduplicate_entries`'s Jaccard/containment path above,
+    never this one.
+    """
+    if not entry.get('recovered_row'):
+        return False
+    cells = [c for c in _recovered_row_value_cells(entry.get('text', '') or '')
+             if not _is_trivial_value_cell(c)]
+    if not cells:
+        return False
+    rendered_text = '\n'.join(rendered_lines)
+    return all(_value_contained_in_text(cell, rendered_text) for cell in cells)
+
+
 def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         require_date_overlap: bool = False,
                         decisions: list[dict] | None = None,
