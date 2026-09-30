@@ -176,6 +176,17 @@ def test_delimiters_key_merges_multiline_entry_and_uses_given_confidence(monkeyp
     assert cost_info == {"cost": 0.001, "tokens": 10, "prompt_tokens": 8, "completion_tokens": 2}
 
 
+def test_prompt_tells_the_model_to_leave_out_template_outline_labels(monkeypatch):
+    # #530: foreign-template scaffold labels reached the Appendix as entries.
+    prompts = []
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: prompts.append(kw["messages"][1]["content"])
+                        or _llm_result({"delimiters": []}))
+    elements = [_para(10, "B. Widget Service (include dates, if applicable)")]
+    stage2.detect_entries_for_section(["Service"], elements, 10, 10, element_index_map=_idx_map(elements))
+    assert "Template Outline Labels Are Not Entries" in prompts[0]
+    assert "When in doubt, keep the line as an entry" in prompts[0]
+
+
 def test_entries_key_used_as_fallback_when_delimiters_key_absent(monkeypatch):
     elements = [_para(1, "Solo paragraph")]
     monkeypatch.setattr(stage2, "call_llm", lambda **kw: _llm_result(

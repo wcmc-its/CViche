@@ -637,6 +637,22 @@ def filter_extraction_noise(entries: list[dict]) -> list[dict]:
     return kept
 
 
+# `detect_entries_for_section` prompt sections 2-3, kept out of the function
+# body so its size ratchet (CODING_STANDARDS.md 3.2a) does not grow.
+_TABLE_AND_TEMPLATE_LABEL_RULES = """### 2. Handling Tables
+
+* **Whole Table as Entry:** If a table describes a *single* summary item (e.g., a summary of one grant), treat the entire table as one entry (`element_type: "table"`).
+* **Rows as Entries:** If a table lists *multiple* items (e.g., a list of courses), treat each row (or group of rows based on the logic above) as a separate entry (`element_type: "table_row"`).
+
+### 3. Template Outline Labels Are Not Entries
+
+Some CVs are written on another institution's template and keep its outline labels, e.g. `C. Academic Appointments (include institution, title and dates of appointment)` or `3. Postgraduate Training (source of support, advisor, if applicable)`.
+
+* Leave a paragraph out of the output when it is **only** such a label: a lettered or numbered heading, usually followed by an instruction in parentheses, with no date, name, institution, or detail of its own.
+* When in doubt, keep the line as an entry. A label that carries real content (e.g. `3. Patents: US 1,234,567, 2019`) is an entry.
+"""
+
+
 def detect_entries_for_section(
     section_hierarchy: list[str],
     doc_elements: list[dict],
@@ -962,12 +978,8 @@ A single logical entry may span multiple lines (paragraphs or table rows). You m
 * `element_idx_end`: Index of the last line containing details for that same item.
 * If an entry is a single line, start and end indices are identical.
 
-### 2. Handling Tables
-
-* **Whole Table as Entry:** If a table describes a *single* summary item (e.g., a summary of one grant), treat the entire table as one entry (`element_type: "table"`).
-* **Rows as Entries:** If a table lists *multiple* items (e.g., a list of courses), treat each row (or group of rows based on the logic above) as a separate entry (`element_type: "table_row"`).
-
-### 3. Output Format
+{_TABLE_AND_TEMPLATE_LABEL_RULES}
+### 4. Output Format
 
 Respond **only** with a JSON array containing the identified entries. If no entries are found, return `[]`.
 
