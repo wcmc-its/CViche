@@ -997,6 +997,9 @@ def test_dedup_and_render_tokens_are_unicode_aware():
     assert _long_word_tokens("Ελένη Παπαδοπούλου") == {"ελενη", "παπαδοπουλου"}
     assert _long_word_tokens("Alpha beta gamma12") == {"alpha", "gamma"}
     assert _long_word_tokens("hello_world") == {"hello", "world"}
+    # #722: CJK never forms a token (excluded, not measured).
+    assert _long_word_tokens("東京大学医学部教授 한국어로된논문제목") == set()
+    assert _long_word_tokens("東京大学医学部 Kessler") == {"kessler"}
 
 
 if __name__ == "__main__":

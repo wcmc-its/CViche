@@ -162,7 +162,30 @@ def segment_already_rendered(segment_text: str, extracted_fields: dict) -> bool:
 RENDER_TOKEN_MIN_COUNT = 3
 RENDER_TOKEN_OVERLAP = 0.7
 # Unicode letters only (no digits/underscore): [a-z]{5,} on ASCII input (#541).
-_RENDER_TOKEN_RE = re.compile(r"[^\W\d_]{5,}")
+#
+# CJK is EXCLUDED, not measured (#722). The 5-letter floor and
+# RENDER_TOKEN_MIN_COUNT assume whitespace-delimited words; Chinese, Japanese
+# and Korean have none, so a run of CJK letters is a clause, not a word, and
+# no threshold here was ever tuned against CJK text (the local farm has 0 CJK
+# CVs). CJK characters therefore never form a token: a chunk that is all CJK
+# has too few tokens, so every render-overlap check returns None ("not
+# verifiable"), never False ("missing"). Latin/Cyrillic/Greek words inside a
+# mixed-script chunk still count. A script-aware floor needs real CJK data.
+_CJK_CLASS = (
+    "\u1100-\u11ff"          # Hangul Jamo (what NFKD turns syllables into)
+    "\u2e80-\u2fdf"          # CJK radicals
+    "\u3040-\u30ff"          # Hiragana, Katakana
+    "\u3130-\u318f"          # Hangul compatibility Jamo
+    "\u31f0-\u31ff"          # Katakana phonetic extensions
+    "\u3400-\u4dbf"          # CJK extension A
+    "\u4e00-\u9fff"          # CJK unified ideographs
+    "\ua960-\ua97f"          # Hangul Jamo extended-A
+    "\uac00-\ud7ff"          # Hangul syllables, Jamo extended-B
+    "\uf900-\ufaff"          # CJK compatibility ideographs
+    "\uff66-\uff9f"          # Halfwidth Katakana
+    "\U00020000-\U0003ffff"  # CJK extensions B and later
+)
+_RENDER_TOKEN_RE = re.compile(rf"(?:(?![{_CJK_CLASS}])[^\W\d_]){{5,}}")
 RENDER_PIECE_MIN_CHARS = 15
 RENDER_PIECE_WINDOW = 40
 

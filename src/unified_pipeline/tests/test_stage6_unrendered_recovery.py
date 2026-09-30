@@ -36,6 +36,11 @@ from unified_pipeline.stage_6_word_template import (  # noqa: E402
     run_stage6,
     segment_already_rendered,
 )
+from unified_pipeline.stage6.render_check import (  # noqa: E402
+    _RENDER_TOKEN_RE,
+    _norm,
+    _record_rendered,
+)
 
 
 def _generator(**kwargs):
@@ -270,6 +275,40 @@ def _f1_entry():
             "expiration_date": "2027-06-30",
         },
     }
+
+
+_CJK_RECORD = ("2015年4月 東京大学医学部附属病院 循環器内科 准教授として心不全の臨床研究に従事 "
+               "한국어로된논문제목입니다 中华人民共和国国家自然科学基金资助项目")
+
+
+def test_cjk_never_forms_a_render_token_so_cjk_lines_are_unverifiable():
+    """#722: CJK has no word boundaries, so the 5-letter floor is not
+    meaningful for it; CJK is excluded, not measured. A CJK-only record line
+    is None (not verifiable), never False, and Latin/Cyrillic words in a
+    mixed-script line still count. Invented text."""
+    assert _RENDER_TOKEN_RE.findall(_norm(_CJK_RECORD)) == []
+    mixed = _norm("東京大学医学部 Cardiology Иванов 心不全の臨床研究 Kessler")
+    assert set(_RENDER_TOKEN_RE.findall(mixed)) == {
+        "cardiology", "иванов", "kessler"}
+    other = [set(_RENDER_TOKEN_RE.findall(_norm("Completely unrelated "
+                                                "Cardiology Kessler line")))]
+    assert _record_rendered(_CJK_RECORD, "", other) is None
+    latin = "Jun 2011, Quexley Cartographer Stairwells Forgotten College"
+    assert _record_rendered(latin, "", other) is False
+
+
+@pytest.mark.parametrize("run", [
+    "ひらがなのことばです",          # Hiragana
+    "カタカナノコトバデス",          # Katakana
+    "ｶﾀｶﾅｶﾅｶﾅｶﾅ",                    # Halfwidth Katakana (raw, pre-NFKD)
+    "한국어한ᄀ",  # Hangul Jamo (NFKD form)
+    "".join(chr(0x3400 + i * 16) for i in range(12)),        # CJK extension A
+    "".join(chr(0x20000 + i * 16) for i in range(12)),       # CJK extension B
+])
+def test_every_cjk_block_is_excluded_from_the_token_regex(run):
+    """#722: each range in `_CJK_CLASS` must keep a 5+ run out of the token
+    set on its own (the sentence-level test above hits only Han/Hangul)."""
+    assert _RENDER_TOKEN_RE.findall(run) == []
 
 
 def test_f1_dropped_license_recovered_column_header_not():
