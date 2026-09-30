@@ -512,7 +512,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         )}
 
         {isComplete && (
-          <section id="feedback-section" className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] px-4 py-5 sm:px-6">
+          <section id="feedback-section">
             <FeedbackForm runId={runId} />
           </section>
         )}
