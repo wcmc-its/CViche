@@ -18,8 +18,8 @@ name it exported before.
 
 import re
 
+from unified_pipeline.core.text_norm import norm
 from unified_pipeline.segmentation_regression import (
-    _norm,
     compute_metrics,
     find_lost_blocks,
     lint_metrics,
@@ -79,7 +79,7 @@ def _hierarchy_titles(stage1a: dict) -> list[str]:
 
     def walk(nodes):
         for node in nodes or []:
-            title = _norm(node.get("text", ""))
+            title = norm(node.get("text", ""))
             if title:
                 titles.append(title)
             walk(node.get("children"))
@@ -90,7 +90,7 @@ def _hierarchy_titles(stage1a: dict) -> list[str]:
 
 #: A leading enumeration token stripped before comparing header keys (#814):
 #: roman ('I.', 'XI.'), arabic ('1.', '1.1.'), or a single letter ('A.').
-#: Applied to lowercase, already-`_norm`ed text -- 'I.' below is 'i.'.
+#: Applied to lowercase, already-`norm`ed text -- 'I.' below is 'i.'.
 #: Stage 1a promotes 'I.  CURRENT POSITION' to the hierarchy node
 #: 'CURRENT POSITION', without the numeral; comparing raw normalized forms
 #: reports every one of those headers as missing (web199: 11 of 11).
@@ -127,7 +127,7 @@ def _header_key(text: str) -> str:
     'I.'/'1.'/'A.' section numeral: stage 1a strips it, so comparing the raw
     forms reports every enumerated section as missing too.
     """
-    normed = _norm(text).rstrip(":").strip()
+    normed = norm(text).rstrip(":").strip()
     return _ENUM_PREFIX_RE.sub("", normed, count=1).strip()
 
 

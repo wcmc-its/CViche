@@ -15,6 +15,9 @@ from pathlib import Path
 
 import pytest
 
+from unified_pipeline import segmentation_regression
+from unified_pipeline.core import text_norm
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -535,3 +538,10 @@ def test_lint_flags_and_clean():
     clean = _cand(text_coverage_pct=99.5, mega_entries=0,
                   duplicate_entries=0, empty_content=0)
     assert lint_metrics(clean) == []
+
+
+def test_segmentation_regression_aliases_are_the_public_functions():
+    assert segmentation_regression._norm is text_norm.norm
+    assert segmentation_regression._squash is text_norm.squash
+    assert segmentation_regression._looks_like_record is text_norm.looks_like_record
+    assert segmentation_regression.SUBSTANTIVE_LINE_CHARS == text_norm.SUBSTANTIVE_LINE_CHARS == 15

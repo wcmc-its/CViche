@@ -43,7 +43,6 @@ import json
 import logging
 import re
 import sys
-import unicodedata
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
@@ -54,12 +53,19 @@ from unified_pipeline.core.template_boilerplate import (
     is_near_template_instruction,
     is_template_instruction,
 )
+from unified_pipeline.core.text_norm import (
+    SUBSTANTIVE_LINE_CHARS,
+    looks_like_record,
+    norm,
+    squash,
+)
+
+# Aliases for callers that predate the move to core.text_norm.
+_norm = norm
+_squash = squash
+_looks_like_record = looks_like_record
 
 logger = logging.getLogger(__name__)
-
-# Substantive-line threshold: shorter lines ("2016", "PhD", bare bullets)
-# match by accident and only add noise to the coverage metric.
-SUBSTANTIVE_LINE_CHARS = 15
 
 # A content entry counts as a mega-entry when it packs this many
 # record-like lines (the layout-table collapse smell, #208).
@@ -192,24 +198,6 @@ def _counts(m: Metrics) -> dict[str, int]:
     }
 
 
-def _fold_marks(text: str) -> str:
-    """Drop combining marks ('Müller' -> 'Muller', Greek tonos, Cyrillic
-    breve) so an accented word tokenizes the same as its base letters (#541).
-    NFKD then NFC: NFC recomposes Hangul jamo so a CJK string keeps its
-    character count (CJK is excluded from render tokens, #722). Pure-ASCII input is
-    returned untouched, byte-identical."""
-    if text.isascii():
-        return text
-    decomposed = unicodedata.normalize("NFKD", text)
-    kept = "".join(c for c in decomposed if not unicodedata.combining(c))
-    return unicodedata.normalize("NFC", kept)
-
-
-def _norm(text: str) -> str:
-    # Lowercase AFTER folding: NFKD can yield uppercase ("™" -> "TM").
-    return _fold_marks(" ".join(str(text or "").split())).lower()
-
-
 # Unicode letters/digits, no underscore: identical to [a-z0-9]+ on the
 # lowercased ASCII input this used to see (#541).
 _TOKEN_RE = re.compile(r"[^\W_]+")
@@ -219,12 +207,12 @@ def _tokens(text: str) -> Counter[str]:
     """Word/number token MULTISET for the coverage check (see
     compute_metrics). A set would collapse repeated tokens, so a source line
     repeating an entry's words would read as covered (#T2.3)."""
-    return Counter(_TOKEN_RE.findall(_norm(text)))
+    return Counter(_TOKEN_RE.findall(norm(text)))
 
 
 def _token_list(text: str) -> list[str]:
     """Word/number tokens in document ORDER (`_tokens` drops the order)."""
-    return _TOKEN_RE.findall(_norm(text))
+    return _TOKEN_RE.findall(norm(text))
 
 
 #: How many tokens beyond the line's own count the smallest stretch of an
@@ -254,15 +242,6 @@ def _has_compact_window(need: Counter[str], entry_tokens: list[str], max_span: i
                 missing += have[left] < need[left]
             lo += 1
     return False
-
-
-def _squash(text: str) -> str:
-    """Whitespace-FREE normalization for the coverage check: stage 2 joins
-    text across in-paragraph line breaks with no whitespace at all
-    ('Present position:' + break + 'Attending' -> 'position:Attending'),
-    and tab-joined label/value lines re-emerge with tabs dropped. Comparing
-    with whitespace removed on both sides is immune to all of that."""
-    return re.sub(r"\s+", "", str(text or "")).lower()
 
 
 # --------------------------------------------------------------- source lines
@@ -332,14 +311,9 @@ def iter_source_block_lines(docx_path: str) -> list[tuple[int, str]]:
 
 # ------------------------------------------------------------------- metrics
 
-def _looks_like_record(line: str) -> bool:
-    line = line.strip()
-    return len(line) > 60 and (" | " in line or "\t" in line)
-
-
 def _walk_headers(nodes: list[HierarchyNode] | None, titles: list[str]) -> None:
     for node in nodes or []:
-        title = _norm(node.get("text", ""))
+        title = norm(node.get("text", ""))
         if title:
             titles.append(title)
         _walk_headers(node.get("children"), titles)
@@ -361,7 +335,7 @@ def _is_template_scaffolding(line: str) -> bool:
     Not `is_template_label_line`: a short label ("2. Principal Investigator",
     "Weill Cornell Medical College") is also a real value in a CV, and its
     loss must still count."""
-    if len(_norm(line)) < TEMPLATE_SCAFFOLDING_MIN_CHARS:
+    if len(norm(line)) < TEMPLATE_SCAFFOLDING_MIN_CHARS:
         return False
     return (is_template_instruction(line) or is_near_template_instruction(line)
             or is_foreign_template_instruction(line))
@@ -373,14 +347,14 @@ def _substantive(source_lines: list[str]) -> list[str]:
     prompts and column labels (a CV written on the template) are not content
     stage 2 should keep, so they are neither covered nor lost (#815: 976WPY's
     64 "lost" lines were its labels)."""
-    return [l for l in source_lines if len(_norm(l)) >= SUBSTANTIVE_LINE_CHARS
+    return [l for l in source_lines if len(norm(l)) >= SUBSTANTIVE_LINE_CHARS
             and not _is_template_scaffolding(l)]
 
 
 def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
     """The substantive lines no entry covers, stripped.
 
-    Whitespace-free comparison (see _squash). Checked PER ENTRY, so a line can
+    Whitespace-free comparison (see squash). Checked PER ENTRY, so a line can
     never be called covered by unrelated content scattered across the document
     (what the old \\x00-sentinel join enforced).
 
@@ -395,12 +369,12 @@ def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
     than the line (#610: holding the same words scattered through an
     unrelated entry is not coverage). Both checks are kept: squash catches glued text with no token boundaries,
     tokens catch mid-line merges. A line is lost only if neither holds."""
-    entry_squash = [_squash(e.get("text", "")) for e in entries]
+    entry_squash = [squash(e.get("text", "")) for e in entries]
     entry_tokens = [_tokens(e.get("text", "")) for e in entries]
     entry_seqs = [_token_list(e.get("text", "")) for e in entries]
 
     def _covered(line: str) -> bool:
-        squashed = _squash(line)
+        squashed = squash(line)
         if squashed and any(squashed in es for es in entry_squash):
             return True
         line_tokens = _tokens(line)
@@ -431,7 +405,7 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
     dups = 0
     empty = 0
     for e in entries:
-        text = _norm(e.get("text", ""))
+        text = norm(e.get("text", ""))
         if e.get("element_type") not in ("header", "break") and not text:
             empty += 1
             continue
@@ -444,7 +418,7 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
     mega = 0
     for e in content:
         records = sum(1 for line in str(e.get("text", "")).split("\n")
-                      if _looks_like_record(line))
+                      if looks_like_record(line))
         if records >= MEGA_ENTRY_MIN_RECORDS:
             mega += 1
 
@@ -462,7 +436,7 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
         # instead of raising or falling back cleanly (#616 item i).
         hierarchy = e.get("hierarchy")
         if isinstance(hierarchy, list) and hierarchy:
-            top = _norm(hierarchy[0]) or "(none)"
+            top = norm(hierarchy[0]) or "(none)"
         else:
             top = "(none)"
         per_h1[top] = per_h1.get(top, 0) + 1
@@ -537,8 +511,8 @@ def compare_metrics(baseline: Metrics, candidate: Metrics) -> tuple[Verdict, lis
     drop = baseline["text_coverage_pct"] - candidate["text_coverage_pct"]
     if drop > COVERAGE_DROP_TOLERANCE_PTS:
         reasons.append(f"coverage {baseline['text_coverage_pct']}% -> {candidate['text_coverage_pct']}%")
-    lost_before = set(map(_norm, baseline["lost_lines"]))
-    newly_lost = [l for l in candidate["lost_lines"] if _norm(l) not in lost_before]
+    lost_before = set(map(norm, baseline["lost_lines"]))
+    newly_lost = [l for l in candidate["lost_lines"] if norm(l) not in lost_before]
     if newly_lost:
         reasons.append(f"{len(newly_lost)} newly lost line(s), e.g. '{newly_lost[0][:60]}'")
     # Diffed unconditionally (not gated on a headers_detected count drop):

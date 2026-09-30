@@ -26,10 +26,10 @@ from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
-from unified_pipeline.segmentation_regression import (
+from unified_pipeline.core.text_norm import (
     SUBSTANTIVE_LINE_CHARS,
-    _looks_like_record,
-    _norm,
+    looks_like_record,
+    norm,
 )
 
 from ..shared import (
@@ -51,7 +51,7 @@ DEAD_SECTION_MIN_LINES = 3
 
 
 # Lint 8: an entry is a fused multi-record candidate at this many record-like
-# lines. _looks_like_record only sees pipe/tab rows; employment/appointment
+# lines. looks_like_record only sees pipe/tab rows; employment/appointment
 # records are date-range-prefixed comma lines ("Jun 2020-Jun 2025, Assistant
 # Professor"), caught by `_is_date_record_line` when the line carries a
 # payload beyond the bare date range. A bare date line (`_is_bare_date_line`)
@@ -324,7 +324,7 @@ _NAME_TOKEN_RE = re.compile(r"[^\W_]+")
 
 
 def _name_tokens(text: str) -> set[str]:
-    stripped = _NAME_LABEL_RE.sub("", _norm(text))
+    stripped = _NAME_LABEL_RE.sub("", norm(text))
     return {tok for tok in _NAME_TOKEN_RE.findall(stripped) if len(tok) > 1}
 
 
@@ -390,9 +390,9 @@ def lint_dead_sections(stage2: dict,
     for e in stage2.get("entries", []):
         if e.get("element_type") in ("header", "break"):
             continue
-        top = _norm((e.get("hierarchy") or ["(none)"])[0]) or "(none)"
+        top = norm((e.get("hierarchy") or ["(none)"])[0]) or "(none)"
         lines = sum(1 for line in str(e.get("text", "")).split("\n")
-                    if len(_norm(line)) >= SUBSTANTIVE_LINE_CHARS)
+                    if len(norm(line)) >= SUBSTANTIVE_LINE_CHARS)
         per_h1[top] = per_h1.get(top, 0) + lines
 
     sections: List[List] = []  # [raw title, normalized name, substantive lines]
@@ -415,9 +415,9 @@ def lint_dead_sections(stage2: dict,
             if is_template_instruction(line) or is_foreign_template_instruction(line):
                 continue
             if kind == "table":
-                if _norm(line):
+                if norm(line):
                     current[2] += 1
-            elif len(_norm(line)) >= SUBSTANTIVE_LINE_CHARS:
+            elif len(norm(line)) >= SUBSTANTIVE_LINE_CHARS:
                 current[2] += 1
 
     findings = []
@@ -443,7 +443,7 @@ def _record_lines(text: object) -> list[str]:
     """Record-like lines of an entry: pipe/tab rows, plus date-prefixed lines
     that pass `_is_date_record_line` (a record, not prose or a bare range)."""
     return [line.strip() for line in str(text or "").split("\n")
-            if _looks_like_record(line) or _is_date_record_line(line.strip())]
+            if looks_like_record(line) or _is_date_record_line(line.strip())]
 
 
 def _bare_date_lines(text: object) -> int:
@@ -842,7 +842,7 @@ def _org_fabricated_from_name(org: str, name: str) -> bool:
     year -- the org column was copied out of the name (#229/#889). An award
     merely NAMED AFTER its grantor ("<org> Postdoc Travel Award") has other
     words left over and is legitimate."""
-    org_n, name_n = _norm(org), _norm(name)
+    org_n, name_n = norm(org), norm(name)
     if org_n not in name_n:
         return False
     leftover = name_n.replace(org_n, " ", 1)
@@ -904,7 +904,7 @@ def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
     'malformed'."""
     if len(tbl) < 2 or not tbl[0]:
         return None
-    header = [_norm(cell) for cell in tbl[0]]
+    header = [norm(cell) for cell in tbl[0]]
     header_all = " ".join(header)
     if "name of award" not in header_all and "date awarded" not in header_all:
         return None
@@ -1032,7 +1032,7 @@ def _passage_key(text) -> str:
     a spacer can neither match another spacer nor break a run."""
     lines = [_PASSAGE_ENUMERATOR_RE.sub("", line)
              for line in str(text or "").split("\n")]
-    return " ".join(_PASSAGE_PUNCT_RE.sub(" ", _norm("\n".join(lines))).split())
+    return " ".join(_PASSAGE_PUNCT_RE.sub(" ", norm("\n".join(lines))).split())
 
 
 def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:

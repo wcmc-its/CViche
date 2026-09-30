@@ -13,7 +13,7 @@ import functools
 import re
 from typing import TYPE_CHECKING, NamedTuple
 
-from unified_pipeline.segmentation_regression import _norm, _squash
+from unified_pipeline.core.text_norm import norm, squash
 
 # The render-overlap/verbatim-piece constants and `_entry_pieces` used to be
 # parallel COPIES of stage6/render_check.py's own (by-name, not by-import --
@@ -48,7 +48,7 @@ _LINE_SENTINEL = "\x00"
 
 def _long_word_tokens(text) -> set:
     """5+-letter token set for one string (lints 5/8 render-overlap checks)."""
-    return set(_RENDER_TOKEN_RE.findall(_norm(text)))
+    return set(_RENDER_TOKEN_RE.findall(norm(text)))
 
 
 @functools.cache
@@ -65,7 +65,7 @@ def _template_haystack() -> str:
     doc = Document(_TEMPLATE_DOCX_PATH)
     texts = [p.text for p in doc.paragraphs]
     texts += [c.text for t in doc.tables for r in t.rows for c in r.cells]
-    return _LINE_SENTINEL.join(s for s in map(_squash, texts) if s)
+    return _LINE_SENTINEL.join(s for s in map(squash, texts) if s)
 
 
 def _piece_in_template(piece: str) -> bool:
@@ -83,11 +83,11 @@ def _output_section_header(text: str) -> str | None:
     header (either form above), else None."""
     stripped = str(text or "").strip()
     if _SECTION_HEADER_RE.match(stripped):
-        return _norm(re.sub(r"^[A-Z]\.\s+", "", stripped))
+        return norm(re.sub(r"^[A-Z]\.\s+", "", stripped))
     if (3 <= len(stripped) <= 60 and stripped[0].isalpha()
             and stripped == stripped.upper()
             and not any(ch.isdigit() for ch in stripped)):
-        return _norm(stripped)
+        return norm(stripped)
     return None
 
 
@@ -128,7 +128,7 @@ def _haystacks(blocks: list[tuple[str, str]]) -> Haystack:
     for _, text in blocks:
         for line in str(text).split("\n"):
             if line.strip():
-                pieces.append(_squash(line))
+                pieces.append(squash(line))
                 tokens.update(_long_word_tokens(line))
     return Haystack(_LINE_SENTINEL.join(pieces), tokens)
 

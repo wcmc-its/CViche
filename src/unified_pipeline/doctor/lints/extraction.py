@@ -36,11 +36,11 @@ from unified_pipeline.stage4.coercion import (
     DATE_RANGE_TAXONOMY_CODES,
     find_single_closed_range,
 )
-from unified_pipeline.segmentation_regression import (
+from unified_pipeline.core.text_norm import (
     SUBSTANTIVE_LINE_CHARS,
-    _looks_like_record,
-    _norm,
-    _squash,
+    looks_like_record,
+    norm,
+    squash,
 )
 from unified_pipeline.stage6.normalization.institutions import (
     _get_cleaned_institution_name,
@@ -99,7 +99,7 @@ _FUNDING_SECTIONS = (
 # accumulating into whichever funding bucket was still open -- the M2C
 # haystack absorbed the entire patents section on every corpus CV that had
 # one (#492). Normalised exactly like `_FUNDING_SECTIONS` titles are
-# compared (`_norm`, trailing colon stripped).
+# compared (`norm`, trailing colon stripped).
 _FUNDING_BOUNDARY_TITLES = frozenset({
     "patents & inventions",
 })
@@ -126,7 +126,7 @@ def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
     for kind, text in blocks:
         stripped = str(text).strip()
         if kind == "p":
-            normed = _norm(stripped).rstrip(":")
+            normed = norm(stripped).rstrip(":")
             code = next((c for c, title in _FUNDING_SECTIONS if normed == title), None)
             if code:
                 current = code
@@ -184,7 +184,7 @@ UNDER_EXTRACTION_MIN_CHARS = 800
 UNDER_EXTRACTION_MIN_RECORDS = 2
 
 
-# _looks_like_record only sees pipe/tab rows; fused award/honor lines are
+# looks_like_record only sees pipe/tab rows; fused award/honor lines are
 # plain newline lines carrying a leading or trailing year ("2020 AECT ...",
 # "... August 2025.") — the 2Q1_ZQ honors mega-entry (19% coverage) was
 # invisible without counting them (#229).
@@ -207,7 +207,7 @@ def lint_under_extraction(stage4: Dict) -> List[Dict]:
             continue
         records = sum(
             1 for line in text.split("\n")
-            if _looks_like_record(line)
+            if looks_like_record(line)
             or (len(line.strip()) >= SUBSTANTIVE_LINE_CHARS
                 and _YEAR_EDGE_LINE_RE.search(line)))
         if records < UNDER_EXTRACTION_MIN_RECORDS:
@@ -240,7 +240,7 @@ def _shared_entry_pieces(entries: list[dict]) -> frozenset:
     boilerplate."""
     texts_by_piece: dict[str, set] = {}
     for e in entries:
-        squashed = _squash(e.get("text"))
+        squashed = squash(e.get("text"))
         for piece in _entry_pieces(e.get("text")):
             texts_by_piece.setdefault(piece, set()).add(squashed)
     return frozenset(p for p, texts in texts_by_piece.items() if len(texts) > 1)
@@ -255,7 +255,7 @@ def _only_boilerplate_hit(text: str | None, pieces: list[str],
     check cannot see, so the entry stays unverifiable rather than lost)."""
     if distinctive or not any(p in haystack for p in pieces):
         return False
-    return sum(1 for f in entry_fragments(text) if _squash(f)) == len(pieces)
+    return sum(1 for f in entry_fragments(text) if squash(f)) == len(pieces)
 
 
 def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set,
@@ -366,7 +366,7 @@ def _span(entry: dict) -> tuple:
 
 def _record_values(record: dict) -> set[str]:
     """The record's distinct, squashed, non-empty extracted string values."""
-    return {_squash(v) for v in _nonempty_field_values(
+    return {squash(v) for v in _nonempty_field_values(
         record.get("extracted_fields") or {})} - {""}
 
 
@@ -379,8 +379,8 @@ def _institution_names(stage5b: dict | None) -> dict:
     names = {}
     for e in entries:
         fields = e.get("extracted_fields")
-        raw = _squash(fields.get("institution")) if isinstance(fields, dict) else ""
-        written = _squash(_get_cleaned_institution_name(e))
+        raw = squash(fields.get("institution")) if isinstance(fields, dict) else ""
+        written = squash(_get_cleaned_institution_name(e))
         if span_counts[_span(e)] == 1 and written:
             names[_span(e)] = {raw: written}
     return names
@@ -421,7 +421,7 @@ def _content_values(record: dict, evidence: Stage4Evidence) -> set[str]:
     fields = {k: v for k, v in (record.get("extracted_fields") or {}).items()
               if k not in UNWRITTEN_CATEGORY_FIELDS}
     raw = _nonempty_field_values(fields)
-    values = {_squash(v) for v in raw if not _is_date_only_text(v)} - {""}
+    values = {squash(v) for v in raw if not _is_date_only_text(v)} - {""}
     return {v for v in values - evidence.shared_values
             if len(v) < RENDERED_FIELDS_MIN_VALUE_CHARS or not _piece_in_template(v)}
 
@@ -633,7 +633,7 @@ def _alphanumeric_tokens(text) -> Counter:
     """Alphanumeric (Unicode) token multiset for one string (lint 11 dedup-containment
     coverage). A Counter, not a set, so a dropped passage that repeats a
     word is not fully covered by a kept passage that says it once (#718)."""
-    return Counter(_DEDUP_TOKEN_RE.findall(_norm(text)))
+    return Counter(_DEDUP_TOKEN_RE.findall(norm(text)))
 
 
 def lint_dedup_drops(report: Dict) -> List[Dict]:
@@ -753,7 +753,7 @@ def _rendered_row_value_sets(
     rows: set[frozenset[str]] = set()
     for tbl in table_rows:
         for row in tbl:
-            cells = frozenset(_norm(c) for c in row if c and str(c).strip())
+            cells = frozenset(norm(c) for c in row if c and str(c).strip())
             if cells:
                 rows.add(cells)
     return rows
@@ -781,7 +781,7 @@ def lint_invented_records(stage4: dict,
         fields = e.get("extracted_fields") or {}
         if _is_invented_record(fields):
             values = _nonempty_field_values(fields)
-            if frozenset(_norm(v) for v in values) in rendered:
+            if frozenset(norm(v) for v in values) in rendered:
                 findings.append(_finding(
                     "invented_records", "WARN",
                     f"entry {e.get('element_idx_start')} ({code}): every "
