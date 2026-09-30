@@ -51,19 +51,37 @@ PARAGRAPH_GAP_EM = 0.45
 BLANK_GAP_EM = 1.0
 #: Horizontal gap between two words above which they MAY be joined with "\t".
 TAB_GAP_EM = 1.5
-#: ...and only if it is also at least this many times the line's median
-#: word gap: a justified line has uniformly wide gaps (no tabs), a
-#: label/value line has one outlier gap (a tab).
+#: On a FULL-WIDTH line (the only kind a justified paragraph produces) a
+#: gap must also be at least this many times the line's median word gap to
+#: be a tab: a justified line has uniformly wide gaps (no tabs), a
+#: label/value line has one outlier gap (a tab). Every other line tabs any
+#: gap over TAB_GAP_EM, so 4+ column rows keep their tabs.
 TAB_OUTLIER_RATIO = 2.0
 #: A line with at most this many word gaps skips the median test (with one
 #: or two gaps the median is the gap itself, so nothing could be an outlier).
 TAB_FEW_GAPS_MAX = 2
 #: A line that starts with a list marker begins a new entry, never a
 #: wrapped continuation: "12." / "3)" (1-3 digits, then whitespace), "[12]",
-#: a bullet glyph, or a dash/asterisk/hyphen followed by whitespace.
-LIST_MARKER_RE = re.compile(r"^(?:\d{1,3}[.)]\s|\[\d{1,3}\]|[•▪◦‣●○■□]|[–—*-]\s)")
-#: A line starting more than this many points LEFT of the previous line is
-#: an outdented entry (hanging indent), not a continuation.
+#: a bullet glyph (U+F0B7 is Word's Symbol-font bullet), or a
+#: dash/asterisk/hyphen followed by whitespace. Exceptions below.
+LIST_MARKER_RE = re.compile(
+    r"^(?:\d{1,3}[.)]\s|\[\d{1,3}\]|[•▪◦‣●○■□\uf0b7\u2500]|[–—*-]\s)")
+#: The dash/asterisk markers, captured. A lone "- present" is a wrapped
+#: range, so these only veto a merge when the paragraph itself began with
+#: the same marker (a real dash list is consistent).
+DASH_MARKER_RE = re.compile(r"^([–—*-])\s")
+#: A previous line ending like this is mid-phrase (a wrapped page range
+#: "529-" / "45.", a date range, "and"): the next line continues it even if
+#: it looks like a marker.
+CONNECTOR_END_RE = re.compile(r"(?:[-–—,(:&]|\b(?:and|of|the|in))$", re.IGNORECASE)
+#: A line ending in a hyphen or dash is broken mid-word/mid-range ("1895-" /
+#: "1904."), so it wraps on even though it stops short of the right margin.
+WRAP_DASH_RE = re.compile(r"[-–—]$")
+#: Hanging-indent test: a paragraph whose first line starts LEFT of its
+#: later lines by more than this many points is a hanging-indent entry;
+#: the next line returning to within this of the first line's x0 starts a
+#: new entry. A first-line indent (first line right of later lines) is a
+#: plain paragraph and never splits.
 OUTDENT_TOLERANCE_PT = 3.0
 #: A line ends "full" (so the next one is a wrapped continuation) when its
 #: right edge is within this fraction of the text width of the page's
@@ -130,6 +148,7 @@ class _Line:
     size: float
     runs: list[_Run]
     has_tab: bool
+    words: list[dict] = field(default_factory=list)  # x-sorted, for a re-layout
 
     @property
     def text(self) -> str:
@@ -144,28 +163,32 @@ class _Line:
 class _Para:
     """One output paragraph; `runs` is empty for a blank paragraph."""
     runs: list[_Run] = field(default_factory=list)
+    first_x0: float = 0.0            # x0 of the paragraph's first line
+    later_x0: float | None = None    # x0 of its second line, once there is one
+    marker: str = ""                 # dash/asterisk marker its first line began with
 
 
 def _is_bold(fontname: str) -> bool:
     return BOLD_FONT_RE.search(fontname.lower()) is not None
 
 
-def _column_gaps(words: list[dict]) -> list[bool]:
+def _column_gaps(words: list[dict], outlier_test: bool = False) -> list[bool]:
     """For each pair of adjacent words: is the gap between them a column gap
-    (a tab), as opposed to a word space, including a stretched justified one?"""
+    (a tab), as opposed to a word space? With `outlier_test` (a full-width
+    line, which may be justified) a stretched-but-uniform gap is not one."""
     gaps = [b["x0"] - a["x1"] for a, b in zip(words, words[1:])]
     median = statistics.median(gaps) if gaps else 0.0
-    few = len(gaps) <= TAB_FEW_GAPS_MAX
-    return [gap > TAB_GAP_EM * a["size"] and (few or gap >= TAB_OUTLIER_RATIO * median)
+    exempt = not outlier_test or len(gaps) <= TAB_FEW_GAPS_MAX
+    return [gap > TAB_GAP_EM * a["size"] and (exempt or gap >= TAB_OUTLIER_RATIO * median)
             for gap, a in zip(gaps, words)]
 
 
-def _build_line(words: list[dict]) -> _Line:
+def _build_line(words: list[dict], outlier_test: bool = False) -> _Line:
     """One visual line from same-line words: runs split on (bold, size)
     change, words joined by a space, or a tab across a wide column gap."""
     words = sorted(words, key=lambda w: w["x0"])
     runs: list[_Run] = []
-    column_gap = _column_gaps(words)
+    column_gap = _column_gaps(words, outlier_test)
     has_tab = any(column_gap)
     for index, w in enumerate(words):
         bold, size = _is_bold(w["fontname"]), round(w["size"], 1)
@@ -186,6 +209,7 @@ def _build_line(words: list[dict]) -> _Line:
         size=max(r.size for r in runs),
         runs=runs,
         has_tab=has_tab,
+        words=words,
     )
 
 
@@ -219,28 +243,63 @@ def _is_full_line(line: _Line, left: float, right: float) -> bool:
     return line.x1 >= right - FULL_LINE_SLACK_FRAC * (right - left)
 
 
-def _continues(prev: _Line, line: _Line, left: float, right: float) -> bool:
-    """True when `line` looks like a wrapped continuation of `prev`: same
-    weight and size, no tabs, not a list-marker or outdented line (a new
-    entry), and `prev` ran to the right margin.
-    ponytail: a paragraph with a first-line indent (line 2 starts left of
-    line 1) is split there. Upgrade path: compare against the modal x0."""
-    if LIST_MARKER_RE.match(line.text) or line.x0 < prev.x0 - OUTDENT_TOLERANCE_PT:
+def _marker_vetoes(prev: _Line, line: _Line, para: _Para) -> bool:
+    """`line` starts a new list entry: it opens with a marker, `prev` does
+    not end mid-phrase, and a dash/asterisk marker matches the marker the
+    paragraph itself began with."""
+    if not LIST_MARKER_RE.match(line.text) or CONNECTOR_END_RE.search(prev.text):
+        return False
+    dash = DASH_MARKER_RE.match(line.text)
+    return dash is None or dash.group(1) == para.marker
+
+
+def _outdent_splits(prev: _Line, line: _Line, para: _Para) -> bool:
+    """`line` returns to the first-line x0 of a hanging-indent paragraph and
+    `prev` does not end mid-phrase."""
+    return (not CONNECTOR_END_RE.search(prev.text)
+            and para.later_x0 is not None
+            and para.later_x0 - para.first_x0 > OUTDENT_TOLERANCE_PT
+            and line.x0 <= para.first_x0 + OUTDENT_TOLERANCE_PT)
+
+
+def _continues(prev: _Line, line: _Line, left: float, right: float,
+               para: _Para) -> bool:
+    """True when `line` looks like a wrapped continuation of `prev` (the
+    last line of `para`): same weight and size, no tabs, not a new list
+    entry or hanging-indent entry, and `prev` ran to the right margin.
+    ponytail: a hanging indent needs two lines to be seen, so a one-line
+    entry followed by another entry merges unless a marker separates them."""
+    if _marker_vetoes(prev, line, para) or _outdent_splits(prev, line, para):
         return False
     if prev.has_tab or line.has_tab or prev.all_bold != line.all_bold:
         return False
     if abs(prev.size - line.size) > MERGE_SIZE_TOLERANCE_PT:
         return False
-    return _is_full_line(prev, left, right)
+    return _is_full_line(prev, left, right) or WRAP_DASH_RE.search(prev.text) is not None
+
+
+def _margins(pages: list[list[_Line]]) -> tuple[float, float]:
+    """Left edge and right edge (text width) over every kept line."""
+    lines = [ln for page in pages for ln in page]
+    return min(ln.x0 for ln in lines), max(ln.x1 for ln in lines)
+
+
+def _untab_justified(pages: list[list[_Line]]) -> list[list[_Line]]:
+    """Re-lay-out full-width tabbed lines with the outlier test: only a
+    line that reaches the right margin can be a justified, stretched one."""
+    if not any(pages):
+        return pages
+    left, right = _margins(pages)
+    return [[_build_line(ln.words, outlier_test=True)
+             if ln.has_tab and _is_full_line(ln, left, right) else ln
+             for ln in lines] for lines in pages]
 
 
 def _assemble(pages: list[list[_Line]]) -> list[_Para]:
     """Lines -> paragraph stream, with an empty paragraph per large gap."""
-    xs = [ln.x0 for lines in pages for ln in lines]
-    if not xs:
+    if not any(pages):
         return []
-    left = min(xs)
-    right = max(ln.x1 for lines in pages for ln in lines)
+    left, right = _margins(pages)
     paras: list[_Para] = []
     prev: _Line | None = None
     for lines in pages:
@@ -248,14 +307,18 @@ def _assemble(pages: list[list[_Line]]) -> list[_Para]:
             same_page = index > 0
             gap = line.top - prev.bottom if (prev and same_page) else 0.0
             merge = prev is not None and gap <= PARAGRAPH_GAP_EM * prev.size \
-                and _continues(prev, line, left, right)
+                and _continues(prev, line, left, right, paras[-1])
             if merge:
                 paras[-1].runs[-1].text += " "
                 paras[-1].runs.extend(line.runs)
+                if paras[-1].later_x0 is None:
+                    paras[-1].later_x0 = line.x0
             else:
                 if prev is not None and gap > BLANK_GAP_EM * prev.size:
                     paras.append(_Para())
-                paras.append(_Para(runs=list(line.runs)))
+                dash = DASH_MARKER_RE.match(line.text)
+                paras.append(_Para(runs=list(line.runs), first_x0=line.x0,
+                                   marker=dash.group(1) if dash else ""))
             prev = line
     return paras
 
@@ -309,7 +372,7 @@ def convert_pdf_to_docx(pdf_path: str | Path, docx_path: str | Path) -> Conversi
     # table becomes tab-separated paragraphs. Upgrade path: emit a table only
     # for pdfplumber tables with ruling lines (strategy "lines") and >= 2
     # columns, and check element order with extract_unified_elements.
-    paras = _assemble(kept)
+    paras = _assemble(_untab_justified(kept))
     _write_docx(paras, Path(docx_path))
     blanks = sum(1 for p in paras if not p.runs)
     chars = sum(len(r.text) for p in paras for r in p.runs)

@@ -20,10 +20,12 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.core.docx_structure_extractor import extract_unified_elements
 from unified_pipeline.core.pdf_to_docx import (
+    _column_gaps,
     _is_bold,
     _Para,
     _Run,
     _write_docx,
+    LIST_MARKER_RE,
     convert_pdf_to_docx,
 )
 from unified_pipeline.run_doctor import iter_header_candidates
@@ -34,6 +36,8 @@ _CLI = _REPO / "scripts" / "pdf_to_docx.py"
 _LONG = ("Completed the doctoral programme and residency with a thesis on the "
          "long term outcomes of")
 _LONG_TAIL = "surgical patients in the region."
+# Same width as _LONG, but the last word is not a connector ("of").
+_LONG_STOP = _LONG[:-2] + "at"
 
 
 _PDF_PAD = bytes.fromhex("28BF4E5E4E758A4164004E56FFFA01082E2E00B6D0683E802F0CA9FE6453697A")
@@ -414,23 +418,106 @@ def _run_cli(*args):
                           env={"PYTHONPATH": str(_SRC), "PATH": ""})
 
 
-@pytest.mark.parametrize("text, breaks", [
-    ("12. Second entry", True), ("3\\) Second entry", True), ("[4] Second entry", True),
-    ("\\267 Second entry", True), ("- Second entry", True), ("\\261 Second entry", True),
-    ("* Second entry", True),
-    ("1.5 mg is the dose", False), ("-5 units of it", False), ("2019 was the year", False),
-    ("1234. long number", False)])
-def test_list_marker_line_starts_a_new_entry(tmp_path, text, breaks):
-    page = [(False, 10, 72, 700, _LONG), (False, 10, 72, 688, text)]
+@pytest.mark.parametrize("prefix, text, breaks", [
+    ("", "12. Second entry", True), ("", "3\\) Second entry", True),
+    ("", "[4] Second entry", True), ("", "\\267 Second entry", True),
+    ("- ", "- Second entry", True), ("* ", "* Second entry", True),
+    ("\\261 ", "\\261 Second entry", True),
+    ("", "1.5 mg is the dose", False), ("", "-5 units of it", False),
+    ("", "2019 was the year", False), ("", "1234. long number", False),
+    ("", "- present", False), ("", "* present", False),
+    ("", "\\261 present", False), ("", "\\320 present", False), ("- ", "* Second entry", False)])
+def test_list_marker_line_starts_a_new_entry(tmp_path, prefix, text, breaks):
+    """A dash/asterisk marker only splits inside a list that began with the
+    same marker; a lone one is a wrapped range ("- present")."""
+    page = [(False, 10, 72, 700, prefix + _LONG + " cohorts."), (False, 10, 72, 688, text)]
     _, doc = _convert(tmp_path, [page])
     assert (len(doc.paragraphs) == 2) is breaks
 
 
-def test_outdented_line_after_a_hanging_indent_is_a_new_entry(tmp_path):
-    page = [(False, 10, 72, 700, _LONG), (False, 10, 90, 688, _LONG),
+@pytest.mark.parametrize("ending", [
+    "529-", "529\\261", "529\\320", "smith,", "trials \\(", "Note:", "Smith &",
+    "the trial and", "a study of", "in the", "held in"])
+def test_marker_after_a_mid_phrase_line_is_a_wrap(tmp_path, ending):
+    """The wrapped page range "...529-" / "45. PMID 1234" is one citation."""
+    page = [(False, 10, 72, 700, f"{_LONG} (3):{ending}"), (False, 10, 72, 688, "45. PMID 1234")]
+    _, doc = _convert(tmp_path, [page])
+    assert len(doc.paragraphs) == 1
+
+
+@pytest.mark.parametrize("ending, merges", [
+    ("529-", True), ("529\\261", True), ("529\\320", True), ("529.", False), ("529 -x", False)])
+def test_short_line_ending_in_a_dash_still_wraps_on(tmp_path, ending, merges):
+    """A page range broken at its dash stops short of the margin (the widest
+    line on the page sets it) but is still one paragraph with what follows."""
+    page = [(False, 10, 72, 700, f"Pages {ending}"), (False, 10, 72, 688, "1904 in print"),
+            (False, 10, 72, 400, _LONG)]
+    _, doc = _convert(tmp_path, [page])
+    assert (_texts(doc)[0].endswith("1904 in print")) is merges
+
+
+def test_marker_after_a_line_that_merely_contains_a_connector_word_splits(tmp_path):
+    page = [(False, 10, 72, 700, f"{_LONG} begin"), (False, 10, 72, 688, "45. PMID 1234")]
+    _, doc = _convert(tmp_path, [page])
+    assert len(doc.paragraphs) == 2
+
+
+def test_real_dash_list_splits_and_a_lone_dash_wrap_merges(tmp_path):
+    lst = [(False, 10, 72, 700, f"- {_LONG} cohorts."), (False, 10, 72, 688, f"- {_LONG} cohorts."),
+           (False, 10, 72, 676, f"- {_LONG} cohorts.")]
+    wrap = [(False, 10, 72, 700, _LONG + " cohorts."), (False, 10, 72, 688, "- present")]
+    _, doc_list = _convert(tmp_path, [lst], name="l")
+    _, doc_wrap = _convert(tmp_path, [wrap], name="w")
+    assert len(doc_list.paragraphs) == 3
+    assert _texts(doc_wrap) == [f"{_LONG} cohorts. - present"]
+
+
+@pytest.mark.parametrize("char", ["\uf0b7", "\u2500", "\u2022"])
+def test_bullet_glyphs_are_list_markers(char):
+    assert LIST_MARKER_RE.match(f"{char} item")
+
+
+def test_first_line_indent_paragraph_is_not_split(tmp_path):
+    page = [(False, 10, 90, 700, _LONG), (False, 10, 72, 688, _LONG),
+            (False, 10, 72, 676, "tail of the paragraph")]
+    _, doc = _convert(tmp_path, [page])
+    assert len(doc.paragraphs) == 1
+
+
+@pytest.mark.parametrize("last_word, splits", [("of", False), ("in", False), ("at", True), ("9.", True)])
+def test_outdent_after_a_mid_phrase_line_does_not_start_an_entry(tmp_path, last_word, splits):
+    second = _LONG[:-2] + last_word  # same width as _LONG: still a full line
+    page = [(False, 10, 72, 700, _LONG), (False, 10, 90, 688, second),
             (False, 10, 72, 676, "Next entry begins here")]
     _, doc = _convert(tmp_path, [page])
-    assert _texts(doc) == [f"{_LONG} {_LONG}", "Next entry begins here"]
+    assert (len(doc.paragraphs) == 2) is splits
+
+
+def test_indentation_is_judged_from_the_second_line_only(tmp_path):
+    """72, 72, 90, 72: line 2 fixes the paragraph as not hanging; a later
+    deeper line must not turn it into a hanging-indent entry."""
+    page = [(False, 10, x, y, _LONG_STOP) for x, y in ((72, 700), (72, 688), (90, 676), (72, 664))]
+    _, doc = _convert(tmp_path, [page])
+    assert len(doc.paragraphs) == 1
+
+
+def test_hanging_indent_needs_a_return_to_the_first_line_x0(tmp_path):
+    """Returning 6pt right of the first line's x0 is outside the 3pt
+    tolerance, so no new entry; returning to 74pt is inside it."""
+    def entry(x):
+        return [(False, 10, 72, 700, _LONG), (False, 10, 90, 688, _LONG_STOP),
+                (False, 10, x, 676, "Next entry begins here")]
+    _, far = _convert(tmp_path, [entry(78)], name="far")
+    _, near = _convert(tmp_path, [entry(74)], name="near")
+    assert len(far.paragraphs) == 1
+    assert len(near.paragraphs) == 2
+
+
+def test_outdented_line_after_a_hanging_indent_is_a_new_entry(tmp_path):
+    page = [(False, 10, 72, 700, _LONG), (False, 10, 90, 688, _LONG_STOP),
+            (False, 10, 72, 676, "Next entry begins here")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == [f"{_LONG} {_LONG_STOP}", "Next entry begins here"]
 
 
 def _spaced_line(tmp_path, gaps, size=10):
@@ -442,35 +529,53 @@ def _spaced_line(tmp_path, gaps, size=10):
     return [(False, size, x, 700, "aa") for x in xs]
 
 
-def test_justified_line_with_uniformly_wide_gaps_has_no_tabs(tmp_path):
-    _, doc = _convert(tmp_path, [_spaced_line(tmp_path, [20, 20, 20, 20])])
-    assert _texts(doc) == ["aa aa aa aa aa"]
+def _words(gaps, size=4.0, width=11.0):
+    xs = [0.0]
+    for gap in gaps:
+        xs.append(xs[-1] + width + gap)
+    return [{"x0": x, "x1": x + width, "size": size} for x in xs]
 
 
-def test_justified_line_stays_mergeable(tmp_path):
-    page = _spaced_line(tmp_path, [89, 89, 89, 89]) + [(False, 10, 72, 688, "tail")]
-    _, doc = _convert(tmp_path, [page + [(False, 10, 72, 400, _LONG)]])
-    assert _texts(doc)[0] == "aa aa aa aa aa tail"
+def test_full_width_justified_line_with_uniform_gaps_has_no_tabs(tmp_path):
+    page = _spaced_line(tmp_path, [89, 89, 89, 89]) + [(False, 10, 72, 400, _LONG)]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[0] == "aa aa aa aa aa"
 
 
-def test_label_value_line_gets_a_tab_at_the_outlier_gap(tmp_path):
-    _, doc = _convert(tmp_path, [_spaced_line(tmp_path, [4, 4, 4, 90])])
-    assert _texts(doc) == ["aa aa aa aa\taa"]
+def test_full_width_line_still_tabs_an_outlier_gap(tmp_path):
+    page = _spaced_line(tmp_path, [10, 10, 10, 350]) + [(False, 10, 72, 400, _LONG)]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[0] == "aa aa aa aa\taa"
 
 
-def test_moderately_wider_gap_is_not_an_outlier(tmp_path):
-    _, doc = _convert(tmp_path, [_spaced_line(tmp_path, [20, 20, 20, 30])])
-    assert _texts(doc) == ["aa aa aa aa aa"]
+def test_row_short_of_the_margin_tabs_every_wide_gap(tmp_path):
+    """4 columns, gaps all near the median: not justified (not full width)."""
+    page = _spaced_line(tmp_path, [30, 24, 43, 43]) + [(False, 10, 72, 400, _LONG)]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[0] == "aa\taa\taa\taa\taa"
 
 
-def test_gap_over_twice_the_median_is_a_column_gap(tmp_path):
-    _, doc = _convert(tmp_path, [_spaced_line(tmp_path, [20, 20, 20, 45])])
-    assert _texts(doc) == ["aa aa aa aa\taa"]
+def test_outlier_test_is_off_unless_asked_for():
+    assert _column_gaps(_words([20, 20, 20, 20])) == [True] * 4
+    assert _column_gaps(_words([20, 20, 20, 20]), outlier_test=True) == [False] * 4
 
 
-def test_outlier_is_measured_against_the_median_not_the_smallest_gap(tmp_path):
-    _, doc = _convert(tmp_path, [_spaced_line(tmp_path, [16, 50, 50, 50])])
-    assert _texts(doc) == ["aa aa aa aa aa"]
+def test_gap_at_exactly_twice_the_median_is_an_outlier():
+    assert _column_gaps(_words([10, 10, 10, 20]), outlier_test=True) == [False, False, False, True]
+    assert _column_gaps(_words([10, 10, 10, 19.9]), outlier_test=True) == [False] * 4
+
+
+def test_gap_over_twice_the_median_is_a_column_gap_even_at_2_25x():
+    assert _column_gaps(_words([20, 20, 20, 45]), outlier_test=True)[-1] is True
+
+
+def test_outlier_is_measured_against_the_median_not_the_smallest_gap():
+    assert _column_gaps(_words([16, 50, 50, 50]), outlier_test=True) == [False] * 4
+
+
+def test_few_gaps_skip_the_median_test():
+    assert _column_gaps(_words([40, 40]), outlier_test=True) == [True, True]
+    assert _column_gaps(_words([40, 40, 40]), outlier_test=True) == [False] * 3
 
 
 def test_line_of_three_columns_keeps_both_tabs(tmp_path):
