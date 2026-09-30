@@ -406,24 +406,26 @@ def test_sections_logger_severity_contract_is_not_silently_empty():
 # content. These are the call sites that still use the substring scan, each
 # with the reason it cannot move yet. A new entry here needs a reason too.
 #
-#   bibliography `_fill_bibliography`, researcher_profiles, service
-#   `_fill_journal_reviewing` / `_fill_other_service` (Q4A-Q4C routing): the
-#     template's sub-labels ("Books:", "Journal Reviewing", "Editor/Co-Editor",
-#     ...) are plain, non-bold, mixed-case paragraphs, so the header shape test
-#     finds nothing and the section would stop rendering.
 #   `_fill_personal_data`: locates the "Name:" / "Date of preparation" labels,
 #     and runs before any bullet exists.
 #   `_fill_percent_effort`: the loose lookup is the documented fallback after
 #     `_find_header_paragraph` misses.
 #   `_validate_output`: reads the document to warn, inserts nothing.
+#
+# The template's plain sub-labels ("Books:", "Journal Reviewing", ...) are not
+# header-shaped, so their anchors use `_find_template_label` instead: the same
+# substring match, restricted to paragraphs the loaded template already had.
 REMAINING_SUBSTRING_ANCHOR_CALLS = {
-    ("bibliography.py", "_fill_bibliography"): 1,
     ("passthrough.py", "_fill_percent_effort"): 1,
     ("personal_data.py", "_fill_personal_data"): 2,
-    ("researcher_profiles.py", "_fill_researcher_profiles"): 2,
+    ("stage_6_word_template.py", "_validate_output"): 2,
+}
+
+TEMPLATE_LABEL_ANCHOR_CALLS = {
+    ("bibliography.py", "_fill_bibliography"): 1,
+    ("researcher_profiles.py", "_fill_researcher_profiles"): 1,
     ("service.py", "_fill_journal_reviewing"): 2,
     ("service.py", "_fill_other_service"): 1,
-    ("stage_6_word_template.py", "_validate_output"): 2,
 }
 
 
@@ -436,6 +438,7 @@ def _finder_calls():
     calls: dict[str, list[tuple[str, str, str | None]]] = {
         "_find_paragraph_with_text": [],
         "_find_header_paragraph": [],
+        "_find_template_label": [],
     }
     for path in paths:
         stack: list[str] = []
@@ -462,6 +465,11 @@ def test_remaining_substring_anchor_calls_are_the_documented_set():
     table above does not list, and fails here."""
     remaining = Counter((f, fn) for f, fn, _ in _finder_calls()["_find_paragraph_with_text"])
     assert dict(remaining) == REMAINING_SUBSTRING_ANCHOR_CALLS
+
+
+def test_template_label_anchor_calls_are_the_documented_set():
+    labels = Counter((f, fn) for f, fn, _ in _finder_calls()["_find_template_label"])
+    assert dict(labels) == TEMPLATE_LABEL_ANCHOR_CALLS
 
 
 def _header_anchor_literals():
@@ -503,6 +511,149 @@ def test_a_body_paragraph_naming_the_anchor_does_not_capture_it(needle):
     assert gen.doc.paragraphs[gen._find_paragraph_with_text(needle)]._p is decoy._p
     assert gen.doc.paragraphs[gen._find_header_paragraph(needle)]._p is real
 
+
+
+# Plain sub-labels the template anchors on: bibliography's S1-S9 labels (a
+# method-local table in `_fill_bibliography`), the Q4 routing table's, and the
+# literal ones at the `_find_template_label` call sites.
+_BIBLIOGRAPHY_LABELS = [
+    "Peer-reviewed Research Articles:", "Reviews and Editorials:", "Books:",
+    "Chapters:", "Non-peer-reviewed Research Publications:", "Case Reports",
+    "In review", "Abstracts", "Other (media, podcasts, etc.):",
+]
+
+
+def _template_label_needles():
+    from unified_pipeline.stage6.sections.service import OTHER_SERVICE_SECTION_ROUTING
+
+    literals = {lit for _, _, lit in _finder_calls()["_find_template_label"] if lit is not None}
+    routed = {t for _, texts in OTHER_SERVICE_SECTION_ROUTING.values() for t in texts}
+    return sorted(literals | routed | set(_BIBLIOGRAPHY_LABELS))
+
+
+def test_every_template_label_needle_resolves_in_the_template():
+    gen = _template_generator()
+    assert [n for n in _template_label_needles() if gen._find_template_label(n) is None] == []
+
+
+@pytest.mark.parametrize("needle", _template_label_needles())
+def test_an_inserted_paragraph_naming_a_label_does_not_capture_it(needle):
+    """The header test above, for the plain labels: a paragraph inserted after
+    the template loaded captures the substring scan, never the label finder."""
+    gen = _template_generator()
+    real = gen.doc.paragraphs[gen._find_template_label(needle)]._p
+
+    decoy = gen.doc.paragraphs[0].insert_paragraph_before(f"see {needle} below")
+
+    assert gen.doc.paragraphs[gen._find_paragraph_with_text(needle)]._p is decoy._p
+    assert gen.doc.paragraphs[gen._find_template_label(needle)]._p is real
+
+
+def test_template_label_matches_by_case_insensitive_substring():
+    gen = _template_generator()
+    assert gen._find_template_label("case reports") == gen._find_paragraph_with_text("Case Reports (optional")
+    assert gen._find_template_label("a label no template has") is None
+
+
+def test_a_generator_with_no_document_has_no_template_paragraphs():
+    gen = WCMTemplateGenerator(verbose=False)
+    assert gen.doc is None and gen._template_paras == frozenset()
+
+
+def _label_index(gen, text):
+    """Index of the template paragraph starting with text (the decoys the
+    tests insert start with other words, or sit before the template)."""
+    return next(i for i, p in enumerate(gen.doc.paragraphs)
+                if p._p in gen._template_paras and p.text.strip().startswith(text))
+
+
+def _cells_containing(gen, text):
+    return [t._tbl for t in gen.doc.tables for r in t.rows for c in r.cells if text in c.text]
+
+
+def _synthetic_pub(code, title, journal):
+    fields = {"authors": "Doe J", "title": title, "journal": journal, "year": "2020"}
+    return {"taxonomy_code": code, "text": f"Doe J. {title}. {journal}. 2020.", "extracted_fields": fields}
+
+
+def test_a_citation_naming_a_later_label_does_not_capture_it():
+    """An S1 citation whose journal title contains 'Case Reports' renders
+    above the S6 label; S6's own citation must still land under S6."""
+    gen = _template_generator()
+    gen._fill_bibliography({
+        "S1": [_synthetic_pub("S1", "A synthetic study", "Synthetic Case Reports")],
+        "S6": [_synthetic_pub("S6", "A synthetic case", "Synthetic Journal")],
+    }, {"last_name": "Doe"}, "uid0")
+    texts = [p.text for p in gen.doc.paragraphs]
+    s1_cite = next(i for i, t in enumerate(texts) if "Synthetic Case Reports" in t)
+    s6_cite = next(i for i, t in enumerate(texts) if "A synthetic case." in t)
+    assert s1_cite < _label_index(gen, "Case Reports") < s6_cite < _label_index(gen, "In review")
+
+
+def test_journal_reviewing_rows_land_in_the_labelled_table_despite_an_earlier_mention():
+    gen = _template_generator()
+    gen.doc.paragraphs[0].insert_paragraph_before("Journal Reviewing and more")
+    real_table = gen._find_table_after_paragraph(_label_index(gen, "Journal Reviewing/"))
+
+    gen._fill_journal_reviewing([{"taxonomy_code": "Q4D", "text": "Reviewer, Synthetic Journal",
+                                  "extracted_fields": {"journal_name": "Synthetic Journal"}}])
+
+    assert _cells_containing(gen, "Synthetic Journal") == [real_table._tbl]
+
+
+def test_the_ad_hoc_reviewing_fallback_label_is_not_captured_either():
+    """A template revision that names only 'Ad hoc Reviewing' (the shipped one
+    names both on one line, so the primary label always wins there)."""
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("Other")
+    other_table = doc.add_table(rows=1, cols=2)
+    doc.add_paragraph("Ad hoc Reviewing")
+    real_table = doc.add_table(rows=1, cols=2)
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = doc
+    gen.doc.paragraphs[0].insert_paragraph_before("Ad hoc Reviewing and more")
+
+    gen._fill_journal_reviewing([{"taxonomy_code": "Q4D", "text": "Reviewer, Synthetic Journal",
+                                  "extracted_fields": {"journal_name": "Synthetic Journal"}}])
+
+    assert _cells_containing(gen, "Synthetic Journal") == [real_table._tbl]
+    assert other_table._tbl not in _cells_containing(gen, "Synthetic Journal")
+
+
+def test_q4a_rows_land_in_the_editor_table_despite_an_earlier_mention():
+    gen = _template_generator()
+    gen.doc.paragraphs[0].insert_paragraph_before("Editor/Co-Editor of a newsletter")
+    real_table = gen._find_table_after_paragraph(_label_index(gen, "Editor/Co-Editor"))
+
+    gen._fill_other_service([{"taxonomy_code": "Q4A", "text": "Editor, Synthetic Review Series",
+                              "extracted_fields": {"role": "Editor", "organization": "Synthetic Review Series"}}])
+
+    assert set(_cells_containing(gen, "Synthetic Review Series")) == {real_table._tbl}
+
+
+def test_researcher_profiles_land_above_the_peer_reviewed_label_despite_an_earlier_mention():
+    gen = _template_generator()
+    gen.doc.paragraphs[0].insert_paragraph_before("Peer-reviewed Research Articles are listed later")
+    gen._fill_researcher_profiles([{"taxonomy_code": "S0", "text": "ORCID: 0000-0000-0000-0000"}])
+    profile = [p.text for p in gen.doc.paragraphs].index("ORCID: 0000-0000-0000-0000")
+    assert _label_index(gen, "BIBLIOGRAPHY") < profile < _label_index(gen, "Peer-reviewed Research Articles:")
+
+
+def test_researcher_profiles_fallback_is_the_bibliography_header_not_instruction_prose():
+    """Without the Peer-reviewed label the fallback is the BIBLIOGRAPHY
+    header; an earlier plain paragraph mentioning bibliography is not it."""
+    from docx import Document
+
+    doc = Document()
+    doc.add_paragraph("Optional: list items in the bibliography below")
+    doc.add_paragraph("BIBLIOGRAPHY")
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = doc
+    gen._fill_researcher_profiles([{"taxonomy_code": "S0", "text": "ORCID: 0000-0000-0000-0000"}])
+    texts = [p.text for p in gen.doc.paragraphs]
+    assert texts.index("Optional: list items in the bibliography below") < texts.index("ORCID: 0000-0000-0000-0000")
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

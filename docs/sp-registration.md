@@ -59,6 +59,18 @@ CViche auto-generates a self-signed SP certificate on first startup:
 
 If the IdP requires a specific certificate or key pair, replace `sp.crt` and `sp.key` with the desired files. CViche will use whatever certificate files are present in the configured directory.
 
+## IdP Certificate Rotation
+
+When WCM ITS rotates the IdP's SAML signing certificate, CViche needs no change.
+
+- The SP client is built from *remote* IdP metadata: `"metadata": {"remote": [{"url": idp_metadata_url}]}` in `get_saml_client()` (`app/saml_client.py`).
+- `get_saml_client()` builds a new client on every `/api/saml/login` and `/api/saml/acs` request, with no caching. pysaml2 therefore re-fetches the metadata, and with it the current signing certificate, on each login.
+- No IdP certificate or metadata file is pinned in the repo or in config, so there's nothing to swap.
+
+The metadata URL is the `saml_idp_metadata_url` SystemConfig value. It's seeded at startup from `saml.idp_metadata_url` in `auth_config.yaml`, which is injected at deploy and not committed.
+
+The only risk during a rotation is the IdP's metadata endpoint being briefly unreachable while ITS swaps it. Logins fail for that window and recover on the next successful fetch. If logins keep failing after a rotation, the cause isn't the signing certificate. Check that `saml_idp_metadata_url` still resolves and still points at the current IdP metadata.
+
 ## Enterprise Directory Group Authorization (Optional)
 
 When enabled, CViche checks Enterprise Directory group membership at login via LDAP:

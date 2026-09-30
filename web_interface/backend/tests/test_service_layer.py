@@ -940,3 +940,42 @@ class TestAdminCsvExportStreaming:
             del seen[:]
             b"".join(c.encode() for c in admin_routes._iter_csv_chunks(export_type, db))
             assert seen == [1], export_type
+
+
+class TestMaterializeInputIfMissing:
+    """#801: the lookup handler stays broad (raw botocore outage errors), the
+    local write handler catches only OSError."""
+
+    class _Storage:
+        def __init__(self, result):
+            self._result = result
+
+        def get_file(self, run_id, key):
+            if isinstance(self._result, BaseException):
+                raise self._result
+            return self._result
+
+    def test_storage_outage_is_logged_not_raised(self, monkeypatch, tmp_path, caplog):
+        monkeypatch.setattr(run_service, "get_storage", lambda: self._Storage(RuntimeError("AccessDenied")))
+        dest = tmp_path / "uploads" / "ABC123.docx"
+        run_service._materialize_input_if_missing("ABC123", "docx", dest)
+        assert not dest.exists()
+        assert "Durable input lookup FAILED" in caplog.text
+
+    def test_local_write_oserror_is_logged_not_raised(self, monkeypatch, tmp_path, caplog):
+        monkeypatch.setattr(run_service, "get_storage", lambda: self._Storage(b"cv-bytes"))
+        blocker = tmp_path / "uploads"
+        blocker.write_bytes(b"")  # a file where the parent dir must go -> OSError
+        run_service._materialize_input_if_missing("ABC123", "docx", blocker / "ABC123.docx")
+        assert "Failed to write re-materialized input" in caplog.text
+
+    def test_local_write_non_oserror_propagates(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(run_service, "get_storage", lambda: self._Storage("not-bytes"))
+        with pytest.raises(TypeError):
+            run_service._materialize_input_if_missing("ABC123", "docx", tmp_path / "ABC123.docx")
+
+    def test_writes_the_durable_copy(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(run_service, "get_storage", lambda: self._Storage(b"cv-bytes"))
+        dest = tmp_path / "uploads" / "ABC123.docx"
+        run_service._materialize_input_if_missing("ABC123", "docx", dest)
+        assert dest.read_bytes() == b"cv-bytes"

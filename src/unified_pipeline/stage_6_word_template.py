@@ -42,6 +42,7 @@ RECLASSIFY_FAILURE_STAT = 'segment_reclassification_failures'
 
 try:
     from docx import Document
+    from docx.document import Document as DocumentType
     from docx.shared import Pt, RGBColor, Inches, Twips
     from docx.table import Table
     from docx.text.paragraph import Paragraph
@@ -1047,6 +1048,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         dedup_decisions: list[dict[str, Any]] = []
         document = [entry for group in pre_dedup_entries_by_code.values()
                     for entry in group]
+        dropped_ids: set[int] = set()
         for code in list(entries_by_code.keys()):
             before = len(entries_by_code[code])
             date_aware = code in _DATE_AWARE_DEDUP_CODES
@@ -1054,7 +1056,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             entries_by_code[code] = deduplicate_entries(
                 entries_by_code[code], verbose=self.verbose,
                 require_date_overlap=date_aware,
-                decisions=group_decisions, code=code, document=document)
+                decisions=group_decisions, code=code, document=document,
+                dropped_ids=dropped_ids)
             for decision in group_decisions:
                 decision["code"] = code
             dedup_decisions.extend(group_decisions)
@@ -1735,6 +1738,39 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         search = search_text.lower()
         for i, para in enumerate(self.doc.paragraphs):
             if search in para.text.lower():
+                return i
+        return None
+
+    @property
+    def doc(self) -> DocumentType | None:
+        return self._doc
+
+    @doc.setter
+    def doc(self, value: DocumentType | None) -> None:
+        """Snapshot the paragraphs a document has when it is assigned (#548).
+
+        generate() assigns the freshly loaded template, so those are the
+        template's own; everything stage 6 writes afterwards (bullets,
+        citations, blanks) is inserted. Holding the elements keeps
+        their lxml proxies alive, so identity checks against the set stay valid.
+        """
+        self._doc = value
+        self._template_paras = frozenset(p._p for p in value.paragraphs) if value is not None else frozenset()
+
+    def _find_template_label(self, search_text: str) -> int | None:
+        """First paragraph containing search_text, as _find_paragraph_with_text
+        matches it, that came with the loaded template -- never one stage 6
+        inserted (#548).
+
+        For plain, mixed-case template labels ('Books:', 'Journal Reviewing')
+        that `_find_header_paragraph`'s shape test cannot see. A citation or
+        bullet an earlier fill wrote can contain the label's text (a journal
+        title naming 'Case Reports', a citation marked 'in review') and would
+        capture a plain substring scan.
+        """
+        search = search_text.lower()
+        for i, para in enumerate(self.doc.paragraphs):
+            if para._p in self._template_paras and search in para.text.lower():
                 return i
         return None
 
