@@ -47,7 +47,8 @@ gate CI.
 3. `node scripts/diagrams/verify-facts.mjs` — diagram constants vs real source. It probes:
    the LLM models (`src/unified_pipeline/config/llm_config.yaml`), the per-pod run cap
    (`web_interface/backend/app/pipeline/concurrency.py`), the backend port (`main.py`),
-   the prod replicas + HPA bounds + host + IRSA role (`k8s/overlays/prod/*`), and the
+   the prod replica floor + HPA bounds (`k8s/overlays/prod/hpa-patch.yaml`), the HPA CPU
+   target (`k8s/base/backend/hpa.yaml`), the host + IRSA role (`k8s/overlays/prod/*`), and the
    12-stage count (`web_interface/backend/app/pipeline/step_registry.py`). It **fails loud**
    if a source constant can't be found, so a refactor that moves it trips the check instead
    of silently passing.
