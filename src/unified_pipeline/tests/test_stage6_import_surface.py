@@ -423,7 +423,23 @@ def test_live_import_walk_is_pinned_by_the_manifest():
 def test_live_import_walk_reaches_every_scoped_module():
     """Guard the guard: a walk that found nothing would pass vacuously."""
     reached = {mod for _, mod, _ in _live_imported_names()}
-    assert reached == set(LIVE_WALK_MANIFESTS)
+    # Pinned by name, not by LIVE_WALK_MANIFESTS: dropping a key must fail here.
+    scope = {
+        "unified_pipeline.stage_6_word_template",
+        "unified_pipeline.core.render_check",
+        "unified_pipeline.stage6.dedup",
+        "unified_pipeline.stage6.render_check",
+    }
+    assert set(LIVE_WALK_MANIFESTS) == scope
+    assert reached == scope
+
+
+def test_tracked_file_listing_fails_loudly_outside_a_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys.modules[__name__], "_REPO_ROOT", tmp_path)
+    # Catch BaseException so a pytest.skip() here FAILS instead of skipping.
+    with pytest.raises(BaseException) as raised:
+        _tracked_python_files()
+    assert raised.type is pytest.fail.Exception
 
 
 def test_live_walk_flags_unpinned_aliased_relative_and_wildcard_imports():
