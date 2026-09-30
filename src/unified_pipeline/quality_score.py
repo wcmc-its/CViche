@@ -559,8 +559,33 @@ _CONTACT_KEY_RE = re.compile(
     r"email|phone|address|\b(?:cell|fax|mobile|telephone)\b", re.IGNORECASE)
 
 
+# An email or phone number anywhere in the stage-2 source text: evidence the
+# CV HAS contact details for stage 4 to find (#427). A CV whose PERSONAL DATA
+# block is empty labels is an input gap, not an extraction miss, and is not
+# penalized. The phone shape is a standalone token so DOIs, PMIDs and grant
+# numbers (which carry 3-3-4 digit runs inside "/" or "." tokens) don't match.
+# ponytail: email/phone only; a source whose ONLY contact is a postal address
+# (2 of the 126 corpus CVs) reads as blank, so a missed address goes
+# unpenalized. Add an address shape if that case shows up as a miss.
+_SOURCE_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_SOURCE_PHONE_RE = re.compile(
+    r"(?<![\w/.\-])(?:\+\d{1,3}[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]?\d{3}[ .-]\d{4}(?!\d)")
+
+
+def _source_has_contact(outputs_dir: Path) -> bool | None:
+    """Whether the stage-2 entry text carries an email or phone number;
+    None when entries.json is absent or unreadable (the caller then keeps
+    the penalty -- no evidence the source is blank)."""
+    data, _ = _load_first(outputs_dir, "*_entries.json")
+    if data is None:
+        return None
+    text = "\n".join(str(e.get("text") or "") for e in data.get("entries") or [])
+    return bool(_SOURCE_EMAIL_RE.search(text) or _SOURCE_PHONE_RE.search(text))
+
+
 def score_cv_owner(outputs_dir: Path) -> tuple[float, str, int | None]:
-    """CV owner name / contact. Missing name is a hard-fail (cap=25)."""
+    """CV owner name / contact. Missing name is a hard-fail (cap=25).
+    Missing contact is penalized only when the source has some (#427)."""
     data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
         return 1.0, _missing_or_unreadable_detail("fields.json", reason), 25
@@ -580,18 +605,21 @@ def score_cv_owner(outputs_dir: Path) -> tuple[float, str, int | None]:
             any_contact = True
             break
 
+    source_contact = None if any_contact else _source_has_contact(outputs_dir)
+
     fraction = 0.0
     if not inference_success:
         fraction += 0.4
     if not primary_location:
         fraction += 0.3
-    if not any_contact:
+    if not any_contact and source_contact is not False:
         fraction += 0.3
 
     detail = (
         f"full_name={full_name!r}; inference_success={inference_success}; "
         f"primary_location={'set' if primary_location else 'missing'}; "
-        f"any_contact={any_contact}; fraction={fraction:.2f}"
+        f"any_contact={any_contact}; source_contact={source_contact}; "
+        f"fraction={fraction:.2f}"
     )
     return clamp(fraction), detail, None
 

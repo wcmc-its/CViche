@@ -84,6 +84,68 @@ def test_no_contact_still_takes_the_penalty(tmp_path):
     assert cap is None, "this is not the hard-fail path"
 
 
+
+# --- source-blank contact is an input gap, not an extraction miss (#427) ---
+
+def _entries(tmp_path, *texts):
+    """Write a minimal stage-2 entries JSON (synthetic text only)."""
+    payload = {"document_uid": "TESTAA",
+               "entries": [{"text": t} for t in texts]}
+    (tmp_path / "TESTAA_entries.json").write_text(json.dumps(payload))
+
+
+def _no_contact_score(tmp_path, *source_texts):
+    _entries(tmp_path, *source_texts)
+    return score_cv_owner(_fields(tmp_path, {"title": "Professor"}))
+
+
+def test_a_source_with_no_email_or_phone_is_not_penalized(tmp_path):
+    """C0ZGFW's shape: the PERSONAL DATA block is empty labels."""
+    fraction, detail, _ = _no_contact_score(
+        tmp_path, "PERSONAL DATA", "Office Address:", "Email:", "Phone:",
+        "2010-2015 Assistant Professor, Example University")
+    assert "source_contact=False" in detail
+    assert fraction == 0.0
+
+
+def test_a_missed_email_in_the_source_keeps_the_penalty(tmp_path):
+    fraction, detail, _ = _no_contact_score(tmp_path, "Email: jane@example.org")
+    assert "source_contact=True" in detail
+    assert fraction >= 0.3
+
+
+def test_a_missed_phone_in_the_source_keeps_the_penalty(tmp_path):
+    for phone in ("(212) 555-0100", "212-555-0100", "212.555.0100",
+                  "+1 212 555 0100", "212-555-0100x12"):
+        fraction, detail, _ = _no_contact_score(tmp_path, f"Tel: {phone}")
+        assert "source_contact=True" in detail, phone
+        assert fraction >= 0.3, phone
+
+
+def test_doi_pmid_and_grant_digit_runs_are_not_phone_numbers(tmp_path):
+    """3-3-4 digit runs inside identifiers were the census's false hits."""
+    fraction, detail, _ = _no_contact_score(
+        tmp_path,
+        "Smith J. Title. J Med. 2019. doi:10.1016/j.123-456-7890",
+        "https://example.org/abs/212-555-0100/full",
+        "Grant R01-212-555-0100 (PI)",
+        "Accession 212 555 01001234")
+    assert "source_contact=False" in detail
+    assert fraction == 0.0
+
+
+def test_extracted_contact_does_not_consult_the_source(tmp_path):
+    _entries(tmp_path, "no contact here")
+    _, detail, _ = score_cv_owner(_fields(tmp_path, {"email": "x"}))
+    assert "source_contact=None" in detail
+
+
+def test_unreadable_entries_json_keeps_the_penalty(tmp_path):
+    (tmp_path / "TESTAA_entries.json").write_text("{not json")
+    fraction, detail, _ = score_cv_owner(_fields(tmp_path, {"title": "Professor"}))
+    assert "source_contact=None" in detail
+    assert fraction >= 0.3
+
 if __name__ == "__main__":
     import tempfile
     for _name, _fn in sorted(globals().items()):
