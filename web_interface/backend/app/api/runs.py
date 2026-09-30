@@ -13,7 +13,7 @@ from app.schemas import RunStatus, RunSummary, StepSummary, PaginatedRuns
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency
-from app.auth import get_current_user
+from app.auth import get_current_user, visible_cost
 from app.api.upload import UPLOAD_DIR, create_run_archive, commit_run_or_compensate
 from app.services.run_service import check_run_access, claim_run_as_running
 from app.rate_limiter import check_rate_limit
@@ -121,7 +121,7 @@ async def list_runs(
             status=run.status,
             started_at=run.started_at,
             completed_at=run.completed_at,
-            total_cost=run.total_cost or 0.0,
+            total_cost=visible_cost(current_user, run.total_cost),
             total_duration_seconds=total_duration_seconds
         ))
 
@@ -155,7 +155,7 @@ async def get_run_status(
             started_at=step.started_at,
             completed_at=step.completed_at,
             duration_seconds=step.duration_seconds,
-            cost=step.cost or 0.0,
+            cost=visible_cost(current_user, step.cost),
             output_files=step.output_files
         )
         for step in sorted(run.steps, key=lambda s: s.step_number)
@@ -171,7 +171,7 @@ async def get_run_status(
         status=run.status,
         started_at=run.started_at,
         completed_at=run.completed_at,
-        total_cost=run.total_cost or 0.0,
+        total_cost=visible_cost(current_user, run.total_cost),
         total_tokens=run.total_tokens or 0,
         input_tokens=run.input_tokens or 0,
         output_tokens=run.output_tokens or 0,

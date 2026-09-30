@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.schemas import StepDetail, LogEntry
-from app.auth import get_current_user, require_admin
+from app.auth import get_current_user, require_admin, visible_cost
 from app.services import artifact_service, prompt_log_service
 from app.services.run_service import check_run_access
 from app.storage import get_storage
@@ -82,7 +82,7 @@ def get_step_detail(
         name=step.step_name,
         status=step.status,
         duration=step.duration_seconds,
-        cost_usd=step.cost or 0.0,
+        cost_usd=visible_cost(current_user, step.cost),
         input_file=step.input_file,
         output_files=output_files,
         logs=log_entries,

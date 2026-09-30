@@ -633,7 +633,7 @@ class TestDocsGating:
 class TestUploadValidation:
     """SEC-04: Upload validation by magic bytes, size limit, and filename sanitization."""
 
-    def _create_auth_user(self, client, db, email="test@example.com"):
+    def _create_auth_user(self, client, db, email="test@example.com", role="user"):
         """Create a user with consent and set auth cookie."""
         from app.models import User
         from app.auth import create_session_cookie, COOKIE_NAME
@@ -641,7 +641,7 @@ class TestUploadValidation:
         user = User(
             email=email,
             display_name="Test User",
-            role="user",
+            role=role,
             consent_version="1.0",
         )
         db.add(user)
@@ -796,6 +796,23 @@ class TestUploadValidation:
             )
         security_logs = [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
         assert len(security_logs) >= 1, "Expected [SECURITY] log for spoofed upload"
+
+    @pytest.mark.parametrize("role, cost_visible", [("admin", True), ("user", False)])
+    def test_estimate_cost_is_admin_only(self, client, db, seed_simple_mode, role, cost_visible):
+        """#1111: a non-admin's estimate carries no dollar figure or pricing
+        model; the time estimate is unaffected."""
+        self._create_auth_user(client, db, role=role)
+        with patch("app.api.upload._validate_docx_magic", return_value=True), \
+             patch("app.api.upload._extract_text", return_value="x" * 600):
+            response = client.post(
+                "/api/estimate",
+                files={"file": ("cv.docx", b"PK\x03\x04dummy", "application/octet-stream")},
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["estimated_time_seconds_min"] > 0
+        for field in ("estimated_cost_min", "estimated_cost_max", "pricing_model"):
+            assert (body[field] is not None) is cost_visible, field
 
     def test_estimate_rejects_spoofed_file(self, client, db, seed_simple_mode):
         """The /estimate endpoint also validates magic bytes."""
