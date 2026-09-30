@@ -172,7 +172,8 @@ RELOCATED_BY_398_RESIDUE = {
 #: the legacy address resolves to the same object). Found by the live walk (#667).
 HOME_ONLY_IMPORTS = {
     "unified_pipeline.stage6.dedup": ("_dates_compatible", "_distinct_bare_names", "_lists_name",
-                                      "_names_a_sibling", "_names_record", "_record_name"),
+                                      "_names_a_sibling", "_names_record", "_other_journal_same_row",
+                                      "_record_name", "_row_residue"),
 }
 
 _RELOCATED_CASES = [
