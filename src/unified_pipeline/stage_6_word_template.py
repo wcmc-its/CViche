@@ -208,6 +208,7 @@ from unified_pipeline.stage6.sections.appendix import (
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 
 from unified_pipeline.core.template_boilerplate import (
+    is_foreign_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
 )
@@ -2635,6 +2636,7 @@ Now analyze the text above:"""
             (text, code, cov) for text, code, cov in remaining
             if text and text.strip()
             and not is_template_instruction(text)
+            and not is_foreign_template_instruction(text)
             and not is_source_boilerplate(text)
         ]
         if not remaining:

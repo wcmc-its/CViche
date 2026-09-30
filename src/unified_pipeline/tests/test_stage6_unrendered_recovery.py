@@ -779,3 +779,21 @@ def test_remaining_appendix_intro_is_the_shared_accurate_banner():
     intro = paragraphs[header + 1]
     assert intro.text == APPENDIX_INTRO_TEXT
     assert all(run.italic for run in intro.runs)
+
+
+# ------------------------------------ #530: foreign scaffolding never recovered
+
+def test_add_remaining_to_appendix_drops_foreign_template_scaffolding():
+    """The bullet writer's own filter (the recovery path, not `_fill_appendix`)
+    drops another institution's instruction line and a "label: N/A" placeholder
+    and still writes the genuine segment."""
+    gen = _generator()
+    written = gen._add_remaining_to_appendix([
+        ("C. Sample Appointments (include institution, title and dates)", "T", 0.0),
+        ("1. Sample Leave: N/A", "T", 0.0),
+        ("Served on the sample review panel for the Example Society", "T", 0.0),
+    ])
+    assert written == ["T"]
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert "Served on the sample review panel for the Example Society" in bullets
+    assert not any("Sample Appointments" in t or "Sample Leave" in t for t in bullets)
