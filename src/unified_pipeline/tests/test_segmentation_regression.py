@@ -230,6 +230,44 @@ def test_compact_window_slack_boundary():
     # The window slides: a later compact stretch qualifies.
     assert _has_compact_window(need, ["a"] + filler + ["x", "a", "b"], span)
 
+    # A surplus repeat of a needed token must not count toward the missing total.
+    assert not _has_compact_window(Counter("ab"), list("aaxxx"), 5)
+    # The left edge advances one token at a time: the window [a, y, b] (span 3)
+    # is reachable only by not skipping the "a" that precedes it.
+    assert _has_compact_window(Counter("ab"), list("xayb"), 3)
+    assert not _has_compact_window(Counter("ab"), list("xayb"), 2)
+
+
+def test_coverage_long_reformatted_line_is_covered_by_its_own_length():
+    """#610: the span budget scales with the line's token count, so a long
+    line (16 tokens) spliced with 2 extra words (window 18, over the bare
+    slack) is still covered."""
+    words = [f"term{c}" for c in "abcdefghijklmnop"]
+    source = [" ".join(words)]
+    entry = " ".join(words[:8] + ["inserted", "words"] + words[8:])
+    m = compute_metrics(source, _STAGE1A, {"entries": [_entry(entry, start=1)]})
+    assert m["lost_lines"] == []
+
+
+def test_coverage_span_budget_counts_repeated_tokens():
+    """#610: the budget is the line's token count WITH multiplicity. A 14-token
+    line over 2 distinct words, spliced with 5 extra tokens (window 19), fits
+    14 + slack but not distinct-count + slack (2 + 12)."""
+    source = [" ".join(["alpha", "beta"] * 7)]
+    entry = " ".join(["alpha", "beta"] * 4 + ["z1", "z2", "z3", "z4", "z5"]
+                     + ["alpha", "beta"] * 3)
+    m = compute_metrics(source, _STAGE1A, {"entries": [_entry(entry, start=1)]})
+    assert m["lost_lines"] == []
+
+
+def test_coverage_substantive_line_without_tokens_is_lost():
+    """A long punctuation-only line has no word tokens to match on, so unless
+    it appears verbatim it is lost (not vacuously covered)."""
+    source = ["----------------------------------------"]
+    m = compute_metrics(source, _STAGE1A,
+                        {"entries": [_entry("Some unrelated paragraph text", start=1)]})
+    assert m["lost_lines"] == ["----------------------------------------"]
+
 
 def test_template_scaffolding_is_neither_covered_nor_lost():
     """#815 (976WPY): a CV written on the WCM template keeps the template's
