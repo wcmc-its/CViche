@@ -8,6 +8,8 @@ tests pin that contract.
 """
 from unittest.mock import patch
 
+import pytest
+
 from app.models import User
 from sqlalchemy.orm import object_session
 
@@ -66,3 +68,31 @@ def test_capacity_is_read_only(client, db, seed_simple_mode):
 def test_capacity_requires_auth(client):
     resp = client.get("/api/capacity")
     assert resp.status_code == 401
+
+
+# --- concurrency.dispatch_mode() (#701 run_queue.py point 10) ---------------
+#
+# Lives here, not a new test_concurrency.py: dispatch_mode() is one of this
+# module's run-admission knobs (beside get_max_concurrent_runs, tested above),
+# and CODING STANDARDS' one-test-file-per-source-module rule means a new knob
+# on an existing module gets tests in that module's existing file.
+
+def test_dispatch_mode_defaults_to_in_process(monkeypatch):
+    monkeypatch.delenv("CVICHE_DISPATCH_MODE", raising=False)
+    from app.pipeline import concurrency
+    assert concurrency.dispatch_mode() == "in_process"
+
+
+def test_dispatch_mode_accepts_queue_case_and_whitespace_insensitively(monkeypatch):
+    from app.pipeline import concurrency
+    monkeypatch.setenv("CVICHE_DISPATCH_MODE", "  Queue \n")
+    assert concurrency.dispatch_mode() == "queue"
+
+
+def test_dispatch_mode_raises_on_an_unrecognized_value(monkeypatch):
+    """A typo (e.g. 'queeu') must fail loudly on the next /start rather than
+    silently falling back to in_process."""
+    from app.pipeline import concurrency
+    monkeypatch.setenv("CVICHE_DISPATCH_MODE", "queeu")
+    with pytest.raises(ValueError, match="queeu"):
+        concurrency.dispatch_mode()

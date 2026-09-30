@@ -24,9 +24,20 @@ import logging
 import os
 import threading
 from collections import Counter
+from typing import Literal
+
 from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)
+
+# The two run-dispatch strategies (#701): today's per-pod BackgroundTask, or
+# handing the run to a Valkey-backed queue worker. Lives here, not in
+# run_queue.py (mrj4001 review, run_queue.py point 10): this is routing
+# policy that gates start_run/retry_step admission the same way
+# get_max_concurrent_runs does, and both knobs are read from the same "llm"
+# config section.
+DispatchMode = Literal["in_process", "queue"]
+_VALID_DISPATCH_MODES: tuple[DispatchMode, ...] = ("in_process", "queue")
 
 # Concurrent full-pipeline runs allowed on a single pod. Conservative default
 # for the 1 vCPU / 1 GiB prod pod: pipelines are LLM-I/O-bound so a little
@@ -118,3 +129,25 @@ async def wait_for_drain(budget_seconds: float, poll_seconds: float | None = Non
         await asyncio.sleep(min(poll_seconds, max(deadline - loop.time(), 0)))
         remaining = active_run_ids()
     return remaining
+
+
+def dispatch_mode() -> DispatchMode:
+    """``in_process`` (today's BackgroundTask) or ``queue``.
+
+    Normalises whitespace and case, and raises ``ValueError`` on anything
+    else, so a typo'd ``CVICHE_DISPATCH_MODE`` (e.g. ``"queeu"``) fails loudly
+    rather than silently running in-process forever (#701 run_queue.py point
+    10). N7: this now fails BACKEND STARTUP itself, not only the next
+    /start -- ``run_service.reconcile_stale_runs`` (via
+    ``_effective_stale_run_minutes``) and ``reconcile_queued_runs`` both call
+    this during the startup lifespan's own reconcile sweep, so a typo'd value
+    stops the whole pod from ever becoming ready rather than surfacing lazily
+    on the first request that reaches it.
+    """
+    raw, _ = get_config("llm", "CVICHE_DISPATCH_MODE", default="in_process")
+    mode = raw.strip().lower()
+    if mode not in _VALID_DISPATCH_MODES:
+        raise ValueError(
+            f"CVICHE_DISPATCH_MODE={raw!r} is not one of {_VALID_DISPATCH_MODES}"
+        )
+    return mode

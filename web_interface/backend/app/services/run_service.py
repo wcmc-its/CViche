@@ -1,12 +1,19 @@
 """Run-related service functions."""
 import logging
+import math
 import os
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
-from app.models import Run, Step, User, Log, LLMUsage, Feedback, RunMetrics
+from app.database import SessionLocal
+from app.models import Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics
 from app.errors import not_found, forbidden
 from app.config_loader import get_config
+from app.pipeline import concurrency, run_queue
 from app.storage import get_storage
 from app.storage.base import RunStorage
 from app.services import auto_retry
@@ -18,11 +25,76 @@ logger = logging.getLogger(__name__)
 # takes, so a sibling replica's genuinely in-flight run is never swept.
 DEFAULT_STALE_RUN_MINUTES = 60
 
+# In queue mode (#701), the stale-running reaper's threshold is floored at the
+# worker's own run watchdog timeout plus this margin -- see
+# _effective_stale_run_minutes. Matches the margin k8s/base/worker/deployment.yaml
+# adds to terminationGracePeriodSeconds over the same RUN_TIMEOUT_S, so both
+# the pod-level and DB-level backstops give the watchdog the same head start.
+QUEUE_MODE_STALE_RUN_MARGIN_MINUTES = 5
+
+# Mirrors run_queue.RUN_TIMEOUT_S_DEFAULT (N2), the single default this value,
+# app.worker.RUN_TIMEOUT_S and run_queue.MIN_IDLE_MS all trace back to. The
+# literal is still duplicated as a plain int (rather than reading
+# run_queue.RUN_TIMEOUT_S_DEFAULT directly) only so _effective_stale_run_minutes
+# below keeps reading CVICHE_RUN_TIMEOUT_SECONDS live on every call -- a config
+# reload must be reflected immediately, and run_queue's own RUN_TIMEOUT_S is
+# fixed once at import time (module-load-time config reads elsewhere in this
+# file, and in run_queue.py, all share that same one-time-read contract).
+DEFAULT_RUN_TIMEOUT_SECONDS = run_queue.RUN_TIMEOUT_S_DEFAULT
+
+# A run still "queued" this long past its flip (#701) has almost certainly
+# lost its Valkey token (the enqueue/reconciler crash windows the #895 review
+# found) rather than genuinely waiting behind a deep backlog. See
+# reconcile_queued_runs.
+DEFAULT_QUEUED_RECONCILE_MINUTES = 5
+
 # A run still at status="created" this many hours after upload was never started
 # (or its start failed / was abandoned) and is safe to reap along with its
 # storage. Generous so a just-uploaded run that is about to be started is never
 # swept.
 DEFAULT_ORPHAN_REAP_HOURS = 24
+
+# Where an upload's pod-local copy lives. Owned here (services/), not
+# app/api/upload.py, so the worker process (#701) can resolve a run's input
+# file without importing anything under app.api -- app.api.runs pulls in
+# fastapi, app.auth and app.rate_limiter, none of which a queue worker should
+# ever need. app.api.upload imports this constant rather than defining its
+# own (CODING STANDARDS section 1.5: one definition of a shared path).
+UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> None:
+    """Re-fetch a run's original upload from durable storage if the pod-local
+    copy is gone (e.g. after a pod recycle), so start/restart/retry survive.
+    No-op if the local file already exists or storage has no copy -- the caller
+    keeps its own missing-file handling.
+    """
+    if dest.exists():
+        return
+    try:
+        data = get_storage().get_file(run_id, f"input/{run_id}.{file_type}")
+    except FileNotFoundError as e:
+        # The run genuinely has no durable copy (e.g. a legacy run predating the
+        # S3 archive). Expected; the caller keeps its own missing-file handling.
+        logger.info("No durable input copy for run %s (%s); using local only", run_id, e)
+        return
+    except Exception as e:
+        # Anything other than a missing object (S3 AccessDenied, KMS, network)
+        # means durable storage is reachable-but-failing. Surface it at WARNING
+        # so a real outage isn't silently misread as "file simply not there".
+        logger.warning(
+            "Durable input lookup FAILED for run %s (%s); using local copy only. "
+            "May indicate an S3/IAM/KMS problem rather than a missing object.",
+            run_id, e,
+        )
+        return
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        logger.info("Re-materialized input for run %s from storage (%d bytes)", run_id, len(data))
+    except Exception as e:
+        logger.warning("Failed to write re-materialized input for run %s: %s", run_id, e)
 
 
 RESTART_INTERRUPT_MESSAGE = (
@@ -96,6 +168,38 @@ def _resume_info_for_run(run: Run, db: Session):
     return last_error_type, start_step_number
 
 
+def _effective_stale_run_minutes() -> int:
+    """CVICHE_STALE_RUN_MINUTES, floored in queue mode at the run watchdog's
+    own timeout plus margin.
+
+    In queue mode a run's Valkey token stays un-ACKed for the run's whole
+    duration (Paul's ACK-semantics decision, #701 worker#3) -- the worker's own
+    watchdog (``app.worker.RUN_TIMEOUT_S``) is what fails a run that outlives
+    its bound. Without this floor, a ``CVICHE_STALE_RUN_MINUTES`` below that
+    timeout would let this DB-side reaper mark a run failed while its worker is
+    still legitimately executing it and would go on to succeed. Outside queue
+    mode the configured value is used as-is, unchanged from before #701.
+    """
+    try:
+        stale_run_minutes, _ = get_config("llm", "CVICHE_STALE_RUN_MINUTES", default=DEFAULT_STALE_RUN_MINUTES)
+        minutes = int(stale_run_minutes)
+    except (TypeError, ValueError):
+        minutes = DEFAULT_STALE_RUN_MINUTES
+
+    if concurrency.dispatch_mode() != "queue":
+        return minutes
+
+    try:
+        run_timeout_s_cfg, _ = get_config(
+            "llm", "CVICHE_RUN_TIMEOUT_SECONDS", default=DEFAULT_RUN_TIMEOUT_SECONDS
+        )
+        run_timeout_s = int(run_timeout_s_cfg)
+    except (TypeError, ValueError):
+        run_timeout_s = DEFAULT_RUN_TIMEOUT_SECONDS
+    watchdog_floor_minutes = math.ceil(run_timeout_s / 60) + QUEUE_MODE_STALE_RUN_MARGIN_MINUTES
+    return max(minutes, watchdog_floor_minutes)
+
+
 def reconcile_stale_runs(db: Session) -> int:
     """Mark orphaned "running" runs as failed. Called once at startup.
 
@@ -119,14 +223,13 @@ def reconcile_stale_runs(db: Session) -> int:
     Age-based rather than "any running run" so that, with multiple replicas, a
     sibling's genuinely in-flight run is not killed. Returns the count of runs
     marked failed (resumed runs are NOT counted -- they stay "running").
-    """
-    try:
-        #minutes = int(os.environ.get("CVICHE_STALE_RUN_MINUTES", DEFAULT_STALE_RUN_MINUTES))
-        stale_run_minutes, _ = get_config("llm","CVICHE_STALE_RUN_MINUTES",default=DEFAULT_STALE_RUN_MINUTES)
-        minutes = int(stale_run_minutes)
-    except (TypeError, ValueError):
-        minutes = DEFAULT_STALE_RUN_MINUTES
 
+    In queue mode the threshold is floored well above the run watchdog's own
+    timeout -- see ``_effective_stale_run_minutes`` -- so this reaper backstops
+    a run whose worker died without tripping its watchdog, rather than racing
+    a run that is still legitimately executing.
+    """
+    minutes = _effective_stale_run_minutes()
     cutoff = datetime.now() - timedelta(minutes=minutes)
     stale_runs = (
         db.query(Run)
@@ -174,6 +277,103 @@ def reconcile_stale_runs(db: Session) -> int:
             failed_count, minutes,
         )
     return failed_count
+
+
+def _queued_reconcile_minutes() -> int:
+    try:
+        minutes_cfg, _ = get_config(
+            "llm", "CVICHE_QUEUED_RECONCILE_MINUTES", default=DEFAULT_QUEUED_RECONCILE_MINUTES
+        )
+        return int(minutes_cfg)
+    except (TypeError, ValueError):
+        return DEFAULT_QUEUED_RECONCILE_MINUTES
+
+
+def reconcile_queued_runs(db: Session) -> int:
+    """Requeue runs stranded at status="queued" (#701 queue mode only).
+
+    A no-op outside queue mode -- safe to call unconditionally from every
+    reaper call site (the periodic loop and the startup sweep), the same way
+    ``reconcile_stale_runs`` is age-based and idempotent so multiple replicas
+    calling it on an interval never step on each other.
+
+    Covers the crash windows the #895 review found where a "queued" row's
+    Valkey token never reaches a worker: a producer dying between
+    ``flip_to_queued``'s commit and ``run_queue.enqueue`` (runs.py point 9), an
+    entry trimmed while pending (run_queue point 3), or any other silent
+    token loss. A row whose id IS in ``run_queue.live_run_ids()`` (undelivered
+    or pending, not yet ACKed) is left alone -- it has a live token and a
+    legitimately deep backlog must not be re-enqueued out from under itself.
+
+    Re-enqueuing a row that in fact still has a live token would be a harmless
+    duplicate (the worker's claim is conditional), but this still goes through
+    ``run_queue.claim_reenqueue_slot`` -- the same guard the already-queued
+    ``/start`` path uses -- so a backlog of many stranded rows, or repeated
+    sweeps, adds at most one fresh token per run per ``REENQUEUE_GUARD_TTL_S``.
+    A guard miss means another sweep or an operator's own ``/start`` already
+    requeued this run within that window, so it is skipped rather than
+    duplicated.
+
+    Returns the number of rows actually requeued.
+    """
+    if concurrency.dispatch_mode() != "queue":
+        return 0
+
+    minutes = _queued_reconcile_minutes()
+    cutoff = datetime.now() - timedelta(minutes=minutes)
+    stranded = (
+        db.query(Run)
+        .filter(Run.status == RunState.QUEUED, Run.queued_at.isnot(None), Run.queued_at < cutoff)
+        .all()
+    )
+    if not stranded:
+        return 0
+
+    live_ids = run_queue.live_run_ids()
+    requeued = 0
+    for run in stranded:
+        if run.id in live_ids or not run_queue.claim_reenqueue_slot(run.id):
+            continue
+        run_queue.enqueue(run.id)
+        requeued += 1
+        logger.warning("requeued_stranded run_id=%s queued_at=%s", run.id, run.queued_at)
+
+    if requeued:
+        logger.info(
+            "Queued-run reconciler requeued %d/%d stranded run(s) (queued_at older than %d min)",
+            requeued, len(stranded), minutes,
+        )
+    return requeued
+
+
+def queue_db_view(db: Session) -> dict[str, int | float | None]:
+    """DB side of the run-queue stats (#701): how many runs are queued/running
+    and the age of the oldest of each.
+
+    Queued age is measured from ``queued_at``, not ``started_at``: since the
+    routes rework, ``flip_to_queued`` stamps ``queued_at`` and leaves
+    ``started_at`` alone, and ``claim_queued`` re-stamps ``started_at`` only
+    once a worker actually claims the run (mrj4001 review, runs.py point 6 --
+    ``started_at`` means "began executing"). Running age still comes from
+    ``started_at``, which is exactly when a "running" row entered that status.
+    """
+    from sqlalchemy import func
+
+    now = datetime.now()
+
+    queued_count, oldest_queued = db.query(func.count(Run.id), func.min(Run.queued_at)).filter(
+        Run.status == RunState.QUEUED
+    ).one()
+    running_count, oldest_running = db.query(func.count(Run.id), func.min(Run.started_at)).filter(
+        Run.status == RunState.RUNNING
+    ).one()
+
+    return {
+        "queued": queued_count,
+        "oldest_queued_age_s": (now - oldest_queued).total_seconds() if oldest_queued else None,
+        "running": running_count,
+        "oldest_running_age_s": (now - oldest_running).total_seconds() if oldest_running else None,
+    }
 
 
 def _submitter_email(db: Session, run: Run) -> str | None:
@@ -467,11 +667,9 @@ def _schedule_auto_retry(
     (delay the relaunch by auto_retry_backoff_seconds()) so a persistently
     failing run cannot tight-loop.
     """
-    # Resolve the original upload path the same way runs.py start/retry do. Done
-    # via lazy import to avoid a circular import with app.api.runs at module load.
+    # Resolve the original upload path the same way runs.py start/retry do.
+    # Both now live in this module (#701), so no lazy/circular import is needed.
     try:
-        from app.api.runs import _materialize_input_if_missing, UPLOAD_DIR
-
         file_path = UPLOAD_DIR / f"{run.id}.{run.file_type}"
         _materialize_input_if_missing(run.id, run.file_type, file_path)
     except Exception:
@@ -554,3 +752,221 @@ def check_run_access(run_id: str, current_user: User, db: Session, *, eager=()) 
     if current_user.role != "admin" and run.user_id != current_user.id:
         raise forbidden("Access denied")
     return run
+
+
+# ============================================================
+# Queue-mode run transitions (#701)
+#
+# Named DB-state transitions shared by the queue producer (app/api/runs.py's
+# _dispatch_queue), the queue worker (app/worker.py) and the queued-run
+# reconciler, in place of each hand-writing its own conditional UPDATE with
+# inline status literals (CODING STANDARDS section 1.5: one definition of a
+# shared vocabulary). None of these commit a caller-supplied Session's
+# unrelated pending changes for it -- claim_queued and mark_failed open and
+# close their own short session (mirroring the pre-existing worker._claim /
+# worker._mark_failed they replace), while flip_to_queued and revert_queued
+# take the request's Session so they share its transaction with the route's
+# other reads.
+# ============================================================
+
+@dataclass(frozen=True, slots=True)
+class ClaimResult:
+    """Outcome of claim_queued: whether this call won the conditional claim,
+    and the row's state right after -- populated whether the claim was won or
+    lost, so a losing caller can still log what it saw."""
+    won: bool
+    status: str | None
+    file_type: str | None
+    resume_from_step: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class StepSnapshot:
+    """One Step row's state captured just before a queue-mode retry_step
+    reset it to "pending" (B3): the exact fields revert_queued needs to
+    restore it if the follow-up XADD then fails, so the run comes back
+    retryable -- an "error" step, not one stranded "pending" with no
+    executor and rejected by retry_step's own ``status != "error"`` guard."""
+    step_id: int
+    status: str
+    error_message: str | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    duration_seconds: int | None
+    cost: float | None
+
+
+@dataclass(frozen=True, slots=True)
+class FlipResult:
+    """Outcome of flip_to_queued: whether the flip applied, plus the exact
+    pre-flip values (read under the same row lock as the flip) a caller needs
+    to undo it with revert_queued if the follow-up XADD then fails.
+    ``step_snapshots`` is populated only when the caller passed
+    ``flip_to_queued`` an ``on_flip`` and the flip actually won (B3)."""
+    flipped: bool
+    prior_status: str
+    prior_started_at: datetime | None
+    prior_error_message: str | None
+    prior_completed_at: datetime | None
+    prior_queued_at: datetime | None
+    step_snapshots: tuple[StepSnapshot, ...] = ()
+
+
+def claim_queued(run_id: str) -> ClaimResult:
+    """The one conditional UPDATE that decides a queue worker's ownership of a
+    run: queued -> running. Own short session, committed at once so no lock
+    spans the run itself -- mirrors the worker's pre-existing ``_claim``,
+    moved here so the worker no longer needs its own DB-transition code next
+    to the reconciler's and the routes' (section 1.5).
+
+    Returns ``resume_from_step`` off the row as it stands right after the
+    attempt, so the caller resumes from the DB's recorded step rather than
+    from anything carried on the Valkey token itself: the token is a pure
+    wake-up now, so a redelivered or stale one can no longer replay an old
+    start_step (mrj4001 review, runs.py point 3).
+    """
+    db = SessionLocal()
+    try:
+        won = db.execute(
+            update(Run)
+            .where(Run.id == run_id, Run.status == RunState.QUEUED)
+            .values(status=RunState.RUNNING, started_at=datetime.now(),
+                    error_message=None, completed_at=None)
+        ).rowcount == 1
+        db.commit()
+        row = db.execute(
+            select(Run.status, Run.file_type, Run.resume_from_step).where(Run.id == run_id)
+        ).one_or_none()
+        return ClaimResult(
+            won=won,
+            status=row[0] if row else None,
+            file_type=row[1] if row else None,
+            resume_from_step=row[2] if row else None,
+        )
+    finally:
+        db.close()
+
+
+def mark_failed(run_id: str, message: str, *, from_statuses: tuple[str, ...]) -> int:
+    """Named failed-transition for the queue worker (dead-letter, run
+    watchdog) and the queued-run reconciler, replacing worker.py's own
+    hand-written UPDATE (section 1.5). Own short session, matching
+    claim_queued.
+
+    Also errors out any Step rows still "running" for this run -- the same
+    cleanup ``_mark_run_failed`` (the startup reaper's ORM path, above) does
+    for an orphaned run -- so a dead-lettered or watchdog-killed run never
+    leaves a phantom "running" step in the UI. Returns the Run UPDATE's
+    rowcount, so a caller can tell a lost race (0: something else already
+    moved the row) from a real transition (1).
+    """
+    db = SessionLocal()
+    try:
+        now = datetime.now()
+        rowcount = db.execute(
+            update(Run)
+            .where(Run.id == run_id, Run.status.in_(from_statuses))
+            .values(status=RunState.FAILED, error_message=message, completed_at=now)
+        ).rowcount
+        if rowcount:
+            db.execute(
+                update(Step)
+                .where(Step.run_id == run_id, Step.status == "running")
+                .values(status="error", completed_at=now)
+            )
+        db.commit()
+        return rowcount
+    finally:
+        db.close()
+
+
+def flip_to_queued(
+    db: Session, run_id: str, allowed_from: tuple[str, ...], *, resume_from_step: int | None = None,
+    on_flip: Callable[[], tuple[StepSnapshot, ...]] | None = None,
+) -> FlipResult:
+    """Conditionally flip a run to "queued". Reads the pre-flip state under a
+    row lock in the SAME transaction as the flip (``SELECT ... FOR UPDATE``),
+    not from an ORM row loaded earlier in the request -- a read from earlier
+    can describe a row the UPDATE no longer matches if it changed in between
+    (mrj4001 review, runs.py point 4). No ``RETURNING``: MariaDB's UPDATE does
+    not support it (probed against the mysql/mariadb SQLAlchemy dialects --
+    ``update_returning`` is False for both), so the locked read is a separate
+    statement rather than ``.returning()``.
+
+    ``resume_from_step`` is written unconditionally, including ``None`` --
+    retry_step passes the step to resume from; start_run passes ``None`` so a
+    fresh start always clears a stale resume point left by an earlier retry.
+
+    Already-"queued" is reported as ``flipped=False`` without writing the row
+    -- the caller's re-enqueue path (``run_queue.claim_reenqueue_slot``)
+    handles that case; this never issues a second flip for it.
+
+    ``on_flip``, if given, runs -- and is committed -- in this SAME
+    transaction, only once the flip has actually won (B3): retry_step uses it
+    to reset the downstream Step rows to "pending" and passes back their
+    prior state as ``StepSnapshot``s, attached to the returned ``FlipResult``
+    so ``revert_queued`` can restore them too if the caller's own follow-up
+    (the queue XADD) then fails. Committing the flip and the step reset
+    separately, as an earlier version of this did, left a real window open: a
+    woken worker could claim the row between the two commits and execute
+    against still-stale step state.
+    """
+    prior_status, prior_started_at, prior_error_message, prior_completed_at, prior_queued_at = db.execute(
+        select(Run.status, Run.started_at, Run.error_message, Run.completed_at, Run.queued_at)
+        .where(Run.id == run_id)
+        .with_for_update()
+    ).one()
+    if prior_status == RunState.QUEUED:
+        db.commit()  # release the row lock; nothing to flip
+        return FlipResult(False, prior_status, prior_started_at, prior_error_message,
+                           prior_completed_at, prior_queued_at)
+    rowcount = db.execute(
+        update(Run)
+        .where(Run.id == run_id, Run.status.in_(allowed_from))
+        .values(status=RunState.QUEUED, queued_at=datetime.now(), error_message=None,
+                completed_at=None, resume_from_step=resume_from_step)
+    ).rowcount
+    step_snapshots: tuple[StepSnapshot, ...] = ()
+    if rowcount == 1 and on_flip is not None:
+        step_snapshots = on_flip()
+    db.commit()
+    return FlipResult(rowcount == 1, prior_status, prior_started_at, prior_error_message,
+                       prior_completed_at, prior_queued_at, step_snapshots=step_snapshots)
+
+
+def revert_queued(db: Session, run_id: str, prior: FlipResult) -> bool:
+    """Undo a flip_to_queued when the follow-up XADD then failed. Guarded
+    ``WHERE status='queued'`` (mrj4001 review, runs.py point 1) so a revert
+    can never clobber a claim or cancel that landed between the flip and this
+    call: if the worker already won queued->running, or the run was
+    cancelled, this is a no-op and the caller should report the run's live
+    status instead of a stale "reverted to prior" one.
+
+    Also restores any ``prior.step_snapshots`` (B3) -- the downstream Step
+    rows a queue-mode retry_step reset to "pending" before the flip -- to
+    their pre-reset state, in the same transaction as the Run revert. Without
+    this a failed enqueue left the run back at its prior (retryable-looking)
+    status but its failed step stuck "pending": no executor is coming for it,
+    and retry_step's own ``status != "error"`` guard then rejects a second
+    retry outright.
+
+    Returns True if the revert actually applied.
+    """
+    rowcount = db.execute(
+        update(Run)
+        .where(Run.id == run_id, Run.status == RunState.QUEUED)
+        .values(status=prior.prior_status, started_at=prior.prior_started_at,
+                error_message=prior.prior_error_message, completed_at=prior.prior_completed_at,
+                queued_at=prior.prior_queued_at)
+    ).rowcount
+    if rowcount == 1:
+        for snap in prior.step_snapshots:
+            db.execute(
+                update(Step)
+                .where(Step.id == snap.step_id)
+                .values(status=snap.status, error_message=snap.error_message,
+                        started_at=snap.started_at, completed_at=snap.completed_at,
+                        duration_seconds=snap.duration_seconds, cost=snap.cost)
+            )
+    db.commit()
+    return rowcount == 1

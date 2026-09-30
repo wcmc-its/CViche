@@ -23,7 +23,10 @@ from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
 
-_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Public (#701 run_queue.WorkToken validates a Valkey work token's run_id
+# against this same pattern -- one definition of "what a run_id may look
+# like", CODING STANDARDS section 1.5).
+RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 # Preview bounds (#780 review r3965770586): a large pipeline artifact must not
 # be expanded into an unbounded response. Parsing stops at the row cap -- it
@@ -69,7 +72,7 @@ def validate_run_id(run_id: str) -> None:
     `{run_id:path}` (or a lookup that stops being exact) cannot silently make
     traversal reachable.
     """
-    if not _RUN_ID_RE.match(run_id):
+    if not RUN_ID_RE.match(run_id):
         logger.warning("[SECURITY] Blocked malformed run_id: %r", run_id)
         raise HTTPException(status_code=400, detail="Invalid run ID")
 

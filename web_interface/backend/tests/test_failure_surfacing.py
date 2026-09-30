@@ -173,6 +173,48 @@ def test_execute_step_timeout_surfaces_error(monkeypatch, tmp_path):
     emitter.emit_step_error.assert_awaited()
 
 
+# --- cancellation is a terminal state too: the DB row must be able to stop a run
+# that a different process (a queue worker, #701) is executing ------------------
+
+def test_check_cancelled_reads_the_db_status_not_only_the_process_local_flag(db, tmp_path):
+    """A cancel set on the row by another process -- the backend answering
+    POST /cancel while a worker pod runs the pipeline -- must stop the run at the
+    next stage boundary even though this process's cancel set is empty and no
+    Redis broker is attached (the cancel key would expire after 300s anyway)."""
+    from app.models import Run
+    from app.pipeline import orchestrator as orch
+
+    db.add(Run(id="CANCDB", filename="cv.docx", file_type="docx", status="running"))
+    db.commit()
+    o = orch.PipelineOrchestrator("CANCDB", tmp_path / "CANCDB.docx", db)
+    o.check_cancelled()  # running: no raise
+
+    other = db.get_bind().connect()
+    other.execute(__import__("sqlalchemy").text("UPDATE runs SET status='cancelled' WHERE id='CANCDB'"))
+    other.commit()
+    other.close()
+
+    assert "CANCDB" not in orch._cancelled_runs
+    with pytest.raises(orch.CancelledException):
+        o.check_cancelled()
+
+
+def test_check_cancelled_does_not_use_the_shared_session(db, tmp_path, monkeypatch):
+    """Stage 2 calls check_cancelled from its parallel section threads, so the
+    DB read must not go through the orchestrator's Session, which is not
+    thread-safe."""
+    from app.models import Run
+    from app.pipeline import orchestrator as orch
+
+    db.add(Run(id="CANCTS", filename="cv.docx", file_type="docx", status="cancelled"))
+    db.commit()
+    o = orch.PipelineOrchestrator("CANCTS", tmp_path / "CANCTS.docx", db)
+    monkeypatch.setattr(db, "execute", lambda *a, **k: pytest.fail("check_cancelled used the shared Session"))
+
+    with pytest.raises(orch.CancelledException):
+        o.check_cancelled()
+
+
 # ---------------------------------------------------------------------------
 # #590: a timed-out stage's worker thread stops at its next callback
 # ---------------------------------------------------------------------------

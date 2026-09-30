@@ -7,6 +7,8 @@ export function statusLabel(status: string): string {
       return 'Complete'
     case 'running':
       return 'Running'
+    case 'queued':
+      return 'Queued'
     case 'failed':
       return 'Failed'
     case 'cancelled':
@@ -26,6 +28,8 @@ export function statusLabelColor(status: string): string {
       return 'text-green-600'
     case 'running':
       return 'text-blue-600'
+    case 'queued':
+      return 'text-gray-600'
     case 'failed':
       return 'text-red-600'
     case 'cancelled':
