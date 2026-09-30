@@ -307,7 +307,7 @@ def test_cjk_never_forms_a_render_token_so_cjk_lines_are_unverifiable():
     "ㄱㄲㄴㄷㄹㅁ",                  # Hangul compatibility Jamo
     "ㇰㇱㇲㇳㇴㇵ",                  # Katakana phonetic extensions
     "ꥠꥡꥢꥣꥤꥥ",                  # Hangul Jamo extended-A
-    "豈更車賈滑串",                  # CJK compatibility ideographs
+    "".join(chr(0xF900 + i) for i in range(6)),              # CJK compatibility ideographs (NFC-unstable literal)
     "ힰힱힲힳힴힵ",                  # Hangul Jamo extended-B
 ])
 def test_every_cjk_block_is_excluded_from_the_token_regex(run):
