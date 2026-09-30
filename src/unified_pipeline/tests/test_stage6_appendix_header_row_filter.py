@@ -846,6 +846,11 @@ _WRAPPED_QUALIFIER = "(e.g., list each sample item or\nsample record in any samp
     "3.  Sample Placement (sample, sample/sample role, etc.; sample sample, sample, if applicable)",
     f"b. {_TEN_WORDS} (sample sample sample)",
     f"b. {_TEN_WORDS} ()",
+    # A qualifier far longer than any length bound (130 characters).
+    "2. Sample Placement (" + ", ".join(["sample"] * 16) + ", if applicable)",
+    # A qualifier glued to the word before it, with no space.
+    # Ten label words, then the qualifier: counted, it would be the eleventh+.
+    "b. one two three four five six seven eight nine ten(sample sample sample)",
     # A marker and a parenthetical alone: the parenthetical is the label, as before.
     f"1. ({_TEN_WORDS})",
 ])
