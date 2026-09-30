@@ -284,14 +284,11 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
       ).length
     : 0
   const showInsights = !!(cvInsights && cvInsights.cv_owner_location?.inference_success)
-  const hasSummary = currentStepData?.status === 'complete' && (currentOutputCount > 0 || showInsights)
-  const activeTab: 'summary' | 'logs' | 'prompts' = showPromptLogs
-    ? 'prompts'
-    : (tab ?? (runStatus.status === 'running' ? 'logs' : 'summary')) === 'summary' && hasSummary
-      ? 'summary'
-      : 'logs'
+  // Summary is the default view of every step, as in the mockup; the full log
+  // stream sits one tab over.
+  const activeTab: 'summary' | 'logs' | 'prompts' = showPromptLogs ? 'prompts' : (tab ?? 'summary')
   const tabs: { key: 'summary' | 'logs' | 'prompts'; label: string; onSelect: () => void }[] = [
-    ...(hasSummary ? [{ key: 'summary' as const, label: 'Summary', onSelect: () => { setTab('summary'); setShowPromptLogs(false) } }] : []),
+    { key: 'summary' as const, label: 'Summary', onSelect: () => { setTab('summary'); setShowPromptLogs(false) } },
     { key: 'logs' as const, label: 'Logs', onSelect: () => { setTab('logs'); setShowPromptLogs(false) } },
     { key: 'prompts' as const, label: 'Prompts', onSelect: () => { fetchPromptLogsContext() } },
   ]
@@ -317,10 +314,17 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         ? formatCost(runningStepCost(runStatus.total_cost, stepStartCosts[currentStep]), 3)
         : formatCost(currentStepData.cost, 3),
     }] : []),
-    ...(currentStepData.status === 'running' && currentProgress && currentProgress.total > 0
-      ? [{ label: 'Progress', value: `${currentProgress.current} / ${currentProgress.total}` }] : []),
     ...(currentOutputCount > 0 ? [{ label: 'Output files', value: String(currentOutputCount) }] : []),
   ] : []
+
+  // Short key facts for the Summary tab: where the step is, and the last thing it logged.
+  const stepLogs = logs[currentStep] || []
+  const latestLog = stepLogs.length > 0 ? stepLogs[stepLogs.length - 1].replace(/^\[[^\]]*\]\s?/, '') : null
+  const summaryRows: { label: string; value: string }[] = [
+    ...(currentStepData?.status === 'running' && currentProgress && currentProgress.total > 0
+      ? [{ label: currentProgress.message || 'Progress', value: `${currentProgress.current} of ${currentProgress.total}` }] : []),
+    ...(latestLog ? [{ label: 'Latest', value: latestLog }] : []),
+  ]
 
   const bannerBase = 'rounded-xl border px-4 py-3'
 
@@ -448,17 +452,6 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                     ))}
                   </div>
 
-                  {currentStepData.status === 'running' && currentProgress && currentProgress.total > 0 && (
-                    <div className="p-3 bg-primary-50 border border-primary-200 rounded-lg">
-                      <div className="flex items-center justify-between mb-2 gap-3">
-                        <span className="text-sm font-medium text-blue-900">{currentProgress.message || 'Processing...'}</span>
-                        <span className="text-sm font-semibold text-blue-900 whitespace-nowrap">{currentProgress.current} / {currentProgress.total}</span>
-                      </div>
-                      <div className="bg-primary-200 rounded-full h-2 overflow-hidden" role="progressbar" aria-valuenow={currentProgress.current} aria-valuemax={currentProgress.total}>
-                        <div className="h-full bg-primary-600 transition-all duration-300" style={{ width: `${(currentProgress.current / currentProgress.total) * 100}%` }} />
-                      </div>
-                    </div>
-                  )}
 
                   <div className="flex gap-[18px] border-b border-sand-200" role="tablist">
                     {tabs.map((t) => {
@@ -481,6 +474,20 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
 
                   {activeTab === 'summary' && (
                     <div id="summary-panel" className="flex flex-col gap-6">
+                      {currentStepData.status === 'pending' ? (
+                        <p className="text-sm text-gray-500">This step has not started yet.</p>
+                      ) : summaryRows.length === 0 && currentOutputCount === 0 && !showInsights ? (
+                        <p className="text-sm text-gray-500">Nothing to summarize yet. The Logs tab shows everything this step has reported.</p>
+                      ) : summaryRows.length > 0 && (
+                        <dl className="text-sm">
+                          {summaryRows.map((r) => (
+                            <div key={r.label} className="flex items-baseline justify-between gap-6 border-b border-sand-200 py-2.5">
+                              <dt className="text-gray-600 shrink-0">{r.label}</dt>
+                              <dd className="min-w-0 truncate text-right font-semibold text-gray-900" title={r.value}>{r.value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )}
                       {showInsights && (
                         <section>
                           <h3 className="text-sm font-semibold text-gray-700 mb-2">CV Insights</h3>
