@@ -153,9 +153,9 @@ def test_known_lints_has_no_duplicates_and_is_not_empty():
     """Guard the guard: an empty or duplicated tuple would pass the checks above."""
     known = _module().KNOWN_LINTS
     assert len(known) == len(set(known)), f"duplicate entries in KNOWN_LINTS: {known}"
-    assert len(known) == 26, (
-        f"KNOWN_LINTS changed size ({len(known)}, was 25 -- this change added "
-        f"date_only_lines). That is fine if a lint was genuinely added or "
+    assert len(known) == 27, (
+        f"KNOWN_LINTS changed size ({len(known)}, was 26 -- this change added "
+        f"stage3b_second_pass_error, #818). That is fine if a lint was genuinely added or "
         f"removed -- update this count and say so in the commit message."
     )
 
@@ -269,6 +269,7 @@ def test_known_lints_literal_expected_order():
         "stage6_render_warnings", "dedup_drops", "pipe_leaks", "table_shape",
         "duplicate_passages", "duplicate_records", "protected_data_in_output",
         "invented_records", "wrong_start_date", "table_lost", "date_only_lines",
+        "stage3b_second_pass_error",
         "owner_contact_missing", "pipeline_errors_present", "no_output",
     )
 
