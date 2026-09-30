@@ -167,6 +167,10 @@ from unified_pipeline.segmentation_regression import compute_metrics, iter_sourc
 # that is not re-exported fails at IMPORT time -- which reads as a lost fix.
 # test_run_doctor_contract.py pins that surface.
 from unified_pipeline.doctor.shared import (  # noqa: F401,E402
+    FINDING_STATUSES,
+    STATUS_RAN,
+    STATUS_SKIPPED,
+    STATUS_UNREADABLE,
     Haystack,
     RENDER_PIECE_MIN_CHARS,
     RENDER_PIECE_WINDOW,
@@ -794,11 +798,13 @@ def _ready(lint_id: str, *, unreadable: Dict[str, str], findings: List[Dict],
     absent = [name for name in missing if name not in unreadable]
     if absent:
         findings.append(_finding(
-            lint_id, "INFO", "skipped: missing " + ", ".join(absent)))
+            lint_id, "INFO", "skipped: missing " + ", ".join(absent),
+            status=STATUS_SKIPPED, reason=", ".join(absent)))
     if broken:
         findings.append(_finding(
             lint_id, "ERROR", "skipped: unreadable " + ", ".join(
-                f"{name} ({unreadable[name]})" for name in broken)))
+                f"{name} ({unreadable[name]})" for name in broken),
+            status=STATUS_UNREADABLE, reason=", ".join(broken)))
     return False
 
 

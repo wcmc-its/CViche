@@ -31,7 +31,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import NamedTuple, TypedDict
 
-from unified_pipeline.run_doctor import KNOWN_LINTS, SEVERITY_ORDER, _uid_owns, run_doctor
+from unified_pipeline.run_doctor import (
+    FINDING_STATUSES, KNOWN_LINTS, SEVERITY_ORDER, STATUS_SKIPPED, _uid_owns, run_doctor)
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +56,16 @@ class Finding(TypedDict):
     it -- the contract `aggregate()` validates every finding against
     (T2.10). Pinned to the real builder by
     `test_finding_contract_matches_doctor_shared_finding`, so the two cannot
-    drift apart silently. `aggregate()` reads lint/severity/message;
+    drift apart silently. `aggregate()` reads lint/severity/status;
     `evidence` is required because the builder always sets it, and a
-    finding without it did not come from the builder."""
+    finding without it did not come from the builder. `status` (#750) is
+    how aggregate() tells a skipped lint from one that ran."""
     lint: str
     severity: str
     message: str
     evidence: list[str]
+    status: str
+    reason: str
 
 
 # Declaration order, for messages that name the missing key.
@@ -356,7 +360,7 @@ def sweep(corpus_dir: Path, run_ids: Iterable[str], work: Path) -> SweepResult:
     return SweepResult(reports, failures, skipped, duplicates)
 
 
-# The lints run_doctor always considers (skipped ones emit a "skipped: missing"
+# The lints run_doctor always considers (skipped ones emit a status="skipped"
 # INFO; a lint that runs clean emits nothing -- so ran = ALL - skipped, not the
 # set of lints that happened to fire).
 #
@@ -367,16 +371,6 @@ def sweep(corpus_dir: Path, run_ids: Iterable[str], work: Path) -> SweepResult:
 # since lint_surprise landed, and nothing runs --selftest in CI, so nobody saw
 # it. Importing the canonical tuple removes both the copy and the heuristic.
 ALL_LINTS = list(KNOWN_LINTS)
-
-# `_ready()` in run_doctor.py records a lint it could not run as an INFO
-# finding whose message is "skipped: missing <inputs>" -- a finding carries
-# no structured status field yet (#750 tracks adding one to `_finding()` and
-# `_ready()`, at which point this constant goes away). Until then this is the
-# ONE place the sweep depends on that wording, and
-# `test_skip_detection_matches_what_run_doctor_actually_emits` runs the real
-# run_doctor through aggregate() so a rewording on either side fails CI
-# instead of silently turning every skipped lint into a "ran clean" one.
-SKIPPED_MISSING_PREFIX = "skipped: missing"
 
 
 class MalformedReportError(Exception):
@@ -409,6 +403,10 @@ def _validate_finding(run_id: str, f: object) -> None:
         raise MalformedFindingError(
             f"run_id={run_id!r}: field=severity value={f['severity']!r} "
             f"not in SEVERITY_ORDER={SEVERITY_ORDER}")
+    if f["status"] not in FINDING_STATUSES:
+        raise MalformedFindingError(
+            f"run_id={run_id!r}: field=status value={f['status']!r} not in "
+            f"FINDING_STATUSES={FINDING_STATUSES}")
     if f["lint"] not in ALL_LINTS:
         raise MalformedFindingError(
             f"run_id={run_id!r}: field=lint value={f['lint']!r} not in "
@@ -450,7 +448,7 @@ def aggregate(reports: dict[str, DoctorReport]) -> list[LintRow]:
         seen_warn, seen_err, skipped = set(), set(), set()
         for f in _validate_report(run_id, rep):
             lint, sev = f["lint"], f["severity"]
-            if sev == "INFO" and f["message"].startswith(SKIPPED_MISSING_PREFIX):
+            if f["status"] == STATUS_SKIPPED:
                 skipped.add(lint)
             elif sev == "WARN":
                 seen_warn.add(lint)

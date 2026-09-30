@@ -75,7 +75,8 @@ def test_lint_dedup_drops_returns_structured_findings():
     finding = result[0]
     assert isinstance(finding, dict)
     # Shape per doctor/shared.py's _finding().
-    assert set(finding.keys()) == {"lint", "severity", "message", "evidence"}
+    assert set(finding.keys()) == {"lint", "severity", "message", "evidence",
+                                   "status", "reason"}
     assert finding["lint"] == "dedup_drops"
     assert finding["severity"] == "WARN"
     assert isinstance(finding["message"], str)
@@ -778,7 +779,8 @@ def test_lint_invented_records_warns_on_a_rendered_header_record():
     findings = lint_invented_records(stage4, table_rows)
     assert len(findings) == 1
     finding = findings[0]
-    assert set(finding.keys()) == {"lint", "severity", "message", "evidence"}
+    assert set(finding.keys()) == {"lint", "severity", "message", "evidence",
+                                   "status", "reason"}
     assert finding["lint"] == "invented_records"
     assert finding["severity"] == "WARN"
     assert "F2" in finding["message"] and "7" in finding["message"]
