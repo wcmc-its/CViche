@@ -301,12 +301,21 @@ def test_stage_thread_that_outlives_grace_is_logged_and_its_callbacks_stay_dead(
     error_logs = [c for c in emitter.emit_log.await_args_list if c.args[3] == "ERROR"]
     assert any("still running" in c.args[2] for c in error_logs)
 
-    logs_before = emitter.emit_log.await_count
+    # The loop is stopped by now, so a late emit would never reach emit_log;
+    # count attempts to schedule one on the loop instead.
+    scheduled = []
+    real_schedule = asyncio.run_coroutine_threadsafe
+
+    def spy(coro, loop):
+        scheduled.append(1)
+        return real_schedule(coro, loop)
+
+    monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", spy)
     release.set()
     assert exited.wait(timeout=5)
     assert o._stage_guard.wait_idle(5)  # the sink's final flush() runs after the stage returns
     assert late_write == []  # the write raised StageAbandoned
-    assert emitter.emit_log.await_count == logs_before
+    assert scheduled == []
 
 
 # ---------------------------------------------------------------------------
