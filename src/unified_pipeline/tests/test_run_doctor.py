@@ -579,8 +579,7 @@ def test_output_hygiene_flags_every_taxonomy_code_shape():
 def test_output_hygiene_flags_boilerplate_in_appendix():
     blocks = [
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("p", "• CURRICULUM VITAE"),
         ("p", "1. Page 2 of 9"),
         ("p", "• Real leftover grant content | Role: PI | Amount: $10,000"),
@@ -618,8 +617,7 @@ def test_output_hygiene_flags_a_non_paragraph_block_inside_the_appendix():
     dropped."""
     blocks = [
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("table", "cell text that never gets scanned as an appendix entry"),
         ("p", "• Real leftover grant content | Role: PI | Status: Under review"),
     ]
@@ -635,8 +633,7 @@ def test_output_hygiene_quiet_on_clean_output():
         ("p", "D. GRANTS"),
         ("table", _GRANT_FSMB),
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("p", "• Real leftover grant content | Role: PI | Status: Under review"),
     ]
     findings = lint_output_hygiene(blocks)
@@ -1738,8 +1735,7 @@ def _build_clean_run(tmp_path, uid=_UID):
     for i, grant in enumerate(grants[1:]):
         table.rows[i].cells[0].paragraphs[0].text = grant
     output.add_paragraph("T. APPENDIX")
-    output.add_paragraph("The following content from the original CV was not "
-                         "successfully mapped to this CV format:")
+    output.add_paragraph("These entries from your original CV could not be matched to a section of the WCM format.")
     out_dir = root / "stage_6_wcm_documents"
     out_dir.mkdir(parents=True)
     output.save(out_dir / f"{uid}_cv_wcm.docx")
@@ -1809,8 +1805,7 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
     }
     blocks = [
         ("p", "T. APPENDIX"),
-        ("p", "The following content from the original CV was not "
-              "successfully mapped to this CV format:"),
+        ("p", "These entries from your original CV could not be matched to a section of the WCM format."),
         ("p", "• Unmapped leftover entry one"),
         ("p", "• Unmapped leftover entry two"),
     ]

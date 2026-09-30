@@ -764,6 +764,23 @@ def test_stage6_llm_outage_propagates_but_other_errors_default(monkeypatch, call
     assert run() == ("National" if call == "geographic_scope" else None)
 
 
+def test_remaining_appendix_intro_is_the_shared_accurate_banner():
+    # #534: the bullet writer creates T. APPENDIX with the same one-line intro
+    # as _fill_appendix -- italic, and never claiming the entries appear
+    # nowhere else (stage 6 cannot prove that).
+    from unified_pipeline.stage6.sections.appendix import APPENDIX_INTRO_TEXT
+
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen._add_remaining_to_appendix([("Example Leftover Committee, 2019-2021", "T", 0.0)])
+
+    paragraphs = gen.doc.paragraphs
+    header = next(i for i, p in enumerate(paragraphs) if p.text == "T. APPENDIX")
+    intro = paragraphs[header + 1]
+    assert intro.text == APPENDIX_INTRO_TEXT
+    assert all(run.italic for run in intro.runs)
+
+
 # ------------------------------------ #530: foreign scaffolding never recovered
 
 def test_add_remaining_to_appendix_drops_foreign_template_scaffolding():

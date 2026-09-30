@@ -804,3 +804,16 @@ def test_filter_reads_reasoning_from_the_entry_and_counts_each_reason():
     assert _describe_dropped(dropped) == (
         "3 non-content blocks removed (cv-title 1, date-stamp 1, section-header 1)"
     )
+
+
+def test_appendix_intro_is_the_shared_accurate_banner(tmp_path, caplog):
+    # #534: _fill_appendix writes the shared intro line, italic, and the old
+    # "not successfully mapped" claim is gone.
+    entries = [_t_entry("Example Leftover Society Membership, 2015", ["OTHER"], 7)]
+    doc = Document(str(_render(tmp_path, entries, caplog)))
+    paragraphs = doc.paragraphs
+    header = next(i for i, p in enumerate(paragraphs) if p.text == "T. APPENDIX")
+    intro = paragraphs[header + 1]
+    assert intro.text == appendix_module.APPENDIX_INTRO_TEXT
+    assert all(run.italic for run in intro.runs)
+    assert "successfully mapped" not in _output_text(tmp_path / "out.docx")

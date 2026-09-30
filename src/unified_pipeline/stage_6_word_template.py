@@ -201,6 +201,7 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     TeachingSection,
 )
 from unified_pipeline.stage6.sections.appendix import (
+    APPENDIX_INTRO_TEXT,
     UnmappedEntry,
     build_appendix_diversion_warnings,
 )
@@ -2653,10 +2654,8 @@ Now analyze the text above:"""
             run.underline = True
 
             intro_para = self.doc.add_paragraph()
-            run = intro_para.add_run(
-                "The following content from the original CV was not successfully mapped to this CV format:"
-            )
-            _set_font(run)
+            run = intro_para.add_run(APPENDIX_INTRO_TEXT)
+            _set_font(run, italic=True)
             self.doc.add_paragraph()
 
         # Add each remaining segment. The taxonomy code is an internal
