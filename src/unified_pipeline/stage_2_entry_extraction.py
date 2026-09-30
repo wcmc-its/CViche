@@ -967,7 +967,14 @@ A single logical entry may span multiple lines (paragraphs or table rows). You m
 * **Whole Table as Entry:** If a table describes a *single* summary item (e.g., a summary of one grant), treat the entire table as one entry (`element_type: "table"`).
 * **Rows as Entries:** If a table lists *multiple* items (e.g., a list of courses), treat each row (or group of rows based on the logic above) as a separate entry (`element_type: "table_row"`).
 
-### 3. Output Format
+### 3. Template Outline Labels Are Not Entries
+
+Some CVs are written on another institution's template and keep its outline labels, e.g. `C. Academic Appointments (include institution, title and dates of appointment)` or `3. Postgraduate Training (source of support, advisor, if applicable)`.
+
+* Leave a paragraph out of the output when it is **only** such a label: a lettered or numbered heading, usually followed by an instruction in parentheses, with no date, name, institution, or detail of its own.
+* When in doubt, keep the line as an entry. A label that carries real content (e.g. `3. Patents: US 1,234,567, 2019`) is an entry.
+
+### 4. Output Format
 
 Respond **only** with a JSON array containing the identified entries. If no entries are found, return `[]`.
 
