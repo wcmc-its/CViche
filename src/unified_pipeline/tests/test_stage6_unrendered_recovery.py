@@ -762,3 +762,21 @@ def test_stage6_llm_outage_propagates_but_other_errors_default(monkeypatch, call
 
     monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm", blip)
     assert run() == ("National" if call == "geographic_scope" else None)
+
+
+# ------------------------------------ #530: foreign scaffolding never recovered
+
+def test_add_remaining_to_appendix_drops_foreign_template_scaffolding():
+    """The bullet writer's own filter (the recovery path, not `_fill_appendix`)
+    drops another institution's instruction line and a "label: N/A" placeholder
+    and still writes the genuine segment."""
+    gen = _generator()
+    written = gen._add_remaining_to_appendix([
+        ("C. Sample Appointments (include institution, title and dates)", "T", 0.0),
+        ("1. Sample Leave: N/A", "T", 0.0),
+        ("Served on the sample review panel for the Example Society", "T", 0.0),
+    ])
+    assert written == ["T"]
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert "Served on the sample review panel for the Example Society" in bullets
+    assert not any("Sample Appointments" in t or "Sample Leave" in t for t in bullets)

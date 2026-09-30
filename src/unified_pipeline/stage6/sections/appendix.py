@@ -114,6 +114,7 @@ from collections.abc import Sequence
 from typing import TypedDict
 
 from ...core.template_boilerplate import (
+    is_foreign_template_instruction,
     is_near_template_instruction,
     is_source_boilerplate,
     is_template_instruction,
@@ -615,7 +616,7 @@ def _appendix_drop_reason(
     """
     if not text.strip():
         return DROP_BLANK
-    if is_template_instruction(text):
+    if is_template_instruction(text) or is_foreign_template_instruction(text):
         return DROP_TEMPLATE_INSTRUCTION
     if is_source_boilerplate(text):
         return DROP_SOURCE_BOILERPLATE
