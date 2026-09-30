@@ -489,6 +489,49 @@ def remove_subset_delimiters(delimiters: list) -> list:
     return kept
 
 
+def row_range_entry(start_key: str, end_key: str, batch_elem_lookup: dict,
+                    confidence: float) -> tuple[dict | None, list[str]]:
+    """The entry for a delimiter on table sub-rows, and the row keys it claims.
+
+    The model may group several rows of one table into one entry ("80.0" to
+    "80.2"). The entry's text must then hold every row in that span: its span
+    is what remove_subset_delimiters trusts, and a span wider than its text
+    let that drop the #420-recovered rows as "contained" -- AV00TQ's 24
+    teaching lines in row 80.2 vanished behind a header-row-only entry
+    (#1126). When the span can't be resolved row by row (another table, an
+    end before the start -- "80.10" arrives as the float 80.1 -- or a row
+    missing from the batch), the entry shrinks to its start row, so the span
+    stays honest and #420 recovery emits the rest.
+
+    Returns (None, []) when the start row is not in the batch.
+    """
+    if start_key not in batch_elem_lookup:
+        return None, []
+    keys = [start_key]
+    start_parent, _, start_row = start_key.partition(".")
+    end_parent, _, end_row = end_key.partition(".")
+    if (end_key != start_key and start_parent == end_parent
+            and start_row.isdigit() and end_row.isdigit()
+            and int(end_row) > int(start_row)):
+        span = [f"{start_parent}.{r}" for r in range(int(start_row), int(end_row) + 1)]
+        if all(k in batch_elem_lookup for k in span):
+            keys = span
+    elem = batch_elem_lookup[start_key]
+    texts = [str(batch_elem_lookup[k].get("full_text", batch_elem_lookup[k].get("text", "")))
+             for k in keys]
+    entry = {
+        "element_idx_start": start_key,
+        "element_idx_end": keys[-1],
+        "element_type": "table_row",
+        "confidence": confidence,
+        "text": "\n".join(t for t in texts if t.strip()),
+        "table_index": elem.get("table_index"),
+        "row_index": elem.get("row_index"),
+        "parent_idx": elem.get("parent_idx"),
+    }
+    return entry, keys
+
+
 def recover_unclaimed_table_rows(batch_elements: list, claimed_row_keys: set) -> list:
     """Return entries for table rows no delimiter claimed (#420).
 
@@ -1013,21 +1056,12 @@ Respond **only** with a JSON array containing the identified entries. If no entr
                     end_idx_str = str(end_idx)
                     if "." in start_idx_str or "." in end_idx_str:
                         # Row sub-index - look up in batch elements by string key
-                        if start_idx_str in batch_elem_lookup:
-                            elem = batch_elem_lookup[start_idx_str]
-                            full_text = elem.get("full_text", elem.get("text", ""))
-                            entry = {
-                                "element_idx_start": start_idx_str,
-                                "element_idx_end": end_idx_str,
-                                "element_type": "table_row",
-                                "confidence": delim.get("confidence", 1.0),
-                                "text": full_text,
-                                "table_index": elem.get("table_index"),
-                                "row_index": elem.get("row_index"),
-                                "parent_idx": elem.get("parent_idx")
-                            }
+                        entry, row_keys = row_range_entry(
+                            start_idx_str, end_idx_str, batch_elem_lookup,
+                            delim.get("confidence", 1.0))
+                        if entry is not None:
                             all_validated_entries.append(entry)
-                            claimed_row_keys.add(start_idx_str)
+                            claimed_row_keys.update(row_keys)
                         continue
 
                     # Handle paragraph indices (integers)
