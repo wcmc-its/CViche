@@ -221,7 +221,7 @@ def test_timed_out_stage_thread_stops_at_next_callback_before_terminal(monkeypat
                 if callback == "stdout":
                     print(f"Processing {len(ticks) % 9 + 1} of 10")
                 else:
-                    o.check_cancelled()  # stage 2's intra-stage callback
+                    o.check_cancelled()  # stages 2 and 4's intra-stage callback
                 ticks.append(1)
                 time.sleep(0.02)
         finally:
@@ -259,6 +259,88 @@ def test_each_stage_starts_with_a_fresh_stop_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(o, "_sync_prompt_logs_to_storage", lambda *a: None)
     o._stage_guard.stop.set()  # left over from an earlier timed-out stage
     asyncio.run(o.execute_step(6, "4", "cv.docx"))  # would raise StageAbandoned if reused
+
+
+def _timeout_by_hand(o):
+    """Run execute_step to its TimeoutError on a hand-driven loop (no executor join)."""
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(TimeoutError, match="timed out"):
+            loop.run_until_complete(o.execute_step(6, "4", "cv.docx"))
+    finally:
+        loop.close()
+
+
+def test_stage_that_swallows_exceptions_still_stops_within_the_real_grace(monkeypatch, tmp_path):
+    import threading
+    import time
+
+    from app.pipeline import orchestrator as orch
+
+    # The grace constant is deliberately NOT patched: the run must wait for the
+    # thread (not fail at once), and a prompt exit must not sleep out the grace.
+    assert orch.STAGE_WORKER_EXIT_GRACE_SECONDS == 30
+    exited = threading.Event()
+    quit_flag = threading.Event()
+
+    def swallowing_stage():
+        try:
+            while not quit_flag.is_set():
+                try:
+                    print("Processing 1 of 10")
+                except Exception:  # noqa: BLE001 - the stage behaviour under test
+                    pass
+                time.sleep(0.02)
+        finally:
+            exited.set()
+
+    o, _ = _timeout_orchestrator(monkeypatch, tmp_path, swallowing_stage)
+    errors = []
+    monkeypatch.setattr(orch.logger, "error", lambda *a, **k: errors.append(a))
+    started = time.monotonic()
+    try:
+        _timeout_by_hand(o)
+    finally:
+        quit_flag.set()  # never leak the thread, even when the assertions below fail
+    assert time.monotonic() - started < 4  # CVICHE_STAGE_TIMEOUT_SECONDS=1 plus a prompt exit
+    assert errors == []
+    assert exited.is_set()
+
+
+def test_grace_wait_leaves_the_event_loop_free_to_drain_emits(monkeypatch, tmp_path):
+    import threading
+
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "STAGE_WORKER_EXIT_GRACE_SECONDS", 3)
+    quit_flag = threading.Event()
+    loops = []
+
+    async def ping():
+        return None
+
+    def loop_dependent_stage():
+        # Every iteration needs the event loop to run a coroutine, so a loop
+        # blocked during the grace keeps the thread from reaching its next print.
+        while not quit_flag.is_set():
+            print("x")  # the stop flag is honoured here
+            asyncio.run_coroutine_threadsafe(ping(), loops[0]).result(5)
+
+    o, _ = _timeout_orchestrator(monkeypatch, tmp_path, loop_dependent_stage)
+    stage_logic = o._execute_stage_logic
+
+    async def remember_loop(*args):
+        loops.append(asyncio.get_running_loop())
+        return await stage_logic(*args)
+
+    monkeypatch.setattr(o, "_execute_stage_logic", remember_loop)
+    errors = []
+    monkeypatch.setattr(orch.logger, "error", lambda *a, **k: errors.append(a))
+    try:
+        _timeout_by_hand(o)
+    finally:
+        quit_flag.set()
+    assert errors == []  # a blocked loop never runs ping(), so the thread would outlive the grace
 
 
 @pytest.mark.parametrize("late_print", [True, False])
