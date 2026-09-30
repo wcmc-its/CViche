@@ -890,7 +890,7 @@ class PositionsSection:
                 logger.info("  D3 Other: %s entries", len(d3_entries))
 
         # Fill Academic Appointments table (D1)
-        acad_idx = self._find_paragraph_with_text("Academic Appointments")
+        acad_idx = self._find_header_paragraph("Academic Appointments")
         if acad_idx is not None and d1_entries:
             acad_table = self._find_table_after_paragraph(acad_idx)
             if acad_table:
@@ -899,7 +899,7 @@ class PositionsSection:
                 self._add_position_rows(acad_table, d1_entries)
 
         # Fill Hospital Appointments table (D2)
-        hosp_idx = self._find_paragraph_with_text("Hospital Appointments")
+        hosp_idx = self._find_header_paragraph("Hospital Appointments")
         if hosp_idx is not None and d2_entries:
             hosp_table = self._find_table_after_paragraph(hosp_idx)
             if hosp_table:
@@ -908,7 +908,7 @@ class PositionsSection:
                 self._add_position_rows(hosp_table, d2_entries)
 
         # Fill Other Professional Positions table (D3)
-        other_idx = self._find_paragraph_with_text("Other Professional Positions")
+        other_idx = self._find_header_paragraph("Other Professional Positions")
         if other_idx is not None and d3_entries:
             other_table = self._find_table_after_paragraph(other_idx)
             if other_table:
@@ -918,7 +918,7 @@ class PositionsSection:
 
         # Fallback: If no specific subsection tables found, use the generic PROFESSIONAL POSITIONS table
         if acad_idx is None and hosp_idx is None and other_idx is None:
-            pos_idx = self._find_paragraph_with_text("PROFESSIONAL POSITIONS")
+            pos_idx = self._find_header_paragraph("PROFESSIONAL POSITIONS")
             if pos_idx is None:
                 return
 

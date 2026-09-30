@@ -434,7 +434,7 @@ class TestTemplateSafetyExits:
 
     def test_missing_education_header_returns_without_raising(self, monkeypatch):
         gen = _generator()
-        monkeypatch.setattr(gen, "_find_paragraph_with_text", lambda _text: None)
+        monkeypatch.setattr(gen, "_find_header_paragraph", lambda _text: None)
 
         gen._fill_education([{"text": "MD", "extracted_fields": {"degree": "MD"}}])
 

@@ -830,7 +830,7 @@ def test_patents_detached_cursor_logs_warning_counts_misplaced_and_holds_cursor(
     == 1`, with a spacing paragraph between Widget B and Widget C that must
     not exist here."""
     gen = _new_generator()
-    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph().add_run("Patents & Inventions").bold = True
 
     real_insert = gen.doc.element.body.insert
     calls = {'n': 0}
@@ -880,7 +880,7 @@ def test_patents_detached_cursor_logs_warning_counts_misplaced_and_holds_cursor(
 
 def test_patents_success_stats_have_no_misplaced_count():
     gen = _new_generator()
-    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph().add_run("Patents & Inventions").bold = True
 
     gen._fill_patents([_patent('a', title='Widget A', year='2021'),
                        _patent('b', title='Widget B', year='2020')])
@@ -908,7 +908,7 @@ def test_patents_render_twice_replaces_the_first_render():
     second set of tables; the previously rendered tables (and the spacing
     between them) are now cleared first, so the body shape is identical."""
     gen = _new_generator()
-    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph().add_run("Patents & Inventions").bold = True
     gen.doc.add_paragraph("Please include inventors, title of invention and patent number.")
     gen.doc.add_paragraph("MENTORING")
     entries = [_patent('a', title='Widget A', year='2021'),

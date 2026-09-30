@@ -90,7 +90,7 @@ def _fake_doc_with_table(heading_text, header_cells):
     """
     gen = WCMTemplateGenerator(verbose=False)
     doc = Document()
-    doc.add_paragraph(heading_text)
+    doc.add_paragraph().add_run(heading_text).bold = True
     table = doc.add_table(rows=1, cols=len(header_cells))
     for cell, text in zip(table.rows[0].cells, header_cells):
         cell.text = text
@@ -403,7 +403,7 @@ def _fake_doc_with_mentee_shaped_table(heading_text):
     """
     gen = WCMTemplateGenerator(verbose=False)
     doc = Document()
-    doc.add_paragraph(heading_text)
+    doc.add_paragraph().add_run(heading_text).bold = True
     table = doc.add_table(rows=6, cols=2)
     table.rows[0].cells[0].text = "Name"
     table.rows[0].cells[1].text = "Institution/Program"

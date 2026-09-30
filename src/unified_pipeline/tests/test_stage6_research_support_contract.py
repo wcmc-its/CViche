@@ -82,6 +82,7 @@ TEST_YEAR = 2026
 def _generator(emit_comments=False):
     """A generator with just enough state to build one table or fill one section."""
     gen = WCMTemplateGenerator.__new__(WCMTemplateGenerator)
+    gen._bullet_paras = set()
     gen.doc = docx.Document()
     gen.verbose = False
     gen.stats = {'tables_populated': 0, 'entries_inserted': 0, 'comments_added': 0}
@@ -97,7 +98,7 @@ def _sectioned_generator(emit_comments=False):
     """A generator whose document already carries the three WCM funding headers."""
     gen = _generator(emit_comments=emit_comments)
     for header in HEADERS:
-        gen.doc.add_paragraph(header)
+        gen.doc.add_paragraph().add_run(header).bold = True
     return gen
 
 
@@ -1582,11 +1583,11 @@ def test_existing_template_table_is_removed_even_when_the_category_is_empty():
     Leaving it behind ships an empty two-column stub in the finished CV.
     """
     gen = _generator()
-    gen.doc.add_paragraph(CURRENT)
+    gen.doc.add_paragraph().add_run(CURRENT).bold = True
     placeholder = gen.doc.add_table(rows=1, cols=2)
     placeholder.cell(0, 0).text = 'Award Source:'
-    gen.doc.add_paragraph(COMPLETED)
-    gen.doc.add_paragraph(PENDING)
+    gen.doc.add_paragraph().add_run(COMPLETED).bold = True
+    gen.doc.add_paragraph().add_run(PENDING).bold = True
 
     gen._fill_research_support({'M2A': [], 'M2B': [], 'M2C': []}, current_year=TEST_YEAR)
 
@@ -1596,11 +1597,11 @@ def test_existing_template_table_is_removed_even_when_the_category_is_empty():
 def test_existing_template_table_is_replaced_by_the_grant_tables():
     """With grants to render the placeholder still goes and only real tables remain."""
     gen = _generator()
-    gen.doc.add_paragraph(CURRENT)
+    gen.doc.add_paragraph().add_run(CURRENT).bold = True
     placeholder = gen.doc.add_table(rows=1, cols=2)
     placeholder.cell(0, 0).text = 'Award Source:'
-    gen.doc.add_paragraph(COMPLETED)
-    gen.doc.add_paragraph(PENDING)
+    gen.doc.add_paragraph().add_run(COMPLETED).bold = True
+    gen.doc.add_paragraph().add_run(PENDING).bold = True
 
     gen._fill_research_support(
         {'M2A': [_entry('M2A', title='Replacement Project Study', agency='NIH',
