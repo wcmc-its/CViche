@@ -20,7 +20,12 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.dedup import _dates_compatible, _drop_is_safe  # noqa: E402
+from unified_pipeline.stage6.dedup import (  # noqa: E402
+    _bare_name_inside_longer_name,
+    _dates_compatible,
+    _drop_is_safe,
+    _kept_fused_beyond_recovery,
+)
 from unified_pipeline.stage_6_word_template import deduplicate_entries  # noqa: E402
 
 
@@ -199,13 +204,13 @@ def test_distinct_fused_terms_full_mmddyyyy_dates_kept():
 
 
 @pytest.mark.xfail(
-    reason="#666 residual, not a date defect: the verbatim-containment branch "
-           "of _drop_is_safe fires on prose with no record-shaped lines, so "
-           "the #221/#225 recovery pass never looks at either entry. Two "
-           "distinct mentees fused into one un-split entry: one mentee's text "
-           "is a literal substring of the other, and neither states a date "
-           "the date gate could compare. Flip to a plain assertion when the "
-           "fused-kept-entry shape is fixed.",
+    reason="#666 residual, prose only: the dropped mentee opens the kept "
+           "entry and the kept entry still carries its text, so a copy that "
+           "merely carries extra detail (a duplicate) and a copy fused with a "
+           "sibling look the same in text. The tab-cell shape of this defect "
+           "is fixed (test_sub_record_inside_fused_tab_row_kept); prose has "
+           "no segment count to compare. Flip to a plain assertion when "
+           "stage 2 stops fusing the two mentees.",
     strict=True,
 )
 def test_distinct_mentees_fused_into_prose_entry_kept():
@@ -355,3 +360,120 @@ def test_fanned_out_records_with_equal_fields_but_different_text_are_both_kept()
     first = _child("Ana Cruz, Ph.D. | 2013 | Waisman", dict(fields))
     second = _child("Ana Cruz, Ph.D. | 2013 | Ashby", dict(fields), 1)
     assert deduplicate_entries([first, second]) == [first, second]
+
+
+# ------------- #666: containment must not vouch for a record nothing re-checks
+
+_FUSED_GRANT_ROW = (
+    "Director, Northern Lights Wellness Initiative (Recovery Act Program)\t"
+    "Harbor Screening PI: Dr Vale (1 of 8 Centers) $594,000\t"
+    "Winter Outreach PI: Drs Vale & Moss (1 of 3 Centers) $867,000\t"
+    "Peer Coaching PI: Dr Moss (1 of 5 Centers) $153,000")
+_SUB_GRANT = "Winter Outreach PI: Drs Vale & Moss (1 of 3 Centers) $867,000"
+
+
+def test_sub_record_inside_fused_tab_row_kept():
+    """web26 M2A shape: a tab-joined single physical line has ONE record line,
+    so the recovery pass never re-checks it, and its renderer writes only the
+    head record. A sub-record that is a verbatim cell of it must survive."""
+    kept, sub = {"text": _FUSED_GRANT_ROW}, {"text": _SUB_GRANT}
+    assert _drop_is_safe(sub, kept) is False
+    assert deduplicate_entries([kept, sub]) == [kept, sub]
+
+
+def test_copy_that_opens_the_fused_row_is_still_dropped():
+    """The head record is what the renderer writes, so its copy is a true
+    duplicate even when the kept entry fuses siblings after it."""
+    head = "Director, Northern Lights Wellness Initiative (Recovery Act Program)"
+    kept = {"text": "2021-2024\t" + _FUSED_GRANT_ROW}
+    assert deduplicate_entries([kept, {"text": head}]) == [kept]
+
+
+def test_dated_copy_that_opens_the_fused_row_is_still_dropped():
+    """The leading date is stripped from BOTH texts before the head check."""
+    head = "Director, Northern Lights Wellness Initiative (Recovery Act Program)"
+    kept = {"text": "2021-2024\t" + _FUSED_GRANT_ROW}
+    assert deduplicate_entries([kept, {"text": "2021-2024\t" + head}]) == [kept]
+
+
+def test_sub_record_inside_kept_with_record_lines_is_still_dropped():
+    """A kept entry with >= UNRENDERED_MIN_RECORD_LINES record lines IS
+    re-verified line by line by the #221/#225 pass, so the drop stays safe."""
+    rows = [f"Member | Committee on Subterranean Balloon Safety Standards "
+            f"{name} | Guild of Meandering Auditors | 2013-2016"
+            for name in ("Alpha", "Bravo", "Charlie")]
+    kept = {"text": "\n".join(rows)}
+    assert _drop_is_safe({"text": rows[1]}, kept) is True
+
+
+@pytest.mark.parametrize("dropped", [
+    "Chief Fellow",                      # fewer than 4 significant words
+    "Department of Psychiatry",
+])
+def test_short_fragment_of_a_fused_row_is_still_dropped(dropped):
+    kept = "Duke Health\tDepartment of Psychiatry\tChief Fellow\tDurham, NC\tJuly 2012"
+    assert _kept_fused_beyond_recovery(dropped, kept) is False
+    assert _drop_is_safe({"text": dropped}, {"text": kept}) is True
+
+
+@pytest.mark.parametrize("dropped, kept, unsafe", [
+    ("Cortex", "Cerebral Cortex", True),
+    ("Nature", "Nature Genetics", True),
+    ("Journal of Neuroscience", "European Journal of Neuroscience", True),
+    ("Cortex", "Brain, Cortex, Neuron", False),                  # a list item of its own
+    ("American Widget Association", "American Widget Association, 1987-present", False),
+    ("American Widget Association", "American Widget Association Jun 2014 - date", False),
+    ("Political Behavior", "Political Behavior (twice)", False),  # parenthetical annotation
+    ("Department of Psychiatry", "Department of Psychiatry\t737 West Street", False),
+    ("Cortex", "Cerebral Cortex\tCortex", False),               # one piece is the name alone
+    ("2020", "DATE Nov 09, 2020", False),                        # no alphabetic word: not a name
+    ("Widget Studies Quarterly", "Widget Studies Quarterly International", True),  # at the 3-word limit
+])
+def test_bare_name_inside_longer_name(dropped, kept, unsafe):
+    assert _bare_name_inside_longer_name(dropped, kept) is unsafe
+
+
+def test_distinct_journals_with_a_shared_word_are_both_kept():
+    """Q4D shape: a reviewer list where one journal's name is a word-aligned
+    part of another's. Containment says nothing about which the CV meant."""
+    rows = [{"text": "Cerebral Cortex"}, {"text": "Cortex"}]
+    assert deduplicate_entries(list(rows)) == rows
+
+
+def test_name_with_only_a_date_annotation_is_still_dropped():
+    long = {"text": "American Widget Association, 1987-present"}
+    short = {"text": "American Widget Association"}
+    assert deduplicate_entries([long, short]) == [long]
+
+
+def test_a_bare_name_longer_than_the_name_limit_is_not_this_shape():
+    assert _bare_name_inside_longer_name("Alpha Beta Gamma Delta", "Alpha Beta Gamma Delta Epsilon") is False
+
+
+def test_fused_row_thresholds_are_exact():
+    """Four significant words and two more segments than the dropped text are
+    the smallest shape that counts; one word or one segment fewer is not."""
+    base = "Alpha Bravo Charlie Delta"
+    two_more = f"Head cell\t{base}\tThird cell"
+    assert _kept_fused_beyond_recovery(base, two_more) is True
+    assert _kept_fused_beyond_recovery("Alpha Bravo Charlie", "Head cell\tAlpha Bravo Charlie\tThird cell") is False
+    assert _kept_fused_beyond_recovery(base, f"Head cell\t{base}") is False
+    # Extra segments are measured against the dropped text's own cells: a
+    # multi-cell copy of most of the kept row is a duplicate, not a sub-record.
+    row = "Widget Society\tChair\tBoston\t2015-2018"
+    assert _kept_fused_beyond_recovery(row, f"Header\t{row}") is False
+
+
+def test_pipe_separated_cells_count_as_segments():
+    kept = ("Director, Northern Lights Initiative | Harbor Screening Pilot Grant | "
+            "Winter Outreach Pilot Grant | Peer Coaching Pilot Grant")
+    assert _kept_fused_beyond_recovery("Winter Outreach Pilot Grant Extra", kept) is True
+
+
+@pytest.mark.parametrize("dropped, kept", [
+    ("of the", "Board of the Directors"),        # no significant word at all
+    ("2020", "Class of 2020"),                   # digits only: a year is not a name
+    ("UK", "UK Biobank"),                        # under 3 letters: an acronym stub
+])
+def test_bare_name_gate_ignores_non_names(dropped, kept):
+    assert _bare_name_inside_longer_name(dropped, kept) is False

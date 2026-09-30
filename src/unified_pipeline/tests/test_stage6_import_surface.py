@@ -170,7 +170,11 @@ RELOCATED_BY_398_RESIDUE = {
 #: re-export, so they cannot sit in RELOCATED_BY_398_RESIDUE (whose test asserts
 #: the legacy address resolves to the same object). Found by the live walk (#667).
 HOME_ONLY_IMPORTS = {
-    "unified_pipeline.stage6.dedup": ("_dates_compatible",),
+    "unified_pipeline.stage6.dedup": (
+        "_bare_name_inside_longer_name",
+        "_dates_compatible",
+        "_kept_fused_beyond_recovery",
+    ),
 }
 
 _RELOCATED_CASES = [

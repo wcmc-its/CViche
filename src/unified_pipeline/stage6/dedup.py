@@ -135,6 +135,94 @@ def _trial_phases(text: str) -> set[str]:
             for n in re.findall(_PHASE_NUMERAL, group, re.IGNORECASE)}
 
 
+# #666 residual: containment (verbatim or token) approves a drop on the claim
+# that the kept entry still carries the dropped text. That holds only when the
+# kept entry RENDERS that text, and two shapes of kept entry do not:
+#   - a fused multi-record entry whose renderer emits one row from its
+#     extracted_fields (a grant table, a citation list): every sub-record but
+#     the head is lost. The #221/#225 recovery pass would notice, but it only
+#     scans entries with >= UNRENDERED_MIN_RECORD_LINES record lines, and a
+#     tab-joined single physical line has one (web26 M2A sub-grant and S1
+#     citation; web228 sub-grants; CZTMHW). Segments (tab / newline / pipe
+#     cells) stand in for "how many records did the kept entry fuse".
+#   - a longer NAME that merely contains a shorter one ("Cortex" in "Cerebral
+#     Cortex", "Nature" in "Nature Genetics"): a bare name's containment says
+#     nothing about whether it names the same thing.
+# Doubt keeps the entry: a surviving duplicate is visible to a reader, a lost
+# record is not. ponytail: text-only signals; the source fix is for each
+# section renderer to record what it wrote (#534), after which this gate can go.
+DEDUP_FUSED_KEPT_EXTRA_SEGMENTS = 2
+DEDUP_FUSED_KEPT_MIN_DROPPED_TOKENS = 4
+DEDUP_BARE_NAME_MAX_TOKENS = 3
+
+_SEGMENT_RE = re.compile(r'[\n\t|]+')
+_LEADING_NOISE_RE = re.compile(r'^[\W\d_]+')
+# A bare name is judged inside the smallest piece of kept text that can hold a
+# name: split at list and sentence punctuation too, so "Brain, Br J Clinical
+# Psychology," lists "Brain" as an item.
+_NAME_PIECE_RE = re.compile(r'[\n\t|;,.:]+')
+_PARENTHETICAL_RE = re.compile(r'\([^)]*\)|\[[^\]]*\]')
+_WORD_RE = re.compile(r'[^\W_]+')
+# Words that annotate a name without naming anything else ("ACS, 1987-present").
+_ANNOTATION_WORDS = frozenset({
+    'present', 'current', 'ongoing', 'date', 'now', 'to', 'through', 'until',
+    'january', 'february', 'march', 'april', 'may', 'june', 'july', 'august',
+    'september', 'sept', 'october', 'november', 'december',
+    'jan', 'feb', 'mar', 'apr', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+})
+
+
+def _segments(text: str) -> list[str]:
+    return [seg for seg in _SEGMENT_RE.split(text) if seg.strip()]
+
+
+def _kept_fused_beyond_recovery(dropped_text: str, kept_text: str) -> bool:
+    """True when the kept entry fuses several records and nothing re-verifies them.
+
+    The recovery pass re-checks an entry's record lines only when it has at
+    least UNRENDERED_MIN_RECORD_LINES of them, so a dropped record inside a
+    kept entry that lacks them, and that carries many more segments than the
+    dropped one, is trusted to a renderer that may write only the head record.
+    A dropped fragment under DEDUP_FUSED_KEPT_MIN_DROPPED_TOKENS significant
+    words is header furniture, not a record, and a dropped text that opens the
+    kept entry (past a leading date or bullet) is the record the renderer
+    writes for it: the copy is a true duplicate."""
+    if len(_significant_words(dropped_text)) < DEDUP_FUSED_KEPT_MIN_DROPPED_TOKENS:
+        return False
+    if _squash(_LEADING_NOISE_RE.sub('', kept_text)).startswith(
+            _squash(_LEADING_NOISE_RE.sub('', dropped_text))):
+        return False
+    if len(_record_lines(kept_text)) >= UNRENDERED_MIN_RECORD_LINES:
+        return False
+    return (len(_segments(kept_text)) - len(_segments(dropped_text))
+            >= DEDUP_FUSED_KEPT_EXTRA_SEGMENTS)
+
+
+def _bare_name_inside_longer_name(dropped_text: str, kept_text: str) -> bool:
+    """True when a short dropped name sits inside a longer name of the kept text.
+
+    Every kept piece holding the dropped words (word-aligned, parentheticals
+    removed) must extend them by a word that is not a date or a month; one
+    piece that is the name alone, or the name plus only an annotation, says
+    the kept entry names the same thing. Text with no such piece (the dropped
+    words straddle a separator) is not this shape."""
+    words = _WORD_RE.findall(dropped_text.lower())
+    if not (1 <= len(_significant_words(dropped_text)) <= DEDUP_BARE_NAME_MAX_TOKENS
+            and any(len(w) >= 3 and not any(c.isdigit() for c in w) for w in words)):
+        return False
+    found_extended = False
+    for piece in _NAME_PIECE_RE.split(_PARENTHETICAL_RE.sub(' ', kept_text)):
+        piece_words = _WORD_RE.findall(piece.lower())
+        for start in range(len(piece_words) - len(words) + 1):
+            if piece_words[start:start + len(words)] != words:
+                continue
+            extra = piece_words[:start] + piece_words[start + len(words):]
+            if all(w in _ANNOTATION_WORDS or any(c.isdigit() for c in w) for w in extra):
+                return False
+            found_extended = True
+    return found_extended
+
+
 def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
     """False when the dropped text states a date the kept text does not carry.
 
@@ -175,11 +263,14 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     #666: the two non-verbatim branches also require `_dates_compatible` --
     a dropped entry that states a date range the kept entry does not carry is a
     different record (a second committee term, a second grant), and no text
-    similarity signal can see that. Still open, and NOT a date defect: the
-    verbatim branch, and both others when the dropped entry is undated, approve
-    dropping a record that sits inside a longer kept entry which fused it with
-    a sibling (two mentees in one un-split entry), and `_record_lines()` finds
-    no line in prose for the #221/#225 recovery pass to re-verify."""
+    similarity signal can see that. The verbatim branch also refuses when the
+    kept entry is a fused tab/pipe row the recovery pass cannot reach
+    (`_kept_fused_beyond_recovery`) or when the dropped text is a bare name
+    inside a longer one (`_bare_name_inside_longer_name`). Still open: the
+    token-containment branch against such a kept entry, and prose with no
+    segments to count (two mentees in one un-split sentence), where
+    `_record_lines()` finds no line for the #221/#225 recovery pass to
+    re-verify."""
     dropped_squashed = _squash(dropped_entry.get('text', ''))
     verbatim = bool(dropped_squashed
                     and dropped_squashed in _squash(kept_entry.get('text', '')))
@@ -198,7 +289,12 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
         return verbatim and (dropped_entry.get('extracted_fields')
                              == kept_entry.get('extracted_fields'))
     if verbatim:
-        return True
+        # #666: containment is not vouching when the kept entry is a fused
+        # blob nothing re-verifies, or the dropped text is a bare name inside a
+        # longer one.
+        dropped_text, kept_text = dropped_entry.get('text') or '', kept_entry.get('text') or ''
+        return not (_kept_fused_beyond_recovery(dropped_text, kept_text)
+                    or _bare_name_inside_longer_name(dropped_text, kept_text))
     if not _dates_compatible(dropped_entry.get('text') or '',
                              kept_entry.get('text') or ''):
         return False  # #666: a different date is a different record
