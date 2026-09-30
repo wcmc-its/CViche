@@ -1063,3 +1063,49 @@ def test_geo_scope_failure_reaches_the_render_warnings_sidecar(
     assert len(found) == 1
     assert found[0]['severity'] == 'WARN'
     assert found[0]['evidence'] == [f'{GEO_SCOPE_FAILURE_STAT}=1']
+
+
+# ---- segment-reclassification failure (#652) ----
+
+_RECLASSIFY_TEXT = 'Visiting Lecturer, Example Institute, 2010'
+
+
+def test_reclassify_failure_returns_none_and_warns_when_verbose(
+        monkeypatch, caplog):
+    """The `except Exception` arm of `_reclassify_entry_segments` returns
+    None and, under verbose, records the failure."""
+    monkeypatch.setattr(s6, 'call_llm', _raising_llm)
+    gen = WCMTemplateGenerator(verbose=True)
+    with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
+        assert gen._reclassify_entry_segments(_RECLASSIFY_TEXT, 'P') is None
+    warnings = _warnings(caplog, S6_LOGGER)
+    assert len(warnings) == 1
+    assert 'LLM reclassification failed' in warnings[0].getMessage()
+    assert 'simulated LLM outage' in warnings[0].getMessage()
+
+
+def test_reclassify_failure_is_silent_when_not_verbose(monkeypatch, caplog):
+    """Pins today's behaviour for #652: outside verbose the fallback leaves
+    no log line and no stat (a CODING_STANDARDS 5.3 gap -- production runs
+    are not verbose). Update this test when the fallback is made visible."""
+    monkeypatch.setattr(s6, 'call_llm', _raising_llm)
+    gen = WCMTemplateGenerator(verbose=False)
+    stats_before = dict(gen.stats)
+    with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
+        assert gen._reclassify_entry_segments(_RECLASSIFY_TEXT, 'P') is None
+    assert not _warnings(caplog, S6_LOGGER)
+    assert dict(gen.stats) == stats_before
+
+
+def test_reconsider_sends_entry_to_appendix_when_reclassify_fails(monkeypatch):
+    """The None fallback reaches the caller: the entry goes to the appendix
+    with its original text and code instead of being dropped."""
+    monkeypatch.setattr(s6, 'call_llm', _raising_llm)
+    gen = WCMTemplateGenerator(verbose=False)
+    sent = []
+    gen._add_remaining_to_appendix = lambda items: sent.extend(items) or []
+    entry = {'text': _RECLASSIFY_TEXT, 'taxonomy_code': 'P',
+             'extracted_fields': {}}
+    gen._appendix_pending = [(entry, 40)]
+    gen._reconsider_appendix_entries()
+    assert sent == [(_RECLASSIFY_TEXT, 'P', 40)]

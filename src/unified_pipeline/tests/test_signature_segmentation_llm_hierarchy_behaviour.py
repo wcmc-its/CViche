@@ -435,6 +435,87 @@ def test_parse_normalized_hierarchy_blank_lines_deep_indent_and_fuzzy_colon_matc
     assert child["paragraph_index"] == 8
 
 
+def _flat_originals(*texts: str) -> list[dict]:
+    return [
+        {"text": t, "level": "H1", "paragraph_index": i, "children": [], "format_signature": {}}
+        for i, t in enumerate(texts)
+    ]
+
+
+def test_parse_normalized_hierarchy_unindented_output_nests_by_tag():
+    # #526: the LLM echoed the unindented input format back, so the [Hn] tags were
+    # the only nesting signal; indent-only parsing flattened every header to H1.
+    original = _flat_originals("Part One", "Sub A", "Leaf 1", "Sub B", "Part Two")
+    corrected = "\n".join([
+        "[H1] Part One",
+        "[H2] Sub A",
+        "[H3] Leaf 1",
+        "[H2] Sub B",
+        "[H1] Part Two",
+    ])
+
+    result = sbs.parse_normalized_hierarchy(corrected, original)
+
+    assert [h["text"] for h in result] == ["Part One", "Part Two"]
+    assert [c["text"] for c in result[0]["children"]] == ["Sub A", "Sub B"]
+    assert [c["level"] for c in result[0]["children"]] == ["H2", "H2"]
+    leaf = result[0]["children"][0]["children"][0]
+    assert (leaf["text"], leaf["level"], leaf["paragraph_index"]) == ("Leaf 1", "H3", 2)
+    assert result[1]["children"] == []
+
+
+def test_parse_normalized_hierarchy_unindented_all_h1_stays_flat():
+    original = _flat_originals("Alpha", "Beta", "Gamma")
+
+    result = sbs.parse_normalized_hierarchy("[H1] Alpha\n[H1] Beta\n[H1] Gamma", original)
+
+    assert [(h["text"], h["level"], h["children"]) for h in result] == [
+        ("Alpha", "H1", []), ("Beta", "H1", []), ("Gamma", "H1", []),
+    ]
+
+
+def test_parse_normalized_hierarchy_any_indented_line_keeps_indent_authoritative():
+    # The model DID indent (one line), so the tag fallback must stay off: the
+    # unindented [H2] line remains a top-level H1, exactly as before #526.
+    original = _flat_originals("Part One", "Sub A", "Sub B")
+    corrected = "[H1] Part One\n[H2] Sub A\n  [H2] Sub B"
+
+    result = sbs.parse_normalized_hierarchy(corrected, original)
+
+    assert [h["text"] for h in result] == ["Part One", "Sub A"]
+    assert [h["level"] for h in result] == ["H1", "H1"]
+    assert [c["text"] for c in result[1]["children"]] == ["Sub B"]
+
+
+def test_parse_normalized_hierarchy_tab_indent_counts_as_indented():
+    original = _flat_originals("Part One", "Sub A")
+
+    result = sbs.parse_normalized_hierarchy("[H1] Part One\n\t[H1] Sub A", original)
+
+    assert [h["text"] for h in result] == ["Part One"]  # tab indent stays authoritative
+    assert [c["text"] for c in result[0]["children"]] == ["Sub A"]
+
+
+def test_normalize_hierarchy_with_llm_unindented_reply_is_nested_end_to_end(monkeypatch):
+    # The wire: chunked extractor -> flat input -> LLM echoes tags without indent ->
+    # normalize_hierarchy_with_llm must still return a nested tree (#526).
+    headers = _flat_originals("Research", "Grants", "Publications")
+    for header, level in zip(headers, ("H1", "H2", "H2")):
+        header["level"] = level
+
+    def fake_call_llm(stage, messages, response_format=None, **kwargs):
+        return {"content": "[H1] Research\n[H2] Grants\n[H2] Publications", "total_tokens": 3, "cost": 0.0}
+
+    monkeypatch.setattr(sbs, "call_llm", fake_call_llm)
+
+    result = sbs.normalize_hierarchy_with_llm(headers, pass_number=2)
+
+    assert [h["text"] for h in result] == ["Research"]
+    assert [(c["text"], c["level"]) for c in result[0]["children"]] == [
+        ("Grants", "H2"), ("Publications", "H2"),
+    ]
+
+
 # ============================================================ validate_headers_vs_entries
 
 def test_validate_headers_vs_entries_drops_high_entry_likelihood(monkeypatch, caplog):
@@ -1173,3 +1254,14 @@ def test_write_hierarchy_deep_chain_does_not_recurse():
     buf = io.StringIO()
     sbs._write_hierarchy(buf, [root])
     assert buf.getvalue().count("\n") == 5000
+
+
+def test_parse_normalized_hierarchy_indented_untagged_line_does_not_disable_tag_fallback():
+    # Only an indented OUTLINE line proves the model indented; stray indented
+    # commentary must not switch the #526 tag fallback off.
+    original = _flat_originals("Part One", "Sub A")
+
+    result = sbs.parse_normalized_hierarchy("[H1] Part One\n  (commentary)\n[H2] Sub A", original)
+
+    assert [h["text"] for h in result] == ["Part One"]
+    assert [(c["text"], c["level"]) for c in result[0]["children"]] == [("Sub A", "H2")]

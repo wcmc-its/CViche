@@ -27,7 +27,7 @@ from app.database import get_db
 from app.models import Run, Step, User
 from app.schemas import UploadResponse
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.auth import get_current_user
+from app.auth import can_see_cost, get_current_user, visible_cost
 from app.rate_limiter import check_rate_limit
 from app.config_loader import get_config_value
 from app.services.config_service import (
@@ -254,14 +254,15 @@ class EstimateResponse(BaseModel):
     """Response model for cost/time estimation."""
     document_tokens: int
     text_characters: int
-    estimated_cost_min: float
-    estimated_cost_max: float
+    # Cost fields are None for non-admins (#1111).
+    estimated_cost_min: float | None
+    estimated_cost_max: float | None
     estimated_time_seconds_min: int
     estimated_time_seconds_max: int
     num_steps: int
     filename: str
     file_size_kb: float
-    pricing_model: str
+    pricing_model: str | None
     # True when the document's text couldn't be read and text_characters is
     # the fixed fallback guess, not a measurement (#794).
     text_characters_is_guess: bool = False
@@ -793,13 +794,13 @@ async def estimate_processing(
     return EstimateResponse(
         document_tokens=estimated_tokens,
         text_characters=text_char_count,
-        estimated_cost_min=round(cost_min, 3),
-        estimated_cost_max=round(cost_max, 3),
+        estimated_cost_min=visible_cost(current_user, round(cost_min, 3)),
+        estimated_cost_max=visible_cost(current_user, round(cost_max, 3)),
         estimated_time_seconds_min=time_min,
         estimated_time_seconds_max=time_max,
         num_steps=num_stages,
         filename=file.filename,
         file_size_kb=round(file_size_kb, 1),
-        pricing_model=get_estimate_model_name(),
+        pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
         text_characters_is_guess=extracted is None,
     )

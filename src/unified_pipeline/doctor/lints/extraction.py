@@ -572,11 +572,11 @@ def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
 # 2Q1_ZQ the one true duplicate scored 1.00 and the seven real losses
 # 0.60-0.89 (#227).
 DEDUP_SAFE_CONTAINMENT = 0.9
-_DEDUP_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_DEDUP_TOKEN_RE = re.compile(r"[^\W_]+")
 
 
 def _alphanumeric_tokens(text) -> Counter:
-    """a-z0-9 token multiset for one string (lint 11 dedup-containment
+    """Alphanumeric (Unicode) token multiset for one string (lint 11 dedup-containment
     coverage). A Counter, not a set, so a dropped passage that repeats a
     word is not fully covered by a kept passage that says it once (#718)."""
     return Counter(_DEDUP_TOKEN_RE.findall(_norm(text)))

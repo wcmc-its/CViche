@@ -319,7 +319,7 @@ def lint_output_hygiene(blocks: list[tuple[str, str]]) -> list[dict]:
 _NAME_LABEL_RE = re.compile(r"^[A-Za-z0-9]{1,3}[.)]\s+")
 
 
-_NAME_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_NAME_TOKEN_RE = re.compile(r"[^\W_]+")
 
 
 def _name_tokens(text: str) -> set[str]:
@@ -1021,7 +1021,7 @@ DUPLICATE_PASSAGE_WARN_COUNT = 1
 _PASSAGE_ENUMERATOR_RE = re.compile(r"^\s*(?:\(?\d{1,3}[.)]|[•·▪◦*]|[-–—](?=\s))\s*")
 
 
-_PASSAGE_PUNCT_RE = re.compile(r"[^a-z0-9]+")
+_PASSAGE_PUNCT_RE = re.compile(r"[\W_]+")
 
 
 def _passage_key(text) -> str:

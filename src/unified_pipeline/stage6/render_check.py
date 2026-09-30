@@ -161,7 +161,8 @@ def segment_already_rendered(segment_text: str, extracted_fields: dict) -> bool:
 
 RENDER_TOKEN_MIN_COUNT = 3
 RENDER_TOKEN_OVERLAP = 0.7
-_RENDER_TOKEN_RE = re.compile(r"[a-z]{5,}")
+# Unicode letters only (no digits/underscore): [a-z]{5,} on ASCII input (#541).
+_RENDER_TOKEN_RE = re.compile(r"[^\W\d_]{5,}")
 RENDER_PIECE_MIN_CHARS = 15
 RENDER_PIECE_WINDOW = 40
 

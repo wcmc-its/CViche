@@ -1,5 +1,6 @@
 import { CheckCircle2, Loader2, XCircle, Circle, ChevronRight } from 'lucide-react'
 import { formatCost, runningStepCost } from '../utils'
+import { useCanSeeCost } from '../contexts/AuthContext'
 
 interface StepInfo {
   step_number: number
@@ -7,7 +8,7 @@ interface StepInfo {
   step_name: string
   status: string
   duration_seconds?: number
-  cost: number
+  cost: number | null
 }
 
 interface StepSidebarProps {
@@ -16,7 +17,7 @@ interface StepSidebarProps {
   onSelectStep: (stepNumber: number) => void
   stepStartTimes: Record<number, number>
   stepStartCosts: Record<number, number>
-  totalCost: number
+  totalCost: number | null
 }
 
 function StatusIcon({ status }: { status: string }) {
@@ -40,6 +41,7 @@ export default function StepSidebar({
   stepStartCosts,
   totalCost,
 }: StepSidebarProps) {
+  const showCost = useCanSeeCost()
   const formatStepTiming = (step: StepInfo) => {
     if (step.status === 'running' && stepStartTimes[step.step_number]) {
       return `${Math.floor((Date.now() - stepStartTimes[step.step_number]) / 1000)}s`
@@ -88,7 +90,7 @@ export default function StepSidebar({
                           {step.step_name}
                         </div>
                         <div className="text-xs text-gray-500">
-                          {formatStepTiming(step)} &middot; {formatStepCost(step)}
+                          {formatStepTiming(step)}{showCost && <> &middot; {formatStepCost(step)}</>}
                         </div>
                       </div>
                       <ChevronRight className="w-4 h-4 text-gray-400 flex-shrink-0" />
@@ -133,7 +135,7 @@ export default function StepSidebar({
                 {/* Expanded info panel below selected pill */}
                 {isActive && (
                   <div className="mt-1 px-2 py-1 text-xs text-gray-500 text-center">
-                    {formatStepTiming(step)} &middot; {formatStepCost(step)}
+                    {formatStepTiming(step)}{showCost && <> &middot; {formatStepCost(step)}</>}
                   </div>
                 )}
               </div>

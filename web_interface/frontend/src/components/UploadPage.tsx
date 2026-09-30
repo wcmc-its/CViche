@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Upload, FileText, Loader2, Shield, HelpCircle, AlertTriangle } from 'lucide-react'
-import { useAuth } from '../contexts/AuthContext'
+import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 import type { Estimate } from '../types'
 import { getEstimate, uploadFile } from '../api/upload'
 import { startRun, getCapacity } from '../api/runs'
@@ -31,6 +31,7 @@ interface UploadPageProps {
 }
 
 export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
+  const showCost = useCanSeeCost()
   const navigate = useNavigate()
   const { user } = useAuth()
   const [file, setFile] = useState<File | null>(null)
@@ -409,19 +410,23 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                       {formatDuration(estimate.estimated_time_seconds_min)} - {formatDuration(estimate.estimated_time_seconds_max)}
                     </dd>
                   </div>
-                  <div className="flex justify-between">
-                    <dt className="text-gray-600">Estimated cost:</dt>
-                    <dd className="font-medium text-success-700">
-                      {formatCost(estimate.estimated_cost_min)} - {formatCost(estimate.estimated_cost_max)}
-                    </dd>
-                  </div>
+                  {showCost && (
+                    <div className="flex justify-between">
+                      <dt className="text-gray-600">Estimated cost:</dt>
+                      <dd className="font-medium text-success-700">
+                        {formatCost(estimate.estimated_cost_min)} - {formatCost(estimate.estimated_cost_max)}
+                      </dd>
+                    </div>
+                  )}
                 </dl>
-                <p className="text-xs text-gray-500 mt-3">
-                  Cost estimated for {estimate.pricing_model}.
-                </p>
+                {showCost && (
+                  <p className="text-xs text-gray-500 mt-3">
+                    Cost estimated for {estimate.pricing_model}.
+                  </p>
+                )}
                 {estimate.text_characters_is_guess && (
                   <p className="text-xs text-amber-700 mt-1">
-                    We couldn't read this document's text, so the time and cost above are a rough guess, not based on its length.
+                    We couldn't read this document's text, so the {showCost ? 'time and cost' : 'time'} above {showCost ? 'are' : 'is'} a rough guess, not based on its length.
                   </p>
                 )}
                 <p className="text-sm text-gray-700 mt-3">

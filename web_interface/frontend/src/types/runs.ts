@@ -4,7 +4,7 @@ export interface StepSummary {
   step_name: string
   status: string
   duration_seconds?: number
-  cost: number
+  cost: number | null
   output_files?: string
 }
 
@@ -12,7 +12,7 @@ export interface RunStatus {
   run_id: string
   filename: string
   status: string
-  total_cost: number
+  total_cost: number | null
   total_tokens: number
   input_tokens: number
   output_tokens: number
@@ -30,7 +30,7 @@ export interface RunSummary {
   status: string
   started_at: string
   completed_at: string | null
-  total_cost: number
+  total_cost: number | null
   total_duration_seconds: number | null
 }
 
