@@ -797,3 +797,207 @@ def test_add_remaining_to_appendix_drops_foreign_template_scaffolding():
     bullets = _bulleted_texts(gen.doc.paragraphs)
     assert "Served on the sample review panel for the Example Society" in bullets
     assert not any("Sample Appointments" in t or "Sample Leave" in t for t in bullets)
+
+
+# ------------------------------------------- #666 unverified dedup drops
+
+_UNVERIFIED_TEXT = ("Zylophone Conservatory Adjunct\t2013-2016\t"
+                    "Visiting Lecturer Emeritus Program")
+
+
+def _restored(gen):
+    return [p.text for p in gen.doc.paragraphs if "Zylophone Conservatory" in p.text]
+
+
+def test_unverified_drop_absent_from_the_document_is_restored():
+    gen = _generator()
+    gen._unverified_drops = [("D1", {"text": _UNVERIFIED_TEXT})]
+
+    gen._recover_unrendered_records({})
+
+    assert len(_restored(gen)) == 1
+    assert gen.stats["unrendered_records_recovered"] == 1
+
+
+def test_unverified_drop_already_in_the_document_is_left_dropped():
+    gen = _generator()
+    gen.doc.add_paragraph("Zylophone Conservatory Adjunct, 2013-2016, "
+                          "Visiting Lecturer Emeritus Program")
+    gen._unverified_drops = [("D1", {"text": _UNVERIFIED_TEXT})]
+
+    gen._recover_unrendered_records({})
+
+    assert len(_restored(gen)) == 1  # the original line, nothing added
+
+
+def test_unverified_drop_inside_a_tracked_insertion_counts_as_rendered():
+    """`paragraph.text` skips w:ins runs; a citation written as a tracked
+    change must still read as rendered."""
+    gen = _generator()
+    para = gen.doc.add_paragraph()
+    ins = para._p.makeelement(qn("w:ins"), {qn("w:id"): "901", qn("w:author"): "t"})
+    run = ins.makeelement(qn("w:r"), {})
+    text = run.makeelement(qn("w:t"), {})
+    text.text = ("Zylophone Conservatory Adjunct 2013-2016 "
+                 "Visiting Lecturer Emeritus Program")
+    run.append(text)
+    ins.append(run)
+    para._p.append(ins)
+    assert para.text == ""  # invisible to python-docx
+    assert gen._tracked_insert_lines() == [text.text]
+    gen._unverified_drops = [("D1", {"text": _UNVERIFIED_TEXT})]
+
+    gen._recover_unrendered_records({})
+
+    assert _restored(gen) == []
+
+
+def test_tracked_insert_lines_ignores_plain_and_blank_paragraphs():
+    gen = _generator()
+    gen.doc.add_paragraph("A plain paragraph")
+    empty = gen.doc.add_paragraph()
+    empty._p.append(empty._p.makeelement(qn("w:ins"), {qn("w:id"): "902", qn("w:author"): "t"}))
+    blank = gen.doc.add_paragraph()
+    ins = blank._p.makeelement(qn("w:ins"), {qn("w:id"): "903", qn("w:author"): "t"})
+    run = ins.makeelement(qn("w:r"), {})
+    text = run.makeelement(qn("w:t"), {})
+    text.text = "   "
+    run.append(text)
+    ins.append(run)
+    blank._p.append(ins)
+    assert gen._tracked_insert_lines() == []
+
+
+def test_unverified_drop_reaching_the_appendix_carries_its_extraction_coverage():
+    gen = _generator()
+    entry = {"text": _UNVERIFIED_TEXT,
+             "extraction_coverage": {"extraction_coverage_percent": 42}}
+    gen._unverified_drops = [("D9", entry)]
+    batch: list = []
+
+    assert gen._recover_unverified_drops(batch) == 1
+
+    assert batch == [(_UNVERIFIED_TEXT, "D9", 42)]
+
+
+def test_unverified_drop_without_coverage_data_reaches_the_appendix_at_zero():
+    gen = _generator()
+    gen._unverified_drops = [("D9", {"text": _UNVERIFIED_TEXT})]
+    batch: list = []
+
+    gen._recover_unverified_drops(batch)
+
+    assert batch == [(_UNVERIFIED_TEXT, "D9", 0)]
+
+
+def test_verbose_recovery_logs_the_restored_unverified_drops(caplog):
+    gen = _generator()
+    gen.verbose = True
+    gen._unverified_drops = [("D1", {"text": _UNVERIFIED_TEXT})]
+
+    with caplog.at_level("INFO"):
+        gen._recover_unrendered_records({})
+
+    assert any("Recovered 1 unrendered record" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("code", ["T", "A"])
+def test_unverified_drops_of_the_catch_all_and_personal_data_codes_are_left(code):
+    gen = _generator()
+    gen._unverified_drops = [(code, {"text": _UNVERIFIED_TEXT})]
+
+    gen._recover_unrendered_records({})
+
+    assert _restored(gen) == []
+
+
+def test_unverified_drops_are_not_restored_when_recovery_is_off():
+    gen = _generator(recover_unrendered_records=False)
+    gen._unverified_drops = [("D1", {"text": _UNVERIFIED_TEXT})]
+
+    gen._recover_unrendered_records({})
+
+    assert _restored(gen) == []
+
+
+def test_unverified_drop_with_no_section_anchor_falls_back_to_the_appendix():
+    gen = _generator()
+    gen._unverified_drops = [("D9", {"text": _UNVERIFIED_TEXT})]
+
+    gen._recover_unrendered_records({})
+
+    assert len(_restored(gen)) == 1
+    assert any("T. APPENDIX" in p.text for p in gen.doc.paragraphs)
+
+
+def test_the_same_unverified_drop_reported_twice_is_restored_once():
+    gen = _generator()
+    entry = {"text": _UNVERIFIED_TEXT}
+    gen._unverified_drops = [("D1", entry), ("D1", dict(entry))]
+
+    gen._recover_unrendered_records({})
+
+    assert len(_restored(gen)) == 1
+    assert gen.stats["unrendered_records_recovered"] == 1
+
+
+def test_unverified_template_instruction_is_not_restored():
+    gen = _generator()
+    instruction = ("Licensure: Every physician appointed to the Hospital "
+                   "staff, except interns, and aliens in the US via "
+                   "non-immigrant visas, must have a New York State license "
+                   "or a temporary certificate in lieu of the license.")
+    gen._unverified_drops = [("F1", {"text": instruction})]
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({})
+
+    assert len(gen.doc.paragraphs) == before
+
+
+def test_unverified_source_furniture_is_not_restored():
+    from unified_pipeline.core.template_boilerplate import is_source_boilerplate
+    furniture = next(t for t in ("Page 2 of 9", "Curriculum Vitae", "CURRICULUM VITAE")
+                     if is_source_boilerplate(t))
+    gen = _generator()
+    gen._unverified_drops = [("D1", {"text": furniture})]
+    before = len(gen.doc.paragraphs)
+
+    gen._recover_unrendered_records({})
+
+    assert len(gen.doc.paragraphs) == before
+
+
+def test_dedup_grouped_entries_collects_the_unverified_drops_by_code():
+    gen = _generator()
+    long, short = {"text": "Cerebral Cortex"}, {"text": "Cortex"}
+
+    gen._dedup_grouped_entries({"Q4D": [long, short]})
+    assert gen._unverified_drops == [("Q4D", short)]
+
+    gen._dedup_grouped_entries({"Q4D": [{"text": "Neuron"}]})
+    assert gen._unverified_drops == []  # reset on every call
+
+
+def test_generate_restores_a_dropped_journal_name_the_document_lacks(tmp_path, monkeypatch):
+    """End to end: 'Cortex' is dropped as contained in 'Cerebral Cortex', is
+    not a piece of any rendered line, so it is restored, once."""
+    monkeypatch.setattr(
+        "unified_pipeline.stage_6_word_template.call_llm",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no LLM in tests")))
+    entries = [{"element_idx_start": i, "taxonomy_code": "Q4D", "text": text,
+                "extracted_fields": {}}
+               for i, text in enumerate(["Cerebral Cortex", "Cortex", "Neuron"])]
+    payload = {"document_uid": "TEST666J", "entries": entries,
+               "cv_owner": {"full_name": "Quenby Marblegate"}}
+    input_path = tmp_path / "TEST666J_fields.json"
+    input_path.write_text(json.dumps(payload))
+
+    out = run_stage6(str(input_path), str(tmp_path / "j.docx"), verbose=False)
+
+    # The journal list sits in a table and in tracked insertions, which
+    # `Document.paragraphs` / `paragraph.text` skip; read every w:t of every w:p.
+    texts = ["".join(t.text or "" for t in p.iter(qn("w:t"))).strip()
+             for p in Document(out).element.body.iter(qn("w:p"))]
+    assert texts.count("Cortex") == 1
+    assert sum("Cerebral Cortex" in t for t in texts) == 1

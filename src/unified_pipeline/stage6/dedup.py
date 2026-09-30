@@ -137,7 +137,7 @@ def _trial_phases(text: str) -> set[str]:
 
 # #666 residual: containment (verbatim or token) approves a drop on the claim
 # that the kept entry still carries the dropped text. That holds only when the
-# kept entry RENDERS that text, and two shapes of kept entry do not:
+# kept entry RENDERS that text, and two shapes of kept entry may not:
 #   - a fused multi-record entry whose renderer emits one row from its
 #     extracted_fields (a grant table, a citation list): every sub-record but
 #     the head is lost. The #221/#225 recovery pass would notice, but it only
@@ -148,9 +148,15 @@ def _trial_phases(text: str) -> set[str]:
 #   - a longer NAME that merely contains a shorter one ("Cortex" in "Cerebral
 #     Cortex", "Nature" in "Nature Genetics"): a bare name's containment says
 #     nothing about whether it names the same thing.
-# Doubt keeps the entry: a surviving duplicate is visible to a reader, a lost
-# record is not. ponytail: text-only signals; the source fix is for each
-# section renderer to record what it wrote (#534), after which this gate can go.
+# Text cannot tell which fused rows a renderer writes in full (an events table
+# writes every row, a grant table only the head), so these drops are still made
+# but reported through `deduplicate_entries(unverified=...)`, and stage 6
+# checks each against the RENDERED document (`unverified_drop_rendered`): a drop
+# whose text is already rendered stays dropped, one that is absent is restored
+# by the #221 recovery pass. A re-introduced duplicate is visible to a reader
+# and a lost record is not, but a restore must not itself be a duplicate.
+# ponytail: text-only signals for "worth checking"; the source fix is for each
+# section renderer to record what it wrote (#534), after which this can go.
 DEDUP_FUSED_KEPT_EXTRA_SEGMENTS = 2
 DEDUP_FUSED_KEPT_MIN_DROPPED_TOKENS = 4
 DEDUP_BARE_NAME_MAX_TOKENS = 3
@@ -160,7 +166,7 @@ _LEADING_NOISE_RE = re.compile(r'^[\W\d_]+')
 # A bare name is judged inside the smallest piece of kept text that can hold a
 # name: split at list and sentence punctuation too, so "Brain, Br J Clinical
 # Psychology," lists "Brain" as an item.
-_NAME_PIECE_RE = re.compile(r'[\n\t|;,.:]+')
+_NAME_PIECE_RE = re.compile(r'[\n\t|;,.:\u201c\u201d"\u2013\u2014]+')
 _PARENTHETICAL_RE = re.compile(r'\([^)]*\)|\[[^\]]*\]')
 _WORD_RE = re.compile(r'[^\W_]+')
 # Words that annotate a name without naming anything else ("ACS, 1987-present").
@@ -205,10 +211,12 @@ def _bare_name_inside_longer_name(dropped_text: str, kept_text: str) -> bool:
     removed) must extend them by a word that is not a date or a month; one
     piece that is the name alone, or the name plus only an annotation, says
     the kept entry names the same thing. Text with no such piece (the dropped
-    words straddle a separator) is not this shape."""
+    words straddle a separator) is not this shape. A name carries no digit: a
+    dated fragment ("Ana Cruz 2001") is a piece of a record, not a name."""
     words = _WORD_RE.findall(dropped_text.lower())
     if not (1 <= len(_significant_words(dropped_text)) <= DEDUP_BARE_NAME_MAX_TOKENS
-            and any(len(w) >= 3 and not any(c.isdigit() for c in w) for w in words)):
+            and any(len(w) >= 3 for w in words)
+            and not any(c.isdigit() for c in dropped_text)):
         return False
     found_extended = False
     for piece in _NAME_PIECE_RE.split(_PARENTHETICAL_RE.sub(' ', kept_text)):
@@ -221,6 +229,83 @@ def _bare_name_inside_longer_name(dropped_text: str, kept_text: str) -> bool:
                 return False
             found_extended = True
     return found_extended
+
+
+def _is_verbatim_copy(dropped_text: str, kept_text: str) -> bool:
+    """The dropped text, squashed, sits inside the kept text, squashed."""
+    dropped_squashed = _squash(dropped_text)
+    return bool(dropped_squashed and dropped_squashed in _squash(kept_text))
+
+
+def _needs_render_check(dropped_entry: dict, kept_entry: dict) -> bool:
+    """True when the verbatim drop of `dropped_entry` should be verified against
+    the rendered document: a verbatim copy inside a fused row nothing
+    re-verifies, or a bare name inside a longer one. Fanned-out records never
+    reach the verbatim branch."""
+    dropped_text, kept_text = dropped_entry.get('text') or '', kept_entry.get('text') or ''
+    if dropped_entry.get(FANNED_OUT_FROM) or not _is_verbatim_copy(dropped_text, kept_text):
+        return False
+    return (_kept_fused_beyond_recovery(dropped_text, kept_text)
+            or _bare_name_inside_longer_name(dropped_text, kept_text))
+
+
+# A dropped name this short (in significant words) counts as rendered only when
+# a piece of some rendered line IS that name: "Cortex" is not rendered by
+# "Cerebral Cortex". Longer text is rendered when a rendered line carries it.
+RENDERED_NAME_MAX_TOKENS = 2
+
+# Share of a dropped entry's significant words one rendered line must carry for
+# the entry to count as rendered. Read off the corpus, not derived: a fielded
+# grant table splits a record over several lines, so a rendered copy of a
+# dropped title still carries only about two thirds of the words of the dropped
+# text (title plus PI), while an unrendered record shares at most 0.6 with any
+# one line. Below the #221 recovery pass's 0.7 for that reason.
+UNVERIFIED_DROP_RENDERED_OVERLAP = 0.65
+
+
+def _name_key(piece: str) -> str:
+    return ' '.join(_WORD_RE.findall(piece.lower()))
+
+
+class RenderedText:
+    """The rendered document's lines, indexed for `unverified_drop_rendered`."""
+
+    def __init__(self, lines: list[str]) -> None:
+        self.squashed: list[str] = []
+        self.token_sets: list[set[str]] = []
+        self.name_pieces: set[str] = set()
+        for line in lines:
+            self.add(line)
+
+    def add(self, line: str) -> None:
+        self.squashed.append(_squash(line))
+        self.token_sets.append(_significant_words(line))
+        self.name_pieces.update(
+            _name_key(piece)
+            for piece in _NAME_PIECE_RE.split(_PARENTHETICAL_RE.sub(' ', line)))
+
+
+def unverified_drop_rendered(text: str, rendered: RenderedText) -> bool:
+    """Whether a dropped entry's text already reached the rendered document.
+
+    True: rendered, the drop stands. False: absent, restore it.
+
+    A name of up to RENDERED_NAME_MAX_TOKENS significant words is rendered only
+    as a piece of its own. Longer text is rendered when every segment sits
+    verbatim inside ONE rendered line (a table row is one line), or when one
+    rendered line carries UNVERIFIED_DROP_RENDERED_OVERLAP of its significant
+    words. Years and short acronyms count as words, so a row for a journal
+    called "ISNR" is not vouched for by some other "Associate Editor" row. A
+    structured renderer reformats and reorders fields, so a verbatim miss alone
+    proves nothing."""
+    words = _significant_words(text)
+    if len(words) <= RENDERED_NAME_MAX_TOKENS:
+        return _name_key(text) in rendered.name_pieces
+    segments = [sq for sq in map(_squash, _segments(text)) if sq]
+    if any(all(sq in line for sq in segments) for line in rendered.squashed):
+        return True
+    return any(len(words & line_words) / len(words) >= UNVERIFIED_DROP_RENDERED_OVERLAP
+               for line_words in rendered.token_sets)
 
 
 def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
@@ -263,17 +348,15 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     #666: the two non-verbatim branches also require `_dates_compatible` --
     a dropped entry that states a date range the kept entry does not carry is a
     different record (a second committee term, a second grant), and no text
-    similarity signal can see that. The verbatim branch also refuses when the
-    kept entry is a fused tab/pipe row the recovery pass cannot reach
-    (`_kept_fused_beyond_recovery`) or when the dropped text is a bare name
-    inside a longer one (`_bare_name_inside_longer_name`). Still open: the
-    token-containment branch against such a kept entry, and prose with no
-    segments to count (two mentees in one un-split sentence), where
-    `_record_lines()` finds no line for the #221/#225 recovery pass to
+    similarity signal can see that. The verbatim branch approves, but
+    `_needs_render_check` flags the two shapes it cannot vouch for (a kept
+    fused tab/pipe row the recovery pass cannot reach, a bare name inside a
+    longer one) so stage 6 can verify them against the rendered document.
+    Still open: the token-containment branch against such a kept entry, and
+    prose with no segments to count (two mentees in one un-split sentence),
+    where `_record_lines()` finds no line for the #221/#225 recovery pass to
     re-verify."""
-    dropped_squashed = _squash(dropped_entry.get('text', ''))
-    verbatim = bool(dropped_squashed
-                    and dropped_squashed in _squash(kept_entry.get('text', '')))
+    verbatim = _is_verbatim_copy(dropped_entry.get('text', ''), kept_entry.get('text', ''))
     if dropped_entry.get(FANNED_OUT_FROM):
         # #983: a record fanned out of a multi-record entry is a single short
         # line, so the two branches below (token containment; fused-blob
@@ -289,12 +372,7 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
         return verbatim and (dropped_entry.get('extracted_fields')
                              == kept_entry.get('extracted_fields'))
     if verbatim:
-        # #666: containment is not vouching when the kept entry is a fused
-        # blob nothing re-verifies, or the dropped text is a bare name inside a
-        # longer one.
-        dropped_text, kept_text = dropped_entry.get('text') or '', kept_entry.get('text') or ''
-        return not (_kept_fused_beyond_recovery(dropped_text, kept_text)
-                    or _bare_name_inside_longer_name(dropped_text, kept_text))
+        return True
     if not _dates_compatible(dropped_entry.get('text') or '',
                              kept_entry.get('text') or ''):
         return False  # #666: a different date is a different record
@@ -311,7 +389,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
 
 def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         require_date_overlap: bool = False,
-                        decisions: list[dict] | None = None) -> list[dict]:
+                        decisions: list[dict] | None = None,
+                        unverified: list[dict] | None = None) -> list[dict]:
     """Remove near-duplicate entries within a code group.
 
     Uses two metrics to catch duplicates:
@@ -330,6 +409,10 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
     values plus dropped/kept text) so the caller can persist the decision
     trail for the run doctor (#227: at these thresholds a drop is not always
     a true duplicate).
+
+    If unverified is a list, every dropped entry that `_needs_render_check`
+    flags is appended to it (the entry itself), for the caller to check against
+    the rendered document (#666).
 
     Pairwise and order-dependent by design, not clustered: entries are
     compared left-to-right and a drop removes that index from further
@@ -428,6 +511,8 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         "dropped_text": entries[drop].get('text', '')[:500],
                         "kept_text": entries[kept].get('text', '')[:500],
                     })
+                if unverified is not None and _needs_render_check(entries[drop], entries[kept]):
+                    unverified.append(entries[drop])
                 drop_indices.add(drop)
                 if drop == i:
                     # i is gone: it must not keep vouching to drop later j's

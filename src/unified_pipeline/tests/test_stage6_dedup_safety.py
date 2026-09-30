@@ -21,11 +21,17 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.dedup import (  # noqa: E402
+    RenderedText,
     _bare_name_inside_longer_name,
     _dates_compatible,
     _drop_is_safe,
+    _is_verbatim_copy,
     _kept_fused_beyond_recovery,
+    _needs_render_check,
+    _segments,
+    unverified_drop_rendered,
 )
+from unified_pipeline.stage6.render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines  # noqa: E402
 from unified_pipeline.stage_6_word_template import deduplicate_entries  # noqa: E402
 
 
@@ -208,7 +214,7 @@ def test_distinct_fused_terms_full_mmddyyyy_dates_kept():
            "entry and the kept entry still carries its text, so a copy that "
            "merely carries extra detail (a duplicate) and a copy fused with a "
            "sibling look the same in text. The tab-cell shape of this defect "
-           "is fixed (test_sub_record_inside_fused_tab_row_kept); prose has "
+           "is reported for a render check (test_sub_record_inside_fused_tab_row_flagged); prose has "
            "no segment count to compare. Flip to a plain assertion when "
            "stage 2 stops fusing the two mentees.",
     strict=True,
@@ -363,57 +369,80 @@ def test_fanned_out_records_with_equal_fields_but_different_text_are_both_kept()
 
 
 # ------------- #666: containment must not vouch for a record nothing re-checks
+#
+# The verbatim branch still drops (dev behaviour), but `_needs_render_check`
+# flags the two shapes it cannot vouch for and `deduplicate_entries` reports
+# those drops through `unverified=`, so stage 6 can check each against the
+# rendered document (`unverified_drop_rendered`).
 
 _FUSED_GRANT_ROW = (
     "Director, Northern Lights Wellness Initiative (Recovery Act Program)\t"
-    "Harbor Screening PI: Dr Vale (1 of 8 Centers) $594,000\t"
-    "Winter Outreach PI: Drs Vale & Moss (1 of 3 Centers) $867,000\t"
-    "Peer Coaching PI: Dr Moss (1 of 5 Centers) $153,000")
-_SUB_GRANT = "Winter Outreach PI: Drs Vale & Moss (1 of 3 Centers) $867,000"
+    "Harbor Screening\tDr Vale (1 of 8 Centers) $594,000\t"
+    "Winter Outreach\tDrs Vale & Moss (1 of 3 Centers) $867,000\t"
+    "Peer Coaching\tDr Moss (1 of 5 Centers) $153,000")
+# Two cells, so its title (the text before the first tab) is two words and the
+# different-titles safety check in `deduplicate_entries` does not apply.
+_SUB_GRANT = "Winter Outreach\tDrs Vale & Moss (1 of 3 Centers) $867,000"
 
 
-def test_sub_record_inside_fused_tab_row_kept():
+def _unverified_of(entries):
+    unverified: list[dict] = []
+    kept = deduplicate_entries(list(entries), unverified=unverified)
+    return kept, unverified
+
+
+def test_sub_record_inside_fused_tab_row_flagged():
     """web26 M2A shape: a tab-joined single physical line has ONE record line,
     so the recovery pass never re-checks it, and its renderer writes only the
-    head record. A sub-record that is a verbatim cell of it must survive."""
+    head record. The sub-record is still dropped, and reported."""
     kept, sub = {"text": _FUSED_GRANT_ROW}, {"text": _SUB_GRANT}
-    assert _drop_is_safe(sub, kept) is False
-    assert deduplicate_entries([kept, sub]) == [kept, sub]
+    assert _drop_is_safe(sub, kept) is True
+    assert _needs_render_check(sub, kept) is True
+    assert _unverified_of([kept, sub]) == ([kept], [sub])
 
 
-def test_copy_that_opens_the_fused_row_is_still_dropped():
+def test_unverified_list_is_optional_and_each_drop_is_reported_once():
+    kept, sub = {"text": _FUSED_GRANT_ROW}, {"text": _SUB_GRANT}
+    assert deduplicate_entries([kept, sub]) == [kept]
+    kept_after, unverified = _unverified_of([kept, sub, dict(sub)])
+    assert kept_after == [kept]
+    assert len(unverified) == 2  # each drop is reported once
+
+
+def test_copy_that_opens_the_fused_row_is_not_flagged():
     """The head record is what the renderer writes, so its copy is a true
     duplicate even when the kept entry fuses siblings after it."""
     head = "Director, Northern Lights Wellness Initiative (Recovery Act Program)"
     kept = {"text": "2021-2024\t" + _FUSED_GRANT_ROW}
-    assert deduplicate_entries([kept, {"text": head}]) == [kept]
+    assert _unverified_of([kept, {"text": head}]) == ([kept], [])
 
 
-def test_dated_copy_that_opens_the_fused_row_is_still_dropped():
+def test_dated_copy_that_opens_the_fused_row_is_not_flagged():
     """The leading date is stripped from BOTH texts before the head check."""
     head = "Director, Northern Lights Wellness Initiative (Recovery Act Program)"
     kept = {"text": "2021-2024\t" + _FUSED_GRANT_ROW}
-    assert deduplicate_entries([kept, {"text": "2021-2024\t" + head}]) == [kept]
+    assert _unverified_of([kept, {"text": "2021-2024\t" + head}]) == ([kept], [])
 
 
-def test_sub_record_inside_kept_with_record_lines_is_still_dropped():
+def test_sub_record_inside_kept_with_record_lines_is_not_flagged():
     """A kept entry with >= UNRENDERED_MIN_RECORD_LINES record lines IS
-    re-verified line by line by the #221/#225 pass, so the drop stays safe."""
+    re-verified line by line by the #221/#225 pass."""
     rows = [f"Member | Committee on Subterranean Balloon Safety Standards "
             f"{name} | Guild of Meandering Auditors | 2013-2016"
             for name in ("Alpha", "Bravo", "Charlie")]
     kept = {"text": "\n".join(rows)}
     assert _drop_is_safe({"text": rows[1]}, kept) is True
+    assert _needs_render_check({"text": rows[1]}, kept) is False
 
 
 @pytest.mark.parametrize("dropped", [
     "Chief Fellow",                      # fewer than 4 significant words
     "Department of Psychiatry",
 ])
-def test_short_fragment_of_a_fused_row_is_still_dropped(dropped):
+def test_short_fragment_of_a_fused_row_is_not_flagged(dropped):
     kept = "Duke Health\tDepartment of Psychiatry\tChief Fellow\tDurham, NC\tJuly 2012"
     assert _kept_fused_beyond_recovery(dropped, kept) is False
-    assert _drop_is_safe({"text": dropped}, {"text": kept}) is True
+    assert _needs_render_check({"text": dropped}, {"text": kept}) is False
 
 
 @pytest.mark.parametrize("dropped, kept, unsafe", [
@@ -428,22 +457,74 @@ def test_short_fragment_of_a_fused_row_is_still_dropped(dropped):
     ("Cortex", "Cerebral Cortex\tCortex", False),               # one piece is the name alone
     ("2020", "DATE Nov 09, 2020", False),                        # no alphabetic word: not a name
     ("Widget Studies Quarterly", "Widget Studies Quarterly International", True),  # at the 3-word limit
+    ("Ana Cruz 2001", "Ana Cruz 2001 Summer Research Fellow, Waisman", False),  # a dated fragment
+    ("Sea Ice", "Arctic Sea Ice", True),                         # every word is 3 letters
 ])
 def test_bare_name_inside_longer_name(dropped, kept, unsafe):
     assert _bare_name_inside_longer_name(dropped, kept) is unsafe
 
 
-def test_distinct_journals_with_a_shared_word_are_both_kept():
+@pytest.mark.parametrize("separator", [";", ".", ":", "|", "\n", "\t", ",", "\u201c", "\u201d", '"', "\u2013", "\u2014"])
+def test_every_name_piece_separator_isolates_a_name(separator):
+    """Each character the piece regex splits on lets the name stand alone."""
+    kept = f"Cerebral Cortex{separator}Cortex"
+    assert _bare_name_inside_longer_name("Cortex", kept) is False
+
+
+def test_a_character_that_is_not_a_separator_does_not_isolate_a_name():
+    assert _bare_name_inside_longer_name("Cortex", "Cerebral Cortex/Cortex") is True
+
+
+@pytest.mark.parametrize("annotation", [
+    "[twice]", "[2014-2016]", "(twice)",
+])
+def test_bracketed_and_parenthetical_annotations_are_not_extensions(annotation):
+    assert _bare_name_inside_longer_name(
+        "Political Behavior", f"Political Behavior {annotation}") is False
+
+
+@pytest.mark.parametrize("word", [
+    "present", "current", "ongoing", "date", "now", "to", "through", "until",
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "sept", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+])
+def test_every_annotation_word_leaves_a_name_unextended(word):
+    """"American Widget Association 1987-present": no comma isolates the
+    annotation, so each word is what keeps the name from reading as longer."""
+    assert _bare_name_inside_longer_name(
+        "American Widget Association", f"American Widget Association 1987-{word}") is False
+
+
+def test_a_word_that_is_not_an_annotation_extends_the_name():
+    assert _bare_name_inside_longer_name(
+        "American Widget Association", "American Widget Association 1987-Affiliates") is True
+
+
+def test_segments_split_on_tab_pipe_and_newline_and_drop_empty_cells():
+    assert _segments("a\tb|c\nd") == ["a", "b", "c", "d"]
+    assert _segments("\ta\t \t\tb\t") == ["a", "b"]
+    assert _segments("   ") == []
+
+
+def test_newline_separated_cells_count_as_segments():
+    """A kept entry of newline-separated lines fuses records the same way."""
+    kept = "Head line\nAlpha Bravo Charlie Delta\nThird line"
+    assert _kept_fused_beyond_recovery("Alpha Bravo Charlie Delta", kept) is True
+
+
+def test_distinct_journals_with_a_shared_word_are_dropped_and_reported():
     """Q4D shape: a reviewer list where one journal's name is a word-aligned
-    part of another's. Containment says nothing about which the CV meant."""
-    rows = [{"text": "Cerebral Cortex"}, {"text": "Cortex"}]
-    assert deduplicate_entries(list(rows)) == rows
+    part of another's. Containment says nothing about which the CV meant, so
+    the drop is reported for the render check."""
+    long, short = {"text": "Cerebral Cortex"}, {"text": "Cortex"}
+    assert _unverified_of([long, short]) == ([long], [short])
 
 
-def test_name_with_only_a_date_annotation_is_still_dropped():
+def test_name_with_only_a_date_annotation_is_dropped_unreported():
     long = {"text": "American Widget Association, 1987-present"}
     short = {"text": "American Widget Association"}
-    assert deduplicate_entries([long, short]) == [long]
+    assert _unverified_of([long, short]) == ([long], [])
 
 
 def test_a_bare_name_longer_than_the_name_limit_is_not_this_shape():
@@ -477,3 +558,140 @@ def test_pipe_separated_cells_count_as_segments():
 ])
 def test_bare_name_gate_ignores_non_names(dropped, kept):
     assert _bare_name_inside_longer_name(dropped, kept) is False
+
+
+def test_fanned_out_record_is_never_flagged():
+    from unified_pipeline.stage6.fan_out import FANNED_OUT_FROM
+    kept = {"text": _FUSED_GRANT_ROW, "extracted_fields": {"a": 1}}
+    sub = {"text": _SUB_GRANT, "extracted_fields": {"a": 1}, FANNED_OUT_FROM: 1}
+    assert _needs_render_check(sub, kept) is False
+
+
+def test_non_verbatim_drop_is_never_flagged():
+    kept = {"text": _FUSED_GRANT_ROW}
+    reworded = {"text": "Winter Outreach PI: Drs Vale and Moss, 1 of 3 Centers, $867,000 total"}
+    assert _needs_render_check(reworded, kept) is False
+
+
+# ------------- #666: does a dropped entry's text already reach the document?
+
+def _rendered(*lines):
+    return RenderedText(list(lines))
+
+
+@pytest.mark.parametrize("text, lines, expected", [
+    # A name of up to two significant words: rendered only as a piece of its own.
+    ("Cortex", ["Cerebral Cortex"], False),
+    ("Cortex", ["Brain, Cortex, Neuron"], True),
+    ("Journal of Neuroscience", ["European Journal of Neuroscience"], False),
+    ("Journal of Neuroscience", ["Journal of Neuroscience"], True),
+    ("The Psychiatric Interview",
+     ["2023\u20132024 \u2013 \u201cThe Psychiatric Interview\u201d \u2013 Co-Creator"], True),
+    ("Political Behavior", ["Political Behavior (twice)"], True),
+    ("Political Behavior", ["Political Behavior [twice]"], True),
+    ("Cortex", ["Neuron; Cortex; Brain"], True),
+    ("Cortex", ["Neuron: Cortex"], True),
+    ("Cortex", ["Neuron. Cortex"], True),
+    ("Cortex", ["Neuron | Cortex"], True),
+    ("Cortex", ["Neuron\tCortex"], True),
+    ("Cortex", ["Neuron \u2014 Cortex"], True),
+])
+def test_short_names_are_rendered_only_as_a_piece_of_their_own(text, lines, expected):
+    assert unverified_drop_rendered(text, _rendered(*lines)) is expected
+
+
+def test_three_word_text_is_rendered_by_a_line_carrying_it_verbatim():
+    """RENDERED_NAME_MAX_TOKENS is two: a three-word phrase inside a longer
+    rendered line (a seminar title) is already rendered."""
+    line = "February 16, 2009 - Congress of Neurological Surgeons Cerebral Vasospasm Management Luncheon Seminar"
+    assert unverified_drop_rendered("Cerebral Vasospasm Management", _rendered(line)) is True
+    assert unverified_drop_rendered("Cerebral Vasospasm Management",
+                                    _rendered("Cerebral Palsy Care")) is False
+
+
+def test_every_segment_must_sit_in_one_line_for_a_verbatim_hit():
+    row = "SNIS Annual Meeting | 2022 | Moderator: Presidential Address and Luminary Lecture"
+    text = "SNIS Annual Meeting\t\t2022\tModerator: Presidential Address and Luminary Lecture"
+    assert unverified_drop_rendered(text, _rendered(row)) is True
+    # Same segments spread over separate lines: no single line carries them all,
+    # and no single line carries enough of the words either.
+    assert unverified_drop_rendered(text, _rendered(
+        "SNIS Annual Meeting", "2022", "Moderator: Presidential Address and Luminary Lecture")) is False
+
+
+def test_a_long_segment_alone_does_not_vouch_for_a_multi_segment_row():
+    """"Associate Editor" appears on every editorial row; it must not render
+    the row for a journal that appears nowhere."""
+    text = "Neurosurgery\t\t2014-present\tAssociate Editor"
+    lines = ["Associate Editor, Biomedical Research International", "2011-2013",
+             "Associate Editor of Excellence Award for Neurosurgery"]
+    assert unverified_drop_rendered(text, _rendered(*lines)) is False
+
+
+def test_token_overlap_threshold_is_exact():
+    """13 of 20 significant words (0.65) in one line renders the text; 12 do not."""
+    words = [f"w{chr(97 + i)}x" for i in range(20)]
+    text = " ".join(words)
+    assert unverified_drop_rendered(text, _rendered(" ".join(words[:13]))) is True
+    assert unverified_drop_rendered(text, _rendered(" ".join(words[:12]))) is False
+
+
+def test_overlap_counts_years_and_short_acronyms_as_words():
+    text = "ISNR Stroke 2011 2014 Associate Editor"
+    assert unverified_drop_rendered(text, _rendered("Stroke Associate Editor")) is False
+    assert unverified_drop_rendered(text, _rendered("ISNR Stroke 2011 2014 Associate")) is True
+
+
+def test_overlap_is_per_line_not_pooled():
+    text = "alpha bravo charlie delta echo foxtrot golf hotel india juliet"
+    assert unverified_drop_rendered(text, _rendered(
+        "alpha bravo charlie delta", "echo foxtrot golf hotel", "india juliet")) is False
+
+
+def test_rendered_text_add_extends_every_index():
+    rendered = _rendered("Cerebral Cortex")
+    text = "Direct Services PI: Dr Vale $594,000"
+    assert unverified_drop_rendered(text, rendered) is False
+    rendered.add("Direct Services | PI: Dr Vale | $594,000")
+    assert unverified_drop_rendered(text, rendered) is True
+    assert unverified_drop_rendered("Neuron", rendered) is False
+    rendered.add("Brain; Neuron")
+    assert unverified_drop_rendered("Neuron", rendered) is True
+
+
+def test_a_kept_entry_with_exactly_the_minimum_record_lines_is_reverified_not_flagged():
+    """UNRENDERED_MIN_RECORD_LINES is the count at which the #221 pass takes
+    over: exactly that many record lines is covered, one fewer is not."""
+    row = ("Member | Committee on Subterranean Balloon Safety Standards | "
+           "Guild of Meandering Auditors | 2013-2016")
+    dropped = "Chair of the Panel on Improbable Weights and Measures"
+    covered = "\n".join([row, row.replace("Member", "Chair"), "x\ty\tz\t" + dropped])
+    assert len(_record_lines(covered)) == UNRENDERED_MIN_RECORD_LINES
+    assert _kept_fused_beyond_recovery(dropped, covered) is False
+    one_row = "\n".join([row, "x\ty\tz\t" + dropped])
+    assert _kept_fused_beyond_recovery(dropped, one_row) is True
+
+
+def test_a_name_split_across_two_pieces_is_not_a_longer_name():
+    """The dropped words straddle a separator: no kept piece holds them."""
+    assert _bare_name_inside_longer_name("Alpha Beta", "Alpha; Beta Gamma") is False
+    assert _bare_name_inside_longer_name("Alpha Beta", "Alpha Beta Gamma") is True
+
+
+def test_empty_or_blank_dropped_text_is_not_a_verbatim_copy():
+    assert _is_verbatim_copy("", "anything at all") is False
+    assert _is_verbatim_copy(" \t ", "anything at all") is False
+    assert _is_verbatim_copy("at all", "anything At All") is True
+
+
+def test_a_segment_rendered_in_other_letters_is_verbatim_in_one_line():
+    """Squashed segments sit in one line even where the word tokens differ
+    ("Widget Works" against "WidgetWorks") and the order is not the text's."""
+    text = "Acme Widget Works\tAlpha Beta"
+    line = "Alpha Beta and AcmeWidgetWorks"
+    assert unverified_drop_rendered(text, _rendered(line)) is True
+
+
+def test_name_lookup_ignores_case():
+    assert unverified_drop_rendered("CORTEX", _rendered("Brain, Cortex")) is True
+    assert unverified_drop_rendered("cortex", _rendered("Brain, CORTEX")) is True

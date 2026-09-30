@@ -171,9 +171,14 @@ RELOCATED_BY_398_RESIDUE = {
 #: the legacy address resolves to the same object). Found by the live walk (#667).
 HOME_ONLY_IMPORTS = {
     "unified_pipeline.stage6.dedup": (
+        "RenderedText",
         "_bare_name_inside_longer_name",
         "_dates_compatible",
+        "_is_verbatim_copy",
         "_kept_fused_beyond_recovery",
+        "_needs_render_check",
+        "_segments",
+        "unverified_drop_rendered",
     ),
 }
 

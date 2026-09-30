@@ -142,6 +142,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
     _significant_words,
     deduplicate_entries,
 )
+from unified_pipeline.stage6.dedup import RenderedText, unverified_drop_rendered
 from unified_pipeline.stage6.render_check import (  # noqa: F401
     RECORD_DATE_LINE_MIN_CHARS,
     RENDER_PIECE_MIN_CHARS,
@@ -485,6 +486,10 @@ RENDER_ROUTED_CODES = frozenset({
 # taxonomy fact, not a setting (§7.2: no new configuration mechanism).
 _DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1'})
 
+# Codes whose unverified dedup drops (#666) `_recover_unverified_drops` leaves
+# alone: T is the appendix catch-all, A has its own orphan pass (#316).
+UNVERIFIED_DROP_SKIP_CODES = frozenset({'T', 'A'})
+
 # Codes routed by the entry's own publication status, not by the heading it
 # sits under: a submitted / in-review / in-preparation manuscript (S7) belongs
 # in "In review" wherever the author listed it. A hierarchy mismatch never
@@ -722,6 +727,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # instead of vanishing. Reset at the top of generate(), declared here
         # for typing/reuse across renders.
         self._declined_grant_entries: list[dict] = []
+
+        # (code, entry) of every drop dedup made on containment it cannot
+        # vouch for (#666); `_recover_unverified_drops` checks each against
+        # the rendered document. Reset by `_dedup_grouped_entries`.
+        self._unverified_drops: list[tuple[str, dict]] = []
 
         # Taxonomy codes owned by a section that raised (#842): removed from
         # mapped_codes before the unmapped sweep so a failed section's
@@ -1041,14 +1051,18 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                                      for code, group in entries_by_code.items()}
         total_deduped = 0
         dedup_decisions: list[dict[str, Any]] = []
+        self._unverified_drops = []
         for code in list(entries_by_code.keys()):
             before = len(entries_by_code[code])
             date_aware = code in _DATE_AWARE_DEDUP_CODES
             group_decisions: list[dict[str, Any]] = []
+            group_unverified: list[dict[str, Any]] = []
             entries_by_code[code] = deduplicate_entries(
                 entries_by_code[code], verbose=self.verbose,
                 require_date_overlap=date_aware,
-                decisions=group_decisions)
+                decisions=group_decisions,
+                unverified=group_unverified)
+            self._unverified_drops.extend((code, entry) for entry in group_unverified)
             for decision in group_decisions:
                 decision["code"] = code
             dedup_decisions.extend(group_decisions)
@@ -2818,6 +2832,8 @@ Now analyze the text above:"""
                         self.stats['unrendered_records_recovered'] += 1
                         n_recovered += 1
 
+            n_recovered += self._recover_unverified_drops(appendix_batch)
+
             # Unconsumed A-coded orphans (#316) are part of the SAME record-
             # recovery safety net the flag above governs -- gated with it,
             # unlike the notice below.
@@ -2843,6 +2859,49 @@ Now analyze the text above:"""
                         f"({len(appendix_batch)} routed to appendix)")
 
         return recovered_codes
+
+    def _tracked_insert_lines(self) -> list[str]:
+        """Full text of every body paragraph holding a tracked insertion.
+
+        `paragraph.text` skips runs inside `w:ins`, so `_rendered_output_lines`
+        cannot see a citation or bullet written as a tracked change; a check
+        against that text alone would call such content absent."""
+        w_ins, w_t = qn('w:ins'), qn('w:t')
+        return [text for para in self.doc.element.body.iter(qn('w:p'))
+                if para.find(f'.//{w_ins}') is not None
+                and (text := ''.join(t.text or '' for t in para.iter(w_t))).strip()]
+
+    def _recover_unverified_drops(self, appendix_batch: list) -> int:
+        """Restore a dedup drop whose text is verifiably absent from the document.
+
+        Dedup drops a verbatim copy on the claim that the kept entry renders it
+        (#666). For a fused row or a name inside a longer name that claim is
+        unchecked, so dedup reports those drops and this pass checks each one
+        against the rendered document, once every section has written
+        (`unverified_drop_rendered`). Rendered: the drop stands, so no
+        duplicate is re-introduced. Absent: the text is re-inserted like any
+        recovered record. The 'T' catch-all already
+        reaches the appendix and 'A' has its own orphan pass (#316), so neither
+        is recovered here. Returns the number restored."""
+        rendered = RenderedText(self._rendered_output_lines() + self._tracked_insert_lines())
+        n_restored = 0
+        for code, entry in self._unverified_drops:
+            text = entry.get('text') or ''
+            if code in UNVERIFIED_DROP_SKIP_CODES or is_template_instruction(text) or is_source_boilerplate(text):
+                continue
+            if unverified_drop_rendered(text, rendered):
+                continue
+            coverage = (entry.get('extraction_coverage') or {}).get('extraction_coverage_percent', 0)
+            if not self._insert_reconsidered_segment(
+                    text, code,
+                    comment=("Recovered: dedup dropped this record as a copy of a "
+                             "longer entry, but the document does not carry it. "
+                             "Review placement and formatting.")):
+                appendix_batch.append((text, code, coverage))
+            rendered.add(text)
+            self.stats['unrendered_records_recovered'] += 1
+            n_restored += 1
+        return n_restored
 
     def _unconsumed_personal_data_batch(self, haystack: str
                                         ) -> List[Tuple[str, str, float]]:
