@@ -77,6 +77,18 @@ CONNECTOR_END_RE = re.compile(r"(?:[-–—,(:&]|\b(?:and|of|the|in))$", re.IGNO
 #: A line ending in a hyphen or dash is broken mid-word/mid-range ("1895-" /
 #: "1904."), so it wraps on even though it stops short of the right margin.
 WRAP_DASH_RE = re.compile(r"[-–—]$")
+#: ...except an OPEN YEAR RANGE ("Member, Committee A, 2004-"), which is a
+#: complete entry: its dash only counts as a wrap (and a connector) when
+#: the next line continues the range: a digit, a month name, or
+#: present/current/now.
+OPEN_RANGE_RE = re.compile(r"\b(?:19|20)\d{2}\s*[-–—]$")
+RANGE_CONTINUATION_RE = re.compile(
+    r"^(?:\d|(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?"
+    r"|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b"
+    r"|(?:present|current|now)\b)", re.IGNORECASE)
+#: A line of only dashes/underscores/spaces is a horizontal rule, not a
+#: line that ends in a dash.
+RULE_LINE_RE = re.compile(r"^[-–—_\s]+$")
 #: Hanging-indent test: a paragraph whose first line starts LEFT of its
 #: later lines by more than this many points is a hanging-indent entry;
 #: the next line returning to within this of the first line's x0 starts a
@@ -243,11 +255,28 @@ def _is_full_line(line: _Line, left: float, right: float) -> bool:
     return line.x1 >= right - FULL_LINE_SLACK_FRAC * (right - left)
 
 
+def _dash_wraps(prev: _Line, line: _Line) -> bool:
+    """`prev` ends in a dash that means "continued on the next line": not a
+    rule line, and not an open year range unless `line` continues it."""
+    text = prev.text
+    if WRAP_DASH_RE.search(text) is None or RULE_LINE_RE.match(text):
+        return False
+    return not OPEN_RANGE_RE.search(text) or RANGE_CONTINUATION_RE.match(line.text) is not None
+
+
+def _ends_mid_phrase(prev: _Line, line: _Line) -> bool:
+    """`prev` stops mid-phrase, so `line` continues it: a connector ending,
+    where a dash counts only under `_dash_wraps`."""
+    if WRAP_DASH_RE.search(prev.text):
+        return _dash_wraps(prev, line)
+    return CONNECTOR_END_RE.search(prev.text) is not None
+
+
 def _marker_vetoes(prev: _Line, line: _Line, para: _Para) -> bool:
     """`line` starts a new list entry: it opens with a marker, `prev` does
     not end mid-phrase, and a dash/asterisk marker matches the marker the
     paragraph itself began with."""
-    if not LIST_MARKER_RE.match(line.text) or CONNECTOR_END_RE.search(prev.text):
+    if not LIST_MARKER_RE.match(line.text) or _ends_mid_phrase(prev, line):
         return False
     dash = DASH_MARKER_RE.match(line.text)
     return dash is None or dash.group(1) == para.marker
@@ -256,7 +285,7 @@ def _marker_vetoes(prev: _Line, line: _Line, para: _Para) -> bool:
 def _outdent_splits(prev: _Line, line: _Line, para: _Para) -> bool:
     """`line` returns to the first-line x0 of a hanging-indent paragraph and
     `prev` does not end mid-phrase."""
-    return (not CONNECTOR_END_RE.search(prev.text)
+    return (not _ends_mid_phrase(prev, line)
             and para.later_x0 is not None
             and para.later_x0 - para.first_x0 > OUTDENT_TOLERANCE_PT
             and line.x0 <= para.first_x0 + OUTDENT_TOLERANCE_PT)
@@ -275,7 +304,7 @@ def _continues(prev: _Line, line: _Line, left: float, right: float,
         return False
     if abs(prev.size - line.size) > MERGE_SIZE_TOLERANCE_PT:
         return False
-    return _is_full_line(prev, left, right) or WRAP_DASH_RE.search(prev.text) is not None
+    return _is_full_line(prev, left, right) or _dash_wraps(prev, line)
 
 
 def _margins(pages: list[list[_Line]]) -> tuple[float, float]:

@@ -445,6 +445,75 @@ def test_marker_after_a_mid_phrase_line_is_a_wrap(tmp_path, ending):
     assert len(doc.paragraphs) == 1
 
 
+_FILL = (False, 10, 72, 400, _LONG)  # a wide line elsewhere: the short lines are not "full"
+
+
+def test_open_year_ranges_stay_separate_entries(tmp_path):
+    lines = ["Member, Committee A, 2004-", "Member, Committee B, 2009-", "Chair, Committee C, 2003-2006"]
+    page = [(False, 10, 72, 700 - 12 * i, t) for i, t in enumerate(lines)] + [_FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:3] == lines
+
+
+@pytest.mark.parametrize("dash", ["-", "\\261", "\\320"])
+@pytest.mark.parametrize("following, merges", [
+    ("present", True), ("Present", True), ("current", True), ("now", True),
+    ("9 months", True), ("June 2010", True), ("May 2010", True), ("Sept. 2011", True),
+    ("Dec 2011", True),
+    ("Marine Corps veteran", False), ("Chair, Board", False), ("Januaryish", False),
+    ("Nowhere Fund", False), ("Presenter, X", False)])
+def test_open_year_range_wraps_only_into_a_continuation(tmp_path, dash, following, merges):
+    page = [(False, 10, 72, 700, f"Member, Committee A, 2004{dash}"),
+            (False, 10, 72, 688, following), _FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert (len(_texts(doc)[0].split()) > 4 and following in _texts(doc)[0]) is merges
+
+
+@pytest.mark.parametrize("prev_text, following, merges", [
+    ("Pages A12004-", "Marine Corps veteran", True),       # not a year (no word boundary)
+    ("Room 1234-", "Marine Corps veteran", True),          # not a 19xx/20xx year
+    ("Chair, 2003-2006, pp. 45-", "Marine Corps veteran", True),  # year-dash is not at the end
+    ("Member, 2004 -", "Marine Corps veteran", False),     # space before the dash
+    ("Member, 2004-", "Chair, 2009 - present", False),     # "present" is not at the start
+    ("Member, 2004-", "PRESENT", True), ("Member, 2004-", "JUNE 2010", True),
+    ("Member, 2004-", "March 2010", True), ("Member, 2004-", "Mar 2010", True),
+    ("Member, 2004-", "2009", True)])
+def test_open_range_edge_cases(tmp_path, prev_text, following, merges):
+    page = [(False, 10, 72, 700, prev_text), (False, 10, 72, 688, following), _FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert (following in _texts(doc)[0]) is merges
+
+
+def test_outdent_after_an_open_year_range_starts_an_entry(tmp_path):
+    second = _LONG[:-6] + " 2004-"  # about the width of _LONG, ends in an open range
+    page = [(False, 10, 72, 700, _LONG), (False, 10, 90, 688, second),
+            (False, 10, 72, 676, "Next entry begins here")]
+    _, doc = _convert(tmp_path, [page])
+    assert len(doc.paragraphs) == 2
+
+
+def test_page_range_before_a_marker_line_still_merges_but_an_open_range_does_not(tmp_path):
+    page_range = [(False, 10, 72, 700, f"{_LONG} (3):529-"), (False, 10, 72, 688, "45. PMID 1234")]
+    open_range = [(False, 10, 72, 700, f"{_LONG} Member, 2004-"), (False, 10, 72, 688, "\\267 Member, 2009-")]
+    _, doc_a = _convert(tmp_path, [page_range], name="a")
+    _, doc_b = _convert(tmp_path, [open_range], name="b")
+    assert len(doc_a.paragraphs) == 1
+    assert len(doc_b.paragraphs) == 2
+
+
+@pytest.mark.parametrize("rule", ["-----", "\\261\\261\\261\\261", "- - - -"])
+def test_rule_line_is_not_a_line_ending_in_a_dash(tmp_path, rule):
+    page = [(False, 10, 72, 700, rule), (False, 10, 72, 688, "1904 in print"), _FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[1] == "1904 in print"
+
+
+def test_full_width_rule_line_does_not_exempt_a_marker_line(tmp_path):
+    page = [(False, 10, 72, 700, "-" * 130), (False, 10, 72, 688, "12. Next entry")]
+    _, doc = _convert(tmp_path, [page])
+    assert len(doc.paragraphs) == 2
+
+
 @pytest.mark.parametrize("ending, merges", [
     ("529-", True), ("529\\261", True), ("529\\320", True), ("529.", False), ("529 -x", False)])
 def test_short_line_ending_in_a_dash_still_wraps_on(tmp_path, ending, merges):
