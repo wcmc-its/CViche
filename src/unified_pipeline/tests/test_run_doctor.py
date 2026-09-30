@@ -1801,6 +1801,9 @@ def _build_clean_run(tmp_path, uid=_UID):
                                      "enriched"),
                      _enriched_entry("Sample citation without identifiers",
                                      "no_identifier")]})
+    _write_stage(root, "stage_5b_institution_enrichment",
+                 f"{uid}_cv_institution_enriched.json",
+                 {"document_uid": uid, "entries": []})
 
     output = Document()
     # Real renders carry grants under RESEARCH (section_lost reads the
