@@ -52,7 +52,7 @@ _TERMINAL_EVENTS = frozenset({"RUN_COMPLETE", "RUN_FAILED", "RUN_CANCELLED"})
 _COST_KEYS = frozenset({"total_cost", "cost", "cost_delta"})
 
 
-def _retrieve_outcome(future: asyncio.Future) -> None:
+def _retrieve_outcome(future: asyncio.Future[None]) -> None:
     """Mark a finished future's exception as retrieved; the caller reports it."""
     if not future.cancelled():
         future.exception()
@@ -284,9 +284,11 @@ class EventEmitter:
         loop that owns the sockets, and wait for it (up to
         CROSS_LOOP_EMIT_WAIT_SECONDS) without blocking the caller's loop.
 
-        Never raises: the caller is a pipeline run, and an event it cannot
-        deliver -- the server loop already gone at shutdown (#1095 drain), or a
-        client too slow to take it -- must not fail the run. A delivery still
+        Never raises for an undeliverable event: the caller is a pipeline run,
+        and an event it cannot deliver -- the server loop already gone at
+        shutdown (#1095 drain), or a client too slow to take it -- must not fail
+        the run. Anything else raised while scheduling is a bug and propagates;
+        the coroutine is closed either way. A delivery still
         running at the timeout is left to finish, not cancelled mid-write.
 
         The delivery task starts from an empty context, not a copy of the
@@ -296,13 +298,18 @@ class EventEmitter:
         emit then blocks the server loop for up to 2s per line.
         """
         coro = self._deliver_local(run_id, message)
+        future = None
         try:
             future = contextvars.Context().run(
                 asyncio.run_coroutine_threadsafe, coro, loop)
         except RuntimeError:
-            coro.close()
             logger.info("Event for run %s dropped: the socket loop is closed", run_id)
             return
+        finally:
+            # Whatever stopped the scheduling, the coroutine never ran; close it
+            # so it is not reported "never awaited" somewhere unrelated later.
+            if future is None:
+                coro.close()
         waited = asyncio.wrap_future(future)
         # Retrieve its outcome whenever it lands, or asyncio logs "Future
         # exception was never retrieved" from this loop for a failed delivery.
@@ -316,6 +323,8 @@ class EventEmitter:
         elif future.exception() is not None:
             logger.warning("Event delivery for run %s failed", run_id,
                            exc_info=future.exception())
+        else:
+            logger.debug("Event for run %s delivered", run_id)
 
     async def emit_run_start(self, run_id: str):
         await self.emit(run_id, {"event": "RUN_START"})

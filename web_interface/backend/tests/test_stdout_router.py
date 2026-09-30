@@ -415,3 +415,46 @@ def test_a_run_loop_write_after_a_stage_timeout_does_not_raise(monkeypatch):
 
     assert asyncio.run(scenario()) == len("stage 4 timed out\n")
     assert "stage 4 timed out\n" in real_stdout.getvalue()
+
+
+def test_the_delivered_debug_line_stays_out_of_the_capture(monkeypatch):
+    """The success branch logs at debug on the run loop (#1132 review). With
+    debug on and app logging through sys.stdout, that line must go to the
+    real stdout, not stream back into the run's log."""
+    import asyncio
+    import logging
+    from app.pipeline import event_emitter as emitter_module
+
+    real_stdout = io.StringIO()
+    monkeypatch.setattr(sys, "__stdout__", real_stdout)
+    previous_level = emitter_module.logger.level
+    emitter_module.logger.setLevel(logging.DEBUG)  # setLevel, not .level=: clears the logger's cache
+
+    class _Socket:
+        def __init__(self):
+            self.sent = []
+
+        async def accept(self):
+            return None
+
+        async def send_text(self, message):
+            self.sent.append(message)
+
+    socket = _Socket()
+    server = asyncio.new_event_loop()
+    thread = threading.Thread(target=server.run_forever, daemon=True)
+    thread.start()
+    emitter = emitter_module.EventEmitter()
+    try:
+        asyncio.run_coroutine_threadsafe(emitter.connect("R1", socket), server).result(5)
+        seconds, logged = _stream_through_real_capture(emitter, 2, [emitter_module.__name__])
+    finally:
+        emitter_module.logger.setLevel(previous_level)
+        server.call_soon_threadsafe(server.stop)
+        thread.join(5)
+        server.close()
+
+    assert seconds is not None and seconds < 5
+    assert logged == ["Processing 1 of 2 sections", "Processing 2 of 2 sections"]
+    assert "Event for run R1 delivered" in real_stdout.getvalue()
+    assert len(socket.sent) == 4  # two LOG, two PROGRESS

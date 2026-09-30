@@ -674,6 +674,32 @@ def test_an_emit_after_the_server_loop_closed_does_not_raise(monkeypatch):
     assert len(made) == 1 and made[0].cr_frame is None
 
 
+def test_an_unexpected_scheduling_error_propagates_and_closes_the_coroutine(monkeypatch):
+    """Only a closed socket loop (RuntimeError) is an expected drop. Anything
+    else raised while scheduling is a bug and reaches the caller -- but the
+    delivery coroutine, which never ran, is closed either way instead of
+    warning "never awaited" at some unrelated later point (#1132 review)."""
+    emitter = EventEmitter()
+    made = []
+    real_deliver = emitter._deliver_local
+
+    def tracking_deliver(run_id, message):
+        made.append(real_deliver(run_id, message))
+        return made[-1]
+
+    def broken_schedule(coro, loop):
+        raise TypeError("scheduler bug")
+
+    with _server_loop() as server:
+        _on(server, emitter.connect("R1", _LoopBoundSocket()))
+        monkeypatch.setattr(emitter, "_deliver_local", tracking_deliver)
+        monkeypatch.setattr(emitter_module.asyncio, "run_coroutine_threadsafe", broken_schedule)
+        _, error = _in_run_thread(lambda: emitter.emit_log("R1", 1, "x"))
+
+    assert isinstance(error, TypeError)
+    assert len(made) == 1 and made[0].cr_frame is None
+
+
 def test_a_new_server_loop_replaces_a_closed_one():
     """Sockets belong to the loop that accepted them most recently; a
     process whose first loop is gone (a TestClient portal, a restarted
