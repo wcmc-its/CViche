@@ -46,10 +46,10 @@ class ResearcherProfilesSection:
             logger.info("Filling Researcher Profiles (%s entries)...", len(s0_entries))
 
         # Find "Peer-reviewed Research Articles" to insert directly above it
-        peer_reviewed_idx = self._find_paragraph_with_text("Peer-reviewed Research Articles")
+        peer_reviewed_idx = self._find_template_label("Peer-reviewed Research Articles")
         if peer_reviewed_idx is None:
             # Fallback to BIBLIOGRAPHY
-            peer_reviewed_idx = self._find_paragraph_with_text("BIBLIOGRAPHY")
+            peer_reviewed_idx = self._find_header_paragraph("BIBLIOGRAPHY")
         if peer_reviewed_idx is None:
             return
 

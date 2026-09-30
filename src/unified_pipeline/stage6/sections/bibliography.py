@@ -367,7 +367,7 @@ class BibliographySection:
                 continue
 
             # Find the section header in the template
-            section_idx = self._find_paragraph_with_text(header_text)
+            section_idx = self._find_template_label(header_text)
             if section_idx is None:
                 logger.warning("Could not find section header %r", header_text)
                 continue

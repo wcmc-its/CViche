@@ -411,17 +411,19 @@ def _render_service(q2_entries):
     """Drive the real _fill_service reroute + both table writers.
 
     Returns (board_rows, journal_rows)."""
-    gen = WCMTemplateGenerator(verbose=False)
-    gen.doc = Document()
-    gen.doc.add_paragraph().add_run("Service on Boards and/or Committees").bold = True
-    boards_table = gen.doc.add_table(rows=1, cols=4)
+    doc = Document()
+    doc.add_paragraph().add_run("Service on Boards and/or Committees").bold = True
+    boards_table = doc.add_table(rows=1, cols=4)
     for i, header in enumerate(["Name of Committee", "Role", "Organization",
                                 "Dates"]):
         boards_table.rows[0].cells[i].text = header
-    gen.doc.add_paragraph("Journal Reviewing/Ad hoc Reviewing")
-    journal_table = gen.doc.add_table(rows=1, cols=2)
+    doc.add_paragraph("Journal Reviewing/Ad hoc Reviewing")
+    journal_table = doc.add_table(rows=1, cols=2)
     for i, header in enumerate(["Journal / Organization Name", "Dates"]):
         journal_table.rows[0].cells[i].text = header
+    # Labels are anchored only if the document had them when assigned (#548).
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = doc
     gen._fill_service({"Q2": q2_entries})
     boards = [[c.text for c in r.cells] for r in boards_table.rows[1:]]
     journal = [[c.text for c in r.cells] for r in journal_table.rows[1:]]
