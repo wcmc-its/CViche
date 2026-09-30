@@ -331,6 +331,8 @@ def test_ready_reports_missing_input_as_info():
                        stage_2=None) is False
     assert findings[0]["severity"] == "INFO"
     assert "missing stage_2" in findings[0]["message"]
+    assert findings[0]["status"] == "skipped"
+    assert findings[0]["reason"] == "stage_2"
 
 
 def test_ready_reports_unreadable_input_as_error():
@@ -343,6 +345,14 @@ def test_ready_reports_unreadable_input_as_error():
                        findings=findings, stage_2=None) is False
     assert findings[0]["severity"] == "ERROR"
     assert "unreadable stage_2" in findings[0]["message"]
+    assert findings[0]["status"] == "unreadable"
+    assert findings[0]["reason"] == "stage_2"
+
+
+def test_finding_status_vocabulary_is_pinned():
+    """#750: consumers (corpus_doctor_sweep's aggregate) branch on these
+    exact strings; renaming one is a contract change, not a refactor."""
+    assert _module().FINDING_STATUSES == ("ran", "skipped", "unreadable")
 
 
 def test_pipeline_errors_present_dispatches_from_a_real_partial_run(tmp_path):
@@ -444,7 +454,7 @@ def test_a_crashing_lint_becomes_an_error_finding_and_the_rest_still_run(
     assert [f for f in payload["findings"] if f["lint"] == "bucket_status"] == [{
         "lint": "bucket_status", "severity": "ERROR",
         "message": "lint bucket_status crashed: RuntimeError: synthetic lint failure",
-        "evidence": []}]
+        "evidence": [], "status": "ran", "reason": ""}]
     assert ran_after, "duplicate_records, dispatched after the crash, never ran"
     assert payload["counts"]["ERROR"] == 1
     assert payload["worst_severity"] == "ERROR"
@@ -467,7 +477,7 @@ def test_the_two_hard_fail_gates_run_inside_the_same_boundary(tmp_path, monkeypa
     assert gate == [{
         "lint": "pipeline_errors_present", "severity": "ERROR",
         "message": "lint pipeline_errors_present crashed: RuntimeError: synthetic lint failure",
-        "evidence": []}]
+        "evidence": [], "status": "ran", "reason": ""}]
     assert payload["worst_severity"] == "ERROR"
 
 # One malformed-but-parseable artifact per JSON kind: (loader label, stage
