@@ -447,7 +447,7 @@ def test_lint_classified_unrendered_does_not_trust_a_shared_boilerplate_hit():
     ]}
     findings = lint_classified_unrendered(
         stage3b, [("p", "Department of Medicine")])
-    assert sorted(f["message"].split(":")[0] for f in findings) == [
+    assert sorted(f["message"].split(":")[0] for f in findings[1:]) == [
         "taxonomy code C", "taxonomy code D"]
 
 
@@ -492,6 +492,40 @@ def test_classified_unrendered_warn_entries_boundary(lost, expected_severity):
     findings = lint_classified_unrendered(stage3b, _OUTPUT_BLOCKS)
     assert len(findings) == 1
     assert findings[0]["severity"] == expected_severity
+
+
+def test_classified_unrendered_one_run_level_warn_over_per_code_info():
+    """#719: several codes lost -> ONE run-level finding carries the magnitude
+    severity (entries lost across all codes, #438) and each per-code finding
+    is INFO evidence. Pre-fix every per-code finding was stamped WARN, so the
+    code that lost one entry read WARN because code A lost three."""
+    lost_a = [_distinctive_missing_entry(i) for i in range(3)]
+    lost_b = [{**_distinctive_missing_entry(9), "taxonomy_code": "B"}]
+    for e in lost_a:
+        e["taxonomy_code"] = "A"
+    findings = lint_classified_unrendered(
+        {"entries": lost_a + lost_b}, _OUTPUT_BLOCKS)
+    run_level, *per_code = findings
+    assert run_level["lint"] == "classified_unrendered"
+    assert run_level["severity"] == "WARN"
+    assert run_level["message"] == ("4 classified entries across 2 taxonomy "
+                                    "codes appear nowhere in the output document")
+    assert run_level["evidence"] == ["taxonomy code A", "taxonomy code B"]
+    assert [f["message"].split(":")[0] for f in per_code] == [
+        "taxonomy code A", "taxonomy code B"]
+    assert [f["severity"] for f in per_code] == ["INFO", "INFO"]
+
+
+def test_classified_unrendered_run_level_finding_tracks_the_magnitude(monkeypatch):
+    """#719: the run-level finding's severity is the #438 magnitude, not a
+    fixed WARN -- below the entries-lost threshold it is INFO too. The
+    threshold is raised because two lost codes already meet the real one."""
+    import unified_pipeline.doctor.lints.extraction as extraction
+    monkeypatch.setattr(extraction, "CLASSIFIED_UNRENDERED_WARN_ENTRIES", 3)
+    stage3b = {"entries": [{**_distinctive_missing_entry(i), "taxonomy_code": c}
+                           for i, c in enumerate("AB")]}
+    findings = lint_classified_unrendered(stage3b, _OUTPUT_BLOCKS)
+    assert [f["severity"] for f in findings] == ["INFO", "INFO", "INFO"]
 
 
 _UNDER_EXTRACTION_RECORD_LINE = ("{year} Distinguished award for excellence "

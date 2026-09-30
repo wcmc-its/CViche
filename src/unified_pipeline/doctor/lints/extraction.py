@@ -516,6 +516,7 @@ def lint_classified_unrendered(stage3b: Dict,
         by_code.setdefault(code, []).append(e)
 
     findings = []
+    lost_codes = []
     lost = 0
     for code in sorted(by_code):
         entries = by_code[code]
@@ -525,17 +526,29 @@ def lint_classified_unrendered(stage3b: Dict,
         if not verifiable or any(v for v, _ in verifiable):
             continue
         findings.append(_finding(
-            "classified_unrendered", "WARN",
+            "classified_unrendered", "INFO",
             f"taxonomy code {code}: none of its {len(entries)} classified "
             f"entries appear in the output document",
             [str(e.get("text", ""))[:80] for _, e in verifiable[:3]]))
+        lost_codes.append(code)
         lost += len(entries)
+    if not findings:
+        return findings
     # As with missed_headers, the magnitude that matters is how much of the
     # document went missing across all codes, not that one code did (#438).
+    # Exactly one finding carries that run-level severity (#719): the lone
+    # per-code finding when one code was lost, else a run-level finding ahead
+    # of per-code INFO evidence -- a code that lost one entry must not read
+    # WARN because a different code on the same run lost several.
     severity = _magnitude_severity(lost, CLASSIFIED_UNRENDERED_WARN_ENTRIES)
-    for f in findings:
-        f["severity"] = severity
-    return findings
+    if len(findings) == 1:
+        findings[0]["severity"] = severity
+        return findings
+    return [_finding(
+        "classified_unrendered", severity,
+        f"{lost} classified entries across {len(findings)} taxonomy codes "
+        f"appear nowhere in the output document",
+        [f"taxonomy code {code}" for code in lost_codes])] + findings
 
 
 # --------------------------------------------------------------------------
