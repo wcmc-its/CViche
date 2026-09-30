@@ -674,7 +674,7 @@ class TestAtomicRunStart:
 def test_orchestrator_rejects_unsafe_document_uid(db, tmp_path, stem):
     from app.pipeline.orchestrator import PipelineOrchestrator
 
-    with pytest.raises(ValueError, match="document_uid"):
+    with pytest.raises(ValueError, match="Invalid document_uid"):
         PipelineOrchestrator("REJ299", tmp_path / f"{stem}.docx", db)
     # A rejected constructor must not leave its output dir behind.
     assert not (Path(__file__).parent.parent.parent / "outputs" / "REJ299").exists()
@@ -693,6 +693,8 @@ def test_orchestrator_rejects_document_uid_that_differs_from_run_id(db, tmp_path
 
     with pytest.raises(ValueError, match="must equal run_id"):
         PipelineOrchestrator("MATCH1", tmp_path / "OTHER1.docx", db)
+    with pytest.raises(ValueError, match="must equal run_id"):
+        PipelineOrchestrator("ABC1", tmp_path / "abc1.docx", db)
     PipelineOrchestrator("MATCH2", tmp_path / "MATCH2.docx", db)
 
 

@@ -34,7 +34,7 @@ from app.services import notifications
 def _doctor_payload():
     """A canned run_doctor report with one substantive (WARN) finding."""
     return {
-        "document_uid": "cv",
+        "document_uid": "DOC_ON",
         "root": "unused",
         "artifacts": {},
         "findings": [
@@ -139,7 +139,7 @@ def test_doctor_runs_by_default_and_publishes(monkeypatch, tmp_path, db):
     db.expire_all()
     assert db.query(Run).filter(Run.id == "DOC_ON").first().status == "complete"
 
-    # Report written under the pipeline outputs dir (document_uid = "cv").
+    # Report written under the pipeline outputs dir (document_uid = run id).
     report = tmp_path / "outputs" / "stage_7_doctor" / "DOC_ON_doctor.json"
     assert json.loads(report.read_text()) == payload
 
