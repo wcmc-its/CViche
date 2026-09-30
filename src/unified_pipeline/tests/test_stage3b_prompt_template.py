@@ -200,3 +200,6 @@ def test_s7_rules_mean_in_review_only_matching_its_template_header():
     for gray in ("White papers", "Preprints", "dissertation"):
         assert gray in s5
     assert "or S7 (gray lit)" not in _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE
+    # The A/B on #1173 left 28 "in press" entries in S7 while only the
+    # section-6 summary said otherwise; rule 30 must say it too.
+    assert '"in press"' in _rule_block("    - S7 = ", "31. CASE REPORTS")

@@ -657,6 +657,10 @@ F. PUBLICATIONS AND SCHOLARLY OUTPUT (S0–S9, M2D)
       "in preparation", "in revision" when cited as such. S7 renders
       under the CV template's "In review" header, so nothing already
       published or publicly released belongs here.
+    - "Accepted", "in press", "forthcoming" or "Epub ahead of print"
+      means peer review is over: classify by publication type (S1, S2,
+      S6, or S3 for a book chapter), NOT S7, even though it is not yet
+      in print.
 
 31. CASE REPORTS (S6)
     - S6 = Formal case reports or case series:
