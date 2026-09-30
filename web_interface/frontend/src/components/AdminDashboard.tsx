@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { BarChart3, Users, DollarSign, MessageSquare, ArrowLeft, Loader2 } from 'lucide-react'
+import { BarChart3, Users, DollarSign, MessageSquare, Loader2 } from 'lucide-react'
 import type { Stats } from '../types'
 import { getAdminStats } from '../api/admin'
 import { formatCost } from '../utils'
@@ -13,7 +12,6 @@ const TABS = ['Users', 'All Submissions', 'Feedback Insights', 'Config'] as cons
 type TabName = typeof TABS[number]
 
 export default function AdminDashboard() {
-  const navigate = useNavigate()
   const [stats, setStats] = useState<Stats | null>(null)
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<TabName>('Users')
@@ -41,37 +39,10 @@ export default function AdminDashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header
-        className="border-b border-gray-200"
-        style={{
-          backgroundImage: 'url(/headerbg.png)',
-          backgroundSize: 'cover',
-          backgroundPosition: 'center',
-        }}
-      >
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => navigate('/')}
-              className="text-gray-400 hover:text-gray-600 transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 rounded-lg p-1.5"
-              aria-label="Back to upload page"
-            >
-              <ArrowLeft className="h-5 w-5" />
-            </button>
-            <div>
-              <h1 className="text-lg font-semibold text-gray-900">Admin Dashboard</h1>
-              <p className="text-xs text-gray-400">CViche Pipeline Management</p>
-            </div>
-          </div>
-          <img
-            src="/header-logo.png"
-            alt="CViche"
-            className="h-8 object-contain hidden sm:block"
-          />
-        </div>
-      </header>
+    <div>
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
+        <h1 className="text-[26px] font-semibold text-gray-900">Dashboard</h1>
+      </div>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         {/* Stat Cards */}
@@ -105,8 +76,8 @@ export default function AdminDashboard() {
         </div>
 
         {/* Tabs */}
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <div className="border-b border-gray-200 px-4 sm:px-6">
+        <div className="bg-white rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] border border-sand-300 overflow-hidden">
+          <div className="border-b border-sand-200 px-4 sm:px-6">
             <nav className="-mb-px flex space-x-1 overflow-x-auto" aria-label="Admin tabs">
               {TABS.map((tab) => (
                 <button
@@ -152,7 +123,7 @@ function StatCard({
   sublabel?: string
 }) {
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 sm:p-5">
+    <div className="bg-white rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] border border-sand-300 p-4 sm:p-5">
       <div className="flex items-center gap-2.5 mb-3">
         <div className={`p-1.5 rounded-lg ${iconBg}`}>{icon}</div>
         <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">{label}</span>

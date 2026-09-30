@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
-import { Link, useLocation } from 'react-router-dom'
-import { HelpCircle, ArrowLeft } from 'lucide-react'
+import { useLocation } from 'react-router-dom'
+import { HelpCircle } from 'lucide-react'
 
 const sections = [
   { id: 'what-is-cviche', label: 'What is CViche?' },
@@ -27,35 +27,10 @@ export default function HelpPage() {
   }, [hash])
   return (
     <main
-      className="flex items-start justify-center min-h-screen p-4 pt-12"
-      style={{
-        backgroundImage: 'url(/headerbg.png)',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        backgroundRepeat: 'no-repeat',
-      }}
+      className="px-4 py-8"
     >
-      <div className="w-full max-w-2xl">
-        {/* Logo */}
-        <div className="flex justify-center mb-6">
-          <img
-            src="/header-logo.png"
-            alt="CViche"
-            className="h-16 object-contain"
-          />
-        </div>
-
-        <section aria-label="Help and support" className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8">
-          {/* Back navigation */}
-          <nav aria-label="Back navigation" className="mb-6">
-            <Link
-              to="/"
-              className="inline-flex items-center gap-1.5 text-sm text-primary-600 hover:text-primary-700 hover:underline"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              Back to upload
-            </Link>
-          </nav>
+      <div className="w-full max-w-2xl mx-auto">
+        <section aria-label="Help and support" className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-6 md:p-8">
 
           {/* Page title */}
           <div className="flex items-center gap-2 mb-6">

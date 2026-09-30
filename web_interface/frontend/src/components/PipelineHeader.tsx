@@ -1,8 +1,6 @@
-import { ArrowLeft, HelpCircle, Download } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { ArrowLeft, Download } from 'lucide-react'
 import { runRoutes } from '../api/routes'
 import { formatCost } from '../utils'
-import UserMenu from './UserMenu'
 import { useCanSeeCost } from '../contexts/AuthContext'
 
 interface PipelineHeaderProps {
@@ -49,21 +47,13 @@ export default function PipelineHeader({
   const badgeClass = statusColors[status] || 'bg-gray-100 text-gray-800'
 
   return (
-    <header
-      role="banner"
-      className="border-b border-gray-200 px-4 py-3 md:px-6"
-      style={{
-        backgroundImage: 'url(/headerbg.png)',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-      }}
-    >
+    <div className="bg-white border-b border-sand-300 px-4 py-3 md:px-6">
       <div className="flex items-center gap-4">
         {/* Left: Back button + Run ID / filename */}
         <div className="flex items-center gap-3 min-w-0 shrink-0">
           <button
             onClick={onBack}
-            aria-label="Back to upload"
+            aria-label="Back to runs"
             className="shrink-0 rounded p-1 text-gray-700 hover:text-gray-900 focus:ring-2 focus:ring-blue-500 focus:outline-none"
           >
             <ArrowLeft className="h-5 w-5" />
@@ -82,13 +72,7 @@ export default function PipelineHeader({
           </div>
         </div>
 
-        {/* Center: Logo — hidden on small screens */}
-        <div className="hidden md:flex flex-1 justify-center">
-          <img src="/header-logo.png" alt="CViche" className="h-10" />
-        </div>
-
-        {/* Spacer when logo is hidden */}
-        <div className="flex-1 md:hidden" />
+        <div className="flex-1" />
 
         {/* Right: Metrics + Status + Cancel */}
         <div className="flex items-center gap-3 lg:gap-5 text-sm shrink-0">
@@ -114,16 +98,6 @@ export default function PipelineHeader({
             <span className="font-semibold text-gray-900">{outputTokens.toLocaleString()}</span>
           </div>
 
-          {/* Help link */}
-          <Link
-            to="/help"
-            aria-label="Help and support"
-            title="Help and support"
-            className="text-gray-500 hover:text-primary-600 transition-colors"
-          >
-            <HelpCircle className="h-5 w-5" />
-          </Link>
-
           {/* Status badge */}
           <span className={`px-3 py-1 rounded-full text-xs font-medium ${badgeClass}`}>
             {status}
@@ -144,11 +118,8 @@ export default function PipelineHeader({
               {isCancelling ? 'Cancelling...' : 'Cancel'}
             </button>
           )}
-
-          {/* Account / sign out */}
-          <UserMenu />
         </div>
       </div>
-    </header>
+    </div>
   )
 }

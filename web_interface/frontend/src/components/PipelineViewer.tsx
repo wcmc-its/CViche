@@ -262,7 +262,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
 
   if (!runStatus || !runStatus.steps) {
   return (
-    <main className="flex items-center justify-center min-h-screen bg-surface-muted">
+    <main className="flex items-center justify-center min-h-screen">
       <div className="text-gray-600 font-medium" role="status" aria-live="polite">
         Loading pipeline data...
       </div>
@@ -271,7 +271,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
 }
 
   return (
-    <div className="min-h-screen bg-surface-muted">
+    <div className="min-h-screen">
       {apiError && <ErrorBanner message={apiError} onDismiss={() => setApiError(null)} />}
 
       {connectionLost && (
@@ -393,7 +393,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
               </>
             )}
           </span>
-          <span>You can close this page. Processing continues, and the result will be in your Run History.</span>
+          <span>You can close this page. Processing continues, and the result will appear in Runs.</span>
         </div>
       </div>
 

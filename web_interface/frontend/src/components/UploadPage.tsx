@@ -1,14 +1,12 @@
 import { useState } from 'react'
-import { useNavigate, Link } from 'react-router-dom'
-import { Upload, FileText, Loader2, Shield, HelpCircle, AlertTriangle } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Upload, FileText, Loader2, AlertTriangle } from 'lucide-react'
 import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 import type { Estimate } from '../types'
 import { getEstimate, uploadFile } from '../api/upload'
 import { startRun, getCapacity } from '../api/runs'
 import { formatDuration, formatCost } from '../utils'
 import ErrorBanner from './ErrorBanner'
-import RunHistory from './RunHistory'
-import UserMenu from './UserMenu'
 
 type SubmissionType = 'own_cv' | 'authorized_admin'
 
@@ -237,38 +235,13 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
 
   return (
     <main
-      className="flex items-center justify-center min-h-screen p-4"
-      style={{
-        backgroundImage: 'url(/headerbg.png)',
-        backgroundSize: 'cover',
-        backgroundPosition: 'center',
-        backgroundRepeat: 'no-repeat'
-      }}
+      className="px-4 py-8"
     >
-      <div className="w-full max-w-3xl">
-        {/* Logo */}
-        <div className="flex justify-center mb-6">
-          <img
-            src="/header-logo.png"
-            alt="CViche - CV Processing Pipeline"
-            className="h-16 object-contain"
-          />
-        </div>
+      <div className="w-full max-w-3xl mx-auto">
+        <h1 className="text-[26px] font-semibold text-gray-900">New run</h1>
+        <p className="text-sm text-gray-600 italic mt-1 mb-5">Upload a CV as a Word document. Get back a document in WCM institutional format.</p>
 
-        <section className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8 relative max-w-md mx-auto">
-          <div className="absolute top-4 right-4 flex items-center gap-1">
-            <Link
-              to="/help"
-              aria-label="Help and support"
-              title="Help and support"
-              className="text-gray-400 hover:text-primary-600 transition-colors"
-            >
-              <HelpCircle className="h-5 w-5" />
-            </Link>
-            <UserMenu />
-          </div>
-          <h1 className="sr-only">Upload CV for Processing</h1>
-          <p className="text-gray-600 mb-8 italic">Upload a CV in any format. Get back a document in WCM institutional format.</p>
+        <section className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-6 md:p-8">
 
           <div className="space-y-6">
             <div>
@@ -430,7 +403,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                   </p>
                 )}
                 <p className="text-sm text-gray-700 mt-3">
-                  You don't need to wait on this page. Processing continues if you close it, and your results will be in Run History below.
+                  You don't need to wait on this page. Processing continues if you close it, and your results will appear in Runs.
                 </p>
               </section>
             )}
@@ -498,21 +471,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
             )}
           </div>
 
-          {user?.role === 'admin' && (
-            <div className="mt-6 pt-4 border-t border-gray-200">
-              <button
-                onClick={() => navigate('/admin')}
-                className="inline-flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-600 transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500 rounded"
-              >
-                <Shield className="w-3.5 h-3.5" aria-hidden="true" />
-                Admin Dashboard
-              </button>
-            </div>
-          )}
         </section>
-
-        {/* Run History — RunHistory returns null when empty, so no wrapper needed */}
-        <RunHistory onSelectRun={(runId) => navigate(`/run/${runId}`)} />
       </div>
     </main>
   )
