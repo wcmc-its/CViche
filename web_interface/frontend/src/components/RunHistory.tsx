@@ -3,7 +3,7 @@ import { FileText, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
 import { getRuns, getFeedbackStatuses, getRunFilterOptions } from '../api/runs'
 import type { FeedbackStatus, RunFilterOptions, RunSummary } from '../types'
 import ErrorBanner from './ErrorBanner'
-import { useAuth } from '../contexts/AuthContext'
+import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 import RunTable from './runs/RunTable'
 import { ActiveFilterChips, RunFilterCombos } from './runs/RunFilterBar'
 import { toListParams, useRunFilters } from './runs/runFilters'
@@ -51,7 +51,7 @@ function getPageNumbers(currentPage: number, totalPages: number): (number | 'ell
 export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
-  const showCost = isAdmin
+  const showCost = useCanSeeCost()
   const controls = useRunFilters(isAdmin)
   const { filters } = controls
   const listParams = useMemo(() => (isAdmin ? toListParams(filters) : undefined), [isAdmin, filters])
@@ -108,7 +108,10 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
     let cancelled = false
     getRunFilterOptions(toListParams(filters))
       .then((data) => { if (!cancelled) setFilterOptions(data) })
-      .catch((err) => console.error('Error fetching run filter options:', err))
+      .catch((err) => {
+        console.error('Error fetching run filter options:', err)
+        if (!cancelled) setError('Unable to load the filter lists. Please refresh the page to try again.')
+      })
     return () => { cancelled = true }
   }, [isAdmin, filters])
 

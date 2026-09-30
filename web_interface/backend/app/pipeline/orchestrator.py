@@ -34,7 +34,7 @@ sys.path.insert(0, str(PARENT_DIR / 'src'))
 from app.models import Run, Step, Log
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.pipeline.event_emitter import event_emitter
-from app.services.cv_owner_service import read_cv_owner_name
+from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name
 from app.storage import get_storage
 from app.storage.base import RunStorage
 from app.config_loader import get_config
@@ -87,9 +87,6 @@ def _record_total_duration(run: Run, elapsed: int, resumed: bool) -> None:
     else:
         run.total_duration_seconds = elapsed
 
-
-# The stage whose *_fields.json carries the inferred CV owner (cv_owner).
-CV_OWNER_STAGE_ID = "4"
 
 # run_id and document_uid become path components (output dir, input copy).
 UID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")

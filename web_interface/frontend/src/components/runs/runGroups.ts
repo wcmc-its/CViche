@@ -1,6 +1,9 @@
 import type { RunSummary } from '../../types'
 import { RUN_BY_SELF } from './runFilters'
 
+/** Run.submission_type of a faculty member uploading their own CV. */
+export const OWN_CV_SUBMISSION_TYPE = 'own_cv'
+
 export type SortField = 'status' | 'cv' | 'started_at' | 'total_duration_seconds' | 'total_cost' | 'feedback'
 export type SortDir = 'asc' | 'desc'
 
@@ -78,13 +81,13 @@ export function compareRuns(
 
 /** Display label for who ran a run; null when unknown. */
 export function runByLabel(run: RunSummary, currentUserId: number | undefined): string | null {
-  if (run.submission_type === 'own_cv') return SELF_RUN_BY_LABEL
+  if (run.submission_type === OWN_CV_SUBMISSION_TYPE) return SELF_RUN_BY_LABEL
   if (!run.run_by) return null
   return run.run_by.id === currentUserId ? `${run.run_by.display_name} (you)` : run.run_by.display_name
 }
 
 /** Value to put in the Run by filter for this run's runner; null when unknown. */
 export function runByFilterValue(run: RunSummary): string | null {
-  if (run.submission_type === 'own_cv') return RUN_BY_SELF
+  if (run.submission_type === OWN_CV_SUBMISSION_TYPE) return RUN_BY_SELF
   return run.run_by ? String(run.run_by.id) : null
 }

@@ -24,11 +24,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from sqlalchemy.orm import Session  # noqa: E402
 
 from app.models import Run, Step  # noqa: E402
-from app.services.cv_owner_service import read_cv_owner_name  # noqa: E402
+from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name  # noqa: E402
 
 logger = logging.getLogger("backfill_cv_owner_name")
 
-STAGE_4_ID = "4"
 STEP_COMPLETE = "complete"
 
 
@@ -48,7 +47,7 @@ def backfill(db: Session, apply: bool) -> BackfillSummary:
         db.query(Run.id, Step.output_files)
         .join(Step, Step.run_id == Run.id)
         .filter(Run.cv_owner_name.is_(None),
-                Step.stage_id == STAGE_4_ID,
+                Step.stage_id == CV_OWNER_STAGE_ID,
                 Step.status == STEP_COMPLETE)
         .all()
     )

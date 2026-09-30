@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 # (same rule as loadCvInsights).
 FIELDS_JSON_MARKER = "_fields.json"
 
+# The pipeline stage whose output carries ``cv_owner``.
+CV_OWNER_STAGE_ID = "4"
+
 CV_OWNER_NAME_MAX_LENGTH = Run.cv_owner_name.type.length
 
 

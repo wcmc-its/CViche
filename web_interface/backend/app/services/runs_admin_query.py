@@ -60,11 +60,18 @@ def parse_run_filters(run_by: str | None, faculty: str | None,
                       faculty=faculty or None, department=department or None)
 
 
+def _not_own_cv() -> ColumnElement[bool]:
+    # submission_type is nullable on older runs; NULL != 'own_cv' is NULL in SQL.
+    return (Run.submission_type.is_(None)) | (Run.submission_type != OWN_CV_SUBMISSION_TYPE)
+
+
 def _run_by_clause(filters: RunFilters) -> ColumnElement[bool] | None:
     if filters.run_by_self:
         return Run.submission_type == OWN_CV_SUBMISSION_TYPE
     if filters.run_by_user_id is not None:
-        return Run.user_id == filters.run_by_user_id
+        # An own_cv run is "Faculty themselves", never also its uploader's
+        # (mirrors the mockup, where "Self" is its own run-by value).
+        return (Run.user_id == filters.run_by_user_id) & _not_own_cv()
     return None
 
 
@@ -130,7 +137,7 @@ def _run_by_counts(db: Session, filters: RunFilters) -> list[RunByOption]:
     rows = (
         db.query(*user_columns, func.count(Run.id))
         .select_from(Run).join(User, Run.user_id == User.id)
-        .filter(*_clauses(filters, skip_run_by=True))
+        .filter(_not_own_cv(), *_clauses(filters, skip_run_by=True))
         .group_by(*user_columns).order_by(User.display_name, User.id).all()
     )
     return [RunByOption(id=uid, display_name=name, cwid=cwid, email=email,
