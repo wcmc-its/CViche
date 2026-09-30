@@ -785,7 +785,9 @@ def test_a_slow_socket_does_not_feed_the_runs_own_log(monkeypatch):
     handler = logging.StreamHandler(_DYNAMIC_STDOUT)
     emitter_module.logger.addHandler(handler)
     emitter = EventEmitter()
-    socket = _LoopBoundSocket(slow={"LOG": 1.5})
+    # Slower than the capture's 2s, so only an emit wait under 2s keeps the
+    # capture from timing out.
+    socket = _LoopBoundSocket(slow={"LOG": 2.5})
     logged = []
 
     class _Run:
@@ -812,6 +814,9 @@ def test_a_slow_socket_does_not_feed_the_runs_own_log(monkeypatch):
         with _server_loop() as server:
             _on(server, emitter.connect("R1", socket))
             seconds, error = _in_run_thread(run)
+            deadline = time.monotonic() + 5
+            while _event_names(socket).count("LOG") < 2 and time.monotonic() < deadline:
+                time.sleep(0.05)
     finally:
         emitter_module.logger.removeHandler(handler)
 
@@ -819,3 +824,4 @@ def test_a_slow_socket_does_not_feed_the_runs_own_log(monkeypatch):
     assert logged == ["Processing 1 of 2 sections", "Processing 2 of 2 sections"]
     assert "[Log emit error" not in real_stdout_side.getvalue()
     assert seconds < 4
+    assert _event_names(socket).count("LOG") == 2

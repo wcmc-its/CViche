@@ -9,7 +9,7 @@ from app.errors import not_found, forbidden
 from app.config_loader import get_config
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.services import auto_retry
+from app.services import auto_retry, notifications
 
 logger = logging.getLogger(__name__)
 
@@ -501,17 +501,26 @@ def fail_runs_interrupted_by_shutdown(db: Session, run_ids: list[str]) -> int:
     Called once at shutdown, after the drain budget ran out, with the runs that
     still hold a slot on this pod. Each is claimed with the same conditional
     UPDATE the reaper uses, so a run that finished (or was cancelled) since the
-    drain last looked is left alone. Returns the count marked failed.
+    drain last looked is left alone. Each run marked failed also gets a Log
+    row and a Teams failure card. Returns the count marked failed.
     """
     now = datetime.now()
-    failed_count = 0
+    failed = []
     for run in db.query(Run).filter(Run.id.in_(run_ids)).all():
         if not _claim_stale_run(db, run, run.started_at, status="failed"):
             continue
         _mark_run_failed(run, db, now, message=DEPLOY_INTERRUPT_MESSAGE)
-        failed_count += 1
+        db.add(Log(run_id=run.id, step_number=0, level="ERROR", message=DEPLOY_INTERRUPT_MESSAGE))
+        failed.append(run)
     db.commit()
-    return failed_count
+    # The failure card is sent from here, not by the run: the process exits
+    # right after the drain, before the run's thread reaches a handler that
+    # could send it. The run cannot send a second one -- stop_run_locally makes
+    # its next check raise CancelledException, whose handler sends nothing.
+    # Queued only; the lifespan's notifications flush() posts it before exit.
+    for run in failed:
+        notifications.notify_run_terminal(run, submitter=_submitter_email(db, run))
+    return len(failed)
 
 
 def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set) -> bool:

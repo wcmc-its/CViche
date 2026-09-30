@@ -20,7 +20,7 @@ from unittest.mock import patch, AsyncMock
 import pytest
 from docx import Document
 
-from app.models import Run, Step, User
+from app.models import Log, Run, Step, User
 from app.pipeline import concurrency
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.services.run_service import (
@@ -113,10 +113,23 @@ class TestReconcileStaleRuns:
         assert run.status == "failed"
 
 
+@pytest.fixture
+def notified(monkeypatch):
+    """Failure cards the shutdown path queues, as (run id, status, submitter)."""
+    cards = []
+
+    def record(run, score=None, submitter=None, doctor_report=None):
+        cards.append((run.id, run.status, submitter))
+
+    monkeypatch.setattr("app.services.notifications.notify_run_terminal", record)
+    return cards
+
+
 class TestFailRunsInterruptedByShutdown:
-    def test_still_running_run_is_failed_with_the_deploy_message(self, db):
+    def test_still_running_run_is_failed_with_the_deploy_message(self, db, notified):
+        user = _make_user(db, email="Owner@Example.com")
         run = Run(id="DPLY01", filename="a.docx", file_type="docx", status="running",
-                  started_at=datetime.now() - timedelta(minutes=30))
+                  started_at=datetime.now() - timedelta(minutes=30), user_id=user.id)
         db.add(run)
         db.add(Step(run_id="DPLY01", step_number=4, step_name="x", status="running"))
         db.commit()
@@ -128,8 +141,13 @@ class TestFailRunsInterruptedByShutdown:
         assert run.error_message == DEPLOY_INTERRUPT_MESSAGE
         assert run.completed_at is not None
         assert db.query(Step).filter(Step.run_id == "DPLY01").one().status == "error"
+        # #116: the run's own log says why it ended, and exactly one failure
+        # card goes out -- the run's thread never gets to send one.
+        assert [(log.level, log.message) for log in db.query(Log).filter(Log.run_id == "DPLY01")] \
+            == [("ERROR", DEPLOY_INTERRUPT_MESSAGE)]
+        assert notified == [("DPLY01", "failed", "owner@example.com")]
 
-    def test_run_that_finished_meanwhile_is_untouched(self, db):
+    def test_run_that_finished_meanwhile_is_untouched(self, db, notified):
         finished_at = datetime.now() - timedelta(minutes=1)
         run = Run(id="DPLY02", filename="a.docx", file_type="docx", status="complete",
                   started_at=datetime.now() - timedelta(minutes=20), completed_at=finished_at)
@@ -142,8 +160,10 @@ class TestFailRunsInterruptedByShutdown:
         assert run.status == "complete"
         assert run.error_message is None
         assert run.completed_at == finished_at
+        assert notified == []
+        assert db.query(Log).filter(Log.run_id == "DPLY02").count() == 0
 
-    def test_run_not_on_this_pod_is_untouched(self, db):
+    def test_run_not_on_this_pod_is_untouched(self, db, notified):
         run = Run(id="DPLY03", filename="a.docx", file_type="docx", status="running",
                   started_at=datetime.now() - timedelta(minutes=5))
         db.add(run)
@@ -153,6 +173,7 @@ class TestFailRunsInterruptedByShutdown:
 
         db.refresh(run)
         assert run.status == "running"
+        assert notified == []
 
 
 # --- #5  restart quota enforcement ------------------------------------------
