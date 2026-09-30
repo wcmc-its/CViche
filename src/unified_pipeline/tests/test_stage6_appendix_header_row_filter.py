@@ -876,6 +876,66 @@ def test_wrapped_tail_without_both_signals_survives(text, kind_sentence):
     assert _residual(text, _confirmed(kind_sentence)) is None
 
 
+_INSTRUCTION = "Instruction text for CV formatting."
+
+
+@pytest.mark.parametrize("verb", ["use", "please", "list", "include", "provide"])
+def test_each_author_directive_verb_is_pinned(verb):
+    assert _residual(f"{verb} sample font for your name",
+                     _confirmed(_INSTRUCTION)) == DROP_TEMPLATE_INSTRUCTION
+
+
+def _gap_text(gap):
+    """'use' + exactly `gap` characters + 'your name' (digit-free)."""
+    return "use " + "a" * (gap - 2) + " your name"
+
+
+@pytest.mark.parametrize("gap, dropped", [(40, True), (41, False)])
+def test_author_directive_window_is_forty_characters(gap, dropped):
+    assert len(_gap_text(gap).split("your")[0]) - len("use") == gap
+    got = _residual(_gap_text(gap), _confirmed(_INSTRUCTION))
+    assert got == (DROP_TEMPLATE_INSTRUCTION if dropped else None)
+
+
+@pytest.mark.parametrize("words, dropped", [(25, True), (26, False)])
+def test_wrapped_tail_word_cap_is_twenty_five(words, dropped):
+    text = " ".join(["word"] * (words - 1)) + " last)"
+    assert len(text.split()) == words
+    got = _residual(text, _confirmed(_INSTRUCTION))
+    assert got == (DROP_TEMPLATE_INSTRUCTION if dropped else None)
+
+
+@pytest.mark.parametrize("text", [
+    "reuse sample font for your name",       # verb only inside a longer word
+    "used sample font for your name",
+    "use sample font for yourself",          # "your" only inside a longer word
+    "use sample font for yours",
+])
+def test_author_directive_needs_word_boundaries(text):
+    assert _residual(text, _confirmed(_INSTRUCTION)) is None
+
+
+@pytest.mark.parametrize("reasoning_sentence", [
+    "Structural category label.",   # not "header/category label"
+    "Structural marker.",           # not "subsection marker"
+])
+def test_section_wordings_need_their_full_phrase(reasoning_sentence):
+    assert _residual("3) Sample Department-wide", _confirmed(reasoning_sentence)) is None
+
+
+@pytest.mark.parametrize("reasoning_sentence", [
+    "Structural instruction.",      # not "instruction text/line"
+    "Structural header.",           # not "broken header"
+])
+def test_instruction_wordings_need_their_full_phrase(reasoning_sentence):
+    assert _residual("presenter, etc.)", _confirmed(reasoning_sentence)) is None
+
+
+def test_category_label_etc_is_case_insensitive():
+    assert _residual("1. Sample Roles, Etc.", _confirmed("Section header.")
+                     ) == DROP_SECTION_HEADER
+
+
 def test_author_directive_is_case_insensitive():
     assert _residual("Use bold font for your name",
                      _confirmed("Instruction text for CV formatting.")
