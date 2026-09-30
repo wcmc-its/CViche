@@ -100,8 +100,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   // to retry; the upload path runs normally.
   const [pendingStart, setPendingStart] = useState<{ runId: string } | null>(null)
   // Output-rendering options (issue #153). Track Changes is always on (Faculty
-  // Affairs asked for no opt-out); classification comments default off.
-  const [includeClassificationComments, setIncludeClassificationComments] = useState(false)
+  // Affairs asked for no opt-out).
   const [stripWcmInstructions, setStripWcmInstructions] = useState(true)
   // Per-upload role + attestation (Faculty Affairs requirement). The consent
   // page's choice is only the preselect; every upload records its own.
@@ -250,7 +249,6 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
 
     try {
       const data = await uploadFile(file, {
-        includeClassificationComments,
         stripWcmInstructions,
         submissionType,
       })
@@ -399,10 +397,6 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
             {/* 3 - Output options (issue #153) */}
             <fieldset className="mt-2 flex flex-col gap-3">
               <legend className={`${H2} mb-3`}>3 &middot; Output options</legend>
-              <CheckBox checked={includeClassificationComments} onChange={setIncludeClassificationComments}>
-                <span className="block font-semibold text-gray-900">Include classification comments</span>
-                <span className="block text-[13px] text-gray-500">Add Word comments explaining how each entry was classified.</span>
-              </CheckBox>
               <CheckBox checked={stripWcmInstructions} onChange={setStripWcmInstructions}>
                 <span className="block font-semibold text-gray-900">Strip WCM template instructions</span>
                 <span className="block text-[13px] text-gray-500">Remove the WCM CV template&apos;s instructional text (e.g. &quot;When preparing the WCM CV template&hellip;&quot;) from the output. On by default.</span>
