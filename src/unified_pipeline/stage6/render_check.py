@@ -164,16 +164,24 @@ RENDER_TOKEN_OVERLAP = 0.7
 # Unicode letters only (no digits/underscore): [a-z]{5,} on ASCII input (#541).
 #
 # CJK is EXCLUDED, not measured (#722). The 5-letter floor and
-# RENDER_TOKEN_MIN_COUNT assume whitespace-delimited words; Chinese, Japanese
-# and Korean have none, so a run of CJK letters is a clause, not a word, and
-# no threshold here was ever tuned against CJK text (the local farm has 0 CJK
-# CVs). CJK characters therefore never form a token: a chunk that is all CJK
-# has too few tokens, so every render-overlap check returns None ("not
-# verifiable"), never False ("missing"). Latin/Cyrillic/Greek words inside a
-# mixed-script chunk still count. A script-aware floor needs real CJK data.
+# RENDER_TOKEN_MIN_COUNT were never tuned against CJK text (the local farm has
+# 0 CJK CVs). Chinese and Japanese have no whitespace word delimiters, so a
+# run of their letters is a clause, not a word. Korean does use spaces; it is
+# excluded because the floor counts different units on the two paths: stage
+# 6's _norm has no NFKD, so it counts syllables, while the doctor's _norm does
+# NFKD, so it counts Jamo (a 2-syllable word becomes 5 or more Jamo). CJK
+# characters therefore never form a token: a chunk that is all CJK has too few
+# tokens, so every render-overlap check returns None ("not verifiable"), never
+# False ("missing"). Latin/Cyrillic/Greek words inside a mixed-script chunk
+# still count. A script-aware floor needs real CJK data.
+#
+# Known gaps, NOT excluded: Bopomofo (U+3100-312F, U+31A0-31BF), halfwidth
+# Hangul (U+FFA0-FFDC; still forms tokens on the stage-6 path, which has no
+# NFKD) and Kana Supplement/Extended (U+1B000-1B16F). The CJK radicals block
+# (U+2E80-2FDF) is not listed: its characters are So, never letters, so
+# [^\W\d_] cannot match them anyway.
 _CJK_CLASS = (
     "\u1100-\u11ff"          # Hangul Jamo (what NFKD turns syllables into)
-    "\u2e80-\u2fdf"          # CJK radicals
     "\u3040-\u30ff"          # Hiragana, Katakana
     "\u3130-\u318f"          # Hangul compatibility Jamo
     "\u31f0-\u31ff"          # Katakana phonetic extensions

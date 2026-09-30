@@ -713,7 +713,7 @@ def test_record_rendered_cjk_line_is_unverifiable_not_absent():
     never measured), so a CJK record absent from the output is None, not a
     False that lint 8 would report as a dropped record. Latin absence stays
     False. Invented text."""
-    out = _rendered_lines([("p", "Completely unrelated Cardiology Kessler line")])
+    out = _rendered_lines([("p", "Completely unrelated Cardiology Blorvane line")])
     cjk = "2015年4月 東京大学医学部附属病院 循環器内科 准教授として心不全の臨床研究に従事"
     assert _record_rendered(cjk, "", out) is None
     assert _record_rendered(_RECORD_2019, "", out) is False

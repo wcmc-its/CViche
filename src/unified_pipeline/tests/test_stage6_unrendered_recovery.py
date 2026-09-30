@@ -287,11 +287,11 @@ def test_cjk_never_forms_a_render_token_so_cjk_lines_are_unverifiable():
     is None (not verifiable), never False, and Latin/Cyrillic words in a
     mixed-script line still count. Invented text."""
     assert _RENDER_TOKEN_RE.findall(_norm(_CJK_RECORD)) == []
-    mixed = _norm("東京大学医学部 Cardiology Иванов 心不全の臨床研究 Kessler")
+    mixed = _norm("東京大学医学部 Cardiology Иванов 心不全の臨床研究 Blorvane")
     assert set(_RENDER_TOKEN_RE.findall(mixed)) == {
-        "cardiology", "иванов", "kessler"}
+        "cardiology", "иванов", "blorvane"}
     other = [set(_RENDER_TOKEN_RE.findall(_norm("Completely unrelated "
-                                                "Cardiology Kessler line")))]
+                                                "Cardiology Blorvane line")))]
     assert _record_rendered(_CJK_RECORD, "", other) is None
     latin = "Jun 2011, Quexley Cartographer Stairwells Forgotten College"
     assert _record_rendered(latin, "", other) is False
@@ -304,6 +304,11 @@ def test_cjk_never_forms_a_render_token_so_cjk_lines_are_unverifiable():
     "한국어한ᄀ",  # Hangul Jamo (NFKD form)
     "".join(chr(0x3400 + i * 16) for i in range(12)),        # CJK extension A
     "".join(chr(0x20000 + i * 16) for i in range(12)),       # CJK extension B
+    "ㄱㄲㄴㄷㄹㅁ",                  # Hangul compatibility Jamo
+    "ㇰㇱㇲㇳㇴㇵ",                  # Katakana phonetic extensions
+    "ꥠꥡꥢꥣꥤꥥ",                  # Hangul Jamo extended-A
+    "豈更車賈滑串",                  # CJK compatibility ideographs
+    "ힰힱힲힳힴힵ",                  # Hangul Jamo extended-B
 ])
 def test_every_cjk_block_is_excluded_from_the_token_regex(run):
     """#722: each range in `_CJK_CLASS` must keep a 5+ run out of the token
