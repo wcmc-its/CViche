@@ -218,6 +218,9 @@ def _call_with_retry(
     Args:
         call_fn: Zero-argument callable that makes the API call
         retry_count: Max number of retries (total attempts = retry_count + 1)
+            This is the ONLY retry layer: the Bedrock client is built with one
+            botocore attempt (#632), so retry_count + 1 is also the raw request
+            count (outage-class errors excluded, see below).
         cancel_check: Optional zero-arg callable invoked between retry
             attempts; see above.
 
