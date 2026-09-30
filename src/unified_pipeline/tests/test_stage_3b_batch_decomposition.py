@@ -180,7 +180,7 @@ def test_four_batch_shapes_produce_exact_expected_results_and_stats(monkeypatch,
         "fallback_entries": 3,  # 1 from batch 3 + 2 from batch 4
         "empty_entries": 2,    # batch 1
         "invalid_code_entries": 0,
-        "classification_rules_version": "2.6.0",
+        "classification_rules_version": stage3b_classify.CLASSIFICATION_RULES_VERSION,
     }
 
     # The malformed object in batch 4 is logged, same as before the split.
@@ -224,7 +224,7 @@ def test_classify_entries_batch_empty_input(monkeypatch):
         "total_tokens": 0,
         "cost": 0.0,
         "model": None,
-        "classification_rules_version": "2.6.0",
+        "classification_rules_version": stage3b_classify.CLASSIFICATION_RULES_VERSION,
         "entries_classified": 0,
         "llm_batches": 0,
         "failed_batches": 0,
