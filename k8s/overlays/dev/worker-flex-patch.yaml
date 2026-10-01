@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-worker-flex
+spec:
+  # Flex pool (#1114): reads the single-run queue first, the batch queue only
+  # when no single run waits (CVICHE_WORKER_STREAMS=single,batch, set in
+  # base/worker-flex). Its replica count is the cap on batch runs executing
+  # at once. Mirrors worker-patch.yaml below this line -- keep the two in step.
+  replicas: 3
+  template:
+    spec:
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: cviche-al2023-nodes
+      containers:
+        - name: worker # Must match the name in base/worker/deployment.yaml
+          resources:
+            # Same as the general pool (worker-patch.yaml): 3 + 3 workers at
+            # these requests keep dev's total at the pre-#1114 6 x 100m / 512Mi.
+            requests:
+              cpu: "100m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          # Same pipeline flags and secrets as the general pool and the
+          # backend (cviche-pipeline-flags is the one source; see
+          # worker-patch.yaml).
+          envFrom:
+            - configMapRef:
+                name: cviche-pipeline-flags
+            - secretRef:
+                name: cviche-secrets
+          volumeMounts:
+            - name: auth-config-volume
+              mountPath: /app/web_interface/backend/auth_config.yaml
+              subPath: auth_config.yaml # Mounts ONLY this file without wiping out existing app files
+              # Required: app.database reads the db section at import time,
+              # and worker.main() reads the redis + s3 sections.
+      volumes:
+        - name: auth-config-volume
+          configMap:
+            name: cviche-auth-config # Automatically links with your configMapGenerator

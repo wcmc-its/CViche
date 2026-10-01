@@ -1,2 +1,3 @@
 resources:
   - deployment.yaml
+  - flex-deployment.yaml # cviche-worker-flex (#1114)

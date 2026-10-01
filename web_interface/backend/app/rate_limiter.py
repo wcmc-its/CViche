@@ -53,9 +53,22 @@ def get_run_counts(user_id: int, db: Session) -> tuple[int, int]:
     return (daily_count, monthly_count)
 
 
-def check_rate_limit(user: User, db: Session) -> dict | None:
-    """Check if user can create a new run. Returns None if allowed,
-    or an error dict {error, message, details} if rate limited."""
+def _limit_message(period: str, limit: int, used: int, requested: int) -> str:
+    """The 429 message: one run reports the limit as reached (the wording
+    /upload has always used); a batch of several says how many remain."""
+    if requested == 1:
+        return f"{period} limit of {limit} runs reached."
+    remaining = max(0, limit - used)
+    return (
+        f"This batch needs {requested} runs, but only {remaining} of your "
+        f"{period.lower()} limit of {limit} remain."
+    )
+
+
+def check_rate_limit(user: User, db: Session, requested: int = 1) -> dict | None:
+    """Check if user can create ``requested`` new runs (1 for /upload, the
+    batch size for POST /batches, #1114). Returns None if allowed, or an
+    error dict {error, message, details} if rate limited."""
     daily_limit, monthly_limit = get_effective_limits(user, db)
 
     # Admins are unlimited
@@ -64,7 +77,7 @@ def check_rate_limit(user: User, db: Session) -> dict | None:
 
     daily_count, monthly_count = get_run_counts(user.id, db)
 
-    if monthly_limit is not None and monthly_count >= monthly_limit:
+    if monthly_limit is not None and monthly_count + requested > monthly_limit:
         now_et = datetime.now(ET)
         # Next month reset
         if now_et.month == 12:
@@ -75,7 +88,7 @@ def check_rate_limit(user: User, db: Session) -> dict | None:
                                        hour=0, minute=0, second=0, microsecond=0)
         return {
             "error": "rate_limited",
-            "message": f"Monthly limit of {monthly_limit} runs reached.",
+            "message": _limit_message("Monthly", monthly_limit, monthly_count, requested),
             "details": {
                 "limit_type": "monthly",
                 "limit": monthly_limit,
@@ -84,13 +97,13 @@ def check_rate_limit(user: User, db: Session) -> dict | None:
             },
         }
 
-    if daily_limit is not None and daily_count >= daily_limit:
+    if daily_limit is not None and daily_count + requested > daily_limit:
         now_et = datetime.now(ET)
         tomorrow = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
         resets_at = tomorrow + timedelta(days=1)
         return {
             "error": "rate_limited",
-            "message": f"Daily limit of {daily_limit} runs reached.",
+            "message": _limit_message("Daily", daily_limit, daily_count, requested),
             "details": {
                 "limit_type": "daily",
                 "limit": daily_limit,

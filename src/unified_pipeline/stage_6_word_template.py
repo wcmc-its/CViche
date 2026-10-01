@@ -1033,7 +1033,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         """
         entries_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
         mismatch_corrections = 0
-        entries = fan_out_multi_record_entries(entries, FIELD_SCHEMAS)
+        entries = fan_out_multi_record_entries(
+            entries, FIELD_SCHEMAS, warnings=self._section_failures)
         for entry in entries:
             code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code)

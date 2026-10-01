@@ -2,7 +2,9 @@
 
 Posts a Microsoft Teams message when a run starts processing, again when it
 reaches a terminal status (complete, failed, or cancelled), and again when a
-user submits feedback on a run. Fully decoupled from run execution and from
+user submits feedback on a run. A batch upload (#1114) posts one "batch
+submitted" card when the batch is created, and its runs then skip the
+"started" card (each still gets its terminal card). Fully decoupled from run execution and from
 the feedback API: a missing webhook URL is a silent no-op, payload building
 and delivery never raise back into the caller, and delivery itself happens on
 a dedicated single-worker thread (see _DELIVERY below) so a slow or
@@ -179,6 +181,22 @@ def _card_text(value: object, limit: int) -> str:
     return text
 
 
+def _batch_action_buttons(batch_id: str) -> list[dict[str, str]]:
+    """The "Open batch" action -- the Runs page filtered to the batch -- or []
+    when no app origin is set. ``batch_id`` must be the RAW id, for the same
+    reason as ``_action_buttons``."""
+    base = _run_link_base()
+    if not base:
+        return []
+    return [
+        {
+            "type": "Action.OpenUrl",
+            "title": "Open batch",
+            "url": f"{base}/runs?batch={quote(str(batch_id), safe='')}",
+        }
+    ]
+
+
 def _action_buttons(run_id: str) -> list[dict[str, str]]:
     """The "Open run" Adaptive Card action list, or [] when no app origin is set.
 
@@ -198,7 +216,7 @@ def _action_buttons(run_id: str) -> list[dict[str, str]]:
 
 
 def _adaptive_card(
-    title: str, color: str, facts: list[dict[str, str]], run_id: str, summary: str,
+    title: str, color: str, facts: list[dict[str, str]], actions: list[dict[str, str]], summary: str,
 ) -> dict:
     """Wrap a colored title + fact list in the Teams message/adaptive-card envelope.
 
@@ -213,13 +231,13 @@ def _adaptive_card(
         title: the bold heading line.
         color: an Adaptive Card color enum ("good"/"attention"/"accent"/...).
         facts: list of {"name", "value"} dicts (rendered as an Adaptive FactSet).
-        run_id: the RAW run id, used only to build the optional "Open run"
-            button link (via urllib.parse.quote). Deliberately NOT the
-            _card_text-truncated id used elsewhere on the card: truncating it
-            here would build a link to a nonexistent, truncated run id
-            (#782 review, D8 point 4) -- percent-encoding already neutralises
-            anything a raw id could inject into the URL, so no length bound
-            is needed for this use.
+        actions: the card's link buttons (``_action_buttons(<RAW run id>)`` or
+            ``_batch_action_buttons``), omitted when empty. Built from the RAW
+            id, deliberately NOT the _card_text-truncated id used elsewhere on
+            the card: truncating it would build a link to a nonexistent,
+            truncated run id (#782 review, D8 point 4) -- percent-encoding
+            already neutralises anything a raw id could inject into the URL,
+            so no length bound is needed for this use.
         summary: plain-text fallback/summary one-liner (see above).
     """
     card = {
@@ -245,7 +263,6 @@ def _adaptive_card(
         ],
     }
 
-    actions = _action_buttons(run_id)
     if actions:
         card["actions"] = actions
 
@@ -280,6 +297,8 @@ class RunFacts:
     status: str
     total_cost: float | None
     total_duration_seconds: int | None
+    # The run's batch (#1114), or None for a single upload.
+    batch_id: str | None = None
 
     @classmethod
     def from_run(cls, run: object) -> RunFacts:
@@ -289,7 +308,16 @@ class RunFacts:
             status=str(getattr(run, "status", None) or "unknown"),
             total_cost=getattr(run, "total_cost", None),
             total_duration_seconds=getattr(run, "total_duration_seconds", None),
+            batch_id=getattr(run, "batch_id", None),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class BatchFacts:
+    """Notification-relevant facts about a batch upload (#1114)."""
+
+    id: str
+    files_submitted: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,8 +386,25 @@ def build_started_payload(facts: RunFacts, submitter: str | None = None) -> dict
     card_facts.append({"name": "Status", "value": "started"})
 
     return _adaptive_card(
-        f"CViche run {run_id} started", _STATUS_COLOR["started"], card_facts, facts.id,
+        f"CViche run {run_id} started", _STATUS_COLOR["started"], card_facts, _action_buttons(facts.id),
         f"CViche run {run_id} started",
+    )
+
+
+def build_batch_submitted_payload(batch: BatchFacts, submitter: str | None = None) -> dict:
+    """Build the one Teams card for a batch upload (#1114): who submitted it,
+    how many files, and an "Open batch" link to the Runs page filtered to it.
+    Its runs post no "started" card of their own (see notify_run_started)."""
+    batch_id = _card_text(batch.id, _FACT_MAX_CHARS)
+    card_facts = [
+        {"name": "Batch ID", "value": batch_id},
+        {"name": "Files", "value": str(batch.files_submitted)},
+    ]
+    if submitter:
+        card_facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
+    title = f"CViche batch {batch_id} submitted ({batch.files_submitted} files)"
+    return _adaptive_card(
+        title, _STATUS_COLOR["started"], card_facts, _batch_action_buttons(batch.id), title,
     )
 
 
@@ -485,7 +530,7 @@ def build_teams_payload(
     summary = f"CViche run {run_id} {status}"
     if extras:
         summary += " — " + ", ".join(extras)
-    return _adaptive_card(f"CViche run {run_id} {status}", color, card_facts, facts.id, summary)
+    return _adaptive_card(f"CViche run {run_id} {status}", color, card_facts, _action_buttons(facts.id), summary)
 
 
 def build_feedback_payload(
@@ -543,7 +588,9 @@ def build_feedback_payload(
         color = _DEFAULT_COLOR
 
     summary = f"CViche feedback on run {run_id}: usefulness {usefulness or 'n/a'}/5, recommend {recommend or 'n/a'}/5"
-    return _adaptive_card(f"CViche feedback on run {run_id}", color, card_facts, run.id, summary)
+    return _adaptive_card(
+        f"CViche feedback on run {run_id}", color, card_facts, _action_buttons(run.id), summary,
+    )
 
 
 # --- delivery -----------------------------------------------------------------
@@ -695,11 +742,17 @@ def flush(timeout: float = 15.0) -> None:
 
 
 def notify_run_started(run: object, submitter: str | None = None) -> None:
-    """Best-effort: queue a Teams notification for a run that just started."""
+    """Best-effort: queue a Teams notification for a run that just started.
+
+    A run in a batch posts none (#1114): its batch already posted one
+    "batch submitted" card, and 50 "started" cards would bury it."""
     run_id = "unknown"
     try:
         run_id = getattr(run, "id", None) or "unknown"
-        payload = build_started_payload(RunFacts.from_run(run), submitter)
+        facts = RunFacts.from_run(run)
+        if facts.batch_id:
+            return
+        payload = build_started_payload(facts, submitter)
         url = _webhook_url()
         if not url:
             return
@@ -755,4 +808,17 @@ def notify_feedback_submitted(feedback: object, run: object, submitter: str | No
         _enqueue(url, payload, run_id)
     except Exception:
         logger.exception("Teams notification payload build failed for run %s", run_id)
+        return
+
+
+def notify_batch_submitted(batch: BatchFacts, submitter: str | None = None) -> None:
+    """Best-effort: queue the Teams "batch submitted" card (#1114)."""
+    try:
+        payload = build_batch_submitted_payload(batch, submitter)
+        url = _webhook_url()
+        if not url:
+            return
+        _enqueue(url, payload, f"batch {batch.id}")
+    except Exception:
+        logger.exception("Teams notification payload build failed for batch %s", batch.id)
         return

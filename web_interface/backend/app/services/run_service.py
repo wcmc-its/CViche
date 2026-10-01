@@ -338,7 +338,7 @@ def reconcile_queued_runs(db: Session) -> int:
     for run in stranded:
         if run.id in live_ids or not run_queue.claim_reenqueue_slot(run.id):
             continue
-        run_queue.enqueue(run.id)
+        run_queue.enqueue(run.id, run_queue.queue_for(run.batch_id))
         requeued += 1
         logger.warning("requeued_stranded run_id=%s queued_at=%s", run.id, run.queued_at)
 

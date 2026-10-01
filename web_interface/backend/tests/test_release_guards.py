@@ -422,7 +422,7 @@ class TestRetryStepQueueModeEnqueueFailure:
         upload_file = UPLOAD_DIR / "RETRYQ1.docx"
         upload_file.write_bytes(b"dummy")
 
-        def enqueue_fails(run_id):
+        def enqueue_fails(run_id, queue):
             raise redis.exceptions.ConnectionError("valkey unreachable")
         monkeypatch.setattr(run_queue, "enqueue", enqueue_fails)
 
@@ -442,7 +442,7 @@ class TestRetryStepQueueModeEnqueueFailure:
 
             # Second retry: enqueue now works.
             enqueued = []
-            monkeypatch.setattr(run_queue, "enqueue", lambda run_id: enqueued.append(run_id) or "1-0")
+            monkeypatch.setattr(run_queue, "enqueue", lambda run_id, queue: enqueued.append(run_id) or "1-0")
 
             resp2 = client.post("/api/run/RETRYQ1/retry/6")
 

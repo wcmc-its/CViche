@@ -4,9 +4,10 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from app.models import Consent
+from app.models import Consent, User
 from app.config_loader import get_config_value
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,22 @@ def get_current_consent_document(db: Session) -> ConsentDocument:
         text=get_consent_text(),
         hash=get_consent_hash(),
     )
+
+
+def require_current_consent(db: Session, user: User) -> None:
+    """Raise 403 ``consent_required`` unless ``user`` has accepted the current
+    consent version. The first check of every request that starts work on a
+    CV: /upload, and POST /batches (#1114), which would otherwise create a
+    batch and post its Teams card for a user every upload then refuses."""
+    current_version = str(get_config_value(db, "consent_version") or DEFAULT_CONSENT_VERSION)
+    if user.consent_version != current_version:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "consent_required",
+                "message": "Please review and accept the updated consent terms.",
+            },
+        )
 
 
 def check_consent_integrity(db: Session) -> None:

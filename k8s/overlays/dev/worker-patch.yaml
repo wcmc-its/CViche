@@ -3,7 +3,11 @@ kind: Deployment
 metadata:
   name: cviche-worker
 spec:
-  replicas: 6 # global run cap for dev -- one run per pod, no HPA (see base/worker/deployment.yaml)
+  # General pool (#1114): reads the single-run queue only. With the 3 flex
+  # workers (worker-flex-patch.yaml) dev still runs at most 6 runs at once,
+  # single runs can use all 6, and batch runs at most the flex pool's 3.
+  # One run per pod, no HPA (see base/worker/deployment.yaml).
+  replicas: 3
   template:
     spec:
       nodeSelector:
@@ -14,7 +18,9 @@ spec:
             requests:
               # Was 300m. Lowered so 6 workers plus a rolling-update surge fit
               # the 2-node cviche node group (max size 2): an idle worker uses 3-8m and a pipeline mostly waits on Bedrock
-              # (kubectl top, 2026-10-01). Limits unchanged.
+              # (kubectl top, 2026-10-01). Limits unchanged. Since #1114 the 6
+              # are 3 here plus 3 in worker-flex-patch.yaml at the same
+              # requests, so the namespace total is unchanged (600m / 3Gi).
               cpu: "100m"
               memory: "512Mi"
             # Burstable on purpose, mirroring the dev backend's sizing for
