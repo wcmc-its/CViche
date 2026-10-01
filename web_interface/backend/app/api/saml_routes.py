@@ -26,7 +26,9 @@ from app.session_idle import get_idle_store, SessionStoreUnavailable
 from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
 from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl, replay_fail_closed
-from app.ed_group_lookup import check_ed_membership, EdUnavailableError, LDAPConfig
+from app.ed_group_lookup import (
+    check_ed_membership, fetch_ed_department, EdUnavailableError, LDAPConfig,
+)
 from pydantic import SecretStr
 from app.services.user_service import provision_user, normalize_email
 from app.redirect_safety import safe_relative_path
@@ -359,6 +361,26 @@ def _saml_role_from_ed(attrs: dict, db: Session) -> tuple[str | None, RedirectRe
     return ("admin" if membership.in_admin_group else "user"), None
 
 
+def _saml_department_from_ed(cwid: str, db: Session) -> str | None:
+    """The user's ED department, or None when ED is off, unconfigured, or the
+    read fails. Best effort: login has already been authorized by
+    _saml_role_from_ed, and a department is display metadata only."""
+    if not get_config_value(db, "ed_enabled"):
+        return None
+
+    from app.config_loader import get_config
+
+    ldap_url, _ = get_config("ldap", "ED_LDAP_URL", default="")
+    bind_dn, _ = get_config("ldap", "ED_LDAP_BIND_DN", default="")
+    if not ldap_url or not bind_dn:
+        return None
+    ldap_cfg = LDAPConfig(
+        ldap_url=ldap_url, bind_dn=bind_dn,
+        bind_password=SecretStr(os.environ.get("ED_LDAP_BIND_PASSWORD", "")),
+    )
+    return fetch_ed_department(cwid, ldap_cfg)
+
+
 def _mint_saml_session(user, db: Session, cwid: str) -> tuple[str | None, RedirectResponse | None]:
     """The session cookie value for a freshly-authenticated SAML user.
 
@@ -409,6 +431,7 @@ def _saml_acs_process(form: dict, db: Session):
         display_name=attrs["display_name"],
         auth_method="saml",
         role=user_role,
+        department=_saml_department_from_ed(attrs["cwid"], db),
     )
 
     token, error = _mint_saml_session(user, db, attrs["cwid"])

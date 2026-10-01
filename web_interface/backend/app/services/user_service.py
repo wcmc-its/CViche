@@ -29,6 +29,7 @@ def provision_user(
     role: str | None = None,
     cwid: str | None = None,
     email: str | None = None,
+    department: str | None = None,
 ) -> User:
     """Create or update a user record. Returns the User.
 
@@ -49,6 +50,8 @@ def provision_user(
         role: Role to assign. None = preserve existing role for updates, "user" for new users.
         cwid: SSO identity anchor (SAML). Normalized by caller.
         email: User's email. Optional; stored when present. Normalized by caller.
+        department: ED department name. None = leave the stored value alone, so a
+            failed or empty ED read never clobbers a known department.
     """
     user = None
     if cwid:
@@ -68,6 +71,8 @@ def provision_user(
             user.email = email
         if role is not None:
             user.role = role
+        if department is not None:
+            user.department = department
         db.commit()
         db.refresh(user)
         return user
@@ -78,6 +83,7 @@ def provision_user(
         display_name=display_name,
         role=role or "user",
         auth_method=auth_method,
+        department=department,
     )
     db.add(user)
     try:

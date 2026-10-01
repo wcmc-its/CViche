@@ -187,7 +187,7 @@ export default function AdminUsers() {
                             onChange={(e) =>
                               setEditLimits((prev) => ({ ...prev, daily: e.target.value }))
                             }
-                            className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none"
+                            className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
                           />
                           <label className="sr-only" htmlFor={`monthly-${user.id}`}>Monthly limit</label>
                           <input
@@ -199,7 +199,7 @@ export default function AdminUsers() {
                             onChange={(e) =>
                               setEditLimits((prev) => ({ ...prev, monthly: e.target.value }))
                             }
-                            className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none"
+                            className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
                           />
                           <button
                             onClick={() => saveLimits(user)}
@@ -230,10 +230,10 @@ export default function AdminUsers() {
                     <td className="px-4 py-3 whitespace-nowrap text-center">
                       <button
                         onClick={() => toggleStatus(user)}
-                        className={`text-xs font-medium px-3 py-1 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-1 ${
+                        className={`text-xs font-medium px-3 py-1 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 ${
                           user.status === 'active'
-                            ? 'text-red-600 hover:bg-red-50 focus:ring-red-400'
-                            : 'text-green-600 hover:bg-green-50 focus:ring-green-400'
+                            ? 'text-red-600 hover:bg-red-50 focus-visible:ring-red-400'
+                            : 'text-green-600 hover:bg-green-50 focus-visible:ring-green-400'
                         }`}
                         aria-label={user.status === 'active' ? `Disable ${user.display_name}` : `Enable ${user.display_name}`}
                       >

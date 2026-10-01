@@ -257,8 +257,9 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
             or _names_a_sibling(kept_entry, kept_fields, rendered, name)):
         return not any(_names_record(entry.get('text') or '', name)
                        for entry in others)
-    if _distinct_bare_names(dropped_entry, kept_entry,
-                            name, _record_name(kept_fields, rendered)):
+    if (_distinct_bare_names(dropped_entry, kept_entry,
+                             name, _record_name(kept_fields, rendered))
+            or _other_journal_same_row(dropped_entry, kept_entry, name, kept_fields)):
         return not any(_lists_name(entry, name) for entry in others)
     return False
 
@@ -309,6 +310,41 @@ def _distinct_bare_names(dropped_entry: dict, kept_entry: dict,
                 and _significant_words(name) != _significant_words(kept_name))
 
 
+# `_other_journal_same_row`: the field that names a journal, and what a row
+# keeps of its text once that name is cut out (its letters: a role and a
+# status such as "Ad hoc ... Present", no dates, no punctuation).
+_JOURNAL_NAME_FIELD = 'journal_name'
+_NON_LETTERS_RE = re.compile(r'[^a-z]')
+
+
+def _row_residue(text: str, name: str) -> str | None:
+    """The letters of `text` left once the first run of `name`'s words is cut
+    out; None when `name` is not in `text` as a run of words."""
+    pattern = _word_run_pattern(name)
+    if not pattern or not re.search(pattern, text.lower()):
+        return None
+    return _NON_LETTERS_RE.sub('', re.sub(pattern, '', text.lower(), count=1))
+
+
+def _other_journal_same_row(dropped_entry: dict, kept_entry: dict,
+                            name: str, kept_fields: dict) -> bool:
+    """True when both entries are a row for a journal, the rows say the same
+    thing about it (role and status; the dates may differ) and the journal
+    names differ in a significant word: "Ad hoc Widgets, 2013-" beside "Ad hoc
+    Widgets Quarterly, 2013-" are two journals, and "Gizmos" is not "Acme
+    Gizmos". Unlike `_distinct_bare_names` the text may hold more than the
+    name, but only what both rows hold. A journal's name is exact where a
+    committee's is not ("Acme University, Review Committee" is "Review
+    Committee"), which is why this stops at journals."""
+    kept_name = kept_fields.get(_JOURNAL_NAME_FIELD)
+    dropped_residue = _row_residue(dropped_entry.get('text') or '', name)
+    return bool(isinstance(kept_name, str)
+                and (dropped_entry.get('extracted_fields') or {}).get(_JOURNAL_NAME_FIELD) == name
+                and dropped_residue is not None
+                and dropped_residue == _row_residue(kept_entry.get('text') or '', kept_name)
+                and _significant_words(name) != _significant_words(kept_name))
+
+
 # `_lists_name`: the separators between the items of a listed text.
 _LIST_ITEM_SEPARATOR_RE = re.compile(r'[,;:|\t\n]')
 
@@ -350,6 +386,23 @@ def _names_record(text: str, name: str) -> bool:
 def _alnum(text: str) -> str:
     """Lowercased letters and digits only: punctuation and spacing ignored."""
     return re.sub(r'[^a-z0-9]', '', text.lower())
+
+
+# A mentee "name" that names nobody: template placeholders the CV left unfilled.
+_PLACEHOLDER_NAMES = frozenset({'', 'na', 'none', 'tbd', 'tba'})
+
+
+def _different_mentees(dropped_entry: dict, kept_entry: dict) -> bool:
+    """#1181: True when both entries name a mentee and the names differ.
+
+    WCM mentee tables repeat the same field labels for every mentee, so two
+    residents at one site score as near-duplicates whatever their names
+    (jaccard 0.92 on FINSIS). A person's name is not reworded between two
+    copies of one record the way a title is, so a different name is a
+    different mentee."""
+    names = {_alnum(str((entry.get('extracted_fields') or {}).get('mentee_name') or ''))
+             for entry in (dropped_entry, kept_entry)}
+    return len(names) == 2 and not names & _PLACEHOLDER_NAMES
 
 
 def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
@@ -402,6 +455,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     if verbatim:
         return not _record_would_be_lost(dropped_entry, kept_entry, code,
                                          document, True, dropped_ids or set())
+    if _different_mentees(dropped_entry, kept_entry):
+        return False  # #1181: a different mentee is a different record
     if not _dates_compatible(dropped_entry.get('text') or '',
                              kept_entry.get('text') or ''):
         return False  # #666: a different date is a different record

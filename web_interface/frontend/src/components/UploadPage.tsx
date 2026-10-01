@@ -100,8 +100,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   // to retry; the upload path runs normally.
   const [pendingStart, setPendingStart] = useState<{ runId: string } | null>(null)
   // Output-rendering options (issue #153). Track Changes is always on (Faculty
-  // Affairs asked for no opt-out); classification comments default off.
-  const [includeClassificationComments, setIncludeClassificationComments] = useState(false)
+  // Affairs asked for no opt-out).
   const [stripWcmInstructions, setStripWcmInstructions] = useState(true)
   // Per-upload role + attestation (Faculty Affairs requirement). The consent
   // page's choice is only the preselect; every upload records its own.
@@ -250,7 +249,6 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
 
     try {
       const data = await uploadFile(file, {
-        includeClassificationComments,
         stripWcmInstructions,
         submissionType,
       })
@@ -389,7 +387,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                   disabled={uploading}
                   aria-label={`Remove ${file.name}`}
                   title="Remove"
-                  className="flex h-7 w-7 flex-none items-center justify-center rounded-md text-gray-500 hover:bg-sand-100 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+                  className="flex h-7 w-7 flex-none items-center justify-center rounded-md text-gray-500 hover:bg-sand-100 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
                 >
                   <X className="h-3.5 w-3.5" strokeWidth={2.2} aria-hidden="true" />
                 </button>
@@ -399,10 +397,6 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
             {/* 3 - Output options (issue #153) */}
             <fieldset className="mt-2 flex flex-col gap-3">
               <legend className={`${H2} mb-3`}>3 &middot; Output options</legend>
-              <CheckBox checked={includeClassificationComments} onChange={setIncludeClassificationComments}>
-                <span className="block font-semibold text-gray-900">Include classification comments</span>
-                <span className="block text-[13px] text-gray-500">Add Word comments explaining how each entry was classified.</span>
-              </CheckBox>
               <CheckBox checked={stripWcmInstructions} onChange={setStripWcmInstructions}>
                 <span className="block font-semibold text-gray-900">Strip WCM template instructions</span>
                 <span className="block text-[13px] text-gray-500">Remove the WCM CV template&apos;s instructional text (e.g. &quot;When preparing the WCM CV template&hellip;&quot;) from the output. On by default.</span>
@@ -460,7 +454,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                         type="checkbox"
                         checked={acknowledged}
                         onChange={(e) => setAcknowledged(e.target.checked)}
-                        className="mt-0.5 h-4 w-4 rounded border-amber-400 text-amber-600 focus:ring-amber-500"
+                        className="mt-0.5 h-4 w-4 rounded border-amber-400 text-amber-600 focus-visible:ring-amber-500"
                       />
                       <span>I understand and want to process this file anyway.</span>
                     </label>
@@ -513,7 +507,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
               <button
                 onClick={handleUpload}
                 disabled={startDisabled}
-                className="rounded-lg bg-primary-600 px-5 py-[11px] font-semibold text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 max-sm:w-full"
+                className="rounded-lg bg-primary-600 px-5 py-[11px] font-semibold text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-gray-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 max-sm:w-full"
                 style={{ touchAction: 'manipulation' }}
               >
                 {uploading ? (

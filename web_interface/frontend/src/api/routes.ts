@@ -38,9 +38,16 @@ export const runRoutes = {
     `/api/run/${id}/retry/${step}` as const,
   /** POST /api/run/:id/start */
   start: (id: string) => `/api/run/${id}/start` as const,
-  /** GET /api/runs?offset=:offset&limit=:limit */
-  list: (offset: number, limit: number) =>
-    `/api/runs?offset=${offset}&limit=${limit}` as const,
+  /** GET /api/run/:id/run-quality  (admin: score breakdown + run doctor) */
+  quality: (id: string) => `/api/run/${id}/run-quality` as const,
+  /** GET /api/run/:id/review-note  (owner or admin: {needs_cleanup}) */
+  reviewNote: (id: string) => `/api/run/${id}/review-note` as const,
+  /** GET /api/runs?offset=:offset&limit=:limit[&:extra]  (extra = pre-built
+   *  admin scope/filter query string, see buildRunListQuery) */
+  list: (offset: number, limit: number, extra = '') =>
+    `/api/runs?offset=${offset}&limit=${limit}${extra ? `&${extra}` : ''}`,
+  /** GET /api/runs/filter-options?:params  (admin; caller passes a pre-built query string) */
+  filterOptions: (params: string) => `/api/runs/filter-options?${params}` as const,
   /** GET /api/runs/feedback-status */
   feedbackStatus: () => `/api/runs/feedback-status` as const,
   /** GET /api/capacity  (read-only run-admission snapshot) */

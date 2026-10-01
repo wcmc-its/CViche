@@ -47,7 +47,7 @@ export default function AdminDashboard() {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`-mb-px whitespace-nowrap px-3 py-2 border-b-2 text-sm transition-colors focus:outline-none focus-visible:text-gray-900 ${
+              className={`-mb-px whitespace-nowrap px-3 py-2 border-b-2 text-sm transition-colors focus-visible:outline-none focus-visible:text-gray-900 ${
                 activeTab === tab
                   ? 'border-ink text-gray-900 font-medium'
                   : 'border-transparent text-gray-500 hover:text-gray-700'

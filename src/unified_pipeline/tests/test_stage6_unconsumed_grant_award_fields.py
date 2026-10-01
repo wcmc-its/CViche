@@ -142,6 +142,21 @@ def test_a_role_line_is_added_to_an_extracted_supervision_type():
     assert _normalize_mentee(entry).supervision_type == "Research"
 
 
+def test_the_template_supervision_row_beats_the_level_inference():
+    # FINSIS: a resident's table row read "Research + Teaching"; inference said "Clinical".
+    entry = {"text": "Name | Jane Roe\nSite/Position | Cornell - Resident\n"
+                     "Type of Supervision (Research, clinical, teaching, leadership) | Research + Teaching",
+             "extracted_fields": {"mentee_level": "Resident"}}
+    assert _normalize_mentee(entry).supervision_type == "Research + Teaching"
+
+
+def test_an_empty_template_supervision_row_falls_back_to_inference():
+    entry = {"text": "Name | Jane Roe\nType of Supervision (Research, clinical, teaching, leadership) | \n"
+                     "Name | Next Mentee",
+             "extracted_fields": {"mentee_level": "Resident"}}
+    assert _normalize_mentee(entry).supervision_type == "Clinical"
+
+
 def test_without_a_role_line_supervision_type_is_inferred_as_before():
     entry = {"text": "Jane Roe, PhD student; her role: none", "extracted_fields": {"mentee_level": "PhD"}}
     assert _normalize_mentee(entry).supervision_type == "Research"

@@ -76,6 +76,15 @@ def _no_teams_webhook_leak(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_live_ed_department_lookup(monkeypatch):
+    """The SAML ACS now reads the user's department from ED after the
+    membership check. Tests that enable ED and patch only check_ed_membership
+    must not fall through to a real LDAP bind; a test that asserts on the
+    department patches this name itself."""
+    monkeypatch.setattr("app.api.saml_routes.fetch_ed_department", lambda cwid, cfg: None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_estimate_rate_limiter():
     """/estimate's per-pod, in-memory, per-user counter (#795) is a process
     global, unlike the per-test in-memory DB above -- without this, one

@@ -34,6 +34,7 @@ sys.path.insert(0, str(PARENT_DIR / 'src'))
 from app.models import Run, Step, Log
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.pipeline.event_emitter import event_emitter
+from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name
 from app.storage import get_storage
 from app.storage.base import RunStorage
 from app.config_loader import get_config
@@ -704,6 +705,26 @@ class PipelineOrchestrator:
                     path_str, self.run_id, e,
                 )
 
+    def _persist_cv_owner_name(self, step: Step) -> None:
+        """Store stage 4's inferred CV owner on ``runs.cv_owner_name``.
+
+        The admin runs list filters on it. Best-effort: a failure here logs a
+        warning and never fails the run (the name is display metadata).
+        """
+        try:
+            name = read_cv_owner_name(self.db, self.run_id, step.output_files)
+            if name is None:
+                return
+            run = self.db.query(Run).filter(Run.id == self.run_id).first()
+            if run is None:
+                return
+            run.cv_owner_name = name
+            self.db.commit()
+        except Exception:
+            logger.warning("Could not persist cv_owner_name for run %s",
+                           self.run_id, exc_info=True)
+            self.db.rollback()
+
     def _stage_errors_path(self) -> Path:
         return stage_errors_path(self.pipeline_output_dir, self.document_uid)
 
@@ -906,10 +927,12 @@ class PipelineOrchestrator:
             score = None
             try:
                 import asyncio
-                from app.services.quality_score_service import compute_and_cache_score
+                from app.services.quality_score_service import compute_and_cache_score, persist_score_columns
                 score = await asyncio.get_running_loop().run_in_executor(
                     None, compute_and_cache_score, self.run_id
                 )
+                # On this thread: self.db must not be touched from the executor.
+                persist_score_columns(self.db, self.run_id, score)
             except Exception as e:
                 logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
 
@@ -1199,6 +1222,8 @@ class PipelineOrchestrator:
                 None, self._persist_outputs_to_storage, result.get("output_files", [])
             )
             await asyncio.to_thread(self._record_stage_outcome, stage_id, None)
+            if stage_id == CV_OWNER_STAGE_ID:
+                self._persist_cv_owner_name(step)
 
             await self.log(step_number, f"Completed Stage {stage_id} in {duration}s")
             await event_emitter.emit_step_complete(

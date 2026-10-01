@@ -10,6 +10,7 @@ artifact read failures and let anything else propagate.
 """
 import json
 import logging
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -58,6 +59,17 @@ def test_run_status_cost_is_admin_only(client, db, seed_simple_mode, role, run_c
     body = resp.json()
     assert body["total_cost"] == run_cost
     assert [s["cost"] for s in body["steps"]] == [step_cost]
+
+
+@pytest.mark.parametrize("role, run_by_name", [("admin", "T"), ("user", None)])
+def test_run_status_carries_owner_and_admin_only_run_by(client, db, seed_simple_mode, role, run_by_name):
+    user, run = _owner_with_run(db, role)
+    run.cv_owner_name = "Jane Testperson"
+    db.commit()
+    _auth(client, user)
+    body = client.get(f"/api/run/{run.id}/status").json()
+    assert body["cv_owner_name"] == "Jane Testperson"
+    assert (body["run_by"] or {}).get("display_name") == run_by_name
 
 
 # ---------------------------------------------------------------------------
@@ -286,3 +298,262 @@ def test_restart_body_is_byte_identical(client, db, seed_simple_mode, run_with_i
     assert resp.status_code == 200, resp.text
     new_run_id = resp.json()["run_id"]
     assert resp.content == _wire_bytes({"run_id": new_run_id, "message": f"New run created from {run.id}"})
+
+
+# ---------------------------------------------------------------------------
+# Admin "all runs" view: GET /runs?scope=all and GET /runs/filter-options
+# ---------------------------------------------------------------------------
+
+def _seed_admin_view(db):
+    """Two faculty-ish users in different departments, an admin, and six runs.
+
+    Synthetic names only. Returns the users by label."""
+    alice = User(email="alice@example.com", cwid="abc1001", display_name="Alice Tester",
+                 role="user", department="Medicine", consent_version="1.0")
+    bob = User(email="bob@example.com", cwid="abc1002", display_name="Bob Tester",
+               role="user", department="Library", consent_version="1.0")
+    admin = User(email="root@example.com", cwid="abc1003", display_name="Root Admin",
+                 role="admin", consent_version="1.0")
+    db.add_all([alice, bob, admin])
+    db.commit()
+    rows = [
+        ("ADM001", alice, "Jane Testperson", "own_cv"),
+        ("ADM002", alice, "Jane Testperson", "authorized_admin"),
+        ("ADM003", bob, "Jane Testperson", "authorized_admin"),
+        ("ADM004", bob, "Omar Testperson", "authorized_admin"),
+        ("ADM005", admin, None, "authorized_admin"),
+        ("ADM006", None, "Omar Testperson", "authorized_admin"),
+    ]
+    for i, (run_id, user, owner, sub_type) in enumerate(rows):
+        db.add(Run(id=run_id, user_id=user.id if user else None, status="complete",
+                   filename="cv.docx", file_type="docx", total_cost=2.5,
+                   cv_owner_name=owner, submission_type=sub_type,
+                   started_at=datetime(2026, 9, 1 + i)))
+    db.commit()
+    return {"alice": alice, "bob": bob, "admin": admin}
+
+
+def _ids(resp):
+    return [r["run_id"] for r in resp.json()["runs"]]
+
+
+def test_scope_all_is_forbidden_for_a_non_admin(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    _auth(client, users["alice"])
+    assert client.get("/api/runs?scope=all").status_code == 403
+    assert client.get("/api/runs/filter-options?scope=all").status_code == 403
+
+
+def test_scope_mine_is_the_default_and_ignores_filters(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    _auth(client, users["alice"])
+    resp = client.get("/api/runs?faculty=Omar%20Testperson&department=Library&run_by=self")
+    assert resp.status_code == 200
+    assert _ids(resp) == ["ADM002", "ADM001"]
+    body = resp.json()["runs"][0]
+    assert body["cv_owner_name"] == "Jane Testperson"
+    assert body["submission_type"] == "authorized_admin"
+    assert body["run_by"] is None
+    assert body["total_cost"] is None  # non-admin never sees cost
+
+
+def test_scope_all_lists_every_run_with_run_by(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    _auth(client, users["admin"])
+    resp = client.get("/api/runs?scope=all")
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 6
+    assert _ids(resp) == ["ADM006", "ADM005", "ADM004", "ADM003", "ADM002", "ADM001"]
+    by_id = {r["run_id"]: r for r in resp.json()["runs"]}
+    assert by_id["ADM004"]["run_by"] == {
+        "id": users["bob"].id, "display_name": "Bob Tester", "cwid": "abc1002",
+        "email": "bob@example.com", "department": "Library"}
+    assert by_id["ADM006"]["run_by"] is None
+    assert by_id["ADM004"]["total_cost"] == 2.5  # admin sees cost via visible_cost
+
+
+@pytest.mark.parametrize("query, expected", [
+    ("faculty=Jane%20Testperson", ["ADM003", "ADM002", "ADM001"]),
+    ("department=Library", ["ADM004", "ADM003"]),
+    ("run_by=self", ["ADM001"]),
+    ("department=Library&faculty=Omar%20Testperson", ["ADM004"]),
+    ("faculty=Nobody", []),
+])
+def test_scope_all_filters(client, db, seed_simple_mode, query, expected):
+    users = _seed_admin_view(db)
+    _auth(client, users["admin"])
+    resp = client.get(f"/api/runs?scope=all&{query}")
+    assert resp.status_code == 200
+    assert _ids(resp) == expected
+    assert resp.json()["total"] == len(expected)
+
+
+def test_scope_all_run_by_user_id(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    _auth(client, users["admin"])
+    resp = client.get(f"/api/runs?scope=all&run_by={users['bob'].id}")
+    assert _ids(resp) == ["ADM004", "ADM003"]
+
+
+@pytest.mark.parametrize("url", [
+    "/api/runs?scope=all&run_by=nobody",
+    "/api/runs?scope=everyone",
+])
+def test_scope_all_rejects_bad_params(client, db, seed_simple_mode, url):
+    users = _seed_admin_view(db)
+    _auth(client, users["admin"])
+    assert client.get(url).status_code == 422
+
+
+def test_filter_options_unfiltered(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    _auth(client, users["admin"])
+    resp = client.get("/api/runs/filter-options?scope=all")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["departments"] == [{"value": "Library", "count": 2},
+                                   {"value": "Medicine", "count": 2}]
+    assert body["faculty"] == [{"value": "Jane Testperson", "count": 3},
+                               {"value": "Omar Testperson", "count": 2}]
+    assert [(o["display_name"], o["count"]) for o in body["run_by"]] == [
+        ("Alice Tester", 2), ("Bob Tester", 2), ("Root Admin", 1)]
+    assert body["run_by"][0] == {"id": users["alice"].id, "display_name": "Alice Tester",
+                                 "cwid": "abc1001", "email": "alice@example.com",
+                                 "department": "Medicine", "count": 2}
+    assert body["self_count"] == 1
+
+
+def test_filter_options_requires_scope_all(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    _auth(client, users["admin"])
+    assert client.get("/api/runs/filter-options?scope=mine").status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Run score: list columns (admin), run-quality report (admin), review note
+# ---------------------------------------------------------------------------
+
+def _scored(db, run_id, score, band, cap):
+    run = db.get(Run, run_id)
+    run.quality_score, run.quality_band, run.quality_cap = score, band, cap
+    db.commit()
+
+
+def test_scope_all_carries_score_columns_and_scope_mine_never_does(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    _scored(db, "ADM001", 25, "RED", 25)
+
+    _auth(client, users["admin"])
+    by_id = {r["run_id"]: r for r in client.get("/api/runs?scope=all").json()["runs"]}
+    assert (by_id["ADM001"]["quality_score"], by_id["ADM001"]["quality_band"],
+            by_id["ADM001"]["quality_cap"]) == (25, "RED", 25)
+    assert by_id["ADM002"]["quality_score"] is None
+
+    # An admin's own scope=mine list is cost-visible but still carries no score.
+    admin_run = db.get(Run, "ADM005")
+    admin_run.quality_score = 90
+    db.commit()
+    mine = client.get("/api/runs").json()["runs"]
+    assert [r["run_id"] for r in mine] == ["ADM005"]
+    assert (mine[0]["quality_score"], mine[0]["quality_band"], mine[0]["quality_cap"]) == (None, None, None)
+
+    _auth(client, users["alice"])
+    alice_runs = client.get("/api/runs").json()["runs"]
+    assert all(r["quality_score"] is None for r in alice_runs)
+
+
+_OWNER_GATE = "CV owner name / contact populated (HARD-FAIL gate)"
+_CACHED_SCORE = {
+    "totalScore": 25, "raw_score_before_caps": 80.0, "hard_fail_caps_applied": [25],
+    "flags": [f"HARD-FAIL cap=25: {_OWNER_GATE} (fraction=1.00)"],
+    "dimensionScores": [{"name": "Duplicate entries", "score": 8.0, "max": 10}],
+    "data_complete": True,
+}
+_DOCTOR = {"findings": [
+    {"lint": "owner_contact_missing", "severity": "ERROR", "message": "m", "status": "ran"},
+    {"lint": "table_shape", "severity": "INFO", "message": "m", "status": "ran"},
+]}
+
+
+def _patch_quality(monkeypatch, score, doctor):
+    from app.services import quality_score_service as svc
+    monkeypatch.setattr(svc, "get_cached_score", lambda _rid: score)
+    monkeypatch.setattr(svc, "get_doctor_report", lambda _rid: doctor)
+
+
+def test_run_quality_is_admin_only(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, _DOCTOR)
+    _auth(client, users["alice"])  # alice owns ADM001
+    assert client.get("/api/run/ADM001/run-quality").status_code == 403
+
+
+def test_run_quality_report_shape(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, _DOCTOR)
+    _auth(client, users["admin"])
+
+    resp = client.get("/api/run/ADM001/run-quality")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert {k: body[k] for k in (
+        "run_id", "score", "band", "band_meaning", "provisional", "cap", "cap_reason",
+        "cap_lint", "earned", "total_weight", "data_complete", "dimensions")} == {
+        "run_id": "ADM001", "score": 25, "band": "RED", "band_meaning": "Don't deliver",
+        "provisional": True, "cap": 25, "cap_reason": "owner name missing",
+        "cap_lint": "owner_contact_missing", "earned": 80, "total_weight": 10,
+        "data_complete": True,
+        "dimensions": [{"name": "Duplicate entries", "weight": 10, "points": 8.0}]}
+    assert [(f["lint"], f["severity"], f["count"], f["caps_score"])
+            for f in body["doctor"]["findings"]] == [
+        ("owner_contact_missing", "ERROR", 1, True), ("table_shape", "INFO", 1, False)]
+    assert body["doctor"]["counts"] == {"error": 1, "warn": 0, "info": 1}
+
+
+def test_run_quality_parts_are_null_when_missing_not_an_error(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, None, None)
+    _auth(client, users["admin"])
+
+    resp = client.get("/api/run/ADM001/run-quality")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["score"], body["band"], body["doctor"], body["dimensions"]) == (None, None, None, [])
+    assert client.get("/api/run/NOSUCH/run-quality").status_code == 404
+
+
+@pytest.mark.parametrize("score, band, cap, expected", [
+    (91, "GREEN", None, False),
+    (72, "YELLOW", None, True),
+    (90, "GREEN", 25, True),
+    (None, None, None, False),
+])
+def test_review_note_for_the_owner_never_carries_the_score(
+        client, db, seed_simple_mode, monkeypatch, score, band, cap, expected):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, None, None)
+    _scored(db, "ADM001", score, band, cap)
+    _auth(client, users["alice"])
+
+    resp = client.get("/api/run/ADM001/review-note")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"needs_cleanup": expected}
+
+
+def test_review_note_falls_back_to_the_cached_score_before_backfill(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, {"totalScore": 70, "hard_fail_caps_applied": []}, None)
+    _auth(client, users["alice"])
+    assert client.get("/api/run/ADM001/review-note").json() == {"needs_cleanup": True}
+
+
+def test_review_note_is_for_the_owner_and_admins_only(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, None, None)
+    _auth(client, users["bob"])  # bob does not own ADM001
+    assert client.get("/api/run/ADM001/review-note").status_code == 403
+    _auth(client, users["admin"])
+    assert client.get("/api/run/ADM001/review-note").status_code == 200

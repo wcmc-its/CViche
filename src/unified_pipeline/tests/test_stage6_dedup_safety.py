@@ -27,8 +27,10 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _lists_name,
     _names_a_sibling,
     _names_record,
+    _other_journal_same_row,
     _record_name,
     recovered_row_already_rendered,
+    _row_residue,
 )
 from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS  # noqa: E402
 from unified_pipeline.stage_6_word_template import deduplicate_entries  # noqa: E402
@@ -242,6 +244,39 @@ def test_fused_prose_without_fields_is_still_dropped():
     one, fused = {"text": _ONE_MENTEE}, {"text": _FUSED_MENTEES}
     assert deduplicate_entries([one, fused], code="N3B",
                                document=[one, fused]) == [fused]
+
+
+# #1181: WCM label|value mentee tables share every label, so two residents at
+# one site with overlapping periods score as duplicates. Synthetic names.
+def _mentee_table(name: str, period: str) -> dict:
+    text = (f"Name | {name}\nSite/Position | Harbor Institute - Resident\n"
+            f"Expected Mentoring Period (mm/yyyy-mm/yyyy) | {period}\n"
+            "Project/Accomplishments** | Case report on widget toxicity\n"
+            "Goals/expected Outcomes | Abstract submission, Poster Presentation\n"
+            "Type of Supervision (Research, clinical, teaching, leadership) | Research")
+    return {"text": text, "extracted_fields": {"mentee_name": name}}
+
+
+def test_distinct_mentees_in_label_value_tables_kept():
+    first = _mentee_table("Avery Quill", "11/2024 – 11/2026")
+    second = _mentee_table("Blair Sprocket", "01/2025 – 06/2026")
+    document = [first, second]
+    assert deduplicate_entries(document, code="N3A", document=document) == document
+
+
+def test_same_mentee_written_two_ways_still_dropped():
+    # Case and punctuation are not a different person.
+    first = _mentee_table("Avery O'Quill", "11/2024 – 11/2026")
+    second = _mentee_table("avery o’ quill", "11/2024 – 11/2026")
+    assert len(deduplicate_entries([first, second], code="N3A",
+                                   document=[first, second])) == 1
+
+
+def test_placeholder_mentee_table_still_dropped():
+    first = _mentee_table("Avery Quill", "11/2024 – 11/2026")
+    blank = _mentee_table("N/A", "11/2024 – 11/2026")
+    assert deduplicate_entries([first, blank], code="N3A",
+                               document=[first, blank]) == [first]
 
 
 def test_distinct_committee_memberships_mentioned_in_passing_kept():
@@ -842,6 +877,10 @@ def test_recovered_row_reformatted_date_value_is_not_confirmed_and_stays():
     # verbatim.
     row = {"text": "Duration of support: | 00/2021-00/2022", "recovered_row": True}
     assert not recovered_row_already_rendered(row, ["Duration of support:", "2021-2022"])
+def test_postdoc_training_role_vouches_for_a_fused_record():
+    """#946: `role` renders on the C type line, so dedup's rendered-words set for C
+    includes it (the field is consumed here as well as by the section renderer)."""
+    assert "role" in _RENDERED_FIELDS["C"]
 
 
 # ------------- #666: two identical standalone copies of a fused record
@@ -1062,3 +1101,93 @@ def test_distinct_bare_names(dropped_text, kept_text, kept_name, distinct):
 ])
 def test_lists_name_needs_the_exact_name(entry, listed):
     assert _lists_name(entry, "Widgets") is listed
+
+
+# ------------ #666: a journal row that says more than the bare name
+# "Ad hoc Widgets, 2013-" beside "Ad hoc Widgets Quarterly, 2013-": the rows
+# say the same thing about two journals.
+
+def _journal_row(text: str, name: str) -> dict:
+    return {"taxonomy_code": "Q4D", "text": text, "extracted_fields": {"journal_name": name}}
+
+
+def test_dated_row_for_a_short_journal_name_is_kept_beside_a_longer_one():
+    kept = _journal_row("Ad hoc Widgets Quarterly\t2013- Present", "Widgets Quarterly")
+    short = _journal_row("Ad hoc Widgets\t2013- Present", "Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is False
+    assert deduplicate_entries([kept, short], code="Q4D",
+                               document=[kept, short]) == [kept, short]
+
+
+def test_journal_rows_with_different_dates_are_kept():
+    kept = _journal_row("2021-2023 Ad Hoc Reviewer, Gadget Widgets", "Gadget Widgets")
+    short = _journal_row("2021 Ad Hoc Reviewer, Widgets", "Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is False
+
+
+def test_journal_row_that_says_less_than_the_kept_row_is_still_dropped():
+    # The kept row also names an editorial role, so the two rows are not the
+    # same statement about two journals.
+    kept = _journal_row("Ad hoc reviewer and editor, Widgets Quarterly, 2013- Present",
+                        "Widgets Quarterly")
+    short = _journal_row("Ad hoc reviewer, Widgets, 2013- Present", "Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is True
+
+
+def test_journal_row_naming_the_same_journal_reworded_is_still_dropped():
+    kept = _journal_row("Ad hoc reviewer, The Widgets, 2013- Present", "The Widgets")
+    short = _journal_row("Ad hoc reviewer, Widgets, 2013- Present", "Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is True
+
+
+def test_journal_row_another_entry_lists_exactly_is_still_dropped():
+    kept = _journal_row("Ad hoc Widgets Quarterly\t2013- Present", "Widgets Quarterly")
+    short = _journal_row("Ad hoc Widgets\t2013- Present", "Widgets")
+    copy = _journal_row("Widgets", "Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short, copy]) is True
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short, copy], {id(copy)}) is False
+
+
+def test_committee_row_with_an_institution_prefix_is_still_dropped():
+    # A committee's name is descriptive: the prefixed name is the same committee.
+    def row(text, name):
+        return {"taxonomy_code": "Q2", "text": text,
+                "extracted_fields": {"committee_name": name}}
+    kept = row("Acme University, Clinic Services Committee\t2012-2014",
+               "Acme University, Clinic Services Committee")
+    short = row("Clinic Services Committee\t2012-2014", "Clinic Services Committee")
+    assert _drop_is_safe(short, kept, "Q2", [kept, short]) is True
+
+
+@pytest.mark.parametrize("dropped_fields,kept_fields,same_row", [
+    ({"journal_name": "Widgets"}, {"journal_name": "Widgets Quarterly"}, True),
+    ({"journal_name": "Widgets"}, {"journal_name": "The Widgets"}, False),  # same words
+    ({"title": "Widgets"}, {"journal_name": "Widgets Quarterly"}, False),  # not a journal row
+    ({"journal_name": "Widgets"}, {"title": "Widgets Quarterly"}, False),
+    ({"journal_name": "Widgets"}, {"journal_name": None}, False),
+    ({"journal_name": "Widgets"}, {"journal_name": "Gizmo Review"}, False),  # not in the kept text
+    ({"journal_name": "Widgets"}, {"journal_name": ["Widgets Quarterly"]}, False),  # not a string
+])
+def test_other_journal_same_row_table(dropped_fields, kept_fields, same_row):
+    dropped = {"text": "Ad hoc Widgets 2013", "extracted_fields": dropped_fields}
+    kept = {"text": "Ad hoc Widgets Quarterly 2013", "extracted_fields": kept_fields}
+    assert _other_journal_same_row(dropped, kept, "Widgets", kept_fields) is same_row
+
+
+def test_two_rows_that_do_not_hold_their_names_are_not_the_same_row():
+    # Neither text holds its journal's name, so neither has a residue to compare.
+    dropped = {"text": "Ad hoc 2013", "extracted_fields": {"journal_name": "Widgets"}}
+    kept = {"text": "Ad hoc 2013", "extracted_fields": {"journal_name": "Gizmo Review"}}
+    assert _other_journal_same_row(dropped, kept, "Widgets", kept["extracted_fields"]) is False
+
+
+@pytest.mark.parametrize("text,name,residue", [
+    ("Ad hoc Widgets\t2013- Present", "Widgets", "adhocpresent"),
+    ("AD HOC, widgets.", "Widgets", "adhoc"),
+    ("Widgets, Widgets", "Widgets", "widgets"),  # the first run only
+    ("Ad hoc Gizmo", "Widgets", None),  # name not in the text
+    ("Ad hoc Widgetsmith", "Widgets", None),  # a longer word is not the name
+    ("Ad hoc Widgets", "--", None),  # a name without words
+])
+def test_row_residue(text, name, residue):
+    assert _row_residue(text, name) == residue

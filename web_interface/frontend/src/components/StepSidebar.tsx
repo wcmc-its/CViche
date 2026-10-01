@@ -100,7 +100,7 @@ export default function StepSidebar({
                       onClick={() => onSelectStep(step.step_number)}
                       aria-current={isActive ? 'step' : undefined}
                       style={{ touchAction: 'manipulation' }}
-                      className={`w-full grid grid-cols-[20px_minmax(0,1fr)_auto] items-center gap-2.5 text-left px-2.5 py-2 rounded-lg border-[1.5px] transition-colors cursor-pointer focus:ring-2 focus:ring-primary-500 focus:outline-none ${
+                      className={`w-full grid grid-cols-[20px_minmax(0,1fr)_auto] items-center gap-2.5 text-left px-2.5 py-2 rounded-lg border-[1.5px] transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none ${
                         isActive
                           ? 'border-ink bg-primary-50'
                           : 'border-transparent hover:bg-sand-50'

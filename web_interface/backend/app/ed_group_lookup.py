@@ -570,6 +570,58 @@ def _query_ed(cwid: str, access_group: str, admin_group: str,
     return MembershipResult(in_access_group=in_access, in_admin_group=in_admin)
 
 
+# ED attributes that carry a person's department name, in preference order.
+# Confirmed against a live ED record (2026-09-30): the PRIMARY department is a
+# single-valued display name ("Library"); weillCornellEduDepartment is the
+# multi-valued list of every department the person belongs to.
+_ED_PRIMARY_DEPARTMENT_ATTR = "weillCornellEduPrimaryDepartment"
+_ED_ALL_DEPARTMENTS_ATTR = "weillCornellEduDepartment"
+_ED_DEPARTMENT_ATTRS = (_ED_PRIMARY_DEPARTMENT_ATTR, _ED_ALL_DEPARTMENTS_ATTR)
+
+# users.department column width (models.User.department).
+DEPARTMENT_MAX_LENGTH = 255
+
+
+def pick_department(attributes: dict[str, list]) -> str | None:
+    """The department name to store from an ED entry's attribute dict.
+
+    Prefers the primary department, falls back to the first listed department,
+    and returns None when neither carries a non-blank value. Pure function so
+    the choice is testable without a directory.
+    """
+    for attr in _ED_DEPARTMENT_ATTRS:
+        for value in attributes.get(attr) or []:
+            cleaned = str(value).strip()
+            if cleaned:
+                return cleaned[:DEPARTMENT_MAX_LENGTH]
+    return None
+
+
+def fetch_ed_department(cwid: str, cfg: LDAPConfig) -> str | None:
+    """The user's department name from ED, or None when it cannot be read.
+
+    Never raises for a directory fault: the department is display metadata, so
+    an ED error here must not change the login outcome (the membership check,
+    which does gate login, has already answered). The fault is logged with its
+    traceback and the caller keeps whatever department it already has.
+    """
+    try:
+        with _bind(cfg) as conn:
+            conn.search(
+                search_base=cfg.search_base,
+                search_filter=f"(uid={escape_filter_chars(cwid)})",
+                search_scope=SUBTREE,
+                attributes=list(_ED_DEPARTMENT_ATTRS),
+            )
+            if not conn.entries:
+                return None
+            return pick_department(conn.entries[0].entry_attributes_as_dict)
+    except (EdUnavailableError, LDAPException):
+        logger.warning("Could not read ED department for cwid=%s", cwid,
+                       exc_info=True)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------

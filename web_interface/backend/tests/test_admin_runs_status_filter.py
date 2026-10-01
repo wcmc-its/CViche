@@ -292,3 +292,20 @@ def test_compute_score_returns_score_evidence(client, db, monkeypatch):
     assert body["totalScore"] == 20
     assert body["data_complete"] is False
     assert body["missing_evidence"] == ["docx: no docx found"]
+
+
+def test_compute_score_writes_the_run_quality_columns(client, db, monkeypatch):
+    """The rescore endpoint copies score, band and cap onto the run row."""
+    from app.api import admin_routes
+    from app.models import Run
+
+    _seed_mixed_status_runs(db)
+    capped = {**_INCOMPLETE_SCORE, "totalScore": 25, "raw_score_before_caps": 80.0,
+              "hard_fail_caps_applied": [25]}
+    monkeypatch.setattr(admin_routes, "compute_and_cache_score", lambda _rid: capped)
+
+    assert _admin_post(client, "/api/admin/run/SF_COMPLETE/score").status_code == 200
+
+    db.expire_all()
+    run = db.get(Run, "SF_COMPLETE")
+    assert (run.quality_score, run.quality_band, run.quality_cap) == (25, "RED", 25)

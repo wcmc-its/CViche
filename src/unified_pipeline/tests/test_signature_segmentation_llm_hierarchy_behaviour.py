@@ -3,7 +3,10 @@
 Covers: classify_signature_groups_with_llm, normalize_hierarchy_with_llm (and its
 inner add_headers_to_list), parse_normalized_hierarchy (and its inner map_headers),
 validate_headers_vs_entries (and its inner collect_headers), build_hierarchy_from_
-classifications, and segment_cv_with_signatures end to end.
+classifications, segment_cv_with_signatures end to end, and
+restore_sub_label_document_order (#429) including its call on the live path
+(chunked_chat_hierarchy_extractor.get_cv_hierarchy_chunked) and the chunk
+prompt's use of GEOGRAPHIC_SUB_LABELS.
 
 ``call_llm`` is stubbed via ``monkeypatch.setattr(sbs, "call_llm", ...)`` on the
 module object itself -- no network call, no prompt-log writes. The module is
@@ -1265,3 +1268,294 @@ def test_parse_normalized_hierarchy_indented_untagged_line_does_not_disable_tag_
 
     assert [h["text"] for h in result] == ["Part One"]
     assert [(c["text"], c["level"]) for c in result[0]["children"]] == [("Sub A", "H2")]
+
+
+# ------------------------------------------- restore_sub_label_document_order (#429)
+# Synthetic headers only; `lines` is the flat docx line stream stage 1a reads.
+
+def _h(text: str, level: str = "H1", *children: dict, **extra: object) -> dict:
+    return {"text": text, "level": level, "children": list(children), **extra}
+
+
+def _shape(nodes: list[dict], depth: int = 0) -> list[tuple]:
+    out = []
+    for n in nodes:
+        out.append((depth, n["level"], n["text"]))
+        out.extend(_shape(n.get("children") or [], depth + 1))
+    return out
+
+
+def test_restore_sub_label_moves_a_flat_label_back_before_the_later_section():
+    hierarchy = [_h("Talks"), _h("Regional"), _h("National"), _h("Papers"), _h("International")]
+    lines = ["Talks", "a", "Regional", "b", "National", "c", "International", "d", "Papers", "e"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert result is hierarchy
+    assert _shape(result) == [(0, "H1", "Talks"), (0, "H1", "Regional"), (0, "H1", "National"),
+                              (0, "H1", "International"), (0, "H1", "Papers")]
+
+
+def test_restore_sub_label_renests_a_label_listed_under_the_later_section():
+    hierarchy = [_h("Talks", "H1", _h("Regional", "H2"), _h("National", "H2")),
+                 _h("Papers", "H1", _h("International", "H2"))]
+    lines = ["Talks", "Regional", "x", "National", "y", "International", "z", "Papers", "w"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert _shape(result) == [(0, "H1", "Talks"), (1, "H2", "Regional"), (1, "H2", "National"),
+                              (1, "H2", "International"), (0, "H1", "Papers")]
+
+
+def test_restore_sub_label_becomes_first_child_when_the_anchor_has_children():
+    hierarchy = [_h("Talks", "H1", _h("National", "H2")), _h("Papers"), _h("International")]
+    lines = ["Talks", "International", "National", "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert _shape(result) == [(0, "H1", "Talks"), (1, "H2", "International"), (1, "H2", "National"),
+                              (0, "H1", "Papers")]
+
+
+def test_restore_sub_label_retags_the_whole_moved_subtree():
+    hierarchy = [_h("Talks"), _h("National"),
+                 _h("Papers", "H1", _h("International", "H2", _h("Keynotes", "H3")))]
+    lines = ["Talks", "National", "International", "Keynotes", "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert _shape(result) == [(0, "H1", "Talks"), (0, "H1", "National"), (0, "H1", "International"),
+                              (1, "H2", "Keynotes"), (0, "H1", "Papers")]
+
+
+def test_restore_sub_label_resolves_a_repeated_label_text_in_document_order():
+    # Two "National" labels: the misplaced label belongs after the second one.
+    hierarchy = [_h("Service", "H1", _h("National", "H2")), _h("Awards"),
+                 _h("Talks", "H1", _h("Regional", "H2"), _h("National", "H2")),
+                 _h("Other"), _h("International")]
+    lines = ["Service", "National", "Awards", "Talks", "Regional", "National", "International", "Other"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert _shape(result) == [(0, "H1", "Service"), (1, "H2", "National"), (0, "H1", "Awards"),
+                              (0, "H1", "Talks"), (1, "H2", "Regional"), (1, "H2", "National"),
+                              (1, "H2", "International"), (0, "H1", "Other")]
+
+
+def test_restore_sub_label_moves_every_misplaced_label():
+    hierarchy = [_h("Talks"), _h("Regional"), _h("Papers"), _h("National"), _h("International")]
+    lines = ["Talks", "Regional", "National", "International", "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert [t for _, _, t in _shape(result)] == ["Talks", "Regional", "National", "International", "Papers"]
+
+
+def test_restore_sub_label_matches_case_colon_and_whitespace():
+    # The anchor header differs from its docx line only in inner whitespace.
+    hierarchy = [_h("Part  One"), _h("Papers"), _h("INTERNATIONAL:")]
+    lines = ["Part\tOne", "  international  ", "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert [t for _, _, t in _shape(result)] == ["Part  One", "INTERNATIONAL:", "Papers"]
+
+
+def test_restore_sub_label_matches_a_space_before_the_colon():
+    # The docx line has a space before its colon; the header does not.
+    hierarchy = [_h("Talks"), _h("Papers"), _h("International:")]
+    lines = ["Talks", "International :", "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert [t for _, _, t in _shape(result)] == ["Talks", "International:", "Papers"]
+
+
+def test_restore_sub_label_an_unfound_header_does_not_advance_the_search():
+    hierarchy = [_h("Talks"), _h("Unfound"), _h("National"), _h("Papers"), _h("International")]
+    lines = ["Talks", "National", "International", "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert [t for _, _, t in _shape(result)] == ["Talks", "Unfound", "National", "International", "Papers"]
+
+
+@pytest.mark.parametrize("hierarchy, lines", [
+    # already in document order
+    ([_h("Talks"), _h("National"), _h("International"), _h("Papers")],
+     ["Talks", "National", "International", "Papers"]),
+    # a non-geographic header out of order is out of scope
+    ([_h("Talks"), _h("Papers"), _h("Awards")], ["Talks", "Awards", "Papers"]),
+    # the label's text is on two docx lines: ambiguous, left alone
+    ([_h("Talks"), _h("Papers"), _h("International")],
+     ["Talks", "International", "International", "Papers"]),
+    # the label is not in the docx at all
+    ([_h("Talks"), _h("Papers"), _h("International")], ["Talks", "Papers"]),
+    # the header listed just before the label was not found: no evidence of an inversion
+    ([_h("Talks"), _h("Papers"), _h("Unfound"), _h("International")],
+     ["Talks", "International", "Papers"]),
+    # the label precedes every header found: nothing to anchor it to
+    ([_h("Talks"), _h("International")], ["International", "Talks"]),
+])
+def test_restore_sub_label_leaves_the_hierarchy_alone(hierarchy, lines):
+    before = _shape(hierarchy)
+
+    assert _shape(sbs.restore_sub_label_document_order(hierarchy, lines)) == before
+
+
+def test_restore_sub_label_does_not_move_a_label_repeated_right_after_itself():
+    # The outline lists the label twice, the docx once: the second copy is not
+    # found, but its only docx line is its predecessor's, which is no inversion.
+    first, second = _h("National", tag="first"), _h("National", tag="second")
+    hierarchy = [_h("Talks"), first, second]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, ["Talks", "National", "body"])
+
+    assert [n.get("tag") for n in result] == [None, "first", "second"]
+
+
+def test_restore_sub_label_leaves_a_second_group_the_docx_marks_with_a_footnote():
+    # Two same-text label groups; the docx marks the second group "Regional*" and
+    # the outline drops the "*". Both groups are already in document order.
+    hierarchy = [_h("Service", "H1", _h("Regional", "H2"), _h("National", "H2"), _h("International", "H2")),
+                 _h("Talks", "H1", _h("Regional", "H2"), _h("National", "H2"), _h("International", "H2")),
+                 _h("Papers")]
+    lines = ["Service", "Regional", "a", "National", "b", "International", "c",
+             "Talks", "Regional*", "d", "National*", "e", "International*", "f", "Papers", "g"]
+    before = _shape(hierarchy)
+
+    assert _shape(sbs.restore_sub_label_document_order(hierarchy, lines)) == before
+
+
+def test_restore_sub_label_leaves_a_label_the_outline_repeats_more_than_the_docx():
+    # The docx spells the second group differently from the outline, so each
+    # "Regional" has one docx line for two outline headers: ambiguous, left alone.
+    hierarchy = [_h("Service", "H1", _h("Regional", "H2")), _h("Talks", "H1", _h("Regional", "H2")),
+                 _h("Papers")]
+    lines = ["Service", "Regional", "a", "Talks", "Regional (continued)", "b", "Papers"]
+    before = _shape(hierarchy)
+
+    assert _shape(sbs.restore_sub_label_document_order(hierarchy, lines)) == before
+
+
+@pytest.mark.parametrize("docx_label", ["International*", "International \u2020", "International\u00b9",
+                                        "International\u2074", "International2", "International12",
+                                        "International\u2021", "International\u00a7", "International\u00b2",
+                                        "International\u00b3", "International\u2070", "International\u2079"])
+def test_restore_sub_label_matches_a_docx_line_with_a_footnote_marker(docx_label):
+    hierarchy = [_h("Talks"), _h("Papers"), _h("International")]
+    lines = ["Talks", docx_label, "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert [t for _, _, t in _shape(result)] == ["Talks", "International", "Papers"]
+
+
+@pytest.mark.parametrize("text, key", [
+    ("Regional1*", "regional"),          # a number, then a marker
+    ("Grants 2020", "grants 2020"),      # a number after a space is part of the header
+    ("Section 100", "section 100"),
+    ("R01 Grants", "r01 grants"),        # only a trailing number is a footnote
+    ("International :", "international"),
+    ("International100", "international100"),  # three attached digits are not a footnote
+    ("Sample_2", "sample_2"),            # an underscore is not a word letter
+    ("Stra\u00dfe", "strasse"),          # casefold, not lower
+])
+def test_document_line_key_strips_only_a_trailing_footnote_marker(text, key):
+    assert sbs._document_line_key(text) == key
+
+
+def test_restore_sub_label_logs_the_docx_line_it_moved_to(caplog):
+    hierarchy = [_h("Talks"), _h("Papers"), _h("International")]
+    lines = ["Talks", "x", "International", "Papers"]
+
+    with caplog.at_level(logging.INFO, logger=sbs.logger.name):
+        sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert "back to document line 2 (#429)" in caplog.text
+
+
+def test_restore_sub_label_keeps_a_number_after_a_space_in_the_key():
+    # "Part 3" is not the docx's "Part 1": nothing is found before the label, so
+    # there is no anchor and nothing moves.
+    hierarchy = [_h("Part 3"), _h("Papers"), _h("International")]
+    lines = ["Part 1", "International", "Papers"]
+    before = _shape(hierarchy)
+
+    assert _shape(sbs.restore_sub_label_document_order(hierarchy, lines)) == before
+
+
+def test_restore_sub_label_an_unanchored_label_does_not_stop_later_moves():
+    # "National" precedes every found header (no anchor) and stays; the later
+    # misplaced "International" still moves.
+    hierarchy = [_h("Talks"), _h("National"), _h("Awards"), _h("Papers"), _h("International")]
+    lines = ["National", "x", "Talks", "Awards", "International", "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert [t for _, _, t in _shape(result)] == ["Talks", "National", "Awards", "International", "Papers"]
+
+
+def test_restore_sub_label_leaves_a_label_found_on_the_last_docx_line():
+    # The label's text is also on an earlier line, but the forward walk finds it
+    # on the last line, in order: two docx lines, so it is not moved.
+    hierarchy = [_h("Service"), _h("National"), _h("Teaching"), _h("International")]
+    lines = ["Service", "International", "National", "Teaching", "International"]
+    before = _shape(hierarchy)
+
+    assert _shape(sbs.restore_sub_label_document_order(hierarchy, lines)) == before
+
+
+def test_restore_sub_label_inserts_after_the_anchor_by_identity():
+    # An equal dict earlier in the anchor's list must not be taken for the anchor.
+    hierarchy = [_h("Talks"), _h("Talks"), _h("Papers"), _h("International")]
+    lines = ["Talks", "Talks", "International", "Papers"]
+
+    result = sbs.restore_sub_label_document_order(hierarchy, lines)
+
+    assert [n["text"] for n in result] == ["Talks", "Talks", "International", "Papers"]
+
+
+def test_chunk_prompt_names_the_geographic_sub_labels(monkeypatch):
+    from unified_pipeline.segmentation import chunked_chat_hierarchy_extractor as cce
+    seen = {}
+
+    def fake_llm(**kwargs):
+        seen["system"] = kwargs["messages"][0]["content"]
+        return {"content": ""}
+
+    monkeypatch.setattr(cce, "call_llm", fake_llm)
+    cce.extract_headers_from_chunk("text", 1, 1)
+
+    assert "  * Geographic: International, National, Regional, Local, State, Institutional\n" in seen["system"]
+
+
+def test_get_cv_hierarchy_chunked_restores_sub_label_order(monkeypatch):
+    # The live stage-1a path: the order repair runs on the final LLM pass's output.
+    from unified_pipeline.segmentation import chunked_chat_hierarchy_extractor as cce
+    lines = ["Talks", "International", "Papers"]
+    monkeypatch.setattr(cce, "extract_text_from_docx", lambda path: lines)
+    monkeypatch.setattr(cce, "extract_headers_from_chunk", lambda chunk, i, n: "")
+    monkeypatch.setattr(cce, "ensure_personal_data_first", lambda h: h)
+    monkeypatch.setattr(cce, "validate_headers_vs_entries", lambda h: h)
+    pass_1 = [_h("Talks"), _h("Papers"), _h("International")]
+    pass_2 = [_h("Talks"), _h("Papers"), _h("International")]
+    label = pass_2[2]
+    passes = {1: pass_1, 2: pass_2}
+    seen = []
+
+    def fake_normalize(h, pass_number):
+        seen.append((pass_number, h))
+        return passes[pass_number]
+
+    monkeypatch.setattr(cce, "normalize_hierarchy_with_llm", fake_normalize)
+
+    hierarchy, stats = cce.get_cv_hierarchy_chunked("unused.docx")
+
+    # pass 2 reads the validated pass-1 output, and the repair reads pass 2's output
+    assert [p for p, _ in seen] == [1, 2]
+    assert seen[1][1] is pass_1
+    # the repair moved pass 2's label, anchored on the first docx line
+    assert [n["text"] for n in hierarchy] == ["Talks", "International", "Papers"]
+    assert hierarchy[1] is label
+    assert stats["final_headers"] == len(pass_2)

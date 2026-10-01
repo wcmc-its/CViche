@@ -91,6 +91,14 @@ MENTEE_TABLE_SPACING_TWIPS = '120'
 #: dropped; it now joins Type of Supervision.
 _ROLE_LINE_RE = re.compile(r'(?:^|[\t\n])\s*Role:\s*([^\t\n]+)')
 
+#: The WCM mentee table's own "Type of Supervision (Research, clinical,
+#: teaching, leadership) | <value>" row, flattened into the entry text by
+#: stage 2. The N3A/N3B schema has no supervision field, so stage 4 never
+#: extracts it and `_infer_supervision_type` guessed from the level instead:
+#: FINSIS rendered "Clinical" for residents whose row read "Research +
+#: Teaching", and blank for mentees with no level.
+_SUPERVISION_ROW_RE = re.compile(r'Type of Supervision[^|\t\n]*\| *([^|\t\n]+)', re.I)
+
 
 @dataclass(frozen=True)
 class MenteeRecord:
@@ -368,6 +376,9 @@ def _normalize_mentee(entry: Mapping[str, Any]) -> MenteeRecord:
         project = f"{project}\nAwards: {mentee_awards}" if project else f"Awards: {mentee_awards}"
 
     supervision_type = _text(fields.get('supervision_type'))
+    if not supervision_type:
+        row_match = _SUPERVISION_ROW_RE.search(_text(entry.get('text')))
+        supervision_type = row_match.group(1).strip() if row_match else ''
     role_match = _ROLE_LINE_RE.search(_text(entry.get('text')))
     role = role_match.group(1).strip() if role_match else ''
     if not supervision_type:

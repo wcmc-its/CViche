@@ -196,3 +196,33 @@ def test_b2_guide_covers_every_extracted_field_and_asks_for_the_whole_line():
     title."""
     assert set(schemas_mod.FIELD_DESCRIPTIONS["B2"]) == set(schemas_mod.get_field_schema("B2")["fields"])
     assert "WHOLE entry" in schemas_mod.FIELD_DESCRIPTIONS["B2"]["program_name"]
+
+
+def test_postdoc_training_schema_asks_the_llm_for_a_role():
+    """#946: ZA1VOV's "Chief Resident '20-21" was never extracted because the C
+    schema had no role field (its coverage record listed chief/resident as
+    unextracted words). Read off the ACTIVE (config-merged) schema, which is
+    what the prompt's field list is built from, and off the built-in table the
+    config falls back to."""
+    assert "role" in schemas_mod.get_field_schema("C")["fields"]
+    assert "role" in schemas_mod.FIELD_SCHEMAS["C"]["fields"]
+    assert "role" in schemas_mod.FIELD_DESCRIPTIONS["C"]
+
+
+def test_postdoc_training_guide_describes_every_extracted_field():
+    """#946 live A/B: a guide naming `role` alone made the model null
+    training_type/specialty/institution on 3 of 8 degree lines in one CV's
+    training section. The C guide must therefore name every field the C prompt
+    lists, not just the new one."""
+    assert set(schemas_mod.FIELD_DESCRIPTIONS["C"]) == set(schemas_mod.get_field_schema("C")["fields"])
+
+
+def test_postdoc_training_guide_keeps_the_program_in_training_type():
+    """#946 live A/B (blind verifier, 4 runs per arm on ZA1VOV): a guide asking
+    training_type 'as the CV words it' turned 'Fellowship' into 'Fellow physician'
+    4 of 4 runs. training_type is the program; the trainee title is not its value,
+    and the plain title stays out of `role` too."""
+    guide = schemas_mod.FIELD_DESCRIPTIONS["C"]
+    assert "not the trainee's position title" in guide["training_type"]
+    assert "as the CV words it" not in guide["training_type"]
+    assert "plain trainee title" in guide["role"]

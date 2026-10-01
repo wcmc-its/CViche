@@ -25,6 +25,9 @@ and a clean run scores 100::
 
     raw = 100 * (1 - sum(weight_i * fraction_i) / sum(weight_i))
 
+The weights sum to 100, so a dimension of weight w costs exactly w * fraction
+points of the raw score.
+
 Two dimensions are hard-fail gates: a fatal pipeline error or a missing CV
 owner name caps the final score regardless of the other dimensions. A third
 gate -- protected personal data in the rendered docx (#820) -- caps the score
@@ -1259,7 +1262,7 @@ DIMENSIONS = [
     ("T-bucket share (stage_3b catch-all over-use)", 15, score_t_bucket),
     ("Sparse / under-filled tables in generated docx", 12, score_sparse_tables),
     ("Broken table / raw formatting artifacts in docx", 10, score_broken_format),
-    ("Field-extraction sparseness (entry-level)", 8, score_field_sparseness),
+    ("Field-extraction sparseness (entry-level)", 13, score_field_sparseness),
     ("Duplicate-entry ratio (de-dup / fragmentation health)", 10, score_duplicate_ratio),
     ("No rendered output produced at all (HARD-FAIL gate)", 0, score_no_output),
     ("Stage-3b batch-fallback ratio (HARD-FAIL gate)", 0, score_stage3b_fallback_ratio),

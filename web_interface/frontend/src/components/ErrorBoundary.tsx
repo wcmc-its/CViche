@@ -53,14 +53,14 @@ export default class ErrorBoundary extends Component<Props, State> {
           <div className="flex items-center justify-center gap-3">
             <a
               href="/"
-              className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium bg-primary-600 text-white hover:bg-primary-700 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+              className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium bg-primary-600 text-white hover:bg-primary-700 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
             >
               Back to home
             </a>
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 focus:ring-2 focus:ring-primary-500 focus:outline-none"
+              className="inline-flex items-center px-4 py-2 rounded-lg text-sm font-medium border border-gray-300 text-gray-700 hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
             >
               Reload
             </button>

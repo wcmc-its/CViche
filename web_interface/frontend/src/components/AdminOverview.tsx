@@ -97,13 +97,13 @@ function NeedsAttention({ p95 }: { p95: number | null | undefined }) {
                     Unusually long · {formatDuration(run.duration_seconds)}
                   </p>
                 )}
-                <p className="mt-0.5 text-xs text-gray-500 break-words">
+                <p className="mt-0.5 text-xs text-gray-500 [overflow-wrap:anywhere]">
                   {reporter(run)} · {run.filename} · {formatDate(run.started_at)}
                 </p>
               </div>
               <Link
                 to={`/run/${run.run_id}`}
-                className="shrink-0 rounded-lg border border-sand-400 bg-white px-3 py-1.5 text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+                className="shrink-0 rounded-lg border border-sand-400 bg-white px-3 py-1.5 text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
               >
                 {kind === 'failed' ? 'Open run' : 'Inspect'}
               </Link>
@@ -130,8 +130,8 @@ function StepTimes({ steps }: { steps: NonNullable<Stats['step_avg_seconds']> })
       ) : (
         <ul className="space-y-2.5">
           {steps.map((s) => (
-            <li key={s.stage_id} className="grid grid-cols-[minmax(0,1fr)_34%_3.5rem] items-center gap-3 text-[13px]">
-              <span className="truncate text-gray-700">
+            <li key={s.stage_id} className="grid grid-cols-[minmax(0,1fr)_24%_3.5rem] items-center gap-3 text-[13px]">
+              <span className="min-w-0 break-words text-gray-700">
                 {s.stage_id} {s.step_name}
               </span>
               <span className="h-1.5 rounded-full bg-sand-100 overflow-hidden" aria-hidden="true">
@@ -180,7 +180,7 @@ function RecentFeedback({ onOpenFeedback }: { onOpenFeedback: () => void }) {
         <button
           type="button"
           onClick={onOpenFeedback}
-          className="text-[13px] text-primary-600 hover:text-primary-700 focus:outline-none focus-visible:underline"
+          className="text-[13px] text-primary-600 hover:text-primary-700 focus-visible:outline-none focus-visible:underline"
         >
           All responses
         </button>
@@ -193,11 +193,11 @@ function RecentFeedback({ onOpenFeedback }: { onOpenFeedback: () => void }) {
         <ul>
           {rows.map((f) => (
             <li key={f.id} className="py-3 border-b border-sand-200 last:border-b-0 first:pt-1">
-              <div className="flex items-baseline justify-between gap-3">
-                <span className="text-sm font-medium text-gray-900 truncate">{f.user_email || 'Anonymous'}</span>
-                <span className="shrink-0 text-xs text-gray-500">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-gray-900 [overflow-wrap:anywhere]">{f.user_email || 'Anonymous'}</p>
+                <p className="mt-0.5 text-xs text-gray-500">
                   Run {f.run_id} · {formatDate(f.submitted_at)}
-                </span>
+                </p>
               </div>
               {f.biggest_issue && (
                 <p className="mt-1 text-[13px] text-gray-700 break-words">&ldquo;{f.biggest_issue}&rdquo;</p>
