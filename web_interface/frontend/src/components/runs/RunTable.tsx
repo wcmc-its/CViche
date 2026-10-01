@@ -1,11 +1,12 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Clock, CheckCircle2, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronRight, MessageSquare } from 'lucide-react'
+import { Clock, CheckCircle2, Lock, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronRight, MessageSquare } from 'lucide-react'
 import { formatRelativeDate } from '../../utils'
 import type { RunSummary } from '../../types'
 import { OWNER_UNKNOWN_LABEL, runByFilterValue, runByLabel } from './runGroups'
 import type { RunGroup, SortDir, SortField } from './runGroups'
 import type { RunFilterKey } from './runFilters'
+import { BAND_STYLE, NO_SCORE_TEXT, scoreTitle } from './runQuality'
 
 const CELL = 'px-2 first:pl-5 last:pr-5 py-3'
 const WRAP = 'break-words [overflow-wrap:anywhere]'
@@ -115,6 +116,19 @@ function SortHeader({ field, label, align = 'left', width = '', sortField, sortD
   )
 }
 
+function ScoreCell({ run, earlier }: { run: RunSummary; earlier: boolean }) {
+  const band = run.quality_score != null ? run.quality_band : null
+  return (
+    <span title={scoreTitle(run)} className="flex items-center gap-1.5 tabular-nums">
+      <span aria-hidden="true" className={`h-2 w-2 flex-none rounded-full ${band ? BAND_STYLE[band].dot : 'bg-sand-400'}`} />
+      <span className={`font-semibold ${band ? (earlier ? 'text-gray-700' : 'text-gray-900') : 'text-gray-400'}`}>
+        {run.quality_score ?? NO_SCORE_TEXT}
+      </span>
+      {run.quality_cap != null && <Lock className="h-3 w-3 flex-none text-error-700" aria-label="Score capped" />}
+    </span>
+  )
+}
+
 function FeedbackCell({ run, feedbackMap }: { run: RunSummary; feedbackMap: Record<string, boolean> }) {
   const navigate = useNavigate()
   if (run.status !== 'complete') return null
@@ -186,6 +200,11 @@ function RunRow({ run, firstCell, earlier = false, isAdmin, showCost, feedbackMa
           <span className={`text-sm ${statusLabelColor(run.status)}`}>{statusLabel(run.status)}</span>
         </span>
       </td>
+      {isAdmin && (
+        <td className={`${CELL} text-left text-sm`}>
+          <ScoreCell run={run} earlier={earlier} />
+        </td>
+      )}
       <td className={`${CELL} text-left text-sm text-gray-500`}>
         <span title={tooltip}>{display}</span>
       </td>
@@ -245,13 +264,13 @@ function GroupCell({ group, expanded, isAdmin, onToggle, onFilter }: GroupCellPr
               <span className={`text-sm font-semibold text-gray-900 ${WRAP}`}>{owner}</span>
             )
           ) : (
-            <span className={`text-sm text-gray-900 ${WRAP}`}>{latest.filename}</span>
+            <span title={latest.filename} className={`text-sm text-gray-900 ${WRAP}`}>{latest.filename}</span>
           )}
           {runCount > 1 && (
             <span className="rounded-full bg-sand-100 px-2 py-px text-xs text-gray-500">{runCount} runs</span>
           )}
         </div>
-        <div className={`text-[13px] text-gray-500 ${WRAP}`}>{owner ? latest.filename : OWNER_UNKNOWN_LABEL}</div>
+        <div title={latest.filename} className={`text-[13px] text-gray-500 ${WRAP}`}>{owner ? latest.filename : OWNER_UNKNOWN_LABEL}</div>
       </div>
     </div>
   )
@@ -279,12 +298,13 @@ export default function RunTable(props: RunTableProps) {
   }
   return (
     <div className="overflow-x-auto">
-      <table className={`w-full table-fixed ${isAdmin ? 'min-w-[900px]' : 'min-w-[640px]'}`}>
+      <table className={`w-full table-fixed ${isAdmin ? 'min-w-[1000px]' : 'min-w-[640px]'}`}>
         <thead className="sticky top-0 z-header bg-sand-50 border-b border-sand-200">
           <tr>
             <SortHeader field="cv" label={isAdmin ? 'Faculty (subject)' : 'CV'} {...header} />
             {isAdmin && <th className={`${CELL} text-left text-xs font-medium text-gray-500 w-[170px]`}>Run by</th>}
             <SortHeader field="status" label="Status" width="w-[120px]" {...header} />
+            {isAdmin && <SortHeader field="quality_score" label="Score" width="w-[84px]" {...header} />}
             <SortHeader field="started_at" label={isAdmin ? 'Started' : 'Date'} width="w-[130px]" {...header} />
             <SortHeader field="total_duration_seconds" label="Duration" align="right" width="w-[72px]" {...header} />
             {showCost && <SortHeader field="total_cost" label="Cost" align="right" width="w-[56px]" {...header} />}
@@ -309,7 +329,7 @@ export default function RunTable(props: RunTableProps) {
                       key={run.run_id}
                       run={run}
                       earlier
-                      firstCell={<div className={`pl-8 text-[13px] text-gray-500 ${WRAP}`}>{run.filename}</div>}
+                      firstCell={<div title={run.filename} className={`pl-8 text-[13px] text-gray-500 ${WRAP}`}>{run.filename}</div>}
                       {...rowProps}
                     />
                   ))

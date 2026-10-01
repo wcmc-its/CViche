@@ -21,6 +21,10 @@ export interface RunStatus {
    *  "taking longer than expected" threshold off this. Absent on older runs. */
   estimated_duration_seconds?: number | null
   error_message?: string
+  /** CV owner inferred by stage 4; null until inferred. */
+  cv_owner_name?: string | null
+  /** Who ran it. Admin only. */
+  run_by?: RunBy | null
   steps: StepSummary[]
 }
 
