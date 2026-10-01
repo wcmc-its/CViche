@@ -56,7 +56,8 @@ except ImportError:
     logger.error("Error: python-docx not installed. Install with: pip install python-docx lxml")
     sys.exit(1)
 
-from unified_pipeline.llm_client import LlmUsage, call_llm
+from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm_client import LlmUsage
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.core.render_check import entry_fragments, entry_lines
 # Every name below is re-exported from this module by being imported here: it is
