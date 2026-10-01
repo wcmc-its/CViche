@@ -161,18 +161,34 @@ def test_an_unfilled_row_with_a_long_template_label_still_drops(row):
 # Each is the tracked Oct-2022 phrase with the edit an older revision made
 # (A5IZ6Q): the exact and containment rules above all miss it.
 NEAR_MATCHES = [
-    # "…institutions. Include division…" -> "…institutions, including division…"
-    "Please list activities at WCM and affiliates, NYP, and previously employed "
+    # the 2020-2022 revisions' wording, minus the comma after "NYP"
+    "Please list activities at WCM and affiliates, NYP and previously employed "
     "institutions, including division or department positions, directorships, "
     "deanships, chairmanships on major institutional committees.",
     # an extra comma, plus the faculty member's "N/A" answer appended
     "Include year(s), leadership role, and description of activity/program, i.e., "
     "director/head of service/clinic or procedure area.: N/A",
-    # the 2022 label without "as teacher": 0.933, just over the threshold. (The
-    # fixture here used to be "Have you passed the examination ...? N/A",
-    # which the 2020 revision now matches exactly -- #829.)
-    "Continuing education and professional education (role and scope of activity)",
+    # the 2020-2022 label with "the" added. (Earlier fixtures here -- "Have you
+    # passed the examination ...? N/A", then the label without "the" -- are
+    # now exact matches against tracked revisions; see EXACT_IN_A_REVISION.)
+    "Continuing education and professional education (role and scope of the activity)",
 ]
+
+# Wording that only a 2020-2022 faculty revision carries (#829): an exact
+# match now that every revision is tracked, not a near one.
+EXACT_IN_A_REVISION = [
+    "Please list activities at WCM and affiliates, NYP, and previously employed "
+    "institutions, including division or department positions, directorships, "
+    "deanships, chairmanships on major institutional committees.",
+    "Continuing education and professional education (role and scope of activity)",
+    "(When not yet at WCM, report activities at current site; when already at WCM, "
+    "report only WCM activities.)",
+]
+
+
+@pytest.mark.parametrize("text", EXACT_IN_A_REVISION)
+def test_a_tracked_revisions_own_wording_drops_exactly(text):
+    assert is_template_instruction(text)
 
 
 @pytest.mark.parametrize("text", NEAR_MATCHES)
