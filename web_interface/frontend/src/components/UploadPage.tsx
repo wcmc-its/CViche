@@ -387,7 +387,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                   disabled={uploading}
                   aria-label={`Remove ${file.name}`}
                   title="Remove"
-                  className="flex h-7 w-7 flex-none items-center justify-center rounded-md text-gray-500 hover:bg-sand-100 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+                  className="flex h-7 w-7 flex-none items-center justify-center rounded-md text-gray-500 hover:bg-sand-100 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
                 >
                   <X className="h-3.5 w-3.5" strokeWidth={2.2} aria-hidden="true" />
                 </button>
@@ -454,7 +454,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                         type="checkbox"
                         checked={acknowledged}
                         onChange={(e) => setAcknowledged(e.target.checked)}
-                        className="mt-0.5 h-4 w-4 rounded border-amber-400 text-amber-600 focus:ring-amber-500"
+                        className="mt-0.5 h-4 w-4 rounded border-amber-400 text-amber-600 focus-visible:ring-amber-500"
                       />
                       <span>I understand and want to process this file anyway.</span>
                     </label>
@@ -507,7 +507,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
               <button
                 onClick={handleUpload}
                 disabled={startDisabled}
-                className="rounded-lg bg-primary-600 px-5 py-[11px] font-semibold text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-gray-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 max-sm:w-full"
+                className="rounded-lg bg-primary-600 px-5 py-[11px] font-semibold text-white transition-colors hover:bg-primary-700 disabled:cursor-not-allowed disabled:bg-gray-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:ring-offset-2 max-sm:w-full"
                 style={{ touchAction: 'manipulation' }}
               >
                 {uploading ? (

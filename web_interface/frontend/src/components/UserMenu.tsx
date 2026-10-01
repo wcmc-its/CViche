@@ -70,7 +70,7 @@ export default function UserMenu({ className }: UserMenuProps) {
         aria-haspopup="menu"
         aria-expanded={open}
         title={user.email}
-        className="flex items-center gap-2.5 rounded-lg p-1 text-left focus:ring-2 focus:ring-primary-500 focus:outline-none"
+        className="flex items-center gap-2.5 rounded-lg p-1 text-left focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
       >
         <span
           aria-hidden="true"
@@ -99,7 +99,7 @@ export default function UserMenu({ className }: UserMenuProps) {
             role="menuitem"
             onClick={handleLogout}
             disabled={signingOut}
-            className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60 disabled:cursor-not-allowed focus:bg-gray-50 focus:outline-none transition-colors"
+            className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60 disabled:cursor-not-allowed focus:bg-gray-50 focus-visible:outline-none transition-colors"
           >
             <LogOut className="h-4 w-4" aria-hidden="true" />
             {signingOut ? 'Signing out...' : 'Sign out'}
