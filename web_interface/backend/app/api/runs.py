@@ -131,6 +131,8 @@ def _dispatch_queue(
                     "message": "The run queue is unavailable right now -- please try again shortly."},
         )
 
+    # A batch run's token goes on the batch queue (#1114), on every branch below.
+    queue = run_queue.queue_for(run.batch_id)
     prior = flip_to_queued(db, run.id, allowed_from, resume_from_step=start_step, on_flip=on_flip)
 
     if not prior.flipped and prior.prior_status != RunState.QUEUED:
@@ -143,7 +145,7 @@ def _dispatch_queue(
                 content={"message": f"Run {run.id} already queued", "status": "queued"},
             )
         try:
-            run_queue.enqueue(run.id)
+            run_queue.enqueue(run.id, queue)
         except redis.exceptions.RedisError as e:
             logger.exception("Re-enqueue failed for already-queued run %s", run.id)
             raise HTTPException(
@@ -157,7 +159,7 @@ def _dispatch_queue(
         )
 
     try:
-        run_queue.enqueue(run.id)
+        run_queue.enqueue(run.id, queue)
     except redis.exceptions.RedisError as e:
         logger.exception("Enqueue failed for run %s; reverting the flip", run.id)
         if not revert_queued(db, run.id, prior):
@@ -231,6 +233,7 @@ def _run_summary(current_user: User, run: Run, all_scope: bool,
         quality_band=run.quality_band if all_scope else None,
         quality_cap=run.quality_cap if all_scope else None,
         feedback=feedback,
+        batch_id=run.batch_id,
     )
 
 
@@ -243,6 +246,7 @@ async def list_runs(
     faculty: str | None = Query(None),
     department: str | None = Query(None),
     feedback: str | None = Query(None),
+    batch_id: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -254,6 +258,8 @@ async def list_runs(
     three are ignored under scope=mine. ``feedback`` ("given" = any reviewer left
     feedback, "needed" = complete with none) applies in both scopes. Every run
     carries a ``feedback`` summary; scope=all adds the reviewer list.
+    ``batch_id`` (#1114) narrows either scope to one batch's runs; every row
+    carries its ``batch_id`` so the list can tag batch runs.
     """
     all_scope = scope == RunScope.ALL
     if all_scope:
@@ -264,6 +270,8 @@ async def list_runs(
         mine_feedback = feedback_clause(parse_feedback_filter(feedback))
         if mine_feedback is not None:
             query = query.filter(mine_feedback)
+    if batch_id:
+        query = query.filter(Run.batch_id == batch_id)
     total = query.count()
     runs = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()
 

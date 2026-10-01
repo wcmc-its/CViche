@@ -605,6 +605,96 @@ def test_notify_started_swallows_builder_exception(monkeypatch, caplog):
     assert "payload build failed" in errors[0].message
 
 
+# --- batch upload (#1114) ------------------------------------------------------
+
+def _capture_posts(monkeypatch):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    posted = []
+
+    def _ok_post(url, json=None, timeout=None):
+        posted.append(json)
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(notifications._SESSION, "post", _ok_post)
+    return posted
+
+
+def test_run_facts_carry_the_batch_id():
+    assert _run_facts(batch_id="BATCHA").batch_id == "BATCHA"
+    assert _run_facts().batch_id is None
+
+
+def test_notify_started_posts_nothing_for_a_run_in_a_batch(monkeypatch):
+    """A batch posts one "batch submitted" card instead; its runs' started
+    cards would bury it (up to 50 of them)."""
+    posted = _capture_posts(monkeypatch)
+
+    notifications.notify_run_started(_run(batch_id="BATCHA"))
+    notifications.notify_run_started(_run(id="SNGL01", batch_id=None))
+    notifications.flush()
+
+    assert [_title(p)["text"] for p in posted] == ["CViche run SNGL01 started"]
+
+
+def test_notify_terminal_still_posts_for_a_run_in_a_batch(monkeypatch):
+    posted = _capture_posts(monkeypatch)
+
+    notifications.notify_run_terminal(_run(batch_id="BATCHA", status="complete"))
+    notifications.flush()
+
+    assert [_title(p)["text"] for p in posted] == ["CViche run A1B2C3 complete"]
+
+
+def test_batch_submitted_payload_names_the_submitter_count_and_links_the_batch(monkeypatch):
+    monkeypatch.setenv("CVICHE_ALLOWED_ORIGINS", "https://cviche.weill.cornell.edu")
+
+    payload = notifications.build_batch_submitted_payload(
+        notifications.BatchFacts(id="BATCHA", files_submitted=30), submitter="Pat Example",
+    )
+
+    assert _title(payload)["text"] == "CViche batch BATCHA submitted (30 files)"
+    assert _facts(payload) == {"Batch ID": "BATCHA", "Files": "30", "Submitted by": "Pat Example"}
+    assert _card(payload)["actions"] == [{
+        "type": "Action.OpenUrl", "title": "Open batch",
+        "url": "https://cviche.weill.cornell.edu/runs?batch=BATCHA",
+    }]
+    assert payload["summary"] == "CViche batch BATCHA submitted (30 files)"
+
+
+def test_batch_submitted_payload_has_no_button_without_an_app_origin(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    payload = notifications.build_batch_submitted_payload(notifications.BatchFacts(id="BATCHA", files_submitted=2))
+    assert "actions" not in _card(payload)
+    assert "Submitted by" not in _facts(payload)
+
+
+def test_notify_batch_submitted_posts_one_card(monkeypatch):
+    posted = _capture_posts(monkeypatch)
+
+    notifications.notify_batch_submitted(notifications.BatchFacts(id="BATCHA", files_submitted=3), "Pat Example")
+    notifications.flush()
+
+    assert [_title(p)["text"] for p in posted] == ["CViche batch BATCHA submitted (3 files)"]
+
+
+def test_notify_batch_submitted_is_noop_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
+    monkeypatch.setattr(notifications, "_enqueue", lambda *a: pytest.fail("must not enqueue when unconfigured"))
+    assert notifications.notify_batch_submitted(notifications.BatchFacts(id="BATCHA", files_submitted=3)) is None
+
+
+def test_notify_batch_submitted_swallows_a_builder_exception(monkeypatch, caplog):
+    def _boom(*a, **k):
+        raise RuntimeError("bad batch")
+    monkeypatch.setattr(notifications, "build_batch_submitted_payload", _boom)
+
+    with caplog.at_level(logging.ERROR):
+        result = notifications.notify_batch_submitted(notifications.BatchFacts(id="BATCHA", files_submitted=3))
+
+    assert result is None
+    assert any("batch BATCHA" in r.getMessage() for r in caplog.records)
+
+
 # --- requests.Timeout is an explicit, tested failure mode (#782 D8 point 2) --
 
 def test_notify_terminal_retries_and_swallows_timeout(monkeypatch, caplog):

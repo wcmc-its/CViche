@@ -28,6 +28,7 @@ from app.schemas import (
     QualityScoreResult,
     QueueDbView,
     QueueStatsResponse,
+    QueueStreamStats,
 )
 from app.services.admin_service import get_step_avg_seconds, get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import (
@@ -307,6 +308,10 @@ def get_queue_stats(
     has claimed yet -- so a non-zero lag does not by itself rule stranding
     out.
 
+    The top-level stream fields are the single-run queue's (unchanged since
+    #701); ``queues`` repeats them per queue, adding the batch stream and its
+    dead-letter count (#1114).
+
     Plain ``def``: both ``queue_db_view`` (sync Session) and ``run_queue``'s
     Valkey calls (sync redis-py) are blocking, so FastAPI runs this in the
     threadpool instead of stalling the event loop (#701 admin_routes.py
@@ -320,7 +325,7 @@ def get_queue_stats(
     if not url:
         return QueueStatsResponse(enabled=True, db=db_view, error="valkey_not_configured")
     try:
-        stats = run_queue.stats()
+        per_queue = {queue.name: run_queue.stats(queue) for queue in run_queue.QUEUES_BY_NAME.values()}
     except redis.exceptions.RedisError as e:
         # The endpoint that diagnoses a stuck queue must still answer when
         # Valkey itself is the problem. The exception's own text can carry a
@@ -328,7 +333,10 @@ def get_queue_stats(
         # only to the log, never the response.
         logger.warning("Queue stats unavailable: %s: %s", type(e).__name__, e)
         return QueueStatsResponse(enabled=True, db=db_view, error="valkey_unavailable")
-    return QueueStatsResponse(enabled=True, db=db_view, **stats)
+    return QueueStatsResponse(
+        enabled=True, db=db_view, **per_queue[run_queue.SINGLE.name],
+        queues={name: QueueStreamStats(**stats) for name, stats in per_queue.items()},
+    )
 
 
 # ---------------------------------------------------------------------------

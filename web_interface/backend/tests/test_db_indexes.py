@@ -20,6 +20,8 @@ EXPECTED_INDEXES = {
     "ix_steps_run_id",
     "ix_logs_run_id",
     "ix_llm_usage_run_id",
+    # #1114: runs.batch_id, from the run_batches migration (c3d8e1f5a297).
+    "ix_runs_batch_id",
 }
 
 
@@ -73,6 +75,30 @@ def test_index_migration_roundtrips_on_sqlite(tmp_path, monkeypatch):
     command.downgrade(cfg, "f1a2b3c4d5e6")
     leftover = EXPECTED_INDEXES & _index_names(eng)
     assert not leftover, f"indexes not dropped on downgrade: {leftover}"
+
+
+def test_run_batches_downgrade_never_drops_an_index_a_foreign_key_needs(monkeypatch):
+    """MariaDB refuses DROP INDEX on an index a foreign key uses (1553), and
+    its DDL is not transactional, so a refusal mid-downgrade leaves the schema
+    half-downgraded. SQLite (the roundtrip above) accepts it, so the order is
+    pinned on the recorded operations: each FK goes before its index, and
+    run_batches' own user_id index goes with DROP TABLE, never on its own."""
+    import importlib.util
+    from unittest.mock import MagicMock
+
+    path = ALEMBIC_DIR / "versions" / "c3d8e1f5a297_add_run_batches.py"
+    spec = importlib.util.spec_from_file_location("c3d8e1f5a297_add_run_batches", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    op = MagicMock()
+    batch_op = op.batch_alter_table.return_value.__enter__.return_value
+    monkeypatch.setattr(migration, "op", op)
+
+    migration.downgrade()
+
+    assert op.drop_index.call_count == 0, op.drop_index.call_args_list
+    assert op.drop_table.call_args_list == [(("run_batches",),)]
+    assert [name for name, _, _ in batch_op.mock_calls] == ["drop_constraint", "drop_index", "drop_column"]
 
 
 def test_engine_sets_pool_recycle():
