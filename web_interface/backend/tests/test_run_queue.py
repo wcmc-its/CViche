@@ -147,15 +147,25 @@ def test_batch_queue_dead_letter_parks_on_the_batch_dead_stream(fake_redis):
     assert _batch_entries(fake_redis) == []
 
 
-def test_read_one_without_block_returns_at_once_on_an_empty_queue(fake_redis, monkeypatch):
+def test_read_one_without_block_sends_no_block_argument(fake_redis):
     """A flex worker's polling pass must not wait BLOCK_MS on each queue in
-    turn, or a single run arriving meanwhile waits behind the batch poll."""
-    import time
+    turn, or a single run arriving meanwhile waits behind the batch poll.
+    Pinned on the XREADGROUP arguments: fakeredis answers an empty blocking
+    read at once, so elapsed time can't tell the two apart."""
     run_queue.ensure_group(run_queue.BATCH)
-    monkeypatch.setattr(run_queue, "BLOCK_MS", 1500)
-    started = time.monotonic()
-    assert run_queue.read_one("a", run_queue.BATCH, block=False) is None
-    assert time.monotonic() - started < 1.0
+    sent_block = []
+    real_xreadgroup = fake_redis.xreadgroup
+
+    def spy(*args, **kwargs):
+        sent_block.append(kwargs.get("block"))
+        return real_xreadgroup(*args, **kwargs)
+    fake_redis.xreadgroup = spy
+    try:
+        assert run_queue.read_one("a", run_queue.BATCH, block=False) is None
+        assert run_queue.read_one("a", run_queue.BATCH) is None
+    finally:
+        del fake_redis.xreadgroup
+    assert sent_block == [None, run_queue.BLOCK_MS]
 
 
 def test_live_run_ids_covers_the_batch_queue(fake_redis):
