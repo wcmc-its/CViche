@@ -424,7 +424,8 @@ class TestParentOwnRecord:
 
 
 @pytest.mark.parametrize('key,expected', [('start_date', True), ('date', True), ('year', True),
-                                          ('end_date', True), ('role', False), ('mentee_name', False)])
+                                          ('end_date', True), ('dates_attended', True),
+                                          ('dates_attended_start_date', True), ('role', False), ('mentee_name', False)])
 def test_date_keys_never_count_as_a_parents_identity(key, expected):
     from unified_pipeline.stage6.fan_out import _is_date_key
     assert _is_date_key(key) is expected
@@ -501,3 +502,100 @@ def test_the_renderer_map_names_only_schema_fields_and_never_narrative():
 
 def test_every_code_with_a_schema_is_in_the_renderer_map_except_text_codes_and_personal_data():
     assert set(FIELD_SCHEMAS) - set(fan_out._RENDERED_FIELDS) == fan_out._TEXT_RENDERED_CODES | {'A'}
+
+
+# --- #1187: B1 degrees carrying dates_attended, and the warning for a refusal ---
+
+def _degree(degree, institution, year, **dates):
+    return {'degree': degree, 'institution': institution, 'year': year, **dates}
+
+
+def _two_degrees(dates_attended):
+    first = _degree('BSc', 'Maple Glen University', '2005', **dates_attended[0])
+    second = _degree('MSc', 'Birch Hollow University', '2008', **dates_attended[1])
+    return {'taxonomy_code': 'B1', 'element_idx_start': 3,
+            'text': 'BSc Maple Glen University 2001 2005 2005\tMSc Birch Hollow University 2006 2008 2008',
+            'extracted_fields': {'degrees': [first, second]}}
+
+
+_NESTED_DATES = [{'dates_attended': {'start_date': '2001', 'end_date': '2005'}},
+                 {'dates_attended': {'start_date': '2006', 'end_date': '2008'}}]
+
+
+class TestB1DatesAttended:
+    def test_two_degrees_with_dates_attended_fan_out(self):
+        children = _fan(_two_degrees(_NESTED_DATES))
+        assert [c['extracted_fields']['degree'] for c in children] == ['BSc', 'MSc']
+        assert children[1]['extracted_fields']['dates_attended'] == _NESTED_DATES[1]['dates_attended']
+
+    def test_a_degree_key_nobody_reads_still_keeps_the_list_whole(self):
+        entry = _two_degrees(_NESTED_DATES)
+        entry['extracted_fields']['degrees'][0]['gpa'] = '3.9'
+        assert _fan(entry) == [entry]
+
+    def test_a_string_dates_attended_holds_no_token_so_the_entry_stays_whole(self):
+        # The B1 renderer ignores a string `dates_attended`; fanning out would
+        # drop the 2001/2006 start years the entry's text names.
+        string_dates = [{'dates_attended': '2001-2005'}, {'dates_attended': '2006-2008'}]
+        entry = _two_degrees(string_dates)
+        assert _fan(entry) == [entry]
+
+    def test_both_degrees_render(self, tmp_path):
+        import json
+
+        from docx import Document
+
+        from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+        source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
+        source.write_text(json.dumps({'document_uid': 'TESTAA',
+                                      'entries': [_two_degrees(_NESTED_DATES)]}))
+        WCMTemplateGenerator(verbose=False).generate(
+            str(source), str(target), research_summary_path=None)
+        body = ' '.join(t.text or '' for t in Document(str(target)).element.body.iter(
+            '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+        for name in ('Maple Glen University', 'Birch Hollow University', 'BSc', 'MSc'):
+            assert name in body
+
+
+class TestRejectedListWarning:
+    def _warnings(self, *entries):
+        warnings = []
+        fan_out_multi_record_entries(list(entries), FIELD_SCHEMAS, warnings)
+        return warnings
+
+    def test_an_unknown_item_key_warns_with_key_names_only(self):
+        entry = _two_degrees(_NESTED_DATES)
+        entry['extracted_fields']['degrees'][0]['gpa'] = '3.9'
+        (warning,) = self._warnings(entry)
+        assert warning['check'] == fan_out.REJECTED_LIST_CHECK
+        assert (warning['code'], warning['severity']) == ('B1', 'WARN')
+        assert 'gpa' in warning['evidence']
+        assert '3.9' not in str(warning)
+
+    def test_a_declined_record_list_warns_without_stray_keys(self):
+        entry = _two_degrees([{}, {}])
+        entry['text'] = entry['text'] + ' Zzunheld'
+        (warning,) = self._warnings(entry)
+        assert warning['evidence'] == ['B1.degrees: 1 entries']
+
+    def test_one_warning_per_code_and_key_counts_the_entries(self):
+        entry = _two_degrees(_NESTED_DATES)
+        entry['extracted_fields']['degrees'][0]['gpa'] = '3.9'
+        (warning,) = self._warnings(entry, copy.deepcopy(entry))
+        assert warning['evidence'][0] == 'B1.degrees: 2 entries'
+
+    def test_a_fanned_out_or_single_record_entry_does_not_warn(self):
+        single = {'taxonomy_code': 'B1', 'text': 'BSc Maple Glen University 2005',
+                  'extracted_fields': _degree('BSc', 'Maple Glen University', '2005')}
+        assert self._warnings(_two_degrees(_NESTED_DATES), single) == []
+
+    def test_no_warnings_list_is_backward_compatible(self):
+        assert len(_fan(_two_degrees(_NESTED_DATES))) == 2
+
+    def test_the_generator_puts_the_warning_in_the_sidecar_list(self):
+        from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+        entry = _two_degrees(_NESTED_DATES)
+        entry['extracted_fields']['degrees'][0]['gpa'] = '3.9'
+        generator = WCMTemplateGenerator(verbose=False)
+        generator._group_entries_by_code([entry])
+        assert [w['check'] for w in generator._section_failures] == [fan_out.REJECTED_LIST_CHECK]
