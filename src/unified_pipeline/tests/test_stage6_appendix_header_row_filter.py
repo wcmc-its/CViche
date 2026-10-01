@@ -224,7 +224,8 @@ def test_documented_false_positive_class_is_pinned(entry):
     ("|  |  |", DROP_RENDERS_EMPTY),
     (HEADER_ROW, DROP_COLUMN_HEADER),
     ("NAME:", DROP_COLUMN_HEADER),
-    ("Please list activities at WCM and affiliates, NYP, and previously employed "
+    # a tracked revision's wording minus one comma: near, not exact (#829)
+    ("Please list activities at WCM and affiliates, NYP and previously employed "
      "institutions, including division or department positions, directorships, "
      "deanships, chairmanships on major institutional committees.",
      DROP_NEAR_TEMPLATE_INSTRUCTION),
