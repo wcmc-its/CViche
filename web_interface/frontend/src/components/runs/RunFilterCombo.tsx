@@ -16,6 +16,8 @@ interface RunFilterComboProps {
   activeId: string
   placeholder: string
   model: ComboModel
+  /** False for short fixed lists: the search box stays for keyboard use but is not shown. */
+  searchable?: boolean
   onPick: (id: string) => void
 }
 
@@ -67,7 +69,7 @@ function OptionRow({ id, option, active, highlighted, onPick, onHover }: OptionR
 }
 
 /** Searchable single-select popover (combobox + listbox) for one admin run filter. */
-export default function RunFilterCombo({ label, valueLabel, activeId, placeholder, model, onPick }: RunFilterComboProps) {
+export default function RunFilterCombo({ label, valueLabel, activeId, placeholder, model, searchable = true, onPick }: RunFilterComboProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [highlight, setHighlight] = useState(0)
@@ -162,7 +164,7 @@ export default function RunFilterCombo({ label, valueLabel, activeId, placeholde
       </button>
       {open && (
         <div className="absolute right-0 top-[42px] z-dropdown w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-[10px] border border-sand-300 bg-white shadow-[0_12px_32px_rgba(60,40,10,0.14)]">
-          <div className="flex h-[42px] items-center gap-2 border-b border-sand-200 px-3">
+          <div className={searchable ? 'flex h-[42px] items-center gap-2 border-b border-sand-200 px-3' : 'sr-only'}>
             <Search className="h-[15px] w-[15px] text-gray-500" aria-hidden="true" />
             <input
               ref={inputRef}

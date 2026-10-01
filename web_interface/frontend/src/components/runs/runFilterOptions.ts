@@ -1,6 +1,7 @@
 import type { RunFilterOptions, RunSummary } from '../../types'
 import { formatRelativeDate } from '../../utils'
 import { RUN_BY_SELF } from './runFilters'
+import { FEEDBACK_VALUE_LABEL } from './runFeedback'
 import { SELF_RUN_BY_LABEL } from './runGroups'
 
 /** One selectable entry in a filter popover. id '' is the "any" entry. */
@@ -54,6 +55,18 @@ export function buildFacultyModel(options: RunFilterOptions): ComboModel {
       count: f.count,
       search: f.value.toLowerCase(),
     })),
+  }
+}
+
+/** Any / Feedback given / Needs feedback, with counts from filter-options; all pinned, no search. */
+export function buildFeedbackModel(options: RunFilterOptions): ComboModel {
+  return {
+    pinned: [
+      { id: '', label: 'Any', search: '' },
+      { id: 'given', label: FEEDBACK_VALUE_LABEL.given, count: options.feedback.given, search: '' },
+      { id: 'needed', label: FEEDBACK_VALUE_LABEL.needed, count: options.feedback.needed, search: '' },
+    ],
+    items: [],
   }
 }
 

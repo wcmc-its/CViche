@@ -3,11 +3,13 @@ import type { RunByOption, RunFilterOptions, RunSummary } from '../../types'
 import RunFilterCombo from './RunFilterCombo'
 import {
   buildDepartmentModel,
+  buildFeedbackModel,
   buildFacultyModel,
   buildRunByModel,
   recentRunByIds,
 } from './runFilterOptions'
-import { RUN_BY_SELF, hasActiveFilters } from './runFilters'
+import { FEEDBACK_VALUE_LABEL } from './runFeedback'
+import { RUN_BY_SELF, hasActiveFilters, isFeedbackFilter } from './runFilters'
 import type { RunFilterControls, RunFilters } from './runFilters'
 import { SELF_RUN_BY_LABEL } from './runGroups'
 
@@ -38,15 +40,21 @@ export function runByValueLabel(
   return id === currentUserId ? `${name} (you)` : name
 }
 
+/** Display text for the selected Feedback value; '' when unset. */
+function feedbackValueLabel(feedback: string): string {
+  return isFeedbackFilter(feedback) ? FEEDBACK_VALUE_LABEL[feedback] : ''
+}
+
 function activeChips(filters: RunFilters, runByLabel: string) {
   return [
     { key: 'department' as const, label: 'Department', value: filters.department },
     { key: 'faculty' as const, label: 'Faculty', value: filters.faculty },
     { key: 'runBy' as const, label: 'Run by', value: filters.runBy && runByLabel },
+    { key: 'feedback' as const, label: 'Feedback', value: feedbackValueLabel(filters.feedback) },
   ].filter((chip) => chip.value)
 }
 
-/** The three admin filter comboboxes, shown right-aligned in the filter row. */
+/** The four admin filter comboboxes, shown right-aligned in the filter row. */
 export function RunFilterCombos({ controls, options, runs, currentUserId, currentUserEmail }: RunFilterBarProps) {
   const { filters, setFilter } = controls
   const data = options ?? EMPTY_OPTIONS
@@ -76,6 +84,15 @@ export function RunFilterCombos({ controls, options, runs, currentUserId, curren
         placeholder="Name, CWID or email"
         model={buildRunByModel(data, currentUserId, currentUserEmail, recentRunByIds(runs, currentUserId))}
         onPick={(id) => setFilter('runBy', id)}
+      />
+      <RunFilterCombo
+        label="Feedback"
+        valueLabel={feedbackValueLabel(filters.feedback) || 'Any'}
+        activeId={filters.feedback}
+        placeholder="Feedback status"
+        model={buildFeedbackModel(data)}
+        searchable={false}
+        onPick={(id) => setFilter('feedback', id)}
       />
     </div>
   )

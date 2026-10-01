@@ -1,13 +1,13 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { FileText, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
-import { getRuns, getFeedbackStatuses, getRunFilterOptions } from '../api/runs'
-import type { FeedbackStatus, RunFilterOptions, RunSummary } from '../types'
+import { getRuns, getRunFilterOptions } from '../api/runs'
+import type { RunFilterOptions, RunSummary } from '../types'
 import ErrorBanner from './ErrorBanner'
 import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 import RunTable from './runs/RunTable'
 import { ActiveFilterChips, RunFilterCombos } from './runs/RunFilterBar'
-import { toListParams, useRunFilters } from './runs/runFilters'
-import { compareRunsDir, groupRuns } from './runs/runGroups'
+import { hasActiveFilters, toListParams, useRunFilters } from './runs/runFilters'
+import { compareGroupsDir, groupRuns } from './runs/runGroups'
 import type { SortDir, SortField } from './runs/runGroups'
 
 interface RunHistoryProps {
@@ -59,7 +59,6 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [total, setTotal] = useState(0)
-  const [feedbackMap, setFeedbackMap] = useState<Record<string, boolean>>({})
   const [filterOptions, setFilterOptions] = useState<RunFilterOptions | null>(null)
   const [currentPage, setCurrentPage] = useState(0)
   const [pageFilterKey, setPageFilterKey] = useState(filterKey)
@@ -73,17 +72,6 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   if (pageFilterKey !== filterKey) {
     setPageFilterKey(filterKey)
     setCurrentPage(0)
-  }
-
-  const fetchFeedbackStatus = async () => {
-    try {
-      const data: FeedbackStatus[] = await getFeedbackStatuses()
-      const map: Record<string, boolean> = {}
-      data.forEach((item) => { map[item.run_id] = item.has_feedback })
-      setFeedbackMap(map)
-    } catch (err) {
-      console.error('Error fetching feedback status:', err)
-    }
   }
 
   const fetchRuns = useCallback(async (offset: number) => {
@@ -100,8 +88,6 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
       setError('Unable to load run history. Please refresh the page to try again.')
     }
   }, [listParams])
-
-  useEffect(() => { fetchFeedbackStatus() }, [])
 
   useEffect(() => {
     if (!isAdmin) return
@@ -134,7 +120,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
 
   // Grouping is per loaded page: reruns of the same faculty member that fall on
   // another page are not merged into this page's group.
-  const groups = groupRuns(runs).sort((a, b) => compareRunsDir(a.latest, b.latest, sortField, sortDir, feedbackMap))
+  const groups = groupRuns(runs).sort((a, b) => compareGroupsDir(a, b, sortField, sortDir, user?.user_id, isAdmin))
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
   const startIndex = currentPage * PAGE_SIZE
@@ -151,7 +137,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
 
   const filterBarProps = { controls, options: filterOptions, runs, currentUserId: user?.user_id }
 
-  if (runs.length === 0 && !error && !controls.filters.department && !controls.filters.faculty && !controls.filters.runBy) {
+  if (runs.length === 0 && !error && !hasActiveFilters(controls.filters)) {
     return (
       <section ref={containerRef} aria-label="Previous runs" className="mt-6 bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-6">
         <div className="flex flex-col items-center justify-center py-12">
@@ -191,7 +177,6 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
               groups={groups}
               isAdmin={isAdmin}
               showCost={showCost}
-              feedbackMap={feedbackMap}
               currentUserId={user?.user_id}
               sortField={sortField}
               sortDir={sortDir}
