@@ -16,7 +16,7 @@ from docx.opc.exceptions import PackageNotFoundError
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from unified_pipeline.core.docx_structure_extractor import extract_owner_side_channel
-from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.llm.retry import RETRYABLE_ERRORS, LLMOutageError
 
 logger = logging.getLogger(__name__)
@@ -81,7 +81,9 @@ Return JSON with:
 If you cannot determine a field, return an empty string for it."""
 
 
-def _run_owner_name_llm(content_lines: list[str]) -> dict[str, str] | None:
+def _run_owner_name_llm(
+    content_lines: list[str], usage: LlmUsage | None = None,
+) -> dict[str, str] | None:
     """Run the owner-name extraction prompt over `content_lines`, joined with
     newlines. Returns the validated 6-field dict on success, or None on any of
     the narrowed failure modes `extract_cv_owner_name` degrades to
@@ -91,6 +93,10 @@ def _run_owner_name_llm(content_lines: list[str]) -> dict[str, str] | None:
     Pure with respect to CV-owner state: callers decide what to do with the
     result. Used for both the body-derived tier and the #456 side-channel
     tier, so the two never drift into different prompts or validation.
+
+    `usage`, when given, receives the call's priced result as soon as the call
+    returns -- before parsing -- so a billed reply that then fails to parse or
+    validate (and degrades to None) still counts toward the stage's cost (#1177).
     """
     content_block = "\n".join(content_lines)
     prompt = _build_owner_name_prompt(content_block)
@@ -101,6 +107,9 @@ def _run_owner_name_llm(content_lines: list[str]) -> dict[str, str] | None:
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"}
         )
+
+        if usage is not None:
+            usage.add(llm_result)
 
         response_text = llm_result["content"]
         parsed = json.loads(response_text)
@@ -196,6 +205,7 @@ def extract_cv_owner_name(
     document_uid: str,
     mapped_entries: list[dict[str, Any]],
     docx_path: str | None = None,
+    usage: LlmUsage | None = None,
 ) -> dict[str, str]:
     """
     Extract CV owner's name using LLM from the first chunk of CV content.
@@ -215,6 +225,10 @@ def extract_cv_owner_name(
             `fallback_from_uid`. None (the default) reproduces pre-#456
             behavior exactly; every existing caller that does not pass it
             is unaffected.
+        usage: Optional LlmUsage that receives every owner-name call_llm
+            result (body tier and side-channel tier), so the caller can fold
+            the cost into stage 4's total (#1177). The returned dict stays the
+            six name fields -- it is persisted as `cv_owner`.
 
     Returns:
         Dict with 'first_name', 'middle_name', 'last_name', 'suffix',
@@ -279,7 +293,7 @@ def extract_cv_owner_name(
         lines, channel = _owner_side_channel_content_lines(document_uid, docx_path)
         if not lines:
             return False
-        side_result = _run_owner_name_llm(lines)
+        side_result = _run_owner_name_llm(lines, usage)
         if side_result and side_result['last_name']:
             result.update(side_result)
             logger.info(
@@ -294,7 +308,7 @@ def extract_cv_owner_name(
             fallback_from_uid()
         return result
 
-    body_result = _run_owner_name_llm(first_entries[:10])
+    body_result = _run_owner_name_llm(first_entries[:10], usage)
     if body_result is not None:
         result.update(body_result)
 

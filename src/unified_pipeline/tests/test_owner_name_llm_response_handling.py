@@ -68,6 +68,34 @@ def test_owner_name_extraction_lets_a_real_bug_propagate(monkeypatch):
         )
 
 
+def test_owner_name_call_result_is_added_to_the_usage_even_when_the_reply_is_unparseable(monkeypatch):
+    """#1177: a billed reply that fails to parse still costs money."""
+    usage = owner_name.LlmUsage()
+    monkeypatch.setattr(
+        owner_name, "call_llm",
+        lambda **kwargs: dict(_llm_result("not valid json", cost=0.002), prompt_tokens=7, completion_tokens=3),
+    )
+
+    result = owner_name._run_owner_name_llm(["synthetic line"], usage)
+
+    assert result is None
+    assert usage.cost == pytest.approx(0.002)
+    assert usage.prompt_tokens == 7 and usage.completion_tokens == 3
+
+
+def test_extract_cv_owner_name_bills_both_tiers_to_the_same_usage(monkeypatch, tmp_path):
+    """Body tier finds no name, so the side-channel tier makes a second call."""
+    usage = owner_name.LlmUsage()
+    monkeypatch.setattr(owner_name, "call_llm", lambda **kw: _llm_result(json.dumps({}), cost=0.01))
+    monkeypatch.setattr(owner_name, "_owner_side_channel_content_lines", lambda uid, path: (["synthetic"], "sdt"))
+    docx = tmp_path / "synthetic.docx"
+    docx.write_bytes(b"x")
+
+    owner_name.extract_cv_owner_name("web001", [{"text": "synthetic entry"}], docx_path=str(docx), usage=usage)
+
+    assert usage.cost == pytest.approx(0.02)
+
+
 def test_owner_name_extraction_still_falls_back_on_malformed_json(monkeypatch):
     """An expected LLM/parsing failure still degrades to the uid fallback."""
 

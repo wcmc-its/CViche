@@ -187,6 +187,41 @@ def test_totals_sum_over_every_batch_across_threads(monkeypatch):
     assert len(out["entries"]) == 10
 
 
+def _stub_owner_billing(monkeypatch, cost=0.25, prompt_tokens=30, completion_tokens=12):
+    """An owner-name stub that bills `usage` the way the real call does."""
+    def billed(document_uid, mapped_entries, docx_path=None, usage=None):
+        usage.add({"cost": cost, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens})
+        return dict(_NO_OWNER)
+
+    monkeypatch.setattr(extraction, "extract_cv_owner_name", billed)
+    monkeypatch.setattr(extraction, "infer_cv_owner_location", lambda entries: {})
+
+
+def test_owner_name_call_cost_and_tokens_fold_into_stage_totals(monkeypatch):
+    """#1177: the owner-name call's cost was discarded, so stage 4 reported low."""
+    _stub_owner_billing(monkeypatch)
+    monkeypatch.setattr(
+        extraction, "extract_fields_batch",
+        lambda entries, batch_idx, total, cv_owner_name, cancel_check=None:
+            _batch_result(entries, cost=0.5, tokens=100),
+    )
+
+    out = extraction.extract_fields_from_mapped_entries(_entries(4), batch_size=2, workers=1)
+
+    assert out["total_cost"] == pytest.approx(0.5 * 2 + 0.25)
+    assert out["total_tokens"] == 100 * 2 + 42
+
+
+def test_owner_name_cost_survives_the_no_valid_entries_early_out(monkeypatch):
+    _stub_owner_billing(monkeypatch)
+    entries = [{"text": "", "element_idx": 0, "taxonomy_code": "A1"}]
+
+    out = extraction.extract_fields_from_mapped_entries(entries, batch_size=5)
+
+    assert out["total_cost"] == pytest.approx(0.25)
+    assert out["total_tokens"] == 42
+
+
 def test_workers_one_is_strictly_serial_and_ordered(monkeypatch):
     _stub_owner(monkeypatch)
     order: list[int] = []
