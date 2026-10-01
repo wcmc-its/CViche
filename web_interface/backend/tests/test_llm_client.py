@@ -1195,3 +1195,42 @@ def test_bedrock_other_models_keep_temperature_and_no_thinking_field(model):
     passed = _converse_kwargs_for(model)
     assert passed["inferenceConfig"]["temperature"] == 0.0
     assert "additionalModelRequestFields" not in passed
+
+
+# ---------------------------------------------------------------------------
+# LlmUsage: the per-caller cost accumulator (#1177)
+# ---------------------------------------------------------------------------
+
+def test_llm_usage_sums_every_result_it_is_given():
+    from unified_pipeline.llm_client import LlmUsage
+
+    usage = LlmUsage()
+    usage.add({"cost": 0.5, "prompt_tokens": 10, "completion_tokens": 4,
+               "cache_read_tokens": 3, "cache_write_tokens": 1})
+    usage.add({"cost": 0.25, "prompt_tokens": 20, "completion_tokens": 6})  # no cache keys
+
+    assert usage.cost == pytest.approx(0.75)
+    assert usage.token_totals() == {"prompt_tokens": 30, "completion_tokens": 10,
+                                    "cache_read_tokens": 3, "cache_write_tokens": 1}
+
+
+def test_llm_usage_is_exact_under_concurrent_adds():
+    import threading
+    from unified_pipeline.llm_client import LlmUsage
+
+    usage = LlmUsage()
+    barrier = threading.Barrier(8)
+
+    def worker():
+        barrier.wait()
+        for _ in range(500):
+            usage.add({"cost": 1.0, "prompt_tokens": 1})
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert usage.cost == 4000.0
+    assert usage.prompt_tokens == 4000

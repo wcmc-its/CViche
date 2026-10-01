@@ -210,6 +210,13 @@ def test_stage6_directory_is_not_valid_output(tmp_path):
 # ---------------------------------------------------------------------------
 
 UID = "testcv"
+
+# Synthetic per-stage costs the stubs report (#1177): distinct so a stage
+# dropped from the total changes the sum.
+_STAGE_4_5_COST = 0.04
+_STAGE_5C_COST = 0.05
+_STAGE_5D_COST = 0.06
+_STAGE_6_COST = 0.07
 _OUT = Path("src/unified_pipeline/outputs")
 _FILES = {
     '1a': _OUT / 'stage_1a_segmentation' / f'{UID}_segmented.json',
@@ -300,7 +307,8 @@ def _install_stubs(monkeypatch, calls, fail, stage5b_writer, stage5_path, tmp_pa
         calls.record('4.5', input_path=input_path, verbose=verbose)
         boom_if('4.5')
         return _write(_FILES['4.5'], {'research_summary': {
-            'method': 'llm', 'm1_score': 0.9, 'summary_length': 500}})
+            'method': 'llm', 'm1_score': 0.9, 'summary_length': 500},
+            'total_cost': _STAGE_4_5_COST})
 
     def stage_5(*, stage4_path, verbose):
         calls.record('5', stage4_path=stage4_path, verbose=verbose)
@@ -318,17 +326,18 @@ def _install_stubs(monkeypatch, calls, fail, stage5b_writer, stage5_path, tmp_pa
     def stage_5c(*, input_path, verbose):
         calls.record('5c', input_path=input_path, verbose=verbose)
         boom_if('5c')
-        return _write(_FILES['5c'])
+        return _write(_FILES['5c'], {'stage_5c': {'total_cost': _STAGE_5C_COST}})
 
     def stage_5d(*, input_path, verbose):
         calls.record('5d', input_path=input_path, verbose=verbose)
         boom_if('5d')
-        return _write(_FILES['5d'])
+        return _write(_FILES['5d'], {'stage_5d': {'total_cost': _STAGE_5D_COST}})
 
-    def stage_6(*, input_path, verbose, original_doc_path):
+    def stage_6(*, input_path, verbose, original_doc_path, llm_usage):
         calls.record('6', input_path=input_path, verbose=verbose,
                      original_doc_path=original_doc_path)
         boom_if('6')
+        llm_usage.add({'cost': _STAGE_6_COST})
         path = tmp_path / _FILES['6']
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b'PK\x03\x04fake')
@@ -948,9 +957,88 @@ def test_total_cost_is_the_sum_of_every_stage_result():
 
 
 def test_the_reported_total_cost_matches_the_stage_lines(tmp_path, monkeypatch, capsys):
-    """0.01 (1a) + 0.02 (2) + 0.01 (3a) + 0.01 (3b) + 0.03 (4) + 0.0 (5b)."""
+    """0.01 (1a) + 0.02 (2) + 0.01 (3a) + 0.01 (3b) + 0.03 (4) + 0.04 (4.5)
+    + 0.0 (5b) + 0.05 (5c) + 0.06 (5d) + 0.07 (6)."""
     _, out = _run_main(tmp_path, monkeypatch, capsys)
-    assert "  Total:    $0.0800" in out
+    assert "  Total:    $0.3000" in out
+
+
+def test_the_costs_block_lists_every_llm_stage_with_its_own_cost(tmp_path, monkeypatch, capsys):
+    """#1177: stages 4.5, 5c, 5d and 6 call the LLM but were missing from the
+    Costs block and from the total (22% low over 40 runs)."""
+    _, out = _run_main(tmp_path, monkeypatch, capsys)
+    costs_block = out.split("Costs:", 1)[1].split("Processing Stats:", 1)[0]
+    for label, cost in (("Stage 4.5:", _STAGE_4_5_COST), ("Stage 5c:", _STAGE_5C_COST),
+                        ("Stage 5d:", _STAGE_5D_COST), ("Stage 6: ", _STAGE_6_COST)):
+        assert f"  {label} ${cost:.4f}" in costs_block
+
+
+def test_an_unreadable_formatter_output_is_unknown_cost_not_zero(tmp_path, caplog):
+    """Same #489 shape for the stages whose cost is read back from their output:
+    an unreadable file is not a genuine $0.00."""
+    corrupt = tmp_path / 'stage_5c.json'
+    corrupt.write_text("{not valid json")
+
+    caplog.set_level(logging.INFO)
+    cost = run_full_pipeline._read_stage_cost(str(corrupt), '5c', 'stage_5c')
+
+    assert cost is None
+    assert any("stage 5c cost" in r.getMessage().lower() for r in caplog.records)
+    run_full_pipeline._print_costs(run_full_pipeline.PipelineResult(
+        results={'stage_5c': _result('5c', cost=cost)}, total_duration_seconds=1.0, failed=[]))
+    assert "Stage 5c: unknown (output cost unreadable)" in caplog.text
+    assert "Stage 5c: $0.0000" not in caplog.text
+
+
+# Every module that imports call_llm, and the stage whose cost line must cover it.
+# A new call_llm module has to be added here, which forces the question
+# "does a driver report its cost?" (#1177).
+_CALL_LLM_MODULE_STAGE = {
+    'segmentation/chunked_chat_hierarchy_extractor.py': '1a',
+    'segmentation/signature_based_segmentation.py': '1a',
+    'stage_2_entry_extraction.py': '2',
+    'stage_3a_header_taxonomy_mapper.py': '3a',
+    'stage_3b_entry_classifier.py': '3b',
+    'stage3b/classify.py': '3b',
+    'stage_4_field_extractor.py': '4',
+    'stage4/extraction.py': '4',
+    'stage4/owner_name.py': '4',
+    'stage_4_5_research_summary.py': '4.5',
+    'stage5b/lookup.py': '5b',
+    'stage_5c_teaching_formatter.py': '5c',
+    'stage_5d_citation_formatter.py': '5d',
+    'stage_6_word_template.py': '6',
+}
+# Import call_llm but no driver runs them (only standalone scripts reach them).
+_CALL_LLM_UNWIRED_MODULES = frozenset({
+    'core/personal_info_extractor.py',
+    'core/candidate_surfacer.py',
+})
+
+
+def _modules_importing_call_llm():
+    package = Path(__file__).resolve().parents[1]
+    found = set()
+    for path in package.rglob('*.py'):
+        relative = path.relative_to(package)
+        if relative.parts[0] == 'tests' or relative.as_posix() == 'llm_client.py':
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.ImportFrom)
+                    and any(alias.name == 'call_llm' for alias in node.names)):
+                found.add(relative.as_posix())
+    return found
+
+
+def test_every_stage_module_that_calls_the_llm_is_in_the_cli_cost_list():
+    modules = _modules_importing_call_llm()
+    unmapped = modules - set(_CALL_LLM_MODULE_STAGE) - _CALL_LLM_UNWIRED_MODULES
+    assert not unmapped, (
+        f"{sorted(unmapped)} import call_llm: map each to its stage in "
+        "_CALL_LLM_MODULE_STAGE so its cost is reported (#1177)")
+    missing = {stage for module, stage in _CALL_LLM_MODULE_STAGE.items()
+               if module in modules} - set(run_full_pipeline._COST_REPORTING_STAGES)
+    assert not missing, f"stages {sorted(missing)} call the LLM but are not in _COST_REPORTING_STAGES"
 
 
 # -- r3960726469 #7: the OS-level exit status -------------------------------
