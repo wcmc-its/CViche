@@ -1512,3 +1512,182 @@ def test_call_with_retry_retries_transport_errors_botocore_no_longer_retries(
     result, _ = retry._call_with_retry(flaky, retry_count=3)
     assert result == "ok"
     assert len(calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# bedrock.py -- content_filtered fallback to Sonnet 4.6 (#1174)
+# ---------------------------------------------------------------------------
+
+SONNET_5 = "us.anthropic.claude-sonnet-5"
+_USER_MSG = [{"role": "user", "content": "synthetic request"}]
+
+
+def _empty_response(stop_reason: str, *, input_tokens: int = 100) -> dict:
+    return {
+        "output": {"message": {"content": []}},
+        "stopReason": stop_reason,
+        "usage": {"inputTokens": input_tokens, "outputTokens": 1},
+    }
+
+
+def _filtered_empty_pair() -> list[dict]:
+    """First call and its JSON-repair retry, both empty and filtered."""
+    return [_empty_response("content_filtered"), _empty_response("content_filtered")]
+
+
+def _model_ids(fake: _FakeBedrockClient) -> list[str]:
+    return [call["modelId"] for call in fake.calls]
+
+
+def test_content_filtered_empty_falls_back_once_to_sonnet_4_6(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ok = _converse_response("hello", input_tokens=10, output_tokens=5)
+    fake = _FakeBedrockClient(_filtered_empty_pair() + [ok])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == [SONNET_5, SONNET_5, bedrock.CONTENT_FILTER_FALLBACK_MODEL]
+    assert bedrock.CONTENT_FILTER_FALLBACK_MODEL == "us.anthropic.claude-sonnet-4-6"
+    assert result["content"] == "hello"
+    assert result["model"] == bedrock.CONTENT_FILTER_FALLBACK_MODEL
+    # The fallback is priced at its own rate, plus the two billed filtered calls.
+    fallback_cost = pipeline_config.calculate_cost(
+        10, 5, model=bedrock.CONTENT_FILTER_FALLBACK_MODEL, provider="bedrock")
+    filtered_cost = pipeline_config.calculate_cost(
+        200, 2, model=SONNET_5, provider="bedrock")
+    assert fallback_cost > 0
+    assert result["cost"] == pytest.approx(fallback_cost + filtered_cost)
+
+
+def test_content_filtered_fallback_request_drops_sonnet_5_only_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeBedrockClient(_filtered_empty_pair() + [_converse_response("hello")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    assert "additionalModelRequestFields" in fake.calls[0]
+    assert "additionalModelRequestFields" not in fake.calls[2]
+    assert fake.calls[2]["inferenceConfig"]["temperature"] == 0.2
+
+
+def test_content_filtered_partial_text_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Mid-stream truncation: non-empty text, never BedrockEmptyResponseError.
+    truncated = _converse_response('{"a": ', stop_reason="content_filtered")
+    ok = _converse_response('{"a": 1}')
+    fake = _FakeBedrockClient([truncated, truncated, ok])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        _USER_MSG, {"type": "json_object"}, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == [SONNET_5, SONNET_5, bedrock.CONTENT_FILTER_FALLBACK_MODEL]
+    assert json.loads(result["content"]) == {"a": 1}
+    assert result["finish_reason"] == "stop"
+
+
+def test_content_filtered_schema_tool_path_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "extract_v1", "schema": {"type": "object"}},
+    }
+    filtered = _empty_response("content_filtered")
+    tool_ok = {
+        "output": {"message": {"content": [{"toolUse": {"input": {"foo": "bar"}}}]}},
+        "stopReason": "tool_use",
+        "usage": {"inputTokens": 10, "outputTokens": 5},
+    }
+    fake = _FakeBedrockClient([filtered, tool_ok])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(_USER_MSG, response_format, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == [SONNET_5, bedrock.CONTENT_FILTER_FALLBACK_MODEL]
+    assert json.loads(result["content"]) == {"foo": "bar"}
+
+
+def test_second_content_filter_on_fallback_raises_and_never_loops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeBedrockClient(_filtered_empty_pair() + _filtered_empty_pair())
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockEmptyResponseError, match="content_filtered"):
+        bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    # primary + its repair, fallback + its repair: no third model, no more calls.
+    assert _model_ids(fake) == [SONNET_5, SONNET_5] + [bedrock.CONTENT_FILTER_FALLBACK_MODEL] * 2
+
+
+def test_second_content_filter_with_partial_text_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    truncated = _converse_response('{"a": ', stop_reason="content_filtered")
+    fake = _FakeBedrockClient([truncated] * 4)
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockContentFilteredError):
+        bedrock._handle_bedrock(
+            _USER_MSG, {"type": "json_object"}, _bedrock_cfg(model=SONNET_5))
+
+    assert len(fake.calls) == 4
+
+
+@pytest.mark.parametrize(
+    "stop_reason", ["guardrail_intervened", "max_tokens", "malformed_model_output"])
+def test_other_stop_reasons_never_fall_back(
+    monkeypatch: pytest.MonkeyPatch, stop_reason: str,
+) -> None:
+    fake = _FakeBedrockClient([_empty_response(stop_reason), _empty_response(stop_reason)])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockEmptyResponseError):
+        bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == [SONNET_5, SONNET_5]
+
+
+def test_non_filtered_result_on_sonnet_5_makes_one_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeBedrockClient([_converse_response("hello", stop_reason="guardrail_intervened")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == [SONNET_5]
+    assert result["model"] == SONNET_5
+
+
+@pytest.mark.parametrize(
+    "model", [BEDROCK_MODEL, "us.anthropic.claude-sonnet-4-6", "anthropic.claude-sonnet-4-5"])
+def test_content_filtered_on_non_sonnet_5_model_does_not_fall_back(
+    monkeypatch: pytest.MonkeyPatch, model: str,
+) -> None:
+    fake = _FakeBedrockClient(_filtered_empty_pair())
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockEmptyResponseError):
+        bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=model))
+
+    assert _model_ids(fake) == [model, model]
+
+
+def test_content_filter_fallback_warning_names_the_stage(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = _FakeBedrockClient(_filtered_empty_pair() + [_converse_response("hello")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"):
+        bedrock._handle_bedrock(
+            _USER_MSG, None, _bedrock_cfg(model=SONNET_5, stage="stage_4_synthetic"))
+
+    assert any(
+        "stage_4_synthetic" in r.getMessage() and "fallback" in r.getMessage()
+        for r in caplog.records if r.levelno == logging.WARNING
+    )
+
+
+def test_resolve_call_config_carries_the_stage_for_provider_log_lines() -> None:
+    from unified_pipeline import llm_client
+    assert llm_client._resolve_call_config("stage_4", {})["stage"] == "stage_4"
