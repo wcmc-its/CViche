@@ -78,6 +78,23 @@ interface RunTableProps {
   onSort: (field: SortField) => void
   onSelectRun: (runId: string) => void
   onFilter: (key: RunFilterKey, value: string) => void
+  /** Open the batch view for a run's batch (the Batch tag). */
+  onOpenBatch: (batchId: string) => void
+}
+
+/** "Batch" tag on a run that belongs to a batch upload; opens that batch's view. */
+export function BatchTag({ batchId, onOpenBatch }: { batchId: string | null | undefined; onOpenBatch: (batchId: string) => void }) {
+  if (!batchId) return null
+  return (
+    <button
+      type="button"
+      title="Show the whole batch"
+      onClick={(e) => { e.stopPropagation(); onOpenBatch(batchId) }}
+      className="flex-none rounded px-1.5 py-px text-[11px] font-semibold text-[#6B5E45] bg-[#F1E8D6] hover:bg-[#E6D9BE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+    >
+      Batch
+    </button>
+  )
 }
 
 interface SortHeaderProps {
@@ -173,7 +190,7 @@ function FeedbackCell({ run, isAdmin, currentUserId, earlierGiven }: FeedbackCel
   }
 }
 
-interface RowProps extends Omit<RunTableProps, 'groups' | 'sortField' | 'sortDir' | 'onSort'> {
+interface RowProps extends Omit<RunTableProps, 'groups' | 'sortField' | 'sortDir' | 'onSort' | 'onOpenBatch'> {
   run: RunSummary
   /** The cell shown first: faculty name + filename for a group row, filename for an earlier run. */
   firstCell: React.ReactNode
@@ -246,9 +263,10 @@ interface GroupCellProps {
   isAdmin: boolean
   onToggle: () => void
   onFilter: (key: RunFilterKey, value: string) => void
+  onOpenBatch: (batchId: string) => void
 }
 
-function GroupCell({ group, expanded, isAdmin, onToggle, onFilter }: GroupCellProps) {
+function GroupCell({ group, expanded, isAdmin, onToggle, onFilter, onOpenBatch }: GroupCellProps) {
   const { owner, latest, older } = group
   const runCount = older.length + 1
   return (
@@ -289,7 +307,10 @@ function GroupCell({ group, expanded, isAdmin, onToggle, onFilter }: GroupCellPr
             <span className="rounded-full bg-sand-100 px-2 py-px text-xs text-gray-500">{runCount} runs</span>
           )}
         </div>
-        <div title={latest.filename} className={`text-[13px] text-gray-500 ${WRAP}`}>{owner ? latest.filename : OWNER_UNKNOWN_LABEL}</div>
+        <div className="flex min-w-0 items-center gap-2">
+          <span title={latest.filename} className={`text-[13px] text-gray-500 ${WRAP}`}>{owner ? latest.filename : OWNER_UNKNOWN_LABEL}</span>
+          <BatchTag batchId={latest.batch_id} onOpenBatch={onOpenBatch} />
+        </div>
       </div>
     </div>
   )
@@ -338,7 +359,14 @@ export default function RunTable(props: RunTableProps) {
                 run={group.latest}
                 earlierGiven={earlierRunHasFeedback(group)}
                 firstCell={
-                  <GroupCell group={group} expanded={isOpen} isAdmin={isAdmin} onToggle={() => toggle(group.key)} onFilter={props.onFilter} />
+                  <GroupCell
+                    group={group}
+                    expanded={isOpen}
+                    isAdmin={isAdmin}
+                    onToggle={() => toggle(group.key)}
+                    onFilter={props.onFilter}
+                    onOpenBatch={props.onOpenBatch}
+                  />
                 }
                 {...rowProps}
               />,
@@ -348,7 +376,12 @@ export default function RunTable(props: RunTableProps) {
                       key={run.run_id}
                       run={run}
                       earlier
-                      firstCell={<div title={run.filename} className={`pl-8 text-[13px] text-gray-500 ${WRAP}`}>{run.filename}</div>}
+                      firstCell={
+                        <div className="flex items-center gap-2 pl-8">
+                          <span title={run.filename} className={`text-[13px] text-gray-500 ${WRAP}`}>{run.filename}</span>
+                          <BatchTag batchId={run.batch_id} onOpenBatch={props.onOpenBatch} />
+                        </div>
+                      }
                       {...rowProps}
                     />
                   ))

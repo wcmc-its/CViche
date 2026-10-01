@@ -115,6 +115,15 @@ export const uploadRoutes = {
   upload: () => `/api/upload` as const,
 } as const
 
+export const batchRoutes = {
+  /** GET/POST /api/batches  (list visible batches / create one before uploading) */
+  batches: () => `/api/batches` as const,
+  /** GET /api/batches/:id  (the batch view) */
+  detail: (id: string) => `/api/batches/${encodeURIComponent(id)}` as const,
+  /** GET /api/queue  (dispatch mode and per-queue wait) */
+  queue: () => `/api/queue` as const,
+} as const
+
 export const wsRoutes = {
   /** WS /ws/run/:id/stream  (live pipeline event stream; passed to getWebSocketUrl) */
   runStream: (id: string) => `/ws/run/${id}/stream` as const,
@@ -128,6 +137,7 @@ export const routes = {
   auth: authRoutes,
   consent: consentRoutes,
   upload: uploadRoutes,
+  batch: batchRoutes,
   ws: wsRoutes,
 } as const
 
