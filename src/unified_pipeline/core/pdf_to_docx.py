@@ -740,14 +740,31 @@ def _furniture_windows(pages: list[list[_Line]], heights: list[float]) -> dict[s
     return windows
 
 
+def _is_furniture(line: _Line, height: float, windows: dict[str, list[tuple[float, float]]]) -> bool:
+    return _in_edge_band(line, height) and any(
+        lo <= line.top <= hi for lo, hi in windows.get(_furniture_text(line), ()))
+
+
 def _drop_furniture(pages: list[list[_Line]], heights: list[float]) -> list[list[_Line]]:
     """Pages without their running headers/footers. Only edge-band lines
-    can match, so a body line is never dropped."""
+    can match, so a body line is never dropped. A running line in the TOP
+    band keeps its first copy: the owner's name and CV title usually sit
+    there on page 1, and later stages read the name from body text. Bottom
+    band repeats (page numbers, footers) are dropped on every page."""
     windows = _furniture_windows(pages, heights)
-    return [[ln for ln in lines
-             if not (_in_edge_band(ln, height)
-                     and any(lo <= ln.top <= hi for lo, hi in windows.get(_furniture_text(ln), ())))]
-            for lines, height in zip(pages, heights)]
+    first_kept: set[str] = set()
+    out = []
+    for lines, height in zip(pages, heights):
+        page = []
+        for ln in lines:
+            if _is_furniture(ln, height, windows):
+                text = _furniture_text(ln)
+                if ln.top >= FURNITURE_BAND_FRAC * height or text in first_kept:
+                    continue
+                first_kept.add(text)
+            page.append(ln)
+        out.append(page)
+    return out
 
 
 # --- Paragraph assembly --------------------------------------------------

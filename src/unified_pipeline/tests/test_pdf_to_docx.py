@@ -186,9 +186,22 @@ def _furniture_pages():
 
 
 def test_running_header_and_page_number_removed(tmp_path):
+    """The running header keeps its page-1 copy; page numbers all go."""
     report, doc = _convert(tmp_path, _furniture_pages())
-    assert [p.text for p in doc.paragraphs if p.text] == [_LONG, "Body 1", "Body 2", "Body 3"]
+    assert [p.text for p in doc.paragraphs if p.text] == ["Confidential CV", _LONG, "Body 1", "Body 2", "Body 3"]
     assert report.pages == 3
+
+
+def test_top_band_repeat_keeps_its_first_copy_and_page_numbers_all_go(tmp_path):
+    """A name at the top of 3 pages is kept once, on page 1; a page number
+    in the bottom band is dropped on every page."""
+    pages = [[(False, 14, 72, 750, "Jane Q. Public"), (False, 10, 72, 600, f"Body {n}"),
+              (False, 9, 280, 25, f"Page {n} of 3")] for n in (1, 2, 3)]
+    _, doc = _convert(tmp_path, pages)
+    texts = [t for t in _texts(doc) if t]
+    assert texts[0] == "Jane Q. Public"
+    assert " ".join(texts).count("Jane Q. Public") == 1
+    assert "Page" not in " ".join(texts)
 
 
 def test_repeated_body_line_is_kept(tmp_path):
@@ -362,18 +375,18 @@ def test_furniture_needs_half_the_pages(tmp_path):
     assert _texts(doc).count("Rare header") == 2
 
 
-def test_two_page_furniture_on_both_pages_is_removed(tmp_path):
+def test_two_page_furniture_keeps_only_its_first_copy(tmp_path):
     pages = [[(False, 9, 72, 765, "Both pages"), (False, 10, 72, 600, f"Body {n}")]
              for n in range(2)]
     _, doc = _convert(tmp_path, pages)
-    assert "Both pages" not in " ".join(_texts(doc))
+    assert " ".join(_texts(doc)).count("Both pages") == 1
 
 
 def test_furniture_matches_across_small_position_jitter(tmp_path):
     pages = [[(False, 9, 72, 765 - 0.4 * n, "Jittery header"), (False, 10, 72, 600, f"Body {n}")]
              for n in range(3)]
     _, doc = _convert(tmp_path, pages)
-    assert "Jittery header" not in " ".join(_texts(doc))
+    assert " ".join(_texts(doc)).count("Jittery header") == 1
 
 
 def test_same_text_at_different_positions_is_not_furniture(tmp_path):
@@ -1382,12 +1395,13 @@ def test_indent_is_measured_from_the_pages_text_left(tmp_path):
 
 
 def test_furniture_window_is_by_position_not_by_text_alone(tmp_path):
-    """Repeated at the top of pages 1-2, the same text 25pt lower on page 3
-    (still in the edge band) is not in the window: kept."""
+    """Repeated at the top of pages 1-2 (page 1's copy kept), the same text
+    25pt lower on page 3 (still in the edge band) is not in the window:
+    kept too."""
     pages = [[(False, 9, 72, y, "Running Name Header"), (False, 10, 72, 600, f"Body {n}")]
              for n, y in enumerate((765, 765, 740))]
     _, doc = _convert(tmp_path, pages)
-    assert " ".join(_texts(doc)).count("Running Name Header") == 1
+    assert " ".join(_texts(doc)).count("Running Name Header") == 2
 
 
 def test_body_line_inside_a_window_that_overhangs_the_edge_band_is_kept(tmp_path):
@@ -1398,7 +1412,7 @@ def test_body_line_inside_a_window_that_overhangs_the_edge_band_is_kept(tmp_path
     pages.append([(False, 9, 72, 689.5, "Running Name Header"),  # top 95.4: body
                   (False, 10, 72, 600, "Body 2")])
     _, doc = _convert(tmp_path, pages)
-    assert " ".join(_texts(doc)).count("Running Name Header") == 1
+    assert " ".join(_texts(doc)).count("Running Name Header") == 2  # page 1's and page 3's
 
 
 @pytest.mark.parametrize("drift, removed", [(0, True), (11, True), (13, False)])
@@ -1408,4 +1422,4 @@ def test_running_header_drift_within_the_window_is_furniture(tmp_path, drift, re
     pages = [[(False, 9, 72, 760 - t, "Running Name Header"), (False, 10, 72, 600, f"Body {n}")]
              for n, t in enumerate(tops)]
     _, doc = _convert(tmp_path, pages)
-    assert ("Running Name Header" not in " ".join(_texts(doc))) is removed
+    assert " ".join(_texts(doc)).count("Running Name Header") == (1 if removed else 3)
