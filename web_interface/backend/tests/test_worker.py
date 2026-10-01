@@ -456,7 +456,11 @@ def test_loop_survives_a_transient_error_and_leaves_the_entry_pending(db, wired,
         t.join(timeout=2)
 
     assert not t.is_alive()
-    assert _pending() == 1  # still pending, never ACKed
+    # Never ACKed away: the run's token is still outstanding. Not
+    # `_pending() == 1`: when shutting_down lands between a read and the claim
+    # decision, loop() hands the entry back as a fresh undelivered one
+    # (requeue), which reads as 0 pending -- a timing flake under load.
+    assert run_queue.live_run_ids() == {"WRK001"}
     assert _row(db).status == "queued"
 
 
@@ -911,6 +915,33 @@ def test_own_pel_reclaim_covers_the_batch_queue(db, wired, tmp_path):
 
     assert StubOrchestrator.calls == [("BAT001", None)]
     assert _batch_pending() == 0
+
+
+def test_loop_startup_reclaims_own_pending_on_every_queue(db, wired, tmp_path, monkeypatch):
+    """A flex pod restarting with a batch entry still in its own PEL runs it
+    at startup -- not only after MIN_IDLE_MS, through XAUTOCLAIM."""
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
+    run_queue.ensure_group(run_queue.BATCH)
+    _seed(db, run_id="BAT001")
+    (tmp_path / "BAT001.docx").write_bytes(b"PK")
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
+    run_queue.enqueue("BAT001", run_queue.BATCH)
+    run_queue.read_one("w1", run_queue.BATCH)  # this pod crashed mid-run
+
+    _run_loop_until(lambda: _row(db, "BAT001").status == "complete", BOTH, timeout=1.0)
+
+    assert StubOrchestrator.calls == [("BAT001", None)]
+    assert _batch_pending() == 0
+
+
+def test_a_bad_token_on_the_batch_queue_is_acked_on_the_batch_stream(wired):
+    run_queue.ensure_group(run_queue.BATCH)
+    wired.xadd(run_queue.BATCH_STREAM, {"junk": "x"})
+
+    worker.handle(*run_queue.read_one("w1", run_queue.BATCH), queue=run_queue.BATCH)
+
+    assert _batch_pending() == 0
+    assert wired.xlen(run_queue.BATCH_STREAM) == 0
 
 
 def test_poison_cap_on_the_batch_queue_dead_letters_to_the_batch_dead_stream(db, wired, monkeypatch):

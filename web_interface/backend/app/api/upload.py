@@ -29,7 +29,7 @@ from app.schemas import UploadResponse
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.auth import can_see_cost, get_current_user, visible_cost
 from app.rate_limiter import check_rate_limit
-from app.config_loader import get_config_value
+from app.consent import require_current_consent
 from app.services.config_service import (
     MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
     ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
@@ -593,15 +593,7 @@ async def upload_cv(
     """Upload a CV file and create a new pipeline run."""
 
     # Check consent at upload time (not just page visit)
-    current_consent_version = str(get_config_value(db, "consent_version") or "1.0")
-    if current_user.consent_version != current_consent_version:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "consent_required",
-                "message": "Please review and accept the updated consent terms.",
-            },
-        )
+    require_current_consent(db, current_user)
 
     # A batch_id must name one of the caller's own batches (404 unknown, 403
     # someone else's) -- checked before anything is read or archived.

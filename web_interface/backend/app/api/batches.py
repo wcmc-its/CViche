@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.consent import require_current_consent
 from app.database import get_db
 from app.errors import bad_request, internal_error
 from app.models import User
@@ -33,8 +34,10 @@ def create_batch(
     the user's remaining daily or monthly run quota with the same 429 body
     /upload answers, so the user learns it before uploading anything. Each
     /upload still checks the quota itself. Posts the one Teams "batch
-    submitted" card.
+    submitted" card. Refused first, like /upload, for a user who has not
+    accepted the current consent terms.
     """
+    require_current_consent(db, current_user)
     if body.files_submitted > batch_service.MAX_BATCH_FILES:
         raise bad_request(f"A batch can hold at most {batch_service.MAX_BATCH_FILES} files.")
     rate_limit_error = check_rate_limit(current_user, db, requested=body.files_submitted)

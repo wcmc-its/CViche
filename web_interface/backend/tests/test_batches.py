@@ -129,6 +129,30 @@ def test_create_batch_posts_one_teams_card_and_none_on_a_refusal(client, db, see
     assert facts["Submitted by"] == "Pat.Example"
 
 
+def test_create_batch_without_the_current_consent_is_uploads_403(client, db, seed_simple_mode, monkeypatch):
+    """A user who has not accepted the current consent terms is refused
+    before anything is stored or posted, with /upload's 403 body."""
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    posted = []
+    monkeypatch.setattr(notifications._SESSION, "post",
+                        lambda url, json=None, timeout=None: posted.append(json) or SimpleNamespace(status_code=200))
+    user = _make_user(db)
+    user.consent_version = "0.9"
+    db.commit()
+    _auth(client, user)
+
+    resp = client.post("/api/batches", json={"files_submitted": 2})
+    notifications.flush()
+
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == {
+        "error": "consent_required",
+        "message": "Please review and accept the updated consent terms.",
+    }
+    assert db.query(RunBatch).count() == 0
+    assert posted == []
+
+
 # --- GET /batches and GET /batches/{id}: visibility ---------------------------
 
 def test_list_batches_shows_a_user_only_their_own_and_an_admin_all(client, db, seed_simple_mode):
