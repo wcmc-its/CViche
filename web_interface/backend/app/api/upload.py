@@ -22,9 +22,6 @@ from typing import Literal, Optional
 from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from lxml.etree import XMLSyntaxError
-import pdfplumber
-from pdfminer.pdfdocument import PDFPasswordIncorrect
-from pdfplumber.utils.exceptions import PdfminerException
 
 from app.database import get_db
 from app.models import Run, Step, User
@@ -43,6 +40,10 @@ from app.storage import get_storage
 from app.storage.base import StorageKeyExists
 from app.services.run_service import UPLOAD_DIR
 from app.services.template_warning import detect_wcm_template
+from app.services.pdf_sandbox import (
+    PDF_TOO_COMPLEX_MESSAGE, EncryptedPdfError, PdfTooComplexError, UnreadablePdfError,
+    extract_pdf_text,
+)
 
 logger = logging.getLogger(__name__)
 ZIP_MAGIC = b"PK\x03\x04"
@@ -127,22 +128,15 @@ _DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSynt
                      zlib.error)
 
 
-class EncryptedPdfError(Exception):
-    """The PDF needs a password to open; both routes answer it with a 400."""
-
-
 def _extract_pdf_text(content: bytes) -> str | None:
-    """`_extract_text` for a PDF. pdfplumber wraps every pdfminer failure in a
-    message-less PdfminerException; a password failure is the one cause a
-    user can act on, so it is raised as EncryptedPdfError. Any other read
-    failure returns None, like a python-docx read failure does."""
+    """`_extract_text` for a PDF, parsed in pdf_sandbox's limited child.
+    A PDF pdfminer cannot parse returns None, like a python-docx read
+    failure; a password or a page/memory/time limit raises (see
+    _extract_text)."""
     try:
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            return "\n".join(page.extract_text() or "" for page in pdf.pages)
-    except PdfminerException as e:
-        if e.args and isinstance(e.args[0], PDFPasswordIncorrect):
-            raise EncryptedPdfError() from e
-        logger.warning("Text extraction for empty-doc guard failed (.pdf): %r", e.args, exc_info=True)
+        return extract_pdf_text(content)
+    except UnreadablePdfError as e:
+        logger.warning("Text extraction for empty-doc guard failed (.pdf): %s", e)
         return None
 
 
@@ -157,6 +151,8 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
 
     Raises:
         EncryptedPdfError: a password-protected PDF.
+        PdfTooComplexError: a PDF over pdf_sandbox's page, memory or time
+            limit. Never fails open: the run would hit the same limit.
     """
     if file_ext == PDF_EXTENSION:
         return _extract_pdf_text(content)
@@ -179,6 +175,18 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
         return None
     finally:
         os.unlink(tmp_path)
+
+
+async def _extract_text_or_400(content: bytes, file_ext: str) -> str | None:
+    """`_extract_text` off the event loop (#793), shared by /upload and
+    /estimate, with its two PDF refusals turned into 400s."""
+    try:
+        return await run_in_threadpool(_extract_text, content, file_ext)
+    except EncryptedPdfError:
+        raise bad_request(_ENCRYPTED_PDF_MESSAGE)
+    except PdfTooComplexError as e:
+        logger.warning("Rejected PDF over a parse limit: %s", e)
+        raise bad_request(PDF_TOO_COMPLEX_MESSAGE)
 
 
 # Bytes read per chunk while bounding an upload body (#793): large enough that
@@ -609,10 +617,7 @@ async def upload_cv(
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
     # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
-    try:
-        extracted = await run_in_threadpool(_extract_text, content, file_ext)
-    except EncryptedPdfError:
-        raise bad_request(_ENCRYPTED_PDF_MESSAGE)
+    extracted = await _extract_text_or_400(content, file_ext)
     if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
@@ -802,10 +807,7 @@ async def estimate_processing(
     # this endpoint used to re-walk the docx paragraphs/tables inline, which
     # could compute a different text_char_count for the same file. Off the
     # event loop, same as /upload (#793).
-    try:
-        extracted = await run_in_threadpool(_extract_text, content, file_ext)
-    except EncryptedPdfError:
-        raise bad_request(_ENCRYPTED_PDF_MESSAGE)
+    extracted = await _extract_text_or_400(content, file_ext)
     if extracted is None:
         # _extract_text already logged the specific read failure (§5.4). No
         # filename here (CODING_STANDARDS §4.7): CV filenames usually carry

@@ -301,7 +301,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     <main className="px-4 py-8">
       <div className="w-full max-w-[760px] mx-auto">
         <h1 className="text-[26px] font-semibold text-gray-900">New run</h1>
-        <p className="text-sm text-gray-600 italic mt-1 mb-5">Upload a CV as a Word document. Get back a document in WCM institutional format.</p>
+        <p className="text-sm text-gray-600 italic mt-1 mb-5">Upload a CV as a Word document or PDF. Get back a document in WCM institutional format.</p>
 
         <section className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-5 sm:p-6">
           <div className="flex flex-col gap-4">

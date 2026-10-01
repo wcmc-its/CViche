@@ -1006,6 +1006,10 @@ def _read_pages(pdf_path: str | Path) -> tuple[list[list[_Line]], list[float], l
                 heights.append(float(page.height))
                 if _is_image_only(page):
                     image_only.append(number)
+                # Drop the page's parsed objects (chars, words, layout) once
+                # its lines are taken, so peak memory tracks one page, not
+                # the document (#806).
+                page.close()
     except PdfminerException as exc:
         # pdfplumber wraps everything in a message-less PdfminerException;
         # name the one cause a caller can act on, re-raise the rest as is.

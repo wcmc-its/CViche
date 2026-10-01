@@ -850,9 +850,10 @@ def test_copy_to_pipeline_input_converts_a_pdf(db, tmp_path, monkeypatch, cv_pdf
         shutil.rmtree(o.web_output_dir, ignore_errors=True)
 
 
-def _execute_one_noop_step(db, monkeypatch, tmp_path, run_id, upload):
+def _execute_one_noop_step(db, monkeypatch, tmp_path, run_id, upload, attempts=(None,)):
     """execute() over the REAL _copy_to_pipeline_input and a one-step no-op
-    registry; returns the run's Log rows."""
+    registry, once per start_step_number in `attempts`; returns the run's
+    Log rows."""
     import shutil
     from types import SimpleNamespace
     from app.pipeline import orchestrator as orch
@@ -867,7 +868,11 @@ def _execute_one_noop_step(db, monkeypatch, tmp_path, run_id, upload):
     o = orch.PipelineOrchestrator(run_id, upload, db)
     monkeypatch.setattr(o, "execute_step", AsyncMock())
     try:
-        asyncio.run(o.execute())
+        for start in attempts:
+            try:
+                asyncio.run(o.execute(start_step_number=start))
+            except Exception:
+                pass  # a failed run is asserted on by the caller, via its row
     finally:
         shutil.rmtree(o.web_output_dir, ignore_errors=True)
     return db.query(Log).filter(Log.run_id == run_id).all()
@@ -883,6 +888,29 @@ def test_image_only_pdf_page_is_a_run_warning(db, tmp_path, monkeypatch, cv_pdf)
     assert len(warnings) == 1
     assert warnings[0].step_number == 1
     assert "page(s) 2 contain only images" in warnings[0].message
+
+
+def test_image_only_warning_is_not_repeated_on_retry(db, tmp_path, monkeypatch, cv_pdf):
+    """A retry/resume re-converts the PDF, but the step-1 log already
+    carries the warning from the first attempt (Log rows are never deleted)."""
+    src = tmp_path / "SCAN02.pdf"
+    src.write_bytes(cv_pdf(image_pages=(1,)))
+    logs = _execute_one_noop_step(db, monkeypatch, tmp_path, "SCAN02", src, attempts=(None, 1))
+    assert len([log for log in logs if log.level == "WARNING"]) == 1
+
+
+def test_pdf_over_a_parse_limit_fails_the_run_with_its_message(db, tmp_path, monkeypatch):
+    """The run's conversion hits the same limits as the upload check and
+    fails with the same user-facing message, not the generic one."""
+    from app.services.pdf_sandbox import PDF_MAX_PAGES, PDF_TOO_COMPLEX_MESSAGE
+    from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
+    src = tmp_path / "LONG01.pdf"
+    src.write_bytes(_make_pdf([[]] * (PDF_MAX_PAGES + 1)))
+    _execute_one_noop_step(db, monkeypatch, tmp_path, "LONG01", src)
+    db.expire_all()
+    run = db.get(Run, "LONG01")
+    assert run.status == "failed"
+    assert run.error_message == PDF_TOO_COMPLEX_MESSAGE
 
 
 def test_text_only_pdf_logs_no_warning(db, tmp_path, monkeypatch, cv_pdf):

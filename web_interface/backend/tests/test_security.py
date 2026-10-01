@@ -715,6 +715,27 @@ class TestUploadValidation:
         assert db.query(Run).count() == 0
         assert list(tmp_path.iterdir()) == []
 
+    @pytest.mark.parametrize("endpoint, data", [
+        ("/api/upload", {"submission_type": "own_cv"}),
+        ("/api/estimate", None),
+    ])
+    def test_pdf_over_a_parse_limit_rejected(self, client, db, seed_simple_mode, tmp_path, endpoint, data):
+        """#806: a PDF over pdf_sandbox's page/memory/time limit is a 400 on
+        both routes -- never a fail-open into a run that would hit it again."""
+        from app.models import Run
+        from app.services.pdf_sandbox import PDF_MAX_PAGES, PDF_TOO_COMPLEX_MESSAGE
+        from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
+        self._create_auth_user(client, db)
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+            response = client.post(
+                endpoint,
+                files={"file": ("long.pdf", _make_pdf([[]] * (PDF_MAX_PAGES + 1)), "application/pdf")}, data=data,
+            )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["message"] == PDF_TOO_COMPLEX_MESSAGE
+        assert db.query(Run).count() == 0
+        assert list(tmp_path.iterdir()) == []
+
     def test_oversized_file_rejected(self, client, db, seed_simple_mode):
         """Files exceeding the size limit are rejected. (upload.py's size
         check runs before the magic-byte check, so the content need not be a

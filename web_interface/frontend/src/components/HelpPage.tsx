@@ -172,7 +172,7 @@ export default function HelpPage() {
               <div className="space-y-3">
                 <p>
                   CViche is a tool that converts your CV into the standard Weill Cornell Medicine (WCM) institutional
-                  format. Upload your CV as a Word document, and CViche uses AI to extract, organize, and reformat your
+                  format. Upload your CV as a Word document or PDF, and CViche uses AI to extract, organize, and reformat your
                   academic record into the correct structure.
                 </p>
                 <p>
