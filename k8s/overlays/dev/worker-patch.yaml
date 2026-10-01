@@ -12,7 +12,10 @@ spec:
         - name: worker # Must match the name in base/worker/deployment.yaml
           resources:
             requests:
-              cpu: "300m"
+              # Was 300m. Lowered so 6 workers plus a rolling-update surge fit
+              # the 2-node cviche node group (max size 2): an idle worker uses 3-8m and a pipeline mostly waits on Bedrock
+              # (kubectl top, 2026-10-01). Limits unchanged.
+              cpu: "100m"
               memory: "512Mi"
             # Burstable on purpose, mirroring the dev backend's sizing for
             # nodegroup density (#82, OPEN). The limit is generous because a

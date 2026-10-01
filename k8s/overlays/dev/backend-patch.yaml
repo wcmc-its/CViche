@@ -26,7 +26,10 @@ spec:
         - name: backend # Must match the name in base/deployment.yaml
           resources:
             requests:
-              cpu: "300m"
+              # Was 300m. Lowered so 6 workers plus a rolling-update surge fit
+              # the 2-node cviche node group (max size 2): the backend no longer runs pipelines in queue mode and uses 6-8m
+              # (kubectl top, 2026-10-01). Limits unchanged.
+              cpu: "150m"
               memory: "512Mi"
             # Burstable: limits raised to 2 vCPU / 2Gi so a pod can absorb 3
             # concurrent runs (CVICHE_MAX_CONCURRENT_RUNS below). Requests kept
