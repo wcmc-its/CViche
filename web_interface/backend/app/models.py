@@ -32,7 +32,7 @@ class RunState(StrEnum):
 class UserRole(StrEnum):
     """Canonical ``users.role`` vocabulary, same pattern as ``RunState``.
 
-    STAFF (Office of Faculty Affairs) is read-only elevated access: every run
+    STAFF is read-only elevated access: every run
     and its pipeline detail, but no cost and no admin writes (see
     ``app.auth.can_view_all_runs``). Used on the lines the staff role adds or
     changes; existing "admin"/"user" literals elsewhere are left as they are

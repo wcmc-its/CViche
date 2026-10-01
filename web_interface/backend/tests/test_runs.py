@@ -553,7 +553,7 @@ def test_review_note_falls_back_to_the_cached_score_before_backfill(client, db, 
 
 
 def _staff(db):
-    staff = User(email="ofa@example.com", cwid="abc1004", display_name="OFA Staff",
+    staff = User(email="staff@example.com", cwid="abc1004", display_name="Staff User",
                  role="staff", consent_version="1.0")
     db.add(staff)
     db.commit()

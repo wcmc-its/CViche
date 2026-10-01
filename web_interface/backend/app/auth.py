@@ -625,7 +625,7 @@ def can_view_all_runs(user: User) -> bool:
     """Read-only access to every user's runs: the runs list, run detail, "Run
     by", run quality, pipeline logs/prompts/stage JSON, and feedback insights.
 
-    Admin or staff (Office of Faculty Affairs). Grants READS only -- every write
+    Admin or staff. Grants READS only -- every write
     (admin config, user management, deleting feedback or runs, acting on
     another user's run) stays behind require_admin or ownership, and cost stays
     behind can_see_cost.

@@ -28,7 +28,9 @@ interface PipelineHeaderProps {
   outputTokens: number
   elapsedSeconds: number
   isCancelling: boolean
-  onCancel: () => void
+  /** Omitted for a viewer who may not act on the run (staff on another user's
+   *  run): the Cancel button is not rendered. */
+  onCancel?: () => void
   onBack: () => void
   /** Complete runs: shows the "Pipeline details" toggle. */
   detailsOpen?: boolean
@@ -199,7 +201,7 @@ export default function PipelineHeader({
             )}
             {tokenStat('Tokens in', inputTokens)}
             {tokenStat('Tokens out', outputTokens)}
-            {(isRunning || status === 'queued') && (
+            {onCancel && (isRunning || status === 'queued') && (
               <button
                 onClick={onCancel}
                 disabled={isCancelling}

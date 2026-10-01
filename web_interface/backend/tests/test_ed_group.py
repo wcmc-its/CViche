@@ -68,7 +68,7 @@ LDAP_PARAMS = {
 }
 ACCESS_GROUP = "cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
 ADMIN_GROUP = "cn=ITS:Library:CViche/admin-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
-STAFF_GROUP = "cn=ITS:Library:CViche/ofa-staff-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+STAFF_GROUP = "cn=ITS:Library:CViche/staff-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
 
 
 def _groups_side_effect(*member_of):
@@ -1362,7 +1362,7 @@ class TestACSGroupCheck:
         clear_cache()
         _set_staff_group_config(db, STAFF_GROUP)
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-        mock_extract.return_value = {"cwid": "staff0002", "email": "ofa@med.cornell.edu", "display_name": "OFA Staff"}
+        mock_extract.return_value = {"cwid": "staff0002", "email": "staff2@med.cornell.edu", "display_name": "Staff User"}
         mock_check_ed.return_value = MembershipResult(
             in_access_group=True, in_admin_group=False, in_staff_group=True)
 

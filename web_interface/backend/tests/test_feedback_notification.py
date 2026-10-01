@@ -92,7 +92,7 @@ def test_submit_feedback_succeeds_even_if_notification_raises(client, db, monkey
 def _staff(db):
     from app.models import User
 
-    staff = User(email="ofa-staff@example.com", display_name="OFA Staff", role="staff")
+    staff = User(email="staff@example.com", display_name="Staff User", role="staff")
     db.add(staff)
     db.commit()
     db.refresh(staff)

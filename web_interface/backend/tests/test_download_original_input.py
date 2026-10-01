@@ -159,7 +159,7 @@ def test_header_injection_stripped_from_upload_name(client, db, seed_simple_mode
 
 
 def test_staff_downloads_another_users_original(client, db, seed_simple_mode, monkeypatch):
-    """Staff (read-only, OFA) read every run's detail, the original included."""
+    """Staff (read-only) read every run's detail, the original included."""
     _, run = _user_and_run(db, suffix="-staff-own")
     staff, _ = _user_and_run(db, role="staff", suffix="-staff")
     _auth(client, staff)

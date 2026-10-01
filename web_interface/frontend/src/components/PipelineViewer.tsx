@@ -15,7 +15,7 @@ import CancelConfirmModal from './CancelConfirmModal'
 import ErrorBanner from './ErrorBanner'
 import FeedbackForm from './FeedbackForm'
 import { RunQualitySections, ReviewNote } from './RunQualityPanel'
-import { useAuth, useCanSeeCost, useCanViewAllRuns } from '../contexts/AuthContext'
+import { canActOnRun, useAuth, useCanSeeCost, useCanViewAllRuns } from '../contexts/AuthContext'
 
 interface PipelineViewerProps {
   runId: string
@@ -277,9 +277,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
 }
 
   const isComplete = runStatus.status === 'complete'
-  // Staff read any run but submit feedback only on their own; the API 403s a
-  // staff submission on someone else's run (check_run_access stays owner-or-admin).
-  const isStaffViewingOthersRun = user?.role === 'staff' && runStatus.run_by?.id !== user.user_id
+  // Run write controls (start/cancel/restart/retry, feedback) only for the
+  // owner or an admin: staff read any run, and the API 403s their writes.
+  const canAct = canActOnRun(user, runStatus.run_by?.id)
   const showDetails = detailsOverride ?? !isComplete
 
   // Count only what the Summary tab will list for this user: stage JSON is
@@ -356,8 +356,12 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                 <p className="text-sm font-medium text-orange-800">This run is taking much longer than expected and may be stuck.</p>
               </div>
               <div className="flex flex-wrap shrink-0 gap-2">
-                <button onClick={handleCancel} disabled={isCancelling} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-55">{isCancelling ? 'Cancelling...' : 'Cancel'}</button>
-                <button onClick={handleRestart} disabled={isRestarting} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 disabled:opacity-55">Restart with file</button>
+                {canAct && (
+                  <>
+                    <button onClick={handleCancel} disabled={isCancelling} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-55">{isCancelling ? 'Cancelling...' : 'Cancel'}</button>
+                    <button onClick={handleRestart} disabled={isRestarting} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 disabled:opacity-55">Restart with file</button>
+                  </>
+                )}
                 <a href={supportHref('a run appears stuck')} className="inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium text-orange-800 hover:bg-orange-100"><LifeBuoy className="h-4 w-4" />Contact support</a>
               </div>
             </div>
@@ -372,10 +376,12 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                 <p className="min-w-0 text-sm font-medium text-red-800 [overflow-wrap:anywhere]">Pipeline failed {runStatus.error_message && ` — ${runStatus.error_message}`}</p>
               </div>
               <div className="flex flex-wrap shrink-0 gap-2">
-                {runStatus.steps?.some((s) => s.status === 'error') && (
+                {canAct && runStatus.steps?.some((s) => s.status === 'error') && (
                   <button onClick={handleRetry} disabled={isRetrying || isRestarting} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-55">{isRetrying ? 'Retrying...' : 'Retry failed step'}</button>
                 )}
-                <button onClick={handleRestart} disabled={isRestarting || isRetrying} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-100 text-red-800 hover:bg-red-200 disabled:opacity-55">Restart with file</button>
+                {canAct && (
+                  <button onClick={handleRestart} disabled={isRestarting || isRetrying} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-100 text-red-800 hover:bg-red-200 disabled:opacity-55">Restart with file</button>
+                )}
                 <a href={supportHref('a run failed')} className="inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium text-red-800 hover:bg-red-100"><LifeBuoy className="h-4 w-4" />Contact support</a>
               </div>
             </div>
@@ -389,7 +395,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                 <AlertCircle className="h-5 w-5 text-orange-600 flex-shrink-0" />
                 <p className="min-w-0 text-sm font-medium text-orange-800 [overflow-wrap:anywhere]">Pipeline was cancelled {runStatus.error_message && ` — ${runStatus.error_message}`}</p>
               </div>
-              <button onClick={handleRestart} disabled={isRestarting} className="shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 disabled:opacity-55">Restart with file</button>
+              {canAct && (
+                <button onClick={handleRestart} disabled={isRestarting} className="shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 disabled:opacity-55">Restart with file</button>
+              )}
             </div>
           </div>
         )}
@@ -398,7 +406,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           <div className={`${bannerBase} bg-white border-sand-300`} role="status">
             <div className="flex flex-wrap items-center justify-between gap-3 max-w-full">
               <p className="text-sm font-medium text-gray-700">Pipeline has not been started yet</p>
-              <button onClick={handleStart} disabled={isStarting} className="shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-55">{isStarting ? 'Starting...' : 'Start pipeline'}</button>
+              {canAct && (
+                <button onClick={handleStart} disabled={isStarting} className="shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-55">{isStarting ? 'Starting...' : 'Start pipeline'}</button>
+              )}
             </div>
           </div>
         )}
@@ -417,7 +427,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           outputTokens={runStatus.output_tokens}
           elapsedSeconds={localElapsedSeconds}
           isCancelling={isCancelling}
-          onCancel={handleCancel}
+          onCancel={canAct ? handleCancel : undefined}
           onBack={onBack}
           detailsOpen={isComplete ? showDetails : undefined}
           onToggleDetails={isComplete ? () => setDetailsOverride(!showDetails) : undefined}
@@ -529,7 +539,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           </div>
         )}
 
-        {isComplete && !isStaffViewingOthersRun && (
+        {isComplete && canAct && (
           <section id="feedback-section">
             <FeedbackForm runId={runId} />
           </section>

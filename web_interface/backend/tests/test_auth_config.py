@@ -179,7 +179,7 @@ def test_ed_staff_group_seeded_from_yaml_and_empty_when_absent(db):
         seed_system_config(db)
     assert json.loads(db.query(SystemConfig).filter_by(key="ed_staff_group").first().value) == ""
 
-    staff_dn = "cn=ITS:Library:CViche/ofa-staff-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+    staff_dn = "cn=ITS:Library:CViche/staff-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
     with patch("app.config_loader.load_yaml_config",
                return_value={**_yaml(), "ed": {"staff_group": staff_dn}}):
         seed_system_config(db)
