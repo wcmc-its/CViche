@@ -663,10 +663,8 @@ class TestUploadValidation:
         assert "does not match .docx format" in response.json()["detail"]["message"]
 
     def test_spoofed_pdf_with_zip_content_rejected(self, client, db, seed_simple_mode):
-        """#524: .pdf is rejected outright now, at the extension check --
-        before the magic-byte check would even run. So a .pdf extension is
-        refused the same way regardless of its actual content (real PDF
-        bytes, ZIP bytes disguised as a .pdf, or garbage)."""
+        """A file with .pdf extension but ZIP magic bytes is rejected by the
+        %PDF magic-byte check (#806 restored it with .pdf's acceptance)."""
         self._create_auth_user(client, db)
         zip_content = b"PK\x03\x04" + b"\x00" * 100
         response = client.post(
@@ -674,36 +672,118 @@ class TestUploadValidation:
             files={"file": ("resume.pdf", zip_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
         )
         assert response.status_code == 400
-        assert response.json()["detail"]["message"] == (
-            "Unsupported file type: .pdf. Only .docx files are supported. "
-            "Please convert your file to .docx before uploading."
-        )
+        assert "does not match .pdf format" in response.json()["detail"]["message"]
 
-    def test_pdf_rejected_at_upload(self, client, db, seed_simple_mode, tmp_path):
-        """#524: PDF is no longer accepted -- the API now matches the
-        frontend's .docx-only guard. Formerly test_valid_pdf_accepted
-        (asserted 200 + file_type "pdf"); every downstream reader
-        (docx_structure_extractor, stage 2, stage 6) is python-docx only, so
-        accepting PDF here always died at stage 1a. No Run row is created."""
+    def test_valid_pdf_accepted(self, client, db, seed_simple_mode, tmp_path, cv_pdf):
+        """#806: a text-based PDF is accepted and stored as the original --
+        {run_id}.pdf on disk and in the archive, Run.file_type "pdf". The
+        orchestrator converts it to the run's docx copy later."""
         from app.models import Run
         self._create_auth_user(client, db)
-        # Minimal valid PDF -- rejected on extension alone, before this
-        # content is ever inspected.
-        pdf_content = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF"
-        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+        pdf_content = cv_pdf()
+        storage = MagicMock()
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path), \
+             patch("app.api.upload.get_storage", return_value=storage):
             response = client.post(
                 "/api/upload",
                 files={"file": ("my_cv.pdf", pdf_content, "application/pdf")}, data={"submission_type": "own_cv"},
             )
-        assert response.status_code == 400
-        assert response.json()["detail"]["message"].startswith("Unsupported file type: .pdf.")
+        assert response.status_code == 200, response.text
+        run_id = response.json()["run_id"]
+        assert response.json()["file_type"] == "pdf"
+        assert db.get(Run, run_id).file_type == "pdf"
+        assert (tmp_path / f"{run_id}.pdf").read_bytes() == pdf_content
+        archived = {c.args[1]: c.args[2] for c in storage.put_file_exclusive.call_args_list}
+        assert archived[f"input/{run_id}.pdf"] == pdf_content
+
+    @pytest.mark.parametrize("endpoint, data", [
+        ("/api/upload", {"submission_type": "own_cv"}),
+        ("/api/estimate", None),
+    ])
+    def test_encrypted_pdf_rejected(self, client, db, seed_simple_mode, tmp_path, cv_pdf, endpoint, data):
+        """#806: a password-protected PDF gets a 400 that says so, on both
+        routes -- not the generic "no readable text" one, and never a run."""
+        from app.models import Run
+        self._create_auth_user(client, db)
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+            response = client.post(
+                endpoint,
+                files={"file": ("my_cv.pdf", cv_pdf(user_password="secret"), "application/pdf")}, data=data,
+            )
+        assert response.status_code == 400, response.text
+        assert "password-protected" in response.json()["detail"]["message"]
         assert db.query(Run).count() == 0
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("endpoint, data", [
+        ("/api/upload", {"submission_type": "own_cv"}),
+        ("/api/estimate", None),
+    ])
+    def test_pdf_over_a_parse_limit_rejected(self, client, db, seed_simple_mode, tmp_path, endpoint, data):
+        """#806: a PDF over pdf_sandbox's page/memory/time limit is a 400 on
+        both routes -- never a fail-open into a run that would hit it again."""
+        from app.models import Run
+        from app.services.pdf_sandbox import PDF_MAX_PAGES, PDF_TOO_COMPLEX_MESSAGE
+        from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
+        self._create_auth_user(client, db)
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+            response = client.post(
+                endpoint,
+                files={"file": ("long.pdf", _make_pdf([[]] * (PDF_MAX_PAGES + 1)), "application/pdf")}, data=data,
+            )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["message"] == PDF_TOO_COMPLEX_MESSAGE
+        assert db.query(Run).count() == 0
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("endpoint, data", [
+        ("/api/upload", {"submission_type": "own_cv"}),
+        ("/api/estimate", None),
+    ])
+    def test_pdf_with_every_sandbox_slot_busy_gets_503(self, client, db, seed_simple_mode, tmp_path,
+                                                      cv_pdf, monkeypatch, endpoint, data):
+        """#806 review B1: with both PDF child slots held, a third PDF
+        request is a 503 with Retry-After -- and spawns no child."""
+        from app.models import Run
+        from app.services import pdf_sandbox
+        self._create_auth_user(client, db)
+
+        def no_spawn(*args, **kwargs):
+            raise AssertionError("spawned a PDF child with every slot taken")
+        monkeypatch.setattr(pdf_sandbox.subprocess, "run", no_spawn)
+        for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
+            assert pdf_sandbox._slots.acquire(blocking=False)
+        try:
+            with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+                response = client.post(
+                    endpoint, files={"file": ("cv.pdf", cv_pdf(), "application/pdf")}, data=data,
+                )
+        finally:
+            for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
+                pdf_sandbox._slots.release()
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["message"] == pdf_sandbox.PDF_BUSY_MESSAGE
+        assert int(response.headers["retry-after"]) > 0
+        assert db.query(Run).count() == 0
+        assert list(tmp_path.iterdir()) == []
+
+    def test_unreadable_pdf_child_reply_is_a_400_not_a_500(self, client, db, seed_simple_mode, cv_pdf, monkeypatch):
+        """#806 review N1: whatever goes wrong inside the PDF job short of an
+        ops fault, the request gets a 400."""
+        from app.services import pdf_sandbox
+        self._create_auth_user(client, db)
+        monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP", "print('not json')")
+        response = client.post(
+            "/api/upload", files={"file": ("cv.pdf", cv_pdf(), "application/pdf")},
+            data={"submission_type": "own_cv"},
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["message"] == pdf_sandbox.PDF_UNREADABLE_MESSAGE
 
     def test_oversized_file_rejected(self, client, db, seed_simple_mode):
-        """Files exceeding the size limit are rejected. Uses .docx (not the
-        formerly-accepted .pdf, #524) so this still reaches the size check
-        (upload.py's size check runs before the magic-byte check, so the
-        content need not be a structurally valid .docx)."""
+        """Files exceeding the size limit are rejected. (upload.py's size
+        check runs before the magic-byte check, so the content need not be a
+        structurally valid .docx.)"""
         self._create_auth_user(client, db)
         docx_header = b"PK\x03\x04"
         with patch("app.api.upload.MAX_UPLOAD_SIZE", 100):  # Set limit to 100 bytes for test
@@ -763,8 +843,7 @@ class TestUploadValidation:
 
     def test_randomized_filename_on_disk(self, client, db, seed_simple_mode, tmp_path):
         """Uploaded files are stored with randomized names, not the
-        user-provided filename. Uses .docx (not the formerly-accepted .pdf,
-        #524); the magic-byte check is bypassed (covered separately by
+        user-provided filename. The magic-byte check is bypassed (covered separately by
         test_upload_atomicity.py's zip-structure tests) so this test stays
         focused on the naming behavior."""
         self._create_auth_user(client, db)
@@ -824,6 +903,17 @@ class TestUploadValidation:
         )
         assert response.status_code == 400
         assert "does not match .docx format" in response.json()["detail"]["message"]
+
+    def test_estimate_rejects_spoofed_pdf(self, client, db, seed_simple_mode):
+        """/estimate validates %PDF magic bytes too (#806); without it a ZIP
+        named .pdf would fail open into a guessed estimate."""
+        self._create_auth_user(client, db)
+        response = client.post(
+            "/api/estimate",
+            files={"file": ("resume.pdf", b"PK\x03\x04" + b"\x00" * 100, "application/octet-stream")},
+        )
+        assert response.status_code == 400
+        assert "does not match .pdf format" in response.json()["detail"]["message"]
 
     @pytest.mark.parametrize("endpoint, data", [
         ("/api/upload", {"submission_type": "own_cv"}),

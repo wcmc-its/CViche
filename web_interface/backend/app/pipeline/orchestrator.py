@@ -63,6 +63,14 @@ from unified_pipeline.stage_6_word_template import run_stage6
 from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
 from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
 from unified_pipeline.llm.retry import LLMOutageError
+from app.services.pdf_sandbox import (
+    PDF_BUSY_RUN_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, ConversionResult, PdfBusyError,
+    PdfTooComplexError, convert_pdf,
+)
+
+# An upload with this suffix is converted, not copied, into the run's private
+# docx (#806); upload.py stores a PDF as {run_id}.pdf.
+_PDF_SUFFIX = ".pdf"
 
 
 def _now() -> float:
@@ -136,6 +144,10 @@ def user_facing_error(exc: BaseException, resuming: bool) -> str:
     chain = list(_exception_chain(exc))
     if any(isinstance(e, LLMOutageError) for e in chain):
         return LLM_OUTAGE_MESSAGE
+    if isinstance(exc, PdfTooComplexError):
+        return PDF_TOO_COMPLEX_MESSAGE
+    if isinstance(exc, PdfBusyError):
+        return PDF_BUSY_RUN_MESSAGE
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return STAGE_TIMEOUT_MESSAGE
     err_text = str(exc).lower()
@@ -571,6 +583,9 @@ class PipelineOrchestrator:
         # replaced at the start of every execute_step.
         self._stage_guard = _StageGuard()
 
+        # Set by _copy_to_pipeline_input when the upload is a PDF (#806).
+        self.pdf_conversion: ConversionResult | None = None
+
     async def log(self, step_number: int, message: str, level: str = "INFO"):
         """Log a message to database and emit via WebSocket."""
         log_entry = Log(run_id=self.run_id, step_number=step_number, level=level, message=message)
@@ -649,11 +664,36 @@ class PipelineOrchestrator:
                 / self.run_id / f"{self.document_uid}.docx")
 
     def _copy_to_pipeline_input(self) -> str:
-        """Copy the uploaded file into this run's input directory; return its path."""
+        """Materialize this run's private docx from the upload; return its path.
+
+        A docx is copied. A PDF is converted (#806), in pdf_sandbox's
+        limited child process: the upload itself stays the original
+        (download-original and restart read it by file_type), and every
+        stage downstream sees only this docx.
+        """
         dest_path = self._pipeline_input_path()
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(self.file_path, dest_path)
+        if Path(self.file_path).suffix.lower() == _PDF_SUFFIX:
+            self.pdf_conversion = convert_pdf(self.file_path, dest_path)
+        else:
+            shutil.copy2(self.file_path, dest_path)
         return str(dest_path)
+
+    async def _warn_image_only_pages(self) -> None:
+        """Name a converted PDF's image-only pages in the run log (#536):
+        their text never reaches the pipeline, so the output silently lacks
+        it otherwise. Logged under the first stage, which the user sees first,
+        and on a run's first attempt only: a retry or resume re-converts but
+        the step-1 log already carries the warning."""
+        if self.pdf_conversion is None or not self.pdf_conversion.image_only_pages:
+            return
+        pages = ", ".join(str(n) for n in self.pdf_conversion.image_only_pages)
+        await self.log(
+            STEP_REGISTRY[0].number,
+            f"PDF page(s) {pages} contain only images (likely scanned), so their "
+            "text could not be read and is missing from the output.",
+            "WARNING",
+        )
 
     def _get_output_paths(self) -> dict[str, Path]:
         """Get expected output file paths for each stage."""
@@ -878,8 +918,12 @@ class PipelineOrchestrator:
             if start_step_number is None:
                 await self._notify_started(run)
 
-            # Copy file to pipeline input directory
-            cv_path = self._copy_to_pipeline_input()
+            # Copy (or, for a PDF, convert) the upload to the pipeline input dir
+            # Off the loop: a PDF conversion can wait for a sandbox slot and
+            # then run for minutes, and the loop must keep serving events.
+            cv_path = await asyncio.to_thread(self._copy_to_pipeline_input)
+            if start_step_number is None:
+                await self._warn_image_only_pages()
 
             if start_step_number is not None:
                 # May lower the resume point if an earlier output is unrecoverable.
@@ -926,7 +970,6 @@ class PipelineOrchestrator:
             # Best-effort, run off the event loop; never affects run status.
             score = None
             try:
-                import asyncio
                 from app.services.quality_score_service import compute_and_cache_score, persist_score_columns
                 score = await asyncio.get_running_loop().run_in_executor(
                     None, compute_and_cache_score, self.run_id
