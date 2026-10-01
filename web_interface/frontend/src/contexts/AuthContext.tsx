@@ -144,3 +144,18 @@ export function useAuth() {
 export function useCanSeeCost(): boolean {
   return useAuth().user?.role === 'admin'
 }
+
+/** Admin-only writes and pages (settings, users, deletes). Same test as the
+ *  backend's require_admin. */
+export function useIsAdmin(): boolean {
+  return useAuth().user?.role === 'admin'
+}
+
+/** Read-only view of every user's runs: the all-runs list, "Run by", run quality,
+ *  stage JSON, and feedback insights. Admin or staff (Office of Faculty Affairs);
+ *  mirrors the backend's can_view_all_runs. Grants reads only -- writes stay on
+ *  useIsAdmin, cost on useCanSeeCost. */
+export function useCanViewAllRuns(): boolean {
+  const role = useAuth().user?.role
+  return role === 'admin' || role === 'staff'
+}

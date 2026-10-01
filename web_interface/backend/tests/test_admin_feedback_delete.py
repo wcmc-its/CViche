@@ -13,6 +13,8 @@ import os
 from datetime import datetime
 from types import SimpleNamespace
 
+import pytest
+
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 
@@ -91,6 +93,50 @@ def test_non_admin_cannot_delete_feedback(client, db):
     assert resp.json()["detail"]["error"] == "forbidden"
     # Row untouched
     assert db.query(Feedback).filter(Feedback.id == fb_id).first() is not None
+
+
+def _as_staff(client, fn):
+    """Staff (read-only) through the REAL require_admin, like _as_user."""
+    from app.main import app
+    from app.auth import get_current_user
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        id=-2, role="staff", email="staff@example.com"
+    )
+    try:
+        return fn()
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+def test_staff_cannot_delete_feedback(client, db):
+    """Staff read Feedback Insights but cannot delete from it."""
+    from app.models import Feedback
+
+    fb_id = _seed_feedback(db)
+
+    resp = _as_staff(client, lambda: client.delete(f"/api/admin/feedback/{fb_id}"))
+
+    assert resp.status_code == 403
+    assert db.query(Feedback).filter(Feedback.id == fb_id).first() is not None
+
+
+@pytest.mark.parametrize("method, path", [
+    ("get", "/api/admin/stats"),           # carries cost
+    ("get", "/api/admin/users"),           # user management
+    ("put", "/api/admin/users/1"),
+    ("get", "/api/admin/config"),          # admin config
+    ("put", "/api/admin/config"),
+    ("delete", "/api/admin/runs/_WY5HW"),  # delete run
+    ("get", "/api/admin/runs"),            # carries raw total_cost
+    ("post", "/api/admin/sessions/revoke-all"),
+])
+def test_staff_is_forbidden_admin_only_endpoints(client, db, method, path):
+    _seed_feedback(db)
+
+    resp = _as_staff(client, lambda: getattr(client, method)(path))
+
+    assert resp.status_code == 403
 
 
 def test_admin_delete_removes_row(client, db):

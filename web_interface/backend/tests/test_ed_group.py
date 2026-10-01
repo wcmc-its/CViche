@@ -68,6 +68,14 @@ LDAP_PARAMS = {
 }
 ACCESS_GROUP = "cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
 ADMIN_GROUP = "cn=ITS:Library:CViche/admin-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+STAFF_GROUP = "cn=ITS:Library:CViche/ofa-staff-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+
+
+def _groups_side_effect(*member_of):
+    """_ldap_check_membership stand-in: True only for the group DNs given."""
+    def side_effect(cwid, group_dn, *args, **kwargs):
+        return group_dn in member_of
+    return side_effect
 
 
 @pytest.fixture(autouse=True)
@@ -150,6 +158,51 @@ class TestCheckEdMembership:
         # Two group checks, one bind (#410).
         assert mock_ldap.call_count == 2
         assert mock_bind.call_count == 1
+
+    @patch("app.ed_group_lookup._bind")
+    @patch("app.ed_group_lookup._ldap_check_membership")
+    def test_user_in_staff_group_is_staff(self, mock_ldap, _mock_bind):
+        mock_ldap.side_effect = _groups_side_effect(ACCESS_GROUP, STAFF_GROUP)
+        result = check_ed_membership(
+            "staff0001", ACCESS_GROUP, ADMIN_GROUP, staff_group=STAFF_GROUP, **LDAP_PARAMS
+        )
+        assert result == MembershipResult(
+            in_access_group=True, in_admin_group=False, in_staff_group=True)
+
+    @patch("app.ed_group_lookup._bind")
+    @patch("app.ed_group_lookup._ldap_check_membership")
+    def test_admin_wins_and_staff_is_not_queried(self, mock_ldap, _mock_bind):
+        """In all three groups -> admin; the staff search is skipped."""
+        mock_ldap.return_value = True
+        result = check_ed_membership(
+            "both0001", ACCESS_GROUP, ADMIN_GROUP, staff_group=STAFF_GROUP, **LDAP_PARAMS
+        )
+        assert result == MembershipResult(
+            in_access_group=True, in_admin_group=True, in_staff_group=False)
+        assert [c.args[1] for c in mock_ldap.call_args_list] == [ACCESS_GROUP, ADMIN_GROUP]
+
+    @patch("app.ed_group_lookup._bind")
+    @patch("app.ed_group_lookup._ldap_check_membership")
+    def test_staff_requires_access_group(self, mock_ldap, _mock_bind):
+        """Staff membership does NOT imply access, the same locked decision as admin."""
+        mock_ldap.side_effect = _groups_side_effect(STAFF_GROUP)
+        result = check_ed_membership(
+            "staffnoaccess", ACCESS_GROUP, ADMIN_GROUP, staff_group=STAFF_GROUP, **LDAP_PARAMS
+        )
+        assert result == MembershipResult(
+            in_access_group=False, in_admin_group=False, in_staff_group=False)
+        assert mock_ldap.call_count == 1
+
+    @patch("app.ed_group_lookup._bind")
+    @patch("app.ed_group_lookup._ldap_check_membership")
+    def test_empty_staff_group_means_nobody_is_staff(self, mock_ldap, _mock_bind):
+        """Unset staff_group (every existing deploy) -> never staff, no staff search."""
+        mock_ldap.side_effect = _groups_side_effect(ACCESS_GROUP, "")
+        result = check_ed_membership(
+            "user0001", ACCESS_GROUP, ADMIN_GROUP, staff_group="", **LDAP_PARAMS
+        )
+        assert result.in_staff_group is False
+        assert [c.args[1] for c in mock_ldap.call_args_list] == [ACCESS_GROUP, ADMIN_GROUP]
 
     @patch("app.ed_group_lookup._bind")
     @patch("app.ed_group_lookup._ldap_check_membership")
@@ -1066,6 +1119,28 @@ class TestCacheKeyIncludesGroups:
         # NOT served from the first pair's cache entry.
         assert mock_ldap.call_count == 4
 
+    def test_same_groups_different_staff_group_do_not_share_cache_entry(self):
+        staff = MembershipResult(in_access_group=True, in_admin_group=False, in_staff_group=True)
+        set_cached_membership("shared0003", ACCESS_GROUP, ADMIN_GROUP, staff, STAFF_GROUP)
+
+        # Staff group unset (or repointed): the staff answer must not be served.
+        assert get_cached_membership("shared0003", ACCESS_GROUP, ADMIN_GROUP) is None
+        assert get_stale_membership("shared0003", ACCESS_GROUP, ADMIN_GROUP) is None
+        assert get_cached_membership(
+            "shared0003", ACCESS_GROUP, ADMIN_GROUP, STAFF_GROUP) == staff
+
+    @patch("app.ed_group_lookup._bind")
+    @patch("app.ed_group_lookup._ldap_check_membership")
+    def test_different_staff_group_triggers_a_fresh_ldap_query(self, mock_ldap, _mock_bind):
+        mock_ldap.side_effect = _groups_side_effect(ACCESS_GROUP, STAFF_GROUP)
+        first = check_ed_membership(
+            "shared0004", ACCESS_GROUP, ADMIN_GROUP, staff_group=STAFF_GROUP, **LDAP_PARAMS)
+        assert first.in_staff_group is True
+
+        second = check_ed_membership(
+            "shared0004", ACCESS_GROUP, ADMIN_GROUP, staff_group="", **LDAP_PARAMS)
+        assert second.in_staff_group is False
+
 
 # ---------------------------------------------------------------------------
 # TestSingleFlight -- B11
@@ -1168,7 +1243,7 @@ class TestMembershipResultContract:
 # Integration tests: ACS handler ED wiring
 # ---------------------------------------------------------------------------
 
-from app.models import User
+from app.models import SystemConfig, User
 from app.auth import create_session_cookie, COOKIE_NAME
 
 
@@ -1187,6 +1262,16 @@ def _mock_saml_client(identity_dict):
     mock_response.assertion = assertion
     mock_client.parse_authn_request_response.return_value = mock_response
     return mock_client
+
+
+def _set_staff_group_config(db, staff_group: str) -> None:
+    """Upsert ed_staff_group: app startup may already have seeded it empty."""
+    row = db.query(SystemConfig).filter_by(key="ed_staff_group").first()
+    if row is None:
+        db.add(SystemConfig(key="ed_staff_group", value=json.dumps(staff_group)))
+    else:
+        row.value = json.dumps(staff_group)
+    db.commit()
 
 
 _ED_ENV = {
@@ -1271,6 +1356,30 @@ class TestACSGroupCheck:
     @patch("app.api.saml_routes.check_ed_membership")
     @patch("app.api.saml_routes.get_saml_client")
     @patch("app.api.saml_routes.extract_user_attrs")
+    def test_staff_group_member_provisioned_as_staff(
+        self, mock_extract, mock_get_client, mock_check_ed, client, db, seed_ed_enabled
+    ):
+        clear_cache()
+        _set_staff_group_config(db, STAFF_GROUP)
+        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+        mock_extract.return_value = {"cwid": "staff0002", "email": "ofa@med.cornell.edu", "display_name": "OFA Staff"}
+        mock_check_ed.return_value = MembershipResult(
+            in_access_group=True, in_admin_group=False, in_staff_group=True)
+
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "dummy", "RelayState": "/"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/"
+        assert mock_check_ed.call_args.kwargs["staff_group"] == STAFF_GROUP
+        assert db.query(User).filter_by(cwid="staff0002").one().role == "staff"
+
+    @patch.dict(os.environ, _ED_ENV)
+    @patch("app.api.saml_routes.check_ed_membership")
+    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.api.saml_routes.extract_user_attrs")
     def test_ldap_unavailable_at_login(
         self, mock_extract, mock_get_client, mock_check_ed, client, seed_ed_enabled
     ):
@@ -1338,6 +1447,69 @@ class TestPerRequestCheck:
 
         response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})
         assert response.status_code == 401
+
+    @staticmethod
+    def _saml_user(db, role="user"):
+        user = User(cwid="staff0001", email="staff@med.cornell.edu",
+                    display_name="Staff User", role=role, auth_method="saml")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+
+    @staticmethod
+    def _configure_staff_group(db):
+        _set_staff_group_config(db, STAFF_GROUP)
+
+    def _me_with_cached(self, client, db, membership, staff_group, role="user"):
+        """GET /api/auth/me for a SAML user whose ED answer is `membership`,
+        cached under the key the per-request check builds for `staff_group`."""
+        clear_cache()
+        user = self._saml_user(db, role=role)
+        set_cached_membership("staff0001", ACCESS_GROUP, ADMIN_GROUP, membership, staff_group)
+        token = create_session_cookie(user, db)
+        return client.get("/api/auth/me", cookies={COOKIE_NAME: token})
+
+    def test_staff_group_member_synced_to_staff(self, client, db, seed_ed_enabled):
+        self._configure_staff_group(db)
+        response = self._me_with_cached(
+            client, db,
+            MembershipResult(in_access_group=True, in_admin_group=False, in_staff_group=True),
+            STAFF_GROUP,
+        )
+        assert response.status_code == 200
+        assert response.json()["role"] == "staff"
+
+    def test_admin_wins_over_staff_on_role_sync(self, client, db, seed_ed_enabled):
+        self._configure_staff_group(db)
+        response = self._me_with_cached(
+            client, db,
+            MembershipResult(in_access_group=True, in_admin_group=True, in_staff_group=True),
+            STAFF_GROUP,
+        )
+        assert response.status_code == 200
+        assert response.json()["role"] == "admin"
+
+    def test_staff_without_access_is_denied(self, client, db, seed_ed_enabled):
+        self._configure_staff_group(db)
+        response = self._me_with_cached(
+            client, db,
+            MembershipResult(in_access_group=False, in_admin_group=False, in_staff_group=True),
+            STAFF_GROUP,
+        )
+        assert response.status_code == 401
+
+    def test_unset_staff_group_demotes_staff_to_user(self, client, db, seed_ed_enabled):
+        """No ed_staff_group configured: a user whose stored role is staff is
+        re-synced to user (the per-request check keys on an empty staff group)."""
+        response = self._me_with_cached(
+            client, db,
+            MembershipResult(in_access_group=True, in_admin_group=False),
+            "",
+            role="staff",
+        )
+        assert response.status_code == 200
+        assert response.json()["role"] == "user"
 
     def test_simple_mode_skips_ed(self, client, db, seed_simple_mode):
         """Simple mode user bypasses ED check entirely."""

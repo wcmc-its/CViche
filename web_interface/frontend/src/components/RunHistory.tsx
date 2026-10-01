@@ -3,7 +3,7 @@ import { FileText, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
 import { getRuns, getFeedbackStatuses, getRunFilterOptions } from '../api/runs'
 import type { FeedbackStatus, RunFilterOptions, RunSummary } from '../types'
 import ErrorBanner from './ErrorBanner'
-import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
+import { useAuth, useCanSeeCost, useCanViewAllRuns } from '../contexts/AuthContext'
 import RunTable from './runs/RunTable'
 import { ActiveFilterChips, RunFilterCombos } from './runs/RunFilterBar'
 import { toListParams, useRunFilters } from './runs/runFilters'
@@ -50,11 +50,12 @@ function getPageNumbers(currentPage: number, totalPages: number): (number | 'ell
 
 export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const { user } = useAuth()
-  const isAdmin = user?.role === 'admin'
+  // Admin or staff: the all-runs view (scope=all, filters, Run by, Score).
+  const allRunsView = useCanViewAllRuns()
   const showCost = useCanSeeCost()
-  const controls = useRunFilters(isAdmin)
+  const controls = useRunFilters(allRunsView)
   const { filters } = controls
-  const listParams = useMemo(() => (isAdmin ? toListParams(filters) : undefined), [isAdmin, filters])
+  const listParams = useMemo(() => (allRunsView ? toListParams(filters) : undefined), [allRunsView, filters])
   const filterKey = JSON.stringify(listParams ?? {})
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -104,7 +105,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   useEffect(() => { fetchFeedbackStatus() }, [])
 
   useEffect(() => {
-    if (!isAdmin) return
+    if (!allRunsView) return
     let cancelled = false
     getRunFilterOptions(toListParams(filters))
       .then((data) => { if (!cancelled) setFilterOptions(data) })
@@ -113,7 +114,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
         if (!cancelled) setError('Unable to load the filter lists. Please refresh the page to try again.')
       })
     return () => { cancelled = true }
-  }, [isAdmin, filters])
+  }, [allRunsView, filters])
 
   useEffect(() => {
     fetchRuns(currentPage * PAGE_SIZE).then(() => {
@@ -165,7 +166,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
 
   return (
     <>
-      {isAdmin && (
+      {allRunsView && (
         <div className="mt-6">
           <div className="flex flex-wrap items-center gap-2">
             <RunFilterCombos {...filterBarProps} currentUserEmail={user?.email} />
@@ -189,7 +190,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
           <>
             <RunTable
               groups={groups}
-              isAdmin={isAdmin}
+              allRunsView={allRunsView}
               showCost={showCost}
               feedbackMap={feedbackMap}
               currentUserId={user?.user_id}

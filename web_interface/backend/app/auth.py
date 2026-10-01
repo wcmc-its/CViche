@@ -14,12 +14,13 @@ from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.exc import OperationalError
 
 from app.database import get_db
-from app.models import User
+from app.models import User, UserRole
 from app.config_loader import get_config_value
 from app.ed_group_lookup import (
     check_ed_membership,
     EdUnavailableError,
     LDAPConfig,
+    MembershipResult,
 )
 from pydantic import SecretStr
 from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
@@ -507,8 +508,8 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
     """Per-request ED group re-check for SAML users, when ED is enabled.
 
     Re-verifies on every request that the user is still in the access group and
-    syncs their role from the admin group; a removal takes effect on the next
-    request rather than at the next login.
+    syncs their role from the admin and staff groups; a removal takes effect on
+    the next request rather than at the next login.
     """
     if user.auth_method != "saml":
         return
@@ -529,6 +530,7 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
 
     ed_access_group = get_config_value(db, "ed_access_group") or ""
     ed_admin_group = get_config_value(db, "ed_admin_group") or ""
+    ed_staff_group = get_config_value(db, "ed_staff_group") or ""
     ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
     ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
     bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
@@ -541,6 +543,7 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
             cwid=user.cwid,
             access_group=ed_access_group,
             admin_group=ed_admin_group,
+            staff_group=ed_staff_group,
             cfg=ldap_cfg,
             use_cache=True,
         )
@@ -567,7 +570,7 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
         raise HTTPException(status_code=401, detail=_NOT_AUTHORIZED_DETAIL)
 
     # Sync role from ED group membership
-    new_role = "admin" if membership.in_admin_group else "user"
+    new_role = role_for_membership(membership)
     if user.role != new_role:
         old_role = user.role
         # Update the in-memory value WITHOUT marking the request session's
@@ -605,6 +608,31 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
+def role_for_membership(membership: MembershipResult) -> UserRole:
+    """The role ED membership grants: admin wins over staff, staff over user.
+
+    The caller has already denied a user outside the access group; the
+    MembershipResult invariant also keeps admin/staff False for such a user.
+    """
+    if membership.in_admin_group:
+        return UserRole.ADMIN
+    if membership.in_staff_group:
+        return UserRole.STAFF
+    return UserRole.USER
+
+
+def can_view_all_runs(user: User) -> bool:
+    """Read-only access to every user's runs: the runs list, run detail, "Run
+    by", run quality, pipeline logs/prompts/stage JSON, and feedback insights.
+
+    Admin or staff (Office of Faculty Affairs). Grants READS only -- every write
+    (admin config, user management, deleting feedback or runs, acting on
+    another user's run) stays behind require_admin or ownership, and cost stays
+    behind can_see_cost.
+    """
+    return user.role in (UserRole.ADMIN, UserRole.STAFF)
+
+
 def can_see_cost(user: User) -> bool:
     """Processing cost is admin-only (#1111). The UI hides it by role too; the
     API withholding it is what keeps it out of the network tab."""
@@ -621,6 +649,16 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
         raise HTTPException(
             status_code=403,
             detail={"error": "forbidden", "message": "Admin access required."}
+        )
+    return user
+
+
+def require_view_all_runs(user: User = Depends(get_current_user)) -> User:
+    """FastAPI dependency for the read-only routes can_view_all_runs opens."""
+    if not can_view_all_runs(user):
+        raise HTTPException(
+            status_code=403,
+            detail={"error": "forbidden", "message": "Admin or staff access required."}
         )
     return user
 

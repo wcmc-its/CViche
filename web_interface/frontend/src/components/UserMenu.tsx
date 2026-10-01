@@ -81,6 +81,7 @@ export default function UserMenu({ className }: UserMenuProps) {
         <span className="hidden md:block leading-tight">
           <span className="block text-sm font-medium text-gray-900">{user.display_name}</span>
           {user.role === 'admin' && <span className="block text-xs text-gray-500">Admin</span>}
+          {user.role === 'staff' && <span className="block text-xs text-gray-500">Staff</span>}
         </span>
       </button>
 

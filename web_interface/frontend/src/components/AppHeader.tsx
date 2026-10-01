@@ -1,6 +1,6 @@
 import { Link, NavLink, useLocation } from 'react-router-dom'
 import { HelpCircle } from 'lucide-react'
-import { useAuth } from '../contexts/AuthContext'
+import { useCanViewAllRuns } from '../contexts/AuthContext'
 import UserMenu from './UserMenu'
 
 const tabClass = ({ isActive }: { isActive: boolean }) =>
@@ -10,7 +10,8 @@ const tabClass = ({ isActive }: { isActive: boolean }) =>
 
 /** Top bar on every signed-in page: logo, main tabs, Help, account (#1112). */
 export default function AppHeader() {
-  const { user } = useAuth()
+  // Admin, or staff (read-only: the dashboard shows staff Feedback only).
+  const showDashboard = useCanViewAllRuns()
   // A run page belongs under Runs even though its path is /run/:id.
   const onRunPage = useLocation().pathname.startsWith('/run/')
 
@@ -23,7 +24,7 @@ export default function AppHeader() {
         <nav aria-label="Main" className="flex h-full min-w-0 overflow-x-auto [scrollbar-width:none]">
           <NavLink to="/runs" className={({ isActive }) => tabClass({ isActive: isActive || onRunPage })}>Runs</NavLink>
           <NavLink to="/" end className={tabClass}>New run</NavLink>
-          {user?.role === 'admin' && <NavLink to="/admin" className={tabClass}>Dashboard</NavLink>}
+          {showDashboard && <NavLink to="/admin" className={tabClass}>Dashboard</NavLink>}
         </nav>
         <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-5">
           <Link

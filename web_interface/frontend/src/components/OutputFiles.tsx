@@ -1,6 +1,6 @@
 import { FileText, Download } from 'lucide-react'
 import { runRoutes } from '../api/routes'
-import { useAuth } from '../contexts/AuthContext'
+import { useCanViewAllRuns } from '../contexts/AuthContext'
 
 interface OutputFilesProps {
   runId: string
@@ -42,27 +42,24 @@ export function DocxDownloadCard({ runId, filename }: { runId: string; filename:
   )
 }
 
-// Stage JSON files are internal pipeline artifacts -- admin-only (the backend
-// enforces this too). Hide them entirely from non-admins; the final .docx and
-// other outputs stay visible to the run owner.
+// Stage JSON files are internal pipeline artifacts -- admin and staff only (the
+// backend enforces this too). Hide them entirely from everyone else; the final
+// .docx and other outputs stay visible to the run owner.
 const isJsonName = (f: string) => (f.split('/').pop() || f).endsWith('.json')
 
 /** The step's output files this user will actually see listed. */
-export function visibleOutputFiles(step: Pick<OutputFilesProps['step'], 'output_files'>, isAdmin: boolean): string[] {
+export function visibleOutputFiles(step: Pick<OutputFilesProps['step'], 'output_files'>, canSeeStageJson: boolean): string[] {
   let files: string[] = []
   try {
     files = step.output_files ? JSON.parse(step.output_files) : []
   } catch {
     files = []
   }
-  return files.filter(f => isAdmin || !isJsonName(f))
+  return files.filter(f => canSeeStageJson || !isJsonName(f))
 }
 
 export default function OutputFiles({ runId, step, onOpenJson, showFinalOutput = true }: OutputFilesProps) {
-  const { user } = useAuth()
-  const isAdmin = user?.role === 'admin'
-
-  const outputFiles = visibleOutputFiles(step, isAdmin)
+  const outputFiles = visibleOutputFiles(step, useCanViewAllRuns())
 
   if (step.status !== 'complete' || outputFiles.length === 0) {
     return null

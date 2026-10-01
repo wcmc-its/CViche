@@ -15,8 +15,8 @@ from sqlalchemy.orm import Query as SAQuery, Session, contains_eager
 
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
-from app.auth import require_admin, SessionEpochUnreadable
-from app.errors import conflict, internal_error, not_found, validation_error
+from app.auth import require_admin, require_view_all_runs, SessionEpochUnreadable
+from app.errors import conflict, forbidden, internal_error, not_found, validation_error
 from app.schemas import (
     AdminStats,
     AdminUser,
@@ -872,18 +872,27 @@ def _iter_csv_chunks(export_type: str, db: Session) -> Iterator[str]:
         yield tail
 
 
+# Exports staff (read-only, UserRole.STAFF) may download: feedback backs the
+# Feedback Insights tab and carries no cost. runs carries total_cost (admin-only,
+# #1111); users and consent are user-management data.
+_STAFF_EXPORT_TYPES = frozenset({"feedback"})
+
+
 @router.get("/admin/export/{export_type}")
 async def export_csv(
     export_type: str,
     db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
+    viewer: User = Depends(require_view_all_runs),
 ):
-    """Export data as CSV. Supported types: runs, users, consent, feedback."""
+    """Export data as CSV. Supported types: runs, users, consent, feedback.
+    Admins may export any type; staff only _STAFF_EXPORT_TYPES."""
     if export_type not in _CSV_EXPORTS:
         raise validation_error(f"Invalid export type: {export_type}. Must be one of: runs, users, consent, feedback.")
+    if viewer.role != "admin" and export_type not in _STAFF_EXPORT_TYPES:
+        raise forbidden("Admin access required for this export.")
 
     logger.info(
-        "admin_export: admin=%s export_type=%s", admin.email, export_type
+        "admin_export: user=%s role=%s export_type=%s", viewer.email, viewer.role, export_type
     )
 
     return StreamingResponse(

@@ -154,7 +154,7 @@ async def get_feedback(
     Returns the user's feedback (or null if none submitted), along with
     which pipeline stages completed and which WCM sections are populated.
     """
-    run = check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db, read_only=True)
 
     # Get existing feedback for this user on this run
     feedback = db.query(Feedback).filter(

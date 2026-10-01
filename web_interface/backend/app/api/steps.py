@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.schemas import StepDetail, LogEntry
-from app.auth import get_current_user, require_admin, visible_cost
+from app.auth import can_view_all_runs, get_current_user, require_view_all_runs, visible_cost
 from app.services import artifact_service, prompt_log_service
 from app.services.run_service import check_run_access
 from app.storage import get_storage
@@ -40,7 +40,7 @@ def get_step_detail(
 ) -> StepDetail:
     """Get detailed information about a specific step."""
 
-    check_run_access(run_id, current_user, db)
+    check_run_access(run_id, current_user, db, read_only=True)
 
     step, logs = artifact_service.get_step_with_logs(db, run_id, step_number)
     if not step:
@@ -100,16 +100,17 @@ def get_data_file(
 ) -> Response:
     """Download or preview a data file."""
 
-    check_run_access(run_id, current_user, db)
+    check_run_access(run_id, current_user, db, read_only=True)
 
-    # Stage JSON files are internal pipeline artifacts -- restrict to admins.
+    # Stage JSON files are internal pipeline artifacts -- restrict to admins and
+    # staff (can_view_all_runs).
     # The final .docx (and any other non-JSON output) stays available to the
     # run owner. This single gate deliberately sits ABOVE every branch below --
     # before the storage short-circuit AND before `preview` is ever read -- so it
     # covers the S3 redirect, the download and the ?preview=true JSON viewer
     # alike. Do not move it into a branch or duplicate it per-branch.
-    if artifact_service.is_json_artifact(filename) and current_user.role != "admin":
-        raise forbidden("Admin access required to access stage JSON.")
+    if artifact_service.is_json_artifact(filename) and not can_view_all_runs(current_user):
+        raise forbidden("Admin or staff access required to access stage JSON.")
 
     resolved = artifact_service.resolve_artifact(db, run_id, filename)
     download_name = resolved.basename
@@ -169,9 +170,9 @@ def download_input_file(
     The source is retained in durable storage at input/<run_id>.<ext> because
     restart/retry re-materialize it (see run_service._materialize_input_if_missing),
     but it was only ever read internally — there was no way to get the original
-    file back out. Same owner-or-admin gate as the outputs download.
+    file back out. Same owner, admin or staff gate as the outputs download.
     """
-    run = check_run_access(run_id, current_user, db)  # 404/403 as needed; returns the Run
+    run = check_run_access(run_id, current_user, db, read_only=True)  # 404/403; returns the Run
 
     file_type = (run.file_type or "").lower() or "docx"
     key = f"input/{run_id}.{file_type}"
@@ -221,12 +222,12 @@ def get_json_content(
     run_id: str,
     filename: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
+    current_user: User = Depends(require_view_all_runs),
 ) -> JSONResponse:
-    """Get raw JSON content for display in viewer. Admin-only: stage JSON is an
-    internal pipeline artifact, not user-facing output."""
+    """Get raw JSON content for display in viewer. Admin or staff only: stage
+    JSON is an internal pipeline artifact, not user-facing output."""
 
-    check_run_access(run_id, current_user, db)
+    check_run_access(run_id, current_user, db, read_only=True)
 
     resolved = artifact_service.resolve_artifact(db, run_id, filename)
 
@@ -281,7 +282,7 @@ def get_prompt_logs(
     """Get prompt logs for a specific step, filtered to only show logs from this run."""
 
     # Verify access and get the run
-    run_record = check_run_access(run_id, current_user, db)
+    run_record = check_run_access(run_id, current_user, db, read_only=True)
     if not run_record.started_at:
         return JSONResponse(content={"logs": [], "error": "Run has no start time"})
 

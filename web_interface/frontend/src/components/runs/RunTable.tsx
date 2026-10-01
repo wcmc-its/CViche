@@ -69,7 +69,7 @@ function formatDuration(seconds: number | null): string {
 
 interface RunTableProps {
   groups: RunGroup[]
-  isAdmin: boolean
+  allRunsView: boolean
   showCost: boolean
   feedbackMap: Record<string, boolean>
   currentUserId: number | undefined
@@ -163,7 +163,7 @@ interface RowProps extends Omit<RunTableProps, 'groups' | 'sortField' | 'sortDir
   earlier?: boolean
 }
 
-function RunRow({ run, firstCell, earlier = false, isAdmin, showCost, feedbackMap, currentUserId, onSelectRun, onFilter }: RowProps) {
+function RunRow({ run, firstCell, earlier = false, allRunsView, showCost, feedbackMap, currentUserId, onSelectRun, onFilter }: RowProps) {
   const { display, tooltip } = formatRelativeDate(run.started_at)
   const muted = earlier ? 'text-gray-500' : ''
   const runBy = runByLabel(run, currentUserId)
@@ -178,7 +178,7 @@ function RunRow({ run, firstCell, earlier = false, isAdmin, showCost, feedbackMa
       className={`cursor-pointer transition-colors border-b border-sand-200 last:border-b-0 hover:bg-sand-50 ${bg}`}
     >
       <td className={`${CELL} text-left`}>{firstCell}</td>
-      {isAdmin && (
+      {allRunsView && (
         <td className={`${CELL} text-left text-sm ${earlier ? 'text-gray-500' : 'text-gray-700'}`}>
           {runBy && runByValue ? (
             <button
@@ -200,7 +200,7 @@ function RunRow({ run, firstCell, earlier = false, isAdmin, showCost, feedbackMa
           <span className={`text-sm ${statusLabelColor(run.status)}`}>{statusLabel(run.status)}</span>
         </span>
       </td>
-      {isAdmin && (
+      {allRunsView && (
         <td className={`${CELL} text-left text-sm`}>
           <ScoreCell run={run} earlier={earlier} />
         </td>
@@ -224,12 +224,12 @@ function RunRow({ run, firstCell, earlier = false, isAdmin, showCost, feedbackMa
 interface GroupCellProps {
   group: RunGroup
   expanded: boolean
-  isAdmin: boolean
+  allRunsView: boolean
   onToggle: () => void
   onFilter: (key: RunFilterKey, value: string) => void
 }
 
-function GroupCell({ group, expanded, isAdmin, onToggle, onFilter }: GroupCellProps) {
+function GroupCell({ group, expanded, allRunsView, onToggle, onFilter }: GroupCellProps) {
   const { owner, latest, older } = group
   const runCount = older.length + 1
   return (
@@ -251,7 +251,7 @@ function GroupCell({ group, expanded, isAdmin, onToggle, onFilter }: GroupCellPr
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           {owner ? (
-            isAdmin ? (
+            allRunsView ? (
               <button
                 type="button"
                 title="Show only this faculty member"
@@ -278,7 +278,7 @@ function GroupCell({ group, expanded, isAdmin, onToggle, onFilter }: GroupCellPr
 
 /** Runs grouped by faculty member: latest run per row, earlier reruns behind a chevron. */
 export default function RunTable(props: RunTableProps) {
-  const { groups, isAdmin, showCost, sortField, sortDir, onSort } = props
+  const { groups, allRunsView, showCost, sortField, sortDir, onSort } = props
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const toggle = (key: string) =>
     setExpanded((prev) => {
@@ -289,7 +289,7 @@ export default function RunTable(props: RunTableProps) {
     })
   const header = { sortField, sortDir, onSort }
   const rowProps = {
-    isAdmin,
+    allRunsView,
     showCost,
     feedbackMap: props.feedbackMap,
     currentUserId: props.currentUserId,
@@ -298,14 +298,14 @@ export default function RunTable(props: RunTableProps) {
   }
   return (
     <div className="overflow-x-auto">
-      <table className={`w-full table-fixed ${isAdmin ? 'min-w-[1000px]' : 'min-w-[640px]'}`}>
+      <table className={`w-full table-fixed ${allRunsView ? 'min-w-[1000px]' : 'min-w-[640px]'}`}>
         <thead className="sticky top-0 z-header bg-sand-50 border-b border-sand-200">
           <tr>
-            <SortHeader field="cv" label={isAdmin ? 'Faculty (subject)' : 'CV'} {...header} />
-            {isAdmin && <th className={`${CELL} text-left text-xs font-medium text-gray-500 w-[170px]`}>Run by</th>}
+            <SortHeader field="cv" label={allRunsView ? 'Faculty (subject)' : 'CV'} {...header} />
+            {allRunsView && <th className={`${CELL} text-left text-xs font-medium text-gray-500 w-[170px]`}>Run by</th>}
             <SortHeader field="status" label="Status" width="w-[120px]" {...header} />
-            {isAdmin && <SortHeader field="quality_score" label="Score" width="w-[84px]" {...header} />}
-            <SortHeader field="started_at" label={isAdmin ? 'Started' : 'Date'} width="w-[130px]" {...header} />
+            {allRunsView && <SortHeader field="quality_score" label="Score" width="w-[84px]" {...header} />}
+            <SortHeader field="started_at" label={allRunsView ? 'Started' : 'Date'} width="w-[130px]" {...header} />
             <SortHeader field="total_duration_seconds" label="Duration" align="right" width="w-[72px]" {...header} />
             {showCost && <SortHeader field="total_cost" label="Cost" align="right" width="w-[56px]" {...header} />}
             <SortHeader field="feedback" label="Feedback" align="center" width="w-[110px]" {...header} />
@@ -319,7 +319,7 @@ export default function RunTable(props: RunTableProps) {
                 key={group.latest.run_id}
                 run={group.latest}
                 firstCell={
-                  <GroupCell group={group} expanded={isOpen} isAdmin={isAdmin} onToggle={() => toggle(group.key)} onFilter={props.onFilter} />
+                  <GroupCell group={group} expanded={isOpen} allRunsView={allRunsView} onToggle={() => toggle(group.key)} onFilter={props.onFilter} />
                 }
                 {...rowProps}
               />,

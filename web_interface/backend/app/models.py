@@ -29,6 +29,20 @@ class RunState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class UserRole(StrEnum):
+    """Canonical ``users.role`` vocabulary, same pattern as ``RunState``.
+
+    STAFF (Office of Faculty Affairs) is read-only elevated access: every run
+    and its pipeline detail, but no cost and no admin writes (see
+    ``app.auth.can_view_all_runs``). Used on the lines the staff role adds or
+    changes; existing "admin"/"user" literals elsewhere are left as they are
+    (no drive-by conversions, CODING STANDARDS section 8.1).
+    """
+    USER = "user"
+    STAFF = "staff"
+    ADMIN = "admin"
+
+
 # ==========================
 # Authentication Models
 # ==========================
@@ -44,7 +58,9 @@ class User(Base):
     cwid = Column(String(20), unique=True, nullable=True, index=True)
     email = Column(String(255), unique=True, nullable=True, index=True)
     display_name = Column(String(255), nullable=False)
-    role = Column(String(20), nullable=False, default="user")  # "user" or "admin"
+    # A UserRole value: "user", "staff" or "admin". A plain String with no
+    # Enum type or CHECK constraint, so adding a role needs no migration.
+    role = Column(String(20), nullable=False, default=UserRole.USER)
     status = Column(String(20), nullable=False, default="active")  # "active" or "disabled"
     daily_limit = Column(Integer, nullable=True)
     monthly_limit = Column(Integer, nullable=True)

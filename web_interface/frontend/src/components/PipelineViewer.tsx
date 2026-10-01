@@ -15,7 +15,7 @@ import CancelConfirmModal from './CancelConfirmModal'
 import ErrorBanner from './ErrorBanner'
 import FeedbackForm from './FeedbackForm'
 import { RunQualitySections, ReviewNote } from './RunQualityPanel'
-import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
+import { useAuth, useCanSeeCost, useCanViewAllRuns } from '../contexts/AuthContext'
 
 interface PipelineViewerProps {
   runId: string
@@ -56,7 +56,9 @@ const TOTAL_WEIGHT = Object.values(STEP_WEIGHTS).reduce((sum, s) => sum + s.weig
 
 export default function PipelineViewer({ runId, onBack, onNavigateToRun }: PipelineViewerProps) {
   const showCost = useCanSeeCost()
-  const isAdmin = useAuth().user?.role === 'admin'
+  const { user } = useAuth()
+  // Admin or staff: Run by, run quality, stage JSON on any run (read-only).
+  const canViewAllRuns = useCanViewAllRuns()
   // Extract clean state and background engine processing mechanisms out of the custom hook
   const {
     runStatus,
@@ -275,12 +277,15 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
 }
 
   const isComplete = runStatus.status === 'complete'
+  // Staff read any run but submit feedback only on their own; the API 403s a
+  // staff submission on someone else's run (check_run_access stays owner-or-admin).
+  const isStaffViewingOthersRun = user?.role === 'staff' && runStatus.run_by?.id !== user.user_id
   const showDetails = detailsOverride ?? !isComplete
 
   // Count only what the Summary tab will list for this user: stage JSON is
-  // admin-only, and on a finished run the final .docx sits in the download card.
+  // admin/staff-only, and on a finished run the final .docx sits in the download card.
   const currentOutputCount = currentStepData
-    ? visibleOutputFiles(currentStepData, isAdmin).filter(
+    ? visibleOutputFiles(currentStepData, canViewAllRuns).filter(
         f => !(isComplete && currentStepData.stage_id === '6' && f.endsWith('.docx')),
       ).length
     : 0
@@ -402,7 +407,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           runId={runId}
           filename={runStatus.filename}
           title={isComplete ? runStatus.cv_owner_name?.trim() || runStatus.filename : undefined}
-          runByName={isAdmin ? runStatus.run_by?.display_name : null}
+          runByName={canViewAllRuns ? runStatus.run_by?.display_name : null}
           status={runStatus.status}
           steps={runStatus.steps}
           stepProgress={stepProgress}
@@ -422,10 +427,10 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
             {isComplete ? 'Your CV is ready to download.' : ''}
           </p>
           {isComplete && finalDocxName && <DocxDownloadCard runId={runId} filename={finalDocxName} />}
-          {isComplete && !isAdmin && <ReviewNote runId={runId} />}
+          {isComplete && !canViewAllRuns && <ReviewNote runId={runId} />}
         </PipelineHeader>
 
-        {isComplete && isAdmin && <RunQualitySections runId={runId} />}
+        {isComplete && canViewAllRuns && <RunQualitySections runId={runId} />}
 
         {showDetails && (
           <div className="grid grid-cols-1 gap-[18px] items-start md:grid-cols-[minmax(260px,340px)_minmax(0,1fr)]">
@@ -524,7 +529,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           </div>
         )}
 
-        {isComplete && (
+        {isComplete && !isStaffViewingOthersRun && (
           <section id="feedback-section">
             <FeedbackForm runId={runId} />
           </section>

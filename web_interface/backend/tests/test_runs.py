@@ -41,7 +41,7 @@ def _auth(client, user):
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))
 
 
-@pytest.mark.parametrize("role, expected", [("admin", 1.25), ("user", None)])
+@pytest.mark.parametrize("role, expected", [("admin", 1.25), ("user", None), ("staff", None)])
 def test_run_list_cost_is_admin_only(client, db, seed_simple_mode, role, expected):
     user, _ = _owner_with_run(db, role)
     _auth(client, user)
@@ -50,7 +50,8 @@ def test_run_list_cost_is_admin_only(client, db, seed_simple_mode, role, expecte
     assert [r["total_cost"] for r in resp.json()["runs"]] == [expected]
 
 
-@pytest.mark.parametrize("role, run_cost, step_cost", [("admin", 1.25, 0.42), ("user", None, None)])
+@pytest.mark.parametrize("role, run_cost, step_cost",
+                         [("admin", 1.25, 0.42), ("user", None, None), ("staff", None, None)])
 def test_run_status_cost_is_admin_only(client, db, seed_simple_mode, role, run_cost, step_cost):
     user, run = _owner_with_run(db, role)
     _auth(client, user)
@@ -61,7 +62,7 @@ def test_run_status_cost_is_admin_only(client, db, seed_simple_mode, role, run_c
     assert [s["cost"] for s in body["steps"]] == [step_cost]
 
 
-@pytest.mark.parametrize("role, run_by_name", [("admin", "T"), ("user", None)])
+@pytest.mark.parametrize("role, run_by_name", [("admin", "T"), ("user", None), ("staff", "T")])
 def test_run_status_carries_owner_and_admin_only_run_by(client, db, seed_simple_mode, role, run_by_name):
     user, run = _owner_with_run(db, role)
     run.cv_owner_name = "Jane Testperson"
@@ -549,6 +550,63 @@ def test_review_note_falls_back_to_the_cached_score_before_backfill(client, db, 
     _patch_quality(monkeypatch, {"totalScore": 70, "hard_fail_caps_applied": []}, None)
     _auth(client, users["alice"])
     assert client.get("/api/run/ADM001/review-note").json() == {"needs_cleanup": True}
+
+
+def _staff(db):
+    staff = User(email="ofa@example.com", cwid="abc1004", display_name="OFA Staff",
+                 role="staff", consent_version="1.0")
+    db.add(staff)
+    db.commit()
+    db.refresh(staff)
+    return staff
+
+
+def test_staff_gets_another_users_run_status_with_run_by_and_no_cost(client, db, seed_simple_mode):
+    _seed_admin_view(db)
+    _auth(client, _staff(db))
+
+    resp = client.get("/api/run/ADM001/status")  # alice's run
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_by"]["display_name"] == "Alice Tester"
+    assert body["total_cost"] is None
+
+
+def test_staff_lists_every_run_and_filter_options_without_cost(client, db, seed_simple_mode):
+    _seed_admin_view(db)
+    _auth(client, _staff(db))
+
+    resp = client.get("/api/runs?scope=all")
+
+    assert resp.status_code == 200
+    assert sorted(_ids(resp)) == ["ADM001", "ADM002", "ADM003", "ADM004", "ADM005", "ADM006"]
+    assert all(r["total_cost"] is None for r in resp.json()["runs"])
+    assert client.get("/api/runs/filter-options?scope=all").status_code == 200
+
+
+def test_run_quality_is_open_to_staff(client, db, seed_simple_mode, monkeypatch):
+    _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, _DOCTOR)
+    _auth(client, _staff(db))
+
+    assert client.get("/api/run/ADM001/run-quality").status_code == 200
+
+
+@pytest.mark.parametrize("action, status", [
+    ("cancel", "running"), ("start", "created"), ("retry/1", "failed"), ("restart", "complete"),
+])
+def test_staff_cannot_act_on_another_users_run(client, db, seed_simple_mode, run_with_input, action, status):
+    """Staff reads every run but writes none: check_run_access stays
+    owner-or-admin unless a route passes read_only=True."""
+    _, run = run_with_input(status)
+    _auth(client, _staff(db))
+
+    resp = client.post(f"/api/run/{run.id}/{action}")
+
+    assert resp.status_code == 403
+    db.refresh(run)
+    assert run.status == status
 
 
 def test_review_note_is_for_the_owner_and_admins_only(client, db, seed_simple_mode, monkeypatch):
