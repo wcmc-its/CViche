@@ -16,15 +16,18 @@ const SEVERITIES: DoctorSeverity[] = ['ERROR', 'WARN', 'INFO']
 
 interface SeverityStyle {
   title: string
+  /** Pill noun for a count of 1 and for any other count. */
+  one: string
+  many: string
   pill: string
   text: string
   Icon: LucideIcon
 }
 
 const SEVERITY_STYLE: Record<DoctorSeverity, SeverityStyle> = {
-  ERROR: { title: 'Errors', pill: 'bg-error-100 text-error-700', text: 'text-error-700', Icon: XCircle },
-  WARN: { title: 'Warnings', pill: 'bg-warning-100 text-amber-700', text: 'text-amber-700', Icon: AlertCircle },
-  INFO: { title: 'Info', pill: 'bg-gray-100 text-gray-500', text: 'text-gray-500', Icon: Info },
+  ERROR: { title: 'Errors', one: 'error', many: 'errors', pill: 'bg-error-100 text-error-700', text: 'text-error-700', Icon: XCircle },
+  WARN: { title: 'Warnings', one: 'warning', many: 'warnings', pill: 'bg-warning-100 text-amber-700', text: 'text-amber-700', Icon: AlertCircle },
+  INFO: { title: 'Info', one: 'info', many: 'info', pill: 'bg-gray-100 text-gray-500', text: 'text-gray-500', Icon: Info },
 }
 
 type Load<T> = { state: 'loading' } | { state: 'error'; message: string } | { state: 'ready'; data: T }
@@ -226,7 +229,7 @@ function SeverityPills({ counts }: { counts: RunDoctorReport['counts'] }) {
     <div className="flex flex-wrap gap-1.5">
       {pills.map(({ s, n }) => (
         <span key={s} className={`rounded-full px-2.5 py-[3px] text-xs font-semibold ${SEVERITY_STYLE[s].pill}`}>
-          {n} {SEVERITY_STYLE[s].title.toLowerCase()}
+          {n} {n === 1 ? SEVERITY_STYLE[s].one : SEVERITY_STYLE[s].many}
         </span>
       ))}
     </div>
