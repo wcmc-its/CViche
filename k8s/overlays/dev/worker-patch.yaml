@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: cviche-worker
 spec:
-  replicas: 2 # global run cap for dev -- one run per pod, no HPA (see base/worker/deployment.yaml)
+  replicas: 6 # global run cap for dev -- one run per pod, no HPA (see base/worker/deployment.yaml)
   template:
     spec:
       nodeSelector:
