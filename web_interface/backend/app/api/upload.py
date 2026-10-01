@@ -348,30 +348,33 @@ def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
     return time_min, time_max
 
 
-_RUN_ID_ALPHABET = string.ascii_uppercase + string.digits
+# Letters only: a code read aloud or retyped never confuses O/0 or I/1.
+_RUN_ID_ALPHABET = string.ascii_uppercase
 
 
 def generate_run_id() -> str:
-    """Generate a unique 6-character run ID like 'A1B2C3'.
+    """Generate a unique 6-character run ID like 'QZKMRT'.
 
-    Draws each of the 6 characters uniformly from A-Z0-9 (36 symbols) via
-    secrets.choice, giving 36**6 ~= 2.18e9 equally-likely ids. This narrows
+    Draws each of the 6 characters uniformly from A-Z (26 symbols) via
+    secrets.choice, giving 26**6 ~= 3.09e8 equally-likely ids. Ids issued
+    before letters-only (A-Z0-9) stay valid: every consumer accepts the
+    wider set. The A-Z0-9 generator itself narrowed
     the alphabet from the prior generator's: `secrets.token_urlsafe(4)[:6]
     .upper()` emitted base64url output (which can include `-` and `_`)
     case-folded onto 38 symbols, and truncating to 6 chars from a 4-byte
     (32-bit) draw left the 6th character able to take only 4 distinct
     values -- collapsing the last position to ~4 outcomes and the whole id
     to ~2e8 effective values instead of the nominal 36**6 (#685). Every
-    existing consumer already accepts the narrower `^[A-Z0-9]{6}$` set --
+    existing consumer already accepts the narrower `^[A-Z]{6}$` set --
     steps.py's `_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")` is a
     superset -- so no consumer needed a change.
 
-    Six base-36 characters stay the canonical run id (#797 decision,
+    Six characters stay the canonical run id (#797 decision,
     2026-09-09): a collision now costs a redraw in create_run_archive, never
     an overwrite, so the id width sets only the redraw rate. With N existing
-    runs a fresh draw collides with probability ~N / 36**6: ~4.6e-5 at 1e5
-    runs, ~4.6e-4 at 1e6, ~4.6e-3 at 1e7. Migration trigger: when the run
-    table approaches ~1e6 rows (redraws near 5e-4 per upload), move to a
+    runs a fresh draw collides with probability ~N / 26**6: ~3.2e-4 at 1e5
+    runs, ~3.2e-3 at 1e6. Migration trigger: when the run table approaches
+    ~1e5 rows (redraws near 3e-4 per upload), move to a
     UUID/ULID canonical id with this 6-char form kept as a display id --
     widening touches Run.id (String(10)), artifact basenames and download
     URLs. Exhaustion of every redraw is logged at ERROR by both callers of

@@ -655,12 +655,12 @@ def test_generate_run_id_format_and_position_entropy():
     show broad (not collapsed) spread at every position."""
     ids = [generate_run_id() for _ in range(20_000)]
 
-    pattern = re.compile(r"^[A-Z0-9]{6}$")
-    assert all(pattern.match(i) for i in ids), "generate_run_id must keep the ^[A-Z0-9]{6}$ format"
+    pattern = re.compile(r"^[A-Z]{6}$")
+    assert all(pattern.match(i) for i in ids), "generate_run_id must keep the letters-only ^[A-Z]{6}$ format"
 
     for pos in range(6):
         distinct = len({run_id[pos] for run_id in ids})
-        assert distinct >= 30, (
+        assert distinct == 26, (
             f"position {pos} saw only {distinct} distinct symbols in 20,000 draws "
             "(the pre-fix defect collapsed position 5 to ~4)"
         )
