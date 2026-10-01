@@ -133,13 +133,18 @@ export interface FilterCount {
   count: number
 }
 
+/** A faculty option; the API sends these newest run first. */
+export interface FacultyOption extends FilterCount {
+  last_run_at: string | null
+}
+
 export interface RunByOption extends RunBy {
   count: number
 }
 
 export interface RunFilterOptions {
   departments: FilterCount[]
-  faculty: FilterCount[]
+  faculty: FacultyOption[]
   run_by: RunByOption[]
   /** Runs where the faculty member uploaded their own CV (run_by = 'self'). */
   self_count: number

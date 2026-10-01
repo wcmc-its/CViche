@@ -64,7 +64,7 @@ def test_faculty_filter_narrows_departments_and_run_by_but_not_faculty(db, seede
     options = build_filter_options(db, RunFilters(faculty="Omar Testperson"))
     departments, faculty, run_by = _pairs(options)
     assert departments == [("Library", 1)]  # the user-less run has no department
-    assert faculty == [("Jane Testperson", 3), ("Omar Testperson", 2)]
+    assert faculty == [("Omar Testperson", 2), ("Jane Testperson", 3)]  # newest run first
     assert run_by == [("Bob Tester", 1)]
     assert options.self_count == 0
 
@@ -84,6 +84,13 @@ def test_self_filter_is_own_cv_runs(db, seeded):
     assert departments == [("Medicine", 1)]
     assert faculty == [("Jane Testperson", 1)]
     assert [r.id for r in filtered_runs_query(db, RunFilters(run_by_self=True)).all()] == ["Q00000"]
+
+
+def test_faculty_options_are_most_recently_run_first(db, seeded):
+    faculty = build_filter_options(db, RunFilters()).faculty
+    # Omar's newest run (Sep 5) is later than Jane's (Sep 3).
+    assert [f.value for f in faculty] == ["Omar Testperson", "Jane Testperson"]
+    assert faculty[0].last_run_at == datetime(2026, 9, 5)
 
 
 def test_filtered_query_loads_the_user_without_a_lazy_load(db, seeded):
