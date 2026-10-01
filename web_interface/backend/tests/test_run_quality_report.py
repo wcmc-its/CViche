@@ -36,6 +36,16 @@ def test_every_scorer_gate_has_a_cap_source():
     assert all(s.lint in KNOWN_LINTS for s in rqr.CAP_SOURCE_BY_GATE_NAME.values())
 
 
+def test_cap_source_parses_the_real_scorers_flag_text(tmp_path):
+    """Fixtures above hand-copy the flag format; this runs the real scorer so a
+    reworded flag f-string fails here instead of silently nulling cap_reason."""
+    snapshot = qss.parse_score(scorer.score_run(tmp_path, "T1"))  # empty dir: no output
+    source = rqr.cap_source(snapshot)
+    assert source is not None
+    assert source == rqr.CAP_SOURCE_BY_GATE_NAME[
+        "No rendered output produced at all (HARD-FAIL gate)"]
+
+
 def test_every_known_lint_has_a_plain_english_line():
     assert set(KNOWN_LINTS) <= set(rqr.LINT_EXPLANATIONS)
 

@@ -24,12 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy.orm import Session  # noqa: E402
 
-from app.models import Run  # noqa: E402
+from app.models import Run, RunState  # noqa: E402
 from app.services.quality_score_service import load_cached_score, score_columns  # noqa: E402
 
 logger = logging.getLogger("backfill_quality_score")
 
-RUN_COMPLETE = "complete"
 
 
 @dataclass
@@ -46,7 +45,7 @@ def backfill(db: Session, apply: bool) -> BackfillSummary:
     summary = BackfillSummary()
     run_ids = [
         run_id for (run_id,) in
-        db.query(Run.id).filter(Run.quality_score.is_(None), Run.status == RUN_COMPLETE).all()
+        db.query(Run.id).filter(Run.quality_score.is_(None), Run.status == RunState.COMPLETE).all()
     ]
     for run_id in run_ids:
         summary.candidates += 1
