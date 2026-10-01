@@ -1,8 +1,18 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Check, CheckCircle2, Loader2 } from 'lucide-react'
+import { Check, Loader2 } from 'lucide-react'
 import type { FeedbackFormData, WcmSection } from '../types'
 import { getFeedback, submitFeedback } from '../api/feedback'
 import ErrorBanner from './ErrorBanner'
+import FeedbackSummary from './FeedbackSummary'
+import {
+  EFFORT_OPTIONS,
+  ISSUE_FIELDS,
+  PROBLEMS_LABEL,
+  QUESTION_LABELS,
+  RATING_SCALES,
+  REVIEWER_ROLES,
+  SUMMARY_GENERATED_OPTIONS,
+} from './feedbackQuestions'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -38,35 +48,7 @@ const INITIAL_FORM_DATA: FeedbackFormData = {
   likelihood_to_recommend: null,
 }
 
-const REVIEWER_ROLES = [
-  { value: 'cv_owner', label: 'I am the CV owner' },
-  { value: 'department_admin', label: 'Department administrator' },
-  { value: 'faculty_affairs', label: 'Faculty affairs staff' },
-  { value: 'other', label: 'Other' },
-]
-
-const ISSUE_FIELDS = [
-  { key: 'issue_missing_content' as const, label: 'Missing content', description: 'Entries or sections from the original are absent' },
-  { key: 'issue_split_merged' as const, label: 'Split or merged entries', description: 'One entry broken in two, or two combined' },
-  { key: 'issue_wrong_section' as const, label: 'Wrong section', description: 'An entry landed under the wrong heading' },
-  { key: 'issue_inaccurate' as const, label: 'Inaccurate details', description: 'Dates, titles, names or journals are wrong' },
-  { key: 'issue_ai_enrichment' as const, label: 'PubMed enrichment errors', description: 'Wrong citation, journal or PMID added' },
-  { key: 'issue_formatting' as const, label: 'Formatting', description: "Layout, ordering or style doesn't match the WCM template" },
-]
 const ISSUE_PLACEHOLDER = 'Which entries?'
-
-const EFFORT_OPTIONS = [
-  { value: '0 minutes', label: '0 minutes' },
-  { value: '< 5 minutes', label: 'Less than 5 minutes' },
-  { value: '5-15 minutes', label: '5-15 minutes' },
-  { value: '15-30 minutes', label: '15-30 minutes' },
-  { value: '30-60 minutes', label: '30-60 minutes' },
-  { value: '1-2 hours', label: '1-2 hours' },
-  { value: '2-4 hours', label: '2-4 hours' },
-  { value: '4-8 hours', label: '4-8 hours' },
-  { value: '8+ hours', label: '8+ hours' },
-  { value: 'not_sure', label: "I'm not sure" },
-]
 
 
 // ---------------------------------------------------------------------------
@@ -195,26 +177,6 @@ function ChoiceRow<T extends string | boolean>({
   )
 }
 
-function FeedbackSubmittedCard({ submittedAt }: { submittedAt?: string | null }) {
-  const formattedDate = submittedAt
-    ? new Date(submittedAt).toLocaleDateString(undefined, {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      })
-    : null
-
-  return (
-    <div className="flex flex-col items-center text-center py-6">
-      <CheckCircle2 className="h-6 w-6 text-success-600 mb-3" aria-hidden="true" />
-      <h3 className="text-lg font-semibold text-gray-900">Feedback Submitted</h3>
-      <p className="text-sm text-gray-500 mt-1">
-        Thank you for your feedback.{formattedDate ? ` Submitted on ${formattedDate}.` : ''}
-      </p>
-    </div>
-  )
-}
-
 // ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
@@ -258,15 +220,12 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
 
         if (cancelled) return
 
-        if (data.feedback) {
-          setExistingFeedback(data.feedback)
-        } else {
-          // Extract wcm_sections that have a section_id
-          const sections: WcmSection[] = (data.run_context?.wcm_sections || []).filter(
-            (s: Record<string, unknown>) => s.section_id,
-          )
-          setWcmSections(sections)
-        }
+        // Extract wcm_sections that have a section_id (the summary names them too)
+        const sections: WcmSection[] = (data.run_context?.wcm_sections || []).filter(
+          (s: Record<string, unknown>) => s.section_id,
+        )
+        setWcmSections(sections)
+        if (data.feedback) setExistingFeedback(data.feedback)
       } catch {
         if (!cancelled) {
           setError('Unable to load feedback form. Please try refreshing the page.')
@@ -411,33 +370,9 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
     )
   }
 
-  // ---- render: existing feedback ----
+  // ---- render: already reviewed (earlier, just now, or a duplicate submit) ----
 
-  if (existingFeedback) {
-    return (
-      <div className={CARD}>
-        <FeedbackSubmittedCard
-          submittedAt={(existingFeedback as Record<string, unknown>).submitted_at as string | null}
-        />
-      </div>
-    )
-  }
-
-  // ---- render: success after submission ----
-
-  if (submitted) {
-    return (
-      <div className={CARD}>
-        <div className="flex flex-col items-center text-center py-8">
-          <CheckCircle2 className="h-8 w-8 text-success-600 mb-3" aria-hidden="true" />
-          <h3 className="text-xl font-semibold text-gray-900">Thank you!</h3>
-          <p className="text-sm text-gray-500 mt-2">
-            Your feedback has been recorded. It helps us improve CViche for everyone.
-          </p>
-        </div>
-      </div>
-    )
-  }
+  if (existingFeedback || submitted) return <FeedbackSummary runId={runId} sections={wcmSections} />
 
   // ---- render: form ----
 
@@ -462,7 +397,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
       )}
 
       <SectionLabel>You</SectionLabel>
-      <QuestionRow label="Your role" helper="Required">
+      <QuestionRow label={QUESTION_LABELS.reviewer_role} helper="Required">
         <ChoiceRow
           options={REVIEWER_ROLES}
           value={formData.reviewer_role}
@@ -484,41 +419,32 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
       </QuestionRow>
 
       <SectionLabel>Quality</SectionLabel>
-      <QuestionRow label="How useful was the CViche output?" helper="Required">
+      <QuestionRow label={QUESTION_LABELS.overall_usefulness} helper="Required">
         <RatingButtonRow
-          min={1}
-          max={5}
+          {...RATING_SCALES.overall_usefulness}
           value={formData.overall_usefulness}
           onChange={(v) => updateField('overall_usefulness', v)}
-          lowLabel="Not useful"
-          highLabel="Extremely useful"
-          ariaLabel="How useful was the CViche output?"
+          ariaLabel={QUESTION_LABELS.overall_usefulness}
         />
       </QuestionRow>
-      <QuestionRow label="How accurate was the output?" helper="Optional">
+      <QuestionRow label={QUESTION_LABELS.overall_accuracy} helper="Optional">
         <RatingButtonRow
-          min={1}
-          max={10}
+          {...RATING_SCALES.overall_accuracy}
           value={formData.overall_accuracy}
           onChange={(v) => updateField('overall_accuracy', v)}
-          lowLabel="Not at all accurate"
-          highLabel="Perfectly accurate"
-          ariaLabel="How accurate was the output?"
+          ariaLabel={QUESTION_LABELS.overall_accuracy}
         />
       </QuestionRow>
-      <QuestionRow label="How complete was the output?" helper="Optional">
+      <QuestionRow label={QUESTION_LABELS.overall_completeness} helper="Optional">
         <RatingButtonRow
-          min={1}
-          max={10}
+          {...RATING_SCALES.overall_completeness}
           value={formData.overall_completeness}
           onChange={(v) => updateField('overall_completeness', v)}
-          lowLabel="Very incomplete"
-          highLabel="Fully complete"
-          ariaLabel="How complete was the output?"
+          ariaLabel={QUESTION_LABELS.overall_completeness}
         />
       </QuestionRow>
 
-      <SectionLabel>Problems</SectionLabel>
+      <SectionLabel>{PROBLEMS_LABEL}</SectionLabel>
       <p className="mt-3 text-sm text-gray-500">
         Select any that apply and say where, so we can find the entries.
       </p>
@@ -566,7 +492,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
       </div>
 
       {anyIssueChecked && wcmSections.length > 0 && (
-        <QuestionRow label="Which sections were affected?">
+        <QuestionRow label={QUESTION_LABELS.issue_locations}>
           <div className="flex flex-wrap gap-2">
             {wcmSections.map((section) => {
               const on = formData.issue_locations.includes(section.section_id)
@@ -587,7 +513,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
         </QuestionRow>
       )}
 
-      <QuestionRow label="What was the biggest issue, if any?" helper="Optional">
+      <QuestionRow label={QUESTION_LABELS.biggest_issue} helper="Optional">
         <textarea
           value={formData.biggest_issue}
           onChange={(e) => updateField('biggest_issue', e.target.value)}
@@ -599,74 +525,62 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
 
       <SectionLabel>Time</SectionLabel>
       <QuestionRow
-        label="Without CViche, how long would it take to convert this CV by hand?"
+        label={QUESTION_LABELS.manual_conversion_effort}
         helper="Required"
       >
         <ChoiceRow
           options={EFFORT_OPTIONS}
           value={formData.manual_conversion_effort}
           onChange={(v) => updateField('manual_conversion_effort', v)}
-          ariaLabel="Without CViche, how long would it take to manually convert this CV to WCM format?"
+          ariaLabel={QUESTION_LABELS.manual_conversion_effort}
           required
         />
       </QuestionRow>
-      <QuestionRow label="How long did it take to correct the CViche output?" helper="Required">
+      <QuestionRow label={QUESTION_LABELS.correction_effort} helper="Required">
         <ChoiceRow
           options={EFFORT_OPTIONS}
           value={formData.correction_effort}
           onChange={(v) => updateField('correction_effort', v)}
-          ariaLabel="How long did it take to correct the CViche output?"
+          ariaLabel={QUESTION_LABELS.correction_effort}
           required
         />
       </QuestionRow>
 
       <SectionLabel>Enrichment</SectionLabel>
-      <QuestionRow label="Quality of AI-enriched data" helper="Optional">
+      <QuestionRow label={QUESTION_LABELS.enrichment_quality} helper="Optional">
         <RatingButtonRow
-          min={1}
-          max={5}
+          {...RATING_SCALES.enrichment_quality}
           value={formData.enrichment_quality}
           onChange={(v) => updateField('enrichment_quality', v)}
-          lowLabel="Poor quality"
-          highLabel="Excellent quality"
-          ariaLabel="How would you rate the quality of AI-enriched data?"
+          ariaLabel={QUESTION_LABELS.enrichment_quality}
         />
       </QuestionRow>
-      <QuestionRow label="Did CViche generate a research summary for this CV?" helper="Optional">
+      <QuestionRow label={QUESTION_LABELS.summary_generated} helper="Optional">
         <ChoiceRow
-          options={[
-            { value: true, label: 'Yes' },
-            { value: false, label: 'No' },
-          ]}
+          options={SUMMARY_GENERATED_OPTIONS}
           value={formData.summary_generated}
           onChange={(v) => updateField('summary_generated', v)}
-          ariaLabel="Did CViche generate a research summary for this CV?"
+          ariaLabel={QUESTION_LABELS.summary_generated}
         />
       </QuestionRow>
       {formData.summary_generated === true && (
-        <QuestionRow label="How would you rate the research summary?" helper="Optional">
+        <QuestionRow label={QUESTION_LABELS.summary_quality} helper="Optional">
           <RatingButtonRow
-            min={1}
-            max={5}
+            {...RATING_SCALES.summary_quality}
             value={formData.summary_quality}
             onChange={(v) => updateField('summary_quality', v)}
-            lowLabel="Poor quality"
-            highLabel="Excellent quality"
-            ariaLabel="How would you rate the research summary?"
+            ariaLabel={QUESTION_LABELS.summary_quality}
           />
         </QuestionRow>
       )}
 
       <SectionLabel>Overall</SectionLabel>
-      <QuestionRow label="How likely are you to recommend CViche to a colleague?" helper="Required">
+      <QuestionRow label={QUESTION_LABELS.likelihood_to_recommend} helper="Required">
         <RatingButtonRow
-          min={1}
-          max={5}
+          {...RATING_SCALES.likelihood_to_recommend}
           value={formData.likelihood_to_recommend}
           onChange={(v) => updateField('likelihood_to_recommend', v)}
-          lowLabel="Not at all likely"
-          highLabel="Extremely likely"
-          ariaLabel="How likely are you to recommend CViche to a colleague?"
+          ariaLabel={QUESTION_LABELS.likelihood_to_recommend}
         />
       </QuestionRow>
 

@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Clock, CheckCircle2, Lock, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronRight, MessageSquare } from 'lucide-react'
+import { Clock, CheckCircle2, Check, Lock, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronRight, MessageSquare } from 'lucide-react'
 import { formatRelativeDate } from '../../utils'
 import type { RunSummary } from '../../types'
-import { OWNER_UNKNOWN_LABEL, runByFilterValue, runByLabel } from './runGroups'
+import { OWNER_UNKNOWN_LABEL, earlierRunHasFeedback, runByFilterValue, runByLabel } from './runGroups'
+import { FEEDBACK_VALUE_LABEL, feedbackGivenTitle, feedbackState } from './runFeedback'
 import type { RunGroup, SortDir, SortField } from './runGroups'
 import type { RunFilterKey } from './runFilters'
 import { BAND_STYLE, NO_SCORE_TEXT, scoreTitle } from './runQuality'
@@ -71,7 +72,6 @@ interface RunTableProps {
   groups: RunGroup[]
   isAdmin: boolean
   showCost: boolean
-  feedbackMap: Record<string, boolean>
   currentUserId: number | undefined
   sortField: SortField
   sortDir: SortDir
@@ -129,31 +129,48 @@ function ScoreCell({ run, earlier }: { run: RunSummary; earlier: boolean }) {
   )
 }
 
-function FeedbackCell({ run, feedbackMap }: { run: RunSummary; feedbackMap: Record<string, boolean> }) {
+interface FeedbackCellProps {
+  run: RunSummary
+  isAdmin: boolean
+  currentUserId: number | undefined
+  /** An older run of the same faculty member has feedback. */
+  earlierGiven: boolean
+}
+
+function FeedbackCell({ run, isAdmin, currentUserId, earlierGiven }: FeedbackCellProps) {
   const navigate = useNavigate()
-  if (run.status !== 'complete') return null
-  if (feedbackMap[run.run_id] === true) {
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[11px] font-medium">
-        <MessageSquare className="w-3 h-3" aria-hidden="true" />
-        Feedback given
-      </span>
-    )
+  switch (feedbackState(run, currentUserId, isAdmin, earlierGiven)) {
+    case 'given':
+      return (
+        <span title={feedbackGivenTitle(run, isAdmin)} className="inline-flex items-center gap-1 text-xs font-medium text-gray-700">
+          <Check className="w-3.5 h-3.5 flex-none text-green-600" aria-hidden="true" />
+          Feedback given
+        </span>
+      )
+    case 'earlier':
+      return (
+        <span className="inline-flex items-center gap-1 text-xs text-gray-500">
+          <Check className="w-3.5 h-3.5 flex-none text-gray-400" aria-hidden="true" />
+          Given on an earlier run
+        </span>
+      )
+    case 'needed':
+      return (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); navigate(`/run/${run.run_id}#feedback`) }}
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[11px] font-medium hover:bg-amber-200 transition-colors cursor-pointer"
+          title="Go to feedback form"
+        >
+          <MessageSquare className="w-3 h-3" aria-hidden="true" />
+          Needs feedback
+        </button>
+      )
+    case 'awaiting':
+      return <span className="text-xs text-gray-500">{FEEDBACK_VALUE_LABEL.needed}</span>
+    case 'none':
+      return <span className="text-gray-400">{'—'}</span>
   }
-  if (feedbackMap[run.run_id] === false) {
-    return (
-      <button
-        type="button"
-        onClick={(e) => { e.stopPropagation(); navigate(`/run/${run.run_id}#feedback`) }}
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[11px] font-medium hover:bg-amber-200 transition-colors cursor-pointer"
-        title="Go to feedback form"
-      >
-        <MessageSquare className="w-3 h-3" aria-hidden="true" />
-        Needs feedback
-      </button>
-    )
-  }
-  return null
 }
 
 interface RowProps extends Omit<RunTableProps, 'groups' | 'sortField' | 'sortDir' | 'onSort'> {
@@ -161,9 +178,11 @@ interface RowProps extends Omit<RunTableProps, 'groups' | 'sortField' | 'sortDir
   /** The cell shown first: faculty name + filename for a group row, filename for an earlier run. */
   firstCell: React.ReactNode
   earlier?: boolean
+  /** Latest run of a group whose earlier runs have feedback. */
+  earlierGiven?: boolean
 }
 
-function RunRow({ run, firstCell, earlier = false, isAdmin, showCost, feedbackMap, currentUserId, onSelectRun, onFilter }: RowProps) {
+function RunRow({ run, firstCell, earlier = false, earlierGiven = false, isAdmin, showCost, currentUserId, onSelectRun, onFilter }: RowProps) {
   const { display, tooltip } = formatRelativeDate(run.started_at)
   const muted = earlier ? 'text-gray-500' : ''
   const runBy = runByLabel(run, currentUserId)
@@ -215,7 +234,7 @@ function RunRow({ run, firstCell, earlier = false, isAdmin, showCost, feedbackMa
         </td>
       )}
       <td className={`${CELL} text-center ${muted}`}>
-        <FeedbackCell run={run} feedbackMap={feedbackMap} />
+        <FeedbackCell run={run} isAdmin={isAdmin} currentUserId={currentUserId} earlierGiven={earlierGiven} />
       </td>
     </tr>
   )
@@ -291,7 +310,6 @@ export default function RunTable(props: RunTableProps) {
   const rowProps = {
     isAdmin,
     showCost,
-    feedbackMap: props.feedbackMap,
     currentUserId: props.currentUserId,
     onSelectRun: props.onSelectRun,
     onFilter: props.onFilter,
@@ -308,7 +326,7 @@ export default function RunTable(props: RunTableProps) {
             <SortHeader field="started_at" label={isAdmin ? 'Started' : 'Date'} width="w-[130px]" {...header} />
             <SortHeader field="total_duration_seconds" label="Duration" align="right" width="w-[72px]" {...header} />
             {showCost && <SortHeader field="total_cost" label="Cost" align="right" width="w-[56px]" {...header} />}
-            <SortHeader field="feedback" label="Feedback" align="center" width="w-[110px]" {...header} />
+            <SortHeader field="feedback" label="Feedback" align="center" width="w-[150px]" {...header} />
           </tr>
         </thead>
         <tbody>
@@ -318,6 +336,7 @@ export default function RunTable(props: RunTableProps) {
               <RunRow
                 key={group.latest.run_id}
                 run={group.latest}
+                earlierGiven={earlierRunHasFeedback(group)}
                 firstCell={
                   <GroupCell group={group} expanded={isOpen} isAdmin={isAdmin} onToggle={() => toggle(group.key)} onFilter={props.onFilter} />
                 }

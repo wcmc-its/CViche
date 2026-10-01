@@ -11,6 +11,16 @@ from app.services.runs_admin_query import (
 
 
 class TestParseRunFilters:
+    def test_feedback_filter_values(self):
+        assert parse_run_filters(None, None, None, "given").feedback.value == "given"
+        assert parse_run_filters(None, None, None, "needed").feedback.value == "needed"
+        assert parse_run_filters(None, None, None, "").feedback is None
+
+    def test_bad_feedback_is_422(self):
+        with pytest.raises(HTTPException) as exc:
+            parse_run_filters(None, None, None, "maybe")
+        assert exc.value.status_code == 422
+
     def test_blank_means_no_filter(self):
         assert parse_run_filters("", "", None) == RunFilters()
 

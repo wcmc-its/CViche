@@ -37,6 +37,22 @@ export interface RunBy {
   department: string | null
 }
 
+/** One reviewer's submission on a run (scope=all only). */
+export interface FeedbackReviewer {
+  display_name: string
+  role: string
+  submitted_at: string | null
+}
+
+/** Feedback left on a run by ANY reviewer, including others on your own run. */
+export interface RunFeedbackSummary {
+  count: number
+  given_by_me: boolean
+  last_at: string | null
+  /** Admin scope=all only, newest first; null under scope=mine. */
+  reviewers: FeedbackReviewer[] | null
+}
+
 export interface RunSummary {
   run_id: string
   filename: string
@@ -57,6 +73,7 @@ export interface RunSummary {
   quality_band?: QualityBand | null
   /** The hard-fail cap that lowered the score, else null. Admin scope=all only. */
   quality_cap?: number | null
+  feedback: RunFeedbackSummary
 }
 
 export type QualityBand = 'GREEN' | 'YELLOW' | 'RED'
@@ -121,8 +138,12 @@ export type RunListScope = 'mine' | 'all'
 
 /** Query params for GET /api/runs and /api/runs/filter-options. The filters are
  *  honoured only with scope 'all' (admin); `run_by` is a user id or 'self'. */
+export type RunFeedbackFilter = 'given' | 'needed'
+
 export interface RunListParams {
   scope?: RunListScope
+  /** 'given' = any reviewer left feedback; 'needed' = complete run with none. Both scopes. */
+  feedback?: RunFeedbackFilter
   run_by?: number | 'self'
   faculty?: string
   department?: string
@@ -148,6 +169,8 @@ export interface RunFilterOptions {
   run_by: RunByOption[]
   /** Runs where the faculty member uploaded their own CV (run_by = 'self'). */
   self_count: number
+  /** Runs per feedback filter value; applies every filter except feedback. */
+  feedback: { given: number; needed: number }
 }
 
 export interface FeedbackStatus {

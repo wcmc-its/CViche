@@ -17,7 +17,7 @@ import pytest
 from sqlalchemy.orm import object_session
 
 from app.auth import COOKIE_NAME, create_session_cookie
-from app.models import Run, Step, User
+from app.models import Feedback, Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.schemas import CapacityResponse, RestartRunResponse, RunActionResponse
 
@@ -428,6 +428,111 @@ def test_filter_options_requires_scope_all(client, db, seed_simple_mode):
     users = _seed_admin_view(db)
     _auth(client, users["admin"])
     assert client.get("/api/runs/filter-options?scope=mine").status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Feedback summary on GET /runs, the `feedback` filter, filter-options counts
+# ---------------------------------------------------------------------------
+
+def _leave_feedback(db, run_id, user, role="self", at=None):
+    db.add(Feedback(run_id=run_id, user_id=user.id, reviewer_role=role,
+                    overall_usefulness=4, manual_conversion_effort="1-2 hours",
+                    correction_effort="1-2 hours", likelihood_to_recommend=4,
+                    submitted_at=at or datetime(2026, 9, 10)))
+    db.commit()
+
+
+def _seed_feedback_view(db):
+    """ADM001 has feedback from bob (older) and admin (newer); ADM003 has
+    feedback from alice (the owner is bob); ADM005 is a failed run, no feedback."""
+    users = _seed_admin_view(db)
+    db.get(Run, "ADM005").status = "failed"
+    db.commit()
+    _leave_feedback(db, "ADM001", users["bob"], "colleague", datetime(2026, 9, 10))
+    _leave_feedback(db, "ADM001", users["admin"], "admin_reviewer", datetime(2026, 9, 11))
+    _leave_feedback(db, "ADM003", users["alice"], "self", datetime(2026, 9, 12))
+    return users
+
+
+def test_runs_feedback_summary_counts_any_reviewer_and_flags_mine(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["alice"])
+    by_id = {r["run_id"]: r["feedback"] for r in client.get("/api/runs").json()["runs"]}
+    # Alice owns ADM001: bob and the admin reviewed it, she did not.
+    last_at = by_id["ADM001"].pop("last_at")
+    assert last_at.startswith("2026-09-11T00:00:00")  # TZDateTime appends the server offset
+    assert by_id["ADM001"] == {"count": 2, "given_by_me": False, "reviewers": None}
+    assert by_id["ADM002"] == {"count": 0, "given_by_me": False, "last_at": None,
+                               "reviewers": None}
+
+
+def test_scope_all_feedback_lists_reviewers_newest_first(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["admin"])
+    by_id = {r["run_id"]: r["feedback"] for r in client.get("/api/runs?scope=all").json()["runs"]}
+    reviewers = by_id["ADM001"]["reviewers"]
+    assert [(r["display_name"], r["role"]) for r in reviewers] == [
+        ("Root Admin", "admin_reviewer"), ("Bob Tester", "colleague")]
+    assert reviewers[0]["submitted_at"].startswith("2026-09-11T00:00:00")
+    assert reviewers[1]["submitted_at"].startswith("2026-09-10T00:00:00")
+    assert by_id["ADM001"]["given_by_me"] is True  # the admin is one of the reviewers
+    assert by_id["ADM003"]["given_by_me"] is False
+    assert by_id["ADM002"]["reviewers"] == []
+
+
+def test_feedback_summary_loads_in_a_fixed_number_of_queries(client, db, seed_simple_mode):
+    from sqlalchemy import event
+    users = _seed_feedback_view(db)
+    _auth(client, users["admin"])
+    statements = []
+    engine = db.get_bind()
+    listener = lambda conn, cur, stmt, *a: statements.append(stmt)  # noqa: E731
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        assert client.get("/api/runs?scope=all").status_code == 200
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+    feedback_queries = [s for s in statements if "FROM feedback" in s and "FROM runs" not in s]
+    assert len(feedback_queries) == 2  # one GROUP BY, one reviewer query
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("given", ["ADM003", "ADM001"]),
+    ("needed", ["ADM006", "ADM004", "ADM002"]),  # ADM005 failed: not "needed"
+])
+def test_scope_all_feedback_filter(client, db, seed_simple_mode, value, expected):
+    users = _seed_feedback_view(db)
+    _auth(client, users["admin"])
+    resp = client.get(f"/api/runs?scope=all&feedback={value}")
+    assert _ids(resp) == expected
+    assert resp.json()["total"] == len(expected)
+
+
+def test_scope_mine_feedback_filter_counts_feedback_from_others(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["alice"])
+    assert _ids(client.get("/api/runs?feedback=given")) == ["ADM001"]
+    assert _ids(client.get("/api/runs?feedback=needed")) == ["ADM002"]
+
+
+def test_feedback_filter_rejects_unknown_value(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["admin"])
+    assert client.get("/api/runs?scope=all&feedback=maybe").status_code == 422
+    assert client.get("/api/runs?feedback=maybe").status_code == 422
+
+
+def test_filter_options_feedback_counts_cascade(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["admin"])
+    body = client.get("/api/runs/filter-options?scope=all").json()
+    assert body["feedback"] == {"given": 2, "needed": 3}
+    # Its own filter is ignored, other filters apply.
+    body = client.get("/api/runs/filter-options?scope=all&feedback=given&department=Library").json()
+    assert body["feedback"] == {"given": 1, "needed": 1}
+    # ...and the other facets honour the feedback filter.
+    assert [o["count"] for o in body["run_by"]] == [1]  # bob: ADM003 only
+    assert body["self_count"] == 0
 
 
 # ---------------------------------------------------------------------------
