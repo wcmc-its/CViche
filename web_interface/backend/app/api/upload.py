@@ -22,6 +22,9 @@ from typing import Literal, Optional
 from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from lxml.etree import XMLSyntaxError
+import pdfplumber
+from pdfminer.pdfdocument import PDFPasswordIncorrect
+from pdfplumber.utils.exceptions import PdfminerException
 
 from app.database import get_db
 from app.models import Run, Step, User
@@ -43,14 +46,22 @@ from app.services.template_warning import detect_wcm_template
 
 logger = logging.getLogger(__name__)
 ZIP_MAGIC = b"PK\x03\x04"
+PDF_MAGIC = b"%PDF-"
+PDF_EXTENSION = ".pdf"
 
-# Extensions the upload API accepts, matching the frontend's ".docx only" guard
-# (UploadPage.tsx's dropzone caption and error, HelpPage.tsx's "accepts .docx
-# ... files only"). PDF was accepted here until #524: every downstream reader
-# (stage 1a/1b/2's docx_structure_extractor, stage 2, stage 6) is python-docx
-# only, so a PDF upload always died at stage 1a. PDF ingest via a conversion
-# step is tracked separately as #806, not implemented here.
-ALLOWED_UPLOAD_EXTENSIONS = (".docx",)
+# Extensions the upload API accepts, matching the frontend's guard
+# (UploadPage.tsx's processFile). A PDF is stored and archived as-is; the
+# orchestrator converts it to the run's private docx copy before stage 1a
+# (#806), since every pipeline reader is python-docx only (#524).
+ALLOWED_UPLOAD_EXTENSIONS = (".docx", PDF_EXTENSION)
+_UNSUPPORTED_TYPE_HINT = (
+    "Only .docx and .pdf files are supported. "
+    "Please convert your file to .docx or .pdf before uploading."
+)
+_ENCRYPTED_PDF_MESSAGE = (
+    "This PDF is password-protected, so we can't read it. Please remove the "
+    "password, or upload the CV as a .docx."
+)
 
 # Minimum extracted text (characters) for a document to be considered readable.
 # A real CV runs into the thousands of characters; anything below this is almost
@@ -84,6 +95,11 @@ _DOCX_MAX_ENTRIES = 1000
 _DOCX_MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
 
 
+def _validate_pdf_magic(content: bytes) -> bool:
+    """Check if content starts with the PDF header."""
+    return content[:len(PDF_MAGIC)] == PDF_MAGIC
+
+
 def _validate_docx_magic(content: bytes) -> bool:
     """Check if content is a ZIP archive containing Word document structure,
     within the entry-count and uncompressed-size bounds above."""
@@ -111,15 +127,39 @@ _DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSynt
                      zlib.error)
 
 
+class EncryptedPdfError(Exception):
+    """The PDF needs a password to open; both routes answer it with a 400."""
+
+
+def _extract_pdf_text(content: bytes) -> str | None:
+    """`_extract_text` for a PDF. pdfplumber wraps every pdfminer failure in a
+    message-less PdfminerException; a password failure is the one cause a
+    user can act on, so it is raised as EncryptedPdfError. Any other read
+    failure returns None, like a python-docx read failure does."""
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            return "\n".join(page.extract_text() or "" for page in pdf.pages)
+    except PdfminerException as e:
+        if e.args and isinstance(e.args[0], PDFPasswordIncorrect):
+            raise EncryptedPdfError() from e
+        logger.warning("Text extraction for empty-doc guard failed (.pdf): %r", e.args, exc_info=True)
+        return None
+
+
 def _extract_text(content: bytes, file_ext: str) -> str | None:
     """Best-effort text extraction for the empty-document guard.
 
     Returns the extracted text, an empty string when the file is readable but
     contains no text (scan/blank), or ``None`` when the document could not be
-    read at all (a known python-docx read failure, see ``_DOCX_READ_ERRORS``).
-    Callers treat ``None`` as "cannot determine" and skip the guard rather than
-    block a possibly-valid upload.
+    read at all (a known python-docx read failure, see ``_DOCX_READ_ERRORS``,
+    or an unreadable PDF). Callers treat ``None`` as "cannot determine" and
+    skip the guard rather than block a possibly-valid upload.
+
+    Raises:
+        EncryptedPdfError: a password-protected PDF.
     """
+    if file_ext == PDF_EXTENSION:
+        return _extract_pdf_text(content)
     if file_ext != ".docx":
         return None
     with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
@@ -546,10 +586,7 @@ async def upload_cv(
 
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
-        raise bad_request(
-            f"Unsupported file type: {file_ext}. Only .docx files are supported. "
-            "Please convert your file to .docx before uploading."
-        )
+        raise bad_request(f"Unsupported file type: {file_ext}. {_UNSUPPORTED_TYPE_HINT}")
 
     # Check rate limit (after file validation so bad uploads don't count)
     rate_limit_error = check_rate_limit(current_user, db)
@@ -561,6 +598,9 @@ async def upload_cv(
     content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
     # Validate magic bytes match claimed extension
+    if file_ext == PDF_EXTENSION and not _validate_pdf_magic(content):
+        logger.warning("[SECURITY] Rejected upload: file claims .pdf but magic bytes do not match (user=%s)", current_user.email)
+        raise bad_request("File content does not match .pdf format. The file may be corrupted or mislabeled.")
     if file_ext == ".docx" and not _validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected upload: file claims .docx but magic bytes do not match (user=%s)", current_user.email)
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
@@ -569,12 +609,15 @@ async def upload_cv(
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
     # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
-    extracted = await run_in_threadpool(_extract_text, content, file_ext)
+    try:
+        extracted = await run_in_threadpool(_extract_text, content, file_ext)
+    except EncryptedPdfError:
+        raise bad_request(_ENCRYPTED_PDF_MESSAGE)
     if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
             "We couldn't read any text from this file. It may be a scanned image, "
-            "password-protected, or empty. Please upload a text-based Word document."
+            "password-protected, or empty. Please upload a text-based Word document or PDF."
         )
 
     # Cheap, no-LLM check: does this look like the *blank* WCM CV template?
@@ -723,10 +766,7 @@ async def estimate_processing(
 
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
-        raise bad_request(
-            f"Unsupported file type: {file_ext}. Only .docx files are supported. "
-            "Please convert your file to .docx before uploading."
-        )
+        raise bad_request(f"Unsupported file type: {file_ext}. {_UNSUPPORTED_TYPE_HINT}")
 
     # Per-pod, per-user in-memory budget (#795), checked first since it's
     # cheaper than the DB-backed check below -- a user already over it never
@@ -749,6 +789,9 @@ async def estimate_processing(
     content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
     # Validate magic bytes
+    if file_ext == PDF_EXTENSION and not _validate_pdf_magic(content):
+        logger.warning("[SECURITY] Rejected estimate: file claims .pdf but magic bytes do not match")
+        raise bad_request("File content does not match .pdf format. The file may be corrupted or mislabeled.")
     if file_ext == ".docx" and not _validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected estimate: file claims .docx but magic bytes do not match")
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
@@ -759,7 +802,10 @@ async def estimate_processing(
     # this endpoint used to re-walk the docx paragraphs/tables inline, which
     # could compute a different text_char_count for the same file. Off the
     # event loop, same as /upload (#793).
-    extracted = await run_in_threadpool(_extract_text, content, file_ext)
+    try:
+        extracted = await run_in_threadpool(_extract_text, content, file_ext)
+    except EncryptedPdfError:
+        raise bad_request(_ENCRYPTED_PDF_MESSAGE)
     if extracted is None:
         # _extract_text already logged the specific read failure (§5.4). No
         # filename here (CODING_STANDARDS §4.7): CV filenames usually carry

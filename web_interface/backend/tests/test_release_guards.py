@@ -239,15 +239,27 @@ class TestEmptyUploadRejection:
         assert "Hello world" in text
         assert "Second line" in text
 
-    def test_extract_text_skips_unrecognized_extension(self):
-        # #524: _extract_text's if/elif now names only .docx (the .pdf
-        # branch was deleted along with .pdf's acceptance at the API). Any
-        # other extension -- .pdf included -- is "cannot determine": no
-        # extraction is attempted and the guard is skipped (fail open), the
-        # same outcome the old .pdf branch produced on a corrupt file, but
-        # now by never trying rather than by catching an exception.
+    def test_extract_text_fails_open_on_a_corrupt_pdf(self):
+        # #806: a PDF pdfminer can't parse is "cannot determine" -- the guard
+        # is skipped (fail open), like a python-docx read failure. Only a
+        # password failure is raised, as EncryptedPdfError.
         from app.api.upload import _extract_text
         assert _extract_text(b"%PDF-1.4 not really a pdf", ".pdf") is None
+
+    def test_upload_rejects_image_only_pdf(self, client, db, seed_simple_mode):
+        # #806: a fully scanned PDF yields no text, so the same readable-text
+        # floor that rejects a blank docx rejects it before any LLM spend.
+        from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
+        user = _make_user(db)
+        _auth_cookie(client, user)
+        resp = client.post(
+            "/api/upload",
+            files={"file": ("scan.pdf", _make_pdf([[]], image_pages=(0,)), "application/pdf")},
+            data={"submission_type": "own_cv"},
+        )
+        assert resp.status_code == 400
+        assert "couldn't read any text" in resp.json()["detail"]["message"]
+        assert db.query(Run).count() == 0
 
     def test_upload_rejects_unreadable_docx(self, client, db, seed_simple_mode):
         user = _make_user(db)
@@ -812,5 +824,69 @@ def test_copy_to_pipeline_input_is_per_run_and_overwrites(db, tmp_path, monkeypa
         src.write_bytes(b"second")
         o._copy_to_pipeline_input()
         assert Path(dest).read_bytes() == b"second"
+        assert o.pdf_conversion is None  # a docx is copied, never converted
     finally:
         shutil.rmtree(o.web_output_dir, ignore_errors=True)
+
+
+def test_copy_to_pipeline_input_converts_a_pdf(db, tmp_path, monkeypatch, cv_pdf):
+    """#806: a PDF upload is converted into the run's private docx path; the
+    upload itself is left untouched as the original."""
+    import shutil
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
+    src = tmp_path / "CONV01.pdf"
+    src.write_bytes(cv_pdf())
+    o = orch.PipelineOrchestrator("CONV01", src, db)
+    try:
+        dest = o._copy_to_pipeline_input()
+        assert dest == str(tmp_path / "repo/data/sample_cvs/word/CONV01/CONV01.docx")
+        text = "\n".join(p.text for p in Document(dest).paragraphs)
+        assert "EDUCATION" in text and "Doctor of Medicine, Example University" in text
+        assert o.pdf_conversion.image_only_pages == []
+        assert src.read_bytes() == cv_pdf()
+    finally:
+        shutil.rmtree(o.web_output_dir, ignore_errors=True)
+
+
+def _execute_one_noop_step(db, monkeypatch, tmp_path, run_id, upload):
+    """execute() over the REAL _copy_to_pipeline_input and a one-step no-op
+    registry; returns the run's Log rows."""
+    import shutil
+    from types import SimpleNamespace
+    from app.pipeline import orchestrator as orch
+
+    monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
+    monkeypatch.setattr(orch, "event_emitter", AsyncMock())
+    monkeypatch.setattr(orch, "STEP_REGISTRY", [SimpleNamespace(number=1, stage_id="1a", name="1a")])
+    monkeypatch.setenv("CVICHE_RUN_DOCTOR", "0")
+    db.add(Run(id=run_id, filename="cv.pdf", file_type="pdf", status="running",
+               started_at=datetime.now()))
+    db.commit()
+    o = orch.PipelineOrchestrator(run_id, upload, db)
+    monkeypatch.setattr(o, "execute_step", AsyncMock())
+    try:
+        asyncio.run(o.execute())
+    finally:
+        shutil.rmtree(o.web_output_dir, ignore_errors=True)
+    return db.query(Log).filter(Log.run_id == run_id).all()
+
+
+def test_image_only_pdf_page_is_a_run_warning(db, tmp_path, monkeypatch, cv_pdf):
+    """#536: a converted PDF's image-only page is named in a WARNING run-log
+    row under the first stage, where the user sees it."""
+    src = tmp_path / "SCAN01.pdf"
+    src.write_bytes(cv_pdf(image_pages=(1,)))
+    logs = _execute_one_noop_step(db, monkeypatch, tmp_path, "SCAN01", src)
+    warnings = [log for log in logs if log.level == "WARNING"]
+    assert len(warnings) == 1
+    assert warnings[0].step_number == 1
+    assert "page(s) 2 contain only images" in warnings[0].message
+
+
+def test_text_only_pdf_logs_no_warning(db, tmp_path, monkeypatch, cv_pdf):
+    src = tmp_path / "TEXT01.pdf"
+    src.write_bytes(cv_pdf())
+    logs = _execute_one_noop_step(db, monkeypatch, tmp_path, "TEXT01", src)
+    assert [log for log in logs if log.level == "WARNING"] == []

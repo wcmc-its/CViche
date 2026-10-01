@@ -33,7 +33,7 @@ const DT = 'pt-3 sm:py-3 sm:border-b sm:border-sand-200 font-semibold text-gray-
 const DD = 'pb-3 sm:py-3 border-b border-sand-200'
 
 const gettingStartedTiles = [
-  ['.docx only', 'Convert PDFs in Word or Google Docs first'],
+  ['.docx or .pdf', "Text-based PDFs work best; scanned pages can't be read"],
   ['2–6 minutes', 'Longer CVs with many publications can take more'],
   ['No charge to you', 'AI processing is covered by the Library'],
 ]
@@ -43,8 +43,9 @@ const faqs: { q: string; a: React.ReactNode }[] = [
     q: 'What file formats does CViche accept?',
     a: (
       <>
-        CViche accepts .docx (Microsoft Word) files only. If your CV is in PDF, .doc, or another format,
-        please convert it to .docx before uploading.
+        CViche accepts .docx (Microsoft Word) and .pdf files. Text-based PDFs work best: a scanned page is
+        only an image, so its text can't be read. If your CV is in .doc or another format, please convert it
+        to .docx before uploading.
       </>
     ),
   },
@@ -198,8 +199,9 @@ export default function HelpPage() {
               </div>
               <div className="space-y-3">
                 <p>
-                  CViche accepts Word documents (.docx format). If your CV is in PDF or another format, convert it to
-                  .docx first using Microsoft Word or Google Docs.
+                  CViche accepts Word documents (.docx) and PDFs (.pdf). Text-based PDFs work best; scanned pages
+                  can't be read. If your CV is in .doc or another format, convert it to .docx first using Microsoft
+                  Word or Google Docs.
                 </p>
                 <p>
                   After uploading, you will see a real-time progress view showing each step of the pipeline as it

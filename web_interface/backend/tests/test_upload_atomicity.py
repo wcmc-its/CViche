@@ -191,22 +191,19 @@ def _real_storage_patches(tmp_path):
     ("cv.txt", ".txt"),
     ("cv.DOC", ".doc"),   # suffix is lower-cased before the check
     ("cv", ""),           # no suffix at all -> "Unsupported file type: ."
-    ("cv.pdf", ".pdf"),   # #524: PDF is no longer accepted at the API
-    ("cv.PDF", ".pdf"),   # suffix is lower-cased before the check
 ])
 def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_path, filename, reported_ext):
     """PR #779 review thread web_interface/backend/tests/test_upload_atomicity.py item 1
 
-    A filename whose suffix is not .docx is rejected with the exact 400
+    A filename whose suffix is not .docx or .pdf is rejected with the exact 400
     message from upload.py:325-328, BEFORE the rate limiter is consulted
     (upload.py:328 -- "after file validation so bad uploads don't count") and
     before any storage write; no Run row is created. An empty filename cannot
     be tested through multipart: FastAPI itself 422s a file part with no
     filename before the endpoint's "No filename provided" guard runs.
 
-    #524: .pdf is now rejected the same as any other unsupported extension
-    (ALLOWED_UPLOAD_EXTENSIONS == (".docx",)), matching the frontend's
-    .docx-only guard -- every downstream reader is python-docx only.
+    #806: .pdf is accepted again (the orchestrator converts it); .doc stays
+    rejected.
     """
     user = _make_user(db)
     _auth(client, user)
@@ -224,8 +221,8 @@ def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_
     assert resp.json()["detail"] == {
         "error": "bad_request",
         "message": (
-            f"Unsupported file type: {reported_ext}. Only .docx files are supported. "
-            "Please convert your file to .docx before uploading."
+            f"Unsupported file type: {reported_ext}. Only .docx and .pdf files are supported. "
+            "Please convert your file to .docx or .pdf before uploading."
         ),
     }
     rate_limit.assert_not_called()
@@ -234,35 +231,31 @@ def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_
     assert list(tmp_path.iterdir()) == []
 
 
-# --- G-524: PDF rejected at both API validators (#524, #525) ----------------
+# --- #806: PDF accepted at both API validators -------------------------------
 
 @pytest.mark.parametrize("filename", ["cv.pdf", "cv.PDF"])
-def test_estimate_rejects_pdf(client, db, seed_simple_mode, filename):
-    """#524/#525: /estimate (upload.py:~511) applies the same
-    ALLOWED_UPLOAD_EXTENSIONS gate as /upload, so a PDF can no longer reach
-    the (now-deleted) pypdf-import branch. Uppercase suffix (cv.PDF) covers
-    the same lower-casing the extension check applies before the gate."""
+def test_estimate_measures_pdf_text(client, db, seed_simple_mode, filename, cv_pdf):
+    """#806: /estimate applies the same ALLOWED_UPLOAD_EXTENSIONS gate as
+    /upload and sizes a PDF from its real extracted text, not the fixed
+    fallback guess. Uppercase suffix (cv.PDF) covers the lower-casing the
+    extension check applies before the gate."""
     user = _make_user(db)
     _auth(client, user)
 
     resp = client.post(
         "/api/estimate",
-        files={"file": (filename, b"%PDF-1.4 dummy pdf content", "application/pdf")},
+        files={"file": (filename, cv_pdf(), "application/pdf")},
     )
 
-    assert resp.status_code == 400, resp.text
-    assert resp.json()["detail"] == {
-        "error": "bad_request",
-        "message": (
-            "Unsupported file type: .pdf. Only .docx files are supported. "
-            "Please convert your file to .docx before uploading."
-        ),
-    }
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["text_characters_is_guess"] is False
+    assert body["text_characters"] > upload_module.MIN_EXTRACTED_CHARS
 
 
 def test_upload_still_accepts_docx_after_pdf_rejection(client, db, seed_simple_mode, tmp_path):
-    """#524 regression: rejecting .pdf must not disturb the .docx path -- the
-    ONLY accepted extension is unchanged."""
+    """#524 regression, kept through #806: changing what .pdf does must not
+    disturb the .docx path."""
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
@@ -427,11 +420,11 @@ def test_extract_text_lets_an_unexpected_error_surface():
 
 
 def test_extract_text_returns_none_for_unrecognized_extension():
-    """#524: _extract_text's if/elif now only names .docx. Any other
-    extension (e.g. the deleted .pdf arm) falls through to the final
-    ``return None`` with no attempt at extraction -- "cannot determine",
-    not "read and found nothing." Guards the deletion of the .pdf branch
-    against silently returning "" instead."""
+    """_extract_text names only .docx and .pdf. Any other extension falls
+    through to the final ``return None`` with no attempt at extraction --
+    "cannot determine", not "read and found nothing." A corrupt PDF is the
+    same "cannot determine" (#806)."""
+    assert _extract_text(b"PK\x03\x04 an old binary .doc", ".doc") is None
     assert _extract_text(b"%PDF-1.4 dummy", ".pdf") is None
 
 

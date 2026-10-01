@@ -122,7 +122,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   // Shared selection path for both the file picker and drag-and-drop.
   const processFile = async (selectedFile: File) => {
     const ext = selectedFile.name.toLowerCase()
-    if (ext.endsWith('.docx')) {
+    if (ext.endsWith('.docx') || ext.endsWith('.pdf')) {
       setFile(selectedFile)
       setError(null)
       setEstimate(null)
@@ -142,7 +142,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
         setEstimating(false)
       }
     } else {
-      setError('Please select a .docx file')
+      setError('Please select a .docx or .pdf file')
       setFile(null)
       setEstimate(null)
       setPendingWarning(null)
@@ -366,10 +366,10 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
               </div>
               <label htmlFor="file-upload" className="block min-w-0 cursor-pointer after:absolute after:inset-0 after:content-['']">
                 <span className="block font-medium text-gray-900">
-                  Drop a .docx file here or <span className="text-primary-700">browse</span>
+                  Drop a .docx or .pdf file here or <span className="text-primary-700">browse</span>
                 </span>
                 <span className="block text-[13px] text-gray-500" id="file-type-hint">
-                  .docx only. One file per run.
+                  .docx or .pdf (text-based PDFs work best). One file per run.
                 </span>
               </label>
             </div>

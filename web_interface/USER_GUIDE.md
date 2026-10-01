@@ -64,9 +64,11 @@ After reading the consent text, check the consent checkbox and click **Agree and
 CViche accepts the following file types:
 
 - **Word documents** (.docx) -- recommended for best results
-- **PDF files** (.pdf)
+- **PDF files** (.pdf) -- text-based PDFs work best
 
-For best results, use Word format. PDFs sometimes lose structural information (headers, tables, lists) during conversion, which can affect the quality of the output.
+Older Word files (.doc) are not accepted; save them as .docx first.
+
+A PDF is converted to Word before processing. Text-based PDFs (exported from Word, Google Docs, or similar) convert well, though they sometimes lose structural information (headers, tables, lists) that can affect the quality of the output. A scanned PDF is only images of pages, so its text can't be read: a fully scanned PDF is rejected at upload, and any scanned pages in an otherwise readable PDF are named in the run log as missing from the output.
 
 ### Upload Steps
 
