@@ -126,7 +126,9 @@ def test_feedback_all_lists_every_reviewer_newest_first(client, db):
     rows = resp.json()
     assert [(r["display_name"], r["reviewer_role"]) for r in rows] == [
         ("Other Reviewer", "colleague"), ("Reviewer", "self")]
-    assert rows[0]["submitted_at"] == "2026-09-02T00:00:00"
+    submitted = datetime.fromisoformat(rows[0]["submitted_at"])
+    assert submitted.tzinfo is not None  # carries a UTC offset (schemas.py rule)
+    assert submitted.replace(tzinfo=None) == datetime(2026, 9, 2)
     assert rows[0]["issue_locations"] == ["A", "M2"]
     assert rows[0]["biggest_issue"] == "Jane Testperson grants are missing"
     assert rows[0]["overall_usefulness"] == 4

@@ -4,7 +4,7 @@ from typing import Annotated, Literal
 from datetime import datetime
 
 
-def _iso_with_offset(dt: datetime) -> str:
+def iso_with_offset(dt: datetime) -> str:
     """Serialize a datetime to ISO 8601 with an explicit UTC offset.
 
     Timestamps are written with naive ``datetime.now()`` (and ``func.now()``),
@@ -27,7 +27,7 @@ def _iso_with_offset(dt: datetime) -> str:
 # Python-mode access (``model.started_at``) a real datetime for internal callers
 # and only rewrites the JSON the browser receives.
 TZDateTime = Annotated[
-    datetime, PlainSerializer(_iso_with_offset, return_type=str, when_used="json")
+    datetime, PlainSerializer(iso_with_offset, return_type=str, when_used="json")
 ]
 
 
@@ -437,7 +437,7 @@ class FeedbackDetail(BaseModel):
     issue_locations: list[str] | None = None
     biggest_issue: str | None = None
     likelihood_to_recommend: int
-    submitted_at: str | None = None
+    submitted_at: TZDateTime | None = None
 
 
 class RunFeedbackStatus(BaseModel):

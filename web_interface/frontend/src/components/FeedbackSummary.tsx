@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
-import type { FeedbackDetail } from '../types'
+import type { FeedbackDetail, WcmSection } from '../types'
 import { getRunFeedbackAll } from '../api/feedback'
 import { useAuth } from '../contexts/AuthContext'
 import { formatDate } from '../utils'
@@ -14,6 +14,7 @@ import {
   QUESTION_LABELS,
   RATING_SCALES,
   REVIEWER_ROLES,
+  SUMMARY_GENERATED_OPTIONS,
 } from './feedbackQuestions'
 
 const CARD = 'bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-5 sm:p-6'
@@ -34,6 +35,10 @@ const scoreText = (value: number | null, max: number): ReactNode =>
   value === null ? NO_ANSWER : `${value} / ${max}`
 
 const textOrDash = (value: string | null): ReactNode => (value && value.trim() ? value : NO_ANSWER)
+
+/** "B1: Name" as the form shows it; the bare id when the run's section list lacks it. */
+const sectionLabel = (id: string, names: Map<string, string>): string =>
+  names.has(id) ? `${id}: ${names.get(id)}` : id
 
 function Chips({ items }: { items: string[] }) {
   if (items.length === 0) return <>{NO_ANSWER}</>
@@ -71,17 +76,17 @@ function IssueChips({ feedback }: { feedback: FeedbackDetail }) {
 
 function summaryGeneratedText(value: number | null): string {
   if (value === null) return NO_ANSWER
-  return value ? 'Yes' : 'No'
+  return SUMMARY_GENERATED_OPTIONS.find((o) => o.value === Boolean(value))?.label ?? NO_ANSWER
 }
 
 /** Every question the form asks, in form order, with this submission's answer. */
-function answersFor(f: FeedbackDetail): Answer[] {
+function answersFor(f: FeedbackDetail, sectionNames: Map<string, string>): Answer[] {
   const answers: Answer[] = [
     { label: QUESTION_LABELS.overall_usefulness, value: scoreText(f.overall_usefulness, RATING_SCALES.overall_usefulness.max) },
     { label: QUESTION_LABELS.overall_accuracy, value: scoreText(f.overall_accuracy, RATING_SCALES.overall_accuracy.max) },
     { label: QUESTION_LABELS.overall_completeness, value: scoreText(f.overall_completeness, RATING_SCALES.overall_completeness.max) },
     { label: PROBLEMS_LABEL, value: <IssueChips feedback={f} /> },
-    { label: QUESTION_LABELS.issue_locations, value: <Chips items={f.issue_locations ?? []} /> },
+    { label: QUESTION_LABELS.issue_locations, value: <Chips items={(f.issue_locations ?? []).map((id) => sectionLabel(id, sectionNames))} /> },
     { label: QUESTION_LABELS.biggest_issue, value: textOrDash(f.biggest_issue) },
     { label: QUESTION_LABELS.manual_conversion_effort, value: optionLabel(EFFORT_OPTIONS, f.manual_conversion_effort) },
     { label: QUESTION_LABELS.correction_effort, value: optionLabel(EFFORT_OPTIONS, f.correction_effort) },
@@ -98,7 +103,7 @@ function answersFor(f: FeedbackDetail): Answer[] {
   return answers
 }
 
-function SubmissionCard({ feedback }: { feedback: FeedbackDetail }) {
+function SubmissionCard({ feedback, sectionNames }: { feedback: FeedbackDetail; sectionNames: Map<string, string> }) {
   const role = optionLabel(REVIEWER_ROLES, feedback.reviewer_role)
   return (
     <article className="py-5 first:pt-0 last:pb-0 border-b border-sand-200 last:border-b-0">
@@ -112,7 +117,7 @@ function SubmissionCard({ feedback }: { feedback: FeedbackDetail }) {
         </time>
       </header>
       <dl className="mt-3">
-        {answersFor(feedback).map((answer) => (
+        {answersFor(feedback, sectionNames).map((answer) => (
           <div key={answer.label} className="py-2.5 border-t border-sand-200 first:border-t-0 grid gap-x-6 gap-y-1 sm:grid-cols-[240px_minmax(0,1fr)] items-start">
             <dt className="text-sm font-medium text-gray-900">{answer.label}</dt>
             <dd className="text-sm text-gray-700 [overflow-wrap:anywhere]">{answer.value}</dd>
@@ -124,7 +129,8 @@ function SubmissionCard({ feedback }: { feedback: FeedbackDetail }) {
 }
 
 /** Read-only feedback on a run: every submission, newest first. Shown once the viewer has reviewed it. */
-export default function FeedbackSummary({ runId }: { runId: string }) {
+export default function FeedbackSummary({ runId, sections }: { runId: string; sections: WcmSection[] }) {
+  const sectionNames = new Map(sections.map((s) => [s.section_id, s.section_name]))
   const isAdmin = useAuth().user?.role === 'admin'
   const [submissions, setSubmissions] = useState<FeedbackDetail[] | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -156,7 +162,7 @@ export default function FeedbackSummary({ runId }: { runId: string }) {
           <Loader2 className="h-6 w-6 animate-spin text-gray-400" aria-label="Loading feedback" />
         </div>
       )}
-      {submissions?.map((feedback) => <SubmissionCard key={feedback.id} feedback={feedback} />)}
+      {submissions?.map((feedback) => <SubmissionCard key={feedback.id} feedback={feedback} sectionNames={sectionNames} />)}
     </section>
   )
 }

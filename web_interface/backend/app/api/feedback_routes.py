@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Run, Step, Feedback, User
-from app.schemas import FeedbackDetail, FeedbackSubmit, FeedbackResponse, RunFeedbackStatus
+from app.schemas import iso_with_offset, FeedbackDetail, FeedbackSubmit, FeedbackResponse, RunFeedbackStatus
 from app.auth import get_current_user
 from app.services.run_service import check_run_access
 
@@ -168,7 +168,7 @@ def serialize_feedback(feedback: Feedback) -> dict:
         "issue_locations": json.loads(feedback.issue_locations) if feedback.issue_locations else None,
         "biggest_issue": feedback.biggest_issue,
         "likelihood_to_recommend": feedback.likelihood_to_recommend,
-        "submitted_at": feedback.submitted_at.isoformat() if feedback.submitted_at else None,
+        "submitted_at": iso_with_offset(feedback.submitted_at) if feedback.submitted_at else None,
     }
 
 

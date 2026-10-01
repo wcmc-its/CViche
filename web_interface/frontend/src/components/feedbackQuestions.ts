@@ -29,6 +29,12 @@ export const EFFORT_OPTIONS = [
   { value: 'not_sure', label: "I'm not sure" },
 ]
 
+/** Yes/No answer to the research-summary question (the form's ChoiceRow options). */
+export const SUMMARY_GENERATED_OPTIONS = [
+  { value: true, label: 'Yes' },
+  { value: false, label: 'No' },
+]
+
 /** Question text per answer field. */
 export const QUESTION_LABELS = {
   reviewer_role: 'Your role',

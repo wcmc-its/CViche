@@ -11,6 +11,7 @@ import {
   QUESTION_LABELS,
   RATING_SCALES,
   REVIEWER_ROLES,
+  SUMMARY_GENERATED_OPTIONS,
 } from './feedbackQuestions'
 
 // ---------------------------------------------------------------------------
@@ -219,15 +220,12 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
 
         if (cancelled) return
 
-        if (data.feedback) {
-          setExistingFeedback(data.feedback)
-        } else {
-          // Extract wcm_sections that have a section_id
-          const sections: WcmSection[] = (data.run_context?.wcm_sections || []).filter(
-            (s: Record<string, unknown>) => s.section_id,
-          )
-          setWcmSections(sections)
-        }
+        // Extract wcm_sections that have a section_id (the summary names them too)
+        const sections: WcmSection[] = (data.run_context?.wcm_sections || []).filter(
+          (s: Record<string, unknown>) => s.section_id,
+        )
+        setWcmSections(sections)
+        if (data.feedback) setExistingFeedback(data.feedback)
       } catch {
         if (!cancelled) {
           setError('Unable to load feedback form. Please try refreshing the page.')
@@ -374,7 +372,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
 
   // ---- render: already reviewed (earlier, just now, or a duplicate submit) ----
 
-  if (existingFeedback || submitted) return <FeedbackSummary runId={runId} />
+  if (existingFeedback || submitted) return <FeedbackSummary runId={runId} sections={wcmSections} />
 
   // ---- render: form ----
 
@@ -559,10 +557,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
       </QuestionRow>
       <QuestionRow label={QUESTION_LABELS.summary_generated} helper="Optional">
         <ChoiceRow
-          options={[
-            { value: true, label: 'Yes' },
-            { value: false, label: 'No' },
-          ]}
+          options={SUMMARY_GENERATED_OPTIONS}
           value={formData.summary_generated}
           onChange={(v) => updateField('summary_generated', v)}
           ariaLabel="Did CViche generate a research summary for this CV?"
