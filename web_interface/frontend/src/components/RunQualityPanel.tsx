@@ -36,20 +36,45 @@ function errorText(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? `${fallback} (${err.message})` : fallback
 }
 
-/** Fetches once per run id; failures are logged and kept as an inline message. */
-function useLoad<T>(load: (() => Promise<T>) | null, key: string, failure: string): Load<T> {
+/** How often, and how many times, an empty quality report is fetched again. The
+ *  page turns "complete" when the run row is committed, but the score and the
+ *  doctor report are written a few seconds after that (orchestrator.execute), so
+ *  a page open at completion asks too early. 5 x 3s covers the ~4s seen on run
+ *  JCWIFB (2026-10-01) with room to spare. */
+export const EMPTY_REPORT_RETRY_MS = 3000
+export const EMPTY_REPORT_RETRIES = 5
+
+/** Fetches once per run id, and again (up to EMPTY_REPORT_RETRIES times) while
+ *  `isEmpty` says the data isn't there yet. Failures are logged and kept as an
+ *  inline message. */
+function useLoad<T>(
+  load: (() => Promise<T>) | null,
+  key: string,
+  failure: string,
+  isEmpty: (data: T) => boolean = () => false,
+): Load<T> {
   const [result, setResult] = useState<Load<T>>({ state: 'loading' })
   useEffect(() => {
     if (!load) return
     let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
     setResult({ state: 'loading' })
-    load()
-      .then((data) => { if (!cancelled) setResult({ state: 'ready', data }) })
-      .catch((err: unknown) => {
-        console.error(failure, err)
-        if (!cancelled) setResult({ state: 'error', message: errorText(err, failure) })
-      })
-    return () => { cancelled = true }
+    const attempt = (retriesLeft: number) => {
+      load()
+        .then((data) => {
+          if (cancelled) return
+          setResult({ state: 'ready', data })
+          if (retriesLeft > 0 && isEmpty(data)) {
+            timer = setTimeout(() => attempt(retriesLeft - 1), EMPTY_REPORT_RETRY_MS)
+          }
+        })
+        .catch((err: unknown) => {
+          console.error(failure, err)
+          if (!cancelled) setResult({ state: 'error', message: errorText(err, failure) })
+        })
+    }
+    attempt(EMPTY_REPORT_RETRIES)
+    return () => { cancelled = true; clearTimeout(timer) }
     // `load` is rebuilt every render; the run id is the real dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key])
@@ -269,9 +294,11 @@ function RunDoctorSection({ doctor, capValue }: { doctor: RunDoctorReport | null
 
 const QUALITY_FAILURE = 'Could not load the quality score and Run Doctor findings.'
 
+const reportIsEmpty = (report: RunQualityReport) => report.score == null && report.doctor == null
+
 /** Admin only: the Quality score and Run Doctor cards of a finished run. */
 export function RunQualitySections({ runId }: { runId: string }) {
-  const result = useLoad(() => getRunQuality(runId), runId, QUALITY_FAILURE)
+  const result = useLoad(() => getRunQuality(runId), runId, QUALITY_FAILURE, reportIsEmpty)
   if (result.state === 'loading') {
     return <p role="status" className="m-0 text-[13px] text-gray-500">Loading quality score...</p>
   }
