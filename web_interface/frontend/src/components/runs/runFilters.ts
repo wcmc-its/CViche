@@ -35,6 +35,10 @@ const FILTER_PARAM: Record<RunFilterKey, string> = {
 
 const FILTER_KEYS = Object.keys(FILTER_PARAM) as RunFilterKey[]
 
+/** URL search param for the Batch filter. Unlike the admin filters it applies to
+ *  everyone: a batch is visible to its submitter as well as to admins. */
+export const BATCH_PARAM = 'batch'
+
 export function hasActiveFilters(filters: RunFilters): boolean {
   return FILTER_KEYS.some((key) => filters[key] !== '')
 }
@@ -87,9 +91,28 @@ export function useRunFilters(enabled: boolean): RunFilterControls {
     setSearchParams((prev) => {
       const next = new URLSearchParams(prev)
       FILTER_KEYS.forEach((key) => next.delete(FILTER_PARAM[key]))
+      next.delete(BATCH_PARAM)
       return next
     })
   }, [setSearchParams])
 
   return { filters, setFilter, clearAll }
+}
+
+/** The selected batch id ('' when unset) held in ?batch=, and its setter ('' clears it). */
+export function useBatchFilter(): [string, (batchId: string) => void] {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const batchId = searchParams.get(BATCH_PARAM) ?? ''
+  const setBatch = useCallback(
+    (value: string) => {
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev)
+        if (value) next.set(BATCH_PARAM, value)
+        else next.delete(BATCH_PARAM)
+        return next
+      })
+    },
+    [setSearchParams],
+  )
+  return [batchId, setBatch]
 }

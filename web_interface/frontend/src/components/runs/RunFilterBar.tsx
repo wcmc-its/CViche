@@ -54,8 +54,8 @@ function activeChips(filters: RunFilters, runByLabel: string) {
   ].filter((chip) => chip.value)
 }
 
-/** The four admin filter comboboxes, shown right-aligned in the filter row. */
-export function RunFilterCombos({ controls, options, runs, currentUserId, currentUserEmail }: RunFilterBarProps) {
+/** The four admin filter comboboxes, shown right-aligned in the filter row; `extra` (the Batch filter) follows them. */
+export function RunFilterCombos({ controls, options, runs, currentUserId, currentUserEmail, extra }: RunFilterBarProps & { extra?: React.ReactNode }) {
   const { filters, setFilter } = controls
   const data = options ?? EMPTY_OPTIONS
   const runByLabel = filters.runBy ? runByValueLabel(filters.runBy, data.run_by, runs, currentUserId) : 'Anyone'
@@ -94,31 +94,50 @@ export function RunFilterCombos({ controls, options, runs, currentUserId, curren
         searchable={false}
         onPick={(id) => setFilter('feedback', id)}
       />
+      {extra}
     </div>
   )
 }
 
+interface ChipProps {
+  label: string
+  value: string
+  onRemove: () => void
+}
+
+function FilterChip({ label, value, onRemove }: ChipProps) {
+  return (
+    <span className="flex items-center gap-1.5 rounded-full bg-ink py-1 pl-2.5 pr-1.5 text-[13px] text-white">
+      <span className="opacity-70">{label}:</span>
+      <span className="font-medium">{value}</span>
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Remove ${label} filter`}
+        title="Remove filter"
+        className="flex h-[18px] w-[18px] items-center justify-center rounded-full hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+      >
+        <X className="h-[11px] w-[11px]" aria-hidden="true" />
+      </button>
+    </span>
+  )
+}
+
+interface ActiveFilterChipsProps extends Omit<RunFilterBarProps, 'currentUserEmail'> {
+  /** The Batch filter's chip, shown first; it applies to every user, not only admins. */
+  batchChip?: { value: string; onRemove: () => void }
+}
+
 /** Dark chips for the active filters, each removable, plus "Clear all". */
-export function ActiveFilterChips({ controls, options, runs, currentUserId }: Omit<RunFilterBarProps, 'currentUserEmail'>) {
+export function ActiveFilterChips({ controls, options, runs, currentUserId, batchChip }: ActiveFilterChipsProps) {
   const { filters, setFilter, clearAll } = controls
-  if (!hasActiveFilters(filters)) return null
+  if (!hasActiveFilters(filters) && !batchChip) return null
   const runByLabel = filters.runBy ? runByValueLabel(filters.runBy, options?.run_by ?? [], runs, currentUserId) : ''
   return (
     <div className="mt-3 flex flex-wrap items-center gap-2">
+      {batchChip && <FilterChip label="Batch" value={batchChip.value} onRemove={batchChip.onRemove} />}
       {activeChips(filters, runByLabel).map((chip) => (
-        <span key={chip.key} className="flex items-center gap-1.5 rounded-full bg-ink py-1 pl-2.5 pr-1.5 text-[13px] text-white">
-          <span className="opacity-70">{chip.label}:</span>
-          <span className="font-medium">{chip.value}</span>
-          <button
-            type="button"
-            onClick={() => setFilter(chip.key, '')}
-            aria-label={`Remove ${chip.label} filter`}
-            title="Remove filter"
-            className="flex h-[18px] w-[18px] items-center justify-center rounded-full hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
-          >
-            <X className="h-[11px] w-[11px]" aria-hidden="true" />
-          </button>
-        </span>
+        <FilterChip key={chip.key} label={chip.label} value={chip.value} onRemove={() => setFilter(chip.key, '')} />
       ))}
       <button type="button" onClick={clearAll} className="text-[13px] text-primary-700 hover:underline">
         Clear all
