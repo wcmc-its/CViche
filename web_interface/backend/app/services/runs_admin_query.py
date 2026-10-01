@@ -1,7 +1,8 @@
 """Filtering and facet counts for the admin "all runs" view.
 
 GET /runs?scope=all lists every user's runs; GET /runs/filter-options feeds its
-three filter dropdowns (Department, Faculty, Run by). Both build on the same
+three filter dropdowns (Department, Faculty, Run by) and the Feedback filter.
+Both build on the same
 filter predicates so a dropdown's counts always describe what picking that
 option would list.
 
@@ -12,12 +13,15 @@ run-by lists while the department list stays complete.
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sqlalchemy import ColumnElement, func
+from sqlalchemy import ColumnElement, and_, case, func, select
 from sqlalchemy.orm import Query, Session, contains_eager
 
 from app.errors import validation_error
-from app.models import Run, User
-from app.schemas import FacultyOption, FilterCount, RunByOption, RunBySummary, RunFilterOptions
+from app.models import Feedback, Run, RunState, User
+from app.schemas import (
+    FacultyOption, FeedbackFilterCounts, FeedbackReviewer, FilterCount,
+    RunByOption, RunBySummary, RunFeedbackSummary, RunFilterOptions,
+)
 
 # Run.submission_type of a faculty member uploading their own CV
 # (upload.py's Literal["own_cv", "authorized_admin"]).
@@ -32,6 +36,12 @@ class RunScope(StrEnum):
     ALL = "all"
 
 
+class FeedbackFilter(StrEnum):
+    """The ``feedback`` filter: runs with any feedback, or complete runs with none."""
+    GIVEN = "given"
+    NEEDED = "needed"
+
+
 @dataclass(frozen=True)
 class RunFilters:
     """The admin runs filters. None/False = not filtering on that facet."""
@@ -39,12 +49,25 @@ class RunFilters:
     run_by_self: bool = False
     faculty: str | None = None
     department: str | None = None
+    feedback: FeedbackFilter | None = None
+
+
+def parse_feedback_filter(feedback: str | None) -> FeedbackFilter | None:
+    """``feedback`` query param -> FeedbackFilter; blank is None, unknown is a 422."""
+    if not feedback:
+        return None
+    try:
+        return FeedbackFilter(feedback)
+    except ValueError:
+        allowed = " or ".join(f'"{f.value}"' for f in FeedbackFilter)
+        raise validation_error(f"feedback must be {allowed}") from None
 
 
 def parse_run_filters(run_by: str | None, faculty: str | None,
-                      department: str | None) -> RunFilters:
+                      department: str | None, feedback: str | None = None) -> RunFilters:
     """Build RunFilters from the raw query params. ``run_by`` is a user id or the
-    literal "self"; anything else is a 422. Blank strings mean "no filter"."""
+    literal "self", ``feedback`` is "given" or "needed"; anything else is a 422.
+    Blank strings mean "no filter"."""
     run_by_user_id = None
     run_by_self = False
     if run_by:
@@ -57,7 +80,8 @@ def parse_run_filters(run_by: str | None, faculty: str | None,
                 raise validation_error(
                     f'run_by must be a user id or "{RUN_BY_SELF}"') from None
     return RunFilters(run_by_user_id=run_by_user_id, run_by_self=run_by_self,
-                      faculty=faculty or None, department=department or None)
+                      faculty=faculty or None, department=department or None,
+                      feedback=parse_feedback_filter(feedback))
 
 
 def _run_by_clause(filters: RunFilters) -> ColumnElement[bool] | None:
@@ -70,8 +94,27 @@ def _run_by_clause(filters: RunFilters) -> ColumnElement[bool] | None:
     return None
 
 
+def _has_feedback() -> ColumnElement[bool]:
+    """Correlated EXISTS: this run has a Feedback row from any reviewer."""
+    return select(Feedback.id).where(Feedback.run_id == Run.id).exists()
+
+
+def _needs_feedback() -> ColumnElement[bool]:
+    return and_(Run.status == RunState.COMPLETE, ~_has_feedback())
+
+
+def feedback_clause(feedback: FeedbackFilter | None) -> ColumnElement[bool] | None:
+    """The predicate for the ``feedback`` filter (None = not filtering)."""
+    if feedback is FeedbackFilter.GIVEN:
+        return _has_feedback()
+    if feedback is FeedbackFilter.NEEDED:
+        return _needs_feedback()
+    return None
+
+
 def _clauses(filters: RunFilters, *, skip_department: bool = False,
-             skip_faculty: bool = False, skip_run_by: bool = False) -> list[ColumnElement[bool]]:
+             skip_faculty: bool = False, skip_run_by: bool = False,
+             skip_feedback: bool = False) -> list[ColumnElement[bool]]:
     """The active filter predicates, minus the facet(s) being counted."""
     clauses = []
     if filters.department and not skip_department:
@@ -81,6 +124,9 @@ def _clauses(filters: RunFilters, *, skip_department: bool = False,
     run_by = None if skip_run_by else _run_by_clause(filters)
     if run_by is not None:
         clauses.append(run_by)
+    feedback = None if skip_feedback else feedback_clause(filters.feedback)
+    if feedback is not None:
+        clauses.append(feedback)
     return clauses
 
 
@@ -154,11 +200,62 @@ def _self_count(db: Session, filters: RunFilters) -> int:
     )
 
 
+def _feedback_counts(db: Session, filters: RunFilters) -> FeedbackFilterCounts:
+    given, needed = (
+        db.query(func.count(case((_has_feedback(), 1))),
+                 func.count(case((_needs_feedback(), 1))))
+        .select_from(Run).outerjoin(User, Run.user_id == User.id)
+        .filter(*_clauses(filters, skip_feedback=True))
+        .one()
+    )
+    return FeedbackFilterCounts(given=given, needed=needed)
+
+
+def load_feedback_summaries(db: Session, run_ids: list[str], current_user_id: int,
+                            *, with_reviewers: bool) -> dict[str, RunFeedbackSummary]:
+    """Feedback summary per run id for one page of runs: one GROUP BY query, plus
+    one query for the reviewer rows when ``with_reviewers`` (admin scope). Runs
+    without feedback are absent from the result."""
+    if not run_ids:
+        return {}
+    rows = (
+        db.query(Feedback.run_id, func.count(Feedback.id), func.max(Feedback.submitted_at),
+                 func.max(case((Feedback.user_id == current_user_id, 1), else_=0)))
+        .filter(Feedback.run_id.in_(run_ids))
+        .group_by(Feedback.run_id).all()
+    )
+    reviewers = _reviewers_by_run(db, run_ids) if with_reviewers else {}
+    return {
+        run_id: RunFeedbackSummary(count=count, given_by_me=bool(mine), last_at=last_at,
+                                   reviewers=reviewers.get(run_id, []) if with_reviewers else None)
+        for run_id, count, last_at, mine in rows
+    }
+
+
+def empty_feedback_summary(*, with_reviewers: bool) -> RunFeedbackSummary:
+    return RunFeedbackSummary(reviewers=[] if with_reviewers else None)
+
+
+def _reviewers_by_run(db: Session, run_ids: list[str]) -> dict[str, list[FeedbackReviewer]]:
+    rows = (
+        db.query(Feedback.run_id, User.display_name, Feedback.reviewer_role, Feedback.submitted_at)
+        .join(User, User.id == Feedback.user_id)
+        .filter(Feedback.run_id.in_(run_ids))
+        .order_by(Feedback.submitted_at.desc(), Feedback.id.desc()).all()
+    )
+    by_run: dict[str, list[FeedbackReviewer]] = {}
+    for run_id, display_name, role, submitted_at in rows:
+        by_run.setdefault(run_id, []).append(
+            FeedbackReviewer(display_name=display_name, role=role, submitted_at=submitted_at))
+    return by_run
+
+
 def build_filter_options(db: Session, filters: RunFilters) -> RunFilterOptions:
-    """Options and run counts for the three admin filters (four GROUP BY queries)."""
+    """Options and run counts for the admin filters (five aggregate queries)."""
     return RunFilterOptions(
         departments=_department_counts(db, filters),
         faculty=_faculty_counts(db, filters),
         run_by=_run_by_counts(db, filters),
         self_count=_self_count(db, filters),
+        feedback=_feedback_counts(db, filters),
     )

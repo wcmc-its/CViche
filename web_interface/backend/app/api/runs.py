@@ -15,7 +15,7 @@ from app.models import Run, RunState, Step, User
 from app.schemas import (
     RunFilterOptions, RunStatus, RunSummary, StepSummary, PaginatedRuns,
     CapacityResponse, RunActionResponse, RestartRunResponse,
-    RunQualityReport, RunReviewNote,
+    RunFeedbackSummary, RunQualityReport, RunReviewNote,
 )
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
@@ -29,8 +29,9 @@ from app.services.run_service import (
 from app.rate_limiter import check_rate_limit
 from app.errors import not_found, bad_request, conflict
 from app.services.runs_admin_query import (
-    RunScope, build_filter_options, filtered_runs_query, parse_run_filters,
-    run_by_summary,
+    RunScope, build_filter_options, empty_feedback_summary, feedback_clause,
+    filtered_runs_query, load_feedback_summaries, parse_feedback_filter,
+    parse_run_filters, run_by_summary,
 )
 from app.services import quality_score_service
 from app.services.run_quality_report import build_run_quality_report, columns_need_cleanup
@@ -200,15 +201,37 @@ def get_run_filter_options(
     run_by: str | None = Query(None),
     faculty: str | None = Query(None),
     department: str | None = Query(None),
+    feedback: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ) -> RunFilterOptions:
     """Options and run counts for the admin runs filters (scope=all, admin only).
 
-    Each list's counts apply the other two filters but not its own."""
+    Each facet's counts apply the other filters but not its own."""
     if scope != RunScope.ALL:
         raise bad_request("filter-options is only available with scope=all")
-    return build_filter_options(db, parse_run_filters(run_by, faculty, department))
+    return build_filter_options(db, parse_run_filters(run_by, faculty, department, feedback))
+
+
+def _run_summary(current_user: User, run: Run, all_scope: bool,
+                 feedback: RunFeedbackSummary) -> RunSummary:
+    return RunSummary(
+        run_id=run.id,
+        filename=run.filename,
+        status=run.status,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        total_cost=visible_cost(current_user, run.total_cost),
+        total_duration_seconds=_run_duration_seconds(run),
+        cv_owner_name=run.cv_owner_name,
+        submission_type=run.submission_type,
+        run_by=run_by_summary(run.user) if all_scope else None,
+        # Score columns are admin-only, like cost: never on scope=mine.
+        quality_score=run.quality_score if all_scope else None,
+        quality_band=run.quality_band if all_scope else None,
+        quality_cap=run.quality_cap if all_scope else None,
+        feedback=feedback,
+    )
 
 
 @router.get("/runs", response_model=PaginatedRuns)
@@ -219,6 +242,7 @@ async def list_runs(
     run_by: str | None = Query(None),
     faculty: str | None = Query(None),
     department: str | None = Query(None),
+    feedback: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -226,38 +250,30 @@ async def list_runs(
 
     scope=mine (default): the current user's runs. scope=all (admin only): every
     user's runs, optionally filtered by run_by (user id or "self"), faculty (the
-    CV owner's name) and department (the running user's ED department); the
-    filters are ignored under scope=mine.
+    CV owner's name) and department (the running user's ED department); those
+    three are ignored under scope=mine. ``feedback`` ("given" = any reviewer left
+    feedback, "needed" = complete with none) applies in both scopes. Every run
+    carries a ``feedback`` summary; scope=all adds the reviewer list.
     """
     all_scope = scope == RunScope.ALL
     if all_scope:
         require_admin(current_user)
-        query = filtered_runs_query(db, parse_run_filters(run_by, faculty, department))
+        query = filtered_runs_query(db, parse_run_filters(run_by, faculty, department, feedback))
     else:
         query = db.query(Run).filter(Run.user_id == current_user.id)
+        mine_feedback = feedback_clause(parse_feedback_filter(feedback))
+        if mine_feedback is not None:
+            query = query.filter(mine_feedback)
     total = query.count()
     runs = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()
 
-    results = []
-    for run in runs:
-        total_duration_seconds = _run_duration_seconds(run)
-
-        results.append(RunSummary(
-            run_id=run.id,
-            filename=run.filename,
-            status=run.status,
-            started_at=run.started_at,
-            completed_at=run.completed_at,
-            total_cost=visible_cost(current_user, run.total_cost),
-            total_duration_seconds=total_duration_seconds,
-            cv_owner_name=run.cv_owner_name,
-            submission_type=run.submission_type,
-            run_by=run_by_summary(run.user) if all_scope else None,
-            # Score columns are admin-only, like cost: never on scope=mine.
-            quality_score=run.quality_score if all_scope else None,
-            quality_band=run.quality_band if all_scope else None,
-            quality_cap=run.quality_cap if all_scope else None,
-        ))
+    summaries = load_feedback_summaries(
+        db, [run.id for run in runs], current_user.id, with_reviewers=all_scope)
+    no_feedback = empty_feedback_summary(with_reviewers=all_scope)
+    results = [
+        _run_summary(current_user, run, all_scope, summaries.get(run.id, no_feedback))
+        for run in runs
+    ]
 
     return PaginatedRuns(
         runs=results,

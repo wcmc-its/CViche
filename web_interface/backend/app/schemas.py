@@ -113,6 +113,23 @@ class StepSummary(BaseModel):
         from_attributes = True
 
 
+class FeedbackReviewer(BaseModel):
+    """One reviewer's submission on a run, as the admin runs table lists it."""
+    display_name: str
+    role: str  # Feedback.reviewer_role
+    submitted_at: TZDateTime | None = None
+
+
+class RunFeedbackSummary(BaseModel):
+    """Feedback left on a run by ANY reviewer (including feedback others left
+    on the caller's own run). ``reviewers`` is populated only by
+    GET /runs?scope=all (admin), newest first; null under scope=mine."""
+    count: int = 0
+    given_by_me: bool = False
+    last_at: TZDateTime | None = None
+    reviewers: list[FeedbackReviewer] | None = None
+
+
 class RunSummary(BaseModel):
     """Summary of a run for the history list."""
     run_id: str
@@ -133,6 +150,7 @@ class RunSummary(BaseModel):
     quality_score: int | None = None
     quality_band: str | None = None
     quality_cap: int | None = None
+    feedback: RunFeedbackSummary = RunFeedbackSummary()
 
     class Config:
         from_attributes = True
@@ -153,12 +171,19 @@ class RunByOption(RunBySummary):
     count: int
 
 
+class FeedbackFilterCounts(BaseModel):
+    """Runs matching each value of the ``feedback`` filter."""
+    given: int
+    needed: int
+
+
 class RunFilterOptions(BaseModel):
     """GET /runs/filter-options: the options each admin runs filter offers."""
     departments: list[FilterCount]
     faculty: list[FacultyOption]
     run_by: list[RunByOption]
     self_count: int
+    feedback: FeedbackFilterCounts
 
 
 class PaginatedRuns(BaseModel):
@@ -385,6 +410,34 @@ class FeedbackResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class FeedbackDetail(BaseModel):
+    """One stored Feedback row plus its reviewer's display name
+    (GET /run/{run_id}/feedback/all)."""
+    id: int
+    run_id: str
+    user_id: int
+    display_name: str
+    reviewer_role: str
+    overall_accuracy: int | None = None
+    overall_completeness: int | None = None
+    overall_usefulness: int
+    manual_conversion_effort: str
+    correction_effort: str
+    enrichment_quality: int | None = None
+    summary_generated: int | None = None  # boolean stored as int
+    summary_quality: int | None = None
+    issue_missing_content: str | None = None
+    issue_split_merged: str | None = None
+    issue_wrong_section: str | None = None
+    issue_inaccurate: str | None = None
+    issue_ai_enrichment: str | None = None
+    issue_formatting: str | None = None
+    issue_locations: list[str] | None = None
+    biggest_issue: str | None = None
+    likelihood_to_recommend: int
+    submitted_at: str | None = None
 
 
 class RunFeedbackStatus(BaseModel):

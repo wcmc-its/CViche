@@ -20,7 +20,8 @@ interface RunFilterBarProps {
   currentUserEmail: string | undefined
 }
 
-const EMPTY_OPTIONS: RunFilterOptions = { departments: [], faculty: [], run_by: [], self_count: 0 }
+const EMPTY_OPTIONS: RunFilterOptions = { departments: [], faculty: [], run_by: [], self_count: 0,
+  feedback: { given: 0, needed: 0 } }
 
 /** Display text for the selected Run by value. */
 export function runByValueLabel(
