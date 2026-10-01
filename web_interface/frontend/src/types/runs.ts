@@ -74,6 +74,8 @@ export interface RunSummary {
   /** The hard-fail cap that lowered the score, else null. Admin scope=all only. */
   quality_cap?: number | null
   feedback: RunFeedbackSummary
+  /** The batch upload this run belongs to; null for a single upload. */
+  batch_id?: string | null
 }
 
 export type QualityBand = 'GREEN' | 'YELLOW' | 'RED'

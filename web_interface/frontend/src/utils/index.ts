@@ -1,1 +1,1 @@
-export { formatDate, formatDateShort, formatDuration, formatCost, runningStepCost, formatRelativeDate } from './format'
+export { formatDate, formatDateShort, formatDuration, formatCost, formatMinutes, runningStepCost, formatRelativeDate } from './format'

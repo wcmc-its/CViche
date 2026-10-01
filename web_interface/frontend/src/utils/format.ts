@@ -40,6 +40,19 @@ export function formatDuration(seconds: number | null): string {
   return `${secs}s`
 }
 
+const MINUTES_PER_HOUR = 60
+
+/**
+ * Format a wait or processing time in minutes, rounded: "25 min", "2 h", "2 h 5 m".
+ */
+export function formatMinutes(minutes: number): string {
+  const total = Math.round(minutes)
+  const hours = Math.floor(total / MINUTES_PER_HOUR)
+  const rest = total % MINUTES_PER_HOUR
+  if (!hours) return `${rest} min`
+  return rest ? `${hours} h ${rest} m` : `${hours} h`
+}
+
 /**
  * Format cost with dollar sign. Default precision 2 for summary views,
  * pass 3 for detail views (PipelineViewer, StepSidebar, AdminSubmissions).
