@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import BatchView from './BatchView'
+import BatchView, { BATCH_REFRESH_MS, COPY_FEEDBACK_MS } from './BatchView'
 import { getBatch, getQueue } from '../../api/batches'
 import type { BatchDetail, BatchRunRow, QueueOverview } from '../../types'
 
@@ -40,7 +40,7 @@ async function renderView(detail: BatchDetail = BATCH, isAdmin = true) {
 
 const lines = () => screen.getAllByTestId('batch-run')
 
-afterEach(() => { cleanup(); vi.resetAllMocks() })
+afterEach(() => { cleanup(); vi.resetAllMocks(); vi.useRealTimers() })
 
 describe('BatchView', () => {
   it('shows the header, the time left and one row per run', async () => {
@@ -95,6 +95,66 @@ describe('BatchView', () => {
   it('says all runs finished once none is queued or running', async () => {
     await renderView({ ...BATCH, status_counts: { complete: 3, running: 0, queued: 0, failed: 1, cancelled: 0, created: 0 } })
     expect(screen.getByText('All runs finished.')).toBeTruthy()
+  })
+
+  it('does not say all runs finished while one is still running', async () => {
+    await renderView({ ...BATCH, status_counts: { complete: 3, running: 1, queued: 0, failed: 0, cancelled: 0, created: 0 } })
+    expect(screen.queryByText('All runs finished.')).toBeNull()
+    expect(screen.getByText('Up to 3 run at once. The last should finish in about 1 h 10 m.')).toBeTruthy()
+  })
+
+  it('leaves statuses with no runs out of the status bar', async () => {
+    await renderView()
+    const legend = screen.getByTestId('batch-status-counts')
+    expect(legend.textContent).toBe('Complete 1Running 1Queued 1Failed 1')
+  })
+
+  it('names a run that was never started the same way in the bar and on its row', async () => {
+    await renderView({
+      ...BATCH,
+      status_counts: { complete: 0, running: 0, queued: 0, failed: 0, cancelled: 0, created: 1 },
+      runs: [row({ status: 'created' })],
+    })
+    expect(screen.getByTestId('batch-status-counts').textContent).toBe('Pending 1')
+    expect(within(lines()[0]).getByText('Pending')).toBeTruthy()
+  })
+
+  it('copies the batch view link', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    await renderView()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy link' }))
+    await flush()
+    expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/runs?batch=BQXZKD`)
+    expect(screen.getByRole('button', { name: 'Link copied' })).toBeTruthy()
+    expect(COPY_FEEDBACK_MS).toBe(1600)
+  })
+
+  it('re-reads the batch while runs are queued or running', async () => {
+    vi.useFakeTimers()
+    await renderView()
+    expect(getBatch).toHaveBeenCalledTimes(1)
+    vi.mocked(getBatch).mockResolvedValue({ ...BATCH, status_counts: { ...BATCH.status_counts, running: 0, queued: 0, complete: 3 } })
+    await act(async () => { vi.advanceTimersByTime(BATCH_REFRESH_MS) })
+    await flush()
+    expect(getBatch).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('All runs finished.')).toBeTruthy()
+
+    await act(async () => { vi.advanceTimersByTime(BATCH_REFRESH_MS * 3) })
+    await flush()
+    expect(getBatch).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps showing the batch when a re-read fails, and tries again', async () => {
+    vi.useFakeTimers()
+    await renderView()
+    vi.mocked(getBatch).mockRejectedValueOnce({ status: 503, message: 'down' })
+    await act(async () => { vi.advanceTimersByTime(BATCH_REFRESH_MS) })
+    await flush()
+    expect(screen.getByRole('heading', { name: '4 CVs' })).toBeTruthy()
+    await act(async () => { vi.advanceTimersByTime(BATCH_REFRESH_MS) })
+    await flush()
+    expect(getBatch).toHaveBeenCalledTimes(3)
   })
 
   it("says the batch can't be shown when the API answers 404", async () => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import RunTable from './RunTable'
 import type { RunSummary } from '../../types'
@@ -14,11 +14,11 @@ const run = (over: Partial<RunSummary>): RunSummary => ({
 const onSelectRun = vi.fn()
 const onOpenBatch = vi.fn()
 
-function renderTable(runs: RunSummary[]) {
+function renderTable(runs: RunSummary[], older: RunSummary[] = []) {
   render(
     <MemoryRouter>
       <RunTable
-        groups={runs.map((r) => ({ key: r.run_id, owner: r.cv_owner_name ?? null, latest: r, older: [] }))}
+        groups={runs.map((r) => ({ key: r.run_id, owner: r.cv_owner_name ?? null, latest: r, older }))}
         isAdmin={false}
         showCost={false}
         currentUserId={7}
@@ -41,6 +41,20 @@ describe('RunTable batch tag', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Batch' }))
     expect(onOpenBatch).toHaveBeenCalledWith('BQXZKD')
     expect(onSelectRun).not.toHaveBeenCalled()
+  })
+
+  it('sits beside the filename, not the faculty name', () => {
+    renderTable([run({ batch_id: 'BQXZKD', filename: 'alpha_cv.docx' })])
+    const line = screen.getByRole('button', { name: 'Batch' }).parentElement!
+    expect(within(line).getByText('alpha_cv.docx')).toBeTruthy()
+    expect(within(line).queryByText('Pat Example')).toBeNull()
+  })
+
+  it('tags an earlier run of a batch too', () => {
+    renderTable([run({ batch_id: null })], [run({ run_id: 'RUNOLD', filename: 'old_cv.docx', batch_id: 'BQOLDB' })])
+    fireEvent.click(screen.getByRole('button', { name: 'Show 1 earlier run' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Batch' }))
+    expect(onOpenBatch).toHaveBeenCalledWith('BQOLDB')
   })
 
   it('shows no tag on a single upload', () => {

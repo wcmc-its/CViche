@@ -90,7 +90,7 @@ export function BatchTag({ batchId, onOpenBatch }: { batchId: string | null | un
       type="button"
       title="Show the whole batch"
       onClick={(e) => { e.stopPropagation(); onOpenBatch(batchId) }}
-      className="flex-none rounded px-1.5 py-px text-[11px] font-semibold text-[#6B5E45] bg-sand-200 hover:bg-[#E6D9BE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+      className="flex-none rounded px-1.5 py-px text-[11px] font-semibold text-[#6B5E45] bg-[#F1E8D6] hover:bg-[#E6D9BE] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
     >
       Batch
     </button>
@@ -306,9 +306,11 @@ function GroupCell({ group, expanded, isAdmin, onToggle, onFilter, onOpenBatch }
           {runCount > 1 && (
             <span className="rounded-full bg-sand-100 px-2 py-px text-xs text-gray-500">{runCount} runs</span>
           )}
+        </div>
+        <div className="flex min-w-0 items-center gap-2">
+          <span title={latest.filename} className={`text-[13px] text-gray-500 ${WRAP}`}>{owner ? latest.filename : OWNER_UNKNOWN_LABEL}</span>
           <BatchTag batchId={latest.batch_id} onOpenBatch={onOpenBatch} />
         </div>
-        <div title={latest.filename} className={`text-[13px] text-gray-500 ${WRAP}`}>{owner ? latest.filename : OWNER_UNKNOWN_LABEL}</div>
       </div>
     </div>
   )

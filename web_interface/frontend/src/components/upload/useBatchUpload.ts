@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ApiError } from '../../api/client'
 import { createBatch } from '../../api/batches'
-import { startRun } from '../../api/runs'
+import { getRunStatus, startRun } from '../../api/runs'
 import { getBatchEstimate, uploadFile } from '../../api/upload'
 import {
-  MAX_BATCH_FILES, MAX_UPLOADS_IN_FLIGHT, classifyFailure, isValidRow, makeRow, runPool, startFailure,
+  MAX_BATCH_FILES, MAX_UPLOADS_IN_FLIGHT, classifyFailure, isValidRow, makeRow, mayAlreadyBeStarted, runPool,
+  startFailure, wasStarted,
 } from './batchRows'
 import type { BatchRow } from './batchRows'
 import type { SubmissionType } from './consentText'
@@ -28,6 +29,18 @@ export function isConsentError(err: unknown): boolean {
 
 type Patch = (key: string, change: Partial<BatchRow>) => void
 
+/** After a start was refused as not startable, ask the run itself: an earlier start
+ *  whose answer was lost may have gone through, and then the run is in the queue. */
+async function startedAnyway(runId: string, err: unknown): Promise<boolean> {
+  if (!mayAlreadyBeStarted(err)) return false
+  try {
+    return wasStarted((await getRunStatus(runId)).status)
+  } catch (statusErr) {
+    console.error('Could not read the run status after a refused start', statusErr)
+    return false
+  }
+}
+
 /** Upload one row (unless an earlier attempt already created its run) and start it.
  *  A start that fails keeps the run id, so a retry re-starts that run and never re-uploads. */
 async function sendRow(row: BatchRow, batchId: string, options: BatchSubmitOptions, patch: Patch): Promise<void> {
@@ -48,7 +61,27 @@ async function sendRow(row: BatchRow, batchId: string, options: BatchSubmitOptio
     patch(row.key, { state: 'queued' })
   } catch (err) {
     console.error('Batch run start failed', err)
-    patch(row.key, { state: 'failed', failure: startFailure(err) })
+    if (await startedAnyway(runId, err)) patch(row.key, { state: 'queued' })
+    else patch(row.key, { state: 'failed', failure: startFailure(err) })
+  }
+}
+
+type PatchMany = (keys: Set<string>, change: (r: BatchRow) => Partial<BatchRow>) => void
+
+/** One /estimate call for `targets`: each row gets its estimate, or the server's reason it can't be submitted. */
+async function estimateRows(targets: BatchRow[], patchMany: PatchMany, setError: (message: string) => void): Promise<void> {
+  const keys = new Set(targets.map((r) => r.key))
+  try {
+    const result = await getBatchEstimate(targets.map((r) => r.file))
+    const byKey = new Map(targets.map((r, i) => [r.key, result.files[i]]))
+    patchMany(keys, (r) => {
+      const answer = byKey.get(r.key)
+      return answer?.error ? { estimate: null, invalidReason: answer.error } : { estimate: answer?.estimate ?? null }
+    })
+  } catch (err) {
+    console.error('Batch estimate failed', err)
+    patchMany(keys, () => ({ estimate: null }))
+    setError(`We couldn't estimate these files: ${(err as ApiError)?.message ?? 'request failed'}`)
   }
 }
 
@@ -83,8 +116,9 @@ export interface BatchUpload {
 }
 
 /** State and wire for a batch: the file rows, one estimate call per add, then
- *  POST /batches and each file's upload + start, two at a time. */
-export function useBatchUpload(onConsentRequired: () => void): BatchUpload {
+ *  POST /batches and each file's upload + start, two at a time. `onFilesChange`
+ *  runs whenever the file list changes, so a run held for the previous files is forgotten. */
+export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () => void): BatchUpload {
   const [rows, setRows] = useState<BatchRow[]>([])
   const [phase, setPhase] = useState<BatchPhase>('edit')
   const [batchId, setBatchId] = useState<string | null>(null)
@@ -92,25 +126,14 @@ export function useBatchUpload(onConsentRequired: () => void): BatchUpload {
   const keySeq = useRef(0)
   useLeaveWarning(phase === 'uploading')
 
-  const patch: Patch = (key, change) => setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...change } : r)))
-  const patchMany = (keys: Set<string>, change: (r: BatchRow) => Partial<BatchRow>) =>
-    setRows((prev) => prev.map((r) => (keys.has(r.key) ? { ...r, ...change(r) } : r)))
-
-  const estimateRows = async (targets: BatchRow[]) => {
-    const keys = new Set(targets.map((r) => r.key))
-    try {
-      const result = await getBatchEstimate(targets.map((r) => r.file))
-      const byKey = new Map(targets.map((r, i) => [r.key, result.files[i]]))
-      patchMany(keys, (r) => {
-        const answer = byKey.get(r.key)
-        return answer?.error ? { estimate: null, invalidReason: answer.error } : { estimate: answer?.estimate ?? null }
-      })
-    } catch (err) {
-      console.error('Batch estimate failed', err)
-      patchMany(keys, () => ({ estimate: null }))
-      setError(`We couldn't estimate these files: ${(err as ApiError)?.message ?? 'request failed'}`)
-    }
+  // Every change to the file list itself (not a row's state) also tells the page.
+  const changeFiles = (next: (prev: BatchRow[]) => BatchRow[]) => {
+    onFilesChange()
+    setRows(next)
   }
+  const patch: Patch = (key, change) => setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...change } : r)))
+  const patchMany: PatchMany = (keys, change) =>
+    setRows((prev) => prev.map((r) => (keys.has(r.key) ? { ...r, ...change(r) } : r)))
 
   const nextKey = () => {
     keySeq.current += 1
@@ -123,8 +146,8 @@ export function useBatchUpload(onConsentRequired: () => void): BatchUpload {
     const room = Math.max(0, MAX_BATCH_FILES - rows.filter(isValidRow).length)
     const toEstimate = fresh.filter(isValidRow).slice(0, room)
     const estimated = new Set(toEstimate.map((r) => r.key))
-    setRows((prev) => [...prev, ...fresh.map((r) => (isValidRow(r) && !estimated.has(r.key) ? { ...r, estimate: null } : r))])
-    if (toEstimate.length) void estimateRows(toEstimate)
+    changeFiles((prev) => [...prev, ...fresh.map((r) => (isValidRow(r) && !estimated.has(r.key) ? { ...r, estimate: null } : r))])
+    if (toEstimate.length) void estimateRows(toEstimate, patchMany, setError)
   }
 
   const sendAll = async (targets: BatchRow[], id: string, options: BatchSubmitOptions) => {
@@ -162,7 +185,7 @@ export function useBatchUpload(onConsentRequired: () => void): BatchUpload {
   }
 
   const reset = () => {
-    setRows([])
+    changeFiles(() => [])
     setPhase('edit')
     setBatchId(null)
     setError(null)
@@ -176,8 +199,8 @@ export function useBatchUpload(onConsentRequired: () => void): BatchUpload {
     error,
     clearError: () => setError(null),
     addFiles,
-    removeRow: (key) => setRows((prev) => prev.filter((r) => r.key !== key)),
-    adopt: (file, estimate) => setRows([makeRow(file, nextKey(), estimate)]),
+    removeRow: (key) => changeFiles((prev) => prev.filter((r) => r.key !== key)),
+    adopt: (file, estimate) => changeFiles(() => [makeRow(file, nextKey(), estimate)]),
     submit,
     retryFailed,
     reset,

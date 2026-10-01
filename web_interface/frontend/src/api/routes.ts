@@ -119,7 +119,7 @@ export const batchRoutes = {
   /** GET/POST /api/batches  (list visible batches / create one before uploading) */
   batches: () => `/api/batches` as const,
   /** GET /api/batches/:id  (the batch view) */
-  detail: (id: string) => `/api/batches/${id}` as const,
+  detail: (id: string) => `/api/batches/${encodeURIComponent(id)}` as const,
   /** GET /api/queue  (dispatch mode and per-queue wait) */
   queue: () => `/api/queue` as const,
 } as const

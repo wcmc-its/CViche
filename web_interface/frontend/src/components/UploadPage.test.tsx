@@ -5,13 +5,13 @@ import { MemoryRouter } from 'react-router-dom'
 import UploadPage from './UploadPage'
 import { getBatchEstimate, getEstimate, uploadFile } from '../api/upload'
 import type { UploadOptions, UploadResult } from '../api/upload'
-import { getCapacity, startRun } from '../api/runs'
+import { getCapacity, getRunStatus, startRun } from '../api/runs'
 import { createBatch, getQueue } from '../api/batches'
 import { getCurrentUser } from '../api/auth'
-import type { BatchEstimate, Estimate, QueueOverview, User } from '../types'
+import type { BatchEstimate, Estimate, QueueOverview, QuotaInfo, RunStatus, User } from '../types'
 
 vi.mock('../api/upload', () => ({ getEstimate: vi.fn(), getBatchEstimate: vi.fn(), uploadFile: vi.fn() }))
-vi.mock('../api/runs', () => ({ startRun: vi.fn(), getCapacity: vi.fn() }))
+vi.mock('../api/runs', () => ({ startRun: vi.fn(), getCapacity: vi.fn(), getRunStatus: vi.fn() }))
 vi.mock('../api/batches', () => ({ createBatch: vi.fn(), getQueue: vi.fn() }))
 vi.mock('../api/auth', () => ({ getCurrentUser: vi.fn() }))
 
@@ -85,6 +85,14 @@ async function addFiles(files: File[]) {
   fireEvent.change(fileInput(), { target: { files } })
   await flush()
 }
+
+const button = (name: string) => screen.getByRole('button', { name }) as HTMLButtonElement
+const attestationBox = () => screen.getByRole('checkbox', { name: /I (have received|agree)/ }) as HTMLInputElement
+const QUOTA_LEFT: QuotaInfo = {
+  daily_limit: 10, daily_used: 0, daily_remaining: 10, monthly_limit: 50, monthly_used: 0, monthly_remaining: 50, is_admin: false,
+}
+const MEMBER: User = { ...ADMIN, role: 'user', display_name: 'Test Member' }
+const runStatus = (status: string) => ({ run_id: 'R', filename: 'x.docx', status }) as RunStatus
 
 const tickAttestation = () => fireEvent.click(screen.getByRole('checkbox', { name: /I (have received|agree)/ }))
 
@@ -379,5 +387,178 @@ describe('UploadPage batch upload wire', () => {
     expect(vi.mocked(uploadFile).mock.calls[0][1]).toEqual({ stripWcmInstructions: true, submissionType: 'own_cv' })
     expect(startRun).toHaveBeenCalledWith('R1')
     expect(onUploadSuccess).toHaveBeenCalledWith('R1')
+  })
+})
+
+describe('UploadPage held run vs a changed file list', () => {
+  it('forgets a blank-template run when its file is removed, and uploads the new file', async () => {
+    vi.mocked(uploadFile).mockImplementation(async (file: File) => (
+      file.name === 'blank.docx' ? { ...ok('R1'), wcm_template_warning: true } : ok('R2')
+    ))
+    await renderPage()
+    await addFiles([docx('blank.docx')])
+    tickAttestation()
+    fireEvent.click(button('Start run'))
+    await flush()
+    expect(button('Process anyway')).toBeTruthy()
+
+    fireEvent.click(button('Remove blank.docx'))
+    expect(screen.queryByRole('alert', { name: 'Blank template warning' })).toBeNull()
+    await addFiles([docx('real.docx')])
+    fireEvent.click(button('Start run'))
+    await flush()
+    expect(vi.mocked(uploadFile).mock.calls.map(([f]) => f.name)).toEqual(['blank.docx', 'real.docx'])
+    expect(vi.mocked(startRun).mock.calls.map(([id]) => id)).toEqual(['R2'])
+    expect(onUploadSuccess).toHaveBeenCalledWith('R2')
+  })
+
+  it('stops offering Retry for a failed one-file start once another file is added', async () => {
+    uploadsSucceed()
+    vi.mocked(startRun).mockRejectedValueOnce({ status: 503, message: 'Service unavailable' })
+    await renderPage()
+    await addFiles([docx('a.docx')])
+    tickAttestation()
+    fireEvent.click(button('Start run'))
+    await flush()
+    expect(button('Retry')).toBeTruthy()
+
+    await addFiles([docx('b.docx')])
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(button('Submit 2 CVs').disabled).toBe(false)
+  })
+})
+
+describe('UploadPage batch options and failures', () => {
+  it('sends the strip choice with every file of the batch', async () => {
+    uploadsSucceed()
+    await renderPage()
+    await addFiles(docxSet(2))
+    fireEvent.click(screen.getByRole('checkbox', { name: /Strip WCM template instructions/ }))
+    tickAttestation()
+    fireEvent.click(button('Submit 2 CVs'))
+    await flush()
+    expect(vi.mocked(uploadFile).mock.calls.map(([, opts]) => opts.stripWcmInstructions)).toEqual([false, false])
+  })
+
+  it('unticks the agreement when the role changes, since the statement changes', async () => {
+    await renderPage()
+    tickAttestation()
+    expect(attestationBox().checked).toBe(true)
+    fireEvent.click(screen.getByLabelText(ROLE_A_LABEL))
+    expect(attestationBox().checked).toBe(false)
+  })
+
+  it('carries only a file that can be submitted across to My own CV', async () => {
+    await renderPage()
+    await addFiles([new File(['x'], 'notes.txt'), docx('a.docx')])
+    fireEvent.click(screen.getByLabelText(ROLE_A_LABEL))
+    expect(screen.getByRole('button', { name: 'Remove a.docx' })).toBeTruthy()
+    expect(screen.queryByText('notes.txt')).toBeNull()
+  })
+
+  it('retries only the failures that can be retried', async () => {
+    let n = 0
+    vi.mocked(uploadFile).mockImplementation(async () => {
+      n += 1
+      if (n === 1) throw { status: 400, message: "Couldn't open the file" }
+      if (n === 2) throw new TypeError('Failed to fetch')
+      return ok(`R${n}`)
+    })
+    await renderPage()
+    await submitBatch(docxSet(3))
+    fireEvent.click(button('Retry 1 failed upload'))
+    await flush()
+    expect(vi.mocked(uploadFile).mock.calls.map(([f]) => f.name)).toEqual(['cv_1.docx', 'cv_2.docx', 'cv_3.docx', 'cv_2.docx'])
+  })
+
+  it('returns to the file list with the reason when the batch cannot be created', async () => {
+    vi.mocked(createBatch).mockRejectedValue({ status: 429, message: 'You have 1 run left today.' })
+    await renderPage()
+    await submitBatch(docxSet(2))
+    expect(uploadFile).not.toHaveBeenCalled()
+    expect(screen.getByText('You have 1 run left today.')).toBeTruthy()
+    expect(button('Submit 2 CVs').disabled).toBe(false)
+  })
+
+  it('counts a start refused because an earlier, unanswered start got through as queued', async () => {
+    uploadsSucceed()
+    let r2Starts = 0
+    vi.mocked(startRun).mockImplementation(async (id) => {
+      if (id !== 'R2') return
+      r2Starts += 1
+      if (r2Starts === 1) throw new TypeError('Failed to fetch')
+      throw { status: 400, message: 'Cannot start run in status: running' }
+    })
+    vi.mocked(getRunStatus).mockResolvedValue(runStatus('running'))
+    await renderPage()
+    await submitBatch(docxSet(2))
+    fireEvent.click(button('Retry 1 failed upload'))
+    await flush()
+    expect(getRunStatus).toHaveBeenCalledWith('R2')
+    expect(uploadFile).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('All 2 CVs queued')).toBeTruthy()
+    expect(screen.queryByText(/couldn't be opened/)).toBeNull()
+  })
+
+  it('keeps a refused start failed when the run never left created', async () => {
+    uploadsSucceed()
+    vi.mocked(startRun).mockImplementation(async (id) => {
+      if (id === 'R2') throw { status: 409, message: 'This run was already started by another request.' }
+    })
+    vi.mocked(getRunStatus).mockResolvedValue(runStatus('created'))
+    await renderPage()
+    await submitBatch(docxSet(2))
+    expect(screen.getByText('1 of 2 CVs queued')).toBeTruthy()
+  })
+})
+
+describe('UploadPage cost is for admins only', () => {
+  it('shows each file\'s cost and the total to an admin', async () => {
+    await renderPage()
+    await addFiles(docxSet(2))
+    expect(screen.getAllByText('$1.50')).toHaveLength(2)
+    expect(screen.getByText('2 CVs · about 10 min of processing · ~$3.00')).toBeTruthy()
+  })
+
+  it('hides every cost from a non-admin, even if an estimate carries one', async () => {
+    currentUser = MEMBER
+    vi.mocked(getCurrentUser).mockResolvedValue({ ...MEMBER, quota: QUOTA_LEFT })
+    await renderPage()
+    await addFiles(docxSet(2))
+    expect(screen.getByText('2 CVs · about 10 min of processing')).toBeTruthy()
+    expect(screen.queryByText(/\$/)).toBeNull()
+  })
+
+  it('hides the single-run cost from a non-admin', async () => {
+    currentUser = MEMBER
+    vi.mocked(getCurrentUser).mockResolvedValue({ ...MEMBER, quota: QUOTA_LEFT })
+    await renderPage()
+    fireEvent.click(screen.getByLabelText(ROLE_A_LABEL))
+    await addFiles([docx('mine.docx')])
+    expect(screen.getByLabelText('Processing estimate').textContent).toContain('Estimated time')
+    expect(screen.queryByText(/\$/)).toBeNull()
+  })
+
+  it('shows the single-run cost to an admin', async () => {
+    await renderPage()
+    fireEvent.click(screen.getByLabelText(ROLE_A_LABEL))
+    await addFiles([docx('mine.docx')])
+    expect(screen.getByLabelText('Processing estimate').textContent).toContain('Estimated cost: $1.00 - $2.00')
+  })
+})
+
+describe('UploadPage quota', () => {
+  it('re-reads the runs left before another batch', async () => {
+    currentUser = MEMBER
+    vi.mocked(getCurrentUser).mockResolvedValue({ ...MEMBER, quota: QUOTA_LEFT })
+    uploadsSucceed()
+    await renderPage()
+    expect(getCurrentUser).toHaveBeenCalledTimes(1)
+    await submitBatch(docxSet(2))
+    vi.mocked(getCurrentUser).mockResolvedValue({ ...MEMBER, quota: { ...QUOTA_LEFT, daily_remaining: 8 } })
+    fireEvent.click(button('Start another batch'))
+    await flush()
+    expect(getCurrentUser).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('8 of 10 runs left today · 50 of 50 this month')).toBeTruthy()
   })
 })

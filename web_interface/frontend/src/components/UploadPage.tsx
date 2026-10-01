@@ -135,7 +135,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   const { user } = useAuth()
   const isAdmin = user?.role === 'admin'
   const toConsent = () => navigate('/consent')
-  const { queue, quota, refreshQueue } = useUploadContext(isAdmin)
+  const { queue, quota, refreshQueue, refreshQuota } = useUploadContext(isAdmin)
   const [stripWcmInstructions, setStripWcmInstructions] = useState(true)
   // Per-upload role + attestation (Faculty Affairs requirement). The consent
   // page's choice is only the preselect; every upload records its own.
@@ -147,21 +147,24 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   const [finishMinutes, setFinishMinutes] = useState<number | null>(null)
   const run = useSingleRun({ stripWcmInstructions, submissionType, onUploadSuccess, onConsentRequired: toConsent })
   const single = useSingleFile(run.reset, run.setError)
-  const batch = useBatchUpload(toConsent)
+  // A file added to or removed from the table forgets any run held for the old
+  // selection (template warning or failed start), as picking a new single file does.
+  const batch = useBatchUpload(toConsent, run.reset)
   const queueMode = queue?.dispatch_mode === 'queue'
   // Several files only "On behalf of faculty", and only when runs wait in a queue.
   const multi = queueMode && submissionType === 'authorized_admin'
   const editable = batch.phase === 'edit'
   const options = { submissionType, stripWcmInstructions }
 
-  // Switching between one file and a batch carries the first file across.
+  // Switching between one file and a batch carries the first valid file across.
   const chooseWho = (value: SubmissionType) => {
     setSubmissionType(value)
     setAttested(false)
     const nextMulti = queueMode && value === 'authorized_admin'
     if (nextMulti === multi) return
     if (nextMulti && single.file) batch.adopt(single.file, single.estimate)
-    if (!nextMulti && batch.rows[0]) single.adopt(batch.rows[0].file, batch.rows[0].estimate ?? null)
+    const carried = batch.rows.find(isValidRow)
+    if (!nextMulti && carried) single.adopt(carried.file, carried.estimate ?? null)
     if (nextMulti) single.clear()
     else batch.reset()
   }
@@ -205,7 +208,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
               finishMinutes={finishMinutes}
               onViewBatch={() => navigate(`/runs?batch=${batch.batchId}`)}
               onRetry={async () => { await batch.retryFailed(options); await afterSend() }}
-              onNewBatch={() => { batch.reset(); setAttested(false) }}
+              onNewBatch={() => { batch.reset(); setAttested(false); refreshQuota() }}
             />
           </div>
         )}

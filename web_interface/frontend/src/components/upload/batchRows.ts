@@ -7,6 +7,14 @@ export const MAX_BATCH_FILES = 50
 /** Uploads in flight at once ("Two files at a time"). */
 export const MAX_UPLOADS_IN_FLIGHT = 2
 
+const NUMBER_WORDS = ['No', 'One', 'Two', 'Three', 'Four', 'Five']
+
+/** "Two files at a time", from MAX_UPLOADS_IN_FLIGHT so the banner can't drift from the cap. */
+export function inFlightText(limit: number = MAX_UPLOADS_IN_FLIGHT): string {
+  const count = NUMBER_WORDS[limit] ?? String(limit)
+  return `${count} ${limit === 1 ? 'file' : 'files'} at a time`
+}
+
 export const NOT_DOCX_REASON = 'Not a .docx file'
 export const PERMANENT_FAILURE_SUFFIX = 'Fix it and upload it on its own.'
 /** Reason shown for a failure with no server message (the request never got an answer). */
@@ -15,6 +23,11 @@ const START_FAILED_REASON = 'Uploaded, but processing could not start'
 
 const SERVER_ERROR_MIN_STATUS = 500
 const TOO_MANY_REQUESTS = 429
+/** POST /run/{id}/start answers these when the run is no longer startable (400 "Cannot start
+ *  run in status: …") or another request already started it (409). */
+const NOT_STARTABLE_STATUSES: ReadonlySet<number> = new Set([400, 409])
+/** Run statuses from which /start still works; any other means the run was started before. */
+const STARTABLE_RUN_STATUSES: ReadonlySet<string> = new Set(['created', 'paused'])
 const SECONDS_PER_MINUTE = 60
 
 export type RowState = 'ready' | 'waiting' | 'uploading' | 'queued' | 'failed'
@@ -64,6 +77,15 @@ export function classifyFailure(err: unknown, fallbackReason: string): RowFailur
 }
 
 export const startFailure = (err: unknown): RowFailure => classifyFailure(err, START_FAILED_REASON)
+
+/** A refused start that may only mean an earlier start (whose answer was lost) got through. */
+export function mayAlreadyBeStarted(err: unknown): boolean {
+  const { status } = (err ?? {}) as Partial<ApiError>
+  return status !== undefined && NOT_STARTABLE_STATUSES.has(status)
+}
+
+/** The run left created/paused, so a start went through: it is queued, running or done. */
+export const wasStarted = (runStatus: string): boolean => !STARTABLE_RUN_STATUSES.has(runStatus)
 
 /** The row's note under its status: the skip reason, or the failure (plus "Fix it…" when permanent). */
 export function rowNote(row: BatchRow): string {

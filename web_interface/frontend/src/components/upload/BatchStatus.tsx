@@ -1,5 +1,5 @@
 import { AlertCircle, Check, Loader2 } from 'lucide-react'
-import { doneBody, doneTitle, permanentNote, retryLabel } from './batchRows'
+import { doneBody, doneTitle, inFlightText, permanentNote, retryLabel } from './batchRows'
 import type { SendProgress } from './batchRows'
 
 const CARD = 'rounded-xl border border-sand-300 bg-white shadow-[0_1px_2px_rgba(60,40,10,0.05)]'
@@ -16,7 +16,7 @@ export function UploadingBanner({ progress }: { progress: SendProgress }) {
           <Loader2 className="h-4 w-4 animate-spin text-primary-600" aria-hidden="true" />
           Uploading {progress.sent} of {progress.total}
         </span>
-        <span className="text-[13px] text-[#1E40AF]">Two files at a time</span>
+        <span className="text-[13px] text-[#1E40AF]">{inFlightText()}</span>
       </div>
       <div className="h-2 overflow-hidden rounded bg-primary-100">
         <div className="h-full bg-primary-600 transition-[width] duration-300" style={{ width: `${pct}%` }} />

@@ -16,22 +16,27 @@ const NOT_FOUND = 404
 export const BATCH_NOT_FOUND = "This batch doesn't exist, or you don't have access to it."
 const BATCH_LOAD_FAILED = 'Unable to load this batch. Please refresh the page to try again.'
 export const FACULTY_PENDING = 'Read from the CV when it runs'
+/** How often the view re-reads the batch while any of its runs is queued or running. */
+export const BATCH_REFRESH_MS = 30_000
 
-/** Status-bar segments in the design's order; a status with no runs is left out. */
-const SEGMENTS: { key: keyof BatchStatusCounts; label: string; color: string }[] = [
-  { key: 'complete', label: 'Complete', color: 'bg-success-700' },
-  { key: 'running', label: 'Running', color: 'bg-primary-600' },
-  { key: 'queued', label: 'Queued', color: 'bg-[#D6CCB6]' },
-  { key: 'failed', label: 'Failed', color: 'bg-error-600' },
-  { key: 'cancelled', label: 'Cancelled', color: 'bg-orange-600' },
-  { key: 'created', label: 'Not started', color: 'bg-gray-300' },
+/** Status-bar segments in the design's order; a status with no runs is left out. Each is
+ *  labelled with statusLabel(), so the bar and the rows name a status the same way. */
+const SEGMENTS: { key: keyof BatchStatusCounts; color: string }[] = [
+  { key: 'complete', color: 'bg-success-700' },
+  { key: 'running', color: 'bg-primary-600' },
+  { key: 'queued', color: 'bg-[#D6CCB6]' },
+  { key: 'failed', color: 'bg-error-600' },
+  { key: 'cancelled', color: 'bg-orange-600' },
+  { key: 'created', color: 'bg-gray-300' },
 ]
+
+const isActive = (counts: BatchStatusCounts): boolean => counts.queued + counts.running > 0
 
 const OPENABLE = new Set(['complete', 'running'])
 
 /** "Up to 3 run at once. The last should finish in about X." or "All runs finished." */
 export function timeLeftText(counts: BatchStatusCounts, lane: QueueLane | null): string {
-  if (counts.queued + counts.running === 0) return 'All runs finished.'
+  if (!isActive(counts)) return 'All runs finished.'
   const parts: string[] = []
   if (lane?.workers) parts.push(`Up to ${lane.workers} run at once.`)
   if (lane?.est_wait_minutes != null) parts.push(`The last should finish in about ${formatMinutes(lane.est_wait_minutes)}.`)
@@ -51,23 +56,36 @@ interface Loaded {
   error: string | null
 }
 
-/** The batch and the batch queue's lane; a queue that can't be read only loses the time line. */
+/** The batch and the batch queue's lane, re-read every BATCH_REFRESH_MS while runs are
+ *  queued or running. A queue that can't be read only loses the time line; a failed
+ *  re-read keeps the last batch shown. */
 function useBatchDetail(batchId: string): Loaded {
   const [state, setState] = useState<Loaded>({ batch: null, lane: null, error: null })
+  const [reads, setReads] = useState(0)
+  useEffect(() => {
+    setState({ batch: null, lane: null, error: null })
+  }, [batchId])
   useEffect(() => {
     let cancelled = false
-    setState({ batch: null, lane: null, error: null })
     getBatch(batchId)
-      .then((batch) => { if (!cancelled) setState((s) => ({ ...s, batch })) })
+      .then((batch) => { if (!cancelled) setState((s) => ({ ...s, batch, error: null })) })
       .catch((err: ApiError) => {
         console.error('Error fetching batch:', err)
-        if (!cancelled) setState((s) => ({ ...s, error: err?.status === NOT_FOUND ? BATCH_NOT_FOUND : BATCH_LOAD_FAILED }))
+        if (cancelled) return
+        setState((s) => (s.batch ? s : { ...s, error: err?.status === NOT_FOUND ? BATCH_NOT_FOUND : BATCH_LOAD_FAILED }))
       })
     getQueue()
       .then((queue) => { if (!cancelled) setState((s) => ({ ...s, lane: queue.batch })) })
       .catch((err) => console.error('Queue overview unavailable; the batch view omits its time line', err))
     return () => { cancelled = true }
-  }, [batchId])
+  }, [batchId, reads])
+  const active = state.batch !== null && isActive(state.batch.status_counts)
+  useEffect(() => {
+    if (!active) return
+    const timer = setTimeout(() => setReads((n) => n + 1), BATCH_REFRESH_MS)
+    return () => clearTimeout(timer)
+    // A new read (reads) or a new answer (state.batch) restarts the wait, so a failed re-read is retried too.
+  }, [active, reads, state.batch])
   return state
 }
 
@@ -107,11 +125,11 @@ function StatusBar({ counts, timeLeft }: { counts: BatchStatusCounts; timeLeft: 
         {shown.map((s) => <div key={s.key} className={`rounded-[3px] ${s.color}`} style={{ flex: counts[s.key] }} />)}
       </div>
       <div className="flex flex-wrap justify-between gap-3 text-[13px]">
-        <div className="flex flex-wrap gap-4">
+        <div className="flex flex-wrap gap-4" data-testid="batch-status-counts">
           {shown.map((s) => (
             <span key={s.key} className="flex items-center gap-1.5 text-gray-700">
               <span className={`h-2 w-2 rounded-sm ${s.color}`} aria-hidden="true" />
-              {s.label} <strong className="tabular-nums">{counts[s.key]}</strong>
+              {statusLabel(s.key)} <strong className="tabular-nums">{counts[s.key]}</strong>
             </span>
           ))}
         </div>

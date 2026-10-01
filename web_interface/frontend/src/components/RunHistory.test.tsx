@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import RunHistory from './RunHistory'
 import { getRuns } from '../api/runs'
@@ -61,6 +61,9 @@ describe('RunHistory batch filter', () => {
     expect(getBatch).toHaveBeenCalledWith('BQXZKD')
     expect(screen.getByRole('region', { name: 'Batch' })).toBeTruthy()
     expect(screen.queryByRole('table')).toBeNull()
+    const chip = screen.getByRole('button', { name: 'Remove Batch filter' }).parentElement!
+    expect(within(chip).getByText(/ · 2 CVs$/)).toBeTruthy()
+    expect(within(chip).queryByText('BQXZKD')).toBeNull()
 
     fireEvent.click(screen.getByRole('button', { name: 'Remove Batch filter' }))
     await flush()

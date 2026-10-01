@@ -10,6 +10,8 @@ export interface UploadContext {
   quota: QuotaInfo | null
   /** Re-read the queue; resolves to the new overview, or null when it could not be read. */
   refreshQueue: () => Promise<QueueOverview | null>
+  /** Re-read the run quota (non-admins), e.g. before a second batch. */
+  refreshQuota: () => void
 }
 
 /** What the New run page reads from the server beyond the file itself: the
@@ -33,6 +35,10 @@ export function useUploadContext(isAdmin: boolean): UploadContext {
     void refreshQueue()
   }, [refreshQueue])
 
+  // Bumped to re-read the quota; the effect below re-runs on each bump.
+  const [quotaReads, setQuotaReads] = useState(0)
+  const refreshQuota = useCallback(() => setQuotaReads((n) => n + 1), [])
+
   useEffect(() => {
     if (isAdmin) return
     let cancelled = false
@@ -40,7 +46,7 @@ export function useUploadContext(isAdmin: boolean): UploadContext {
       .then((me) => { if (!cancelled) setQuota(me.quota ?? null) })
       .catch((err) => console.error('Run quota unavailable; the quota line is hidden', err))
     return () => { cancelled = true }
-  }, [isAdmin])
+  }, [isAdmin, quotaReads])
 
-  return { queue, quota, refreshQueue }
+  return { queue, quota, refreshQueue, refreshQuota }
 }
