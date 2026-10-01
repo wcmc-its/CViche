@@ -663,3 +663,42 @@ def test_review_note_is_for_the_owner_and_admins_only(client, db, seed_simple_mo
     assert client.get("/api/run/ADM001/review-note").status_code == 403
     _auth(client, users["admin"])
     assert client.get("/api/run/ADM001/review-note").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# #1114: batch_id on every /runs row, and the batch_id filter.
+# ---------------------------------------------------------------------------
+
+def _runs_in_and_out_of_a_batch(db, role="user"):
+    from app.models import RunBatch
+    user = User(email=f"batch-{role}@example.com", display_name="B", role=role, consent_version="1.0")
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    db.add(RunBatch(id="BATCHA", user_id=user.id, files_submitted=2))
+    db.add_all([
+        Run(id="INBATA", user_id=user.id, status="complete", filename="a.docx", file_type="docx",
+            batch_id="BATCHA", started_at=datetime(2026, 10, 1, 9, 0)),
+        Run(id="INBATB", user_id=user.id, status="queued", filename="b.docx", file_type="docx",
+            batch_id="BATCHA", started_at=datetime(2026, 10, 1, 9, 1)),
+        Run(id="SINGLE", user_id=user.id, status="complete", filename="c.docx", file_type="docx",
+            started_at=datetime(2026, 10, 1, 9, 2)),
+    ])
+    db.commit()
+    return user
+
+
+def test_run_list_rows_carry_their_batch_id(client, db, seed_simple_mode):
+    user = _runs_in_and_out_of_a_batch(db)
+    _auth(client, user)
+    rows = client.get("/api/runs").json()["runs"]
+    assert {r["run_id"]: r["batch_id"] for r in rows} == {"INBATA": "BATCHA", "INBATB": "BATCHA", "SINGLE": None}
+
+
+@pytest.mark.parametrize("role, scope", [("user", "mine"), ("admin", "all")])
+def test_run_list_filters_to_one_batch_in_either_scope(client, db, seed_simple_mode, role, scope):
+    user = _runs_in_and_out_of_a_batch(db, role)
+    _auth(client, user)
+    body = client.get(f"/api/runs?scope={scope}&batch_id=BATCHA").json()
+    assert sorted(r["run_id"] for r in body["runs"]) == ["INBATA", "INBATB"]
+    assert body["total"] == 2

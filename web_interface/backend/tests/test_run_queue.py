@@ -29,7 +29,7 @@ def fake_redis(monkeypatch):
     r = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer(), decode_responses=True)
     monkeypatch.setattr(run_queue, "_client", lambda: r)
     monkeypatch.setattr(run_queue, "_producer_client", lambda: r)
-    monkeypatch.setattr(run_queue, "_autoclaim_cursor", "0-0")
+    monkeypatch.setattr(run_queue, "_autoclaim_cursors", {})
     # N3's is_configured() check reads CVICHE_REDIS_URL directly (independent
     # of the client-factory monkeypatches above), so it must see something set.
     monkeypatch.setenv("CVICHE_REDIS_URL", "redis://fake-valkey:6379/0")
@@ -71,8 +71,168 @@ def test_every_key_the_module_builds_shares_the_cviche_runs_hash_tag():
     requeue) spanning two hash slots fails CROSSSLOT. All three keys this
     module ever XADDs/SETs to must carry the same {cviche:runs} hash tag."""
     guard_key = f"{run_queue.STREAM}:enq:SOME_RUN"
-    for key in (run_queue.STREAM, run_queue.DEAD_STREAM, guard_key):
-        assert "{cviche:runs}" in key, key
+    keys = (run_queue.STREAM, run_queue.DEAD_STREAM, run_queue.BATCH_STREAM, run_queue.BATCH_DEAD_STREAM, guard_key)
+    for key in keys:
+        assert key.startswith("{cviche:runs}"), key
+    assert len(set(keys)) == len(keys), "the batch queue must not share a stream with the single-run queue"
+
+
+# --- two queues (#1114) -------------------------------------------------------
+
+def _batch_entries(r):
+    return [fields for _, fields in r.xrange(run_queue.BATCH_STREAM)]
+
+
+def test_queue_for_routes_a_batch_run_to_the_batch_queue_and_anything_else_to_single():
+    assert run_queue.queue_for("BATCHA") is run_queue.BATCH
+    assert run_queue.queue_for(None) is run_queue.SINGLE
+    assert run_queue.queue_for("") is run_queue.SINGLE
+
+
+def test_the_batch_queue_has_its_own_stream_group_and_dead_stream():
+    single, batch = run_queue.SINGLE, run_queue.BATCH
+    assert (single.stream, single.group, single.dead_stream) == (run_queue.STREAM, run_queue.GROUP, run_queue.DEAD_STREAM)
+    assert batch.stream != single.stream
+    assert batch.group != single.group
+    assert batch.dead_stream != single.dead_stream
+
+
+def test_enqueue_on_the_batch_queue_writes_only_the_batch_stream(fake_redis):
+    run_queue.enqueue("BQ1", run_queue.BATCH)
+    assert [e["run_id"] for e in _batch_entries(fake_redis)] == ["BQ1"]
+    assert _entries(fake_redis) == []
+
+
+def test_batch_queue_read_ack_and_delivery_count_stay_on_the_batch_stream(fake_redis):
+    run_queue.ensure_group()
+    run_queue.ensure_group(run_queue.BATCH)
+    eid = run_queue.enqueue("BQ2", run_queue.BATCH)
+    assert run_queue.read_one("a", run_queue.SINGLE, block=False) is None
+    entry_id, fields = run_queue.read_one("a", run_queue.BATCH)
+    assert (entry_id, fields["run_id"]) == (eid, "BQ2")
+    assert run_queue.delivery_count(eid, run_queue.BATCH) == 1
+    run_queue.ack(eid, run_queue.BATCH)
+    assert _batch_entries(fake_redis) == []
+    assert run_queue.delivery_count(eid, run_queue.BATCH) == 0
+
+
+def test_batch_queue_autoclaim_and_own_pel_reclaim_read_the_batch_group(fake_redis, monkeypatch):
+    run_queue.ensure_group()
+    run_queue.ensure_group(run_queue.BATCH)
+    monkeypatch.setattr(run_queue, "MIN_IDLE_MS", 0)
+    eid = run_queue.enqueue("BQ3", run_queue.BATCH)
+    run_queue.read_one("a", run_queue.BATCH)
+    assert [e for e, _ in run_queue.reclaim_own_pending("a", run_queue.BATCH)] == [eid]
+    assert run_queue.autoclaim_one("b", run_queue.SINGLE) is None
+    assert run_queue.autoclaim_one("b", run_queue.BATCH)[0] == eid
+
+
+def test_batch_queue_requeue_puts_the_token_back_on_the_batch_stream(fake_redis):
+    run_queue.ensure_group(run_queue.BATCH)
+    eid = run_queue.enqueue("BQ4", run_queue.BATCH)
+    _, fields = run_queue.read_one("a", run_queue.BATCH)
+    new_id = run_queue.requeue(eid, fields, run_queue.BATCH)
+    assert [e["run_id"] for e in _batch_entries(fake_redis)] == ["BQ4"]
+    assert _entries(fake_redis) == []
+    assert run_queue.read_one("b", run_queue.BATCH)[0] == new_id
+
+
+def test_batch_queue_dead_letter_parks_on_the_batch_dead_stream(fake_redis):
+    run_queue.ensure_group(run_queue.BATCH)
+    eid = run_queue.enqueue("BQ5", run_queue.BATCH)
+    _, fields = run_queue.read_one("a", run_queue.BATCH)
+    run_queue.dead_letter(eid, fields, run_queue.BATCH)
+    assert [d[1]["run_id"] for d in fake_redis.xrange(run_queue.BATCH_DEAD_STREAM)] == ["BQ5"]
+    assert fake_redis.xlen(run_queue.DEAD_STREAM) == 0
+    assert _batch_entries(fake_redis) == []
+
+
+def test_read_one_without_block_sends_no_block_argument(fake_redis):
+    """A flex worker's polling pass must not wait BLOCK_MS on each queue in
+    turn, or a single run arriving meanwhile waits behind the batch poll.
+    Pinned on the XREADGROUP arguments: fakeredis answers an empty blocking
+    read at once, so elapsed time can't tell the two apart."""
+    run_queue.ensure_group(run_queue.BATCH)
+    sent_block = []
+    real_xreadgroup = fake_redis.xreadgroup
+
+    def spy(*args, **kwargs):
+        sent_block.append(kwargs.get("block"))
+        return real_xreadgroup(*args, **kwargs)
+    fake_redis.xreadgroup = spy
+    try:
+        assert run_queue.read_one("a", run_queue.BATCH, block=False) is None
+        assert run_queue.read_one("a", run_queue.BATCH) is None
+    finally:
+        del fake_redis.xreadgroup
+    assert sent_block == [None, run_queue.BLOCK_MS]
+
+
+def test_live_run_ids_covers_the_batch_queue(fake_redis):
+    run_queue.ensure_group()
+    run_queue.ensure_group(run_queue.BATCH)
+    run_queue.enqueue("SINGLE1")
+    run_queue.enqueue("BATCH1", run_queue.BATCH)
+    run_queue.enqueue("BATCH2", run_queue.BATCH)
+    run_queue.read_one("a", run_queue.BATCH)  # BATCH1 pending, BATCH2 undelivered
+    assert run_queue.live_run_ids() == {"SINGLE1", "BATCH1", "BATCH2"}
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ("single", ("single",)),
+    ("single,batch", ("single", "batch")),
+    (" Batch , SINGLE ", ("batch", "single")),
+])
+def test_parse_worker_streams_keeps_the_listed_order(raw, expected):
+    assert tuple(q.name for q in run_queue.parse_worker_streams(raw)) == expected
+
+
+@pytest.mark.parametrize("raw", ["", " , ", "single,bogus", "single,single"])
+def test_parse_worker_streams_rejects_an_empty_unknown_or_repeated_list(raw):
+    with pytest.raises(ValueError, match="CVICHE_WORKER_STREAMS"):
+        run_queue.parse_worker_streams(raw)
+
+
+def test_worker_queues_default_is_the_single_run_queue_only(monkeypatch):
+    monkeypatch.delenv("CVICHE_WORKER_STREAMS", raising=False)
+    assert run_queue.worker_queues() == (run_queue.SINGLE,)
+    monkeypatch.setenv("CVICHE_WORKER_STREAMS", "single,batch")
+    assert run_queue.worker_queues() == (run_queue.SINGLE, run_queue.BATCH)
+
+
+def test_live_consumer_counts_are_zero_before_any_group_exists(fake_redis):
+    assert run_queue.live_consumer_counts() == {run_queue.SINGLE: 0, run_queue.BATCH: 0}
+
+
+def test_live_consumer_counts_count_recent_consumers_and_busy_ones_only(fake_redis, monkeypatch):
+    """Stale consumers of replaced pods stay in the group: only one seen
+    within LIVE_CONSUMER_MAX_IDLE_MS counts -- or one holding a pending entry,
+    since a worker mid-run does not touch the stream for the whole run."""
+    run_queue.ensure_group()
+    run_queue.enqueue("LC1")
+    run_queue.read_one("busy")                      # holds LC1 pending
+    run_queue.read_one("idle", block=False)         # registered, nothing pending
+    assert run_queue.live_consumer_counts()[run_queue.SINGLE] == 2
+    monkeypatch.setattr(run_queue, "LIVE_CONSUMER_MAX_IDLE_MS", 0)  # every consumer now reads as stale
+    assert run_queue.live_consumer_counts()[run_queue.SINGLE] == 1
+
+
+def test_a_worker_busy_on_one_queue_still_counts_on_every_queue_it_reads(fake_redis, monkeypatch):
+    """A flex worker mid-run on a single run holds that entry pending in the
+    single group and touches the batch group not at all, so past
+    LIVE_CONSUMER_MAX_IDLE_MS it is idle there -- yet it is a batch worker
+    the moment the run ends. A replaced pod, live in no group, never counts."""
+    run_queue.ensure_group(run_queue.SINGLE)
+    run_queue.ensure_group(run_queue.BATCH)
+    for n in range(3):
+        run_queue.enqueue(f"FLEX{n}")
+    for name in ("flex-1", "flex-2", "flex-3"):
+        run_queue.read_one(name, run_queue.SINGLE, block=False)
+        run_queue.read_one(name, run_queue.BATCH, block=False)
+    run_queue.read_one("replaced-pod", run_queue.BATCH, block=False)
+    monkeypatch.setattr(run_queue, "LIVE_CONSUMER_MAX_IDLE_MS", 0)  # 30s have passed for every consumer
+
+    assert run_queue.live_consumer_counts() == {run_queue.SINGLE: 3, run_queue.BATCH: 3}
 
 
 def test_enqueue_does_not_trim_the_stream_past_1000_entries(fake_redis):
@@ -130,7 +290,7 @@ def test_autoclaim_carries_its_cursor_across_calls(fake_redis, monkeypatch):
     for _ in eids:
         run_queue.read_one("a")
     assert run_queue.autoclaim_one("b") is not None
-    assert run_queue._autoclaim_cursor != "0-0"
+    assert run_queue._autoclaim_cursors[run_queue.STREAM] != "0-0"
 
 
 def test_reclaim_own_pending_returns_this_consumers_pel_entries_immediately(fake_redis):
@@ -559,6 +719,45 @@ def test_start_reports_live_status_when_a_revert_loses_to_a_concurrent_claim(cli
     assert resp.status_code == 202, resp.text
     assert resp.json()["status"] == "running"
     assert _status(db) == "running", "the guarded revert must not clobber the worker's claim"
+
+
+def _make_batch_run(db, run_id="RUNQ01"):
+    """Put the seeded run in a batch owned by its user (#1114)."""
+    from app.models import RunBatch
+    run = _row(db, run_id)
+    db.add(RunBatch(id="BATCHQ", user_id=run.user_id, files_submitted=1))
+    run.batch_id = "BATCHQ"
+    db.commit()
+
+
+def test_start_of_a_batch_run_enqueues_on_the_batch_stream(client, db, fake_redis, queue_mode, as_user_with_input):
+    user, _ = _seed(db)
+    _make_batch_run(db)
+    as_user_with_input(user)
+    resp = client.post("/api/run/RUNQ01/start")
+    assert resp.status_code == 202, resp.text
+    assert [e["run_id"] for e in _batch_entries(fake_redis)] == ["RUNQ01"]
+    assert _entries(fake_redis) == []
+
+
+def test_re_enqueue_of_an_already_queued_batch_run_stays_on_the_batch_stream(
+    client, db, fake_redis, queue_mode, as_user_with_input,
+):
+    user, _ = _seed(db, status="queued")
+    _make_batch_run(db)
+    as_user_with_input(user)
+    assert client.post("/api/run/RUNQ01/start").status_code == 202
+    assert [e["run_id"] for e in _batch_entries(fake_redis)] == ["RUNQ01"]
+    assert _entries(fake_redis) == []
+
+
+def test_retry_of_a_batch_run_enqueues_on_the_batch_stream(client, db, fake_redis, queue_mode, as_user_with_input):
+    user, _ = _seed(db, status="failed")
+    _make_batch_run(db)
+    as_user_with_input(user)
+    assert client.post("/api/run/RUNQ01/retry/2").status_code == 202
+    assert [e["run_id"] for e in _batch_entries(fake_redis)] == ["RUNQ01"]
+    assert _entries(fake_redis) == []
 
 
 def test_start_on_already_queued_run_re_enqueues_without_flip(client, db, fake_redis, queue_mode, as_user_with_input):

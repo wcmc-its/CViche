@@ -22,7 +22,8 @@ What is deliberately NOT fanned out:
 
 - a list that is not 2+ dicts (a one-item list is not a fused entry, and a list
   of strings is a list of values);
-- a list any of whose dicts shares no key with the schema -- web181's K2
+- a list any of whose dicts shares no key with the schema (plus the
+  `_EXTRA_RECORD_KEYS` the code's items are known to carry) -- web181's K2
   `mentees: [{name, year}]` is the named example. Its items name nothing the K2
   renderer reads, so a child built from one would render empty and the entry's
   raw text would be lost;
@@ -142,12 +143,54 @@ _FORMATTED_KEYS = ('formatted_text', 'formatted_citation')
 # inherit it.
 _ENTRY_REMARK_KEY = 'notes'
 
+# #1187: keys stage 4 emits on a code's records that its `FIELD_SCHEMAS` entry
+# does not define. The schema is also the stage-4 extraction prompt, so the
+# allowance lives here, not there. B1 carries its attendance dates under
+# `dates_attended` (a string or a `{start_date, end_date}` dict), flat
+# `dates_attended_start_date` / `_end_date`, or plain `start_date` / `end_date`
+# (the three shapes `sections/education.py` reads); a multi-degree `degrees`
+# list whose items hold one failed `_record_list` on that key alone and both
+# degrees vanished. Counted over the 126 stage-4 artifacts: the only extra key
+# a B1 list item carries is `dates_attended`; the flat and generic keys sit on
+# the parent and are listed so a child's own copy is accepted too.
+_EXTRA_RECORD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
+    'B1': frozenset({'dates_attended', 'dates_attended_start_date',
+                     'dates_attended_end_date', 'start_date', 'end_date'}),
+})
+
+# #1187: codes whose renderer writes nothing for a record list left whole --
+# `sections/education.py` skips a B1 row with no top-level degree or
+# institution, so an unsplit `degrees` list vanishes. Other codes keep the
+# entry's text (K2/K4 refuse to split by design), so a declined list there
+# loses nothing; warning on them put 31 false alarms in 16 corpus CVs.
+_LIST_LOST_WHEN_KEPT_WHOLE = frozenset({'B1'})
+
+# #1187: the attendance dates `sections/education.py` writes into B1's Dates
+# column on top of `_RENDERED_FIELDS['B1']`: flat, generic, and the nested
+# `dates_attended: {start_date, end_date}` dict. A STRING `dates_attended` is
+# not among them -- the renderer ignores it -- so it holds no token. Without
+# these a degree child whose dates the text also names would always be refused
+# by `_fields_carry_text`, and the entry would still vanish.
+_RENDERED_DATE_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
+    'B1': frozenset({'dates_attended_start_date', 'dates_attended_end_date',
+                     'start_date', 'end_date'}),
+})
+_NESTED_DATES_KEY = 'dates_attended'
+
+# Render-warning record for a record list that was not fanned out (#1187).
+REJECTED_LIST_CHECK = 'fan_out_record_list_rejected'
+_WARN_SEVERITY = 'WARN'
+_EVIDENCE_KEYS_SHOWN = 8
+
 _DATE_KEY_SUFFIX = '_date'
 _BARE_DATE_KEYS = frozenset({'date', 'year'})
+# `dates_attended` and its flat `dates_attended_start_date` / `_end_date` (#1187).
+_DATES_ATTENDED_PREFIX = 'dates_attended'
 
 
 def _is_date_key(key: str) -> bool:
-    return key in _BARE_DATE_KEYS or key.endswith(_DATE_KEY_SUFFIX)
+    return (key in _BARE_DATE_KEYS or key.endswith(_DATE_KEY_SUFFIX)
+            or key.startswith(_DATES_ATTENDED_PREFIX))
 
 
 def _is_blank(value: object) -> bool:
@@ -176,6 +219,14 @@ def _rendered_text(key: str, value: object, code: str) -> str:
     return format_date_for_section(text, code) if _is_date_key(key) else text
 
 
+def _is_written_date(code: str, key: str, value: object) -> bool:
+    """Whether B1's renderer writes this attendance-date field (#1187)."""
+    if key in _RENDERED_DATE_FIELDS.get(code, frozenset()):
+        return True
+    return code in _RENDERED_DATE_FIELDS and key == _NESTED_DATES_KEY \
+        and isinstance(value, Mapping)
+
+
 def _fields_carry_text(entry: Mapping[str, Any],
                        child_fields: Sequence[Mapping[str, Any]]) -> bool:
     """Whether the fields the renderer writes, summed over the children (each
@@ -192,6 +243,8 @@ def _fields_carry_text(entry: Mapping[str, Any],
         for key, value in fields.items():
             if key in rendered:
                 held += _tokens(_rendered_text(key, value, code))
+            elif _is_written_date(code, key, value):
+                held += _tokens(_leaf_text(value))
     return not _tokens(str(entry.get('text') or '')) - held
 
 
@@ -202,6 +255,12 @@ def _record_list(value: object, schema: frozenset[str]) -> bool:
         return False
     return all(isinstance(item, Mapping) and item
                and set(item) <= schema for item in value)
+
+
+def _record_schema(code: object, schema: frozenset[str]) -> frozenset[str]:
+    """The keys a record of `code` may carry: the stage-4 schema plus the
+    `_EXTRA_RECORD_KEYS` stage 4 is known to add (#1187)."""
+    return schema | _EXTRA_RECORD_KEYS.get(str(code), frozenset())
 
 
 def _record_keys(fields: Mapping[str, Any], schema: frozenset[str]) -> list[str]:
@@ -269,6 +328,60 @@ def _child(entry: Mapping[str, Any], fields: dict[str, Any], text: str,
     return child
 
 
+def _is_dict_list(value: object) -> bool:
+    """2+ non-empty dicts: record-like, whatever their keys."""
+    return (isinstance(value, list) and len(value) >= _MIN_RECORDS
+            and all(isinstance(item, Mapping) and item for item in value))
+
+
+def _rejected_record_lists(fields: Mapping[str, Any],
+                           schema: frozenset[str]) -> dict[str, list[str]]:
+    """`{key: item keys outside the schema}` for every field outside the
+    schema that holds a list of record-like dicts `_record_list` refused
+    (#1187). Key names only; never a value."""
+    return {key: sorted({k for item in value for k in item} - schema)
+            for key, value in fields.items()
+            if key not in schema and _is_dict_list(value)
+            and not _record_list(value, schema)}
+
+
+def _rejection_warnings(rejected: Mapping[tuple[str, str], list[list[str]]]) -> list[dict[str, Any]]:
+    """One sidecar WARN per (code, list key), counting the entries and, when
+    item keys outside the schema kept the list from fanning out, naming them.
+    An empty key list means the list was record-shaped and the entry was
+    declined by the other guards (text a rendered field does not carry, a
+    stage-5 rendering, several lists). Sorted, so the sidecar is deterministic."""
+    out = []
+    for (code, key), cases in sorted(rejected.items()):
+        stray = sorted({k for extra in cases for k in extra})
+        why = (f"item keys outside the {code} schema: {', '.join(stray[:_EVIDENCE_KEYS_SHOWN])}"
+               if stray else "the entry's text holds content its fields do not carry")
+        out.append({
+            'check': REJECTED_LIST_CHECK,
+            'code': code,
+            'section': None,
+            'message': (f"{len(cases)} {code} entr{'y' if len(cases) == 1 else 'ies'}: "
+                        f"`{key}` holds several records that were not split into "
+                        f"separate rows ({why}); a record may be missing from "
+                        "the output"),
+            'evidence': [f"{code}.{key}: {len(cases)} entr{'y' if len(cases) == 1 else 'ies'}",
+                         *stray[:_EVIDENCE_KEYS_SHOWN]],
+            'severity': _WARN_SEVERITY,
+        })
+    return out
+
+
+def _declined_record_lists(entry: Mapping[str, Any], schema: frozenset[str]) -> dict[str, list[str]]:
+    """Every record-list key of an entry `_fan_out_entry` declined: the lists
+    `_record_list` refused (with their stray item keys) plus the ones it
+    accepted that a later guard then declined (no stray keys)."""
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, Mapping):
+        return {}
+    return {**{key: [] for key in _record_keys(fields, schema)},
+            **_rejected_record_lists(fields, schema)}
+
+
 def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dict[str, Any]] | None:
     """The children of `entry`, or None when it is not a multi-record entry."""
     fields = entry.get('extracted_fields')
@@ -293,7 +406,8 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dic
 
 def fan_out_multi_record_entries(
         entries: Sequence[Mapping[str, Any]],
-        schema_fields: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+        schema_fields: Mapping[str, Mapping[str, Any]],
+        warnings: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """`entries` with every multi-record entry replaced, in place and in order,
     by one child per record. Everything else is returned untouched.
 
@@ -302,10 +416,22 @@ def fan_out_multi_record_entries(
     `extracted_fields` plus its own record, the record winning any conflict;
     the parent's other keys are copied; `FANNED_OUT_FROM` names the list it
     came from.
+
+    A list of record-like dicts that is not fanned out -- `_record_list`
+    refused it, or a later guard declined the entry -- is not dropped silently
+    (#1187): for a code in `_LIST_LOST_WHEN_KEPT_WHOLE`, when `warnings` is given, one render-warning dict per (code, list
+    key) is appended to it (`REJECTED_LIST_CHECK`).
     """
     out: list[dict[str, Any]] = []
+    rejected: dict[tuple[str, str], list[list[str]]] = {}
     for entry in entries:
-        schema = frozenset(schema_fields.get(entry.get('taxonomy_code'), {}).get('fields', ()))
+        code = entry.get('taxonomy_code')
+        schema = _record_schema(code, frozenset(schema_fields.get(code, {}).get('fields', ())))
         children = _fan_out_entry(entry, schema)
+        if children is None and code in _LIST_LOST_WHEN_KEPT_WHOLE:
+            for key, stray in _declined_record_lists(entry, schema).items():
+                rejected.setdefault((str(code), key), []).append(stray)
         out.extend(children if children is not None else [entry])
+    if warnings is not None:
+        warnings.extend(_rejection_warnings(rejected))
     return out
