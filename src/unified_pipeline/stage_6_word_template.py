@@ -57,6 +57,7 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm_client import LlmUsage
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.core.render_check import entry_fragments, entry_lines
 # Every name below is re-exported from this module by being imported here: it is
@@ -667,7 +668,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     def __init__(self, template_path: str = None, verbose: bool = True,
                  emit_track_changes: bool = True, emit_comments: bool = False,
                  strip_template_instructions: bool = True,
-                 recover_unrendered_records: bool = True):
+                 recover_unrendered_records: bool = True,
+                 llm_usage: LlmUsage | None = None):
+        # Priced result of every call_llm this render makes (geographic scope,
+        # appendix reclassification). The caller passes its own to read the
+        # total back; run_stage6 returns a path, so there is no other channel
+        # for it (#1177).
+        self.llm_usage = llm_usage if llm_usage is not None else LlmUsage()
         # Find a valid template path
         self.template_path = self._find_template(template_path)
         self.verbose = verbose
@@ -1614,6 +1621,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 temperature=0.0,
                 response_format={"type": "json_object"}
             )
+            self.llm_usage.add(llm_result)
 
             result = json.loads(llm_result["content"])
             scope = result.get('scope', 'National')
@@ -2600,6 +2608,7 @@ Now analyze the text above:"""
                 # trailing records (#209); the 16K DEFAULT_MAX_TOKENS floor still
                 # bounds a runaway. Never add a tighter cap back.
             )
+            self.llm_usage.add(llm_result)
 
             return parse_reclassified_segments(
                 llm_result["content"], original_code)
@@ -3661,7 +3670,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
                strip_template_instructions: bool = True,
                recover_unrendered_records: bool = True,
                original_doc_path: str | None = None,
-               discover_original_doc: bool = True) -> str:
+               discover_original_doc: bool = True,
+               llm_usage: LlmUsage | None = None) -> str:
     r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -3731,6 +3741,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         discover_original_doc: False renders with no source document when
             original_doc_path is None, skipping that guess (#732). Only
             scripts/render_gate.py passes it; default True.
+        llm_usage: Optional LlmUsage the render's call_llm results are added
+            to, so a driver can report stage 6's cost (#1177).
 
     Returns:
         Path to generated document
@@ -3741,6 +3753,7 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         emit_comments=emit_comments,
         strip_template_instructions=strip_template_instructions,
         recover_unrendered_records=recover_unrendered_records,
+        llm_usage=llm_usage,
     )
     return generator.generate(input_path, output_path, original_doc_path=original_doc_path,
                               discover_original_doc=discover_original_doc)

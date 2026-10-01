@@ -832,6 +832,55 @@ def test_stage6_llm_outage_propagates_but_other_errors_default(monkeypatch, call
     assert run() == ("National" if call == "geographic_scope" else None)
 
 
+_PRICED_LLM_RESULT = {"content": '{"scope": "National"}', "cost": 0.125,
+                      "prompt_tokens": 11, "completion_tokens": 5,
+                      "cache_read_tokens": 2, "cache_write_tokens": 1}
+
+
+@pytest.mark.parametrize("call", ["geographic_scope", "reclassify"])
+def test_stage6_llm_calls_are_added_to_the_generators_usage(monkeypatch, call):
+    """#1177: stage 6 reported no cost at all; both of its call_llm sites now
+    feed the generator's LlmUsage."""
+    gen = _generator()
+    gen.cv_owner_location = {"primary_location": {"institution": "Example Medical College",
+                                                  "city": "Springfield", "state": "ZZ"}}
+    entry = {"text": "Visiting Lecturer", "extracted_fields": {"organization": "Example Institute"}}
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: dict(_PRICED_LLM_RESULT))
+
+    if call == "geographic_scope":
+        gen._classify_geographic_scope(entry)
+    else:
+        gen._reclassify_entry_segments("Visiting Lecturer, Example Institute, 2010", "P")
+
+    assert gen.llm_usage.cost == pytest.approx(0.125)
+    assert gen.llm_usage.prompt_tokens == 11
+    assert gen.llm_usage.completion_tokens == 5
+    assert gen.llm_usage.cache_read_tokens == 2
+    assert gen.llm_usage.cache_write_tokens == 1
+
+
+def test_run_stage6_hands_the_callers_usage_to_the_generator(monkeypatch):
+    from unified_pipeline import stage_6_word_template as stage6
+    from unified_pipeline.llm_client import LlmUsage
+
+    seen = {}
+
+    class _FakeGenerator:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def generate(self, *args, **kwargs):
+            return "unused.docx"
+
+    monkeypatch.setattr(stage6, "WCMTemplateGenerator", _FakeGenerator)
+    usage = LlmUsage()
+
+    stage6.run_stage6("unused.json", llm_usage=usage)
+
+    assert seen["llm_usage"] is usage
+
+
 def test_remaining_appendix_intro_is_the_shared_accurate_banner():
     # #534: the bullet writer creates T. APPENDIX with the same one-line intro
     # as _fill_appendix -- italic, and never claiming the entries appear

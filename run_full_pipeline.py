@@ -84,7 +84,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from unified_pipeline.core.prompt_logger import set_current_run_id
-from unified_pipeline.llm_client import format_models_used
+from unified_pipeline.llm_client import LlmUsage, format_models_used
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
 from unified_pipeline.stage_2_entry_extraction import run_stage_2
@@ -816,6 +816,7 @@ def _stage_4_5(ctx: PipelineContext) -> StageResult:
     logger.info("  M1 Score: %.2f", info.get('m1_score', 0))
     logger.info("  Summary length: %s chars", info.get('summary_length', 0))
     return StageResult(stage='4.5', output_file=str(output_path),
+                       cost=data.get('total_cost', 0.0),
                        stats={'method': info.get('method', 'unknown'),
                               'm1_score': info.get('m1_score', 0),
                               'summary_length': info.get('summary_length', 0)})
@@ -855,6 +856,22 @@ def _read_stage_5b_cost(output_path: str) -> float | None:
     return data.get('institution_enrichment_stats', {}).get('cost', 0.0)
 
 
+def _read_stage_cost(output_path: str, stage: str, section: str) -> float | None:
+    """A formatter stage's own reported cost, or None when its output cannot be read.
+
+    Stages 5c and 5d record ``total_cost`` under a section key of their output
+    JSON. None is not 0.0, for the same reason as stage 5b's (#489).
+    """
+    try:
+        with open(output_path) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:  # unreadable file, or JSON that does not parse
+        logger.warning("Could not read stage %s cost from %s: %s: %s",
+                       stage, output_path, type(e).__name__, e)
+        return None
+    return data.get(section, {}).get('total_cost', 0.0)
+
+
 def _stage_5b(ctx: PipelineContext) -> StageResult:
     """Institution enrichment: city/state on institution-bearing entries."""
     _banner("STAGE 5B: INSTITUTION ENRICHMENT")
@@ -887,7 +904,8 @@ def _stage_5c(ctx: PipelineContext) -> StageResult:
     logger.info("")
     logger.info("Stage 5c Complete")
     logger.info("  Output: %s", output_path)
-    return StageResult(stage='5c', output_file=str(output_path))
+    return StageResult(stage='5c', output_file=str(output_path),
+                       cost=_read_stage_cost(output_path, '5c', 'stage_5c'))
 
 
 def _stage_5d(ctx: PipelineContext) -> StageResult:
@@ -902,7 +920,8 @@ def _stage_5d(ctx: PipelineContext) -> StageResult:
     logger.info("")
     logger.info("Stage 5d Complete")
     logger.info("  Output: %s", output_path)
-    return StageResult(stage='5d', output_file=str(output_path))
+    return StageResult(stage='5d', output_file=str(output_path),
+                       cost=_read_stage_cost(output_path, '5d', 'stage_5d'))
 
 
 def _stage_6(ctx: PipelineContext) -> StageResult:
@@ -918,12 +937,13 @@ def _stage_6(ctx: PipelineContext) -> StageResult:
     # (which only resolves for a uid-style run from the repo root). A
     # standalone --stage 6 rerun without the .docx on disk is still fine:
     # the fallback checks is_file() and skips.
+    usage = LlmUsage()
     output_path = run_stage6(input_path=input_path, verbose=True,
-                             original_doc_path=str(ctx.cv_path))
+                             original_doc_path=str(ctx.cv_path), llm_usage=usage)
     logger.info("")
     logger.info("Stage 6 Complete")
     logger.info("  Output: %s", output_path)
-    return StageResult(stage='6', output_file=str(output_path))
+    return StageResult(stage='6', output_file=str(output_path), cost=usage.cost)
 
 
 _STAGE_RUNNERS: dict[str, Callable[[PipelineContext], StageResult]] = {
@@ -995,9 +1015,11 @@ _SUMMARY_LABELS: dict[str, str] = {
     '6': 'Stage 6: ',
 }
 
-# Stages that report a cost of their own. Stage 5b is handled separately: its
+# Every stage that calls call_llm, in pipeline order (#1177).
+# tests/test_run_full_pipeline_exit_status.py fails when a stage module that
+# imports call_llm is missing from here. Stage 5b is printed specially: its
 # cost can be unknown (#489), which is not the same as zero.
-_COST_REPORTING_STAGES = ('1a', '2', '3a', '3b', '4')
+_COST_REPORTING_STAGES = ('1a', '2', '3a', '3b', '4', '4.5', '5b', '5c', '5d', '6')
 _CODE_DISTRIBUTION_LIMIT = 10
 
 
@@ -1021,18 +1043,25 @@ def _print_timing(result: PipelineResult) -> None:
     logger.info("")
 
 
+def _print_stage_5b_cost(stage_5b: StageResult) -> None:
+    if stage_5b.cost is None:
+        logger.info("  Stage 5b: unknown (institution enrichment stats unreadable)")
+    elif stage_5b.cost > 0:
+        logger.info("  %s $%.4f", _SUMMARY_LABELS['5b'], stage_5b.cost)
+
+
 def _print_costs(result: PipelineResult) -> None:
     logger.info("Costs:")
     for stage in _COST_REPORTING_STAGES:
         stage_result = result.results.get(f'stage_{stage}')
-        if stage_result is not None and stage_result.succeeded and stage_result.cost is not None:
+        if stage_result is None or not stage_result.succeeded:
+            continue
+        if stage == '5b':
+            _print_stage_5b_cost(stage_result)
+        elif stage_result.cost is not None:
             logger.info("  %s $%.4f", _SUMMARY_LABELS[stage], stage_result.cost)
-    stage_5b = result.results.get('stage_5b')
-    if stage_5b is not None and stage_5b.succeeded:
-        if stage_5b.cost is None:
-            logger.info("  Stage 5b: unknown (institution enrichment stats unreadable)")
-        elif stage_5b.cost > 0:
-            logger.info("  %s $%.4f", _SUMMARY_LABELS['5b'], stage_5b.cost)
+        else:
+            logger.info("  Stage %s: unknown (output cost unreadable)", stage)
     logger.info("  Total:    $%.4f", result.total_cost)
     logger.info("")
 

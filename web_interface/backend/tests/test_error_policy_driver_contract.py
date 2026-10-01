@@ -9,8 +9,13 @@ must stop the pipeline, not get logged and skipped past. The opposite half
 by test_run_full_pipeline_exit_status.py::test_a_mid_pipeline_crash_also_exits_non_zero.
 The two together are the check §5.1 was missing.
 """
+import ast
 import asyncio
+import inspect
+import json
+import sys
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -136,3 +141,72 @@ def test_stage_6_receives_the_real_resolved_cv_path(monkeypatch, tmp_path, db):
     asyncio.run(o._execute_stage_logic("6", real_cv_path))
 
     assert captured.get("original_doc_path") == real_cv_path
+
+
+# -- #1177: every stage that calls the LLM adds its cost to the run ---------
+
+
+def test_stage_5b_cost_is_added_to_the_run_total(monkeypatch, tmp_path, db):
+    """The orchestrator never called update_cost for 5b, so its LLM spend was
+    missing from Run.total_cost."""
+    from app.pipeline import orchestrator as orch
+
+    out = tmp_path / "stage5b.json"
+    out.write_text(json.dumps({"institution_enrichment_stats": {"cost": 0.25}}))
+    monkeypatch.setattr(orch, "run_stage5b", lambda **kwargs: str(out))
+
+    o = _orchestrator(monkeypatch, tmp_path, db, "STAGE5BCOST")
+    result = asyncio.run(o._execute_stage_logic("5b", str(tmp_path / "cv.docx")))
+
+    assert o.total_cost == pytest.approx(0.25)
+    assert result["cost"] == pytest.approx(0.25)
+
+
+def test_stage_6_cost_is_added_to_the_run_total(monkeypatch, tmp_path, db):
+    """Stage 6 hands its priced call_llm results back through the LlmUsage the
+    driver passes in; the orchestrator never read them."""
+    from app.pipeline import orchestrator as orch
+
+    def fake_run_stage6(**kwargs):
+        kwargs["llm_usage"].add({"cost": 0.3, "prompt_tokens": 40, "completion_tokens": 10})
+        out = tmp_path / "out.docx"
+        out.write_bytes(b"PK")
+        return str(out)
+
+    monkeypatch.setattr(orch, "run_stage6", fake_run_stage6)
+
+    o = _orchestrator(monkeypatch, tmp_path, db, "STAGE6COST")
+    o.stage_outputs["5d"] = str(tmp_path / "stage5d.json")
+    result = asyncio.run(o._execute_stage_logic("6", str(tmp_path / "cv.docx")))
+
+    assert o.total_cost == pytest.approx(0.3)
+    from app.models import Run
+    assert db.query(Run).filter(Run.id == "STAGE6COST").first().total_tokens == 50
+    assert result["cost"] == pytest.approx(0.3)
+
+
+def _stage_branches_that_record_cost() -> set[str]:
+    """Stage ids whose `elif stage_id == 'X'` branch in _execute_stage_logic
+    calls update_cost, directly or through _track_llm_cost."""
+    from app.pipeline import orchestrator as orch
+
+    tree = ast.parse(inspect.getsource(orch.PipelineOrchestrator._execute_stage_logic).lstrip())
+    recorded = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                and isinstance(node.test.left, ast.Name) and node.test.left.id == "stage_id"
+                and isinstance(node.test.comparators[0], ast.Constant)):
+            continue
+        calls = {n.func.attr for stmt in node.body for n in ast.walk(stmt)
+                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
+        if calls & {"update_cost", "_track_llm_cost"}:
+            recorded.add(node.test.comparators[0].value)
+    return recorded
+
+
+def test_the_orchestrator_records_cost_for_exactly_the_stages_the_cli_reports():
+    """One list of cost-bearing stages: the CLI's. A stage added there but not
+    recorded here (or the reverse) fails this, so neither driver can forget it."""
+    import run_full_pipeline
+
+    assert _stage_branches_that_record_cost() == set(run_full_pipeline._COST_REPORTING_STAGES)

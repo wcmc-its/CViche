@@ -19,7 +19,7 @@ import io
 from pathlib import Path
 from datetime import datetime
 from typing import Any
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -63,6 +63,7 @@ from unified_pipeline.stage_6_word_template import run_stage6
 from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
 from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
 from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import LlmUsage
 from app.services.pdf_sandbox import (
     PDF_BUSY_RUN_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, ConversionResult, PdfBusyError,
     PdfTooComplexError, convert_pdf,
@@ -592,6 +593,22 @@ class PipelineOrchestrator:
         self.db.add(log_entry)
         self.db.commit()
         await event_emitter.emit_log(self.run_id, step_number, message, level)
+
+    async def _track_llm_cost(self, step_number: int, cost: float, tokens: Mapping) -> float:
+        """Record one stage's reported LLM cost on the run; returns the cost.
+
+        ``tokens`` carries prompt/completion/cache_read/cache_write token
+        counts under those key prefixes (a stage's own metadata dict works);
+        a stage that reports cost only passes ``{}``. Nothing is recorded for
+        a zero cost.
+        """
+        if cost > 0:
+            input_tokens = tokens.get('prompt_tokens', 0)
+            output_tokens = tokens.get('completion_tokens', 0)
+            await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                   cache_read_tokens_delta=tokens.get('cache_read_tokens', 0),
+                                   cache_write_tokens_delta=tokens.get('cache_write_tokens', 0))
+        return cost
 
     async def update_cost(self, step_number: int, cost_delta: float, tokens_delta: int = 0,
                           input_tokens_delta: int = 0, output_tokens_delta: int = 0,
@@ -1503,7 +1520,9 @@ class PipelineOrchestrator:
                 output_files.append(str(output_file))
 
                 await self.log(step_number, f"Extracted {len(hierarchy)} top-level sections, {total_headers} total headers")
-                await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens)
+                await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                       cache_read_tokens_delta=stats.get('extraction_cache_read_tokens', 0),
+                                       cache_write_tokens_delta=stats.get('extraction_cache_write_tokens', 0))
 
             elif stage_id == '1b':
                 # Stage 1b: Hierarchy Mapping (no LLM)
@@ -1657,16 +1676,7 @@ class PipelineOrchestrator:
                 method = research_info.get('method', 'generated')
                 await self.log(step_number, f"Research summary {method}, M1 score: {research_info.get('m1_score', 0):.2f}")
 
-                # Track LLM cost for stage 4.5
-                cost = stage45_data.get('total_cost', 0)
-                input_tokens = stage45_data.get('prompt_tokens', 0)
-                output_tokens = stage45_data.get('completion_tokens', 0)
-                cache_read_tokens = stage45_data.get('cache_read_tokens', 0)
-                cache_write_tokens = stage45_data.get('cache_write_tokens', 0)
-                if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
-                                           cache_read_tokens_delta=cache_read_tokens,
-                                           cache_write_tokens_delta=cache_write_tokens)
+                cost = await self._track_llm_cost(step_number, stage45_data.get('total_cost', 0), stage45_data)
 
             elif stage_id == '5':
                 # Stage 5: PubMed Enrichment
@@ -1704,6 +1714,12 @@ class PipelineOrchestrator:
                 self.stage_outputs['5b'] = stage5b_output_path
                 output_files.append(stage5b_output_path)
 
+                # Track LLM cost for stage 5b (the stage reports cost only, no tokens)
+                with open(stage5b_output_path, 'r') as f:
+                    stage5b_data = json.load(f)
+                cost = await self._track_llm_cost(
+                    step_number, stage5b_data.get('institution_enrichment_stats', {}).get('cost', 0), {})
+
                 await self.log(step_number, "Institution enrichment complete")
 
             elif stage_id == '5c':
@@ -1731,15 +1747,7 @@ class PipelineOrchestrator:
                 with open(stage5c_output_path, 'r') as f:
                     stage5c_data = json.load(f)
                 stage5c_meta = stage5c_data.get('stage_5c', {})
-                cost = stage5c_meta.get('total_cost', 0)
-                input_tokens = stage5c_meta.get('prompt_tokens', 0)
-                output_tokens = stage5c_meta.get('completion_tokens', 0)
-                cache_read_tokens = stage5c_meta.get('cache_read_tokens', 0)
-                cache_write_tokens = stage5c_meta.get('cache_write_tokens', 0)
-                if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
-                                           cache_read_tokens_delta=cache_read_tokens,
-                                           cache_write_tokens_delta=cache_write_tokens)
+                cost = await self._track_llm_cost(step_number, stage5c_meta.get('total_cost', 0), stage5c_meta)
 
                 await self.log(step_number, "Teaching entries formatted")
 
@@ -1772,15 +1780,7 @@ class PipelineOrchestrator:
                 with open(stage5d_output_path, 'r') as f:
                     stage5d_data = json.load(f)
                 stage5d_meta = stage5d_data.get('stage_5d', {})
-                cost = stage5d_meta.get('total_cost', 0)
-                input_tokens = stage5d_meta.get('prompt_tokens', 0)
-                output_tokens = stage5d_meta.get('completion_tokens', 0)
-                cache_read_tokens = stage5d_meta.get('cache_read_tokens', 0)
-                cache_write_tokens = stage5d_meta.get('cache_write_tokens', 0)
-                if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
-                                           cache_read_tokens_delta=cache_read_tokens,
-                                           cache_write_tokens_delta=cache_write_tokens)
+                cost = await self._track_llm_cost(step_number, stage5d_meta.get('total_cost', 0), stage5d_meta)
 
                 await self.log(step_number, "Citations formatted")
 
@@ -1803,11 +1803,13 @@ class PipelineOrchestrator:
 
                 emit_track_changes, emit_comments, strip_template_instructions = self._render_options()
 
+                stage6_usage = LlmUsage()
                 stage6_output_path = await self._run_with_stdout_capture(
                     run_stage6,
                     step_number,
                     input_path=input_path,
                     verbose=True,
+                    llm_usage=stage6_usage,
                     emit_track_changes=emit_track_changes,
                     emit_comments=emit_comments,
                     strip_template_instructions=strip_template_instructions,
@@ -1825,6 +1827,9 @@ class PipelineOrchestrator:
                     f"{self.document_uid}_render_warnings.json")
                 if sidecar.is_file():
                     output_files.append(str(sidecar))
+
+                # Track LLM cost for stage 6 (geographic scope + appendix reclassification)
+                cost = await self._track_llm_cost(step_number, stage6_usage.cost, stage6_usage.token_totals())
 
                 await self.log(step_number, f"WCM template generated: {Path(stage6_output_path).name}")
 
