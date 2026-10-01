@@ -5,12 +5,14 @@ import { formatRelativeDate } from '../../utils'
 const RUN_COMPLETE = 'complete'
 
 /** What the Feedback column shows for one run. */
-export type FeedbackState = 'given' | 'earlier' | 'needed' | 'none'
+/** 'awaiting' = finished with no feedback, but not the viewer's to review (an admin
+ *  looking at someone else's run), so it gets no call-to-action. */
+export type FeedbackState = 'given' | 'earlier' | 'needed' | 'awaiting' | 'none'
 
-/** Ascending sort rank per state: none < needed < earlier < given. */
-const FEEDBACK_RANK: Record<FeedbackState, number> = { none: 0, needed: 1, earlier: 2, given: 3 }
+/** Ascending sort rank per state: none < awaiting < needed < earlier < given. */
+const FEEDBACK_RANK: Record<FeedbackState, number> = { none: 0, awaiting: 1, needed: 2, earlier: 3, given: 4 }
 
-export const FEEDBACK_VALUE_LABEL = { given: 'Feedback given', needed: 'Needs feedback' } as const
+export const FEEDBACK_VALUE_LABEL = { given: 'Feedback given', needed: 'No feedback yet' } as const
 
 /** The viewer can review this run: admins only their own runs, everyone else every run in their list. */
 export function canReviewRun(run: RunSummary, currentUserId: number | undefined, isAdmin: boolean): boolean {
@@ -19,7 +21,7 @@ export function canReviewRun(run: RunSummary, currentUserId: number | undefined,
 
 /**
  * State for one run. `earlierGiven` is true when an older run of the same faculty
- * member has feedback; it only changes a run that would otherwise say "Needs feedback".
+ * member has feedback; it only changes a finished run with no feedback of its own.
  */
 export function feedbackState(
   run: RunSummary,
@@ -28,8 +30,9 @@ export function feedbackState(
   earlierGiven = false,
 ): FeedbackState {
   if (run.feedback.count > 0) return 'given'
-  if (run.status !== RUN_COMPLETE || !canReviewRun(run, currentUserId, isAdmin)) return 'none'
-  return earlierGiven ? 'earlier' : 'needed'
+  if (run.status !== RUN_COMPLETE) return 'none'
+  if (earlierGiven) return 'earlier'
+  return canReviewRun(run, currentUserId, isAdmin) ? 'needed' : 'awaiting'
 }
 
 export function feedbackRank(state: FeedbackState): number {

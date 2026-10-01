@@ -4,7 +4,7 @@ import { Clock, CheckCircle2, Check, Lock, Loader2, XCircle, AlertCircle, Chevro
 import { formatRelativeDate } from '../../utils'
 import type { RunSummary } from '../../types'
 import { OWNER_UNKNOWN_LABEL, earlierRunHasFeedback, runByFilterValue, runByLabel } from './runGroups'
-import { feedbackGivenTitle, feedbackState } from './runFeedback'
+import { FEEDBACK_VALUE_LABEL, feedbackGivenTitle, feedbackState } from './runFeedback'
 import type { RunGroup, SortDir, SortField } from './runGroups'
 import type { RunFilterKey } from './runFilters'
 import { BAND_STYLE, NO_SCORE_TEXT, scoreTitle } from './runQuality'
@@ -166,6 +166,8 @@ function FeedbackCell({ run, isAdmin, currentUserId, earlierGiven }: FeedbackCel
           Needs feedback
         </button>
       )
+    case 'awaiting':
+      return <span className="text-xs text-gray-500">{FEEDBACK_VALUE_LABEL.needed}</span>
     case 'none':
       return <span className="text-gray-400">{'—'}</span>
   }

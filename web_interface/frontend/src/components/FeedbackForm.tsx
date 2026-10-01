@@ -532,7 +532,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           options={EFFORT_OPTIONS}
           value={formData.manual_conversion_effort}
           onChange={(v) => updateField('manual_conversion_effort', v)}
-          ariaLabel="Without CViche, how long would it take to manually convert this CV to WCM format?"
+          ariaLabel={QUESTION_LABELS.manual_conversion_effort}
           required
         />
       </QuestionRow>
@@ -552,7 +552,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           {...RATING_SCALES.enrichment_quality}
           value={formData.enrichment_quality}
           onChange={(v) => updateField('enrichment_quality', v)}
-          ariaLabel="How would you rate the quality of AI-enriched data?"
+          ariaLabel={QUESTION_LABELS.enrichment_quality}
         />
       </QuestionRow>
       <QuestionRow label={QUESTION_LABELS.summary_generated} helper="Optional">

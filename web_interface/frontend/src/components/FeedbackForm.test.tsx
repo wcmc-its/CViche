@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import FeedbackForm from './FeedbackForm'
 import { getFeedback, getRunFeedbackAll, submitFeedback } from '../api/feedback'
 import type { FeedbackDetail } from '../types'
+import { QUESTION_LABELS } from './feedbackQuestions'
 
 vi.mock('../api/feedback', () => ({
   getFeedback: vi.fn(),
@@ -99,7 +100,7 @@ describe('FeedbackForm problem cards', () => {
       fireEvent.click(within(screen.getByRole('radiogroup', { name: group })).getByRole('radio', { name }))
     pick('Department administrator', 'Your role')
     pick('3', 'How useful was the CViche output?')
-    pick('0 minutes', 'Without CViche, how long would it take to manually convert this CV to WCM format?')
+    pick('0 minutes', QUESTION_LABELS.manual_conversion_effort)
     pick('0 minutes', 'How long did it take to correct the CViche output?')
     pick('4', 'How likely are you to recommend CViche to a colleague?')
 
@@ -139,7 +140,7 @@ describe('FeedbackForm summary', () => {
       fireEvent.click(within(screen.getByRole('radiogroup', { name: group })).getByRole('radio', { name }))
     pick('Department administrator', 'Your role')
     pick('3', 'How useful was the CViche output?')
-    pick('0 minutes', 'Without CViche, how long would it take to manually convert this CV to WCM format?')
+    pick('0 minutes', QUESTION_LABELS.manual_conversion_effort)
     pick('0 minutes', 'How long did it take to correct the CViche output?')
     pick('4', 'How likely are you to recommend CViche to a colleague?')
     fireEvent.click(screen.getByRole('button', { name: 'Submit review' }))
