@@ -416,3 +416,133 @@ def test_filter_options_requires_scope_all(client, db, seed_simple_mode):
     users = _seed_admin_view(db)
     _auth(client, users["admin"])
     assert client.get("/api/runs/filter-options?scope=mine").status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Run score: list columns (admin), run-quality report (admin), review note
+# ---------------------------------------------------------------------------
+
+def _scored(db, run_id, score, band, cap):
+    run = db.get(Run, run_id)
+    run.quality_score, run.quality_band, run.quality_cap = score, band, cap
+    db.commit()
+
+
+def test_scope_all_carries_score_columns_and_scope_mine_never_does(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    _scored(db, "ADM001", 25, "RED", 25)
+
+    _auth(client, users["admin"])
+    by_id = {r["run_id"]: r for r in client.get("/api/runs?scope=all").json()["runs"]}
+    assert (by_id["ADM001"]["quality_score"], by_id["ADM001"]["quality_band"],
+            by_id["ADM001"]["quality_cap"]) == (25, "RED", 25)
+    assert by_id["ADM002"]["quality_score"] is None
+
+    # An admin's own scope=mine list is cost-visible but still carries no score.
+    admin_run = db.get(Run, "ADM005")
+    admin_run.quality_score = 90
+    db.commit()
+    mine = client.get("/api/runs").json()["runs"]
+    assert [r["run_id"] for r in mine] == ["ADM005"]
+    assert (mine[0]["quality_score"], mine[0]["quality_band"], mine[0]["quality_cap"]) == (None, None, None)
+
+    _auth(client, users["alice"])
+    alice_runs = client.get("/api/runs").json()["runs"]
+    assert all(r["quality_score"] is None for r in alice_runs)
+
+
+_OWNER_GATE = "CV owner name / contact populated (HARD-FAIL gate)"
+_CACHED_SCORE = {
+    "totalScore": 25, "raw_score_before_caps": 80.0, "hard_fail_caps_applied": [25],
+    "flags": [f"HARD-FAIL cap=25: {_OWNER_GATE} (fraction=1.00)"],
+    "dimensionScores": [{"name": "Duplicate entries", "score": 8.0, "max": 10}],
+    "data_complete": True,
+}
+_DOCTOR = {"findings": [
+    {"lint": "owner_contact_missing", "severity": "ERROR", "message": "m", "status": "ran"},
+    {"lint": "table_shape", "severity": "INFO", "message": "m", "status": "ran"},
+]}
+
+
+def _patch_quality(monkeypatch, score, doctor):
+    from app.services import quality_score_service as svc
+    monkeypatch.setattr(svc, "get_cached_score", lambda _rid: score)
+    monkeypatch.setattr(svc, "get_doctor_report", lambda _rid: doctor)
+
+
+def test_run_quality_is_admin_only(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, _DOCTOR)
+    _auth(client, users["alice"])  # alice owns ADM001
+    assert client.get("/api/run/ADM001/run-quality").status_code == 403
+
+
+def test_run_quality_report_shape(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, _CACHED_SCORE, _DOCTOR)
+    _auth(client, users["admin"])
+
+    resp = client.get("/api/run/ADM001/run-quality")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert {k: body[k] for k in (
+        "run_id", "score", "band", "band_meaning", "provisional", "cap", "cap_reason",
+        "cap_lint", "earned", "total_weight", "data_complete", "dimensions")} == {
+        "run_id": "ADM001", "score": 25, "band": "RED", "band_meaning": "Don't deliver",
+        "provisional": True, "cap": 25, "cap_reason": "owner name missing",
+        "cap_lint": "owner_contact_missing", "earned": 80, "total_weight": 10,
+        "data_complete": True,
+        "dimensions": [{"name": "Duplicate entries", "weight": 10, "points": 8.0}]}
+    assert [(f["lint"], f["severity"], f["count"], f["caps_score"])
+            for f in body["doctor"]["findings"]] == [
+        ("owner_contact_missing", "ERROR", 1, True), ("table_shape", "INFO", 1, False)]
+    assert body["doctor"]["counts"] == {"error": 1, "warn": 0, "info": 1}
+
+
+def test_run_quality_parts_are_null_when_missing_not_an_error(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, None, None)
+    _auth(client, users["admin"])
+
+    resp = client.get("/api/run/ADM001/run-quality")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert (body["score"], body["band"], body["doctor"], body["dimensions"]) == (None, None, None, [])
+    assert client.get("/api/run/NOSUCH/run-quality").status_code == 404
+
+
+@pytest.mark.parametrize("score, band, cap, expected", [
+    (91, "GREEN", None, False),
+    (72, "YELLOW", None, True),
+    (90, "GREEN", 25, True),
+    (None, None, None, False),
+])
+def test_review_note_for_the_owner_never_carries_the_score(
+        client, db, seed_simple_mode, monkeypatch, score, band, cap, expected):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, None, None)
+    _scored(db, "ADM001", score, band, cap)
+    _auth(client, users["alice"])
+
+    resp = client.get("/api/run/ADM001/review-note")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"needs_cleanup": expected}
+
+
+def test_review_note_falls_back_to_the_cached_score_before_backfill(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, {"totalScore": 70, "hard_fail_caps_applied": []}, None)
+    _auth(client, users["alice"])
+    assert client.get("/api/run/ADM001/review-note").json() == {"needs_cleanup": True}
+
+
+def test_review_note_is_for_the_owner_and_admins_only(client, db, seed_simple_mode, monkeypatch):
+    users = _seed_admin_view(db)
+    _patch_quality(monkeypatch, None, None)
+    _auth(client, users["bob"])  # bob does not own ADM001
+    assert client.get("/api/run/ADM001/review-note").status_code == 403
+    _auth(client, users["admin"])
+    assert client.get("/api/run/ADM001/review-note").status_code == 200

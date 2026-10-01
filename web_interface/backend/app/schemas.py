@@ -123,6 +123,12 @@ class RunSummary(BaseModel):
     # Only populated by GET /runs?scope=all (admin); null for runs without a
     # user and always null under scope=mine.
     run_by: RunBySummary | None = None
+    # Advisory quality score columns: only populated by GET /runs?scope=all
+    # (admin); always null under scope=mine. quality_cap is set only when a
+    # hard-fail cap lowered the score.
+    quality_score: int | None = None
+    quality_band: str | None = None
+    quality_cap: int | None = None
 
     class Config:
         from_attributes = True
@@ -550,3 +556,62 @@ class AdminConfigUpdate(BaseModel):
     rate_limit_daily: int | None = None
     rate_limit_monthly: int | None = None
     consent_version: str | None = None
+
+
+# --- Run quality / run doctor (admin run page) and the owner-facing note ---
+
+DoctorSeverity = Literal["ERROR", "WARN", "INFO"]
+QualityBand = Literal["GREEN", "YELLOW", "RED"]
+
+
+class QualityDimension(BaseModel):
+    """One weighted scorer dimension: ``points`` earned out of ``weight``."""
+    name: str
+    weight: int
+    points: float
+
+
+class DoctorSeverityCounts(BaseModel):
+    """Distinct lints that fired at each severity (not finding instances)."""
+    error: int = 0
+    warn: int = 0
+    info: int = 0
+
+
+class DoctorFindingGroup(BaseModel):
+    """One lint that fired, collapsed across its instances."""
+    lint: str
+    severity: DoctorSeverity  # the most severe of the lint's instances
+    message: str  # plain-English explanation of the lint
+    count: int  # instances of this lint in the run
+    prevalence: float | None = None  # share of runs it fires on; None if unmeasured
+    caps_score: bool = False  # this lint is the gate behind the run's applied cap
+
+
+class RunDoctorReport(BaseModel):
+    counts: DoctorSeverityCounts
+    findings: list[DoctorFindingGroup]  # rarest lint first
+    not_run: int = 0  # lints skipped or unreadable (an input artifact was absent)
+
+
+class RunQualityReport(BaseModel):
+    """GET /run/{run_id}/run-quality (admin). Score fields are null together
+    when no score is cached; ``doctor`` is null when no report was stored."""
+    run_id: str
+    score: int | None = None
+    band: QualityBand | None = None
+    band_meaning: str | None = None
+    provisional: bool = True
+    cap: int | None = None
+    cap_reason: str | None = None
+    cap_lint: str | None = None
+    earned: int | None = None  # weighted total before the cap
+    total_weight: int | None = None
+    data_complete: bool | None = None
+    dimensions: list[QualityDimension] = []
+    doctor: RunDoctorReport | None = None
+
+
+class RunReviewNote(BaseModel):
+    """GET /run/{run_id}/review-note: never carries the score itself."""
+    needs_cleanup: bool
