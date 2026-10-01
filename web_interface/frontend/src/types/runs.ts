@@ -47,6 +47,70 @@ export interface RunSummary {
   submission_type?: string | null
   /** Populated only with scope=all; null for runs without a user. */
   run_by?: RunBy | null
+  /** Advisory 0-100 quality score. Admin scope=all only; null when unscored. */
+  quality_score?: number | null
+  /** GREEN / YELLOW / RED. Admin scope=all only. */
+  quality_band?: QualityBand | null
+  /** The hard-fail cap that lowered the score, else null. Admin scope=all only. */
+  quality_cap?: number | null
+}
+
+export type QualityBand = 'GREEN' | 'YELLOW' | 'RED'
+export type DoctorSeverity = 'ERROR' | 'WARN' | 'INFO'
+
+export interface QualityDimension {
+  name: string
+  weight: number
+  points: number
+}
+
+export interface DoctorFindingGroup {
+  lint: string
+  /** Most severe of the lint's instances. */
+  severity: DoctorSeverity
+  /** Plain-English explanation of the lint. */
+  message: string
+  /** Instances of this lint in the run. */
+  count: number
+  /** Share of runs the lint fires on (0-1); null when unmeasured. */
+  prevalence: number | null
+  /** This lint is the gate behind the run's applied cap. */
+  caps_score: boolean
+}
+
+export interface RunDoctorReport {
+  /** Distinct lints per severity (not instances). */
+  counts: { error: number; warn: number; info: number }
+  /** One row per lint, rarest first. */
+  findings: DoctorFindingGroup[]
+  /** Lints skipped or unreadable because an input artifact was absent. */
+  not_run: number
+}
+
+/** GET /api/run/:id/run-quality (admin). Score fields are null together when no
+ *  score is cached; `doctor` is null when no report was stored. */
+export interface RunQualityReport {
+  run_id: string
+  score: number | null
+  band: QualityBand | null
+  /** "Ship" / "Needs human cleanup" / "Don't deliver". */
+  band_meaning: string | null
+  provisional: boolean
+  cap: number | null
+  cap_reason: string | null
+  cap_lint: string | null
+  /** Weighted total before the cap. */
+  earned: number | null
+  total_weight: number | null
+  data_complete: boolean | null
+  /** Weighted dimensions in the scorer's order. */
+  dimensions: QualityDimension[]
+  doctor: RunDoctorReport | null
+}
+
+/** GET /api/run/:id/review-note. Never carries the score. */
+export interface RunReviewNote {
+  needs_cleanup: boolean
 }
 
 export type RunListScope = 'mine' | 'all'
