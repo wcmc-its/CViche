@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { CheckCircle2, Loader2 } from 'lucide-react'
+import { Check, CheckCircle2, Loader2 } from 'lucide-react'
 import type { FeedbackFormData, WcmSection } from '../types'
 import { getFeedback, submitFeedback } from '../api/feedback'
 import ErrorBanner from './ErrorBanner'
@@ -46,13 +46,14 @@ const REVIEWER_ROLES = [
 ]
 
 const ISSUE_FIELDS = [
-  { key: 'issue_missing_content' as const, label: 'Missing content', placeholder: 'What content is missing from the output?' },
-  { key: 'issue_split_merged' as const, label: 'Split or merged entries', placeholder: 'Which entries were split or merged?' },
-  { key: 'issue_wrong_section' as const, label: 'Wrong section placement', placeholder: 'Which entries were placed in the wrong section?' },
-  { key: 'issue_inaccurate' as const, label: 'Inaccurate information', placeholder: 'What information was inaccurate?' },
-  { key: 'issue_ai_enrichment' as const, label: 'AI enrichment errors', placeholder: 'Describe the enrichment errors you noticed' },
-  { key: 'issue_formatting' as const, label: 'Formatting problems', placeholder: 'Describe the formatting issues' },
+  { key: 'issue_missing_content' as const, label: 'Missing content', description: 'Entries or sections from the original are absent' },
+  { key: 'issue_split_merged' as const, label: 'Split or merged entries', description: 'One entry broken in two, or two combined' },
+  { key: 'issue_wrong_section' as const, label: 'Wrong section', description: 'An entry landed under the wrong heading' },
+  { key: 'issue_inaccurate' as const, label: 'Inaccurate details', description: 'Dates, titles, names or journals are wrong' },
+  { key: 'issue_ai_enrichment' as const, label: 'PubMed enrichment errors', description: 'Wrong citation, journal or PMID added' },
+  { key: 'issue_formatting' as const, label: 'Formatting', description: "Layout, ordering or style doesn't match the WCM template" },
 ]
+const ISSUE_PLACEHOLDER = 'Which entries?'
 
 const EFFORT_OPTIONS = [
   { value: '0 minutes', label: '0 minutes' },
@@ -518,38 +519,51 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
       </QuestionRow>
 
       <SectionLabel>Problems</SectionLabel>
-      <QuestionRow label="Check any issues you found" helper="Optional">
-        <div className="space-y-3">
-          <div className="flex flex-wrap gap-2">
-            {ISSUE_FIELDS.map((issue) => {
-              const checked = formData[issue.key] !== null
-              return (
-                <button
-                  key={issue.key}
-                  type="button"
-                  role="checkbox"
-                  aria-checked={checked}
-                  onClick={() => updateField(issue.key, checked ? null : '')}
-                  className={`${TOGGLE_BASE} ${checked ? TOGGLE_ON : TOGGLE_OFF}`}
-                >
-                  {issue.label}
-                </button>
-              )
-            })}
-          </div>
-          {ISSUE_FIELDS.filter((issue) => formData[issue.key] !== null).map((issue) => (
-            <input
+      <p className="mt-3 text-sm text-gray-500">
+        Select any that apply and say where, so we can find the entries.
+      </p>
+      <div className="mt-3 mb-2 space-y-2">
+        {ISSUE_FIELDS.map((issue) => {
+          const checked = formData[issue.key] !== null
+          return (
+            <label
               key={issue.key}
-              type="text"
-              value={formData[issue.key] ?? ''}
-              onChange={(e) => updateField(issue.key, e.target.value)}
-              placeholder={issue.placeholder}
-              aria-label={issue.label}
-              className={TEXT_INPUT}
-            />
-          ))}
-        </div>
-      </QuestionRow>
+              className={`flex cursor-pointer items-start gap-3 rounded-xl border px-4 py-3 transition-colors ${
+                checked ? 'border-ink bg-sand-50' : 'border-sand-300 bg-white hover:bg-sand-50'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => updateField(issue.key, checked ? null : '')}
+                className="peer sr-only"
+              />
+              <span
+                aria-hidden="true"
+                className={`mt-0.5 flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded border peer-focus-visible:ring-2 peer-focus-visible:ring-primary-500 peer-focus-visible:ring-offset-1 ${
+                  checked ? 'border-ink bg-ink text-white' : 'border-sand-400 bg-white'
+                }`}
+              >
+                {checked && <Check className="h-3 w-3" strokeWidth={3} />}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-semibold text-gray-900">{issue.label}</span>
+                <span className="block text-xs text-gray-500">{issue.description}</span>
+                {checked && (
+                  <input
+                    type="text"
+                    value={formData[issue.key] ?? ''}
+                    onChange={(e) => updateField(issue.key, e.target.value)}
+                    placeholder={ISSUE_PLACEHOLDER}
+                    aria-label={`${issue.label}: ${ISSUE_PLACEHOLDER}`}
+                    className={`mt-2 ${TEXT_INPUT}`}
+                  />
+                )}
+              </span>
+            </label>
+          )
+        })}
+      </div>
 
       {anyIssueChecked && wcmSections.length > 0 && (
         <QuestionRow label="Which sections were affected?">

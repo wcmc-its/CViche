@@ -133,6 +133,7 @@ jobs:
       # catch anything that breaks the production bundle.
       - run: npx tsc --noEmit
       - run: npm run build
+      - run: npm test
 
   type-check:
     # Opt-in mypy over the modules modernized to typed form (#328). Scope lives
