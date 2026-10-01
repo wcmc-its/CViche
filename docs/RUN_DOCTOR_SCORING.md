@@ -10,9 +10,9 @@ answer different questions.
 | Number? | **no number at all** | yes |
 | Where it runs | orchestrator post-run, `stage_7_doctor/<uid>_doctor.json` | `quality_score_service`, cached at `runs/{id}/quality_score.json` |
 
-The doctor does not compute a 0-100 score. It reports *two* of the quality
-score's hard-fail gates so the two cannot drift apart — that is the whole
-overlap.
+The doctor does not compute a 0-100 score. It reports all five of the quality
+score's hard-fail gates, each as an ERROR lint that calls the scorer's own
+predicate, so the two cannot drift apart — that is the whole overlap.
 
 ## Part 1: the doctor's verdict
 
@@ -54,8 +54,10 @@ unchanged verdict was never evidence of no regression. These are static
 constants and go stale as the pipeline improves — #440 replaces them with a
 live corpus baseline.
 
-The two hard-fail lints are ERROR by construction — each one on its own caps
-the quality score into the RED band.
+The five hard-fail lints (`no_output`, `owner_contact_missing`,
+`protected_data_in_output`, `pipeline_errors_present`, `stage3b_fallback_ratio`)
+are ERROR by construction — each one on its own caps the quality score into
+the RED band.
 
 ### Step 3 — roll up
 
@@ -112,10 +114,15 @@ score = round(max(0, final))
 All fractions clamp to `[0, 1]`. A dimension whose artifact is missing scores
 1.0 (full penalty); a missing docx scores 0.5.
 
-### The two hard-fail caps
+### The five hard-fail caps
 
-A cap is a ceiling on the final score, applied after the weighted sum:
+A cap is a ceiling on the final score, applied after the weighted sum. When
+several fire, the lowest wins. Only the first two (owner, fatal error) also
+carry weight as dimensions; the other three are weight-0 gates, so adding them
+moved no clean run's raw score.
 
+- **cap 20** — `no_output_produced()`: no rendered docx at all. Nothing to
+  deliver (#745). Doctor lint: `no_output`.
 - **cap 25** — `cv_owner_name_missing()`: no usable `full_name`, and not both
   `first_name` and `last_name`. The document cannot be delivered under anyone's
   name. Also trips when `*_fields.json` is absent entirely.
@@ -123,10 +130,21 @@ A cap is a ceiling on the final score, applied after the weighted sum:
   in the scanned JSON: `name 'x' is not defined`, `Traceback (most recent call
   last)`, `NameError:`, `UnboundLocalError:`, `KeyError:`. Means a stage broke,
   not that a lookup came back empty.
+- **cap 25** — `score_protected_data()`: protected personal data (date of
+  birth, SSN and the other #820 label/value shapes) reached the rendered docx.
+  Cap-only gate in `CAP_ONLY_GATES`, not in `DIMENSIONS`. It runs the same scan
+  as the doctor's `protected_data_in_output` lint (#825).
+- **cap 40** — `stage3b_fallback_ratio_exceeded()`: more than
+  `STAGE3B_FALLBACK_RATIO_THRESHOLD` (5%) of stage 3b's classification batches,
+  or of its entries, fell back to a default code (#810). These failures are
+  recorded as numbers in `meta.stats`, which the error-string scan above cannot
+  see. Same cap as a fatal error, since both mean a stage produced output that
+  looks real but isn't. Doctor lint: `stage3b_fallback_ratio`. The 5% is a
+  starting calibration, not a fitted percentile.
 
-Both predicates live in `quality_score.py` and are imported by `run_doctor.py`
-for its `owner_contact_missing` / `pipeline_errors_present` lints, so the doctor
-reports the gate rather than a second definition of it. What that buys is that they cannot drift apart — **not** independent
+Every predicate lives in `quality_score.py` (or, for protected data, in the
+shared lint it calls), and the doctor's matching lint uses the same function,
+so the doctor reports the gate rather than a second definition of it. What that buys is that they cannot drift apart — **not** independent
 confirmation that the gate is calibrated.
 
 ### Bands
