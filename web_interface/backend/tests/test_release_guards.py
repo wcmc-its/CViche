@@ -239,12 +239,21 @@ class TestEmptyUploadRejection:
         assert "Hello world" in text
         assert "Second line" in text
 
-    def test_extract_text_fails_open_on_a_corrupt_pdf(self):
-        # #806: a PDF pdfminer can't parse is "cannot determine" -- the guard
-        # is skipped (fail open), like a python-docx read failure. Only a
-        # password failure is raised, as EncryptedPdfError.
-        from app.api.upload import _extract_text
-        assert _extract_text(b"%PDF-1.4 not really a pdf", ".pdf") is None
+    def test_upload_rejects_a_corrupt_pdf(self, client, db, seed_simple_mode):
+        # #806: unlike a docx read failure, a PDF that cannot be parsed never
+        # fails open -- the run's conversion uses the same parser and would
+        # fail too -- so it is a 400 up front, never a 500 or a doomed run.
+        from app.services.pdf_sandbox import PDF_UNREADABLE_MESSAGE
+        user = _make_user(db)
+        _auth_cookie(client, user)
+        resp = client.post(
+            "/api/upload",
+            files={"file": ("cv.pdf", b"%PDF-1.4 not really a pdf", "application/pdf")},
+            data={"submission_type": "own_cv"},
+        )
+        assert resp.status_code == 400
+        assert resp.json()["detail"]["message"] == PDF_UNREADABLE_MESSAGE
+        assert db.query(Run).count() == 0
 
     def test_upload_rejects_image_only_pdf(self, client, db, seed_simple_mode):
         # #806: a fully scanned PDF yields no text, so the same readable-text
@@ -911,6 +920,44 @@ def test_pdf_over_a_parse_limit_fails_the_run_with_its_message(db, tmp_path, mon
     run = db.get(Run, "LONG01")
     assert run.status == "failed"
     assert run.error_message == PDF_TOO_COMPLEX_MESSAGE
+
+
+def test_run_waiting_too_long_for_a_pdf_slot_fails_with_its_message(db, tmp_path, monkeypatch, cv_pdf):
+    """#806 review B1: the run's conversion waits a bounded time for a PDF
+    child slot, then fails the run with a message that says why."""
+    from app.services import pdf_sandbox
+    src = tmp_path / "BUSY01.pdf"
+    src.write_bytes(cv_pdf())
+    monkeypatch.setattr(pdf_sandbox, "PDF_CONVERT_SLOT_WAIT_SECONDS", 0.2)
+    for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
+        assert pdf_sandbox._slots.acquire(blocking=False)
+    try:
+        _execute_one_noop_step(db, monkeypatch, tmp_path, "BUSY01", src)
+    finally:
+        for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
+            pdf_sandbox._slots.release()
+    db.expire_all()
+    run = db.get(Run, "BUSY01")
+    assert run.status == "failed"
+    assert run.error_message == pdf_sandbox.PDF_BUSY_RUN_MESSAGE
+
+
+def test_conversion_runs_off_the_event_loop_thread(db, tmp_path, monkeypatch):
+    """#806 review N6: the conversion can wait for a slot and run for
+    minutes; it must not block the run's event loop (cancel included)."""
+    import threading
+    from app.pipeline import orchestrator as orch
+    seen = {}
+    real = orch.PipelineOrchestrator._copy_to_pipeline_input
+
+    def record(self):
+        seen["thread"] = threading.current_thread()
+        return real(self)
+    monkeypatch.setattr(orch.PipelineOrchestrator, "_copy_to_pipeline_input", record)
+    src = tmp_path / "LOOP01.docx"
+    src.write_bytes(b"docx bytes")
+    _execute_one_noop_step(db, monkeypatch, tmp_path, "LOOP01", src)
+    assert seen["thread"] is not threading.main_thread()
 
 
 def test_text_only_pdf_logs_no_warning(db, tmp_path, monkeypatch, cv_pdf):

@@ -422,10 +422,9 @@ def test_extract_text_lets_an_unexpected_error_surface():
 def test_extract_text_returns_none_for_unrecognized_extension():
     """_extract_text names only .docx and .pdf. Any other extension falls
     through to the final ``return None`` with no attempt at extraction --
-    "cannot determine", not "read and found nothing." A corrupt PDF is the
-    same "cannot determine" (#806)."""
+    "cannot determine", not "read and found nothing." (A corrupt PDF is not
+    this case: it raises UnreadablePdfError, #806.)"""
     assert _extract_text(b"PK\x03\x04 an old binary .doc", ".doc") is None
-    assert _extract_text(b"%PDF-1.4 dummy", ".pdf") is None
 
 
 def test_upload_rejects_password_protected_document(client, db, seed_simple_mode, tmp_path):

@@ -64,7 +64,8 @@ from unified_pipeline.stage_errors import StageError, record_stage_outcome, stag
 from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
 from unified_pipeline.llm.retry import LLMOutageError
 from app.services.pdf_sandbox import (
-    PDF_TOO_COMPLEX_MESSAGE, ConversionResult, PdfTooComplexError, convert_pdf,
+    PDF_BUSY_RUN_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, ConversionResult, PdfBusyError,
+    PdfTooComplexError, convert_pdf,
 )
 
 # An upload with this suffix is converted, not copied, into the run's private
@@ -145,6 +146,8 @@ def user_facing_error(exc: BaseException, resuming: bool) -> str:
         return LLM_OUTAGE_MESSAGE
     if isinstance(exc, PdfTooComplexError):
         return PDF_TOO_COMPLEX_MESSAGE
+    if isinstance(exc, PdfBusyError):
+        return PDF_BUSY_RUN_MESSAGE
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return STAGE_TIMEOUT_MESSAGE
     err_text = str(exc).lower()
@@ -916,7 +919,9 @@ class PipelineOrchestrator:
                 await self._notify_started(run)
 
             # Copy (or, for a PDF, convert) the upload to the pipeline input dir
-            cv_path = self._copy_to_pipeline_input()
+            # Off the loop: a PDF conversion can wait for a sandbox slot and
+            # then run for minutes, and the loop must keep serving events.
+            cv_path = await asyncio.to_thread(self._copy_to_pipeline_input)
             if start_step_number is None:
                 await self._warn_image_only_pages()
 
@@ -965,7 +970,6 @@ class PipelineOrchestrator:
             # Best-effort, run off the event loop; never affects run status.
             score = None
             try:
-                import asyncio
                 from app.services.quality_score_service import compute_and_cache_score, persist_score_columns
                 score = await asyncio.get_running_loop().run_in_executor(
                     None, compute_and_cache_score, self.run_id

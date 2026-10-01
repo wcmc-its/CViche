@@ -736,6 +736,50 @@ class TestUploadValidation:
         assert db.query(Run).count() == 0
         assert list(tmp_path.iterdir()) == []
 
+    @pytest.mark.parametrize("endpoint, data", [
+        ("/api/upload", {"submission_type": "own_cv"}),
+        ("/api/estimate", None),
+    ])
+    def test_pdf_with_every_sandbox_slot_busy_gets_503(self, client, db, seed_simple_mode, tmp_path,
+                                                      cv_pdf, monkeypatch, endpoint, data):
+        """#806 review B1: with both PDF child slots held, a third PDF
+        request is a 503 with Retry-After -- and spawns no child."""
+        from app.models import Run
+        from app.services import pdf_sandbox
+        self._create_auth_user(client, db)
+
+        def no_spawn(*args, **kwargs):
+            raise AssertionError("spawned a PDF child with every slot taken")
+        monkeypatch.setattr(pdf_sandbox.subprocess, "run", no_spawn)
+        for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
+            assert pdf_sandbox._slots.acquire(blocking=False)
+        try:
+            with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+                response = client.post(
+                    endpoint, files={"file": ("cv.pdf", cv_pdf(), "application/pdf")}, data=data,
+                )
+        finally:
+            for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
+                pdf_sandbox._slots.release()
+        assert response.status_code == 503, response.text
+        assert response.json()["detail"]["message"] == pdf_sandbox.PDF_BUSY_MESSAGE
+        assert int(response.headers["retry-after"]) > 0
+        assert db.query(Run).count() == 0
+        assert list(tmp_path.iterdir()) == []
+
+    def test_unreadable_pdf_child_reply_is_a_400_not_a_500(self, client, db, seed_simple_mode, cv_pdf, monkeypatch):
+        """#806 review N1: whatever goes wrong inside the PDF job short of an
+        ops fault, the request gets a 400."""
+        from app.services import pdf_sandbox
+        self._create_auth_user(client, db)
+        monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP", "print('not json')")
+        response = client.post(
+            "/api/upload", files={"file": ("cv.pdf", cv_pdf(), "application/pdf")},
+            data={"submission_type": "own_cv"},
+        )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["message"] == pdf_sandbox.PDF_UNREADABLE_MESSAGE
+
     def test_oversized_file_rejected(self, client, db, seed_simple_mode):
         """Files exceeding the size limit are rejected. (upload.py's size
         check runs before the magic-byte check, so the content need not be a

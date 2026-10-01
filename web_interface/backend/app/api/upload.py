@@ -41,8 +41,8 @@ from app.storage.base import StorageKeyExists
 from app.services.run_service import UPLOAD_DIR
 from app.services.template_warning import detect_wcm_template
 from app.services.pdf_sandbox import (
-    PDF_TOO_COMPLEX_MESSAGE, EncryptedPdfError, PdfTooComplexError, UnreadablePdfError,
-    extract_pdf_text,
+    PDF_BUSY_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, PDF_UNREADABLE_MESSAGE, EncryptedPdfError,
+    PdfBusyError, PdfTooComplexError, UnreadablePdfError, extract_pdf_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,9 @@ _UNSUPPORTED_TYPE_HINT = (
     "Only .docx and .pdf files are supported. "
     "Please convert your file to .docx or .pdf before uploading."
 )
+# A PDF child slot frees within PDF_TEXT_TIMEOUT_SECONDS at worst and ~4 s
+# for the largest real CV, so a retry this much later usually lands.
+_PDF_BUSY_RETRY_AFTER_SECONDS = 10
 _ENCRYPTED_PDF_MESSAGE = (
     "This PDF is password-protected, so we can't read it. Please remove the "
     "password, or upload the CV as a .docx."
@@ -128,34 +131,26 @@ _DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSynt
                      zlib.error)
 
 
-def _extract_pdf_text(content: bytes) -> str | None:
-    """`_extract_text` for a PDF, parsed in pdf_sandbox's limited child.
-    A PDF pdfminer cannot parse returns None, like a python-docx read
-    failure; a password or a page/memory/time limit raises (see
-    _extract_text)."""
-    try:
-        return extract_pdf_text(content)
-    except UnreadablePdfError as e:
-        logger.warning("Text extraction for empty-doc guard failed (.pdf): %s", e)
-        return None
-
-
 def _extract_text(content: bytes, file_ext: str) -> str | None:
     """Best-effort text extraction for the empty-document guard.
 
     Returns the extracted text, an empty string when the file is readable but
     contains no text (scan/blank), or ``None`` when the document could not be
-    read at all (a known python-docx read failure, see ``_DOCX_READ_ERRORS``,
-    or an unreadable PDF). Callers treat ``None`` as "cannot determine" and
-    skip the guard rather than block a possibly-valid upload.
+    read at all (a known python-docx read failure, see ``_DOCX_READ_ERRORS``).
+    Callers treat ``None`` as "cannot determine" and skip the guard rather
+    than block a possibly-valid upload.
+
+    A PDF never fails open (#806): the run's conversion uses the same parser
+    under the same limits, so a PDF this cannot read, the run cannot either.
 
     Raises:
         EncryptedPdfError: a password-protected PDF.
-        PdfTooComplexError: a PDF over pdf_sandbox's page, memory or time
-            limit. Never fails open: the run would hit the same limit.
+        PdfTooComplexError: a PDF over pdf_sandbox's page, memory or time limit.
+        UnreadablePdfError: any other PDF parse failure.
+        PdfBusyError: every PDF child slot is taken.
     """
     if file_ext == PDF_EXTENSION:
-        return _extract_pdf_text(content)
+        return extract_pdf_text(content)
     if file_ext != ".docx":
         return None
     with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
@@ -179,7 +174,7 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
 
 async def _extract_text_or_400(content: bytes, file_ext: str) -> str | None:
     """`_extract_text` off the event loop (#793), shared by /upload and
-    /estimate, with its two PDF refusals turned into 400s."""
+    /estimate: every PDF refusal is a 400, a full PDF sandbox a 503."""
     try:
         return await run_in_threadpool(_extract_text, content, file_ext)
     except EncryptedPdfError:
@@ -187,6 +182,15 @@ async def _extract_text_or_400(content: bytes, file_ext: str) -> str | None:
     except PdfTooComplexError as e:
         logger.warning("Rejected PDF over a parse limit: %s", e)
         raise bad_request(PDF_TOO_COMPLEX_MESSAGE)
+    except UnreadablePdfError as e:
+        logger.warning("Rejected unreadable PDF: %s", e)
+        raise bad_request(PDF_UNREADABLE_MESSAGE)
+    except PdfBusyError:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "pdf_busy", "message": PDF_BUSY_MESSAGE},
+            headers={"Retry-After": str(_PDF_BUSY_RETRY_AFTER_SECONDS)},
+        )
 
 
 # Bytes read per chunk while bounding an upload body (#793): large enough that

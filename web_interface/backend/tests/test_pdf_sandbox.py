@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives import padding
 
 from app.services import pdf_sandbox
 from app.services.pdf_sandbox import (
-    PDF_MAX_PAGES, EncryptedPdfError, PdfTooComplexError, UnreadablePdfError,
+    PDF_MAX_PAGES, EncryptedPdfError, PdfBusyError, PdfTooComplexError, UnreadablePdfError,
     convert_pdf, extract_pdf_text,
 )
 
@@ -176,7 +176,7 @@ def test_page_cap_is_inclusive():
     from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
     page = [(False, 10, 72, 700, "A page.")]
     assert extract_pdf_text(_make_pdf([page] * PDF_MAX_PAGES)).count("A page.") == PDF_MAX_PAGES
-    with pytest.raises(PdfTooComplexError, match="declares 301 pages"):
+    with pytest.raises(PdfTooComplexError, match="more than 300 pages"):
         extract_pdf_text(_make_pdf([page] * (PDF_MAX_PAGES + 1)))
 
 
@@ -186,7 +186,7 @@ def test_page_cap_is_read_from_raw_bytes_before_pdfminer():
     raw-byte scan must reject it first, by its declared count -- reaching
     pdfminer would surface as "exceeded" instead."""
     from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
-    with pytest.raises(PdfTooComplexError, match="declares 20000 pages"):
+    with pytest.raises(PdfTooComplexError, match=r"more than 300 pages \(found 20000\)"):
         extract_pdf_text(_make_pdf([[]] * 20000))
 
 
@@ -216,7 +216,7 @@ def test_page_cap_is_rechecked_after_pdfminer_opens_the_document():
     from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
     content = _make_pdf([[(False, 10, 72, 700, "A page.")]] * (PDF_MAX_PAGES + 1)).replace(
         b"<< /Type /Pages /Kids", b"<< /Type /Pages /X << >> /Kids", 1)
-    with pytest.raises(PdfTooComplexError, match="declares 301 pages"):
+    with pytest.raises(PdfTooComplexError, match=r"more than 300 pages \(found 301\)"):
         extract_pdf_text(content)
 
 
@@ -269,7 +269,12 @@ def test_flate_bomb_hits_the_memory_cap():
     exceeds PDF_CHILD_ADDRESS_SPACE_BYTES, which must surface as a limit,
     not a crash or a fail-open."""
     import zlib
-    data = zlib.compress(b"BT /F1 12 Tf 72 720 Td (x) Tj ET" + b" " * (1 << 30), 9)
+    # Compressed a megabyte at a time: building the 1 GiB in the test process
+    # itself OOM-killed it in a 2 GiB container.
+    z = zlib.compressobj(9)
+    chunk = b" " * (1 << 20)
+    data = (z.compress(b"BT /F1 12 Tf 72 720 Td (x) Tj ET")
+            + b"".join(z.compress(chunk) for _ in range(1024)) + z.flush())
     objs = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -304,3 +309,168 @@ def test_child_failure_is_not_swallowed(monkeypatch):
     unknown op) is a RuntimeError, never a pass or a fail-open."""
     with pytest.raises(RuntimeError, match="exit code"):
         pdf_sandbox.run_pdf_job("no-such-op", ["/nonexistent.pdf"], 30)
+
+
+# --- concurrency slots (#806 review B1) -----------------------------------
+
+
+@pytest.fixture
+def both_slots_held():
+    """Take every PDF child slot for the duration of a test."""
+    for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
+        assert pdf_sandbox._slots.acquire(blocking=False)
+    yield
+    for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
+        pdf_sandbox._slots.release()
+
+
+def _no_spawn(*args, **kwargs):
+    raise AssertionError("a PDF child was spawned with every slot taken")
+
+
+def test_request_path_does_not_wait_for_a_slot(both_slots_held, monkeypatch, cv_pdf):
+    import time
+    monkeypatch.setattr(pdf_sandbox.subprocess, "run", _no_spawn)
+    start = time.monotonic()
+    with pytest.raises(PdfBusyError):
+        extract_pdf_text(cv_pdf())
+    assert time.monotonic() - start < 0.5  # refused at once, not after a wait
+
+
+def test_conversion_waits_for_a_slot_then_gives_up(both_slots_held, monkeypatch, tmp_path):
+    monkeypatch.setattr(pdf_sandbox.subprocess, "run", _no_spawn)
+    monkeypatch.setattr(pdf_sandbox, "PDF_CONVERT_SLOT_WAIT_SECONDS", 0.2)
+    with pytest.raises(PdfBusyError):
+        convert_pdf(tmp_path / "a.pdf", tmp_path / "a.docx")
+
+
+def test_conversion_takes_a_slot_freed_while_it_waits(monkeypatch, cv_pdf, tmp_path):
+    import threading
+    src = tmp_path / "cv.pdf"
+    src.write_bytes(cv_pdf())
+    for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
+        pdf_sandbox._slots.acquire()
+    threading.Timer(0.3, pdf_sandbox._slots.release).start()
+    try:
+        assert convert_pdf(src, tmp_path / "cv.docx").image_only_pages == []
+    finally:
+        for _ in range(pdf_sandbox.PDF_CHILD_SLOTS - 1):
+            pdf_sandbox._slots.release()
+
+
+@pytest.mark.parametrize("child", [
+    "import time; time.sleep(5)",  # timed out and killed
+    "import sys; sys.exit(1)",     # failed
+    "print('garbage')",            # unreadable reply
+])
+def test_every_exit_path_releases_its_slot(monkeypatch, child):
+    monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP", child)
+    with pytest.raises(Exception):
+        pdf_sandbox.run_pdf_job("text", ["/x.pdf"], 0.5)
+    for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):  # all free again
+        assert pdf_sandbox._slots.acquire(blocking=False)
+    for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
+        pdf_sandbox._slots.release()
+
+
+# --- every parse failure is a known error, never a 500 (#806 review N1) ----
+
+
+def test_a_5000_digit_page_count_is_refused():
+    """The raw scan used to int() it outside any handler and hit Python's
+    int-digit limit; a raw-scan-invisible copy reaches pdfminer's own int()."""
+    from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
+    huge = b"/Count " + b"9" * 5000
+    visible = _make_pdf([[]]).replace(b"/Count 1", huge, 1)
+    with pytest.raises(PdfTooComplexError):
+        extract_pdf_text(visible)
+    hidden = visible.replace(b"<< /Type /Pages /Kids", b"<< /Type /Pages /X << >> /Kids", 1)
+    with pytest.raises((PdfTooComplexError, UnreadablePdfError)):
+        extract_pdf_text(hidden)
+
+
+def test_a_page_without_a_mediabox_is_unreadable(cv_pdf):
+    """pdfplumber raises an unwrapped TypeError here, not its own type."""
+    content = cv_pdf().replace(b"/MediaBox [0 0 612 792] ", b"", 1)
+    with pytest.raises(UnreadablePdfError, match="TypeError"):
+        extract_pdf_text(content)
+
+
+@pytest.mark.parametrize("stdout", ["", "garbage", "[1, 2, 3]", '{"a": 1}', '"ok"', '["ok", 5]', '["weird", 1]'])
+def test_an_unreadable_child_reply_is_unreadable(monkeypatch, cv_pdf, stdout):
+    monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP", f"import sys; sys.stdout.write({stdout!r})")
+    with pytest.raises(UnreadablePdfError):
+        extract_pdf_text(cv_pdf())
+
+
+@pytest.mark.parametrize("value", ["5", "{}", '{"image_only_pages": "x"}', '{"image_only_pages": ["1"]}'])
+def test_a_wrong_shaped_conversion_reply_is_unreadable(monkeypatch, tmp_path, value):
+    reply = f'["ok", {value}]'
+    monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP", f"import sys; sys.stdout.write({reply!r})")
+    with pytest.raises(UnreadablePdfError):
+        convert_pdf(tmp_path / "a.pdf", tmp_path / "a.docx")
+
+
+# --- a page tree that lies about its size (#806 review N2) -----------------
+
+
+def _lying_tree_pdf(nodes: int, per_node: int) -> bytes:
+    """Root /Count 1 over `nodes` intermediate nodes, each also /Count 1,
+    each holding `per_node` real pages: no /Count the raw scan sees is big."""
+    objs = {1: b"<< /Type /Catalog /Pages 2 0 R >>",
+            3: b"<< /Length 0 >>\nstream\n\nendstream"}
+    num, inter = 4, []
+    for _ in range(nodes):
+        node, num = num, num + 1
+        kids = []
+        for _ in range(per_node):
+            objs[num] = (b"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 612 792] "
+                         b"/Contents 3 0 R >>" % node)
+            kids.append(b"%d 0 R" % num)
+            num += 1
+        objs[node] = b"<< /Type /Pages /Parent 2 0 R /Count 1 /Kids [" + b" ".join(kids) + b"] >>"
+        inter.append(b"%d 0 R" % node)
+    objs[2] = b"<< /Type /Pages /Count 1 /Kids [" + b" ".join(inter) + b"] >>"
+    out, offsets = bytearray(b"%PDF-1.4\n"), {}
+    for n in sorted(objs):
+        offsets[n] = len(out)
+        out += b"%d 0 obj\n" % n + objs[n] + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offsets[n] for n in sorted(objs))
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
+def test_a_page_tree_that_understates_its_count_is_still_capped():
+    content = _lying_tree_pdf(nodes=100, per_node=200)  # 20,000 pages, every /Count 1
+    assert pdf_sandbox._PAGES_COUNT_RE.findall(content)  # the scan sees only /Count 1s
+    with pytest.raises(PdfTooComplexError, match=r"more than 300 pages \(found 301\)"):
+        extract_pdf_text(content)
+
+
+# --- environment and rlimit (#806 review N3, N5) ---------------------------
+
+
+def test_child_gets_no_credentials(monkeypatch):
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "leak")
+    monkeypatch.setenv("DB_PASSWORD", "leak")
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP",
+                        "import json, os, sys; sys.stdout.write(json.dumps(['ok', sorted(os.environ)]))")
+    env = pdf_sandbox.run_pdf_job("text", ["/x.pdf"], 30)
+    assert "AWS_SECRET_ACCESS_KEY" not in env and "DB_PASSWORD" not in env
+    assert "PATH" in env and "LC_ALL" in env
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="RLIMIT_AS is enforced on Linux only (every pod)")
+def test_rlimit_that_cannot_be_applied_on_linux_is_fatal(monkeypatch, cv_pdf):
+    """Lowering the child's hard RLIMIT_AS below the cap first makes the
+    child's own setrlimit raise; on Linux that must stop the child (a
+    deployment fault, a 500), never parse unbounded."""
+    child = ("import resource, sys; resource.setrlimit(resource.RLIMIT_AS, (200 << 20, 200 << 20)); "
+             "sys.path[:0] = sys.argv[1:3]; "
+             "from app.services.pdf_sandbox import _child_main; _child_main()")
+    monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP", child)
+    with pytest.raises(RuntimeError, match="exit code 1"):
+        extract_pdf_text(cv_pdf())
