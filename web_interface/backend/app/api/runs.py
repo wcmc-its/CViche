@@ -278,7 +278,9 @@ async def get_run_status(
 
     # Eager-load the run's steps in the access query (Run.steps is
     # lazy="raise_on_sql", so it must be loaded explicitly before access).
-    run = check_run_access(run_id, current_user, db, eager=(selectinload(Run.steps),))
+    run = check_run_access(
+        run_id, current_user, db, eager=(selectinload(Run.steps), selectinload(Run.user)),
+    )
 
     step_summaries = [
         StepSummary(
@@ -312,6 +314,8 @@ async def get_run_status(
         total_duration_seconds=total_duration_seconds,
         estimated_duration_seconds=run.estimated_duration_seconds,
         error_message=run.error_message,
+        cv_owner_name=run.cv_owner_name,
+        run_by=run_by_summary(run.user) if current_user.role == "admin" else None,
         steps=step_summaries
     )
 

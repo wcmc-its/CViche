@@ -60,6 +60,15 @@ class UploadResponse(BaseModel):
 # Run Schemas
 # ============================================================
 
+class RunBySummary(BaseModel):
+    """Who ran a run, as the admin "all runs" view shows it."""
+    id: int
+    display_name: str
+    cwid: str | None = None
+    email: str | None = None
+    department: str | None = None
+
+
 class RunStatus(BaseModel):
     """Overall run status."""
     run_id: str
@@ -78,6 +87,10 @@ class RunStatus(BaseModel):
     # created before the column existed (watchdog falls back to a default).
     estimated_duration_seconds: int | None = None
     error_message: str | None = None
+    # Stage 4's inferred CV owner (the run page heading); null until inferred.
+    cv_owner_name: str | None = None
+    # Who ran it. Admin only; null for everyone else and for user-less runs.
+    run_by: RunBySummary | None = None
     steps: list[StepSummary]
 
     class Config:
@@ -98,15 +111,6 @@ class StepSummary(BaseModel):
 
     class Config:
         from_attributes = True
-
-
-class RunBySummary(BaseModel):
-    """Who ran a run, as the admin "all runs" view shows it."""
-    id: int
-    display_name: str
-    cwid: str | None = None
-    email: str | None = None
-    department: str | None = None
 
 
 class RunSummary(BaseModel):

@@ -61,6 +61,17 @@ def test_run_status_cost_is_admin_only(client, db, seed_simple_mode, role, run_c
     assert [s["cost"] for s in body["steps"]] == [step_cost]
 
 
+@pytest.mark.parametrize("role, run_by_name", [("admin", "T"), ("user", None)])
+def test_run_status_carries_owner_and_admin_only_run_by(client, db, seed_simple_mode, role, run_by_name):
+    user, run = _owner_with_run(db, role)
+    run.cv_owner_name = "Jane Testperson"
+    db.commit()
+    _auth(client, user)
+    body = client.get(f"/api/run/{run.id}/status").json()
+    assert body["cv_owner_name"] == "Jane Testperson"
+    assert (body["run_by"] or {}).get("display_name") == run_by_name
+
+
 # ---------------------------------------------------------------------------
 # #801: query-parameter bounds, response models, narrowed quality excepts.
 # ---------------------------------------------------------------------------
