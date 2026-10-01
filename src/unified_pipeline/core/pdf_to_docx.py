@@ -178,6 +178,15 @@ _DATE = rf"(?:{_MONTH}\.?,?\s+|\d{{1,2}}/(?:\d{{1,2}}/)?)?(?:19|20)\d{{2}}"
 LEADING_LABEL_RE = re.compile(
     rf"^(?:\d{{1,3}}[.)]?|{_DATE}(?:\s*[-–—]\s*(?:{_DATE}|present|current|now)?)?)[.:,]?$",
     re.IGNORECASE)
+#: A line starting with a date (or a date range: it starts with a date).
+DATE_START_RE = re.compile(rf"^{_DATE}", re.IGNORECASE)
+#: A line starting with a date RANGE and then words is a date-led entry
+#: ("2015-2019 Residency, ..."): not a wrapped "2019-2021." tail (no words)
+#: and not a wrapped citation tail that starts with one date ("Nov 2019.
+#: (...)", "2019, City" -- 4 of 4 single-date vetoes on the twins split one
+#: source paragraph).
+DATE_LED_ENTRY_RE = re.compile(
+    rf"^{_DATE}\s*[-–—]\s*(?:{_DATE}|present|current|now)[.:,]?\s+\S", re.IGNORECASE)
 #: A line ending in a hyphen or dash is broken mid-word/mid-range ("1895-" /
 #: "1904."), so it wraps on even though it stops short of the right margin.
 WRAP_DASH_RE = re.compile(r"[-–—]$")
@@ -320,6 +329,7 @@ class _Para:
     later_x0: float | None = None    # x0 of its second line, once there is one
     marker: str = ""                 # dash/asterisk marker its first line began with
     indent: float = 0.0              # first_x0 minus its page's text left
+    date_led: bool = False           # its first line started with a date or date range
 
 
 def _is_bold(fontname: str) -> bool:
@@ -835,6 +845,15 @@ def _marker_vetoes(prev: _Line, line: _Line, para: _Para) -> bool:
     return dash is None or dash.group(1) == para.marker
 
 
+def _date_label_vetoes(prev: _Line, line: _Line, para: _Para) -> bool:
+    """`line` starts the next date-led entry: a date range and then words,
+    in a paragraph whose own first line started with a date, after a
+    `prev` that does not end mid-phrase. (One date-led entry per line is a
+    degree / training / appointment list, whatever the line lengths.)"""
+    return (para.date_led and DATE_LED_ENTRY_RE.match(line.text) is not None
+            and not _ends_mid_phrase(prev, line))
+
+
 def _outdent_splits(prev: _Line, line: _Line, para: _Para) -> bool:
     """`line` returns to the first-line x0 of a hanging-indent paragraph and
     `prev` does not end mid-phrase."""
@@ -853,7 +872,8 @@ def _continues(prev: _Line, line: _Line, left: float, right: float,
     not have fitted on it.
     ponytail: a hanging indent needs two lines to be seen, so a one-line
     entry followed by another entry merges unless a marker separates them."""
-    if _marker_vetoes(prev, line, para) or _outdent_splits(prev, line, para):
+    if _marker_vetoes(prev, line, para) or _date_label_vetoes(prev, line, para) \
+            or _outdent_splits(prev, line, para):
         return False
     left, right = _edges(prev, left, right)
     if line.has_tab or (prev.has_tab and not _hangs_from_label(prev, line, left, right)):
@@ -915,6 +935,13 @@ def _blank_gap_em(pages: list[list[_Line]]) -> float:
     return min(BLANK_GAP_EM, max(PARAGRAPH_GAP_EM, midpoint))
 
 
+def _blank_before_last(paras: list[_Para]) -> bool:
+    """The last paragraph was blank-separated from the one before it: a
+    page break that starts a new paragraph after it keeps that rhythm (the
+    gap across a page break cannot be measured)."""
+    return len(paras) >= 2 and not paras[-2].runs
+
+
 def _assemble(pages: list[list[_Line]], blank_gap_em: float = BLANK_GAP_EM) -> list[_Para]:
     """Lines -> paragraph stream, with an empty paragraph per large gap."""
     if not any(pages):
@@ -938,12 +965,14 @@ def _assemble(pages: list[list[_Line]], blank_gap_em: float = BLANK_GAP_EM) -> l
                 if paras[-1].later_x0 is None:
                     paras[-1].later_x0 = line.x0
             else:
-                if prev is not None and gap > blank_gap_em * prev.size:
+                if prev is not None and (gap > blank_gap_em * prev.size
+                                         or (index == 0 and _blank_before_last(paras))):
                     paras.append(_Para())
                 dash = DASH_MARKER_RE.match(line.text)
                 paras.append(_Para(runs=list(line.runs), first_x0=line.x0,
                                    marker=dash.group(1) if dash else "",
-                                   indent=line.x0 - page_left))
+                                   indent=line.x0 - page_left,
+                                   date_led=DATE_START_RE.match(line.text) is not None))
             prev = line
     return paras
 

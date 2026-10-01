@@ -402,6 +402,25 @@ def test_page_with_text_and_an_image_is_not_image_only(tmp_path):
     assert report.image_only_pages == []
 
 
+@pytest.mark.parametrize("blank_above", [True, False])
+def test_page_break_after_a_blank_separated_entry_gets_a_blank(tmp_path, blank_above):
+    """Entries separated by blank lines that straddle a page break keep a
+    blank between them; tight entries do not get one."""
+    second_y = 670 if blank_above else 688
+    pages = [[(False, 10, 72, 700, "Grant one"), (False, 10, 72, second_y, "Grant two")],
+             [(False, 10, 72, 700, "Grant three"), _FILL]]
+    _, doc = _convert(tmp_path, pages)
+    assert _texts(doc)[:-2] == (["Grant one", "", "Grant two", "", "Grant three"] if blank_above
+                                else ["Grant one", "Grant two", "Grant three"])
+
+
+def test_tight_entry_after_a_blank_separated_one_gets_no_blank_on_the_same_page(tmp_path):
+    page = [(False, 10, 72, 700, "Grant one"), (False, 10, 72, 670, "Grant two"),
+            (False, 10, 72, 658, "Grant three"), _FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:4] == ["Grant one", "", "Grant two", "Grant three"]
+
+
 def test_page_break_is_not_a_vertical_gap(tmp_path):
     pages = [[(False, 10, 72, 750, "Top of page one")], [(False, 10, 72, 60, "Bottom of page two")]]
     report, _ = _convert(tmp_path, pages)
@@ -1136,6 +1155,60 @@ def test_entry_ending_a_sentence_does_not_absorb_a_long_surname(tmp_path, ending
             (False, 10, x, 688, _SURNAME + " L, Other M.")]
     _, doc = _convert(tmp_path, [page])
     assert (entry.replace("\\)", ")") in _texts(doc)) is not merges
+
+
+@pytest.mark.parametrize("sep", [" ", ": "])
+@pytest.mark.parametrize("ragged", [False, True])
+def test_date_led_one_line_entries_stay_separate(tmp_path, ragged, sep):
+    """Three degree/appointment lines, each a date range and then words:
+    full width (merge by width) or ending 30pt short before a date token
+    that would not fit there (merge by ragged wrap) -- three entries."""
+    entries = [f"{2010 + i}-{2014 + i}{sep}Residency in Internal Medicine, Boston, MA" for i in range(3)]
+    right = 72 + _width(tmp_path, _LONG)
+    x = right - 30 - _width(tmp_path, entries[0]) if ragged else 72
+    page = [(False, 10, x, 700 - 12 * i, t) for i, t in enumerate(entries)]
+    page.append((False, 10, 72, 400, _LONG) if ragged else (False, 10, 72, 400, "x"))
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:3] == entries
+
+
+def test_open_ended_date_ranges_lead_entries_too(tmp_path):
+    entries = [f"{2010 + i}-present Professor of Medicine, Boston, MA" for i in range(2)]
+    page = [(False, 10, 72, 700 - 12 * i, t) for i, t in enumerate(entries)]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == entries
+
+
+def test_date_led_wrap_after_a_connector_still_merges(tmp_path):
+    first = "2010-2014 " + _LONG[:-3] + " and"
+    page = [(False, 10, 72, 700, first), (False, 10, 72, 688, "2015-2018 Fellowship in Cardiology")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == [f"{first} 2015-2018 Fellowship in Cardiology"]
+
+
+@pytest.mark.parametrize("tail", ["Nov 2019. (Invited talk)", "2019, Boston, MA."])
+def test_single_date_wrap_in_a_date_led_paragraph_merges(tmp_path, tail):
+    """A wrapped citation tail starting with one date is not a new entry."""
+    first = "2010-2014 " + _LONG[:-12] + " Journal"
+    page = [(False, 10, 72, 700, first), (False, 10, 72, 688, tail.replace("(", "\\(").replace(")", "\\)"))]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == [f"{first} {tail}"]
+
+
+def test_wrapped_date_range_tail_still_merges(tmp_path):
+    """A date-led grant whose wrap is only "2019-2021." (no words after the
+    date) is the same entry."""
+    first = "2018-2021 " + _LONG[:-6] + " Funded"
+    page = [(False, 10, 72, 700, first), (False, 10, 72, 688, "2019-2021.")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == [f"{first} 2019-2021."]
+
+
+def test_date_led_entry_after_a_plain_paragraph_still_wraps(tmp_path):
+    """Only a paragraph that itself began with a date vetoes the merge."""
+    page = [(False, 10, 72, 700, _LONG_STOP), (False, 10, 72, 688, "2015-2018 Fellowship in Cardiology")]
+    _, doc = _convert(tmp_path, [page])
+    assert len(doc.paragraphs) == 1
 
 
 def test_ragged_right_line_whose_next_word_fits_is_not_a_wrap(tmp_path):
