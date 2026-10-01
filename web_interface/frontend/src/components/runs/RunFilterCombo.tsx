@@ -152,7 +152,7 @@ export default function RunFilterCombo({ label, valueLabel, activeId, placeholde
           setQuery('')
           setHighlight(0)
         }}
-        className={`flex h-9 max-w-[260px] items-center gap-1.5 whitespace-nowrap rounded-lg border bg-white pl-3 pr-2.5 text-[13px] text-gray-500 hover:border-sand-400 focus:outline-none focus:ring-2 focus:ring-primary-500 ${
+        className={`flex h-9 max-w-[260px] items-center gap-1.5 whitespace-nowrap rounded-lg border bg-white pl-3 pr-2.5 text-[13px] text-gray-500 hover:border-sand-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
           activeId ? 'border-ink' : 'border-sand-400'
         }`}
       >

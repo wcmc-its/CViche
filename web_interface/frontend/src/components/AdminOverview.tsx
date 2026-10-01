@@ -103,7 +103,7 @@ function NeedsAttention({ p95 }: { p95: number | null | undefined }) {
               </div>
               <Link
                 to={`/run/${run.run_id}`}
-                className="shrink-0 rounded-lg border border-sand-400 bg-white px-3 py-1.5 text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+                className="shrink-0 rounded-lg border border-sand-400 bg-white px-3 py-1.5 text-[13px] font-medium text-gray-900 hover:bg-sand-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
               >
                 {kind === 'failed' ? 'Open run' : 'Inspect'}
               </Link>
@@ -180,7 +180,7 @@ function RecentFeedback({ onOpenFeedback }: { onOpenFeedback: () => void }) {
         <button
           type="button"
           onClick={onOpenFeedback}
-          className="text-[13px] text-primary-600 hover:text-primary-700 focus:outline-none focus-visible:underline"
+          className="text-[13px] text-primary-600 hover:text-primary-700 focus-visible:outline-none focus-visible:underline"
         >
           All responses
         </button>

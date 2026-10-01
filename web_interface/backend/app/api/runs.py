@@ -15,6 +15,7 @@ from app.models import Run, RunState, Step, User
 from app.schemas import (
     RunFilterOptions, RunStatus, RunSummary, StepSummary, PaginatedRuns,
     CapacityResponse, RunActionResponse, RestartRunResponse,
+    RunQualityReport, RunReviewNote,
 )
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
@@ -31,6 +32,8 @@ from app.services.runs_admin_query import (
     RunScope, build_filter_options, filtered_runs_query, parse_run_filters,
     run_by_summary,
 )
+from app.services import quality_score_service
+from app.services.run_quality_report import build_run_quality_report, columns_need_cleanup
 from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
@@ -250,6 +253,10 @@ async def list_runs(
             cv_owner_name=run.cv_owner_name,
             submission_type=run.submission_type,
             run_by=run_by_summary(run.user) if all_scope else None,
+            # Score columns are admin-only, like cost: never on scope=mine.
+            quality_score=run.quality_score if all_scope else None,
+            quality_band=run.quality_band if all_scope else None,
+            quality_cap=run.quality_cap if all_scope else None,
         ))
 
     return PaginatedRuns(
@@ -271,7 +278,9 @@ async def get_run_status(
 
     # Eager-load the run's steps in the access query (Run.steps is
     # lazy="raise_on_sql", so it must be loaded explicitly before access).
-    run = check_run_access(run_id, current_user, db, eager=(selectinload(Run.steps),))
+    run = check_run_access(
+        run_id, current_user, db, eager=(selectinload(Run.steps), selectinload(Run.user)),
+    )
 
     step_summaries = [
         StepSummary(
@@ -305,6 +314,8 @@ async def get_run_status(
         total_duration_seconds=total_duration_seconds,
         estimated_duration_seconds=run.estimated_duration_seconds,
         error_message=run.error_message,
+        cv_owner_name=run.cv_owner_name,
+        run_by=run_by_summary(run.user) if current_user.role == "admin" else None,
         steps=step_summaries
     )
 
@@ -742,6 +753,45 @@ def retry_step(
     background_tasks.add_task(run_pipeline)
 
     return {"message": f"Retrying run {run_id} from step {step_number}", "status": "running"}
+
+
+@router.get("/run/{run_id}/run-quality", response_model=RunQualityReport)
+def get_run_quality(
+    run_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> RunQualityReport:
+    """Quality score breakdown and run-doctor findings for one run (admin only).
+
+    Either part is null when its artifact was never stored. Sync def so the
+    blocking storage reads run off the event loop. The path is not
+    /run/{run_id}/quality, which is the extraction data-quality report below.
+    """
+    check_run_access(run_id, admin, db)
+    return build_run_quality_report(
+        run_id,
+        quality_score_service.get_cached_score(run_id),
+        quality_score_service.get_doctor_report(run_id),
+    )
+
+
+@router.get("/run/{run_id}/review-note", response_model=RunReviewNote)
+def get_run_review_note(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> RunReviewNote:
+    """Whether the run's owner should see the "may need cleanup" note.
+
+    Open to the run's owner and admins; answers a bool and never the score.
+    """
+    run = check_run_access(run_id, current_user, db)
+    cols = quality_score_service.ScoreColumns(
+        run.quality_score, run.quality_band, run.quality_cap)
+    if cols.quality_score is None:
+        # Not yet backfilled onto the row: fall back to the cached score.
+        cols = quality_score_service.score_columns(quality_score_service.get_cached_score(run_id))
+    return RunReviewNote(needs_cleanup=columns_need_cleanup(cols))
 
 
 @router.get("/run/{run_id}/quality")

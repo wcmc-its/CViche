@@ -41,7 +41,7 @@ export default function PromptLogViewer({
             <li key={i}>
               <button
                 onClick={() => onSelectPromptLog(log.filename)}
-                className={`w-full text-left px-3 py-2 rounded text-xs truncate transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none ${
+                className={`w-full text-left px-3 py-2 rounded text-xs truncate transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none ${
                   selectedPromptLog === log.filename
                     ? 'bg-primary-600 text-white'
                     : 'bg-white hover:bg-sand-100 text-gray-700'

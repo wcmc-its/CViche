@@ -294,7 +294,7 @@ export default function HelpPage() {
                           aria-expanded={open}
                           aria-controls={`faq-panel-${i}`}
                           onClick={() => setOpenFaq(open ? null : i)}
-                          className="flex w-full items-center justify-between gap-3 py-3 text-left font-semibold text-gray-900 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-600"
+                          className="flex w-full items-center justify-between gap-3 py-3 text-left font-semibold text-gray-900 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-600"
                         >
                           {item.q}
                           <ChevronDown

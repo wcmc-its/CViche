@@ -96,7 +96,7 @@ export function ActiveFilterChips({ controls, options, runs, currentUserId }: Om
             onClick={() => setFilter(chip.key, '')}
             aria-label={`Remove ${chip.label} filter`}
             title="Remove filter"
-            className="flex h-[18px] w-[18px] items-center justify-center rounded-full hover:bg-white/20 focus:outline-none focus:ring-2 focus:ring-white"
+            className="flex h-[18px] w-[18px] items-center justify-center rounded-full hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
           >
             <X className="h-[11px] w-[11px]" aria-hidden="true" />
           </button>

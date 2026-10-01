@@ -7,7 +7,7 @@ import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 import RunTable from './runs/RunTable'
 import { ActiveFilterChips, RunFilterCombos } from './runs/RunFilterBar'
 import { toListParams, useRunFilters } from './runs/runFilters'
-import { compareRuns, groupRuns } from './runs/runGroups'
+import { compareRunsDir, groupRuns } from './runs/runGroups'
 import type { SortDir, SortField } from './runs/runGroups'
 
 interface RunHistoryProps {
@@ -134,10 +134,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
 
   // Grouping is per loaded page: reruns of the same faculty member that fall on
   // another page are not merged into this page's group.
-  const groups = groupRuns(runs).sort((a, b) => {
-    const cmp = compareRuns(a.latest, b.latest, sortField, feedbackMap)
-    return sortDir === 'asc' ? cmp : -cmp
-  })
+  const groups = groupRuns(runs).sort((a, b) => compareRunsDir(a.latest, b.latest, sortField, sortDir, feedbackMap))
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
   const startIndex = currentPage * PAGE_SIZE

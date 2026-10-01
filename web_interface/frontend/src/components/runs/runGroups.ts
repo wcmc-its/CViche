@@ -1,6 +1,6 @@
 import type { RunSummary } from '../../types'
 
-export type SortField = 'status' | 'cv' | 'started_at' | 'total_duration_seconds' | 'total_cost' | 'feedback'
+export type SortField = 'status' | 'cv' | 'started_at' | 'total_duration_seconds' | 'total_cost' | 'feedback' | 'quality_score'
 export type SortDir = 'asc' | 'desc'
 
 export const OWNER_UNKNOWN_LABEL = 'Owner not yet identified'
@@ -52,6 +52,12 @@ function feedbackRank(runId: string, feedbackMap: Record<string, boolean>): numb
   return feedbackMap[runId] === false ? 1 : 0
 }
 
+/** Score order with unscored runs after every scored one. */
+function compareScores(a: number | null | undefined, b: number | null | undefined): number {
+  if (a == null || b == null) return a == null && b == null ? 0 : a == null ? 1 : -1
+  return a - b
+}
+
 /** Ascending comparison of two runs on one sort field. */
 export function compareRuns(
   a: RunSummary,
@@ -72,7 +78,22 @@ export function compareRuns(
       return (a.total_cost ?? 0) - (b.total_cost ?? 0)
     case 'feedback':
       return feedbackRank(a.run_id, feedbackMap) - feedbackRank(b.run_id, feedbackMap)
+    case 'quality_score':
+      return compareScores(a.quality_score, b.quality_score)
   }
+}
+
+/** compareRuns in the chosen direction; unscored runs stay last either way. */
+export function compareRunsDir(
+  a: RunSummary,
+  b: RunSummary,
+  field: SortField,
+  dir: SortDir,
+  feedbackMap: Record<string, boolean>,
+): number {
+  const cmp = compareRuns(a, b, field, feedbackMap)
+  const unscored = field === 'quality_score' && (a.quality_score == null || b.quality_score == null)
+  return dir === 'asc' || unscored ? cmp : -cmp
 }
 
 /** Display label for who ran a run; null when unknown. */

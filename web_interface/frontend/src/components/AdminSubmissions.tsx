@@ -223,7 +223,7 @@ export default function AdminSubmissions() {
             placeholder="Filter by user email..."
             value={filterUser}
             onChange={(e) => setFilterUser(e.target.value)}
-            className="pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none w-64"
+            className="pl-9 pr-3 py-2 text-sm border border-gray-300 rounded-lg focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none w-64"
           />
         </div>
         <label className="sr-only" htmlFor="filter-status">Filter by status</label>
@@ -231,7 +231,7 @@ export default function AdminSubmissions() {
           id="filter-status"
           value={filterStatus}
           onChange={(e) => setFilterStatus(e.target.value)}
-          className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none bg-white"
+          className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none bg-white"
         >
           {/* Default ("") hides never-started "created" runs (abandoned/declined
               uploads). "all" opts back in to every status; "created" inspects
@@ -394,7 +394,7 @@ export default function AdminSubmissions() {
               <button
                 onClick={handleShowMore}
                 disabled={loadingMore}
-                className="w-full py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none flex items-center justify-center gap-1.5"
+                className="w-full py-2 text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 rounded-lg transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none flex items-center justify-center gap-1.5"
               >
                 {loadingMore ? (
                   <>

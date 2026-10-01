@@ -43,10 +43,10 @@ export default function LogViewer({ logs, logsEndRef }: LogViewerProps) {
         <span className="font-mono">{logs.length} {logs.length === 1 ? 'line' : 'lines'}</span>
         {logs.length > 0 && (
           <span className="flex gap-3">
-            <button type="button" onClick={handleCopy} className="hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-primary-500 rounded">
+            <button type="button" onClick={handleCopy} className="hover:text-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 rounded">
               {copied ? 'Copied' : 'Copy'}
             </button>
-            <button type="button" onClick={handleDownload} className="hover:text-gray-100 focus:outline-none focus:ring-2 focus:ring-primary-500 rounded">
+            <button type="button" onClick={handleDownload} className="hover:text-gray-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 rounded">
               Download
             </button>
           </span>
@@ -60,9 +60,9 @@ export default function LogViewer({ logs, logsEndRef }: LogViewerProps) {
               const time = m ? m[1] : ''
               const message = m ? m[2] : log
               return (
-                <div key={i} className="grid grid-cols-[auto_1fr] gap-x-4">
+                <div key={i} className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4">
                   <span className="text-gray-500 tabular-nums">{time}</span>
-                  <span className={`${lineTone(message)} break-words`}>{message}</span>
+                  <span className={`${lineTone(message)} [overflow-wrap:anywhere]`}>{message}</span>
                 </div>
               )
             })}

@@ -246,7 +246,7 @@ export default function AdminFeedbackInsights() {
       <div className="flex justify-end">
         <button
           onClick={handleExport}
-          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500"
+          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
         >
           <Download className="w-4 h-4" aria-hidden="true" />
           Export CSV
@@ -367,7 +367,7 @@ export default function AdminFeedbackInsights() {
                   setDeleteError(null)
                   setPendingDelete(f)
                 }}
-                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 transition-colors focus:outline-none focus:ring-2 focus:ring-red-500"
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
                 aria-label={`Delete feedback for run ${f.run_id}`}
               >
                 <Trash2 className="h-4 w-4" aria-hidden="true" />

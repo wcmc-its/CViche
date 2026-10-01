@@ -1,7 +1,10 @@
 import { api } from './client'
 import type { ApiError } from './client'
 import { runRoutes } from './routes'
-import type { RunStatus, PaginatedRuns, FeedbackStatus, RunListParams, RunFilterOptions } from '../types'
+import type {
+  RunStatus, PaginatedRuns, FeedbackStatus, RunListParams, RunFilterOptions,
+  RunQualityReport, RunReviewNote,
+} from '../types'
 
 export async function getRunStatus(runId: string): Promise<RunStatus> {
   return api.get<RunStatus>(runRoutes.status(runId))
@@ -91,4 +94,15 @@ export interface Capacity {
 // applies -- so callers should fail open if this request errors.
 export async function getCapacity(): Promise<Capacity> {
   return api.get<Capacity>(runRoutes.capacity())
+}
+
+/** Admin only: score breakdown and run-doctor findings for a run. Either part
+ *  is null when its artifact was never stored. */
+export async function getRunQuality(runId: string): Promise<RunQualityReport> {
+  return api.get<RunQualityReport>(runRoutes.quality(runId))
+}
+
+/** Run owner or admin: whether the run may need cleanup. Never the score. */
+export async function getRunReviewNote(runId: string): Promise<RunReviewNote> {
+  return api.get<RunReviewNote>(runRoutes.reviewNote(runId))
 }
