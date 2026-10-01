@@ -17,7 +17,7 @@ from sqlalchemy.orm import Query, Session, contains_eager
 
 from app.errors import validation_error
 from app.models import Run, User
-from app.schemas import FilterCount, RunByOption, RunBySummary, RunFilterOptions
+from app.schemas import FacultyOption, FilterCount, RunByOption, RunBySummary, RunFilterOptions
 
 # Run.submission_type of a faculty member uploading their own CV
 # (upload.py's Literal["own_cv", "authorized_admin"]).
@@ -113,15 +113,19 @@ def _department_counts(db: Session, filters: RunFilters) -> list[FilterCount]:
     return [FilterCount(value=value, count=count) for value, count in rows]
 
 
-def _faculty_counts(db: Session, filters: RunFilters) -> list[FilterCount]:
+def _faculty_counts(db: Session, filters: RunFilters) -> list[FacultyOption]:
     rows = (
-        db.query(Run.cv_owner_name, func.count(Run.id))
+        db.query(Run.cv_owner_name, func.count(Run.id), func.max(Run.started_at))
         .select_from(Run).outerjoin(User, Run.user_id == User.id)
         .filter(Run.cv_owner_name.isnot(None),
                 *_clauses(filters, skip_faculty=True))
-        .group_by(Run.cv_owner_name).order_by(Run.cv_owner_name).all()
+        # Most recently run first, so the short list matches the runs table
+        # (alphabetical showed only A-names in its first eight).
+        .group_by(Run.cv_owner_name)
+        .order_by(func.max(Run.started_at).desc(), Run.cv_owner_name).all()
     )
-    return [FilterCount(value=value, count=count) for value, count in rows]
+    return [FacultyOption(value=value, count=count, last_run_at=last)
+            for value, count, last in rows]
 
 
 def _run_by_counts(db: Session, filters: RunFilters) -> list[RunByOption]:

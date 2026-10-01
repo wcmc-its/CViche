@@ -413,8 +413,9 @@ def test_filter_options_unfiltered(client, db, seed_simple_mode):
     body = resp.json()
     assert body["departments"] == [{"value": "Library", "count": 2},
                                    {"value": "Medicine", "count": 2}]
-    assert body["faculty"] == [{"value": "Jane Testperson", "count": 3},
-                               {"value": "Omar Testperson", "count": 2}]
+    assert body["faculty"] == [  # newest run first (ADM006 > ADM003)
+        {"value": "Omar Testperson", "count": 2, "last_run_at": "2026-09-06T00:00:00"},
+        {"value": "Jane Testperson", "count": 3, "last_run_at": "2026-09-03T00:00:00"}]
     assert [(o["display_name"], o["count"]) for o in body["run_by"]] == [
         ("Alice Tester", 2), ("Bob Tester", 2), ("Root Admin", 1)]
     assert body["run_by"][0] == {"id": users["alice"].id, "display_name": "Alice Tester",

@@ -144,6 +144,11 @@ class FilterCount(BaseModel):
     count: int
 
 
+class FacultyOption(FilterCount):
+    """A faculty filter option; the list is ordered by ``last_run_at``, newest first."""
+    last_run_at: datetime | None = None
+
+
 class RunByOption(RunBySummary):
     count: int
 
@@ -151,7 +156,7 @@ class RunByOption(RunBySummary):
 class RunFilterOptions(BaseModel):
     """GET /runs/filter-options: the options each admin runs filter offers."""
     departments: list[FilterCount]
-    faculty: list[FilterCount]
+    faculty: list[FacultyOption]
     run_by: list[RunByOption]
     self_count: int
 

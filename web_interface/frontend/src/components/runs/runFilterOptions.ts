@@ -1,4 +1,5 @@
 import type { RunFilterOptions, RunSummary } from '../../types'
+import { formatRelativeDate } from '../../utils'
 import { RUN_BY_SELF } from './runFilters'
 import { SELF_RUN_BY_LABEL } from './runGroups'
 
@@ -41,13 +42,15 @@ export function buildDepartmentModel(options: RunFilterOptions): ComboModel {
   }
 }
 
-/** Faculty options carry only a name from the API, so name is all the search can match. */
+/** Faculty options carry only a name from the API, so name is all the search can match.
+ *  Kept in the API's order: most recently run first. */
 export function buildFacultyModel(options: RunFilterOptions): ComboModel {
   return {
     pinned: [{ id: '', label: 'All faculty', search: '' }],
     items: options.faculty.map((f) => ({
       id: f.value,
       label: f.value,
+      meta: f.last_run_at ? `Last run ${formatRelativeDate(f.last_run_at).display}` : undefined,
       count: f.count,
       search: f.value.toLowerCase(),
     })),
