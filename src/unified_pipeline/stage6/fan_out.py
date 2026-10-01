@@ -158,6 +158,13 @@ _EXTRA_RECORD_KEYS: Mapping[str, frozenset[str]] = MappingProxyType({
                      'dates_attended_end_date', 'start_date', 'end_date'}),
 })
 
+# #1187: codes whose renderer writes nothing for a record list left whole --
+# `sections/education.py` skips a B1 row with no top-level degree or
+# institution, so an unsplit `degrees` list vanishes. Other codes keep the
+# entry's text (K2/K4 refuse to split by design), so a declined list there
+# loses nothing; warning on them put 31 false alarms in 16 corpus CVs.
+_LIST_LOST_WHEN_KEPT_WHOLE = frozenset({'B1'})
+
 # #1187: the attendance dates `sections/education.py` writes into B1's Dates
 # column on top of `_RENDERED_FIELDS['B1']`: flat, generic, and the nested
 # `dates_attended: {start_date, end_date}` dict. A STRING `dates_attended` is
@@ -357,7 +364,8 @@ def _rejection_warnings(rejected: Mapping[tuple[str, str], list[list[str]]]) -> 
                         f"`{key}` holds several records that were not split into "
                         f"separate rows ({why}); a record may be missing from "
                         "the output"),
-            'evidence': [f"{code}.{key}: {len(cases)} entries", *stray[:_EVIDENCE_KEYS_SHOWN]],
+            'evidence': [f"{code}.{key}: {len(cases)} entr{'y' if len(cases) == 1 else 'ies'}",
+                         *stray[:_EVIDENCE_KEYS_SHOWN]],
             'severity': _WARN_SEVERITY,
         })
     return out
@@ -411,7 +419,7 @@ def fan_out_multi_record_entries(
 
     A list of record-like dicts that is not fanned out -- `_record_list`
     refused it, or a later guard declined the entry -- is not dropped silently
-    (#1187): when `warnings` is given, one render-warning dict per (code, list
+    (#1187): for a code in `_LIST_LOST_WHEN_KEPT_WHOLE`, when `warnings` is given, one render-warning dict per (code, list
     key) is appended to it (`REJECTED_LIST_CHECK`).
     """
     out: list[dict[str, Any]] = []
@@ -420,7 +428,7 @@ def fan_out_multi_record_entries(
         code = entry.get('taxonomy_code')
         schema = _record_schema(code, frozenset(schema_fields.get(code, {}).get('fields', ())))
         children = _fan_out_entry(entry, schema)
-        if children is None:
+        if children is None and code in _LIST_LOST_WHEN_KEPT_WHOLE:
             for key, stray in _declined_record_lists(entry, schema).items():
                 rejected.setdefault((str(code), key), []).append(stray)
         out.extend(children if children is not None else [entry])

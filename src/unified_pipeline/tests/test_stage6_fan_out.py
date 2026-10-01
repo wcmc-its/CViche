@@ -511,10 +511,10 @@ def _degree(degree, institution, year, **dates):
 
 
 def _two_degrees(dates_attended):
-    first = _degree('BSc', 'Maple Glen University', '2005', **dates_attended[0])
+    first = _degree('BSc', 'Harrowfield University', '2005', **dates_attended[0])
     second = _degree('MSc', 'Birch Hollow University', '2008', **dates_attended[1])
     return {'taxonomy_code': 'B1', 'element_idx_start': 3,
-            'text': 'BSc Maple Glen University 2001 2005 2005\tMSc Birch Hollow University 2006 2008 2008',
+            'text': 'BSc Harrowfield University 2001 2005 2005\tMSc Birch Hollow University 2006 2008 2008',
             'extracted_fields': {'degrees': [first, second]}}
 
 
@@ -553,7 +553,7 @@ class TestB1DatesAttended:
             str(source), str(target), research_summary_path=None)
         body = ' '.join(t.text or '' for t in Document(str(target)).element.body.iter(
             '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
-        for name in ('Maple Glen University', 'Birch Hollow University', 'BSc', 'MSc'):
+        for name in ('Harrowfield University', 'Birch Hollow University', 'BSc', 'MSc'):
             assert name in body
 
 
@@ -576,7 +576,13 @@ class TestRejectedListWarning:
         entry = _two_degrees([{}, {}])
         entry['text'] = entry['text'] + ' Zzunheld'
         (warning,) = self._warnings(entry)
-        assert warning['evidence'] == ['B1.degrees: 1 entries']
+        assert warning['evidence'] == ['B1.degrees: 1 entry']
+
+    def test_a_code_that_keeps_the_entry_text_does_not_warn(self):
+        entry = _two_degrees([{}, {}])
+        entry['text'] = entry['text'] + ' Zzunheld'
+        entry['taxonomy_code'] = 'K4'
+        assert self._warnings(entry) == []
 
     def test_one_warning_per_code_and_key_counts_the_entries(self):
         entry = _two_degrees(_NESTED_DATES)
@@ -585,8 +591,8 @@ class TestRejectedListWarning:
         assert warning['evidence'][0] == 'B1.degrees: 2 entries'
 
     def test_a_fanned_out_or_single_record_entry_does_not_warn(self):
-        single = {'taxonomy_code': 'B1', 'text': 'BSc Maple Glen University 2005',
-                  'extracted_fields': _degree('BSc', 'Maple Glen University', '2005')}
+        single = {'taxonomy_code': 'B1', 'text': 'BSc Harrowfield University 2005',
+                  'extracted_fields': _degree('BSc', 'Harrowfield University', '2005')}
         assert self._warnings(_two_degrees(_NESTED_DATES), single) == []
 
     def test_no_warnings_list_is_backward_compatible(self):
