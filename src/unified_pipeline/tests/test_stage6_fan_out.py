@@ -533,12 +533,26 @@ class TestB1DatesAttended:
         entry['extracted_fields']['degrees'][0]['gpa'] = '3.9'
         assert _fan(entry) == [entry]
 
-    def test_a_string_dates_attended_holds_no_token_so_the_entry_stays_whole(self):
-        # The B1 renderer ignores a string `dates_attended`; fanning out would
-        # drop the 2001/2006 start years the entry's text names.
+    def test_a_string_dates_attended_holds_its_tokens_when_no_start_end_exists(self):
+        # The B1 renderer writes a string `dates_attended` into the Dates cell
+        # when no start/end builds a range, so the 2001/2006 start years the
+        # entry's text names are held and the degrees fan out.
         string_dates = [{'dates_attended': '2001-2005'}, {'dates_attended': '2006-2008'}]
-        entry = _two_degrees(string_dates)
+        children = _fan(_two_degrees(string_dates))
+        assert [c['extracted_fields']['degree'] for c in children] == ['BSc', 'MSc']
+
+    def test_a_string_dates_attended_holds_nothing_beside_a_start_date(self):
+        # With a flat start/end the renderer builds the range from those and
+        # never writes the string, so its tokens are not held.
+        entry = _two_degrees([{'dates_attended': '2001-2005', 'start_date': '2005'},
+                              {'dates_attended': '2006-2008', 'start_date': '2008'}])
         assert _fan(entry) == [entry]
+
+    def test_discipline_is_a_rendered_field_so_a_degree_with_one_fans_out(self):
+        entry = _two_degrees(_NESTED_DATES)
+        entry['text'] += ' Zzfield'
+        entry['extracted_fields']['degrees'][0]['discipline'] = 'Zzfield'
+        assert [c['extracted_fields']['degree'] for c in _fan(entry)] == ['BSc', 'MSc']
 
     def test_both_degrees_render(self, tmp_path):
         import json
