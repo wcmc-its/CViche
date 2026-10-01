@@ -751,3 +751,12 @@ class TestDisciplineAndStringDates:
 
     def test_a_blank_string_dates_attended_leaves_the_cell_empty(self):
         assert self._render(degree="PhD", dates_attended="  ").cells[2].text == ""
+
+    def test_string_dates_attended_is_formatted_like_other_b1_dates(self):
+        row = self._render(degree="PhD", dates_attended="1998-06")
+        assert row.cells[2].text == "06/1998"
+
+    def test_string_dates_attended_repeating_the_year_awarded_is_skipped(self):
+        row = self._render(degree="PhD", dates_attended="1987", year_awarded="1987")
+        assert row.cells[2].text == ""
+        assert row.cells[3].text == "1987"

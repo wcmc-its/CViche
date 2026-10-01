@@ -122,12 +122,17 @@ def _with_discipline(degree: str, fields: Mapping) -> str:
     return f"{degree}, {discipline}" if degree else discipline
 
 
-def _string_dates_attended(fields: Mapping) -> str:
-    """A string `dates_attended` exactly as stage 4 wrote it, for the Dates
-    cell when no start/end range could be built (#1187). Written verbatim: a
+def _string_dates_attended(fields: Mapping, year_awarded: str) -> str:
+    """A string `dates_attended`, formatted like every other B1 Dates cell
+    (mm/yyyy), for the Dates cell when no start/end range could be built
+    (#1187). Empty when it only repeats the Year Awarded cell, so the cell is
+    filled only if it adds information. Not run through format_date_range: a
     bare "2010" must not become an invented "2010-Present"."""
     value = fields.get('dates_attended')
-    return value.strip() if isinstance(value, str) else ''
+    if not isinstance(value, str) or not value.strip():
+        return ''
+    text = format_date_for_section(value.strip(), 'B1')
+    return '' if text.strip() == str(year_awarded or '').strip() else text
 
 
 class EducationSection:
@@ -255,9 +260,6 @@ class EducationSection:
                 dates = format_date_range(start, end, 'B1')
             else:
                 dates = ''
-            if not dates:
-                dates = _string_dates_attended(fields)
-
             # Year awarded - try to extract from raw text if missing
             year_awarded = fields.get('year_awarded') or fields.get('year') or end or ''
             year_is_enriched = False
@@ -272,6 +274,9 @@ class EducationSection:
             # Format year_awarded - B1 uses mm/yyyy but year awarded column is just yyyy
             if year_awarded:
                 year_awarded = format_date_for_section(year_awarded, 'H')  # H uses yyyy format
+
+            if not dates:
+                dates = _string_dates_attended(fields, year_awarded)
 
             # A degree that is still in progress ("expected May 2026", a future
             # award year, etc.) must NOT be presented as a conferred year. Mark it
