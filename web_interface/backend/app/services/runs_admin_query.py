@@ -232,6 +232,17 @@ def load_feedback_summaries(db: Session, run_ids: list[str], current_user_id: in
     }
 
 
+def load_run_feedback_with_reviewers(db: Session, run_id: str) -> list[tuple[Feedback, str]]:
+    """Every feedback row on one run with its reviewer's display name, newest first."""
+    return (
+        db.query(Feedback, User.display_name)
+        .join(User, User.id == Feedback.user_id)
+        .filter(Feedback.run_id == run_id)
+        .order_by(Feedback.submitted_at.desc(), Feedback.id.desc())
+        .all()
+    )
+
+
 def empty_feedback_summary(*, with_reviewers: bool) -> RunFeedbackSummary:
     return RunFeedbackSummary(reviewers=[] if with_reviewers else None)
 

@@ -424,7 +424,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           {...RATING_SCALES.overall_usefulness}
           value={formData.overall_usefulness}
           onChange={(v) => updateField('overall_usefulness', v)}
-          ariaLabel="How useful was the CViche output?"
+          ariaLabel={QUESTION_LABELS.overall_usefulness}
         />
       </QuestionRow>
       <QuestionRow label={QUESTION_LABELS.overall_accuracy} helper="Optional">
@@ -432,7 +432,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           {...RATING_SCALES.overall_accuracy}
           value={formData.overall_accuracy}
           onChange={(v) => updateField('overall_accuracy', v)}
-          ariaLabel="How accurate was the output?"
+          ariaLabel={QUESTION_LABELS.overall_accuracy}
         />
       </QuestionRow>
       <QuestionRow label={QUESTION_LABELS.overall_completeness} helper="Optional">
@@ -440,7 +440,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           {...RATING_SCALES.overall_completeness}
           value={formData.overall_completeness}
           onChange={(v) => updateField('overall_completeness', v)}
-          ariaLabel="How complete was the output?"
+          ariaLabel={QUESTION_LABELS.overall_completeness}
         />
       </QuestionRow>
 
@@ -541,7 +541,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           options={EFFORT_OPTIONS}
           value={formData.correction_effort}
           onChange={(v) => updateField('correction_effort', v)}
-          ariaLabel="How long did it take to correct the CViche output?"
+          ariaLabel={QUESTION_LABELS.correction_effort}
           required
         />
       </QuestionRow>
@@ -560,7 +560,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           options={SUMMARY_GENERATED_OPTIONS}
           value={formData.summary_generated}
           onChange={(v) => updateField('summary_generated', v)}
-          ariaLabel="Did CViche generate a research summary for this CV?"
+          ariaLabel={QUESTION_LABELS.summary_generated}
         />
       </QuestionRow>
       {formData.summary_generated === true && (
@@ -569,7 +569,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
             {...RATING_SCALES.summary_quality}
             value={formData.summary_quality}
             onChange={(v) => updateField('summary_quality', v)}
-            ariaLabel="How would you rate the research summary?"
+            ariaLabel={QUESTION_LABELS.summary_quality}
           />
         </QuestionRow>
       )}
@@ -580,7 +580,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
           {...RATING_SCALES.likelihood_to_recommend}
           value={formData.likelihood_to_recommend}
           onChange={(v) => updateField('likelihood_to_recommend', v)}
-          ariaLabel="How likely are you to recommend CViche to a colleague?"
+          ariaLabel={QUESTION_LABELS.likelihood_to_recommend}
         />
       </QuestionRow>
 

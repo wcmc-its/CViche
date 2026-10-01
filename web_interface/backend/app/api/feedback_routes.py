@@ -12,6 +12,7 @@ from app.models import Run, Step, Feedback, User
 from app.schemas import iso_with_offset, FeedbackDetail, FeedbackSubmit, FeedbackResponse, RunFeedbackStatus
 from app.auth import get_current_user
 from app.services.run_service import check_run_access
+from app.services.runs_admin_query import load_run_feedback_with_reviewers
 
 logger = logging.getLogger(__name__)
 
@@ -223,19 +224,13 @@ def get_all_feedback(
     run_id: str,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-):
+) -> list[FeedbackDetail]:
     """Every reviewer's feedback on this run, newest first.
 
     Run owner or admin only (403 otherwise, 404 for an unknown run).
     """
     check_run_access(run_id, current_user, db)
-    rows = (
-        db.query(Feedback, User.display_name)
-        .join(User, User.id == Feedback.user_id)
-        .filter(Feedback.run_id == run_id)
-        .order_by(Feedback.submitted_at.desc(), Feedback.id.desc())
-        .all()
-    )
+    rows = load_run_feedback_with_reviewers(db, run_id)
     return [
         FeedbackDetail(**serialize_feedback(feedback), display_name=display_name)
         for feedback, display_name in rows
