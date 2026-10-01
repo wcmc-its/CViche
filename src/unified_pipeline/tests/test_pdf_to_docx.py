@@ -769,12 +769,21 @@ def test_rows_offset_under_a_line_height_still_split_into_columns(tmp_path):
     assert _order(doc, "Side", "Main") == ["Side"] * 8 + ["Main"] * 8
 
 
-def test_full_width_line_splits_the_columns_into_regions(tmp_path):
-    """Between full-width lines each region reads left column, then right."""
-    heading = (False, 10, _gutter_middle(tmp_path) - 60, 520, "Fullwidthheadingthatcrossesthegutter")
+@pytest.mark.parametrize("in_gutter", [False, True])
+def test_full_width_line_splits_the_columns_into_regions(tmp_path, in_gutter):
+    """Between full-width lines each region reads left column, then right.
+    The heading's long word starts before the gutter, or inside it short of
+    its middle: neither gap is a column gap by the gutter."""
+    # Column gaps before the gutter band and in the main column, none by
+    # the gutter: still full width.
+    label_end = 72 + _width(tmp_path, "2019")
+    heading = [(False, 10, 72, 520, "2019"),
+               (False, 10, 2 * _gutter_middle(tmp_path) - 260 + 5 if in_gutter else label_end + 16, 520,
+                "Fullwidthheadingthatcrossesthegutter"),
+               (False, 10, 450, 520, "2020")]
     below = [(False, 10, 72, 500 - 14 * i, f"Low {i}") for i in range(6)] + \
             [(False, 10, 260, 495 - 14 * i, f"Deep {i}") for i in range(6)]
-    _, doc = _convert(tmp_path, [_two_column_page(right_offset=5) + [heading] + below])
+    _, doc = _convert(tmp_path, [_two_column_page(right_offset=5) + heading + below])
     words = [w[:4] for w in " ".join(_texts(doc)).split()]
     assert [w for w in words if w in ("Side", "Main", "Full", "Low", "Deep")] == (
         ["Side"] * 8 + ["Main"] * 8 + ["Full"] + ["Low"] * 6 + ["Deep"] * 6)
@@ -848,6 +857,54 @@ def test_indented_main_column_line_is_not_full_width(tmp_path):
     assert _order(doc, "Side", "Main", "Indented") == ["Side"] * 8 + ["Main"] * 3 + ["Indented"] + ["Main"] * 4
 
 
+@pytest.mark.parametrize("past_edge", [2.9, 3.6, -6.0])
+def test_sidebar_line_and_main_heading_on_one_baseline_split(tmp_path, past_edge):
+    """A small sidebar URL running past the gutter's middle shares a baseline
+    with a large main-column heading starting just inside or just outside
+    the edge tolerance (or 6pt into the gutter), 20pt after the URL: split at
+    that column gap (over 1.5em, under 3em), URL in the sidebar."""
+    url = "https://example.org/a/long/path"
+    x = 260 + past_edge
+    page = _two_column_page(right_offset=5) + [
+        (False, 9.4, x - 20 - _width(tmp_path, url, 9.4), 665, url), (False, 16.9, x, 665, "Heading")]
+    _, doc = _convert(tmp_path, [page])
+    assert not any(url in t and "Heading" in t for t in _texts(doc))
+    assert _order(doc, "Side", url, "Main", "Heading") == [url] + ["Side"] * 8 + ["Heading"] + ["Main"] * 8
+
+
+def test_last_gap_by_the_gutter_is_the_cut(tmp_path):
+    """A sidebar line with a word in the gutter strip past its middle, then
+    a main-column word on the same baseline: both gaps qualify; the cut is
+    the last, before the main word, so the gutter word stays in the sidebar."""
+    page = _two_column_page(right_offset=5)
+    y = page[3][3]
+    page[3:4] = [(False, 10, 72, y, "Side 3"), (False, 10, 200, y, "pokes"), (False, 10, 260, y, "Extra")]
+    _, doc = _convert(tmp_path, [page])
+    assert any("pokes" in t and "Side" in t and "Extra" not in t for t in _texts(doc))
+    assert _order(doc, "Side", "Extra", "Main")[:8] == ["Side"] * 8
+
+
+def test_edge_band_lines_on_one_side_or_split_by_a_gap_join_their_columns(tmp_path):
+    """Bottom-band lines are not spanning names: one alone in the sidebar,
+    and a sidebar/main pair split by a column gap, go to their columns."""
+    page = _two_column_page(right_offset=5) + [
+        (False, 10, 72, 75, "Footside"), (False, 10, 72, 62, "Pairside"), (False, 10, 260, 62, "Pairmain")]
+    _, doc = _convert(tmp_path, [page])
+    order = _order(doc, "Side", "Footside", "Pairside", "Main", "Pairmain")
+    assert order == ["Side"] * 8 + ["Footside", "Pairside"] + ["Main"] * 8 + ["Pairmain"]
+
+
+def test_name_in_the_top_band_spanning_the_gutter_stays_whole_and_first(tmp_path):
+    """A 37.6pt name line in the top band, one of its words on the right
+    column's edge: never split by a gutter found without it."""
+    q = 72 + _width(tmp_path, "Janet", 37.6) + 10
+    assert 260 - (q + _width(tmp_path, "Q.", 37.6)) < 1.5 * 37.6  # no column gap
+    name = [(False, 37.6, 72, 740, "Janet"), (False, 37.6, q, 740, "Q."), (False, 37.6, 260, 740, "Public")]
+    _, doc = _convert(tmp_path, [name + _two_column_page(right_offset=5)])
+    assert _texts(doc)[0] == "Janet Q. Public"
+    assert _order(doc, "Side", "Main") == ["Side"] * 8 + ["Main"] * 8
+
+
 def test_narrow_gap_is_not_a_gutter(tmp_path):
     """Columns 11pt apart (under GUTTER_MIN_WIDTH_PT) are read row by row."""
     side_w = _width(tmp_path, "Side 0")
@@ -872,10 +929,9 @@ def test_short_label_column_is_not_a_sidebar(tmp_path):
 
 def test_full_width_lines_count_in_neither_column(tmp_path):
     """6 sidebar lines beside 9 is under COLUMN_BALANCE_MIN_FRAC; a heading
-    whose first word sits in the sidebar must not lift that to 7 of 9."""
-    middle = _gutter_middle(tmp_path)
+    that starts in the sidebar and runs across must not lift that to 7 of 9."""
     page = _two_column_page(right_offset=5, n_side=6, n_main=9) + [
-        (False, 10, 72, 480, "Heading"), (False, 10, middle - 20, 480, "Straddlingwordacross")]
+        (False, 10, 72, 480, "Headingstraddlingwordacrossthegutterandon")]
     _, doc = _convert(tmp_path, [page])
     assert _read_row_by_row(doc)
 

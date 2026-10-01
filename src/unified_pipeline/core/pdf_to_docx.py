@@ -447,7 +447,7 @@ def _page_lines(page: Page) -> list[_Line]:
     lines = [_build_line(c) for c in _fold_superscripts(clusters)]
     gutter = _find_gutter(lines, float(page.height))
     if gutter is not None:
-        lines = _column_order(lines, gutter)
+        lines = _column_order(lines, gutter, float(page.height))
     return _join_table_rows(lines)
 
 
@@ -481,13 +481,29 @@ def _widest_gutter(lines: list[_Line]) -> tuple[float, float] | None:
     return best
 
 
+def _gutter_cut(line: _Line, gutter: tuple[float, float]) -> int | None:
+    """Index of the first right-column word when the line has a column gap
+    (over TAB_GAP_EM) by the gutter: from a word ending before the right
+    column to one starting past the gutter's middle; the last such gap. A
+    sidebar line and a main-column line on one baseline split there, even
+    when a sidebar word runs past the middle."""
+    middle = (gutter[0] + gutter[1]) / 2
+    cuts = [k + 1 for k, (a, b) in enumerate(zip(line.words, line.words[1:]))
+            if b["x0"] - a["x1"] > TAB_GAP_EM * a["size"]
+            and a["x1"] <= gutter[1] and b["x0"] >= middle]
+    return cuts[-1] if cuts else None
+
+
 def _split_at(line: _Line, gutter: tuple[float, float]) -> tuple[_Line | None, _Line | None]:
-    """The line's left-column and right-column words, as two lines. The right
-    column starts where the gutter ends, so a left-column word that pokes
-    into the gutter (even past its middle) stays in the left column."""
-    edge = gutter[1] - OUTDENT_TOLERANCE_PT
-    left = [w for w in line.words if w["x0"] < edge]
-    right = [w for w in line.words if w["x0"] >= edge]
+    """The line's left-column and right-column words, as two lines: at a
+    column gap by the gutter if it has one, else where the right column
+    starts (the gutter's end), so a left-column word that pokes into the
+    gutter (even past its middle) stays in the left column."""
+    cut = _gutter_cut(line, gutter)
+    if cut is None:
+        edge = gutter[1] - OUTDENT_TOLERANCE_PT
+        cut = sum(1 for w in line.words if w["x0"] < edge)
+    left, right = line.words[:cut], line.words[cut:]
     return (_build_line(left) if left else None), (_build_line(right) if right else None)
 
 
@@ -530,11 +546,13 @@ def _find_gutter(lines: list[_Line], height: float) -> tuple[float, float] | Non
 
 def _crosses(line: _Line, gutter: tuple[float, float]) -> bool:
     """A full-width line: a word spans the gutter's middle and the text runs
-    on into the right column, but not as a right-column line (no word
-    starts on the right column's edge). A sidebar line that pokes into the
-    gutter, alone or beside a right-column line, does not cross it."""
+    on into the right column, with no column gap by the gutter and not as a
+    right-column line (no word starts on the right column's edge). A
+    sidebar line that pokes into the gutter, alone or beside a right-column
+    line, does not cross it."""
     middle = (gutter[0] + gutter[1]) / 2
-    return (any(w["x0"] < middle < w["x1"] for w in line.words)
+    return (_gutter_cut(line, gutter) is None
+            and any(w["x0"] < middle < w["x1"] for w in line.words)
             and line.x1 > gutter[1] + OUTDENT_TOLERANCE_PT
             and not any(abs(w["x0"] - gutter[1]) <= OUTDENT_TOLERANCE_PT for w in line.words))
 
@@ -557,20 +575,25 @@ def _set_bounds(column: list[_Line]) -> None:
             ln.bounds = edges
 
 
-def _column_order(lines: list[_Line], gutter: tuple[float, float]) -> list[_Line]:
+def _column_order(lines: list[_Line], gutter: tuple[float, float], height: float) -> list[_Line]:
     """Reading order for a two-column page: between full-width lines (which
-    cross the gutter), the left column's lines, then the right column's.
-    Each column line carries its column's text edges as `bounds`."""
+    cross the gutter, or sit in the edge band and span it with no column
+    gap: a name block the gutter was found without), the left column's
+    lines, then the right column's. Each column line carries its column's
+    text edges as `bounds`."""
     out: list[_Line] = []
     left: list[_Line] = []
     right: list[_Line] = []
     columns: tuple[list[_Line], list[_Line]] = ([], [])
     for ln in lines:
-        if _crosses(ln, gutter):
+        parts = _split_at(ln, gutter)
+        spans_edge_band = (_in_edge_band(ln, height) and None not in parts
+                           and _gutter_cut(ln, gutter) is None)
+        if spans_edge_band or _crosses(ln, gutter):
             _flush_region(out, left, right)
             out.append(ln)
             continue
-        for part, region, column in zip(_split_at(ln, gutter), (left, right), columns):
+        for part, region, column in zip(parts, (left, right), columns):
             if part is not None:
                 region.append(part)
                 column.append(part)
