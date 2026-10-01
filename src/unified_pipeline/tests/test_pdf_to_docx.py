@@ -23,7 +23,11 @@ from unified_pipeline.core.pdf_to_docx import (
     _column_gaps,
     _is_bold,
     _Para,
+    GUTTER_EDGE_FRAC,
+    _blank_gap_em,
+    _Line,
     _Run,
+    _runs,
     _write_docx,
     LIST_MARKER_RE,
     convert_pdf_to_docx,
@@ -182,9 +186,22 @@ def _furniture_pages():
 
 
 def test_running_header_and_page_number_removed(tmp_path):
+    """The running header keeps its page-1 copy; page numbers all go."""
     report, doc = _convert(tmp_path, _furniture_pages())
-    assert [p.text for p in doc.paragraphs if p.text] == [_LONG, "Body 1", "Body 2", "Body 3"]
+    assert [p.text for p in doc.paragraphs if p.text] == ["Confidential CV", _LONG, "Body 1", "Body 2", "Body 3"]
     assert report.pages == 3
+
+
+def test_top_band_repeat_keeps_its_first_copy_and_page_numbers_all_go(tmp_path):
+    """A name at the top of 3 pages is kept once, on page 1; a page number
+    in the bottom band is dropped on every page."""
+    pages = [[(False, 14, 72, 750, "Jane Q. Public"), (False, 10, 72, 600, f"Body {n}"),
+              (False, 9, 280, 25, f"Page {n} of 3")] for n in (1, 2, 3)]
+    _, doc = _convert(tmp_path, pages)
+    texts = [t for t in _texts(doc) if t]
+    assert texts[0] == "Jane Q. Public"
+    assert " ".join(texts).count("Jane Q. Public") == 1
+    assert "Page" not in " ".join(texts)
 
 
 def test_repeated_body_line_is_kept(tmp_path):
@@ -358,18 +375,18 @@ def test_furniture_needs_half_the_pages(tmp_path):
     assert _texts(doc).count("Rare header") == 2
 
 
-def test_two_page_furniture_on_both_pages_is_removed(tmp_path):
+def test_two_page_furniture_keeps_only_its_first_copy(tmp_path):
     pages = [[(False, 9, 72, 765, "Both pages"), (False, 10, 72, 600, f"Body {n}")]
              for n in range(2)]
     _, doc = _convert(tmp_path, pages)
-    assert "Both pages" not in " ".join(_texts(doc))
+    assert " ".join(_texts(doc)).count("Both pages") == 1
 
 
 def test_furniture_matches_across_small_position_jitter(tmp_path):
     pages = [[(False, 9, 72, 765 - 0.4 * n, "Jittery header"), (False, 10, 72, 600, f"Body {n}")]
              for n in range(3)]
     _, doc = _convert(tmp_path, pages)
-    assert "Jittery header" not in " ".join(_texts(doc))
+    assert " ".join(_texts(doc)).count("Jittery header") == 1
 
 
 def test_same_text_at_different_positions_is_not_furniture(tmp_path):
@@ -383,6 +400,25 @@ def test_page_with_text_and_an_image_is_not_image_only(tmp_path):
     pages = [[(False, 10, 72, 700, "A page with real text and a logo image on it.")]]
     report, _ = _convert(tmp_path, pages, image_pages=(0,))
     assert report.image_only_pages == []
+
+
+@pytest.mark.parametrize("blank_above", [True, False])
+def test_page_break_after_a_blank_separated_entry_gets_a_blank(tmp_path, blank_above):
+    """Entries separated by blank lines that straddle a page break keep a
+    blank between them; tight entries do not get one."""
+    second_y = 670 if blank_above else 688
+    pages = [[(False, 10, 72, 700, "Grant one"), (False, 10, 72, second_y, "Grant two")],
+             [(False, 10, 72, 700, "Grant three"), _FILL]]
+    _, doc = _convert(tmp_path, pages)
+    assert _texts(doc)[:-2] == (["Grant one", "", "Grant two", "", "Grant three"] if blank_above
+                                else ["Grant one", "Grant two", "Grant three"])
+
+
+def test_tight_entry_after_a_blank_separated_one_gets_no_blank_on_the_same_page(tmp_path):
+    page = [(False, 10, 72, 700, "Grant one"), (False, 10, 72, 670, "Grant two"),
+            (False, 10, 72, 658, "Grant three"), _FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:4] == ["Grant one", "", "Grant two", "Grant three"]
 
 
 def test_page_break_is_not_a_vertical_gap(tmp_path):
@@ -423,7 +459,8 @@ def _run_cli(*args):
     ("", "[4] Second entry", True), ("", "\\267 Second entry", True),
     ("- ", "- Second entry", True), ("* ", "* Second entry", True),
     ("\\261 ", "\\261 Second entry", True),
-    ("", "1.5 mg is the dose", False), ("", "-5 units of it", False),
+    ("", "12.Smith and colleagues", True), ("", "3\\)Second entry", True),
+    ("", "1.5 mg is the dose", False), ("", "12.smith lower case", False), ("", "-5 units of it", False),
     ("", "2019 was the year", False), ("", "1234. long number", False),
     ("", "- present", False), ("", "* present", False),
     ("", "\\261 present", False), ("", "\\320 present", False), ("- ", "* Second entry", False)])
@@ -706,3 +743,756 @@ def test_cli_all_ok_exits_zero_for_single_file(tmp_path):
     res = _run_cli(pdf, tmp_path / "out")
     assert res.returncode == 0 and res.stdout.count("\n") == 1
     assert res.stderr == ""
+
+
+# --- Round 2 (#806): the live A/B's defects --------------------------------
+
+
+def _bold_width(tmp_path, text, size=10):
+    probe = tmp_path / "probe_bold.pdf"
+    probe.write_bytes(_make_pdf([[(True, size, 0, 700, text)]]))
+    with pdfplumber.open(probe) as pdf:
+        return max(w["x1"] for w in pdf.pages[0].extract_words())
+
+
+_MAIN = "Main text of the main column that runs on {}"
+
+
+def _two_column_page(right_offset, n_side=8, n_main=8, top=650):
+    """A sidebar (x=72) and a main column (x=260), 14pt pitch; the main
+    column's baselines sit `right_offset` points lower."""
+    side = [(False, 10, 72, top - 14 * i, f"Side {i}") for i in range(n_side)]
+    main = [(False, 10, 260, top - right_offset - 14 * i, _MAIN.format(i)) for i in range(n_main)]
+    return side + main
+
+
+def _order(doc, *keys):
+    return [w for w in " ".join(_texts(doc)).split() if w in keys]
+
+
+def _gutter_middle(tmp_path):
+    """Where `_widest_gutter` puts the middle of `_two_column_page`'s gutter:
+    the strip runs from GUTTER_EDGE_FRAC in from the text's left edge to
+    the main column's x0."""
+    right = 260 + _width(tmp_path, _MAIN.format(0))
+    return (int(72 + GUTTER_EDGE_FRAC * (right - 72)) + 260) / 2
+
+
+def test_two_column_page_reads_the_left_column_first(tmp_path):
+    """Each column's equal-width lines are full against their OWN column's
+    right edge, so each column is one paragraph; a column start never
+    continues the sidebar's last line."""
+    _, doc = _convert(tmp_path, [_two_column_page(right_offset=5)])
+    assert _texts(doc) == [" ".join(f"Side {i}" for i in range(8)),
+                           " ".join(_MAIN.format(i) for i in range(8))]
+
+
+def test_row_aligned_columns_stay_one_tabbed_line_per_row(tmp_path):
+    """A date column beside its entries is a table, not two columns."""
+    _, doc = _convert(tmp_path, [_two_column_page(right_offset=0, n_side=10, n_main=10)])
+    assert _texts(doc)[0] == f"Side 0\t{_MAIN.format(0)}"
+
+
+def test_rows_offset_under_a_line_height_still_split_into_columns(tmp_path):
+    """3pt apart the two columns' lines group into one visual line each, but
+    they are not row-aligned (over ROW_ALIGN_TOLERANCE_PT) and the gap at
+    the gutter is a gutter, not a word gap: two columns."""
+    _, doc = _convert(tmp_path, [_two_column_page(right_offset=3)])
+    assert _order(doc, "Side", "Main") == ["Side"] * 8 + ["Main"] * 8
+
+
+@pytest.mark.parametrize("in_gutter", [False, True])
+def test_full_width_line_splits_the_columns_into_regions(tmp_path, in_gutter):
+    """Between full-width lines each region reads left column, then right.
+    The heading's long word starts before the gutter, or inside it short of
+    its middle: neither gap is a column gap by the gutter."""
+    # Column gaps before the gutter band and in the main column, none by
+    # the gutter: still full width.
+    label_end = 72 + _width(tmp_path, "2019")
+    heading = [(False, 10, 72, 520, "2019"),
+               (False, 10, 2 * _gutter_middle(tmp_path) - 260 + 5 if in_gutter else label_end + 16, 520,
+                "Fullwidthheadingthatcrossesthegutter"),
+               (False, 10, 450, 520, "2020")]
+    below = [(False, 10, 72, 500 - 14 * i, f"Low {i}") for i in range(6)] + \
+            [(False, 10, 260, 495 - 14 * i, f"Deep {i}") for i in range(6)]
+    _, doc = _convert(tmp_path, [_two_column_page(right_offset=5) + heading + below])
+    words = [w[:4] for w in " ".join(_texts(doc)).split()]
+    assert [w for w in words if w in ("Side", "Main", "Full", "Low", "Deep")] == (
+        ["Side"] * 8 + ["Main"] * 8 + ["Full"] + ["Low"] * 6 + ["Deep"] * 6)
+
+
+@pytest.mark.parametrize("clustered", [False, True])
+def test_long_sidebar_line_ending_near_the_main_column_is_a_sidebar_line(tmp_path, clustered):
+    """A sidebar at x=50 with one long line ending 8pt short of the main
+    column at x=240 (on its own row, or on a main line's row): not full
+    width, so the main column still reads as one paragraph after the
+    whole sidebar."""
+    long_side = "Sidebar line that runs on"
+    side = [(False, 10, 50, 650 - 14 * i, f"Side {i}") for i in range(8)]
+    side[2] = (False, 10, 232 - _width(tmp_path, long_side), side[2][3] - (3 if clustered else 0), long_side)
+    main = [(False, 10, 240, 645 - 14 * i, _MAIN.format(i)) for i in range(8)]
+    _, doc = _convert(tmp_path, [side + main])
+    assert _order(doc, "Side", "Sidebar", "Main")[-8:] == ["Main"] * 8
+    assert " ".join(_MAIN.format(i) for i in range(8)) in _texts(doc)
+
+
+def test_gutter_tolerates_exactly_a_tenth_of_the_lines_crossing(tmp_path):
+    """20 body lines, 2 full-width headings across the gutter: 2 <= 10%."""
+    wide = "Heading " * 8
+    page = (_two_column_page(right_offset=5, n_side=5, n_main=5)
+            + [(False, 10, 72, 570, "H1" + wide)]
+            + _two_column_page(right_offset=5, n_side=4, n_main=4, top=540)
+            + [(False, 10, 72, 470, "H2" + wide)])
+    _, doc = _convert(tmp_path, [page])
+    words = [w[:2] if w.startswith("H") else w for w in " ".join(_texts(doc)).split()]
+    assert [w for w in words if w in ("Side", "Main", "H1", "H2")] == (
+        ["Side"] * 5 + ["Main"] * 5 + ["H1"] + ["Side"] * 4 + ["Main"] * 4 + ["H2"])
+
+
+def test_the_widest_strip_is_the_gutter(tmp_path):
+    """A 14pt strip inside the sidebar comes first, left to right; the wide
+    one past it is the gutter."""
+    first = "Sidebarentry"
+    x = 72 + _width(tmp_path, first) + 14
+    page = _two_column_page(right_offset=5)
+    page[:8] = [ln for i in range(8) for ln in ((False, 10, 72, 650 - 14 * i, first),
+                                                 (False, 10, x, 650 - 14 * i, f"x{i}"))]
+    _, doc = _convert(tmp_path, [page])
+    assert _order(doc, first, "Main") == [first] * 8 + ["Main"] * 8
+
+
+def test_column_line_poking_into_the_gutter_does_not_cross_it(tmp_path):
+    """One sidebar line runs 40pt further right than the others (into the
+    gutter strip, which tolerates one crossing line of 16) but stops well
+    short of the main column: still a sidebar line, so the page keeps one
+    region and reads every sidebar line before any main line."""
+    page = _two_column_page(right_offset=5)
+    page[3] = (False, 10, 72, page[3][3], "Side 3 runs on and on")
+    _, doc = _convert(tmp_path, [page])
+    assert _order(doc, "Side", "Main") == ["Side"] * 8 + ["Main"] * 8
+
+
+def test_edge_band_lines_do_not_count_against_the_gutter(tmp_path):
+    """Three full-width lines in the top band (a name block) would be 3 of
+    19 lines crossing; the gutter is judged on the body band alone."""
+    header = [(False, 10, 72, 760 - 12 * i, "Header line " * 20) for i in range(3)]
+    _, doc = _convert(tmp_path, [header + _two_column_page(right_offset=5)])
+    assert _order(doc, "Side", "Main") == ["Side"] * 8 + ["Main"] * 8
+
+
+def test_indented_main_column_line_is_not_full_width(tmp_path):
+    """A main-column line indented 20pt starts off the column's edge but
+    spans nothing across the gutter: still a main-column line."""
+    page = _two_column_page(right_offset=5)
+    page[11] = (False, 10, 280, page[11][3], "Indented main line")
+    _, doc = _convert(tmp_path, [page])
+    assert _order(doc, "Side", "Main", "Indented") == ["Side"] * 8 + ["Main"] * 3 + ["Indented"] + ["Main"] * 4
+
+
+@pytest.mark.parametrize("past_edge", [2.9, 3.6, -6.0])
+def test_sidebar_line_and_main_heading_on_one_baseline_split(tmp_path, past_edge):
+    """A small sidebar URL running past the gutter's middle shares a baseline
+    with a large main-column heading starting just inside or just outside
+    the edge tolerance (or 6pt into the gutter), 20pt after the URL: split at
+    that column gap (over 1.5em, under 3em), URL in the sidebar."""
+    url = "https://example.org/a/long/path"
+    x = 260 + past_edge
+    page = _two_column_page(right_offset=5) + [
+        (False, 9.4, x - 20 - _width(tmp_path, url, 9.4), 665, url), (False, 16.9, x, 665, "Heading")]
+    _, doc = _convert(tmp_path, [page])
+    assert not any(url in t and "Heading" in t for t in _texts(doc))
+    assert _order(doc, "Side", url, "Main", "Heading") == [url] + ["Side"] * 8 + ["Heading"] + ["Main"] * 8
+
+
+def test_last_gap_by_the_gutter_is_the_cut(tmp_path):
+    """A sidebar line with a word in the gutter strip past its middle, then
+    a main-column word on the same baseline: both gaps qualify; the cut is
+    the last, before the main word, so the gutter word stays in the sidebar."""
+    page = _two_column_page(right_offset=5)
+    y = page[3][3]
+    page[3:4] = [(False, 10, 72, y, "Side 3"), (False, 10, 200, y, "pokes"), (False, 10, 260, y, "Extra")]
+    _, doc = _convert(tmp_path, [page])
+    assert any("pokes" in t and "Side" in t and "Extra" not in t for t in _texts(doc))
+    assert _order(doc, "Side", "Extra", "Main")[:8] == ["Side"] * 8
+
+
+def test_edge_band_lines_on_one_side_or_split_by_a_gap_join_their_columns(tmp_path):
+    """Bottom-band lines are not spanning names: one alone in the sidebar,
+    and a sidebar/main pair split by a column gap, go to their columns."""
+    page = _two_column_page(right_offset=5) + [
+        (False, 10, 72, 75, "Footside"), (False, 10, 72, 62, "Pairside"), (False, 10, 260, 62, "Pairmain")]
+    _, doc = _convert(tmp_path, [page])
+    order = _order(doc, "Side", "Footside", "Pairside", "Main", "Pairmain")
+    assert order == ["Side"] * 8 + ["Footside", "Pairside"] + ["Main"] * 8 + ["Pairmain"]
+
+
+def test_name_in_the_top_band_spanning_the_gutter_stays_whole_and_first(tmp_path):
+    """A 37.6pt name line in the top band, one of its words on the right
+    column's edge: never split by a gutter found without it."""
+    q = 72 + _width(tmp_path, "Janet", 37.6) + 10
+    assert 260 - (q + _width(tmp_path, "Q.", 37.6)) < 1.5 * 37.6  # no column gap
+    name = [(False, 37.6, 72, 740, "Janet"), (False, 37.6, q, 740, "Q."), (False, 37.6, 260, 740, "Public")]
+    _, doc = _convert(tmp_path, [name + _two_column_page(right_offset=5)])
+    assert _texts(doc)[0] == "Janet Q. Public"
+    assert _order(doc, "Side", "Main") == ["Side"] * 8 + ["Main"] * 8
+
+
+def test_narrow_gap_is_not_a_gutter(tmp_path):
+    """Columns 11pt apart (under GUTTER_MIN_WIDTH_PT) are read row by row."""
+    side_w = _width(tmp_path, "Side 0")
+    page = [(False, 10, 72, 650 - 14 * i, f"Side {i}") for i in range(8)] + \
+           [(False, 10, 72 + side_w + 11, 645 - 14 * i, f"Main text {i}") for i in range(8)]
+    _, doc = _convert(tmp_path, [page])
+    words = " ".join(_texts(doc)).split()
+    assert words.index("Main") < words.index("Side", 1)
+
+
+def _read_row_by_row(doc):
+    order = _order(doc, "Side", "Main")
+    return order.index("Main") < len(order) - 1 - order[::-1].index("Side")
+
+
+def test_short_label_column_is_not_a_sidebar(tmp_path):
+    """5 left lines beside 8 (under COLUMN_BALANCE_MIN_FRAC): a label column,
+    read row by row."""
+    _, doc = _convert(tmp_path, [_two_column_page(right_offset=5, n_side=5)])
+    assert _read_row_by_row(doc)
+
+
+def test_full_width_lines_count_in_neither_column(tmp_path):
+    """6 sidebar lines beside 9 is under COLUMN_BALANCE_MIN_FRAC; a heading
+    that starts in the sidebar and runs across must not lift that to 7 of 9."""
+    page = _two_column_page(right_offset=5, n_side=6, n_main=9) + [
+        (False, 10, 72, 480, "Headingstraddlingwordacrossthegutterandon")]
+    _, doc = _convert(tmp_path, [page])
+    assert _read_row_by_row(doc)
+
+
+def test_column_needs_five_lines_even_when_balanced(tmp_path):
+    """4 beside 5 is balanced (0.8) but under COLUMN_MIN_LINES. The heading
+    is one word across the gutter, so it adds a line to neither column."""
+    page = _two_column_page(right_offset=5, n_side=4, n_main=5) + [
+        (False, 10, 72, 400, "Fullwidthheading" * 4)]
+    _, doc = _convert(tmp_path, [page])
+    assert _read_row_by_row(doc)
+
+
+def test_row_alignment_is_judged_on_the_column_with_fewer_lines(tmp_path):
+    """14 left lines, 10 right lines of which 6 sit on left rows: the right
+    column is 60% aligned (a date column), the left only 43%."""
+    left = [(False, 10, 72, 650 - 14 * i, f"Side {i}") for i in range(14)]
+    right = [(False, 10, 260, 650 - 14 * i - (0 if i < 6 else 5), _MAIN.format(i)) for i in range(10)]
+    _, doc = _convert(tmp_path, [left + right])
+    assert _texts(doc)[0] == f"Side 0\t{_MAIN.format(0)}"
+
+
+@pytest.mark.parametrize("column", ["left", "right"])
+def test_column_of_tabbed_rows_is_part_of_a_table(tmp_path, column):
+    """A 'column' whose lines carry column gaps is a table cut down its
+    middle, read row by row."""
+    if column == "left":
+        extra = [(False, 10, 72 + _width(tmp_path, "Side 0") + 20, 650 - 14 * i, "x") for i in range(8)]
+    else:
+        extra = [(False, 10, 260 + _width(tmp_path, _MAIN.format(0)) + 20, 645 - 14 * i, "x")
+                 for i in range(8)]
+    _, doc = _convert(tmp_path, [_two_column_page(right_offset=5) + extra])
+    assert _read_row_by_row(doc)
+
+
+def test_right_column_first_on_the_page_may_continue_the_last_page(tmp_path):
+    """A page whose first region is right-column lines only: its first line
+    is not a column start, so it can continue page 1's last paragraph."""
+    page2 = ([(False, 10, 260, 670 - 14 * i, f"Top {i}") for i in range(2)]
+             + [(False, 10, 72, 630, "Fullwidthheading" * 4)]
+             + _two_column_page(right_offset=5, top=600))
+    _, doc = _convert(tmp_path, [[(False, 10, 72, 100, _LONG)], page2])
+    assert _texts(doc)[0].startswith(f"{_LONG} Top 0")
+
+
+def test_wrap_inside_a_column_is_judged_against_the_column_edge(tmp_path):
+    """'Side' stops 50pt short of the sidebar's right edge; 'Continuation'
+    would not fit there (it would fit before the page's right margin)."""
+    side = ["Side alpha beta", "Side", "Continuation", "Side 3", "Side 4", "Side 5", "Side 6", "Side 7"]
+    page = _two_column_page(right_offset=5)
+    page[:8] = [(False, 10, 72, 650 - 14 * i, t) for i, t in enumerate(side)]
+    _, doc = _convert(tmp_path, [page])
+    assert "Side Continuation" in " ".join(_texts(doc))
+
+
+def test_label_wrap_inside_a_column_uses_the_column_width(tmp_path):
+    """A right-column line with a leading date is full-width in its column
+    (so re-laid out for justification); its wrap hangs under the text."""
+    page = _two_column_page(right_offset=5)
+    text = _MAIN.format(0)
+    page[8] = (False, 10, 260, 645, "2019")
+    page += [(False, 10, 302, 645, text), (False, 10, 302, 631, "tail words")]
+    page[9:16] = [(False, 10, 260, 617 - 14 * i, _MAIN.format(i)) for i in range(7)]
+    _, doc = _convert(tmp_path, [page])
+    assert f"2019\t{text} tail words" in _texts(doc)
+
+
+@pytest.mark.parametrize("first_main_is_row", [False, True])
+def test_column_start_below_the_sidebar_adds_no_blank(tmp_path, first_main_is_row):
+    """The main column starts 30pt below the sidebar's last line: a column
+    start, not a vertical gap (also when the first main line is a row)."""
+    page = _two_column_page(right_offset=5, top=650)
+    page[8:] = [(False, 10, 260, 510 - 14 * i, _MAIN.format(i)) for i in range(8)]
+    if first_main_is_row:
+        page[8:9] = [(False, 10, 260, 510, "2019"), (False, 10, 320, 510, "cellb"),
+                     (False, 10, 380, 510, "cellc"), (False, 10, 380, 503, "wrap")]
+    report, _ = _convert(tmp_path, [page])
+    assert report.blank_paragraphs == 0
+
+
+def test_row_at_the_foot_of_the_sidebar_does_not_take_the_main_column(tmp_path):
+    page = _two_column_page(right_offset=5)
+    page[7] = (False, 10, 72, page[7][3], "a")
+    page += [(False, 10, 100, 552, "b"), (False, 10, 128, 552, "c")]
+    _, doc = _convert(tmp_path, [page])
+    assert not any("Main" in t and "\t" in t for t in _texts(doc))
+
+
+def _spaceless_line(tmp_path, y, words, gap, size=10, bold=False):
+    """Each word drawn on its own, `gap` points apart, with no space glyph."""
+    out, x = [], 72.0
+    for word in words:
+        out.append((bold, size, x, y, word))
+        x += (_bold_width if bold else _width)(tmp_path, word, size) + gap
+    return out
+
+
+_SPACELESS_WORDS = ["alpha", "beta", "gamma", "delta", "epsilon"]
+
+
+def test_page_without_space_glyphs_splits_words_on_a_relative_gap(tmp_path):
+    page = [w for i in range(9) for w in _spaceless_line(tmp_path, 700 - 30 * i, _SPACELESS_WORDS, 2.8)]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[0] == " ".join(_SPACELESS_WORDS)
+
+
+def test_page_with_space_glyphs_keeps_the_fixed_tolerance(tmp_path):
+    """Letter-spaced capitals 2pt apart (over 0.15 x 12pt) stay one word on
+    a page that has real spaces."""
+    prose = [(False, 10, 72, 700 - 30 * i, "a line of ordinary words with spaces") for i in range(8)]
+    caps, x = [], 72.0
+    for ch in "SECTION":
+        caps.append((False, 12, x, 400, ch))
+        x += _width(tmp_path, ch, 12) + 2.0
+    _, doc = _convert(tmp_path, [prose + caps])
+    assert "SECTION" in _texts(doc)
+
+
+def test_too_few_characters_is_never_spaceless(tmp_path):
+    page = _spaceless_line(tmp_path, 700, _SPACELESS_WORDS, 2.8)
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == ["".join(_SPACELESS_WORDS)]
+
+
+@pytest.mark.parametrize("label", ["2019-2020", "Jan 2019"])
+def test_wrap_under_the_text_after_a_leading_date_merges(tmp_path, label):
+    page = [(False, 10, 72, 700, label), (False, 10, 150, 700, _LONG),
+            (False, 10, 150, 688, "tail words")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == [f"{label}\t{_LONG} tail words"]
+
+
+@pytest.mark.parametrize("x, merges", [(150, True), (153, True), (154, False), (72, False)])
+def test_wrap_after_a_label_must_align_with_the_text_column(tmp_path, x, merges):
+    page = [(False, 10, 72, 700, "2019"), (False, 10, 150, 700, _LONG),
+            (False, 10, x, 688, "tail words")]
+    _, doc = _convert(tmp_path, [page])
+    assert (len(doc.paragraphs) == 1) is merges
+
+
+@pytest.mark.parametrize("label, merges", [
+    ("12.", True), ("3\\)", True), ("Sept. 2011 - Dec 2012", True), ("05/2019 - present", True),
+    ("2004 -", True), ("Note", False), ("Boston", False), ("1234", False)])
+def test_only_a_number_or_date_label_is_a_leading_label(tmp_path, label, merges):
+    page = [(False, 10, 72, 700, label), (False, 10, 200, 700, _LONG),
+            (False, 10, 200, 688, "tail words")]
+    _, doc = _convert(tmp_path, [page])
+    assert (len(doc.paragraphs) == 1) is merges
+
+
+def test_label_past_a_fifth_of_the_width_is_not_a_leading_label(tmp_path):
+    """The label ends past 20% of the text width: a label/value line, whose
+    next line is its own entry even when aligned under the value."""
+    label = "Department of Internal Medicine"
+    x = 72 + _width(tmp_path, label) + 20
+    page = [(False, 10, 72, 700, label), (False, 10, x, 700, _LONG),
+            (False, 10, x, 688, "tail words")]
+    _, doc = _convert(tmp_path, [page])
+    assert len(doc.paragraphs) == 2
+
+
+def test_ragged_right_wrap_merges_when_the_next_word_would_not_fit(tmp_path):
+    """Prev stops 40pt short of the margin (outside the 8% slack) but the
+    next line's first word is wider than that gap: a soft wrap."""
+    right = 72 + _width(tmp_path, _LONG)
+    word = "Internationalization"
+    short = "short line of text"
+    x = right - 40 - _width(tmp_path, short)
+    assert _width(tmp_path, word) > 40
+    page = [(False, 10, 72, 400, _LONG), (False, 10, x, 700, short), (False, 10, x, 688, word)]
+    _, doc = _convert(tmp_path, [page])
+    assert f"{short} {word}" in _texts(doc)
+
+
+_SURNAME = "Abcdefghijklmnopqrstuvwxy"  # 25 letters
+
+
+@pytest.mark.parametrize("ending, merges", [
+    (".", False), (";", False), ("\\)", False), (",", True), (" and", True), (":", True)])
+def test_entry_ending_a_sentence_does_not_absorb_a_long_surname(tmp_path, ending, merges):
+    """An entry ending ~40pt short of the margin, then an entry starting
+    with a 25-letter surname that would not have fitted there: a finished
+    entry (. ; or )) is not wrapped; a comma, a connector or a colon is."""
+    right = 72 + _width(tmp_path, _LONG)
+    entry = "Smith J, Jones K. A short title" + ending
+    x = right - 40 - _width(tmp_path, entry)
+    assert _width(tmp_path, _SURNAME) > 40
+    page = [(False, 10, 72, 400, _LONG), (False, 10, x, 700, entry),
+            (False, 10, x, 688, _SURNAME + " L, Other M.")]
+    _, doc = _convert(tmp_path, [page])
+    assert (entry.replace("\\)", ")") in _texts(doc)) is not merges
+
+
+@pytest.mark.parametrize("sep", [" ", ": "])
+@pytest.mark.parametrize("ragged", [False, True])
+def test_date_led_one_line_entries_stay_separate(tmp_path, ragged, sep):
+    """Three degree/appointment lines, each a date range and then words:
+    full width (merge by width) or ending 30pt short before a date token
+    that would not fit there (merge by ragged wrap) -- three entries."""
+    entries = [f"{2010 + i}-{2014 + i}{sep}Residency in Internal Medicine, Boston, MA" for i in range(3)]
+    right = 72 + _width(tmp_path, _LONG)
+    x = right - 30 - _width(tmp_path, entries[0]) if ragged else 72
+    page = [(False, 10, x, 700 - 12 * i, t) for i, t in enumerate(entries)]
+    page.append((False, 10, 72, 400, _LONG) if ragged else (False, 10, 72, 400, "x"))
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:3] == entries
+
+
+def test_open_ended_date_ranges_lead_entries_too(tmp_path):
+    entries = [f"{2010 + i}-present Professor of Medicine, Boston, MA" for i in range(2)]
+    page = [(False, 10, 72, 700 - 12 * i, t) for i, t in enumerate(entries)]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == entries
+
+
+def test_date_led_wrap_after_a_connector_still_merges(tmp_path):
+    first = "2010-2014 " + _LONG[:-3] + " and"
+    page = [(False, 10, 72, 700, first), (False, 10, 72, 688, "2015-2018 Fellowship in Cardiology")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == [f"{first} 2015-2018 Fellowship in Cardiology"]
+
+
+@pytest.mark.parametrize("tail", ["Nov 2019. (Invited talk)", "2019, Boston, MA."])
+def test_single_date_wrap_in_a_date_led_paragraph_merges(tmp_path, tail):
+    """A wrapped citation tail starting with one date is not a new entry."""
+    first = "2010-2014 " + _LONG[:-12] + " Journal"
+    page = [(False, 10, 72, 700, first), (False, 10, 72, 688, tail.replace("(", "\\(").replace(")", "\\)"))]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == [f"{first} {tail}"]
+
+
+def test_wrapped_date_range_tail_still_merges(tmp_path):
+    """A date-led grant whose wrap is only "2019-2021." (no words after the
+    date) is the same entry."""
+    first = "2018-2021 " + _LONG[:-6] + " Funded"
+    page = [(False, 10, 72, 700, first), (False, 10, 72, 688, "2019-2021.")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == [f"{first} 2019-2021."]
+
+
+def test_date_led_entry_after_a_plain_paragraph_still_wraps(tmp_path):
+    """Only a paragraph that itself began with a date vetoes the merge."""
+    page = [(False, 10, 72, 700, _LONG_STOP), (False, 10, 72, 688, "2015-2018 Fellowship in Cardiology")]
+    _, doc = _convert(tmp_path, [page])
+    assert len(doc.paragraphs) == 1
+
+
+def test_ragged_right_line_whose_next_word_fits_is_not_a_wrap(tmp_path):
+    right = 72 + _width(tmp_path, _LONG)
+    short = "short line of text"
+    x = right - 40 - _width(tmp_path, short)
+    page = [(False, 10, 72, 400, _LONG), (False, 10, x, 700, short), (False, 10, x, 688, "at home")]
+    _, doc = _convert(tmp_path, [page])
+    assert short in _texts(doc)
+
+
+def test_right_margin_ignores_a_few_lines_that_stick_out(tmp_path):
+    """51 lines end at the margin, one sticks out 30pt: a line 10pt short of
+    the real margin is full; measured from the stray line it would not be,
+    and "tail" would fit after it."""
+    base = 72 + _width(tmp_path, _LONG)
+    lines = [(False, 10, 72 + (30 if i == 25 else 0), 760 - 12 * i, _LONG) for i in range(51)]
+    short = _LONG[:-12]
+    page2 = [(False, 10, base - 10 - _width(tmp_path, short), 700, short), (False, 10, 72, 688, "tail")]
+    _, doc = _convert(tmp_path, [lines, page2])
+    assert _texts(doc)[-1].endswith(f"{short} tail")
+
+
+def _table_row(y, cells):
+    return [(False, 10, x, y, text) for x, text in cells if text]
+
+
+def test_wrapped_table_cells_reassemble_into_one_row(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Title of"), (400, "Boston")])
+            + _table_row(688, [(150, "the award")])
+            + _table_row(676, [(400, "MA USA")])
+            + _table_row(664, [(72, "2020"), (150, "Next title"), (400, "Paris")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle of the award\tBoston MA USA", "2020\tNext title\tParis"]
+
+
+def test_row_with_an_empty_first_cell_is_its_own_row(tmp_path):
+    """A vertically merged first cell prints once (its own text wrapped:
+    "Inst"): the next row starts in cell 2. It is a row of its own, its
+    first cell left empty, not absorbed into the row above."""
+    page = (_table_row(700, [(72, "Alpha"), (150, "Professor"), (400, "2001-2005")])
+            + _table_row(688, [(72, "Inst")])
+            + _table_row(676, [(150, "Lecturer"), (400, "1998-2001")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["Alpha Inst\tProfessor\t2001-2005", "\tLecturer\t1998-2001"]
+
+
+def test_indented_note_across_cells_is_not_spread_into_them(tmp_path):
+    """A note under a row, indented but running across several cells with
+    no column gap, is its own paragraph."""
+    note = "Note: this appointment was held jointly with the partner institution"
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(90, note)]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle\tBoston", note]
+
+
+def test_cell_continuation_must_end_before_the_next_cell(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(360, "Internationalization")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle\tBoston", "Internationalization"]
+
+
+def test_line_with_a_gap_inside_one_cell_ends_the_row(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(400, "MA"), (440, "USA")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle\tBoston", "MA\tUSA"]
+
+
+def test_gapless_line_from_a_later_anchor_across_cells_is_not_a_row(tmp_path):
+    line = "A remark that starts under the title and runs on across the city column"
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(150, line)]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle\tBoston", line]
+
+
+def test_line_with_its_own_first_cell_is_not_a_merged_cell_row(tmp_path):
+    """One column gap, from the first anchor to the third: not a row of the
+    table above (that needs an empty first cell), so what follows it is not
+    a cell continuation."""
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(72, "2020"), (400, "Paris")])
+            + _table_row(676, [(400, "France")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:3] == ["2019\tTitle\tBoston", "2020\tParis", "France"]
+
+
+def test_empty_middle_cell_keeps_its_tab(tmp_path):
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (280, "Dept"), (380, "Boston")])
+            + _table_row(688, [(150, "Lecturer"), (380, "Paris")]) + [_FILL])
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["2019\tTitle\tDept\tBoston", "\tLecturer\t\tParis"]
+
+
+def test_row_needs_two_column_gaps_and_close_spacing(tmp_path):
+    one_gap = _table_row(700, [(72, "2019"), (400, "Boston")]) + _table_row(688, [(150, "MA")])
+    spaced = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+              + _table_row(680, [(400, "MA")]))
+    _, doc_a = _convert(tmp_path, [one_gap], name="a")
+    _, doc_b = _convert(tmp_path, [spaced], name="b")
+    assert _texts(doc_a) == ["2019\tBoston", "MA"]
+    assert [t for t in _texts(doc_b) if t] == ["2019\tTitle\tBoston", "MA"]
+
+
+def test_row_continuation_word_goes_to_the_cell_its_x0_falls_in(tmp_path):
+    """A word 3pt left of a cell anchor still belongs to that cell; 4pt left
+    belongs to the cell before."""
+    page = (_table_row(700, [(72, "2019"), (150, "Title"), (400, "Boston")])
+            + _table_row(688, [(397, "near")]) + _table_row(676, [(300, "far")]))
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == ["2019\tTitle far\tBoston near"]
+
+
+def _gapped_groups(groups, blank_gap):
+    """`groups` three-line groups of short lines, 2pt apart inside a group,
+    `blank_gap` points between groups."""
+    page, y = [], 760.0
+    for g in range(groups):
+        for i in range(3):
+            page.append((False, 10, 72, y, f"Group {g} line {i}"))
+            y -= 12
+        y -= blank_gap - 2
+    return page
+
+
+def test_blank_threshold_follows_the_documents_blank_line_gap(tmp_path):
+    """A Word blank line measured 0.9em: under the 1.0em fallback, over the
+    midpoint of this document's line gap (0.2em) and blank gap (0.9em)."""
+    report, doc = _convert(tmp_path, [_gapped_groups(12, 9)])
+    assert report.blank_paragraphs == 11
+
+
+def test_blank_threshold_falls_back_without_a_clear_second_mode(tmp_path):
+    report, _ = _convert(tmp_path, [_gapped_groups(10, 9)])  # 9 gaps < BLANK_MODE_MIN_COUNT
+    assert report.blank_paragraphs == 0
+
+
+def _gap_pages(gaps, block_at=()):
+    """One page of 10pt lines separated by `gaps` (in ems); lines whose
+    index is in `block_at` are column starts."""
+    lines, top = [], 100.0
+    for index, gap in enumerate([0.0] + gaps):
+        top += gap * 10
+        lines.append(_Line(top=top, bottom=top + 10, x0=72, x1=100, size=10.0,
+                           runs=[_Run("x", False, 10.0)], tabs=[], block_start=index in block_at))
+        top += 10
+    return [lines]
+
+
+@pytest.mark.parametrize("gaps, block_at, expected", [
+    ([0.2] * 24 + [0.9] * 11, (), 0.55),                        # midway between the modes
+    ([-0.5] * 30 + [0.2] * 20 + [0.9] * 11, (), 0.55),          # overlapping lines ignored
+    ([0.35] * 30 + [0.2] * 20 + [0.9] * 11, range(1, 31), 0.55),  # column starts ignored
+    ([0.6] * 30 + [1.3] * 12, (), 1.0),                         # double-spaced: fallback
+    ([0.2] * 20 + [2.4] * 12, (), 1.0),                         # never above BLANK_GAP_EM
+    ([0.0] * 20 + [0.5] * 12, (), 0.45),                        # never below PARAGRAPH_GAP_EM
+    ([0.2] * 30 + [0.6] * 10 + [1.2] * 20, (), 0.7),            # the most frequent wide gap
+    ([0.1] * 5 + [0.2] * 30 + [0.9] * 11, (), 0.55),            # the most frequent line gap
+])
+def test_blank_gap_threshold(gaps, block_at, expected):
+    assert _blank_gap_em(_gap_pages(gaps, block_at)) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("kern", [0.0, -0.5])
+def test_raised_superscript_folds_into_its_line(tmp_path, kern):
+    """Also when kerning tucks it 0.5pt under the end of its word."""
+    x = 72 + _width(tmp_path, "21") + kern
+    page = [(False, 10, 72, 700, "21"), (False, 7.9, x, 704.5, "st"),
+            (False, 10, x + 10, 700, "century")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == ["21st century"]
+
+
+def test_small_text_away_from_the_line_is_not_a_superscript(tmp_path):
+    """Small text raised on the same row but not touching a word (a sidebar
+    set smaller) stays its own line."""
+    page = [(False, 10, 72, 700, "Main line"), (False, 7.9, 300, 704.5, "aside"), _FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert sorted(_texts(doc)[:2]) == ["Main line", "aside"]
+
+
+def test_superscript_before_its_word_folds_in(tmp_path):
+    x = 72 + _width(tmp_path, "a", 7.9)
+    page = [(False, 7.9, 72, 704.5, "a"), (False, 10, x, 700, "Smith")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == ["aSmith"]
+
+
+def test_same_size_raised_word_is_not_a_superscript(tmp_path):
+    """Touching and overlapping, but as big as its neighbour: its own line."""
+    x = 72 + _width(tmp_path, "Line")
+    page = [(False, 10, 72, 700, "Line"), (False, 10, x, 704.5, "next"), _FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert sorted(_texts(doc)[:2]) == ["Line", "next"]
+
+
+def test_small_cluster_folds_only_if_every_word_touches(tmp_path):
+    x = 72 + _width(tmp_path, "21")
+    page = [(False, 10, 72, 700, "21"), (False, 7.9, x, 704.5, "st"),
+            (False, 7.9, 300, 704.5, "aside"), _FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert "21" in _texts(doc) and "st\taside" in _texts(doc)
+
+
+def test_small_text_touching_but_barely_overlapping_is_not_folded(tmp_path):
+    """Raised 9pt: it touches the word but overlaps its line by under half
+    of its own height."""
+    x = 72 + _width(tmp_path, "Word")
+    page = [(False, 10, 72, 700, "Word"), (False, 7.9, x, 709, "up"), _FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert sorted(_texts(doc)[:2]) == ["Word", "up"]
+
+
+def test_lowered_subscript_folds_into_the_line_above(tmp_path):
+    """9pt lowered 4.9pt under 12pt: bottoms 4.3pt apart (its own cluster,
+    sorted after its host), overlapping the host by over half its height."""
+    x = 72 + _width(tmp_path, "CO", 12)
+    page = [(False, 12, 72, 700, "CO"), (False, 9, x, 695.1, "2"), (False, 12, x + 10, 700, "level")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == ["CO2 level"]
+
+
+def test_same_size_line_close_above_is_not_a_superscript(tmp_path):
+    page = [(False, 10, 72, 700, "first"), (False, 10, 72, 690, "second"), _FILL]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc)[:2] == ["first", "second"]
+
+
+@pytest.mark.parametrize("gap", [0.0, 0.5])
+def test_font_change_inside_a_word_adds_no_space(tmp_path, gap):
+    x = 72 + _bold_width(tmp_path, "Word") + gap
+    page = [(True, 10, 72, 700, "Word"), (False, 10, x, 700, ", then more")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == ["Word, then more"]
+
+
+def test_font_change_across_a_real_space_keeps_it(tmp_path):
+    x = 72 + _bold_width(tmp_path, "Word") + 1.1
+    page = [(True, 10, 72, 700, "Word"), (False, 10, x, 700, "next")]
+    _, doc = _convert(tmp_path, [page])
+    assert _texts(doc) == ["Word next"]
+
+
+def test_combining_diacritic_is_composed():
+    words = [{"text": "José", "fontname": "Helvetica", "size": 10.0}]
+    assert [r.text for r in _runs(words, [])] == ["José"]
+
+
+def test_indent_is_measured_from_the_pages_text_left(tmp_path):
+    page = [(False, 10, 72, 700, "Flush"), (False, 10, 108, 660, "Indented")]
+    _, doc = _convert(tmp_path, [page])
+    assert doc.paragraphs[0].paragraph_format.left_indent is None
+    assert doc.paragraphs[-1].paragraph_format.left_indent.pt == 36
+
+
+def test_furniture_window_is_by_position_not_by_text_alone(tmp_path):
+    """Repeated at the top of pages 1-2 (page 1's copy kept), the same text
+    25pt lower on page 3 (still in the edge band) is not in the window:
+    kept too."""
+    pages = [[(False, 9, 72, y, "Running Name Header"), (False, 10, 72, 600, f"Body {n}")]
+             for n, y in enumerate((765, 765, 740))]
+    _, doc = _convert(tmp_path, pages)
+    assert " ".join(_texts(doc)).count("Running Name Header") == 2
+
+
+def test_body_line_inside_a_window_that_overhangs_the_edge_band_is_kept(tmp_path):
+    """The header's window runs 12pt down from its top, past the band's
+    edge; the same text just below the band is a body line."""
+    pages = [[(False, 9, 72, 701, "Running Name Header"), (False, 10, 72, 600, f"Body {n}")]
+             for n in range(2)]  # top 83.9: in the band (95.0), window to 95.9
+    pages.append([(False, 9, 72, 689.5, "Running Name Header"),  # top 95.4: body
+                  (False, 10, 72, 600, "Body 2")])
+    _, doc = _convert(tmp_path, pages)
+    assert " ".join(_texts(doc)).count("Running Name Header") == 2  # page 1's and page 3's
+
+
+@pytest.mark.parametrize("drift, removed", [(0, True), (11, True), (13, False)])
+def test_running_header_drift_within_the_window_is_furniture(tmp_path, drift, removed):
+    """Three pages need two repeats; `drift` apart, only 12pt or less pair up."""
+    tops = (0, drift, 2 * drift)
+    pages = [[(False, 9, 72, 760 - t, "Running Name Header"), (False, 10, 72, 600, f"Body {n}")]
+             for n, t in enumerate(tops)]
+    _, doc = _convert(tmp_path, pages)
+    assert " ".join(_texts(doc)).count("Running Name Header") == (1 if removed else 3)
