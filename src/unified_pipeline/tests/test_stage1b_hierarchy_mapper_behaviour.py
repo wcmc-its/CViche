@@ -345,6 +345,107 @@ def test_map_hierarchy_node_fallback_search_skips_wrong_type_and_empty_text():
     assert next_idx == 3
 
 
+# ------------------------------------------------------------- #1178 backward-match guard
+
+def _map_top_level(hierarchy: list[dict], elements: list[dict], top_level_headers=frozenset()):
+    """Mirror run_stage_1b's top-level loop (no docx needed)."""
+    mapped, next_idx = [], 0
+    for node in hierarchy:
+        m, next_idx = map_hierarchy_node(
+            node, elements, [], next_idx, top_level_headers=top_level_headers
+        )
+        mapped.append(m)
+    return mapped
+
+
+def _unspaced_child_hierarchy() -> list[dict]:
+    """H1 Presentations (early), then H1 Publications whose H2 text differs
+    from its paragraph (no space), so the forward search cannot find it."""
+    return [
+        {"text": "Presentations", "level": "H1", "children": []},
+        {"text": "Publications", "level": "H1",
+         "children": [{"text": "Poster Presentations", "level": "H2", "children": []}]},
+    ]
+
+
+def _unspaced_child_elements() -> list[dict]:
+    return [
+        _elem(0, "Presentations"), _elem(1, "Talk A"), _elem(2, "Talk B"),
+        _elem(3, "Publications"), _elem(4, "Paper A"), _elem(5, "Paper B"),
+        _elem(6, "PosterPresentations:"), _elem(7, "Poster A"),
+    ]
+
+
+def test_child_never_maps_before_its_parent_start():
+    # Invariant (a) on its own: no top-level set supplied, so only the
+    # parent-start lower bound stands between the child and element 0.
+    mapped = _map_top_level(_unspaced_child_hierarchy(), _unspaced_child_elements())
+    child = mapped[1]["children"][0]
+    assert mapped[1]["element_idx"] == 3
+    assert child["element_idx"] is None or child["element_idx"] > 3
+
+
+def test_child_contained_match_never_lands_on_a_top_level_header():
+    # Defence in depth (b) on its own: min_search_idx left at 0 so the
+    # backward range does reach element 0; only the H1 exclusion stops it.
+    elements = _unspaced_child_elements()
+    node = {"text": "Poster Presentations", "level": "H2", "children": []}
+    mapped, _ = map_hierarchy_node(
+        node, elements, ["Publications"], 7,
+        min_search_idx=0, top_level_headers=frozenset({"presentations", "publications"}),
+    )
+    assert mapped["element_idx"] is None
+
+
+def test_child_forward_contained_match_skips_a_later_top_level_header():
+    elements = [
+        _elem(0, "Publications"), _elem(1, "Paper A"),
+        _elem(2, "Presentations"), _elem(3, "Talk A"),
+    ]
+    hierarchy = [
+        {"text": "Publications", "level": "H1",
+         "children": [{"text": "Poster Presentations", "level": "H2", "children": []}]},
+        {"text": "Presentations", "level": "H1", "children": []},
+    ]
+    mapped = _map_top_level(hierarchy, elements, frozenset({"publications", "presentations"}))
+    assert mapped[0]["children"][0]["element_idx"] is None
+    assert mapped[1]["element_idx"] == 2
+
+
+def test_unmatched_child_leaves_parent_a_leaf_with_its_body_accounted():
+    # The #1178 symptom end to end: Publications stays a leaf and its body
+    # is inside its section bounds.
+    elements = _unspaced_child_elements()
+    mapped = _map_top_level(
+        _unspaced_child_hierarchy(), elements, frozenset({"presentations", "publications"})
+    )
+    sections = compute_section_boundaries(mapped, len(elements))
+    pubs = next(sec for sec in sections if sec["hierarchy"] == ["Publications"])
+    assert pubs["has_children"] is False
+    assert (pubs["element_idx_start"], pubs["element_idx_end"]) == (3, 7)
+    pres = next(sec for sec in sections if sec["hierarchy"] == ["Presentations"])
+    assert pres["element_idx_end"] < pubs["element_idx_start"]
+
+
+def test_child_exact_match_of_a_top_level_text_is_still_accepted():
+    # The exclusion only blocks PARTIAL matches: an exact paragraph is kept.
+    elements = [_elem(0, "Awards"), _elem(1, "Awards"), _elem(2, "Prize A")]
+    node = {"text": "Awards", "level": "H2", "children": []}
+    mapped, _ = map_hierarchy_node(
+        node, elements, ["Honors"], 1, min_search_idx=0, top_level_headers=frozenset({"awards"}),
+    )
+    assert mapped["element_idx"] == 1
+
+
+def test_child_fallback_still_finds_a_header_between_parent_and_start():
+    # Out-of-order siblings: the backward fallback still works inside the
+    # parent's own range (parent start up to the search start).
+    elements = [_elem(0, "Parent"), _elem(1, "Sub B"), _elem(2, "Sub A"), _elem(3, "Body")]
+    node = {"text": "Sub B", "level": "H2", "children": []}
+    mapped, _ = map_hierarchy_node(node, elements, ["Parent"], 3, min_search_idx=1)
+    assert mapped["element_idx"] == 1
+
+
 # ------------------------------------------------------------- get_first_child_element_idx
 
 def test_get_first_child_element_idx_picks_minimum_direct_child():
@@ -1160,3 +1261,15 @@ def test_map_hierarchy_node_fallback_search_prefers_the_exact_paragraph():
     }
     mapped, _ = map_hierarchy_node(node, elements, [], 0)
     assert mapped["children"][0]["element_idx"] == 2
+
+
+def test_child_may_share_its_parents_own_element():
+    # A combined heading paragraph holds both the parent and its first child
+    # header: the child maps to the parent's start (not BEFORE it), so the
+    # body after the heading stays a leaf's body and is not orphaned.
+    elements = [_elem(0, "Lead In"), _elem(1, "Parent Sub A"), _elem(2, "Body")]
+    hierarchy = [{"text": "Parent Sub", "level": "H1", "children": [
+        {"text": "Sub A", "level": "H2", "children": []}]}]
+    mapped = _map_top_level(hierarchy, elements, frozenset({"parent sub"}))
+    assert mapped[0]["element_idx"] == 1
+    assert mapped[0]["children"][0]["element_idx"] == 1

@@ -147,8 +147,13 @@ def _find_header_element(
     expected_header: str,
     search_start: int,
     search_end: int,
+    excluded_headers: frozenset[str] = frozenset(),
 ) -> tuple[int, int] | None:
     """Locate `expected_header` among elements[search_start:search_end].
+
+    A paragraph whose normalized text is in `excluded_headers` is skipped
+    unless it IS `expected_header`: a partial ("contained") match must not
+    land on a heading that is itself another known header (#1178).
 
     Returns (position in `elements`, element index to report), or None. A
     paragraph whose normalized text IS the header wins over an earlier
@@ -169,6 +174,8 @@ def _find_header_element(
 
         para_text = normalize_text(elem_text)
         if not para_text:
+            continue
+        if para_text in excluded_headers and para_text != expected_header:
             continue
 
         # strict=True prevents matching content paragraphs like
@@ -224,11 +231,37 @@ def find_header_in_sequence(
     return matches
 
 
+def _fallback_header_search(
+    elements: list[dict[str, Any]],
+    normalized_target: str,
+    start_search_idx: int,
+    min_search_idx: int,
+    excluded_headers: frozenset[str],
+) -> int | None:
+    """Plain header search for a node the sequence match could not place.
+
+    Forward from `start_search_idx` first; then backward over
+    [min_search_idx, start_search_idx) because the Stage 1a hierarchy may not
+    match document order. `min_search_idx` is the parent's start for a child,
+    so a child is never placed before its parent (#1178).
+    """
+    hit = _find_header_element(
+        elements, normalized_target, start_search_idx, len(elements), excluded_headers
+    )
+    if hit is None and start_search_idx > min_search_idx:
+        hit = _find_header_element(
+            elements, normalized_target, min_search_idx, start_search_idx, excluded_headers
+        )
+    return hit[1] if hit is not None else None
+
+
 def map_hierarchy_node(
     node: HierarchyNode,
     elements: list[dict[str, Any]],
     parent_path: list[str] | None = None,
-    start_search_idx: int = 0
+    start_search_idx: int = 0,
+    min_search_idx: int = 0,
+    top_level_headers: frozenset[str] = frozenset(),
 ) -> tuple[MappedNode, int]:
     """
     Map a single hierarchy node and its children to element indices.
@@ -238,6 +271,12 @@ def map_hierarchy_node(
         elements: List of document elements from structure extractor
         parent_path: Path of parent headers for context
         start_search_idx: Where to start searching in document
+        min_search_idx: Earliest element position the backward fallback may
+            return. A child passes its parent's start: a child cannot precede
+            its parent, but may share the parent's own element when the
+            two headings sit in one paragraph (#1178).
+        top_level_headers: Normalized texts of the hierarchy's top-level
+            headers. A child's fallback never partial-matches one (#1178).
 
     Returns:
         Tuple of (mapped_node, next_search_idx)
@@ -267,23 +306,13 @@ def map_hierarchy_node(
             # Found the sequence - use the last match (this node)
             element_idx = matches[-1][1]
         else:
-            # Fallback: Simple text search using word-boundary matching
-            # First try searching forward from start_search_idx
-            # If not found, try searching from the beginning (handles out-of-order hierarchies)
-            normalized_target = normalize_text(node_text)
-
-            def search_for_header(search_start: int, search_end: int) -> int | None:
-                """Search for header in a range of elements."""
-                hit = _find_header_element(elements, normalized_target, search_start, search_end)
-                return hit[1] if hit is not None else None
-
-            # Try forward search first
-            element_idx = search_for_header(start_search_idx, len(elements))
-
-            # If not found and we didn't start from the beginning,
-            # try searching from the beginning (Stage 1a hierarchy may not match document order)
-            if element_idx is None and start_search_idx > 0:
-                element_idx = search_for_header(0, start_search_idx)
+            element_idx = _fallback_header_search(
+                elements,
+                normalize_text(node_text),
+                start_search_idx,
+                min_search_idx,
+                top_level_headers if parent_path else frozenset(),
+            )
 
     # Build mapped node
     mapped_node: MappedNode = {
@@ -303,13 +332,16 @@ def map_hierarchy_node(
         # For synthetic headers, children should search from the original start position
         # because the LLM may have grouped items out of document order
         child_search_start = start_search_idx if is_synthetic else next_search_idx
+        child_min_search_idx = min_search_idx if element_idx is None else element_idx
 
         for child in node["children"]:
             mapped_child, child_next_idx = map_hierarchy_node(
                 child,
                 elements,
                 current_path,
-                child_search_start
+                child_search_start,
+                child_min_search_idx,
+                top_level_headers,
             )
             mapped_children.append(mapped_child)
 
@@ -818,8 +850,14 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) 
     mapped_hierarchy: list[MappedNode] = []
     next_search_idx = 0
 
-    for node in hierarchy_data.get("hierarchy", []):
-        mapped_node, next_search_idx = map_hierarchy_node(node, elements, [], next_search_idx)
+    top_level = hierarchy_data.get("hierarchy", [])
+    top_level_headers = frozenset(
+        normalize_text(n.get("text", "")) for n in top_level if n.get("text", "").strip()
+    )
+    for node in top_level:
+        mapped_node, next_search_idx = map_hierarchy_node(
+            node, elements, [], next_search_idx, top_level_headers=top_level_headers
+        )
         mapped_hierarchy.append(mapped_node)
 
     print(f"✓ Mapped {len(mapped_hierarchy)} top-level sections")
