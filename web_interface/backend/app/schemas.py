@@ -1,5 +1,5 @@
 """Pydantic schemas for API request/response validation."""
-from pydantic import BaseModel, PlainSerializer
+from pydantic import BaseModel, Field, PlainSerializer
 from typing import Annotated, Literal
 from datetime import datetime
 
@@ -151,6 +151,8 @@ class RunSummary(BaseModel):
     quality_band: str | None = None
     quality_cap: int | None = None
     feedback: RunFeedbackSummary = RunFeedbackSummary()
+    # The batch upload this run belongs to (#1114), null for a single upload.
+    batch_id: str | None = None
 
     class Config:
         from_attributes = True
@@ -599,6 +601,80 @@ class QueueStatsResponse(BaseModel):
     consumers: int | None = None
     owners: list[dict] = []
     dead: int | None = None
+
+
+# ============================================================
+# Batch upload Schemas (#1114)
+# ============================================================
+
+class BatchCreateRequest(BaseModel):
+    """POST /api/batches: how many valid files the user is about to upload."""
+    files_submitted: int = Field(ge=1)
+
+
+class BatchCreateResponse(BaseModel):
+    id: str
+
+
+class BatchSummary(BaseModel):
+    """One batch in GET /api/batches (the Runs page's Batch filter)."""
+    id: str
+    submitted_by: RunBySummary | None = None
+    created_at: TZDateTime
+    run_count: int
+    files_submitted: int
+
+
+class BatchListResponse(BaseModel):
+    batches: list[BatchSummary]
+
+
+class BatchStatusCounts(BaseModel):
+    """How many of a batch's runs are in each status. ``created`` is a run
+    uploaded but not yet started (the client starts each right after upload)."""
+    complete: int = 0
+    running: int = 0
+    queued: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    created: int = 0
+
+
+class BatchRunRow(BaseModel):
+    """One run in the batch view. ``queue_position`` is set on queued rows
+    only: how many queued batch runs entered the queue before this one.
+    ``quality_score`` is admin-only, like the Runs list's Score column."""
+    run_id: str
+    filename: str
+    cv_owner_name: str | None = None
+    status: str
+    queue_position: int | None = None
+    quality_score: int | None = None
+
+
+class BatchDetail(BatchSummary):
+    """GET /api/batches/{id}: the batch view's header and rows, oldest run first."""
+    status_counts: BatchStatusCounts
+    runs: list[BatchRunRow]
+
+
+class QueueLane(BaseModel):
+    """One queue in GET /api/queue. ``workers`` counts live consumers of the
+    queue (null when Valkey can't be read); ``ahead`` is runs waiting in it;
+    ``est_wait_minutes`` is (ahead + that kind's running runs) x the recent
+    median run time / workers, null when either is unknown. The batch figure
+    is a best case: single runs can take the flex workers too."""
+    workers: int | None
+    ahead: int
+    est_wait_minutes: int | None
+
+
+class QueueOverview(BaseModel):
+    """GET /api/queue, for any signed-in user. ``single``/``batch`` are null
+    unless ``dispatch_mode`` is ``queue`` -- in-process dispatch has no queue."""
+    dispatch_mode: str
+    single: QueueLane | None = None
+    batch: QueueLane | None = None
 
 
 class AdminConfigResponse(BaseModel):

@@ -171,7 +171,7 @@ def fake_redis(monkeypatch):
     r = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer(), decode_responses=True)
     monkeypatch.setattr(run_queue, "_client", lambda: r)
     monkeypatch.setattr(run_queue, "_producer_client", lambda: r)
-    monkeypatch.setattr(run_queue, "_autoclaim_cursor", "0-0")
+    monkeypatch.setattr(run_queue, "_autoclaim_cursors", {})
     return r
 
 
@@ -184,12 +184,16 @@ def _stream_run_ids(r):
     return [fields["run_id"] for _, fields in r.xrange(run_queue.STREAM)]
 
 
-def _seed_queued_run(db, run_id, *, queued_at):
+def _seed_queued_run(db, run_id, *, queued_at, batch_id=None):
     run = Run(id=run_id, filename="cv.docx", file_type="docx",
-              status=RunState.QUEUED, queued_at=queued_at)
+              status=RunState.QUEUED, queued_at=queued_at, batch_id=batch_id)
     db.add(run)
     db.commit()
     return run
+
+
+def _batch_stream_run_ids(r):
+    return [fields["run_id"] for _, fields in r.xrange(run_queue.BATCH_STREAM)]
 
 
 class TestReconcileQueuedRuns:
@@ -255,6 +259,24 @@ class TestReconcileQueuedRuns:
         assert run_service.reconcile_queued_runs(db) == 1
         assert run_service.reconcile_queued_runs(db) == 0
         assert _stream_run_ids(fake_redis) == ["SQ006"]
+
+    def test_requeues_a_stranded_batch_run_onto_the_batch_queue(self, db, fake_redis, queue_mode):
+        """#1114: the reconciler routes through run_queue.queue_for like every
+        other producer -- a stranded batch run goes back on the batch stream,
+        never onto the single-run stream where general workers would take it."""
+        _seed_queued_run(db, "SQB001", queued_at=datetime.now() - timedelta(minutes=10), batch_id="BATCHA")
+        assert run_service.reconcile_queued_runs(db) == 1
+        assert _batch_stream_run_ids(fake_redis) == ["SQB001"]
+        assert _stream_run_ids(fake_redis) == []
+
+    def test_leaves_a_batch_run_alone_while_its_batch_token_is_live(self, db, fake_redis, queue_mode):
+        """#1114: live_run_ids() must see the batch stream too, or every queued
+        batch run older than the threshold would get a duplicate token."""
+        run_queue.ensure_group(run_queue.BATCH)
+        _seed_queued_run(db, "SQB002", queued_at=datetime.now() - timedelta(minutes=10), batch_id="BATCHA")
+        run_queue.enqueue("SQB002", run_queue.BATCH)
+        assert run_service.reconcile_queued_runs(db) == 0
+        assert _batch_stream_run_ids(fake_redis) == ["SQB002"]
 
 
 class TestEffectiveStaleRunMinutes:

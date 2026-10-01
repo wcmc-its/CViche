@@ -1134,3 +1134,148 @@ def test_upload_requires_current_consent(client, db, seed_simple_mode, tmp_path,
     rate_limit.assert_not_called()
     storage.put_file_exclusive.assert_not_called()
     assert db.query(Run).count() == 0
+
+
+# --- #1114: batch upload ------------------------------------------------------
+
+def _add_batch(db, owner, batch_id="BATCHA"):
+    from app.models import RunBatch
+    db.add(RunBatch(id=batch_id, user_id=owner.id, files_submitted=2))
+    db.commit()
+
+
+def test_upload_with_the_callers_batch_id_puts_the_run_in_the_batch(client, db, seed_simple_mode, tmp_path):
+    user = _make_user(db)
+    _add_batch(db, user)
+    _auth(client, user)
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
+                                                      data={"batch_id": "BATCHA"}))
+
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).batch_id == "BATCHA"
+
+
+def test_upload_without_a_batch_id_is_a_single_run(client, db, seed_simple_mode, tmp_path):
+    user = _make_user(db)
+    _auth(client, user)
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).batch_id is None
+
+
+@pytest.mark.parametrize("batch_owner, status", [("nobody", 404), ("someone else", 403), ("admin", 403)])
+def test_upload_into_a_batch_the_caller_does_not_own_is_refused_before_storage(
+    client, db, seed_simple_mode, tmp_path, batch_owner, status,
+):
+    """A batch_id must name one of the caller's own batches: 404 for one that
+    doesn't exist, 403 for another user's (the caller here is an admin in the
+    last arm -- admins see every batch but upload only into their own)."""
+    uploader = _make_user(db, role="admin" if batch_owner == "admin" else "user")
+    if batch_owner != "nobody":
+        _add_batch(db, _make_user(db, email="sam@example.com"))
+    _auth(client, uploader)
+    storage = MagicMock()
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
+                                                      data={"batch_id": "BATCHA"}))
+
+    assert resp.status_code == status, resp.text
+    storage.put_file_exclusive.assert_not_called()
+    assert db.query(Run).count() == 0
+
+
+def _post_estimates(client, *names):
+    return client.post(
+        "/api/estimate",
+        files=[("files", (name, b"PK\x03\x04dummy-docx-bytes", "application/octet-stream")) for name in names],
+    )
+
+
+@pytest.mark.parametrize("role, cost_visible", [("admin", True), ("user", False)])
+def test_estimate_many_files_returns_a_row_per_file_and_totals(client, db, seed_simple_mode, role, cost_visible):
+    user = _make_user(db, role=role)
+    _auth(client, user)
+    patches = [
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", return_value="x" * 4000),
+    ]
+
+    resp = _run_patches(patches, lambda: _post_estimates(client, "a.docx", "b.docx", "c.docx"))
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [row["filename"] for row in body["files"]] == ["a.docx", "b.docx", "c.docx"]
+    assert all(row["error"] is None for row in body["files"])
+    one = body["files"][0]["estimate"]
+    assert body["estimated_time_seconds_min"] == 3 * one["estimated_time_seconds_min"]
+    assert body["estimated_time_seconds_max"] == 3 * one["estimated_time_seconds_max"]
+    if cost_visible:
+        assert body["estimated_cost_min"] == pytest.approx(3 * one["estimated_cost_min"])
+        assert body["pricing_model"]
+    else:
+        assert (body["estimated_cost_min"], body["estimated_cost_max"], one["estimated_cost_min"]) == (None, None, None)
+        assert body["pricing_model"] is None
+
+
+def test_estimate_many_files_reports_a_bad_file_on_its_row_and_totals_the_rest(client, db, seed_simple_mode):
+    user = _make_user(db)
+    _auth(client, user)
+    patches = [
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", return_value="x" * 4000),
+    ]
+
+    resp = _run_patches(patches, lambda: _post_estimates(client, "a.docx", "notes.txt"))
+
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["files"]
+    assert rows[1]["estimate"] is None
+    assert rows[1]["error"].startswith("Unsupported file type: .txt.")
+    assert resp.json()["estimated_time_seconds_min"] == rows[0]["estimate"]["estimated_time_seconds_min"]
+
+
+def test_estimate_many_files_counts_as_one_call_against_the_estimate_limit(client, db, seed_simple_mode):
+    user = _make_user(db)
+    _auth(client, user)
+    one_call = upload_module._EstimatePerUserWindow(max_calls=1, window_seconds=300)
+    patches = [
+        patch("app.api.upload._estimate_rate_limiter", one_call),
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", return_value="x" * 4000),
+    ]
+
+    def two_calls():
+        names = [f"cv{n}.docx" for n in range(upload_module.MAX_BATCH_FILES)]
+        return _post_estimates(client, *names), _post_estimates(client, "again.docx")
+
+    batch_resp, next_resp = _run_patches(patches, two_calls)
+
+    assert batch_resp.status_code == 200, batch_resp.text
+    assert len(batch_resp.json()["files"]) == upload_module.MAX_BATCH_FILES
+    assert next_resp.status_code == 429
+
+
+def test_estimate_refuses_more_than_fifty_files_or_both_shapes_at_once(client, db, seed_simple_mode):
+    user = _make_user(db)
+    _auth(client, user)
+    names = [f"cv{n}.docx" for n in range(upload_module.MAX_BATCH_FILES + 1)]
+
+    too_many = _post_estimates(client, *names)
+    both = client.post("/api/estimate", files=[
+        ("file", ("a.docx", b"PK", "application/octet-stream")),
+        ("files", ("b.docx", b"PK", "application/octet-stream")),
+    ])
+    neither = client.post("/api/estimate", data={"unrelated": "x"})
+
+    assert too_many.status_code == 400
+    assert both.status_code == 400
+    assert neither.status_code == 400

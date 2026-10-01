@@ -20,6 +20,8 @@ EXPECTED_INDEXES = {
     "ix_steps_run_id",
     "ix_logs_run_id",
     "ix_llm_usage_run_id",
+    # #1114: runs.batch_id, from the run_batches migration (c3d8e1f5a297).
+    "ix_runs_batch_id",
 }
 
 

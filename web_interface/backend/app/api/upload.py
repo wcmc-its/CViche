@@ -38,6 +38,7 @@ from app.services.config_service import (
 from app.errors import bad_request, internal_error
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
+from app.services.batch_service import MAX_BATCH_FILES, get_owned_batch
 from app.services.run_service import UPLOAD_DIR
 from app.services.template_warning import detect_wcm_template
 from app.services.pdf_sandbox import (
@@ -556,6 +557,19 @@ def commit_run_or_compensate(
         )
 
 
+def _add_pending_steps(db: Session, run_id: str) -> None:
+    """Stage one pending Step row per STEP_REGISTRY entry for a new run."""
+    for step_def in STEP_REGISTRY:
+        step = Step(
+            run_id=run_id,
+            step_number=step_def.number,
+            stage_id=step_def.stage_id,
+            step_name=step_def.name,
+            status="pending"
+        )
+        db.add(step)
+
+
 @router.post("/upload", response_model=UploadResponse)
 async def upload_cv(
     file: UploadFile = File(...),
@@ -570,6 +584,9 @@ async def upload_cv(
     # record whether the submitter was the faculty member or an administrator
     # who attested to having the faculty member's permission.
     submission_type: Literal["own_cv", "authorized_admin"] = Form(...),
+    # The batch this file belongs to (#1114), from POST /batches. Optional:
+    # absent, the run is a single upload exactly as before.
+    batch_id: str | None = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -585,6 +602,11 @@ async def upload_cv(
                 "message": "Please review and accept the updated consent terms.",
             },
         )
+
+    # A batch_id must name one of the caller's own batches (404 unknown, 403
+    # someone else's) -- checked before anything is read or archived.
+    if batch_id is not None:
+        get_owned_batch(db, batch_id, current_user)
 
     # Validate file type
     if not file.filename:
@@ -729,19 +751,10 @@ async def upload_cv(
         show_track_changes=1 if include_track_changes else 0,
         show_pipeline_comments=1 if include_classification_comments else 0,
         strip_template_instructions=1 if strip_wcm_instructions else 0,
+        batch_id=batch_id,
     )
     db.add(run)
-
-    # Create step records (all pending initially)
-    for step_def in STEP_REGISTRY:
-        step = Step(
-            run_id=run_id,
-            step_number=step_def.number,
-            stage_id=step_def.stage_id,
-            step_name=step_def.name,
-            status="pending"
-        )
-        db.add(step)
+    _add_pending_steps(db, run_id)
 
     commit_run_or_compensate(db, run_id, current_user.email, file_path)
 
@@ -756,30 +769,42 @@ async def upload_cv(
     )
 
 
-@router.post("/estimate", response_model=EstimateResponse)
-async def estimate_processing(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Estimate cost and time for processing a CV file.
+class BatchEstimateFile(BaseModel):
+    """One file of a multi-file /estimate (#1114): its estimate, or the
+    reason it could not be estimated -- the same 400 message /estimate gives
+    for that file alone (unsupported type, too large, unreadable PDF...)."""
+    filename: str
+    estimate: EstimateResponse | None = None
+    error: str | None = None
 
-    This endpoint analyzes the document to estimate:
-    - Number of tokens (based on document text)
-    - Estimated cost range (based on token count and LLM pricing)
-    - Estimated time range (based on token count and processing patterns)
 
-    The file is not saved - this is just for estimation.
-    """
-    # Validate file type
+class BatchEstimateResponse(BaseModel):
+    """Multi-file /estimate (#1114): a row per file plus totals over the
+    files that could be estimated. Cost fields are None for non-admins, as
+    on the single-file response (#1111)."""
+    files: list[BatchEstimateFile]
+    estimated_time_seconds_min: int
+    estimated_time_seconds_max: int
+    estimated_cost_min: float | None
+    estimated_cost_max: float | None
+    num_steps: int
+    pricing_model: str | None
+
+
+def _estimate_file_ext(file: UploadFile) -> str:
+    """The file's lower-cased extension, or a 400 for a missing name or an
+    unsupported type."""
     if not file.filename:
         raise bad_request("No filename provided")
-
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
         raise bad_request(f"Unsupported file type: {file_ext}. {_UNSUPPORTED_TYPE_HINT}")
+    return file_ext
 
+
+def _check_estimate_limits(current_user: User, db: Session) -> None:
+    """Both /estimate budgets, raising their 429. A call counts once against
+    each, however many files it carries (#1114)."""
     # Per-pod, per-user in-memory budget (#795), checked first since it's
     # cheaper than the DB-backed check below -- a user already over it never
     # costs a query. Both checks run before the body is read (_read_bounded)
@@ -796,6 +821,10 @@ async def estimate_processing(
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
 
+
+async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> EstimateResponse:
+    """Read, validate and size one file for /estimate; raises the same 400s
+    /upload would for an unreadable or mislabeled file."""
     # Read file content in bounded chunks so an oversized body is never fully
     # buffered before being rejected (#793).
     content = await _read_bounded(file, MAX_UPLOAD_SIZE)
@@ -851,8 +880,80 @@ async def estimate_processing(
         estimated_time_seconds_min=time_min,
         estimated_time_seconds_max=time_max,
         num_steps=num_stages,
-        filename=file.filename,
+        filename=file.filename or "",
         file_size_kb=round(file_size_kb, 1),
         pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
         text_characters_is_guess=extracted is None,
     )
+
+
+async def _estimate_batch_file(file: UploadFile, current_user: User) -> BatchEstimateFile:
+    """One row of a multi-file /estimate. A 400 for this file becomes the
+    row's ``error`` so one bad file doesn't cost the whole batch its quote;
+    any other failure (a full PDF sandbox's 503) still fails the call."""
+    filename = file.filename or ""
+    try:
+        file_ext = _estimate_file_ext(file)
+        estimate = await _estimate_one(file, file_ext, current_user)
+    except HTTPException as e:
+        if e.status_code != 400:
+            raise
+        return BatchEstimateFile(filename=filename, error=e.detail["message"])
+    return BatchEstimateFile(filename=filename, estimate=estimate)
+
+
+def _sum_cost(values: list[float | None]) -> float | None:
+    """Total of per-file costs, or None when they are hidden (non-admin)."""
+    if any(value is None for value in values):
+        return None
+    return round(sum(value for value in values if value is not None), 3)
+
+
+def _batch_totals(rows: list[BatchEstimateFile], current_user: User) -> BatchEstimateResponse:
+    estimates = [row.estimate for row in rows if row.estimate is not None]
+    return BatchEstimateResponse(
+        files=rows,
+        estimated_time_seconds_min=sum(e.estimated_time_seconds_min for e in estimates),
+        estimated_time_seconds_max=sum(e.estimated_time_seconds_max for e in estimates),
+        estimated_cost_min=_sum_cost([e.estimated_cost_min for e in estimates]),
+        estimated_cost_max=_sum_cost([e.estimated_cost_max for e in estimates]),
+        num_steps=len(STEP_REGISTRY),
+        pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
+    )
+
+
+@router.post("/estimate", response_model=EstimateResponse | BatchEstimateResponse)
+async def estimate_processing(
+    file: UploadFile | None = File(None),
+    # Up to MAX_BATCH_FILES files at once, for a batch upload (#1114): one
+    # call against both rate limits, a row per file plus totals.
+    files: list[UploadFile] | None = File(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EstimateResponse | BatchEstimateResponse:
+    """
+    Estimate cost and time for processing a CV file.
+
+    This endpoint analyzes the document to estimate:
+    - Number of tokens (based on document text)
+    - Estimated cost range (based on token count and LLM pricing)
+    - Estimated time range (based on token count and processing patterns)
+
+    One file as ``file`` answers an EstimateResponse, as it always has; up to
+    MAX_BATCH_FILES as ``files`` answers a BatchEstimateResponse. Nothing is
+    saved - this is just for estimation.
+    """
+    if files is None:
+        if file is None:
+            raise bad_request("No file provided")
+        file_ext = _estimate_file_ext(file)
+        _check_estimate_limits(current_user, db)
+        return await _estimate_one(file, file_ext, current_user)
+
+    if file is not None:
+        raise bad_request("Send one file as `file` or several as `files`, not both.")
+    if len(files) > MAX_BATCH_FILES:
+        raise bad_request(f"At most {MAX_BATCH_FILES} files can be estimated at once.")
+    _check_estimate_limits(current_user, db)
+    rows = [await _estimate_batch_file(each, current_user) for each in files]
+    return _batch_totals(rows, current_user)

@@ -50,7 +50,7 @@ def wired(db, monkeypatch, tmp_path):
     r = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer(), decode_responses=True)
     monkeypatch.setattr(run_queue, "_client", lambda: r)
     monkeypatch.setattr(run_queue, "_producer_client", lambda: r)
-    monkeypatch.setattr(run_queue, "_autoclaim_cursor", "0-0")
+    monkeypatch.setattr(run_queue, "_autoclaim_cursors", {})
     monkeypatch.setattr(worker, "SessionLocal", TestingSessionLocal)
     # claim_queued/mark_failed (run_service) open their own short session too
     # -- point it at the same shared test DB the `db` fixture uses.
@@ -465,7 +465,7 @@ def test_loop_reclaims_own_pending_at_startup_and_after_each_error(wired, monkey
     depending on Valkey PEL mechanics already proved separately in
     test_run_queue.py."""
     calls = []
-    monkeypatch.setattr(worker, "_reclaim_own_pending", lambda: calls.append(1) or [])
+    monkeypatch.setattr(worker, "_reclaim_own_pending", lambda queues: calls.append(1) or [])
     monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
     monkeypatch.setattr(worker, "RETRY_DELAY_S", 0.05)
 
@@ -609,8 +609,8 @@ def test_shutdown_between_read_and_claim_requeues_the_entry_without_claiming(db,
 
     real_read_one = run_queue.read_one
 
-    def read_then_shutdown(consumer):
-        result = real_read_one(consumer)
+    def read_then_shutdown(consumer, *args, **kwargs):
+        result = real_read_one(consumer, *args, **kwargs)
         if result:
             worker.shutting_down.set()
         return result
@@ -750,7 +750,7 @@ def test_main_refuses_to_start_without_redis_and_s3(monkeypatch, env, tmp_path):
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("CVICHE_WORKER_ALLOW_LOCAL_STORAGE", raising=False)
     monkeypatch.setattr(worker, "configure_logging", lambda: None)
-    monkeypatch.setattr(run_queue, "ensure_group", lambda: pytest.fail("must not touch Valkey"))
+    monkeypatch.setattr(run_queue, "ensure_group", lambda queue: pytest.fail("must not touch Valkey"))
     ready_file = tmp_path / "ready"
     monkeypatch.setattr(worker, "READY_FILE", ready_file)
 
@@ -764,14 +764,243 @@ def test_main_writes_the_ready_file_only_after_config_checks_and_ensure_group(mo
     monkeypatch.setattr(worker, "configure_logging", lambda: None)
     ready_file = tmp_path / "ready"
     monkeypatch.setattr(worker, "READY_FILE", ready_file)
+    monkeypatch.delenv("CVICHE_WORKER_STREAMS", raising=False)
     ensure_group_calls = []
-    monkeypatch.setattr(run_queue, "ensure_group", lambda: ensure_group_calls.append(1))
-    monkeypatch.setattr(worker, "loop", lambda: None)  # don't actually run the read loop
+    loop_queues = []
+    monkeypatch.setattr(run_queue, "ensure_group", lambda queue: ensure_group_calls.append(queue))
+    monkeypatch.setattr(worker, "loop", loop_queues.append)  # don't actually run the read loop
 
     assert worker.main() == 0
 
-    assert ensure_group_calls == [1]
+    assert ensure_group_calls == [run_queue.SINGLE], "unset CVICHE_WORKER_STREAMS = the single-run queue only"
+    assert loop_queues == [(run_queue.SINGLE,)]
     assert ready_file.exists()
+
+
+# --- two queues (#1114) -------------------------------------------------------
+
+BOTH = (run_queue.SINGLE, run_queue.BATCH)
+
+
+def _batch_pending():
+    """Delivered-but-unACKed entries on the batch queue."""
+    return run_queue._client().xpending(run_queue.BATCH_STREAM, run_queue.BATCH_GROUP)["pending"]
+
+
+def _run_loop_until(predicate, queues, timeout=3.0):
+    """Run worker.loop(queues) on a thread until predicate() holds, then stop it."""
+    t = threading.Thread(target=worker.loop, args=(queues,))
+    t.start()
+    try:
+        deadline = time.time() + timeout
+        while not predicate() and time.time() < deadline:
+            time.sleep(0.02)
+    finally:
+        worker.shutting_down.set()
+        t.join(timeout=3)
+    assert not t.is_alive()
+
+
+def test_handle_on_the_batch_queue_acks_on_the_batch_stream(db, wired, tmp_path):
+    run_queue.ensure_group(run_queue.BATCH)
+    _seed(db, run_id="BAT001")
+    (tmp_path / "BAT001.docx").write_bytes(b"PK")
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
+    run_queue.enqueue("BAT001", run_queue.BATCH)
+
+    worker.handle(*run_queue.read_one("w1", run_queue.BATCH), queue=run_queue.BATCH)
+
+    assert _row(db, "BAT001").status == "complete"
+    assert _batch_pending() == 0
+    assert wired.xlen(run_queue.BATCH_STREAM) == 0
+
+
+def test_a_flex_worker_takes_a_waiting_single_run_before_a_batch_run(db, wired, tmp_path, monkeypatch):
+    """The batch run was queued FIRST; a worker reading single,batch still
+    runs the single run first, because it polls the queues in order."""
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
+    run_queue.ensure_group(run_queue.BATCH)
+    for run_id in ("BAT001", "SNG001"):
+        _seed(db, run_id=run_id)
+        (tmp_path / f"{run_id}.docx").write_bytes(b"PK")
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
+    run_queue.enqueue("BAT001", run_queue.BATCH)
+    run_queue.enqueue("SNG001", run_queue.SINGLE)
+
+    _run_loop_until(lambda: len(StubOrchestrator.calls) == 2, BOTH)
+
+    assert [run_id for run_id, _ in StubOrchestrator.calls] == ["SNG001", "BAT001"]
+    assert _pending() == 0 and _batch_pending() == 0
+
+
+def test_a_single_queue_worker_never_reads_the_batch_queue(db, wired, tmp_path, monkeypatch):
+    """The general pool (CVICHE_WORKER_STREAMS unset) is what caps batch runs
+    at the flex pool's size: it must leave a batch token alone entirely."""
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
+    run_queue.ensure_group(run_queue.BATCH)
+    _seed(db, run_id="BAT001")
+    (tmp_path / "BAT001.docx").write_bytes(b"PK")
+    run_queue.enqueue("BAT001", run_queue.BATCH)
+
+    _run_loop_until(lambda: False, worker.DEFAULT_QUEUES, timeout=0.3)
+
+    assert StubOrchestrator.calls == []
+    assert _row(db, "BAT001").status == "queued"
+    assert _batch_pending() == 0
+    assert run_queue.read_one("flex", run_queue.BATCH, block=False) is not None, "never delivered to anyone"
+
+
+def test_read_next_polls_every_queue_then_blocks_only_on_the_first(wired, monkeypatch):
+    calls = []
+
+    def fake_read_one(consumer, queue, *, block=True):
+        calls.append((queue.name, block))
+        return None
+    monkeypatch.setattr(run_queue, "read_one", fake_read_one)
+
+    assert worker._read_next(BOTH) is None
+    assert calls == [("single", False), ("batch", False), ("single", True)]
+
+
+def test_read_next_with_one_queue_is_the_single_blocking_read_of_before(wired, monkeypatch):
+    calls = []
+
+    def fake_read_one(consumer, queue, *, block=True):
+        calls.append((queue.name, block))
+        return None
+    monkeypatch.setattr(run_queue, "read_one", fake_read_one)
+
+    assert worker._read_next(worker.DEFAULT_QUEUES) is None
+    assert calls == [("single", True)]
+
+
+def test_read_next_returns_the_batch_entry_tagged_with_its_queue(wired):
+    run_queue.ensure_group(run_queue.BATCH)
+    eid = run_queue.enqueue("BAT001", run_queue.BATCH)
+    entry = worker._read_next(BOTH)
+    assert (entry.queue, entry.entry_id, entry.fields["run_id"]) == (run_queue.BATCH, eid, "BAT001")
+
+
+def test_loop_autoclaims_an_abandoned_batch_entry(db, wired, tmp_path, monkeypatch):
+    """XAUTOCLAIM sweeps every queue the worker reads, not just the first."""
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
+    monkeypatch.setattr(run_queue, "MIN_IDLE_MS", 0)
+    run_queue.ensure_group(run_queue.BATCH)
+    _seed(db, run_id="BAT001")
+    (tmp_path / "BAT001.docx").write_bytes(b"PK")
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
+    run_queue.enqueue("BAT001", run_queue.BATCH)
+    run_queue.read_one("dead-pod", run_queue.BATCH)  # delivered, then that pod died
+
+    monkeypatch.setattr(run_queue, "read_one", lambda *a, **kw: None)  # only autoclaim can find it
+    _run_loop_until(lambda: _row(db, "BAT001").status == "complete", BOTH)
+
+    assert StubOrchestrator.calls == [("BAT001", None)]
+    assert _batch_pending() == 0
+
+
+def test_own_pel_reclaim_covers_the_batch_queue(db, wired, tmp_path):
+    run_queue.ensure_group(run_queue.BATCH)
+    _seed(db, run_id="BAT001")
+    (tmp_path / "BAT001.docx").write_bytes(b"PK")
+    StubOrchestrator.on_execute = staticmethod(_set_status("complete"))
+    run_queue.enqueue("BAT001", run_queue.BATCH)
+    run_queue.read_one("w1", run_queue.BATCH)  # this pod crashed mid-run
+
+    assert worker._reclaim_own_pending(BOTH) == []
+
+    assert StubOrchestrator.calls == [("BAT001", None)]
+    assert _batch_pending() == 0
+
+
+def test_poison_cap_on_the_batch_queue_dead_letters_to_the_batch_dead_stream(db, wired, monkeypatch):
+    monkeypatch.setattr(run_queue, "MIN_IDLE_MS", 0)
+    run_queue.ensure_group(run_queue.BATCH)
+    _seed(db, run_id="BAT001")
+    eid = run_queue.enqueue("BAT001", run_queue.BATCH)
+    run_queue.read_one("A", run_queue.BATCH)
+    for _ in range(run_queue.MAX_DELIVERIES):
+        wired.xclaim(run_queue.BATCH_STREAM, run_queue.BATCH_GROUP, "A", 0, [eid])
+
+    worker.handle(*run_queue.autoclaim_one("B", run_queue.BATCH), reclaimed=True, queue=run_queue.BATCH)
+
+    assert [d[1]["run_id"] for d in wired.xrange(run_queue.BATCH_DEAD_STREAM)] == ["BAT001"]
+    assert wired.xlen(run_queue.DEAD_STREAM) == 0
+    assert _batch_pending() == 0
+    assert _row(db, "BAT001").status == "failed"
+
+
+def test_shutdown_requeues_a_batch_entry_onto_the_batch_stream(db, wired, monkeypatch):
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
+    run_queue.ensure_group(run_queue.BATCH)
+    _seed(db, run_id="BAT001")
+    eid = run_queue.enqueue("BAT001", run_queue.BATCH)
+    real_read_one = run_queue.read_one
+
+    def read_then_shutdown(consumer, *args, **kwargs):
+        result = real_read_one(consumer, *args, **kwargs)
+        if result:
+            worker.shutting_down.set()
+        return result
+    monkeypatch.setattr(run_queue, "read_one", read_then_shutdown)
+
+    t = threading.Thread(target=worker.loop, args=(BOTH,))
+    t.start()
+    t.join(timeout=2)
+
+    assert not t.is_alive()
+    remaining = wired.xrange(run_queue.BATCH_STREAM)
+    assert [(e != eid, f["run_id"]) for e, f in remaining] == [(True, "BAT001")]
+    assert wired.xlen(run_queue.STREAM) == 0
+    assert _row(db, "BAT001").status == "queued"
+
+
+def test_watchdog_on_a_batch_run_acks_the_batch_entry(db, wired, tmp_path, monkeypatch):
+    run_queue.ensure_group(run_queue.BATCH)
+    _seed(db, run_id="BAT001")
+    (tmp_path / "BAT001.docx").write_bytes(b"PK")
+    monkeypatch.setattr(worker, "RUN_TIMEOUT_S", 0.05)
+    exit_codes = []
+    monkeypatch.setattr(worker.os, "_exit", lambda code: exit_codes.append(code))
+    acked = []
+    real_ack = run_queue.ack
+    monkeypatch.setattr(run_queue, "ack", lambda entry_id, queue=run_queue.SINGLE: (acked.append(queue), real_ack(entry_id, queue))[1])
+    StubOrchestrator.on_execute = staticmethod(lambda session, run_id: time.sleep(0.3))
+    run_queue.enqueue("BAT001", run_queue.BATCH)
+
+    worker.handle(*run_queue.read_one("w1", run_queue.BATCH), queue=run_queue.BATCH)
+
+    assert exit_codes == [1]
+    assert acked and set(acked) == {run_queue.BATCH}, "the watchdog's ack and handle's own must both hit the batch stream"
+
+
+def test_main_reads_cviche_worker_streams_and_ensures_every_group(monkeypatch, tmp_path):
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://x")
+    monkeypatch.setenv("CVICHE_STORAGE_BACKEND", "s3")
+    monkeypatch.setenv("CVICHE_WORKER_STREAMS", "single,batch")
+    monkeypatch.setattr(worker, "configure_logging", lambda: None)
+    monkeypatch.setattr(worker, "READY_FILE", tmp_path / "ready")
+    ensured, loop_queues = [], []
+    monkeypatch.setattr(run_queue, "ensure_group", ensured.append)
+    monkeypatch.setattr(worker, "loop", loop_queues.append)
+
+    assert worker.main() == 0
+
+    assert ensured == [run_queue.SINGLE, run_queue.BATCH]
+    assert loop_queues == [BOTH]
+
+
+def test_main_refuses_to_start_on_an_invalid_cviche_worker_streams(monkeypatch, tmp_path):
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://x")
+    monkeypatch.setenv("CVICHE_STORAGE_BACKEND", "s3")
+    monkeypatch.setenv("CVICHE_WORKER_STREAMS", "single,batchh")
+    monkeypatch.setattr(worker, "configure_logging", lambda: None)
+    ready_file = tmp_path / "ready"
+    monkeypatch.setattr(worker, "READY_FILE", ready_file)
+    monkeypatch.setattr(run_queue, "ensure_group", lambda queue: pytest.fail("must not touch Valkey"))
+
+    assert worker.main() == 2
+    assert not ready_file.exists()
 
 
 def test_run_timeout_stays_below_the_pod_grace_period():
@@ -783,3 +1012,50 @@ def test_run_timeout_stays_below_the_pod_grace_period():
     grace_period = manifest["spec"]["template"]["spec"]["terminationGracePeriodSeconds"]
 
     assert worker.RUN_TIMEOUT_S < grace_period
+
+
+_K8S = Path(__file__).resolve().parent.parent.parent.parent / "k8s"
+
+
+def test_flex_worker_manifest_differs_from_the_worker_only_where_intended():
+    """#1114: cviche-worker-flex is a copy of the worker base. Its probes,
+    grace period, rollout strategy and security context must never drift from
+    the general pool's; only the name/label, CVICHE_WORKER_STREAMS and the
+    base replica count (0, so an overlay that doesn't patch it runs none) may
+    differ."""
+    worker = yaml.safe_load((_K8S / "base/worker/deployment.yaml").read_text())
+    flex = yaml.safe_load((_K8S / "base/worker/flex-deployment.yaml").read_text())
+
+    flex_env = flex["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert {"name": "CVICHE_WORKER_STREAMS", "value": "single,batch"} in flex_env
+    assert run_queue.parse_worker_streams("single,batch") == (run_queue.SINGLE, run_queue.BATCH)
+    assert flex["spec"]["replicas"] == 0
+    assert flex["metadata"]["name"] == "cviche-worker-flex"
+    assert flex["spec"]["selector"]["matchLabels"] == {"app": "cviche-worker-flex"}
+    assert flex["spec"]["template"]["metadata"]["labels"] == {"app": "cviche-worker-flex"}
+
+    flex_env.remove({"name": "CVICHE_WORKER_STREAMS", "value": "single,batch"})
+    flex["metadata"]["name"] = worker["metadata"]["name"]
+    flex["spec"]["replicas"] = worker["spec"]["replicas"]
+    flex["spec"]["selector"] = worker["spec"]["selector"]
+    flex["spec"]["template"]["metadata"]["labels"] = worker["spec"]["template"]["metadata"]["labels"]
+    assert flex == worker
+
+
+def test_dev_worker_pools_split_six_workers_three_and_three_at_identical_sizing():
+    """#1114: dev keeps 6 workers and 6 x 100m / 512Mi of requests in total,
+    split 3 general + 3 flex, the flex patch mirroring the general one."""
+    general = yaml.safe_load((_K8S / "overlays/dev/worker-patch.yaml").read_text())
+    flex = yaml.safe_load((_K8S / "overlays/dev/worker-flex-patch.yaml").read_text())
+
+    assert (general["spec"]["replicas"], flex["spec"]["replicas"]) == (3, 3)
+    assert flex["metadata"]["name"] == "cviche-worker-flex"
+    assert flex["spec"]["template"]["spec"]["volumes"] == general["spec"]["template"]["spec"]["volumes"]
+    assert flex["spec"]["template"]["spec"]["nodeSelector"] == general["spec"]["template"]["spec"]["nodeSelector"]
+    general_container = general["spec"]["template"]["spec"]["containers"][0]
+    flex_container = flex["spec"]["template"]["spec"]["containers"][0]
+    for key in ("name", "resources", "envFrom", "volumeMounts"):
+        assert flex_container[key] == general_container[key], key
+    assert general_container["resources"]["requests"] == {"cpu": "100m", "memory": "512Mi"}
+    overlay = yaml.safe_load((_K8S / "overlays/dev/kustomization.yaml").read_text())
+    assert {"path": "worker-flex-patch.yaml"} in overlay["patches"]
