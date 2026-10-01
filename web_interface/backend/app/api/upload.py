@@ -595,8 +595,8 @@ async def upload_cv(
     # Check consent at upload time (not just page visit)
     require_current_consent(db, current_user)
 
-    # A batch_id must name one of the caller's own batches (404 unknown, 403
-    # someone else's) -- checked before anything is read or archived.
+    # A batch_id must name one of the caller's own batches (404 for unknown
+    # and someone else's alike) -- checked before anything is read or archived.
     if batch_id is not None:
         get_owned_batch(db, batch_id, current_user)
 

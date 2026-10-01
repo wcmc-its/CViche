@@ -200,11 +200,11 @@ def test_worker_queues_default_is_the_single_run_queue_only(monkeypatch):
     assert run_queue.worker_queues() == (run_queue.SINGLE, run_queue.BATCH)
 
 
-def test_live_consumer_count_is_zero_before_any_group_exists(fake_redis):
-    assert run_queue.live_consumer_count(run_queue.BATCH) == 0
+def test_live_consumer_counts_are_zero_before_any_group_exists(fake_redis):
+    assert run_queue.live_consumer_counts() == {run_queue.SINGLE: 0, run_queue.BATCH: 0}
 
 
-def test_live_consumer_count_counts_recent_consumers_and_busy_ones_only(fake_redis, monkeypatch):
+def test_live_consumer_counts_count_recent_consumers_and_busy_ones_only(fake_redis, monkeypatch):
     """Stale consumers of replaced pods stay in the group: only one seen
     within LIVE_CONSUMER_MAX_IDLE_MS counts -- or one holding a pending entry,
     since a worker mid-run does not touch the stream for the whole run."""
@@ -212,9 +212,27 @@ def test_live_consumer_count_counts_recent_consumers_and_busy_ones_only(fake_red
     run_queue.enqueue("LC1")
     run_queue.read_one("busy")                      # holds LC1 pending
     run_queue.read_one("idle", block=False)         # registered, nothing pending
-    assert run_queue.live_consumer_count(run_queue.SINGLE) == 2
+    assert run_queue.live_consumer_counts()[run_queue.SINGLE] == 2
     monkeypatch.setattr(run_queue, "LIVE_CONSUMER_MAX_IDLE_MS", 0)  # every consumer now reads as stale
-    assert run_queue.live_consumer_count(run_queue.SINGLE) == 1
+    assert run_queue.live_consumer_counts()[run_queue.SINGLE] == 1
+
+
+def test_a_worker_busy_on_one_queue_still_counts_on_every_queue_it_reads(fake_redis, monkeypatch):
+    """A flex worker mid-run on a single run holds that entry pending in the
+    single group and touches the batch group not at all, so past
+    LIVE_CONSUMER_MAX_IDLE_MS it is idle there -- yet it is a batch worker
+    the moment the run ends. A replaced pod, live in no group, never counts."""
+    run_queue.ensure_group(run_queue.SINGLE)
+    run_queue.ensure_group(run_queue.BATCH)
+    for n in range(3):
+        run_queue.enqueue(f"FLEX{n}")
+    for name in ("flex-1", "flex-2", "flex-3"):
+        run_queue.read_one(name, run_queue.SINGLE, block=False)
+        run_queue.read_one(name, run_queue.BATCH, block=False)
+    run_queue.read_one("replaced-pod", run_queue.BATCH, block=False)
+    monkeypatch.setattr(run_queue, "LIVE_CONSUMER_MAX_IDLE_MS", 0)  # 30s have passed for every consumer
+
+    assert run_queue.live_consumer_counts() == {run_queue.SINGLE: 3, run_queue.BATCH: 3}
 
 
 def test_enqueue_does_not_trim_the_stream_past_1000_entries(fake_redis):

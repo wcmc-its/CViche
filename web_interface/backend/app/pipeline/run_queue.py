@@ -36,7 +36,7 @@ import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import redis
 
@@ -447,29 +447,51 @@ def _live_run_ids_in(queue: Queue) -> set[str]:
     return run_ids
 
 
-def live_consumer_count(queue: Queue) -> int:
-    """Workers currently reading ``queue``, for GET /api/queue (#1114): its
-    group's consumers seen within LIVE_CONSUMER_MAX_IDLE_MS, plus any holding
-    a pending entry -- a worker mid-run does not touch the stream for the
-    run's whole 15-20 minutes, so idle time alone would drop every busy
-    worker. A crashed pod's consumer can still hold a pending entry until
-    XAUTOCLAIM moves it (MIN_IDLE_MS), the one window this overcounts. No
-    stream or no group yet reads as 0 workers, never an error."""
+def _consumers_of(queue: Queue) -> list[dict[str, Any]]:
+    """XINFO CONSUMERS for ``queue``'s group; no stream or no group yet reads
+    as no consumers, never an error."""
     try:
-        consumers = _client().xinfo_consumers(queue.stream, queue.group)
+        return _client().xinfo_consumers(queue.stream, queue.group)
     except redis.exceptions.ResponseError as e:
         message = str(e).lower()
         if "no such key" not in message and "nogroup" not in message:
             raise
-        return 0
-    return sum(
-        1 for consumer in consumers
-        if consumer["idle"] < LIVE_CONSUMER_MAX_IDLE_MS or consumer["pending"] > 0
-    )
+        return []
 
 
-def stats() -> QueueStats:
-    """Read-only depth and ownership for the admin endpoint. Never calls
+def _is_live_in_group(consumer: dict[str, Any]) -> bool:
+    """Seen within LIVE_CONSUMER_MAX_IDLE_MS, or holding a pending entry."""
+    return consumer["idle"] < LIVE_CONSUMER_MAX_IDLE_MS or consumer["pending"] > 0
+
+
+def live_consumer_counts() -> dict[Queue, int]:
+    """Workers currently reading each queue, for GET /api/queue (#1114).
+
+    A worker is live when, in ANY group, it was seen within
+    LIVE_CONSUMER_MAX_IDLE_MS or holds a pending entry -- a worker mid-run
+    does not touch any stream for the run's whole 15-20 minutes, so idle time
+    alone would drop every busy worker. A queue's count is the consumers
+    registered in its group whose name is live anywhere: a flex worker busy
+    on a single run is idle in the batch group, yet is still a batch worker
+    the moment it finishes. Consumers of replaced pods are live nowhere and
+    never count. A crashed pod's consumer can still hold a pending entry
+    until XAUTOCLAIM moves it (MIN_IDLE_MS), the one window this overcounts."""
+    consumers = {queue: _consumers_of(queue) for queue in QUEUES_BY_NAME.values()}
+    live_names = {
+        consumer["name"]
+        for group_consumers in consumers.values()
+        for consumer in group_consumers
+        if _is_live_in_group(consumer)
+    }
+    return {
+        queue: sum(1 for consumer in group_consumers if consumer["name"] in live_names)
+        for queue, group_consumers in consumers.items()
+    }
+
+
+def stats(queue: Queue = SINGLE) -> QueueStats:
+    """Read-only depth and ownership of ``queue`` (the single-run queue by
+    default) for the admin endpoint. Never calls
     ensure_group(): a GET must not mask "no worker has ever started" by
     creating the stream and group as a side effect. A missing stream or group
     reads as pending=None/lag=None/consumers=0/owners=[]; any other
@@ -483,20 +505,20 @@ def stats() -> QueueStats:
     started" case this rewrite exists to report cleanly."""
     r = _client()
     pipe = r.pipeline(transaction=False)
-    pipe.xlen(STREAM)
-    pipe.xinfo_groups(STREAM)
-    pipe.xlen(DEAD_STREAM)
+    pipe.xlen(queue.stream)
+    pipe.xinfo_groups(queue.stream)
+    pipe.xlen(queue.dead_stream)
     try:
         stream_length, groups, dead = pipe.execute()
     except redis.exceptions.ResponseError as e:
         if "no such key" not in str(e).lower():
             raise
-        stream_length, groups, dead = r.xlen(STREAM), [], r.xlen(DEAD_STREAM)
+        stream_length, groups, dead = r.xlen(queue.stream), [], r.xlen(queue.dead_stream)
 
-    group = next((g for g in groups if g["name"] == GROUP), None)
+    group = next((g for g in groups if g["name"] == queue.group), None)
     owners: list[dict[str, object]] = []
     if group is not None:
-        owners = r.xpending(STREAM, GROUP)["consumers"] or []
+        owners = r.xpending(queue.stream, queue.group)["consumers"] or []
 
     return QueueStats(
         stream_length=stream_length,

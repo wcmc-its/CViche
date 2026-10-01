@@ -25,7 +25,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.errors import forbidden, not_found
+from app.errors import not_found
 from app.models import Run, RunBatch, RunState, User
 from app.pipeline import concurrency, run_queue
 from app.schemas import (
@@ -46,6 +46,10 @@ BATCH_ID_LENGTH = 6
 # Redraws after a primary-key collision before giving up. At 26**6 ids a
 # second collision in a row means something other than chance is wrong.
 _BATCH_ID_ATTEMPTS = 5
+# How each database reports a duplicate primary key: MySQL/MariaDB's
+# ER_DUP_ENTRY errno, and SQLite's message prefix (the test database).
+_MYSQL_DUPLICATE_KEY_ERRNO = 1062
+_SQLITE_UNIQUE_FAILED = "UNIQUE constraint failed"
 
 # How many recent completed runs the wait estimate's median duration is taken
 # over: recent enough to track today's pipeline speed, enough to be stable.
@@ -62,22 +66,40 @@ def generate_batch_id() -> str:
     return "".join(secrets.choice(_BATCH_ID_ALPHABET) for _ in range(BATCH_ID_LENGTH))
 
 
+def _is_duplicate_key(error: IntegrityError) -> bool:
+    """True when ``error`` is a duplicate-key violation -- the only integrity
+    error a redrawn id can cure. MySQL/MariaDB report it as errno 1062,
+    SQLite (the test database) as "UNIQUE constraint failed"."""
+    orig = error.orig
+    if orig is None:
+        return False
+    if orig.args and orig.args[0] == _MYSQL_DUPLICATE_KEY_ERRNO:
+        return True
+    return _SQLITE_UNIQUE_FAILED in str(orig)
+
+
 def create_batch(db: Session, user: User, files_submitted: int) -> RunBatch:
     """Insert and commit a new batch owned by ``user``, redrawing the id on a
-    primary-key collision. Raises BatchIdAttemptsExhausted if every draw
+    duplicate-key collision. Any other integrity error (a foreign-key
+    violation, say) is re-raised at once: no redraw can cure it. Raises
+    BatchIdAttemptsExhausted, chained to the last collision, if every draw
     collides."""
+    last_collision: IntegrityError | None = None
     for _ in range(_BATCH_ID_ATTEMPTS):
         batch = RunBatch(id=generate_batch_id(), user_id=user.id, files_submitted=files_submitted)
         db.add(batch)
         try:
             db.commit()
-        except IntegrityError:
+        except IntegrityError as e:
             db.rollback()
+            if not _is_duplicate_key(e):
+                raise
+            last_collision = e
             logger.warning("batch id collision on %s; redrawing", batch.id)
             continue
         db.refresh(batch)
         return batch
-    raise BatchIdAttemptsExhausted(f"no free batch id after {_BATCH_ID_ATTEMPTS} attempts")
+    raise BatchIdAttemptsExhausted(f"no free batch id after {_BATCH_ID_ATTEMPTS} attempts") from last_collision
 
 
 def can_see_batch(user: User, batch: RunBatch) -> bool:
@@ -95,14 +117,14 @@ def get_visible_batch(db: Session, batch_id: str, user: User) -> RunBatch:
 
 
 def get_owned_batch(db: Session, batch_id: str, user: User) -> RunBatch:
-    """The batch an upload is joining: it must exist (404) and be the
-    caller's own (403, as ``run_service.check_run_access`` answers for a run).
-    No admin exception: an admin's uploads go into the admin's own batches."""
+    """The batch an upload is joining: it must exist and be the caller's own,
+    else the same 404 ``get_visible_batch`` answers, so /upload discloses no
+    more about another user's batch than GET /batches/{id} does. No admin
+    exception: only the submitter adds runs, so an admin uploading into
+    someone else's batch gets the 404 too."""
     batch = db.get(RunBatch, batch_id)
-    if batch is None:
+    if batch is None or batch.user_id != user.id:
         raise not_found("Batch not found")
-    if batch.user_id != user.id:
-        raise forbidden("This batch belongs to another user")
     return batch
 
 
@@ -255,17 +277,18 @@ def recent_median_duration_seconds(db: Session) -> float | None:
     return statistics.median(durations) if durations else None
 
 
-def _live_workers(queue: run_queue.Queue) -> int | None:
-    """Live consumers of ``queue``, or None when Valkey can't be read -- the
-    page then shows no estimate rather than failing to load."""
+def _live_workers() -> dict[run_queue.Queue, int] | None:
+    """Live workers per queue (``run_queue.live_consumer_counts``), or None
+    when Valkey can't be read -- the page then shows no estimate rather than
+    failing to load."""
     if not run_queue.is_configured():
         return None
     try:
-        return run_queue.live_consumer_count(queue)
+        return run_queue.live_consumer_counts()
     except redis.exceptions.RedisError as e:
         # No host:port in the log line's message (the exception text can
         # carry it); the type is enough to tell an outage from a bug.
-        logger.warning("queue worker count unavailable for %s: %s", queue.name, type(e).__name__)
+        logger.warning("queue worker counts unavailable: %s", type(e).__name__)
         return None
 
 
@@ -286,9 +309,10 @@ def queue_overview(db: Session) -> QueueOverview:
         return QueueOverview(dispatch_mode=mode)
     loads = _lane_loads(db)
     median_seconds = recent_median_duration_seconds(db)
+    live = _live_workers()
     lanes = {}
     for queue, load in loads.items():
-        workers = _live_workers(queue)
+        workers = live[queue] if live is not None else None
         lanes[queue.name] = QueueLane(
             workers=workers,
             ahead=load.waiting,

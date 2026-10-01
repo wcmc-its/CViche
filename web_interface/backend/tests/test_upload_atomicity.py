@@ -1170,13 +1170,15 @@ def test_upload_without_a_batch_id_is_a_single_run(client, db, seed_simple_mode,
     assert db.get(Run, resp.json()["run_id"]).batch_id is None
 
 
-@pytest.mark.parametrize("batch_owner, status", [("nobody", 404), ("someone else", 403), ("admin", 403)])
+@pytest.mark.parametrize("batch_owner", ["nobody", "someone else", "admin"])
 def test_upload_into_a_batch_the_caller_does_not_own_is_refused_before_storage(
-    client, db, seed_simple_mode, tmp_path, batch_owner, status,
+    client, db, seed_simple_mode, tmp_path, batch_owner,
 ):
-    """A batch_id must name one of the caller's own batches: 404 for one that
-    doesn't exist, 403 for another user's (the caller here is an admin in the
-    last arm -- admins see every batch but upload only into their own)."""
+    """A batch_id must name one of the caller's own batches. Another user's
+    batch answers the same 404 as one that doesn't exist, as GET
+    /batches/{id} does, so /upload discloses no batch's existence (the caller
+    is an admin in the last arm -- admins see every batch, but only the
+    submitter adds runs)."""
     uploader = _make_user(db, role="admin" if batch_owner == "admin" else "user")
     if batch_owner != "nobody":
         _add_batch(db, _make_user(db, email="sam@example.com"))
@@ -1188,7 +1190,8 @@ def test_upload_into_a_batch_the_caller_does_not_own_is_refused_before_storage(
     resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
                                                       data={"batch_id": "BATCHA"}))
 
-    assert resp.status_code == status, resp.text
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == {"error": "not_found", "message": "Batch not found"}
     storage.put_file_exclusive.assert_not_called()
     assert db.query(Run).count() == 0
 

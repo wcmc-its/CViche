@@ -77,6 +77,30 @@ def test_index_migration_roundtrips_on_sqlite(tmp_path, monkeypatch):
     assert not leftover, f"indexes not dropped on downgrade: {leftover}"
 
 
+def test_run_batches_downgrade_never_drops_an_index_a_foreign_key_needs(monkeypatch):
+    """MariaDB refuses DROP INDEX on an index a foreign key uses (1553), and
+    its DDL is not transactional, so a refusal mid-downgrade leaves the schema
+    half-downgraded. SQLite (the roundtrip above) accepts it, so the order is
+    pinned on the recorded operations: each FK goes before its index, and
+    run_batches' own user_id index goes with DROP TABLE, never on its own."""
+    import importlib.util
+    from unittest.mock import MagicMock
+
+    path = ALEMBIC_DIR / "versions" / "c3d8e1f5a297_add_run_batches.py"
+    spec = importlib.util.spec_from_file_location("c3d8e1f5a297_add_run_batches", path)
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+    op = MagicMock()
+    batch_op = op.batch_alter_table.return_value.__enter__.return_value
+    monkeypatch.setattr(migration, "op", op)
+
+    migration.downgrade()
+
+    assert op.drop_index.call_count == 0, op.drop_index.call_args_list
+    assert op.drop_table.call_args_list == [(("run_batches",),)]
+    assert [name for name, _, _ in batch_op.mock_calls] == ["drop_constraint", "drop_index", "drop_column"]
+
+
 def test_engine_sets_pool_recycle():
     """create_cviche_engine wires pool_recycle so stale RDS connections are dropped."""
     from app.database_factory import create_cviche_engine

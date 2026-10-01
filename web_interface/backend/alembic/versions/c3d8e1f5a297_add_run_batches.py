@@ -51,5 +51,8 @@ def downgrade() -> None:
         batch_op.drop_constraint(BATCH_FK_NAME, type_='foreignkey')
         batch_op.drop_index('ix_runs_batch_id')
         batch_op.drop_column('batch_id')
-    op.drop_index('ix_run_batches_user_id', table_name='run_batches')
+    # No drop_index('ix_run_batches_user_id') first: MariaDB refuses it
+    # (1553, "needed in a foreign key constraint" -- the user_id FK uses it),
+    # and DDL is not transactional there, so the runs side above would stay
+    # downgraded. DROP TABLE drops the index with the table.
     op.drop_table('run_batches')

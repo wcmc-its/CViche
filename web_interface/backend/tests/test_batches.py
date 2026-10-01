@@ -11,8 +11,10 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import fakeredis
+import pymysql
 import pytest
 import redis
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import object_session
 
 from app.auth import COOKIE_NAME, create_session_cookie
@@ -111,6 +113,22 @@ def test_create_batch_over_the_monthly_quota_is_429_monthly(client, db, seed_sim
     assert resp.json()["detail"]["details"]["limit_type"] == "monthly"
 
 
+def test_create_batch_over_a_lowered_limit_never_reports_a_negative_remainder(client, db, seed_simple_mode):
+    """A user whose limit was lowered below what they already ran today has
+    0 runs left, not -1: the 429 message clamps the remainder at zero."""
+    user = _make_user(db, daily_limit=2, monthly_limit=100)
+    for n in range(3):
+        _run(db, f"TODAY{n}", user, created_at=datetime.now())
+    _auth(client, user)
+
+    resp = client.post("/api/batches", json={"files_submitted": 2})
+
+    assert resp.status_code == 429
+    detail = resp.json()["detail"]
+    assert detail["message"] == "This batch needs 2 runs, but only 0 of your daily limit of 2 remain."
+    assert (detail["details"]["limit"], detail["details"]["used"]) == (2, 3)
+
+
 def test_create_batch_posts_one_teams_card_and_none_on_a_refusal(client, db, seed_simple_mode, monkeypatch):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
     posted = []
@@ -151,6 +169,46 @@ def test_create_batch_without_the_current_consent_is_uploads_403(client, db, see
     }
     assert db.query(RunBatch).count() == 0
     assert posted == []
+
+
+def test_create_batch_redraws_a_colliding_id_and_chains_the_last_collision(db, monkeypatch):
+    """A duplicate primary key is the one integrity error a new id cures: it
+    is redrawn every attempt, and when every draw collides the error raised
+    is chained to the database's own."""
+    owner = _make_user(db)
+    _batch(db, owner, "TAKENN")
+    draws = []
+    monkeypatch.setattr(batch_service, "generate_batch_id", lambda: draws.append("TAKENN") or "TAKENN")
+
+    with pytest.raises(batch_service.BatchIdAttemptsExhausted) as raised:
+        batch_service.create_batch(db, owner, 2)
+
+    assert len(draws) == batch_service._BATCH_ID_ATTEMPTS
+    assert isinstance(raised.value.__cause__, IntegrityError)
+    assert "UNIQUE constraint failed" in str(raised.value.__cause__.orig)
+
+
+def test_create_batch_reraises_a_foreign_key_violation_at_once(db, monkeypatch):
+    """Any integrity error but a duplicate key (here MySQL's 1452 FK
+    violation) is re-raised on the first attempt: no redrawn id can cure it,
+    and retrying would bury it under BatchIdAttemptsExhausted."""
+    owner = _make_user(db)
+    fk_violation = IntegrityError(
+        "INSERT INTO run_batches ...", {},
+        pymysql.err.IntegrityError(1452, "Cannot add or update a child row: a foreign key constraint fails"),
+    )
+    commits = []
+
+    def failing_commit():
+        commits.append(1)
+        raise fk_violation
+    monkeypatch.setattr(db, "commit", failing_commit)
+
+    with pytest.raises(IntegrityError) as raised:
+        batch_service.create_batch(db, owner, 2)
+
+    assert raised.value is fk_violation
+    assert len(commits) == 1
 
 
 # --- GET /batches and GET /batches/{id}: visibility ---------------------------
@@ -214,6 +272,21 @@ def test_batch_view_counts_statuses_and_lists_runs_in_upload_order(client, db, s
         ("RUNFOR", "runfor.docx", None),
     ]
     assert body["submitted_by"]["display_name"] == "Pat"
+
+
+def test_batch_view_counts_a_created_but_unstarted_run(client, db, seed_simple_mode):
+    """A run uploaded but not yet started is ``created``; every run lands in
+    exactly one count, so the counts add up to run_count."""
+    owner = _make_user(db)
+    _batch(db, owner, files_submitted=2)
+    _run(db, "UPLOAD", owner, batch_id="BATCHA", status=RunState.CREATED)
+    _run(db, "DONEUP", owner, batch_id="BATCHA", status=RunState.COMPLETE, created_at=T0 + timedelta(seconds=1))
+    _auth(client, owner)
+
+    body = client.get("/api/batches/BATCHA").json()
+
+    assert body["status_counts"]["created"] == 1
+    assert sum(body["status_counts"].values()) == body["run_count"] == 2
 
 
 @pytest.mark.parametrize("role, expected", [("admin", 87), ("user", None)])
@@ -299,9 +372,9 @@ def test_queue_reports_live_workers_waiting_runs_and_the_wait_per_queue(client, 
 
 
 def test_queue_still_answers_when_valkey_is_down(client, db, seed_simple_mode, fake_valkey, monkeypatch):
-    def down(queue):
+    def down():
         raise redis.exceptions.ConnectionError("valkey down")
-    monkeypatch.setattr(run_queue, "live_consumer_count", down)
+    monkeypatch.setattr(run_queue, "live_consumer_counts", down)
     user = _make_user(db)
     _run(db, "SNGLQA", user, status="queued", queued_at=T0)
     _auth(client, user)
@@ -310,6 +383,45 @@ def test_queue_still_answers_when_valkey_is_down(client, db, seed_simple_mode, f
 
     assert resp.status_code == 200
     assert resp.json()["single"] == {"workers": None, "ahead": 1, "est_wait_minutes": None}
+
+
+def test_queue_counts_flex_workers_busy_on_single_runs_as_batch_workers(
+    client, db, seed_simple_mode, fake_valkey, monkeypatch,
+):
+    """Three flex workers each mid-run on a single run for over 30s: idle in
+    the batch group, but still the batch queue's three workers."""
+    user = _make_user(db)
+    run_queue.ensure_group(run_queue.SINGLE)
+    run_queue.ensure_group(run_queue.BATCH)
+    for n in range(3):
+        run_queue.enqueue(f"SNGL{n:02d}")
+    for name in ("flex-1", "flex-2", "flex-3"):
+        run_queue.read_one(name, run_queue.SINGLE, block=False)
+        run_queue.read_one(name, run_queue.BATCH, block=False)
+    monkeypatch.setattr(run_queue, "LIVE_CONSUMER_MAX_IDLE_MS", 0)  # past the 30s window
+    _auth(client, user)
+
+    body = client.get("/api/queue").json()
+
+    assert (body["single"]["workers"], body["batch"]["workers"]) == (3, 3)
+
+
+def test_queue_with_no_live_batch_worker_has_no_estimate_and_still_answers(
+    client, db, seed_simple_mode, fake_valkey,
+):
+    """No live consumer on the batch queue and a batch run waiting: 0
+    workers, no estimate -- never a division by zero."""
+    user = _make_user(db)
+    _batch(db, user)
+    run_queue.ensure_group(run_queue.BATCH)
+    _run(db, "DONE00", user, status="complete", total_duration_seconds=600, completed_at=T0)
+    _run(db, "BATQ00", user, batch_id="BATCHA", status="queued", queued_at=T0)
+    _auth(client, user)
+
+    resp = client.get("/api/queue")
+
+    assert resp.status_code == 200
+    assert resp.json()["batch"] == {"workers": 0, "ahead": 1, "est_wait_minutes": None}
 
 
 def test_queue_has_no_estimate_before_any_run_has_completed(client, db, seed_simple_mode, fake_valkey):

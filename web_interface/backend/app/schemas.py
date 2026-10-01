@@ -585,13 +585,29 @@ class QueueDbView(BaseModel):
     oldest_running_age_s: float | None = None
 
 
+class QueueStreamStats(BaseModel):
+    """One queue's stream as ``run_queue.stats`` reads it (#1114): depth,
+    group pending/lag/consumers, per-consumer pending, dead-letter count."""
+    stream_length: int
+    pending: int | None = None
+    lag: int | None = None
+    consumers: int
+    owners: list[dict] = []
+    dead: int
+
+
 class QueueStatsResponse(BaseModel):
     """Run-queue depth and ownership (Valkey), beside the DB view, for the
     admin dashboard (#701). ``enabled`` is ``dispatch_mode() == "queue"``,
     independent of whether ``CVICHE_REDIS_URL`` happens to be set (other
     features share that same URL). ``error`` is a stable code
     (``valkey_unavailable`` / ``valkey_not_configured``) -- never raw
-    exception text, which can carry a host:port."""
+    exception text, which can carry a host:port.
+
+    The top-level stream fields are the single-run queue's, as before batch
+    upload; ``queues`` has every queue's, keyed by short name (``single``,
+    ``batch``, #1114), so the batch stream and its dead-letter count show
+    without renaming a field an existing reader uses."""
     enabled: bool
     db: QueueDbView
     error: str | None = None
@@ -601,6 +617,7 @@ class QueueStatsResponse(BaseModel):
     consumers: int | None = None
     owners: list[dict] = []
     dead: int | None = None
+    queues: dict[str, QueueStreamStats] = {}
 
 
 # ============================================================
