@@ -1128,6 +1128,35 @@ def test_run_stage_1b_end_to_end_nested_hierarchy_marks_parent_non_leaf(tmp_path
     assert output_data["meta"]["leaf_sections"] == 3
 
 
+def test_run_stage_1b_child_does_not_contain_match_a_later_top_level_header(tmp_path, monkeypatch):
+    # Wire test for the top_level_headers set built inside run_stage_1b (#1178).
+    _redirect_output_manager(monkeypatch, tmp_path)
+
+    doc = Document()
+    _bold_paragraph(doc, "PUBLICATIONS")
+    doc.add_paragraph("Paper A")
+    _bold_paragraph(doc, "PRESENTATIONS")
+    doc.add_paragraph("Talk A")
+    docx_path = tmp_path / "forward_cv.docx"
+    doc.save(docx_path)
+
+    hierarchy = {
+        "document_uid": "FWDUID",
+        "hierarchy": [
+            {"text": "Publications", "level": "H1",
+             "children": [{"text": "Poster Presentations", "level": "H2", "children": []}]},
+            {"text": "Presentations", "level": "H1", "children": []},
+        ],
+    }
+    hierarchy_path = tmp_path / "forward_hierarchy.json"
+    hierarchy_path.write_text(json.dumps(hierarchy))
+
+    output_data, _ = stage1b.run_stage_1b(str(docx_path), str(hierarchy_path))
+
+    boundaries = {tuple(s["hierarchy"]): s for s in output_data["section_boundaries"]}
+    assert boundaries[("Publications",)]["has_children"] is False
+
+
 def test_run_stage_1b_no_preamble_when_first_element_is_a_mapped_header(tmp_path, monkeypatch):
     # When the very first document element IS a mapped header, there's no
     # gap before it -- no synthetic "Personal Data" section should be added.
