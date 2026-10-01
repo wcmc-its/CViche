@@ -55,7 +55,8 @@ function Chips({ items }: { items: string[] }) {
 
 /** Ticked problem cards: the card label as a chip, the reviewer's "which entries" text under it. */
 function IssueChips({ feedback }: { feedback: FeedbackDetail }) {
-  const ticked = ISSUE_FIELDS.filter((issue) => feedback[issue.key] !== null)
+  // Stored as Text: null = not ticked, a string (possibly empty) = ticked with the "where" note.
+  const ticked = ISSUE_FIELDS.filter((issue) => typeof feedback[issue.key] === 'string')
   if (ticked.length === 0) return <>{NO_ANSWER}</>
   return (
     <ul className="space-y-2">
