@@ -927,10 +927,12 @@ class PipelineOrchestrator:
             score = None
             try:
                 import asyncio
-                from app.services.quality_score_service import compute_and_cache_score
+                from app.services.quality_score_service import compute_and_cache_score, persist_score_columns
                 score = await asyncio.get_running_loop().run_in_executor(
                     None, compute_and_cache_score, self.run_id
                 )
+                # On this thread: self.db must not be touched from the executor.
+                persist_score_columns(self.db, self.run_id, score)
             except Exception as e:
                 logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
 

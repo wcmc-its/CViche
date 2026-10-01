@@ -30,7 +30,9 @@ from app.schemas import (
     QueueStatsResponse,
 )
 from app.services.admin_service import get_step_avg_seconds, get_users_with_stats, get_single_user_stats
-from app.services.quality_score_service import get_cached_score, compute_and_cache_score
+from app.services.quality_score_service import (
+    get_cached_score, compute_and_cache_score, persist_score_columns,
+)
 from app.audit_events import RUN_DELETED
 from app.services.run_service import delete_run_and_artifacts, find_run, reap_orphaned_created_runs, queue_db_view
 from app.config_loader import get_config as read_config  # a route below is named get_config
@@ -490,6 +492,8 @@ def compute_run_score(
     result = compute_and_cache_score(run_id)
     if not result:
         raise not_found("No scorable outputs available for this run")
+
+    persist_score_columns(db, run_id, result)
 
     return QualityScoreResult(
         run_id=run_id,

@@ -201,6 +201,12 @@ class Run(Base):
     # without opening each run's JSON. NULL until stage 4 completes or when no
     # owner was inferred.
     cv_owner_name = Column(String(255), nullable=True, index=True)
+    # Denormalised advisory quality score (see quality_score_service.score_columns):
+    # the final 0-100 score, its GREEN/YELLOW/RED band, and the hard-fail cap
+    # value when one lowered the score. NULL until scored.
+    quality_score = Column(Integer, nullable=True, index=True)
+    quality_band = Column(String(20), nullable=True)
+    quality_cap = Column(Integer, nullable=True)
     show_track_changes = Column(Integer, default=1)
     show_pipeline_comments = Column(Integer, default=0)
     strip_template_instructions = Column(Integer, default=1, server_default="1", nullable=False)

@@ -200,3 +200,21 @@ def test_doctor_source_is_the_runs_private_input_copy(monkeypatch, tmp_path, db)
     o._doctor_report()
 
     assert seen["source"] == copied
+
+
+def test_completed_run_gets_its_quality_columns(monkeypatch, tmp_path, db):
+    """The run-end score is copied onto runs.quality_* on the orchestrator's thread."""
+    from app.models import Run
+    from app.services import quality_score_service
+
+    monkeypatch.setenv("CVICHE_RUN_DOCTOR", "0")
+    monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
+    score = {"totalScore": 62, "raw_score_before_caps": 62.0, "hard_fail_caps_applied": []}
+    monkeypatch.setattr(quality_score_service, "compute_and_cache_score", lambda _rid: score)
+
+    o = _orchestrator(monkeypatch, tmp_path, db, "DOC_SCORE")
+    asyncio.run(o.execute())
+
+    db.expire_all()
+    run = db.query(Run).filter(Run.id == "DOC_SCORE").first()
+    assert (run.quality_score, run.quality_band, run.quality_cap) == (62, "YELLOW", None)
