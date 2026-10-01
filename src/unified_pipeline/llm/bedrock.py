@@ -38,14 +38,53 @@ STOP_REASON_MAP = {
 }
 
 
+# Converse stopReason for the model's own safety filter (not a guardrail,
+# which reports "guardrail_intervened"). Sonnet 5 raises it on some
+# infectious-disease CV content that Sonnet 4.6 answers normally (#1174).
+CONTENT_FILTERED_STOP_REASON = "content_filtered"
+
+# A call that ends content_filtered on a Sonnet-5-family model is retried ONCE
+# on this model (#1174). It has a PRICING entry in config.py, so the retry is
+# costed at its own rate. Only the family below falls back; every other
+# model and every other stopReason keeps today's behaviour.
+CONTENT_FILTER_FALLBACK_MODEL = "us.anthropic.claude-sonnet-4-6"
+CONTENT_FILTER_FALLBACK_MODEL_PREFIX = "anthropic.claude-sonnet-5"
+
+
 class BedrockToolCallDidNotFireError(RuntimeError):
     """A forced json_schema tool call did not fire: the schema was not
-    enforced, so the response cannot be trusted as structured output."""
+    enforced, so the response cannot be trusted as structured output.
+
+    stop_reason is the Converse stopReason of the call that failed to fire;
+    cost is what that call was billed, so a fallback can account for it.
+    """
+
+    def __init__(self, message: str, *, stop_reason: str | None = None,
+                 cost: float = 0.0) -> None:
+        super().__init__(message)
+        self.stop_reason = stop_reason
+        self.cost = cost
 
 
 class BedrockEmptyResponseError(RuntimeError):
     """Neither the initial call nor the JSON-repair retry returned any text
-    content (#884), so there is nothing to repair or return."""
+    content (#884), so there is nothing to repair or return.
+
+    stop_reason is the FINAL attempt's Converse stopReason; cost is what both
+    attempts were billed, so a fallback can account for them (#1174).
+    """
+
+    def __init__(self, message: str, *, stop_reason: str | None = None,
+                 cost: float = 0.0) -> None:
+        super().__init__(message)
+        self.stop_reason = stop_reason
+        self.cost = cost
+
+
+class BedrockContentFilteredError(RuntimeError):
+    """The model-filter fallback (#1174) also ended content_filtered with
+    partial text. Raised instead of returning truncated output a caller would
+    only mis-parse as invalid JSON."""
 
 # Hard ceiling for any Bedrock call that reaches _call_bedrock without an
 # explicit max_tokens. When `maxTokens` is omitted, Bedrock applies the MODEL's
@@ -438,6 +477,17 @@ def _finalize_bedrock_result(content, usage, cache_read_tokens, cache_write_toke
     }
 
 
+def _usage_cost(usage: dict, cache_read_tokens: int, cache_write_tokens: int,
+                model: str) -> float:
+    """Bedrock cost of one call (or a summed call + repair), by the same
+    pricing path _finalize_bedrock_result uses."""
+    return calculate_cost(
+        usage["inputTokens"], usage["outputTokens"], model=model,
+        provider="bedrock", cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+    )
+
+
 def _finalize_schema_tool_response(response: dict, usage: dict, cache_read_tokens: int,
                                    cache_write_tokens: int, model: str,
                                    api_seconds: float) -> dict:
@@ -454,7 +504,9 @@ def _finalize_schema_tool_response(response: dict, usage: dict, cache_read_token
         raise BedrockToolCallDidNotFireError(
             f"Bedrock forced json_schema tool call did not fire "
             f"(stopReason={stop_reason!r}, tool_input="
-            f"{'present' if tool_input is not None else 'missing'})"
+            f"{'present' if tool_input is not None else 'missing'})",
+            stop_reason=stop_reason,
+            cost=_usage_cost(usage, cache_read_tokens, cache_write_tokens, model),
         )
     return _finalize_bedrock_result(
         json.dumps(tool_input), usage, cache_read_tokens, cache_write_tokens,
@@ -506,8 +558,11 @@ def _call_bedrock_json_repair(messages: list, response_format: dict | None,
     )
 
 
-def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
-    """Dispatch one Bedrock call and normalize the response.
+def _dispatch_bedrock(messages: list, response_format: dict | None, cfg: dict) -> tuple[dict, str | None]:
+    """Dispatch one Bedrock call and normalize the response. Returns the
+    result and the FINAL attempt's raw Converse stopReason (the result's own
+    finish_reason is the lossy mapped form: guardrail_intervened and
+    content_filtered both read "content_filter").
 
     Covers both output shapes: the #46 forced-tool json_schema path, and the
     text/json_object path (with its one-shot JSON repair retry).
@@ -527,7 +582,8 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
 
     if _schema_tool_config(response_format) is not None:
         return _finalize_schema_tool_response(
-            response, usage, cache_read_tokens, cache_write_tokens, model, api_seconds)
+            response, usage, cache_read_tokens, cache_write_tokens, model, api_seconds
+        ), response.get("stopReason")
 
     # Extract and normalize Bedrock response (text / json_object path). A
     # guardrail intervention or other provider condition can send back an
@@ -560,6 +616,8 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
         api_seconds += retry_api_seconds
         retry_content = _extract_text_content(retry_response)
         retry_stop_reason = retry_response.get("stopReason", "end_turn")
+        retry_usage = retry_response["usage"]
+        retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
         if content_missing and retry_content is None:
             # Neither call returned any text -- nothing to repair or return.
             # Fail loud with both stopReasons so the caller's per-group
@@ -568,14 +626,18 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
             raise BedrockEmptyResponseError(
                 "Bedrock Converse returned no text content on the initial "
                 f"call (stopReason={stop_reason!r}) or the retry "
-                f"(stopReason={retry_stop_reason!r})"
+                f"(stopReason={retry_stop_reason!r})",
+                stop_reason=retry_stop_reason,
+                cost=_usage_cost(
+                    {"inputTokens": usage["inputTokens"] + retry_usage["inputTokens"],
+                     "outputTokens": usage["outputTokens"] + retry_usage["outputTokens"]},
+                    cache_read_tokens + retry_cache_read,
+                    cache_write_tokens + retry_cache_write, model),
             )
         # If the retry also came back empty but the initial call had
         # (invalid) content, keep the initial content -- let downstream
         # handle it per D-05, same as the pre-#884 "still invalid" path.
         content = retry_content if retry_content is not None else content
-        retry_usage = retry_response["usage"]
-        retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
         # Accumulate token usage from retry. No "totalTokens" key here:
         # _finalize_bedrock_result computes its own total from inputTokens/
         # outputTokens/cache below, it never reads this dict's totalTokens
@@ -608,4 +670,62 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
         # After the JSON-repair branch, so a repair call's API time is included
         # rather than dropped.
         int(api_seconds * 1000),
+    ), stop_reason
+
+
+def _content_filter_fallback_applies(model: str) -> bool:
+    """True for a Sonnet-5-family primary model: the only family that falls
+    back on content_filtered (#1174)."""
+    return _normalize_model_id(model).startswith(CONTENT_FILTER_FALLBACK_MODEL_PREFIX)
+
+
+def _call_on_content_filter_fallback(messages: list, response_format: dict | None, cfg: dict,
+                                     first_attempt_cost: float) -> dict:
+    """The single fallback attempt (#1174). Calls _dispatch_bedrock, never
+    _handle_bedrock, so it cannot recurse: one fallback per logical call.
+
+    The filtered attempt was billed, so its cost is added to the result.
+    A second content_filtered ending raises; any other failure of the
+    fallback call propagates as it would for a primary call.
+    """
+    stage = cfg.get("stage")
+    logger.warning(
+        "Bedrock call (stage=%s) ended %s on %s; retrying once on fallback %s.",
+        stage, CONTENT_FILTERED_STOP_REASON, cfg["model"], CONTENT_FILTER_FALLBACK_MODEL,
     )
+    try:
+        result, stop_reason = _dispatch_bedrock(
+            messages, response_format, {**cfg, "model": CONTENT_FILTER_FALLBACK_MODEL})
+    except (BedrockEmptyResponseError, BedrockToolCallDidNotFireError) as e:
+        if e.stop_reason == CONTENT_FILTERED_STOP_REASON:
+            logger.warning(
+                "Bedrock call (stage=%s) was also %s on fallback %s; giving up.",
+                stage, CONTENT_FILTERED_STOP_REASON, CONTENT_FILTER_FALLBACK_MODEL)
+        raise
+    if stop_reason == CONTENT_FILTERED_STOP_REASON:
+        logger.warning(
+            "Bedrock call (stage=%s) was also %s on fallback %s; giving up.",
+            stage, CONTENT_FILTERED_STOP_REASON, CONTENT_FILTER_FALLBACK_MODEL)
+        raise BedrockContentFilteredError(
+            f"Bedrock call ended stopReason={CONTENT_FILTERED_STOP_REASON!r} on "
+            f"{cfg['model']} and again on the fallback {CONTENT_FILTER_FALLBACK_MODEL}")
+    result["cost"] += first_attempt_cost
+    return result
+
+
+def _handle_bedrock(messages: list, response_format: dict | None, cfg: dict) -> dict:
+    """Dispatch one Bedrock call; if a Sonnet-5-family model ends it
+    content_filtered, retry once on CONTENT_FILTER_FALLBACK_MODEL (#1174).
+    Any other model or stopReason is returned or raised exactly as
+    _dispatch_bedrock produced it."""
+    eligible = _content_filter_fallback_applies(cfg["model"])
+    try:
+        result, stop_reason = _dispatch_bedrock(messages, response_format, cfg)
+    except (BedrockEmptyResponseError, BedrockToolCallDidNotFireError) as e:
+        if not (eligible and e.stop_reason == CONTENT_FILTERED_STOP_REASON):
+            raise
+        return _call_on_content_filter_fallback(messages, response_format, cfg, e.cost)
+    if eligible and stop_reason == CONTENT_FILTERED_STOP_REASON:
+        return _call_on_content_filter_fallback(
+            messages, response_format, cfg, result["cost"])
+    return result

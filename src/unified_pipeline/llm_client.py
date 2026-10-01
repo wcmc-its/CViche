@@ -76,6 +76,8 @@ def _resolve_call_config(stage: str, kwargs: dict) -> dict:
     """Merge the stage's YAML config with per-call kwarg overrides."""
     config = get_stage_config(stage)
     return {
+        # For provider-layer log lines (e.g. the #1174 content-filter fallback).
+        "stage": stage,
         "provider": kwargs.get("provider", config["provider"]),
         "model": kwargs.get("model", config["model"]),
         "temperature": kwargs.get("temperature", config["temperature"]),
