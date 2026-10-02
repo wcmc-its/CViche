@@ -44,6 +44,8 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
     _record_rendered,
+    _whole_record_rendered,
+    segments_cover_source,
 )
 
 
@@ -1025,3 +1027,269 @@ def test_add_remaining_to_appendix_drops_foreign_template_scaffolding():
     bullets = _bulleted_texts(gen.doc.paragraphs)
     assert "Served on the sample review panel for the Example Society" in bullets
     assert not any("Sample Appointments" in t or "Sample Leave" in t for t in bullets)
+
+
+# ------------------------------------------- #1230: T-coded fused entries
+
+_T_ROWS = [
+    f"Example Grant Title {title} | Example Funder {funder} | Role {n} | {n}7% | ${n}1,500 | 19{n}1-19{n}2"
+    for n, (title, funder) in enumerate((("Zeolite Catalysis", "Marigold Foundation"),
+                                         ("Quartzite Weathering", "Nasturtium Institute"),
+                                         ("Obsidian Fracturing", "Hyacinth Society")), start=3)
+]
+
+
+def _t_entry():
+    return {
+        "element_idx_start": 7,
+        "element_type": "table_row",
+        "hierarchy": ["COMPLETED GRANTS"],
+        "taxonomy_code": "T",
+        "text": "\n".join(_T_ROWS),
+        "extraction_coverage": {"extraction_coverage_percent": 3.0},
+        "extracted_fields": {},
+    }
+
+
+def test_t_fused_entry_rows_cut_by_the_appendix_cap_are_recovered():
+    """`_fill_appendix` caps a body at APPENDIX_MAX_CHARS, so the rows after the
+    cap reach no page; the recovery pass, no longer skipping T, writes them."""
+    gen = _generator()
+    entry = _t_entry()
+    gen._fill_appendix([entry])
+    capped = "\n".join(p.text for p in gen.doc.paragraphs)
+    assert _T_ROWS[2] not in capped  # the cap really cut it
+
+    gen._recover_unrendered_records({"T": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert _T_ROWS[2] in bullets
+    assert gen.stats["unrendered_records_recovered"] >= 1
+
+
+def test_t_row_already_on_the_page_is_not_duplicated():
+    gen = _generator()
+    entry = _t_entry()
+    gen.doc.add_paragraph(_T_ROWS[0])  # rendered whole, e.g. by another section
+    gen._recover_unrendered_records({"T": [entry]})
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert _T_ROWS[0] not in bullets
+    assert _T_ROWS[1] in bullets and _T_ROWS[2] in bullets
+
+
+def test_t_row_whose_title_cell_alone_renders_is_still_recovered():
+    """The per-cell check treats a rendered title as the record rendered; for T
+    the whole line must be accounted for, so funder and amount are not lost."""
+    gen = _generator()
+    entry = _t_entry()
+    gen.doc.add_paragraph("Example Grant Title Quartzite Weathering")
+    gen._recover_unrendered_records({"T": [entry]})
+    assert _T_ROWS[1] in _bulleted_texts(gen.doc.paragraphs)
+
+
+def test_whole_record_rendered_verdicts():
+    row = _T_ROWS[0]
+    sets = [set(_RENDER_TOKEN_RE.findall(_norm(row)))]
+    assert _whole_record_rendered(row, _squash_text(row), sets) is True
+    assert _whole_record_rendered(_T_ROWS[1], "", sets) is False
+    assert _whole_record_rendered("A | B | 1", "", []) is None
+
+
+def test_whole_record_rendered_cut_line_vouches_only_for_a_record_it_carries_whole():
+    from unified_pipeline.stage6.render_check import _record_tokens
+    carried = "Example Grant Title Zeolite Catalysis | Example Funder Marigold Foundation | 1987"
+    cut = [_record_tokens(carried + " | extra words here ...")]
+    assert _whole_record_rendered(carried, "", [], cut) is True
+    longer = carried + " | with a tail the cut line lost entirely"
+    assert _whole_record_rendered(longer, "", [], cut) is False
+
+
+def _squash_text(text):
+    from unified_pipeline.stage6.normalization import _squash
+    return _squash(text)
+
+
+def test_segments_cover_source_threshold():
+    words = ["zeolite", "marigold", "quartzite", "nasturtium", "basalt",
+             "chrysanthemum", "obsidian", "hyacinth", "feldspar", "delphinium"] * 2
+    source = "\n".join(f"Synthetic Record {w}{'x' * i} Entry" for i, w in enumerate(words))
+    faithful = source.split("\n")
+    assert segments_cover_source(faithful, source) is True
+    assert segments_cover_source(["[all 20 records follow]"], source) is False
+    assert segments_cover_source(faithful[:10], source) is False
+    assert segments_cover_source([], "tiny") is True  # too few tokens to judge
+
+
+def test_t_header_rows_the_appendix_would_drop_are_not_recovered():
+    """A T entry stage 3b confirmed as a table header row is scaffolding the
+    Appendix drops; recovery must not resurrect its lines."""
+    header_rows = [
+        "Years Inclusive | Grant Number and Title | Source | Annual Direct Costs",
+        "Years Inclusive | Years Inclusive | Grant Number and Title | Source",
+    ] * 4  # past APPENDIX_MAX_CHARS, so the entry reaches the candidate scan
+    entry = {
+        "element_idx_start": 3, "element_type": "table_row",
+        "hierarchy": ["GRANTS"], "taxonomy_code": "T",
+        "text": "\n".join(header_rows),
+        "classification_reasoning":
+            "[T-validation confirmed] Column header row - structural artifact",
+        "extraction_coverage": {"extraction_coverage_percent": 0.0},
+        "extracted_fields": {},
+    }
+    gen = _generator()
+    gen._recover_unrendered_records({"T": [entry]})
+    assert not any("Years Inclusive" in t
+                   for t in _bulleted_texts(gen.doc.paragraphs))
+
+
+def test_t_sibling_row_differing_only_in_amount_and_years_is_recovered():
+    """Two rows share title, funder and role words and differ in amount and
+    years. The one on the page must not vouch for the other (#1230)."""
+    base = "Example Grant Title Zeolite Catalysis | Example Funder Marigold Foundation | Site Lead | "
+    on_page = base + "$1,500 | 1991-1992"
+    sibling = base + "$8,200 | 1987-1988"
+    entry = _t_entry()
+    entry["text"] = "\n".join([on_page, sibling, _T_ROWS[1]])
+    gen = _generator()
+    gen.doc.add_paragraph(on_page)
+    gen._recover_unrendered_records({"T": [entry]})
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert sibling in bullets
+    assert on_page not in bullets
+
+
+def test_t_prose_lines_past_the_cap_are_recovered():
+    """Lines of a capped T entry that are not record-shaped (no pipe, tab or
+    dated prefix) are recovered too: the cap cut them just the same."""
+    lines = [f"Doe J. Synthetic {w} lecture series, Example University, 200{i}."
+             for i, w in enumerate(("zeolite", "marigold", "quartzite", "nasturtium",
+                                    "basalt", "obsidian"))]
+    entry = _t_entry()
+    entry["text"] = "\n".join(lines)
+    gen = _generator()
+    gen._fill_appendix([entry])
+    gen._recover_unrendered_records({"T": [entry]})
+    body = "\n".join(p.text for p in gen.doc.paragraphs)
+    assert all(line in body for line in lines)
+
+
+def test_t_single_record_entry_cut_by_the_cap_is_recovered():
+    long_line = ("Doe J. 2003. Synthetic invited lecture on zeolite catalysis at the Example "
+                 "Symposium, hosted by the Marigold Institute, Example City, with a "
+                 "long tail of detail that lies well past the two hundred character cap.")
+    entry = _t_entry()
+    entry["text"] = long_line
+    gen = _generator()
+    gen._fill_appendix([entry])
+    gen._recover_unrendered_records({"T": [entry]})
+    assert long_line in "\n".join(p.text for p in gen.doc.paragraphs)
+
+
+def test_t_undated_prose_and_undated_merged_cell_rows_are_not_recovered():
+    """A line with no year and no row shape (template text, an objective) is
+    not a record, and neither is a merged-cell row that collapses to one such
+    cell: recovery leaves both to the Appendix pointer."""
+    prose = ("Example instruction: list every activity in reverse order and "
+             "describe each briefly, with the role held and the venue used. " * 2)
+    merged = " | ".join(["Example label for a category of activities"] * 3)
+    entry = _t_entry()
+    entry["text"] = "\n".join([prose, merged])
+    gen = _generator()
+    gen._recover_unrendered_records({"T": [entry]})
+    assert gen.stats["unrendered_records_recovered"] == 0
+    body = "\n".join(p.text for p in gen.doc.paragraphs)
+    assert "Example instruction" not in body and "Example label for" not in body
+
+
+def test_t_merged_cell_description_after_a_record_is_recovered_once():
+    """A description spanning six grid columns is flattened to six copies; the
+    recovered line carries it once."""
+    description = ("Funding for a synthetic pilot study of zeolite weathering "
+                   "in Example County, used to collect first-round samples.")
+    entry = _t_entry()
+    entry["text"] = "\n".join([_T_ROWS[0], " | ".join([description] * 6), _T_ROWS[1]])
+    gen = _generator()
+    gen._fill_appendix([entry])
+    gen._recover_unrendered_records({"T": [entry]})
+    body = "\n".join(p.text for p in gen.doc.paragraphs)
+    assert description in body
+    assert description + " | " + description not in body
+
+
+def test_t_description_row_after_a_record_is_recovered():
+    """An undated description row directly after a grant row travels with it."""
+    description = ("Funding for a synthetic pilot study of zeolite weathering "
+                   "in Example County, used to collect first-round samples.")
+    entry = _t_entry()
+    entry["text"] = "\n".join([_T_ROWS[0], description, _T_ROWS[1]])
+    gen = _generator()
+    gen._fill_appendix([entry])
+    gen._recover_unrendered_records({"T": [entry]})
+    assert description in "\n".join(p.text for p in gen.doc.paragraphs)
+
+
+def test_t_entry_under_the_cap_is_left_alone():
+    entry = _t_entry()
+    entry["text"] = "Doe J. Short synthetic note, Example University."
+    gen = _generator()
+    gen._recover_unrendered_records({"T": [entry]})
+    assert gen.stats["unrendered_records_recovered"] == 0
+
+
+def test_segments_cover_source_rejects_a_reply_that_summarises_a_few_lines():
+    """17 of 20 lines kept verbatim plus one bracketed summary: pooled coverage
+    is high, but three source lines are carried by no segment (#1230)."""
+    words = ["zeolite", "marigold", "quartzite", "nasturtium", "basalt",
+             "chrysanthemum", "obsidian", "hyacinth", "feldspar", "delphinium",
+             "granite", "snapdragon", "tourmaline", "gardenia", "pumice",
+             "lavender", "dolomite", "begonia", "gypsum", "camellia"]
+    lines = [f"Doe J. Synthetic {w} outcomes. Journal of Invented {w.title()} stuff {i}."
+             for i, w in enumerate(words)]
+    source = "\n".join(lines)
+    reply = lines[:17] + ["[3 further publications follow]"]
+    assert segments_cover_source(lines, source) is True
+    assert segments_cover_source(reply, source) is False
+
+
+def test_segments_cover_source_ignores_a_repeated_page_header_the_reply_drops():
+    """A page-break header repeats in the source and a faithful reply rightly
+    drops it; that must not reject the reply (#1230)."""
+    pairs = (("zeolite", "geyser"), ("marigold", "estuary"), ("quartzite", "lagoon"),
+             ("nasturtium", "tundra"), ("basalt", "savanna"), ("obsidian", "fjord"),
+             ("hyacinth", "canyon"), ("feldspar", "glacier"))
+    lines = [f"Doe J. Synthetic {a} and {b} outcomes {i}." for i, (a, b) in enumerate(pairs)]
+    header = "Example Header Continued"
+    source = "\n".join(lines[:4] + [header] + lines[4:] + [header])
+    assert segments_cover_source(lines, source) is True
+    assert segments_cover_source(lines[:-1], source) is False
+
+
+def test_t_sibling_rows_differing_only_in_one_name_are_all_recovered():
+    """Committee rows with the same years and place, told apart by one word:
+    the complete row on the page must not vouch for its siblings (#1230)."""
+    names = ("Zeolite", "Marigold", "Quartzite", "Nasturtium", "Obsidian", "Hyacinth")
+    rows = [f"Member | {n} Committee | Example Department of Synthetic Geology | Example College of Sciences | Example University | 1987-1992"
+            for n in names]
+    entry = _t_entry()
+    entry["text"] = "\n".join(rows)
+    gen = _generator()
+    gen.doc.add_paragraph(rows[0])
+    gen._recover_unrendered_records({"T": [entry]})
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert all(row in bullets for row in rows[1:])
+    assert rows[0] not in bullets
+
+
+def test_t_row_that_is_its_own_non_t_entry_is_not_recovered():
+    """A T entry that repeats a table whose rows are entries of their own: the
+    row renders from its entry, reformatted, so recovering it duplicates it."""
+    row = _T_ROWS[1]
+    own = dict(_t_entry(), taxonomy_code="N", text=row)
+    entry = _t_entry()
+    entry["text"] = "\n".join(_T_ROWS)
+    gen = _generator()
+    gen.doc.add_paragraph("Reformatted Zeolite")  # the entry rendered, differently
+    gen._recover_unrendered_records({"T": [entry], "N": [own]})
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert row not in bullets
+    assert _T_ROWS[2] in bullets

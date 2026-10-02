@@ -48,6 +48,14 @@ RATE_LIMIT_DELAY = 0.1 if NCBI_API_KEY else 0.34  # 10/s with key, 3/s without
 MAX_ATTEMPTS = 3
 BACKOFF_BASE_SECONDS = 1.0  # 1s, 2s, ... doubling; Retry-After honored when larger
 
+# idconv (#1219): a 429 there outlasted the 3-attempt, ~3 s window in 2 of 8
+# batch CVs and failed every PMCID in the CV. Re-probes showed it throttles
+# intermittently (429, 200, 429, 200 at 15 s spacing). 6 attempts back off
+# 1+2+4+8+16 = 31 s; the total cap bounds that sum plus any Retry-After, so a
+# server asking for longer than the cap fails fast instead of stalling stage 5.
+IDCONV_MAX_ATTEMPTS = 6
+IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS = 60.0
+
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5_enrichment"
 
@@ -63,6 +71,10 @@ ID_CONVERTER_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
 # (swapped adjacent PMIDs top out at 0.33); the lowest same-paper matches
 # (retitled on publication) score 0.45-0.57.
 MIN_TITLE_WORD_OVERLAP = 0.4
+
+# Statuses the PMCID path leaves on an entry it could not enrich, which the
+# bare-digits-as-PMID retry (#1219) may still resolve.
+PMCID_PATH_FAILURES = ('pmcid_conversion_failed', 'title_check_failed')
 
 # Words shorter than this carry no signal ("of", "in", "a"); 3 keeps short
 # content words such as "DNA" and "HIV". Preventive, no incident: a stopword
@@ -422,15 +434,17 @@ class PubMedEnricher:
         match = re.search(r'(10\.\d{4,}/[^\s]+)', doi_str)
         return match.group(1).rstrip('.,;') if match else None
 
-    def _enrich_by_pmid(self, entries_with_pmid: list[tuple[dict, str]]) -> list[dict]:
+    def _enrich_by_pmid(
+        self, entries_with_pmid: list[tuple[dict, str]], source: str = 'pmid'
+    ) -> list[dict]:
         """
         Enrich entries by direct PMID lookup.
 
-        Batches requests for efficiency (up to 200 per request).
+        Batches requests for efficiency (up to 200 per request). Entries that
+        share a PMID are each checked against the one record (#1219).
         """
         results = []
-        pmids = [pmid for _, pmid in entries_with_pmid]
-        entry_map = {pmid: entry for entry, pmid in entries_with_pmid}
+        pmids = list(dict.fromkeys(pmid for _, pmid in entries_with_pmid))
 
         # Fetch in batches
         batch_size = 200
@@ -446,9 +460,9 @@ class PubMedEnricher:
                 time.sleep(RATE_LIMIT_DELAY)
 
         # Merge enrichment data into entries
-        for pmid, entry in entry_map.items():
+        for entry, pmid in entries_with_pmid:
             if pmid in all_records:
-                self._accept_record(entry, all_records[pmid], 'pmid')
+                self._accept_record(entry, all_records[pmid], source)
             else:
                 entry['enrichment_status'] = 'lookup_failed'
                 self.stats['failed_lookups'] += 1
@@ -489,7 +503,55 @@ class PubMedEnricher:
                 self.stats['failed_lookups'] += 1
             results.append(entry)
 
+        self._retry_bare_pmcids_as_pmids(results)
         return results
+
+    def _bare_digits_pmid(self, entry: dict) -> str | None:
+        """The PMID-length digit run of a "PMCID" value that has no PMC prefix
+        (#1219: a CV labelled 8-digit PMIDs as PMCIDs). "PMCID-123..." and
+        "PMCID: 123..." are labels, not prefixes; only "PMC" directly
+        followed by a digit marks a real PMCID."""
+        raw = str((entry.get('extracted_fields') or {}).get('pmcid') or '')
+        if re.search(r'PMC\d', raw.upper()):
+            return None
+        match = re.search(r'(?<!\d)\d{7,8}(?!\d)', raw)
+        return match.group(0) if match else None
+
+    @staticmethod
+    def _failure_counts(status: str | None) -> tuple[int, int]:
+        """(failed_lookups, title_mismatches) an entry with this status adds."""
+        failed = status in PMCID_PATH_FAILURES or status == 'lookup_failed'
+        return (1 if failed else 0, 1 if status == 'title_check_failed' else 0)
+
+    def _shift_failure_counts(self, status: str | None, sign: int) -> None:
+        failed, mismatched = self._failure_counts(status)
+        self.stats['failed_lookups'] += sign * failed
+        self.stats['title_mismatches'] += sign * mismatched
+
+    def _retry_bare_pmcids_as_pmids(self, entries: list[dict]) -> None:
+        """Second chance for entries the PMCID path failed or title-rejected
+        whose "PMCID" has no PMC prefix: look the digits up as a PMID. The
+        title check guards the result. An entry the retry does not enrich
+        keeps the status and rejection record it had, so an idconv outage is
+        never recorded as a title rejection."""
+        retry = [(e, self._bare_digits_pmid(e)) for e in entries
+                 if e.get('enrichment_status') in PMCID_PATH_FAILURES]
+        retry = [(e, pmid) for e, pmid in retry if pmid]
+        prior = {id(e): (e['enrichment_status'], e.pop('enrichment_rejected', None))
+                 for e, _ in retry}
+        for entry, _ in retry:
+            self._shift_failure_counts(prior[id(entry)][0], -1)
+        self._enrich_by_pmid(retry, source='pmcid_as_pmid')
+        for entry, _ in retry:
+            status, rejected = prior[id(entry)]
+            if entry['enrichment_status'] == 'enriched':
+                continue
+            self._shift_failure_counts(entry['enrichment_status'], -1)
+            self._shift_failure_counts(status, 1)
+            entry['enrichment_status'] = status
+            entry.pop('enrichment_rejected', None)
+            if rejected:
+                entry['enrichment_rejected'] = rejected
 
     def _enrich_by_doi(
         self, entries_with_doi: list[tuple[dict, str]], progress_base: int = 0, progress_total: int | None = None,
@@ -706,17 +768,37 @@ class PubMedEnricher:
             message += f" | response body: {_sanitize_error(body[:500])}"
         logger.error(message)
 
-    def _get_with_retry(self, url: str, params: dict[str, Any]) -> requests.Response:
+    @staticmethod
+    def _retry_delay(attempt: int, retry_after: str | None) -> float:
+        """Exponential backoff for this attempt, raised to a numeric Retry-After."""
+        delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
+        if retry_after:
+            try:
+                delay = max(delay, float(retry_after))
+            except ValueError:
+                pass  # HTTP-date Retry-After: deliberately ignored, backoff applies
+        return delay
+
+    def _get_with_retry(
+        self,
+        url: str,
+        params: dict[str, Any],
+        max_attempts: int = MAX_ATTEMPTS,
+        total_wait_cap: float | None = None,
+    ) -> requests.Response:
         """
         HTTP GET with retry on transient failures.
 
         Retries 429s, 5xx responses, and connection/timeout errors up to
-        MAX_ATTEMPTS total attempts with exponential backoff (1s, 2s, ...),
-        honoring a Retry-After header when larger. Other HTTP errors
-        (e.g. 404) raise immediately, exactly as before.
+        max_attempts total attempts with exponential backoff (1s, 2s, ...),
+        honoring a Retry-After header when larger. When total_wait_cap is set,
+        a retry whose delay would push the summed waits past it is not taken
+        and the last error raises. Other HTTP errors (e.g. 404) raise
+        immediately, exactly as before.
         """
         last_error = None
-        for attempt in range(MAX_ATTEMPTS):
+        waited = 0.0
+        for attempt in range(max_attempts):
             retry_after = None
             try:
                 response = self.session.get(url, params=params, timeout=30)
@@ -732,16 +814,14 @@ class PubMedEnricher:
             except (requests.ConnectionError, requests.Timeout) as e:
                 last_error = e
 
-            if attempt < MAX_ATTEMPTS - 1:
-                delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
-                if retry_after:
-                    try:
-                        delay = max(delay, float(retry_after))
-                    except ValueError:
-                        pass
+            if attempt < max_attempts - 1:
+                delay = self._retry_delay(attempt, retry_after)
+                if total_wait_cap is not None and waited + delay > total_wait_cap:
+                    break
+                waited += delay
                 if self.verbose:
                     logger.warning(f"    ⏳ Transient API error ({_sanitize_error(last_error)}); "
-                                   f"retry {attempt + 1}/{MAX_ATTEMPTS - 1} in {delay:g}s")
+                                   f"retry {attempt + 1}/{max_attempts - 1} in {delay:g}s")
                 time.sleep(delay)
 
         raise last_error
@@ -896,7 +976,11 @@ class PubMedEnricher:
                 **self._identity_params()
             }
 
-            response = self._get_with_retry(ID_CONVERTER_URL, params)
+            response = self._get_with_retry(
+                ID_CONVERTER_URL, params,
+                max_attempts=IDCONV_MAX_ATTEMPTS,
+                total_wait_cap=IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS,
+            )
 
             data = response.json()
 
@@ -930,7 +1014,9 @@ class PubMedEnricher:
         """
         params = {
             'db': 'pubmed',
-            'term': f'{doi}[doi]',
+            # Quoted: unquoted, PubMed re-tags the text after '/' as
+            # [Publisher ID] and returns unrelated PMIDs (#1219).
+            'term': f'"{doi.replace(chr(34), "")}"[doi]',
             'retmode': 'json',
             **self._identity_params()
         }

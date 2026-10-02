@@ -590,6 +590,31 @@ def test_under_extraction_min_records_boundary():
     assert len(lint_under_extraction({"entries": [at]})) == 1
 
 
+
+def _stage4_records_entry(code, field):
+    """An entry whose two stage-4 records carry its whole text; its own
+    field (the last record, as stage 4 leaves it) carries one line."""
+    text = _padded_under_extraction_text(4, UNDER_EXTRACTION_MIN_CHARS + 50)
+    lines = text.split("\n")
+    records = [{field: "\n".join(lines[:2])}, {field: "\n".join(lines[2:])}]
+    return {"element_type": "paragraph", "element_idx_start": 1, "taxonomy_code": code,
+            "text": text, "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records},
+            "extraction_coverage": {"extraction_coverage_percent": 100.0}}
+
+
+def test_under_extraction_ignores_stage4_records_no_renderer_writes():
+    """#1299: T has no fan-out renderer, so its stage-4 records never
+    render and must not count toward coverage."""
+    entry = _stage4_records_entry("T", "title")
+    entry["extracted_fields"] = {"title": "zz", STAGE4_RECORDS_KEY:
+                                 entry["extracted_fields"][STAGE4_RECORDS_KEY]}
+    assert len(lint_under_extraction({"entries": [entry]})) == 1
+
+
+def test_under_extraction_credits_stage4_records_that_fan_out():
+    assert lint_under_extraction({"entries": [_stage4_records_entry("H", "award_name")]}) == []
+
+
 _OVERLAP_WORDS = [''.join(c) for c in itertools.islice(
     itertools.product('abcdefghijklmnopqrstuvwxyz', repeat=5), 100)]
 _OVERLAP_ENTRY_TEXT = " ".join(_OVERLAP_WORDS)

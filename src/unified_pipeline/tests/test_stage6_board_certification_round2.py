@@ -26,6 +26,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
+    SKIPPED_ROW_CHECK,
     CERTIFICATE_NUMBER_PATTERN,
     _classify_cert_token,
     _format_certification_date_str,
@@ -1162,6 +1163,91 @@ class TestCertificateNumberSeparatorHeuristic:
             ("Board B", "222", "2012"),
             ("Board C", "333", "2014"),
         ]
+
+
+class TestSpecialtyOnlyRecordTakesTheStructuredPath:
+    """#1234: a record with a specialty and dates but no board name or number
+    used to fall to the raw-text reparse, which put the whole source line in
+    the name cell. A year-only line was then skipped without any record."""
+
+    def test_specialty_and_dates_render_as_clean_cells(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Certification in Example Medicine 2010 - 2020",
+             "extracted_fields": {"specialty": "Example Medicine",
+                                  "start_date": "2010", "end_date": "2020"}},
+        ])
+        assert _rows_after_board(gen) == [("Example Medicine", "", "2010-2020")]
+
+    def test_specialty_without_dates_renders_the_specialty_alone(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine: Board Certified",
+             "extracted_fields": {"specialty": "Example Medicine"}},
+        ])
+        assert _rows_after_board(gen) == [("Example Medicine", "", "")]
+
+    def test_year_only_line_is_skipped_with_a_render_warning(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "1977", "extracted_fields": {}},
+        ])
+        assert _rows_after_board(gen) == []
+        assert [w["check"] for w in gen._section_failures] == [SKIPPED_ROW_CHECK]
+        assert gen._section_failures[0]["severity"] == "WARN"
+        assert gen._section_failures[0]["evidence"] == ["year=1977"]
+
+    def test_a_rendered_row_records_no_warning(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2012",
+             "extracted_fields": {"specialty": "Example Medicine", "year_certified": "2012"}},
+        ])
+        assert gen._section_failures == []
+
+    def test_a_reparsed_row_that_renders_records_no_warning(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2012", "extracted_fields": {}},
+        ])
+        assert len(_rows_after_board(gen)) == 1
+        assert gen._section_failures == []
+
+    def test_multi_line_specialty_only_text_keeps_every_line(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2010\nSample Surgery 2012",
+             "extracted_fields": {"specialty": "Example Medicine"}},
+        ])
+        names = [r[0] for r in _rows_after_board(gen)]
+        assert len(names) == 2
+        assert "Sample Surgery" in names[1]
+
+    def test_multi_line_specialty_with_a_date_keeps_every_line(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2010\nSample Surgery 2012",
+             "extracted_fields": {"specialty": "Example Medicine",
+                                  "start_date": "2010"}},
+        ])
+        assert len(_rows_after_board(gen)) == 2
+
+    def test_list_specialty_never_renders_a_python_repr(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2010\nSample Surgery 2012",
+             "extracted_fields": {"specialty": ["Example Medicine", "Sample Surgery"]}},
+        ])
+        rows = _rows_after_board(gen)
+        assert rows and not any("[" in r[0] or "'" in r[0] for r in rows)
+
+    def test_blank_specialty_keeps_the_source_line(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2010",
+             "extracted_fields": {"specialty": "   ", "start_date": "2010"}},
+        ])
+        assert [r[0] for r in _rows_after_board(gen)] == ["Example Medicine 2010"]
 
 
 _RECERT_RANGE = {"start_date": "2008", "end_date": "2018"}

@@ -76,6 +76,7 @@ from unified_pipeline.stage6.pii_pass import PERSONAL_DATA_CODE
 from unified_pipeline.stage_6_word_template import (
     RENDER_ROUTED_CODES,
     grant_status_rebucket_target,
+    rendered_extraction_coverage,
 )
 
 from ..shared import (
@@ -220,7 +221,11 @@ def lint_under_extraction(stage4: Dict) -> List[Dict]:
     for e in stage4.get("entries", []):
         if e.get("element_type") in ("header", "break"):
             continue
-        pct = (e.get("extraction_coverage") or {}).get("extraction_coverage_percent")
+        # The coverage stage 6 acts on: stage 4's records fanned out first,
+        # so records no renderer writes don't count as extracted (#1299).
+        rendered = fan_out_multi_record_entries(
+            [e], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)[-1]
+        pct = (rendered_extraction_coverage(rendered) or {}).get("extraction_coverage_percent")
         if pct is None or pct >= UNDER_EXTRACTION_MAX_PCT:
             continue
         text = str(e.get("text", ""))
