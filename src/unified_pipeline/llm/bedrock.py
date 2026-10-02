@@ -334,6 +334,76 @@ def _validate_json_response(content, response_format):
         return False
 
 
+# A markdown code fence, as _strip_markdown_fences and Claude write it. Lines
+# that start with it separate two answers without being prose (#1218).
+_FENCE_MARKER = "```"
+
+# A self-correcting response holds the answer plus its correction: fewer than
+# two complete objects is a plain parse failure, not a self-correction (#1218).
+_MIN_OBJECTS_FOR_SELF_CORRECTION = 2
+
+
+def _holds_prose(gap: str) -> bool:
+    """True when `gap` has text beyond whitespace and markdown fence lines."""
+    return any(
+        line.strip() and not line.strip().startswith(_FENCE_MARKER)
+        for line in gap.splitlines()
+    )
+
+
+def _objects_separated_by_prose(text: str) -> list[str] | None:
+    """Split `text` into the top-level JSON objects it is made of, or None.
+
+    Returns the objects (as source text, in order) only when the text is
+    nothing but complete objects with prose between each pair, e.g. an answer,
+    a line saying the model noticed a mistake, then the corrected answer.
+    Anything else is None, so genuinely malformed text stays malformed: text
+    that does not start at an object, an object that is truncated or not
+    valid, and two objects with no prose between them (which may be two
+    distinct records rather than a correction).
+    """
+    start = text.find("{")
+    if start == -1 or _holds_prose(text[:start]):
+        return None
+    decoder = json.JSONDecoder()
+    objects: list[str] = []
+    while start != -1:
+        try:
+            _, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            return None
+        objects.append(text[start:end])
+        start = text.find("{", end)
+        if start != -1 and not _holds_prose(text[end:start]):
+            return None
+    return objects
+
+
+def _select_final_json_object(content: str | None, response_format: dict | None,
+                              stage: str | None = None) -> str | None:
+    """Reduce a self-correcting JSON response to its last object (#1218).
+
+    Sonnet 5 sometimes answers, writes a line of prose saying it noticed a
+    mistake, then answers again. json.loads rejects that ("Extra data") and
+    the one-shot repair re-sends the same prompt, so it repeats the shape.
+    The later object is the correction, so it is the one returned.
+
+    Content that already parses, is not a JSON request, or is not text is
+    returned unchanged, as is anything _objects_separated_by_prose rejects:
+    those still take the repair path.
+    """
+    if not isinstance(content, str) or _validate_json_response(content, response_format):
+        return content
+    objects = _objects_separated_by_prose(_strip_markdown_fences(content))
+    if objects is None or len(objects) < _MIN_OBJECTS_FOR_SELF_CORRECTION:
+        return content
+    logger.warning(
+        "Bedrock JSON response (stage=%s) held %d objects separated by prose; "
+        "using the last and discarding %d.", stage, len(objects), len(objects) - 1,
+    )
+    return objects[-1]
+
+
 def _call_bedrock(model, messages, temperature, response_format=None,
                   max_tokens=None, enable_prompt_caching=False, **kwargs):
     """Make a Bedrock Converse API call.
@@ -590,7 +660,12 @@ def _dispatch_bedrock(messages: list, response_format: dict | None, cfg: dict) -
     # empty content list with no text block at all (#884) -- read it through
     # the same guarded helper the retry branch below re-reads, rather than
     # indexing content[0] directly.
-    content = _extract_text_content(response)
+    # A self-correcting response (answer, prose, corrected answer) is reduced
+    # to its last object here, before validation, so it needs no repair call
+    # (#1218).
+    stage = cfg.get("stage")
+    content = _select_final_json_object(
+        _extract_text_content(response), response_format, stage)
     stop_reason = response.get("stopReason", "end_turn")
     finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
     content_missing = content is None
@@ -614,7 +689,8 @@ def _dispatch_bedrock(messages: list, response_format: dict | None, cfg: dict) -
         # Previously latency_ms was frozen before this branch ran, so the
         # repair call was billed but never timed.
         api_seconds += retry_api_seconds
-        retry_content = _extract_text_content(retry_response)
+        retry_content = _select_final_json_object(
+            _extract_text_content(retry_response), response_format, stage)
         retry_stop_reason = retry_response.get("stopReason", "end_turn")
         retry_usage = retry_response["usage"]
         retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
