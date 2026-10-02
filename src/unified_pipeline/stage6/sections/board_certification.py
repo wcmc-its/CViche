@@ -84,6 +84,10 @@ _HAS_LETTER = re.compile(r'[A-Za-z]')
 # misclassified as a certification year (#625 thread 3850184512).
 _MOC_TOKEN_PATTERN = re.compile(r'^MOC(?:[\s:.\-]*\d{4})?$', re.IGNORECASE)
 
+# Sidecar check name for a reconstructed row dropped for lack of a specialty and
+# certificate number (#1234).
+SKIPPED_ROW_CHECK = 'board_certification_row_skipped'
+
 CertTokenType = Literal['year', 'cert_number', 'specialty'] | None
 
 
@@ -539,8 +543,11 @@ class BoardCertificationSection:
             else:
                 certificate_number = str(certificate_number) if certificate_number else ''
 
-            # Check if we have structured fields
-            if certifying_board or certificate_number:
+            # Check if we have structured fields. A specialty alone counts
+            # (#1234): a record with a specialty and dates but no board name
+            # used to fall to the raw-text reparse, which put the whole source
+            # line in the name cell.
+            if certifying_board or certificate_number or fields.get('specialty'):
                 # Multiple certifications merged into one entry? (#625 thread
                 # 3850459808: considers certifying_board too, not just the
                 # certificate-number count -- see _is_fused_certification.)
@@ -675,6 +682,25 @@ class BoardCertificationSection:
 
             if specialty or cert_num:
                 self._add_board_cert_row(table, specialty, cert_num, year)
+            else:
+                self._warn_skipped_certification_row(year)
+
+    def _warn_skipped_certification_row(self, year: str) -> None:
+        """Record a reconstructed row dropped for having neither a specialty
+        nor a certificate number (a bare year line), so the doctor sees it
+        instead of the date vanishing silently (#1234)."""
+        logger.warning(
+            "board certification: skipping reconstructed row with no specialty "
+            "and no certificate number (year=%r)", year)
+        self._section_failures.append({
+            "check": SKIPPED_ROW_CHECK,
+            "code": "F2",
+            "section": "board_certification",
+            "message": ("a board certification line with only a year was "
+                        "skipped (no specialty or certificate number)"),
+            "evidence": [f"year={year}"],
+            "severity": "WARN",
+        })
 
     def _add_board_cert_row(self, table, specialty: str, cert_number: str, dates: str):
         """Add a single board certification row to the table.
