@@ -47,8 +47,8 @@ def _auth(client, user):
 def storage(tmp_path, monkeypatch):
     store = LocalRunStorage(str(tmp_path / "store"))
     monkeypatch.setattr("app.api.inbox.get_storage", lambda: store)
-    monkeypatch.setattr("app.api.upload.get_storage", lambda: store)
-    monkeypatch.setattr("app.api.upload.UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr("app.services.run_creation.get_storage", lambda: store)
+    monkeypatch.setattr("app.services.run_creation.UPLOAD_DIR", tmp_path)
     return store
 
 

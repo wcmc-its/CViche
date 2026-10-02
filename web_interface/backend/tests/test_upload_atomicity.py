@@ -69,12 +69,12 @@ def _bypass_file_validation(tmp_path):
     byte payload reaches the storage step, and redirect the ephemeral pod-local
     write into tmp_path. Returns a list of patch context managers."""
     return [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
         # None == "couldn't extract"; the endpoint fails open and skips the
         # min-text gate, which is all we need to reach the storage step.
-        patch("app.api.upload._extract_text", return_value=None),
-        patch("app.api.upload.detect_wcm_template", return_value=(False, None)),
+        patch("app.services.run_creation._extract_text", return_value=None),
+        patch("app.services.run_creation.detect_wcm_template", return_value=(False, None)),
     ]
 
 
@@ -96,7 +96,7 @@ def test_upload_aborts_and_creates_no_run_when_archive_fails(client, db, seed_si
     storage.put_file_exclusive.side_effect = Exception("S3 unavailable")
 
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     for p in patches:
         p.start()
     try:
@@ -123,7 +123,7 @@ def test_upload_succeeds_when_by_submitter_index_fails(client, db, seed_simple_m
     storage.put_global.side_effect = Exception("index write failed")
 
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     for p in patches:
         p.start()
     try:
@@ -181,7 +181,7 @@ def _real_storage_patches(tmp_path):
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     patches = _bypass_file_validation(upload_dir)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     return storage, upload_dir, patches
 
 
@@ -212,8 +212,8 @@ def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_
     storage = MagicMock()
     rate_limit = MagicMock(return_value=None)
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload.get_storage", return_value=storage),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation.get_storage", return_value=storage),
         patch("app.api.upload.check_rate_limit", rate_limit),
     ]
     resp = _run_patches(patches, lambda: _post_upload(client, filename, b"MZ\x90\x00not-a-cv"))
@@ -260,7 +260,7 @@ def test_upload_still_accepts_docx_after_pdf_rejection(client, db, seed_simple_m
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
     resp = _run_patches(
         patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy-docx-bytes", DOCX_MIME)
     )
@@ -299,8 +299,8 @@ def test_upload_rejects_docx_with_bad_zip_structure(client, db, seed_simple_mode
     _auth(client, user)
     storage = MagicMock()
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload.get_storage", return_value=storage),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation.get_storage", return_value=storage),
     ]
     with caplog.at_level(logging.WARNING):
         resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", payload, DOCX_MIME))
@@ -440,10 +440,10 @@ def test_upload_rejects_password_protected_document(client, db, seed_simple_mode
     _auth(client, user)
     storage = MagicMock()
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", return_value=""),
-        patch("app.api.upload.get_storage", return_value=storage),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value=""),
+        patch("app.services.run_creation.get_storage", return_value=storage),
     ]
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
@@ -471,11 +471,11 @@ def test_upload_returns_wcm_template_warning(client, db, seed_simple_mode, tmp_p
     extracted = "x" * 600  # above MIN_EXTRACTED_CHARS so the readability gate passes
     detect = MagicMock(return_value=(warning, ratio))
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", return_value=extracted),
-        patch("app.api.upload.detect_wcm_template", detect),
-        patch("app.api.upload.get_storage", return_value=MagicMock()),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value=extracted),
+        patch("app.services.run_creation.detect_wcm_template", detect),
+        patch("app.services.run_creation.get_storage", return_value=MagicMock()),
     ]
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
@@ -504,11 +504,11 @@ def _upload_with_text(client, db, tmp_path, extracted, input_format_patch=None):
     user = _make_user(db)
     _auth(client, user)
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", return_value=extracted),
-        patch("app.api.upload.detect_wcm_template", return_value=(False, None)),
-        patch("app.api.upload.get_storage", return_value=MagicMock()),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value=extracted),
+        patch("app.services.run_creation.detect_wcm_template", return_value=(False, None)),
+        patch("app.services.run_creation.get_storage", return_value=MagicMock()),
     ]
     if input_format_patch is not None:
         patches.append(input_format_patch)
@@ -691,13 +691,13 @@ def test_upload_offloads_extraction_and_template_checks_to_threadpool(client, db
         return await real_run_in_threadpool(func, *args, **kwargs)
 
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", extract_mock),
-        patch("app.api.upload.detect_wcm_template", detect_mock),
-        patch("app.api.upload.detect_input_format_or_none", format_mock),
-        patch("app.api.upload.get_storage", return_value=MagicMock()),
-        patch("app.api.upload.run_in_threadpool", spy),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", extract_mock),
+        patch("app.services.run_creation.detect_wcm_template", detect_mock),
+        patch("app.services.run_creation.detect_input_format_or_none", format_mock),
+        patch("app.services.run_creation.get_storage", return_value=MagicMock()),
+        patch("app.services.run_creation.run_in_threadpool", spy),
     ]
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
@@ -723,9 +723,9 @@ def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode
         return await real_run_in_threadpool(func, *args, **kwargs)
 
     patches = [
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", extract_mock),
-        patch("app.api.upload.run_in_threadpool", spy),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", extract_mock),
+        patch("app.services.run_creation.run_in_threadpool", spy),
     ]
     resp = _run_patches(
         patches,
@@ -759,7 +759,7 @@ def test_upload_persists_render_options(client, db, seed_simple_mode, tmp_path, 
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
     resp = _run_patches(
         patches,
         lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME, data=form),
@@ -785,7 +785,7 @@ def test_upload_requires_and_persists_submission_type(client, db, seed_simple_mo
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
     resp = _run_patches(
         patches,
         lambda: client.post(
@@ -863,7 +863,7 @@ def test_upload_creates_pending_step_rows(client, db, seed_simple_mode, tmp_path
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 200, resp.text
@@ -891,7 +891,7 @@ def test_upload_enforces_rate_limit(client, db, seed_simple_mode, tmp_path, role
     _auth(client, user)
     storage = MagicMock()
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == expected_status, resp.text
@@ -918,8 +918,8 @@ def test_upload_validates_extension_before_rate_limit(client, db, seed_simple_mo
     user = _make_user(db, daily_limit=0)
     _auth(client, user)
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload.get_storage", return_value=MagicMock()),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation.get_storage", return_value=MagicMock()),
     ]
     resp = _run_patches(patches, lambda: _post_upload(client, "cv.exe", b"MZ"))
 
@@ -946,8 +946,8 @@ def test_upload_removes_local_file_after_fatal_storage_failure(client, db, seed_
     storage = MagicMock()
     storage.put_file_exclusive.side_effect = Exception("S3 unavailable")
     patches = _bypass_file_validation(upload_dir)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", return_value="FATAL1"))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="FATAL1"))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 502, resp.text
@@ -984,7 +984,7 @@ def test_upload_content_write_failure_after_manifest_is_fatal(client, db, seed_s
     put_global = MagicMock()
     patches.append(patch.object(storage, "put_file_exclusive", put))
     patches.append(patch.object(storage, "put_global", put_global))
-    patches.append(patch("app.api.upload.generate_run_id", return_value="ORPHN1"))
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="ORPHN1"))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 502, resp.text
@@ -1062,7 +1062,7 @@ def test_upload_db_commit_failure_compensates_the_archive_and_creates_no_run(cli
     user = _make_user(db)
     _auth(client, user)
     storage, upload_dir, patches = _real_storage_patches(tmp_path)
-    patches.append(patch("app.api.upload.generate_run_id", return_value="DBFA1L"))
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="DBFA1L"))
     patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
@@ -1101,8 +1101,8 @@ def test_upload_compensates_archive_when_commit_fails(client, db, seed_simple_mo
     storage.put_file_exclusive.return_value = None
     storage.put_global.return_value = None
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", return_value="CMFAIL"))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="CMFAIL"))
     patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
 
     # Wraps the real rollback (so the session actually rolls back) while
@@ -1148,8 +1148,8 @@ def test_upload_compensation_failure_does_not_mask_commit_error(client, db, seed
     storage.delete_run.side_effect = Exception("delete_run also failed")
     storage.delete_global_prefix.side_effect = Exception("delete_global_prefix also failed")
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", return_value="CMFAI2"))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="CMFAI2"))
     patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
     with caplog.at_level(logging.ERROR, logger="app.api.upload"):
         resp = _run_patches(patches, lambda: _post_dummy_upload(client))
@@ -1188,7 +1188,7 @@ def test_upload_rejects_filename_over_column_width_before_archive(client, db, se
 
     storage = MagicMock()
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     filename = "x" * 256 + ".docx"  # 261 chars; Run.filename is String(255)
     resp = _run_patches(
         patches,
@@ -1246,7 +1246,7 @@ def test_upload_requires_current_consent(client, db, seed_simple_mode, tmp_path,
     storage = MagicMock()
     rate_limit = MagicMock(return_value=None)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     patches.append(patch("app.api.upload.check_rate_limit", rate_limit))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
@@ -1273,7 +1273,7 @@ def test_upload_with_the_callers_batch_id_puts_the_run_in_the_batch(client, db, 
     _add_batch(db, user)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
 
     resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
                                                       data={"batch_id": "BATCHA"}))
@@ -1286,7 +1286,7 @@ def test_upload_without_a_batch_id_is_a_single_run(client, db, seed_simple_mode,
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
 
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
@@ -1309,7 +1309,7 @@ def test_upload_into_a_batch_the_caller_does_not_own_is_refused_before_storage(
     _auth(client, uploader)
     storage = MagicMock()
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
 
     resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
                                                       data={"batch_id": "BATCHA"}))
@@ -1332,8 +1332,8 @@ def test_estimate_many_files_returns_a_row_per_file_and_totals(client, db, seed_
     user = _make_user(db, role=role)
     _auth(client, user)
     patches = [
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", return_value="x" * 4000),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value="x" * 4000),
     ]
 
     resp = _run_patches(patches, lambda: _post_estimates(client, "a.docx", "b.docx", "c.docx"))
@@ -1357,8 +1357,8 @@ def test_estimate_many_files_reports_a_bad_file_on_its_row_and_totals_the_rest(c
     user = _make_user(db)
     _auth(client, user)
     patches = [
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", return_value="x" * 4000),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value="x" * 4000),
     ]
 
     resp = _run_patches(patches, lambda: _post_estimates(client, "a.docx", "notes.txt"))
@@ -1376,8 +1376,8 @@ def test_estimate_many_files_counts_as_one_call_against_the_estimate_limit(clien
     one_call = upload_module._EstimatePerUserWindow(max_calls=1, window_seconds=300)
     patches = [
         patch("app.api.upload._estimate_rate_limiter", one_call),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", return_value="x" * 4000),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value="x" * 4000),
     ]
 
     def two_calls():

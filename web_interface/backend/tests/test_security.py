@@ -682,8 +682,8 @@ class TestUploadValidation:
         self._create_auth_user(client, db)
         pdf_content = cv_pdf()
         storage = MagicMock()
-        with patch("app.api.upload.UPLOAD_DIR", tmp_path), \
-             patch("app.api.upload.get_storage", return_value=storage):
+        with patch("app.services.run_creation.UPLOAD_DIR", tmp_path), \
+             patch("app.services.run_creation.get_storage", return_value=storage):
             response = client.post(
                 "/api/upload",
                 files={"file": ("my_cv.pdf", pdf_content, "application/pdf")}, data={"submission_type": "own_cv"},
@@ -705,7 +705,7 @@ class TestUploadValidation:
         routes -- not the generic "no readable text" one, and never a run."""
         from app.models import Run
         self._create_auth_user(client, db)
-        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+        with patch("app.services.run_creation.UPLOAD_DIR", tmp_path):
             response = client.post(
                 endpoint,
                 files={"file": ("my_cv.pdf", cv_pdf(user_password="secret"), "application/pdf")}, data=data,
@@ -726,7 +726,7 @@ class TestUploadValidation:
         from app.services.pdf_sandbox import PDF_MAX_PAGES, PDF_TOO_COMPLEX_MESSAGE
         from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
         self._create_auth_user(client, db)
-        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+        with patch("app.services.run_creation.UPLOAD_DIR", tmp_path):
             response = client.post(
                 endpoint,
                 files={"file": ("long.pdf", _make_pdf([[]] * (PDF_MAX_PAGES + 1)), "application/pdf")}, data=data,
@@ -754,7 +754,7 @@ class TestUploadValidation:
         for _ in range(pdf_sandbox.PDF_CHILD_SLOTS):
             assert pdf_sandbox._slots.acquire(blocking=False)
         try:
-            with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+            with patch("app.services.run_creation.UPLOAD_DIR", tmp_path):
                 response = client.post(
                     endpoint, files={"file": ("cv.pdf", cv_pdf(), "application/pdf")}, data=data,
                 )
@@ -848,9 +848,9 @@ class TestUploadValidation:
         focused on the naming behavior."""
         self._create_auth_user(client, db)
         docx_content = b"PK\x03\x04dummy-docx-bytes"
-        with patch("app.api.upload.UPLOAD_DIR", tmp_path), \
-             patch("app.api.upload._validate_docx_magic", return_value=True), \
-             patch("app.api.upload._extract_text", return_value="x" * 600):
+        with patch("app.services.run_creation.UPLOAD_DIR", tmp_path), \
+             patch("app.services.run_creation._validate_docx_magic", return_value=True), \
+             patch("app.services.run_creation._extract_text", return_value="x" * 600):
             response = client.post(
                 "/api/upload",
                 files={"file": ("John_Doe_CV_2024.docx", docx_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
@@ -881,8 +881,8 @@ class TestUploadValidation:
         """#1111: a non-admin's estimate carries no dollar figure or pricing
         model; the time estimate is unaffected."""
         self._create_auth_user(client, db, role=role)
-        with patch("app.api.upload._validate_docx_magic", return_value=True), \
-             patch("app.api.upload._extract_text", return_value="x" * 600):
+        with patch("app.services.run_creation._validate_docx_magic", return_value=True), \
+             patch("app.services.run_creation._extract_text", return_value="x" * 600):
             response = client.post(
                 "/api/estimate",
                 files={"file": ("cv.docx", b"PK\x03\x04dummy", "application/octet-stream")},
@@ -930,7 +930,7 @@ class TestUploadValidation:
         buf = io.BytesIO()
         doc.save(buf)
         with patch("app.services.upload_validation._DOCX_MAX_UNCOMPRESSED_BYTES", 40_000), \
-                patch("app.api.upload._extract_text") as extract:
+                patch("app.services.run_creation._extract_text") as extract:
             response = client.post(
                 endpoint,
                 files={"file": ("cv.docx", buf.getvalue(), "application/octet-stream")},
@@ -946,8 +946,8 @@ class TestUploadValidation:
         that could compute a different count for the same file."""
         self._create_auth_user(client, db)
         docx_content = b"PK\x03\x04dummy-docx-bytes"
-        with patch("app.api.upload._validate_docx_magic", return_value=True), \
-             patch("app.api.upload._extract_text", return_value="y" * 4321) as extract_mock:
+        with patch("app.services.run_creation._validate_docx_magic", return_value=True), \
+             patch("app.services.run_creation._extract_text", return_value="y" * 4321) as extract_mock:
             response = client.post(
                 "/api/estimate",
                 files={"file": ("cv.docx", docx_content, "application/octet-stream")},
@@ -965,8 +965,8 @@ class TestUploadValidation:
         since `""` is falsy but not None."""
         self._create_auth_user(client, db)
         docx_content = b"PK\x03\x04dummy-docx-bytes"
-        with patch("app.api.upload._validate_docx_magic", return_value=True), \
-             patch("app.api.upload._extract_text", return_value=""), \
+        with patch("app.services.run_creation._validate_docx_magic", return_value=True), \
+             patch("app.services.run_creation._extract_text", return_value=""), \
              caplog.at_level(logging.WARNING):
             response = client.post(
                 "/api/estimate",
@@ -988,8 +988,8 @@ class TestUploadValidation:
         name) -- the request id already ties it back to the request."""
         self._create_auth_user(client, db)
         docx_content = b"PK\x03\x04dummy-docx-bytes"
-        with patch("app.api.upload._validate_docx_magic", return_value=True), \
-             patch("app.api.upload._extract_text", return_value=None), \
+        with patch("app.services.run_creation._validate_docx_magic", return_value=True), \
+             patch("app.services.run_creation._extract_text", return_value=None), \
              caplog.at_level(logging.WARNING):
             response = client.post(
                 "/api/estimate",
@@ -1011,11 +1011,11 @@ class TestUploadValidation:
         from app.models import Run
         self._create_auth_user(client, db)
         content = b"PK\x03\x04" + b"\x00" * 200_000
-        with patch("app.api.upload.UPLOAD_DIR", tmp_path), \
-             patch("app.api.upload._validate_docx_magic", return_value=True), \
-             patch("app.api.upload._extract_text", return_value=extracted), \
-             patch("app.api.upload.detect_wcm_template", return_value=(False, None)), \
-             patch("app.api.upload.get_storage", return_value=MagicMock()):
+        with patch("app.services.run_creation.UPLOAD_DIR", tmp_path), \
+             patch("app.services.run_creation._validate_docx_magic", return_value=True), \
+             patch("app.services.run_creation._extract_text", return_value=extracted), \
+             patch("app.services.run_creation.detect_wcm_template", return_value=(False, None)), \
+             patch("app.services.run_creation.get_storage", return_value=MagicMock()):
             est = client.post("/api/estimate", files={"file": ("cv.docx", content, "application/octet-stream")})
             up = client.post(
                 "/api/upload",
@@ -1039,10 +1039,10 @@ class TestUploadValidation:
         old 20 s/stage overhead and 3-min floor put all six below the range's
         MINIMUM. Char counts are recovered from each run's stored estimate
         under prod's knobs (30 s/1k tokens, 60 s base)."""
-        from app.api import upload
-        with patch.object(upload, "TIME_PER_1K_TOKENS", 30), \
-             patch.object(upload, "BASE_OVERHEAD_SECONDS", 60):
-            time_min, time_max = upload.estimate_run_seconds(text_chars)
+        from app.services import run_creation
+        with patch.object(run_creation, "TIME_PER_1K_TOKENS", 30), \
+             patch.object(run_creation, "BASE_OVERHEAD_SECONDS", 60):
+            time_min, time_max = run_creation.estimate_run_seconds(text_chars)
         assert time_min <= actual_seconds <= time_max
 
     def test_estimate_respects_rate_limit(self, client, db, seed_simple_mode):
@@ -1066,7 +1066,7 @@ class TestUploadValidation:
         }
         docx_content = b"PK\x03\x04dummy-docx-bytes"
         with patch("app.api.upload.check_rate_limit", return_value=rate_limit_body), \
-             patch("app.api.upload._extract_text") as extract_mock:
+             patch("app.services.run_creation._extract_text") as extract_mock:
             response = client.post(
                 "/api/estimate",
                 files={"file": ("cv.docx", docx_content, "application/octet-stream")},
@@ -1087,8 +1087,8 @@ class TestUploadValidation:
         docx_content = b"PK\x03\x04dummy-docx-bytes"
         small_limiter = upload_module._EstimatePerUserWindow(max_calls=2, window_seconds=300)
         with patch("app.api.upload._estimate_rate_limiter", small_limiter), \
-             patch("app.api.upload._validate_docx_magic", return_value=True) as magic_mock, \
-             patch("app.api.upload._extract_text", return_value="x" * 2000) as extract_mock:
+             patch("app.services.run_creation._validate_docx_magic", return_value=True) as magic_mock, \
+             patch("app.services.run_creation._extract_text", return_value="x" * 2000) as extract_mock:
             for _ in range(2):
                 ok_response = client.post(
                     "/api/estimate",
@@ -1150,8 +1150,8 @@ class TestUploadValidation:
         small_limiter = upload_module._EstimatePerUserWindow(max_calls=1, window_seconds=300)
         docx_content = b"PK\x03\x04dummy-docx-bytes"
         with patch("app.api.upload._estimate_rate_limiter", small_limiter), \
-             patch("app.api.upload._validate_docx_magic", return_value=True), \
-             patch("app.api.upload._extract_text", return_value="x" * 2000):
+             patch("app.services.run_creation._validate_docx_magic", return_value=True), \
+             patch("app.services.run_creation._extract_text", return_value="x" * 2000):
             first_a = client.post(
                 "/api/estimate",
                 files={"file": ("cv.docx", docx_content, "application/octet-stream")},

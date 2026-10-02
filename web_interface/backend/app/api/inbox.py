@@ -16,7 +16,7 @@ from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.upload import DuplicateInfo, RunRequest, create_run_from_bytes, duplicate_info
+from app.services.run_creation import DuplicateInfo, RunRequest, create_run_from_bytes, duplicate_info
 from app.auth import get_current_user
 from app.consent import require_current_consent
 from app.database import get_db
