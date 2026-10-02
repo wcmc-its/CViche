@@ -53,6 +53,9 @@ INK = "#222222"
 MUTED = "#5F5A50"
 FONT = "Arial, Helvetica, sans-serif"
 MAX_WIDTH_PX = 600
+BUTTON_COLOUR = "#1F2328"
+BADGE_PX = 44
+BADGE_MOBILE_PX = 38
 BUTTON_CHAR_PX = 9
 BUTTON_PAD_PX = 48
 BUTTON_MIN_PX = 160
@@ -73,6 +76,25 @@ STATUS_COLOURS = {
     StatusKind.FAILED: "#B91C1C",
     StatusKind.WAITING: "#B45309",
     StatusKind.SKIPPED: "#8A7A58",
+}
+
+
+class BadgeKind(StrEnum):
+    CLOCK = "clock"
+    CHECK_AMBER = "check_amber"
+    CHECK_GREEN = "check_green"
+    CROSS = "cross"
+    EXCLAMATION = "exclamation"
+
+
+# kind -> (glyph, circle background, glyph colour). No images: a text glyph in
+# a fixed-size cell. U+FE0E asks for the text (not emoji) form of the check.
+BADGES = {
+    BadgeKind.CLOCK: ("\u25F7", "#EFF6FF", "#1D4ED8"),
+    BadgeKind.CHECK_AMBER: ("\u2713\uFE0E", "#FFFBEB", "#B45309"),
+    BadgeKind.CHECK_GREEN: ("\u2713\uFE0E", "#ECFDF3", "#15803D"),
+    BadgeKind.CROSS: ("\u2715", "#FEF2F2", "#B91C1C"),
+    BadgeKind.EXCLAMATION: ("!", "#FFFBEB", "#B45309"),
 }
 
 
@@ -110,6 +132,7 @@ class EmailContent:
     cta_url: str | None = None
     greeting: str = FALLBACK_GREETING
     status: tuple[StatusRow, ...] = ()
+    badge: BadgeKind | None = None
 
 
 def _visible(rows: tuple[StatusRow, ...]) -> tuple[StatusRow, ...]:
@@ -188,9 +211,9 @@ def _button_html(label: str, url: str) -> str:
     vml = (f'<!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" '
            f'xmlns:w="urn:schemas-microsoft-com:office:word" href="{href}" '
            f'style="height:{BUTTON_HEIGHT_PX}px;v-text-anchor:middle;width:{width}px;" arcsize="14%" stroke="f" '
-           f'fillcolor="{WCM_RED}"><w:anchorlock/><center style="{text_style}">{escape(label)}</center>'
+           f'fillcolor="{BUTTON_COLOUR}"><w:anchorlock/><center style="{text_style}">{escape(label)}</center>'
            f'</v:roundrect><![endif]-->')
-    anchor = (f'<!--[if !mso]><!--><a class="btn" href="{href}" style="display:inline-block;background-color:{WCM_RED};'
+    anchor = (f'<!--[if !mso]><!--><a class="btn" href="{href}" style="display:inline-block;background-color:{BUTTON_COLOUR};'
               f'color:#ffffff;font-family:{FONT};font-size:15px;font-weight:bold;line-height:18px;text-decoration:none;'
               f'padding:13px 24px;border-radius:6px;text-align:center;">{escape(label)}</a><!--<![endif]-->')
     return _row(vml + anchor, "padding:8px 0 4px 0;")
@@ -218,9 +241,22 @@ _STYLE = (
     ".card{padding:16px 22px 22px 22px !important;}"
     ".its{width:220px !important;}"
     ".mark{width:104px !important;}"
+    ".badge{width:38px !important;height:38px !important;line-height:38px !important;font-size:19px !important;}"
     ".h{font-size:24px !important;line-height:30px !important;}"
     ".btn{display:block !important;width:100% !important;box-sizing:border-box !important;}}"
 )
+
+
+def _badge_html(kind: BadgeKind | None) -> str:
+    if kind is None:
+        return ""
+    glyph, background, colour = BADGES[kind]
+    cell = (f'<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>'
+            f'<td class="badge" width="{BADGE_PX}" height="{BADGE_PX}" align="center" valign="middle" '
+            f'style="width:{BADGE_PX}px;height:{BADGE_PX}px;background-color:{background};border-radius:50%;'
+            f'font-family:{FONT};font-size:22px;line-height:{BADGE_PX}px;font-weight:bold;color:{colour};'
+            f'text-align:center;">{glyph}</td></tr></table>')
+    return _row(cell, "padding:0 0 14px 0;")
 
 
 def _card_html(content: EmailContent) -> str:
@@ -229,6 +265,7 @@ def _card_html(content: EmailContent) -> str:
     rest = paragraphs[1:] if lead else paragraphs
     inner = (
         _row(_img(CVICHE_LOGO_CID, CVICHE_LOGO_WIDTH_PX, CVICHE_LOGO_HEIGHT_PX, "CViche", "mark"), "padding:0 0 22px 0;")
+        + _badge_html(content.badge)
         + _row(escape(content.headline), "padding:0 0 16px 0;font-size:28px;line-height:34px;font-weight:bold;", "h")
         + _row(escape(content.greeting), "padding:0 0 14px 0;font-size:15px;line-height:22px;")
         + lead + _status_html(_visible(content.status)) + "".join(_para_html(p) for p in rest) + _cta_html(content)

@@ -336,9 +336,10 @@ def test_the_rejection_email_has_no_button(monkeypatch):
     assert 'class="btn"' not in mail.html and "<v:roundrect" not in mail.html and "https://" not in mail.body.split("SIGNATURE")[0].replace(templates.HELPDESK_ARTICLE_URL, "")
 
 
-def test_the_button_is_a_filled_red_vml_and_anchor_pair():
+def test_the_button_is_a_filled_dark_vml_and_anchor_pair():
     html = mailer.completion_notice("pat@med.cornell.edu", complete=2, failed=0, batch_id="BATCHA").html
-    assert 'fillcolor="#B31B1B"' in html and "background-color:#B31B1B" in html and "border-radius:6px" in html
+    assert 'fillcolor="#1F2328"' in html and "background-color:#1F2328" in html and "border-radius:6px" in html
+    assert 'fillcolor="#B31B1B"' not in html
     assert "<!--[if mso]>" in html and "<!--[if !mso]><!-->" in html
 
 
@@ -381,3 +382,41 @@ def test_html_puts_the_lead_before_the_status_list_and_other_copy_after():
     assert page.index("Follow progress in Runs.") < page.index(">Processing</td>") < page.index("These CVs are processed")
     done = mailer.completion_notice("pat@med.cornell.edu", complete=1, failed=1, batch_id="BATCHA").html
     assert done.index("Ready to download") < done.index("Open a failed run to retry it.")
+
+
+def _badge_cell(mail):
+    cell = mail.html[:mail.html.index("</td>", mail.html.index('class="badge"'))]
+    return cell[cell.rindex("<td"):] if 'class="badge"' in mail.html else ""
+
+
+# (builder, background, glyph colour) as the round-2 mock draws each email's badge.
+_MOCK_BADGES = {
+    "processing": (lambda: mailer.processing_notice("a@b.org", runs=2, held=0, batch_id="BATCHA"), "#EFF6FF", "#1D4ED8", "\u25F7"),
+    "held_consent": (lambda: mailer.processing_notice("a@b.org", runs=0, held=2, outdated_consent=True), "#FFFBEB", "#B45309", "!"),
+    "batch_with_failures": (lambda: mailer.completion_notice("a@b.org", complete=1, failed=1, batch_id="BATCHA"), "#FFFBEB", "#B45309", "\u2713"),
+    "batch_clean": (lambda: mailer.completion_notice("a@b.org", complete=2, failed=0, batch_id="BATCHA"), "#ECFDF3", "#15803D", "\u2713"),
+    "single_ready": (lambda: mailer.completion_notice("a@b.org", complete=1, failed=0, batch_id="BATCHA", single_run_id="RUNAAA"), "#ECFDF3", "#15803D", "\u2713"),
+    "single_failed": (lambda: mailer.completion_notice("a@b.org", complete=0, failed=1, batch_id="BATCHA", single_run_id="RUNAAA"), "#FEF2F2", "#B91C1C", "\u2715"),
+    "rejection": (lambda: mailer.rejection("a@b.org", InboundRejectReason.TOO_MANY_FILES), "#FEF2F2", "#B91C1C", "\u2715"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_MOCK_BADGES))
+def test_each_email_has_its_badge_in_the_mocks_colours(name):
+    make, background, colour, glyph = _MOCK_BADGES[name]
+    cell = _badge_cell(make())
+    assert f"background-color:{background};" in cell and f"color:{colour};" in cell and glyph in cell
+    assert "border-radius:50%" in cell and 'width="44"' in cell and 'height="44"' in cell
+
+
+def test_badge_kinds_differ_in_glyph_or_colour_and_stay_text_only():
+    assert len(set(templates.BADGES.values())) == len(templates.BadgeKind)
+    html = mailer.rejection("a@b.org", InboundRejectReason.TOO_MANY_FILES).html
+    assert "<svg" not in html and html.count("<img") == 2  # the two logos, no badge image
+
+
+def test_every_button_is_the_dark_fill_and_links_stay_red(monkeypatch):
+    for mail in _all_mails(monkeypatch):
+        if 'class="btn"' in mail.html:
+            assert mail.html.count("background-color:#1F2328") == 1 and 'fillcolor="#1F2328"' in mail.html
+        assert "color:#B31B1B;text-decoration:underline" in mail.html  # the footer links

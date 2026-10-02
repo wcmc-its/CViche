@@ -22,7 +22,7 @@ from app.config_loader import get_config
 from app.models import InboundRejectReason
 from app.services import notifications
 from app.services.email_templates import (
-    LOGO_FILES, EmailContent, Para, StatusKind, StatusRow, greeting_for, render_html, render_text,
+    LOGO_FILES, BadgeKind, EmailContent, Para, StatusKind, StatusRow, greeting_for, render_html, render_text,
 )
 
 if TYPE_CHECKING:
@@ -110,8 +110,9 @@ def processing_notice(
             StatusRow(StatusKind.SKIPPED, skipped, f"{_plural(skipped, 'Attachment')} skipped"),
         )
         cta = ((_cv_button(runs), _runs_batch_url(batch_id)) if runs else ("Open New run", _new_run_url()))
+    badge = BadgeKind.CLOCK if runs and not outdated_consent else BadgeKind.EXCLAMATION
     content = EmailContent(_processing_headline(runs, held, outdated_consent), tuple(paras), *cta,
-                           greeting=greeting_for(display_name), status=status)
+                           greeting=greeting_for(display_name), status=status, badge=badge)
     return _mail(MailKind.ACKNOWLEDGEMENT, to_addr, f"CViche received {_cvs(runs + held)}", content)
 
 
@@ -148,7 +149,7 @@ def _cvs(count: int) -> str:
 def rejection(to_addr: str, reason: InboundRejectReason, display_name: str | None = None) -> OutboundMail:
     content = EmailContent(
         "We couldn't accept your email",
-        (Para(_REJECTION_TEXT[reason], lead=True),),
+        (Para(_REJECTION_TEXT[reason], lead=True),), badge=BadgeKind.CROSS,
         greeting=greeting_for(display_name),
     )
     return _mail(MailKind.REJECTION, to_addr, "CViche couldn't accept your email", content)
@@ -172,14 +173,18 @@ def completion_notice(
 def _single_completion(complete: int, run_id: str) -> EmailContent:
     url = f"{_new_run_url()}run/{run_id}"
     if complete:
-        return EmailContent("Your CV is ready", (Para("Download it from the run page.", lead=True),), "View your CV", url)
-    return EmailContent("Your CV failed to process", (Para("Open the run to retry it.", lead=True),), "View your CV", url)
+        return EmailContent("Your CV is ready", (Para("Download it from the run page.", lead=True),), "View your CV", url,
+                            badge=BadgeKind.CHECK_GREEN)
+    return EmailContent("Your CV failed to process", (Para("Open the run to retry it.", lead=True),), "View your CV", url,
+                        badge=BadgeKind.CROSS)
 
 
 def _batch_completion(complete: int, failed: int, batch_id: str) -> EmailContent:
     status = (StatusRow(StatusKind.READY, complete, "Ready to download"), StatusRow(StatusKind.FAILED, failed, "Failed"))
     paras = (Para("Open a failed run to retry it."),) if failed else ()
-    return EmailContent("Your CVs have been converted", paras, "View your CVs", _runs_batch_url(batch_id), status=status)
+    badge = BadgeKind.CHECK_AMBER if failed else BadgeKind.CHECK_GREEN
+    return EmailContent("Your CVs have been converted", paras, "View your CVs", _runs_batch_url(batch_id),
+                        status=status, badge=badge)
 
 
 def send(mail: OutboundMail) -> bool:
