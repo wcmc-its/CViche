@@ -85,13 +85,13 @@ def test_every_accepted_notice_cites_the_agreed_terms_with_the_consent_date(monk
     monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
     body = _notice(consent_date=datetime(2026, 9, 3, 14, 5), **kwargs)
     assert ("These CVs are processed under the CViche terms you agreed to on September 3, 2026: "
-            "https://cviche.example.org/help#data-retention") in body
+            "https://cviche.example.org/terms") in body
 
 
 def test_the_terms_sentence_omits_the_date_when_none_is_stored(monkeypatch):
     monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
     body = _notice(runs=1, held=0, consent_date=None)
-    assert "terms you agreed to: https://cviche.example.org/help#data-retention" in body
+    assert "terms you agreed to: https://cviche.example.org/terms" in body
     assert " on " not in body.split("agreed to")[1].split(":")[0]
 
 

@@ -30,9 +30,9 @@ DEFAULT_MAIL_FROM = "no-reply@cviche.weill.cornell.edu"
 # SES identities for CViche live in us-east-1 (spec, 2026-10-02).
 DEFAULT_MAIL_REGION = "us-east-1"
 # Where the terms live in the app. A user who has consented is bounced from
-# /consent to /, so the data-handling terms they agreed to are linked at /help;
+# /consent to /, so the terms they agreed to are linked at the read-only /terms page;
 # a user whose consent is outdated gets /consent (after sign-in) to accept the new ones.
-TERMS_PATH = "help#data-retention"
+TERMS_PATH = "terms"
 CONSENT_PATH = "consent"
 CONSENT_DATE_FORMAT = "%B %-d, %Y"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})

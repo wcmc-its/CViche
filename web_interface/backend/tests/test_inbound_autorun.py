@@ -105,7 +105,7 @@ def test_the_reply_cites_the_users_stored_consent_date(db, storage, sent, queue,
     from datetime import datetime
     _user(db, consent_date=datetime(2026, 8, 6, 9, 0))
     _send(db, storage, ["one"])
-    assert "terms you agreed to on August 6, 2026: " in sent[0].body and "/help#data-retention" in sent[0].body
+    assert "terms you agreed to on August 6, 2026: " in sent[0].body and "/terms" in sent[0].body
 
 
 @pytest.mark.parametrize("chosen, expected", [

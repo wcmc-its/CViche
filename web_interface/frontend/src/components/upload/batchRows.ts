@@ -1,6 +1,6 @@
 import type { ApiError } from '../../api/client'
 import { isDuplicateError } from '../../api/upload'
-import type { Estimate, QueueLane, QuotaInfo } from '../../types'
+import type { Estimate, InboxItem, InboxSubmitResult, QueueLane, QuotaInfo } from '../../types'
 import { formatMinutes } from '../../utils'
 
 /** Most files one batch may hold; POST /api/batches enforces the same cap. */
@@ -60,6 +60,9 @@ export interface BatchRow {
   /** Set once the upload created the run, so a retry only re-starts it. */
   runId: string | null
   failure: RowFailure | null
+  /** Set for an emailed CV (#1298): its bytes are on the server, so "upload" is POST /inbox/submit.
+   *  `file` is then a name-only placeholder and `sizeBytes` the real size. */
+  inbox: { id: number; sizeBytes: number } | null
 }
 
 /** Why a chosen file can't be submitted (wrong type, over the size cap); null when it can. */
@@ -80,7 +83,28 @@ export function makeRow(file: File, key: string, estimate: Estimate | null | und
     state: 'ready',
     runId: null,
     failure: null,
+    inbox: null,
   }
+}
+
+/** A row for an emailed CV. The server already validated it, and it has no estimate (the bytes are not here). */
+export function makeInboxRow(item: InboxItem, key: string): BatchRow {
+  return { ...makeRow(new File([], item.filename), key, null), inbox: { id: item.id, sizeBytes: item.size_bytes } }
+}
+
+/** The size to show: an emailed row's real size, not its empty placeholder's. */
+export const rowSize = (row: BatchRow): number => row.inbox?.sizeBytes ?? row.file.size
+
+const DUPLICATE_ERROR_CODE = 'duplicate_file'
+const RATE_LIMITED_ERROR_CODE = 'rate_limited'
+const INBOX_REFUSED_REASON = "Couldn't submit the emailed file"
+
+/** Sort a refused /inbox/submit item like a refused /upload: a duplicate waits for "Run it again",
+ *  a rate limit can be retried, anything else (file gone, unreadable) cannot. */
+export function inboxFailure(result: InboxSubmitResult): RowFailure {
+  const reason = result.message ?? INBOX_REFUSED_REASON
+  if (result.error === DUPLICATE_ERROR_CODE) return { reason, retryable: false, duplicate: true }
+  return { reason, retryable: result.error === RATE_LIMITED_ERROR_CODE }
 }
 
 export const isValidRow = (row: BatchRow): boolean => row.invalidReason === null
@@ -161,8 +185,10 @@ export function countText(rows: BatchRow[]): string {
   return `${valid} to submit${skipped ? ` · ${skipped} skipped` : ''}`
 }
 
-/** "30 CVs · about 6 h 20 m of processing" plus "· ~$49.40" for admins. */
+/** "30 CVs · about 6 h 20 m of processing" plus "· ~$49.40" for admins; just the count when no row has an estimate. */
 export function estimateText(count: number, totals: Totals, showCost: boolean): string {
+  // Emailed CVs carry no estimate (their bytes are on the server); say nothing rather than "about 0 min".
+  if (totals.minutes <= 0) return `${count} ${plural(count, 'CV', 'CVs')}`
   const cost = showCost && totals.cost !== null ? ` · ~$${totals.cost.toFixed(2)}` : ''
   return `${count} ${plural(count, 'CV', 'CVs')} · about ${formatMinutes(totals.minutes)} of processing${cost}`
 }

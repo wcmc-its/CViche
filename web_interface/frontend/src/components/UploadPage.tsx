@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
-import type { QueueOverview, QuotaInfo } from '../types'
+import { useInbox } from '../contexts/InboxContext'
+import type { InboxItem, QueueOverview, QuotaInfo } from '../types'
 import ErrorBanner from './ErrorBanner'
 import BatchFileTable from './upload/BatchFileTable'
 import { DoneCard, UploadingBanner } from './upload/BatchStatus'
@@ -13,6 +14,7 @@ import {
 import ConsentSection from './upload/ConsentSection'
 import type { SubmissionType } from './upload/consentText'
 import DropZone from './upload/DropZone'
+import InboxSection from './upload/InboxSection'
 import SingleFileRow from './upload/SingleFileRow'
 import UploadFooter from './upload/UploadFooter'
 import { H2, OptionsSection, DuplicateNotice, SingleEstimate, TemplateWarning, WhoToggle } from './upload/UploadSections'
@@ -88,7 +90,8 @@ interface FooterInput {
 
 /** Batch mode with exactly one valid file and nothing else runs as a single run (design). */
 function submitsAsSingle(multi: boolean, batch: BatchUpload): boolean {
-  return !multi || (batch.rows.length === 1 && isValidRow(batch.rows[0]))
+  // An emailed CV is submitted from the server, so it always goes through the batch path.
+  return !multi || (batch.rows.length === 1 && isValidRow(batch.rows[0]) && batch.rows[0].inbox === null)
 }
 
 function footerLabel(input: FooterInput, count: number): string {
@@ -171,7 +174,28 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     else batch.reset()
   }
 
+  // Emailed CVs still waiting, less those already in the table.
+  const inbox = useInbox()
+  const inTable = new Set(batch.rows.flatMap((r) => (r.inbox ? [r.inbox.id] : [])))
+  const waiting = inbox.items.filter((item) => !inTable.has(item.id))
+
+  // Loading emailed CVs needs the batch table, so switch to "On behalf of faculty" first.
+  const addInbox = (items: InboxItem[]) => {
+    if (!multi) chooseWho('authorized_admin')
+    batch.addInbox(items)
+  }
+
+  const discardInbox = async (id: number) => {
+    try {
+      await inbox.discard(id)
+    } catch (err) {
+      console.error('Could not discard the emailed CV', err)
+      run.setError((err as { message?: string })?.message || "We couldn't discard that file. Please try again.")
+    }
+  }
+
   const afterSend = async () => {
+    void inbox.refresh()
     const overview = await refreshQueue()
     setFinishMinutes(overview?.batch?.est_wait_minutes ?? null)
   }
@@ -215,9 +239,13 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
               finishMinutes={finishMinutes}
               onViewBatch={() => navigate(`/runs?batch=${batch.batchId}`)}
               onRetry={async () => { await batch.retryFailed(options); await afterSend() }}
-              onNewBatch={() => { batch.reset(); setAttested(false); refreshQuota() }}
+              onNewBatch={() => { batch.reset(); setAttested(false); refreshQuota(); void inbox.refresh() }}
             />
           </div>
+        )}
+
+        {editable && (
+          <InboxSection items={waiting} onAdd={addInbox} onDiscard={(id) => void discardInbox(id)} canAdd={queueMode} />
         )}
 
         <section className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-5 sm:p-6">

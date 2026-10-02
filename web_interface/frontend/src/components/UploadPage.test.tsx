@@ -9,7 +9,9 @@ import type { UploadOptions, UploadResult } from '../api/upload'
 import { getCapacity, getRunStatus, startRun } from '../api/runs'
 import { createBatch, getQueue } from '../api/batches'
 import { getCurrentUser } from '../api/auth'
-import type { BatchEstimate, Estimate, QueueOverview, QuotaInfo, RunStatus, User } from '../types'
+import { discardInboxItem, listInbox, submitInboxItem } from '../api/inbox'
+import { InboxProvider } from '../contexts/InboxContext'
+import type { BatchEstimate, Estimate, InboxItem, InboxSubmitResult, QueueOverview, QuotaInfo, RunStatus, User } from '../types'
 
 vi.mock('../api/upload', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../api/upload')>()),
@@ -18,6 +20,7 @@ vi.mock('../api/upload', async (importOriginal) => ({
 vi.mock('../api/runs', () => ({ startRun: vi.fn(), getCapacity: vi.fn(), getRunStatus: vi.fn() }))
 vi.mock('../api/batches', () => ({ createBatch: vi.fn(), getQueue: vi.fn() }))
 vi.mock('../api/auth', () => ({ getCurrentUser: vi.fn() }))
+vi.mock('../api/inbox', () => ({ listInbox: vi.fn(), discardInboxItem: vi.fn(), submitInboxItem: vi.fn() }))
 
 // Invented user; no real names in fixtures.
 const ADMIN: User = {
@@ -79,7 +82,7 @@ const onUploadSuccess = vi.fn()
 
 async function renderPage(queue: QueueOverview = QUEUE) {
   vi.mocked(getQueue).mockResolvedValue(queue)
-  render(<MemoryRouter><UploadPage onUploadSuccess={onUploadSuccess} /></MemoryRouter>)
+  render(<MemoryRouter><InboxProvider><UploadPage onUploadSuccess={onUploadSuccess} /></InboxProvider></MemoryRouter>)
   await flush()
 }
 
@@ -120,6 +123,7 @@ beforeEach(() => {
   vi.mocked(getCapacity).mockResolvedValue({ available: true, active: 0, limit: 6 })
   vi.mocked(createBatch).mockResolvedValue({ id: 'BQXZKD' })
   vi.mocked(startRun).mockResolvedValue(undefined)
+  vi.mocked(listInbox).mockResolvedValue([])
 })
 
 afterEach(() => {
@@ -145,7 +149,7 @@ describe('UploadPage gating', () => {
 
   it('treats a failed queue probe as no queue', async () => {
     vi.mocked(getQueue).mockRejectedValue({ status: 500, message: 'boom' })
-    render(<MemoryRouter><UploadPage onUploadSuccess={onUploadSuccess} /></MemoryRouter>)
+    render(<MemoryRouter><InboxProvider><UploadPage onUploadSuccess={onUploadSuccess} /></InboxProvider></MemoryRouter>)
     await flush()
     expect(fileInput().multiple).toBe(false)
   })
@@ -632,5 +636,103 @@ describe('SingleEstimate scanned pages (#1282)', () => {
   it('says nothing when no page is scanned', () => {
     render(<SingleEstimate estimate={EST} showCost={false} />)
     expect(screen.queryByText(/scanned image/)).toBeNull()
+  })
+})
+
+// Invented emailed-CV fixtures (#1298).
+const heldItem = (id: number, filename: string, duplicate: InboxItem['duplicate'] = null): InboxItem => (
+  { id, filename, size_bytes: 2048, received_at: '2026-10-01T12:00:00Z', duplicate }
+)
+const INBOX_ITEMS = [
+  heldItem(11, 'emailed_one.docx'),
+  heldItem(12, 'emailed_two.pdf', { last_processed_on: 'September 3, 2026', run_id: null }),
+]
+const submitted = (id: number, runId: string): InboxSubmitResult =>
+  ({ id, status: 'submitted', run_id: runId, error: null, message: null, last_processed_on: null })
+const refused = (id: number): InboxSubmitResult => (
+  { id, status: 'failed', run_id: null, error: 'duplicate_file', message: DUPLICATE_MESSAGE, last_processed_on: 'September 3, 2026' }
+)
+
+describe('UploadPage emailed CV inbox (#1298)', () => {
+  it('lists held emailed CVs above the drop zone with a duplicate note, and nothing when there are none', async () => {
+    await renderPage()
+    expect(screen.queryByText(/Emailed to CViche/)).toBeNull()
+    cleanup()
+    vi.mocked(listInbox).mockResolvedValue(INBOX_ITEMS)
+    await renderPage()
+    expect(screen.getByRole('heading', { name: /Emailed to CViche \(2\)/ })).toBeTruthy()
+    const list = within(screen.getByRole('list', { name: 'Emailed CVs' }))
+    expect(list.getByTitle('emailed_one.docx')).toBeTruthy()
+    expect(list.getByText('Already processed on September 3, 2026')).toBeTruthy()
+    expect(list.getAllByText(/Already processed/)).toHaveLength(1)
+  })
+
+  it('discards one item and re-reads the list', async () => {
+    vi.mocked(listInbox).mockResolvedValueOnce(INBOX_ITEMS).mockResolvedValue([INBOX_ITEMS[1]])
+    vi.mocked(discardInboxItem).mockResolvedValue(undefined)
+    await renderPage()
+    fireEvent.click(button('Discard emailed_one.docx'))
+    await flush()
+    expect(discardInboxItem).toHaveBeenCalledWith(11)
+    expect(screen.getByRole('heading', { name: /Emailed to CViche \(1\)/ })).toBeTruthy()
+  })
+
+  it('loads items into the batch table, and submits them through /inbox/submit, never /upload', async () => {
+    vi.mocked(listInbox).mockResolvedValue([INBOX_ITEMS[0]])
+    vi.mocked(submitInboxItem).mockResolvedValue(submitted(11, 'RM1'))
+    await renderPage()
+    fireEvent.click(button('Add emailed_one.docx to this batch'))
+    await flush()
+    expect(screen.queryByRole('heading', { name: /Emailed to CViche/ })).toBeNull()
+    expect(screen.getAllByTestId('batch-row')).toHaveLength(1)
+    tickAttestation()
+    fireEvent.click(button('Start run'))
+    await flush()
+    expect(createBatch).toHaveBeenCalledWith(1)
+    expect(submitInboxItem).toHaveBeenCalledWith(11, expect.objectContaining({ batchId: 'BQXZKD', submissionType: 'authorized_admin', stripWcmInstructions: true }))
+    expect(uploadFile).not.toHaveBeenCalled()
+    expect(startRun).toHaveBeenCalledWith('RM1')
+    expect(screen.getByText('All 1 CVs queued')).toBeTruthy()
+  })
+
+  it('holds a refused duplicate for Run it again, which resends that item with confirmDuplicate', async () => {
+    vi.mocked(listInbox).mockResolvedValue(INBOX_ITEMS)
+    vi.mocked(submitInboxItem).mockImplementation(async (id, opts) => (
+      id === 12 && !opts.confirmDuplicate ? refused(12) : submitted(id, `RM${id}`)
+    ))
+    await renderPage()
+    fireEvent.click(button('Add all 2 to this batch'))
+    await flush()
+    tickAttestation()
+    fireEvent.click(button('Submit 2 CVs'))
+    await flush()
+    expect(screen.getByText(DUPLICATE_MESSAGE)).toBeTruthy()
+    expect(startRun).toHaveBeenCalledTimes(1)
+    fireEvent.click(button('Run it again'))
+    await flush()
+    const resent = vi.mocked(submitInboxItem).mock.calls.filter(([, o]) => o.confirmDuplicate)
+    expect(resent.map(([id]) => id)).toEqual([12])
+    expect(startRun).toHaveBeenCalledTimes(2)
+    expect(uploadFile).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the inbox after a submit', async () => {
+    vi.mocked(listInbox).mockResolvedValue([INBOX_ITEMS[0]])
+    vi.mocked(submitInboxItem).mockResolvedValue(submitted(11, 'RM1'))
+    await renderPage()
+    const before = vi.mocked(listInbox).mock.calls.length
+    fireEvent.click(button('Add emailed_one.docx to this batch'))
+    await flush()
+    tickAttestation()
+    fireEvent.click(button('Start run'))
+    await flush()
+    expect(vi.mocked(listInbox).mock.calls.length).toBeGreaterThan(before)
+  })
+
+  it('does not offer Add without a queue, where there is no batch table', async () => {
+    vi.mocked(listInbox).mockResolvedValue(INBOX_ITEMS)
+    await renderPage(IN_PROCESS)
+    expect(screen.queryByRole('button', { name: /^Add / })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Discard emailed_one.docx' })).toBeTruthy()
   })
 })

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { ChevronDown } from 'lucide-react'
 
 const sections = [
@@ -278,6 +278,11 @@ export default function HelpPage() {
                   To have a run removed, contact Paul Albert at {mailLink}. The original CV, intermediate outputs, and
                   final document are deleted from storage and the run record from the database. Deleted runs may remain
                   in routine system backups for a limited period.
+                </dd>
+                <dt className={DT}>Terms you agreed to</dt>
+                <dd className={DD}>
+                  The consent terms you accepted are always available on the{' '}
+                  <Link to="/terms" className="text-primary-600 hover:underline">terms page</Link>.
                 </dd>
               </dl>
             </section>
