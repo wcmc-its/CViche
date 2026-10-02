@@ -1066,21 +1066,29 @@ def test_an_int_is_a_value_for_a_scalar_field_and_a_repr_for_a_prose_one(field):
 # Round-2 review, test-coverage list: `_format_mentee_duration`
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize('fields,expected', [
-    ({'start_date': '2019', 'end_date': '2021'}, '2019-2021'),
-    ({'start_date': '2019', 'end_date': ''}, '2019-present'),
-    ({'start_date': '2019'}, '2019-present'),
-    ({'start_date': '', 'end_date': ''}, ''),
-    ({}, ''),
+@pytest.mark.parametrize('fields,ongoing,expected', [
+    ({'start_date': '2019', 'end_date': '2021'}, False, '2019-2021'),
+    ({'start_date': '2019', 'end_date': '2021'}, True, '2019-2021'),
+    ({'start_date': '2019', 'end_date': ''}, True, '2019-present'),
+    ({'start_date': '2019'}, True, '2019-present'),
+    # A past mentee with one date renders that year alone (class 1,
+    # 2026-10-02 s7ab autopsy), with any month or season stage 4 added
+    # dropped; a value with no single year is left as stored.
+    ({'start_date': '2019', 'end_date': ''}, False, '2019'),
+    ({'start_date': '2019', 'end_date': None}, False, '2019'),
+    ({'start_date': '2007-05'}, False, '2007'),
+    ({'start_date': '2005-Summer'}, False, '2005'),
+    ({'start_date': 'Fall term'}, False, 'Fall term'),
+    ({'start_date': '', 'end_date': ''}, False, ''),
+    ({}, True, ''),
     # An end with no start reads as no duration at all rather than
     # "-2021" -- current behaviour, pinned because nothing else states it.
-    ({'end_date': '2021'}, ''),
+    ({'end_date': '2021'}, False, ''),
 ])
-def test_format_mentee_duration_covers_every_branch(fields, expected):
-    """The helper had no test of any kind. All three branches (start+end,
-    start alone, neither) plus the end-alone shape that falls into the last
-    one."""
-    assert _format_mentee_duration(fields) == expected
+def test_format_mentee_duration_covers_every_branch(fields, ongoing, expected):
+    """Every branch: start+end, start alone (ongoing or past), neither,
+    plus the end-alone shape."""
+    assert _format_mentee_duration(fields, ongoing=ongoing) == expected
 
 
 # ---------------------------------------------------------------------------

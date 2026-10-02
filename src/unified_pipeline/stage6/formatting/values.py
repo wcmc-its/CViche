@@ -19,8 +19,9 @@ shape a record takes, and what punctuation joins it (round-4 review of PR #737,
 points 1/2/3 and 8-15).
 """
 import re
+from collections.abc import Mapping
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Dict
+from typing import Any
 
 from ..normalization import ResolvedPublication, resolve_publication
 
@@ -302,13 +303,40 @@ def _format_currency(value: object) -> str:
         return value_str
 
 
-def _format_mentee_duration(fields: Dict) -> str:
-    """Format mentee duration."""
-    start = fields.get('start_date', '')
-    end = fields.get('end_date', '')
+#: A four-digit year inside a stored date value: "2005" in "2005-Summer" or
+#: "2006-06-21".
+_FOUR_DIGIT_YEAR_RE = re.compile(r'(?<!\d)\d{4}(?!\d)')
+
+
+def _mentee_single_date(value: str) -> str:
+    """A mentee period that has only one date, as the bare year it names.
+
+    A completion, visit or class year stored with a month or season stage 4
+    added ("2007-05", "2005-Summer") renders as its year, the way the N3A/N3B
+    rows read everywhere else (`DATE_FORMATS` gives both codes 'yyyy'). A
+    value holding no single four-digit year is rendered as stored rather
+    than guessed at.
+    """
+    years = _FOUR_DIGIT_YEAR_RE.findall(value)
+    return years[0] if len(years) == 1 else value
+
+
+def _format_mentee_duration(fields: Mapping[str, Any], *, ongoing: bool) -> str:
+    """The Mentoring Period cell of one mentee table.
+
+    `ongoing` is the caller's decision that the mentorship is still running
+    (stage6/sections/mentoring.py `_is_ongoing_mentorship`). Only then does a
+    start date with no end date read as "<start>-present"; a past mentee
+    with one date renders that year alone, never an invented open range
+    (class 1 of the 2026-10-02 s7ab autopsy: 121 rows on 4 CVs).
+    """
+    start = str(fields.get('start_date') or '').strip()
+    end = str(fields.get('end_date') or '').strip()
 
     if start and end:
         return f"{start}-{end}"
-    elif start:
+    if start and ongoing:
         return f"{start}-present"
+    if start:
+        return _mentee_single_date(start)
     return ''

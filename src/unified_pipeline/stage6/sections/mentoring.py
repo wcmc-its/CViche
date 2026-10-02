@@ -11,8 +11,9 @@ The section is two layers (#739 review):
 - `_partition_mentoring_entries` decides WHAT renders where and touches no
   document. It re-partitions the stage-4 codes three times, and each pass
   exists because rendering the codes literally lost content (#261): an N3B
-  (past) mentee whose end date says "present", or that has a start date and no
-  end date at all, is really current (`_is_ongoing_mentorship`); an N3A/N3B
+  (past) mentee whose end date says "present", or whose source text leaves its
+  start year open ("2019-", "2019 - present"), is really current
+  (`_is_ongoing_mentorship`); an N3A/N3B
   entry that names no mentee is an aggregate count, not a mentee, and renders
   as a plain line; N4 outcome narrative arrives disguised as a current mentee
   and is reclaimed for the section header. `_normalize_mentee` then resolves
@@ -48,6 +49,7 @@ except ImportError as exc:
 from ..formatting import (
     _format_mentee_duration,
     _insert_after,
+    _source_leaves_year_open,
     _set_cell_vertical_alignment,
     _set_font,
     _set_table_border,
@@ -55,6 +57,7 @@ from ..formatting import (
 )
 from ..normalization import _clean_inline_tabs
 from ..parsing import _is_mentee_record, _is_mentoring_outcome
+from ..parsing.dates import _parse_date_components
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +101,19 @@ _ROLE_LINE_RE = re.compile(r'(?:^|[\t\n])\s*Role:\s*([^\t\n]+)')
 #: FINSIS rendered "Clinical" for residents whose row read "Research +
 #: Teaching", and blank for mentees with no level.
 _SUPERVISION_ROW_RE = re.compile(r'Type of Supervision[^|\t\n]*\| *([^|\t\n]+)', re.I)
+
+#: An end_date value, whole, that means the mentorship is still running.
+#: Any end_date containing "present" ("2019-present") counts as well.
+_ONGOING_END_WORDS = frozenset({'ongoing', 'current', 'now'})
+
+#: A year followed by a range-end word that says the range is still open:
+#: "2019-present", "2019 - Current", "2019 to date". Anchored on the year
+#: because a mentee row routinely says "now Assistant Professor at ..." or
+#: "Current position: ..." about the MENTEE, which says nothing about whether
+#: the mentoring is still going on.
+_ONGOING_RANGE_END_RE = re.compile(
+    r'(?<!\d)\d{4}\s*(?:[-\u2013\u2014]|\bto\b)\s*(?:present|current|now|ongoing|date)\b',
+    re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -157,17 +173,41 @@ def _text(value: object) -> str:
     return str(value) if value else ''
 
 
-def _is_ongoing_mentorship(fields: Mapping[str, Any]) -> bool:
+def _source_says_ongoing(source_text: str, start_date: str) -> bool:
+    """True when the entry's own text writes its range as still open: a
+    year followed by present/current/now/ongoing/"to date", or `start_date`'s
+    year followed by an open dash ("2019-", "(2019- )")."""
+    if _ONGOING_RANGE_END_RE.search(source_text):
+        return True
+    start_year = _parse_date_components(start_date)[0]
+    return _source_leaves_year_open(source_text, start_year)
+
+
+def _is_ongoing_mentorship(fields: Mapping[str, Any], source_text: str) -> bool:
     """The "N3B + present = current" rule: an end date that says the
-    relationship is still running, or a start date with no end date at all
-    (which would otherwise display as "2019-present" under Past Mentees).
+    relationship is still running, or a start date with no end date whose
+    source text leaves the range open.
+
+    A start date alone is NOT enough. Stage 4 stores a mentee's lone year --
+    a completion, visit or class year -- as start_date with no end, and
+    reading that as "still running" moved 121 past mentees on 4 CVs under
+    Current Mentees as "YYYY-present" (class 1, 2026-10-02 s7ab autopsy;
+    residue of #556 and #1220).
     """
     end_date = str(fields.get('end_date', '') or '').strip()
     start_date = str(fields.get('start_date', '') or '').strip()
     end_lower = end_date.lower()
-    if 'present' in end_lower or end_lower in ('ongoing', 'current', 'now'):
+    if 'present' in end_lower or end_lower in _ONGOING_END_WORDS:
         return True
-    return bool(start_date and not end_date)
+    if not start_date or end_date:
+        return False
+    return _source_says_ongoing(source_text, start_date)
+
+
+def _entry_is_ongoing(entry: Mapping[str, Any]) -> bool:
+    """`_is_ongoing_mentorship` for one raw stage-4 entry."""
+    return _is_ongoing_mentorship(entry.get('extracted_fields') or {},
+                                  _text(entry.get('text')))
 
 
 def _training_grant_rows(fields: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -300,10 +340,8 @@ def _partition_mentoring_entries(
     n3b_entries = list(entries_by_code.get('N3B', []))
     n4_entries = list(entries_by_code.get('N4', []))
 
-    moved = [entry for entry in n3b_entries
-             if _is_ongoing_mentorship(entry.get('extracted_fields') or {})]
-    n3b_entries = [entry for entry in n3b_entries
-                   if not _is_ongoing_mentorship(entry.get('extracted_fields') or {})]
+    moved = [entry for entry in n3b_entries if _entry_is_ongoing(entry)]
+    n3b_entries = [entry for entry in n3b_entries if not _entry_is_ongoing(entry)]
     n3a_entries.extend(moved)
 
     # Aggregate summaries (no mentee named) get a line, not a table.
@@ -347,8 +385,11 @@ def _infer_supervision_type(level_text: str) -> str:
     return ''
 
 
-def _normalize_mentee(entry: Mapping[str, Any]) -> MenteeRecord:
+def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecord:
     """Resolve one raw stage-4 mentee dict into a `MenteeRecord`.
+
+    `ongoing` is whether the entry renders under Current Mentees, which is
+    the only place a start date with no end date reads as "-present".
 
     `extracted_fields` is sometimes explicitly `None` rather than absent
     (#659), which a bare `.get('extracted_fields', {})` does not cover.
@@ -389,7 +430,7 @@ def _normalize_mentee(entry: Mapping[str, Any]) -> MenteeRecord:
     return MenteeRecord(
         name=_text(fields.get('name') or fields.get('mentee_name')),
         site_position=site_position,
-        mentoring_period=_format_mentee_duration(fields),
+        mentoring_period=_format_mentee_duration(fields, ongoing=ongoing),
         project=project,
         current_position=_text(fields.get('current_position')),
         supervision_type=supervision_type,
@@ -528,12 +569,12 @@ class MentoringSection:
         # share one anchor and every insert lands directly under it, so the
         # group rendered last is the one that ends up on top.
         groups = [
-            (mentees, summaries, anchor, heading)
-            for mentees, summaries, anchor, heading in (
+            (mentees, summaries, anchor, heading, ongoing)
+            for mentees, summaries, anchor, heading, ongoing in (
                 (partition.past, partition.past_summaries, past_anchor,
-                 PAST_MENTEES_HEADING),
+                 PAST_MENTEES_HEADING, False),
                 (partition.current, partition.current_summaries, current_anchor,
-                 CURRENT_MENTEES_HEADING),
+                 CURRENT_MENTEES_HEADING, True),
             )
             if mentees or summaries
         ]
@@ -541,15 +582,15 @@ class MentoringSection:
         # Only warn about a missing heading when there was something to
         # render under it; the placeholder removal above already ran for
         # every anchor regardless of content.
-        for mentees, summaries, anchor, heading in groups:
+        for mentees, summaries, anchor, heading, _ongoing in groups:
             if anchor is None:
                 logger.warning(
                     "Mentoring: '%s' heading not found in template; "
                     "%d entries not rendered", heading, len(mentees) + len(summaries))
 
-        for mentees, summaries, anchor, _heading in groups:
+        for mentees, summaries, anchor, _heading, ongoing in groups:
             if anchor is not None:
-                self._render_mentee_group(mentees, summaries, anchor)
+                self._render_mentee_group(mentees, summaries, anchor, ongoing=ongoing)
 
         # Mentoring outcomes (N4) have no table in the WCM template; they go
         # under the section header.
@@ -733,12 +774,16 @@ class MentoringSection:
         mentees: Sequence[Mapping[str, Any]],
         summaries: Sequence[Mapping[str, Any]],
         anchor: BaseOxmlElement,
+        *,
+        ongoing: bool,
     ) -> None:
         """One heading's worth of content: the mentee tables in reverse so the
         document order matches `mentees`, then the summary lines, which go in
-        last so they land directly under the heading, above the tables."""
+        last so they land directly under the heading, above the tables.
+        `ongoing` is True under Current Mentees (see `_normalize_mentee`)."""
         for entry in reversed(mentees):
-            self._create_mentee_table_with_spacing(_normalize_mentee(entry), anchor)
+            self._create_mentee_table_with_spacing(
+                _normalize_mentee(entry, ongoing=ongoing), anchor)
         self._insert_mentoring_summaries(summaries, anchor)
 
     def _insert_mentoring_summaries(
