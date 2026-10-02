@@ -1317,7 +1317,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         written_appendix_entries: list[UnmappedEntry] = []
         if unmapped_entries or self._declined_grant_entries:
             written_appendix_entries = self._render_section(
-                'appendix', lambda: self._fill_appendix(unmapped_entries + self._declined_grant_entries)) or []
+                'appendix', lambda: self._fill_appendix(unmapped_entries + self._declined_grant_entries, cv_owner)) or []
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()

@@ -53,7 +53,9 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     DROP_DATE_STAMP,
     DROP_NEAR_TEMPLATE_INSTRUCTION,
     DROP_RENDERS_EMPTY,
+    DROP_RULE_LINE,
     DROP_SECTION_HEADER,
+    DROP_SIGNATURE_BLOCK,
     DROP_SOURCE_BOILERPLATE,
     DROP_STATUS_MARKER,
     DROP_TEMPLATE_INSTRUCTION,
@@ -64,6 +66,7 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     _describe_dropped,
     _filter_unmapped_entries,
     _group_by_source_heading,
+    _owner_signature_tokens,
     _truncate_appendix_text,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -122,7 +125,8 @@ def _appendix_log(caplog: pytest.LogCaptureFixture) -> str:
 
 
 def _render(tmp_path: Path, entries: list[dict[str, object]],
-            caplog: pytest.LogCaptureFixture, emit_comments: bool = False) -> Path:
+            caplog: pytest.LogCaptureFixture, emit_comments: bool = False,
+            cv_owner: dict[str, str] | None = None) -> Path:
     # recover_unrendered_records=False: isolates _fill_appendix's own filter
     # chain from the separate #221 post-render recovery pass, which can pull
     # unconsumed personal-data entries (our 'A' name entry, used only to give
@@ -136,6 +140,8 @@ def _render(tmp_path: Path, entries: list[dict[str, object]],
     # chain under test and keeps the render deterministic + credential-free.
     gen._reconsider_appendix_entries = lambda: None
     data = {"document_uid": "TEST424", "entries": entries}
+    if cv_owner is not None:
+        data["cv_owner"] = cv_owner
     ip = tmp_path / "in.json"
     op = tmp_path / "out.docx"
     ip.write_text(json.dumps(data))
@@ -1064,3 +1070,149 @@ def test_appendix_intro_is_the_shared_accurate_banner(tmp_path, caplog):
     assert intro.text == appendix_module.APPENDIX_INTRO_TEXT
     assert all(run.italic for run in intro.runs)
     assert "successfully mapped" not in _output_text(tmp_path / "out.docx")
+
+
+# ---------------------------------------------------- #1221: signature, date, rule
+
+_FAKE_OWNER = {
+    "first_name": "Jane", "middle_name": "Q.", "last_name": "Doe",
+    "full_name_with_credentials": "Jane Q. Doe, MD, F.A.C.P.",
+}
+_OWNER_TOKENS = _owner_signature_tokens(_FAKE_OWNER)
+
+
+def _sig(text, reasoning, code="T", tokens=_OWNER_TOKENS):
+    return _appendix_drop_reason(text, _clean_inline_tabs(text), code, reasoning, tokens)
+
+
+@pytest.mark.parametrize("text", [
+    "_" * 5, "_" * 70, "=====", "-----", "–––––––", "_-_=_-",
+])
+def test_rule_line_is_dropped_text_only_when_t_coded(text):
+    assert _sig(text, None) == DROP_RULE_LINE
+    assert _sig(text, None, code="K1") is None
+
+
+@pytest.mark.parametrize("text", ["____", "----", "_ _ _ _ _", "Example ______", "-----x"])
+def test_short_or_mixed_rule_shapes_survive(text):
+    assert _sig(text, None) != DROP_RULE_LINE
+
+
+@pytest.mark.parametrize("text, sentence", [
+    ("(Date)\t(Signature of Candidate)", "This is a structural artifact (signature line)."),
+    ("01/02/2020\n(Date)\t(Signature of Candidate)", "Date line with signature placeholder."),
+    ("1/2/2020 \nDate:\t(Signature of Candidate)", "Signature block with date."),
+    ("Date: Aug 5, 2018    Signature:", "A document footer or signature block."),
+    ("Date:  ____________   Signature ______________", "Signature line template."),
+    ("__________\n(Date)\t____________\n   (Signature of Candidate)", "Signature line with blanks."),
+    ("Signed:   Jane Q. Doe, MD", "Signature line ('Signed: ...')."),
+    ("01/02/2020\n(Date)\tJANE DOE, MD\n(Signature of Candidate)", "A signature block with date."),
+    ("March 3, 2021         Jane Q. Doe\tDate        Jane Q. Doe, M.D.", "A structural artifact."),
+    ("March 3, 2021   Jane Doe\tDate   J. Doe, MD", "A structural artifact."),
+])
+def test_signature_blocks_are_dropped_with_both_signals(text, sentence):
+    assert _sig(text, _confirmed(sentence)) == DROP_SIGNATURE_BLOCK
+
+
+@pytest.mark.parametrize("text, sentence", [
+    # A real record that merely contains a date, or a name, or the word signature.
+    ("Signed a contract with Example Press, 2019", "Signature line."),
+    ("Signature Programs Committee, Example University, 2018", "Signature block."),
+    ("Jane Q. Doe, Example University, 03/04/2019", "Signature block."),
+    ("Date of Birth: 01/02/1970", "Signature block."),
+    ("Signed: Pat Roe, MD", "Signature line."),  # a name that is not the owner's
+    ("Jane Q. Doe", "Signature line."),  # a bare name has no date or signature word
+    ("Of", "Signature line."),
+    ("Candidate of Medicine, 06/15/2010", "Structural artifact."),
+    # Degree candidacy lines hold a date and the owner's credential.
+    ("PhD Candidate, May 2019", "Structural artifact."),
+    ("MD Candidate, June 2010", "Structural artifact."),
+])
+def test_signature_shape_never_drops_a_real_record(text, sentence):
+    assert _sig(text, _confirmed(sentence)) is None
+
+
+@pytest.mark.parametrize("lead", [
+    "Assigned to the program.",  # "signed" inside another word
+    "Designed as a form.",
+    "This is not a structural artifact.",  # a negated phrase
+    "This is not a signature line.",
+])
+def test_signature_reasoning_signal_is_word_bounded_and_not_negated(lead):
+    reasoning = f"[T-validation confirmed] {lead}"
+    assert _sig("Jane Doe 3/4/2020", reasoning) is None
+
+
+def test_signature_shape_alone_or_reasoning_alone_keeps_the_entry():
+    shape = "(Date)\t(Signature of Candidate)"
+    assert _sig(shape, None) is None
+    assert _sig(shape, "[T-validation confirmed] Hobbies list.") is None
+    assert _sig("Jane Q. Doe, Example University", _confirmed("Signature line.")) is None
+
+
+def test_signature_blocks_survive_when_not_t_coded():
+    text = "(Date)\t(Signature of Candidate)"
+    assert _sig(text, _confirmed("Signature line."), code="K1") is None
+
+
+def test_signed_owner_needs_the_owner_signature_tokens():
+    text = "Signed:   Jane Q. Doe, MD"
+    assert _sig(text, _confirmed("Signature line."), tokens=frozenset()) is None
+
+
+@pytest.mark.parametrize("text, sentence", [
+    ("(As of 02/14/2017)", "Structural timestamp/date marker."),
+    ("As of 02/14/2017", "Date stamp."),
+    ("Sept 9, 2016", "Date line only."),
+    ("9/9/2016", "Date line only."),
+    ("(Sept 9, 2016)", "Date stamp."),
+])
+def test_numeric_and_bare_full_date_stamps_are_dropped(text, sentence):
+    assert _sig(text, _confirmed(sentence)) == DROP_DATE_STAMP
+
+
+@pytest.mark.parametrize("text", [
+    "May 2020",  # month-year alone is also a record's date fragment
+    "Sept 9, 2016 Annual Meeting",
+    "(As of 02/14/2017) Example Society, Member",
+    "02/14",
+    "(1.2.10)",  # a section number or two-digit-year date is not a stamp
+    "12-15-20",
+])
+def test_date_stamp_shape_never_drops_a_record_that_holds_a_date(text):
+    assert _sig(text, _confirmed("Date stamp.")) is None
+
+
+def test_owner_signature_tokens_normalise_periods_and_tolerate_missing_owner():
+    assert {"jane", "q", "doe", "md", "facp", "j", "d", "m", "f"} <= _OWNER_TOKENS
+    assert _owner_signature_tokens(None) == frozenset()
+    assert _owner_signature_tokens({"first_name": None}) == frozenset()
+
+
+def test_signature_and_rule_drops_are_counted_and_described():
+    entries = [
+        {"text": "_" * 40, "taxonomy_code": "T"},
+        {"text": "Signed: Jane Doe", "taxonomy_code": "T",
+         "classification_reasoning": _confirmed("Signature line.")},
+        {"text": "Example Society, Member, 2019", "taxonomy_code": "T",
+         "classification_reasoning": _confirmed("Signature line.")},
+    ]
+    kept, dropped = _filter_unmapped_entries(entries, _OWNER_TOKENS)
+    assert [t for _, t in kept] == ["Example Society, Member, 2019"]
+    assert dropped == Counter({DROP_RULE_LINE: 1, DROP_SIGNATURE_BLOCK: 1})
+    assert _describe_dropped(dropped) == (
+        "2 non-content blocks removed (rule-line 1, signature-block 1)"
+    )
+
+
+def test_fill_appendix_passes_the_cv_owner_to_the_signature_shape(tmp_path, caplog):
+    entry = _t_entry("Signed:   Jane Q. Doe, MD", ["Footer"], 3)
+    entry["classification_reasoning"] = _confirmed("Signature line.")
+    keeper = _t_entry("Example Leftover Society Membership, 2015", ["Footer"], 4)
+    doc = Document(str(_render(tmp_path, [_NAME_ENTRY, entry, keeper], caplog,
+                               cv_owner=_FAKE_OWNER)))
+    text = "\n".join(p.text for p in doc.paragraphs)
+    assert "Example Leftover Society Membership" in text
+    assert "Signed:" not in text
+    doc2 = Document(str(_render(tmp_path, [_NAME_ENTRY, entry, keeper], caplog)))
+    assert "Signed:" in "\n".join(p.text for p in doc2.paragraphs)
