@@ -59,6 +59,7 @@ from unified_pipeline.core.text_norm import (
     norm,
     squash,
 )
+from unified_pipeline.stage6.normalization.pii import redact_pre_llm_values
 
 # Aliases for callers that predate the move to core.text_norm.
 _norm = norm
@@ -351,6 +352,27 @@ def _substantive(source_lines: list[str]) -> list[str]:
             and not _is_template_scaffolding(l)]
 
 
+def _scrubbed_as_stage2_read_it(line: str) -> str:
+    """`line` with the pre-LLM scrub applied to the form the pipeline scrubbed.
+
+    The doctor reads source lines with real tabs (`iter_source_lines`); the
+    pipeline's reader turns each tab into a space and the scrub ran on that.
+    A tab is a fragment boundary to the scrub, so a label followed by two or
+    more tabs is left untouched as read here (#1232, a date-of-birth label
+    with four tabs before its value). Scrub the space form instead. A line
+    the scrub does not change comes back as given, tabs and all, so the
+    evidence for an ordinary lost line is unchanged.
+
+    Mirrors only the per-line scrub. The pipeline also scrubs across table
+    cells and across lines (a bare label with its value in the next cell or
+    paragraph); none of the 163 corpus CVs differs on that, and a line that
+    scrub withholds but this one does not still reads as lost, never as
+    covered."""
+    flat = line.replace("\t", " ")
+    scrubbed = redact_pre_llm_values(flat)
+    return scrubbed if scrubbed != flat else line
+
+
 def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
     """The substantive lines no entry covers, stripped.
 
@@ -368,7 +390,16 @@ def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
     within one COMPACT stretch, at most COVERAGE_WINDOW_SLACK tokens longer
     than the line (#610: holding the same words scattered through an
     unrelated entry is not coverage). Both checks are kept: squash catches glued text with no token boundaries,
-    tokens catch mid-line merges. A line is lost only if neither holds."""
+    tokens catch mid-line merges. A line is lost only if neither holds.
+
+    A line is also covered when its pre-LLM scrub is (#1232). Stage 2 reads the
+    post-scrub stream (#847), so a date-of-birth line sits in its entries as
+    'Birth Date: [withheld]' and the raw source line can never match it. The
+    raw form is tried first, so an artifact from before the scrub, which holds
+    the real value, still counts. Each lost line is returned in its scrubbed
+    form, so the evidence a lint quotes never carries the value the scrub
+    withheld. The scrub is applied to the form the pipeline scrubbed (tabs as
+    spaces, see `_scrubbed_as_stage2_read_it`)."""
     entry_squash = [squash(e.get("text", "")) for e in entries]
     entry_tokens = [_tokens(e.get("text", "")) for e in entries]
     entry_seqs = [_token_list(e.get("text", "")) for e in entries]
@@ -384,7 +415,15 @@ def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
         return any(line_tokens <= et and _has_compact_window(line_tokens, seq, max_span)
                    for et, seq in zip(entry_tokens, entry_seqs))
 
-    return [l.strip() for l in substantive if not _covered(l)]
+    lost: list[str] = []
+    for line in substantive:
+        if _covered(line):
+            continue
+        scrubbed = _scrubbed_as_stage2_read_it(line)
+        if scrubbed != line and _covered(scrubbed):
+            continue
+        lost.append(scrubbed.strip())
+    return lost
 
 
 def count_mega_entries(entries: list[Entry]) -> int:

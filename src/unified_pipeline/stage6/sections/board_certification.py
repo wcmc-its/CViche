@@ -200,7 +200,9 @@ def _format_certification_date_str(fields: dict) -> str:
     entry's structured fields.
 
     Prefers `start_date`/`end_date`; falls back to `year_certified`/
-    `recertification_date` when those are absent. Factored out so the
+    `recertification_date` when those are absent. Either may be a
+    `{start_date, end_date}` range, which renders as that range (#1233), the
+    same as the equivalent "2008-2018" string always did. Factored out so the
     single-certification path and `_parse_and_add_multiple_certifications`'s
     structured-fallback (HARD SAFETY NET, see that function) build the same
     string the same way instead of two copies drifting apart.
@@ -208,8 +210,8 @@ def _format_certification_date_str(fields: dict) -> str:
     start_date = fields.get('start_date') or fields.get('year_certified') or ''
     end_date = fields.get('end_date') or fields.get('recertification_date') or ''
 
-    start_fmt = format_date_for_section(str(start_date), 'F2') if start_date else ''
-    end_fmt = format_date_for_section(str(end_date), 'F2') if end_date else ''
+    start_fmt = format_date_for_section(start_date, 'F2') if start_date else ''
+    end_fmt = format_date_for_section(end_date, 'F2') if end_date else ''
 
     if start_fmt and end_fmt:
         if end_fmt.lower() == 'present':
