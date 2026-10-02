@@ -651,9 +651,10 @@ DATE_FIELD_NAMES = (
 _TWENTIETH_CENTURY_YEAR_PATTERN = re.compile(r'(?<!\d)19(\d\d)(?!\d)')
 
 #: What may precede a two-digit year in the source text for it to count as
-#: one: a numeric month (m/yy) or month and day (m/d/yy), or an apostrophe
-#: ('03, straight or curly). The two digits themselves must end the number.
-_TWO_DIGIT_YEAR_PREFIX = r"(?:(?<!\d)\d{1,2}/(?:\d{1,2}/)?|['\u2018\u2019])"
+#: one: a one- or two-digit number and a slash -- the month of m/yy, or the
+#: day of m/d/yy -- or an apostrophe ('03, straight or curly). The two digits
+#: themselves must end the number.
+_TWO_DIGIT_YEAR_PREFIX = r"(?:(?<!\d)\d{1,2}/|['\u2018\u2019])"
 
 _TWO_DIGIT_CENTURY_REASON = 'Re-derived the century of a two-digit source year'
 
