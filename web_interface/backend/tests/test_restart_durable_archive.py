@@ -61,8 +61,8 @@ def test_restart_archives_input_to_storage(db, tmp_path):
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=storage), \
          patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.get_storage", return_value=storage), \
+         patch("app.services.run_creation.UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.get_storage", return_value=storage), \
          patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
          patch("pathlib.Path.exists", return_value=True):
         result = asyncio.run(
@@ -121,8 +121,8 @@ def test_restart_of_a_pdf_run_reconverts(db, tmp_path, monkeypatch, cv_pdf):
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=storage), \
          patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.get_storage", return_value=storage):
+         patch("app.services.run_creation.UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.get_storage", return_value=storage):
         new_run_id = asyncio.run(
             runs_api.restart_run(run_id="ORIGAR", db=db, current_user=user)
         )["run_id"]
@@ -161,8 +161,8 @@ def test_restart_aborts_when_archive_fails(db, tmp_path):
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=storage), \
          patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.get_storage", return_value=storage), \
+         patch("app.services.run_creation.UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.get_storage", return_value=storage), \
          patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
          patch("pathlib.Path.unlink", return_value=None), \
          patch("pathlib.Path.exists", return_value=True):
@@ -202,8 +202,8 @@ def test_restart_denied_to_non_owner_creates_nothing(db, tmp_path):
 
     with patch.object(runs_api, "get_storage", return_value=storage), \
          patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.get_storage", return_value=storage):
+         patch("app.services.run_creation.UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.get_storage", return_value=storage):
         with pytest.raises(HTTPException) as exc:
             asyncio.run(
                 runs_api.restart_run(run_id="ORIGAR", db=db, current_user=other)
@@ -239,9 +239,9 @@ def test_restart_compensates_archive_when_commit_fails(db, tmp_path, caplog):
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=storage), \
          patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.get_storage", return_value=storage), \
-         patch("app.api.upload.generate_run_id", return_value="RSTFAI"), \
+         patch("app.services.run_creation.UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.get_storage", return_value=storage), \
+         patch("app.services.run_creation.generate_run_id", return_value="RSTFAI"), \
          patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
          patch("pathlib.Path.exists", return_value=True), \
          patch.object(db, "commit", side_effect=RuntimeError("db down")), \

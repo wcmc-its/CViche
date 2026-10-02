@@ -402,6 +402,31 @@ def loop(queues: tuple[Queue, ...] = DEFAULT_QUEUES) -> None:
             shutting_down.wait(RETRY_DELAY_S)
 
 
+EMAIL_INTAKE_FLAG = "CVICHE_EMAIL_INTAKE"
+_FLAG_ON = frozenset({"1", "true", "yes", "on"})
+
+
+def _start_email_intake() -> threading.Thread | None:
+    """Start the emailed-CV intake poller (#1298) when CVICHE_EMAIL_INTAKE is on.
+
+    Off by default. The import is here, not at module top: the intake service
+    pulls in app.auth for the ED check, which a worker with intake off must not
+    need (see run_service.UPLOAD_DIR)."""
+    flag, _ = get_config("mail", EMAIL_INTAKE_FLAG, default="")
+    if str(flag).strip().lower() not in _FLAG_ON:
+        return None
+    from app.services import inbound_service
+    from app.storage import get_storage
+
+    thread = threading.Thread(
+        target=inbound_service.run_intake_loop, args=(SessionLocal, get_storage(), shutting_down),
+        name="email-intake", daemon=True,
+    )
+    thread.start()
+    logger.info("worker %s: email intake poller started", CONSUMER)
+    return thread
+
+
 def main() -> int:
     configure_logging()
     url, _ = get_config("redis", "CVICHE_REDIS_URL", default="")
@@ -441,6 +466,7 @@ def main() -> int:
     # not count a pod as available before that.
     _touch(READY_FILE)
     logger.info("worker %s started (queues=%s)", CONSUMER, ",".join(queue.name for queue in queues))
+    _start_email_intake()
     loop(queues)
     logger.info("worker %s stopped", CONSUMER)
     return 0

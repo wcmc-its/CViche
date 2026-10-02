@@ -55,8 +55,8 @@ def test_restart_inherits_render_options(db, tmp_path):
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=MagicMock()), \
          patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.get_storage", return_value=MagicMock()), \
+         patch("app.services.run_creation.UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.get_storage", return_value=MagicMock()), \
          patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
          patch("pathlib.Path.unlink", return_value=None), \
          patch("pathlib.Path.exists", return_value=True):
