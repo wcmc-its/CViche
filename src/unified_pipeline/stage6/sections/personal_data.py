@@ -429,6 +429,17 @@ def _cell_and_home_signals(phone: _JsonValue, text: str,
             _label_word_present('home', text, pii_fragments))
 
 
+def _without_home_numbers(entry: dict) -> dict:
+    """`entry`, or a copy whose text lacks every number a home label ("(h)",
+    "h:", "Home tel") introduces (#1222). The pii pass cuts only the home
+    WORDS, so a displaced entry handed to the Appendix whole would print a
+    number this module withholds as home."""
+    text = entry.get('text', '') or ''
+    scrubbed = _LABELLED_NUMBER_RE.sub(
+        lambda m: '' if m.group('home') else m.group(0), text)
+    return entry if scrubbed == text else {**entry, 'text': scrubbed}
+
+
 @dataclass
 class _SlotRank:
     """An Office slot's ranking state: its own work-contact label, whether the
@@ -456,9 +467,11 @@ class _SlotRank:
         if current and not (is_labelled and not self.labelled
                             and self.source is not None):
             return current
-        if self.source is not None and all(e is not self.source
-                                           for e in self.unconsumed):
-            self.unconsumed.append(self.source)
+        if self.source is not None:
+            handed_back = _without_home_numbers(self.source)
+            if all(e is not self.source and e.get('text') != handed_back.get('text')
+                   for e in self.unconsumed):
+                self.unconsumed.append(handed_back)
         self.labelled, self.source = is_labelled, entry
         return candidate
 

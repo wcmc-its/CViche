@@ -1210,3 +1210,41 @@ def test_a_value_from_a_structured_address_is_not_displaced(tmp_path):
            {"address": "1 Sample Way, Exampleton, ZZ 00000"}, idx=1),
     ])
     assert "5 Dict Street" in rows["Office address:"]
+
+
+@pytest.mark.parametrize("home_line", ["(h) 555-0199", "H: 555-0199"])
+def test_a_displaced_banner_entry_never_surfaces_a_home_lettered_number(
+        tmp_path, home_line):
+    """The pii pass cuts only home WORDS; a displaced entry recovered whole
+    must not print a number labelled "(h)" or "H:" (#1222)."""
+    text = _render(tmp_path, [
+        _a(f"1 Banner Street, Exampleton, ZZ 00000\n{home_line}",
+           {"address": "1 Banner Street, Exampleton, ZZ 00000",
+            "phone": "555-0199"}, idx=0),
+        _a("Business Address: 1 Sample Way, Exampleton, ZZ 00000",
+           {"address": "1 Sample Way, Exampleton, ZZ 00000"}, idx=1),
+    ])
+    assert "1 Sample Way" in text
+    assert "1 Banner Street" in text, "the displaced address was lost"
+    assert "555-0199" not in text, "a home-lettered number was rendered"
+
+
+def test_a_displaced_phone_entry_never_surfaces_a_home_lettered_number(tmp_path):
+    text = _render(tmp_path, [
+        _a("Tel: 555-0101\n(h) 555-0199",
+           {"phone": "555-0101, 555-0199"}, idx=0),
+        _a("Office Phone: 555-0102", {"phone": "555-0102"}, idx=1),
+    ])
+    assert "555-0102" in text
+    assert "555-0199" not in text, "a home-lettered number was rendered"
+
+
+def test_a_cell_label_written_straight_before_a_number_without_punctuation(tmp_path):
+    """The label-end alternative `Cell 555-...` with no colon or dash; the two
+    numbers do not pair with the extracted value, so only the block-level
+    regex can route it."""
+    rows = _contact_rows(tmp_path, [
+        _a("Cell 555-0100, Office 555-0101",
+           {"phone": "555-0100, 555-0101"}),
+    ])
+    assert rows["Cell phone:"] != ""
