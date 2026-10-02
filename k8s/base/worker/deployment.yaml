@@ -52,6 +52,8 @@ spec:
               value: "0" # Alembic owns schema; the backend's initContainer runs migrations
             # Emailed-CV intake (#1298), OFF by default. Enable on ONE worker pool; it also
             # needs the ED_LDAP_* settings and an IRSA role that can read inbound/.
+            # The SES receipt rule must have ScanEnabled: true: a message without
+            # X-SES-Virus-Verdict: PASS is rejected, so without scanning every one is (#1332).
             # - name: CVICHE_EMAIL_INTAKE
             #   value: "1"
             # - name: CVICHE_MAIL_SEND
