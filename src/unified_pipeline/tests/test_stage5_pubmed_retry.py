@@ -202,6 +202,17 @@ def test_id_converter_retry_after_beyond_the_cap_fails_fast(monkeypatch):
     assert enricher.stats['api_errors'] == 1
 
 
+def test_id_converter_summed_retry_after_waits_are_capped(monkeypatch):
+    # Each 25 s wait is under the 60 s cap alone; the third would push the sum to 75 s.
+    enricher, session, sleeps = _make(
+        monkeypatch,
+        [FakeResponse(429, headers={'Retry-After': '25'})] * stage5.IDCONV_MAX_ATTEMPTS)
+    assert enricher._convert_pmcids_to_pmids(['PMC1234567']) == {}
+    assert sleeps == [25.0, 25.0]
+    assert len(session.calls) == 3
+    assert enricher.stats['api_errors'] == 1
+
+
 def test_doi_search_retries_5xx_then_succeeds(monkeypatch):
     enricher, _, sleeps = _make(monkeypatch, [
         FakeResponse(500),
