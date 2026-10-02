@@ -588,16 +588,15 @@ def test_extract_table_metadata_basic_shape():
     assert [c["text"] for c in meta["data"][1]] == ["R1C0", "R1C1"]
 
 
-def test_extract_table_metadata_gridspan_repeats_merged_cell():
-    # python-docx repeats the merged _Cell object at every grid column it
-    # spans (verified empirically) -- the reader does not deduplicate this,
-    # so both grid positions carry identical text.
+def test_extract_table_metadata_gridspan_emits_merged_cell_once():
+    # python-docx repeats the merged _Cell at every grid column it spans;
+    # the reader emits each distinct <w:tc> once (#1229), with col counting
+    # logical cells. `cols` stays the layout-grid width.
     doc = Document()
     table = doc.add_table(rows=2, cols=3)
     a = table.cell(0, 0)
     a.text = "Merged Header"
-    b = table.cell(0, 1)
-    a.merge(b)
+    a.merge(table.cell(0, 1))
     table.cell(1, 0).text = "x"
     table.cell(1, 1).text = "y"
     table.cell(1, 2).text = "z"
@@ -606,10 +605,55 @@ def test_extract_table_metadata_gridspan_repeats_merged_cell():
 
     assert meta["cols"] == 3
     row0 = meta["data"][0]
-    assert len(row0) == 3
-    assert row0[0]["text"] == row0[1]["text"] == "Merged Header"
-    assert row0[0]["col"] == 0
-    assert row0[1]["col"] == 1
+    assert [(c["col"], c["text"]) for c in row0] == [(0, "Merged Header"), (1, "")]
+    assert [c["text"] for c in meta["data"][1]] == ["x", "y", "z"]
+
+
+def test_extract_table_metadata_gridspan_stacked_cell_not_split_into_subrows():
+    # A merged cell stacking three lines beside a one-line cell used to be
+    # counted as two aligned 3-line cells by split_merged_cells_in_row (#612).
+    doc = Document()
+    table = doc.add_table(rows=1, cols=3)
+    merged = table.cell(0, 0).merge(table.cell(0, 1))
+    merged.text = "2001 - 2002\nA12345\n(Doe J, Example University)"
+    table.cell(0, 2).text = "Example title"
+
+    row = extract_table_metadata(table, idx="table_0")["data"][0]
+
+    assert len(row) == 2
+    assert len(split_merged_cells_in_row(row)) == 1
+
+
+def test_extract_table_metadata_keeps_distinct_cells_with_equal_text():
+    # Dedupe is by <w:tc> identity, not text: two separate cells that happen
+    # to hold the same text both stay, beside a merged cell.
+    doc = Document()
+    table = doc.add_table(rows=1, cols=4)
+    table.cell(0, 0).merge(table.cell(0, 1)).text = "Merged"
+    table.cell(0, 2).text = "2001"
+    table.cell(0, 3).text = "2001"
+
+    row = extract_table_metadata(table, idx="table_0")["data"][0]
+
+    assert [c["text"] for c in row] == ["Merged", "2001", "2001"]
+    assert [(c["grid_col"], c["grid_span"]) for c in row] == [(0, 2), (2, 1), (3, 1)]
+
+
+def test_extract_table_metadata_vertical_merge_still_repeats_down_rows():
+    # python-docx hands back the top cell's <w:tc> for a continuation row, so
+    # it repeats down the rows; only same-row gridSpan repeats are collapsed.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    top = table.cell(0, 0)
+    top.text = "Spans down"
+    top.merge(table.cell(1, 0))
+    table.cell(0, 1).text = "r0"
+    table.cell(1, 1).text = "r1"
+
+    data = extract_table_metadata(table, idx="table_0")["data"]
+
+    assert [c["text"] for c in data[0]] == ["Spans down", "r0"]
+    assert [c["text"] for c in data[1]] == ["Spans down", "r1"]
 
 
 def test_extract_table_metadata_falls_back_to_itertext_and_lets_its_errors_propagate(monkeypatch):
@@ -1178,6 +1222,105 @@ def test_extract_unified_elements_pre_llm_scrub_is_idempotent(tmp_path):
 
     result = extract_unified_elements(str(docx_path))
     assert result["elements"][0]["text"] == "Date of Birth: [withheld]"
+
+
+def _table_cell_texts(path):
+    elements = extract_unified_elements(str(path))["elements"]
+    return [
+        cell.get("text", "")
+        for el in elements
+        if el.get("data")
+        for row in el["data"]
+        for cell in row
+    ]
+
+
+def test_scrub_cell_below_label_when_the_label_row_merges_a_cell(tmp_path):
+    # #1229: the label row merges its first two columns, the value row does
+    # not. The value sits in layout column 2, which is list index 1 in the
+    # label row once the merged cell is emitted once.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).merge(table.cell(0, 1)).text = "Name"
+    table.cell(0, 2).text = "Date of Birth:"
+    table.cell(1, 0).text = "a"
+    table.cell(1, 1).text = "b"
+    table.cell(1, 2).text = "01/02/1970"
+    docx_path = tmp_path / "label_row_merged.docx"
+    doc.save(str(docx_path))
+
+    texts = _table_cell_texts(docx_path)
+
+    assert "01/02/1970" not in " ".join(texts)
+    assert "a" in texts and "b" in texts
+
+
+def test_scrub_cell_below_label_when_the_value_row_merges_a_cell(tmp_path):
+    # #1229: the value row merges its first two columns; the label sits in
+    # layout column 2 of an unmerged row.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).text = "a"
+    table.cell(0, 1).text = "b"
+    table.cell(0, 2).text = "Date of Birth:"
+    table.cell(1, 0).merge(table.cell(1, 1)).text = "Name"
+    table.cell(1, 2).text = "01/02/1970"
+    docx_path = tmp_path / "value_row_merged.docx"
+    doc.save(str(docx_path))
+
+    texts = _table_cell_texts(docx_path)
+
+    assert "01/02/1970" not in " ".join(texts)
+    assert "Name" in texts
+
+
+def test_scrub_cell_below_label_reaches_a_merged_cell_spanning_the_label_column(
+    tmp_path,
+):
+    # A value cell that merges across the label's column is still "below" it.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).text = "a"
+    table.cell(0, 1).text = "Date of Birth:"
+    table.cell(0, 2).text = "b"
+    table.cell(1, 0).merge(table.cell(1, 1)).text = "01/02/1970"
+    table.cell(1, 2).text = "c"
+    docx_path = tmp_path / "value_spans_label_col.docx"
+    doc.save(str(docx_path))
+
+    assert "01/02/1970" not in " ".join(_table_cell_texts(docx_path))
+
+
+def test_scrub_cell_below_a_merged_label_reaches_its_second_column(tmp_path):
+    # The label cell itself spans layout columns 1-2; the value sits under
+    # the second of them.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).text = "Name"
+    table.cell(0, 1).merge(table.cell(0, 2)).text = "Date of Birth:"
+    table.cell(1, 0).text = "Doe J"
+    table.cell(1, 1).text = ""
+    table.cell(1, 2).text = "01/02/1970"
+    docx_path = tmp_path / "label_merged.docx"
+    doc.save(str(docx_path))
+
+    assert "01/02/1970" not in " ".join(_table_cell_texts(docx_path))
+
+
+def test_scrub_cell_below_survives_a_split_value_row(tmp_path):
+    # The value row is split into several rows (aligned multi-line cells);
+    # the split cells must keep their layout column so the value is found.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=4)
+    for i, text in enumerate(["a", "b", "Date of Birth:", "c"]):
+        table.cell(0, i).text = text
+    table.cell(1, 0).merge(table.cell(1, 1)).text = "x1\nx2\nx3"
+    table.cell(1, 2).text = "01/02/1970\ny2\ny3"
+    table.cell(1, 3).text = "z"
+    docx_path = tmp_path / "value_row_split.docx"
+    doc.save(str(docx_path))
+
+    assert "01/02/1970" not in " ".join(_table_cell_texts(docx_path))
 
 
 def test_extract_unified_elements_scrubs_dob_in_the_cell_below_a_label(tmp_path):
