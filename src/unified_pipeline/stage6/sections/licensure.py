@@ -135,11 +135,18 @@ _DEA_LIKE_SHAPE_RE = re.compile(r'^[A-Za-z]{2}[A-Za-z0-9]{7}$')
 # A DEA-number token inside a fused `license_number` cell (#1217), cut out by
 # `_strip_dea_number_tokens`. The tight shape, as for `_strip_dea_lines`: this
 # predicate deletes, so it must not match a nine-letter word. A leading '#' (a
-# "#BP1234567" the source wrote that way) goes with the token.
+# "#AB1234567" the source wrote that way) goes with the token.
 _FUSED_DEA_TOKEN_RE = re.compile(
     rf'(?<![A-Za-z0-9])#?{_DEA_NUMBER_SHAPE}(?![A-Za-z0-9])')
 _NUMBER_SEPARATOR_RE = re.compile(r'[\s,;/]+')
 _SEPARATOR_RUN_RE = re.compile(r'(?:\s*[,;/]\s*){2,}')
+# How many tokens a number cell needs before a DEA-shaped one is cut. A licence
+# cell needs two: a lone token beside a stated jurisdiction can be a real state
+# licence number of the same shape (#573). An NPI cell needs one: an NPI is ten
+# or eleven digits and is never DEA-shaped, so a DEA-shaped token there is not
+# the NPI wherever it sits.
+_MIN_TOKENS_LICENSE_CELL = 2
+_MIN_TOKENS_NPI_CELL = 1
 
 # Classification results for one F1 entry.
 KIND_LICENSE = 'license'
@@ -353,25 +360,41 @@ def _strip_dea_lines(text: str) -> str:
     return '\n'.join(kept)
 
 
-def _strip_dea_number_tokens(number: str) -> str:
-    """Cut DEA-number tokens out of a fused, multi-token licence number cell.
+def _strip_dea_number_tokens(number: str, min_tokens: int) -> str:
+    """Cut DEA-number tokens out of a fused licence or NPI number cell.
 
     The reader sometimes leaves several stacked credentials' numbers in ONE
-    licence entry's number cell ("<licence>, <licence>, <npi>, <dea>"); the
-    DEA registration that rode along is not the entry's own, so
+    entry's number cell ("<licence>, <licence>, <npi>, <dea>"); the DEA
+    registration that rode along is not the entry's own, so
     `_classify_licensure_entry` (one verdict per entry) cannot see it (#1217).
     Only the tight DEA shape is cut (`_FUSED_DEA_TOKEN_RE`), and only from a
-    cell of two or more tokens: a lone token beside a stated jurisdiction is
-    still a state licence by the classifier's own rule, since a licence
-    number can share the shape. Returns `number` unchanged when no token
-    matched.
+    cell of at least `min_tokens` tokens (`_MIN_TOKENS_LICENSE_CELL`,
+    `_MIN_TOKENS_NPI_CELL`: why the two kinds differ is on those constants).
+    Returns `number` unchanged when no token matched.
     """
-    if len(_NUMBER_SEPARATOR_RE.split(number.strip())) < 2:
+    if len(_NUMBER_SEPARATOR_RE.split(number.strip())) < min_tokens:
         return number
     if not _FUSED_DEA_TOKEN_RE.search(number):
         return number
     cut = _SEPARATOR_RUN_RE.sub(', ', _FUSED_DEA_TOKEN_RE.sub('', number))
     return cut.strip(' ,;/')
+
+
+def _withhold_fused_dea(raw: MutableMapping[str, Any], entry: LicensureEntry,
+                        min_tokens: int) -> tuple[LicensureEntry, bool]:
+    """Withhold a DEA number riding in a licence or NPI entry's number cell.
+
+    Returns the entry with the token cut out and True when one was; the
+    entry is returned untouched with False otherwise. The entry keeps the
+    kind it was classified as -- only the token is not its own. A cut also
+    strips the DEA line from `raw['text']`, the text the #221 recovery pass
+    re-reads, exactly as for a DEA-classified entry (see `_resolve_licensure`).
+    """
+    number = _strip_dea_number_tokens(entry.number, min_tokens)
+    if number == entry.number:
+        return entry, False
+    raw['text'] = _strip_dea_lines(entry.original_text)
+    return replace(entry, number=number), True
 
 
 def _resolve_licensure(
@@ -423,24 +446,22 @@ def _resolve_licensure(
         kind = _classify_licensure_entry(entry.state, entry.number,
                                          entry.license_type,
                                          entry.original_text)
-        if kind == KIND_NPI:
-            npi_number = _claim_identifier_slot(
-                'NPI', npi_number, entry.number, entry.original_text)
-            continue
         if kind == KIND_DEA:
             dea_withheld = True
             raw['text'] = _strip_dea_lines(entry.original_text)
             continue
 
-        number = _strip_dea_number_tokens(entry.number)
-        if number != entry.number:
-            # A DEA number fused into this licence's number cell (#1217):
-            # the entry is a licence, the token is not. Withhold it with
-            # the same notice, and out of the raw text the #221 recovery
-            # pass re-reads, exactly as for a DEA-classified entry.
-            dea_withheld = True
-            raw['text'] = _strip_dea_lines(entry.original_text)
-            entry = replace(entry, number=number)
+        # A DEA number fused into this NPI's or licence's number cell
+        # (#1217): the entry keeps its kind, the token is not its own.
+        min_tokens = (_MIN_TOKENS_NPI_CELL if kind == KIND_NPI
+                      else _MIN_TOKENS_LICENSE_CELL)
+        entry, fused = _withhold_fused_dea(raw, entry, min_tokens)
+        dea_withheld = dea_withheld or fused
+
+        if kind == KIND_NPI:
+            npi_number = _claim_identifier_slot(
+                'NPI', npi_number, entry.number, entry.original_text)
+            continue
 
         record = _license_record(entry)
         if record is not None:

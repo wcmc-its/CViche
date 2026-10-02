@@ -396,3 +396,72 @@ def test_a_nine_letter_word_in_a_number_cell_is_not_cut():
     result = _resolve_licensure([_fused_number_entry("Wisconsin, 12345A")])
     assert result.dea_withheld is False
     assert result.licenses[0].number == "Wisconsin, 12345A"
+
+
+# ---------------------------------------------------------------------------
+# 6. #1217, the NPI slot: the fused-cell cut must cover an NPI-labelled entry
+#    too. If the stacked credential column lists the NPI first, the NPI entry
+#    is the one that receives every number, DEA included.
+# ---------------------------------------------------------------------------
+
+def _npi_entry(number, *, labelled_by="text"):
+    entry = {
+        "taxonomy_code": "F1",
+        "text": f"NPI | {number}",
+        "extracted_fields": {"license_number": number},
+    }
+    if labelled_by == "type":
+        entry["text"] = f"Identifier | {number}"
+        entry["extracted_fields"]["license_type"] = "NPI"
+    return entry
+
+
+def _dea_npi_table_cells(gen):
+    for table in gen.doc.tables:
+        if any("dea number" in r.cells[0].text.lower() for r in table.rows):
+            return {r.cells[0].text.lower(): r.cells[1].text for r in table.rows}
+    raise AssertionError("template's DEA/NPI table not found")
+
+
+def test_a_dea_token_fused_into_an_npi_number_cell_is_cut_out_and_withheld():
+    for labelled_by in ("text", "type"):
+        entry = _npi_entry("1234567890, AB1234567", labelled_by=labelled_by)
+        result = _resolve_licensure([entry])
+        assert result.identifiers.npi == "1234567890", labelled_by
+        assert result.dea_withheld is True, labelled_by
+        assert result.licenses == ()
+        assert "AB1234567" not in entry["text"], labelled_by
+
+
+def test_a_lone_dea_shaped_number_in_an_npi_entry_is_not_an_npi():
+    """Unlike a licence cell, one token is enough here: an NPI is ten or
+    eleven digits, so a DEA-shaped value is not the NPI wherever it sits."""
+    entry = _npi_entry("AB1234567")
+    result = _resolve_licensure([entry])
+    assert not result.identifiers.npi
+    assert result.dea_withheld is True
+    assert "AB1234567" not in entry["text"]
+
+
+def test_an_npi_entry_that_holds_only_an_npi_is_untouched():
+    entry = _npi_entry("1234567890")
+    text_before = entry["text"]
+    result = _resolve_licensure([entry])
+    assert result.identifiers.npi == "1234567890"
+    assert result.dea_withheld is False
+    assert entry["text"] == text_before
+
+
+def test_a_fused_npi_cell_render_has_no_dea_number_and_records_the_notice():
+    gen = _generator()
+    gen._fill_licensure([_npi_entry("1234567890, AB1234567")])
+    assert "AB1234567" not in _all_cell_text(gen)
+    assert _dea_npi_table_cells(gen)["npi number: (optional)"] == "1234567890"
+    assert [i.category for i in gen._pii_result.withheld] == [CAT_DEA]
+
+
+def test_a_clean_npi_entry_still_fills_the_slot_in_either_order_beside_a_cut_one():
+    for order in (("AB1234567", "1234567890"), ("1234567890", "AB1234567")):
+        result = _resolve_licensure([_npi_entry(n) for n in order])
+        assert result.identifiers.npi == "1234567890", order
+        assert result.dea_withheld is True, order
