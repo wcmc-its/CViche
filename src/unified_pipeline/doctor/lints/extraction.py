@@ -5,7 +5,8 @@ the source they came from and the document they landed in -- grants filed under
 the wrong funding heading, entries whose field extraction covered almost none of
 their text, taxonomy codes that vanished between classification and render,
 dedup drops that were not duplicates, records fabricated from the template's
-own scaffolding.
+own scaffolding, values filed under a key no renderer reads, and years given
+the wrong century.
 
 The line against `render.py` is which side of the comparison is the subject.
 These five are about the extracted record; the render lints are about the page.
@@ -18,8 +19,10 @@ in `run_doctor.py`, so they move together and stop being module-global.
 `_funding_haystacks` have since been fixed in place (#537, #492) -- see their
 docstrings and comments for what changed.
 """
+import json
 import re
 from collections import Counter
+from collections.abc import Mapping
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.docx_structure_extractor import _is_date_only_text
@@ -34,8 +37,13 @@ from unified_pipeline.core.template_boilerplate import (
 )
 from unified_pipeline.stage4.coercion import (
     DATE_RANGE_TAXONOMY_CODES,
+    GRANT_EFFORT_TAXONOMY_PREFIX,
+    IDENTIFIER_TAXONOMY_CODES,
     find_single_closed_range,
 )
+from unified_pipeline.stage4.schemas import FIELD_SCHEMA_CONFIG_PATH, FIELD_SCHEMAS
+from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
+from unified_pipeline.stage_5d_citation_formatter import PUBLICATION_CODES
 from unified_pipeline.core.text_norm import (
     SUBSTANTIVE_LINE_CHARS,
     looks_like_record,
@@ -45,6 +53,14 @@ from unified_pipeline.core.text_norm import (
 from unified_pipeline.stage6.normalization.institutions import (
     _get_cleaned_institution_name,
 )
+from unified_pipeline.stage6.fan_out import (
+    FANNED_OUT_FROM,
+    _RENDERED_FIELDS,
+    _TEXT_RENDERED_CODES,
+    _is_blank,
+    fan_out_multi_record_entries,
+)
+from unified_pipeline.core.two_digit_year import TWO_DIGIT_YEAR_PIVOT
 from unified_pipeline.stage6.normalization.pii import (
     CAT_HOME_CONTACT,
     SCOPE_PERSONAL_AND_APPENDIX,
@@ -849,4 +865,329 @@ def lint_wrong_start_date(stage4: dict) -> list[dict]:
             f"carries the single closed range {range_start}-{range_end} -- "
             f"renders '{start}-Present' (#729)",
             [text[:120]]))
+    return findings
+
+
+# --------------------------------------------------------------------------
+# Field values stage 4 extracted that the document cannot show: a value filed
+# under a key no renderer reads, and a year given the wrong century. Both read
+# stage 4 only, never the docx -- the value is already wrong or unreachable
+# there, and reading the rendered text would add a match step that can only
+# lose precision (four-digit numbers below 1930 sit in citation page ranges).
+
+
+class _FieldsEntry(NamedTuple):
+    """The four things the field lints read off one stage-4 entry, read once
+    at the artifact boundary instead of by `.get()` in every helper (§8.1).
+    `fields` is empty when `extracted_fields` is absent or not an object."""
+    element_idx: object
+    code: str
+    text: str
+    fields: Mapping[str, object]
+
+
+def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
+    entries = []
+    for raw in stage4.get("entries", []):
+        fields = raw.get("extracted_fields")
+        entries.append(_FieldsEntry(
+            raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""),
+            str(raw.get("text") or ""),
+            fields if isinstance(fields, Mapping) else {}))
+    return entries
+
+
+#: A key that names a date or a year: `date`, `start_date`, `year_certified`,
+#: `dates_attended`, and the shapes `fan_out._is_date_key` (suffix-based)
+#: does not see, `date_range` and `start_date_1`. Matched as a whole
+#: underscore-separated word, so `candidate_name` is not a date key.
+_DATE_NAMED_KEY_RE = re.compile(r"(?:^|_)(?:dates?|years?)(?:_|$)")
+
+#: Characters of one value, and values per finding, quoted as evidence.
+FIELD_EVIDENCE_VALUE_CHARS = 100
+FIELD_EVIDENCE_MAX_VALUES = 3
+
+
+def _evidence_value(value: object) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return text[:FIELD_EVIDENCE_VALUE_CHARS]
+
+
+# --- offschema_fields --------------------------------------------------------
+#
+# Stage 4 asks for JSON with no schema enforced, so the model sometimes files
+# a value, or a whole second record, under a key the code's schema does not
+# define (`organization_2`, `additional_entry`, `honors`, `outcome`). Every
+# section renderer reads fixed keys, so the value is dropped with no warning
+# (pilot batch 2026-10-02: whole records lost in TXTATQ, YOXXOH and BFSUMA, a
+# fact lost in CYOFWJ, JNATFN and WIANVH). #817 is the field-level loss
+# measurement this is the cheap, key-set-only slice of.
+
+#: Codes the lint does not inspect. A (personal data): the #820 PII pass owns
+#: it, and quoting its values as evidence would put protected data in a report
+#: mirrored to S3. The text-rendered codes (`fan_out._TEXT_RENDERED_CODES`,
+#: which include T): their section writes the entry's text, not its fields,
+#: so a value under any key is in the document already. The codes a stage-5
+#: formatter rewrites whole from the entry's text -- teaching (5c's
+#: `formatted_text`) and publications (5d's `formatted_citation`): the
+#: off-schema keys stage 4 leaves on them (`other_id`, `journal_or_source`,
+#: a K1 `description`) travel inside that rendering. Known miss: a
+#: contribution note under S1 `notes` (PFBSNH).
+_OFFSCHEMA_SKIPPED_CODES = (frozenset({PERSONAL_DATA_CODE}) | _TEXT_RENDERED_CODES
+                            | frozenset(TEACHING_CODES) | frozenset(PUBLICATION_CODES))
+
+#: Keys stage 4's own post-processing writes onto entries whose schema may
+#: not declare them -- bookkeeping, not a value the model misfiled:
+#: `coercion.apply_regex_post_processing` sets the identifiers on S and
+#: `IDENTIFIER_TAXONOMY_CODES`, and `percent_effort` on M2*. Only what this
+#: lint can see is listed: S, N4 and the `orcid` codes A and S0 are skipped
+#: above, and `owner_name.add_target_names`' `target_name` lands only on S
+#: and on R codes that either declare it (R) or have no schema at all.
+_IDENTIFIER_KEYS = frozenset({"pmid", "pmcid", "doi"})
+_PERCENT_EFFORT_KEY = "percent_effort"
+
+#: `<declared field>_<n>`: a numbered second copy of a schema field, which is
+#: a second record (`organization_2` held the second column of a two-column
+#: memberships list).
+_NUMBERED_FIELD_RE = re.compile(r"^(?P<field>.+)_\d+$")
+
+
+class OffschemaValue(NamedTuple):
+    """One non-empty value under a key no renderer reads."""
+    element_idx: object
+    value: object
+    record_shaped: bool
+
+
+def _declared_fields() -> dict[str, frozenset[str]]:
+    """Every field name each code declares in either schema definition: the
+    built-in `FIELD_SCHEMAS` and the versioned config file, whatever the
+    field's `extract` flag. Read here rather than through
+    `load_field_schemas_from_config`, which drops `extract: false` fields by
+    design -- a key declared but not extracted is #817's other half, not an
+    off-schema key. A missing or corrupt config file raises, so the lint
+    reports ERROR rather than flagging every config-only key (§5.5)."""
+    declared = {code: set(schema.get("fields", ()))
+                for code, schema in FIELD_SCHEMAS.items()}
+    config = json.loads(FIELD_SCHEMA_CONFIG_PATH.read_text(encoding="utf-8"))
+    for code, schema in config.get("schemas", {}).items():
+        if isinstance(schema, dict):
+            declared.setdefault(code, set()).update(schema.get("fields") or {})
+    return {code: frozenset(names) for code, names in declared.items()}
+
+
+def _stage4_bookkeeping_keys(code: str) -> frozenset[str]:
+    keys: set[str] = set()
+    if code in IDENTIFIER_TAXONOMY_CODES:
+        keys |= _IDENTIFIER_KEYS
+    if code.startswith(GRANT_EFFORT_TAXONOMY_PREFIX):
+        keys.add(_PERCENT_EFFORT_KEY)
+    return frozenset(keys)
+
+
+def _fanned_out_keys(entry: _FieldsEntry) -> frozenset[str]:
+    """The keys stage 6's fan-out splits this entry on, each record then
+    rendering as its own child -- run through the same call and the same
+    built-in schema `stage_6_word_template` hands it, so the doctor cannot
+    disagree with the renderer about which lists render."""
+    probe = {"taxonomy_code": entry.code, "text": entry.text,
+             "extracted_fields": dict(entry.fields)}
+    children = fan_out_multi_record_entries([probe], FIELD_SCHEMAS)
+    return frozenset(child[FANNED_OUT_FROM]["key"] for child in children
+                     if FANNED_OUT_FROM in child)
+
+
+def _is_record_shaped(key: str, value: object, declared: frozenset[str]) -> bool:
+    """A whole record rather than one fact: a list of objects, an object that
+    shares a key with the code's schema, or a numbered schema field."""
+    if isinstance(value, list):
+        return all(isinstance(item, Mapping) for item in value)
+    if isinstance(value, Mapping):
+        return bool(set(value) & declared)
+    numbered = _NUMBERED_FIELD_RE.match(key)
+    return bool(numbered and numbered.group("field") in declared)
+
+
+def _holds_a_non_date_value(entry: _FieldsEntry, keys: frozenset[str]) -> bool:
+    """Whether any of `keys` other than a date-named one holds a value. When
+    none does, the section renderers have no name, title or role to write and
+    fall back to the entry's raw text (see `fan_out`'s module docstring). That
+    text usually carries a one-fact value: on the 163-CV wave-1 farm the
+    rendered docx held every string of 151 of the 169 such values. It does
+    not reliably carry a record-shaped one: only 9 of the 20 there, and whole
+    appointments, consultantships and degrees under an off-schema key were
+    missing from the pilot's and wave-1's rendered docx (#1187). So
+    `_offschema_values` uses this to drop only the one-fact values of such
+    an entry."""
+    return any(not _is_blank(entry.fields.get(key)) for key in keys
+               if not _DATE_NAMED_KEY_RE.search(key))
+
+
+def _offschema_values(entry: _FieldsEntry, declared_by_code: dict[str, frozenset[str]],
+                      ) -> dict[str, OffschemaValue]:
+    """`{key: value}` for this entry's non-empty, non-date keys that are in
+    neither schema, not rendered for its code, not stage-4 bookkeeping, and
+    not a record list stage 6 fans out. On an entry none of whose schema or
+    rendered keys holds a value other than a date, a one-fact value is left
+    out, because the raw text the entry renders from usually carries it; a
+    record-shaped value is always reported, because that text does not
+    carry a whole record (see `_holds_a_non_date_value`)."""
+    if entry.code in _OFFSCHEMA_SKIPPED_CODES:
+        return {}
+    declared = declared_by_code.get(entry.code, frozenset())
+    schema_keys = declared | _RENDERED_FIELDS.get(entry.code, frozenset())
+    readable = schema_keys | _stage4_bookkeeping_keys(entry.code)
+    candidates = {key: value for key, value in entry.fields.items()
+                  if key not in readable and not _is_blank(value)
+                  and not _DATE_NAMED_KEY_RE.search(key)}
+    for key in _fanned_out_keys(entry):
+        candidates.pop(key, None)
+    hits = {key: OffschemaValue(entry.element_idx, value,
+                                _is_record_shaped(key, value, declared))
+            for key, value in candidates.items()}
+    renders_from_text = not _holds_a_non_date_value(entry, schema_keys)
+    return {key: hit for key, hit in hits.items()
+            if hit.record_shaped or not renders_from_text}
+
+
+class OffschemaSummary(NamedTuple):
+    """One (code, key) group's severity, message and evidence, in `_finding`'s
+    positional order."""
+    severity: str
+    message: str
+    evidence: list[str]
+
+
+def _offschema_summary(code: str, key: str,
+                       hits: list[OffschemaValue]) -> OffschemaSummary:
+    """WARN when any value is a whole record, INFO when each is one fact."""
+    records = sum(hit.record_shaped for hit in hits)
+    noun = "entry" if len(hits) == 1 else "entries"
+    lost = (f"{records} {'holds' if records == 1 else 'hold'} a whole record"
+            if records else "each holds one fact of its record")
+    return OffschemaSummary(
+        "WARN" if records else "INFO",
+        f"{len(hits)} {code} {noun}: `{key}` is outside the {code} schema and "
+        f"no renderer reads it -- {lost}, missing from the output (#817)",
+        [f"entry {hit.element_idx}: {_evidence_value(hit.value)}"
+         for hit in hits[:FIELD_EVIDENCE_MAX_VALUES]])
+
+
+def lint_offschema_fields(stage4: dict) -> list[dict]:
+    """A non-empty stage-4 value under a key that is in neither field schema
+    (built-in or config, any `extract` flag), not in `fan_out._RENDERED_FIELDS`
+    for its code, not stage-4 bookkeeping, and not a record list fan-out
+    splits: nothing reads it, so it never reaches the document. One finding
+    per (code, key); date-named keys are left out (two-thirds of the corpus's
+    off-schema keys are dates a schema names differently)."""
+    declared_by_code = _declared_fields()
+    groups: dict[tuple[str, str], list[OffschemaValue]] = {}
+    for entry in _fields_entries(stage4):
+        for key, hit in _offschema_values(entry, declared_by_code).items():
+            groups.setdefault((entry.code, key), []).append(hit)
+    return [_finding("offschema_fields", *_offschema_summary(code, key, hits))
+            for (code, key), hits in sorted(groups.items())]
+
+
+# --- implausible_year --------------------------------------------------------
+#
+# Given a two-digit year (`m/yy`, `m/d/yy`, `m/yy-yyyy`), the stage-4 model
+# sometimes picks the wrong century: dates from the 2000s came back in the
+# 1900s and rendered that way (pilot batch 2026-10-02: YOXXOH, WIANVH).
+# Nothing after stage 4 can see it -- stage 6's own century pivot applies
+# only to a raw two-digit string, and the value is four digits by then.
+
+#: Under `TWO_DIGIT_YEAR_PIVOT` a two-digit yy <= 30 means 20yy, so a 19yy year
+#: below 1930 is exactly a year no two-digit date can produce correctly -- and
+#: no faculty member's own record predates it.
+IMPLAUSIBLE_YEAR_FLOOR = 1900 + TWO_DIGIT_YEAR_PIVOT
+
+#: A record more than this many years before the owner's earliest degree year
+#: is implausible too, when that degree year is known.
+DEGREE_YEAR_LEAD = 10
+
+#: Academic degrees (PIPELINE_README.md): the code the owner's earliest degree
+#: year is read from.
+ACADEMIC_DEGREE_CODE = "B1"
+
+_FOUR_DIGIT_YEAR_RE = re.compile(r"(?<!\d)(\d{4})(?!\d)")
+
+
+class YearFloor(NamedTuple):
+    """The earliest plausible year for this owner, and where it came from."""
+    year: int
+    reason: str
+
+
+def _leaf_strings(value: object) -> list[str]:
+    """Every string and integer inside a field value, lists and objects
+    flattened (`dates_attended` is sometimes `{start_date, end_date}`)."""
+    if isinstance(value, Mapping):
+        return [s for item in value.values() for s in _leaf_strings(item)]
+    if isinstance(value, list):
+        return [s for item in value for s in _leaf_strings(item)]
+    if isinstance(value, (str, int)):
+        return [str(value)]
+    return []
+
+
+def _date_field_years(fields: Mapping[str, object]) -> list[tuple[str, int]]:
+    """`(key, year)` for every four-digit year in a date-named field."""
+    return [(key, int(match))
+            for key, value in fields.items() if _DATE_NAMED_KEY_RE.search(key)
+            for leaf in _leaf_strings(value)
+            for match in _FOUR_DIGIT_YEAR_RE.findall(leaf)]
+
+
+def _year_in_text(year: int, text: str) -> bool:
+    """The entry's own text writes this year in four digits: the value is the
+    source's, whatever it says. Bounded on the left only, because a range
+    whose dash the source reader dropped fuses into one digit run
+    ("1985-89" read as "198589"; web200's school and degree rows)."""
+    return re.search(rf"(?<!\d){year}", text) is not None
+
+
+def _earliest_degree_year(entries: list[_FieldsEntry]) -> int | None:
+    """The earliest plausible degree year a B1 entry both extracts and writes
+    in its own text -- a degree year that is itself a wrong century, or that
+    the text never states, cannot set the floor."""
+    years = [year for entry in entries if entry.code == ACADEMIC_DEGREE_CODE
+             for _, year in _date_field_years(entry.fields)
+             if year >= IMPLAUSIBLE_YEAR_FLOOR and _year_in_text(year, entry.text)]
+    return min(years, default=None)
+
+
+def _year_floor(entries: list[_FieldsEntry]) -> YearFloor:
+    degree_year = _earliest_degree_year(entries)
+    if (degree_year is not None
+            and degree_year - DEGREE_YEAR_LEAD > IMPLAUSIBLE_YEAR_FLOOR):
+        return YearFloor(degree_year - DEGREE_YEAR_LEAD,
+                         f"{DEGREE_YEAR_LEAD} years before the earliest degree "
+                         f"year, {degree_year}")
+    return YearFloor(IMPLAUSIBLE_YEAR_FLOOR,
+                     "no two-digit year resolves below it")
+
+
+def lint_implausible_year(stage4: dict) -> list[dict]:
+    """A year in a stage-4 date-named field that is below the owner's floor
+    (`YearFloor`) and that the entry's own text never writes in four digits:
+    a two-digit year given the wrong century, rendered as extracted. WARN,
+    one finding per entry. Report-only: the value is not repaired. Code A is
+    skipped, since its dates are personal data, not records."""
+    entries = _fields_entries(stage4)
+    floor = _year_floor(entries)
+    findings = []
+    for entry in entries:
+        if entry.code == PERSONAL_DATA_CODE:
+            continue
+        bad = [f"{key}={year}" for key, year in _date_field_years(entry.fields)
+               if year < floor.year and not _year_in_text(year, entry.text)]
+        if bad:
+            findings.append(_finding(
+                "implausible_year", "WARN",
+                f"entry {entry.element_idx} ({entry.code}): {', '.join(bad)} -- "
+                f"before {floor.year} ({floor.reason}) and not written in the "
+                f"entry's text; most likely a two-digit year given the wrong "
+                f"century",
+                [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings

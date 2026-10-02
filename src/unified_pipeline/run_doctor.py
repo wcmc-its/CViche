@@ -91,6 +91,20 @@ Lints, ranked by the severity of the failure class they catch:
                           meta.stats: it failed and left its entries
                           unchanged; WARN, the run completes (#818)
 
+14f. offschema_fields     a stage-4 value under a key that is in neither
+                          field schema, not rendered for its code, not
+                          stage-4 bookkeeping, and not a record list fan-out
+                          splits -- no renderer reads it, so it never reaches
+                          the document (TXTATQ's `organization_2`: 6
+                          memberships); WARN for a whole record, INFO for one
+                          fact (#817)
+
+14g. implausible_year     a stage-4 date-named field whose year is below
+                          1930 (or 10 years before the owner's earliest
+                          degree) and that the entry's text never writes --
+                          a two-digit year given the wrong century (YOXXOH's
+                          talks from the 2000s rendered in the 1900s); WARN
+
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
 construction lints, because each one on its own caps quality_score.py's final
@@ -212,7 +226,9 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
+    lint_implausible_year,
     lint_invented_records,
+    lint_offschema_fields,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
     lint_wrong_start_date,
@@ -350,6 +366,8 @@ KNOWN_LINTS = (
     "table_lost",
     "date_only_lines",
     "stage3b_second_pass_error",
+    "offschema_fields",
+    "implausible_year",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -428,6 +446,14 @@ LINT_PREVALENCE = {
     # 0.001 floor; this row now carries its own measured value rather than
     # borrowing theirs.
     "invented_records": 0.011,
+    # Both measured 2026-10-02 on the 163-CV wave-1 stage-4 farm, one fire
+    # per CV at any severity: offschema_fields 37/163 (16 of 23 sampled
+    # findings a value missing from the rendered docx, before record-shaped
+    # values on text-rendered entries were reported too: 20 more values, 11
+    # with a string the docx lacks), implausible_year 6/163 (every one of
+    # its 17 findings a hand-checked wrong century).
+    "offschema_fields": 0.227,
+    "implausible_year": 0.037,
 }
 
 
@@ -898,6 +924,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("table_lost", lint_table_lost, ("source_block_lines", "stage_2")),
     LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
     LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
+    LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",)),
+    LintSpec("implausible_year", lint_implausible_year, ("stage_4",)),
 )
 
 
