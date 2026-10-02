@@ -57,6 +57,7 @@ docstring, `scripts/render_gate.py`'s module docstring and
 """
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -429,33 +430,42 @@ def _cell_and_home_signals(phone: _JsonValue, text: str,
 
 @dataclass
 class _SlotRank:
-    """Whether an Office slot's value carries a work-contact label, and the
-    entry that supplied it."""
+    """An Office slot's ranking state: its own work-contact label, whether the
+    current value carries it, and the entry that supplied that value."""
+    label_re: re.Pattern[str]
+    cell_text: Callable[[_JsonValue, str], str | None]
+    unconsumed: list[dict]
     labelled: bool = False
     source: dict | None = None
 
+    def offer(self, current: str | None, extracted: _JsonValue,
+              entry: dict) -> str | None:
+        """The slot value after offering `extracted`, taken from `entry`.
 
-def _offer_office_slot(current: str | None, rank: _SlotRank,
-                       candidate: str | None, entry: dict,
-                       label_re: re.Pattern[str],
-                       unconsumed: list[dict]) -> str | None:
-    """The slot value after offering `candidate`, taken from `entry`.
+        The first value still wins its slot, except that a value whose entry
+        carries the slot's own label outranks an unlabelled one (#1222): a
+        banner line or a bare institution name read as an address came first
+        and blocked the labelled Work address that followed. A displaced
+        value's entry is handed back to `unconsumed`, so the post-render
+        recovery can place it."""
+        is_labelled = bool(self.label_re.search(entry.get('text', '')))
+        candidate = self.cell_text(extracted, 'office')
+        if not candidate:
+            return current
+        if current and not (is_labelled and not self.labelled
+                            and self.source is not None):
+            return current
+        if self.source is not None and all(e is not self.source
+                                           for e in self.unconsumed):
+            self.unconsumed.append(self.source)
+        self.labelled, self.source = is_labelled, entry
+        return candidate
 
-    The first value still wins its slot, except that a value whose entry
-    carries the slot's own label outranks an unlabelled one (#1222): a banner
-    line or a bare institution name read as an address came first and blocked
-    the labelled Work address that followed. A displaced value's entry is
-    handed back to `unconsumed`, so the post-render recovery can place it."""
-    is_labelled = bool(label_re.search(entry.get('text', '')))
-    if not candidate:
-        return current
-    if current and not (is_labelled and not rank.labelled
-                        and rank.source is not None):
-        return current
-    if rank.source is not None and all(e is not rank.source for e in unconsumed):
-        unconsumed.append(rank.source)
-    rank.labelled, rank.source = is_labelled, entry
-    return candidate
+
+def _office_slot_ranks(unconsumed: list[dict]) -> tuple[_SlotRank, _SlotRank]:
+    """The (address, telephone) ranking state for the two Office slots."""
+    return (_SlotRank(_WORK_ADDRESS_LABEL_RE, _address_cell_text, unconsumed),
+            _SlotRank(_WORK_PHONE_LABEL_RE, _phone_cell_text, unconsumed))
 
 
 # #946: consumer mail domains. An address at one of these is the owner's
@@ -801,7 +811,6 @@ class PersonalDataSection:
         cell_phone = None
         home_phone = None
         office_address = None
-        address_rank, phone_rank = _SlotRank(), _SlotRank()
         home_address = None
 
         # A entries that reach none of the six slots below are consumed by
@@ -810,6 +819,7 @@ class PersonalDataSection:
         # re-listing the fields this loop reads, so it cannot drift out of step
         # when the loop learns to read a new one.
         unconsumed = []
+        address_rank, phone_rank = _office_slot_ranks(unconsumed)
 
         for entry in entries:
             fields = entry.get('extracted_fields', {}) or {}
@@ -897,10 +907,7 @@ class PersonalDataSection:
                     if not home_phone:
                         home_phone = _phone_cell_text(extracted_phone, 'home')
                 elif has_work or not office_phone:
-                    office_phone = _offer_office_slot(
-                        office_phone, phone_rank,
-                        _phone_cell_text(extracted_phone, 'office'), entry,
-                        _WORK_PHONE_LABEL_RE, unconsumed)
+                    office_phone = phone_rank.offer(office_phone, extracted_phone, entry)
 
             # Classify address by type
             if extracted_address:
@@ -918,10 +925,7 @@ class PersonalDataSection:
                     if not home_address:
                         home_address = _address_cell_text(extracted_address, 'home')
                 elif 'office' in text or 'work' in text or 'business' in text or not office_address:
-                    office_address = _offer_office_slot(
-                        office_address, address_rank,
-                        _address_cell_text(extracted_address, 'office'), entry,
-                        _WORK_ADDRESS_LABEL_RE, unconsumed)
+                    office_address = address_rank.offer(office_address, extracted_address, entry)
 
             # Classify email by type
             if extracted_email:
