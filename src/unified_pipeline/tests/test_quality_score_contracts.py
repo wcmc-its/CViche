@@ -2200,3 +2200,198 @@ def test_broken_format_page_break_renders_no_whitespace(tmp_path):
     doc.save(tmp_path / "out.docx")
     fraction, detail, cap = score_broken_format(tmp_path)
     assert "raw_tab_paragraphs=1" in detail, detail
+
+
+# --------------------------------------------------------------------- D23
+# #822: cap-only content-loss gates (under-extracted entry, fused entries,
+# lost source table). Synthetic text only.
+# --------------------------------------------------------------------- D23
+
+def _big_multi_record_entry(coverage_pct):
+    """A stage-4 entry over under_extraction's size and record floors, with the
+    given extraction coverage (the lint fires below 40%)."""
+    lines = [f"Example Society {i} of Medicine and Surgery | Member | 201{i}-202{i} | "
+             "Committee on Sample Matters" for i in range(12)]
+    return {"element_idx_start": 7, "text": "\n".join(lines),
+            "extracted_fields": {"role": "Member"}, "extraction_success": True,
+            "extraction_coverage": {"extraction_coverage_percent": coverage_pct}}
+
+
+def _fused_entry(element_type="table_row"):
+    """An entry packing MEGA_ENTRY_MIN_RECORDS record-like lines."""
+    lines = [f"Example Grant {i} Title Words Here | Example Agency | 2011-2014 | Role: PI"
+             for i in range(3)]
+    return {"element_type": element_type, "text": "\n".join(lines)}
+
+
+def _source_docx_with_table(root: Path, n_lines: int, subdir: str = qs.SOURCE_DOCX_SUBDIR) -> None:
+    """A source CV whose only table holds n_lines substantive lines."""
+    rows = [[f"Alpha record number {i} about example research topics"] for i in range(n_lines)]
+    (root / subdir).mkdir(exist_ok=True)
+    _make_docx(["Body paragraph of an example curriculum vitae."], tables=[rows]).save(
+        root / subdir / "cv.docx")
+
+
+def _unrelated_entries(root: Path) -> None:
+    _write_json(root, "X_entries.json",
+                {"entries": [{"element_type": "paragraph", "text": "Completely unrelated example text"}]})
+
+
+def test_under_extracted_entry_caps_just_under_green(tmp_path):
+    _write_json(tmp_path, "X_fields.json", {"entries": [_big_multi_record_entry(12)]})
+    fraction, detail, cap = qs.score_under_extracted_records(tmp_path)
+    assert cap == qs.BAND_GREEN - 1 == qs.CONTENT_LOSS_CAP
+    assert "under_extraction_findings=1" in detail
+
+
+def test_a_well_extracted_big_entry_does_not_cap(tmp_path):
+    _write_json(tmp_path, "X_fields.json", {"entries": [_big_multi_record_entry(90)]})
+    assert qs.score_under_extracted_records(tmp_path)[2] is None
+
+
+def test_under_extraction_gate_is_not_evaluated_without_fields_json(tmp_path):
+    fraction, detail, cap = qs.score_under_extracted_records(tmp_path)
+    assert cap is None
+    assert "not evaluated" in detail
+
+
+def test_one_fused_entry_does_not_cap_but_the_threshold_count_does(tmp_path):
+    _write_json(tmp_path, "X_entries.json", {"entries": [_fused_entry()]})
+    _, detail, cap = qs.score_fused_entries(tmp_path)
+    assert cap is None and "mega_entries=1" in detail
+    _write_json(tmp_path, "X_entries.json", {"entries": [_fused_entry(), _fused_entry()]})
+    _, detail, cap = qs.score_fused_entries(tmp_path)
+    assert cap == qs.CONTENT_LOSS_CAP and "mega_entries=2" in detail
+
+
+def test_fused_header_and_break_entries_are_not_counted(tmp_path):
+    _write_json(tmp_path, "X_entries.json", {"entries": [
+        _fused_entry("header"), _fused_entry("break"), _fused_entry()]})
+    assert qs.score_fused_entries(tmp_path)[2] is None
+
+
+def test_fused_entries_gate_is_not_evaluated_without_entries_json(tmp_path):
+    fraction, detail, cap = qs.score_fused_entries(tmp_path)
+    assert cap is None
+    assert "not evaluated" in detail
+
+
+def test_a_lost_source_table_caps_at_the_line_floor(tmp_path):
+    _unrelated_entries(tmp_path)
+    _source_docx_with_table(tmp_path, qs.LOST_TABLE_CAP_MIN_LINES)
+    _, detail, cap = qs.score_lost_source_table(tmp_path)
+    assert cap == qs.CONTENT_LOSS_CAP
+    assert f"worst_lost_table_lines={qs.LOST_TABLE_CAP_MIN_LINES}" in detail
+
+
+def test_a_lost_table_below_the_line_floor_does_not_cap(tmp_path):
+    _unrelated_entries(tmp_path)
+    _source_docx_with_table(tmp_path, qs.LOST_TABLE_CAP_MIN_LINES - 1)
+    _, detail, cap = qs.score_lost_source_table(tmp_path)
+    assert cap is None
+    assert f"worst_lost_table_lines={qs.LOST_TABLE_CAP_MIN_LINES - 1}" in detail
+
+
+def test_the_worst_of_several_lost_tables_decides_the_cap(tmp_path):
+    _unrelated_entries(tmp_path)
+    big = qs.LOST_TABLE_CAP_MIN_LINES + 2
+    small = [[f"Beta entry number {i} about example teaching topics"]
+             for i in range(qs.LOST_TABLE_CAP_MIN_LINES - 1)]
+    large = [[f"Alpha record number {i} about example research topics"] for i in range(big)]
+    (tmp_path / qs.SOURCE_DOCX_SUBDIR).mkdir()
+    _make_docx(["Body paragraph of an example curriculum vitae."], tables=[small, large]).save(
+        tmp_path / qs.SOURCE_DOCX_SUBDIR / "cv.docx")
+    _, detail, cap = qs.score_lost_source_table(tmp_path)
+    assert cap == qs.CONTENT_LOSS_CAP
+    assert f"worst_lost_table_lines={big}" in detail
+
+
+def test_a_source_table_that_stage_2_kept_does_not_cap(tmp_path):
+    n = qs.LOST_TABLE_CAP_MIN_LINES + 3
+    _write_json(tmp_path, "X_entries.json", {"entries": [
+        {"element_type": "table_row", "text": f"Alpha record number {i} about example research topics"}
+        for i in range(n)]})
+    _source_docx_with_table(tmp_path, n)
+    _, detail, cap = qs.score_lost_source_table(tmp_path)
+    assert cap is None and "worst_lost_table_lines=0" in detail
+
+
+def test_lost_table_gate_is_not_evaluated_without_a_source_docx(tmp_path):
+    _unrelated_entries(tmp_path)
+    fraction, detail, cap = qs.score_lost_source_table(tmp_path)
+    assert cap is None
+    assert "not evaluated" in detail
+
+
+def test_lost_table_gate_ignores_an_unreadable_source(tmp_path, caplog):
+    _unrelated_entries(tmp_path)
+    (tmp_path / qs.SOURCE_DOCX_SUBDIR).mkdir()
+    (tmp_path / qs.SOURCE_DOCX_SUBDIR / "cv.docx").write_bytes(b"not a zip")
+    with caplog.at_level(logging.WARNING):
+        _, detail, cap = qs.score_lost_source_table(tmp_path)
+    assert cap is None and "not evaluated" in detail
+    # The scored dir sits right after the label, not only inside the exception text.
+    assert f"could not read source docx {tmp_path / qs.SOURCE_DOCX_SUBDIR / 'cv.docx'} (" in caplog.text
+
+
+def test_lost_table_gate_ignores_an_ambiguous_source(tmp_path, caplog):
+    """Two readable originals: either alone would cap, so taking the first (or
+    any) of them would fire; the gate must refuse to guess."""
+    _unrelated_entries(tmp_path)
+    _source_docx_with_table(tmp_path, qs.LOST_TABLE_CAP_MIN_LINES)
+    rows = [[f"Alpha record number {i} about example research topics"]
+            for i in range(qs.LOST_TABLE_CAP_MIN_LINES)]
+    _make_docx(["Second example curriculum vitae."], tables=[rows]).save(
+        tmp_path / qs.SOURCE_DOCX_SUBDIR / "second.docx")
+    with caplog.at_level(logging.WARNING):
+        _, detail, cap = qs.score_lost_source_table(tmp_path)
+    assert cap is None and "not evaluated" in detail
+    assert "found multiple source docx" in caplog.text
+    assert str(tmp_path) in caplog.text
+
+
+def test_content_loss_gates_are_registered_and_weightless():
+    """The wire: score_run only runs what CAP_ONLY_GATES lists, and none of them
+    may enter DIMENSIONS (a clean run's raw score must not move)."""
+    registered = [fn for _, fn in qs.CAP_ONLY_GATES]
+    for gate in (qs.score_under_extracted_records, qs.score_fused_entries,
+                 qs.score_lost_source_table):
+        assert gate in registered
+        assert gate not in [fn for _, _, fn in qs.DIMENSIONS]
+    assert TOTAL_WEIGHT == 100
+
+
+def test_score_run_caps_a_green_run_that_lost_records_without_moving_its_raw_score(tmp_path):
+    clean = _complete_run_dir(tmp_path)
+    before = score_run(clean)
+    assert before["raw_score_before_caps"] >= qs.BAND_GREEN, before
+    assert before["hard_fail_caps_applied"] == []
+
+    fields = json.loads((clean / "X_fields.json").read_text())
+    fields["entries"].append(_big_multi_record_entry(12))
+    _write_json(clean, "X_fields.json", fields)
+    after = score_run(clean)
+
+    assert after["hard_fail_caps_applied"] == [qs.CONTENT_LOSS_CAP]
+    assert after["totalScore"] == qs.CONTENT_LOSS_CAP
+    assert after["band"].startswith("YELLOW")
+    assert any(f.startswith(f"HARD-FAIL cap={qs.CONTENT_LOSS_CAP}: Source records lost")
+               for f in after["flags"]), after["flags"]
+    assert [d["score"] for d in after["dimensionScores"]
+            if d["name"].startswith("Pipeline/API")] == [25.0]
+
+
+def test_a_run_already_below_green_keeps_its_lower_score_under_the_content_cap(tmp_path):
+    """The cap is a ceiling, not a target: a 75-point run stays 75."""
+    clean = _complete_run_dir(tmp_path)
+    _write_json(clean, "X_classified.json", _classified(
+        total_entries=4, duplicate_entries=3, code_distribution={"A": 1, "T": 3}))
+    _write_json(clean, "X_fields.json", {
+        "cv_owner": {"full_name": "Jane Q. Public"},
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "entries": [{"extracted_fields": {"email": "j@x.org"}, "extraction_success": True},
+                    _big_multi_record_entry(12)]})
+    result = score_run(clean)
+    assert result["hard_fail_caps_applied"] == [qs.CONTENT_LOSS_CAP]
+    assert result["raw_score_before_caps"] < qs.CONTENT_LOSS_CAP, result
+    assert result["totalScore"] == round(result["raw_score_before_caps"])

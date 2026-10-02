@@ -14,7 +14,10 @@ The doctor does not compute a 0-100 score. It reports all five of the quality
 score's hard-fail gates, each as an ERROR lint that calls the scorer's own
 predicate, so the two cannot drift apart — that is the whole overlap. A sixth
 cap, stage 4's failed extraction groups (below), stops short of RED and so is a
-WARN lint on the same shared predicate.
+WARN lint on the same shared predicate. Three more caps (#822, below) cover
+source content lost before the document was written; they also stop one point
+under GREEN, and each calls the signal behind an existing doctor lint
+(`under_extraction`, `segmentation`, `table_lost`).
 
 ## Part 1: the doctor's verdict
 
@@ -175,6 +178,43 @@ confirmation that the gate is calibrated.
   rare (3 of 163 corpus CVs), so a flat cap is the claim the evidence supports.
   It also does not see a call served by the Sonnet 4.6 content-filter fallback
   (#1207) that succeeded, because stage 4 does not record which model answered.
+
+### The three content-loss caps (#822)
+
+Cap-only gates like protected data (`CAP_ONLY_GATES`, weight 0, so no run's raw
+score moves), but soft: each caps a run at `CONTENT_LOSS_CAP` (84, one point
+under GREEN), so a run that lost source content cannot read "ship" and is not
+pushed toward RED. No weighted dimension measures lost content; these call the
+doctor's own signals, restricted to the ones batch IPXFBA hand-checked as real.
+
+- `score_under_extracted_records()` — the doctor's `under_extraction` lint, any
+  finding (in IPXFBA all 4 findings were true positives, but only 2 lost
+  records outright; outside IPXFBA a finding can fire with nothing lost).
+- `score_fused_entries()` — `mega_entries` (`count_mega_entries`) at
+  `MEGA_ENTRIES_CAP_MIN` (2) or more entries; one fused entry is common and
+  harmless, so the threshold is a count (7 of 9 flagged entries were real).
+- `score_lost_source_table()` — the primitive behind `table_lost`
+  (`find_lost_blocks`), worst lost table at `LOST_TABLE_CAP_MIN_LINES` (5) or
+  more lines. It reads the original uploaded `.docx` from the
+  `SOURCE_DOCX_SUBDIR` (`source/`) of the scored directory; the web service
+  stages `input/*.docx` there and `score_one.py --source` does the same. With no
+  readable source the gate is not evaluated, so a score computed without it can
+  sit above the web app's.
+
+Both thresholds were fitted to one batch and are named in the code to be revisited.
+
+Which cap the run page names when several sit at 84: the three content-loss caps
+and the stage-4 cap share a value, and the run page's reason and doctor-lint
+pointer (`run_quality_report.cap_source`) is the first matching flag, in
+`CAP_ONLY_GATES` order. The order is most specific first: lost table (the loss
+is measured against the delivered docx), fused entries (a count of swallowed
+records), under-extraction (fires on any finding, including ones that lost
+nothing), then stage 4's failed group (a call failed and was retried; no loss is
+measured). The score and band do not depend on the order, only the pointer.
+In batch IPXFBA it decides two runs: EKGTXD (under-extraction and fused entries)
+and PBSGQZ (fused entries and a stage-4 failure) both point at the fused-entries
+reason, which is where their verified loss is (EKGTXD's two under-extraction
+findings lost no records).
 
 ### Bands
 

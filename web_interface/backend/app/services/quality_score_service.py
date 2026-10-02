@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Run
 from app.storage import get_storage
+from app.storage.base import RunStorage
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,19 @@ _SRC = Path(__file__).resolve().parents[4] / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.quality_score import SOURCE_DOCX_SUBDIR  # noqa: E402
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX  # noqa: E402
 
 # Artifacts the scorer reads (see quality_score.py dimension scorers), plus the
 # orchestrator's stage-error record (#745), mirrored to outputs/ like the rest.
 _NEEDED_SUFFIXES = ("_classified.json", "_fields.json", "_entries.json", ".docx",
                     STAGE_ERRORS_SUFFIX)
+
+# The original upload, archived under input/ (upload.py). The scorer reads it
+# only for the lost-source-table gate (#822); a run whose original is not a
+# single .docx (a PDF upload) simply skips that gate.
+_SOURCE_PREFIX = "input/"
+_SOURCE_SUFFIX = ".docx"
 
 CACHE_KEY = "quality_score.json"
 
@@ -70,6 +78,22 @@ def load_cached_score(run_id: str) -> object | None:
         return None
 
 
+def _stage_source_docx(storage: RunStorage, run_id: str, dest: Path) -> None:
+    """Copy the run's original .docx to ``dest/SOURCE_DOCX_SUBDIR`` for the
+    scorer's lost-source-table gate. Best-effort: with no single .docx under
+    input/ (or on a storage error, logged) the gate is just not evaluated."""
+    try:
+        keys = [k for k in storage.list_files(run_id, _SOURCE_PREFIX)
+                if k.lower().endswith(_SOURCE_SUFFIX)]
+        if len(keys) != 1:
+            return
+        source_dir = dest / SOURCE_DOCX_SUBDIR
+        source_dir.mkdir()
+        (source_dir / Path(keys[0]).name).write_bytes(storage.get_file(run_id, keys[0]))
+    except Exception:
+        logger.warning("Could not stage the source docx for run %s", run_id, exc_info=True)
+
+
 def compute_and_cache_score(run_id: str) -> dict | None:
     """Score a completed run from its persisted outputs and cache the result.
 
@@ -89,6 +113,7 @@ def compute_and_cache_score(run_id: str) -> dict | None:
         try:
             for key in wanted:
                 (tmp / Path(key).name).write_bytes(storage.get_file(run_id, key))
+            _stage_source_docx(storage, run_id, tmp)
             result = score_run(str(tmp), run_id)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)

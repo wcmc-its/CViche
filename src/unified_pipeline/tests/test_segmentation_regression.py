@@ -34,6 +34,7 @@ from unified_pipeline.segmentation_regression import (  # noqa: E402
     SUBSTANTIVE_LINE_CHARS,
     compare_metrics,
     compute_metrics,
+    count_mega_entries,
     find_lost_blocks,
     iter_source_block_lines,
     iter_source_lines,
@@ -435,6 +436,20 @@ def test_mega_entry_threshold_boundary():
     assert m_below["mega_entries"] == 0
     m_at = compute_metrics([], _STAGE1A, {"entries": [_entry(_records(MEGA_ENTRY_MIN_RECORDS))]})
     assert m_at["mega_entries"] == 1
+
+
+def test_count_mega_entries_counts_content_entries_at_the_threshold_only():
+    """The scorer's fused-entries gate calls this directly (#822)."""
+    entries = [
+        _entry(_records(MEGA_ENTRY_MIN_RECORDS), start=1),
+        _entry(_records(MEGA_ENTRY_MIN_RECORDS - 1), start=2),
+        _entry(_records(MEGA_ENTRY_MIN_RECORDS), etype="header", start=3),
+        _entry(_records(MEGA_ENTRY_MIN_RECORDS), etype="break", start=4),
+        _entry(_records(MEGA_ENTRY_MIN_RECORDS), etype="table_row", start=5),
+    ]
+    assert count_mega_entries(entries) == 2
+    assert count_mega_entries(entries) == compute_metrics([], _STAGE1A, {"entries": entries})["mega_entries"]
+    assert count_mega_entries([]) == 0
 
 
 def test_same_text_different_start_is_not_a_duplicate():
