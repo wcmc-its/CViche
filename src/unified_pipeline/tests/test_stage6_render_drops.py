@@ -24,6 +24,10 @@ from unified_pipeline.stage6.parsing import (
 )
 from unified_pipeline.stage_6_word_template import (
     _TAXONOMY_WARNED_CONFUSIONS,
+    REROUTE_ACCEPTED_CROSS_FAMILY,
+    REROUTE_ACCEPTED_SAME_FAMILY,
+    REROUTE_CHECK,
+    REROUTE_REFUSED_FIELDS,
     WCMTemplateGenerator,
 )
 
@@ -185,6 +189,114 @@ def test_each_warned_pair_is_named_by_the_taxonomy() -> None:
         assert re.search(
             rf"misclassified as {target}\b[^.;]*instead of[^.;]*\b{assigned}\b", warnings,
         ), (assigned, target)
+
+
+# --- Class 3 (AUTOPSY-s7ab-batch-2026-10-02): a cross-family reroute must fit --
+# A low-confidence cross-family reroute sent mentees, courses and committees to
+# S8, whose renderer reads none of their fields: each rendered as a bare
+# numbered item. Synthetic records, invented values.
+
+def _fielded(code: str, expected: list[str], fields: dict, idx: int = 7,
+             confidence: float = 0.55) -> dict:
+    entry = _mismatched(code, expected, "Heading", confidence=confidence)
+    entry.update({"element_idx_start": idx, "extracted_fields": fields})
+    return entry
+
+
+_MENTEE = {"mentee_name": "Pat Example", "mentee_level": "Resident",
+           "research_focus": "synthetic topic", "start_date": "2001", "end_date": "2002"}
+
+
+def _reroute_records(gen: WCMTemplateGenerator) -> list[dict]:
+    return [w for w in gen._section_failures if w["check"] == REROUTE_CHECK]
+
+
+def test_mentee_is_not_rerouted_to_a_citation_section_it_cannot_fill() -> None:
+    entry = _fielded("N3B", ["R", "S8"], dict(_MENTEE), idx=1234)
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([entry])
+    assert list(groups) == ["N3B"]
+    assert entry["taxonomy_code"] == "N3B"
+    assert "taxonomy_code_original" not in entry
+    [record] = _reroute_records(gen)
+    assert (record["code"], record["severity"]) == ("N3B", "INFO")
+    assert "N3B->S8" in record["message"] and REROUTE_REFUSED_FIELDS.replace("_", " ") in record["message"]
+    assert record["evidence"] == ["element_idx_start 1234"]
+
+
+def test_generic_date_place_role_fields_do_not_fit_a_target() -> None:
+    # A course's `role` and a talk's `location` are rendered by R too, but
+    # say nothing about the record being an invited presentation.
+    course = _fielded("K1", ["R"], {"course_title": "Course X", "role": "Lecturer",
+                                    "institution": "Example U", "start_date": "2010"})
+    talk = _fielded("K5", ["R"], {"activity_title": "Talk X", "location": "Springfield",
+                                  "date": "2011"})
+    assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(course, "K1") == "K1"
+    assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(talk, "K5") == "K5"
+
+
+def test_record_with_target_fields_is_still_rerouted_and_warned() -> None:
+    # An abstract under a Presentations heading carries a title R renders.
+    entry = _fielded("S8", ["R"], {"authors": "Doe J", "title": "A synthetic abstract",
+                                   "conference_name": "Meeting X", "year": "2015"}, idx=433)
+    gen = WCMTemplateGenerator(verbose=False)
+    assert list(gen._group_entries_by_code([entry])) == ["R"]
+    assert entry["taxonomy_code_original"] == "S8"
+    [record] = _reroute_records(gen)
+    assert record["severity"] == "WARN"
+    assert REROUTE_ACCEPTED_CROSS_FAMILY.replace("_", " ") in record["message"]
+
+
+def test_pending_grant_needs_more_than_a_title() -> None:
+    # A commentary (S2) under a pending-funding heading: a title alone fills an
+    # otherwise empty grant table. An agency is what makes it a grant.
+    expected = ["M2C"]
+    bare = _fielded("S2", expected, {"title": "A synthetic commentary", "year": "2019"})
+    funded = _fielded("S2", expected, {"title": "A synthetic proposal", "agency": "Agency X"})
+    gen = WCMTemplateGenerator(verbose=False)
+    assert gen._correct_mismatch_if_needed(bare, "S2") == "S2"
+    assert gen._correct_mismatch_if_needed(funded, "S2") == "M2C"
+    numbered = _fielded("S2", expected, {"title": "A synthetic award", "grant_number": "X01 000"})
+    assert gen._correct_mismatch_if_needed(numbered, "S2") == "M2C"
+
+
+def test_fields_inside_a_record_list_count_toward_the_fit() -> None:
+    # The scalar alone does not fit S8; the list's titles do.
+    entry = _fielded("N3B", ["R", "S8"], {"mentee_level": "Resident",
+                                         "talks": [{"title": "One", "authors": "Doe J"},
+                                                   {"title": "Two"}]})
+    assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(entry, "N3B") == "S8"
+
+
+def test_blank_target_fields_do_not_fit() -> None:
+    # Stage 4 writes every schema key; an empty or whitespace title is no title.
+    entry = _fielded("N3B", ["R", "S8"], {**_MENTEE, "title": "  ", "authors": {},
+                                         "doi": None})
+    assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(entry, "N3B") == "N3B"
+
+
+def test_text_rendered_target_and_fieldless_entry_keep_the_old_rule() -> None:
+    # K2 renders the entry's text, so any record fits; an entry with no
+    # stage-4 fields has nothing to judge (see the H -> Q2 test above).
+    membership = _fielded("I", ["K2"], {"organization": "Society X", "start_date": "2000"})
+    assert WCMTemplateGenerator(verbose=False)._correct_mismatch_if_needed(membership, "I") == "K2"
+
+
+def test_every_reroute_is_logged_without_entry_text() -> None:
+    same = _mismatched("S6", ["S8"], "Abstracts")
+    same["element_idx_start"] = 3
+    refused = _fielded("N3B", ["R", "S8"], dict(_MENTEE), idx=4)
+    also_refused = _fielded("N3B", ["R", "S8"], dict(_MENTEE), idx=5)
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._group_entries_by_code([same, refused, also_refused])
+    records = _reroute_records(gen)
+    assert [(r["code"], r["severity"], r["evidence"]) for r in records] == [
+        ("S6", "INFO", ["element_idx_start 3"]),
+        ("N3B", "INFO", ["element_idx_start 4", "element_idx_start 5"]),
+    ]
+    assert REROUTE_ACCEPTED_SAME_FAMILY.replace("_", " ") in records[0]["message"]
+    dumped = json.dumps(records)
+    assert "Doe" not in dumped and "Pat Example" not in dumped
 
 
 # --- #983: multi-record entries fan out before the PII pass and dedup --------
