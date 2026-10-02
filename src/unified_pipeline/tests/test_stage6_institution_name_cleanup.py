@@ -41,6 +41,41 @@ def test_empty_cleaned_name_falls_back_to_official_name() -> None:
     assert _get_cleaned_institution_name(entry) == "Weill Cornell Medicine"
 
 
+def _official(official: str, raw: str) -> dict:
+    return {"institution_enrichment": {"cleaned_name": "", "official_name": official},
+            "extracted_fields": {"institution": raw}}
+
+
+def test_official_name_naming_another_place_is_not_used() -> None:
+    """Stage 5b matched an acronym to an unrelated institution: the CV's own
+    value renders instead (the caller's fallback)."""
+    entry = _official("Institut Supérieur de Lumière Numérique",
+                      "International Society for Kestrel Therapy (ISKT), online")
+    assert _get_cleaned_institution_name(entry) is None
+
+
+def test_official_name_in_another_script_is_not_used() -> None:
+    assert _get_cleaned_institution_name(_official("كلية طب", "Kestrel Medical College")) is None
+
+
+def test_official_name_sharing_a_distinctive_word_is_used() -> None:
+    entry = _official("Kestrel Harbor University", "Kestrel Harbor Univ., Springfield")
+    assert _get_cleaned_institution_name(entry) == "Kestrel Harbor University"
+
+
+def test_official_name_is_used_when_the_entry_has_no_institution() -> None:
+    entry = {"institution_enrichment": {"official_name": "Kestrel Harbor University"}}
+    assert _get_cleaned_institution_name(entry) == "Kestrel Harbor University"
+
+
+def test_cleaned_name_is_not_checked_against_the_raw_value() -> None:
+    """cleaned_name is the raw value without its location, so a name of
+    generic words only ("University Hospital") still applies."""
+    entry = {"institution_enrichment": {"cleaned_name": "University Hospital"},
+             "extracted_fields": {"institution": "University Hospital, Springfield, IL"}}
+    assert _get_cleaned_institution_name(entry) == "University Hospital"
+
+
 def test_both_empty_returns_none() -> None:
     entry = {"institution_enrichment": {"cleaned_name": "", "official_name": ""}}
     assert _get_cleaned_institution_name(entry) is None
