@@ -10,6 +10,7 @@ never sees the lazy initialisation (the #496 split-state lesson). Reach it as
 `unified_pipeline.stage4.schemas._LOADED_SCHEMAS` or not at all.
 """
 
+import re
 import copy
 import json
 import logging
@@ -123,6 +124,12 @@ STAGE4_RECORDS_KEY = "stage4_records"
 # The entry-level count of items the reply held for the entry, written only
 # when it is 2 or more, so the multi-record shape stays visible downstream.
 STAGE4_RECORDS_RETURNED_KEY = "stage4_records_returned"
+
+# `<schema field>_<n>`: a numbered second copy of a schema field, which the
+# model uses for a second record (`organization_2` held the second column of
+# a two-column memberships list, #1245). Stage 4 splits it into its own
+# record; the doctor's `offschema_fields` lint reports what is left.
+NUMBERED_FIELD_RE = re.compile(r"^(?P<field>.+)_(?P<n>\d+)$")
 
 # ============================================================================
 # Field Extraction Schemas by Taxonomy Code

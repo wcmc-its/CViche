@@ -44,6 +44,7 @@ from unified_pipeline.stage4.owner_name import (
 from unified_pipeline.stage4.schemas import (
     FIELD_DESCRIPTIONS,
     FIELD_SCHEMA_VERSION,
+    NUMBERED_FIELD_RE,
     STAGE4_RECORDS_KEY,
     STAGE4_RECORDS_RETURNED_KEY,
     get_active_schemas,
@@ -268,6 +269,61 @@ def _union_of_records(records: list[dict[str, Any]]) -> dict[str, Any]:
             for key, value in record.items()}
 
 
+def _offschema_records(fields: dict[str, Any], taxonomy_code: str,
+                       ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """`(fields, extra)`: `fields` without the off-schema keys that hold a
+    whole second record, and those records (#1245). Nothing renders a key
+    outside the code's schema, so each record was dropped from the output.
+
+    - `<field>_<n>` keys: the numbered fields alone make record n. The
+      parent's other fields are not copied: in a two-column list the parent's
+      date belongs to the first column only.
+    - an object under a key outside the schema, sharing a key with it
+      (`additional_entry`, `additional_presentation`, `additional_period`):
+      the parent's fields with the object's laid over them, since it most
+      often repeats the parent at another venue or period.
+
+    A list of records is left alone: fan-out splits it, or declines it with a
+    warning (#1187).
+    """
+    schema = set(get_field_schema(taxonomy_code).get("fields") or ())
+    numbered: dict[str, dict[str, Any]] = {}
+    nested: list[dict[str, Any]] = []
+    kept: dict[str, Any] = {}
+    for key, value in fields.items():
+        match = NUMBERED_FIELD_RE.match(key)
+        if key in schema:
+            kept[key] = value
+        elif match and match.group("field") in schema:
+            if not _is_blank(value):
+                numbered.setdefault(match.group("n"), {})[match.group("field")] = value
+        elif isinstance(value, dict) and schema & set(value):
+            nested.append(value)
+        else:
+            kept[key] = value
+    extra = [record for _, record in sorted(numbered.items(), key=lambda kv: int(kv[0]))]
+    extra += [{**kept, **record} for record in nested]
+    return kept, extra
+
+
+def _is_blank(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _with_offschema_records(cleaned: list[tuple[dict[str, Any], ReformattedFields]],
+                            taxonomy_code: str,
+                            ) -> list[tuple[dict[str, Any], ReformattedFields]]:
+    """Each cleaned record followed by the records `_offschema_records` takes
+    out of it, each cleaned without the entry's text, as an earlier record of
+    a multi-record entry is."""
+    out = []
+    for fields, reformatted in cleaned:
+        kept, extra = _offschema_records(fields, taxonomy_code)
+        out.append((kept, reformatted))
+        out += [_clean_item(_NO_ENTRY_TEXT, record, taxonomy_code) for record in extra]
+    return out
+
+
 def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
                          taxonomy_code: str) -> _EntryExtraction:
     """The reply's items for one entry, in reply order, as that entry's fields.
@@ -282,17 +338,23 @@ def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
     value belongs to one of them at most, so only the last record, the one
     the entry kept before, is offered the text; an earlier one gets the
     text-free cleanups alone.
+
+    A second record the model filed under an off-schema key follows the
+    record it came from (`_offschema_records`). `records_returned` stays the
+    count of items the model returned.
     """
     cleaned = [_clean_item(_NO_ENTRY_TEXT, dict(item), taxonomy_code) for item in items[:-1]]
     cleaned.append(_clean_item(entry_text, dict(items[-1]), taxonomy_code))
-    last_fields, last_reformatted = cleaned[-1]
+    last_reformatted = cleaned[-1][1]
+    cleaned = _with_offschema_records(cleaned, taxonomy_code)
+    last_fields = cleaned[-1][0]
     if len(cleaned) < _MIN_RECORDS_PER_ENTRY:
         coverage = calculate_unextracted_content(entry_text, last_fields)
-        return _EntryExtraction(last_fields, last_reformatted, coverage, len(cleaned))
+        return _EntryExtraction(last_fields, last_reformatted, coverage, len(items))
     records = [fields for fields, _ in cleaned]
     fields = {**last_fields, STAGE4_RECORDS_KEY: records}
     coverage = calculate_unextracted_content(entry_text, _union_of_records(records))
-    return _EntryExtraction(fields, last_reformatted, coverage, len(records))
+    return _EntryExtraction(fields, last_reformatted, coverage, len(items))
 
 
 def _entry_with_extraction(entry: dict[str, Any], extraction: _EntryExtraction,
