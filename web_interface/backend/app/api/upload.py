@@ -16,9 +16,10 @@ from collections.abc import Callable
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
+from dataclasses import dataclass
 from datetime import datetime
 from pydantic import BaseModel
-from typing import Literal, Optional
+from typing import Literal, NamedTuple, Optional
 from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from lxml.etree import XMLSyntaxError
@@ -561,21 +562,34 @@ def commit_run_or_compensate(
         )
 
 
+class DuplicateInfo(NamedTuple):
+    """An earlier run of the same file: when, and the run id if the viewer may see it."""
+    processed_on: str
+    run_id: str | None
+
+
+def duplicate_info(db: Session, sha256: str, user: User) -> DuplicateInfo | None:
+    """The #1286 privacy rule in one place: any run (any submitter) holding this
+    file's hash counts, but non-admins get only the date; the run id goes to
+    admins and to the run's own submitter, never anyone else's."""
+    latest = latest_run_with_hash(db, sha256)
+    if latest is None:
+        return None
+    can_see_run = user.role == "admin" or latest.user_id == user.id
+    return DuplicateInfo(latest.started_at.strftime(DUPLICATE_DATE_FORMAT), latest.id if can_see_run else None)
+
+
 def _reject_unconfirmed_duplicate(db: Session, sha256: str, user: User) -> None:
     """Stop with a 409 when any run (any submitter) already holds this file's hash.
 
-    Non-admins get only the date; the run id goes to admins and to the run's own
-    submitter, never anyone else's. Raised before anything is archived or charged."""
-    latest = latest_run_with_hash(db, sha256)
-    if latest is None:
-        return
-    processed_on = latest.started_at.strftime(DUPLICATE_DATE_FORMAT)
-    can_see_run = user.role == "admin" or latest.user_id == user.id
-    raise duplicate_file(
-        f"This file was already processed on {processed_on}. Run it again?",
-        processed_on,
-        latest.id if can_see_run else None,
-    )
+    Raised before anything is archived or charged."""
+    info = duplicate_info(db, sha256, user)
+    if info is not None:
+        raise duplicate_file(
+            f"This file was already processed on {info.processed_on}. Run it again?",
+            info.processed_on,
+            info.run_id,
+        )
 
 
 def _archive_or_502(
@@ -672,6 +686,46 @@ async def upload_cv(
     # buffered before being rejected (#793).
     content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
+    return await create_run_from_bytes(
+        db, current_user, filename=file.filename, content=content, content_type=file.content_type,
+        request=RunRequest(
+            submission_type=submission_type,
+            include_track_changes=include_track_changes,
+            include_classification_comments=include_classification_comments,
+            strip_wcm_instructions=strip_wcm_instructions,
+            batch_id=batch_id,
+            confirm_duplicate=confirm_duplicate,
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RunRequest:
+    """How one CV becomes a run: the attestation, the render options and the
+    batch it joins. Shared by /upload and POST /inbox/submit (#1298)."""
+    submission_type: Literal["own_cv", "authorized_admin"]
+    include_track_changes: bool = True
+    include_classification_comments: bool = False
+    strip_wcm_instructions: bool = True
+    batch_id: str | None = None
+    confirm_duplicate: bool = False
+
+
+async def create_run_from_bytes(
+    db: Session, current_user: User, *, filename: str, content: bytes,
+    content_type: str | None, request: RunRequest,
+) -> UploadResponse:
+    """The upload core (#1298): validate the bytes -> duplicate check -> extract
+    text -> archive -> Run row. The caller has already checked consent, the
+    batch, the filename and the rate limit, and read ``content`` within the
+    size cap. Raises the same HTTPErrors /upload always did."""
+    file_ext = Path(filename).suffix.lower()
+    submission_type = request.submission_type
+    include_track_changes = request.include_track_changes
+    include_classification_comments = request.include_classification_comments
+    strip_wcm_instructions = request.strip_wcm_instructions
+    batch_id = request.batch_id
+    confirm_duplicate = request.confirm_duplicate
     # Validate magic bytes match claimed extension
     if file_ext == PDF_EXTENSION and not _validate_pdf_magic(content):
         logger.warning("[SECURITY] Rejected upload: file claims .pdf but magic bytes do not match (user=%s)", current_user.email)
@@ -734,12 +788,12 @@ async def upload_cv(
     def _build_manifest(run_id: str, stored_name: str) -> bytes:
         return json.dumps({
             "run_id": run_id,
-            "original_filename": file.filename,  # only record of the real name
+            "original_filename": filename,  # only record of the real name
             "stored_as": stored_name,
             "file_type": file_ext[1:],
             "size_bytes": len(content),
             "sha256": source_sha256,
-            "content_type": file.content_type,
+            "content_type": content_type,
             "uploaded_at": datetime.now().isoformat(),
             "user_email": current_user.email,
         }, indent=2).encode("utf-8")
@@ -777,7 +831,7 @@ async def upload_cv(
     # #153) as the truthy ints the Stage 6 generator reads at render time.
     run = Run(
         id=run_id,
-        filename=file.filename,
+        filename=filename,
         file_type=file_ext[1:],  # Remove dot
         status="created",
         started_at=datetime.now(),
@@ -799,7 +853,7 @@ async def upload_cv(
 
     return UploadResponse(
         run_id=run_id,
-        filename=file.filename,
+        filename=filename,
         file_type=file_ext[1:],
         status="created",
         message=f"File uploaded successfully. Run ID: {run_id}",

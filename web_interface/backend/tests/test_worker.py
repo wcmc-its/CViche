@@ -1107,3 +1107,21 @@ def test_dev_worker_pools_split_six_workers_three_and_three_at_identical_sizing(
     assert general_container["resources"]["requests"] == {"cpu": "100m", "memory": "512Mi"}
     overlay = yaml.safe_load((_K8S / "overlays/dev/kustomization.yaml").read_text())
     assert {"path": "worker-flex-patch.yaml"} in overlay["patches"]
+
+
+def test_email_intake_poller_is_off_unless_flagged(monkeypatch):
+    """#1298: CVICHE_EMAIL_INTAKE gates the poller thread; default off."""
+    monkeypatch.delenv("CVICHE_EMAIL_INTAKE", raising=False)
+    assert worker._start_email_intake() is None
+
+
+def test_email_intake_poller_starts_a_thread_when_flagged(monkeypatch):
+    from app.services import inbound_service
+    started = threading.Event()
+    monkeypatch.setenv("CVICHE_EMAIL_INTAKE", "1")
+    monkeypatch.setattr(inbound_service, "run_intake_loop", lambda factory, storage, stop: started.set())
+    monkeypatch.setattr("app.storage.get_storage", lambda: object())
+    thread = worker._start_email_intake()
+    assert thread is not None
+    thread.join(timeout=5)
+    assert started.is_set()
