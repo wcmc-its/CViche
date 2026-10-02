@@ -48,6 +48,15 @@ _SEASON_TOKENS = frozenset({'spring', 'summer', 'fall', 'autumn', 'winter'})
 # range the other two modules already treat it as.
 CURRENT_DATE_VALUES = frozenset({'present', 'current', 'ongoing', 'now'})
 
+# The two keys of the range stage 4 sometimes returns where a single date was
+# asked for: `{"start_date": "2008", "end_date": "2018"}` (#1233). B1's
+# `dates_attended` has always arrived this way and education.py unwraps it; F2's
+# `recertification_date` and R's `date` arrive this way too. Shared by
+# formatting/dates.py (renders it as a range) and sorting/chronological.py
+# (keys it by its end, else its start), for the same reason as above.
+RANGE_START_KEY = 'start_date'
+RANGE_END_KEY = 'end_date'
+
 
 def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int | None]:
     """Parse a date string into (year, month, day) ints; any component absent
