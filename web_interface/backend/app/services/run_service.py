@@ -19,6 +19,16 @@ from app.storage import get_storage
 from app.storage.base import RunStorage
 from app.services import auto_retry, notifications
 
+# Baked into the image by the Dockerfile's IMAGE_TAG build arg (#1239).
+IMAGE_TAG_ENV = "CVICHE_IMAGE_TAG"
+
+
+def current_image_tag() -> str | None:
+    """The tag of the image this process runs, or None when it was built
+    without one (local dev, or an image built before #1239)."""
+    return os.environ.get(IMAGE_TAG_ENV, "").strip() or None
+
+
 logger = logging.getLogger(__name__)
 
 # A run older than this while still marked "running" at startup is treated as
@@ -63,6 +73,13 @@ DEFAULT_ORPHAN_REAP_HOURS = 24
 # own (CODING STANDARDS section 1.5: one definition of a shared path).
 UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def latest_run_with_hash(db: Session, sha256: str) -> Run | None:
+    """The most recently started run (any submitter) whose upload hashed to ``sha256``."""
+    return db.scalars(
+        select(Run).where(Run.source_sha256 == sha256).order_by(Run.started_at.desc()).limit(1)
+    ).first()
 
 
 def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> None:
@@ -571,6 +588,7 @@ def _transition_run_for_retry(
     if not _claim_stale_run(
         db, run, seen_started_at,
         attempt_count=Run.attempt_count + 1,
+        image_tag=current_image_tag(),
         started_at=datetime.now(),
         error_message=None,
         completed_at=None,
@@ -744,11 +762,12 @@ def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set)
     guarantees the winning row is actually modified.
 
     ``status_criteria`` are SQLAlchemy expressions on ``Run.status``; ``also_set``
-    are extra columns written in the same statement. Does not commit: the caller
+    are extra columns written in the same statement. Also stamps ``image_tag``
+    with the executing image (#1239). Does not commit: the caller
     commits on a win, and on a loss holds nothing to undo.
     """
     result = db.query(Run).filter(Run.id == run_id, *status_criteria).update(
-        {"status": "running", **also_set}, synchronize_session="evaluate"
+        {"status": "running", "image_tag": current_image_tag(), **also_set}, synchronize_session="evaluate"
     )
     return result == 1
 
@@ -853,6 +872,7 @@ def claim_queued(run_id: str) -> ClaimResult:
             update(Run)
             .where(Run.id == run_id, Run.status == RunState.QUEUED)
             .values(status=RunState.RUNNING, started_at=datetime.now(),
+                    image_tag=current_image_tag(),
                     error_message=None, completed_at=None)
         ).rowcount == 1
         db.commit()

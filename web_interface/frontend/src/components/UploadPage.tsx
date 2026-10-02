@@ -15,7 +15,7 @@ import type { SubmissionType } from './upload/consentText'
 import DropZone from './upload/DropZone'
 import SingleFileRow from './upload/SingleFileRow'
 import UploadFooter from './upload/UploadFooter'
-import { H2, OptionsSection, SingleEstimate, TemplateWarning, WhoToggle } from './upload/UploadSections'
+import { H2, OptionsSection, DuplicateNotice, SingleEstimate, TemplateWarning, WhoToggle } from './upload/UploadSections'
 import { useBatchUpload } from './upload/useBatchUpload'
 import type { BatchUpload } from './upload/useBatchUpload'
 import { useSingleFile, useSingleRun } from './upload/useSingleRun'
@@ -25,10 +25,11 @@ import { useUploadContext } from './upload/useUploadContext'
 interface BatchFilesProps {
   batch: BatchUpload
   showCost: boolean
+  onRunAgain: (key: string) => void
 }
 
 /** Step 2 for a batch: heading with "N to submit · M skipped", the multi-file drop zone, the table. */
-function BatchFiles({ batch, showCost }: BatchFilesProps) {
+function BatchFiles({ batch, showCost, onRunAgain }: BatchFilesProps) {
   const editable = batch.phase === 'edit'
   return (
     <>
@@ -51,7 +52,7 @@ function BatchFiles({ batch, showCost }: BatchFilesProps) {
         />
       )}
       {batch.rows.length > 0 && (
-        <BatchFileTable rows={batch.rows} showCost={showCost} editable={editable} onRemove={batch.removeRow} />
+        <BatchFileTable rows={batch.rows} showCost={showCost} editable={editable} onRemove={batch.removeRow} onRunAgain={batch.phase === 'done' ? onRunAgain : undefined} />
       )}
     </>
   )
@@ -94,6 +95,7 @@ function footerLabel(input: FooterInput, count: number): string {
   const { run, multi, batch } = input
   if (run.uploading) return 'Starting run...'
   if (run.pendingWarning) return 'Process anyway'
+  if (run.pendingDuplicate) return 'Run it again'
   if (run.pendingStart) return 'Retry'
   if (multi && batch.estimating) return 'Estimating…'
   return multi && count > 1 ? `Submit ${count} CVs` : 'Start run'
@@ -174,6 +176,11 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     setFinishMinutes(overview?.batch?.est_wait_minutes ?? null)
   }
 
+  const runAgain = async (key: string) => {
+    await batch.runAgain(key, options)
+    await afterSend()
+  }
+
   const handleStart = async () => {
     if (submitsAsSingle(multi, batch)) {
       const file = multi ? batch.rows[0].file : single.file
@@ -216,7 +223,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
         <section className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-5 sm:p-6">
           <div className="flex flex-col gap-4">
             {editable && <WhoToggle value={submissionType} queueMode={queueMode} onChange={chooseWho} />}
-            {multi ? <BatchFiles batch={batch} showCost={showCost} /> : <SingleFiles single={single} run={run} />}
+            {multi ? <BatchFiles batch={batch} showCost={showCost} onRunAgain={(key) => void runAgain(key)} /> : <SingleFiles single={single} run={run} />}
 
             {editable && (
               <>
@@ -242,6 +249,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                   </div>
                 )}
                 {run.pendingWarning && <TemplateWarning acknowledged={run.acknowledged} onAcknowledge={run.setAcknowledged} />}
+                {run.pendingDuplicate && <DuplicateNotice message={run.pendingDuplicate} />}
                 {run.error && <ErrorBanner message={run.error} onDismiss={() => run.setError(null)} />}
                 {batch.error && <ErrorBanner message={batch.error} onDismiss={batch.clearError} />}
 

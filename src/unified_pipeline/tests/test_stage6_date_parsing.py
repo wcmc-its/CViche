@@ -563,9 +563,9 @@ from unified_pipeline.stage6.formatting.dates import (  # noqa: E402
 
 def test_point_in_time_codes_are_pinned():
     """The decision on #946 names awards, talks, CME lectures and P/Q one-off
-    rows; each member's reason is at the constant. Pinned so adding or
-    dropping a code is a visible, deliberate act."""
-    assert POINT_IN_TIME_CODES == frozenset({"H", "R", "K4", "P", "Q2", "Q3"})
+    rows, and #1220 added B2; each member's reason is at the constant. Pinned
+    so adding or dropping a code is a visible, deliberate act."""
+    assert POINT_IN_TIME_CODES == frozenset({"H", "R", "K4", "P", "Q2", "Q3", "B2"})
 
 
 @pytest.mark.parametrize("code", sorted(POINT_IN_TIME_CODES))
@@ -625,3 +625,101 @@ def test_point_in_time_unreadable_start_renders_as_written():
 def test_an_unreadable_year_is_never_searched_for():
     from unified_pipeline.stage6.formatting.dates import _source_leaves_year_open
     assert _source_leaves_year_open("None- Committee", None) is False
+
+
+# --- #1233: a {start_date, end_date} mapping is a range, never its repr -------
+
+@pytest.mark.parametrize("code, value, expected", [
+    ("F2", {"start_date": "2008", "end_date": "2018"}, "2008-2018"),
+    ("B1", {"start_date": "2006-09", "end_date": "2010-06"}, "09/2006-06/2010"),
+    # a one-occasion code collapses a same-year span to that year ...
+    ("R", {"start_date": "2021-05-17", "end_date": "2021-05-19"}, "2021"),
+    # ... and keeps both years when the span crosses a year boundary
+    ("R", {"start_date": "2021-12-30", "end_date": "2022-01-02"}, "2021-2022"),
+    ("R", {"start_date": "2021-05-17", "end_date": None}, "2021"),
+    ("F2", {"start_date": "2008", "end_date": "present"}, "2008-Present"),
+    ("F2", {"start_date": "", "end_date": "2018"}, "2018"),
+    ("F2", {"start_date": "2008"}, "2008-Present"),
+])
+def test_a_start_end_mapping_formats_as_the_range(code, value, expected):
+    assert format_date_for_section(value, code) == expected
+
+
+@pytest.mark.parametrize("code", ["F2", "R", "K4", "P", "B1"])
+def test_a_start_end_mapping_formats_like_the_same_two_dates_as_a_range(code):
+    value = {"start_date": "2021-05-17", "end_date": "2022-03-02"}
+    assert format_date_for_section(value, code) == format_date_range(
+        value["start_date"], value["end_date"], code)
+
+
+def test_a_start_end_mapping_never_renders_as_its_repr():
+    out = format_date_for_section({"start_date": "2008", "end_date": "2018"}, "F2")
+    assert "{" not in out and "start_date" not in out and "'" not in out
+
+
+def test_a_mapping_holding_no_dates_renders_blank():
+    assert format_date_for_section({}, "F2") == ""
+    assert format_date_for_section({"start_date": "", "end_date": ""}, "F2") == ""
+
+
+def test_a_mapping_without_the_range_keys_renders_blank_and_is_logged(caplog):
+    with caplog.at_level("WARNING", logger="unified_pipeline.stage6.formatting.dates"):
+        out = format_date_for_section({"year": "2008"}, "F2")
+    assert out == ""
+    assert "without start_date/end_date keys" in caplog.text
+    assert "['year']" in caplog.text
+
+
+def test_a_string_date_is_unchanged_by_the_mapping_branch():
+    assert format_date_for_section("March 2008", "F2") == "2008"
+    assert format_date_for_section("2008-2018", "F2") == "2008-2018"
+    assert format_date_for_section("TBD", "F2") == "TBD"
+
+
+@pytest.mark.parametrize("value, expected", [
+    ({"start_date": "2021-05-17", "end_date": "2021-05-19"}, (2021, 5, 19)),
+    ({"start_date": "2021-05-17", "end_date": None}, (2021, 5, 17)),
+    ({"start_date": "2021-05-17", "end_date": "present"}, (9999, 12, 31)),
+    ({"start_date": "2008", "end_date": "2018"}, (2018, 1, 1)),
+    ({"start_date": "2008"}, (2008, 1, 1)),
+    ({"start_date": {"start_date": "2008", "end_date": "2018"}}, (2018, 1, 1)),
+    ({}, (0, 0, 0)),
+    ({"year": "2008"}, (0, 0, 0)),
+])
+def test_a_start_end_mapping_sorts_by_its_end_else_its_start(value, expected):
+    """#1233: `str()` of the mapping held no year, so the entry keyed (0, 0, 0)
+    and sank to the bottom of its reverse-chronological table."""
+    assert extract_sort_date({"extracted_fields": {"date": value}}) == expected
+
+
+def test_a_range_valued_recertification_date_is_left_out_of_the_sort_key():
+    """F2 falls through to `year_certified`, as it did while the mapping's repr
+    held no year, rather than ranking a certification by its renewal window."""
+    fields = {"year_certified": "2001",
+              "recertification_date": {"start_date": "2008", "end_date": "2018"}}
+    assert extract_sort_date({"extracted_fields": fields}) == (2001, 1, 1)
+
+
+def test_a_range_recertification_date_keys_the_same_as_its_string_form():
+    as_dict = {"year_certified": "2001",
+               "recertification_date": {"start_date": "2008", "end_date": "2018"}}
+    as_text = {"year_certified": "2001", "recertification_date": "2008-2018"}
+    assert (extract_sort_date({"extracted_fields": as_dict})
+            == extract_sort_date({"extracted_fields": as_text}))
+
+
+def test_a_single_date_recertification_still_outranks_year_certified():
+    fields = {"year_certified": "2001", "recertification_date": "2018"}
+    assert extract_sort_date({"extracted_fields": fields}) == (2018, 1, 1)
+
+
+def test_a_mapping_dated_entry_sorts_among_string_dated_entries():
+    from unified_pipeline.stage6.sorting import sort_entries_reverse_chronological
+    entries = [
+        {"extracted_fields": {"label": "newer-string", "date": "2020-03-01"}},
+        {"extracted_fields": {"label": "newest-mapping",
+                              "date": {"start_date": "2021-05-17", "end_date": "2021-05-19"}}},
+        {"extracted_fields": {"label": "oldest-string", "date": "2019"}},
+    ]
+    ordered = [e["extracted_fields"]["label"] for e in sort_entries_reverse_chronological(entries)]
+    assert ordered == ["newest-mapping", "newer-string", "oldest-string"]

@@ -17,8 +17,9 @@ name it exported before.
 """
 
 import re
+from difflib import SequenceMatcher
 
-from unified_pipeline.core.text_norm import norm
+from unified_pipeline.core.text_norm import fold_quotes, norm
 from unified_pipeline.segmentation_regression import (
     compute_metrics,
     find_lost_blocks,
@@ -73,6 +74,16 @@ def lint_table_lost(source_block_lines: list[tuple[int, str]],
 # header is what made the verdict carry no information (#438).
 MISSED_HEADERS_WARN_COUNT = 6
 
+#: Severity of a finding whose only claim to being a header is its Heading
+#: style, i.e. a line that is not ALL-CAPS (#1232). Many CVs style record
+#: titles, journal names and contact-block lines Heading 1-6: on one batch
+#: 42 of 75 findings (30 of them one CV's record titles) were such lines and
+#: none was a real miss. Other CVs style their real sub-section labels the
+#: same way and stage 1a misses some of them, so dropping the class would
+#: lose real findings. Too ambiguous to drop, too weak to count toward the
+#: run's WARN threshold: it is reported, never escalated.
+WEAK_CANDIDATE_SEVERITY = "INFO"
+
 
 def _hierarchy_titles(stage1a: dict) -> list[str]:
     titles: list[str] = []
@@ -115,9 +126,29 @@ MIN_HEADER_KEY_WORDS = 2
 MIN_KEY_TO_TITLE_RATIO = 0.5
 
 
+#: A leading bullet or asterisk marker stripped before comparing header keys
+#: (#1232): the source line '*TENURE REVIEWS' is promoted by stage 1a as the
+#: hierarchy node 'TENURE REVIEWS'. Applied to `norm`ed text.
+_LEADING_MARKER_RE = re.compile(r"^[*\u2022\u00b7\u25aa\u25a0\u25cf\u25cb\u25e6]+\s*")
+
+#: A trailing empty-value suffix stripped before comparing header keys
+#: (#1232): 'SPECIALTY BOARD STATUS: N/A' is promoted as 'SPECIALTY BOARD
+#: STATUS'. The suffix is a value, not part of the header name. Applied to
+#: `norm`ed text, so 'n/a' is lowercase here.
+_EMPTY_VALUE_SUFFIX_RE = re.compile(r"\s*:\s*n/a$")
+
+#: Similarity (`difflib` ratio) at which a header wrapped over two source
+#: lines counts as a known title that stage 1a copy-edited while joining the
+#: lines (#1232): 1a corrected a one-letter typo in the first line, so the
+#: joined text is no longer an exact, prefix or suffix copy of its title.
+WRAPPED_HEADER_MIN_SIMILARITY = 0.95
+
+
 def _header_key(text: str) -> str:
-    """Comparison key for header matching: normalized, trailing ':' dropped,
-    then a leading enumeration token stripped (#814).
+    """Comparison key for header matching: typographic quotes folded,
+    normalized, a leading bullet/asterisk marker and a trailing ': N/A' value
+    dropped, trailing ':' dropped, then a leading enumeration token stripped
+    (#814, #1232).
 
     Stage 1a promotes 'PROFESSIONAL SOCIETIES:' to the hierarchy node
     'PROFESSIONAL SOCIETIES' -- the colon is source formatting, not part of the
@@ -125,9 +156,13 @@ def _header_key(text: str) -> str:
     detected as missing: on the 2026-07-15 corpus (25 CVs) that was 36 of 61
     findings (59%), including 22 of web061's 23. The same is true of a leading
     'I.'/'1.'/'A.' section numeral: stage 1a strips it, so comparing the raw
-    forms reports every enumerated section as missing too.
+    forms reports every enumerated section as missing too. A curly apostrophe
+    in the source against an ASCII one in the node ('LOCAL (CONT'D)'), a
+    leading '*' and a trailing ': N/A' are the same class (#1232).
     """
-    normed = norm(text).rstrip(":").strip()
+    normed = norm(fold_quotes(text))
+    normed = _LEADING_MARKER_RE.sub("", normed, count=1)
+    normed = _EMPTY_VALUE_SUFFIX_RE.sub("", normed.rstrip()).rstrip(":").strip()
     return _ENUM_PREFIX_RE.sub("", normed, count=1).strip()
 
 
@@ -164,6 +199,25 @@ def _key_matches_title(key: str, titles: set[str]) -> bool:
     return False
 
 
+def _is_near_known_title(key: str, titles: set[str]) -> bool:
+    """Is `key`, a header wrapped over two source lines and joined, a near
+    copy (`WRAPPED_HEADER_MIN_SIMILARITY`) of some KNOWN stage-1a title?
+    Same short-key guard as `_key_matches_title`; the cheap length and
+    character-bag ratios run first, so the full ratio is computed only for a
+    title of about the same length and letters (#1232)."""
+    if not _is_substantial_key(key):
+        return False
+    matcher = SequenceMatcher(None)
+    matcher.set_seq2(key)  # the sequence difflib indexes: once, not per title
+    for title in titles:
+        matcher.set_seq1(title)
+        if (matcher.real_quick_ratio() >= WRAPPED_HEADER_MIN_SIMILARITY
+                and matcher.quick_ratio() >= WRAPPED_HEADER_MIN_SIMILARITY
+                and matcher.ratio() >= WRAPPED_HEADER_MIN_SIMILARITY):
+            return True
+    return False
+
+
 def _name_words(text: object) -> list[str]:
     return re.findall(r"[^\W\d_]+", str(text or "").lower())
 
@@ -196,14 +250,16 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
     """Header-looking source lines absent from the 1a hierarchy AND from
     every entry hierarchy path: a header demoted to content misroutes
     everything filed under it. The CV owner's own name (optional stage-4
-    ``cv_owner``) is document furniture, not a header (#539)."""
+    ``cv_owner``) is document furniture, not a header (#539). A candidate
+    that is not ALL-CAPS reached the list through its Heading style alone and
+    never sets the run's severity (`WEAK_CANDIDATE_SEVERITY`, #1232)."""
     allowed, required = _owner_name_words(stage4)
     known = {_header_key(t) for t in _hierarchy_titles(stage1a)}
     paths = {_header_key(h) for e in stage2.get("entries", [])
              for h in (e.get("hierarchy") or [])}
     titles = known | paths
 
-    findings, seen = [], set()
+    findings, strong, seen = [], [], set()
     n = len(candidates)
     skip_next = False
     for i, cand in enumerate(candidates):
@@ -223,7 +279,8 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
         # title by prefix.
         nxt = candidates[i + 1] if i + 1 < n else None
         joined = _header_key(f"{cand} {nxt}") if nxt is not None else ""
-        if joined and (joined in titles or _key_matches_title(joined, known)):
+        if joined and (joined in titles or _key_matches_title(joined, known)
+                       or _is_near_known_title(joined, known)):
             seen.add(normed)
             seen.add(_header_key(nxt))
             skip_next = True
@@ -234,15 +291,22 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
             continue
         if _is_owner_name(cand, allowed, required):
             continue
-        findings.append(_finding(
+        finding = _finding(
             "missed_headers", "WARN",
             f"header-like source line missing from segmentation: '{cand}'",
-            [cand]))
+            [cand])
+        findings.append(finding)
+        if cand == cand.upper():
+            strong.append(finding)
     # Severity is a property of the RUN, not of each header: one stray
     # header-like line is normal, a dozen means segmentation lost the document's
     # shape. This lint emits one finding per header, so without this the finding
     # count doubled as the severity and a long CV always looked worse (#438).
-    severity = _magnitude_severity(len(findings), MISSED_HEADERS_WARN_COUNT)
+    # Only ALL-CAPS candidates are counted and take that severity; a Heading-
+    # styled line that is not ALL-CAPS stays at WEAK_CANDIDATE_SEVERITY (#1232).
+    severity = _magnitude_severity(len(strong), MISSED_HEADERS_WARN_COUNT)
     for f in findings:
+        f["severity"] = WEAK_CANDIDATE_SEVERITY
+    for f in strong:
         f["severity"] = severity
     return findings

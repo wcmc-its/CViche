@@ -16,6 +16,8 @@ export type BatchPhase = 'edit' | 'uploading' | 'done'
 export interface BatchSubmitOptions {
   submissionType: SubmissionType
   stripWcmInstructions: boolean
+  /** Set when re-sending a row after the user agreed to re-run a file already processed. */
+  confirmDuplicate?: boolean
 }
 
 const UPLOAD_FAILED_REASON = "Couldn't upload the file"
@@ -112,6 +114,8 @@ export interface BatchUpload {
   adopt: (file: File, estimate: Estimate | null) => void
   submit: (options: BatchSubmitOptions) => Promise<void>
   retryFailed: (options: BatchSubmitOptions) => Promise<void>
+  /** Re-send one row the server refused as already processed, confirmed. */
+  runAgain: (key: string, options: BatchSubmitOptions) => Promise<void>
   reset: () => void
 }
 
@@ -184,6 +188,13 @@ export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () 
     await sendAll(targets, batchId, options)
   }
 
+  const runAgain = async (key: string, options: BatchSubmitOptions) => {
+    const target = rows.find((r) => r.key === key)
+    if (!batchId || !target?.failure?.duplicate) return
+    patch(key, { state: 'waiting', failure: null })
+    await sendAll([target], batchId, { ...options, confirmDuplicate: true })
+  }
+
   const reset = () => {
     changeFiles(() => [])
     setPhase('edit')
@@ -203,6 +214,7 @@ export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () 
     adopt: (file, estimate) => changeFiles(() => [makeRow(file, nextKey(), estimate)]),
     submit,
     retryFailed,
+    runAgain,
     reset,
   }
 }

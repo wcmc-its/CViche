@@ -32,7 +32,17 @@ Two dimensions are hard-fail gates: a fatal pipeline error or a missing CV
 owner name caps the final score regardless of the other dimensions. A third
 gate -- protected personal data in the rendered docx (#820) -- caps the score
 the same way but carries NO weight (``CAP_ONLY_GATES``), so a clean run's raw
-score is unchanged by its existence.
+score is unchanged by its existence. A fourth, also cap-only, keeps a run in
+which a stage-4 extraction group failed outright out of GREEN (#1174). A
+fifth, also cap-only, does the same for a run in which the content-filter
+fallback model served a call (#1174).
+
+Three more cap-only gates (#822) cover source content the pipeline lost before
+the document was written, a thing no weighted dimension measures: an
+under-extracted entry, several fused entries, a lost source table. Each caps a
+run at ``CONTENT_LOSS_CAP``, just under GREEN, so a run with a verified loss
+cannot read "ship". They are the doctor's own signals, called rather than
+re-derived, restricted to the ones the IPXFBA batch hand-checked as real.
 
 The result also says what the score was computed *without*: ``data_complete``
 is False and ``missing_evidence`` names each scored artifact that was absent,
@@ -71,6 +81,8 @@ import logging
 import re
 import sys
 import zipfile
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -97,8 +109,19 @@ from unified_pipeline.core.template_boilerplate import (
     is_template_label_line,
     is_unanswered_prompt,
 )
+from unified_pipeline.doctor.lints.extraction import lint_under_extraction
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
 from unified_pipeline.doctor.shared import _cell_text, _docx_text, docx_body_blocks
+from unified_pipeline.llm_provenance import (
+    STAGE4_5_FALLBACK_CALLS_KEY,
+    STAGE4_ENTRY_FALLBACK_KEY,
+)
+from unified_pipeline.segmentation_regression import (
+    count_mega_entries,
+    find_lost_blocks,
+    iter_source_block_lines,
+)
+from unified_pipeline.stage4.error_codes import NO_MATCHING_EXTRACTION
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX, read_stage_errors
 
 logger = logging.getLogger(__name__)
@@ -456,6 +479,164 @@ def stage3b_fallback_ratio_exceeded(stage_3b_data: dict | None) -> tuple[bool, s
         f"entries_classified={stats.get('entries_classified')})")
 
 
+#: A run in which a stage-4 extraction group failed outright cannot score GREEN
+#: (#1174). The cap sits one point under the GREEN band, so the run reads
+#: YELLOW ("human cleanup needed") and the owner-facing "may need cleanup" flag
+#: (`cap` set) comes on. It is derived from BAND_GREEN so the two cannot drift.
+#: Deliberately NOT a graded cap by share of entries lost: nothing measured
+#: supports a threshold (see docs/RUN_DOCTOR_SCORING.md), and a run whose
+#: failed group the recovery pass rescued is flagged here too, because the
+#: rescued entries were read on a different prompt and can carry wrong values.
+STAGE4_GROUP_FAILURE_CAP = BAND_GREEN - 1
+
+
+@dataclass(frozen=True)
+class Stage4GroupFailures:
+    """What stage 4 recorded about taxonomy groups whose extraction call failed.
+
+    ``failed_batches`` is stage 4's own ``stats.failed_batches`` (batches with
+    at least one failed group); the entry counts come from the entries'
+    ``extraction_error``. ``stats.extraction_failed`` is not used: it counts
+    entries still unextracted AFTER the recovery pass, so it reads 0 when every
+    entry of a failed group was rescued.
+    """
+
+    failed_batches: int
+    entries_failed: int
+    entries_rescued: int
+    entries_by_code: dict[str, int]
+    errors: dict[str, int]
+
+    @property
+    def entries_unrecovered(self) -> int:
+        return self.entries_failed - self.entries_rescued
+
+    def summary(self) -> str:
+        codes = ",".join(f"{code}:{n}" for code, n in self.entries_by_code.items())
+        errors = ",".join(f"{error}:{n}" for error, n in self.errors.items())
+        return (
+            f"failed_batches={self.failed_batches}; entries_failed={self.entries_failed} "
+            f"(rescued={self.entries_rescued}, unrecovered={self.entries_unrecovered}); "
+            f"taxonomy_codes={codes or 'none'}; errors={errors or 'none'}")
+
+
+def _is_group_failure(entry: object) -> bool:
+    """Whether the entry carries the error of a failed extraction-group call.
+
+    Every `extraction_error` except NO_MATCHING_EXTRACTION counts, not an
+    allowlist of today's three codes: a code stage 4 adds later is then counted
+    rather than silently missed, which is the gap this gate closes."""
+    if not isinstance(entry, dict):
+        return False
+    error = entry.get("extraction_error")
+    return bool(error) and error != NO_MATCHING_EXTRACTION
+
+
+def _failed_batch_count(stage_4_data: dict) -> int:
+    stats = stage_4_data.get("stats")
+    count = stats.get("failed_batches") if isinstance(stats, dict) else 0
+    return count if isinstance(count, int) and count > 0 else 0
+
+
+def stage4_group_failures(stage_4_data: dict | None) -> Stage4GroupFailures | None:
+    """The failed extraction groups recorded in a stage-4 artifact, or None
+    when it records none (or the artifact is absent or not the expected shape).
+
+    A group's call failing (an invalid reply, a timeout, a provider error such
+    as a content filter) leaves ``extraction_error`` on every entry of the
+    group. The recovery pass then retries those entries; one it fills in gains
+    ``extraction_success=True`` and KEEPS its ``extraction_error``, so
+    ``extraction_success`` alone cannot tell a rescued entry from one that was
+    never touched (#1174: a rescued group read as a clean run). Never raises on
+    a malformed artifact.
+
+    The single source both `score_stage4_group_failures` (the cap) and the
+    doctor's `stage4_group_failures` lint read, so the two cannot disagree
+    about what counts (§1.5)."""
+    if not isinstance(stage_4_data, dict):
+        return None
+    entries = stage_4_data.get("entries")
+    failed = [e for e in entries if _is_group_failure(e)] if isinstance(entries, list) else []
+    failed_batches = _failed_batch_count(stage_4_data)
+    if not failed and not failed_batches:
+        return None
+    return Stage4GroupFailures(
+        failed_batches=failed_batches,
+        entries_failed=len(failed),
+        entries_rescued=sum(1 for e in failed if e.get("extraction_success")),
+        entries_by_code=dict(sorted(
+            Counter(str(e.get("taxonomy_code") or "?") for e in failed).items())),
+        errors=dict(sorted(Counter(str(e["extraction_error"]) for e in failed).items())),
+    )
+
+
+#: A run in which the content-filter fallback model served a call cannot score
+#: GREEN (#1174). Same value as STAGE4_GROUP_FAILURE_CAP and for the same
+#: reason: the run reads YELLOW and the owner-facing "may need cleanup" flag
+#: comes on. The call itself succeeded, so this is deliberately not RED; the
+#: cap says the output of that call came from a model the stage was not tuned
+#: on, nothing more. Derived from BAND_GREEN so the two cannot drift.
+FALLBACK_SERVED_CAP = BAND_GREEN - 1
+
+#: Filename suffix of the stage-4.5 artifact the fallback gate reads. The score
+#: collectors (`scripts/score_one.py`, `quality_score_service`) select
+#: artifacts by suffix, so they import this rather than spell it.
+RESEARCH_SUMMARY_SUFFIX = "_research_summary.json"
+
+#: How a stage-4.5 call is named as a section in a finding.
+_STAGE4_5_SECTION = "research summary"
+
+
+@dataclass(frozen=True)
+class FallbackServedCall:
+    """One section whose LLM call the content-filter fallback served.
+
+    ``count`` is the entries of a stage-4 taxonomy group, or 1 for a stage-4.5
+    call; ``section`` is the taxonomy code, or "research summary (<call>)".
+    """
+
+    stage: str
+    section: str
+    model: str
+    count: int
+
+    def describe(self) -> str:
+        unit = "entries" if self.stage == "4" else "call"
+        return f"stage {self.stage} {self.section} on {self.model} ({self.count} {unit})"
+
+
+def _stage4_fallback_served(stage_4_data: object) -> list[FallbackServedCall]:
+    entries = stage_4_data.get("entries") if isinstance(stage_4_data, dict) else None
+    served = Counter(
+        (str(e.get("taxonomy_code") or "?"), str(e[STAGE4_ENTRY_FALLBACK_KEY]))
+        for e in entries or [] if isinstance(e, dict) and e.get(STAGE4_ENTRY_FALLBACK_KEY))
+    return [FallbackServedCall("4", code, model, n) for (code, model), n in sorted(served.items())]
+
+
+def _stage4_5_fallback_served(stage_4_5_data: object) -> list[FallbackServedCall]:
+    calls = stage_4_5_data.get(STAGE4_5_FALLBACK_CALLS_KEY) if isinstance(stage_4_5_data, dict) else None
+    return [
+        FallbackServedCall("4.5", f"{_STAGE4_5_SECTION} ({c.get('call')})", str(c.get("model")), 1)
+        for c in calls or [] if isinstance(c, dict) and c.get("model")]
+
+
+def llm_fallback_served(stage_4_data: dict | None,
+                        stage_4_5_data: dict | None) -> list[FallbackServedCall]:
+    """The sections whose call the content-filter fallback served, as stages 4
+    and 4.5 recorded them (#1174); empty when none, or when the artifacts are
+    absent, from before the record existed, or not the expected shape. Never
+    raises on a malformed artifact.
+
+    A served call is a SUCCESS, so no error marker records it: stage 4 stamps
+    ``llm_fallback_model`` on the entries of the taxonomy group the fallback
+    answered, stage 4.5 lists the calls under ``llm_fallback_calls``. Stage 2,
+    3b, 5d and 6 calls are not recorded.
+
+    The single source both `score_llm_fallback_served` (the cap) and the
+    doctor's `llm_fallback_served` lint read (§1.5)."""
+    return _stage4_fallback_served(stage_4_data) + _stage4_5_fallback_served(stage_4_5_data)
+
+
 # ---------------------------------------------------------------------------
 # Dimension scorers  -- each returns (penalty_fraction, detail, hard_fail_cap)
 # ---------------------------------------------------------------------------
@@ -567,12 +748,15 @@ _CONTACT_KEY_RE = re.compile(
 # block is empty labels is an input gap, not an extraction miss, and is not
 # penalized. The phone shape is a standalone token so DOIs, PMIDs and grant
 # numbers (which carry 3-3-4 digit runs inside "/" or "." tokens) don't match.
+# The area code needs its own separator (or parentheses): a six-digit
+# certification number followed by a year ("#123456 2005") is not a
+# phone number, and without that rule it read as one (#822, batch IPXFBA).
 # ponytail: email/phone only; a source whose ONLY contact is a postal address
 # (2 of the 126 corpus CVs) reads as blank, so a missed address goes
 # unpenalized. Add an address shape if that case shows up as a miss.
 _SOURCE_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _SOURCE_PHONE_RE = re.compile(
-    r"(?<![\w/.\-])(?:\+\d{1,3}[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]?\d{3}[ .-]\d{4}(?!\d)")
+    r"(?<![\w/.\-])(?:\+\d{1,3}[ .-]?)?(?:\(\d{3}\)[ .-]?|\d{3}[ .-])\d{3}[ .-]\d{4}(?!\d)")
 
 
 def _source_has_contact(outputs_dir: Path) -> bool | None:
@@ -646,6 +830,104 @@ def score_protected_data(outputs_dir: Path) -> tuple[float, str, int | None]:
     if hits:
         return 1.0, f"protected_data_hits={hits}; hard-fail cap={PROTECTED_DATA_CAP}", PROTECTED_DATA_CAP
     return 0.0, "protected_data_hits=0", None
+
+
+#: The cap the content-loss gates apply (#822): one point under GREEN, so a run
+#: with a verified loss cannot read "ship" but is not pushed toward RED -- none
+#: of these signals says the document is undeliverable, only that source
+#: content did not reach it. Derived from BAND_GREEN so the two cannot drift.
+#: Not shared with `STAGE4_GROUP_FAILURE_CAP` (#1174): that is a separate
+#: policy for a separate signal that happens to land on the same value, and
+#: retuning one should not silently move the other.
+CONTENT_LOSS_CAP = BAND_GREEN - 1
+
+#: Fused entries cap a run only at this count. One fused entry is common and
+#: can be harmless (batch IPXFBA: CTXOTY's single fused entry kept every
+#: mentee); the runs that lost records had several (EKGTXD 4, PBSGQZ 3 flagged).
+#: A threshold fitted to one batch: revisit with more data.
+MEGA_ENTRIES_CAP_MIN = 2
+
+#: A lost source table caps a run only when its worst table lost this many
+#: lines. The doctor's own `table_lost` floor is 3 lines, and the short lost
+#: tables the corpus shows are template labels (#1102's noise class); the one
+#: loss verified in batch IPXFBA (TALVAE) was far larger. Fitted to one batch.
+LOST_TABLE_CAP_MIN_LINES = 5
+
+#: Subdirectory of the scored directory that holds the run's original uploaded
+#: .docx. Optional: `score_lost_source_table` reads the source to find tables
+#: that never reached stage 2, and is simply not evaluated without it.
+SOURCE_DOCX_SUBDIR = "source"
+
+
+def score_under_extracted_records(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: a large multi-record entry whose stage-4 extraction covered
+    under 40% of it, so its other records vanish (#822). The doctor's
+    `under_extraction` lint, called as is. In batch IPXFBA its 4 findings were
+    all true positives, but only 2 lost records outright (MYAXRH, ZGNARO); the
+    other 2 (EKGTXD) were garbled or recovered by stage 6, and that run's lost
+    records reach the cap through the fused-entries gate. All 3 runs carrying a
+    finding had verified loss somewhere. Outside IPXFBA a finding can fire with
+    nothing lost; any finding still caps (a judgement call)."""
+    data, reason = _load_first(outputs_dir, "*_fields.json")
+    if data is None:
+        return 0.0, f"{_missing_or_unreadable_detail('fields.json', reason)}; not evaluated", None
+    findings = len(lint_under_extraction(data))
+    if findings:
+        return 1.0, f"under_extraction_findings={findings}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
+    return 0.0, "under_extraction_findings=0", None
+
+
+def score_fused_entries(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: stage 2 fused several records into one entry, in
+    MEGA_ENTRIES_CAP_MIN or more entries (#822). Counted by the same function
+    as the doctor's `mega_entries` flag; 7 of the 9 flagged entries in batch
+    IPXFBA were real, which is why the cap needs a count and not one entry."""
+    data, reason = _load_first(outputs_dir, "*_entries.json")
+    if data is None:
+        return 0.0, f"{_missing_or_unreadable_detail('entries.json', reason)}; not evaluated", None
+    fused = count_mega_entries(data.get("entries", []))
+    if fused >= MEGA_ENTRIES_CAP_MIN:
+        return 1.0, f"mega_entries={fused}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
+    return 0.0, f"mega_entries={fused}", None
+
+
+def _source_block_lines(outputs_dir: Path) -> list[tuple[int, str]] | None:
+    """The source docx's lines tagged by table, or None when no usable source
+    was supplied under SOURCE_DOCX_SUBDIR (absent, ambiguous or unreadable)."""
+    from docx.opc.exceptions import PackageNotFoundError
+    from lxml.etree import XMLSyntaxError
+
+    candidates = sorted((outputs_dir / SOURCE_DOCX_SUBDIR).glob("*.docx"))
+    if len(candidates) != 1:
+        if candidates:
+            logger.warning("quality_score found multiple source docx in %s: %s",
+                           outputs_dir, ", ".join(c.name for c in candidates))
+        return None
+    try:
+        return iter_source_block_lines(str(candidates[0]))
+    except (OSError, zipfile.BadZipFile, KeyError, ValueError, PackageNotFoundError,
+            XMLSyntaxError) as e:
+        logger.warning("quality_score could not read source docx %s (%s: %s)",
+                       candidates[0], type(e).__name__, e)
+        return None
+
+
+def score_lost_source_table(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: a source table whose text stage 2 mostly lost, at
+    LOST_TABLE_CAP_MIN_LINES or more lost lines (#822). The primitive behind the
+    doctor's `table_lost` lint. Needs the source docx (SOURCE_DOCX_SUBDIR): the
+    scorer's other artifacts cannot show a table the reader never saw (TALVAE,
+    batch IPXFBA: a 39-line nested table, the one verified `table_lost`)."""
+    data, reason = _load_first(outputs_dir, "*_entries.json")
+    if data is None:
+        return 0.0, f"{_missing_or_unreadable_detail('entries.json', reason)}; not evaluated", None
+    block_lines = _source_block_lines(outputs_dir)
+    if block_lines is None:
+        return 0.0, "no readable source docx; not evaluated", None
+    worst = max((len(b["lost_lines"]) for b in find_lost_blocks(block_lines, data)), default=0)
+    if worst >= LOST_TABLE_CAP_MIN_LINES:
+        return 1.0, f"worst_lost_table_lines={worst}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
+    return 0.0, f"worst_lost_table_lines={worst}", None
 
 
 #: Same cell split as `core.template_boilerplate._LABEL_PIECE_SPLIT_RE`: a
@@ -1252,6 +1534,34 @@ def score_stage3b_fallback_ratio(outputs_dir: Path) -> tuple[float, str, int | N
         else "within threshold", None
 
 
+def score_stage4_group_failures(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Stage 4's failed extraction groups (#1174): a cap-only gate like
+    `score_protected_data`, NOT a scored dimension -- it carries no weight, so
+    a run without a failed group scores exactly what it did before the gate
+    existed. A missing or unreadable ``*_fields.json`` is quiet here: the
+    owner and sparseness dimensions already penalise that absence in full."""
+    data, reason = _load_first(outputs_dir, "*_fields.json")
+    failures = stage4_group_failures(data)
+    if failures is not None:
+        return 1.0, failures.summary(), STAGE4_GROUP_FAILURE_CAP
+    if data is None:
+        return 0.0, _missing_or_unreadable_detail("fields.json", reason), None
+    return 0.0, "no failed extraction group", None
+
+
+def score_llm_fallback_served(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """A call the content-filter fallback served (#1174): a cap-only gate like
+    `score_stage4_group_failures`, weight 0, so a run without one scores exactly
+    what it did before the gate existed. A missing or unreadable artifact is
+    quiet here: the dimensions that read it already penalise its absence."""
+    stage_4, _ = _load_first(outputs_dir, "*_fields.json")
+    stage_4_5, _ = _load_first(outputs_dir, f"*{RESEARCH_SUMMARY_SUFFIX}")
+    served = llm_fallback_served(stage_4, stage_4_5)
+    if not served:
+        return 0.0, "no call served by the fallback model", None
+    return 1.0, "; ".join(call.describe() for call in served), FALLBACK_SERVED_CAP
+
+
 # ---------------------------------------------------------------------------
 # Dimension registry  -- single source of truth (name, weight, scorer fn)
 # ---------------------------------------------------------------------------
@@ -1277,8 +1587,28 @@ PROTECTED_DATA_CAP = 25
 #: are exactly what they were before the gate existed -- a batch scored
 #: last month is still comparable to one scored today. Same (fraction,
 #: detail, cap) contract as a dimension scorer; only the cap is read.
+#:
+#: ORDER MATTERS for the caps that sit at the same value (84): the run
+#: page's "why is this capped" pointer (`run_quality_report.cap_source`) names
+#: the FIRST flag at the binding cap, and flags are written in this order. They
+#: are listed most specific first: the lost-table gate measures the loss against
+#: the delivered docx; the fused-entries gate counts records swallowed in the
+#: extraction (7 of 9 flagged entries real); the under-extraction gate fires on
+#: any finding, including ones that lost nothing; the stage-4 gate (#1174)
+#: reports that a call failed and was retried and measures no loss. So a run
+#: that trips several is pointed at the signal most likely to name what it
+#: actually lost (batch IPXFBA: EKGTXD fires under-extraction and fused, and
+#: PBSGQZ fires fused and stage-4; the verified loss in both is the fused entry).
+#: The fallback-served gate (#1174) is LAST: it records only that a backup model
+#: answered, measures no loss, and every other gate names something concrete.
 CAP_ONLY_GATES = [
     ("Protected personal data absent from rendered docx (HARD-FAIL gate)", score_protected_data),
+    ("Source table lost before extraction (CAP-ONLY gate)", score_lost_source_table),
+    ("Source records fused: several entries swallowed multiple records (CAP-ONLY gate)",
+     score_fused_entries),
+    ("Source records lost: entry under-extracted (CAP-ONLY gate)", score_under_extracted_records),
+    ("Stage-4 extraction group failed (caps below GREEN)", score_stage4_group_failures),
+    ("Call served by the content-filter fallback model (caps below GREEN)", score_llm_fallback_served),
 ]
 
 

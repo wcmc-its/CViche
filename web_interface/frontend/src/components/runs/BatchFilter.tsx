@@ -47,10 +47,12 @@ interface BatchFilterComboProps {
   batchId: string
   currentUserId: number | undefined
   onPick: (batchId: string) => void
+  /** Fill the width of the parent (inside the narrow-screen Filters panel). */
+  fullWidth?: boolean
 }
 
 /** The "Batch" filter beside Department, Faculty and Run by; shown to anyone with a batch. */
-export function BatchFilterCombo({ batches, batchId, currentUserId, onPick }: BatchFilterComboProps) {
+export function BatchFilterCombo({ batches, batchId, currentUserId, onPick, fullWidth }: BatchFilterComboProps) {
   const selected = batches.find((b) => b.id === batchId)
   return (
     <RunFilterCombo
@@ -59,6 +61,7 @@ export function BatchFilterCombo({ batches, batchId, currentUserId, onPick }: Ba
       activeId={batchId}
       placeholder="Search batches"
       model={buildBatchModel(batches, currentUserId)}
+      fullWidth={fullWidth}
       onPick={onPick}
     />
   )

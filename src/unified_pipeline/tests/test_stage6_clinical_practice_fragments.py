@@ -314,6 +314,64 @@ def test_second_entry_renders_after_the_first_not_inside_it(code, filler, header
     ]
 
 
+# --- (a1) L3 `unit_program`: the unit the role led reaches the bullet -------
+
+def test_l3_bullet_names_the_unit_program_between_role_and_institution():
+    """`unit_program` is an `extract: true` L3 field no writer read: two roles at
+    one hospital rendered as the same role/hospital/dates bullet with the unit
+    each led dropped. It now sits between the role and the institution."""
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Medical Director", leadership_role="Medical Director",
+                unit_program="Kestrel Step-Down Unit", institution="Harrowgate Hospital",
+                start_date="2015", end_date="2020")],
+    )
+    assert gen.stats["tables_populated"] == 0, "L3 took the table branch"
+    assert added == ["", "Medical Director, Kestrel Step-Down Unit, Harrowgate Hospital, 2015-2020"]
+
+
+def test_l3_unit_program_stands_in_for_a_missing_institution():
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Medical Director", leadership_role="Medical Director",
+                unit_program="Kestrel Step-Down Unit", start_date="2015", end_date="2020")],
+    )
+    assert added == ["", "Medical Director, Kestrel Step-Down Unit, 2015-2020"]
+
+
+def test_l3_unit_program_the_role_already_names_is_not_repeated():
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Director, Kestrel Step-Down Unit", leadership_role="Director, Kestrel Step-Down Unit",
+                unit_program="Kestrel Step-Down Unit", institution="Harrowgate Hospital",
+                start_date="2015", end_date="2020")],
+    )
+    assert added == ["", "Director, Kestrel Step-Down Unit, Harrowgate Hospital, 2015-2020"]
+
+
+def test_l3_unit_program_the_institution_already_names_is_not_repeated():
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Medical Director", leadership_role="Medical Director",
+                unit_program="Kestrel Step-Down Unit",
+                institution="Kestrel Step-Down Unit, Harrowgate Hospital",
+                start_date="2015", end_date="2020")],
+    )
+    assert added == ["", "Medical Director, Kestrel Step-Down Unit, Harrowgate Hospital, 2015-2020"]
+
+
+def test_l3_unit_program_is_not_rendered_again_as_a_source_fragment():
+    """The unit is in the composed bullet, so the same unit flattened out of
+    the source row after the role is not appended as its own bullet."""
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Medical Director\tKestrel Step-Down Unit\tHarrowgate Hospital\t2015-2020",
+                unit_program="Kestrel Step-Down Unit", institution="Harrowgate Hospital",
+                start_date="2015", end_date="2020")],
+    )
+    assert added == ["", "Medical Director, Kestrel Step-Down Unit, Harrowgate Hospital, 2015-2020"]
+
+
 # --- (a2) the overflow router: does the split make stage 6 render it twice? --
 
 def _low_coverage_entry(text, code):

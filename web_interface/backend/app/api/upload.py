@@ -35,11 +35,13 @@ from app.services.config_service import (
     ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
     get_estimated_run_cost, get_estimate_model_name,
 )
-from app.errors import bad_request, internal_error
+from app.services.run_service import latest_run_with_hash
+from app.errors import bad_request, duplicate_file, internal_error
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
 from app.services.batch_service import MAX_BATCH_FILES, get_owned_batch
 from app.services.run_service import UPLOAD_DIR
+from app.services.input_format import detect_input_format_or_none
 from app.services.template_warning import detect_wcm_template
 from app.services.pdf_sandbox import (
     PDF_BUSY_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, PDF_UNREADABLE_MESSAGE, EncryptedPdfError,
@@ -50,6 +52,8 @@ logger = logging.getLogger(__name__)
 ZIP_MAGIC = b"PK\x03\x04"
 PDF_MAGIC = b"%PDF-"
 PDF_EXTENSION = ".pdf"
+# How the duplicate notice words the date a file was last processed.
+DUPLICATE_DATE_FORMAT = "%B %-d, %Y"
 
 # Extensions the upload API accepts, matching the frontend's guard
 # (UploadPage.tsx's processFile). A PDF is stored and archived as-is; the
@@ -557,6 +561,46 @@ def commit_run_or_compensate(
         )
 
 
+def _reject_unconfirmed_duplicate(db: Session, sha256: str, user: User) -> None:
+    """Stop with a 409 when any run (any submitter) already holds this file's hash.
+
+    Non-admins get only the date; the run id goes to admins and to the run's own
+    submitter, never anyone else's. Raised before anything is archived or charged."""
+    latest = latest_run_with_hash(db, sha256)
+    if latest is None:
+        return
+    processed_on = latest.started_at.strftime(DUPLICATE_DATE_FORMAT)
+    can_see_run = user.role == "admin" or latest.user_id == user.id
+    raise duplicate_file(
+        f"This file was already processed on {processed_on}. Run it again?",
+        processed_on,
+        latest.id if can_see_run else None,
+    )
+
+
+def _archive_or_502(
+    content: bytes,
+    file_ext: str,
+    build_manifest: Callable[[str, str], bytes],
+    write_local: Callable[[Path], None],
+) -> tuple[str, str, Path, bytes]:
+    """create_run_archive, with a storage failure turned into the 502 that creates no run (#170)."""
+    try:
+        return create_run_archive(content, file_ext, build_manifest, write_local)
+    except Exception as e:
+        logger.error("Durable archive of upload failed; aborting upload: %s", e)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "storage_unavailable",
+                "message": (
+                    "We couldn't store your file securely, so no run was created. "
+                    "Please try again in a moment."
+                ),
+            },
+        )
+
+
 def _add_pending_steps(db: Session, run_id: str) -> None:
     """Stage one pending Step row per STEP_REGISTRY entry for a new run."""
     for step_def in STEP_REGISTRY:
@@ -587,6 +631,8 @@ async def upload_cv(
     # The batch this file belongs to (#1114), from POST /batches. Optional:
     # absent, the run is a single upload exactly as before.
     batch_id: str | None = Form(None),
+    # Set by the UI after the user agrees to re-process a file already run (#1286).
+    confirm_duplicate: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -634,6 +680,11 @@ async def upload_cv(
         logger.warning("[SECURITY] Rejected upload: file claims .docx but magic bytes do not match (user=%s)", current_user.email)
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
 
+    # Same bytes already run by anyone? Ask first (nothing archived or charged yet).
+    source_sha256 = hashlib.sha256(content).hexdigest()
+    if not confirm_duplicate:
+        _reject_unconfirmed_duplicate(db, source_sha256, current_user)
+
     # Reject documents we can't read (scanned images, password-protected, blank).
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
@@ -662,6 +713,12 @@ async def upload_cv(
             current_user.email, wcm_template_match_ratio,
         )
 
+    # Was this CV written in the WCM template (filled in) or another format?
+    # Recorded on the run for score comparisons; best-effort, NULL on failure.
+    input_format, input_format_score = await run_in_threadpool(
+        detect_input_format_or_none, extracted
+    )
+
     # Allocate a fresh run id and durably archive the ORIGINAL upload to the
     # run's storage namespace BEFORE creating the run record. The pod-local
     # copy is ephemeral (lost on a pod recycle), so the archive is the run's
@@ -681,7 +738,7 @@ async def upload_cv(
             "stored_as": stored_name,
             "file_type": file_ext[1:],
             "size_bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
+            "sha256": source_sha256,
             "content_type": file.content_type,
             "uploaded_at": datetime.now().isoformat(),
             "user_email": current_user.email,
@@ -691,22 +748,9 @@ async def upload_cv(
         with open(path, "xb") as f:
             f.write(content)
 
-    try:
-        run_id, stored_name, file_path, manifest = create_run_archive(
-            content, file_ext, _build_manifest, _write_local,
-        )
-    except Exception as e:
-        logger.error("Durable archive of upload failed; aborting upload: %s", e)
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": "storage_unavailable",
-                "message": (
-                    "We couldn't store your file securely, so no run was created. "
-                    "Please try again in a moment."
-                ),
-            },
-        )
+    run_id, stored_name, file_path, manifest = _archive_or_502(
+        content, file_ext, _build_manifest, _write_local,
+    )
     storage = get_storage()
 
     # Cross-run, browsable-by-submitter index: the same manifest keyed under the
@@ -744,6 +788,9 @@ async def upload_cv(
         show_pipeline_comments=1 if include_classification_comments else 0,
         strip_template_instructions=1 if strip_wcm_instructions else 0,
         batch_id=batch_id,
+        input_format=input_format,
+        input_format_score=input_format_score,
+        source_sha256=source_sha256,
     )
     db.add(run)
     _add_pending_steps(db, run_id)

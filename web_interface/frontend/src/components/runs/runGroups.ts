@@ -6,6 +6,7 @@ export type SortDir = 'asc' | 'desc'
 
 export const OWNER_UNKNOWN_LABEL = 'Owner not yet identified'
 export const SELF_RUN_BY_LABEL = 'Faculty themselves'
+export const ON_BEHALF_RUN_BY_LABEL = 'On their behalf'
 
 /** One row of the table: the latest run of a faculty member plus their earlier reruns. */
 export interface RunGroup {

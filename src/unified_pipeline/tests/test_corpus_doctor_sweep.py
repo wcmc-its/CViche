@@ -397,16 +397,20 @@ def test_skip_detection_matches_what_run_doctor_actually_emits(tmp_path):
     cli = _load_cli()
     rep = run_doctor(tmp_path, "aaa111")
 
-    real_lints = set(cli.ALL_LINTS) - {"no_output"}
+    # stage_failure_recorded (#1174) is the other exception: no stage-error
+    # record is the normal clean case, read as an empty list, so it runs on
+    # every root and never skips.
+    real_lints = set(cli.ALL_LINTS) - {"no_output", "stage_failure_recorded"}
     assert {f["lint"] for f in rep["findings"]} == real_lints, (
-        "every registered lint but no_output must skip on an empty root")
+        "every registered lint but no_output and stage_failure_recorded "
+        "must skip on an empty root")
     assert {f["severity"] for f in rep["findings"]} == {"INFO"}
     assert {f["status"] for f in rep["findings"]} == {STATUS_SKIPPED}, (
         "every skip must carry the status aggregate() reads")
     assert rep["artifacts"]["stage_4"] is None, "an empty root never reached stage 4"
 
     rows = cli.aggregate({"r1": rep})
-    expected_ran = {lint: 0 for lint in cli.ALL_LINTS}
+    expected_ran = {lint: 0 for lint in cli.ALL_LINTS} | {"stage_failure_recorded": 1}
     assert {r["lint"]: r["cvs_ran"] for r in rows} == expected_ran, (
         "a skipped lint -- and no_output on a run that never reached stage 4 "
         "-- must not count as having run")

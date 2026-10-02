@@ -68,7 +68,7 @@ const faqs: { q: string; a: React.ReactNode }[] = [
     a: (
       <>
         Yes. Upload the same file again from the main page. Each upload creates a new run. Your previous runs
-        are saved in the run history table below the upload area.
+        are saved on the Runs page.
       </>
     ),
   },
@@ -219,7 +219,7 @@ export default function HelpPage() {
               <div className="space-y-3">
                 <p>
                   When processing completes, you will receive a Word document (.docx) formatted in the WCM institutional
-                  CV template. Download this file from the Output Files section of your run page.
+                  CV template. Download this file from the Download card on the run page.
                 </p>
                 <p>
                   The CV Insights panel shows a summary of what CViche extracted: number of publications found, sections

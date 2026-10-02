@@ -41,6 +41,7 @@ export function formatDuration(seconds: number | null): string {
 }
 
 const MINUTES_PER_HOUR = 60
+const SECONDS_PER_MINUTE = 60
 
 /**
  * Format a wait or processing time in minutes, rounded: "25 min", "2 h", "2 h 5 m".
@@ -51,6 +52,18 @@ export function formatMinutes(minutes: number): string {
   const rest = total % MINUTES_PER_HOUR
   if (!hours) return `${rest} min`
   return rest ? `${hours} h ${rest} m` : `${hours} h`
+}
+
+/**
+ * "about 3 min left" for a running run: the estimate minus the time already run, rounded up to a
+ * minute. null when the estimate is unknown or already used up, so the caller hides it rather than
+ * showing a negative or stale figure.
+ */
+export function formatTimeLeft(estimatedSeconds: number | null | undefined, elapsedSeconds: number): string | null {
+  if (!estimatedSeconds || estimatedSeconds <= 0) return null
+  const remaining = estimatedSeconds - elapsedSeconds
+  if (remaining <= 0) return null
+  return `about ${formatMinutes(Math.ceil(remaining / SECONDS_PER_MINUTE))} left`
 }
 
 /**

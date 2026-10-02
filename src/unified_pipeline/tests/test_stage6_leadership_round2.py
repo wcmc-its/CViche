@@ -487,6 +487,71 @@ class TestInstitutionReachesTheMultilineRows:
             "Member, Gamma Panel (Member)"]
 
 
+
+def _o_entry(**fields):
+    return {"text": fields.get("leadership_role", ""), "taxonomy_code": "O",
+            "extracted_fields": {"start_date": "2012", "end_date": "2018", **fields}}
+
+
+_O_DATES = format_date_range("2012", "2018", "O")
+
+
+class TestDivisionDepartmentReachesTheInstitutionCell:
+    """Stage 4 fills `division_department` on O entries, and the writer read it
+    only when the institution was empty, so the program or division that told
+    one leadership row from the next was dropped in the normal case."""
+
+    def test_division_is_written_before_the_institution(self):
+        rows = _o_rows(_o_entry(leadership_role="Program Director",
+                                division_department="Zorblax Outcomes Program",
+                                institution="Quuxville General Hospital"))
+        assert rows == [("Program Director", "Zorblax Outcomes Program, Quuxville General Hospital",
+                         _O_DATES)]
+
+    def test_division_alone_still_fills_an_empty_institution(self):
+        rows = _o_rows(_o_entry(leadership_role="Program Director",
+                                division_department="Zorblax Outcomes Program"))
+        assert rows == [("Program Director", "Zorblax Outcomes Program", _O_DATES)]
+
+    def test_division_the_role_already_names_is_not_repeated(self):
+        rows = _o_rows(_o_entry(leadership_role="Director, Zorblax Outcomes Program",
+                                division_department="Zorblax Outcomes Program",
+                                institution="Quuxville General Hospital"))
+        assert rows == [("Director, Zorblax Outcomes Program", "Quuxville General Hospital", _O_DATES)]
+
+    def test_division_the_institution_already_names_is_not_repeated(self):
+        rows = _o_rows(_o_entry(leadership_role="Chief",
+                                division_department="Zorblax Division",
+                                institution="Zorblax Division, Quuxville General Hospital"))
+        assert rows == [("Chief", "Zorblax Division, Quuxville General Hospital", _O_DATES)]
+
+    def test_a_division_differing_only_in_case_is_not_repeated(self):
+        rows = _o_rows(_o_entry(leadership_role="Chief, Zorblax Division",
+                                division_department="zorblax division",
+                                institution="Quuxville General Hospital"))
+        assert rows == [("Chief, Zorblax Division", "Quuxville General Hospital", _O_DATES)]
+
+    def test_function_words_do_not_make_a_division_new(self):
+        # "Division of Zorblax" says nothing "Chief, Zorblax Division" does not.
+        rows = _o_rows(_o_entry(leadership_role="Chief, Zorblax Division",
+                                division_department="Division of Zorblax",
+                                institution="Quuxville General Hospital"))
+        assert rows == [("Chief, Zorblax Division", "Quuxville General Hospital", _O_DATES)]
+
+    def test_one_new_word_keeps_the_division(self):
+        rows = _o_rows(_o_entry(leadership_role="Chief, Zorblax Division",
+                                division_department="Pediatric Zorblax Division",
+                                institution="Quuxville General Hospital"))
+        assert rows == [("Chief, Zorblax Division",
+                         "Pediatric Zorblax Division, Quuxville General Hospital", _O_DATES)]
+
+    def test_structured_institution_is_written_as_text_not_a_repr(self):
+        rows = _o_rows(_o_entry(leadership_role="Program Director",
+                                division_department="Zorblax Outcomes Program",
+                                institution={"name": "Quuxville General Hospital"}))
+        assert rows == [("Program Director", "Zorblax Outcomes Program, Quuxville General Hospital",
+                         _O_DATES)]
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
