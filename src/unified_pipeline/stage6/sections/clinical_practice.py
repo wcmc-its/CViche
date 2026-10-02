@@ -176,6 +176,25 @@ def _fragment_is_new(fragment: str, composed: str) -> bool:
     return not any(composed_words[i:i + span] == words
                    for i in range(len(composed_words) - span + 1))
 
+
+def _with_unit_program(institution: str, unit_program: str, role: str) -> str:
+    """The L3 place text: the unit or program the role led, then the
+    institution it sits in ("Unit, Institution").
+
+    `unit_program` is an `extract: true` L3 field that no writer read, so a CV
+    with several leadership roles at one hospital rendered several rows that
+    named the role, the hospital and the dates but not the unit each role led.
+    The unit goes in front of the institution because it is the narrower of
+    the two, the same order Section O writes a division in. It is left out
+    when the role and institution already say it (`_fragment_is_new`), so a
+    role such as "Director, Wound Care Program" does not repeat its program.
+    """
+    if not unit_program or not _fragment_is_new(unit_program, f"{role} {institution}"):
+        return institution
+    if not institution:
+        return unit_program
+    return f"{unit_program}, {institution}"
+
 # Section L taxonomy codes (docs/CODING_STANDARDS.md §8.2): L1 Clinical
 # Practice, L2 Clinical Innovations, L3 Clinical Leadership.
 CLINICAL_TAXONOMY_CODES = ('L1', 'L2', 'L3')
@@ -554,6 +573,7 @@ class ClinicalPracticeSection:
                     institution = _committee_cell_text(
                         fields.get('institution') or fields.get('organization') or '')
                     description = _committee_cell_text(fields.get('description') or fields.get('program') or '')
+                    unit_program = _committee_cell_text(fields.get('unit_program'))
                     start_date = fields.get('start_date') or ''
                     end_date = fields.get('end_date') or ''
                     dates = format_date_range(start_date, end_date, 'L3') or ''
@@ -562,6 +582,7 @@ class ClinicalPracticeSection:
                         parts = original_text.split('|')
                         if len(parts) >= 1:
                             role = parts[0].strip()
+                    institution = _with_unit_program(institution, unit_program, role)
 
                     if role:
                         # Typical leadership table: Year(s) | Role | Description
@@ -608,6 +629,8 @@ class ClinicalPracticeSection:
                         role, _, role_remainder = original_text.partition('\t')
                         role = role.strip()
 
+                    institution = _with_unit_program(
+                        institution, _committee_cell_text(fields.get('unit_program')), role)
                     if role and institution and dates:
                         bullet_text = f"{role}, {institution}, {dates}"
                     elif role and dates:
