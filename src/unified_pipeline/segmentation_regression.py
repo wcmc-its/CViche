@@ -352,6 +352,27 @@ def _substantive(source_lines: list[str]) -> list[str]:
             and not _is_template_scaffolding(l)]
 
 
+def _scrubbed_as_stage2_read_it(line: str) -> str:
+    """`line` with the pre-LLM scrub applied to the form the pipeline scrubbed.
+
+    The doctor reads source lines with real tabs (`iter_source_lines`); the
+    pipeline's reader turns each tab into a space and the scrub ran on that.
+    A tab is a fragment boundary to the scrub, so a label followed by two or
+    more tabs is left untouched as read here (#1232, a date-of-birth label
+    with four tabs before its value). Scrub the space form instead. A line
+    the scrub does not change comes back as given, tabs and all, so the
+    evidence for an ordinary lost line is unchanged.
+
+    Mirrors only the per-line scrub. The pipeline also scrubs across table
+    cells and across lines (a bare label with its value in the next cell or
+    paragraph); none of the 163 corpus CVs differs on that, and a line that
+    scrub withholds but this one does not still reads as lost, never as
+    covered."""
+    flat = line.replace("\t", " ")
+    scrubbed = redact_pre_llm_values(flat)
+    return scrubbed if scrubbed != flat else line
+
+
 def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
     """The substantive lines no entry covers, stripped.
 
@@ -377,7 +398,8 @@ def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
     raw form is tried first, so an artifact from before the scrub, which holds
     the real value, still counts. Each lost line is returned in its scrubbed
     form, so the evidence a lint quotes never carries the value the scrub
-    withheld."""
+    withheld. The scrub is applied to the form the pipeline scrubbed (tabs as
+    spaces, see `_scrubbed_as_stage2_read_it`)."""
     entry_squash = [squash(e.get("text", "")) for e in entries]
     entry_tokens = [_tokens(e.get("text", "")) for e in entries]
     entry_seqs = [_token_list(e.get("text", "")) for e in entries]
@@ -397,7 +419,7 @@ def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
     for line in substantive:
         if _covered(line):
             continue
-        scrubbed = redact_pre_llm_values(line)
+        scrubbed = _scrubbed_as_stage2_read_it(line)
         if scrubbed != line and _covered(scrubbed):
             continue
         lost.append(scrubbed.strip())

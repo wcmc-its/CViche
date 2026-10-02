@@ -358,6 +358,55 @@ def test_scrubbed_dob_line_in_a_source_table_is_not_a_lost_block():
         [_DOB_SCRUBBED, _GRANT_B]]
 
 
+_DOB_TABBED = "Date of Birth:\t\t\t\tJanuary 2, 1970"
+
+
+def test_tab_separated_dob_line_is_covered_by_its_withheld_entry():
+    """#1232: the doctor reads source lines with real tabs, the pipeline
+    with spaces, and the scrub ran on the space form -- a tab is a fragment
+    boundary, so a label followed by two or more tabs is NOT scrubbed as read.
+    The line must still be covered by the entry that holds it withheld."""
+    stage2 = {"entries": [_entry(_DOB_SCRUBBED, start=1), _entry(_GRANT_A, start=2)]}
+    m = compute_metrics([_DOB_TABBED, _GRANT_A], _STAGE1A, stage2)
+    assert m["lost_lines"] == []
+    assert m["text_coverage_pct"] == 100.0
+
+
+def test_a_lost_tab_separated_dob_line_is_quoted_without_its_value():
+    """The evidence for a really lost label<tabs>value line is the form the
+    pipeline scrubbed, never the raw line that carries the date."""
+    m = compute_metrics([_DOB_TABBED, _GRANT_A], _STAGE1A,
+                        {"entries": [_entry(_GRANT_A, start=1)]})
+    assert len(m["lost_lines"]) == 1
+    assert "1970" not in m["lost_lines"][0]
+    assert "[withheld]" in m["lost_lines"][0]
+    assert not any("1970" in f for f in lint_metrics(m))
+
+
+def test_a_lost_line_the_scrub_leaves_alone_keeps_its_tabs():
+    """Only a line the scrub changes is returned flattened: a lost line with
+    tabs and no date is quoted verbatim, so a snapshot taken before this
+    change still compares equal on it."""
+    tabbed = "1984-1989\t\tB.S.\tExample University\t(Biology)"
+    m = compute_metrics([tabbed, _GRANT_A], _STAGE1A,
+                        {"entries": [_entry(_GRANT_A, start=1)]})
+    assert m["lost_lines"] == [tabbed]
+
+
+def test_tab_separated_dob_line_read_from_a_docx_is_covered(tmp_path):
+    """The wire: the tabs come from `iter_source_lines` reading a real docx
+    paragraph, not from a hand-built string."""
+    doc = Document()
+    doc.add_paragraph(_DOB_TABBED)
+    doc.add_paragraph(_GRANT_A)
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+    stage2 = {"entries": [_entry(_DOB_SCRUBBED, start=1), _entry(_GRANT_A, start=2)]}
+    m = compute_metrics(iter_source_lines(str(path)), _STAGE1A, stage2)
+    assert m["lost_lines"] == []
+    assert m["text_coverage_pct"] == 100.0
+
+
 def test_substantive_line_chars_boundary():
     """A source line of exactly SUBSTANTIVE_LINE_CHARS is substantive (and here
     lost); one char shorter is ignored by the coverage metric."""
