@@ -1105,3 +1105,23 @@ def test_every_written_cell_label_shape_still_routes_to_cell_phone(tmp_path, tex
     rows = _contact_rows(tmp_path, [_a(text, {"phone": "555-0100"})])
     assert rows["Cell phone:"] == "555-0100"
     assert rows["Office telephone:"] == ""
+
+
+def test_labelled_work_phone_outranks_an_earlier_unlabelled_phone(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Dr Example Doe\n1 Plain Street, Exampleton, ZZ 00000\n555-0101",
+           {"phone": "555-0101"}, idx=0),
+        _a("Primary Work Address:\t1 Sample Way\tExampleton, ZZ 00000\tPhone 555-0102",
+           {"phone": "555-0102", "address": "1 Sample Way, Exampleton, ZZ 00000"}, idx=1),
+    ])
+    assert rows["Office telephone:"] == "555-0102"
+    assert "1 Sample Way" in rows["Office address:"]
+
+
+def test_labelled_home_phone_never_fills_the_office_row(tmp_path):
+    text = _render(tmp_path, [
+        _a("Home Phone: 555-0199", {"phone": "555-0199"}, idx=0),
+        _a("Office Phone: 555-0102", {"phone": "555-0102"}, idx=1),
+    ])
+    assert "555-0102" in text
+    assert "555-0199" not in text

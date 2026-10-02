@@ -343,11 +343,12 @@ _CELL_KEYWORD_AS_LABEL_RE = re.compile(
     rf'|\d\)?[ ]*[-,;]?[ ]*{_CELL_KEYWORD}\b(?![ ]+[a-z])',
     re.IGNORECASE,
 )
-# A work-address label (#1222): office, work or business, then the word
-# "address" within the same label. A bare "work" or "business" elsewhere in
-# the entry (a "Work phone" line, "Business School") is not an address label.
-_WORK_ADDRESS_LABEL_RE = re.compile(
-    r'\b(?:office|work|business)\b[^\n:;]{0,25}\baddress\b', re.IGNORECASE)
+# A work-contact label (#1222): office, work or business, then "address" or a
+# phone word within the same label. A bare "work" or "business" elsewhere in
+# the entry ("Business School") is not a contact label.
+_WORK_CONTACT_LABEL_RE = re.compile(
+    r'\b(?:office|work|business)\b[^\n:;]{0,25}\b(?:address|phone|telephone|tel|number)\b',
+    re.IGNORECASE)
 # A number found in the text is the extracted one when the two digit strings
 # agree once a country prefix (at most three digits, ITU E.164) is ignored.
 # Below the minimum the suffix test could pair two unrelated short numbers;
@@ -417,21 +418,21 @@ def _cell_and_home_signals(phone: _JsonValue, text: str,
             _label_word_present('home', text, pii_fragments))
 
 
-def _office_address_candidate(current: str | None, current_is_labelled: bool,
-                              candidate: _JsonValue,
-                              text: str) -> tuple[str | None, bool]:
-    """(office address, whether it carries a work-address label) after
-    offering `candidate`, the extracted address of an entry whose lowercased
-    text is `text`.
+def _office_slot_candidate(current: str | None, current_is_labelled: bool,
+                           candidate: str | None,
+                           text: str) -> tuple[str | None, bool]:
+    """(office address or phone, whether it carries a work-contact label)
+    after offering `candidate`, the value of an entry whose lowercased text
+    is `text`.
 
     The first value still wins its slot, except that a value carrying the
     label outranks an unlabelled one (#1222): a banner line or a bare
     institution name read as an address came first and blocked the labelled
     Work address that followed."""
-    is_labelled = bool(_WORK_ADDRESS_LABEL_RE.search(text))
+    is_labelled = bool(_WORK_CONTACT_LABEL_RE.search(text))
     if current and not (is_labelled and not current_is_labelled):
         return current, current_is_labelled
-    return _address_cell_text(candidate, 'office') or current, is_labelled
+    return candidate or current, is_labelled
 
 
 # #946: consumer mail domains. An address at one of these is the owner's
@@ -776,7 +777,7 @@ class PersonalDataSection:
         office_phone = None
         cell_phone = None
         home_phone = None
-        office_address, office_address_is_labelled = None, False
+        office_address, office_address_is_labelled, office_phone_is_labelled = None, False, False
         home_address = None
 
         # A entries that reach none of the six slots below are consumed by
@@ -872,8 +873,8 @@ class PersonalDataSection:
                     if not home_phone:
                         home_phone = _phone_cell_text(extracted_phone, 'home')
                 elif has_work or not office_phone:
-                    if not office_phone:
-                        office_phone = _phone_cell_text(extracted_phone, 'office')
+                    office_phone, office_phone_is_labelled = _office_slot_candidate(
+                        office_phone, office_phone_is_labelled, _phone_cell_text(extracted_phone, 'office'), text)
 
             # Classify address by type
             if extracted_address:
@@ -891,8 +892,8 @@ class PersonalDataSection:
                     if not home_address:
                         home_address = _address_cell_text(extracted_address, 'home')
                 elif 'office' in text or 'work' in text or 'business' in text or not office_address:
-                    office_address, office_address_is_labelled = _office_address_candidate(
-                        office_address, office_address_is_labelled, extracted_address, text)
+                    office_address, office_address_is_labelled = _office_slot_candidate(
+                        office_address, office_address_is_labelled, _address_cell_text(extracted_address, 'office'), text)
 
             # Classify email by type
             if extracted_email:
