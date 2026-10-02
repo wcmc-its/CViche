@@ -16,10 +16,19 @@ only its presentation.
 Parsing the string into components is `parsing/dates.py`, imported below. That
 direction is one-way and must stay so.
 """
+from collections.abc import Mapping
 from types import MappingProxyType
+import logging
 import re
 
-from ..parsing.dates import _parse_date_components, _year_of_calendar_invalid_date
+from ..parsing.dates import (
+    RANGE_END_KEY,
+    RANGE_START_KEY,
+    _parse_date_components,
+    _year_of_calendar_invalid_date,
+)
+
+logger = logging.getLogger(__name__)
 
 # Taxonomy codes whose entries are single occasions, so a record with a start
 # date and no end date happened in that year -- it is not still going on
@@ -111,12 +120,37 @@ DATE_FORMATS = MappingProxyType({
 })
 
 
-def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool = False) -> str:
+def _format_date_mapping(value: Mapping, taxonomy_code: str) -> str:
+    """A `{start_date, end_date}` mapping read as the range it states (#1233).
+
+    Every caller hands `format_date_for_section` the raw stage-4 field, and
+    before this a mapping fell through to `str(value)`: no year is findable in
+    the repr, so the "not a date at all" passthrough returned the repr and
+    `{'start_date': '2008', 'end_date': '2018'}` was printed into the cell. It
+    reads as the range here, so it renders exactly as the same two dates do
+    from a `format_date_range` call.
+
+    A mapping with neither key holds no date this module can find, so it
+    renders blank and says so in the log -- never as its repr.
+    """
+    if RANGE_START_KEY not in value and RANGE_END_KEY not in value:
+        logger.warning(
+            "date value is a mapping without %s/%s keys (keys: %s) -- "
+            "rendering it blank rather than as its repr (#1233)",
+            RANGE_START_KEY, RANGE_END_KEY, sorted(map(str, value)))
+        return ''
+    return format_date_range(value.get(RANGE_START_KEY) or '',
+                             value.get(RANGE_END_KEY) or '', taxonomy_code)
+
+
+def format_date_for_section(date_str: str | Mapping, taxonomy_code: str,
+                            is_end_date: bool = False) -> str:
     """
     Format a date string according to the WCM template requirements for a section.
 
     Args:
-        date_str: Input date string (various formats)
+        date_str: Input date string (various formats), or a
+            `{start_date, end_date}` mapping, which formats as the range
         taxonomy_code: Taxonomy code to determine required format
         is_end_date: True if this is an end date (affects 'present' handling)
 
@@ -125,6 +159,9 @@ def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool
     """
     if not date_str:
         return ''
+
+    if isinstance(date_str, Mapping):
+        return _format_date_mapping(date_str, taxonomy_code)
 
     date_str = str(date_str).strip()
 

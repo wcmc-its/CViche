@@ -28,6 +28,7 @@ from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa:
 from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     CERTIFICATE_NUMBER_PATTERN,
     _classify_cert_token,
+    _format_certification_date_str,
     _is_certification_header_line,
     _is_fused_certification,
     _reconstruct_certification_rows,
@@ -1160,4 +1161,51 @@ class TestCertificateNumberSeparatorHeuristic:
             ("Board A", "111", "2010"),
             ("Board B", "222", "2012"),
             ("Board C", "333", "2014"),
+        ]
+
+
+_RECERT_RANGE = {"start_date": "2008", "end_date": "2018"}
+
+
+class TestDictValuedCertificationDates:
+    """#1233: stage 4 sometimes returns `recertification_date` as a
+    `{start_date, end_date}` dict. `_format_certification_date_str` wrapped it
+    in `str()` first, no year is findable in the repr, and the Dates cell
+    printed the repr. It now reads as the range, the same text the equivalent
+    "2008-2018" string has always produced."""
+
+    def test_a_dict_recertification_date_reads_as_the_range(self):
+        fields = {"year_certified": "2001", "recertification_date": _RECERT_RANGE}
+        assert _format_certification_date_str(fields) == "2001-2008-2018"
+
+    def test_the_dict_renders_the_same_as_the_equivalent_string(self):
+        as_dict = {"year_certified": "2001", "recertification_date": _RECERT_RANGE}
+        as_text = {"year_certified": "2001", "recertification_date": "2008-2018"}
+        assert _format_certification_date_str(as_dict) == _format_certification_date_str(as_text)
+
+    def test_a_dict_with_no_year_certified_is_just_the_range(self):
+        assert _format_certification_date_str({"recertification_date": _RECERT_RANGE}) == "2008-2018"
+
+    def test_a_string_recertification_date_is_unchanged(self):
+        fields = {"year_certified": "2001", "recertification_date": "2008"}
+        assert _format_certification_date_str(fields) == "2001-2008"
+
+    def test_a_dict_year_certified_never_renders_as_its_repr(self):
+        fields = {"year_certified": {"start_date": "2001", "end_date": "2003"},
+                  "recertification_date": "2008"}
+        assert _format_certification_date_str(fields) == "2001-2003-2008"
+
+    def test_the_dates_cell_never_holds_a_python_repr(self):
+        gen = _generator()
+        gen._fill_board_certification([{
+            "extracted_fields": {
+                "certifying_board": "Example Board of Testing",
+                "certificate_number": "A12345",
+                "year_certified": "2001",
+                "recertification_date": _RECERT_RANGE,
+            },
+            "text": "Example Board of Testing",
+        }])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Testing", "A12345", "2001-2008-2018"),
         ]

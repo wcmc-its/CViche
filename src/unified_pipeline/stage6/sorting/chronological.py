@@ -10,7 +10,28 @@ a section that raises mid-render loses the whole document.
 """
 from collections.abc import Mapping
 
-from ..parsing.dates import _parse_date_components
+from ..parsing.dates import (
+    RANGE_END_KEY,
+    RANGE_START_KEY,
+    _parse_date_components,
+)
+
+
+def _range_sort_text(value: object) -> object:
+    """The one date a `{start_date, end_date}` mapping sorts by (#1233): its
+    end, else its start -- the order the flat `end_date`/`start_date` fields are
+    tried in below, since a range ends after it starts. Any other value is
+    returned as it came.
+
+    Stage 4 returns R's `date` and F2's `recertification_date` this way. Without
+    the unwrap `str()` below turned the mapping into its repr, no year is
+    findable in that, and the entry keyed (0, 0, 0): a correctly dated row
+    landed at the bottom of a reverse-chronological table.
+    """
+    if isinstance(value, Mapping):
+        return _range_sort_text(value.get(RANGE_END_KEY) or value.get(RANGE_START_KEY) or '')
+    return value
+
 
 def extract_sort_date(entry: dict) -> tuple:
     """
@@ -57,7 +78,7 @@ def extract_sort_date(entry: dict) -> tuple:
         fields.get('publication_date', ''),
     ]
 
-    for date_str in date_candidates:
+    for date_str in map(_range_sort_text, date_candidates):
         if not date_str:
             continue
 
