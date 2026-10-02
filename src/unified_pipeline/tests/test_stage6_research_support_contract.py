@@ -48,11 +48,16 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.sections import research_support  # noqa: E402
 from unified_pipeline.stage6.sections.research_support import (  # noqa: E402
+    ROLE_EFFORT_DIGIT_RE,
+    ROLE_EFFORT_FIELD_ROW_RE,
+    ROLE_EFFORT_HEADER_RE,
+    ROLE_EFFORT_HEADER_WINDOW,
     UnsupportedRebucketTargetError,
     apply_effort_to_grants,
     claim_goal_rows,
     fill_major_goals_from_text,
     filter_role_effort_headers,
+    is_role_effort_header,
     match_effort_for_title,
     normalize_percent_effort,
     parse_major_goals,
@@ -700,6 +705,14 @@ BLANK_LABEL_WITH_VALUED_ROWS = [
     'Percent Effort: |\nYears Inclusive: | 01/01/2031 - 12/31/2031\n'
     'Total Direct Costs: | $12,345',
     "Your role in the project (including percent effort):\nTotal Direct Costs: | $12,345",
+    # Rows that END in a bare number have the "<project> <effort>" shape, but the
+    # number is not a percent effort (a year, a cost with no `$` or separators),
+    # so they are not pairs the filter reads.
+    'Percent Effort: |\nYears Inclusive: | 2031 - 2033',
+    'Percent Effort: |\nTotal Direct Costs: | 12345',
+    # A value cell that wrapped onto its own, indented line: a number with no
+    # project name in front of it is not a pair once the line is stripped.
+    'Percent Effort: |\n    35',
 ]
 
 
@@ -707,8 +720,8 @@ BLANK_LABEL_WITH_VALUED_ROWS = [
 def test_a_blank_label_with_valued_rows_below_it_is_not_a_role_effort_header(text):
     """The rows under the label are not `<project> <effort>` pairs, so it is a grant.
 
-    The filter only reads pairs out of a header; anything else under the first
-    line is content it would drop unread.
+    The filter only reads pairs, with an effort that normalizes, out of a header;
+    anything else under the first line is content it would drop unread.
     """
     lookup = {}
     entries = [{'text': text}]
@@ -766,6 +779,45 @@ def test_a_blank_label_with_pairs_below_it_is_a_header_and_the_pairs_are_read():
     assert messages == ['  Filtered role/effort header entry, extracted 2 effort values']
 
 
+# The phrase is inside the first 60 characters, and the first value is past them.
+# The first has a digit and a colon, the second only a digit, the third only a
+# colon, so each of the two value checks is the only thing that keeps one of them.
+VALUE_PAST_THE_WINDOW_ROWS = [
+    'Role in project and percent effort (calendar months per year): 1.2',
+    'Percent effort on the collaborative multi-site award per year 35%',
+    'Role in project and percent effort for the collaborative multi-site award: Example Co-I',
+]
+
+
+@pytest.mark.parametrize('text', VALUE_PAST_THE_WINDOW_ROWS)
+def test_a_value_past_the_search_window_is_not_a_role_effort_header(text):
+    """The digit and colon/pipe checks read the whole first line, not 60 characters.
+
+    The 60 characters bound the phrase search only; a long label that puts its
+    value after them is still a grant row, and used to be dropped silently.
+    """
+    window = text[:ROLE_EFFORT_HEADER_WINDOW]
+    assert ROLE_EFFORT_HEADER_RE.search(window)
+    assert not ROLE_EFFORT_DIGIT_RE.search(window)
+    assert not ROLE_EFFORT_FIELD_ROW_RE.search(window)
+
+    entries = [{'text': text}]
+    kept, _messages = filter_role_effort_headers(entries, {})
+
+    assert kept == entries
+
+
+@pytest.mark.parametrize('padding, is_header', [
+    (ROLE_EFFORT_HEADER_WINDOW - len('role in project'), True),
+    (ROLE_EFFORT_HEADER_WINDOW - len('role in project') + 1, False),
+])
+def test_the_header_phrase_has_to_end_inside_the_search_window(padding, is_header):
+    """The window is 60 characters: a phrase ending at 60 counts, one ending at 61 does not."""
+    text = 'Example Agency'.ljust(padding) + 'role in project'
+
+    assert is_role_effort_header(text) is is_header
+
+
 def test_a_phrase_past_the_search_window_does_not_make_a_header():
     """A first line that only reaches the phrase after 60 characters is a grant."""
     text = 'Example funding program for pediatric research, with the work ' \
@@ -819,6 +871,27 @@ def test_a_blank_effort_label_with_value_rows_reaches_the_appendix_through_the_s
     gen._fill_research_support({'M2A': [fragment]}, current_year=TEST_YEAR)
 
     assert [e['text'] for e in gen._declined_grant_entries] == [fragment['text']]
+
+
+@pytest.mark.parametrize('text, fields', [
+    ('Percent Effort: |\nYears Inclusive: | 2031 - 2033',
+     {'start_date': '2031', 'end_date': '2033'}),
+    ('Percent Effort: |\nTotal Direct Costs: | 12345', {'total_funding': '12345'}),
+    ('Role in project and percent effort (calendar months per year): 1.2',
+     {'percent_effort': '1.2'}),
+    ('Percent effort on the collaborative multi-site award per year 35%',
+     {'percent_effort': '35%'}),
+])
+def test_a_value_the_header_shape_check_used_to_miss_reaches_the_appendix(text, fields):
+    """The wire for the year-range / bare-cost fragments and the long-label rows.
+
+    Each was read as a header and removed with nothing harvested and nothing on
+    the list `generate()` sends to the Appendix."""
+    gen = _sectioned_generator()
+    fragment = _entry('M2A', text=text, **fields)
+    gen._fill_research_support({'M2A': [fragment]}, current_year=TEST_YEAR)
+
+    assert [e['text'] for e in gen._declined_grant_entries] == [text]
 
 
 def test_a_titled_grant_that_starts_with_an_effort_row_is_rendered():
