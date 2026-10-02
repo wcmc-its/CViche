@@ -26,3 +26,20 @@ export function demotionBlock(user: AdminUser, users: AdminUser[], currentUserId
   const activeAdmins = users.filter((u) => u.role === 'admin' && u.status === 'active').length
   return activeAdmins <= 1 ? LAST_ADMIN_REASON : null
 }
+
+/** Allowed-list emails that have not signed in yet (no users-table account), in list order.
+ *  Emails compare case-insensitively; the users table's own address may be absent (e.g. SSO without mail). */
+export function pendingInvites(allowedUsers: string[], users: Pick<AdminUser, 'email'>[]): string[] {
+  const signedIn = new Set(users.map((u) => (u.email ?? '').toLowerCase()))
+  return allowedUsers.filter((email) => !signedIn.has(email.toLowerCase()))
+}
+
+/** True when ``email`` is in the admin list (case-insensitive). */
+export function isListedAdmin(adminUsers: string[], email: string): boolean {
+  return adminUsers.some((a) => a.toLowerCase() === email.toLowerCase())
+}
+
+/** Why a not-yet-signed-in address can't be switched to Member; null when the switch is allowed. */
+export function inviteDemotionBlock(adminUsers: string[], email: string): string | null {
+  return isListedAdmin(adminUsers, email) && adminUsers.length <= 1 ? LAST_ADMIN_REASON : null
+}

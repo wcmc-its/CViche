@@ -24,6 +24,7 @@ from app.services.quality_score_service import BAND_RED
 from app.schemas import (
     FacultyOption, FeedbackFilterCounts, InputFormatFilterCounts, FeedbackReviewer, FilterCount,
     RunByOption, RunBySummary, RunFeedbackSummary, RunFilterOptions, StatusFilterCounts,
+    DepartmentSubmissions, SubmissionSplit,
 )
 
 # Run.submission_type of a faculty member uploading their own CV
@@ -293,6 +294,28 @@ def _submission_type_count(db: Session, filters: RunFilters, submission_type: st
                 *_clauses(filters, skip_run_by=True))
         .scalar() or 0
     )
+
+
+def submission_split(db: Session) -> SubmissionSplit:
+    """Own-CV vs on-behalf runs over all runs, overall and per submitter department
+    (the same User.department the Runs Department filter matches). One grouped query;
+    runs with no submitting user or no department land under department None."""
+    own = func.count(case((Run.submission_type == OWN_CV_SUBMISSION_TYPE, 1)))
+    behalf = func.count(case((Run.submission_type == AUTHORIZED_ADMIN_SUBMISSION_TYPE, 1)))
+    rows = (
+        db.query(User.department, own, behalf)
+        .select_from(Run).outerjoin(User, Run.user_id == User.id)
+        .filter(Run.submission_type.in_((OWN_CV_SUBMISSION_TYPE, AUTHORIZED_ADMIN_SUBMISSION_TYPE)))
+        .group_by(User.department).all()
+    )
+    departments = sorted(
+        (DepartmentSubmissions(department=name, own_cv=n_own, on_behalf=n_behalf)
+         for name, n_own, n_behalf in rows),
+        key=lambda d: (-(d.own_cv + d.on_behalf), d.department is None, d.department or ""),
+    )
+    return SubmissionSplit(own_cv=sum(d.own_cv for d in departments),
+                           on_behalf=sum(d.on_behalf for d in departments),
+                           departments=departments)
 
 
 def _status_counts(db: Session, filters: RunFilters, *,

@@ -6,6 +6,28 @@ export interface Stats {
   avg_duration_seconds?: number | null
   p95_duration_seconds?: number | null
   step_avg_seconds?: StepAvg[]
+  submissions?: SubmissionSplit
+}
+
+export interface DepartmentSubmissions {
+  /** null: the submitter has no ED department. */
+  department: string | null
+  own_cv: number
+  on_behalf: number
+}
+
+/** Who submits CVs: faculty themselves (own_cv) vs on their behalf. */
+export interface SubmissionSplit {
+  own_cv: number
+  on_behalf: number
+  departments: DepartmentSubmissions[]
+}
+
+export interface ConsentPublishPreview {
+  current_version: string
+  next_version: string
+  /** Active users whose consent_version is not next_version. */
+  users_to_reconsent: number
 }
 
 export interface StepAvg {

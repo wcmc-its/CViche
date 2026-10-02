@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LAST_ADMIN_REASON, SELF_DEMOTION_REASON, demotionBlock, isWcmEmail } from './adminUserRules'
+import { LAST_ADMIN_REASON, SELF_DEMOTION_REASON, demotionBlock, inviteDemotionBlock, isListedAdmin, isWcmEmail, pendingInvites } from './adminUserRules'
 import type { AdminUser } from '../types'
 
 const user = (id: number, role: string, status = 'active'): AdminUser => ({
@@ -35,5 +35,30 @@ describe('demotionBlock', () => {
 
   it('never blocks a promotion', () => {
     expect(demotionBlock(users[2], users, 3)).toBeNull()
+  })
+})
+
+describe('pendingInvites', () => {
+  it('lists allowed addresses with no account, ignoring case, in list order', () => {
+    const users = [user(1, 'admin'), user(2, 'user')]
+    const allowed = ['U2@Example.com', 'new@example.com', 'u1@example.com', 'later@example.com']
+    expect(pendingInvites(allowed, users)).toEqual(['new@example.com', 'later@example.com'])
+  })
+
+  it('treats every address as pending when nobody has signed in', () => {
+    expect(pendingInvites(['a@example.com'], [])).toEqual(['a@example.com'])
+  })
+})
+
+describe('invite roles', () => {
+  it('finds an admin-listed address regardless of case', () => {
+    expect(isListedAdmin(['Boss@Example.com'], 'boss@example.com')).toBe(true)
+    expect(isListedAdmin(['boss@example.com'], 'other@example.com')).toBe(false)
+  })
+
+  it('blocks demoting the only listed admin, not one of several or a plain member', () => {
+    expect(inviteDemotionBlock(['boss@example.com'], 'boss@example.com')).toBe(LAST_ADMIN_REASON)
+    expect(inviteDemotionBlock(['boss@example.com', 'b@example.com'], 'boss@example.com')).toBeNull()
+    expect(inviteDemotionBlock(['boss@example.com'], 'member@example.com')).toBeNull()
   })
 })
