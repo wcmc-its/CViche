@@ -84,6 +84,12 @@ RUN groupadd --gid ${APP_GID} cviche \
         /app/web_interface/backend/prompt_logs
 
 # alembic and uvicorn both run from the backend directory.
+# Image tag baked in by buildspec.yaml (--build-arg IMAGE_TAG=$TAG) so a run can
+# record which image executed it (#1239). Declared after the COPY/chown layers
+# so a changing tag never invalidates them. Empty when built outside CodeBuild.
+ARG IMAGE_TAG=""
+ENV CVICHE_IMAGE_TAG=${IMAGE_TAG}
+
 WORKDIR /app/web_interface/backend
 
 EXPOSE 8000

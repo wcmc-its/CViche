@@ -185,6 +185,21 @@ def test_resumed_run_is_not_stale_on_the_next_sweep(db, monkeypatch):
     assert run.started_at > datetime.now() - timedelta(minutes=1)
 
 
+def test_resume_restamps_the_image_tag_of_the_resuming_process(db, monkeypatch):
+    """A run resumed after a deploy shows the image that resumed it."""
+    monkeypatch.setenv("CVICHE_AUTO_RETRY_ENABLED", "1")
+    monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-new.tag")
+    _patch_launch(monkeypatch, [])
+    run = _seed_stale_running_run(db, run_id="RTAG01", attempt_count=1)
+    run.image_tag = "dev-old.tag"
+    db.commit()
+
+    run_service.reconcile_stale_runs(db)
+
+    db.refresh(run)
+    assert run.image_tag == "dev-new.tag"
+
+
 def test_sweep_with_a_stale_snapshot_loses_the_claim(db, monkeypatch):
     """Two pods read the same stale run. The first resumes it; the second still
     holds the started_at it read, so both its retry and its fail path lose the
