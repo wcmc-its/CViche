@@ -675,30 +675,95 @@ def _alphanumeric_tokens(text) -> Counter:
     return Counter(_DEDUP_TOKEN_RE.findall(norm(text)))
 
 
-def lint_dedup_drops(report: Dict) -> List[Dict]:
-    """Stage-6 dedup decisions whose dropped text is NOT near-fully contained
-    in the kept entry: at loose similarity thresholds these are distinct
-    records lost, not duplicates (#227)."""
+# A dropped record that is fully token-covered by the kept entry passes the
+# coverage check above whether it is a duplicate or a different record whose
+# name is a sub-phrase of the kept one ("Optics" beside "European Optics",
+# #666): the words alone cannot tell them apart. What can is the extracted name
+# the two entries carry and what the page shows. Stage 6 writes only the name
+# fields worth comparing into the decision (`_decision_fields`).
+# Findings listing this many drops stay readable in the finding message.
+DEDUP_EVIDENCE_LIMIT = 6
+
+
+def _identity_conflicts(decision: Mapping) -> list[str]:
+    """Normalised values the dropped entry filled under a name field the kept
+    entry also filled with a different value. Empty when the decision carries
+    no fields (a sidecar written before #666) or none conflict."""
+    dropped = decision.get("dropped_fields") or {}
+    kept = decision.get("kept_fields") or {}
+    conflicts = []
+    for key in dropped:
+        if key not in kept:
+            continue
+        value = " ".join(_DEDUP_TOKEN_RE.findall(norm(dropped[key])))
+        if value and value != " ".join(_DEDUP_TOKEN_RE.findall(norm(kept[key]))):
+            conflicts.append(value)
+    return conflicts
+
+
+def _rendered_item_set(blocks: list[tuple[str, str]]) -> set[str]:
+    """Every rendered paragraph and table cell or row, token-normalised."""
+    items = set()
+    for _kind, text in blocks:
+        for line in text.split("\n"):
+            items.add(" ".join(_DEDUP_TOKEN_RE.findall(norm(line))))
+    return items
+
+
+def _unrendered_identity(decision: Mapping, rendered_items: set[str]) -> str | None:
+    """The first identity value the dropped entry carries that the kept entry
+    does not, and that appears in the document as no paragraph or table cell
+    of its own; None when the dropped record's name is on the page."""
+    for value in _identity_conflicts(decision):
+        if value not in rendered_items:
+            return value
+    return None
+
+
+def lint_dedup_drops(report: Dict,
+                     blocks: list[tuple[str, str]] | None = None) -> List[Dict]:
+    """Stage-6 dedup decisions that may have dropped a distinct record.
+
+    WARN: the dropped text is NOT near-fully contained in the kept entry, so at
+    these loose similarity thresholds it is a distinct record, not a duplicate
+    (#227).
+
+    INFO (#666, needs the rendered document): the dropped text IS contained, but
+    the two entries carry different names and the dropped name is on the page
+    as no cell of its own. Whichever guard let stage 6 approve the drop, the
+    name it dropped is absent from the output. A duplicate reworded by the kept
+    entry also lands here, so it stays INFO."""
     suspect = []
+    named_apart = []
+    rendered_items = _rendered_item_set(blocks) if blocks is not None else None
     for d in report.get("dedup_decisions", []):
         dropped = _alphanumeric_tokens(d.get("dropped_text", ""))
         kept = _alphanumeric_tokens(d.get("kept_text", ""))
         if not dropped:
             continue
         coverage = sum((dropped & kept).values()) / sum(dropped.values())
-        if coverage >= DEDUP_SAFE_CONTAINMENT:
-            continue
-        suspect.append(
-            f"{d.get('code', '?')} ({d.get('metric', '?')}, {coverage:.0%} "
-            f"covered by kept): dropped '{d.get('dropped_text', '')[:80]}' "
-            f"vs kept '{d.get('kept_text', '')[:80]}'")
-    if not suspect:
-        return []
-    return [_finding(
-        "dedup_drops", "WARN",
-        f"{len(suspect)} dedup drop(s) poorly covered by the kept entry — "
-        f"possible distinct records lost (#227)",
-        suspect[:6])]
+        pair = (f"dropped '{d.get('dropped_text', '')[:80]}' "
+                f"vs kept '{d.get('kept_text', '')[:80]}'")
+        if coverage < DEDUP_SAFE_CONTAINMENT:
+            suspect.append(f"{d.get('code', '?')} ({d.get('metric', '?')}, "
+                           f"{coverage:.0%} covered by kept): {pair}")
+        elif rendered_items is not None and _unrendered_identity(d, rendered_items):
+            named_apart.append(f"{d.get('code', '?')} ({d.get('metric', '?')}): {pair}")
+    findings = []
+    if suspect:
+        findings.append(_finding(
+            "dedup_drops", "WARN",
+            f"{len(suspect)} dedup drop(s) poorly covered by the kept entry — "
+            f"possible distinct records lost (#227)",
+            suspect[:DEDUP_EVIDENCE_LIMIT]))
+    if named_apart:
+        findings.append(_finding(
+            "dedup_drops", "INFO",
+            f"{len(named_apart)} dedup drop(s) fully covered by the kept entry "
+            f"but named differently, and the dropped name is no cell of its own "
+            f"on the page — possible distinct records lost (#666)",
+            named_apart[:DEDUP_EVIDENCE_LIMIT]))
+    return findings
 
 
 # --------------------------------------------------------------------------

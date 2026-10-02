@@ -2588,6 +2588,24 @@ def test_run_doctor_reemits_sidecar_findings_end_to_end(tmp_path):
     assert "dedup_drops" in lints
 
 
+def test_run_doctor_wires_rendered_blocks_into_dedup_drops_info(tmp_path):
+    """#666: the INFO tier needs the rendered document. `dedup_drops` is
+    registered with `blocks` optional; dropping that wiring leaves the WARN
+    tier working and the INFO tier silently dead, so drive run_doctor()."""
+    root = _build_clean_run(tmp_path)
+    _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
+                 {"document_uid": _UID, "warnings": [],
+                  "dedup_decisions": [
+                      {"code": "Q4D", "metric": "containment=1.00",
+                       "dropped_text": "Example Optics",
+                       "kept_text": "European Example Optics",
+                       "dropped_fields": {"journal_name": "Example Optics"},
+                       "kept_fields": {"journal_name": "European Example Optics"}}]})
+    payload = run_doctor(root, _UID)
+    drops = [f for f in payload["findings"] if f["lint"] == "dedup_drops"]
+    assert [f["severity"] for f in drops] == ["INFO"]
+
+
 def test_run_doctor_hard_fail_gate_makes_an_undeliverable_run_an_error(tmp_path):
     """web139: score 25, RED, do-not-deliver — but worst=WARN, indistinguishable
     from a healthy run. An emptied cv_owner must now push worst to ERROR and say

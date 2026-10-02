@@ -282,6 +282,25 @@ def test_estimate_names_a_minority_of_scanned_pages(client, db, seed_simple_mode
     assert resp.json()["scanned_pages"] == [3]
 
 
+def test_upload_records_a_minority_of_scanned_pages(client, db, seed_simple_mode, cv_pdf, tmp_path):
+    """#1282: an accepted PDF's scanned pages are stored on the run, for
+    the run page's warning; a docx's are not (NULL, not "")."""
+    user = _make_user(db)
+    _auth(client, user)
+    patches = [patch("app.api.upload.UPLOAD_DIR", tmp_path),
+               patch("app.api.upload.get_storage", return_value=MagicMock())]
+    resp = _run_patches(patches, lambda: _post_upload(
+        client, "cv.pdf", cv_pdf(image_pages=(2,), text_pages=2), "application/pdf"))
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).scanned_pages == "3"
+
+    patches = _bypass_file_validation(tmp_path) + [patch("app.api.upload.get_storage", return_value=MagicMock())]
+    resp = _run_patches(patches, lambda: _post_upload(
+        client, "cv.docx", b"PK\x03\x04dummy-docx-bytes", DOCX_MIME, data={"confirm_duplicate": "true"}))
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).scanned_pages is None
+
+
 def test_page_ranges_collapses_runs():
     assert upload_module._page_ranges([2, 3, 4, 7, 9, 10]) == "2–4, 7, 9–10"
 

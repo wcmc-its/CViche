@@ -91,6 +91,8 @@ class RunStatus(BaseModel):
     cv_owner_name: str | None = None
     # Who ran it. Admin only; null for everyone else and for user-less runs.
     run_by: RunBySummary | None = None
+    # A PDF's scanned pages, whose text is missing from the output (#1282).
+    scanned_pages: list[int] = []
     steps: list[StepSummary]
 
     class Config:

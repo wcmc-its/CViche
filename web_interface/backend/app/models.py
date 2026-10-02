@@ -228,6 +228,14 @@ class Run(Base):
     # against every run, any submitter, to ask before re-processing a file.
     # NULL for runs that predate the column until the backfill fills it.
     source_sha256 = Column(String(SHA256_HEX_LENGTH), nullable=True, index=True)
+    # A PDF's image-only (scanned) pages, 1-based and comma-joined (#1282):
+    # their text never reaches the pipeline, so the run page warns. Set at
+    # upload; NULL for a docx, a PDF with none, and runs that predate it.
+    scanned_pages = Column(Text, nullable=True)
+
+    @property
+    def scanned_page_numbers(self) -> list[int]:
+        return [int(n) for n in self.scanned_pages.split(",")] if self.scanned_pages else []
     # The batch upload this run belongs to (#1114), NULL for a single upload.
     # Also routes the run's queue token to the batch queue
     # (run_queue.queue_for) and suppresses its Teams "started" card.
