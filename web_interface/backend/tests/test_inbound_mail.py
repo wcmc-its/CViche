@@ -13,6 +13,11 @@ SES_FAIL = "amazonses.com; spf=pass; dkim=none; dmarc=fail header.from=med.corne
 DOCX = b"PK\x03\x04 synthetic docx bytes"
 PDF = b"%PDF-1.4 synthetic pdf bytes"
 OCTET = ("application", "octet-stream")
+VIRUS = "X-SES-Virus-Verdict"
+SPAM = "X-SES-Spam-Verdict"
+# What SES adds when the receipt rule scans and finds nothing; a header passed
+# in ``headers`` overrides it, and ``None`` leaves it out.
+DEFAULT_SES_HEADERS = {VIRUS: "PASS"}
 
 
 def make_eml(*, auth=(SES_PASS,), from_addr="Pat Example <pat@med.cornell.edu>", headers=None,
@@ -25,8 +30,9 @@ def make_eml(*, auth=(SES_PASS,), from_addr="Pat Example <pat@med.cornell.edu>",
     msg["To"] = "cv@mail.example.org"
     msg["Subject"] = "FW: synthetic"
     msg["Message-ID"] = "<synthetic-1@example.org>"
-    for key, value in (headers or {}).items():
-        msg[key] = value
+    for key, value in {**DEFAULT_SES_HEADERS, **(headers or {})}.items():
+        if value is not None:
+            msg[key] = value
     msg.set_content(body)
     for _ in range(inline_images):
         msg.add_attachment(b"\x89PNG synthetic", maintype="image", subtype="png", disposition="inline")
@@ -54,10 +60,34 @@ def test_a_first_header_that_is_not_ses_does_not_count():
     assert parse_message(make_eml(auth=("mx.example.org; dmarc=pass", SES_PASS))).authenticated is False
 
 
-@pytest.mark.parametrize("header", ["X-SES-Spam-Verdict", "X-SES-Virus-Verdict"])
+@pytest.mark.parametrize("header", [SPAM, VIRUS])
 def test_ses_fail_verdicts_flag_the_message(header):
     assert parse_message(make_eml(headers={header: "FAIL"})).spam_or_virus is True
     assert parse_message(make_eml(headers={header: "PASS"})).spam_or_virus is False
+
+
+@pytest.mark.parametrize("verdict", ["PASS", " pass "], ids=["upper", "lower_padded"])
+def test_virus_pass_is_accepted(verdict):
+    assert parse_message(make_eml(headers={VIRUS: verdict})).spam_or_virus is False
+
+
+@pytest.mark.parametrize("verdict", [None, "", "GRAY", "PROCESSING_FAILED", "FAIL"],
+                         ids=["header_missing", "empty", "gray", "processing_failed", "fail"])
+def test_virus_verdict_other_than_pass_fails_closed(verdict):
+    """#1332: no header means the receipt rule never scanned (no ScanEnabled)."""
+    assert parse_message(make_eml(headers={VIRUS: verdict})).spam_or_virus is True
+
+
+@pytest.mark.parametrize("spam, expected", [("GRAY", False), ("FAIL", True)])
+def test_spam_rejects_on_fail_only_when_the_virus_scan_passed(spam, expected):
+    assert parse_message(make_eml(headers={SPAM: spam, VIRUS: "PASS"})).spam_or_virus is expected
+
+
+def test_the_inner_message_virus_verdict_is_ignored():
+    """SES scans the whole raw message, so only the outer verdict counts."""
+    inner = make_eml(attachments=[("inner.docx", DOCX)], auth=(), headers={VIRUS: "PASS"})
+    parsed = parse_message(make_eml(headers={VIRUS: None}, attachments=[("forwarded.eml", inner)]))
+    assert parsed.spam_or_virus is True
 
 
 def test_sender_is_the_single_lowercased_address():

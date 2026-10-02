@@ -168,6 +168,15 @@ def test_spam_or_virus_fail_is_dropped_silently(db, storage, sent):
     assert sent == []
 
 
+def test_unscanned_message_is_dropped_silently(db, storage, sent):
+    """#1332: no virus verdict (receipt rule without ScanEnabled) fails closed."""
+    _user(db)
+    _process(db, storage, make_eml(headers={"X-SES-Virus-Verdict": None}, attachments=[("a.docx", _docx())]))
+    assert _rejected(db) == InboundRejectReason.SPAM_OR_VIRUS
+    assert db.query(InboundFile).count() == 0
+    assert sent == []
+
+
 def test_a_non_wcm_domain_is_dropped_silently(db, storage, sent):
     _user(db, email="pat@example.org")
     _process(db, storage, make_eml(from_addr="pat@example.org", attachments=[("a.docx", _docx())]))

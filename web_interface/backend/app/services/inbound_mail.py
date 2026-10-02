@@ -4,7 +4,9 @@ CV attachments. Pure -- no database, no storage, no network.
 Only the OUTER message is trusted: the first ``Authentication-Results`` header
 (the one SES prepends) must show ``dmarc=pass``, and the sender checks use the
 outer From. A forwarded or attached message contributes its attachments only,
-never a sender, so a spoofed inner header proves nothing.
+never a sender, so a spoofed inner header proves nothing. The SES spam and
+virus verdicts are read from the outer message too: SES scans the whole raw
+message, attached ones included.
 
 Nothing here logs or returns a filename, subject or address for logging
 (CODING_STANDARDS 4.7): rejected attachments are reported as reason counts.
@@ -39,6 +41,9 @@ PDF_MAGIC = b"%PDF-"
 SES_AUTHSERV_ID = re.compile(r"^\s*amazonses\.com\s*;", re.IGNORECASE)
 DMARC_PASS = re.compile(r"\bdmarc=pass\b", re.IGNORECASE)
 SES_FAIL_VERDICT = "FAIL"
+SES_PASS_VERDICT = "PASS"
+SES_SPAM_HEADER = "X-SES-Spam-Verdict"
+SES_VIRUS_HEADER = "X-SES-Virus-Verdict"
 # Attachments inside a message attached to the outer one; one level only.
 MAX_ATTACHED_MESSAGE_DEPTH = 1
 
@@ -90,10 +95,20 @@ def _dmarc_passed(msg: EmailMessage) -> bool:
     return bool(SES_AUTHSERV_ID.match(first) and DMARC_PASS.search(first))
 
 
+def _ses_verdict(msg: EmailMessage, header: str) -> str:
+    return str(msg.get(header, "")).strip().upper()
+
+
 def _ses_failed(msg: EmailMessage) -> bool:
-    return any(
-        str(msg.get(header, "")).strip().upper() == SES_FAIL_VERDICT
-        for header in ("X-SES-Spam-Verdict", "X-SES-Virus-Verdict")
+    """True when SES marked the message as spam or did not scan it clean of
+    viruses (#1332). The virus check fails closed: only PASS is accepted. A missing header means the receipt rule
+    has no ``ScanEnabled: true``, so nothing was scanned; GRAY and
+    PROCESSING_FAILED mean SES could not say the attachments are safe. Spam
+    rejects on FAIL only: it says nothing about the files, and GRAY is common
+    for legitimate mail."""
+    return (
+        _ses_verdict(msg, SES_SPAM_HEADER) == SES_FAIL_VERDICT
+        or _ses_verdict(msg, SES_VIRUS_HEADER) != SES_PASS_VERDICT
     )
 
 
