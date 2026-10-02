@@ -470,18 +470,28 @@ def is_column_header_row(cell_texts: list[str], marked_repeat_header: bool) -> b
     return _is_column_header_row(" | ".join(sorted(filled)))
 
 
-def _distinct_row_cells(row: _Row) -> list[_Cell]:
-    """The row's cells, one per distinct ``<w:tc>`` (#1229).
+def _distinct_row_cells(row: _Row) -> list[tuple[int, int, _Cell]]:
+    """The row's cells as ``(grid_col, grid_span, cell)``, one per distinct
+    ``<w:tc>`` (#1229).
 
     python-docx's ``row.cells`` repeats a gridSpan-merged cell once per layout
     column it spans, so a merged cell's text would reach stage 2 several
-    times. Dedupe within the row only: a vertically merged cell is a distinct
-    ``<w:tc>`` in each row and keeps its existing row-by-row behaviour.
+    times. Dedupe within the row only, by element identity: two distinct
+    cells with equal text are both kept. ``grid_col`` is the cell's first
+    layout column and ``grid_span`` how many it covers, so a consumer that
+    pairs cells across rows by column (``_scrub_pre_llm_pii_column``) still
+    lines up when rows merge cells differently. A vertically merged cell is
+    a distinct ``<w:tc>`` in each row (python-docx hands back the top cell
+    for a continuation row) and keeps its existing row-by-row behaviour.
     """
-    cells: list[_Cell] = []
-    for cell in row.cells:
-        if not any(cell._tc is kept._tc for kept in cells):
-            cells.append(cell)
+    cells: list[tuple[int, int, _Cell]] = []
+    for grid_col, cell in enumerate(row.cells):
+        for i, (start, span, kept) in enumerate(cells):
+            if cell._tc is kept._tc:
+                cells[i] = (start, span + 1, kept)
+                break
+        else:
+            cells.append((grid_col, 1, cell))
     return cells
 
 
@@ -501,7 +511,7 @@ def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
 
     for row_idx, row in enumerate(table.rows):
         cells_data = []
-        for col_idx, cell in enumerate(_distinct_row_cells(row)):
+        for col_idx, (grid_col, grid_span, cell) in enumerate(_distinct_row_cells(row)):
             # FIX: cell.text sometimes returns empty string for cells with complex formatting
             # or malformed XML (e.g., <w:rPr> inside <w:t> instead of as sibling)
             cell_text = get_cell_text(cell).strip()
@@ -516,6 +526,8 @@ def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
             cell_data = {
                 "row": row_idx,
                 "col": col_idx,
+                "grid_col": grid_col,
+                "grid_span": grid_span,
                 "text": cell_text
             }
 
@@ -676,16 +688,12 @@ def row_has_nonblank_value_cells(row: list[dict[str, Any]]) -> bool:
     whose trailing cells just echo cell 0's own text, has nothing to lose by
     being emitted as a header (see issue #811).
 
-    The row[0]-text exclusion is the predicate-only alternative to deduping
-    `extract_table_metadata`'s `data` rows by `_tc` identity (#811 round 3,
-    finding 1): that dedup shrank the cell count of every gridSpan CONTENT
-    row too, silently changing the row shape stage 2 reads off `data` for
-    `split_merged_row_into_pseudo_rows`. This predicate reads `data` as-is
-    (unchanged from origin/dev) and only affects header/content routing
-    here in `extract_unified_elements`. Trade-off: a row with two textually
-    IDENTICAL but structurally distinct trailing cells (not a gridSpan
-    duplicate) is now indistinguishable from a genuine merge and is treated
-    the same way -- not observed in the corpus.
+    `extract_table_metadata` now emits a gridSpan-merged cell once (#1229), so
+    a merged row's trailing cells no longer echo cell 0. The row[0]-text
+    exclusion stays for rows whose cells are still repeated, and has the
+    trade-off that a row with two textually IDENTICAL but structurally
+    distinct trailing cells is treated like a merge -- not observed in the
+    corpus.
     """
     if not row:
         return False
@@ -987,6 +995,19 @@ def _row_already_resolved(row: list[Any], col_idx: int) -> bool:
     return False
 
 
+def _cell_at_grid_col(row: list[Any], grid_col: int) -> Any:
+    """The cell of `row` covering layout column `grid_col`, or None. Cells
+    carry `grid_col`/`grid_span` from `extract_table_metadata`; a cell dict
+    without them is one column wide at its list position."""
+    for idx, cell in enumerate(row):
+        if not isinstance(cell, dict):
+            continue
+        start = cell.get("grid_col", idx)
+        if start <= grid_col < start + cell.get("grid_span", 1):
+            return cell
+    return None
+
+
 def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
     """Round 3 (#847 residual): a two-row FORM table -- a label cell
     ("Date of Birth") with its value directly below it in the SAME COLUMN
@@ -1007,12 +1028,12 @@ def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
         if not isinstance(row, list) or not isinstance(next_row, list):
             continue
         for col_idx, cell in enumerate(row):
-            if not isinstance(cell, dict) or col_idx >= len(next_row):
+            if not isinstance(cell, dict):
                 continue
             category = pre_llm_bare_label_category(cell.get("text"))
             if category is None or _row_already_resolved(row, col_idx):
                 continue
-            below = next_row[col_idx]
+            below = _cell_at_grid_col(next_row, cell.get("grid_col", col_idx))
             if isinstance(below, dict) and isinstance(below.get("text"), str):
                 below["text"] = redact_pre_llm_value_of_category(
                     below["text"], category, cross_boundary=True
