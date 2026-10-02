@@ -995,7 +995,7 @@ def _row_already_resolved(row: list[Any], col_idx: int) -> bool:
     return False
 
 
-def _cell_at_grid_col(row: list[Any], grid_col: int) -> Any:
+def _cell_at_grid_col(row: list[Any], grid_col: int) -> dict[str, Any] | None:
     """The cell of `row` covering layout column `grid_col`, or None. Cells
     carry `grid_col`/`grid_span` from `extract_table_metadata`; a cell dict
     without them is one column wide at its list position."""
