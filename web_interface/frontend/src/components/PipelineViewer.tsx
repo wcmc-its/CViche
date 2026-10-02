@@ -333,7 +333,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     <div className="min-h-screen">
       {apiError && <ErrorBanner message={apiError} onDismiss={() => setApiError(null)} />}
 
-      <div className={`mx-auto w-full flex flex-col gap-[18px] px-4 sm:px-7 pt-6 pb-16 ${isComplete && !showDetails ? 'max-w-[1000px]' : 'max-w-[1240px]'}`}>
+      <div className={`mx-auto w-full flex flex-col gap-[18px] px-4 sm:px-7 pt-6 pb-16 ${isComplete ? 'max-w-[1000px]' : 'max-w-[1240px]'}`}>
         {connectionLost && (
           <div className={`${bannerBase} bg-orange-50 border-orange-300`} role="status" aria-live="polite">
             <div className="flex items-center gap-3 max-w-full">
@@ -436,8 +436,6 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           {isComplete && !isAdmin && <ReviewNote runId={runId} />}
         </PipelineHeader>
 
-        {isComplete && isAdmin && <RunQualitySections runId={runId} />}
-
         {showDetails && (
           <div className="grid grid-cols-1 gap-[18px] items-start md:grid-cols-[minmax(260px,340px)_minmax(0,1fr)]">
             <StepSidebar steps={runStatus.steps} currentStep={currentStep} onSelectStep={setCurrentStep} stepStartTimes={stepStartTimes} />
@@ -534,6 +532,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
             </main>
           </div>
         )}
+
+        {/* Below the step details, so "Pipeline details" opens them under the header, not past the score. */}
+        {isComplete && isAdmin && <RunQualitySections runId={runId} />}
 
         {isComplete && (
           <section id="feedback-section">
