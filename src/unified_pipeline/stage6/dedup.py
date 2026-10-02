@@ -204,6 +204,29 @@ def _record_name(fields: dict, rendered: frozenset[str]) -> str | None:
     return fields[key] if key else None
 
 
+# The doctor's `dedup_drops` lint (#666) reads each decision's extracted name:
+# the text alone cannot tell a dropped record from a duplicate once the kept
+# text contains all of its words. Only the field that names the record is
+# written, and only for the codes where a name conflict has been a real drop:
+# a journal name on any code (Q4D "Optics" beside "European Optics"), an I
+# society, a D2 hospital, an S3 textbook title. The other name keys (R location,
+# H award, Q3 panel, P committee) were 0 real on IPXFBA, because a fused row's
+# fragment reads as a different name.
+_DECISION_NAME_ANY_CODE = ('journal_name',)
+_DECISION_NAME_BY_CODE = {'I': ('organization',), 'D2': ('institution',),
+                          'S3': ('title',)}
+_DECISION_FIELD_MAX_CHARS = 120
+
+
+def _decision_fields(entry: dict, code: str | None) -> dict:
+    """The entry's filled name fields for `code`, clipped for the sidecar."""
+    fields = entry.get('extracted_fields') or {}
+    keys = _DECISION_NAME_ANY_CODE + _DECISION_NAME_BY_CODE.get(code, ())
+    return {key: fields[key].strip()[:_DECISION_FIELD_MAX_CHARS]
+            for key in keys
+            if isinstance(fields.get(key), str) and fields[key].strip()}
+
+
 def _shares_record_id(dropped_fields: dict, kept_fields: dict) -> bool:
     """True when both entries carry the same amount, grant number, DOI or other id."""
     for key in _RECORD_ID_FIELDS:
@@ -986,6 +1009,8 @@ def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         "title_containment": round(title_containment, 2),
                         "dropped_text": entries[drop].get('text', '')[:500],
                         "kept_text": entries[kept].get('text', '')[:500],
+                        "dropped_fields": _decision_fields(entries[drop], code),
+                        "kept_fields": _decision_fields(entries[kept], code),
                     })
                 drop_indices.add(drop)
                 dropped_ids.add(id(entries[drop]))

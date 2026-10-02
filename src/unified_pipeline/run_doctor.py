@@ -49,7 +49,10 @@ Lints, ranked by the severity of the failure class they catch:
 11. dedup_drops           stage-6 dedup decisions whose dropped text is not
                           near-fully contained in the kept entry — at loose
                           thresholds these are distinct records lost, not
-                          duplicates (#227: 7 of 8 drops on 2Q1_ZQ were real)
+                          duplicates (#227: 7 of 8 drops on 2Q1_ZQ were real);
+                          plus an INFO finding for a fully-covered drop whose
+                          extracted name differs from the kept entry's and is
+                          on the page as no cell of its own (#666)
 12. pipe_leaks            raw ' | '-delimited source lines rendered as output
                           paragraphs — verbatim-fallback formatting reaching
                           the faculty-facing document (#208 costs)
@@ -1009,7 +1012,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("section_lost", lint_section_lost, ("stage_4", "blocks")),
     LintSpec("enrichment_failures", lint_enrichment_failures, ("stage_5_enrichment",)),
     LintSpec("stage6_render_warnings", lint_stage6_warnings, ("stage_6_report",)),
-    LintSpec("dedup_drops", lint_dedup_drops, ("stage_6_report",)),
+    LintSpec("dedup_drops", lint_dedup_drops, ("stage_6_report",),
+             optional=("blocks",)),
     LintSpec("pipe_leaks", lint_pipe_leaks, ("blocks",)),
     LintSpec("table_shape", lint_table_shape, ("table_rows",)),
     LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),

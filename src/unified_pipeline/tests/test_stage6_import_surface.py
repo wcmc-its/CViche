@@ -181,7 +181,8 @@ HOME_ONLY_IMPORTS = {
                                       "_distinct_bare_names", "_lists_name",
                                       "_names_a_sibling", "_names_record", "_other_journal_same_row",
                                       "_place_only_event", "_record_name", "_title_only_fragment",
-                                      "recovered_row_already_rendered","_row_residue"),
+                                      "recovered_row_already_rendered","_row_residue",
+                                      "_DECISION_FIELD_MAX_CHARS", "_decision_fields"),
 }
 
 _RELOCATED_CASES = [
