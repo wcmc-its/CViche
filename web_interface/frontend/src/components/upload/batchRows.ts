@@ -16,7 +16,9 @@ export function inFlightText(limit: number = MAX_UPLOADS_IN_FLIGHT): string {
   return `${count} ${limit === 1 ? 'file' : 'files'} at a time`
 }
 
-export const NOT_DOCX_REASON = 'Not a .docx file'
+/** File types the batch table submits; the backend accepts the same two (#1273). */
+const ACCEPTED_EXTENSIONS = ['.docx', '.pdf']
+export const UNSUPPORTED_TYPE_REASON = 'Not a .docx or .pdf file'
 /** Client copy of the backend upload cap (CVICHE_MAX_UPLOAD_MB, default 10; MAX_UPLOAD_SIZE in
  *  backend/app/services/config_service.py). The backend does not expose it to the client, so keep the two in step. */
 export const MAX_UPLOAD_MB = 10
@@ -62,7 +64,8 @@ export interface BatchRow {
 
 /** Why a chosen file can't be submitted (wrong type, over the size cap); null when it can. */
 export function fileInvalidReason(file: File): string | null {
-  if (!file.name.toLowerCase().endsWith('.docx')) return NOT_DOCX_REASON
+  const name = file.name.toLowerCase()
+  if (!ACCEPTED_EXTENSIONS.some((ext) => name.endsWith(ext))) return UNSUPPORTED_TYPE_REASON
   return file.size > MAX_UPLOAD_BYTES ? TOO_LARGE_REASON : null
 }
 
@@ -102,10 +105,20 @@ export function mayAlreadyBeStarted(err: unknown): boolean {
 /** The run left created/paused, so a start went through: it is queued, running or done. */
 export const wasStarted = (runStatus: string): boolean => !STARTABLE_RUN_STATUSES.has(runStatus)
 
-/** The row's note under its status: the skip reason, or the failure (plus "Fix it…" when permanent). */
+/** "Page 2 of this PDF is a scanned image, …": the estimate's scanned_pages (#1282) in words. */
+export function scannedPagesText(pages: number[]): string {
+  const one = pages.length === 1
+  return `${one ? 'Page' : 'Pages'} ${pages.join(', ')} of this PDF ${one ? 'is a scanned image' : 'are scanned images'}, `
+    + `so ${one ? 'its' : 'their'} text can't be read and will be missing from the output.`
+}
+
+/** The row's note under its status: the skip reason, the failure (plus "Fix it…" when permanent),
+ *  or a PDF's scanned pages. */
 export function rowNote(row: BatchRow): string {
   if (row.invalidReason) return row.invalidReason
-  if (row.state !== 'failed' || !row.failure) return ''
+  if (row.state !== 'failed' || !row.failure) {
+    return row.estimate?.scanned_pages?.length ? scannedPagesText(row.estimate.scanned_pages) : ''
+  }
   if (row.failure.retryable || row.failure.duplicate) return row.failure.reason
   return `${row.failure.reason.replace(/\.\s*$/, '')}. ${PERMANENT_FAILURE_SUFFIX}`
 }
