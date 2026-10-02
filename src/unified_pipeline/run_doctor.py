@@ -15,7 +15,9 @@ Lints, ranked by the severity of the failure class they catch:
                           source table (web207's lost personal-data table)
 2. missed_headers         ALL-CAPS bold header-like source lines absent from
                           the 1a hierarchy AND every entry hierarchy path
-                          ('PROFESSIONAL EXPERIENCE' demoted to content)
+                          ('PROFESSIONAL EXPERIENCE' demoted to content); a
+                          Heading-styled line that is not ALL-CAPS is
+                          reported at INFO and never escalates the run
 3. bucket_status          grant status vs the funding subsection the grant
                           actually rendered under in the stage-6 document
                           (the #214 rebucketing rules)
@@ -563,6 +565,13 @@ def _is_single_column(tbl) -> bool:
     return all(len(_logical_cells(row)) == 1 for row in tbl.rows)
 
 
+#: An enumeration token followed by a TAB ('I.<tab>OVERVIEW OF ...'): the tab
+#: separates the numeral from the title, it does not split a label from a
+#: value, so the line is still a header candidate (#1232). Roman numeral or a
+#: single letter only: an arabic numeral is rejected by the digit-free rule.
+_ENUM_TAB_RE = re.compile(r"^(\s*(?:[IVXLCivxlc]+|[A-Za-z])\.)\s*\t\s*")
+
+
 def iter_header_candidates(docx_path: str) -> list[str]:
     """Header-looking source lines: short, letters-only, ALL-CAPS bold (or
     styled as a Heading), from top-level paragraphs and single-column table
@@ -576,7 +585,7 @@ def iter_header_candidates(docx_path: str) -> list[str]:
     candidates: List[str] = []
 
     def consider(para):
-        text = para.text.strip()
+        text = _ENUM_TAB_RE.sub(r"\1 ", para.text.strip(), count=1)
         if not 3 <= len(text) <= 60:
             return
         if not any(ch.isalpha() for ch in text) or any(ch.isdigit() for ch in text):
