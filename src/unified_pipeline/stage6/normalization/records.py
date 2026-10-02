@@ -6,8 +6,8 @@ this canonicalises the record itself, in the two ways the corpus shows it
 arriving wrong:
 
 - one record holds several. The #208 fusion class reaches the bibliography, so a
-  single `formatted_citation` can carry several newline-separated citations that
-  must be numbered separately.
+  single `formatted_citation` can carry several citations, joined by newlines or
+  (#1237) by " | ", that must be numbered separately.
 - the record is filed under a bucket its own fields contradict. A grant whose
   status reads "Under review" is Pending regardless of what its dates imply.
 
@@ -52,9 +52,38 @@ _ACTIVE_HEADING_RE = re.compile(r'\b(?:current|active|ongoing|present)\b')
 # A heading that files its grants as ended without the word "completed".
 _PAST_HEADING_RE = re.compile(r'\b(?:past|previous(?:ly)?|prior)\b')
 
+# Stage 5d usually puts one citation per line when a block holds several, but in
+# one corpus run (#1237) it joined ten conference presentations on one line with
+# this joiner instead. Kept as code, not config: it is the one joiner observed,
+# and a second joiner would need its own corpus check.
+_CITATION_PIPE_JOINER = ' | '
+_CITATION_YEAR_RE = re.compile(r'\b(?:19|20)\d{2}\b')
+
+
+def _is_citation_shaped(segment: str) -> bool:
+    """Whether a pipe-delimited segment reads as a whole citation: it carries a
+    publication year and ends the way 5d ends a citation, with a period. Both
+    must hold so that a title which merely contains a pipe ("Home | Archive") is
+    not mistaken for two citations."""
+    return segment.endswith('.') and bool(_CITATION_YEAR_RE.search(segment))
+
+
+def _split_pipe_joined(line: str) -> list[str]:
+    """Split a line on the 5d pipe joiner, but only when EVERY segment is
+    citation-shaped (#1237). All-or-nothing: one segment that is not a citation
+    means the pipe belongs to a single citation, and the line is returned
+    whole."""
+    if _CITATION_PIPE_JOINER not in line:
+        return [line]
+    segments = [seg.strip() for seg in line.split(_CITATION_PIPE_JOINER)]
+    if all(_is_citation_shaped(seg) for seg in segments):
+        return segments
+    return [line]
+
+
 def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
     """Un-fuse publication entries whose stage-5d ``formatted_citation`` carries
-    multiple newline-separated citations.
+    multiple citations, newline-separated or (#1237) joined by " | ".
 
     The #208 fusion class reaches the bibliography too: when several source
     citations collapse into one entry, stage 5d formats the whole block into a
@@ -63,9 +92,11 @@ def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
     continuation lines (the "no numbering on some pubs" symptom, HNFLBA S8).
 
     Splitting each non-blank line into its own entry lets the caller number them
-    individually. A non-fused citation is a single line (verified: 100/101 of a
-    real CV's formatted_citations have zero internal newlines), so it passes
-    through untouched. Only stage-5d LLM citations with >=2 lines are split;
+    individually. A line is further split on " | " when every piece of it is
+    citation-shaped (``_split_pipe_joined``); a citation whose title merely holds
+    a pipe stays whole. A non-fused citation is a single line (verified: 100/101
+    of a real CV's formatted_citations have zero internal newlines), so it
+    passes through untouched. Only stage-5d LLM citations with >=2 lines are split;
     other bibliography shapes (parts-built citations) never carry newlines.
     Continuation lines (i>0) are distinct records, so per-entry provenance that
     belongs to the block as a whole (classification comment, enrichment
@@ -82,7 +113,11 @@ def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
         # citation (#552's input class) silently became two numbered entries
         # (#742). Split on real line breaks only.
         normalized = fc.replace('\r\n', '\n').replace('\r', '\n')
-        lines = [ln.strip() for ln in normalized.split('\n') if ln.strip()]
+        lines = [
+            unit
+            for ln in normalized.split('\n') if ln.strip()
+            for unit in _split_pipe_joined(ln.strip())
+        ]
         if fields.get('formatting_source') == 'stage_5d_llm' and len(lines) >= 2:
             for i, line in enumerate(lines):
                 clone = dict(pub)
