@@ -703,10 +703,13 @@ def test_run_quality_report_shape(client, db, seed_simple_mode, monkeypatch):
         "provisional": True, "cap": 25, "cap_reason": "owner name missing",
         "cap_lint": "owner_contact_missing", "earned": 80, "total_weight": 10,
         "data_complete": True,
-        "dimensions": [{"name": "Duplicate entries", "weight": 10, "points": 8.0}]}
+        "dimensions": [{"name": "Duplicate entries", "weight": 10, "points": 8.0, "label": None,
+                        "checks": None, "scoring": None, "if_lost": None, "can_cap": False}]}
+    assert body["gates_fired"] == []
     assert [(f["lint"], f["severity"], f["count"], f["caps_score"])
             for f in body["doctor"]["findings"]] == [
         ("owner_contact_missing", "ERROR", 1, True), ("table_shape", "INFO", 1, False)]
+    assert body["doctor"]["findings"][0]["title"] == "Owner name not found"
     assert body["doctor"]["counts"] == {"error": 1, "warn": 0, "info": 1}
 
 

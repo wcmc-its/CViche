@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { AlertCircle, Info, Lock, XCircle } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { getRunQuality, getRunReviewNote } from '../api/runs'
-import type { DoctorFindingGroup, DoctorSeverity, QualityDimension, RunDoctorReport, RunQualityReport } from '../types'
+import type { DoctorFindingGroup, DoctorSeverity, QualityDimension, QualityGate, RunDoctorReport, RunQualityReport, ScoreRowWording } from '../types'
 import { BAND_STYLE } from './runs/runQuality'
 
 const CARD = 'flex flex-col bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] px-4 py-5 sm:px-6'
@@ -111,7 +111,15 @@ function ScoreBox({ report }: { report: RunQualityReport }) {
 /** Id of a Run Doctor finding row; the cap banner links to it. */
 export const doctorRowId = (lint: string): string => `doctor-lint-${lint}`
 
+/** The cap lint's plain title, from its Run Doctor row; the lint name when the
+ *  row is absent or has no wording. */
+function capLintTitle(report: RunQualityReport): string | null {
+  if (!report.cap_lint) return null
+  return report.doctor?.findings.find((f) => f.lint === report.cap_lint)?.title ?? report.cap_lint
+}
+
 function CapBanner({ report }: { report: RunQualityReport }) {
+  const title = capLintTitle(report)
   return (
     <div className="flex items-start gap-3 rounded-[10px] border border-red-200 bg-error-50 px-3.5 py-3">
       <Lock className="mt-px h-[18px] w-[18px] flex-none text-error-700" aria-hidden="true" />
@@ -122,18 +130,50 @@ function CapBanner({ report }: { report: RunQualityReport }) {
         <span className="text-[13px] [overflow-wrap:anywhere]">
           {report.earned != null && <>The weighted dimensions alone would score {report.earned}. </>}
           A hard-fail cap overrides that.
-          {report.cap_lint && <> See <a href={`#${doctorRowId(report.cap_lint)}`} className={`${MONO} underline`}>{report.cap_lint}</a> in Run Doctor below.</>}
+          {report.cap_lint && <> See <a href={`#${doctorRowId(report.cap_lint)}`} className="underline">{title}</a> in Run Doctor below.</>}
         </span>
       </div>
     </div>
   )
 }
 
+/** A row's plain label with the mock's hover / focus card: what it checks, how
+ *  it loses points or caps, what to do, and the technical name. */
+/** `weight` is null for a weight-0 row: it carries no points, it only caps. */
+function RowLabel({ row, canCap, weight }: { row: ScoreRowWording; canCap: boolean; weight: number | null }) {
+  const [open, setOpen] = useState(false)
+  const label = row.label ?? row.name
+  return (
+    <span
+      tabIndex={0}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onFocus={() => setOpen(true)}
+      onBlur={() => setOpen(false)}
+      className="relative flex min-w-0 cursor-help items-center gap-1.5 text-gray-900 outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+    >
+      <span className="underline decoration-dotted decoration-sand-500 underline-offset-[3px] [overflow-wrap:anywhere]">{label}</span>
+      {canCap && <Lock className="h-3 w-3 flex-none text-gray-400" aria-label="Can cap the score" />}
+      {open && (
+        <span role="tooltip" className="absolute left-0 top-[calc(100%+8px)] z-30 flex w-[320px] max-w-[calc(100vw-32px)] cursor-default flex-col gap-1.5 rounded-[9px] bg-[#1F2328] px-3.5 py-3 text-[13px] leading-[1.45] text-gray-100 shadow-[0_10px_28px_rgba(0,0,0,.22)]">
+          <span className="font-semibold text-white">{label}</span>
+          {row.checks && <span>{row.checks}</span>}
+          {row.scoring && <span className={canCap ? 'text-red-300' : 'text-gray-300'}>{row.scoring}</span>}
+          {row.if_lost && <span className="text-gray-300"><strong className="font-semibold text-white">{weight == null ? 'If it fires:' : 'If points are lost:'}</strong> {row.if_lost}</span>}
+          <span className="border-t border-gray-700 pt-1.5 text-xs text-gray-400">Scored as {'\u201c'}{row.name}{'\u201d'} {'\u00b7'} {weight == null ? 'caps only, no points' : `weight ${weight}`}</span>
+        </span>
+      )}
+    </span>
+  )
+}
+
+const ROW_GRID = 'grid grid-cols-1 items-center gap-x-3.5 gap-y-1 text-[13px] sm:grid-cols-[minmax(0,240px)_minmax(0,1fr)_84px]'
+
 function DimensionRow({ dim, maxWeight, lostClass }: { dim: QualityDimension; maxWeight: number; lostClass: string }) {
   const lost = Math.max(0, dim.weight - dim.points)
   return (
-    <div className="grid grid-cols-1 items-center gap-x-3.5 gap-y-1 text-[13px] sm:grid-cols-[minmax(0,240px)_minmax(0,1fr)_84px]">
-      <span className="min-w-0 text-gray-900 [overflow-wrap:anywhere]">{dim.name}</span>
+    <div className={ROW_GRID}>
+      <RowLabel row={dim} canCap={dim.can_cap} weight={dim.weight} />
       <div
         className="flex h-2.5 justify-end overflow-hidden rounded-[3px] bg-green-300"
         style={{ width: `${(dim.weight / maxWeight) * PERCENT}%` }}
@@ -144,6 +184,18 @@ function DimensionRow({ dim, maxWeight, lostClass }: { dim: QualityDimension; ma
       </div>
       <span className="text-gray-900 tabular-nums sm:text-right">
         <strong className="font-semibold">{round1(dim.points)}</strong> / {dim.weight}
+      </span>
+    </div>
+  )
+}
+
+/** A weight-0 row whose cap fired: no points, so no bar. */
+function GateRow({ gate }: { gate: QualityGate }) {
+  return (
+    <div className={ROW_GRID}>
+      <RowLabel row={gate} canCap weight={null} />
+      <span className="text-error-700 sm:col-span-2 sm:text-right">
+        <a href={`#${doctorRowId(gate.lint)}`} className="font-semibold underline">Caps score at {gate.cap}</a>
       </span>
     </div>
   )
@@ -167,11 +219,15 @@ function DimensionBars({ report }: { report: RunQualityReport }) {
   return (
     <div className="flex flex-col gap-2.5">
       <div className="flex items-baseline justify-between">
-        <h3 className="m-0 text-[13px] font-semibold text-gray-700">Points by dimension</h3>
+        <h3 className="m-0 text-[13px] font-semibold text-gray-700">What the score checks</h3>
         <span className="text-[13px] text-gray-500 tabular-nums">{earned} / {total}</span>
       </div>
       {dims.map((dim) => <DimensionRow key={dim.name} dim={dim} maxWeight={maxWeight} lostClass={lostClass} />)}
-      <p className="mt-0.5 mb-0 text-xs text-gray-500">{weightsFootnote(dims)}</p>
+      {report.gates_fired.map((gate) => <GateRow key={gate.name} gate={gate} />)}
+      <p className="mt-0.5 mb-0 text-xs text-gray-500">
+        {weightsFootnote(dims)} Hover a check to see what it measures and what to do if it loses points.{' '}
+        <Lock className="inline h-[11px] w-[11px] align-[-1px] text-gray-400" aria-hidden="true" /> marks checks that can cap the score.
+      </p>
     </div>
   )
 }
@@ -204,7 +260,10 @@ function FindingRow({ finding, capValue, style }: { finding: DoctorFindingGroup;
       <Icon className={`mt-0.5 h-4 w-4 flex-none ${style.text}`} aria-hidden="true" />
       <div className="flex min-w-0 flex-col gap-[3px]">
         <div className="flex flex-wrap items-center gap-2">
-          <span className={`${MONO} text-[13px] font-semibold text-gray-900 [overflow-wrap:anywhere]`}>{finding.lint}</span>
+          {finding.title && <span className="text-sm font-semibold text-gray-900 [overflow-wrap:anywhere]">{finding.title}</span>}
+          <span className={finding.title
+            ? `${MONO} text-[11px] text-gray-400 [overflow-wrap:anywhere]`
+            : `${MONO} text-[13px] font-semibold text-gray-900 [overflow-wrap:anywhere]`}>{finding.lint}</span>
           {tied && (
             <span className="inline-flex items-center gap-1 rounded-full bg-error-100 px-2 py-px text-xs font-semibold text-error-700">
               <Lock className="h-[11px] w-[11px]" aria-hidden="true" />
@@ -213,13 +272,23 @@ function FindingRow({ finding, capValue, style }: { finding: DoctorFindingGroup;
           )}
         </div>
         <span className="text-[13px] text-gray-700 [overflow-wrap:anywhere]">{finding.message}</span>
+        {finding.what_to_do && (
+          <span className="text-[13px] text-gray-700 [overflow-wrap:anywhere]"><strong className="font-semibold">What to do:</strong> {finding.what_to_do}</span>
+        )}
         {finding.prevalence != null && (
-          <span className="text-xs text-gray-400">Fires on {Math.round(finding.prevalence * PERCENT)}% of runs</span>
+          <span className="text-xs text-gray-400">Seen on {seenOn(finding.prevalence)} of runs</span>
         )}
       </div>
-      <span className="text-[13px] font-semibold text-gray-700 tabular-nums">{'×'}{finding.count}</span>
+      <span className="whitespace-nowrap text-[13px] text-gray-500">{finding.count === 1 ? 'Once' : `${finding.count} times`}</span>
     </div>
   )
+}
+
+/** A rate that rounds to 0% (an unobserved lint carries a 0.001 floor) reads
+ *  "under 1%", not "0%". */
+export const seenOn = (prevalence: number): string => {
+  const pct = Math.round(prevalence * PERCENT)
+  return pct < 1 ? 'under 1%' : `${pct}%`
 }
 
 interface FindingGroupProps {
@@ -266,7 +335,7 @@ function SeverityPills({ counts }: { counts: RunDoctorReport['counts'] }) {
 
 function RunDoctorSection({ doctor, capValue }: { doctor: RunDoctorReport | null; capValue: number | null }) {
   const [hidden, setHidden] = useState<Record<DoctorSeverity, boolean>>({ ERROR: false, WARN: false, INFO: true })
-  const blurb = 'Findings ordered by how rarely they occur across runs. Rare findings come first.'
+  const blurb = 'Specific problems found in this output. Unusual ones are listed first; minor ones most runs have are under Info.'
   const groups = SEVERITIES.map((s) => ({ s, items: (doctor?.findings ?? []).filter((f) => f.severity === s) })).filter((g) => g.items.length > 0)
   return (
     <section aria-label="Run Doctor" className={`${CARD} gap-3.5`}>
