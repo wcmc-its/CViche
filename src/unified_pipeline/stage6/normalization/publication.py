@@ -45,8 +45,8 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, TypedDict
 
-from .citation_matching import _append_missing_stage5d_values
-from .authors import _normalize_author_names
+from .citation_matching import _append_missing_stage5d_values, _restore_stage5d_authors
+from .authors import _join_spaced_initials, _normalize_author_names
 
 #: The value `extracted_fields['formatting_source']` carries when stage 5d's
 #: LLM wrote `formatted_citation`. It is the only source the renderer trusts
@@ -233,8 +233,13 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     # it -- except this one (#481).
     formatted_citation = _text(fields.get('formatted_citation'))
     if formatted_citation and fields.get('formatting_source') == _STAGE_5D_FORMATTING_SOURCE:
+        # 5d's "first 6, et al." rule cut the CV owner from their own
+        # citations; stage 4 kept the whole list (#1259).
+        source_authors = _normalize_author_names(
+            _join_spaced_initials(_text(fields.get('authors'))))
         formatted_citation = _append_missing_stage5d_values(
-            formatted_citation, editors, publisher)
+            _restore_stage5d_authors(formatted_citation, source_authors),
+            editors, publisher)
     else:
         formatted_citation = ''
 

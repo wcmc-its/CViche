@@ -115,3 +115,35 @@ def _append_missing_stage5d_values(
     if not additions:
         return formatted_citation
     return f"{formatted_citation} " + " ".join(additions)
+
+
+#: The "et al." that closes a Vancouver author list.
+_ET_AL_RE = re.compile(r"\bet al\.?", re.IGNORECASE)
+
+#: A normalized author list item that is initials alone ("Perri G, M"): stage
+#: 4 split one author in two, and the list would render that damage (24 of
+#: 205 truncated lists on the pilot CVs, #1259).
+_LONE_INITIALS_RE = re.compile(r"(?:^|,\s*)[A-Z]{1,3}\s*(?:,|$)")
+
+
+def _restore_stage5d_authors(formatted_citation: str, authors: str) -> str:
+    """`formatted_citation` with stage 4's full author list in place of an
+    "et al." stage 5d added (#1259).
+
+    The 5d prompt's "first 6 authors, et al." rule cut 206 author lists on
+    11 of the 12 pilot CVs and removed the CV owner's own name from 84 of
+    them. When the source list (stage 4's `authors`, already normalized) has
+    no "et al." of its own, everything up to the citation's first "et al."
+    is its author segment, and the source list replaces it. A "." before
+    that "et al." means it is not in the author segment (a Vancouver author
+    list has none; "In: Topol E, et al., eds." follows the title), and the
+    citation is left alone. The rest of the
+    5d citation is kept as it is.
+    """
+    match = _ET_AL_RE.search(formatted_citation)
+    if not authors or not match or _ET_AL_RE.search(authors) \
+            or _LONE_INITIALS_RE.search(authors) \
+            or "." in formatted_citation[:match.start()]:
+        return formatted_citation
+    rest = formatted_citation[match.end():].lstrip(" .")
+    return f"{authors.rstrip('. ')}. {rest}"
