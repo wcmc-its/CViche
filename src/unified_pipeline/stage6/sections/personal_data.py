@@ -329,6 +329,21 @@ _CELL_LABEL_AFTER_NUMBER_RE = re.compile(
 )
 _PHONE_LABEL_CELL = 'cell'
 _PHONE_LABEL_HOME = 'home'
+# A cell keyword counts at the block level only when it is written as a label
+# (#1222): "(cell)", "Cell:", "Cell phone 212-..." -- never as a word inside an
+# organisation or department name ("Department of Cellular and Integrative
+# Physiology", "Cell Biology"), which routed the office phone to Cell phone.
+_CELL_KEYWORD_AS_LABEL_RE = re.compile(
+    rf'\((?:{_CELL_WORDS}|mob)\)'
+    rf'|\b(?:{_CELL_WORDS}|mob)\b{_COMBINED_WITH_ANOTHER_KIND}{_CELL_NOUN}'
+    r'\s*(?:[:.]|(?=[+(]?\d))',
+    re.IGNORECASE,
+)
+# A work-address label (#1222): office, work or business, then the word
+# "address" within the same label. A bare "work" or "business" elsewhere in
+# the entry (a "Work phone" line, "Business School") is not an address label.
+_WORK_ADDRESS_LABEL_RE = re.compile(
+    r'\b(?:office|work|business)\b[^\n:;]{0,25}\baddress\b', re.IGNORECASE)
 # A number found in the text is the extracted one when the two digit strings
 # agree once a country prefix (at most three digits, ITU E.164) is ignored.
 # Below the minimum the suffix test could pair two unrelated short numbers;
@@ -394,8 +409,25 @@ def _cell_and_home_signals(phone: _JsonValue, text: str,
     nearest = _nearest_phone_label(_PhoneNumber.parse(phone), text)
     if nearest is not None:
         return nearest == _PHONE_LABEL_CELL, nearest == _PHONE_LABEL_HOME
-    return (('cell' in text or 'mobile' in text),
+    return (bool(_CELL_KEYWORD_AS_LABEL_RE.search(text)),
             _label_word_present('home', text, pii_fragments))
+
+
+def _office_address_candidate(current: str | None, current_is_labelled: bool,
+                              candidate: _JsonValue,
+                              text: str) -> tuple[str | None, bool]:
+    """(office address, whether it carries a work-address label) after
+    offering `candidate`, the extracted address of an entry whose lowercased
+    text is `text`.
+
+    The first value still wins its slot, except that a value carrying the
+    label outranks an unlabelled one (#1222): a banner line or a bare
+    institution name read as an address came first and blocked the labelled
+    Work address that followed."""
+    is_labelled = bool(_WORK_ADDRESS_LABEL_RE.search(text))
+    if current and not (is_labelled and not current_is_labelled):
+        return current, current_is_labelled
+    return _address_cell_text(candidate, 'office') or current, is_labelled
 
 
 # #946: consumer mail domains. An address at one of these is the owner's
@@ -741,6 +773,7 @@ class PersonalDataSection:
         cell_phone = None
         home_phone = None
         office_address = None
+        office_address_is_labelled = False
         home_address = None
 
         # A entries that reach none of the six slots below are consumed by
@@ -855,8 +888,9 @@ class PersonalDataSection:
                     if not home_address:
                         home_address = _address_cell_text(extracted_address, 'home')
                 elif 'office' in text or 'work' in text or 'business' in text or not office_address:
-                    if not office_address:
-                        office_address = _address_cell_text(extracted_address, 'office')
+                    office_address, office_address_is_labelled = _office_address_candidate(
+                        office_address, office_address_is_labelled,
+                        extracted_address, text)
 
             # Classify email by type
             if extracted_email:
