@@ -677,3 +677,36 @@ def test_status_before_a_word_still_counts():
     # Corpus shapes: the status is followed by an identifier or a venue, not punctuation.
     assert in_press_phrase('Doe J. A sling trial. J Urol. In press PMID: 26820550') == 'in press'
     assert in_press_phrase('Doe J. Learning. [In Press in the 2022 Proceedings of X]') == 'in press'
+
+
+def test_pubmed_title_idioms_are_not_statuses():
+    # From the 2,496 PubMed titles holding a trigger phrase (2026-10-02 sweep).
+    for text in ('Constructing the image of China in press conference interpreting. J X. 2020;1:1.',
+                 'Bone stress in press-fit femoral knee implants. J Biomech. 2021;1:1.',
+                 'Unmasking disparities in Press Ganey surveys. J Y. 2022;1:1.',
+                 'Microwave ablation can be accepted as a standard treatment. J Z. 2019;1:1.',
+                 'Recommendations made and accepted by a stewardship program. J Z. 2019;1:1.'):
+        assert in_press_phrase(text) is None, text
+
+
+def test_accepted_status_shapes_still_count():
+    for text, phrase in (('Doe J. A study. JAMA. Accepted.', 'accepted'),
+                         ('Doe J. A study. JAMA (accepted 9/2021)', 'accepted'),
+                         ('Doe J. A study. Accepted for publication in J Am Coll Surg.', 'accepted'),
+                         ('Doe J. A study. Mov Disord. 2022 Accepted Author Manuscript.', 'accepted'),
+                         ('Doe J. A study. Pancreas. [Epub ahead of print].', 'epub ahead of print')):
+        assert in_press_phrase(text) == phrase, text
+
+
+def test_untitled_entry_is_not_treated_as_in_press(tmp_path, monkeypatch):
+    # Without a title, a letter titled 'Re: ... Eur Urol. In press.' cannot be
+    # told from a status, and there is nothing to search by anyway.
+    # The entry has a PMID, so the ID path enriches it; only the in-press
+    # note, year and recode are withheld.
+    entry = _inpress_entry(text='Doe J. Re: Smith A. A trial. Eur Urol. In press. PMID: 12345678')
+    entry['extracted_fields'].update(title='', pmid=PMID)
+    result, _, _ = _run_stage5(tmp_path, monkeypatch, entry,
+                               [FakeResponse(200, content=_published_xml())])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['taxonomy_code'] == 'S7'
+    assert 'in_press_note' not in result

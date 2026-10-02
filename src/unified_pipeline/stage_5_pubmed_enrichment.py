@@ -85,13 +85,18 @@ TITLE_SEARCH_MAX_HITS = 3
 # with a near-identical title.
 IN_PRESS_YEAR_WINDOW = range(-1, 3)
 
-# "accepted" counts only for publication, not "accepted for presentation",
-# "accepted as a poster" or "Accepted abstract" (a corpus conference
-# abstract). "in press release(s)" is a title idiom ("Exaggerations and
-# Caveats in Press Releases...", PMID 27978540), not a status.
+# "accepted" counts only in a status shape: followed by punctuation, a date,
+# "for publication" or "author manuscript". Every corpus "accepted" in an S
+# entry has one of those shapes (2026-10-02, 60 CVs), while PubMed's 1,599
+# titles with the word mostly use it as a verb ("accepted by", "accepted as a
+# standard"), and "accepted for presentation" / "Accepted abstract" are
+# conference items. "in press" likewise needs punctuation, a year, PMID,
+# doi or "in" after it (every corpus shape, "In press PMID: ...", "[In Press
+# in the 2022 Proceedings"); PubMed titles hold "in Press Releases" (PMID
+# 27978540), "in press conference", "in press-fit", "in Press Ganey".
 IN_PRESS_PATTERN = re.compile(
-    r'\b(in[\s-]press(?!\s+releases?\b)'
-    r'|accepted(?!\s+abstract)(?!\s+(?:for|as)\s+(?:an?\s+)?(?:presentation|poster|oral|abstract|talk))'
+    r'\b(in[\s-]press(?=\s*(?:[^\w\s-]|\d|$|pmid\b|doi\b|in\b))'
+    r'|accepted(?=\s*(?:[^\w\s]|\d|$)|\s+for\s+publication|\s+author\s+manuscript)'
     r'|(?:e-?pub|online)\s+ahead\s+of\s+print)\b', re.I)
 # An entry that also says it is still under review is not in press (4 of the
 # 63 probe entries said both).
@@ -507,7 +512,10 @@ class PubMedEnricher:
         for entry in pub_entries:
             fields = entry.get('extracted_fields') or {}
             title = fields.get('title') or fields.get('chapter_title') or ''
-            phrase = in_press_phrase(entry.get('text') or '', title)
+            # No title, no way to tell a status from a title that says
+            # "(in press)" (letters, corrigenda) or ends "accepted." -- and no
+            # title search either.
+            phrase = title and in_press_phrase(entry.get('text') or '', title)
             if not phrase:
                 continue
             if entry.get('enrichment_status') in _TITLE_SEARCHABLE_STATUSES:
