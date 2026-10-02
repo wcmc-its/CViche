@@ -45,6 +45,11 @@ if TYPE_CHECKING:
 # never occurs in real CV text).
 _LINE_SENTINEL = "\x00"
 
+# Joins the cells of a multi-cell table row into the one extra line
+# `_table_lines` adds per row. A lint that must not count a cell again for its
+# joined row splits on this same constant (`doctor/lints/render.py`).
+TABLE_ROW_JOINER = " | "
+
 
 def _long_word_tokens(text) -> set:
     """5+-letter token set for one string (lints 5/8 render-overlap checks)."""
@@ -206,7 +211,7 @@ def _table_lines(tbl) -> list[str]:
             for nested in cell.tables:
                 lines.extend(_table_lines(nested))
         if len(cell_texts) > 1:
-            lines.append(" | ".join(" ".join(t.split()) for t in cell_texts))
+            lines.append(TABLE_ROW_JOINER.join(" ".join(t.split()) for t in cell_texts))
     return lines
 
 
