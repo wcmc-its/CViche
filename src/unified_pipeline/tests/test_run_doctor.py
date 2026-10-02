@@ -139,6 +139,30 @@ def test_segmentation_lint_quiet_on_clean_extraction():
     assert lint_segmentation(source, _STAGE1A, stage2) == []
 
 
+def test_segmentation_lint_quiet_on_a_dob_line_stage_2_withheld():
+    """#1232: the pre-LLM scrub (#847) puts '[withheld]' where the source
+    line has the date. On a short CV that one line took coverage under the
+    97% threshold."""
+    dob = "Date of Birth: January 2, 1970"
+    source = ["GRANTS", dob, _GRANT_FSMB, _GRANT_TEMPLETON, _GRANT_NBME]
+    stage2 = {"entries": [_entry("Date of Birth: [withheld]", start=1),
+                          _entry(_GRANT_FSMB, start=2),
+                          _entry(_GRANT_TEMPLETON, start=3),
+                          _entry(_GRANT_NBME, start=4)]}
+    assert lint_segmentation(source, _STAGE1A, stage2) == []
+
+
+def test_segmentation_lint_evidence_never_quotes_a_withheld_dob():
+    """A date-of-birth line that really is lost is reported, but the evidence
+    in the run's `_doctor.json` is the scrubbed line (#1232)."""
+    source = ["Date of Birth: January 2, 1970", _GRANT_FSMB]
+    findings = lint_segmentation(source, _STAGE1A,
+                                 {"entries": [_entry(_GRANT_FSMB, start=1)]})
+    coverage = next(f for f in findings if f["message"].startswith("coverage"))
+    assert coverage["evidence"] == ["Date of Birth: [withheld]"]
+    assert "1970" not in coverage["message"]
+
+
 def test_table_lost_lint_is_one_warn_per_run_with_worst_table_evidence():
     stage2 = {"entries": [_entry(_GRANT_FSMB, start=1)]}
     small = [f"lost contact line {i} zebra" for i in range(3)]
@@ -164,6 +188,35 @@ def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
     payload = run_doctor(root, _UID)
     missed = [f["evidence"] for f in payload["findings"] if f["lint"] == "missed_headers"]
     assert missed == [["MENTORING"]]
+
+
+def test_missed_headers_heading_styled_lines_never_escalate_the_run():
+    """#1232: a line that is not ALL-CAPS reached the candidate list through
+    its Heading style alone (record titles, journal names, contact lines). A
+    CV that styles its records Heading 1 must not read as a WARN storm, and
+    the lines stay reported."""
+    weak = [f"Example Record {name}" for name in
+            ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta")]
+    assert len(weak) > MISSED_HEADERS_WARN_COUNT
+    findings = lint_missed_headers(weak, _STAGE1A, {"entries": []})
+    assert [f["evidence"][0] for f in findings] == weak
+    assert {f["severity"] for f in findings} == {"INFO"}
+
+
+def test_missed_headers_only_all_caps_candidates_set_the_run_severity():
+    """Weak candidates are not counted toward the WARN threshold, and an
+    ALL-CAPS candidate still takes the run severity from ITS OWN count."""
+    weak = [f"Example Record {name}" for name in ("Alpha", "Beta", "Gamma")]
+    few = [f"SECTION {chr(65 + i)}" for i in range(MISSED_HEADERS_WARN_COUNT - 1)]
+    found = lint_missed_headers(few + weak, _STAGE1A, {"entries": []})
+    assert {f["severity"] for f in found} == {"INFO"}, \
+        "five strong lines plus weak ones stay under the threshold"
+
+    many = [f"SECTION {chr(65 + i)}" for i in range(MISSED_HEADERS_WARN_COUNT)]
+    found = lint_missed_headers(many + weak, _STAGE1A, {"entries": []})
+    by_line = {f["evidence"][0]: f["severity"] for f in found}
+    assert {by_line[line] for line in many} == {"WARN"}
+    assert {by_line[line] for line in weak} == {"INFO"}
 
 
 def test_run_doctor_reports_a_lost_source_table(tmp_path):
@@ -309,6 +362,23 @@ def test_iter_header_candidates_skips_a_leading_role_marker_name(tmp_path):
     assert iter_header_candidates(str(path)) == [
         "PI. RESPONSIBILITIES", "Dr. PUBLICATIONS", "Pi. Notes",
         "Dr. Jane Sample GRANTS AND AWARDS", "Ms. Research Support GRANTS"]
+
+
+def test_iter_header_candidates_flattens_the_tab_after_an_enumeration_token(tmp_path):
+    """#1232: 'I.<tab>OVERVIEW OF ...' is a header whose numeral is tab-
+    separated from its title, not a label/value data row, so it is a candidate
+    (with the tab read as a space). Any other tab still means a data row."""
+    doc = Document()
+    doc.add_paragraph("I. \tOVERVIEW OF EXAMPLE DUTIES,").runs[0].bold = True
+    doc.add_paragraph("AND EXAMPLE RESEARCH").runs[0].bold = True
+    doc.add_paragraph("B.\tTEACHING", style="Heading 2")
+    doc.add_paragraph("I.\tTITLE\tVALUE", style="Heading 2")        # second tab
+    doc.add_paragraph("ACTIVE\t\t\tEXAMPLELAND", style="Heading 2")  # data row
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert iter_header_candidates(str(path)) == [
+        "I. OVERVIEW OF EXAMPLE DUTIES,", "AND EXAMPLE RESEARCH", "B. TEACHING"]
 
 
 _MH_STAGE4 = {"cv_owner": {"first_name": "Jane", "middle_name": "Q", "last_name": "Sample"}}
@@ -2808,6 +2878,76 @@ def test_missed_headers_true_positive_still_fires_after_814():
     found = lint_missed_headers(["PROFESSIONAL SOCIETIES"], stage1a, {"entries": []})
     assert len(found) == 1
     assert "PROFESSIONAL SOCIETIES" in found[0]["message"]
+
+
+# -------------------------------------- #1232: header spellings stage 1a
+# normalises, and a wrapped header it copy-edited
+
+def test_missed_headers_folds_a_typographic_apostrophe():
+    """A page-break running header is spelled with a curly apostrophe in the
+    source and an ASCII one in the 1a node: the header WAS detected."""
+    ascii_node = {"hierarchy": [{"text": "LOCAL (CONT'D)", "children": []}]}
+    assert lint_missed_headers(["LOCAL (CONT\u2019D)"], ascii_node, {"entries": []}) == []
+    curly_node = {"hierarchy": [{"text": "LOCAL (CONT\u2019D)", "children": []}]}
+    assert lint_missed_headers(["LOCAL (CONT'D)"], curly_node, {"entries": []}) == []
+    found = lint_missed_headers(["OTHER (CONT\u2019D)"], ascii_node, {"entries": []})
+    assert len(found) == 1
+
+
+def test_missed_headers_ignores_a_leading_asterisk_or_bullet_marker():
+    stage1a = {"hierarchy": [{"text": "TENURE REVIEWS", "children": []},
+                             {"text": "JOURNAL REVIEWS (WITHIN RANK)", "children": []}]}
+    assert lint_missed_headers(["*TENURE REVIEWS"], stage1a, {"entries": []}) == []
+    assert lint_missed_headers(["\u2022 JOURNAL REVIEWS (WITHIN RANK):"], stage1a,
+                               {"entries": []}) == []
+    assert len(lint_missed_headers(["*GRANT REVIEWS"], stage1a, {"entries": []})) == 1
+
+
+def test_missed_headers_ignores_a_trailing_empty_value_but_not_a_real_one():
+    """1a promotes 'SPECIALTY BOARD STATUS: N/A' as the label alone."""
+    stage1a = {"hierarchy": [{"text": "SPECIALTY BOARD STATUS", "children": []}]}
+    assert lint_missed_headers(["SPECIALTY BOARD STATUS: N/A"], stage1a,
+                               {"entries": []}) == []
+    assert len(lint_missed_headers(["SPECIALTY BOARD STATUS: CERTIFIED"], stage1a,
+                                   {"entries": []})) == 1
+
+
+_COPY_EDITED_TITLE = "OVERVIEW OF EXAMPLE ACCOMPLISHMENTS IN TEACHING, SERVICE AND RESEARCH"
+
+
+def test_missed_headers_matches_a_wrapped_header_that_1a_copy_edited():
+    """The source wraps one header over two lines and misspells a word in the
+    first; 1a joins them and corrects it. The joined text is then neither
+    equal to, nor a prefix or suffix of, the node (the second line alone is
+    under the length-ratio guard), so only a near-copy match recognises it."""
+    stage1a = {"hierarchy": [{"text": _COPY_EDITED_TITLE, "children": []}]}
+    candidates = ["I. OVERVEIW OF EXAMPLE ACCOMPLISHMENTS IN TEACHING,",
+                  "SERVICE AND RESEARCH"]
+    assert lint_missed_headers(candidates, stage1a, {"entries": []}) == []
+
+
+def test_missed_headers_quiet_on_a_tab_led_wrapped_header_read_from_a_docx(tmp_path):
+    """The wire for the tab-led wrapped header: the reader must pair the
+    tab-led first line with its continuation, and the lint must then match
+    the joined text to the node 1a copy-edited."""
+    doc = Document()
+    doc.add_paragraph("I. \tOVERVEIW OF EXAMPLE ACCOMPLISHMENTS IN TEACHING,").runs[0].bold = True
+    doc.add_paragraph("SERVICE AND RESEARCH").runs[0].bold = True
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    stage1a = {"hierarchy": [{"text": "I. " + _COPY_EDITED_TITLE, "children": []}]}
+    candidates = iter_header_candidates(str(path))
+    assert len(candidates) == 2
+    assert lint_missed_headers(candidates, stage1a, {"entries": []}) == []
+
+
+def test_missed_headers_near_copy_match_does_not_silence_a_different_header():
+    stage1a = {"hierarchy": [{"text": _COPY_EDITED_TITLE, "children": []}]}
+    candidates = ["OVERVIEW OF EXAMPLE ACCOMPLISHMENTS IN TEACHING,",
+                  "AND UNRELATED COMMITTEE SERVICE"]
+    found = lint_missed_headers(candidates, stage1a, {"entries": []})
+    assert [f["evidence"] for f in found] == [["AND UNRELATED COMMITTEE SERVICE"]]
 
 
 # ---------------------------------------------------- round-2 F1: a standalone

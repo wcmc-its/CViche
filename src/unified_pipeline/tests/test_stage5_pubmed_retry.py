@@ -23,6 +23,7 @@ Run with:
 Self-contained: requests layer fully mocked, sleeps monkeypatched, no network.
 """
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -39,6 +40,9 @@ from unified_pipeline.stage_5_pubmed_enrichment import (  # noqa: E402
     MIN_TITLE_WORD_OVERLAP,
     PubMedEnricher,
     _sanitize_error,
+    in_press_phrase,
+    plausible_publication_year,
+    shares_an_author,
     title_word_overlap,
 )
 
@@ -522,3 +526,128 @@ def test_rejection_records_the_rounded_overlap(monkeypatch):
 def test_three_letter_words_count():
     # 'DNA' is signal: a 4-letter floor would score these two titles 0.
     assert title_word_overlap('DNA repair', ['DNA damage']) == 0.5
+
+
+# ------------------------------------------- "in press" title search (2026-10-02)
+
+INPRESS_TITLE = 'Statin adherence after myocardial infarction in older adults'
+
+
+def _published_xml(title=INPRESS_TITLE, surname='Garcia', pubtypes=('Journal Article',)):
+    types = ''.join(f'<PublicationType>{t}</PublicationType>' for t in pubtypes)
+    return f"""<?xml version="1.0"?>
+<PubmedArticleSet><PubmedArticle><MedlineCitation><PMID>{PMID}</PMID>
+<Article><Journal><JournalIssue><Volume>12</Volume><PubDate><Year>2025</Year></PubDate>
+</JournalIssue><Title>Heart Journal</Title></Journal><ArticleTitle>{title}</ArticleTitle>
+<Pagination><MedlinePgn>100-9</MedlinePgn></Pagination>
+<AuthorList><Author><LastName>{surname}</LastName><Initials>M</Initials></Author></AuthorList>
+<PublicationTypeList>{types}</PublicationTypeList></Article>
+</MedlineCitation></PubmedArticle></PubmedArticleSet>""".encode()
+
+
+def _inpress_entry(text=None, code='S7', authors='Garcia M, Doe J'):
+    return {
+        'taxonomy_code': code,
+        'classification_reasoning': 'Not yet published.',
+        'text': text or f'Garcia M, Doe J. {INPRESS_TITLE}. Heart Journal. In press.',
+        'extracted_fields': {'title': INPRESS_TITLE, 'authors': authors, 'year': 'in press'},
+    }
+
+
+def _run_stage5(tmp_path, monkeypatch, entry, responses):
+    enricher, session, _ = _make(monkeypatch, responses)
+    path = tmp_path / 's4.json'
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [entry]}))
+    [result] = enricher.enrich_stage4_output(str(path))['entries']
+    return result, session, enricher
+
+
+def _found(xml=None):
+    return [FakeResponse(200, json_data=ESEARCH_JSON),
+            FakeResponse(200, content=xml or _published_xml())]
+
+
+def test_in_press_phrase_matches_status_not_presentations_or_submissions():
+    assert in_press_phrase('Doe J. A study. JAMA. In press.') == 'in press'
+    assert in_press_phrase('Doe J. A study. JAMA 2025 (Accepted for publication)') == 'accepted'
+    assert in_press_phrase('Doe J. A study. Epub ahead of print.') == 'epub ahead of print'
+    assert in_press_phrase('Doe J. A study. Accepted for presentation, AHA 2024.') is None
+    assert in_press_phrase('Doe J. A study. Accepted as a poster.') is None
+    assert in_press_phrase('Doe J. A study. Submitted; in press pending revision.') is None
+    assert in_press_phrase('Doe J. A study. Circulation. 2024;1:1.') is None
+
+
+def test_in_press_s7_entry_is_found_by_title_recoded_and_annotated(tmp_path, monkeypatch):
+    result, session, enricher = _run_stage5(tmp_path, monkeypatch, _inpress_entry(), _found())
+    assert session.calls[0][1]['term'] == f'{INPRESS_TITLE}[ti]'
+    assert result['enrichment_status'] == 'enriched'
+    assert result['enrichment_source'] == 'title_search'
+    assert result['taxonomy_code'] == 'S1'
+    assert result['extracted_fields']['pmid'] == PMID
+    assert result['extracted_fields']['year'] == 2025
+    assert 'year' in result['enriched_fields']
+    assert result['in_press_note'] == (
+        f'Found in PubMed as PMID {PMID}, published 2025; the CV listed it as in press.')
+    assert 'Moved from S7 to S1' in result['classification_reasoning']
+    assert enricher.stats['in_press_resolved'] == 1
+
+
+def test_published_review_and_case_report_take_their_own_codes(tmp_path, monkeypatch):
+    for pubtypes, code in [(('Review',), 'S2'), (('Case Reports', 'Review'), 'S6')]:
+        result, _, _ = _run_stage5(tmp_path, monkeypatch, _inpress_entry(),
+                                   _found(_published_xml(pubtypes=pubtypes)))
+        assert result['taxonomy_code'] == code
+
+
+def test_weak_title_match_leaves_the_entry_in_s7(tmp_path, monkeypatch):
+    xml = _published_xml(title='Statin adherence in children with familial hypercholesterolemia')
+    result, _, enricher = _run_stage5(tmp_path, monkeypatch, _inpress_entry(), _found(xml))
+    assert result['taxonomy_code'] == 'S7'
+    assert result['enrichment_status'] == 'no_identifier'
+    assert 'in_press_note' not in result
+    assert enricher.stats['title_searches'] == 1
+
+
+def test_title_match_with_no_shared_author_is_rejected(tmp_path, monkeypatch):
+    result, _, _ = _run_stage5(tmp_path, monkeypatch, _inpress_entry(),
+                               _found(_published_xml(surname='Okonkwo')))
+    assert result['taxonomy_code'] == 'S7'
+    assert 'in_press_note' not in result
+
+
+def test_two_letter_surnames_count_as_shared_authors():
+    assert shares_an_author('Li X, Doe J', ['Li X'])
+    assert not shares_an_author('Doe J', ['Li X'])
+    assert shares_an_author('', ['Li X'])
+
+
+def test_accepted_inside_the_title_is_not_a_status(tmp_path, monkeypatch):
+    entry = _inpress_entry(text='Garcia M. Socially accepted norms of statin use. JAMA. 2024;1:1.')
+    entry['extracted_fields']['title'] = 'Socially accepted norms of statin use'
+    result, session, _ = _run_stage5(tmp_path, monkeypatch, entry, [])
+    assert session.calls == []
+    assert 'in_press_note' not in result
+
+
+def test_title_search_failure_leaves_the_entry_unchanged(tmp_path, monkeypatch):
+    result, _, enricher = _run_stage5(tmp_path, monkeypatch, _inpress_entry(),
+                                      [FakeResponse(400)])
+    assert result['enrichment_status'] == 'no_identifier'
+    assert result['taxonomy_code'] == 'S7'
+    assert enricher.stats['api_errors'] == 1
+
+
+def test_title_match_published_years_after_the_cv_year_is_another_paper(tmp_path, monkeypatch):
+    entry = _inpress_entry()
+    entry['extracted_fields']['year'] = '2021'  # PubMed says 2025
+    result, _, _ = _run_stage5(tmp_path, monkeypatch, entry, _found())
+    assert result['taxonomy_code'] == 'S7'
+    assert 'in_press_note' not in result
+
+
+def test_publication_year_window():
+    assert plausible_publication_year('2023', 2025)
+    assert plausible_publication_year(2025, 2024)
+    assert not plausible_publication_year('2021', 2025)
+    assert plausible_publication_year('in press', 2025)
+    assert plausible_publication_year(None, 2025)

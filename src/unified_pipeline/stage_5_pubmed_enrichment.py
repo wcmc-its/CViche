@@ -70,12 +70,91 @@ MIN_TITLE_WORD_OVERLAP = 0.4
 _MIN_TITLE_WORD_LEN = 3
 
 
+# A CV entry the author called "in press" or "accepted" that has no
+# identifier is looked up by title. The 2026-10-01 probe (63 in-press entries
+# stuck in S7, `3b-adjudication-2026-10-01/pubmed_probe.py`) found 29 at
+# overlap >= 0.8, all of type Journal Article; 3 weaker hits were left alone.
+# A title search can return any paper, so this floor is twice the ID paths'.
+MIN_TITLE_SEARCH_OVERLAP = 0.8
+# Fewer words than this and a title search matches too much; the probe used 4.
+MIN_TITLE_SEARCH_WORDS = 4
+TITLE_SEARCH_MAX_HITS = 3
+# A paper in press is published within a couple of years of the year the CV
+# gives it. Of the 87 corpus matches (2026-10-02) with a CV year, 64 were 0-2
+# years later; the one at 4 years was a different paper by the same group
+# with a near-identical title.
+IN_PRESS_YEAR_WINDOW = range(-1, 3)
+
+# "accepted" counts only for publication, not "accepted for presentation" or
+# "accepted as a poster/abstract".
+IN_PRESS_PATTERN = re.compile(
+    r'\b(in[\s-]press|accepted(?!\s+(?:for|as)\s+(?:an?\s+)?(?:presentation|poster|oral|abstract|talk))'
+    r'|(?:e-?pub|online)\s+ahead\s+of\s+print)\b', re.I)
+# An entry that also says it is still under review is not in press (4 of the
+# 63 probe entries said both).
+NOT_YET_ACCEPTED_PATTERN = re.compile(
+    r'\b(submitted|under\s+review|in\s+review|in\s+revision|under\s+revision|in\s+prep(?:aration)?)\b', re.I)
+
+# The S code an in-press entry moves to once PubMed shows it published, by
+# PubMed PublicationType; first match wins, otherwise S1. Case Reports comes
+# first because "case report and review of the literature" carries both.
+PUBTYPE_TAXONOMY_CODES = (('Case Reports', 'S6'), ('Review', 'S2'),
+                          ('Systematic Review', 'S2'), ('Editorial', 'S2'))
+PUBLISHED_DEFAULT_CODE = 'S1'
+IN_REVIEW_CODE = 'S7'
+# Only an ID-less entry, or one whose DOI PubMed did not know, is searched by
+# title: a CV identifier that resolved to another paper stays rejected.
+_TITLE_SEARCHABLE_STATUSES = frozenset({'no_identifier', 'doi_not_in_pubmed'})
+
+
+def in_press_phrase(text: str) -> str | None:
+    """The phrase that marks the entry as in press, lowercased, or None when
+    there is none or the entry also says it is still under review."""
+    match = IN_PRESS_PATTERN.search(text or '')
+    if not match or NOT_YET_ACCEPTED_PATTERN.search(text):
+        return None
+    return re.sub(r'\s+', ' ', match.group(1).lower())
+
+
+def _folded_words(text: str, min_len: int) -> set[str]:
+    unquoted = re.sub(r"['\u2019]", '', text or '')
+    folded = unicodedata.normalize('NFKD', unquoted).encode('ascii', 'ignore').decode()
+    return {w for w in re.findall(r'[a-z0-9]+', folded.lower()) if len(w) >= min_len}
+
+
 def _title_words(title: str) -> set[str]:
     """Accent-folded lowercase words, so 'geneticas' matches 'genéticas'.
     Apostrophes are dropped first so "Men’s" and "Men's" both give 'mens'."""
-    unquoted = re.sub(r"['\u2019]", '', title or '')
-    folded = unicodedata.normalize('NFKD', unquoted).encode('ascii', 'ignore').decode()
-    return {w for w in re.findall(r'[a-z0-9]+', folded.lower()) if len(w) >= _MIN_TITLE_WORD_LEN}
+    return _folded_words(title, _MIN_TITLE_WORD_LEN)
+
+
+def shares_an_author(cv_authors: str | list[str] | None, pubmed_authors: list[str]) -> bool:
+    """True when any PubMed surname ("Smith JA" -> "smith") appears in the
+    CV's author text, or the CV names no authors to compare. Two-letter
+    surnames such as Li and Wu count."""
+    if isinstance(cv_authors, list):
+        cv_authors = ' '.join(map(str, cv_authors))
+    cv_words = _folded_words(str(cv_authors or ''), 2)
+    if not cv_words:
+        return True
+    return any(_folded_words(a.rsplit(' ', 1)[0], 2) & cv_words for a in pubmed_authors)
+
+
+def plausible_publication_year(cv_year: str | int | None, pubmed_year: int | None) -> bool:
+    """False only when both years are known and PubMed's falls outside
+    IN_PRESS_YEAR_WINDOW of the CV's."""
+    match = re.fullmatch(r'\s*((?:19|20)\d\d)\s*', str(cv_year))
+    if not match or not pubmed_year:
+        return True
+    return pubmed_year - int(match.group(1)) in IN_PRESS_YEAR_WINDOW
+
+
+def published_taxonomy_code(publication_types: list[str]) -> str:
+    """The S code for a published paper of these PubMed publication types."""
+    for pubtype, code in PUBTYPE_TAXONOMY_CODES:
+        if pubtype in publication_types:
+            return code
+    return PUBLISHED_DEFAULT_CODE
 
 
 def title_word_overlap(source_title: str, pubmed_titles: list[str]) -> float | None:
@@ -136,7 +215,9 @@ class PubMedEnricher:
             'doi_searches': 0,
             'failed_lookups': 0,
             'title_mismatches': 0,
-            'api_errors': 0
+            'api_errors': 0,
+            'title_searches': 0,
+            'in_press_resolved': 0,
         }
 
         # (operation, status/exception) classes already logged at ERROR this run
@@ -230,6 +311,9 @@ class PubMedEnricher:
         for entry in no_id:
             entry['enrichment_status'] = 'no_identifier'
             enriched_entries.append(entry)
+
+        # 5. "In press" entries: title search, then record what PubMed shows
+        self._resolve_in_press(pub_entries)
 
         # Build output
         output = {
@@ -403,6 +487,83 @@ class PubMedEnricher:
             time.sleep(RATE_LIMIT_DELAY)
 
         return results
+
+    def _resolve_in_press(self, pub_entries: list[dict]) -> None:
+        """An entry the CV calls in press is searched by title when it had no
+        usable identifier; once matched by any path it takes PubMed's year,
+        leaves S7 for its published code, and carries `in_press_note`, the
+        Word comment stage 6 attaches to the tracked change."""
+        for entry in pub_entries:
+            fields = entry.get('extracted_fields') or {}
+            title = fields.get('title') or fields.get('chapter_title') or ''
+            # The phrase must sit outside the title: "Socially accepted norms"
+            # is a title, not a status.
+            phrase = in_press_phrase((entry.get('text') or '').replace(title, ' '))
+            if not phrase:
+                continue
+            if entry.get('enrichment_status') in _TITLE_SEARCHABLE_STATUSES:
+                self._enrich_by_title(entry, title)
+            if entry.get('enrichment_status') == 'enriched':
+                self._record_in_press_resolution(entry, phrase)
+
+    def _enrich_by_title(self, entry: dict, title: str) -> None:
+        """Accept the best of the top title-search hits when its title
+        overlap clears MIN_TITLE_SEARCH_OVERLAP, it shares an author with the
+        CV, and its year is plausible for the CV's. A miss leaves the entry as it was: a miss is not evidence the
+        paper is unpublished (non-indexed journals, chapters, retitling)."""
+        if len(_title_words(title)) < MIN_TITLE_SEARCH_WORDS:
+            return
+        self.stats['title_searches'] += 1
+        try:
+            pmids = self._search_pmids_by_title(title)
+        except (requests.RequestException, ValueError) as e:
+            self.stats['api_errors'] += 1
+            self._log_api_failure('title_search', e)
+            return
+        finally:
+            time.sleep(RATE_LIMIT_DELAY)
+        records = self._fetch_pubmed_batch(pmids) if pmids else {}
+        scored = [(title_word_overlap(title, [r['title'], r['vernacular_title']]) or 0, r)
+                  for r in records.values()]
+        if not scored:
+            return
+        overlap, best = max(scored, key=lambda pair: pair[0])
+        fields = entry.get('extracted_fields') or {}
+        if (overlap >= MIN_TITLE_SEARCH_OVERLAP
+                and shares_an_author(fields.get('authors'), best['authors'])
+                and plausible_publication_year(fields.get('year'), best['year'])):
+            self._accept_record(entry, best, 'title_search')
+
+    def _search_pmids_by_title(self, title: str) -> list[str]:
+        params = {
+            'db': 'pubmed',
+            'term': f'{title}[ti]',
+            'retmode': 'json',
+            'retmax': TITLE_SEARCH_MAX_HITS,
+            **self._identity_params()
+        }
+        if self.api_key:
+            params['api_key'] = self.api_key
+        response = self._get_with_retry(ESEARCH_URL, params)
+        return response.json().get('esearchresult', {}).get('idlist', [])
+
+    def _record_in_press_resolution(self, entry: dict, phrase: str) -> None:
+        enrichment = entry.get('enrichment_data') or {}
+        pmid, year = enrichment.get('pubmed_pmid'), enrichment.get('pubmed_year')
+        fields = entry.setdefault('extracted_fields', {})
+        if year and str(fields.get('year')) != str(year):
+            fields['year'] = year
+            entry.setdefault('enriched_fields', []).append('year')
+        if entry.get('taxonomy_code') == IN_REVIEW_CODE:
+            code = published_taxonomy_code(enrichment.get('publication_types') or [])
+            entry['taxonomy_code'] = code
+            if entry.get('classification_reasoning'):
+                entry['classification_reasoning'] += (
+                    f" Moved from {IN_REVIEW_CODE} to {code}: PubMed PMID {pmid} shows it published.")
+        published = f", published {year}" if year else ""
+        entry['in_press_note'] = (f"Found in PubMed as PMID {pmid}{published}; "
+                                  f"the CV listed it as {phrase}.")
+        self.stats['in_press_resolved'] += 1
 
     def _identity_params(self) -> dict[str, str]:
         """NCBI identification params; email omitted when not configured."""
