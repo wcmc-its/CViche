@@ -219,6 +219,7 @@ from unified_pipeline.stage6.sections.appendix import (
     UnmappedEntry,
     _appendix_drop_reason,
     build_appendix_diversion_warnings,
+    is_t_validation_recoded_m1,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 
@@ -643,6 +644,28 @@ def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
     if len({TAXONOMY_TO_SECTION.get(code) for code in candidates}) > 1:
         return None
     return min(candidates)
+
+
+# Stage 4.5's `generation_method` when its summary IS the CV's own M1 text,
+# joined verbatim (stage_4_5_research_summary.py); any other method paraphrases.
+# Duplicated rather than imported: stage 6 reads the stage 4.5 artifact as its contract.
+_SUMMARY_METHOD_VERBATIM_M1 = "existing_content"
+
+
+def _recoded_m1_appendix_entries(entries_by_code: dict[str, list[dict]],
+                                 mapped_codes: set[str],
+                                 research_summary_data: dict | None) -> list[dict]:
+    """M1 entries stage 3b's T-validation recoded from T, bound for the
+    Appendix because the rendered research summary paraphrases M1 and so
+    carries none of them (AUTOPSY-s7ab-batch-2026-10-02 class 11). Empty when
+    M1 is already unmapped -- every M1 entry then reaches the Appendix through
+    `generate()`'s unmapped-code loop -- or when the summary is the M1 text verbatim."""
+    if 'M1' not in mapped_codes:
+        return []
+    summary_info = (research_summary_data or {}).get('research_summary') or {}
+    if summary_info.get('generation_method') == _SUMMARY_METHOD_VERBATIM_M1:
+        return []
+    return [e for e in entries_by_code.get('M1', []) if is_t_validation_recoded_m1(e)]
 
 
 def _merge_appendix_diversion_warnings(
@@ -1360,11 +1383,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # summary, or the template lacks a RESEARCH ACTIVITIES header), the M1
         # entries would otherwise render nowhere AND be excluded from the appendix
         # by being 'mapped' — a silent content loss (#317, C0ZGFW). Route them to
-        # the appendix safety net instead. No-op when the summary rendered.
+        # the appendix safety net instead; when it rendered, only T-validation's M1 recodes go.
         if not research_summary_rendered:
             mapped_codes.discard('M1')
-
-        unmapped_entries: list[dict] = []
+        unmapped_entries = _recoded_m1_appendix_entries(entries_by_code, mapped_codes, research_summary_data)
 
         # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260) and claimed goals rows (#958).
         for code, entries in entries_by_code.items():

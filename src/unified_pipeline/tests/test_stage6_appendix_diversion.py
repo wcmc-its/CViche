@@ -781,3 +781,27 @@ def test_quarantined_invalid_code_is_reported_as_invalid_code_not_no_render_rout
     assert "not a valid taxonomy code" in invalid["message"]
     assert invalid["evidence"] == []
     assert got[("T", REASON_NO_RENDER_ROUTE)]["count"] == 1
+
+
+def test_t_validation_recoded_m1_is_reported_as_its_own_reason():
+    # AUTOPSY-s7ab-batch-2026-10-02 class 11: an M1 entry stage 3b's
+    # T-validation recoded from T reaches the Appendix for that reason, not
+    # the "no research summary rendered" one an ordinary M1 entry gets.
+    from unified_pipeline.stage6.sections.appendix import REASON_T_VALIDATION_RECODED
+    written = [
+        {"taxonomy_code": "M1", "t_validation_applied": True},
+        {"taxonomy_code": "M1", "t_validation_applied": True},
+        {"taxonomy_code": "M1"},
+        # Recoded to a code with its own renderer: not this reason.
+        {"taxonomy_code": "H", "t_validation_applied": True},
+    ]
+    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
+    got = {(w["code"], w["reason"]): w for w in warnings}
+    assert set(got) == {("M1", REASON_T_VALIDATION_RECODED), ("M1", REASON_RENDERER_DECLINED),
+                        ("H", REASON_RENDERER_DECLINED)}
+    recoded = got[("M1", REASON_T_VALIDATION_RECODED)]
+    assert recoded["count"] == 2
+    assert recoded["message"] == (
+        "M1: 2 entries diverted to the Appendix — stage 3b T-validation "
+        "recoded them from T to M1, which only the research summary renders")
+    assert recoded["evidence"] == []
