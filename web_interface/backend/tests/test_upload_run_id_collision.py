@@ -653,10 +653,18 @@ def test_generate_run_id_format_and_position_entropy():
     """Pins #685's actual defect: the prior generator's 6th character could
     take only ~4 values. 20,000 draws must keep the documented format and
     show broad (not collapsed) spread at every position."""
+    # Lazy: unified_pipeline is on sys.path only once conftest has imported the
+    # orchestrator, which happens in an autouse fixture, after collection.
+    from unified_pipeline.core.run_id import is_run_id
+
     ids = [generate_run_id() for _ in range(20_000)]
 
     pattern = re.compile(r"^[A-Z]{6}$")
     assert all(pattern.match(i) for i in ids), "generate_run_id must keep the letters-only ^[A-Z]{6}$ format"
+    # #457: stage 4 and stage 6 refuse to read a run id as a person's name, by
+    # this shape. #1192 narrowed the alphabet and an isalpha() guard went inert
+    # unnoticed; a generator change that escapes the shape now fails here.
+    assert all(is_run_id(i) for i in ids), "generate_run_id emitted an id unified_pipeline.core.run_id does not recognise"
 
     for pos in range(6):
         distinct = len({run_id[pos] for run_id in ids})
