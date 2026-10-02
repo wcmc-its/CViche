@@ -977,3 +977,160 @@ def test_postdoc_training_prompt_asks_for_a_role_and_keeps_the_other_fields():
     listed = [name.strip() for name in field_line.split(",")]
     assert listed == ["training_type", "specialty", "institution", "start_date", "end_date", "role"]
     assert "- role: " in prompt
+
+
+# ---------------------------------------------------------------------------
+# A reply that holds several items for ONE entry keeps every item. Each used to
+# overwrite the one before it in both parsers, so only the last survived.
+# Invented values.
+# ---------------------------------------------------------------------------
+
+from unified_pipeline.stage4.schemas import (  # noqa: E402
+    STAGE4_RECORDS_KEY,
+    STAGE4_RECORDS_RETURNED_KEY,
+)
+
+_MULTI_TEXT = "Glade Board chair, Fern Council member and Moss Panel member at Ashby University"
+_SINGLE_TEXT = "Member, Heron Committee, Ashby University"
+
+
+def _p_entries() -> list[dict]:
+    return [
+        {"text": _MULTI_TEXT, "taxonomy_code": "P", "element_idx_start": 4, "element_idx_end": 4},
+        {"text": _SINGLE_TEXT, "taxonomy_code": "P", "element_idx_start": 5, "element_idx_end": 5},
+    ]
+
+
+_MULTI_ITEMS = [
+    {"committee_name": "Glade Board", "role": "Chair", "institution": "Ashby University"},
+    {"committee_name": "Fern Council", "role": "Member", "institution": "Ashby University"},
+    {"committee_name": "Moss Panel", "role": "Member", "institution": "Ashby University"},
+]
+_SINGLE_ITEM = {"committee_name": "Heron Committee", "role": "Member", "institution": "Ashby University"}
+
+
+def _reply(content: dict, cost: float = 0.01) -> dict:
+    return {"content": json.dumps(content), "cost": cost, "total_tokens": 3}
+
+
+def _batch_reply_with_three_items_for_entry_0(**kwargs) -> dict:
+    return _reply({"entries": [
+        *({"entry_index": 0, **item} for item in _MULTI_ITEMS),
+        {"entry_index": 1, **_SINGLE_ITEM},
+    ]})
+
+
+def test_validate_raw_extractions_keeps_every_item_per_entry_in_reply_order():
+    grouped = extraction._validate_raw_extractions([
+        {"entry_index": 0, "role": "first"},
+        {"entry_index": 1, "role": "other"},
+        {"role": "no index"},  # malformed -- dropped
+        {"entry_index": 0, "role": "second"},
+    ], "P")
+    assert grouped == {0: [{"role": "first"}, {"role": "second"}], 1: [{"role": "other"}]}
+
+
+def test_batch_reply_with_several_items_for_one_entry_keeps_them_all(monkeypatch):
+    monkeypatch.setattr(extraction, "call_llm", _batch_reply_with_three_items_for_entry_0)
+    multi, _ = extraction.extract_fields_batch(_p_entries(), 0, 1)["entries"]
+
+    fields = multi["extracted_fields"]
+    assert [r["committee_name"] for r in fields[STAGE4_RECORDS_KEY]] == [
+        "Glade Board", "Fern Council", "Moss Panel"]
+    # The entry's own scalars stay the last item, which is all it kept before.
+    assert {k: v for k, v in fields.items() if k != STAGE4_RECORDS_KEY} == _MULTI_ITEMS[-1]
+    assert multi[STAGE4_RECORDS_RETURNED_KEY] == 3
+
+
+def test_multi_record_coverage_is_measured_over_every_record(monkeypatch):
+    monkeypatch.setattr(extraction, "call_llm", _batch_reply_with_three_items_for_entry_0)
+    multi, _ = extraction.extract_fields_batch(_p_entries(), 0, 1)["entries"]
+    last_only = extraction.calculate_unextracted_content(_MULTI_TEXT, _MULTI_ITEMS[-1])
+    union = multi["extraction_coverage"]
+    assert union["extraction_coverage_percent"] > last_only["extraction_coverage_percent"]
+    assert "glade" in last_only["unextracted_words"]
+    assert "glade" not in union["unextracted_words"]
+
+
+def test_a_single_item_entry_is_exactly_what_it_was_before(monkeypatch):
+    monkeypatch.setattr(extraction, "call_llm", _batch_reply_with_three_items_for_entry_0)
+    _, single = extraction.extract_fields_batch(_p_entries(), 0, 1)["entries"]
+    expected = {
+        **_p_entries()[1],
+        "extracted_fields": _SINGLE_ITEM,
+        "extraction_success": True,
+        "extraction_coverage": extraction.calculate_unextracted_content(_SINGLE_TEXT, _SINGLE_ITEM),
+    }
+    assert json.dumps(single) == json.dumps(expected)
+
+
+def test_every_record_is_cleaned_not_only_the_last(monkeypatch):
+    # normalize_dates splits a range on each item; an earlier one used to be
+    # dropped before any cleaning ran, so this pins that it is cleaned too.
+    def reply(**kwargs):
+        return _reply({"entries": [
+            {"entry_index": 0, "committee_name": "Glade Board", "dates": "1999-2001"},
+            {"entry_index": 0, "committee_name": "Fern Council", "dates": "2002-2004"},
+        ]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (entry,) = extraction.extract_fields_batch(_p_entries()[:1], 0, 1)["entries"]
+    first, last = entry["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert (first["start_date"], first["end_date"]) == ("1999", "2001")
+    assert (last["start_date"], last["end_date"]) == ("2002", "2004")
+
+
+def test_records_that_cover_the_entry_skip_the_recovery_call(monkeypatch):
+    # The last item alone covers a fifth of a long dated entry, which sends it
+    # to recovery; the five items together cover all of it.
+    records = [{"committee_name": f"{name} Committee", "description": f"{detail} oversight", "start_date": "2015"}
+               for name, detail in [("Glade", "budgetary"), ("Fern", "curricular"), ("Moss", "editorial"),
+                                    ("Heron", "procedural"), ("Wren", "technical")]]
+    text = "; ".join(f"{r['committee_name']}, {r['description']}, 2015 to present" for r in records)
+    text += " -- standing appointments"
+    entry = {"text": text, "taxonomy_code": "P", "element_idx_start": 0, "element_idx_end": 0}
+    assert len(text) >= 200
+    last_alone = {"text": text, "extracted_fields": records[-1],
+                  "extraction_coverage": extraction.calculate_unextracted_content(text, records[-1])}
+    assert extraction.needs_llm_recovery(last_alone)
+    calls = []
+
+    def reply(**kwargs):
+        calls.append(kwargs)
+        return _reply({"entries": [{"entry_index": 0, **record} for record in records]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    assert not extraction.needs_llm_recovery(out)
+    assert len(calls) == 1
+    assert out[STAGE4_RECORDS_RETURNED_KEY] == 5
+
+
+def test_recovery_reply_with_several_items_for_one_id_keeps_them_all(monkeypatch):
+    entry = {**_p_entries()[0], STAGE4_RECORDS_RETURNED_KEY: 9}
+
+    def reply(**kwargs):
+        return _reply({"recovered_entries": [
+            {"entry_id": "4_4", "fields": item} for item in _MULTI_ITEMS[:2]]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.attempt_llm_recovery([entry])["entries"]
+    assert [r["committee_name"] for r in out["extracted_fields"][STAGE4_RECORDS_KEY]] == [
+        "Glade Board", "Fern Council"]
+    assert out["extracted_fields"]["committee_name"] == "Fern Council"
+    assert out[STAGE4_RECORDS_RETURNED_KEY] == 2
+    assert out["llm_recovery_applied"] is True
+
+
+def test_a_single_item_recovery_drops_the_count_an_earlier_pass_wrote(monkeypatch):
+    entry = {**_p_entries()[0], STAGE4_RECORDS_RETURNED_KEY: 3,
+             "extracted_fields": {**_MULTI_ITEMS[-1], STAGE4_RECORDS_KEY: _MULTI_ITEMS}}
+
+    def reply(**kwargs):
+        return _reply({"recovered_entries": [{"entry_id": "4_4", "fields": _SINGLE_ITEM}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.attempt_llm_recovery([entry])["entries"]
+    assert STAGE4_RECORDS_RETURNED_KEY not in out
+    assert out["extracted_fields"] == _SINGLE_ITEM
+    assert list(out)[-1] == "llm_recovery_applied"

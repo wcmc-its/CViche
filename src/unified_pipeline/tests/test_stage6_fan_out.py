@@ -23,6 +23,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS  # noqa: E402
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY as _RECORDS  # noqa: E402
 from unified_pipeline.stage6 import fan_out  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
@@ -619,3 +620,116 @@ class TestRejectedListWarning:
         generator = WCMTemplateGenerator(verbose=False)
         generator._group_entries_by_code([entry])
         assert [w['check'] for w in generator._section_failures] == [fan_out.REJECTED_LIST_CHECK]
+
+
+# --- the list stage 4 keeps when one reply held several items for an entry ---
+# Invented values. The entry's scalars are the LAST record, as stage 4 leaves
+# them; `_RECORDS` is the name stage 6 hands in (`STAGE4_RECORDS_KEY`).
+
+
+def _committee(name, role='Member', start='2001', end='2003'):
+    return {'committee_name': name, 'role': role, 'institution': 'Ashby University',
+            'start_date': start, 'end_date': end}
+
+
+def _stage4_entry(records, text=None, code='P', **entry_keys):
+    return {'taxonomy_code': code, 'element_idx_start': 4,
+            'text': text or 'Committees: Glade Board, Fern Council and Moss Panel, Ashby University',
+            'extracted_fields': {**records[-1], _RECORDS: records}, **entry_keys}
+
+
+_THREE_COMMITTEES = [_committee('Glade Board', 'Chair', '1999', '2001'),
+                     _committee('Fern Council'), _committee('Moss Panel', start='2004', end='2006')]
+
+
+def _fan4(*entries):
+    return fan_out_multi_record_entries(list(entries), FIELD_SCHEMAS, records_key=_RECORDS)
+
+
+class TestStage4Records:
+    def test_one_child_per_record_and_the_last_is_the_parent(self):
+        parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES))
+        children = _fan4(parent)
+        assert [c['extracted_fields']['committee_name'] for c in children] == [
+            'Glade Board', 'Fern Council', 'Moss Panel']
+        last = children[-1]
+        assert last['text'] == parent['text']
+        assert last['extracted_fields'] == _THREE_COMMITTEES[-1]
+        assert FANNED_OUT_FROM not in last
+        assert [c[FANNED_OUT_FROM] for c in children[:-1]] == [
+            {'key': _RECORDS, 'index': 0, 'count': 3}, {'key': _RECORDS, 'index': 1, 'count': 3}]
+
+    def test_an_earlier_record_inherits_no_scalar_from_the_last(self):
+        records = [{'committee_name': 'Glade Board'}, _committee('Moss Panel')]
+        first, last = _fan4(_stage4_entry(records))
+        assert first['extracted_fields'] == {'committee_name': 'Glade Board'}
+        assert last['extracted_fields']['role'] == 'Member'
+
+    def test_a_stage5_annotation_stays_on_the_last_record_only(self):
+        enrichment = {'cleaned_name': 'Ashby University', 'city': 'Ashby'}
+        parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES),
+                               institution_enrichment=enrichment, enriched_fields=['city'])
+        children = _fan4(parent)
+        for child in children[:-1]:
+            assert not set(child) & fan_out._STAGE5_ENTRY_KEYS
+        assert children[-1]['institution_enrichment'] == enrichment
+        assert children[-1]['enriched_fields'] == ['city']
+
+    def test_a_scalar_stage5_added_to_the_parent_stays_on_the_last_record(self):
+        parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES))
+        parent['extracted_fields']['city'] = 'Ashby'
+        children = _fan4(parent)
+        assert children[-1]['extracted_fields']['city'] == 'Ashby'
+        assert 'city' not in children[0]['extracted_fields']
+
+    def test_tab_segments_are_the_earlier_records_texts_when_the_counts_line_up(self):
+        text = 'Chair, Glade Board 1999-2001\tMember, Fern Council 2001-2003\tMember, Moss Panel 2004-2006'
+        children = _fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES), text=text))
+        assert [c['text'] for c in children] == [
+            'Chair, Glade Board 1999-2001', 'Member, Fern Council 2001-2003', text]
+
+    def test_a_record_key_outside_the_schema_does_not_decline_the_list(self):
+        records = copy.deepcopy(_THREE_COMMITTEES)
+        records[0]['site_note'] = 'east wing'
+        assert len(_fan4(_stage4_entry(records))) == 3
+
+    def test_text_the_records_do_not_hold_does_not_decline_the_list(self):
+        # The parent alone never held it either: the last child keeps the text.
+        text = 'Zzunheld Qqunheld: Glade Board, Fern Council, Moss Panel'
+        assert len(_fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES), text=text))) == 3
+
+    @pytest.mark.parametrize('why', ['text_rendered_code', 'formatted', 'empty_record'])
+    def test_a_declined_list_leaves_the_entry_as_it_was(self, why):
+        records = copy.deepcopy(_THREE_COMMITTEES)
+        entry = _stage4_entry(records, code='K2' if why == 'text_rendered_code' else 'P')
+        if why == 'formatted':
+            entry['extracted_fields']['formatted_text'] = 'Glade Board; Fern Council; Moss Panel'
+        if why == 'empty_record':
+            records[1] = {'description': 'nothing a P row writes'}
+        assert _fan4(entry) == [entry]
+
+    def test_a_declined_list_is_not_split_by_the_generic_rules(self):
+        # Without records_key the generic rules would take the list as an
+        # off-schema record list; with it, a declined list is not theirs.
+        entry = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), code='K2')
+        entry['extracted_fields'] = {_RECORDS: [{'teaching_role': 'Lecturer'}, {'teaching_role': 'Tutor'}]}
+        assert _fan4(entry) == [entry]
+
+    def test_a_record_list_in_the_scalars_is_left_to_the_generic_rules(self):
+        # The last record carried its own off-schema list: that list splits as
+        # it did before the stage-4 list existed, and the stage-4 list goes.
+        last = {'committees': [_committee('Fern Council'), _committee('Moss Panel')]}
+        entry = {'taxonomy_code': 'P', 'text': 'Member, Fern Council\tMember, Moss Panel',
+                 'extracted_fields': {**last, _RECORDS: [_committee('Glade Board'), last]}}
+        children = _fan4(entry)
+        assert [c['extracted_fields']['committee_name'] for c in children] == [
+            'Fern Council', 'Moss Panel']
+        assert all(_RECORDS not in c['extracted_fields'] for c in children)
+        assert [c[FANNED_OUT_FROM]['key'] for c in children] == ['committees', 'committees']
+
+    def test_the_parent_is_not_mutated(self):
+        parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), institution_enrichment={'city': 'Ashby'})
+        original = copy.deepcopy(parent)
+        children = _fan4(parent)
+        children[-1]['extracted_fields']['role'] = 'changed'
+        assert parent == original
