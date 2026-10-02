@@ -1164,7 +1164,9 @@ def test_offschema_stage4_records_fan_out_splits_is_not_reported():
     entry = _anchored("I", {"organization": "Society B", STAGE4_RECORDS_KEY: [
         {"organization": "Society A", "membership_type": "Member"},
         {"organization": "Society B", "membership_type": "Fellow"}]},
-        text="Society A Member\tSociety B Fellow")
+        text="Societies: Society A Member\tSociety B Fellow")
+    # "Societies" is held by no field, so the generic list rule would decline;
+    # only the stage-4 records path splits this entry.
     assert _offschema(entry) == []
 
 
