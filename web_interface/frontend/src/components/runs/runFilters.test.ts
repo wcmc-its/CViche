@@ -5,7 +5,7 @@ import type { ReactNode } from 'react'
 import { act, renderHook } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import {
-  EMPTY_FILTERS, activeStatusPill, applyStatusPill, countPanelFilters, toListParams, toMemberListParams, useBatchFilter,
+  EMPTY_FILTERS, activeStatusPill, applyStatusPill, countPanelFilters, runsUrlWith, toListParams, toMemberListParams, useBatchFilter,
   useRunFilters,
 } from './runFilters'
 
@@ -94,6 +94,14 @@ describe('status pills', () => {
     expect(member.result.current.search).toContain('status=failed')
     expect(toMemberListParams({ ...EMPTY_FILTERS, status: 'red', feedback: 'needed' })).toEqual({ feedback: 'needed' })
     expect(toMemberListParams({ ...EMPTY_FILTERS, status: 'running' })).toEqual({ status: 'running' })
+  })
+})
+
+describe('runsUrlWith', () => {
+  it('writes each set filter under the param name the Runs page reads and skips unset ones', () => {
+    const url = new URL(runsUrlWith({ department: 'Test Dept', runBy: 'on_behalf', faculty: '' }), 'https://example.org')
+    expect(url.pathname).toBe('/runs')
+    expect(Object.fromEntries(url.searchParams)).toEqual({ department: 'Test Dept', run_by: 'on_behalf' })
   })
 })
 

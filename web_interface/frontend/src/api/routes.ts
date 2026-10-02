@@ -78,6 +78,8 @@ export const adminRoutes = {
   runScore: (runId: string) => `/api/admin/run/${runId}/score` as const,
   /** GET/PUT /api/admin/config */
   config: () => `/api/admin/config` as const,
+  /** GET (preview) / POST (publish) /api/admin/consent/publish */
+  consentPublish: () => `/api/admin/consent/publish` as const,
   /** GET/href /api/admin/export/:type  (csv export; type ∈ runs|users|consent|feedback) */
   export: (type: string) => `/api/admin/export/${type}` as const,
   /** Convenience for the single hard-coded feedback export (== export('feedback')) */

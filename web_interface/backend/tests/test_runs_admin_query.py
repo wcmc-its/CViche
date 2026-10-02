@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from app.models import Run, User
 from app.services.runs_admin_query import (
     InputFormatFilter, RunFilters, StatusFilter, build_filter_options, filtered_runs_query,
-    my_status_counts, parse_run_filters,
+    my_status_counts, parse_run_filters, submission_split,
 )
 
 
@@ -215,3 +215,43 @@ def test_other_facets_honour_the_status_filter(db, status_runs):
     options = build_filter_options(db, RunFilters(status=StatusFilter.RUNNING))
     assert [(f.value, f.count) for f in options.faculty] == [("Omar Testperson", 2)]
     assert options.feedback.needed == 0
+
+
+class TestSubmissionSplit:
+    def test_splits_own_and_on_behalf_overall_and_per_department(self, db, seeded):
+        split = submission_split(db)
+        assert (split.own_cv, split.on_behalf) == (1, 4)
+        by_dept = {d.department: (d.own_cv, d.on_behalf) for d in split.departments}
+        assert by_dept == {"Medicine": (1, 1), "Library": (0, 2), None: (0, 1)}
+
+    def test_largest_department_first_and_unknown_last_on_a_tie(self, db, seeded):
+        names = [d.department for d in submission_split(db).departments]
+        assert names == ["Library", "Medicine", None]
+
+    def test_runs_without_a_submission_type_are_not_counted(self, db, seeded):
+        alice, _ = seeded
+        db.add(Run(id="QOLD00", user_id=alice.id, status="complete", filename="cv.docx",
+                   file_type="docx", submission_type=None, started_at=datetime(2026, 8, 1)))
+        db.commit()
+        assert submission_split(db).own_cv + submission_split(db).on_behalf == 5
+
+    def test_department_matches_the_runs_department_filter(self, db, seeded):
+        """A bar's count is exactly what Runs lists for department + run_by=on_behalf."""
+        split = submission_split(db)
+        for dept in split.departments:
+            if dept.department is None:
+                continue
+            listed = filtered_runs_query(db, parse_run_filters("on_behalf", None, dept.department)).count()
+            assert listed == dept.on_behalf
+
+    def test_stats_endpoint_carries_the_split_for_admins_only(self, client, db, seeded):
+        from types import SimpleNamespace
+        from app.auth import get_current_user
+        from app.main import app
+
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(role="user", id=1)
+        assert client.get("/api/admin/stats").status_code == 403
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(role="admin", id=1, email="a@example.com")
+        body = client.get("/api/admin/stats").json()["submissions"]
+        assert (body["own_cv"], body["on_behalf"]) == (1, 4)
+        assert body["departments"][0] == {"department": "Library", "own_cv": 0, "on_behalf": 2}

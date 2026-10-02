@@ -68,6 +68,16 @@ const MEMBER_FILTER_KEYS: readonly RunFilterKey[] = ['feedback', 'status']
  *  everyone: a batch is visible to its submitter as well as to admins. */
 export const BATCH_PARAM = 'batch'
 
+/** The Runs page URL with the given filters applied, e.g. a dashboard link into a filtered list. */
+export function runsUrlWith(filters: Partial<RunFilters>): string {
+  const params = new URLSearchParams()
+  for (const key of FILTER_KEYS) {
+    const value = filters[key]
+    if (value) params.set(FILTER_PARAM[key], value)
+  }
+  return `/runs?${params.toString()}`
+}
+
 export function hasActiveFilters(filters: RunFilters): boolean {
   return FILTER_KEYS.some((key) => filters[key] !== '')
 }

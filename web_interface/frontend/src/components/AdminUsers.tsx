@@ -1,14 +1,17 @@
 import { useState, useEffect } from 'react'
 import { Loader2, Shield, User as UserIcon, Ban, Check, Pencil, X, AlertTriangle } from 'lucide-react'
-import type { AdminUser } from '../types'
-import { getAdminUsers, updateAdminUser } from '../api/admin'
+import type { AdminUser, SystemConfig } from '../types'
+import { getAdminConfig, getAdminUsers, updateAdminConfig, updateAdminUser } from '../api/admin'
 import { formatDateShort, formatCost } from '../utils'
 import { useAuth } from '../contexts/AuthContext'
-import { demotionBlock, isWcmEmail } from './adminUserRules'
+import { demotionBlock, inviteDemotionBlock, isListedAdmin, isWcmEmail, pendingInvites } from './adminUserRules'
+import AddUserForm from './AddUserForm'
+import PendingInviteRow from './PendingInviteRow'
 
 export default function AdminUsers() {
   const currentUserId = useAuth().user?.user_id
   const [users, setUsers] = useState<AdminUser[]>([])
+  const [config, setConfig] = useState<SystemConfig | null>(null)
   const [loading, setLoading] = useState(true)
   const [editingId, setEditingId] = useState<number | null>(null)
   const [editLimits, setEditLimits] = useState({ daily: '', monthly: '' })
@@ -16,7 +19,9 @@ export default function AdminUsers() {
 
   const fetchUsers = async () => {
     try {
-      setUsers(await getAdminUsers())
+      const [loadedUsers, loadedConfig] = await Promise.all([getAdminUsers(), getAdminConfig()])
+      setUsers(loadedUsers)
+      setConfig(loadedConfig)
     } catch (err) {
       console.error('Failed to fetch users:', err)
     } finally {
@@ -27,6 +32,45 @@ export default function AdminUsers() {
   useEffect(() => {
     fetchUsers()
   }, [])
+
+  /** Save allowed/admin list changes, then reload the config so the panel shows what the server holds. */
+  const saveLists = async (updates: Partial<SystemConfig>): Promise<boolean> => {
+    setError(null)
+    try {
+      await updateAdminConfig(updates)
+      setConfig(await getAdminConfig())
+      return true
+    } catch (err: any) {
+      setError(err.message || 'Failed to save the user list')
+      return false
+    }
+  }
+
+  const addUser = async (email: string): Promise<boolean> => {
+    if (!config) return false
+    if (config.allowed_users.some((e) => e.toLowerCase() === email)) {
+      setError('User already in allowed list.')
+      return false
+    }
+    return saveLists({ allowed_users: [...config.allowed_users, email] })
+  }
+
+  const removeInvite = (email: string) => {
+    if (!config) return
+    if (isListedAdmin(config.admin_users, email)) {
+      setError('Remove admin privileges first before removing user.')
+      return
+    }
+    saveLists({ allowed_users: config.allowed_users.filter((e) => e.toLowerCase() !== email.toLowerCase()) })
+  }
+
+  const toggleInviteRole = (email: string) => {
+    if (!config) return
+    const admins = isListedAdmin(config.admin_users, email)
+      ? config.admin_users.filter((e) => e.toLowerCase() !== email.toLowerCase())
+      : [...config.admin_users, email]
+    saveLists({ admin_users: admins })
+  }
 
   const toggleStatus = async (user: AdminUser) => {
     setError(null)
@@ -87,6 +131,8 @@ export default function AdminUsers() {
     )
   }
 
+  const invites = config ? pendingInvites(config.allowed_users, users) : []
+
   return (
     <div>
       {error && (
@@ -96,6 +142,12 @@ export default function AdminUsers() {
       )}
 
       <div className="bg-white rounded-lg shadow-sm border border-sand-300 overflow-hidden">
+        <AddUserForm onAdd={addUser} />
+        {config && config.auth_mode !== 'simple' && (
+          <p className="px-4 py-2 text-xs text-gray-500 border-b border-sand-200">
+            This instance signs in through SSO and the directory group, so added addresses only apply to simple (email) login.
+          </p>
+        )}
         <div className="overflow-x-auto">
           <table className="min-w-full divide-y divide-sand-200">
             <thead className="bg-sand-50">
@@ -274,11 +326,21 @@ export default function AdminUsers() {
                   </tr>
                 )
               })}
+              {invites.map((email) => (
+                <PendingInviteRow
+                  key={email}
+                  email={email}
+                  isAdmin={isListedAdmin(config?.admin_users ?? [], email)}
+                  roleBlock={inviteDemotionBlock(config?.admin_users ?? [], email)}
+                  onToggleRole={() => toggleInviteRole(email)}
+                  onRemove={() => removeInvite(email)}
+                />
+              ))}
             </tbody>
           </table>
         </div>
 
-        {users.length === 0 && (
+        {users.length === 0 && invites.length === 0 && (
           <div className="text-center py-12 text-gray-500 text-sm">
             No users found.
           </div>
