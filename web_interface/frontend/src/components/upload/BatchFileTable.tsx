@@ -1,6 +1,6 @@
 import { AlertCircle, CheckCircle2, Circle, Loader2, X, XCircle } from 'lucide-react'
 import { formatCost, formatMinutes } from '../../utils'
-import { estimateCost, estimateMinutes, rowNote } from './batchRows'
+import { estimateCost, estimateMinutes, rowNote, rowSize } from './batchRows'
 import type { BatchRow, RowState } from './batchRows'
 import { formatFileSize } from './SingleFileRow'
 
@@ -49,7 +49,7 @@ function FileRow({ row, index, showCost, editable, onRemove, onRunAgain }: RowPr
     <li className={`${GRID} items-center border-b border-sand-200 px-3.5 py-2.5 last:border-b-0 ${bg}`} data-testid="batch-row">
       <span className="text-right text-xs tabular-nums text-gray-400">{index + 1}</span>
       <span title={row.file.name} className={`truncate font-medium text-gray-900 ${row.invalidReason ? 'opacity-60' : ''}`}>{row.file.name}</span>
-      <span className="text-right text-[13px] tabular-nums text-gray-500">{formatFileSize(row.file.size)}</span>
+      <span className="text-right text-[13px] tabular-nums text-gray-500">{formatFileSize(rowSize(row))}</span>
       <span className="text-right text-[13px] tabular-nums"><EstimateCell row={row} showCost={showCost} /></span>
       <span className="flex min-w-0 flex-col gap-px">
         <span className={`flex items-center gap-1.5 text-[13px] font-medium ${status.text}`}>{status.icon}{status.label}</span>

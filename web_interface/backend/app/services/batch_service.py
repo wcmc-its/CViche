@@ -26,7 +26,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.errors import not_found
-from app.models import Run, RunBatch, RunState, User
+from app.models import BatchSource, Run, RunBatch, RunState, User
 from app.pipeline import concurrency, run_queue
 from app.schemas import (
     BatchDetail, BatchRunRow, BatchStatusCounts, BatchSummary, QueueLane, QueueOverview,
@@ -78,7 +78,7 @@ def _is_duplicate_key(error: IntegrityError) -> bool:
     return _SQLITE_UNIQUE_FAILED in str(orig)
 
 
-def create_batch(db: Session, user: User, files_submitted: int) -> RunBatch:
+def create_batch(db: Session, user: User, files_submitted: int, source: str = BatchSource.WEB) -> RunBatch:
     """Insert and commit a new batch owned by ``user``, redrawing the id on a
     duplicate-key collision. Any other integrity error (a foreign-key
     violation, say) is re-raised at once: no redraw can cure it. Raises
@@ -86,7 +86,7 @@ def create_batch(db: Session, user: User, files_submitted: int) -> RunBatch:
     collides."""
     last_collision: IntegrityError | None = None
     for _ in range(_BATCH_ID_ATTEMPTS):
-        batch = RunBatch(id=generate_batch_id(), user_id=user.id, files_submitted=files_submitted)
+        batch = RunBatch(id=generate_batch_id(), user_id=user.id, files_submitted=files_submitted, source=source)
         db.add(batch)
         try:
             db.commit()

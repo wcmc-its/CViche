@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import type { ApiError } from '../../api/client'
 import { createBatch } from '../../api/batches'
 import { getRunStatus, startRun } from '../../api/runs'
+import { submitInboxItem } from '../../api/inbox'
 import { getBatchEstimate, uploadFile } from '../../api/upload'
 import {
-  MAX_BATCH_FILES, MAX_UPLOADS_IN_FLIGHT, classifyFailure, isValidRow, makeRow, mayAlreadyBeStarted, runPool,
+  MAX_BATCH_FILES, MAX_UPLOADS_IN_FLIGHT, classifyFailure, inboxFailure, isValidRow, makeInboxRow, makeRow, mayAlreadyBeStarted, runPool,
   startFailure, wasStarted,
 } from './batchRows'
-import type { BatchRow } from './batchRows'
+import type { BatchRow, HeldFile } from './batchRows'
 import type { SubmissionType } from './consentText'
 import type { Estimate } from '../../types'
 
@@ -43,19 +44,28 @@ async function startedAnyway(runId: string, err: unknown): Promise<boolean> {
   }
 }
 
+/** Create the row's run: upload the file, or for an emailed CV submit its held item. Null when it failed (the row is patched). */
+async function createRun(row: BatchRow, batchId: string, options: BatchSubmitOptions, patch: Patch): Promise<string | null> {
+  try {
+    if (row.inbox === null) return (await uploadFile(row.file, { ...options, batchId })).run_id
+    const result = await submitInboxItem(row.inbox.id, { ...options, batchId })
+    if (result.status === 'submitted' && result.run_id) return result.run_id
+    patch(row.key, { state: 'failed', failure: inboxFailure(result) })
+  } catch (err) {
+    console.error('Batch file upload failed', err)
+    patch(row.key, { state: 'failed', failure: classifyFailure(err, UPLOAD_FAILED_REASON) })
+  }
+  return null
+}
+
 /** Upload one row (unless an earlier attempt already created its run) and start it.
  *  A start that fails keeps the run id, so a retry re-starts that run and never re-uploads. */
 async function sendRow(row: BatchRow, batchId: string, options: BatchSubmitOptions, patch: Patch): Promise<void> {
   patch(row.key, { state: 'uploading', failure: null })
   let runId = row.runId
   if (runId === null) {
-    try {
-      runId = (await uploadFile(row.file, { ...options, batchId })).run_id
-    } catch (err) {
-      console.error('Batch file upload failed', err)
-      patch(row.key, { state: 'failed', failure: classifyFailure(err, UPLOAD_FAILED_REASON) })
-      return
-    }
+    runId = await createRun(row, batchId, options, patch)
+    if (runId === null) return
     patch(row.key, { runId })
   }
   try {
@@ -109,6 +119,8 @@ export interface BatchUpload {
   error: string | null
   clearError: () => void
   addFiles: (files: File[]) => void
+  /** Add emailed CVs (#1298) to the table; they are submitted from the server, not uploaded. */
+  addInbox: (items: HeldFile[]) => void
   removeRow: (key: string) => void
   /** Start the table from a file already chosen in the single-file picker. */
   adopt: (file: File, estimate: Estimate | null) => void
@@ -152,6 +164,11 @@ export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () 
     const estimated = new Set(toEstimate.map((r) => r.key))
     changeFiles((prev) => [...prev, ...fresh.map((r) => (isValidRow(r) && !estimated.has(r.key) ? { ...r, estimate: null } : r))])
     if (toEstimate.length) void estimateRows(toEstimate, patchMany, setError)
+  }
+
+  const addInbox = (items: HeldFile[]) => {
+    const held = new Set(rows.flatMap((r) => (r.inbox ? [r.inbox.id] : [])))
+    changeFiles((prev) => [...prev, ...items.filter((i) => !held.has(i.id)).map((i) => makeInboxRow(i, nextKey()))])
   }
 
   const sendAll = async (targets: BatchRow[], id: string, options: BatchSubmitOptions) => {
@@ -210,6 +227,7 @@ export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () 
     error,
     clearError: () => setError(null),
     addFiles,
+    addInbox,
     removeRow: (key) => changeFiles((prev) => prev.filter((r) => r.key !== key)),
     adopt: (file, estimate) => changeFiles(() => [makeRow(file, nextKey(), estimate)]),
     submit,

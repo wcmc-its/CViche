@@ -65,7 +65,7 @@ def test_multiple_t_entries_are_each_reviewed_and_reclassified_independently(mon
     monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(None) | {
         "content": json.dumps([
             {"entry_index": 0, "new_code": "S1", "confidence": 0.9, "reasoning": "research"},
-            {"entry_index": 1, "new_code": "M1", "confidence": 0.7, "reasoning": "membership"},
+            {"entry_index": 1, "new_code": "M2A", "confidence": 0.7, "reasoning": "membership"},
         ])
     })
 
@@ -74,7 +74,7 @@ def test_multiple_t_entries_are_each_reviewed_and_reclassified_independently(mon
     assert stats["t_entries_reviewed"] == 2
     assert stats["t_entries_reclassified"] == 2
     assert updated[0]["taxonomy_code"] == "S1"
-    assert updated[1]["taxonomy_code"] == "M1"
+    assert updated[1]["taxonomy_code"] == "M2A"
 
 
 def test_wrapped_entries_key_response(monkeypatch):
@@ -296,13 +296,36 @@ def test_duplicate_entry_index_current_behavior_first_applied_reclassification_w
     monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(None) | {
         "content": json.dumps([
             {"entry_index": 0, "new_code": "S1", "confidence": 0.9, "reasoning": "first"},
-            {"entry_index": 0, "new_code": "M1", "confidence": 0.8, "reasoning": "second"},
+            {"entry_index": 0, "new_code": "M2A", "confidence": 0.8, "reasoning": "second"},
         ])
     })
 
     updated, stats = classify.validate_t_classifications([_t_entry()], _taxonomy())
 
     assert updated[0]["taxonomy_code"] == "S1"
+    assert stats["t_entries_reclassified"] == 1
+
+
+def test_m1_proposal_keeps_t_with_a_distinct_tag(monkeypatch):
+    """T-validation must never recode T to M1: stage 6 renders M1 only through
+    the stage 4.5 research summary, so a recoded website or project note was
+    lost (AUTOPSY-s7ab-batch-2026-10-02 class 11). The entry keeps T, is not
+    counted as reclassified, and its reasoning says why -- not "confirmed",
+    which stage 6's Appendix filter reads as a structural-drop signal."""
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(None) | {
+        "content": json.dumps([
+            {"entry_index": 0, "new_code": "M1", "confidence": 0.9, "reasoning": "lab site"},
+            {"entry_index": 1, "new_code": "S1", "confidence": 0.9, "reasoning": "paper"},
+        ])
+    })
+
+    updated, stats = classify.validate_t_classifications(
+        [_t_entry("Item A"), _t_entry("Item B")], _taxonomy())
+
+    assert updated[0]["taxonomy_code"] == "T"
+    assert updated[0]["classification_reasoning"] == "[T-validation: M1 not allowed, kept T] lab site"
+    assert updated[0]["t_validation_applied"] is True
+    assert updated[1]["taxonomy_code"] == "S1"
     assert stats["t_entries_reclassified"] == 1
 
 

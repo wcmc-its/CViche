@@ -128,6 +128,15 @@ export const batchRoutes = {
   queue: () => `/api/queue` as const,
 } as const
 
+export const inboxRoutes = {
+  /** GET /api/inbox  (the caller's emailed CVs held for confirmation) */
+  list: () => `/api/inbox` as const,
+  /** POST /api/inbox/:id/discard */
+  discard: (id: number) => `/api/inbox/${id}/discard` as const,
+  /** POST /api/inbox/submit  (create runs from held items) */
+  submit: () => `/api/inbox/submit` as const,
+} as const
+
 export const wsRoutes = {
   /** WS /ws/run/:id/stream  (live pipeline event stream; passed to getWebSocketUrl) */
   runStream: (id: string) => `/ws/run/${id}/stream` as const,
@@ -142,6 +151,7 @@ export const routes = {
   consent: consentRoutes,
   upload: uploadRoutes,
   batch: batchRoutes,
+  inbox: inboxRoutes,
   ws: wsRoutes,
 } as const
 

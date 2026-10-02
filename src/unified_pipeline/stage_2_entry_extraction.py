@@ -334,6 +334,96 @@ def collect_header_info(hierarchy_with_indices: list[dict]) -> dict[int, list[st
     return header_info
 
 
+# How much text may follow an unlocated heading's own words on its line and
+# still count as that heading -- room for a parenthetical note such as
+# "(selected)" or "(2015-2020)", not for a content line that merely opens
+# with the same word.
+_MAX_HEADING_SUFFIX_CHARS = 80
+
+
+class _UnlocatedHeading(NamedTuple):
+    """A stage-1a heading stage 1b kept in its hierarchy but could not place
+    on a document line (``element_idx`` None, not synthetic)."""
+    path: tuple[str, ...]
+
+
+def collect_unlocated_headings(hierarchy_with_indices: list[dict]) -> list[_UnlocatedHeading]:
+    """Every non-synthetic heading in stage 1b's hierarchy with no element_idx,
+    with its full hierarchy path, in document-outline order."""
+    found: list[_UnlocatedHeading] = []
+    pending = [(item, ()) for item in reversed(hierarchy_with_indices)]
+    while pending:
+        item, parent_path = pending.pop()
+        text = (item.get("text") or "").strip()
+        path = parent_path + (text,) if text else parent_path
+        if text and item.get("element_idx") is None and not item.get("synthetic"):
+            found.append(_UnlocatedHeading(path))
+        pending.extend((child, path) for child in reversed(item.get("children") or []))
+    return found
+
+
+def _collapse_whitespace(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _line_is_heading(line_text: str, heading_text: str) -> bool:
+    """True when the line is the heading, or the heading followed by a short
+    non-word suffix ("ABSTRACTS (selected)"). Case-sensitive: 1a copies the
+    heading's text from the line itself."""
+    line = _collapse_whitespace(line_text)
+    heading = _collapse_whitespace(heading_text)
+    if not heading or not line.startswith(heading):
+        return False
+    suffix = line[len(heading):]
+    if not suffix:
+        return True
+    return not suffix[0].isalnum() and len(suffix) <= _MAX_HEADING_SUFFIX_CHARS
+
+
+def _repath_section_tail(entries: list[dict], heading_pos: int, new_path: list[str]) -> int:
+    """Move the entries after ``entries[heading_pos]`` that share its section
+    under ``new_path``, stopping at the next header or section change.
+    Returns how many entries moved."""
+    old_path = entries[heading_pos]["hierarchy"]
+    moved = 0
+    for entry in entries[heading_pos + 1:]:
+        if entry["element_type"] == "header" or entry["hierarchy"] != old_path:
+            break
+        entry["hierarchy"] = list(new_path)
+        moved += 1
+    return moved
+
+
+def promote_unlocated_headings(entries: list[dict], hierarchy_with_indices: list[dict]) -> list[dict]:
+    """Restore a heading stage 1b failed to place (autopsy 2026-10-02, class 6).
+
+    1b leaves such a heading's line inside the previous section, the LLM
+    rightly claims no entry for it, and it was emitted as a ``break`` -- so
+    every entry under it inherited the previous section's hierarchy (an
+    ABSTRACTS heading lost, so 3b coded its abstracts as articles). A break whose
+    line is that heading becomes a ``header`` carrying the heading's path, and
+    the rest of its section moves under it. Only a heading with exactly one
+    matching break is promoted; an ambiguous one is logged and left alone.
+    ``entries`` must be sorted by element index; it is updated in place and
+    returned.
+    """
+    for heading in collect_unlocated_headings(hierarchy_with_indices):
+        positions = [
+            pos for pos, entry in enumerate(entries)
+            if entry["element_type"] == "break" and _line_is_heading(entry.get("text") or "", heading.path[-1])
+        ]
+        if len(positions) != 1:
+            if positions:
+                logger.warning(f"  Unlocated heading {list(heading.path)} matches {len(positions)} break lines; left as breaks")
+            continue
+        pos = positions[0]
+        moved = _repath_section_tail(entries, pos, list(heading.path))
+        entries[pos]["element_type"] = "header"
+        entries[pos]["hierarchy"] = list(heading.path)
+        logger.info(f"  Promoted break at {entries[pos]['element_idx_start']} to unlocated heading {list(heading.path)}; {moved} entries moved under it")
+    return entries
+
+
 def remove_subset_delimiters(delimiters: list) -> list:
     """
     Remove delimiters that are subsets of larger delimiters.
@@ -1503,6 +1593,22 @@ def _drop_foreign_template_instructions(entries: list[dict]) -> list[dict]:
     ]
 
 
+def _entry_sort_key(entry: dict) -> tuple[float, float]:
+    """Sort key over mixed int/string element indices (e.g., 22 vs "22.2")."""
+    idx = entry["element_idx_start"]
+    if isinstance(idx, str) and "." in idx:
+        # Row sub-index like "22.2" -> (22, 2)
+        parts = idx.split(".", 1)
+        return (float(parts[0]), float(parts[1]) if len(parts) > 1 else 0)
+    elif isinstance(idx, str):
+        # String index like "table_0" -> (1000000 + idx number)
+        if idx.startswith("table_"):
+            return (1000000 + int(idx.split("_")[1]), 0)
+        return (float(idx), 0)
+    else:
+        return (float(idx), 0)
+
+
 def run_stage_2(
     docx_path: str,
     hierarchy_json_path: str = None,
@@ -1687,22 +1793,7 @@ def run_stage_2(
         all_entries.extend(section_entries)
 
     # Sort entries by element_idx_start for consistent output
-    # Handle mixed int/string indices (e.g., 22 vs "22.2")
-    def sort_key(entry):
-        idx = entry["element_idx_start"]
-        if isinstance(idx, str) and "." in idx:
-            # Row sub-index like "22.2" -> (22, 2)
-            parts = idx.split(".", 1)
-            return (float(parts[0]), float(parts[1]) if len(parts) > 1 else 0)
-        elif isinstance(idx, str):
-            # String index like "table_0" -> (1000000 + idx number)
-            if idx.startswith("table_"):
-                return (1000000 + int(idx.split("_")[1]), 0)
-            return (float(idx), 0)
-        else:
-            return (float(idx), 0)
-
-    all_entries.sort(key=sort_key)
+    all_entries.sort(key=_entry_sort_key)
 
     # Calculate coverage statistics
     content_entries = [e for e in all_entries if e["element_type"] not in ("header", "break")]
@@ -1721,6 +1812,7 @@ def run_stage_2(
     # Drop empty content entries and exact duplicates (#211). Unconditional:
     # unlike the instruction filter above, this never removes real content.
     all_entries = filter_extraction_noise(all_entries)
+    all_entries = promote_unlocated_headings(all_entries, hierarchy)
 
     # Recompute coverage buckets after filtering so reported counts are accurate.
     content_entries = [e for e in all_entries if e["element_type"] not in ("header", "break")]

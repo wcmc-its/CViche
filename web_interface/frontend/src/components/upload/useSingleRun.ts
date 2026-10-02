@@ -1,9 +1,12 @@
 import { useState } from 'react'
+import { submitInboxItem } from '../../api/inbox'
 import { getEstimate, isDuplicateError, uploadFile } from '../../api/upload'
+import type { UploadResult } from '../../api/upload'
 import type { Estimate } from '../../types'
 import { getCapacity, startRun } from '../../api/runs'
 import { isConsentError } from './useBatchUpload'
 import { MAX_UPLOAD_BYTES, TOO_LARGE_REASON } from './batchRows'
+import type { HeldFile } from './batchRows'
 import type { SubmissionType } from './consentText'
 
 interface SingleRunOptions {
@@ -24,11 +27,12 @@ export interface SingleRun {
   /** The server already ran this exact file (#1286); its message, held until the user re-submits to run it again. */
   pendingDuplicate: string | null
   /** Upload `file` and start it; or, with a run already held, start that run. */
-  start: (file: File) => Promise<void>
+  start: (file: File, held?: HeldFile | null) => Promise<void>
   /** Forget any held run (a new file was chosen or the file was removed). */
   reset: () => void
 }
 
+const INBOX_REFUSED = "Couldn't submit the emailed file. Please try again."
 const START_FAILED =
   'Your file was uploaded, but processing could not start. Please try again in a moment.'
 const AT_CAPACITY =
@@ -95,8 +99,19 @@ export function useSingleRun({ stripWcmInstructions, submissionType, onUploadSuc
     return true
   }
 
-  const uploadAndStart = async (file: File, confirmDuplicate: boolean) => {
-    const data = await uploadFile(file, { stripWcmInstructions, submissionType, confirmDuplicate: confirmDuplicate || undefined })
+  /** Create the run: upload the file, or submit the emailed CV held on the server (#1298; no batch). */
+  const createRun = async (file: File, held: HeldFile | null, confirmDuplicate: boolean): Promise<UploadResult> => {
+    if (!held) return uploadFile(file, { stripWcmInstructions, submissionType, confirmDuplicate: confirmDuplicate || undefined })
+    const result = await submitInboxItem(held.id, { stripWcmInstructions, submissionType, confirmDuplicate })
+    if (result.status === 'submitted' && result.run_id) {
+      return { run_id: result.run_id, wcm_template_warning: false, wcm_template_match_ratio: null }
+    }
+    // Same shape /upload's refusal has, so the catch below treats a duplicate the same way.
+    throw { status: result.error === 'duplicate_file' ? 409 : 400, code: result.error ?? undefined, message: result.message ?? INBOX_REFUSED }
+  }
+
+  const uploadAndStart = async (file: File, held: HeldFile | null, confirmDuplicate: boolean) => {
+    const data = await createRun(file, held, confirmDuplicate)
     // Blank-template heuristic tripped: don't start the run yet. Surface the
     // warning and require the acknowledgement checkbox before the next click
     // (which spends a paid run). The upload itself already created the run.
@@ -116,7 +131,7 @@ export function useSingleRun({ stripWcmInstructions, submissionType, onUploadSuc
     }
   }
 
-  const start = async (file: File) => {
+  const start = async (file: File, held: HeldFile | null = null) => {
     if (pendingWarning) {
       if (acknowledged) await restartHeld(pendingWarning.runId, 'Failed to start processing. Please try again.')
       return
@@ -134,7 +149,7 @@ export function useSingleRun({ stripWcmInstructions, submissionType, onUploadSuc
       return
     }
     try {
-      await uploadAndStart(file, confirmDuplicate)
+      await uploadAndStart(file, held, confirmDuplicate)
     } catch (err: any) {
       if (isDuplicateError(err)) {
         setPendingDuplicate(err.message)
@@ -171,6 +186,9 @@ export interface SingleFile {
   pick: (file: File) => Promise<void>
   /** Take a file whose estimate is already known (carried over from the batch table). */
   adopt: (file: File, estimate: Estimate | null) => void
+  /** The emailed CV chosen for this run (#1298), whose bytes are on the server; `file` is a name-only placeholder. */
+  held: HeldFile | null
+  adoptHeld: (item: HeldFile) => void
   clear: () => void
 }
 
@@ -181,8 +199,10 @@ export function useSingleFile(onChange: () => void, onRefused: (message: string 
   const [file, setFile] = useState<File | null>(null)
   const [estimate, setEstimate] = useState<Estimate | null>(null)
   const [estimating, setEstimating] = useState(false)
+  const [held, setHeld] = useState<HeldFile | null>(null)
 
   const clear = () => {
+    setHeld(null)
     setFile(null)
     setEstimate(null)
     onChange()
@@ -200,6 +220,7 @@ export function useSingleFile(onChange: () => void, onRefused: (message: string 
       clear()
       return
     }
+    setHeld(null)
     setFile(selected)
     onRefused(null)
     setEstimate(null)
@@ -214,11 +235,19 @@ export function useSingleFile(onChange: () => void, onRefused: (message: string 
     }
   }
 
+  const adoptHeld = (item: HeldFile) => {
+    setHeld(item)
+    setFile(new File([], item.filename))
+    setEstimate(null)
+    onChange()
+  }
+
   const adopt = (selected: File, known: Estimate | null) => {
+    setHeld(null)
     setFile(selected)
     setEstimate(known)
     onChange()
   }
 
-  return { file, estimate, estimating, pick, adopt, clear }
+  return { file, estimate, estimating, pick, adopt, held, adoptHeld, clear }
 }

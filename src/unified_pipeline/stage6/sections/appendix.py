@@ -533,6 +533,16 @@ REASON_INVALID_CODE = "invalid_code"
 _QUARANTINE_MARKER_KEY = "taxonomy_code_quarantine_reason"
 _QUARANTINE_MARKER_INVALID_CODE = "invalid_taxonomy_code"
 
+# Stage 3b's T-validation pass recoded this entry from T to M1. The research
+# summary only paraphrases M1, so such an entry (a website, a project note) is
+# diverted here rather than lost (AUTOPSY-s7ab-batch-2026-10-02 class 11:
+# RGUNJV 3038/3040, BMAMWE 1282..). Keyed off stage 3b's `t_validation_applied`
+# marker, which on a non-T entry means T-validation moved it off T
+# (stage3b/classify.py `validate_t_classifications`); the string is duplicated
+# rather than imported, as with the quarantine marker above.
+REASON_T_VALIDATION_RECODED = "t_validation_recoded"
+_T_VALIDATION_MARKER_KEY = "t_validation_applied"
+
 # E, G and J -- the three passthrough sections. None of the three is in
 # `RENDER_ROUTED_CODES` (they have no taxonomy-code dispatch of their own --
 # the passthrough writers select by source hierarchy, not code), so an
@@ -578,6 +588,13 @@ _REASON_TEXT = {
 }
 
 
+def is_t_validation_recoded_m1(entry: Mapping[str, object]) -> bool:
+    """True when stage 3b's T-validation pass moved *entry* from T to M1 --
+    content the research summary does not render (REASON_T_VALIDATION_RECODED)."""
+    return (entry.get("taxonomy_code") == _RESEARCH_SUMMARY_CODE
+            and entry.get(_T_VALIDATION_MARKER_KEY) is True)
+
+
 def _plural_entries(count: int) -> str:
     """'entry' for 1, 'entries' otherwise -- the noun in `_diversion_message`."""
     return "entry" if count == 1 else "entries"
@@ -619,6 +636,8 @@ def _diversion_message(code: str, count: int, reason: str,
       any of the ~20 routed sections could be the one whose renderer raised
       -- and points at the section-failure record rather than repeating the
       section name (`_diversion_message` has no `label`, only `code`).
+    - REASON_T_VALIDATION_RECODED (and REASON_INVALID_CODE): stage 3b's
+      recode named as the cause, checked before any routing-based reason.
     - Everything else (REASON_NO_RENDER_ROUTE, and REASON_RENDERER_DECLINED
       for `_RESEARCH_SUMMARY_CODE`): the shared `_REASON_TEXT` lookup.
     """
@@ -628,6 +647,10 @@ def _diversion_message(code: str, count: int, reason: str,
                 f"quarantined {'it' if count == 1 else 'them'}: the stage 3b "
                 f"taxonomy code was not a valid taxonomy code (see "
                 f"original_taxonomy_code in the stage 4 artifact)")
+    if reason == REASON_T_VALIDATION_RECODED:
+        return (f"{code}: {count} {noun} diverted to the Appendix — stage 3b "
+                f"T-validation recoded {'it' if count == 1 else 'them'} from T "
+                f"to {code}, which only the research summary renders")
     if reason == REASON_RECOVERED_UNRENDERED:
         verb = _plural_was(count)
         return (f"{code}: {count} {noun} classified {code} {verb} not "
@@ -739,6 +762,8 @@ def build_appendix_diversion_warnings(
         code = entry.get("taxonomy_code") or "?"
         if entry.get(_QUARANTINE_MARKER_KEY) == _QUARANTINE_MARKER_INVALID_CODE:
             reason = REASON_INVALID_CODE
+        elif is_t_validation_recoded_m1(entry):
+            reason = REASON_T_VALIDATION_RECODED
         else:
             reason = _appendix_diversion_reason(code, render_routed_codes, passthrough_codes)
         counts[(code, reason)] += 1

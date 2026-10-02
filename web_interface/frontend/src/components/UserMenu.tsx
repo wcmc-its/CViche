@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { LogOut } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
+import { FileText, LogOut } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 
 const HEADSHOT_BASE = 'https://directory.weill.cornell.edu/api/v1/person/profile'
@@ -107,6 +107,15 @@ export default function UserMenu({ className }: UserMenuProps) {
             <p className="text-sm font-medium text-gray-900 truncate">{user.display_name}</p>
             <p className="text-xs text-gray-500 truncate">{user.email}</p>
           </div>
+          <Link
+            to="/terms"
+            role="menuitem"
+            onClick={() => setOpen(false)}
+            className="flex w-full items-center gap-2 px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50 focus:bg-gray-50 focus-visible:outline-none transition-colors"
+          >
+            <FileText className="h-4 w-4" aria-hidden="true" />
+            Terms you agreed to
+          </Link>
           <button
             type="button"
             role="menuitem"
