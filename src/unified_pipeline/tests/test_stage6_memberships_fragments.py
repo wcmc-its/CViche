@@ -1110,28 +1110,17 @@ def test_a_header_row_drop_is_written_to_the_render_warnings():
     }]
 
 
-# --- class 13 (2026-10-02): a start-only membership reads its source --------
 
-@pytest.mark.parametrize("text, expected", [
-    ("Fictional Society of Examples, Charter Member, 1981", "1981"),
-    ("Fictional Society of Examples, Charter Member, 1981-", "1981-Present"),
-])
-def test_single_membership_start_only_date_reads_its_own_source_text(text, expected):
+# --- class 13 (2026-10-02): memberships are left out of the bare-year rule ----
+# A start-only membership is usually ongoing, so it keeps "-Present" even
+# when the source gives only a join year (Paul, 2026-10-02).
+
+def test_start_only_membership_keeps_present_without_an_open_dash():
     entry = {
-        "text": text,
+        "text": "Fictional Society of Examples, Charter Member, 1981",
         "extracted_fields": {"organization": "Fictional Society of Examples",
                              "membership_type": "Charter Member",
                              "start_date": "1981"},
     }
     rows = _render_memberships([entry])
-    assert [row[1] for row in rows] == [expected]
-
-
-def test_multi_membership_start_only_dates_read_the_entry_source_text():
-    entry = {
-        "text": ("Member | State Medical Society | 2/2015 | "
-                 "Fellow | National Surgical Association | 3/2018-"),
-        "extracted_fields": {"organization": "State Medical Society", "start_date": "2015"},
-    }
-    rows = _render_memberships([entry])
-    assert [row[1] for row in rows] == ["2015", "2018-Present"]
+    assert [row[1] for row in rows] == ["1981-Present"]
