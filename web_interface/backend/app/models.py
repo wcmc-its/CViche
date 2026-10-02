@@ -1,7 +1,7 @@
 """SQLAlchemy database models."""
 from enum import StrEnum
 
-from sqlalchemy import Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint, text
+from sqlalchemy import Boolean, Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint, false, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.base_class import Base
@@ -272,9 +272,12 @@ class RunBatch(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     # Valid files the user selected when creating the batch.
     files_submitted = Column(Integer, nullable=False)
-    # Where the batch came from (#1298): only an "email" batch gets the
+    # Where the batch came from (#1298): an "email" batch always gets the
     # completion email.
     source = Column(String(10), nullable=False, default=BatchSource.WEB, server_default=BatchSource.WEB)
+    # A web batch whose submitter ticked "Email me when job completes" (#1335)
+    # gets it too.
+    notify_on_complete = Column(Boolean, nullable=False, default=False, server_default=false())
     # Set once, by a conditional UPDATE, by whichever pod sends the completion email.
     completion_notified_at = Column(DateTime, nullable=True)
 

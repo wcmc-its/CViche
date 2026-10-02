@@ -80,6 +80,12 @@ def _enabled() -> bool:
     return str(value).strip().lower() in _TRUTHY
 
 
+def sending_enabled() -> bool:
+    """Whether ``send`` would hand mail to SES (``CVICHE_MAIL_SEND``), so the
+    New run page offers its "Email me when job completes" box (#1335)."""
+    return _enabled()
+
+
 def _new_run_url() -> str:
     explicit, _ = get_config("mail", "CVICHE_PUBLIC_URL", default="")
     return (explicit or notifications._run_link_base()).rstrip("/") + "/"

@@ -67,6 +67,15 @@ export function WhoToggle({ value, queueMode, onChange }: WhoToggleProps) {
   )
 }
 
+/** "Email me when job completes" (#1335), below the attestation. The page shows it only when the server can send mail. */
+export function CompletionEmailOption({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <CheckBox checked={checked} onChange={onChange}>
+      <span className="block font-semibold text-gray-900">Email me when job completes</span>
+    </CheckBox>
+  )
+}
+
 /** Output options (issue #153); track changes is always on and has no control. */
 export function OptionsSection({ heading, strip, onStripChange }: { heading: string; strip: boolean; onStripChange: (v: boolean) => void }) {
   return (

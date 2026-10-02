@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createBatch } from '../../api/batches'
 import { submitInboxItem } from '../../api/inbox'
 import { getEstimate, isDuplicateError, uploadFile } from '../../api/upload'
 import type { UploadResult } from '../../api/upload'
@@ -12,6 +13,8 @@ import type { SubmissionType } from './consentText'
 interface SingleRunOptions {
   stripWcmInstructions: boolean
   submissionType: SubmissionType
+  /** "Email me when job completes" (#1335): the run goes into a one-file batch that asks for the email. */
+  notifyOnComplete: boolean
   onUploadSuccess: (runId: string) => void
   onConsentRequired: () => void
 }
@@ -40,9 +43,11 @@ const AT_CAPACITY =
   'right now. Any runs already in progress will keep going -- please ' +
   'wait a moment and try again.'
 
-/** The single-run flow (one file, no batch): upload, then start, then hand off
+/** The single-run flow (one file; no batch unless the completion email is asked for): upload, then start, then hand off
  *  to the progress page. Moved unchanged from UploadPage. */
-export function useSingleRun({ stripWcmInstructions, submissionType, onUploadSuccess, onConsentRequired }: SingleRunOptions): SingleRun {
+export function useSingleRun({
+  stripWcmInstructions, submissionType, notifyOnComplete, onUploadSuccess, onConsentRequired,
+}: SingleRunOptions): SingleRun {
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // When the backend flags the upload as a blank/near-blank WCM template, we
@@ -99,10 +104,13 @@ export function useSingleRun({ stripWcmInstructions, submissionType, onUploadSuc
     return true
   }
 
-  /** Create the run: upload the file, or submit the emailed CV held on the server (#1298; no batch). */
+  /** Create the run: upload the file, or submit the emailed CV held on the server (#1298). No batch,
+   *  unless "Email me when job completes" is ticked: then a one-file batch that asks for the email (#1335).
+   *  A refused batch (consent, quota) throws like a refused upload. */
   const createRun = async (file: File, held: HeldFile | null, confirmDuplicate: boolean): Promise<UploadResult> => {
-    if (!held) return uploadFile(file, { stripWcmInstructions, submissionType, confirmDuplicate: confirmDuplicate || undefined })
-    const result = await submitInboxItem(held.id, { stripWcmInstructions, submissionType, confirmDuplicate })
+    const batchId = notifyOnComplete ? (await createBatch(1, { notifyOnComplete: true })).id : undefined
+    if (!held) return uploadFile(file, { stripWcmInstructions, submissionType, confirmDuplicate: confirmDuplicate || undefined, batchId })
+    const result = await submitInboxItem(held.id, { stripWcmInstructions, submissionType, confirmDuplicate, batchId })
     if (result.status === 'submitted' && result.run_id) {
       return { run_id: result.run_id, wcm_template_warning: false, wcm_template_match_ratio: null }
     }

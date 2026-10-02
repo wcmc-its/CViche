@@ -56,7 +56,7 @@ beforeEach(() => {
   vi.mocked(getMyStatusCounts).mockResolvedValue({ all: 5, running: 1, awaiting_feedback: 2, failed: 0, red: 0 })
   vi.mocked(listBatches).mockResolvedValue([SUMMARY])
   vi.mocked(getBatch).mockResolvedValue(DETAIL)
-  vi.mocked(getQueue).mockResolvedValue({ dispatch_mode: 'queue', single: null, batch: null })
+  vi.mocked(getQueue).mockResolvedValue({ dispatch_mode: 'queue', single: null, batch: null, completion_email_available: false })
 })
 afterEach(() => { cleanup(); clearViewport(); vi.resetAllMocks() })
 

@@ -661,8 +661,10 @@ class QueueStatsResponse(BaseModel):
 # ============================================================
 
 class BatchCreateRequest(BaseModel):
-    """POST /api/batches: how many valid files the user is about to upload."""
+    """POST /api/batches: how many valid files the user is about to upload,
+    and whether to email them when every run is finished (#1335)."""
     files_submitted: int = Field(ge=1)
+    notify_on_complete: bool = False
 
 
 class BatchCreateResponse(BaseModel):
@@ -724,8 +726,11 @@ class QueueLane(BaseModel):
 
 class QueueOverview(BaseModel):
     """GET /api/queue, for any signed-in user. ``single``/``batch`` are null
-    unless ``dispatch_mode`` is ``queue`` -- in-process dispatch has no queue."""
+    unless ``dispatch_mode`` is ``queue`` -- in-process dispatch has no queue.
+    ``completion_email_available``: the server can send mail, so the page
+    offers "Email me when job completes" (#1335)."""
     dispatch_mode: str
+    completion_email_available: bool = False
     single: QueueLane | None = None
     batch: QueueLane | None = None
 

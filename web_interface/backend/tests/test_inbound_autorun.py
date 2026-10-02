@@ -268,6 +268,33 @@ def test_a_web_batch_never_gets_a_completion_email(db, sent, seed_simple_mode):
     assert sent == [] and db.get(RunBatch, batch.id).completion_notified_at is None
 
 
+def test_a_web_batch_that_asked_for_the_email_gets_it_once_when_its_last_run_finishes(db, sent, seed_simple_mode):
+    """'Email me when job completes' on a multi-file upload (#1335)."""
+    user = _user(db)
+    batch = batch_service.create_batch(db, user, 2, notify_on_complete=True)
+    db.add_all([Run(id=f"WEBRN{n}", filename="cv.docx", file_type="docx", status=RunState.COMPLETE, batch_id=batch.id)
+                for n in (1, 2)])
+    db.commit()
+    _finish(db, RunState.COMPLETE, RunState.RUNNING)
+    assert batch_completion.send_if_batch_complete(db, batch.id) is False and sent == []
+    _finish(db, RunState.COMPLETE, RunState.FAILED)
+    assert batch_completion.send_if_batch_complete(db, batch.id) is True
+    assert batch_completion.send_if_batch_complete(db, batch.id) is False
+    [mail] = _completion_mails(sent)
+    assert mail.to_addr == SENDER and "- 1 ready to download\n- 1 failed" in mail.body
+
+
+def test_a_single_upload_that_asked_for_the_email_links_to_its_run(db, sent, seed_simple_mode):
+    """A ticked single upload is a one-file batch, so it gets the one-CV wording (#1335)."""
+    user = _user(db)
+    batch = batch_service.create_batch(db, user, 1, notify_on_complete=True)
+    db.add(Run(id="WEBONE", filename="cv.docx", file_type="docx", status=RunState.COMPLETE, batch_id=batch.id))
+    db.commit()
+    assert batch_completion.send_if_batch_complete(db, batch.id) is True
+    [mail] = _completion_mails(sent)
+    assert mail.subject == "Your CV is ready" and "/run/WEBONE" in mail.body
+
+
 def test_two_pods_finishing_the_last_runs_at_once_send_exactly_one_email(db, storage, sent, queue, monkeypatch, seed_simple_mode):
     _user(db)
     _send(db, storage, ["one", "two"])
