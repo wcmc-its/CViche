@@ -176,11 +176,28 @@ CONSUMED_GRANT_FIELDS: frozenset[str] = GrantFields.__optional_keys__
 
 # "Individual's role in project including percent effort" and its variants: a
 # source-table header row, not a grant. Searched over the first 60 characters
-# only, so a real grant that happens to mention a role further in survives.
-ROLE_EFFORT_HEADER_RE = re.compile(
-    r"(?:Individual's role|your role|role in project|percent effort)",
-    re.IGNORECASE
+# of the entry's FIRST line only (see `is_role_effort_header`), so a real grant
+# that happens to mention a role or an effort further in survives.
+_ROLE_EFFORT_PHRASES = r"(?:Individual's role|your role|role in project|percent effort)"
+ROLE_EFFORT_HEADER_RE = re.compile(_ROLE_EFFORT_PHRASES, re.IGNORECASE)
+
+# The same phrase followed, on its line, by a colon or pipe and then a value:
+# "Percent Effort: | 35", "Role and percent effort: Example Co-I". That is a
+# label|value grant row, not the template's header sentence, which is a bare
+# phrase with nothing after it. The value must be something other than
+# whitespace or a pipe, so "Percent Effort: |" (a label with a blank value cell)
+# still reads as having no value.
+ROLE_EFFORT_FIELD_ROW_RE = re.compile(
+    _ROLE_EFFORT_PHRASES + r"[^\n]*?[:|]\s*[^\s|]", re.IGNORECASE
 )
+# A digit anywhere in the searched part of the first line is a value written
+# without a colon or pipe ("Percent effort 35%", "Role in project PI, 35%
+# effort", "Example Agency Grant; role in project Co-I 55%"). The template's
+# header sentence is words only, so a digit means a grant row.
+ROLE_EFFORT_DIGIT_RE = re.compile(r"\d")
+# How much of the first line is searched for either phrase (unchanged from when
+# the whole entry text was searched at this width).
+ROLE_EFFORT_HEADER_WINDOW = 60
 
 # The only buckets a status rebucket may move a grant INTO. M2A is deliberately
 # absent: `grant_status_rebucket_target` returns 'M2B', 'M2C' or None
@@ -347,6 +364,37 @@ def copy_entries_for_render(entries: list[dict]) -> list[dict]:
     return copies
 
 
+def is_role_effort_header(text: str) -> bool:
+    """True when an entry's text is the template's role/effort header row.
+
+    The header is the entry's FIRST line, a bare phrase such as "Individual's
+    role in project including percent effort", with the "<project> <effort>"
+    pairs on the lines below it. Two things this refuses that the old
+    first-60-characters test accepted, both of which silently dropped real
+    grant values (#1227):
+
+    * a phrase that only appears on a later line -- "Years Inclusive: | ...",
+      then "Percent Effort: | 5" -- because the 60-character window reached
+      across the newline;
+    * a first line that is itself a label|value row, "Percent Effort: | 35":
+      the phrase is a field label there, and what follows it is the value;
+    * a first line carrying a value with no colon or pipe, "Percent effort
+      35%" or "Role in project PI, 35% effort": the header sentence is words
+      only, so a digit in the searched window marks a grant row.
+
+    A label with a blank value ("Percent Effort:") carries nothing to lose and
+    still counts as a header row. The decision is made on text shape, not on
+    the stage-4 fields, because the real header row has fields too: stage 4
+    reads a `title` and a `percent_effort` off its first project line.
+    """
+    first_line = text.split('\n', 1)[0][:ROLE_EFFORT_HEADER_WINDOW]
+    if not ROLE_EFFORT_HEADER_RE.search(first_line):
+        return False
+    if ROLE_EFFORT_DIGIT_RE.search(first_line):
+        return False
+    return not ROLE_EFFORT_FIELD_ROW_RE.search(first_line)
+
+
 def filter_role_effort_headers(
     entries: list[dict], effort_lookup: dict[str, str]
 ) -> tuple[list[dict], list[str]]:
@@ -366,7 +414,7 @@ def filter_role_effort_headers(
     messages: list[str] = []
     for entry in entries:
         text = entry.get('text', '')
-        if not ROLE_EFFORT_HEADER_RE.search(text[:60]):
+        if not is_role_effort_header(text):
             filtered.append(entry)
             continue
         for line in text.split('\n')[1:]:  # Skip the header line
