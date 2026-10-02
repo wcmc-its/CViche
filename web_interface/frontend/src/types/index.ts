@@ -4,6 +4,7 @@ export type {
   RunBy, RunListScope, RunListParams, FilterCount, RunByOption, RunFilterOptions,
   QualityBand, DoctorSeverity, QualityDimension, DoctorFindingGroup, RunDoctorReport,
   RunQualityReport, RunReviewNote, RunFeedbackSummary, FeedbackReviewer, RunFeedbackFilter,
+  RunInputFormatFilter,
 } from './runs'
 export type { FeedbackFormData, FeedbackDetail, WcmSection } from './feedback'
 export type { Stats, AdminUser, AdminRun, AdminRunsResponse, QualityScoreResult, SystemConfig, FeedbackData, AggregatedScores } from './admin'

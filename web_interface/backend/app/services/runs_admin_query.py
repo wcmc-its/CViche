@@ -1,7 +1,8 @@
 """Filtering and facet counts for the admin "all runs" view.
 
 GET /runs?scope=all lists every user's runs; GET /runs/filter-options feeds its
-three filter dropdowns (Department, Faculty, Run by) and the Feedback filter.
+three filter dropdowns (Department, Faculty, Run by) and the Feedback and
+Input format filters.
 Both build on the same
 filter predicates so a dropdown's counts always describe what picking that
 option would list.
@@ -17,9 +18,10 @@ from sqlalchemy import ColumnElement, and_, case, func, select
 from sqlalchemy.orm import Query, Session, contains_eager
 
 from app.errors import validation_error
+from app.services.input_format import INPUT_FORMAT_OTHER, INPUT_FORMAT_WCM
 from app.models import Feedback, Run, RunState, User
 from app.schemas import (
-    FacultyOption, FeedbackFilterCounts, FeedbackReviewer, FilterCount,
+    FacultyOption, FeedbackFilterCounts, InputFormatFilterCounts, FeedbackReviewer, FilterCount,
     RunByOption, RunBySummary, RunFeedbackSummary, RunFilterOptions,
 )
 
@@ -42,6 +44,14 @@ class FeedbackFilter(StrEnum):
     NEEDED = "needed"
 
 
+class InputFormatFilter(StrEnum):
+    """The ``input_format`` filter: CVs written in the WCM template, in another
+    format, or not yet classified (a NULL column)."""
+    WCM = INPUT_FORMAT_WCM
+    OTHER = INPUT_FORMAT_OTHER
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class RunFilters:
     """The admin runs filters. None/False = not filtering on that facet."""
@@ -50,6 +60,7 @@ class RunFilters:
     faculty: str | None = None
     department: str | None = None
     feedback: FeedbackFilter | None = None
+    input_format: InputFormatFilter | None = None
 
 
 def parse_feedback_filter(feedback: str | None) -> FeedbackFilter | None:
@@ -63,11 +74,23 @@ def parse_feedback_filter(feedback: str | None) -> FeedbackFilter | None:
         raise validation_error(f"feedback must be {allowed}") from None
 
 
+def parse_input_format_filter(input_format: str | None) -> InputFormatFilter | None:
+    """``input_format`` query param -> InputFormatFilter; blank is None, unknown is a 422."""
+    if not input_format:
+        return None
+    try:
+        return InputFormatFilter(input_format)
+    except ValueError:
+        allowed = ", ".join(f'"{f.value}"' for f in InputFormatFilter)
+        raise validation_error(f"input_format must be one of {allowed}") from None
+
+
 def parse_run_filters(run_by: str | None, faculty: str | None,
-                      department: str | None, feedback: str | None = None) -> RunFilters:
+                      department: str | None, feedback: str | None = None,
+                      input_format: str | None = None) -> RunFilters:
     """Build RunFilters from the raw query params. ``run_by`` is a user id or the
-    literal "self", ``feedback`` is "given" or "needed"; anything else is a 422.
-    Blank strings mean "no filter"."""
+    literal "self", ``feedback`` is "given" or "needed", ``input_format`` is "wcm",
+    "other" or "unknown"; anything else is a 422. Blank strings mean "no filter"."""
     run_by_user_id = None
     run_by_self = False
     if run_by:
@@ -81,7 +104,8 @@ def parse_run_filters(run_by: str | None, faculty: str | None,
                     f'run_by must be a user id or "{RUN_BY_SELF}"') from None
     return RunFilters(run_by_user_id=run_by_user_id, run_by_self=run_by_self,
                       faculty=faculty or None, department=department or None,
-                      feedback=parse_feedback_filter(feedback))
+                      feedback=parse_feedback_filter(feedback),
+                      input_format=parse_input_format_filter(input_format))
 
 
 def _run_by_clause(filters: RunFilters) -> ColumnElement[bool] | None:
@@ -112,9 +136,19 @@ def feedback_clause(feedback: FeedbackFilter | None) -> ColumnElement[bool] | No
     return None
 
 
+def input_format_clause(input_format: InputFormatFilter | None) -> ColumnElement[bool] | None:
+    """The predicate for the ``input_format`` filter (None = not filtering)."""
+    if input_format is None:
+        return None
+    if input_format is InputFormatFilter.UNKNOWN:
+        return Run.input_format.is_(None)
+    return Run.input_format == input_format.value
+
+
 def _clauses(filters: RunFilters, *, skip_department: bool = False,
              skip_faculty: bool = False, skip_run_by: bool = False,
-             skip_feedback: bool = False) -> list[ColumnElement[bool]]:
+             skip_feedback: bool = False,
+             skip_input_format: bool = False) -> list[ColumnElement[bool]]:
     """The active filter predicates, minus the facet(s) being counted."""
     clauses = []
     if filters.department and not skip_department:
@@ -127,6 +161,9 @@ def _clauses(filters: RunFilters, *, skip_department: bool = False,
     feedback = None if skip_feedback else feedback_clause(filters.feedback)
     if feedback is not None:
         clauses.append(feedback)
+    input_format = None if skip_input_format else input_format_clause(filters.input_format)
+    if input_format is not None:
+        clauses.append(input_format)
     return clauses
 
 
@@ -211,6 +248,18 @@ def _feedback_counts(db: Session, filters: RunFilters) -> FeedbackFilterCounts:
     return FeedbackFilterCounts(given=given, needed=needed)
 
 
+def _input_format_counts(db: Session, filters: RunFilters) -> InputFormatFilterCounts:
+    wcm, other, unknown = (
+        db.query(func.count(case((Run.input_format == INPUT_FORMAT_WCM, 1))),
+                 func.count(case((Run.input_format == INPUT_FORMAT_OTHER, 1))),
+                 func.count(case((Run.input_format.is_(None), 1))))
+        .select_from(Run).outerjoin(User, Run.user_id == User.id)
+        .filter(*_clauses(filters, skip_input_format=True))
+        .one()
+    )
+    return InputFormatFilterCounts(wcm=wcm, other=other, unknown=unknown)
+
+
 def load_feedback_summaries(db: Session, run_ids: list[str], current_user_id: int,
                             *, with_reviewers: bool) -> dict[str, RunFeedbackSummary]:
     """Feedback summary per run id for one page of runs: one GROUP BY query, plus
@@ -262,11 +311,12 @@ def _reviewers_by_run(db: Session, run_ids: list[str]) -> dict[str, list[Feedbac
 
 
 def build_filter_options(db: Session, filters: RunFilters) -> RunFilterOptions:
-    """Options and run counts for the admin filters (five aggregate queries)."""
+    """Options and run counts for the admin filters (six aggregate queries)."""
     return RunFilterOptions(
         departments=_department_counts(db, filters),
         faculty=_faculty_counts(db, filters),
         run_by=_run_by_counts(db, filters),
         self_count=_self_count(db, filters),
         feedback=_feedback_counts(db, filters),
+        input_format=_input_format_counts(db, filters),
     )

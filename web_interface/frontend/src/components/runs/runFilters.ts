@@ -1,6 +1,6 @@
 import { useCallback, useMemo } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import type { RunFeedbackFilter, RunListParams } from '../../types'
+import type { RunFeedbackFilter, RunInputFormatFilter, RunListParams } from '../../types'
 
 /** Literal run_by value for runs the faculty member uploaded themselves. */
 export const RUN_BY_SELF = 'self'
@@ -12,18 +12,30 @@ export function isFeedbackFilter(value: string): value is RunFeedbackFilter {
   return (FEEDBACK_FILTER_VALUES as readonly string[]).includes(value)
 }
 
+/** The input-format filter values the API accepts, with their display text. */
+export const INPUT_FORMAT_VALUE_LABEL: Record<RunInputFormatFilter, string> = {
+  wcm: 'WCM template',
+  other: 'Other format',
+  unknown: 'Not classified',
+}
+
+export function isInputFormatFilter(value: string): value is RunInputFormatFilter {
+  return Object.keys(INPUT_FORMAT_VALUE_LABEL).includes(value)
+}
+
 /** Active admin filters; '' means unset. runBy is a user id (as text) or RUN_BY_SELF;
- *  feedback is '' or a RunFeedbackFilter. */
+ *  feedback is '' or a RunFeedbackFilter; inputFormat is '' or a RunInputFormatFilter. */
 export interface RunFilters {
   department: string
   faculty: string
   runBy: string
   feedback: string
+  inputFormat: string
 }
 
 export type RunFilterKey = keyof RunFilters
 
-export const EMPTY_FILTERS: RunFilters = { department: '', faculty: '', runBy: '', feedback: '' }
+export const EMPTY_FILTERS: RunFilters = { department: '', faculty: '', runBy: '', feedback: '', inputFormat: '' }
 
 /** URL search param behind each filter; the URL is the single source of filter state. */
 const FILTER_PARAM: Record<RunFilterKey, string> = {
@@ -31,6 +43,7 @@ const FILTER_PARAM: Record<RunFilterKey, string> = {
   faculty: 'faculty',
   runBy: 'run_by',
   feedback: 'feedback',
+  inputFormat: 'input_format',
 }
 
 const FILTER_KEYS = Object.keys(FILTER_PARAM) as RunFilterKey[]
@@ -51,6 +64,7 @@ export function toListParams(filters: RunFilters): RunListParams {
   if (filters.runBy === RUN_BY_SELF) params.run_by = RUN_BY_SELF
   else if (/^\d+$/.test(filters.runBy)) params.run_by = Number(filters.runBy)
   if (isFeedbackFilter(filters.feedback)) params.feedback = filters.feedback
+  if (isInputFormatFilter(filters.inputFormat)) params.input_format = filters.inputFormat
   return params
 }
 
@@ -60,7 +74,7 @@ export interface RunFilterControls {
   clearAll: () => void
 }
 
-/** Filter state held in the URL (?department=&faculty=&run_by=&feedback=) so it survives reload and back. */
+/** Filter state held in the URL (?department=&faculty=&run_by=&feedback=&input_format=) so it survives reload and back. */
 export function useRunFilters(enabled: boolean): RunFilterControls {
   const [searchParams, setSearchParams] = useSearchParams()
   const department = searchParams.get(FILTER_PARAM.department) ?? ''
@@ -68,10 +82,12 @@ export function useRunFilters(enabled: boolean): RunFilterControls {
   const runBy = searchParams.get(FILTER_PARAM.runBy) ?? ''
   const rawFeedback = searchParams.get(FILTER_PARAM.feedback) ?? ''
   const feedback = isFeedbackFilter(rawFeedback) ? rawFeedback : ''
+  const rawInputFormat = searchParams.get(FILTER_PARAM.inputFormat) ?? ''
+  const inputFormat = isInputFormatFilter(rawInputFormat) ? rawInputFormat : ''
 
   const filters = useMemo<RunFilters>(
-    () => (enabled ? { department, faculty, runBy, feedback } : EMPTY_FILTERS),
-    [enabled, department, faculty, runBy, feedback],
+    () => (enabled ? { department, faculty, runBy, feedback, inputFormat } : EMPTY_FILTERS),
+    [enabled, department, faculty, runBy, feedback, inputFormat],
   )
 
   const setFilter = useCallback(
