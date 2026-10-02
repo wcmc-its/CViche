@@ -938,5 +938,10 @@ def test_uid_owner_surname_with_no_publications_falls_back_to_the_guess():
     assert bibliography._resolve_uid_owner_surname("2003_Quennevillejs_Cv", []) == "Quenneville"
 
 
+def test_uid_owner_surname_is_empty_for_a_run_id():
+    # #457: a letters-only run id is not a surname to bold citation authors by.
+    pubs = [_citation_entry("Qzkmrt AB, Doe J. A study. J Med. 2020.", None, 2020)]
+    assert bibliography._resolve_uid_owner_surname("QZKMRT", pubs) == ""
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q", "-p", "no:cacheprovider"]))

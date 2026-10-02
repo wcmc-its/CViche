@@ -563,9 +563,9 @@ from unified_pipeline.stage6.formatting.dates import (  # noqa: E402
 
 def test_point_in_time_codes_are_pinned():
     """The decision on #946 names awards, talks, CME lectures and P/Q one-off
-    rows; each member's reason is at the constant. Pinned so adding or
-    dropping a code is a visible, deliberate act."""
-    assert POINT_IN_TIME_CODES == frozenset({"H", "R", "K4", "P", "Q2", "Q3"})
+    rows, and #1220 added B2; each member's reason is at the constant. Pinned
+    so adding or dropping a code is a visible, deliberate act."""
+    assert POINT_IN_TIME_CODES == frozenset({"H", "R", "K4", "P", "Q2", "Q3", "B2"})
 
 
 @pytest.mark.parametrize("code", sorted(POINT_IN_TIME_CODES))

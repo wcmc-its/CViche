@@ -334,6 +334,101 @@ def _validate_json_response(content, response_format):
         return False
 
 
+# A markdown code fence, as _strip_markdown_fences and Claude write it. A line
+# that starts with it is a separator, not prose (#1218).
+_FENCE_MARKER = "```"
+
+# A self-correcting response holds the answer plus its correction: fewer than
+# two complete objects is a plain parse failure, not a self-correction (#1218).
+_MIN_OBJECTS_FOR_SELF_CORRECTION = 2
+
+
+def _is_blank_or_fence(line: str) -> bool:
+    """True for an empty line or a markdown fence line (```, ```json)."""
+    stripped = line.strip()
+    return not stripped or stripped.startswith(_FENCE_MARKER)
+
+
+def _holds_text(edge: str) -> bool:
+    """True when `edge`, the text before the first or after the last object,
+    has anything beyond whitespace and markdown fence lines."""
+    return not all(_is_blank_or_fence(line) for line in edge.splitlines())
+
+
+def _is_prose_gap(gap: str) -> bool:
+    """True when `gap`, the text between two objects, is a line of prose.
+
+    Each object must sit on its own lines: the rest of the line the earlier
+    object ends on, and the start of the line the later one begins on, must be
+    blank or a fence. So a comma, a semicolon or a bracket next to an object
+    rejects the gap. Between them, every line that is not blank or a fence
+    must carry a letter, and at least one such line must exist.
+    """
+    lines = gap.split("\n")
+    if not (_is_blank_or_fence(lines[0]) and _is_blank_or_fence(lines[-1])):
+        return False
+    text_lines = [line for line in lines[1:-1] if not _is_blank_or_fence(line)]
+    return bool(text_lines) and all(
+        any(ch.isalpha() for ch in line) for line in text_lines
+    )
+
+
+def _objects_separated_by_prose(text: str) -> list[str] | None:
+    """Split `text` into the top-level JSON objects it is made of, or None.
+
+    Returns the objects (as source text, in order) only when the text is
+    nothing but complete objects, each on its own lines, with a line of prose
+    between each pair, e.g. an answer, a line saying the model noticed a
+    mistake, then the corrected answer. Only whitespace and fence lines may
+    come before the first object or after the last. Anything else is None, so
+    genuinely malformed text stays malformed: an object that is truncated or
+    not valid, text around the objects, and objects joined by anything other
+    than prose (adjacent, comma- or semicolon-separated, or the elements of an
+    array), which may be distinct records rather than a correction.
+    """
+    start = text.find("{")
+    if start == -1 or _holds_text(text[:start]):
+        return None
+    decoder = json.JSONDecoder()
+    objects: list[str] = []
+    while True:
+        try:
+            _, end = decoder.raw_decode(text, start)
+        except json.JSONDecodeError:
+            return None
+        objects.append(text[start:end])
+        start = text.find("{", end)
+        if start == -1:
+            return None if _holds_text(text[end:]) else objects
+        if not _is_prose_gap(text[end:start]):
+            return None
+
+
+def _select_final_json_object(content: str | None, response_format: dict | None,
+                              stage: str | None = None) -> str | None:
+    """Reduce a self-correcting JSON response to its last object (#1218).
+
+    Sonnet 5 sometimes answers, writes a line of prose saying it noticed a
+    mistake, then answers again. json.loads rejects that ("Extra data") and
+    the one-shot repair re-sends the same prompt, so it repeats the shape.
+    The later object is the correction, so it is the one returned.
+
+    Content that already parses, is not a JSON request, or is not text is
+    returned unchanged, as is anything _objects_separated_by_prose rejects:
+    those still take the repair path.
+    """
+    if not isinstance(content, str) or _validate_json_response(content, response_format):
+        return content
+    objects = _objects_separated_by_prose(_strip_markdown_fences(content))
+    if objects is None or len(objects) < _MIN_OBJECTS_FOR_SELF_CORRECTION:
+        return content
+    logger.warning(
+        "Bedrock JSON response (stage=%s) held %d objects separated by prose; "
+        "using the last and discarding %d.", stage, len(objects), len(objects) - 1,
+    )
+    return objects[-1]
+
+
 def _call_bedrock(model, messages, temperature, response_format=None,
                   max_tokens=None, enable_prompt_caching=False, **kwargs):
     """Make a Bedrock Converse API call.
@@ -590,7 +685,12 @@ def _dispatch_bedrock(messages: list, response_format: dict | None, cfg: dict) -
     # empty content list with no text block at all (#884) -- read it through
     # the same guarded helper the retry branch below re-reads, rather than
     # indexing content[0] directly.
-    content = _extract_text_content(response)
+    # A self-correcting response (answer, prose, corrected answer) is reduced
+    # to its last object here, before validation, so it needs no repair call
+    # (#1218).
+    stage = cfg.get("stage")
+    content = _select_final_json_object(
+        _extract_text_content(response), response_format, stage)
     stop_reason = response.get("stopReason", "end_turn")
     finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
     content_missing = content is None
@@ -614,7 +714,8 @@ def _dispatch_bedrock(messages: list, response_format: dict | None, cfg: dict) -
         # Previously latency_ms was frozen before this branch ran, so the
         # repair call was billed but never timed.
         api_seconds += retry_api_seconds
-        retry_content = _extract_text_content(retry_response)
+        retry_content = _select_final_json_object(
+            _extract_text_content(retry_response), response_format, stage)
         retry_stop_reason = retry_response.get("stopReason", "end_turn")
         retry_usage = retry_response["usage"]
         retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)

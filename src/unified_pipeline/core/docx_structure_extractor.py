@@ -11,6 +11,7 @@ This is significantly cheaper and faster than vision-based approaches.
 import json
 import logging
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, TypedDict
 from docx import Document
@@ -18,6 +19,7 @@ from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml.text.paragraph import CT_P
+from docx.oxml.xmlchemy import BaseOxmlElement
 from docx.oxml.table import CT_Tbl
 from docx.table import _Cell, _Row, Table
 from docx.text.paragraph import Paragraph
@@ -30,6 +32,12 @@ from unified_pipeline.stage6.normalization.pii import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Word stores a text box as mc:AlternateContent: a DrawingML copy under
+# mc:Choice and a VML copy of the same text under mc:Fallback (#1236).
+_MC_NS = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
+_MC_CHOICE = f'{{{_MC_NS}}}Choice'
+_MC_FALLBACK = f'{{{_MC_NS}}}Fallback'
 
 
 def rgb_to_hex(rgb: RGBColor | None) -> str:
@@ -46,6 +54,25 @@ def pt_to_inches(pt: Pt | None) -> float:
     return pt.inches if hasattr(pt, 'inches') else 0.0
 
 
+def _iter_text_nodes(parent: BaseOxmlElement, tags: tuple[str, ...]) -> Iterator[BaseOxmlElement]:
+    """The descendants of `parent` whose tag is in `tags`, in document order,
+    reading ONE branch of each mc:AlternateContent (#1236).
+
+    A plain `parent.iter(...)` descends into both the mc:Choice and the
+    mc:Fallback copy of a text box and returns its text twice. This reads the
+    Choice and skips a Fallback that has a Choice sibling; a Fallback with no
+    Choice sibling is the only copy and is read. The skip applies only below
+    `parent`, so asking for a paragraph that itself sits inside a Fallback
+    still reads that paragraph.
+    """
+    for child in parent:
+        if child.tag == _MC_FALLBACK and parent.find(_MC_CHOICE) is not None:
+            continue
+        if child.tag in tags:
+            yield child
+        yield from _iter_text_nodes(child, tags)
+
+
 def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
     """Extract all text from a paragraph, including nested structures.
 
@@ -55,6 +82,8 @@ def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
     - w:hyperlink
     - w:sdt (structured document tags / content controls)
     - w:ins (tracked-change insertions) -- see #557
+    - mc:AlternateContent (text boxes), read once: the mc:Choice copy, never
+      the mc:Fallback copy of the same text -- see #1236
 
     Without this, paragraphs using smartTags appear empty even though they contain text.
     """
@@ -65,11 +94,11 @@ def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
     # mashed multi-line paragraphs into run-on text ("CURRICULUM VITAEZachary..."),
     # which hid sub-headers from the chunk LLM once stage 1a converged onto this reader.
     # w:tab -> tab_char (space by default) on purpose: a literal tab would trip the
-    # mega-entry record heuristic downstream. iter() also descends into
+    # mega-entry record heuristic downstream. The walk also descends into
     # smartTag/hyperlink/sdt/ins.
     WT, WBR, WCR, WTAB = qn('w:t'), qn('w:br'), qn('w:cr'), qn('w:tab')
     parts = []
-    for node in para._p.iter(WT, WBR, WCR, WTAB):
+    for node in _iter_text_nodes(para._p, (WT, WBR, WCR, WTAB)):
         if node.tag == WT:
             if node.text:
                 parts.append(node.text)

@@ -134,6 +134,19 @@ def test_uid_prefix_strip_still_removes_a_real_leading_prefix():
     assert _extract_name_from_uid("CV_2015_Wende") == "Wende"
 
 
+# --- #457: a run id names nobody ---------------------------------------------
+
+@pytest.mark.parametrize("run_id", ["QZKMRT", "AB1CDE", "CV_QZKMRT"])
+def test_a_run_id_yields_no_name_from_either_uid_helper(run_id):
+    assert _extract_name_from_uid(run_id) == ""
+    assert _extract_last_name_from_uid(run_id) == ""
+
+
+def test_a_six_letter_mixed_case_stem_is_still_a_name():
+    assert _extract_name_from_uid("Zephyr") == "Zephyr"
+    assert _extract_last_name_from_uid("Zephyr") == "Zephyr"
+
+
 # --- item 3: all-caps structural-label check needs corroboration -----------
 
 def test_all_caps_matching_hierarchy_is_still_a_structural_label():
