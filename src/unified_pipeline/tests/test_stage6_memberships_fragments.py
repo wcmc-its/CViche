@@ -1033,3 +1033,74 @@ def test_short_organization_right_after_a_type_is_kept_on_the_multi_line_path():
              "extracted_fields": {}}
     rows = _render_memberships([entry])
     assert rows == [["Member, AMA", "2010-Present"], ["Fellow, ACP", "2012-Present"]]
+
+
+# --- (u) header-row veto: extracted fields win over the text heuristic -------
+#
+# `_is_table_header_entry`'s short-text path counts the bare word "date" as
+# both a keyword and a header pattern, so an open membership written
+# "yyyy-date" beside "Society" or "Member" scored as the source table's header
+# row and was dropped whole, with nothing in the render warnings. Fixtures are
+# synthetic.
+
+_HEADER_SHAPED_DATA = "Example Surgical Society (2015-date)"
+
+
+def _header_skips(gen):
+    return [w for w in gen._section_failures
+            if w["check"] == memberships_module.HEADER_SKIP_CHECK]
+
+
+def test_open_membership_written_to_date_renders_when_fields_were_extracted():
+    entry = {"text": _HEADER_SHAPED_DATA, "extracted_fields": {
+        "organization": "Example Surgical Society",
+        "start_date": "2015", "end_date": "Present"}}
+    gen, rows = _fill([entry])
+    assert rows == [["Example Surgical Society", "2015-Present"]], rows
+    assert _header_skips(gen) == []
+
+
+def test_an_extracted_organization_alone_vetoes_the_header_heuristic():
+    entry = {"text": "Example Society of Lung Medicine, Member (2010-date)",
+             "extracted_fields": {"organization": "Example Society of Lung Medicine"}}
+    gen, rows = _fill([entry])
+    assert [r[0] for r in rows] == ["Example Society of Lung Medicine"], rows
+
+
+def test_an_organization_alias_field_vetoes_the_header_heuristic():
+    entry = {"text": "Example Society of Lung Medicine, Member (2010-date)",
+             "extracted_fields": {"institution": "Example Society of Lung Medicine"}}
+    gen, rows = _fill([entry])
+    assert len(rows) == 1 and "Example Society of Lung Medicine" in rows[0][0], rows
+    assert _header_skips(gen) == []
+
+
+def test_an_extracted_date_pair_alone_vetoes_the_header_heuristic():
+    entry = {"text": _HEADER_SHAPED_DATA,
+             "extracted_fields": {"start_date": "2015", "end_date": "Present"}}
+    gen, rows = _fill([entry])
+    assert len(rows) == 1 and rows[0][1] == "2015-Present", rows
+    assert _header_skips(gen) == []
+
+
+@pytest.mark.parametrize("fields", [
+    {}, {"start_date": "2015"}, {"end_date": "Present"}, {"membership_type": "Member"}])
+def test_a_real_header_row_without_an_organization_or_date_pair_is_still_dropped(fields):
+    gen, rows = _fill([{"text": "Organization | Dates", "extracted_fields": fields}])
+    assert rows == [], rows
+    assert len(_header_skips(gen)) == 1
+
+
+def test_a_header_row_drop_is_written_to_the_render_warnings():
+    entry = {"text": "Name of organization\tDates", "extracted_fields": {},
+             "element_idx_start": 7}
+    gen, rows = _fill([entry])
+    assert rows == []
+    assert gen._section_failures == [{
+        "check": "stage6_header_skip",
+        "code": "I",
+        "section": "memberships",
+        "message": "I: entry at element 7 dropped as a source table header row",
+        "evidence": ["element_idx_start=7"],
+        "severity": "INFO",
+    }]

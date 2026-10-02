@@ -63,6 +63,9 @@ substring test rejected the first two.
 
 Extraction keeps the source table's own header row, so header-shaped entries are
 dropped explicitly rather than rendered as a membership called "Organization".
+An entry with an extracted organization or date pair is never header-shaped,
+whatever its text says, and every drop is written to the render-warnings
+sidecar as a `stage6_header_skip` record.
 
 `_add_table_row` is the generic row writer, and it lives here because this is
 the only section that calls it. Everything else either writes cells directly or
@@ -73,7 +76,7 @@ than the table has columns instead of dropping the surplus cells.
 """
 import logging
 import re
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 try:
     from docx.table import Table
@@ -161,6 +164,17 @@ _TRAILING_DATES_RE = re.compile(
 )
 _LEADING_TYPE_RE = re.compile(r'^([^,:;–—-]{1,40})\s*[,:;–—-]\s+(.+)$')
 _BRACKET_PAIRS = (('(', ')'), ('[', ']'))
+
+# The column-label vocabulary `_is_table_header_entry` scores an entry's text
+# against to decide it is the source table's own header row.
+_HEADER_KEYWORDS = ['organization', 'membership', 'society', 'date', 'member']
+# Every field that names the organization, for the header-row veto below.
+_ORGANIZATION_FIELDS = ('organization', *_ORGANIZATION_FIELD_ALIASES)
+# Render-warnings sidecar record for an entry dropped as a header row. INFO,
+# not WARN: the veto already keeps every entry with an extracted organization
+# or date pair, so what is left carries no field a row could render.
+HEADER_SKIP_CHECK = 'stage6_header_skip'
+_HEADER_SKIP_SEVERITY = 'INFO'
 
 
 class MembershipsRowShapeError(ValueError):
@@ -549,6 +563,39 @@ def _organization_fallback(text: str, fields: dict) -> MembershipFallback:
     )
 
 
+def _is_source_header_row(fields: dict, original_text: str) -> bool:
+    """Is this entry the source table's column-header row, not a membership?
+
+    Extracted fields win over the text heuristic, the same veto
+    `PositionsSection._is_source_column_header` applies: a header row has no
+    organization and no date pair for stage 4 to extract. Without it, an open
+    membership written "yyyy-date" next to "Society" or "Member" scored as a
+    header (the bare word "date" is both a keyword and a header pattern) and
+    the whole row was dropped.
+    """
+    if _first_field(fields, _ORGANIZATION_FIELDS):
+        return False
+    if _first_field(fields, ('start_date',)) and _first_field(fields, ('end_date',)):
+        return False
+    return _is_table_header_entry(original_text, _HEADER_KEYWORDS)
+
+
+def _header_skip_warning(entry: dict) -> dict[str, Any]:
+    """The sidecar record for an entry dropped as a header row, so the skip
+    reaches the run doctor instead of only the log. The element index only,
+    never the entry's text."""
+    element_idx = entry.get('element_idx_start', '?')
+    return {
+        'check': HEADER_SKIP_CHECK,
+        'code': _MEMBERSHIPS_TAXONOMY_CODE,
+        'section': 'memberships',
+        'message': (f"{_MEMBERSHIPS_TAXONOMY_CODE}: entry at element "
+                    f"{element_idx} dropped as a source table header row"),
+        'evidence': [f"element_idx_start={element_idx}"],
+        'severity': _HEADER_SKIP_SEVERITY,
+    }
+
+
 def _single_membership_row(fields: dict, original_text: str) -> tuple[str, str, bool]:
     """The (organization cell, dates cell, fallback fired) for one membership.
 
@@ -643,7 +690,8 @@ class MembershipsSection:
             original_text = entry.get('text', '')
 
             # Skip table header entries
-            if _is_table_header_entry(original_text, ['organization', 'membership', 'society', 'date', 'member']):
+            if _is_source_header_row(fields, original_text):
+                self._section_failures.append(_header_skip_warning(entry))
                 if self.verbose:
                     logger.warning("  Skipping header entry: '%s...'", original_text[:50])
                 continue
