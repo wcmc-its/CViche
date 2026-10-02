@@ -493,6 +493,36 @@ def remove_subset_delimiters(delimiters: list) -> list:
     return kept
 
 
+class _ExactNumber(float):
+    """A JSON decimal that remembers the digits the model wrote.
+
+    A table row's index is the text ``"<table>.<row>"``, and the model writes it
+    as a bare JSON number: ``474.10`` is row 10 of table 474. As a float it is
+    474.1, which is row 1 (#1228) -- the same row key as the model's own row-1
+    entries, so a range starting at row 10 read as a range starting at row 1.
+    The literal is the only thing that names the row.
+    """
+
+    __slots__ = ("literal",)
+
+    def __new__(cls, literal: str) -> _ExactNumber:
+        number = super().__new__(cls, literal)
+        number.literal = literal
+        return number
+
+
+def parse_delimiter_reply(reply_text: str) -> list | dict:
+    """``json.loads`` for a stage-2 reply, with every decimal keeping its literal
+    text for ``delimiter_index_text``. Numbers still behave as floats."""
+    return json.loads(reply_text, parse_float=_ExactNumber)
+
+
+def delimiter_index_text(value: object) -> str:
+    """The row-index text the model wrote: ``474.10`` for a decimal parsed by
+    ``parse_delimiter_reply``, ``str(value)`` for anything else."""
+    return value.literal if isinstance(value, _ExactNumber) else str(value)
+
+
 def row_range_entry(start_key: str, end_key: str, batch_elem_lookup: dict,
                     confidence: float) -> tuple[dict | None, list[str]]:
     """The entry for a delimiter on table sub-rows, and the row keys it claims.
@@ -503,9 +533,10 @@ def row_range_entry(start_key: str, end_key: str, batch_elem_lookup: dict,
     let that drop the #420-recovered rows as "contained" -- AV00TQ's 24
     teaching lines in row 80.2 vanished behind a header-row-only entry
     (#1126). When the span can't be resolved row by row (another table, an
-    end before the start -- "80.10" arrives as the float 80.1 -- or a row
-    missing from the batch), the entry shrinks to its start row, so the span
-    stays honest and #420 recovery emits the rest.
+    end before the start, or a row missing from the batch), the entry shrinks
+    to its start row, so the span stays honest and #420 recovery emits the
+    rest. The keys must be the index text the model wrote
+    (``delimiter_index_text``): a float-parsed "80.10" is "80.1", row 1.
 
     Returns (None, []) when the start row is not in the batch.
     """
@@ -540,11 +571,12 @@ def recover_unclaimed_table_rows(batch_elements: list, claimed_row_keys: set) ->
     """Return entries for table rows no delimiter claimed (#420).
 
     The model returns sub-row indices as JSON NUMBERS, so a row index with a
-    trailing zero collapses: "114.10" parses to the float 114.1, ``str()``
-    renders it back as "114.1", and the lookup lands on row 1 -- row 10 is
+    trailing zero used to collapse: "114.10" parsed to the float 114.1, ``str()``
+    rendered it back as "114.1", and the lookup landed on row 1 -- row 10 was
     unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50 exactly this way,
-    and element 109 lost row 10. Rows the model simply omitted disappear
-    identically. Either way the content survived only inside whatever
+    and element 109 lost row 10. ``parse_delimiter_reply`` now keeps the index
+    text (#1228), so this recovers only rows the model simply omitted, which
+    disappear identically. Either way the content survived only inside whatever
     whole-table entry the model happened to emit, which is what made those
     blobs load-bearing (and what made #227's dedup drop real content loss).
 
@@ -1007,7 +1039,7 @@ Respond **only** with a JSON array containing the identified entries. If no entr
             )
 
             result_text = llm_result["content"]
-            result = json.loads(result_text)
+            result = parse_delimiter_reply(result_text)
 
             # Accumulate cost
             total_cost += llm_result["cost"]
@@ -1056,8 +1088,8 @@ Respond **only** with a JSON array containing the identified entries. If no entr
 
                     # Handle row sub-indices (floats like 22.2 or strings like "22.2")
                     # These come from table_content rows with format "parent_idx.row_idx"
-                    start_idx_str = str(start_idx)
-                    end_idx_str = str(end_idx)
+                    start_idx_str = delimiter_index_text(start_idx)
+                    end_idx_str = delimiter_index_text(end_idx)
                     if "." in start_idx_str or "." in end_idx_str:
                         # Row sub-index - look up in batch elements by string key
                         entry, row_keys = row_range_entry(
@@ -1101,10 +1133,10 @@ Respond **only** with a JSON array containing the identified entries. If no entr
             # blob whose rows are now all present becomes a provable duplicate and
             # is collapsed by the #418 coverage check.
             #
-            # ponytail: a backstop, not a cure. The real fix is to stop round
-            # tripping these indices through JSON numbers -- emit them as strings
-            # ("114.10") or renumber rows to unique ints. Do that and this loop
-            # only ever recovers rows the model genuinely skipped.
+            # The indices no longer round trip through floats (#1228): this loop
+            # only recovers rows the model genuinely skipped. A row key that is
+            # not exactly the text the model wrote would bring the old collapse
+            # back, which is why delimiter_index_text exists.
             recovered = recover_unclaimed_table_rows(batch_elements, claimed_row_keys)
             all_validated_entries.extend(recovered)
             if recovered:
