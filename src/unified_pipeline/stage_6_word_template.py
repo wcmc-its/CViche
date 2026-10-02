@@ -171,6 +171,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     normalize_retired_code,
     segment_already_rendered,
 )
+from unified_pipeline.stage4.extraction import UnextractedContentReport, calculate_unextracted_content
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
@@ -507,6 +508,26 @@ _TAXONOMY_WARNED_CONFUSIONS = frozenset({
     ('D3', 'D1'), ('K1', 'K4'), ('K4', 'K1'), ('K5', 'K4'),
     ('Q1', 'Q2'), ('Q2', 'Q3'), ('S1', 'S8'), ('S2', 'S1'),
 })
+
+
+def rendered_extraction_coverage(entry: Mapping[str, Any]) -> UnextractedContentReport | None:
+    """The entry's stage-4 coverage, counting only the records stage 6 renders.
+
+    Stage 4 measures a multi-record entry over every record it kept under
+    `STAGE4_RECORDS_KEY` (#1265). Fan-out removes that key from every child it
+    renders, so an entry that still carries it after fan-out had its records
+    declined (a T entry has no fan-out renderer at all), and only its own
+    fields render. Crediting the declined records read a lost 18K-character
+    entry as 92% covered and kept it out of the low-coverage overflow (#1299).
+    Run on a stage-4 entry, call `fan_out_multi_record_entries` first.
+    """
+    coverage = entry.get('extraction_coverage')
+    fields = entry.get('extracted_fields')
+    if not isinstance(coverage, dict) or not isinstance(fields, Mapping) \
+            or STAGE4_RECORDS_KEY not in fields:
+        return coverage if isinstance(coverage, dict) else None
+    own = {key: value for key, value in fields.items() if key != STAGE4_RECORDS_KEY}
+    return calculate_unextracted_content(str(entry.get('text') or ''), own)
 
 
 _KEEP_SENTINEL = 'KEEP'
@@ -2280,7 +2301,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 continue
 
             # Get coverage for the comment
-            extraction_coverage = entry.get('extraction_coverage', {})
+            extraction_coverage = rendered_extraction_coverage(entry)
             coverage_pct = extraction_coverage.get('extraction_coverage_percent', 0) if isinstance(extraction_coverage, dict) else 0
 
             # Find this paragraph's position in the document
@@ -2945,7 +2966,7 @@ Now analyze the text above:"""
                     if len(records) < UNRENDERED_MIN_RECORD_LINES:
                         continue  # not a fused multi-record entry
                     fields = entry.get('extracted_fields') or {}
-                    coverage = (entry.get('extraction_coverage') or {}).get(
+                    coverage = (rendered_extraction_coverage(entry) or {}).get(
                         'extraction_coverage_percent', 0)
                     for line in records:
                         if _record_rendered(line, haystack, line_token_sets) is not False:
@@ -3178,7 +3199,7 @@ Now analyze the text above:"""
         is_k_code = taxonomy_code.startswith('K')
         has_formatted_text = fields.get('formatted_text') or fields.get('formatting_source') == 'stage_5c_llm'
 
-        extraction_coverage = entry.get('extraction_coverage', {})
+        extraction_coverage = rendered_extraction_coverage(entry)
         if isinstance(extraction_coverage, dict) and not is_k_code and not has_formatted_text:
             coverage_pct = extraction_coverage.get('extraction_coverage_percent', 100)
             if coverage_pct and coverage_pct < 70:
