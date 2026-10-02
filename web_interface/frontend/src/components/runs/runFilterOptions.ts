@@ -1,8 +1,8 @@
 import type { RunFilterOptions, RunSummary } from '../../types'
 import { formatRelativeDate } from '../../utils'
-import { INPUT_FORMAT_VALUE_LABEL, RUN_BY_SELF } from './runFilters'
+import { INPUT_FORMAT_VALUE_LABEL, RUN_BY_ON_BEHALF, RUN_BY_SELF } from './runFilters'
 import { FEEDBACK_VALUE_LABEL } from './runFeedback'
-import { SELF_RUN_BY_LABEL } from './runGroups'
+import { ON_BEHALF_RUN_BY_LABEL, SELF_RUN_BY_LABEL } from './runGroups'
 
 /** One selectable entry in a filter popover. id '' is the "any" entry. */
 export interface ComboOption {
@@ -113,6 +113,15 @@ export function buildRunByModel(
       label: SELF_RUN_BY_LABEL,
       meta: 'Uploaded their own CV',
       count: options.self_count,
+      search: '',
+    })
+  }
+  if (options.on_behalf_count > 0) {
+    pinned.push({
+      id: RUN_BY_ON_BEHALF,
+      label: ON_BEHALF_RUN_BY_LABEL,
+      meta: 'Submitted by someone else',
+      count: options.on_behalf_count,
       search: '',
     })
   }

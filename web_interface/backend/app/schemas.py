@@ -186,12 +186,23 @@ class InputFormatFilterCounts(BaseModel):
     unknown: int
 
 
+class StatusFilterCounts(BaseModel):
+    """Runs behind each status pill (every filter applies except ``status``)."""
+    all: int
+    running: int
+    awaiting_feedback: int
+    failed: int
+    red: int
+
+
 class RunFilterOptions(BaseModel):
     """GET /runs/filter-options: the options each admin runs filter offers."""
     departments: list[FilterCount]
     faculty: list[FacultyOption]
     run_by: list[RunByOption]
     self_count: int
+    on_behalf_count: int
+    status: StatusFilterCounts
     feedback: FeedbackFilterCounts
     input_format: InputFormatFilterCounts
 

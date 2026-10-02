@@ -10,9 +10,13 @@ import {
   recentRunByIds,
 } from './runFilterOptions'
 import { FEEDBACK_VALUE_LABEL } from './runFeedback'
-import { INPUT_FORMAT_VALUE_LABEL, RUN_BY_SELF, hasActiveFilters, isFeedbackFilter, isInputFormatFilter } from './runFilters'
+import {
+  INPUT_FORMAT_VALUE_LABEL, RUN_BY_ON_BEHALF, RUN_BY_SELF, STATUS_PILLS, activeStatusPill, isFeedbackFilter,
+  isInputFormatFilter,
+} from './runFilters'
+import type { StatusPillId } from './runFilters'
 import type { RunFilterControls, RunFilters } from './runFilters'
-import { SELF_RUN_BY_LABEL } from './runGroups'
+import { ON_BEHALF_RUN_BY_LABEL, SELF_RUN_BY_LABEL } from './runGroups'
 
 interface RunFilterBarProps {
   controls: RunFilterControls
@@ -24,6 +28,7 @@ interface RunFilterBarProps {
 }
 
 const EMPTY_OPTIONS: RunFilterOptions = { departments: [], faculty: [], run_by: [], self_count: 0,
+  on_behalf_count: 0, status: { all: 0, running: 0, awaiting_feedback: 0, failed: 0, red: 0 },
   feedback: { given: 0, needed: 0 }, input_format: { wcm: 0, other: 0, unknown: 0 } }
 
 /** Display text for the selected Run by value. */
@@ -34,6 +39,7 @@ export function runByValueLabel(
   currentUserId: number | undefined,
 ): string {
   if (runBy === RUN_BY_SELF) return SELF_RUN_BY_LABEL
+  if (runBy === RUN_BY_ON_BEHALF) return ON_BEHALF_RUN_BY_LABEL
   const id = Number(runBy)
   const name =
     people.find((p) => p.id === id)?.display_name ?? runs.find((r) => r.run_by?.id === id)?.run_by?.display_name
@@ -59,6 +65,40 @@ function activeChips(filters: RunFilters, runByLabel: string) {
     { key: 'feedback' as const, label: 'Feedback', value: feedbackValueLabel(filters.feedback) },
     { key: 'inputFormat' as const, label: 'Input format', value: inputFormatValueLabel(filters.inputFormat) },
   ].filter((chip) => chip.value)
+}
+
+interface StatusPillsProps {
+  controls: RunFilterControls
+  /** Filter-options, for the pill counts; null for members, who have none. */
+  options: RunFilterOptions | null
+  isAdmin: boolean
+}
+
+/** The single-select status pills above the table. Never wrap: they scroll sideways on a narrow screen. */
+export function StatusPills({ controls, options, isAdmin }: StatusPillsProps) {
+  const active = activeStatusPill(controls.filters)
+  return (
+    <div role="group" aria-label="Show runs" className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+      {STATUS_PILLS.filter((pill) => isAdmin || !pill.adminOnly).map((pill) => {
+        const on = pill.id === active
+        const count = options?.status[pill.id]
+        return (
+          <button
+            key={pill.id}
+            type="button"
+            aria-pressed={on}
+            onClick={() => controls.setStatusPill(pill.id as StatusPillId)}
+            className={`shrink-0 whitespace-nowrap rounded-full border px-3 py-1 text-[13px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-600 ${
+              on ? 'border-ink bg-ink text-white' : 'border-sand-300 bg-white text-gray-700 hover:bg-sand-50'
+            }`}
+          >
+            {pill.label}
+            {count !== undefined && <span className={`ml-1.5 ${on ? 'opacity-70' : 'text-gray-500'}`}>{count}</span>}
+          </button>
+        )
+      })}
+    </div>
+  )
 }
 
 /** The five admin filter comboboxes, shown right-aligned in the filter row; `extra` (the Batch filter) follows them. */
@@ -147,12 +187,14 @@ interface ActiveFilterChipsProps extends Omit<RunFilterBarProps, 'currentUserEma
 /** Dark chips for the active filters, each removable, plus "Clear all". */
 export function ActiveFilterChips({ controls, options, runs, currentUserId, batchChip }: ActiveFilterChipsProps) {
   const { filters, setFilter, clearAll } = controls
-  if (!hasActiveFilters(filters) && !batchChip) return null
   const runByLabel = filters.runBy ? runByValueLabel(filters.runBy, options?.run_by ?? [], runs, currentUserId) : ''
+  // The status pills show their own state, so they get no chip; "All faculty" clears them.
+  const chips = activeChips(filters, runByLabel)
+  if (chips.length === 0 && !batchChip) return null
   return (
     <div className="mt-3 flex flex-wrap items-center gap-2">
       {batchChip && <FilterChip label="Batch" value={batchChip.value} onRemove={batchChip.onRemove} />}
-      {activeChips(filters, runByLabel).map((chip) => (
+      {chips.map((chip) => (
         <FilterChip key={chip.key} label={chip.label} value={chip.value} onRemove={() => setFilter(chip.key, '')} />
       ))}
       <button type="button" onClick={clearAll} className="text-[13px] text-primary-700 hover:underline">

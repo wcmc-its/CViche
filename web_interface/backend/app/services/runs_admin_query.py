@@ -1,8 +1,8 @@
 """Filtering and facet counts for the admin "all runs" view.
 
 GET /runs?scope=all lists every user's runs; GET /runs/filter-options feeds its
-three filter dropdowns (Department, Faculty, Run by) and the Feedback and
-Input format filters.
+three filter dropdowns (Department, Faculty, Run by), the Feedback and
+Input format filters, and the status pills' counts.
 Both build on the same
 filter predicates so a dropdown's counts always describe what picking that
 option would list.
@@ -14,23 +14,33 @@ run-by lists while the department list stays complete.
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sqlalchemy import ColumnElement, and_, case, func, select
-from sqlalchemy.orm import Query, Session, contains_eager
+from sqlalchemy import ColumnElement, and_, case, func, or_, select
+from sqlalchemy.orm import Query, Session, aliased, contains_eager
 
 from app.errors import validation_error
 from app.services.input_format import INPUT_FORMAT_OTHER, INPUT_FORMAT_WCM
 from app.models import Feedback, Run, RunState, User
+from app.services.quality_score_service import BAND_RED
 from app.schemas import (
     FacultyOption, FeedbackFilterCounts, InputFormatFilterCounts, FeedbackReviewer, FilterCount,
-    RunByOption, RunBySummary, RunFeedbackSummary, RunFilterOptions,
+    RunByOption, RunBySummary, RunFeedbackSummary, RunFilterOptions, StatusFilterCounts,
 )
 
 # Run.submission_type of a faculty member uploading their own CV
 # (upload.py's Literal["own_cv", "authorized_admin"]).
 OWN_CV_SUBMISSION_TYPE = "own_cv"
 
+# Run.submission_type of an authorized admin submitting on a faculty member's behalf.
+AUTHORIZED_ADMIN_SUBMISSION_TYPE = "authorized_admin"
+
 # The run_by filter value meaning "the faculty member themselves".
 RUN_BY_SELF = "self"
+
+# The run_by filter value meaning "someone submitted it on their behalf".
+RUN_BY_ON_BEHALF = "on_behalf"
+
+# Run states the "Running" pill lists: in the queue or being processed.
+ACTIVE_RUN_STATES = (RunState.QUEUED, RunState.RUNNING)
 
 
 class RunScope(StrEnum):
@@ -52,15 +62,24 @@ class InputFormatFilter(StrEnum):
     UNKNOWN = "unknown"
 
 
+class StatusFilter(StrEnum):
+    """The ``status`` filter behind the runs-list pills. RED (score band) is admin-only."""
+    RUNNING = "running"
+    FAILED = "failed"
+    RED = "red"
+
+
 @dataclass(frozen=True)
 class RunFilters:
     """The admin runs filters. None/False = not filtering on that facet."""
     run_by_user_id: int | None = None
     run_by_self: bool = False
+    run_by_on_behalf: bool = False
     faculty: str | None = None
     department: str | None = None
     feedback: FeedbackFilter | None = None
     input_format: InputFormatFilter | None = None
+    status: StatusFilter | None = None
 
 
 def parse_feedback_filter(feedback: str | None) -> FeedbackFilter | None:
@@ -85,32 +104,52 @@ def parse_input_format_filter(input_format: str | None) -> InputFormatFilter | N
         raise validation_error(f"input_format must be one of {allowed}") from None
 
 
+def parse_status_filter(status: str | None) -> StatusFilter | None:
+    """``status`` query param -> StatusFilter; blank is None, unknown is a 422."""
+    if not status:
+        return None
+    try:
+        return StatusFilter(status)
+    except ValueError:
+        allowed = ", ".join(f'"{f.value}"' for f in StatusFilter)
+        raise validation_error(f"status must be one of {allowed}") from None
+
+
 def parse_run_filters(run_by: str | None, faculty: str | None,
                       department: str | None, feedback: str | None = None,
-                      input_format: str | None = None) -> RunFilters:
-    """Build RunFilters from the raw query params. ``run_by`` is a user id or the
-    literal "self", ``feedback`` is "given" or "needed", ``input_format`` is "wcm",
-    "other" or "unknown"; anything else is a 422. Blank strings mean "no filter"."""
+                      input_format: str | None = None,
+                      status: str | None = None) -> RunFilters:
+    """Build RunFilters from the raw query params. ``run_by`` is a user id, "self"
+    or "on_behalf", ``feedback`` is "given" or "needed", ``input_format`` is "wcm",
+    "other" or "unknown", ``status`` is "running", "failed" or "red"; anything else
+    is a 422. Blank strings mean "no filter"."""
     run_by_user_id = None
     run_by_self = False
+    run_by_on_behalf = False
     if run_by:
         if run_by == RUN_BY_SELF:
             run_by_self = True
+        elif run_by == RUN_BY_ON_BEHALF:
+            run_by_on_behalf = True
         else:
             try:
                 run_by_user_id = int(run_by)
             except ValueError:
                 raise validation_error(
-                    f'run_by must be a user id or "{RUN_BY_SELF}"') from None
+                    f'run_by must be a user id, "{RUN_BY_SELF}" or "{RUN_BY_ON_BEHALF}"') from None
     return RunFilters(run_by_user_id=run_by_user_id, run_by_self=run_by_self,
+                      run_by_on_behalf=run_by_on_behalf,
                       faculty=faculty or None, department=department or None,
                       feedback=parse_feedback_filter(feedback),
-                      input_format=parse_input_format_filter(input_format))
+                      input_format=parse_input_format_filter(input_format),
+                      status=parse_status_filter(status))
 
 
 def _run_by_clause(filters: RunFilters) -> ColumnElement[bool] | None:
     if filters.run_by_self:
         return Run.submission_type == OWN_CV_SUBMISSION_TYPE
+    if filters.run_by_on_behalf:
+        return Run.submission_type == AUTHORIZED_ADMIN_SUBMISSION_TYPE
     if filters.run_by_user_id is not None:
         # Includes the user's own_cv runs: a faculty member who ran their own
         # CV is listed under their own name.
@@ -145,10 +184,33 @@ def input_format_clause(input_format: InputFormatFilter | None) -> ColumnElement
     return Run.input_format == input_format.value
 
 
+def status_clause(status: StatusFilter | None, *,
+                  owner_user_id: int | None = None) -> ColumnElement[bool] | None:
+    """The predicate for the ``status`` filter (None = not filtering).
+
+    Failed lists the failed runs AND every run of a faculty member (same CV owner
+    name) who has one, so a grouped row whose earlier rerun failed is kept, as the
+    table groups by owner. ``owner_user_id`` limits "has a failed run" to that
+    user's own runs (scope=mine must not read other users' runs)."""
+    if status is StatusFilter.RUNNING:
+        return Run.status.in_(ACTIVE_RUN_STATES)
+    if status is StatusFilter.FAILED:
+        failed = aliased(Run)
+        failed_owners = select(failed.cv_owner_name).where(
+            failed.status == RunState.FAILED, failed.cv_owner_name.isnot(None))
+        if owner_user_id is not None:
+            failed_owners = failed_owners.where(failed.user_id == owner_user_id)
+        return or_(Run.status == RunState.FAILED, Run.cv_owner_name.in_(failed_owners))
+    if status is StatusFilter.RED:
+        return Run.quality_band == BAND_RED
+    return None
+
+
 def _clauses(filters: RunFilters, *, skip_department: bool = False,
              skip_faculty: bool = False, skip_run_by: bool = False,
              skip_feedback: bool = False,
-             skip_input_format: bool = False) -> list[ColumnElement[bool]]:
+             skip_input_format: bool = False,
+             skip_status: bool = False) -> list[ColumnElement[bool]]:
     """The active filter predicates, minus the facet(s) being counted."""
     clauses = []
     if filters.department and not skip_department:
@@ -164,6 +226,9 @@ def _clauses(filters: RunFilters, *, skip_department: bool = False,
     input_format = None if skip_input_format else input_format_clause(filters.input_format)
     if input_format is not None:
         clauses.append(input_format)
+    status = None if skip_status else status_clause(filters.status)
+    if status is not None:
+        clauses.append(status)
     return clauses
 
 
@@ -227,14 +292,31 @@ def _run_by_counts(db: Session, filters: RunFilters) -> list[RunByOption]:
             for uid, name, cwid, email, department, count in rows]
 
 
-def _self_count(db: Session, filters: RunFilters) -> int:
+def _submission_type_count(db: Session, filters: RunFilters, submission_type: str) -> int:
     return (
         db.query(func.count(Run.id))
         .select_from(Run).outerjoin(User, Run.user_id == User.id)
-        .filter(Run.submission_type == OWN_CV_SUBMISSION_TYPE,
+        .filter(Run.submission_type == submission_type,
                 *_clauses(filters, skip_run_by=True))
         .scalar() or 0
     )
+
+
+def _status_counts(db: Session, filters: RunFilters) -> StatusFilterCounts:
+    """Runs per pill. Applies every filter except ``status`` (the pills are one
+    choice among themselves); ``awaiting_feedback`` is the feedback=needed count."""
+    total, running, failed, red, awaiting = (
+        db.query(func.count(Run.id),
+                 func.count(case((status_clause(StatusFilter.RUNNING), 1))),
+                 func.count(case((status_clause(StatusFilter.FAILED), 1))),
+                 func.count(case((status_clause(StatusFilter.RED), 1))),
+                 func.count(case((_needs_feedback(), 1))))
+        .select_from(Run).outerjoin(User, Run.user_id == User.id)
+        .filter(*_clauses(filters, skip_status=True))
+        .one()
+    )
+    return StatusFilterCounts(all=total, running=running, awaiting_feedback=awaiting,
+                              failed=failed, red=red)
 
 
 def _feedback_counts(db: Session, filters: RunFilters) -> FeedbackFilterCounts:
@@ -311,12 +393,14 @@ def _reviewers_by_run(db: Session, run_ids: list[str]) -> dict[str, list[Feedbac
 
 
 def build_filter_options(db: Session, filters: RunFilters) -> RunFilterOptions:
-    """Options and run counts for the admin filters (six aggregate queries)."""
+    """Options and run counts for the admin filters (eight aggregate queries)."""
     return RunFilterOptions(
         departments=_department_counts(db, filters),
         faculty=_faculty_counts(db, filters),
         run_by=_run_by_counts(db, filters),
-        self_count=_self_count(db, filters),
+        self_count=_submission_type_count(db, filters, OWN_CV_SUBMISSION_TYPE),
+        on_behalf_count=_submission_type_count(db, filters, AUTHORIZED_ADMIN_SUBMISSION_TYPE),
+        status=_status_counts(db, filters),
         feedback=_feedback_counts(db, filters),
         input_format=_input_format_counts(db, filters),
     )

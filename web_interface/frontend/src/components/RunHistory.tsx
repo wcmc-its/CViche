@@ -6,8 +6,8 @@ import type { BatchSummary, RunFilterOptions, RunSummary } from '../types'
 import ErrorBanner from './ErrorBanner'
 import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 import RunTable from './runs/RunTable'
-import { ActiveFilterChips, RunFilterCombos } from './runs/RunFilterBar'
-import { hasActiveFilters, toListParams, useBatchFilter, useRunFilters } from './runs/runFilters'
+import { ActiveFilterChips, RunFilterCombos, StatusPills } from './runs/RunFilterBar'
+import { hasActiveFilters, toListParams, toMemberListParams, useBatchFilter, useRunFilters } from './runs/runFilters'
 import type { RunFilterControls } from './runs/runFilters'
 import { BatchFilterCombo, batchLabel } from './runs/BatchFilter'
 import BatchView from './runs/BatchView'
@@ -80,21 +80,24 @@ interface FilterRowProps {
   setBatch: (batchId: string) => void
 }
 
-/** The filter combos (admin filters, then Batch for anyone with a batch) and the active chips. */
+/** The status pills, the filter combos (admin filters, then Batch for anyone with a batch) and the active chips.
+ *  The pills are hidden in a batch view, which they do not filter. */
 function RunFilterRow({ isAdmin, batches, batchId, setBatch, currentUserEmail, ...bar }: FilterRowProps) {
   const batchCombo = (batches.length > 0 || batchId) && (
     <BatchFilterCombo batches={batches} batchId={batchId} currentUserId={bar.currentUserId} onPick={setBatch} />
   )
-  if (!isAdmin && !batchCombo) return null
   const selected = batches.find((b) => b.id === batchId)
   const batchChip = batchId ? { value: selected ? batchLabel(selected) : batchId, onRemove: () => setBatch('') } : undefined
   return (
     <div className="mt-6">
-      <div className="flex flex-wrap items-center gap-2">
-        {isAdmin
-          ? <RunFilterCombos {...bar} currentUserEmail={currentUserEmail} extra={batchCombo} />
-          : <div className="flex flex-wrap gap-2 sm:ml-auto">{batchCombo}</div>}
-      </div>
+      {!batchId && <StatusPills controls={bar.controls} options={isAdmin ? bar.options : null} isAdmin={isAdmin} />}
+      {(isAdmin || batchCombo) && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {isAdmin
+            ? <RunFilterCombos {...bar} currentUserEmail={currentUserEmail} extra={batchCombo} />
+            : <div className="flex flex-wrap gap-2 sm:ml-auto">{batchCombo}</div>}
+        </div>
+      )}
       <ActiveFilterChips {...bar} batchChip={batchChip} />
     </div>
   )
@@ -106,7 +109,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const showCost = useCanSeeCost()
   const controls = useRunFilters(isAdmin)
   const { filters } = controls
-  const listParams = useMemo(() => (isAdmin ? toListParams(filters) : undefined), [isAdmin, filters])
+  const listParams = useMemo(() => (isAdmin ? toListParams(filters) : toMemberListParams(filters)), [isAdmin, filters])
   const filterKey = JSON.stringify(listParams ?? {})
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [loading, setLoading] = useState(true)
