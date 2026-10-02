@@ -105,6 +105,15 @@ Lints, ranked by the severity of the failure class they catch:
                           a two-digit year given the wrong century (YOXXOH's
                           talks from the 2000s rendered in the 1900s); WARN
 
+14h. stage4_group_failures a stage-4 taxonomy group's extraction call failed
+                          (invalid reply, timeout, provider error such as a
+                          content filter): its entries were written empty and
+                          the recovery pass retried them, so the failure hides
+                          in the artifact -- `extraction_error` on the entries
+                          and `stats.failed_batches`, never an `error` key.
+                          WARN: it caps the quality score at 84, one point
+                          under GREEN, not into the RED band (#1174)
+
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
 construction lints, because each one on its own caps quality_score.py's final
@@ -298,6 +307,7 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_pipeline_errors,
     lint_stage3b_fallback_ratio,
     lint_stage3b_second_pass_errors,
+    lint_stage4_group_failures,
 )
 
 
@@ -368,6 +378,7 @@ KNOWN_LINTS = (
     "stage3b_second_pass_error",
     "offschema_fields",
     "implausible_year",
+    "stage4_group_failures",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -454,6 +465,12 @@ LINT_PREVALENCE = {
     # its 17 findings a hand-checked wrong century).
     "offschema_fields": 0.227,
     "implausible_year": 0.037,
+    # #1174: 3 of 163 corpus CVs (the 126-CV census farm + the 37 uids of the
+    # 2026-10-02 IPXFBA batch, scripts/doctor_gate.py, measured 2026-10-02):
+    # two batch uids whose stage-4 group call returned two JSON objects, and
+    # one older-build census uid whose group call hit a provider error. Same
+    # mixed-corpus caveat as duplicate_records above.
+    "stage4_group_failures": 0.018,
 }
 
 
@@ -926,6 +943,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
     LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",)),
     LintSpec("implausible_year", lint_implausible_year, ("stage_4",)),
+    LintSpec("stage4_group_failures", lint_stage4_group_failures, ("stage_4",)),
 )
 
 

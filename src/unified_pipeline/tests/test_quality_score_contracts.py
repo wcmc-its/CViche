@@ -26,6 +26,8 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline import quality_score as qs  # noqa: E402
 from unified_pipeline.quality_score import (  # noqa: E402
+    CAP_ONLY_GATES,
+    DIMENSIONS,
     FATAL_ERROR_PATTERN,
     SCORED_ARTIFACT_COUNT,
     TOTAL_WEIGHT,
@@ -48,7 +50,15 @@ from unified_pipeline.quality_score import (  # noqa: E402
     score_run,
     score_sparse_tables,
     score_stage3b_fallback_ratio,
+    score_stage4_group_failures,
     score_t_bucket,
+    stage4_group_failures,
+)
+from unified_pipeline.stage4.error_codes import (  # noqa: E402
+    LLM_PROVIDER_ERROR,
+    LLM_RESPONSE_INVALID,
+    LLM_TIMEOUT,
+    NO_MATCHING_EXTRACTION,
 )
 
 docx = pytest.importorskip("docx")
@@ -1413,6 +1423,201 @@ def test_stage3b_fallback_ratio_quiet_when_classified_json_is_absent(tmp_path):
     fraction, detail, cap = score_stage3b_fallback_ratio(tmp_path)
     assert fraction == 0.0 and cap is None
     assert "no classified.json found" in detail
+
+
+# --------------------------------------------------------------------- D21b
+# #1174 stage-4 failed extraction groups: a cap-only gate (weight 0) read from
+# stage 4's own `extraction_error` markers and `stats.failed_batches`.
+# --------------------------------------------------------------------- D21b
+
+def _entry_in_failed_group(code="A1", error=LLM_RESPONSE_INVALID, rescued=False):
+    """An entry of a taxonomy group whose extraction call failed, as stage 4
+    writes it: no fields and the error. When the recovery pass succeeds it sets
+    extraction_success and llm_recovery_applied and KEEPS the error."""
+    return {"taxonomy_code": code, "extraction_error": error,
+            "extraction_success": rescued, "llm_recovery_applied": rescued,
+            "extracted_fields": {"note": "x"} if rescued else {}}
+
+
+def _clean_entry(code="A1"):
+    return {"taxonomy_code": code, "extraction_success": True,
+            "extracted_fields": {"note": "x"}}
+
+
+def _stage4_artifact(entries, **stats):
+    data = {"cv_owner": {"full_name": "Jane Q. Public"}, "entries": entries}
+    if stats:
+        data["stats"] = stats
+    return data
+
+
+def test_stage4_group_failures_splits_rescued_entries_from_unrecovered_ones():
+    entries = [_entry_in_failed_group("P", rescued=True) for _ in range(3)]
+    entries.append(_entry_in_failed_group("M2A", error=LLM_TIMEOUT))
+    entries += [_clean_entry(), _clean_entry()]
+
+    failures = stage4_group_failures(_stage4_artifact(entries, failed_batches=2))
+
+    assert failures.failed_batches == 2
+    assert failures.entries_failed == 4
+    assert failures.entries_rescued == 3
+    assert failures.entries_unrecovered == 1
+    assert failures.entries_by_code == {"M2A": 1, "P": 3}
+    assert failures.errors == {LLM_RESPONSE_INVALID: 3, LLM_TIMEOUT: 1}
+
+
+def test_stage4_group_failures_sees_a_fully_rescued_group_that_extraction_failed_cannot():
+    """The shape of the batch's silent-GREEN run: every entry of the failed
+    group was rescued, so stats.extraction_failed (entries still unextracted
+    AFTER recovery) is 0 and a count of extraction_success == False is 0 too."""
+    entries = [_entry_in_failed_group("P", rescued=True) for _ in range(8)]
+    artifact = _stage4_artifact(entries, failed_batches=1, extraction_failed=0)
+    assert not any(e["extraction_success"] is False for e in artifact["entries"])
+
+    failures = stage4_group_failures(artifact)
+
+    assert failures is not None
+    assert (failures.entries_failed, failures.entries_unrecovered) == (8, 0)
+
+
+def test_stage4_group_failures_ignores_a_per_entry_miss_in_a_successful_call():
+    """NO_MATCHING_EXTRACTION is not a failed call: the group's reply simply
+    held no item for this entry. score_field_sparseness already counts it."""
+    entries = [{"taxonomy_code": "A1", "extraction_success": False,
+                "extraction_error": NO_MATCHING_EXTRACTION, "extracted_fields": {}}]
+    assert stage4_group_failures(_stage4_artifact(entries, failed_batches=0)) is None
+
+
+def test_stage4_group_failures_counts_a_code_stage_4_adds_later():
+    """Everything but the one non-failure counts, so a new failure code is not
+    silently missed -- the gap this gate exists to close."""
+    entries = [_entry_in_failed_group(error="llm_some_future_failure")]
+    assert stage4_group_failures(_stage4_artifact(entries)).errors == {
+        "llm_some_future_failure": 1}
+
+
+def test_stage4_group_failures_reads_the_failed_batches_stat_on_its_own():
+    failures = stage4_group_failures(_stage4_artifact([_clean_entry()], failed_batches=1))
+    assert (failures.failed_batches, failures.entries_failed) == (1, 0)
+
+
+@pytest.mark.parametrize("artifact", [
+    None, [], {}, {"entries": None}, {"entries": "x"}, {"entries": [None, 3, "x"]},
+    {"entries": [_clean_entry()]},
+    {"entries": [], "stats": "x"},
+    {"entries": [], "stats": {"failed_batches": 0}},
+    {"entries": [], "stats": {"failed_batches": -1}},
+    {"entries": [], "stats": {"failed_batches": "1"}},
+], ids=repr)
+def test_stage4_group_failures_is_none_without_a_failed_group_and_never_raises(artifact):
+    assert stage4_group_failures(artifact) is None
+
+
+def test_score_stage4_group_failures_caps_one_point_under_green_even_when_all_rescued(tmp_path):
+    entries = [_entry_in_failed_group("P", rescued=True) for _ in range(8)]
+    _write_json(tmp_path, "X_fields.json", _stage4_artifact(entries, failed_batches=1))
+
+    fraction, detail, cap = score_stage4_group_failures(tmp_path)
+
+    assert fraction == 1.0
+    assert cap == qs.BAND_GREEN - 1 == 84
+    assert "entries_failed=8 (rescued=8, unrecovered=0)" in detail
+    assert "taxonomy_codes=P:8" in detail
+
+
+def test_score_stage4_group_failures_quiet_without_a_failure_or_an_artifact(tmp_path):
+    assert score_stage4_group_failures(tmp_path) == (0.0, "no fields.json found", None)
+
+    _write_json(tmp_path, "X_fields.json", _stage4_artifact([_clean_entry()], failed_batches=0))
+    assert score_stage4_group_failures(tmp_path) == (
+        0.0, "no failed extraction group", None)
+
+    _truncate(tmp_path, "X_fields.json")
+    fraction, detail, cap = score_stage4_group_failures(tmp_path)
+    assert (fraction, cap) == (0.0, None)
+    assert detail.startswith("fields.json unreadable")
+
+
+def test_stage4_group_failure_gate_is_cap_only_and_moves_no_raw_score():
+    assert score_stage4_group_failures not in [scorer for _, _, scorer in DIMENSIONS]
+    assert score_stage4_group_failures in [gate for _, gate in CAP_ONLY_GATES]
+    assert TOTAL_WEIGHT == 100
+
+
+def test_score_run_keeps_a_run_with_a_failed_stage4_group_out_of_green(tmp_path):
+    """End to end through score_run (the gate is dispatched from CAP_ONLY_GATES,
+    which the scorer-level tests above never touch). The fixture run scores
+    exactly 85 GREEN, so a cap of 84 is visible; the same run with one rescued
+    failed group must differ in the cap and nothing else."""
+    clean = score_run(_complete_run_dir(tmp_path))
+    assert (clean["totalScore"], clean["band"]) == (85, "GREEN (ship)")
+
+    rescued = {**_clean_entry("P"), "extraction_error": LLM_RESPONSE_INVALID,
+               "llm_recovery_applied": True, "extracted_fields": {"email": "j@x.org"}}
+    artifact = _stage4_artifact([rescued], failed_batches=1)
+    artifact["cv_owner_location"] = {"inference_success": True, "primary_location": "NY"}
+    _write_json(tmp_path, "X_fields.json", artifact)
+    failed = score_run(tmp_path)
+
+    assert failed["raw_score_before_caps"] == clean["raw_score_before_caps"]
+    assert failed["total_weight"] == clean["total_weight"]
+    assert len(failed["dimensionScores"]) == len(clean["dimensionScores"])
+    assert failed["hard_fail_caps_applied"] == [84]
+    assert failed["totalScore"] == 84 and failed["band"].startswith("YELLOW")
+    assert failed["flags"][0].startswith(
+        "HARD-FAIL cap=84: Stage-4 extraction group failed (caps below GREEN) (failed_batches=1;")
+    assert clean["hard_fail_caps_applied"] == []
+
+
+def test_the_scorer_reads_the_markers_stage_4_actually_writes(monkeypatch):
+    """Producer -> consumer wire (#1174): stage 4's real failed-group path, with
+    the LLM stubbed, writes entries the scorer counts. The group call returns
+    invalid JSON; the recovery pass rescues the one entry long enough to be
+    eligible (>= 50 chars) and cannot touch the short one."""
+    from unified_pipeline.stage4 import extraction
+
+    replies = iter([
+        {"content": "not valid json", "cost": 0.0, "total_tokens": 0},
+        {"content": json.dumps({"recovered_entries": [
+            {"entry_id": "0_0", "fields": {"note": "recovered"}}]}),
+         "cost": 0.0, "total_tokens": 0},
+    ])
+    monkeypatch.setattr(extraction, "call_llm", lambda **kwargs: next(replies))
+    entries = [
+        {"text": "Example entry with well over fifty characters of padding text.",
+         "taxonomy_code": "A1", "element_idx_start": 0, "element_idx_end": 0},
+        {"text": "too short", "taxonomy_code": "A1",
+         "element_idx_start": 1, "element_idx_end": 1},
+    ]
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+    failures = stage4_group_failures({"entries": result["entries"]})
+
+    assert result["success"] is False
+    assert failures.errors == {LLM_RESPONSE_INVALID: 2}
+    assert failures.entries_by_code == {"A1": 2}
+    assert (failures.entries_rescued, failures.entries_unrecovered) == (1, 1)
+
+
+def test_the_scorer_does_not_count_the_per_entry_miss_stage_4_actually_writes(monkeypatch):
+    """The other half of the wire: a group call that SUCCEEDS but omits one
+    entry marks it NO_MATCHING_EXTRACTION, which is not a failed group."""
+    from unified_pipeline.stage4 import extraction
+
+    reply = {"content": json.dumps({"entries": [{"entry_index": 0, "note": "kept"}]}),
+             "cost": 0.0, "total_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}
+    monkeypatch.setattr(extraction, "call_llm", lambda **kwargs: reply)
+    entries = [
+        {"text": "kept", "taxonomy_code": "A1", "element_idx_start": 0, "element_idx_end": 0},
+        {"text": "omitted by the reply", "taxonomy_code": "A1",
+         "element_idx_start": 1, "element_idx_end": 1},
+    ]
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    assert [e.get("extraction_error") for e in result["entries"]] == [
+        None, NO_MATCHING_EXTRACTION]
+    assert stage4_group_failures({"entries": result["entries"]}) is None
 
 
 def test_dimension_weights_sum_to_100():
