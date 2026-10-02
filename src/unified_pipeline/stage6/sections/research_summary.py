@@ -50,7 +50,8 @@ class ResearchSummarySection:
         Args:
             research_summary_data: Stage 4.5 standalone output containing:
                 - research_summary.text: The generated summary
-                - research_summary.generation_method: "llm_generated" or "existing_content"
+                - research_summary.generation_method: "llm_generated" or "existing_content";
+                  "skipped_empty_context" and "refused_by_model" carry empty text (#1224)
                 - research_summary.word_count: Word count of summary
 
         Returns:
