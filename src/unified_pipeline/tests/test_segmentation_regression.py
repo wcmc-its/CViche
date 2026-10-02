@@ -313,6 +313,51 @@ def test_short_template_text_and_real_content_still_count_as_lost():
     assert m["text_coverage_pct"] == 25.0
 
 
+_DOB_LINE = "Date of Birth: January 2, 1970"
+_DOB_SCRUBBED = "Date of Birth: [withheld]"
+
+
+def test_pre_llm_scrubbed_dob_line_is_covered_by_its_withheld_entry():
+    """#1232: stage 2 reads the post-scrub stream (#847), so the entry for a
+    date-of-birth line carries '[withheld]' where the source line has the
+    date. That is the scrub working, not a lost line."""
+    stage2 = {"entries": [_entry(_DOB_SCRUBBED, start=1), _entry(_GRANT_A, start=2)]}
+    m = compute_metrics([_DOB_LINE, _GRANT_A], _STAGE1A, stage2)
+    assert m["lost_lines"] == []
+    assert m["text_coverage_pct"] == 100.0
+
+
+def test_dob_line_held_verbatim_by_a_pre_scrub_artifact_is_still_covered():
+    """An artifact from before the scrub holds the real value; it must keep
+    counting as covered, so the fix does not move an old run."""
+    stage2 = {"entries": [_entry(_DOB_LINE, start=1), _entry(_GRANT_A, start=2)]}
+    m = compute_metrics([_DOB_LINE, _GRANT_A], _STAGE1A, stage2)
+    assert m["lost_lines"] == []
+
+
+def test_a_genuinely_lost_dob_line_is_lost_and_quoted_without_its_value():
+    """The scrub is not a free pass: a date-of-birth line no entry holds in
+    either form is still lost. Its evidence is the scrubbed form, so no lint
+    message built from it carries the value the scrub withheld (#1232)."""
+    m = compute_metrics([_DOB_LINE, _GRANT_A], _STAGE1A,
+                        {"entries": [_entry(_GRANT_A, start=1)]})
+    assert m["lost_lines"] == [_DOB_SCRUBBED]
+    assert m["text_coverage_pct"] == 50.0
+    flags = lint_metrics(m)
+    assert flags and not any("1970" in f for f in flags)
+
+
+def test_scrubbed_dob_line_in_a_source_table_is_not_a_lost_block():
+    """`find_lost_blocks` shares `_lost_lines`, so a small table whose
+    date-of-birth line stage 2 withheld is not reported as mostly lost."""
+    block_lines = [(1, _DOB_LINE), (1, _GRANT_A), (1, _GRANT_B)]
+    stage2 = {"entries": [_entry(_DOB_SCRUBBED, start=1), _entry(_GRANT_A, start=2)]}
+    assert [b["lost_lines"] for b in find_lost_blocks(block_lines, stage2)] == []
+    lost_dob = {"entries": [_entry(_GRANT_A, start=2)]}
+    assert [b["lost_lines"] for b in find_lost_blocks(block_lines, lost_dob)] == [
+        [_DOB_SCRUBBED, _GRANT_B]]
+
+
 def test_substantive_line_chars_boundary():
     """A source line of exactly SUBSTANTIVE_LINE_CHARS is substantive (and here
     lost); one char shorter is ignored by the coverage metric."""

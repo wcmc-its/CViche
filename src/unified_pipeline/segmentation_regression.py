@@ -59,6 +59,7 @@ from unified_pipeline.core.text_norm import (
     norm,
     squash,
 )
+from unified_pipeline.stage6.normalization.pii import redact_pre_llm_values
 
 # Aliases for callers that predate the move to core.text_norm.
 _norm = norm
@@ -368,7 +369,15 @@ def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
     within one COMPACT stretch, at most COVERAGE_WINDOW_SLACK tokens longer
     than the line (#610: holding the same words scattered through an
     unrelated entry is not coverage). Both checks are kept: squash catches glued text with no token boundaries,
-    tokens catch mid-line merges. A line is lost only if neither holds."""
+    tokens catch mid-line merges. A line is lost only if neither holds.
+
+    A line is also covered when its pre-LLM scrub is (#1232). Stage 2 reads the
+    post-scrub stream (#847), so a date-of-birth line sits in its entries as
+    'Birth Date: [withheld]' and the raw source line can never match it. The
+    raw form is tried first, so an artifact from before the scrub, which holds
+    the real value, still counts. Each lost line is returned in its scrubbed
+    form, so the evidence a lint quotes never carries the value the scrub
+    withheld."""
     entry_squash = [squash(e.get("text", "")) for e in entries]
     entry_tokens = [_tokens(e.get("text", "")) for e in entries]
     entry_seqs = [_token_list(e.get("text", "")) for e in entries]
@@ -384,7 +393,15 @@ def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
         return any(line_tokens <= et and _has_compact_window(line_tokens, seq, max_span)
                    for et, seq in zip(entry_tokens, entry_seqs))
 
-    return [l.strip() for l in substantive if not _covered(l)]
+    lost: list[str] = []
+    for line in substantive:
+        if _covered(line):
+            continue
+        scrubbed = redact_pre_llm_values(line)
+        if scrubbed != line and _covered(scrubbed):
+            continue
+        lost.append(scrubbed.strip())
+    return lost
 
 
 def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -> Metrics:
