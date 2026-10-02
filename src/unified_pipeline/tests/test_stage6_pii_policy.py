@@ -2098,6 +2098,12 @@ def test_1223_a_labelless_family_shape_does_not_take_the_cell_after_it():
     ("Wife- Pat", [CAT_SPOUSE]),
     ("Husband - Pat", [CAT_SPOUSE]),
     ("Family- Married to Pat Example", [CAT_FAMILY]),
+    # ...so the title-shaped controls are withheld there too (the issue's own,
+    # and #473's spouse-title control), though not in an Appendix entry below.
+    ("Children - A Review of the Literature", [CAT_CHILDREN]),
+    ("Spouse- A Documentary Film Review", [CAT_SPOUSE]),
+    ("Family- wise error rate in gene association studies", [CAT_FAMILY]),
+    ("Name of Spouse \u2013 A Documentary Film Review", [CAT_SPOUSE]),
 ])
 def test_1223_the_dash_form_of_a_family_label_in_the_personal_data_block_is_withheld(text, categories):
     """An A-coded entry is the Personal Data block: it holds no titles, so the
