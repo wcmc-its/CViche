@@ -60,7 +60,7 @@ from unified_pipeline.stage6.fan_out import (
     _is_blank,
     fan_out_multi_record_entries,
 )
-from unified_pipeline.stage6.parsing.dates import TWO_DIGIT_YEAR_PIVOT
+from unified_pipeline.core.two_digit_year import TWO_DIGIT_YEAR_PIVOT
 from unified_pipeline.stage6.normalization.pii import (
     CAT_HOME_CONTACT,
     SCOPE_PERSONAL_AND_APPENDIX,
