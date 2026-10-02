@@ -391,9 +391,15 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  anchored=True, render_only=True),
     WithholdRule(CAT_BIRTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  shape=_BORN_STATEMENT, render_only=True),
-    # #1223: "Family Information:" and "Family Data:" open the row too.
+    WithholdRule(CAT_FAMILY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"family"),
+    # #1223: "Family Information:" and "Family Data:" open a family block too.
+    # Render-time only, like the shape rows above: this row's span runs to the
+    # next hard delimiter, so a DOB or SSN in the same fragment ("Family
+    # Information: 123-45-6789") would be merged into a `family` span and the
+    # pre-LLM value scrub, which only replaces a span of its own category,
+    # would stop finding it.
     WithholdRule(CAT_FAMILY, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
-                 label=r"family (?: \s+ (?: information | data ) )?"),
+                 label=r"family \s+ (?: information | data )", render_only=True),
     WithholdRule(CAT_AGE, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"age"),
     WithholdRule(CAT_GENDER, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"gender"),
     WithholdRule(CAT_RELIGION, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"religion"),
@@ -782,10 +788,12 @@ def _label_spans(text: str, pattern: re.Pattern, category: str | None = None) ->
 #: #1223: the dash form of the children, spouse and family labels ("Children-
 #: <names>", "Wife- <name>"). #1041 left these rows colon-only on purpose --
 #: with a dash they matched real titles ("Spouse - A Documentary Film Review",
-#: "Children - A Review") -- so the dash form is accepted only where a `Family`
-#: label (`_FAMILY_LABEL_RE`) already opened the same paragraph
-#: (`_opens_under_family_label`): a "Family:" block whose members are listed
-#: with a dash is family data, a title under no such block is left alone.
+#: "Children - A Review") -- so the dash form is accepted only where the text
+#: gives it a second reason to be family data: it is an A-coded entry's (the
+#: Personal Data block holds no titles), or a `Family` label
+#: (`_FAMILY_LABEL_RE`) already opened the same paragraph, ahead of it
+#: (`_family_dash_matches`): a "Family:" block whose members are listed with a
+#: dash is family data, a title under no such block is left alone.
 #: Built from the table's own label rows, so the vocabulary has one definition.
 _FAMILY_DASH_CATEGORIES = frozenset({CAT_CHILDREN, CAT_SPOUSE, CAT_FAMILY})
 _DASH_TERMINATOR = r"\s*[-–—](?=\s|$)"
@@ -794,18 +802,20 @@ _FAMILY_DASH_PATTERNS: tuple[tuple[str, re.Pattern], ...] = tuple(
     for rule in WITHHOLD_POLICY
     if rule.category in _FAMILY_DASH_CATEGORIES and rule.label is not None
 )
-_FAMILY_LABEL_RE = next(pattern for rule, pattern in _COMPILED_POLICY
-                        if rule.category == CAT_FAMILY and rule.label is not None)
+_FAMILY_LABEL_RE = re.compile("|".join(
+    pattern.pattern for rule, pattern in _COMPILED_POLICY
+    if rule.category == CAT_FAMILY and rule.label is not None), re.X | re.I)
 #: A paragraph break: a blank line, the boundary a "Family:" block ends at.
 _PARAGRAPH_BREAK_RE = re.compile(r"\n[ \t]*\n")
 
 
-def _family_dash_matches(text: str) -> list[PiiMatch]:
-    """Every dash-labelled children/spouse/family fragment of `text` that
-    sits under a `Family` label (`_FAMILY_DASH_PATTERNS`): one whose
-    paragraph, ahead of it, holds a `Family` label."""
+def _family_dash_matches(text: str, *, personal_data: bool) -> list[PiiMatch]:
+    """Every dash-labelled children/spouse/family fragment of `text` that is
+    family data: all of them in an A-coded entry's text (`personal_data`),
+    otherwise those whose paragraph, ahead of them, holds a `Family` label
+    (`_FAMILY_DASH_PATTERNS`)."""
     family_starts = [start for start, _ in _label_spans(text, _FAMILY_LABEL_RE, CAT_FAMILY)]
-    if not family_starts:
+    if not family_starts and not personal_data:
         return []
     block_starts = [0] + [brk.end() for brk in _PARAGRAPH_BREAK_RE.finditer(text)]
     found: list[PiiMatch] = []
@@ -813,7 +823,7 @@ def _family_dash_matches(text: str) -> list[PiiMatch]:
         for start, end in _label_spans(text, pattern, category):
             block_start = block_starts[bisect.bisect_right(block_starts, start) - 1]
             first = bisect.bisect_left(family_starts, block_start)
-            if first < len(family_starts) and family_starts[first] < start:
+            if personal_data or (first < len(family_starts) and family_starts[first] < start):
                 found.append(PiiMatch(start, end, category))
     return found
 
@@ -833,7 +843,7 @@ def _merge_matches(spans: list[PiiMatch]) -> list[PiiMatch]:
 
 
 def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX, *,
-                 for_pre_llm_scrub: bool = False) -> list[PiiMatch]:
+                 for_pre_llm_scrub: bool = False, personal_data: bool = False) -> list[PiiMatch]:
     """Every protected-data span of `text` under the rows in force at
     `scope`, merged, in document order. A label row's span runs from the
     label to the next hard delimiter (its value included); a shape row's
@@ -841,7 +851,10 @@ def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX, *,
 
     `for_pre_llm_scrub` drops the rows that are render-time only
     (`WithholdRule.render_only`) and the dash family labels, so the pre-LLM
-    value scrub sees exactly the spans it saw before #1223."""
+    value scrub sees exactly the spans it saw before #1223. `personal_data`
+    says `text` is the Personal Data block's (an A-coded entry's), where a
+    dash family label needs no `Family` label ahead of it
+    (`_family_dash_matches`)."""
     text = str(text or "")
     if not text:
         return []
@@ -856,7 +869,7 @@ def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX, *,
             found.extend(PiiMatch(m.start(), m.end(), rule.category)
                          for m in pattern.finditer(text))
     if scope == SCOPE_PERSONAL_AND_APPENDIX and not for_pre_llm_scrub:
-        found.extend(_family_dash_matches(text))
+        found.extend(_family_dash_matches(text, personal_data=personal_data))
     return _merge_matches(found)
 
 

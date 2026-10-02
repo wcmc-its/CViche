@@ -547,16 +547,46 @@ def _absorb_continuation_cells(text: str, end: int) -> int:
         end = limit
 
 
+#: #1223: a family list that goes on over the next lines of one entry
+#: ("Children: <a>\n<b>\n<c>"). Unlike a cell, a line is only taken when the
+#: WHOLE line is shaped like a list of people: items of capitalised name
+#: tokens (two or more, or one with a year or date), separated by `,`, `;`,
+#: `&` or "and". A line with a lowercase word, a colon, a number that is not
+#: a date in a name's detail, or a blank line before it is never one. The
+#: price is stated: an unlabelled line of capitalised words straight after a
+#: children or family list ("US Citizen") is cut with it, never leaked.
+_LIST_NAME = r"[A-ZÀ-ÖØ-Þ](?:[^\W\d_]|['’.-])*"
+_LIST_DETAIL = r"(?:\((?=[^()\n]*\d)[^()\n]{1,30}\)|[-–—,][ \t]*\d[\d/.-]{2,9})"
+_LIST_ITEM = (r"(?:" + _LIST_NAME + r"(?:[ \t]+" + _LIST_NAME + r"){1,3}(?:[ \t]*" + _LIST_DETAIL + r")?"
+              r"|" + _LIST_NAME + r"[ \t]*" + _LIST_DETAIL + r")")
+_LIST_LINE_RE = re.compile(
+    r"[ \t]*\n[ \t]*" + _LIST_ITEM
+    + r"(?:[ \t]*(?:[,;&]|\band\b)[ \t]*" + _LIST_ITEM + r")*[ \t]*(?=\n|$)")
+_LIST_LINE_CATEGORIES = frozenset({CAT_CHILDREN, CAT_FAMILY})
+
+
+def _absorb_list_lines(text: str, end: int) -> int:
+    """The offset a cut ending at `end` runs to once the lines that go on
+    with the list it ends (`_LIST_LINE_RE`) are taken in (#1223)."""
+    while (line := _LIST_LINE_RE.match(text, end)) is not None:
+        end = line.end()
+    return end
+
+
 def _extend_label_span(text: str, match: PiiMatch, scope: str) -> _BareLabelSpan:
     """`match`'s cut: its own bare-label extension, then, at the full
     (Personal Data / Appendix) scope for a `_CONTINUATION_CATEGORIES` label,
-    the unlabelled cells that continue it (#1223). Only a label has a value
-    that continues: a labelless shape ("Married (<name>)") is the whole of
-    what it matched, and the cell after it is somebody else's."""
+    the unlabelled cells that continue it and, for a children or family
+    list, the list lines that go on after it (#1223). Only a label has a
+    value that continues: a labelless shape ("Married (<name>)") is the
+    whole of what it matched, and the cell after it is somebody else's."""
     span = _extend_bare_label_span(text, match.start, match.end)
     if (scope == SCOPE_PERSONAL_AND_APPENDIX and match.category in _CONTINUATION_CATEGORIES
             and _KNOWN_FIELD_LABEL_RE.match(text, match.start)):
-        return span._replace(end=_absorb_continuation_cells(text, span.end))
+        end = _absorb_continuation_cells(text, span.end)
+        if match.category in _LIST_LINE_CATEGORIES:
+            end = _absorb_list_lines(text, end)
+        return span._replace(end=end)
     return span
 
 
@@ -638,7 +668,8 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
         for entry in entries:
             index += 1
             raw_text = entry.get("text", "") or ""
-            matches = _pii_matches(raw_text, scope) if raw_text else []
+            matches = (_pii_matches(raw_text, scope, personal_data=code == PERSONAL_DATA_CODE)
+                       if raw_text else [])
             # #833: an Appendix-bound entry also gets the value-shape
             # third-party-contact check -- scope already excludes every
             # routed content code (SCOPE_ALL_CODES). #920 review: an

@@ -426,6 +426,22 @@ def test_1223_unlabelled_family_prose_is_a_finding_in_the_appendix_only():
     assert lint_protected_data_in_output(body) == []
 
 
+def test_1223_a_dash_family_label_is_a_finding_in_the_personal_data_block_only_or_under_a_family_label():
+    """#1223: the Personal Data block holds no titles, so the dash form of a
+    children / spouse label is a finding there; in the Appendix it needs a
+    `Family` label ahead of it, and a title is left alone."""
+    personal = [_p("PERSONAL DATA"), _t("Spouse- Pat\nChildren - Kim (1971)")]
+    assert [f["message"].split("(")[1].split(")")[0]
+            for f in lint_protected_data_in_output(personal)] == ["spouse", "children / dependents"]
+    under_family = [_p("T. APPENDIX"), _p("Family:\nChildren- Kim (1971)")]
+    assert [f["message"].split("(")[1].split(")")[0]
+            for f in lint_protected_data_in_output(under_family)] == ["family", "children / dependents"]
+    title = [_p("T. APPENDIX"), _p("Children - A Review of the Literature")]
+    assert lint_protected_data_in_output(title) == []
+    body = [_p("HONORS"), _p("Spouse- Pat")]
+    assert lint_protected_data_in_output(body) == []
+
+
 def test_unambiguous_label_is_a_finding_in_any_section():
     body = [_p("HONORS"), _p("Award; Date of Birth: 01/02/1970")]
     findings = lint_protected_data_in_output(body)
