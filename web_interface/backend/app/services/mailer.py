@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from email.message import EmailMessage
 from enum import StrEnum
@@ -21,7 +21,9 @@ from typing import TYPE_CHECKING
 from app.config_loader import get_config
 from app.models import InboundRejectReason
 from app.services import notifications
-from app.services.email_templates import LOGO_CID, LOGO_PATH, EmailContent, Para, render_html, render_text
+from app.services.email_templates import (
+    LOGO_FILES, EmailContent, Para, greeting_for, render_html, render_text,
+)
 
 if TYPE_CHECKING:
     from botocore.client import BaseClient
@@ -90,32 +92,43 @@ def _runs_batch_url(batch_id: str) -> str:
 def processing_notice(
     to_addr: str, *, runs: int, held: int, batch_id: str | None = None,
     outdated_consent: bool = False, skipped: int = 0, consent_date: datetime | None = None,
+    display_name: str | None = None,
 ) -> OutboundMail:
-    """The reply to an accepted message: how many CVs are processing (with a link
-    to their batch in Runs) and how many wait for the sender in New run. Counts
-    only, never a filename."""
+    """The reply to an accepted message: how many CVs are processing and how
+    many wait for the sender in New run, with one button. Counts only, never a
+    filename."""
     paras: list[Para] = []
     if outdated_consent:
-        paras.append(Para("The CViche terms have been updated. Please sign in to review and accept them",
-                          f"{_new_run_url()}{CONSENT_PATH}", "Review the terms", bold=True))
-        paras.append(Para(f"Your {_cvs(held)} {'is' if held == 1 else 'are'} waiting for you in New run",
-                          _new_run_url(), "Open New run"))
+        paras.append(Para("The CViche terms have been updated. Please sign in to review and accept them.", bold=True))
+        paras.append(Para(f"Your {_cvs(held)} {'is' if held == 1 else 'are'} waiting for you in New run."))
+        cta = ("Review the terms", f"{_new_run_url()}{CONSENT_PATH}")
     else:
         if runs:
-            paras.append(Para(f"Processing {_cvs(runs)}. Follow progress in Runs",
-                              _runs_batch_url(batch_id), "Open Runs", bold=True))
+            paras.append(Para(f"Processing {_cvs(runs)}. Follow progress in Runs.", bold=True))
         if held:
-            paras.append(Para(f"{_cvs(held)} {'is' if held == 1 else 'are'} waiting for your confirmation in New run",
-                              _new_run_url(), "Open New run"))
-        when = f" on {consent_date.strftime(CONSENT_DATE_FORMAT)}" if consent_date else ""
-        paras.append(Para(f"These CVs are processed under the CViche terms you agreed to{when}",
-                          f"{_new_run_url()}{TERMS_PATH}", "Read the terms"))
+            paras.append(Para(f"{_cvs(held)} {'is' if held == 1 else 'are'} waiting for your confirmation in New run."))
+        paras.append(_terms_para(consent_date))
+        cta = ((_cv_button(runs), _runs_batch_url(batch_id)) if runs else ("Open New run", _new_run_url()))
     if skipped:
-        paras.append(Para(f"{skipped} other attachment(s) could not be used and were skipped."))
-    cta = (_runs_batch_url(batch_id), "View in CViche") if runs and not outdated_consent else (_new_run_url(), "Open CViche")
-    headline = _processing_headline(runs, held, outdated_consent)
-    return _mail(MailKind.ACKNOWLEDGEMENT, to_addr, f"CViche received {_cvs(runs + held)}",
-                 EmailContent(headline, tuple(paras), cta[1], cta[0]))
+        verb = "was" if skipped == 1 else "were"
+        paras.append(Para(f"{skipped} {_plural(skipped, 'attachment')} could not be used and {verb} skipped."))
+    content = EmailContent(_processing_headline(runs, held, outdated_consent), tuple(paras), *cta,
+                           greeting=greeting_for(display_name))
+    return _mail(MailKind.ACKNOWLEDGEMENT, to_addr, f"CViche received {_cvs(runs + held)}", content)
+
+
+def _terms_para(consent_date: datetime | None) -> Para:
+    when = f" on {consent_date.strftime(CONSENT_DATE_FORMAT)}" if consent_date else ""
+    return Para(f"These CVs are processed under the CViche terms you agreed to{when}",
+                f"{_new_run_url()}{TERMS_PATH}", "Read the terms")
+
+
+def _plural(count: int, noun: str) -> str:
+    return noun if count == 1 else f"{noun}s"
+
+
+def _cv_button(count: int) -> str:
+    return "View your CV" if count == 1 else "View your CVs"
 
 
 def _processing_headline(runs: int, held: int, outdated_consent: bool) -> str:
@@ -134,16 +147,18 @@ def _cvs(count: int) -> str:
     return f"{count} CV" if count == 1 else f"{count} CVs"
 
 
-def rejection(to_addr: str, reason: InboundRejectReason) -> OutboundMail:
+def rejection(to_addr: str, reason: InboundRejectReason, display_name: str | None = None) -> OutboundMail:
     content = EmailContent(
         "We couldn't accept your email",
         (Para(f"We couldn't accept your email to CViche. {_REJECTION_TEXT[reason]}", bold=True),),
+        greeting=greeting_for(display_name),
     )
     return _mail(MailKind.REJECTION, to_addr, "CViche couldn't accept your email", content)
 
 
 def completion_notice(
     to_addr: str, *, complete: int, failed: int, batch_id: str, single_run_id: str | None = None,
+    display_name: str | None = None,
 ) -> OutboundMail:
     """Sent once when every run of an emailed batch is terminal (#1298). Counts
     only, never a filename or a score. ``single_run_id`` is the lone run of a
@@ -152,29 +167,26 @@ def completion_notice(
         content = _single_completion(complete, single_run_id)
     else:
         content = _batch_completion(complete, failed, batch_id)
+    content = replace(content, greeting=greeting_for(display_name))
     return _mail(MailKind.COMPLETION, to_addr, content.headline, content)
 
 
 def _single_completion(complete: int, run_id: str) -> EmailContent:
     url = f"{_new_run_url()}run/{run_id}"
     if complete:
-        paras = (Para("Your CV is ready", url, "Open the run to download it", bold=True),)
-        return EmailContent("Your CV is ready", paras, "View in CViche", url)
-    paras = (Para("Your CV failed to process. Open the run to retry it", url, "Open the run", bold=True),)
-    return EmailContent("Your CV failed to process", paras, "View in CViche", url)
+        return EmailContent("Your CV is ready", (Para("Your CV is ready.", bold=True),), "View your CV", url)
+    paras = (Para("Your CV failed to process. Open the run to retry it.", bold=True),)
+    return EmailContent("Your CV failed to process", paras, "View your CV", url)
 
 
 def _batch_completion(complete: int, failed: int, batch_id: str) -> EmailContent:
-    url = _runs_batch_url(batch_id)
     total = complete + failed
     summary = f"Your {total} CVs are done: {complete} ready to download"
     summary += f", {failed} failed." if failed else "."
     paras = [Para(summary, bold=True)]
     if failed:
-        paras.append(Para("Open a failed run to retry it", url, "Open the batch in Runs"))
-    else:
-        paras.append(Para("Download them from Runs", url, "Open Runs"))
-    return EmailContent("Your CVs are done", tuple(paras), "View in CViche", url)
+        paras.append(Para("Open a failed run to retry it."))
+    return EmailContent("Your CVs are done", tuple(paras), "View your CVs", _runs_batch_url(batch_id))
 
 
 def send(mail: OutboundMail) -> bool:
@@ -200,8 +212,8 @@ def send(mail: OutboundMail) -> bool:
 
 
 def build_message(mail: OutboundMail, sender: str) -> EmailMessage:
-    """multipart/related (HTML + the CID logo) inside multipart/alternative's
-    text part. Every header value is one line."""
+    """multipart/related (HTML + the CID logos it references, and only those)
+    inside multipart/alternative's HTML part. Every header value is one line."""
     message = EmailMessage()
     message["Subject"] = one_line(mail.subject)
     message["From"] = sender
@@ -209,10 +221,11 @@ def build_message(mail: OutboundMail, sender: str) -> EmailMessage:
     message.set_content(mail.body)
     if mail.html:
         message.add_alternative(mail.html, subtype="html")
-        message.get_payload()[1].add_related(
-            LOGO_PATH.read_bytes(), maintype="image", subtype="png", cid=f"<{LOGO_CID}>",
-            filename="cviche-logo.png", disposition="inline",
-        )
+        html_part = message.get_payload()[1]
+        for cid, path in LOGO_FILES.items():
+            if f"cid:{cid}" in mail.html:
+                html_part.add_related(path.read_bytes(), maintype="image", subtype="png", cid=f"<{cid}>",
+                                      filename=path.name, disposition="inline")
     return message
 
 

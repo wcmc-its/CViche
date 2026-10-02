@@ -53,12 +53,15 @@ def send_if_batch_complete(db: Session, batch_id: str) -> bool:
         return False
     complete = status_counts.get(RunState.COMPLETE, 0)
     failed = sum(status_counts.get(state, 0) for state in _NOT_READY)
-    to_addr = db.scalar(select(User.email).join(RunBatch, RunBatch.user_id == User.id).where(RunBatch.id == batch_id))
-    if not to_addr:
+    recipient = db.execute(
+        select(User.email, User.display_name).join(RunBatch, RunBatch.user_id == User.id).where(RunBatch.id == batch_id)
+    ).one_or_none()
+    if recipient is None or not recipient.email:
         return False
     single = db.scalar(select(Run.id).where(Run.batch_id == batch_id)) if complete + failed == 1 else None
     mailer.send(mailer.completion_notice(
-        to_addr, complete=complete, failed=failed, batch_id=batch_id, single_run_id=single))
+        recipient.email, complete=complete, failed=failed, batch_id=batch_id, single_run_id=single,
+        display_name=recipient.display_name))
     return True
 
 

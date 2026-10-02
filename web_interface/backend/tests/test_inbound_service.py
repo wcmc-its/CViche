@@ -120,7 +120,7 @@ def test_skipped_attachments_are_summarised_and_counted_in_the_ack(db, storage, 
     message = _message(db)
     assert message.status == InboundMessageStatus.ACCEPTED
     assert message.reject_reason == f"{AttachmentReject.UNSUPPORTED_TYPE}:1"
-    assert "1 other attachment" in sent[0].body
+    assert "1 attachment could not be used" in sent[0].body
 
 
 def test_an_unreadable_document_is_skipped(db, storage, sent, monkeypatch):
@@ -257,7 +257,7 @@ def test_a_mostly_scanned_pdf_is_skipped_and_counted_in_the_reply(db, storage, s
     assert message.status == InboundMessageStatus.ACCEPTED
     assert message.reject_reason == f"{AttachmentReject.SCANNED_PDF}:1"
     assert [f.filename for f in _files(db)] == ["ok.docx"]
-    assert "1 other attachment" in sent[0].body and "scan.pdf" not in sent[0].body
+    assert "1 attachment could not be used" in sent[0].body and "scan.pdf" not in sent[0].body
 
 
 def test_a_minority_of_scanned_pages_is_accepted(db, storage, sent, monkeypatch):

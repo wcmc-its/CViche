@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.models import InboundRejectReason
+from app.services import email_templates as templates
 from app.services import mailer
 
 
@@ -56,12 +57,12 @@ def test_notice_for_runs_only_links_to_the_batch(monkeypatch):
     assert "waiting" not in body
 
 
-def test_notice_with_held_files_also_links_to_new_run(monkeypatch):
+def test_notice_with_held_files_names_new_run_and_keeps_one_button(monkeypatch):
     monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
     body = _notice(runs=2, held=1)
     assert "Processing 2 CVs" in body and "1 CV is waiting for your confirmation" in body
-    assert "https://cviche.example.org/runs?batch=BATCHA" in body and "https://cviche.example.org/ " not in body
-    assert body.count("https://cviche.example.org/\n") == 1  # the New run link
+    assert "View your CVs: https://cviche.example.org/runs?batch=BATCHA" in body
+    assert body.count("https://cviche.example.org/runs") == 1  # one button; no inline duplicate link
 
 
 def test_notice_when_everything_is_held():
@@ -121,7 +122,7 @@ def test_a_ses_error_is_swallowed(ses, monkeypatch):
 
 @pytest.mark.parametrize("reason", sorted(mailer.REPLYABLE_REASONS))
 def test_every_rejection_reply_has_fixed_wording(reason):
-    assert mailer.rejection("pat@med.cornell.edu", reason).body.startswith("We couldn't accept your email")
+    assert mailer.rejection("pat@med.cornell.edu", reason).body.split("\n\n")[1].startswith("We couldn't accept your email")
 
 
 def test_unknown_or_unauthenticated_reasons_are_never_replyable():
@@ -153,24 +154,58 @@ def _all_mails(monkeypatch):
     ]
 
 
-def test_every_mail_is_text_plus_html_with_the_logo_inline_by_cid(ses, monkeypatch):
+def _images(message):
+    return {p["Content-ID"]: p for p in message.walk() if p.get_content_type() == "image/png"}
+
+
+@pytest.mark.parametrize("branding,expected", [
+    (templates.Branding.ITS_TOP_CVICHE_BOTTOM, {"<wcm-its-logo>", "<cviche-logo>"}),
+    (templates.Branding.BOTH_TOP, {"<wcm-its-logo>", "<cviche-logo>"}),
+    (templates.Branding.CVICHE_ONLY, {"<cviche-logo>"}),
+])
+def test_each_branding_attaches_exactly_the_images_it_references(ses, monkeypatch, branding, expected):
+    monkeypatch.setenv("CVICHE_MAIL_SEND", "1")
+    monkeypatch.setattr(templates, "EMAIL_BRANDING", branding)
+    for mail in _all_mails(monkeypatch):
+        assert mailer.send(mail)
+        message = _parse(ses.send_email.call_args.kwargs)
+        images = _images(message)
+        assert set(images) == expected
+        assert all(p.get_content()[:4] == b"\x89PNG" for p in images.values())
+        html = _html(message)
+        assert {f"<{cid}>" for cid in ("cviche-logo", "wcm-its-logo") if f"cid:{cid}" in html} == expected
+
+
+def test_the_default_branding_is_its_top_and_cviche_at_the_bottom():
+    assert templates.EMAIL_BRANDING == templates.Branding.ITS_TOP_CVICHE_BOTTOM
+    html = mailer.completion_notice("pat@med.cornell.edu", complete=2, failed=0, batch_id="BATCHA").html
+    html = html[html.index("<body"):]
+    assert html.index("cid:wcm-its-logo") < html.index("Your CVs are done") < html.index("cid:cviche-logo")
+    assert html.index("cid:cviche-logo") < html.index("About CViche")
+
+
+def test_both_top_puts_cviche_right_under_the_its_banner():
+    html = templates.render_html(templates.EmailContent("Headline", ()), templates.Branding.BOTH_TOP)
+    html = html[html.index("<body"):]
+    assert html.index("cid:wcm-its-logo") < html.index("cid:cviche-logo") < html.index(">Headline<")
+
+
+def test_every_mail_is_text_plus_html_with_cid_images(ses, monkeypatch):
     monkeypatch.setenv("CVICHE_MAIL_SEND", "1")
     for mail in _all_mails(monkeypatch):
         assert mailer.send(mail)
         message = _parse(ses.send_email.call_args.kwargs)
         assert message.get_content_type() == "multipart/alternative"
         assert _text(message).strip() and "<table" in _html(message)
-        logo = [p for p in message.walk() if p.get_content_type() == "image/png"]
-        assert len(logo) == 1 and logo[0]["Content-ID"] == "<cviche-logo>" and logo[0].get_content()[:4] == b"\x89PNG"
-        assert 'src="cid:cviche-logo"' in _html(message)
-        assert "http://" not in _html(message) and "src=\"https" not in _html(message)  # no remote images
+        assert "http://" not in _html(message) and 'src="https' not in _html(message)  # no remote images
 
 
 def test_the_html_is_the_branded_layout(monkeypatch):
     html = mailer.completion_notice("pat@med.cornell.edu", complete=2, failed=0, batch_id="BATCHA").html
-    assert "#B31B1B" in html and "Your CVs are done" in html and "VIEW IN CVICHE".lower() in html.lower()
+    assert "#B31B1B" in html and "Your CVs are done" in html and "View your CVs" in html
     assert "text-transform:uppercase" in html and "max-width:600px" in html and "About CViche" in html
-    assert "paa2013@med.cornell.edu" in html
+    assert "paa2013" not in html and "mailto:support@med.cornell.edu" in html and templates.HELPDESK_ARTICLE_URL.replace("&", "&amp;") in html
+    assert "If you have questions, read the" in html and "Weill Cornell Medicine Information Technologies &amp; Services" in html
 
 
 def test_html_escapes_every_interpolated_value(monkeypatch):
@@ -214,3 +249,48 @@ def test_html_escapes_paragraph_text_headline_and_link_label():
     for raw in ("<script>", "<i>head", "<u>go", "<b>cta", "b=<2>"):
         assert raw not in html
     assert "&lt;script&gt;" in html and "&amp;b=" in html
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("Dr. Pat Example", "Hi Pat,"), ("Dr Pat Example", "Hi Pat,"), ("Prof. Pat Example", "Hi Pat,"),
+    ("Pat Example", "Hi Pat,"), ("  Pat  ", "Hi Pat,"), ("", "Hello,"), (None, "Hello,"), ("Dr.", "Hello,"),
+])
+def test_greeting_derivation(name, expected):
+    assert templates.greeting_for(name) == expected
+
+
+def test_every_mail_opens_with_the_greeting_in_both_parts(monkeypatch):
+    for mail in _all_mails(monkeypatch):
+        assert mail.body.startswith("Hello,\n")
+    mail = mailer.completion_notice("pat@med.cornell.edu", complete=2, failed=0, batch_id="BATCHA", display_name="Dr. Pat Example")
+    assert mail.body.startswith("Hi Pat,\n") and ">Hi Pat,<" in mail.html
+
+
+def test_the_greeting_name_is_html_escaped():
+    mail = mailer.rejection("pat@med.cornell.edu", InboundRejectReason.TOO_MANY_FILES, display_name="<script>x</script> Example")
+    assert "<script" not in mail.html and "Hi &lt;script&gt;x&lt;/script&gt;," in mail.html
+
+
+def test_the_help_line_and_signature_are_in_both_parts(monkeypatch):
+    for mail in _all_mails(monkeypatch):
+        for part in (mail.body, mail.html):
+            assert "support@med.cornell.edu" in part and "paa2013" not in part
+            assert "Information Technologies" in part
+        assert templates.HELPDESK_ARTICLE_URL in mail.body
+
+
+@pytest.mark.parametrize("skipped,text", [(1, "1 attachment could not be used and was skipped."), (2, "2 attachments could not be used and were skipped.")])
+def test_skipped_attachment_wording_is_singular_or_plural(skipped, text):
+    assert text in mailer.processing_notice("pat@med.cornell.edu", runs=1, held=0, batch_id="BATCHA", skipped=skipped).body
+
+
+@pytest.mark.parametrize("kwargs,label", [
+    ({"runs": 3, "held": 0}, "View your CVs"), ({"runs": 1, "held": 0}, "View your CV"),
+    ({"runs": 0, "held": 2}, "Open New run"), ({"runs": 0, "held": 2, "outdated_consent": True}, "Review the terms"),
+])
+def test_each_email_has_one_button_labelled_for_it(monkeypatch, kwargs, label):
+    monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
+    mail = mailer.processing_notice("pat@med.cornell.edu", batch_id="BATCHA", **kwargs)
+    assert mail.html.count("text-decoration:underline;text-transform:uppercase") == 1 and f">{label}</a>" in mail.html
+    assert f"{label}: https://" in mail.body
+    assert "Open Runs" not in mail.html and "Open the batch" not in mail.html
