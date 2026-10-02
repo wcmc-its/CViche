@@ -1387,3 +1387,39 @@ def test_fallback_takes_a_forward_fragment_when_no_exact_line_is_behind_the_curs
     mapped, _ = map_hierarchy_node(node, elements, [], 2)
     assert mapped["element_idx"] == 2
     assert mapped["children"][0]["element_idx"] == 3
+
+
+def test_synthetic_parent_child_still_uses_the_sequence_anchor():
+    elements = [
+        _elem(0, "Teaching"),
+        _elem(1, "body line"),
+        _elem(2, "Awards"),
+        _elem(3, "Teaching"),
+        _elem(4, "body line"),
+    ]
+    node = {
+        "text": "Awards",
+        "level": "H1",
+        "text_metadata": {"synthetic": True},
+        "children": [{"text": "Teaching", "level": "H2"}],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["element_idx"] is None
+    assert mapped["children"][0]["element_idx"] == 3
+
+
+def test_child_may_partial_match_its_mapped_parents_own_line():
+    elements = [
+        _elem(0, "Intro"),
+        _elem(1, "body line"),
+        _elem(2, "Training: Undergraduate:"),
+        _elem(3, "body line"),
+    ]
+    node = {
+        "text": "Training",
+        "level": "H1",
+        "children": [{"text": "Undergraduate", "level": "H2"}],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["element_idx"] == 2
+    assert mapped["children"][0]["element_idx"] == 2
