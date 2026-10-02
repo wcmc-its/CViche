@@ -14,12 +14,12 @@ const run = (over: Partial<RunSummary>): RunSummary => ({
 const onSelectRun = vi.fn()
 const onOpenBatch = vi.fn()
 
-function renderTable(runs: RunSummary[], older: RunSummary[] = []) {
+function renderTable(runs: RunSummary[], older: RunSummary[] = [], isAdmin = false) {
   render(
     <MemoryRouter>
       <RunTable
         groups={runs.map((r) => ({ key: r.run_id, owner: r.cv_owner_name ?? null, latest: r, older }))}
-        isAdmin={false}
+        isAdmin={isAdmin}
         showCost={false}
         currentUserId={7}
         sortField="started_at"
@@ -32,6 +32,35 @@ function renderTable(runs: RunSummary[], older: RunSummary[] = []) {
     </MemoryRouter>,
   )
 }
+
+describe('RunTable columns', () => {
+  it('heads the date column Started for members and admins', () => {
+    renderTable([run({})])
+    expect(screen.getByRole('button', { name: 'Started' })).toBeTruthy()
+    cleanup()
+    renderTable([run({})], [], true)
+    expect(screen.getByRole('button', { name: 'Started' })).toBeTruthy()
+  })
+
+  it('shows a bare dash, no band dot, for an unscored run, and a dot for a scored one', () => {
+    renderTable([run({ run_id: 'RUNBBB', cv_owner_name: 'Quinn Example', quality_score: null })], [], true)
+    const cells = (id: string) => within(screen.getByText(id).closest('tr')!)
+    expect(cells('Quinn Example').queryByTitle('No score')?.textContent).toBe('—')
+    expect(cells('Quinn Example').queryByTitle('No score')?.querySelector('span')).toBeNull()
+    cleanup()
+    renderTable([run({ quality_score: 88, quality_band: 'GREEN' })], [], true)
+    expect(screen.getByTitle(/Green/).querySelector('span[aria-hidden]')).toBeTruthy()
+  })
+
+  it('reads No feedback yet the same, in grey text, for members and admins', () => {
+    renderTable([run({})])
+    expect(screen.getByText('No feedback yet').tagName).toBe('SPAN')
+    expect(screen.queryByText('Needs feedback')).toBeNull()
+    cleanup()
+    renderTable([run({})], [], true)
+    expect(screen.getByText('No feedback yet').tagName).toBe('SPAN')
+  })
+})
 
 afterEach(() => { cleanup(); vi.resetAllMocks() })
 

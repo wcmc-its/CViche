@@ -147,12 +147,18 @@ export type RunFeedbackFilter = 'given' | 'needed'
 /** Whether the uploaded CV was written in the WCM CV template; 'unknown' = not classified. */
 export type RunInputFormatFilter = 'wcm' | 'other' | 'unknown'
 
+/** Status pills: 'running' = queued or running; 'failed' = failed runs; 'red' = score band RED (admin only: 403 under scope 'mine'). */
+export type RunStatusFilter = 'running' | 'failed' | 'red'
+
 export interface RunListParams {
   scope?: RunListScope
   /** 'given' = any reviewer left feedback; 'needed' = complete run with none. Both scopes. */
   feedback?: RunFeedbackFilter
   input_format?: RunInputFormatFilter
-  run_by?: number | 'self'
+  /** A user id, 'self' (the faculty member uploaded it) or 'on_behalf' (an authorized admin did). */
+  run_by?: number | 'self' | 'on_behalf'
+  /** Both scopes; 'red' is admin only. */
+  status?: RunStatusFilter
   faculty?: string
   department?: string
 }
@@ -171,12 +177,24 @@ export interface RunByOption extends RunBy {
   count: number
 }
 
+/** Runs behind each status pill; applies every filter except status. */
+export interface StatusFilterCounts {
+  all: number
+  running: number
+  awaiting_feedback: number
+  failed: number
+  red: number
+}
+
 export interface RunFilterOptions {
   departments: FilterCount[]
   faculty: FacultyOption[]
   run_by: RunByOption[]
   /** Runs where the faculty member uploaded their own CV (run_by = 'self'). */
   self_count: number
+  /** Runs an authorized admin submitted on the faculty member's behalf (run_by = 'on_behalf'). */
+  on_behalf_count: number
+  status: StatusFilterCounts
   /** Runs per feedback filter value; applies every filter except feedback. */
   feedback: { given: number; needed: number }
   /** Runs per input-format filter value; applies every filter except input format. */

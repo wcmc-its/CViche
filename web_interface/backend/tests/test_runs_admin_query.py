@@ -6,7 +6,8 @@ from fastapi import HTTPException
 
 from app.models import Run, User
 from app.services.runs_admin_query import (
-    InputFormatFilter, RunFilters, build_filter_options, filtered_runs_query, parse_run_filters,
+    InputFormatFilter, RunFilters, StatusFilter, build_filter_options, filtered_runs_query,
+    my_status_counts, parse_run_filters,
 )
 
 
@@ -29,6 +30,20 @@ class TestParseRunFilters:
     def test_bad_input_format_is_422(self):
         with pytest.raises(HTTPException) as exc:
             parse_run_filters(None, None, None, None, "pdf")
+        assert exc.value.status_code == 422
+
+    def test_on_behalf_run_by(self):
+        filters = parse_run_filters("on_behalf", None, None)
+        assert filters.run_by_on_behalf is True and filters.run_by_user_id is None
+
+    def test_status_filter_values(self):
+        for value in ("running", "failed", "red"):
+            assert parse_run_filters(None, None, None, None, None, value).status.value == value
+        assert parse_run_filters(None, None, None, None, None, "").status is None
+
+    def test_bad_status_is_422(self):
+        with pytest.raises(HTTPException) as exc:
+            parse_run_filters(None, None, None, None, None, "green")
         assert exc.value.status_code == 422
 
     def test_blank_means_no_filter(self):
@@ -132,3 +147,71 @@ def test_input_format_filter_selects_by_column_and_unknown_means_null(db, seeded
     assert ids(InputFormatFilter.UNKNOWN) == ["Q00003", "Q00004"]
     assert len(ids(None)) == 5
 
+
+
+def test_on_behalf_filter_is_authorized_admin_runs_and_counts_cascade(db, seeded):
+    assert sorted(r.id for r in filtered_runs_query(db, RunFilters(run_by_on_behalf=True)).all()) == [
+        "Q00001", "Q00002", "Q00003", "Q00004"]
+    assert build_filter_options(db, RunFilters()).on_behalf_count == 4
+    # Own filter ignored, the others apply: Library has two, both on someone's behalf.
+    assert build_filter_options(db, RunFilters(department="Library", run_by_on_behalf=True)).on_behalf_count == 2
+    assert build_filter_options(db, RunFilters(run_by_self=True)).on_behalf_count == 4
+
+
+@pytest.fixture
+def status_runs(db, seeded):
+    """Jane's group (Q00000-2) has a failed rerun; Omar's has a queued and a running run."""
+    for run_id, values in {
+        "Q00001": {Run.status: "failed"},
+        "Q00002": {Run.quality_band: "RED"},
+        "Q00003": {Run.status: "running"},
+        "Q00004": {Run.status: "queued"},
+    }.items():
+        db.query(Run).filter(Run.id == run_id).update(values)
+    db.commit()
+
+
+def _status_ids(db, status, **kwargs):
+    return sorted(r.id for r in filtered_runs_query(db, RunFilters(status=status, **kwargs)).all())
+
+
+def test_status_running_lists_queued_and_running_runs(db, status_runs):
+    assert _status_ids(db, StatusFilter.RUNNING) == ["Q00003", "Q00004"]
+
+
+def test_status_failed_lists_only_the_failed_runs(db, status_runs):
+    # Jane's clean runs (Q00000, Q00002) stay out: the visible top row of a group is a failed run.
+    assert _status_ids(db, StatusFilter.FAILED) == ["Q00001"]
+    assert _status_ids(db, StatusFilter.FAILED, department="Library") == []
+
+
+def test_status_red_is_the_red_score_band(db, status_runs):
+    assert _status_ids(db, StatusFilter.RED) == ["Q00002"]
+
+
+def test_status_composes_with_other_filters(db, status_runs):
+    assert _status_ids(db, StatusFilter.RUNNING, department="Library") == ["Q00003"]
+    assert _status_ids(db, StatusFilter.RUNNING, run_by_self=True) == []
+
+
+def test_status_counts_ignore_status_but_apply_other_filters(db, status_runs):
+    everything = build_filter_options(db, RunFilters(status=StatusFilter.RED)).status
+    assert (everything.all, everything.running, everything.failed, everything.red) == (5, 2, 1, 1)
+    assert everything.awaiting_feedback == 2  # Q00000 and Q00002 are complete with no feedback
+    library = build_filter_options(db, RunFilters(department="Library")).status
+    assert (library.all, library.running, library.failed, library.red, library.awaiting_feedback) == (2, 1, 0, 1, 1)
+
+
+def test_my_status_counts_cover_only_that_users_runs(db, seeded, status_runs):
+    alice, bob = seeded
+    # Alice: Q00000 (own_cv, complete, no feedback) + Q00001 (failed).
+    mine = my_status_counts(db, alice.id)
+    assert (mine.all, mine.running, mine.failed, mine.red, mine.awaiting_feedback) == (2, 0, 1, 0, 1)
+    theirs = my_status_counts(db, bob.id)
+    assert (theirs.all, theirs.running, theirs.failed) == (2, 1, 0)  # Q00002 is RED but red is admin only
+
+
+def test_other_facets_honour_the_status_filter(db, status_runs):
+    options = build_filter_options(db, RunFilters(status=StatusFilter.RUNNING))
+    assert [(f.value, f.count) for f in options.faculty] == [("Omar Testperson", 2)]
+    assert options.feedback.needed == 0

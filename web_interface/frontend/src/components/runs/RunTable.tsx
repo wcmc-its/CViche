@@ -1,6 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Clock, CheckCircle2, Check, Lock, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronRight, MessageSquare } from 'lucide-react'
+import { Clock, CheckCircle2, Check, Lock, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronRight } from 'lucide-react'
 import { formatRelativeDate } from '../../utils'
 import type { RunSummary } from '../../types'
 import { OWNER_UNKNOWN_LABEL, earlierRunHasFeedback, runByFilterValue, runByLabel } from './runGroups'
@@ -135,12 +134,12 @@ function SortHeader({ field, label, align = 'left', width = '', sortField, sortD
 
 function ScoreCell({ run, earlier }: { run: RunSummary; earlier: boolean }) {
   const band = run.quality_score != null ? run.quality_band : null
+  // No score (running, failed): a bare dash, no dot.
+  if (!band) return <span title={scoreTitle(run)} className="text-gray-400">{NO_SCORE_TEXT}</span>
   return (
     <span title={scoreTitle(run)} className="flex items-center gap-1.5 tabular-nums">
-      <span aria-hidden="true" className={`h-2 w-2 flex-none rounded-full ${band ? BAND_STYLE[band].dot : 'bg-sand-400'}`} />
-      <span className={`font-semibold ${band ? (earlier ? 'text-gray-700' : 'text-gray-900') : 'text-gray-400'}`}>
-        {run.quality_score ?? NO_SCORE_TEXT}
-      </span>
+      <span aria-hidden="true" className={`h-2 w-2 flex-none rounded-full ${BAND_STYLE[band].dot}`} />
+      <span className={`font-semibold ${earlier ? 'text-gray-700' : 'text-gray-900'}`}>{run.quality_score}</span>
       {run.quality_cap != null && <Lock className="h-3 w-3 flex-none text-error-700" aria-label="Score capped" />}
     </span>
   )
@@ -155,7 +154,6 @@ interface FeedbackCellProps {
 }
 
 function FeedbackCell({ run, isAdmin, currentUserId, earlierGiven }: FeedbackCellProps) {
-  const navigate = useNavigate()
   switch (feedbackState(run, currentUserId, isAdmin, earlierGiven)) {
     case 'given':
       return (
@@ -172,17 +170,6 @@ function FeedbackCell({ run, isAdmin, currentUserId, earlierGiven }: FeedbackCel
         </span>
       )
     case 'needed':
-      return (
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); navigate(`/run/${run.run_id}#feedback`) }}
-          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[11px] font-medium hover:bg-amber-200 transition-colors cursor-pointer"
-          title="Go to feedback form"
-        >
-          <MessageSquare className="w-3 h-3" aria-hidden="true" />
-          Needs feedback
-        </button>
-      )
     case 'awaiting':
       return <span className="text-xs text-gray-500">{FEEDBACK_VALUE_LABEL.needed}</span>
     case 'none':
@@ -250,7 +237,7 @@ function RunRow({ run, firstCell, earlier = false, earlierGiven = false, isAdmin
           {run.total_cost ? `$${run.total_cost.toFixed(2)}` : '—'}
         </td>
       )}
-      <td className={`${CELL} text-center ${muted}`}>
+      <td className={`${CELL} text-left ${muted}`}>
         <FeedbackCell run={run} isAdmin={isAdmin} currentUserId={currentUserId} earlierGiven={earlierGiven} />
       </td>
     </tr>
@@ -347,7 +334,7 @@ export default function RunTable(props: RunTableProps) {
             <SortHeader field="started_at" label="Started" width="w-[130px]" {...header} />
             <SortHeader field="total_duration_seconds" label="Duration" align="right" width="w-[72px]" {...header} />
             {showCost && <SortHeader field="total_cost" label="Cost" align="right" width="w-[56px]" {...header} />}
-            <SortHeader field="feedback" label="Feedback" align="center" width="w-[150px]" {...header} />
+            <SortHeader field="feedback" label="Feedback" width="w-[150px]" {...header} />
           </tr>
         </thead>
         <tbody>

@@ -3,7 +3,7 @@ import type { ApiError } from './client'
 import { runRoutes } from './routes'
 import type {
   RunStatus, PaginatedRuns, FeedbackStatus, RunListParams, RunFilterOptions,
-  RunQualityReport, RunReviewNote,
+  RunQualityReport, RunReviewNote, StatusFilterCounts,
 } from '../types'
 
 export async function getRunStatus(runId: string): Promise<RunStatus> {
@@ -72,6 +72,11 @@ export async function getRunFilterOptions(params: RunListParams = {}): Promise<R
   return api.get<RunFilterOptions>(
     runRoutes.filterOptions(buildRunListQuery({ scope: 'all', ...params })),
   )
+}
+
+/** Status pill counts over the caller's own runs; members have no filter-options. */
+export async function getMyStatusCounts(): Promise<StatusFilterCounts> {
+  return api.get<StatusFilterCounts>(runRoutes.myStatusCounts())
 }
 
 export async function getFeedbackStatuses(): Promise<FeedbackStatus[]> {
