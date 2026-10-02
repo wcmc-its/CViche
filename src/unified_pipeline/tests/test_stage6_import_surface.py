@@ -60,6 +60,10 @@ STAGE6_IMPORT_SURFACE = (
     "PII_REDACTED_NOTICE",
     "RECLASSIFY_FAILURE_STAT",
     "RENDER_ROUTED_CODES",
+    "REROUTE_ACCEPTED_CROSS_FAMILY",
+    "REROUTE_ACCEPTED_SAME_FAMILY",
+    "REROUTE_CHECK",
+    "REROUTE_REFUSED_FIELDS",
     "RETIRED_TAXONOMY_CODES",
     "TAXONOMY_TO_SECTION",
     "TEMPLATE_PATH",
@@ -289,7 +293,7 @@ def test_the_surface_list_is_not_silently_empty():
     A refactor that reduced these tuples to () would make every test above
     vacuously pass by generating zero cases. Pin the counts measured on dev.
     """
-    assert len(STAGE6_IMPORT_SURFACE) == 34, (
+    assert len(STAGE6_IMPORT_SURFACE) == 38, (
         "the pinned stage 6 import surface changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
