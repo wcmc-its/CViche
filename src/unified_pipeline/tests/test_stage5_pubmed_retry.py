@@ -599,10 +599,11 @@ def test_published_review_and_case_report_take_their_own_codes(tmp_path, monkeyp
         assert result['taxonomy_code'] == code
 
 
-def test_weak_title_match_leaves_the_entry_in_s7(tmp_path, monkeypatch):
+def test_weak_title_match_is_not_accepted(tmp_path, monkeypatch):
     xml = _published_xml(title='Statin adherence in children with familial hypercholesterolemia')
     result, _, enricher = _run_stage5(tmp_path, monkeypatch, _inpress_entry(), _found(xml))
-    assert result['taxonomy_code'] == 'S7'
+    assert 'enrichment_data' not in result
+    assert result['taxonomy_code'] == 'S1'  # #1166 text fallback, not the match
     assert result['enrichment_status'] == 'no_identifier'
     assert 'in_press_note' not in result
     assert enricher.stats['title_searches'] == 1
@@ -611,7 +612,8 @@ def test_weak_title_match_leaves_the_entry_in_s7(tmp_path, monkeypatch):
 def test_title_match_with_no_shared_author_is_rejected(tmp_path, monkeypatch):
     result, _, _ = _run_stage5(tmp_path, monkeypatch, _inpress_entry(),
                                _found(_published_xml(surname='Okonkwo')))
-    assert result['taxonomy_code'] == 'S7'
+    assert 'enrichment_data' not in result
+    assert result['taxonomy_code'] == 'S1'  # #1166 text fallback, not the match
     assert 'in_press_note' not in result
 
 
@@ -629,11 +631,12 @@ def test_accepted_inside_the_title_is_not_a_status(tmp_path, monkeypatch):
     assert 'in_press_note' not in result
 
 
-def test_title_search_failure_leaves_the_entry_unchanged(tmp_path, monkeypatch):
+def test_title_search_failure_leaves_the_entry_unenriched(tmp_path, monkeypatch):
     result, _, enricher = _run_stage5(tmp_path, monkeypatch, _inpress_entry(),
                                       [FakeResponse(400)])
     assert result['enrichment_status'] == 'no_identifier'
-    assert result['taxonomy_code'] == 'S7'
+    assert 'enrichment_data' not in result
+    assert result['taxonomy_code'] == 'S1'  # #1166 text fallback, not the match
     assert enricher.stats['api_errors'] == 1
 
 
@@ -641,7 +644,8 @@ def test_title_match_published_years_after_the_cv_year_is_another_paper(tmp_path
     entry = _inpress_entry()
     entry['extracted_fields']['year'] = '2021'  # PubMed says 2025
     result, _, _ = _run_stage5(tmp_path, monkeypatch, entry, _found())
-    assert result['taxonomy_code'] == 'S7'
+    assert 'enrichment_data' not in result
+    assert result['taxonomy_code'] == 'S1'  # #1166 text fallback, not the match
     assert 'in_press_note' not in result
 
 
@@ -746,3 +750,52 @@ def test_same_pmid_elsewhere_is_a_duplicate_but_similar_title_other_year_is_not(
         path.write_text(json.dumps({'document_uid': 'x', 'entries': [_inpress_entry(), other]}))
         result = enricher.enrich_stage4_output(str(path))['entries'][0]
         assert result.get('in_press_superseded', False) is superseded, other
+
+
+# ------------------------- #1166: in press, but PubMed found nothing
+
+def _unmatched(text, code='S7', **fields):
+    entry = {'taxonomy_code': code, 'classification_reasoning': 'Not yet published.', 'text': text,
+             'extracted_fields': {'title': INPRESS_TITLE, 'authors': 'Garcia M', **fields}}
+    return entry
+
+
+_NO_HITS = [FakeResponse(200, json_data={'esearchresult': {'idlist': []}})]
+
+
+def test_unmatched_in_press_article_leaves_s7_for_s1_with_its_journal(tmp_path, monkeypatch):
+    entry = _unmatched(f'Garcia M. {INPRESS_TITLE}. Heart Journal. In press.', target_journal='Heart Journal')
+    result, _, enricher = _run_stage5(tmp_path, monkeypatch, entry, _NO_HITS)
+    assert result['taxonomy_code'] == 'S1'
+    assert result['extracted_fields']['journal'] == 'Heart Journal'
+    assert 'Moved from S7 to S1' in result['classification_reasoning']
+    assert 'in_press_note' not in result  # nothing was changed in the faculty's text
+    assert enricher.stats['in_press_promoted'] == 1
+
+
+def test_unmatched_in_press_chapter_goes_to_s4():
+    for text in (f'Garcia M. {INPRESS_TITLE}. In: Doe J, ed. Cardiology. Springer. In press.',
+                 f'Garcia M. {INPRESS_TITLE}. Doe J, Roe K (eds.) Cardiology. In press.',
+                 f'Garcia M. {INPRESS_TITLE}. Chapter 4 in Cardiology. Accepted.',
+                 # web200's shapes: "In;" and an unclosed "(eds Name" / "(ed Name)".
+                 'Wessely S. Fatigue. In; "Neurological Rehabilitation". (eds Greenwood, Barnes). In press.',
+                 'Wessely S. A UK perspective. In;Current Topics (ed Venables). OUP, in press'):
+        assert stage5.CHAPTER_PATTERN.search(text), text
+    assert not stage5.CHAPTER_PATTERN.search(f'Garcia M. {INPRESS_TITLE}. Heart Journal. In press.')
+
+
+def test_unmatched_chapter_is_recoded_s4_without_a_journal(tmp_path, monkeypatch):
+    entry = _unmatched(f'Garcia M. {INPRESS_TITLE}. In: Doe J, ed. Cardiology. In press.',
+                       target_journal='Cardiology')
+    result, _, _ = _run_stage5(tmp_path, monkeypatch, entry, _NO_HITS)
+    assert result['taxonomy_code'] == 'S4'
+    assert 'journal' not in result['extracted_fields']
+
+
+def test_fallback_leaves_submitted_and_non_s7_entries_alone(tmp_path, monkeypatch):
+    submitted = _unmatched(f'Garcia M. {INPRESS_TITLE}. Submitted; in press pending revision.')
+    result, session, _ = _run_stage5(tmp_path, monkeypatch, submitted, [])
+    assert session.calls == [] and result['taxonomy_code'] == 'S7'
+    chapter_s3 = _unmatched(f'Garcia M. {INPRESS_TITLE}. Springer. In press.', code='S3')
+    result, _, _ = _run_stage5(tmp_path, monkeypatch, chapter_s3, _NO_HITS)
+    assert result['taxonomy_code'] == 'S3'
