@@ -124,7 +124,8 @@ export interface BatchUpload {
   removeRow: (key: string) => void
   /** Start the table from a file already chosen in the single-file picker. */
   adopt: (file: File, estimate: Estimate | null) => void
-  submit: (options: BatchSubmitOptions) => Promise<void>
+  /** `notifyOnComplete`: the batch asks for one email when every run is finished (#1335). */
+  submit: (options: BatchSubmitOptions, notifyOnComplete: boolean) => Promise<void>
   retryFailed: (options: BatchSubmitOptions) => Promise<void>
   /** Re-send one row the server refused as already processed, confirmed. */
   runAgain: (key: string, options: BatchSubmitOptions) => Promise<void>
@@ -177,7 +178,7 @@ export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () 
     setPhase('done')
   }
 
-  const submit = async (options: BatchSubmitOptions) => {
+  const submit = async (options: BatchSubmitOptions, notifyOnComplete: boolean) => {
     const valid = rows.filter(isValidRow)
     const keys = new Set(valid.map((r) => r.key))
     setError(null)
@@ -185,7 +186,7 @@ export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () 
     patchMany(keys, () => ({ state: 'waiting' }))
     let id: string
     try {
-      id = (await createBatch(valid.length)).id
+      id = (await createBatch(valid.length, { notifyOnComplete })).id
     } catch (err) {
       console.error('Batch creation failed', err)
       patchMany(keys, () => ({ state: 'ready' }))

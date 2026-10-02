@@ -26,7 +26,9 @@ const BATCH: BatchDetail = {
     row({ run_id: 'RUNDDD', filename: 'delta_cv.docx', status: 'failed' }),
   ],
 }
-const QUEUE: QueueOverview = { dispatch_mode: 'queue', single: null, batch: { workers: 3, ahead: 1, est_wait_minutes: 70 } }
+const QUEUE: QueueOverview = {
+  dispatch_mode: 'queue', single: null, batch: { workers: 3, ahead: 1, est_wait_minutes: 70 }, completion_email_available: false,
+}
 
 const flush = () => act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve() })
 const onSelectRun = vi.fn()

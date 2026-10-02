@@ -51,6 +51,8 @@ export interface QueueOverview {
   dispatch_mode: string
   single: QueueLane | null
   batch: QueueLane | null
+  /** The server can send mail, so the page offers "Email me when job completes" (#1335). */
+  completion_email_available: boolean
 }
 
 /** One file of a multi-file POST /api/estimate: its estimate, or why it has none. */

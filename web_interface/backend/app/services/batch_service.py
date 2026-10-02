@@ -31,6 +31,7 @@ from app.pipeline import concurrency, run_queue
 from app.schemas import (
     BatchDetail, BatchRunRow, BatchStatusCounts, BatchSummary, QueueLane, QueueOverview,
 )
+from app.services import mailer
 from app.services.runs_admin_query import run_by_summary
 
 logger = logging.getLogger(__name__)
@@ -78,7 +79,9 @@ def _is_duplicate_key(error: IntegrityError) -> bool:
     return _SQLITE_UNIQUE_FAILED in str(orig)
 
 
-def create_batch(db: Session, user: User, files_submitted: int, source: str = BatchSource.WEB) -> RunBatch:
+def create_batch(
+    db: Session, user: User, files_submitted: int, source: str = BatchSource.WEB, *, notify_on_complete: bool = False,
+) -> RunBatch:
     """Insert and commit a new batch owned by ``user``, redrawing the id on a
     duplicate-key collision. Any other integrity error (a foreign-key
     violation, say) is re-raised at once: no redraw can cure it. Raises
@@ -86,7 +89,8 @@ def create_batch(db: Session, user: User, files_submitted: int, source: str = Ba
     collides."""
     last_collision: IntegrityError | None = None
     for _ in range(_BATCH_ID_ATTEMPTS):
-        batch = RunBatch(id=generate_batch_id(), user_id=user.id, files_submitted=files_submitted, source=source)
+        batch = RunBatch(id=generate_batch_id(), user_id=user.id, files_submitted=files_submitted, source=source,
+                         notify_on_complete=notify_on_complete)
         db.add(batch)
         try:
             db.commit()
@@ -305,8 +309,9 @@ def queue_overview(db: Session) -> QueueOverview:
     """GET /api/queue: the dispatch mode, and per queue its live workers,
     the runs waiting in it and the estimated wait for a new run."""
     mode = concurrency.dispatch_mode()
+    can_email = mailer.sending_enabled()
     if mode != "queue":
-        return QueueOverview(dispatch_mode=mode)
+        return QueueOverview(dispatch_mode=mode, completion_email_available=can_email)
     loads = _lane_loads(db)
     median_seconds = recent_median_duration_seconds(db)
     live = _live_workers()
@@ -318,4 +323,5 @@ def queue_overview(db: Session) -> QueueOverview:
             ahead=load.waiting,
             est_wait_minutes=estimate_wait_minutes(load, workers, median_seconds),
         )
-    return QueueOverview(dispatch_mode=mode, single=lanes[run_queue.SINGLE.name], batch=lanes[run_queue.BATCH.name])
+    return QueueOverview(dispatch_mode=mode, single=lanes[run_queue.SINGLE.name], batch=lanes[run_queue.BATCH.name],
+                         completion_email_available=can_email)

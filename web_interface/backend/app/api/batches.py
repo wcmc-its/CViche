@@ -44,7 +44,8 @@ def create_batch(
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
     try:
-        batch = batch_service.create_batch(db, current_user, body.files_submitted)
+        batch = batch_service.create_batch(
+            db, current_user, body.files_submitted, notify_on_complete=body.notify_on_complete)
     except batch_service.BatchIdAttemptsExhausted as e:
         raise internal_error("We couldn't create the batch. Please try again in a moment.") from e
     notifications.notify_batch_submitted(

@@ -67,6 +67,17 @@ def test_create_batch_stores_a_letters_only_id_owned_by_the_caller(client, db, s
     assert re.fullmatch(r"[A-Z]{6}", batch_id)
     row = db.get(RunBatch, batch_id)
     assert (row.user_id, row.files_submitted) == (user.id, 3)
+    assert row.notify_on_complete is False
+
+
+def test_create_batch_stores_email_me_when_job_completes(client, db, seed_simple_mode):
+    """The New run page's "Email me when job completes" box (#1335)."""
+    _auth(client, _make_user(db))
+
+    resp = client.post("/api/batches", json={"files_submitted": 1, "notify_on_complete": True})
+
+    assert resp.status_code == 200, resp.text
+    assert db.get(RunBatch, resp.json()["id"]).notify_on_complete is True
 
 
 def test_create_batch_rejects_more_than_fifty_files(client, db, seed_simple_mode):
@@ -338,8 +349,23 @@ def fake_valkey(monkeypatch):
 
 def test_queue_reports_only_the_mode_outside_queue_mode(client, db, seed_simple_mode, monkeypatch):
     monkeypatch.delenv("CVICHE_DISPATCH_MODE", raising=False)
+    monkeypatch.delenv("CVICHE_MAIL_SEND", raising=False)
     _auth(client, _make_user(db))
-    assert client.get("/api/queue").json() == {"dispatch_mode": "in_process", "single": None, "batch": None}
+    assert client.get("/api/queue").json() == {
+        "dispatch_mode": "in_process", "single": None, "batch": None, "completion_email_available": False,
+    }
+
+
+@pytest.mark.parametrize("dispatch_mode", ["in_process", "queue"])
+@pytest.mark.parametrize("mail_send, expected", [("true", True), ("", False)])
+def test_queue_offers_the_completion_email_only_when_mail_can_be_sent(
+    client, db, seed_simple_mode, fake_valkey, monkeypatch, dispatch_mode, mail_send, expected,
+):
+    """The New run page shows "Email me when job completes" only when it would work (#1335)."""
+    monkeypatch.setenv("CVICHE_DISPATCH_MODE", dispatch_mode)
+    monkeypatch.setenv("CVICHE_MAIL_SEND", mail_send)
+    _auth(client, _make_user(db))
+    assert client.get("/api/queue").json()["completion_email_available"] is expected
 
 
 def test_queue_reports_live_workers_waiting_runs_and_the_wait_per_queue(client, db, seed_simple_mode, fake_valkey):
@@ -368,6 +394,7 @@ def test_queue_reports_live_workers_waiting_runs_and_the_wait_per_queue(client, 
         "dispatch_mode": "queue",
         "single": {"workers": 2, "ahead": 2, "est_wait_minutes": 23},
         "batch": {"workers": 1, "ahead": 3, "est_wait_minutes": 45},
+        "completion_email_available": False,
     }
 
 

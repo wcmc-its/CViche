@@ -18,7 +18,9 @@ import DropZone from './upload/DropZone'
 import InboxSection from './upload/InboxSection'
 import SingleFileRow from './upload/SingleFileRow'
 import UploadFooter from './upload/UploadFooter'
-import { H2, OptionsSection, DuplicateNotice, SingleEstimate, TemplateWarning, WhoToggle } from './upload/UploadSections'
+import {
+  H2, CompletionEmailOption, OptionsSection, DuplicateNotice, SingleEstimate, TemplateWarning, WhoToggle,
+} from './upload/UploadSections'
 import { useBatchUpload } from './upload/useBatchUpload'
 import type { BatchUpload } from './upload/useBatchUpload'
 import { useSingleFile, useSingleRun } from './upload/useSingleRun'
@@ -149,9 +151,12 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     user?.default_submission_type === 'authorized_admin' ? 'authorized_admin' : 'own_cv',
   )
   const [attested, setAttested] = useState(false)
+  // "Email me when job completes" (#1335): off by default, offered only when the server can send mail.
+  const [notifyOnComplete, setNotifyOnComplete] = useState(false)
+  const canEmail = queue?.completion_email_available === true
   const [aheadBefore, setAheadBefore] = useState(0)
   const [finishMinutes, setFinishMinutes] = useState<number | null>(null)
-  const run = useSingleRun({ stripWcmInstructions, submissionType, onUploadSuccess, onConsentRequired: toConsent })
+  const run = useSingleRun({ stripWcmInstructions, submissionType, notifyOnComplete, onUploadSuccess, onConsentRequired: toConsent })
   const single = useSingleFile(run.reset, run.setError)
   // A file added to or removed from the table forgets any run held for the old
   // selection (template warning or failed start), as picking a new single file does.
@@ -215,7 +220,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
       return
     }
     setAheadBefore(queue?.batch?.ahead ?? 0)
-    await batch.submit(options)
+    await batch.submit(options, notifyOnComplete)
     await afterSend()
   }
 
@@ -270,6 +275,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                   attested={attested}
                   onAttestedChange={setAttested}
                 />
+                {canEmail && <CompletionEmailOption checked={notifyOnComplete} onChange={setNotifyOnComplete} />}
 
                 {!multi && single.estimating && (
                   <div className="bg-primary-50 border border-primary-200 rounded-lg p-4" role="status" aria-live="polite">

@@ -1,10 +1,13 @@
-"""The completion email for an emailed batch (#1298).
+"""The completion email for a batch (#1298, #1335).
 
-One email per auto-run batch (``run_batches.source == "email"``), sent once
-when every one of its runs is terminal. Web batches and inbox items confirmed
-later in the UI never get it. Called after each run's terminal transition is
-committed, from every path that makes one (the orchestrator, the worker's
-dead-letter and watchdog, the stale-run reaper, user cancel).
+One email per batch that asked for it, sent once when every one of its runs
+is terminal: every auto-run batch (``run_batches.source == "email"``), and a
+web batch whose submitter ticked "Email me when job completes"
+(``run_batches.notify_on_complete``). A single upload with the box ticked is a
+one-file batch. Other web batches never get it. Called after each run's
+terminal transition is committed, from every path that makes one (the
+orchestrator, the worker's dead-letter and watchdog, the stale-run reaper,
+user cancel).
 
 Exactly once across pods: the last two runs of a batch can finish on two pods
 at the same moment, and both then see "all terminal". The winner is whoever's
@@ -71,12 +74,17 @@ def _status_counts(db: Session, batch_id: str) -> dict[str, int]:
 
 
 def _is_complete(db: Session, batch_id: str, status_counts: dict[str, int]) -> bool:
-    """An unnotified email batch whose runs all exist and are all terminal.
-    Fewer runs than ``files_submitted`` means auto_run is still creating them."""
+    """An unnotified batch that wants the email (an email batch, or a web
+    batch with ``notify_on_complete``) whose runs all exist and are all
+    terminal. Fewer runs than ``files_submitted`` means they are still being
+    created (auto_run, or the browser's uploads)."""
     row = db.execute(
-        select(RunBatch.source, RunBatch.files_submitted, RunBatch.completion_notified_at).where(RunBatch.id == batch_id)
+        select(RunBatch.source, RunBatch.notify_on_complete, RunBatch.files_submitted,
+               RunBatch.completion_notified_at).where(RunBatch.id == batch_id)
     ).one_or_none()
-    if row is None or row.source != BatchSource.EMAIL or row.completion_notified_at is not None:
+    if row is None or row.completion_notified_at is not None:
+        return False
+    if row.source != BatchSource.EMAIL and not row.notify_on_complete:
         return False
     total = sum(status_counts.values())
     terminal = sum(count for status, count in status_counts.items() if status in Run.TERMINAL_RUN_STATUSES)

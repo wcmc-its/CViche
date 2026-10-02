@@ -50,8 +50,9 @@ const QUEUE: QueueOverview = {
   dispatch_mode: 'queue',
   single: { workers: 6, ahead: 0, est_wait_minutes: 0 },
   batch: { workers: 3, ahead: 2, est_wait_minutes: 25 },
+  completion_email_available: false,
 }
-const IN_PROCESS: QueueOverview = { dispatch_mode: 'in_process', single: null, batch: null }
+const IN_PROCESS: QueueOverview = { dispatch_mode: 'in_process', single: null, batch: null, completion_email_available: false }
 
 const EST: Estimate = {
   document_tokens: 1000, text_characters: 4000, estimated_cost_min: 1, estimated_cost_max: 2,
@@ -688,7 +689,7 @@ describe('UploadPage emailed CV inbox (#1298)', () => {
     tickAttestation()
     fireEvent.click(button('Start run'))
     await flush()
-    expect(createBatch).toHaveBeenCalledWith(1)
+    expect(createBatch).toHaveBeenCalledWith(1, { notifyOnComplete: false })
     expect(submitInboxItem).toHaveBeenCalledWith(11, expect.objectContaining({ batchId: 'BQXZKD', submissionType: 'authorized_admin', stripWcmInstructions: true }))
     expect(uploadFile).not.toHaveBeenCalled()
     expect(startRun).toHaveBeenCalledWith('RM1')
@@ -784,5 +785,59 @@ describe('UploadPage emailed CV inbox (#1298)', () => {
     expect(screen.queryByTestId('batch-row')).toBeNull()
     fireEvent.click(button('Remove emailed_one.docx'))
     expect(screen.getByRole('heading', { name: /Emailed to CViche \(2\)/ })).toBeTruthy()
+  })
+})
+
+describe('UploadPage "Email me when job completes" (#1335)', () => {
+  const EMAIL_LABEL = 'Email me when job completes'
+  const emailBox = () => screen.getByRole('checkbox', { name: EMAIL_LABEL }) as HTMLInputElement
+  const follows = (a: Node, b: Node) => Boolean(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING)
+
+  it('sits unticked below the attestation, in the batch and the single-file layout, when mail can be sent', async () => {
+    await renderPage({ ...QUEUE, completion_email_available: true })
+    for (const layout of ['batch', 'single']) {
+      if (layout === 'single') fireEvent.click(screen.getByLabelText(ROLE_A_LABEL))
+      expect(emailBox().checked).toBe(false)
+      expect(follows(screen.getByTestId('retention-summary'), emailBox())).toBe(true)
+      expect(follows(attestationBox(), emailBox())).toBe(true)
+      expect(follows(emailBox(), button('Start run'))).toBe(true)
+    }
+  })
+
+  it('is absent when the server cannot send mail', async () => {
+    await renderPage(QUEUE)
+    expect(screen.queryByRole('checkbox', { name: EMAIL_LABEL })).toBeNull()
+    cleanup()
+    await renderPage(IN_PROCESS)
+    expect(screen.queryByRole('checkbox', { name: EMAIL_LABEL })).toBeNull()
+  })
+
+  it('creates the batch with the box as ticked', async () => {
+    uploadsSucceed()
+    await renderPage({ ...QUEUE, completion_email_available: true })
+    fireEvent.click(emailBox())
+    await submitBatch([docx('a.docx'), docx('b.docx')])
+    expect(createBatch).toHaveBeenCalledWith(2, { notifyOnComplete: true })
+    expect(vi.mocked(uploadFile).mock.calls.map(([, opts]) => opts.batchId)).toEqual(['BQXZKD', 'BQXZKD'])
+  })
+
+  it('creates the batch without the email when the box is left unticked', async () => {
+    uploadsSucceed()
+    await renderPage({ ...QUEUE, completion_email_available: true })
+    await submitBatch([docx('a.docx'), docx('b.docx')])
+    expect(createBatch).toHaveBeenCalledWith(2, { notifyOnComplete: false })
+  })
+
+  it('puts a ticked single upload in a one-file batch that asks for the email', async () => {
+    uploadsSucceed()
+    await renderPage({ ...IN_PROCESS, completion_email_available: true })
+    await addFiles([docx('mine.docx')])
+    fireEvent.click(emailBox())
+    tickAttestation()
+    fireEvent.click(button('Start run'))
+    await flush()
+    expect(createBatch).toHaveBeenCalledWith(1, { notifyOnComplete: true })
+    expect(vi.mocked(uploadFile).mock.calls[0][1].batchId).toBe('BQXZKD')
+    expect(onUploadSuccess).toHaveBeenCalledWith('R1')
   })
 })

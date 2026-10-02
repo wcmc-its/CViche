@@ -5,19 +5,24 @@ import { useSingleFile, useSingleRun } from './useSingleRun'
 import { MAX_UPLOAD_BYTES } from './batchRows'
 import { uploadFile } from '../../api/upload'
 import { getCapacity, startRun } from '../../api/runs'
+import { createBatch } from '../../api/batches'
+import { submitInboxItem } from '../../api/inbox'
 
 vi.mock('../../api/upload', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../api/upload')>()),
   uploadFile: vi.fn(), getEstimate: vi.fn(),
 }))
 vi.mock('../../api/runs', () => ({ startRun: vi.fn(), getCapacity: vi.fn() }))
+vi.mock('../../api/batches', () => ({ createBatch: vi.fn() }))
+vi.mock('../../api/inbox', () => ({ submitInboxItem: vi.fn() }))
 
 const onUploadSuccess = vi.fn()
+const onConsentRequired = vi.fn()
 const FILE = new File(['cv'], 'mine.docx')
 
-function renderRun() {
+function renderRun(notifyOnComplete = false) {
   return renderHook(() => useSingleRun({
-    stripWcmInstructions: true, submissionType: 'own_cv', onUploadSuccess, onConsentRequired: vi.fn(),
+    stripWcmInstructions: true, submissionType: 'own_cv', notifyOnComplete, onUploadSuccess, onConsentRequired,
   }))
 }
 
@@ -65,6 +70,47 @@ describe('useSingleRun', () => {
     expect(uploadFile).toHaveBeenCalledTimes(1)
     expect(startRun).toHaveBeenCalledWith('R1')
     expect(onUploadSuccess).toHaveBeenCalledWith('R1')
+  })
+
+  it('uploads with no batch when "Email me when job completes" is off', async () => {
+    const { result } = renderRun(false)
+    await act(() => result.current.start(FILE))
+    expect(createBatch).not.toHaveBeenCalled()
+    expect(vi.mocked(uploadFile).mock.calls[0][1].batchId).toBeUndefined()
+  })
+
+  it('puts the run in a one-file batch that asks for the email when it is on (#1335)', async () => {
+    vi.mocked(createBatch).mockResolvedValue({ id: 'BQXZKD' })
+    const { result } = renderRun(true)
+    await act(() => result.current.start(FILE))
+    expect(createBatch).toHaveBeenCalledWith(1, { notifyOnComplete: true })
+    expect(vi.mocked(uploadFile).mock.calls[0][1].batchId).toBe('BQXZKD')
+    expect(onUploadSuccess).toHaveBeenCalledWith('R1')
+  })
+
+  it('puts an emailed CV held for this run in the one-file batch too', async () => {
+    vi.mocked(createBatch).mockResolvedValue({ id: 'BQXZKD' })
+    vi.mocked(submitInboxItem).mockResolvedValue({ id: 11, status: 'submitted', run_id: 'RM1', error: null, message: null, last_processed_on: null })
+    const { result } = renderRun(true)
+    await act(() => result.current.start(new File([], 'emailed.docx'), { id: 11, filename: 'emailed.docx', size_bytes: 10 }))
+    expect(vi.mocked(submitInboxItem).mock.calls[0][1].batchId).toBe('BQXZKD')
+    expect(onUploadSuccess).toHaveBeenCalledWith('RM1')
+  })
+
+  it("shows a refused batch's quota message and uploads nothing", async () => {
+    vi.mocked(createBatch).mockRejectedValue({ status: 429, message: 'Daily limit reached' })
+    const { result } = renderRun(true)
+    await act(() => result.current.start(FILE))
+    expect(uploadFile).not.toHaveBeenCalled()
+    expect(result.current.error).toBe('Daily limit reached')
+  })
+
+  it('sends the user to the consent page when the batch is refused for consent', async () => {
+    vi.mocked(createBatch).mockRejectedValue({ status: 403, message: 'consent_required' })
+    const { result } = renderRun(true)
+    await act(() => result.current.start(FILE))
+    expect(uploadFile).not.toHaveBeenCalled()
+    expect(onConsentRequired).toHaveBeenCalled()
   })
 })
 
