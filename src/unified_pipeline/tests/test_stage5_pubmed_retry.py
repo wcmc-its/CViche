@@ -710,3 +710,39 @@ def test_untitled_entry_is_not_treated_as_in_press(tmp_path, monkeypatch):
     assert result['enrichment_status'] == 'enriched'
     assert result['taxonomy_code'] == 'S7'
     assert 'in_press_note' not in result
+
+
+def _published_entry(**fields):
+    return {'taxonomy_code': 'S1', 'text': 'Garcia M. Published version.',
+            'extracted_fields': {'authors': 'Garcia M', **fields}}
+
+
+def test_in_press_entry_already_listed_as_published_is_marked_superseded(tmp_path, monkeypatch):
+    # web200: the same paper listed both as published and as "in press".
+    enricher, _, _ = _make(monkeypatch, _found())
+    path = tmp_path / 's4.json'
+    published = _published_entry(title=INPRESS_TITLE, year='2025')
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_inpress_entry(), published]}))
+    result = enricher.enrich_stage4_output(str(path))['entries'][0]
+    assert result['in_press_superseded'] is True
+    assert result['in_press_note'] == (
+        f'Already listed as published (PMID {PMID}); the CV also listed it as in press.')
+    assert result['taxonomy_code'] == 'S7'  # left alone: stage 6 deletes it
+    assert enricher.stats['in_press_duplicates'] == 1
+    assert enricher.stats['in_press_resolved'] == 0
+
+
+def test_same_pmid_elsewhere_is_a_duplicate_but_similar_title_other_year_is_not(tmp_path, monkeypatch):
+    # A PMID on the other entry costs one efetch before the title search.
+    pmid_lookup = [FakeResponse(200, content=_published_xml())]
+    for other, superseded, extra in (
+            (_published_entry(title=INPRESS_TITLE, pmid=PMID), True, pmid_lookup),
+            (_published_entry(title=INPRESS_TITLE, year='2019'), False, []),
+            # web228: a shorter title nested in the in-press one, same year.
+            (_published_entry(title='Statin adherence in older adults', year='2025'), False, []),
+            (dict(_published_entry(title=INPRESS_TITLE, year='2025'), taxonomy_code='S8'), False, [])):
+        enricher, _, _ = _make(monkeypatch, extra + _found())
+        path = tmp_path / 's4.json'
+        path.write_text(json.dumps({'document_uid': 'x', 'entries': [_inpress_entry(), other]}))
+        result = enricher.enrich_stage4_output(str(path))['entries'][0]
+        assert result.get('in_press_superseded', False) is superseded, other

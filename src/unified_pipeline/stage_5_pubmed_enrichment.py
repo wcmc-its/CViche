@@ -110,6 +110,11 @@ PUBTYPE_TAXONOMY_CODES = (('Case Reports', 'S6'), ('Review', 'S2'),
                           ('Systematic Review', 'S2'), ('Editorial', 'S2'))
 PUBLISHED_DEFAULT_CODE = 'S1'
 IN_REVIEW_CODE = 'S7'
+# An in-press entry whose PubMed match another entry already lists as
+# published is a stale duplicate (web200: the same 2006 paper listed both as
+# published and as "in press" in another journal). Compared only against these
+# codes, so a same-titled conference abstract (S8) is not mistaken for it.
+PUBLISHED_ARTICLE_CODES = frozenset({'S1', 'S2', 'S6'})
 # Only an ID-less entry, or one whose DOI PubMed did not know, is searched by
 # title: a CV identifier that resolved to another paper stays rejected.
 _TITLE_SEARCHABLE_STATUSES = frozenset({'no_identifier', 'doi_not_in_pubmed'})
@@ -163,6 +168,15 @@ def plausible_publication_year(cv_year: str | int | None, pubmed_year: int | Non
     if not match or not pubmed_year:
         return True
     return pubmed_year - int(match.group(1)) in IN_PRESS_YEAR_WINDOW
+
+
+def _same_title(a: str, b: str) -> bool:
+    """Overlap against the longer title, so one title nested in the other
+    does not count as the same paper."""
+    words_a, words_b = _title_words(a), _title_words(b)
+    if not words_a or not words_b:
+        return False
+    return len(words_a & words_b) / max(len(words_a), len(words_b)) >= MIN_TITLE_SEARCH_OVERLAP
 
 
 def published_taxonomy_code(publication_types: list[str]) -> str:
@@ -234,6 +248,7 @@ class PubMedEnricher:
             'api_errors': 0,
             'title_searches': 0,
             'in_press_resolved': 0,
+            'in_press_duplicates': 0,
         }
 
         # (operation, status/exception) classes already logged at ERROR this run
@@ -520,7 +535,11 @@ class PubMedEnricher:
                 continue
             if entry.get('enrichment_status') in _TITLE_SEARCHABLE_STATUSES:
                 self._enrich_by_title(entry, title)
-            if entry.get('enrichment_status') == 'enriched':
+            if entry.get('enrichment_status') != 'enriched':
+                continue
+            if self._lists_as_published(entry, pub_entries):
+                self._record_in_press_duplicate(entry, phrase)
+            else:
                 self._record_in_press_resolution(entry, phrase)
 
     def _enrich_by_title(self, entry: dict, title: str) -> None:
@@ -581,6 +600,36 @@ class PubMedEnricher:
         entry['in_press_note'] = (f"Found in PubMed as PMID {pmid}{published}; "
                                   f"the CV listed it as {phrase}.")
         self.stats['in_press_resolved'] += 1
+
+    def _lists_as_published(self, entry: dict, pub_entries: list[dict]) -> bool:
+        """Whether another published-article entry of this CV is the paper
+        `entry` was matched to: the same PMID, or a title clearing
+        MIN_TITLE_SEARCH_OVERLAP measured against the LONGER title, with the
+        same year. Both guards are corpus incidents (2026-10-02): 7 of 8
+        title-only candidates were same-group papers in another year, and
+        web228's 2018 Sci Rep meta-analysis has a short title nested inside
+        the in-press paper's, which a shorter-title overlap scores as a match."""
+        enrichment = entry.get('enrichment_data') or {}
+        pmid, year = enrichment.get('pubmed_pmid'), enrichment.get('pubmed_year')
+        for other in pub_entries:
+            if other is entry or other.get('taxonomy_code') not in PUBLISHED_ARTICLE_CODES:
+                continue
+            fields = other.get('extracted_fields') or {}
+            if pmid and str(fields.get('pmid')) == str(pmid):
+                return True
+            if (year and str(fields.get('year')) == str(year)
+                    and _same_title(fields.get('title') or '', enrichment.get('pubmed_title') or '')):
+                return True
+        return False
+
+    def _record_in_press_duplicate(self, entry: dict, phrase: str) -> None:
+        """Stage 6 renders this entry as a tracked deletion, not a replacement:
+        replacing it would print the paper twice. Its code and year stay."""
+        pmid = (entry.get('enrichment_data') or {}).get('pubmed_pmid')
+        entry['in_press_superseded'] = True
+        entry['in_press_note'] = (f"Already listed as published (PMID {pmid}); "
+                                  f"the CV also listed it as {phrase}.")
+        self.stats['in_press_duplicates'] += 1
 
     def _identity_params(self) -> dict[str, str]:
         """NCBI identification params; email omitted when not configured."""
