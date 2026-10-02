@@ -1082,7 +1082,7 @@ _ANCHOR = {"R": {"title": "Talk one"}, "I": {"organization": "Society A"},
            "K1": {"course_title": "Course"}, "S1": {"title": "Paper"},
            "S8": {"title": "Paper"}, "R1": {"title": "Talk"}, "M2C": {"title": "Grant"},
            "H": {"award_name": "Prize"}, "A": {"name": "Owner"},
-           "T": {"title": "x"}, "K2": {"title": "x"}}
+           "T": {"description": "x"}, "G": {"organization": "Example Org"}}
 
 
 def _anchored(code, fields, **kwargs):
@@ -1175,7 +1175,7 @@ def test_offschema_a_record_list_fan_out_declines_is_warn():
     _anchored("I", {"extra": {}}),
     _anchored("A", {"school": "Example School"}),              # personal data
     _anchored("T", {"extra": "x"}),                            # text-rendered
-    _anchored("K2", {"extra": "x"}),
+    _anchored("G", {"extra": "x"}),
     _anchored("S1", {"other_id": "x"}),                        # publication (5d)
     _anchored("S1", {"notes": "x"}),
     _anchored("K1", {"description": "x"}),                     # teaching (5c)
