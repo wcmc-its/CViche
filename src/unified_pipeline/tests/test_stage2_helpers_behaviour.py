@@ -705,6 +705,17 @@ def test_row_range_entry_reads_row_10_and_row_1_as_two_different_rows():
     assert entry["element_idx_start"] == "474.10"
 
 
+def test_remove_subset_delimiters_keeps_pseudo_row_10_apart_from_pseudo_row_1():
+    """A merged row split into pseudo-rows is keyed "<table>.<row>.<k>". Read as
+    one float, "92.5.10" is 92.5.1 and the tenth line was dropped as a duplicate
+    of the first; "92.5.2" also sorted after it."""
+    kept = remove_subset_delimiters([
+        _d("92.5.10", "92.5.10", "tenth line of the cell"), _d("92.5.1", "92.5.1", "first line of the cell"),
+        _d("92.5.2", "92.5.2", "second line of the cell"),
+    ])
+    assert [d["element_idx_start"] for d in kept] == ["92.5.1", "92.5.2", "92.5.10"]
+
+
 def test_remove_subset_delimiters_keeps_row_1_row_10_and_the_pairs_between_apart():
     """The keys the delimiter handling now produces ("474.10", not "474.1") are
     distinct to remove_subset_delimiters: nothing here contains anything else."""
@@ -731,6 +742,11 @@ def test_dedup_idx_key_plain_numeric_string_without_dot_converts():
 def test_dedup_idx_key_row_10_is_not_row_1():
     assert _dedup_idx_key("474.10") == (474.0, 10.0)
     assert _dedup_idx_key("474.10") != _dedup_idx_key("474.1")
+
+
+def test_dedup_idx_key_pseudo_row_10_is_not_pseudo_row_1():
+    assert _dedup_idx_key("92.5.10") == (92.0, 5.0, 10.0)
+    assert _dedup_idx_key("92.5.10") != _dedup_idx_key("92.5.1")
 
 
 # ------------------------------------------------------- filter_extraction_noise

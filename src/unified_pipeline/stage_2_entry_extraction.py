@@ -351,11 +351,12 @@ def remove_subset_delimiters(delimiters: list) -> list:
         return delimiters
 
     def normalize_idx(idx):
-        """Convert index to sortable tuple (main_idx, sub_idx)."""
+        """Convert index to a sortable tuple, one float per dotted part:
+        (main_idx, row) or, for a pseudo-row, (main_idx, row, pseudo_row).
+        "92.5.10" must not read as "92.5.1" -- float("5.10") is 5.1."""
         if isinstance(idx, str):
             if "." in idx:
-                parts = idx.split(".", 1)
-                return (float(parts[0]), float(parts[1]))
+                return tuple(float(part) for part in idx.split("."))
             elif idx.startswith("table_"):
                 return (1000000 + int(idx.split("_")[1]), 0)
             else:
@@ -366,7 +367,7 @@ def remove_subset_delimiters(delimiters: list) -> list:
         """True when idx carries no ".row" sub-index (i.e. a whole element)."""
         return not (isinstance(idx, str) and "." in idx)
 
-    def normalize_span(d: dict) -> tuple[tuple[float, float], tuple[float, float]]:
+    def normalize_span(d: dict) -> tuple[tuple[float, ...], tuple[float, ...]]:
         """Return (start, end) sort keys for a delimiter.
 
         A mixed delimiter -- a sub-indexed start ("9.1") paired with a bare
@@ -613,7 +614,8 @@ def _dedup_idx_key(idx):
     """Normalize an element index to a comparable (main, sub) tuple.
 
     Handles the mixed representations stage 2 emits for the SAME element:
-    int 30, float 30.0, str "30.0", sub-row "22.2", and "table_3".
+    int 30, float 30.0, str "30.0", sub-row "22.2", pseudo-row "22.2.1" (one
+    float per dotted part, so "22.2.10" is not "22.2.1"), and "table_3".
     """
     if isinstance(idx, str):
         if idx.startswith("table_"):
@@ -622,9 +624,8 @@ def _dedup_idx_key(idx):
             except (ValueError, IndexError):
                 return (str(idx), 0.0)
         if "." in idx:
-            parts = idx.split(".", 1)
             try:
-                return (float(parts[0]), float(parts[1]))
+                return tuple(float(part) for part in idx.split("."))
             except ValueError:
                 return (str(idx), 0.0)
     try:
