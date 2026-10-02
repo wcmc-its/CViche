@@ -147,6 +147,29 @@ shared lint it calls), and the doctor's matching lint uses the same function,
 so the doctor reports the gate rather than a second definition of it. What that buys is that they cannot drift apart — **not** independent
 confirmation that the gate is calibrated.
 
+### The three content-loss caps (#822)
+
+Cap-only gates like protected data (`CAP_ONLY_GATES`, weight 0, so no run's raw
+score moves), but soft: each caps a run at `CONTENT_LOSS_CAP` (84, one point
+under GREEN), so a run that lost source content cannot read "ship" and is not
+pushed toward RED. No weighted dimension measures lost content; these call the
+doctor's own signals, restricted to the ones batch IPXFBA hand-checked as real.
+
+- `score_under_extracted_records()` — the doctor's `under_extraction` lint, any
+  finding (4 of 4 real in IPXFBA).
+- `score_fused_entries()` — `mega_entries` (`count_mega_entries`) at
+  `MEGA_ENTRIES_CAP_MIN` (2) or more entries; one fused entry is common and
+  harmless, so the threshold is a count (7 of 9 flagged entries were real).
+- `score_lost_source_table()` — the primitive behind `table_lost`
+  (`find_lost_blocks`), worst lost table at `LOST_TABLE_CAP_MIN_LINES` (5) or
+  more lines. It reads the original uploaded `.docx` from the
+  `SOURCE_DOCX_SUBDIR` (`source/`) of the scored directory; the web service
+  stages `input/*.docx` there and `score_one.py --source` does the same. With no
+  readable source the gate is not evaluated, so a score computed without it can
+  sit above the web app's.
+
+Both thresholds were fitted to one batch and are named in the code to be revisited.
+
 ### Bands
 
 | Score | Band | `quality_gate` verdict |

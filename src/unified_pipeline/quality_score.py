@@ -34,6 +34,13 @@ gate -- protected personal data in the rendered docx (#820) -- caps the score
 the same way but carries NO weight (``CAP_ONLY_GATES``), so a clean run's raw
 score is unchanged by its existence.
 
+Three more cap-only gates (#822) cover source content the pipeline lost before
+the document was written, a thing no weighted dimension measures: an
+under-extracted entry, several fused entries, a lost source table. Each caps a
+run at ``CONTENT_LOSS_CAP``, just under GREEN, so a run with a verified loss
+cannot read "ship". They are the doctor's own signals, called rather than
+re-derived, restricted to the ones the IPXFBA batch hand-checked as real.
+
 The result also says what the score was computed *without*: ``data_complete``
 is False and ``missing_evidence`` names each scored artifact that was absent,
 unreadable, or ambiguous (and a ``EVIDENCE INCOMPLETE`` flag repeats it), so a
@@ -97,8 +104,14 @@ from unified_pipeline.core.template_boilerplate import (
     is_template_label_line,
     is_unanswered_prompt,
 )
+from unified_pipeline.doctor.lints.extraction import lint_under_extraction
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
 from unified_pipeline.doctor.shared import _cell_text, _docx_text, docx_body_blocks
+from unified_pipeline.segmentation_regression import (
+    count_mega_entries,
+    find_lost_blocks,
+    iter_source_block_lines,
+)
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX, read_stage_errors
 
 logger = logging.getLogger(__name__)
@@ -567,12 +580,15 @@ _CONTACT_KEY_RE = re.compile(
 # block is empty labels is an input gap, not an extraction miss, and is not
 # penalized. The phone shape is a standalone token so DOIs, PMIDs and grant
 # numbers (which carry 3-3-4 digit runs inside "/" or "." tokens) don't match.
+# The area code needs its own separator (or parentheses): a six-digit
+# certification number followed by a year ("#123456 2017 - present") is not a
+# phone number, and without that rule it read as one (#822, batch IPXFBA).
 # ponytail: email/phone only; a source whose ONLY contact is a postal address
 # (2 of the 126 corpus CVs) reads as blank, so a missed address goes
 # unpenalized. Add an address shape if that case shows up as a miss.
 _SOURCE_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _SOURCE_PHONE_RE = re.compile(
-    r"(?<![\w/.\-])(?:\+\d{1,3}[ .-]?)?(?:\(\d{3}\)|\d{3})[ .-]?\d{3}[ .-]\d{4}(?!\d)")
+    r"(?<![\w/.\-])(?:\+\d{1,3}[ .-]?)?(?:\(\d{3}\)[ .-]?|\d{3}[ .-])\d{3}[ .-]\d{4}(?!\d)")
 
 
 def _source_has_contact(outputs_dir: Path) -> bool | None:
@@ -646,6 +662,97 @@ def score_protected_data(outputs_dir: Path) -> tuple[float, str, int | None]:
     if hits:
         return 1.0, f"protected_data_hits={hits}; hard-fail cap={PROTECTED_DATA_CAP}", PROTECTED_DATA_CAP
     return 0.0, "protected_data_hits=0", None
+
+
+#: The cap the content-loss gates apply (#822): one point under GREEN, so a run
+#: with a verified loss cannot read "ship" but is not pushed toward RED -- none
+#: of these signals says the document is undeliverable, only that source
+#: content did not reach it. Derived from BAND_GREEN so the two cannot drift.
+CONTENT_LOSS_CAP = BAND_GREEN - 1
+
+#: Fused entries cap a run only at this count. One fused entry is common and
+#: can be harmless (batch IPXFBA: CTXOTY's single fused entry kept every
+#: mentee); the runs that lost records had several (EKGTXD 4, PBSGQZ 3 flagged).
+#: A threshold fitted to one batch: revisit with more data.
+MEGA_ENTRIES_CAP_MIN = 2
+
+#: A lost source table caps a run only when its worst table lost this many
+#: lines. The doctor's own `table_lost` floor is 3 lines, and the short lost
+#: tables the corpus shows are template labels (#1102's noise class); the one
+#: loss verified in batch IPXFBA (TALVAE) was far larger. Fitted to one batch.
+LOST_TABLE_CAP_MIN_LINES = 5
+
+#: Subdirectory of the scored directory that holds the run's original uploaded
+#: .docx. Optional: `score_lost_source_table` reads the source to find tables
+#: that never reached stage 2, and is simply not evaluated without it.
+SOURCE_DOCX_SUBDIR = "source"
+
+
+def score_under_extracted_records(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: a large multi-record entry whose stage-4 extraction covered
+    under 40% of it, so its other records vanish (#822). The doctor's
+    `under_extraction` lint, called as is: 4 of 4 findings in batch IPXFBA were
+    real record loss (MYAXRH, ZGNARO, EKGTXD)."""
+    data, reason = _load_first(outputs_dir, "*_fields.json")
+    if data is None:
+        return 0.0, f"{_missing_or_unreadable_detail('fields.json', reason)}; not evaluated", None
+    findings = len(lint_under_extraction(data))
+    if findings:
+        return 1.0, f"under_extraction_findings={findings}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
+    return 0.0, "under_extraction_findings=0", None
+
+
+def score_fused_entries(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: stage 2 fused several records into one entry, in
+    MEGA_ENTRIES_CAP_MIN or more entries (#822). Counted by the same function
+    as the doctor's `mega_entries` flag; 7 of the 9 flagged entries in batch
+    IPXFBA were real, which is why the cap needs a count and not one entry."""
+    data, reason = _load_first(outputs_dir, "*_entries.json")
+    if data is None:
+        return 0.0, f"{_missing_or_unreadable_detail('entries.json', reason)}; not evaluated", None
+    fused = count_mega_entries(data.get("entries", []))
+    if fused >= MEGA_ENTRIES_CAP_MIN:
+        return 1.0, f"mega_entries={fused}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
+    return 0.0, f"mega_entries={fused}", None
+
+
+def _source_block_lines(outputs_dir: Path) -> list[tuple[int, str]] | None:
+    """The source docx's lines tagged by table, or None when no usable source
+    was supplied under SOURCE_DOCX_SUBDIR (absent, ambiguous or unreadable)."""
+    from docx.opc.exceptions import PackageNotFoundError
+    from lxml.etree import XMLSyntaxError
+
+    candidates = sorted((outputs_dir / SOURCE_DOCX_SUBDIR).glob("*.docx"))
+    if len(candidates) != 1:
+        if candidates:
+            logger.warning("quality_score found multiple source docx: %s",
+                           ", ".join(c.name for c in candidates))
+        return None
+    try:
+        return iter_source_block_lines(str(candidates[0]))
+    except (OSError, zipfile.BadZipFile, KeyError, ValueError, PackageNotFoundError,
+            XMLSyntaxError) as e:
+        logger.warning("quality_score could not read source docx %s (%s: %s)",
+                       candidates[0].name, type(e).__name__, e)
+        return None
+
+
+def score_lost_source_table(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Cap-only gate: a source table whose text stage 2 mostly lost, at
+    LOST_TABLE_CAP_MIN_LINES or more lost lines (#822). The primitive behind the
+    doctor's `table_lost` lint. Needs the source docx (SOURCE_DOCX_SUBDIR): the
+    scorer's other artifacts cannot show a table the reader never saw (TALVAE,
+    batch IPXFBA: a 39-line nested table, the one verified `table_lost`)."""
+    data, reason = _load_first(outputs_dir, "*_entries.json")
+    if data is None:
+        return 0.0, f"{_missing_or_unreadable_detail('entries.json', reason)}; not evaluated", None
+    block_lines = _source_block_lines(outputs_dir)
+    if block_lines is None:
+        return 0.0, "no readable source docx; not evaluated", None
+    worst = max((len(b["lost_lines"]) for b in find_lost_blocks(block_lines, data)), default=0)
+    if worst >= LOST_TABLE_CAP_MIN_LINES:
+        return 1.0, f"worst_lost_table_lines={worst}; cap={CONTENT_LOSS_CAP}", CONTENT_LOSS_CAP
+    return 0.0, f"worst_lost_table_lines={worst}", None
 
 
 #: Same cell split as `core.template_boilerplate._LABEL_PIECE_SPLIT_RE`: a
@@ -1279,6 +1386,10 @@ PROTECTED_DATA_CAP = 25
 #: detail, cap) contract as a dimension scorer; only the cap is read.
 CAP_ONLY_GATES = [
     ("Protected personal data absent from rendered docx (HARD-FAIL gate)", score_protected_data),
+    ("Source records lost: entry under-extracted (CAP-ONLY gate)", score_under_extracted_records),
+    ("Source records fused: several entries swallowed multiple records (CAP-ONLY gate)",
+     score_fused_entries),
+    ("Source table lost before extraction (CAP-ONLY gate)", score_lost_source_table),
 ]
 
 

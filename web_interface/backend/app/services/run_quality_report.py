@@ -45,6 +45,12 @@ _CAP_SOURCE_BY_SCORER = {
         "classification fell back to defaults", "stage3b_fallback_ratio"),
     scorer.score_protected_data: CapSource(
         "protected personal data in the output", "protected_data_in_output"),
+    scorer.score_under_extracted_records: CapSource(
+        "a large entry was only partly read, so its records are missing", "under_extraction"),
+    scorer.score_fused_entries: CapSource(
+        "several records were fused into one entry", "segmentation"),
+    scorer.score_lost_source_table: CapSource(
+        "a source table never reached the output", "table_lost"),
 }
 
 # Gate name (as it appears in the scorer's flags) -> its CapSource.

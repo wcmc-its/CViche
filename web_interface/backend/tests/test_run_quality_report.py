@@ -46,6 +46,22 @@ def test_cap_source_parses_the_real_scorers_flag_text(tmp_path):
         "No rendered output produced at all (HARD-FAIL gate)"]
 
 
+@pytest.mark.parametrize("gate, lint", [
+    (scorer.score_under_extracted_records, "under_extraction"),
+    (scorer.score_fused_entries, "segmentation"),
+    (scorer.score_lost_source_table, "table_lost"),
+])
+def test_each_content_loss_cap_points_at_the_lint_that_reports_it(gate, lint):
+    """#822: a content-loss cap on the run page names its own gate and the doctor
+    lint to read next, recovered from the flag text the scorer really writes."""
+    name = next(n for n, fn in scorer.CAP_ONLY_GATES if fn is gate)
+    flag = f"HARD-FAIL cap={scorer.CONTENT_LOSS_CAP}: {name} (detail)"
+    snapshot = qss.parse_score(_score(total=scorer.CONTENT_LOSS_CAP, raw=92.0,
+                                      caps=(scorer.CONTENT_LOSS_CAP,), flags=[flag]))
+    source = rqr.cap_source(snapshot)
+    assert source is not None and source.lint == lint
+
+
 def test_every_known_lint_has_a_plain_english_line():
     assert set(KNOWN_LINTS) <= set(rqr.LINT_EXPLANATIONS)
 
