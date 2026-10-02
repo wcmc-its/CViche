@@ -4,7 +4,7 @@ guards for Stage 5 PubMed enrichment (#222).
 NCBI E-utilities return 429 when the shared rate limit is hit; previously a
 single 429 aborted the whole efetch batch (catch-all -> {}). These tests pin
 the new behavior: transient failures (429 / 5xx / connection errors) retry up
-to 3 total attempts with exponential backoff (Retry-After honored when
+to 3 total attempts (idconv: IDCONV_MAX_ATTEMPTS) with exponential backoff (Retry-After honored when
 larger), non-transient HTTP errors still fail immediately, exhausted retries
 degrade exactly as before, api_key never leaks into logged errors, and the
 fake support@example.com identity is gone (email sent only when configured).
@@ -27,6 +27,7 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
 import requests
 
 # Ensure the repo's ``src`` directory is importable regardless of cwd/rootdir.
@@ -581,10 +582,30 @@ def test_bare_digit_pmcid_retry_keeps_the_title_guard(monkeypatch):
     ])
     entry = _titled(UNRELATED_TITLE, pmcid=BARE_PMID)
     [result] = enricher._enrich_by_pmcid([(entry, f'PMC{BARE_PMID}')])
-    assert result['enrichment_status'] == 'title_check_failed'
-    assert result['enrichment_rejected']['source'] == 'pmcid_as_pmid'
-    assert enricher.stats['title_mismatches'] == 1
+    assert result['enrichment_status'] == 'pmcid_conversion_failed'
+    assert 'enrichment_rejected' not in result
+    assert enricher.stats['title_mismatches'] == 0
     assert enricher.stats['failed_lookups'] == 1
+
+
+@pytest.mark.parametrize('label', [f'PMCID-{BARE_PMID}', f'PMCID: {BARE_PMID}', f'PMCID {BARE_PMID}'])
+def test_labelled_digit_pmcid_is_tried_as_a_pmid(monkeypatch, label):
+    enricher, session, _ = _make(monkeypatch, [
+        _idconv_error_response(),
+        FakeResponse(200, content=PUBMED_XML),
+    ])
+    entry = _titled('A test article', pmcid=label)
+    [result] = enricher._enrich_by_pmcid([(entry, f'PMC{BARE_PMID}')])
+    assert result['enrichment_status'] == 'enriched'
+    assert session.calls[1][1]['id'] == BARE_PMID
+
+
+def test_nine_digit_pmcid_value_is_not_truncated_to_a_pmid(monkeypatch):
+    enricher, session, _ = _make(monkeypatch, [_idconv_error_response()])
+    entry = _titled('A test article', pmcid='123456789')
+    [result] = enricher._enrich_by_pmcid([(entry, 'PMC123456789')])
+    assert result['enrichment_status'] == 'pmcid_conversion_failed'
+    assert len(session.calls) == 1
 
 
 def test_bare_digit_pmcid_missing_as_pmid_keeps_its_original_failure(monkeypatch):

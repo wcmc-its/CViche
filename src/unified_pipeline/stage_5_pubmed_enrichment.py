@@ -372,33 +372,51 @@ class PubMedEnricher:
         return results
 
     def _bare_digits_pmid(self, entry: dict) -> str | None:
-        """The digits of a "PMCID" value written without a PMC prefix, read as
-        a PMID candidate (#1219: a CV labelled 8-digit PMIDs as PMCIDs)."""
+        """The PMID-length digit run of a "PMCID" value that has no PMC prefix
+        (#1219: a CV labelled 8-digit PMIDs as PMCIDs). "PMCID-123..." and
+        "PMCID: 123..." are labels, not prefixes; only "PMC" directly
+        followed by a digit marks a real PMCID."""
         raw = str((entry.get('extracted_fields') or {}).get('pmcid') or '')
-        return None if 'PMC' in raw.upper() else self._clean_pmid(raw)
+        if re.search(r'PMC\d', raw.upper()):
+            return None
+        match = re.search(r'(?<!\d)\d{7,8}(?!\d)', raw)
+        return match.group(0) if match else None
+
+    @staticmethod
+    def _failure_counts(status: str | None) -> tuple[int, int]:
+        """(failed_lookups, title_mismatches) an entry with this status adds."""
+        failed = status in PMCID_PATH_FAILURES or status == 'lookup_failed'
+        return (1 if failed else 0, 1 if status == 'title_check_failed' else 0)
+
+    def _shift_failure_counts(self, status: str | None, sign: int) -> None:
+        failed, mismatched = self._failure_counts(status)
+        self.stats['failed_lookups'] += sign * failed
+        self.stats['title_mismatches'] += sign * mismatched
 
     def _retry_bare_pmcids_as_pmids(self, entries: list[dict]) -> None:
         """Second chance for entries the PMCID path failed or title-rejected
         whose "PMCID" has no PMC prefix: look the digits up as a PMID. The
-        title check guards the result; an entry that fails again keeps the
-        status and rejection record it had."""
+        title check guards the result. An entry the retry does not enrich
+        keeps the status and rejection record it had, so an idconv outage is
+        never recorded as a title rejection."""
         retry = [(e, self._bare_digits_pmid(e)) for e in entries
                  if e.get('enrichment_status') in PMCID_PATH_FAILURES]
         retry = [(e, pmid) for e, pmid in retry if pmid]
         prior = {id(e): (e['enrichment_status'], e.pop('enrichment_rejected', None))
                  for e, _ in retry}
         for entry, _ in retry:
-            self.stats['failed_lookups'] -= 1
-            if prior[id(entry)][0] == 'title_check_failed':
-                self.stats['title_mismatches'] -= 1
+            self._shift_failure_counts(prior[id(entry)][0], -1)
         self._enrich_by_pmid(retry, source='pmcid_as_pmid')
         for entry, _ in retry:
-            if entry['enrichment_status'] == 'lookup_failed':
-                status, rejected = prior[id(entry)]
-                entry['enrichment_status'] = status
-                if rejected:
-                    entry['enrichment_rejected'] = rejected
-                    self.stats['title_mismatches'] += 1
+            status, rejected = prior[id(entry)]
+            if entry['enrichment_status'] == 'enriched':
+                continue
+            self._shift_failure_counts(entry['enrichment_status'], -1)
+            self._shift_failure_counts(status, 1)
+            entry['enrichment_status'] = status
+            entry.pop('enrichment_rejected', None)
+            if rejected:
+                entry['enrichment_rejected'] = rejected
 
     def _enrich_by_doi(self, entries_with_doi: list[tuple[dict, str]]) -> list[dict]:
         """
@@ -484,7 +502,7 @@ class PubMedEnricher:
             try:
                 delay = max(delay, float(retry_after))
             except ValueError:
-                pass
+                pass  # HTTP-date Retry-After: deliberately ignored, backoff applies
         return delay
 
     def _get_with_retry(
