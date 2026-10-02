@@ -646,8 +646,8 @@ DATE_FIELD_NAMES = (
 #: A 19xx year inside an extracted date value. Only 19xx is a repair
 #: candidate: the observed failure is the LLM reading "03" as 1903, never the
 #: reverse. Pulling 20yy back to 19yy for yy above the pivot would break real
-#: future dates -- the 163-CV farm has a grant ending "6/30/31" that the LLM
-#: correctly read as 2031.
+#: future dates -- the 163-CV farm has a grant whose m/d/yy end date lies
+#: just past the pivot, which the LLM correctly read as 20yy.
 _TWENTIETH_CENTURY_YEAR_PATTERN = re.compile(r'(?<!\d)19(\d\d)(?!\d)')
 
 #: What may precede a two-digit year in the source text for it to count as
@@ -705,8 +705,8 @@ def repair_two_digit_year_century(
 ) -> None:
     """Move a 19xx year the LLM read off a two-digit source year to 20xx.
 
-    The stage-4 LLM sometimes reads "11/02" or "1/14/03" as 1902 or 1903
-    rather than 2002 or 2003. Nothing downstream can see the error: by stage
+    The stage-4 LLM sometimes reads "10/08" or "3/22/05" as 1908 or 1905
+    rather than 2008 or 2005. Nothing downstream can see the error: by stage
     6 the value is a plain four-digit year. This applies the century pivot
     stage 6 uses for raw mm/dd/yy strings (core/two_digit_year.py) to each
     declared date field, rewriting only years the source text does not
@@ -951,7 +951,7 @@ def apply_regex_post_processing(
     if taxonomy_code.startswith(GRANT_EFFORT_TAXONOMY_PREFIX):
         _normalize_grant_effort(original_text, updated, reformatted)
 
-    # Move a 19xx year read off a two-digit source year ("11/02") to 20xx.
+    # Move a 19xx year read off a two-digit source year ("10/08") to 20xx.
     # Before the range repair, so it compares against the corrected start.
     repair_two_digit_year_century(original_text, updated, reformatted)
 

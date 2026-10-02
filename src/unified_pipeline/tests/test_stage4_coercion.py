@@ -33,7 +33,7 @@ to a specific bug fix:
     post-processing pass. `ExtractedFields`' key set is hand-kept (this
     module may not import stage4.schemas), so it needs the same drift
     guard `DATE_RANGE_TAXONOMY_CODES` has -- see the last two tests.
-  - Two-digit-year century: the LLM read "11/02" as 1902. The repair moves a
+  - Two-digit-year century: the LLM read "10/08" as 1908. The repair moves a
     19xx year the text holds only as a two-digit token to the century the
     shared pivot (core/two_digit_year.py) gives it -- see the last section.
 
@@ -301,20 +301,20 @@ _CENTURY_REASON = "Re-derived the century of a two-digit source year"
     "text,fields,expected",
     [
         # m/yy, the bare month-year shape
-        ("Invited talk, Example Society 11/02", {"date": "1902-11"}, {"date": "2002-11"}),
+        ("Invited talk, Example Society 10/08", {"date": "1908-10"}, {"date": "2008-10"}),
         # m/d/yy
-        ("Grand rounds, Example Hospital 1/14/03", {"date": "1903-01-14"}, {"date": "2003-01-14"}),
+        ("Grand rounds, Example Hospital 3/22/05", {"date": "1905-03-22"}, {"date": "2005-03-22"}),
         # m/yy-yyyy: only the two-digit start is wrong; the 4-digit end is in the text
         (
-            "Example Committee, member 9/02-2012",
-            {"start_date": "1902", "end_date": "2012"},
-            {"start_date": "2002", "end_date": "2012"},
+            "Example Committee, member 4/07-2013",
+            {"start_date": "1907", "end_date": "2013"},
+            {"start_date": "2007", "end_date": "2013"},
         ),
         # m/d/yy-m/d/yy: both ends of the range move
         (
-            "Example Award 9/1/09- 8/31/14",
-            {"start_date": "1909-09-01", "end_date": "1914-08-31"},
-            {"start_date": "2009-09-01", "end_date": "2014-08-31"},
+            "Example Award 8/1/08- 7/31/12",
+            {"start_date": "1908-08-01", "end_date": "1912-07-31"},
+            {"start_date": "2008-08-01", "end_date": "2012-07-31"},
         ),
         # apostrophe forms: straight, left and right curly quotes
         ("Example Prize '04", {"year": "1904"}, {"year": "2004"}),
@@ -334,12 +334,12 @@ def test_two_digit_source_year_moves_to_the_pivot_century(text, fields, expected
 
 def test_two_digit_century_repair_records_what_it_changed():
     updated, reformatted = apply_regex_post_processing(
-        "Invited talk, Example Society 11/02", {"date": "1902-11", "title": "Example"}, "R"
+        "Invited talk, Example Society 10/08", {"date": "1908-10", "title": "Example"}, "R"
     )
 
-    assert updated == {"date": "2002-11", "title": "Example"}
+    assert updated == {"date": "2008-10", "title": "Example"}
     assert reformatted == {
-        "date": {"original": "1902-11", "reformatted": "2002-11", "reason": _CENTURY_REASON},
+        "date": {"original": "1908-10", "reformatted": "2008-10", "reason": _CENTURY_REASON},
     }
 
 
@@ -349,8 +349,8 @@ def test_two_digit_century_repair_records_what_it_changed():
         # a 1960s two-digit date: the pivot reads "65" as 1965, so it stays
         ("Example Society member 6/65", {"date": "1965-06"}),
         # a 20yy year above the pivot is never pulled back to 19yy: a grant
-        # ending "6/30/31" really does end in 2031
-        ("Example grant 7/1/26-6/30/31", {"start_date": "2026-07-01", "end_date": "2031-06-30"}),
+        # ending "8/31/32" really does end in 2032
+        ("Example grant 9/1/27-8/31/32", {"start_date": "2027-09-01", "end_date": "2032-08-31"}),
         # the 19xx year is written out in the text, so the text supports it
         ("Example Society, founded 1903; member 5/03", {"date": "1903"}),
         # no two-digit token at all
