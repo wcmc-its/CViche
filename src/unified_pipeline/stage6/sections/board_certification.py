@@ -688,10 +688,8 @@ class BoardCertificationSection:
     def _warn_skipped_certification_row(self, year: str) -> None:
         """Record a reconstructed row dropped for having neither a specialty
         nor a certificate number (a bare year line), so the doctor sees it
-        instead of the date vanishing silently (#1234)."""
-        logger.warning(
-            "board certification: skipping reconstructed row with no specialty "
-            "and no certificate number (year=%r)", year)
+        instead of the date vanishing silently (#1234). The sidecar record is
+        logged by `_log_validation_warnings`, so no separate log call."""
         self._section_failures.append({
             "check": SKIPPED_ROW_CHECK,
             "code": "F2",
