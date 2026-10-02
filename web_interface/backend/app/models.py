@@ -6,6 +6,9 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.base_class import Base
 
+# Length of a hex-encoded sha256 digest.
+SHA256_HEX_LENGTH = 64
+
 
 class RunState(StrEnum):
     """Canonical ``runs.status`` vocabulary (CODING STANDARDS section 1.5: one
@@ -221,6 +224,10 @@ class Run(Base):
     # columns, unreadable text, or a detector failure at upload.
     input_format = Column(String(10), nullable=True, index=True)
     input_format_score = Column(Integer, nullable=True)
+    # sha256 (hex) of the uploaded bytes (#1286): the upload endpoint matches it
+    # against every run, any submitter, to ask before re-processing a file.
+    # NULL for runs that predate the column until the backfill fills it.
+    source_sha256 = Column(String(SHA256_HEX_LENGTH), nullable=True, index=True)
     # The batch upload this run belongs to (#1114), NULL for a single upload.
     # Also routes the run's queue token to the batch queue
     # (run_queue.queue_for) and suppresses its Teams "started" card.

@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import logging
+import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -530,6 +531,82 @@ def test_upload_survives_an_input_format_detector_failure(client, db, seed_simpl
         run = _upload_with_text(client, db, tmp_path, _WCM_TEMPLATE_TEXT, boom)
     assert run.input_format is None and run.input_format_score is None
     assert any("Input-format detection failed" in r.message for r in caplog.records)
+
+
+# --- #1286: ask before re-processing a file already run -----------------------
+
+_DUP_BYTES = b"PK\x03\x04synthetic-duplicate-bytes"
+_DUP_SHA = hashlib.sha256(_DUP_BYTES).hexdigest()
+
+
+def _seed_prior_run(db, owner, run_id="P00001", sha=_DUP_SHA, started=datetime(2026, 3, 4, 10, 0)):
+    db.add(Run(id=run_id, filename="old.docx", file_type="docx", status="complete",
+               user_id=owner.id, started_at=started, source_sha256=sha))
+    db.commit()
+
+
+def _dup_upload(client, tmp_path, data=None):
+    """Upload the duplicate bytes with a real LocalRunStorage; returns (response, storage)."""
+    root = tmp_path / uuid.uuid4().hex
+    root.mkdir()
+    storage, _, patches = _real_storage_patches(root)
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", _DUP_BYTES, DOCX_MIME, data))
+    return resp, root
+
+
+def test_upload_stores_source_sha256(client, db, seed_simple_mode, tmp_path):
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path)
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).source_sha256 == _DUP_SHA
+
+
+def test_duplicate_upload_stops_without_creating_or_archiving(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other)
+    _auth(client, _make_user(db))
+    resp, root = _dup_upload(client, tmp_path)
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "duplicate_file"
+    assert "March 4, 2026" in detail["message"]
+    assert db.query(Run).count() == 1  # only the seeded prior run
+    assert [p for p in root.rglob("*") if p.is_file()] == []  # nothing archived or written locally
+
+
+def test_confirm_duplicate_proceeds(client, db, seed_simple_mode, tmp_path):
+    _seed_prior_run(db, _make_user(db, email="other@example.com"))
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path, {"confirm_duplicate": "true"})
+
+    assert resp.status_code == 200, resp.text
+    assert db.query(Run).filter(Run.source_sha256 == _DUP_SHA).count() == 2
+
+
+def test_duplicate_notice_hides_other_submitters_run_from_non_admin(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other, run_id="ZZ9999")
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path)
+
+    assert resp.status_code == 409
+    assert "run_id" not in resp.json()["detail"]
+    for leaked in ("ZZ9999", "other@example.com", "Test User"):
+        assert leaked not in resp.text
+
+
+def test_duplicate_notice_shows_run_id_to_admin_and_to_its_own_submitter(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other, run_id="ZZ9999")
+    admin = _make_user(db, email="admin@example.com", role="admin")
+    _auth(client, admin)
+    assert _dup_upload(client, tmp_path)[0].json()["detail"]["run_id"] == "ZZ9999"
+
+    me = _make_user(db, email="me@example.com")
+    _seed_prior_run(db, me, run_id="MINE01", started=datetime(2026, 5, 1))
+    _auth(client, me)
+    assert _dup_upload(client, tmp_path)[0].json()["detail"]["run_id"] == "MINE01"
 
 
 # --- #793: bounded read + off-event-loop extraction -------------------------

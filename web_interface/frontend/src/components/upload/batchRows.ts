@@ -1,4 +1,5 @@
 import type { ApiError } from '../../api/client'
+import { isDuplicateError } from '../../api/upload'
 import type { Estimate, QueueLane, QuotaInfo } from '../../types'
 import { formatMinutes } from '../../utils'
 
@@ -36,6 +37,8 @@ export interface RowFailure {
   reason: string
   /** Network errors, 5xx and 429 can be retried; a 4xx validation error cannot. */
   retryable: boolean
+  /** The server already ran this exact file (#1286): the row waits for "Run it again". */
+  duplicate?: boolean
 }
 
 /** One selected file of a batch. */
@@ -71,6 +74,7 @@ export const isValidRow = (row: BatchRow): boolean => row.invalidReason === null
 /** Sort a failed request into retryable (no answer, 5xx, 429) or permanent (other 4xx). */
 export function classifyFailure(err: unknown, fallbackReason: string): RowFailure {
   const { status, message } = (err ?? {}) as Partial<ApiError>
+  if (isDuplicateError(err)) return { reason: message ?? fallbackReason, retryable: false, duplicate: true }
   const retryable = status === undefined || status >= SERVER_ERROR_MIN_STATUS || status === TOO_MANY_REQUESTS
   const reason = status === undefined ? INTERRUPTED_REASON : message || fallbackReason
   return { reason, retryable }
@@ -91,7 +95,7 @@ export const wasStarted = (runStatus: string): boolean => !STARTABLE_RUN_STATUSE
 export function rowNote(row: BatchRow): string {
   if (row.invalidReason) return row.invalidReason
   if (row.state !== 'failed' || !row.failure) return ''
-  if (row.failure.retryable) return row.failure.reason
+  if (row.failure.retryable || row.failure.duplicate) return row.failure.reason
   return `${row.failure.reason.replace(/\.\s*$/, '')}. ${PERMANENT_FAILURE_SUFFIX}`
 }
 
@@ -202,6 +206,8 @@ export interface SendProgress {
   queued: number
   retryable: number
   permanent: number
+  /** Rows held for the user to confirm re-running a file already processed. */
+  duplicates: number
 }
 
 export function sendProgress(rows: BatchRow[]): SendProgress {
@@ -209,7 +215,8 @@ export function sendProgress(rows: BatchRow[]): SendProgress {
   const failed = valid.filter((r) => r.state === 'failed')
   const retryable = failed.filter((r) => r.failure?.retryable).length
   const queued = valid.filter((r) => r.state === 'queued').length
-  return { sent: queued + failed.length, total: valid.length, queued, retryable, permanent: failed.length - retryable }
+  const duplicates = failed.filter((r) => r.failure?.duplicate).length
+  return { sent: queued + failed.length, total: valid.length, queued, retryable, permanent: failed.length - retryable - duplicates, duplicates }
 }
 
 export function doneTitle(p: SendProgress): string {
