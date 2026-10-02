@@ -651,3 +651,98 @@ def test_publication_year_window():
     assert not plausible_publication_year('2021', 2025)
     assert plausible_publication_year('in press', 2025)
     assert plausible_publication_year(None, 2025)
+
+
+PRESS_RELEASES = ('Sumner P, Vivian-Griffiths S, Boivin J. Exaggerations and caveats in '
+                  'press releases and health-related science news. PLoS One. 2016;11(12):e0168217.')
+
+
+def test_in_press_releases_is_a_title_idiom_not_a_status():
+    # PMID 27978540: stage 4's title absent or spelled differently must not matter.
+    assert in_press_phrase(PRESS_RELEASES) is None
+    assert in_press_phrase(PRESS_RELEASES, 'Exaggerations and Caveats in Press Releases') is None
+
+
+def test_phrase_in_a_differently_spelled_title_needs_a_second_match():
+    text = 'Garcia M. SOCIALLY ACCEPTED NORMS of statin use. JAMA. 2024;1:1.'
+    assert in_press_phrase(text, 'Socially accepted norms of statin use') is None
+    assert in_press_phrase(text + ' Accepted.', 'Socially accepted norms of statin use') == 'accepted'
+
+
+def test_accepted_abstract_is_a_conference_abstract():
+    assert in_press_phrase('Doe J. Hard metal lung disease. Accepted abstract, ATS 2024.') is None
+
+
+def test_status_before_a_word_still_counts():
+    # Corpus shapes: the status is followed by an identifier or a venue, not punctuation.
+    assert in_press_phrase('Doe J. A sling trial. J Urol. In press PMID: 26820550') == 'in press'
+    assert in_press_phrase('Doe J. Learning. [In Press in the 2022 Proceedings of X]') == 'in press'
+
+
+def test_pubmed_title_idioms_are_not_statuses():
+    # From the 2,496 PubMed titles holding a trigger phrase (2026-10-02 sweep).
+    for text in ('Constructing the image of China in press conference interpreting. J X. 2020;1:1.',
+                 'Bone stress in press-fit femoral knee implants. J Biomech. 2021;1:1.',
+                 'Unmasking disparities in Press Ganey surveys. J Y. 2022;1:1.',
+                 'Microwave ablation can be accepted as a standard treatment. J Z. 2019;1:1.',
+                 'Recommendations made and accepted by a stewardship program. J Z. 2019;1:1.'):
+        assert in_press_phrase(text) is None, text
+
+
+def test_accepted_status_shapes_still_count():
+    for text, phrase in (('Doe J. A study. JAMA. Accepted.', 'accepted'),
+                         ('Doe J. A study. JAMA (accepted 9/2021)', 'accepted'),
+                         ('Doe J. A study. Accepted for publication in J Am Coll Surg.', 'accepted'),
+                         ('Doe J. A study. Mov Disord. 2022 Accepted Author Manuscript.', 'accepted'),
+                         ('Doe J. A study. Pancreas. [Epub ahead of print].', 'epub ahead of print')):
+        assert in_press_phrase(text) == phrase, text
+
+
+def test_untitled_entry_is_not_treated_as_in_press(tmp_path, monkeypatch):
+    # Without a title, a letter titled 'Re: ... Eur Urol. In press.' cannot be
+    # told from a status, and there is nothing to search by anyway.
+    # The entry has a PMID, so the ID path enriches it; only the in-press
+    # note, year and recode are withheld.
+    entry = _inpress_entry(text='Doe J. Re: Smith A. A trial. Eur Urol. In press. PMID: 12345678')
+    entry['extracted_fields'].update(title='', pmid=PMID)
+    result, _, _ = _run_stage5(tmp_path, monkeypatch, entry,
+                               [FakeResponse(200, content=_published_xml())])
+    assert result['enrichment_status'] == 'enriched'
+    assert result['taxonomy_code'] == 'S7'
+    assert 'in_press_note' not in result
+
+
+def _published_entry(**fields):
+    return {'taxonomy_code': 'S1', 'text': 'Garcia M. Published version.',
+            'extracted_fields': {'authors': 'Garcia M', **fields}}
+
+
+def test_in_press_entry_already_listed_as_published_is_marked_superseded(tmp_path, monkeypatch):
+    # web200: the same paper listed both as published and as "in press".
+    enricher, _, _ = _make(monkeypatch, _found())
+    path = tmp_path / 's4.json'
+    published = _published_entry(title=INPRESS_TITLE, year='2025')
+    path.write_text(json.dumps({'document_uid': 'x', 'entries': [_inpress_entry(), published]}))
+    result = enricher.enrich_stage4_output(str(path))['entries'][0]
+    assert result['in_press_superseded'] is True
+    assert result['in_press_note'] == (
+        f'Already listed as published (PMID {PMID}); the CV also listed it as in press.')
+    assert result['taxonomy_code'] == 'S7'  # left alone: stage 6 deletes it
+    assert enricher.stats['in_press_duplicates'] == 1
+    assert enricher.stats['in_press_resolved'] == 0
+
+
+def test_same_pmid_elsewhere_is_a_duplicate_but_similar_title_other_year_is_not(tmp_path, monkeypatch):
+    # A PMID on the other entry costs one efetch before the title search.
+    pmid_lookup = [FakeResponse(200, content=_published_xml())]
+    for other, superseded, extra in (
+            (_published_entry(title=INPRESS_TITLE, pmid=PMID), True, pmid_lookup),
+            (_published_entry(title=INPRESS_TITLE, year='2019'), False, []),
+            # web228: a shorter title nested in the in-press one, same year.
+            (_published_entry(title='Statin adherence in older adults', year='2025'), False, []),
+            (dict(_published_entry(title=INPRESS_TITLE, year='2025'), taxonomy_code='S8'), False, [])):
+        enricher, _, _ = _make(monkeypatch, extra + _found())
+        path = tmp_path / 's4.json'
+        path.write_text(json.dumps({'document_uid': 'x', 'entries': [_inpress_entry(), other]}))
+        result = enricher.enrich_stage4_output(str(path))['entries'][0]
+        assert result.get('in_press_superseded', False) is superseded, other

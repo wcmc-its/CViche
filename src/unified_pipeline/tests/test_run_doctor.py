@@ -24,8 +24,12 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
-from unified_pipeline.quality_score import score_cv_owner  # noqa: E402
-from unified_pipeline.doctor.lints.render import DATE_ONLY_LINES_WARN_COUNT  # noqa: E402
+from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH, score_cv_owner  # noqa: E402
+from unified_pipeline.doctor.lints.render import (  # noqa: E402
+    DATE_ONLY_LINES_WARN_COUNT,
+    OUTPUT_LEAK_EVIDENCE_LIMIT,
+)
+from unified_pipeline.doctor.shared import TABLE_ROW_JOINER, docx_body_blocks  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     MISSED_HEADERS_WARN_COUNT,
@@ -43,12 +47,14 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
+    lint_llm_refusal_in_output,
     lint_missed_headers,
     lint_no_output,
     lint_output_hygiene,
     lint_owner_contact_missing,
     lint_pipe_leaks,
     lint_pipeline_errors,
+    lint_python_repr_in_output,
     lint_section_lost,
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
@@ -1326,6 +1332,194 @@ def test_date_only_lines_is_a_registered_lint():
                for spec in LINT_REGISTRY)
 
 
+# ------- lints 14f/14g: repr and refusal text in the output (#1233, #1224)
+
+_REPR_DICT = "{'start_date': '2010', 'end_date': '2020'}"
+
+
+def _table_block(*rows):
+    """A table block the way `docx_body_blocks` writes it: each cell on its
+    own line, then each multi-cell row again joined the way `_table_lines`
+    joins it."""
+    lines = []
+    for cells in rows:
+        lines += list(cells)
+        if len(cells) > 1:
+            lines.append(TABLE_ROW_JOINER.join(cells))
+    return ("table", "\n".join(lines))
+
+
+def test_python_repr_flags_a_dict_repr_glued_to_a_year():
+    blocks = [("p", "G. LICENSURE, BOARD CERTIFICATION"),
+              _table_block(("Example Board", f"2000-{_REPR_DICT}"))]
+    findings = lint_python_repr_in_output(blocks)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "python_repr_in_output" and f["severity"] == "WARN"
+    assert f["message"].startswith("1 distinct Python dict/list repr text(s)")
+    assert f["evidence"] == [_REPR_DICT]
+
+
+def test_python_repr_counts_a_table_cell_once_not_again_for_its_joined_row():
+    """One repr in the first cell (the joined row then carries text after it)
+    and one in the last (it does not): neither is counted a second time."""
+    other = "{'start_date': '2015', 'end_date': '2016'}"
+    blocks = [_table_block((_REPR_DICT, "Example Talk"), ("Other Talk", other))]
+    findings = lint_python_repr_in_output(blocks)
+    assert findings[0]["message"].startswith("2 distinct")
+    assert findings[0]["evidence"] == [_REPR_DICT, other]
+
+
+def test_python_repr_counts_a_cell_of_a_real_docx_table_once():
+    """`_table_block` imitates `docx_body_blocks`; this reads the real thing, so
+    the dedupe cannot drift from how `_table_lines` joins a row."""
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].paragraphs[0].text = _REPR_DICT
+    table.rows[0].cells[1].paragraphs[0].text = "Example Talk"
+    findings = lint_python_repr_in_output(docx_body_blocks(doc))
+    assert findings[0]["message"].startswith("1 distinct")
+    assert findings[0]["evidence"] == [_REPR_DICT]
+
+
+@pytest.mark.parametrize("text", [
+    "['Example course A', 'Example course B']",
+    '["Women\'s health", \'Example course\']',
+    "['2001-01', '2003-03']-['2002-02', '2004-04']",
+    '{"start_date": "2010", "end_date": "2020"}',
+    "[{'start_date': '2010'}]",
+])
+def test_python_repr_flags_each_shape_str_of_a_container_prints(text):
+    findings = lint_python_repr_in_output([("p", f"Example row | {text}")])
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"]
+
+
+@pytest.mark.parametrize("text", [
+    "[1] Doe J, Roe R. Example title. J Example. 2020;1:1-9. [2] Doe J.",
+    "Uptake of [3H]-thymidine was measured in {n=12} wells.",
+    "Doe J [Ed.]. Example Handbook. Cohort [n=40], set {a, b}.",
+    "Example Center for Health (CEH) ('Example Study', 2020)",
+    "https://example.org/a[0]/b",
+    "",
+])
+def test_python_repr_ignores_ordinary_brackets_braces_and_quotes(text):
+    assert lint_python_repr_in_output([("p", text), ("table", text)]) == []
+
+
+def test_python_repr_scans_the_appendix_too():
+    blocks = [("p", "T. APPENDIX"), ("p", f"1. Example entry {_REPR_DICT}")]
+    assert len(lint_python_repr_in_output(blocks)) == 1
+
+
+def test_python_repr_caps_the_evidence_and_still_counts_every_hit():
+    dicts = [f"{{'start_date': '20{i:02d}'}}" for i in range(OUTPUT_LEAK_EVIDENCE_LIMIT + 2)]
+    findings = lint_python_repr_in_output([("p", d) for d in dicts])
+    assert findings[0]["message"].startswith(f"{len(dicts)} distinct")
+    assert findings[0]["evidence"] == dicts[:OUTPUT_LEAK_EVIDENCE_LIMIT]
+    assert len(findings[0]["evidence"]) == 5  # the cap itself, not the constant
+
+
+# The shape MYAXRH rendered (#1224), with invented names. Every sentence below
+# is one the model wrote to the user, not text a CV owner wrote.
+_REFUSAL = (
+    "I don't have access to specific CV details for Example Person beyond "
+    "what you've indicated would be provided, and no actual CV content was "
+    'included in your message. The "CV CONTEXT" section appears empty.\n\n'
+    "Please provide the actual CV content or research details for Example "
+    "Person, and I'll be happy to draft a concise summary paragraph.")
+
+
+def test_llm_refusal_flags_the_text_stage_4_5_rendered_for_an_empty_context():
+    blocks = [("p", "Research Activities: In a paragraph (up to 300 words)"),
+              ("p", _REFUSAL)]
+    findings = lint_llm_refusal_in_output(blocks)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "llm_refusal_in_output" and f["severity"] == "WARN"
+    assert f["message"].startswith("2 distinct language-model refusal")
+    assert f["evidence"][0].startswith("I don't have access to")
+
+
+@pytest.mark.parametrize("sentence", [
+    "I do not have access to the document.",
+    "I don\u2019t have access to the document.",
+    "I am unable to access the CV text.",
+    "I'm not able to summarize this without more detail.",
+    "I cannot provide a summary of this researcher.",
+    "I can't generate that paragraph.",
+    "As an AI language model, I have nothing to summarise.",
+    "As an AI assistant I cannot see the CV.",
+    "As an AI, I have no record of this researcher.",
+    "I'm sorry, but there is nothing here to work with.",
+    "I apologize, but the context is blank.",
+    'The "CV CONTEXT" section is missing.',
+    "Please provide the full CV and I will start.",
+    "No details were provided in your message.",
+    "I will be glad to write the paragraph once I have the CV.",
+])
+def test_llm_refusal_flags_each_standard_refusal_opener(sentence):
+    findings = lint_llm_refusal_in_output([("p", f"Example heading\n{sentence}")])
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"]
+
+
+@pytest.mark.parametrize("text", [
+    "I Can't Sleep Anymore: A Case Series. J Example. 2020;1:1-9.",
+    "If yes, please provide Visa type (Examples: J-1, H-1B):",
+    "As an AI researcher she builds models of example outcomes.",
+    "Example Chatbot as an AI assistant in clinical documentation: a review.",
+    "Example Tool as an AI language model in medical education. J Example.",
+    "Dr. Doe is unable to attend; please provide feedback to the chair.",
+    "The CV context for this hire was reviewed by the committee.",
+    "She cannot be reached by phone, and she writes every weekday.",
+    "",
+])
+def test_llm_refusal_ignores_first_person_and_polite_text_in_a_real_cv(text):
+    assert lint_llm_refusal_in_output([("p", text), ("table", text)]) == []
+
+
+def test_neither_lint_fires_on_the_pristine_wcm_template():
+    """The template's own scaffolding ("please provide Visa type", every field
+    label) is on every rendered CV, so a phrase it contains would fire
+    corpus-wide."""
+    from docx import Document as OpenDocument
+    blocks = docx_body_blocks(OpenDocument(str(_TEMPLATE_DOCX_PATH)))
+    assert blocks
+    assert lint_python_repr_in_output(blocks) == []
+    assert lint_llm_refusal_in_output(blocks) == []
+
+
+def test_repr_and_refusal_lints_are_registered_lints():
+    from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_REGISTRY
+    for lint_id, rule in (("python_repr_in_output", lint_python_repr_in_output),
+                          ("llm_refusal_in_output", lint_llm_refusal_in_output)):
+        assert lint_id in KNOWN_LINTS
+        assert any(spec.lint_id == lint_id and spec.rule is rule
+                   and spec.inputs == ("blocks",) for spec in LINT_REGISTRY)
+
+
+def test_run_doctor_wires_repr_and_refusal_through_to_the_verdict(tmp_path):
+    """#1233 / #1224 end to end: a real docx table cell and a real paragraph,
+    read through `read_docx_blocks`, reach the verdict as one WARN each."""
+    root = _build_clean_run(tmp_path)
+    docx_path = next((root / "stage_6_wcm_documents").glob(f"{_UID}*_wcm.docx"))
+    doc = Document(str(docx_path))
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].paragraphs[0].text = "Example Board"
+    table.rows[0].cells[1].paragraphs[0].text = f"2000-{_REPR_DICT}"
+    doc.add_paragraph(_REFUSAL)
+    doc.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    by_lint = {f["lint"]: f for f in payload["findings"]}
+    assert by_lint["python_repr_in_output"]["severity"] == "WARN"
+    assert by_lint["python_repr_in_output"]["evidence"] == [_REPR_DICT]
+    assert by_lint["llm_refusal_in_output"]["severity"] == "WARN"
+    assert payload["counts"]["ERROR"] == 0
+
+
 # ------------------------------------------------------ lint 12: pipe leaks
 
 def test_pipe_leaks_flags_multi_pipe_paragraphs_not_tables():
@@ -1997,12 +2191,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (30), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (32), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 29
+    assert len(payload["findings"]) == 31
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

@@ -210,6 +210,11 @@ class Run(Base):
     show_track_changes = Column(Integer, default=1)
     show_pipeline_comments = Column(Integer, default=0)
     strip_template_instructions = Column(Integer, default=1, server_default="1", nullable=False)
+    # Image tag of the process that last moved this run to "running" (#1239):
+    # stamped at the worker's claim (and at each resume or retry, so the latest
+    # executing image wins), not at upload. NULL for runs that predate the
+    # column or when the image was built without a tag.
+    image_tag = Column(String(128), nullable=True)
     # The batch upload this run belongs to (#1114), NULL for a single upload.
     # Also routes the run's queue token to the batch queue
     # (run_queue.queue_for) and suppresses its Teams "started" card.

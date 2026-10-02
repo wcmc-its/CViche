@@ -41,7 +41,11 @@ from unified_pipeline.stage4.coercion import (
     IDENTIFIER_TAXONOMY_CODES,
     find_single_closed_range,
 )
-from unified_pipeline.stage4.schemas import FIELD_SCHEMA_CONFIG_PATH, FIELD_SCHEMAS
+from unified_pipeline.stage4.schemas import (
+    FIELD_SCHEMA_CONFIG_PATH,
+    FIELD_SCHEMAS,
+    STAGE4_RECORDS_KEY,
+)
 from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
 from unified_pipeline.stage_5d_citation_formatter import PUBLICATION_CODES
 from unified_pipeline.core.text_norm import (
@@ -992,7 +996,8 @@ def _fanned_out_keys(entry: _FieldsEntry) -> frozenset[str]:
     disagree with the renderer about which lists render."""
     probe = {"taxonomy_code": entry.code, "text": entry.text,
              "extracted_fields": dict(entry.fields)}
-    children = fan_out_multi_record_entries([probe], FIELD_SCHEMAS)
+    children = fan_out_multi_record_entries([probe], FIELD_SCHEMAS,
+                                            records_key=STAGE4_RECORDS_KEY)
     return frozenset(child[FANNED_OUT_FROM]["key"] for child in children
                      if FANNED_OUT_FROM in child)
 

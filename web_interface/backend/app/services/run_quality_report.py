@@ -99,6 +99,8 @@ LINT_EXPLANATIONS = {
     "offschema_fields": "Some extracted details were filed under a name no part of the document reads, so they are missing from it.",
     "implausible_year": "Some dates are a century off, most likely because the CV gave a two-digit year.",
     "stage4_group_failures": "Reading a group of entries failed and was retried separately, so those entries may be incomplete or hold wrong values.",
+    "python_repr_in_output": "Raw program data, such as curly braces around quoted field names, was written into the document instead of a formatted value.",
+    "llm_refusal_in_output": "The document contains the AI model's reply asking for more information instead of CV content.",
     "owner_contact_missing": "The CV owner's name could not be identified, so the document cannot be filed under anyone.",
     "pipeline_errors_present": "A stage failed with an error, so part of the output is missing.",
     "no_output": "The run produced no document.",

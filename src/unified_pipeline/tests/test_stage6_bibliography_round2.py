@@ -966,3 +966,39 @@ def test_in_press_note_is_a_comment_on_the_tracked_citation_even_with_comments_o
     assert para._p.find(qn("w:del")) is not None
     assert para._p.find(qn("w:commentRangeStart")) is not None
     assert [c["text"] for c in gen._comments] == [note]
+
+
+def _superseded_entry():
+    entry = _citation_entry("Doe J. A study. J. 2025;1:1-2.", "Doe J", 2025)
+    entry.update(enrichment_status="enriched", text="Doe J. A study. Other J. In press.",
+                 in_press_superseded=True,
+                 in_press_note="Already listed as published (PMID 1); the CV also listed it as in press.")
+    return entry
+
+
+def test_superseded_in_press_citation_is_one_tracked_deletion_with_no_number():
+    gen = _generator()
+    kept = _citation_entry("Doe J. Kept study. J. 2024;1:1-2.", "Doe J", 2024)
+
+    gen._fill_bibliography({"S1": [_superseded_entry(), kept]}, cv_owner={}, document_uid="")
+
+    header_idx = gen._find_paragraph_with_text("Peer-reviewed Research Articles:")
+    paras = gen.doc.paragraphs[header_idx:header_idx + 5]
+    deleted = [p for p in paras if p._p.find(qn("w:del")) is not None]
+    assert len(deleted) == 1
+    assert deleted[0]._p.find(qn("w:ins")) is None
+    assert "".join(t.text for t in deleted[0]._p.iter(qn("w:delText"))) == "Doe J. A study. Other J. In press."
+    assert "1. Doe J. Kept study. J. 2024;1:1-2." in [p.text for p in paras]
+    assert [c["text"] for c in gen._comments] == [_superseded_entry()["in_press_note"]]
+
+
+def test_superseded_in_press_citation_is_absent_with_track_changes_off():
+    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=False)
+    gen.doc = Document(gen.template_path)
+    before = len(gen.doc.paragraphs)
+
+    gen._fill_bibliography({"S1": [_superseded_entry()]}, cv_owner={}, document_uid="")
+
+    assert all("A study" not in p.text for p in gen.doc.paragraphs)
+    assert gen._comments == []
+    assert len(gen.doc.paragraphs) - before <= 1  # at most the section's leading blank line
