@@ -1075,16 +1075,20 @@ def test_an_organization_alias_field_vetoes_the_header_heuristic():
     assert _header_skips(gen) == []
 
 
-def test_an_extracted_date_pair_alone_vetoes_the_header_heuristic():
-    entry = {"text": _HEADER_SHAPED_DATA,
-             "extracted_fields": {"start_date": "2015", "end_date": "Present"}}
+def test_a_date_pair_without_an_organization_is_dropped_and_warned():
+    """The date half of a source row split across two entries: rendering it
+    would put the word "date" in the organization cell, so the date pair does
+    not veto the heuristic. The drop is a WARN because fields were extracted."""
+    entry = {"text": "Member      2014 - date", "extracted_fields": {
+        "membership_type": "Member", "start_date": "2014", "end_date": "present"}}
     gen, rows = _fill([entry])
-    assert len(rows) == 1 and rows[0][1] == "2015-Present", rows
-    assert _header_skips(gen) == []
+    assert rows == [], rows
+    assert [w["severity"] for w in _header_skips(gen)] == ["WARN"]
 
 
 @pytest.mark.parametrize("fields", [
-    {}, {"start_date": "2015"}, {"end_date": "Present"}, {"membership_type": "Member"}])
+    {}, {"start_date": "2015"}, {"end_date": "Present"}, {"membership_type": "Member"},
+    {"start_date": "2015", "end_date": "Present"}])
 def test_a_real_header_row_without_an_organization_or_date_pair_is_still_dropped(fields):
     gen, rows = _fill([{"text": "Organization | Dates", "extracted_fields": fields}])
     assert rows == [], rows
