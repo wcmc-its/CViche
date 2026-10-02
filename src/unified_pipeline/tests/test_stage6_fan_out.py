@@ -666,14 +666,17 @@ class TestStage4Records:
         assert last['extracted_fields']['role'] == 'Member'
 
     def test_a_stage5_annotation_stays_on_the_last_record_only(self):
-        enrichment = {'cleaned_name': 'Ashby University', 'city': 'Ashby'}
-        parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES),
-                               institution_enrichment=enrichment, enriched_fields=['city'])
+        # Every entry key stage 5 writes, named here rather than read off the
+        # module, so dropping one from `_STAGE5_ENTRY_KEYS` fails this test.
+        annotations = {'enriched_fields': ['city'], 'enrichment_data': {'pmid': '1'},
+                       'enrichment_rejected': True, 'enrichment_source': 'llm',
+                       'enrichment_status': 'ok',
+                       'institution_enrichment': {'cleaned_name': 'Ashby University'}}
+        parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), **annotations)
         children = _fan4(parent)
         for child in children[:-1]:
-            assert not set(child) & fan_out._STAGE5_ENTRY_KEYS
-        assert children[-1]['institution_enrichment'] == enrichment
-        assert children[-1]['enriched_fields'] == ['city']
+            assert not set(child) & set(annotations)
+        assert {key: children[-1][key] for key in annotations} == annotations
 
     def test_a_scalar_stage5_added_to_the_parent_stays_on_the_last_record(self):
         parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES))
@@ -709,16 +712,17 @@ class TestStage4Records:
         assert _fan4(entry) == [entry]
 
     def test_a_declined_list_is_not_split_by_the_generic_rules(self):
-        # Without records_key the generic rules would take the list as an
-        # off-schema record list; with it, a declined list is not theirs.
-        entry = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), code='K2')
-        entry['extracted_fields'] = {_RECORDS: [{'teaching_role': 'Lecturer'}, {'teaching_role': 'Tutor'}]}
+        # The second record writes nothing in a P row, so this list declines;
+        # the generic rules, handed it, would split it into an empty row.
+        records = [{'committee_name': 'Glade Board', 'role': 'Chair'}, {'description': 'Zz'}]
+        entry = _stage4_entry(records, text='Glade Board Chair')
+        assert len(fan_out_multi_record_entries([entry], FIELD_SCHEMAS)) == 2
         assert _fan4(entry) == [entry]
 
     def test_a_record_list_in_the_scalars_is_left_to_the_generic_rules(self):
         # The last record carried its own off-schema list: that list splits as
         # it did before the stage-4 list existed, and the stage-4 list goes.
-        last = {'committees': [_committee('Fern Council'), _committee('Moss Panel')]}
+        last = {'role': 'Member', 'committees': [_committee('Fern Council'), _committee('Moss Panel')]}
         entry = {'taxonomy_code': 'P', 'text': 'Member, Fern Council\tMember, Moss Panel',
                  'extracted_fields': {**last, _RECORDS: [_committee('Glade Board'), last]}}
         children = _fan4(entry)
@@ -732,4 +736,6 @@ class TestStage4Records:
         original = copy.deepcopy(parent)
         children = _fan4(parent)
         children[-1]['extracted_fields']['role'] = 'changed'
+        children[-1]['institution_enrichment']['city'] = 'changed'
+        children[0]['extracted_fields']['role'] = 'changed'
         assert parent == original

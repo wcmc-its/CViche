@@ -1028,6 +1028,15 @@ def test_validate_raw_extractions_keeps_every_item_per_entry_in_reply_order():
         {"entry_index": 0, "role": "second"},
     ], "P")
     assert grouped == {0: [{"role": "first"}, {"role": "second"}], 1: [{"role": "other"}]}
+    with pytest.raises(KeyError):  # a plain dict: a missing index is not an empty list
+        grouped[2]
+
+
+def test_the_records_keys_are_a_persisted_artifact_contract():
+    # Written into <uid>_fields.json and read back by stage 6 (and by any
+    # later reader of a stored run), so the names are pinned, not just shared.
+    assert (STAGE4_RECORDS_KEY, STAGE4_RECORDS_RETURNED_KEY) == (
+        "stage4_records", "stage4_records_returned")
 
 
 def test_batch_reply_with_several_items_for_one_entry_keeps_them_all(monkeypatch):
@@ -1078,6 +1087,25 @@ def test_every_record_is_cleaned_not_only_the_last(monkeypatch):
     first, last = entry["extracted_fields"][STAGE4_RECORDS_KEY]
     assert (first["start_date"], first["end_date"]) == ("1999", "2001")
     assert (last["start_date"], last["end_date"]) == ("2002", "2004")
+
+
+def test_only_the_last_record_is_offered_the_entry_text(monkeypatch):
+    # The text's one closed range is filled into the last record, as it was
+    # into the one record the entry kept before, and into no earlier record.
+    entry = {"text": "Fern Council; Glade Board 2001-2005", "taxonomy_code": "P",
+             "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"entries": [{"entry_index": 0, "committee_name": "Fern Council",
+                                    "role": ["Chair", "Member"]},
+                                   {"entry_index": 0, "committee_name": "Glade Board"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    first, last = out["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert first == {"committee_name": "Fern Council", "role": "Chair; Member"}  # coerced, not dated
+    assert (last["start_date"], last["end_date"]) == ("2001", "2005")
+    assert sorted(out["reformatted_fields"]) == ["end_date", "start_date"]
 
 
 def test_records_that_cover_the_entry_skip_the_recovery_call(monkeypatch):

@@ -233,6 +233,10 @@ def calculate_unextracted_content(original_text: str, extracted_fields: dict[str
 # overwriting the rest.
 _MIN_RECORDS_PER_ENTRY = 2
 
+# The source text an earlier record of a multi-record entry is cleaned
+# against: none, so the regex pass fills nothing from the entry's text into it.
+_NO_ENTRY_TEXT = ""
+
 
 class _EntryExtraction(NamedTuple):
     """What the reply's items for one entry become on that entry."""
@@ -274,8 +278,15 @@ def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
     entry's scalar fields stay the last item, as they were when the last item
     overwrote the others, every item is also kept under STAGE4_RECORDS_KEY for
     `stage6/fan_out.py` to split, and coverage is measured over all of them.
+
+    The regex pass fills a value it finds once in the entry's text (a PMID, a
+    percent effort, the one closed date range). With several records that
+    value belongs to one of them at most, so only the last record, the one
+    the entry kept before, is offered the text; an earlier one gets the
+    text-free cleanups alone.
     """
-    cleaned = [_clean_item(entry_text, dict(item), taxonomy_code) for item in items]
+    cleaned = [_clean_item(_NO_ENTRY_TEXT, dict(item), taxonomy_code) for item in items[:-1]]
+    cleaned.append(_clean_item(entry_text, dict(items[-1]), taxonomy_code))
     last_fields, last_reformatted = cleaned[-1]
     if len(cleaned) < _MIN_RECORDS_PER_ENTRY:
         coverage = calculate_unextracted_content(entry_text, last_fields)
