@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
-  MAX_UPLOAD_BYTES, NOT_DOCX_REASON, TOO_LARGE_REASON, classifyFailure, inFlightText, makeRow, mayAlreadyBeStarted, quotaShortfall, wasStarted,
+  MAX_UPLOAD_BYTES, TOO_LARGE_REASON, UNSUPPORTED_TYPE_REASON, classifyFailure, inFlightText, makeRow, mayAlreadyBeStarted, quotaShortfall, rowNote, wasStarted,
 } from './batchRows'
-import type { QuotaInfo } from '../../types'
+import type { Estimate, QuotaInfo } from '../../types'
+
+const EST_BASE: Estimate = {
+  document_tokens: 1000, text_characters: 4000, estimated_cost_min: 1, estimated_cost_max: 2,
+  estimated_time_seconds_min: 240, estimated_time_seconds_max: 360, num_steps: 12, filename: 'cv.pdf',
+  file_size_kb: 10, pricing_model: 'test-model', text_characters_is_guess: false,
+}
 
 const QUOTA: QuotaInfo = {
   daily_limit: 10, daily_used: 0, daily_remaining: 10, monthly_limit: 50, monthly_used: 47, monthly_remaining: 3, is_admin: false,
@@ -73,6 +79,30 @@ describe('makeRow size check', () => {
 
   it('accepts a file exactly at the cap and keeps the wrong-type reason first', () => {
     expect(makeRow(sized('ok.docx', MAX_UPLOAD_BYTES), 'k').invalidReason).toBeNull()
-    expect(makeRow(sized('big.pdf', MAX_UPLOAD_BYTES + 1), 'k').invalidReason).toBe(NOT_DOCX_REASON)
+    expect(makeRow(sized('big.doc', MAX_UPLOAD_BYTES + 1), 'k').invalidReason).toBe(UNSUPPORTED_TYPE_REASON)
+  })
+})
+
+describe('makeRow file type (#1273)', () => {
+  it('accepts .docx and .pdf in any case, and refuses anything else', () => {
+    for (const name of ['cv.docx', 'cv.pdf', 'CV.PDF']) expect(makeRow(new File(['x'], name), 'k').invalidReason).toBeNull()
+    for (const name of ['cv.doc', 'cv.txt', 'cv.pdf.zip']) {
+      expect(makeRow(new File(['x'], name), 'k').invalidReason).toBe(UNSUPPORTED_TYPE_REASON)
+    }
+  })
+})
+
+describe('rowNote scanned pages (#1282)', () => {
+  const withPages = (pages: number[]) => makeRow(new File(['x'], 'cv.pdf'), 'k', { ...EST_BASE, scanned_pages: pages })
+
+  it("names a PDF's scanned pages under a valid row", () => {
+    expect(rowNote(withPages([2]))).toBe("Page 2 of this PDF is a scanned image, so its text can't be read and will be missing from the output.")
+    expect(rowNote(withPages([3, 4]))).toMatch(/^Pages 3, 4 of this PDF are scanned images, so their text/)
+  })
+
+  it('says nothing when no page is scanned, and a failure still wins', () => {
+    expect(rowNote(withPages([]))).toBe('')
+    const failed = { ...withPages([2]), state: 'failed' as const, failure: { reason: 'Server error', retryable: true } }
+    expect(rowNote(failed)).toBe('Server error')
   })
 })
