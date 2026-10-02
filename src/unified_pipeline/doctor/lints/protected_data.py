@@ -247,7 +247,8 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
         # ("Born January 2, 1970" -> "Born January") would carry part of
         # the value into a Teams card. The bare-SSN and visa value shapes
         # are ALL_CODES policy rows, so they are found here in any section.
-        for match in _pii_matches(stripped, _scan_scope(section)):
+        for match in _pii_matches(stripped, _scan_scope(section),
+                                  personal_data=section == _PERSONAL_DATA_SECTION):
             if (match.category == CAT_HOME_CONTACT
                     and _HOME_CONTACT_LABEL_ONLY_RE.match(
                         stripped[match.start:match.end])):
