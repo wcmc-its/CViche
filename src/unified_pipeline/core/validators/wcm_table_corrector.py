@@ -44,14 +44,15 @@ _BOARD = re.compile(
 # membership context.
 _BOARD_NAME = re.compile(r"american board of", re.I)
 _BOARD_CERT_WORD = re.compile(
-    r"board[\s-]*(?:certif|eligible)|\bdiplomat\w*|re-?certif|certificate\s*(?:#|no\b|number)",
+    r"board[\s-]*(?:certif|eligible)|\bdiplomates?\b|re-?certif|\bcertifi(?:ed|cation)\b"
+    r"|certificate\s*(?:#|no\b|number)",
     re.I,
 )
 _YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
 _NON_CERT_HIERARCHY = re.compile(
     r"award|honou?r|committee|member|societ|organi[sz]ation", re.I
 )
-_NON_CERT_TEXT = re.compile(r"\b(?:award|prize|committee)\b", re.I)
+_NON_CERT_TEXT = re.compile(r"\b(?:awards?|prizes?|committees?)\b", re.I)
 _LICENSURE = re.compile(
     r"\b(dea|npi)\s*number\b|license\s*number|\blicensure\b|medical\s+license",
     re.I,
@@ -73,14 +74,16 @@ def _is_board_certification(entry: dict) -> bool:
     # the empty table-header row has no digit and is not promoted.
     if not _BOARD_NAME.search(text):
         return bool(re.search(r"\d", text))
+    if _NON_CERT_TEXT.search(text):
+        return False
     if _BOARD_CERT_WORD.search(text):
         return True
     return _is_board_name_with_year(entry, text)
 
 
 def _is_board_name_with_year(entry: dict, text: str) -> bool:
-    """Board name plus a year, unless the section or text says award/committee/membership."""
-    if not _YEAR.search(text) or _NON_CERT_TEXT.search(text):
+    """Board name plus a year, unless the section says award/committee/membership."""
+    if not _YEAR.search(text):
         return False
     return not _NON_CERT_HIERARCHY.search(" ".join(entry.get("hierarchy") or []))
 
