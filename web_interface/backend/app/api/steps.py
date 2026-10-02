@@ -17,7 +17,7 @@ from app.services import artifact_service, prompt_log_service
 from app.services.run_service import check_run_access
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.errors import bad_request, conflict, not_found, internal_error, forbidden
+from app.errors import bad_request, not_found, internal_error, forbidden
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +170,8 @@ _FLAG_ON = frozenset({"1", "true", "yes", "on"})
 # https://docs.aws.amazon.com/guardduty/latest/ug/monitoring-malware-protection-s3-scans-gdu.html#s3-object-scan-result-value-malware-protection
 MALWARE_SCAN_CLEAN = "NO_THREATS_FOUND"
 MALWARE_SCAN_THREATS_FOUND = "THREATS_FOUND"
+# Matches the "try again in a minute" the 409 tells the user.
+_STILL_SCANNING_RETRY_AFTER_SECONDS = 60
 
 
 def _malware_scan_required() -> bool:
@@ -188,7 +190,15 @@ def _require_clean_scan(storage: RunStorage, run_id: str, key: str) -> None:
     if status == MALWARE_SCAN_CLEAN:
         return
     if status is None:
-        raise conflict("This file is still being scanned for malware. Please try again in a minute.")
+        # errors.conflict() takes no headers, so build its 409 shape here.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "conflict",
+                "message": "This file is still being scanned for malware. Please try again in a minute.",
+            },
+            headers={"Retry-After": str(_STILL_SCANNING_RETRY_AFTER_SECONDS)},
+        )
     if status == MALWARE_SCAN_THREATS_FOUND:
         # Run id only: the upload's filename embeds its owner's name.
         logger.warning("Original-input download refused for run %s: malware scan found a threat", run_id)

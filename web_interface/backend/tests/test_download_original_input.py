@@ -4,6 +4,8 @@ run owner/admin, named as it was uploaded.
 """
 from urllib.parse import quote
 
+import pytest
+
 import app.api.steps as steps_mod
 from app.models import User, Run
 from app.auth import create_session_cookie, COOKIE_NAME
@@ -185,8 +187,12 @@ def _scanned_download(client, db, monkeypatch, suffix, scan_status):
     return store, client.get(f"/api/run/{run.id}/input", follow_redirects=False)
 
 
-def test_scan_flag_off_never_reads_the_scan_tag(client, db, seed_simple_mode, monkeypatch):
-    monkeypatch.delenv(_SCAN_FLAG, raising=False)
+@pytest.mark.parametrize("flag_value", [None, "0", "false", "off"])
+def test_scan_flag_off_never_reads_the_scan_tag(client, db, seed_simple_mode, monkeypatch, flag_value):
+    if flag_value is None:
+        monkeypatch.delenv(_SCAN_FLAG, raising=False)
+    else:
+        monkeypatch.setenv(_SCAN_FLAG, flag_value)
     store, resp = _scanned_download(client, db, monkeypatch, "-scan-off", None)
     assert resp.status_code == 307
     assert store.scan_lookups == 0
@@ -203,7 +209,9 @@ def test_scan_flag_on_untagged_original_is_409_still_scanning(client, db, seed_s
     monkeypatch.setenv(_SCAN_FLAG, "1")
     _, resp = _scanned_download(client, db, monkeypatch, "-scan-none", None)
     assert resp.status_code == 409
+    assert resp.json()["detail"]["error"] == "conflict"
     assert "still being scanned" in resp.json()["detail"]["message"]
+    assert resp.headers["Retry-After"] == "60"
 
 
 def test_scan_flag_on_threat_is_403_and_logs_run_id_not_filename(
@@ -218,9 +226,10 @@ def test_scan_flag_on_threat_is_403_and_logs_run_id_not_filename(
     assert not any("Synthetic Person" in w for w in warnings)
 
 
-def test_scan_flag_on_unscannable_original_is_403(client, db, seed_simple_mode, monkeypatch):
+@pytest.mark.parametrize("scan_status", ["UNSUPPORTED", "ACCESS_DENIED", "FAILED"])
+def test_scan_flag_on_unscannable_original_is_403(client, db, seed_simple_mode, monkeypatch, scan_status):
     monkeypatch.setenv(_SCAN_FLAG, "1")
-    _, resp = _scanned_download(client, db, monkeypatch, "-scan-unsup", "UNSUPPORTED")
+    _, resp = _scanned_download(client, db, monkeypatch, "-scan-unsup", scan_status)
     assert resp.status_code == 403
     assert "couldn't be scanned" in resp.json()["detail"]["message"]
 
