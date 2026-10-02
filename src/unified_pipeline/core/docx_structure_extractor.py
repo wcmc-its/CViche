@@ -112,8 +112,12 @@ def _iter_cell_paragraphs(cell: _Cell) -> Iterator[Paragraph]:
     nested in the cell (#1231). `cell.paragraphs` skips nested tables."""
     for item in cell.iter_inner_content():
         if isinstance(item, Table):
-            for cells in _unique_row_cells(item):
-                for nested_cell in cells:
+            seen_cells: set[Any] = set()   # a merged cell repeats across spanned rows/cols
+            for row in item.rows:
+                for nested_cell in row.cells:
+                    if nested_cell._tc in seen_cells:
+                        continue
+                    seen_cells.add(nested_cell._tc)
                     yield from _iter_cell_paragraphs(nested_cell)
         else:
             yield item

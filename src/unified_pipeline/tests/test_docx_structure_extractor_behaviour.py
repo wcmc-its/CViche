@@ -1972,3 +1972,60 @@ def test_nested_multi_cell_row_is_one_space_joined_line(tmp_path):
     doc.save(str(path))
     data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
     assert data[0][0]["text"] == "Host\n2018 Example University"
+
+
+def test_single_column_nested_vertical_merge_emits_merged_cell_once(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=1)
+    nested = outer.cell(0, 0).add_table(rows=3, cols=2)
+    nested.cell(0, 0).merge(nested.cell(2, 0)).text = "Merged label"
+    for i in range(3):
+        nested.cell(i, 1).text = f"Value {i}"
+    path = tmp_path / "vmerge.docx"
+    doc.save(str(path))
+    texts = _element_texts(str(path))
+    assert texts.count("Merged label") == 1
+    assert [t for t in texts if t.startswith("Value")] == ["Value 0", "Value 1", "Value 2"]
+
+
+def test_single_column_nested_horizontal_merge_and_deep_nesting(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=1)
+    nested = outer.cell(0, 0).add_table(rows=1, cols=2)
+    nested.cell(0, 0).merge(nested.cell(0, 1)).text = "Wide cell"
+    inner = nested.cell(0, 0).add_table(rows=1, cols=1)
+    inner.cell(0, 0).text = "Doubly nested line"
+    path = tmp_path / "deep.docx"
+    doc.save(str(path))
+    texts = _element_texts(str(path))
+    assert texts.count("Wide cell") == 1
+    assert texts.count("Doubly nested line") == 1
+
+
+def test_nested_row_with_horizontal_merge_is_listed_once_per_line(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "Host"
+    nested = cell.add_table(rows=1, cols=2)
+    nested.cell(0, 0).merge(nested.cell(0, 1)).text = "Spanning text"
+    outer.cell(0, 1).text = "Right"
+    path = tmp_path / "hmerge.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    assert data[0][0]["text"] == "Host\nSpanning text"
+
+
+def test_row_zero_header_cell_hosting_nested_list_keeps_the_list(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "ABSTRACTS"
+    nested = cell.add_table(rows=2, cols=1)
+    nested.cell(0, 0).text = "Nested abstract entry one, synthetic text that is long enough to count as content here."
+    nested.cell(1, 0).text = "Nested abstract entry two, synthetic text that is long enough to count as content here."
+    outer.cell(0, 1).text = ""
+    path = tmp_path / "hdr.docx"
+    doc.save(str(path))
+    blob = "\n".join(_element_texts(str(path)))
+    assert "Nested abstract entry one" in blob and "Nested abstract entry two" in blob
