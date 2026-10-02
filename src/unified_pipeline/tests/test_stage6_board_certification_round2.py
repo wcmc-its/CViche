@@ -1232,20 +1232,20 @@ def _board_order(entries):
 _SHARED_RANGE = {"start_date": "2009", "end_date": "2019"}
 
 
-class TestSharedRecertificationRangeOrdersByYearCertified:
-    """#1233: a dict `recertification_date` keys by its end, so two rows sharing
-    one range tie on it. They used to fall through to `year_certified` (the
-    dict's repr held no year) and read newest-certified first; the tie must
-    not turn that into input order."""
+class TestRangeValuedRecertificationDoesNotReorderRows:
+    """#1233: a `{start_date, end_date}` recertification_date is left out of the
+    F2 sort key, as it was while its repr held no year and as the string form of
+    a range still is. Two rows sharing one range therefore order by
+    `year_certified`, newest first, whatever order stage 4 listed them in."""
 
-    def test_rows_sharing_a_dict_range_read_newest_certified_first(self):
+    def test_rows_sharing_a_range_read_newest_certified_first(self):
         entries = [
             _certification("Example Older Board", "1994", _SHARED_RANGE),
             _certification("Example Newer Board", "1999", _SHARED_RANGE),
         ]
         assert _board_order(entries) == ["Example Newer Board", "Example Older Board"]
 
-    def test_the_order_is_the_same_whatever_order_stage_4_listed_them_in(self):
+    def test_the_order_does_not_depend_on_the_input_order(self):
         entries = [
             _certification("Example Newer Board", "1999", _SHARED_RANGE),
             _certification("Example Older Board", "1994", _SHARED_RANGE),
@@ -1253,10 +1253,9 @@ class TestSharedRecertificationRangeOrdersByYearCertified:
         assert _board_order(entries) == ["Example Newer Board", "Example Older Board"]
 
     def test_the_dict_range_orders_the_rows_as_the_equivalent_string_does(self):
-        as_text = "2009-2019"
         text_entries = [
-            _certification("Example Older Board", "1994", as_text),
-            _certification("Example Newer Board", "1999", as_text),
+            _certification("Example Older Board", "1994", "2009-2019"),
+            _certification("Example Newer Board", "1999", "2009-2019"),
         ]
         dict_entries = [
             _certification("Example Older Board", "1994", _SHARED_RANGE),
@@ -1264,10 +1263,10 @@ class TestSharedRecertificationRangeOrdersByYearCertified:
         ]
         assert _board_order(dict_entries) == _board_order(text_entries)
 
-    def test_a_later_recertification_still_outranks_a_later_year_certified(self):
+    def test_a_later_range_does_not_lift_an_earlier_certification(self):
         later_range = {"start_date": "2014", "end_date": "2024"}
         entries = [
-            _certification("Example Newer Board", "1999", _SHARED_RANGE),
             _certification("Example Older Board", "1994", later_range),
+            _certification("Example Newer Board", "1999", _SHARED_RANGE),
         ]
-        assert _board_order(entries) == ["Example Older Board", "Example Newer Board"]
+        assert _board_order(entries) == ["Example Newer Board", "Example Older Board"]

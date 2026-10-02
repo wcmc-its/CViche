@@ -23,14 +23,28 @@ def _range_sort_text(value: object) -> object:
     tried in below, since a range ends after it starts. Any other value is
     returned as it came.
 
-    Stage 4 returns R's `date` and F2's `recertification_date` this way. Without
-    the unwrap `str()` below turned the mapping into its repr, no year is
-    findable in that, and the entry keyed (0, 0, 0): a correctly dated row
-    landed at the bottom of a reverse-chronological table.
+    Stage 4 returns R's and K4's `date` this way. Without the unwrap `str()`
+    below turned the mapping into its repr, no year is findable in that, and the
+    entry keyed (0, 0, 0): a correctly dated row landed at the bottom of a
+    reverse-chronological table.
     """
     if isinstance(value, Mapping):
         return _range_sort_text(value.get(RANGE_END_KEY) or value.get(RANGE_START_KEY) or '')
     return value
+
+
+def _recertification_sort_text(value: object) -> object:
+    """F2's `recertification_date` as the key reads it: a `{start_date, end_date}`
+    range is left out, so the entry falls through to `year_certified` (#1233).
+
+    That is where it fell before #1233 (the mapping's repr held no year) and
+    where the string form of a range ("2008-2018") still falls (it holds none
+    either). Keying the mapping by its end would rank a certification by the
+    end of a renewal window, which can be a future expiry, and reorder F2 rows
+    that today sit in `year_certified` order. Any other value is returned as it
+    came.
+    """
+    return '' if isinstance(value, Mapping) else value
 
 
 def extract_sort_date(entry: dict) -> tuple:
@@ -69,7 +83,7 @@ def extract_sort_date(entry: dict) -> tuple:
     # `end_date` dominates a `start_date`.
     date_candidates = [
         fields.get('end_date', ''),
-        fields.get('recertification_date', ''),
+        _recertification_sort_text(fields.get('recertification_date', '')),
         fields.get('year', ''),
         fields.get('year_awarded', ''),
         fields.get('start_date', ''),
@@ -100,18 +114,7 @@ def extract_sort_date(entry: dict) -> tuple:
     return (0, 0, 0)
 
 
-def _field_sort_date(entry: dict, field: str) -> tuple:
-    """`entry`'s sort key read from `field` alone: `extract_sort_date` over a
-    copy that carries nothing else. A non-mapping `extracted_fields` is a
-    missing one, as it is in `extract_sort_date`."""
-    raw_fields = entry.get('extracted_fields')
-    value = raw_fields.get(field) if isinstance(raw_fields, Mapping) else None
-    return extract_sort_date({'extracted_fields': {field: value}})
-
-
-def sort_entries_reverse_chronological(
-    entries: list[dict], then_by: str | None = None
-) -> list[dict]:
+def sort_entries_reverse_chronological(entries: list[dict]) -> list[dict]:
     """
     Sort entries in reverse chronological order (most recent first).
 
@@ -120,16 +123,8 @@ def sort_entries_reverse_chronological(
 
     Args:
         entries: List of entry dictionaries
-        then_by: Optional date field that orders entries whose keys tie, most
-            recent first (#1233). Default: ties keep their input order.
 
     Returns:
         Sorted list of entries
     """
-    if then_by is None:
-        return sorted(entries, key=extract_sort_date, reverse=True)
-    return sorted(
-        entries,
-        key=lambda entry: (extract_sort_date(entry), _field_sort_date(entry, then_by)),
-        reverse=True,
-    )
+    return sorted(entries, key=extract_sort_date, reverse=True)

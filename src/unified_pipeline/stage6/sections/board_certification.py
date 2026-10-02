@@ -524,11 +524,8 @@ class BoardCertificationSection:
         # own `recertification_date` and `year_certified` (both declared by
         # F2 alone, so no other section's order can shift), which is what
         # real board-certification entries actually carry -- a certification
-        # issued in 2005 and recertified in 2020 sorts as 2020. Two rows that
-        # share a recertification range tie on it, so `year_certified` orders
-        # them, newest first (#1233): a dict range keys by its end where the
-        # string "A-B" keys as nothing and fell through to `year_certified`.
-        for entry in sort_entries_reverse_chronological(entries, then_by='year_certified'):
+        # issued in 2005 and recertified in 2020 sorts as 2020.
+        for entry in sort_entries_reverse_chronological(entries):
             fields = entry.get('extracted_fields', {}) or {}
             original_text = entry.get('text', '')
             if _is_header_record(fields, original_text):
