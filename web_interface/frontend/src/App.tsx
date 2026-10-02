@@ -10,6 +10,8 @@ import AppHeader from './components/AppHeader'
 import RunsPage from './components/RunsPage'
 import AdminDashboard from './components/AdminDashboard'
 import HelpPage from './components/HelpPage'
+import TermsPage from './components/TermsPage'
+import { InboxProvider } from './contexts/InboxContext'
 import ErrorBoundary from './components/ErrorBoundary'
 import { Loader2 } from 'lucide-react'
 
@@ -188,6 +190,7 @@ function App() {
   return (
     <BrowserRouter>
       <AuthErrorHandler />
+      <InboxProvider>
       <div className="min-h-screen">
         <RoutedErrorBoundary>
         <Routes>
@@ -256,6 +259,18 @@ function App() {
             }
           />
           <Route
+            path="/terms"
+            element={
+              <RequireAuth>
+                <RequireConsent>
+                  <WithHeader>
+                    <TermsPage />
+                  </WithHeader>
+                </RequireConsent>
+              </RequireAuth>
+            }
+          />
+          <Route
             path="/admin"
             element={
               <RequireAuth>
@@ -270,6 +285,7 @@ function App() {
         </Routes>
         </RoutedErrorBoundary>
       </div>
+      </InboxProvider>
     </BrowserRouter>
   )
 }

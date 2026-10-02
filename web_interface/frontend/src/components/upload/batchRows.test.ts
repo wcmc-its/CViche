@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  MAX_UPLOAD_BYTES, TOO_LARGE_REASON, UNSUPPORTED_TYPE_REASON, classifyFailure, inFlightText, makeRow, mayAlreadyBeStarted, quotaShortfall, rowNote, wasStarted,
+  MAX_UPLOAD_BYTES, TOO_LARGE_REASON, UNSUPPORTED_TYPE_REASON, classifyFailure, inFlightText, inboxFailure, makeInboxRow, makeRow, rowSize, estimateText, mayAlreadyBeStarted, quotaShortfall, rowNote, wasStarted,
 } from './batchRows'
 import type { Estimate, QuotaInfo } from '../../types'
 
@@ -104,5 +104,33 @@ describe('rowNote scanned pages (#1282)', () => {
     expect(rowNote(withPages([]))).toBe('')
     const failed = { ...withPages([2]), state: 'failed' as const, failure: { reason: 'Server error', retryable: true } }
     expect(rowNote(failed)).toBe('Server error')
+  })
+})
+
+describe('emailed CV rows (#1298)', () => {
+  const item = { id: 5, filename: 'emailed.docx', size_bytes: 4096, received_at: '2026-10-01T12:00:00Z', duplicate: null }
+
+  it('carries the item id and its real size on a name-only placeholder file', () => {
+    const row = makeInboxRow(item, 'row-1')
+    expect(row.inbox).toEqual({ id: 5, sizeBytes: 4096 })
+    expect(row.file.name).toBe('emailed.docx')
+    expect(rowSize(row)).toBe(4096)
+    expect(row.invalidReason).toBeNull()
+    expect(row.estimate).toBeNull()
+    expect(makeRow(new File(['ab'], 'a.docx'), 'row-2').inbox).toBeNull()
+  })
+
+  it('states only the count when no row has an estimate', () => {
+    expect(estimateText(2, { minutes: 0, cost: null }, false)).toBe('2 CVs')
+    expect(estimateText(2, { minutes: 12, cost: null }, false)).toBe('2 CVs · about 12 min of processing')
+  })
+
+  it('classifies a refused item like a refused upload', () => {
+    const base = { id: 5, status: 'failed' as const, run_id: null, last_processed_on: null }
+    expect(inboxFailure({ ...base, error: 'duplicate_file', message: 'Already processed' }))
+      .toEqual({ reason: 'Already processed', retryable: false, duplicate: true })
+    expect(inboxFailure({ ...base, error: 'rate_limited', message: 'Daily limit reached' }).retryable).toBe(true)
+    expect(inboxFailure({ ...base, error: 'file_missing', message: null }))
+      .toEqual({ reason: "Couldn't submit the emailed file", retryable: false })
   })
 })

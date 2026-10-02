@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation } from 'react-router-dom'
 import { HelpCircle, Menu, X } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { useInbox } from '../contexts/InboxContext'
 import { NARROW_HEADER_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import UserMenu from './UserMenu'
 
@@ -14,6 +15,24 @@ const menuItemClass = ({ isActive }: { isActive: boolean }) =>
   `block px-4 py-3 text-sm font-medium focus-visible:outline-none focus-visible:bg-sand-100 hover:bg-sand-100 ${
     isActive ? 'text-gray-900 bg-sand-100' : 'text-gray-700'
   }`
+
+/** "New run" with the count of emailed CVs waiting for confirmation (#1298); no badge at zero. */
+function NewRunLabel() {
+  const waiting = useInbox().items.length
+  if (!waiting) return <>New run</>
+  return (
+    <span className="flex items-center gap-1.5">
+      New run
+      <span
+        role="status"
+        aria-label={`${waiting} emailed ${waiting === 1 ? 'CV' : 'CVs'} waiting`}
+        className="min-w-[18px] rounded-full bg-primary-600 px-1.5 text-center text-xs font-semibold leading-[18px] text-white"
+      >
+        {waiting}
+      </span>
+    </span>
+  )
+}
 
 interface NarrowMenuProps {
   isAdmin: boolean
@@ -72,7 +91,7 @@ function NarrowMenu({ isAdmin, onRunPage }: NarrowMenuProps) {
         >
           <nav aria-label="Main">
             <NavLink to="/runs" className={({ isActive }) => menuItemClass({ isActive: isActive || onRunPage })}>Runs</NavLink>
-            <NavLink to="/" end className={menuItemClass}>New run</NavLink>
+            <NavLink to="/" end className={menuItemClass}><NewRunLabel /></NavLink>
             {isAdmin && <NavLink to="/admin" className={menuItemClass}>Dashboard</NavLink>}
             <NavLink to="/help" className={menuItemClass}>Help</NavLink>
           </nav>
@@ -105,7 +124,7 @@ export default function AppHeader() {
           <>
             <nav aria-label="Main" className="flex h-full min-w-0 overflow-x-auto [scrollbar-width:none]">
               <NavLink to="/runs" className={({ isActive }) => tabClass({ isActive: isActive || onRunPage })}>Runs</NavLink>
-              <NavLink to="/" end className={tabClass}>New run</NavLink>
+              <NavLink to="/" end className={tabClass}><NewRunLabel /></NavLink>
               {isAdmin && <NavLink to="/admin" className={tabClass}>Dashboard</NavLink>}
             </nav>
             <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-5">

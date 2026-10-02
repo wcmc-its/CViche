@@ -13,3 +13,4 @@ export type {
   BatchSummary, BatchStatusCounts, BatchRunRow, BatchDetail, QueueLane, QueueOverview,
   BatchEstimateFile, BatchEstimate,
 } from './batches'
+export type { InboxItem, InboxSubmitResult } from './inbox'
