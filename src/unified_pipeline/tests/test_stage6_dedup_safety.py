@@ -22,13 +22,17 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.dedup import (  # noqa: E402
     _dates_compatible,
+    _companion_title,
+    _different_institution,
     _distinct_bare_names,
     _drop_is_safe,
     _lists_name,
     _names_a_sibling,
     _names_record,
     _other_journal_same_row,
+    _place_only_event,
     _record_name,
+    _title_only_fragment,
     recovered_row_already_rendered,
     _row_residue,
 )
@@ -571,11 +575,11 @@ def test_a_short_name_is_named_only_as_one_run(text, named):
 # change to which records the #666 check can protect.
 _NAME_FIELD_BY_CODE = {
     "B1": "degree", "B2": "program_name", "C": "specialty", "D1": "title",
-    "D2": "title", "D3": "title", "F1": None, "F2": "specialty", "H": "award_name",
-    "I": None, "K1": "course_title", "L3": "leadership_role", "M2A": "title",
+    "D2": "title", "D3": "title", "F1": "state_country", "F2": "specialty", "H": "award_name",
+    "I": "organization", "K1": "course_title", "L3": "leadership_role", "M2A": "title",
     "M2B": "title", "M2C": "title", "M2D": "title", "N2": "grant_title",
     "N3A": "mentee_name", "N3B": "mentee_name", "O": "leadership_role",
-    "P": "committee_name", "Q1": None, "Q2": "committee_name", "Q3": "panel_name",
+    "P": "committee_name", "Q1": "organization", "Q2": "committee_name", "Q3": "panel_name",
     "Q4": "journal_name", "Q4A": "journal_name", "Q4B": "journal_name",
     "Q4C": "journal_name", "Q4D": "journal_name", "R": "title", "S1": "title",
     "S2": "title", "S3": "title", "S4": "chapter_title", "S5": "title",
@@ -1041,6 +1045,23 @@ def test_bare_short_name_inside_a_longer_bare_name_is_kept():
                                document=[kept, short]) == [kept, short]
 
 
+@pytest.mark.parametrize("kept_name", [
+    "Acme Society (APS)",  # an acronym is no other word of the name
+    "Acme Society (ACME), formerly Gadget Society (GS)",  # history, not another record
+])
+def test_a_kept_name_with_an_acronym_or_history_is_the_same_name(kept_name):
+    assert _distinct_bare_names({"text": "Acme Society"}, {"text": kept_name},
+                                "Acme Society", kept_name) is False
+    assert _distinct_bare_names({"text": "Acme Society"}, {"text": kept_name},
+                                "Acme Society", "Acme Society (Exchange Program)") is False
+    assert _distinct_bare_names({"text": "Acme Society"}, {"text": kept_name},
+                                "Acme Society", "Beta Society - Acme Society Exchange Program") is True
+    assert _distinct_bare_names({"text": "Acme Society"}, {"text": kept_name},
+                                "Acme Society", "Acme Society Council on Widgets") is False
+    assert _distinct_bare_names({"text": "Acme Society"}, {"text": kept_name},
+                                "Acme Society", "Acme Society - Gadget Society Exchange Program") is True
+
+
 def test_bare_name_differing_only_in_a_stop_word_is_still_dropped():
     kept, short = _journal("The Widgets"), _journal("Widgets")
     assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is True
@@ -1048,7 +1069,7 @@ def test_bare_name_differing_only_in_a_stop_word_is_still_dropped():
 
 def test_bare_name_another_entry_lists_exactly_is_still_dropped():
     kept, short = _journal("Widgets Quarterly"), _journal("Widgets")
-    listed = {"text": "Ad hoc reviewer: Gizmo Review; Widgets"}
+    listed = {"taxonomy_code": "Q4D", "text": "Ad hoc reviewer: Gizmo Review; Widgets"}
     assert _drop_is_safe(short, kept, "Q4D", [kept, short, listed]) is True
 
 
@@ -1074,7 +1095,11 @@ def test_short_name_in_a_text_rendered_code_is_still_dropped():
 @pytest.mark.parametrize("dropped_text,kept_text,kept_name,distinct", [
     ("Widgets", "Widgets Quarterly", "Widgets Quarterly", True),
     ("Ad hoc Widgets", "Widgets Quarterly", "Widgets Quarterly", False),  # dropped holds more
-    ("Widgets", "Advisory Panel, Widgets Quarterly", "Widgets Quarterly", False),  # kept too
+    ("Widgets", "Advisory Panel, Widgets Quarterly", "Widgets Quarterly", False),  # kept name opens with it: a unit of the same body
+    ("Widgets", "Advisory Panel, Gizmo Widgets", "Gizmo Widgets", True),  # kept row holds it and more
+    ("Widgets Quarterly", "Advisory Panel, Widgets", "Widgets", False),  # kept row holds less
+    ("Widgets", "Gadgets", "Gadgets", True),  # both bare, neither holds the other
+
     ("Widgets", "The Widgets", "The Widgets", False),  # same significant words
     ("WIDGETS.", "Widgets Quarterly", "Widgets Quarterly", True),  # case, punctuation
     ("Widgets", "", None, False),  # no kept name
@@ -1093,14 +1118,40 @@ def test_distinct_bare_names(dropped_text, kept_text, kept_name, distinct):
     ({"text": "Reviewer: Widgets"}, True),
     ({"text": "Widgets Quarterly"}, False),
     ({"text": "Reviewer for Widgets"}, False),
-    ({"text": "", "extracted_fields": {"journal_name": "Widgets"}}, True),
-    ({"text": "", "extracted_fields": {"committee_name": "Widgets"}}, True),
-    ({"text": "", "extracted_fields": {"journal_name": "Widgets Quarterly"}}, False),
-    ({"text": "", "extracted_fields": {"notes": "Widgets"}}, False),  # not a name field
+    ({"text": "Widgets", "taxonomy_code": "S7"}, False),  # a list of another code
+    ({"text": "", "extracted_fields": {"journal_name": "Widgets"}}, False),  # no row to compare
+    ({"text": "Widgets", "extracted_fields": {"journal_name": "Widgets"}}, True),
+    ({"text": "Widgets Quarterly", "extracted_fields": {"journal_name": "Widgets Quarterly"}}, False),
+    ({"text": "Widgets", "extracted_fields": {"notes": "Widgets"}}, True),  # the text lists it
+    ({"text": "Gizmo", "extracted_fields": {"notes": "Widgets"}}, False),
     ({"text": None, "extracted_fields": None}, False),
 ])
 def test_lists_name_needs_the_exact_name(entry, listed):
-    assert _lists_name(entry, "Widgets") is listed
+    entry = {"taxonomy_code": "Q4D", **entry}
+    assert _lists_name(entry, "Widgets", "journal_name", "Q4D", "Widgets") is listed
+
+
+@pytest.mark.parametrize("field,listed", [
+    ("journal_name", True),
+    ("specialty", False),  # a fellowship's specialty is not a journal
+    ("degree", False),
+    ("committee_name", False),
+])
+def test_only_the_field_that_named_the_record_vouches_for_it(field, listed):
+    entry = {"taxonomy_code": "C", "text": "Widgets",
+             "extracted_fields": {field: "Widgets"}}
+    assert _lists_name(entry, "Widgets", "journal_name", "Q4D", "Widgets") is listed
+
+
+def test_a_row_for_the_same_journal_with_another_role_does_not_vouch():
+    board = {"taxonomy_code": "Q4C", "text": "Widgets\tEditorial Board\t2012-2017",
+             "extracted_fields": {"journal_name": "Widgets"}}
+    assert _lists_name(board, "Widgets", "journal_name", "Q4B",
+                       "Widgets\tAssociate Editor\t2019-present") is False
+    same_role = {"taxonomy_code": "Q4B", "text": "Widgets\tAssociate Editor\t2009-2011",
+                 "extracted_fields": {"journal_name": "Widgets"}}
+    assert _lists_name(same_role, "Widgets", "journal_name", "Q4B",
+                       "Widgets\tAssociate Editor\t2019-present") is True
 
 
 # ------------ #666: a journal row that says more than the bare name
@@ -1174,6 +1225,14 @@ def test_other_journal_same_row_table(dropped_fields, kept_fields, same_row):
     assert _other_journal_same_row(dropped, kept, "Widgets", kept_fields) is same_row
 
 
+def test_a_trailing_journal_is_not_another_journal():
+    dropped = _journal_row("Widgets Record\tReviewing Editor\t2015-2020", "Widgets Record")
+    kept = _journal_row("Reviewing Editor\tWidgets Record journal\t2015-2020",
+                        "Widgets Record journal")
+    assert _other_journal_same_row(dropped, kept, "Widgets Record",
+                                   kept["extracted_fields"]) is False
+
+
 def test_two_rows_that_do_not_hold_their_names_are_not_the_same_row():
     # Neither text holds its journal's name, so neither has a residue to compare.
     dropped = {"text": "Ad hoc 2013", "extracted_fields": {"journal_name": "Widgets"}}
@@ -1191,3 +1250,233 @@ def test_two_rows_that_do_not_hold_their_names_are_not_the_same_row():
 ])
 def test_row_residue(text, name, residue):
     assert _row_residue(text, name) == residue
+
+
+# ------------ #666 (batch IPXFBA): five ways a distinct record still dropped.
+
+def _entry(code: str, text: str, **fields) -> dict:
+    return {"taxonomy_code": code, "text": text, "extracted_fields": fields}
+
+
+def _kept_both(code: str, dropped: dict, kept: dict, *others: dict) -> bool:
+    """True when `deduplicate_entries` keeps `dropped` beside `kept`."""
+    document = [kept, dropped, *others]
+    result = deduplicate_entries([kept, dropped], code=code, document=document)
+    return any(entry is dropped for entry in result)
+
+
+def test_other_fields_that_hold_a_journal_word_do_not_vouch_for_its_bare_name():
+    # (a) A fellowship's specialty and a certification's specialty are not
+    # another listing of the journal "Widgets".
+    dropped = _entry("Q4D", "Widgets | Journal Reviewer", journal_name="Widgets")
+    kept = _entry("Q4D", "Gizmo and Widgets | Journal Reviewer",
+                  journal_name="Gizmo and Widgets")
+    fellowship = _entry("C", "Fellowship, Widgets", specialty="Widgets")
+    board = _entry("F2", "Board certified, Widgets", specialty="Widgets")
+    assert _kept_both("Q4D", dropped, kept, fellowship, board)
+
+
+def test_a_citation_listing_the_word_does_not_vouch_for_a_bare_journal():
+    dropped = _journal("Widgets")
+    kept = _journal("Gizmo Widgets")
+    citation = {"taxonomy_code": "S7", "text": "Doe J, Roe R, Widgets, Gizmo, 2019"}
+    assert _kept_both("Q4D", dropped, kept, citation)
+
+
+def test_a_board_row_of_the_same_journal_does_not_vouch_for_an_editor_row():
+    dropped = _entry("Q4B", "Widgets\tAssociate Editor\t2019-present",
+                     journal_name="Widgets", role="Associate Editor")
+    kept = _entry("Q4B", "Widgets Letters\tAssociate Editor\t2019-present",
+                  journal_name="Widgets Letters", role="Associate Editor")
+    board = _entry("Q4C", "Widgets\tEditorial Board\t2012-2017", journal_name="Widgets")
+    assert _kept_both("Q4B", dropped, kept, board)
+
+
+def test_a_bare_journal_listed_by_another_entry_of_its_list_is_still_dropped():
+    dropped = _journal("Widgets")
+    kept = _journal("Gizmo Widgets")
+    again = _journal("Widgets")
+    assert not _kept_both("Q4D", dropped, kept, again)
+
+
+def test_a_membership_listed_bare_beside_a_longer_exchange_row_is_kept():
+    # (b) I has no name field in `_RECORD_NAME_FIELDS` before this change.
+    kept = _entry("I", "Member of Gadget Society - Acme Society Exchange Program, 2003",
+                  organization="Gadget Society - Acme Society Exchange Program",
+                  start_date="2003", membership_type="Member")
+    dropped = _entry("I", "Acme Society", organization="Acme Society")
+    assert _kept_both("I", dropped, kept)
+
+
+@pytest.mark.parametrize("dropped_text,kept_org", [
+    ("Acme Society", "Acme Society"),
+    ("Acme Society", "Acme Society (ACME)"),
+    ("Acme Society", "Acme Society (ACME), formerly Gadget Society (GS)"),
+])
+def test_a_membership_that_is_the_kept_one_reworded_is_still_dropped(dropped_text, kept_org):
+    kept = _entry("I", f"Fellow, {kept_org}, 2010-present", organization=kept_org,
+                  start_date="2010", membership_type="Fellow")
+    dropped = _entry("I", dropped_text, organization=dropped_text)
+    assert not _kept_both("I", dropped, kept)
+
+
+def test_f1_and_q1_name_a_record_by_state_and_organization():
+    assert _record_name({"state_country": "Ohio", "license_number": "A1"},
+                        _RENDERED_FIELDS["F1"]) == "Ohio"
+    assert _record_name({"organization": "Acme Society", "role": "Chair"},
+                        _RENDERED_FIELDS["Q1"]) == "Acme Society"
+    # A code that fills an earlier name field keeps it.
+    assert _record_name({"committee_name": "Review Board", "organization": "Acme"},
+                        _RENDERED_FIELDS["Q2"]) == "Review Board"
+
+
+def test_a_place_only_talk_beside_a_dated_one_at_that_place_is_kept():
+    place = "Example University, Department of Widgets"
+    kept = _entry("R", f"2004 {place}", location=place, date="2004")
+    dropped = _entry("R", place, location=place)
+    assert _kept_both("R", dropped, kept)
+
+
+def test_a_place_only_talk_beside_an_undated_copy_is_still_dropped():
+    place = "Example University, Department of Widgets"
+    kept = _entry("R", f"{place}, seminar", location=place, event_name="Seminar")
+    dropped = _entry("R", place, location=place)
+    assert not _kept_both("R", dropped, kept)
+
+
+def _appointment(institution: str, text: str | None = None, code: str = "D2") -> dict:
+    title = "Senior Fellow"
+    return _entry(code, text or f"{institution}\t{title}, 2013-present",
+                  title=title, institution=institution,
+                  start_date="2013", end_date="present")
+
+
+def test_one_title_at_two_hospitals_is_two_appointments():
+    # (c) Both hospitals' words occur in the other's name; their order differs.
+    kept = _appointment("Gadget Clinic for Children at Sample Regional")
+    dropped = _appointment("Sample Regional Teaching Clinic")
+    assert _kept_both("D2", dropped, kept)
+    assert _kept_both("D2", _appointment("Gadget Hospital"), _appointment("Acme Hospital"))
+
+
+@pytest.mark.parametrize("dropped_institution,kept_institution", [
+    ("Acme Medical Center", "Acme Medical Center"),
+    ("Acme Medical Center", "Acme Medical Center, Springfield, IL"),
+    ("Sample Institute, Country Z", "Sample Institute, Citytown, Country Z"),
+    ("Division of Widgets, College of", "Division of Widgets, College of Acme"),
+    ("U. of Acme", "University of Acme"),
+])
+def test_one_hospital_worded_two_ways_is_still_one_appointment(dropped_institution,
+                                                                kept_institution):
+    kept = _appointment(kept_institution)
+    dropped = _appointment(dropped_institution)
+    assert not _kept_both("D2", dropped, kept)
+
+
+@pytest.mark.parametrize("longer,shorter", [
+    ("Sample Institute, Citytown, Country Z", "Sample Institute, Country Z"),
+    ("Acme Medical Center, Springfield, IL", "Acme Medical Center"),
+])
+def test_an_institution_cut_short_is_the_same_in_either_direction(longer, shorter):
+    longer_fields, shorter_fields = {"institution": longer}, {"institution": shorter}
+    assert _different_institution("D2", longer_fields, shorter_fields) is None
+    assert _different_institution("D2", shorter_fields, longer_fields) is None
+    assert _different_institution("D2", longer_fields, {"institution": "Gadget Hospital"}) == longer
+
+
+def test_a_place_only_row_of_another_code_is_not_a_talk():
+    assert _place_only_event("D1", {"location": "Acme"}, {"date": "2004"}) is None
+    assert _place_only_event("R", {"location": "Acme"}, {"date": "2004"}) == "Acme"
+    assert _place_only_event("R", {"location": "Acme", "title": "Talk"},
+                             {"date": "2004"}) is None
+    assert _place_only_event("R", {"location": "Acme"}, {}) is None
+
+
+def test_appointments_of_another_code_are_not_told_apart_by_institution():
+    kept = _entry("L3", "Chair, Gadget Hospital", leadership_role="Chair",
+                  institution="Gadget Hospital")
+    dropped = _entry("L3", "Chair, Acme Health Hospital", leadership_role="Chair",
+                     institution="Acme Health Hospital")
+    assert _different_institution_for("L3", dropped, kept) is None
+
+
+def _different_institution_for(code, dropped, kept):
+    return _different_institution(code, dropped["extracted_fields"], kept["extracted_fields"])
+
+
+def _book(title: str, edition: str) -> dict:
+    return _entry("S3", f"Doe, Jane, {title} {edition}, Springfield: Example Press, 2017.",
+                  authors="Doe, Jane", year="2017", title=title,
+                  publisher="Example Press", edition=edition)
+
+
+def test_a_book_beside_its_instructors_guide_is_kept():
+    # (d) The kept title holds the dropped one after "Workbook for".
+    kept = _book("Study Workbook for Widget Anatomy Atlas (Revised)", "4th ed")
+    dropped = _book("Widget Anatomy Atlas", "4th ed")
+    assert _kept_both("S3", dropped, kept)
+
+
+@pytest.mark.parametrize("kept_title", [
+    "Fundamentals of Widget Anatomy Atlas",  # may be the same book reworded
+    "Widget Anatomy Atlas",
+    "Widget Anatomy Atlas: A Companion",
+])
+def test_a_title_nested_without_a_companion_word_is_still_dropped(kept_title):
+    assert not _kept_both("S3", _book("Widget Anatomy Atlas", "4th ed"), _book(kept_title, "4th ed"))
+
+
+def _grant(title: str, **fields) -> dict:
+    text = title + (" (PI)" if fields.get("pi_role") else "")
+    return _entry("M2B", text, title=title, **fields)
+
+
+def test_a_title_only_grant_row_with_another_title_is_kept():
+    # (e) The other cells of the dropped row landed on a different grant.
+    kept = _grant("Sprocket Dynamics and Cogs of Gizmo Assembly Under Cold Storage Conditions", pi_role="PI",
+                  agency="Example Foundation", start_date="2014", end_date="2016")
+    dropped = _grant("Sprocket Dynamics of Gizmo Assembly Under Cold Storage Conditions", pi_role="PI")
+    assert _kept_both("M2B", dropped, kept)
+
+
+def test_a_title_only_grant_row_with_the_kept_title_is_still_dropped():
+    kept = _grant("Sprocket Dynamics of Gizmo Assembly Under Cold Storage Conditions", pi_role="PI",
+                  agency="Example Foundation", start_date="2014", end_date="2016")
+    dropped = _grant("The sprocket dynamics of gizmo assembly under cold storage conditions.")
+    assert not _kept_both("M2B", dropped, kept)
+
+
+def test_a_grant_row_with_an_agency_is_not_a_fragment():
+    title = "Sprocket Dynamics of Gizmo Assembly Under Cold Storage Conditions"
+    kept_title = "Sprocket Dynamics and Cogs of Gizmo Assembly Under Cold Storage Conditions"
+    kept = {"title": kept_title}
+    assert _title_only_fragment("M2B", {"title": title}, kept) == title
+    assert _title_only_fragment("M2B", {"title": title, "agency": "Example Foundation"},
+                                kept) is None
+    assert _title_only_fragment("S3", {"title": title}, kept) is None
+
+
+def test_a_membership_beside_a_unit_of_the_same_society_is_still_dropped():
+    # A parallel listing: the kept row opens with the dropped name, and what
+    # follows is a council of that society, not another organization.
+    kept = _entry("I", "Member, Acme Society - Council on Widgets",
+                  organization="Acme Society - Council on Widgets", membership_type="Member")
+    other = _entry("I", "Member, Acme Society - Gadget Society Exchange Program",
+                   organization="Acme Society - Gadget Society Exchange Program",
+                   membership_type="Member")
+    assert _kept_both("I", _entry("I", "Acme Society", organization="Acme Society"), other)
+    dropped = _entry("I", "Acme Society", organization="Acme Society")
+    assert not _kept_both("I", dropped, kept)
+
+
+def test_a_companion_title_is_told_apart_in_a_book_only():
+    dropped, kept = {"title": "Widget Repair"}, {"title": "A Guide to Widget Repair"}
+    assert _companion_title("S3", dropped, kept) == "Widget Repair"
+    assert _companion_title("R", dropped, kept) is None
+
+
+def test_a_title_only_grant_that_is_the_kept_title_plus_a_suffix_is_still_dropped():
+    kept = _grant("Sprocket Dynamics of Gizmo Assembly Under Cold Storage Conditions (R01)", pi_role="PI",
+                  agency="Example Foundation")
+    dropped = _grant("Sprocket Dynamics of Gizmo Assembly Under Cold Storage Conditions", pi_role="PI")
+    assert not _kept_both("M2B", dropped, kept)
