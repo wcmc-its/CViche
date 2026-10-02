@@ -170,11 +170,14 @@ def _dates_compatible(dropped_text: str, kept_text: str) -> bool:
 # dropped record's name: the one of these fields the code's section writes
 # (its title-like FIELD_SCHEMAS key; no field-rendered code writes two). A code
 # whose section renders the entry's text is not in `_RENDERED_FIELDS`, and its
-# verbatim drops stand; F1, I and Q1 write no name field, and theirs stand too.
+# verbatim drops stand.
 _RECORD_NAME_FIELDS = (
     'title', 'chapter_title', 'grant_title', 'course_title', 'award_name',
     'leadership_role', 'committee_name', 'panel_name', 'program_name',
-    'mentee_name', 'journal_name', 'degree', 'specialty')
+    'mentee_name', 'journal_name', 'degree', 'specialty',
+    # Last, so a code that fills a field above keeps it: I and Q1 name a row by
+    # its organization, F1 by its state, an R row with no title by its location.
+    'organization', 'state_country', 'location')
 # A grant whose amount or number the kept entry also carries is the same grant,
 # whatever its title field holds (a description can land in `title`).
 _RECORD_ID_FIELDS = (
@@ -184,14 +187,21 @@ _RECORD_ID_FIELDS = (
 _RECORD_ID_MIN_DIGITS = 4
 
 
-def _record_name(fields: dict, rendered: frozenset[str]) -> str | None:
-    """The record's name: its first filled `_RECORD_NAME_FIELDS` value the
-    section renders, or None when it fills none."""
+def _record_name_key(fields: dict, rendered: frozenset[str]) -> str | None:
+    """The first `_RECORD_NAME_FIELDS` key the section renders and `fields`
+    fills, or None when it fills none."""
     for key in _RECORD_NAME_FIELDS:
         value = fields.get(key)
         if key in rendered and isinstance(value, str) and value.strip():
-            return value
+            return key
     return None
+
+
+def _record_name(fields: dict, rendered: frozenset[str]) -> str | None:
+    """The record's name: its first filled `_RECORD_NAME_FIELDS` value the
+    section renders, or None when it fills none."""
+    key = _record_name_key(fields, rendered)
+    return fields[key] if key else None
 
 
 # The doctor's `dedup_drops` lint (#666) reads each decision's extracted name:
@@ -264,18 +274,24 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
     record, so keeping this copy cannot print it twice. Entries in
     `dropped_ids` (dropped already, this group or an earlier one) carry
     nothing: two identical copies must not each vouch for the other's drop.
-    Doubt drops, as it did before.
+    One more shape needs no such check: the fields say it is another record
+    (`_distinct_record_label`: another institution, a companion title, a
+    grant's title alone, a bare place). Doubt drops, as it did before.
     """
     rendered = _RENDERED_FIELDS.get(code or '', frozenset())
     dropped_fields = dropped_entry.get('extracted_fields') or {}
     kept_fields = kept_entry.get('extracted_fields') or {}
-    name = _record_name(dropped_fields, rendered)
+    name_key = _record_name_key(dropped_fields, rendered)
+    name = dropped_fields[name_key] if name_key else None
     if (not name or not kept_fields
             or _shares_record_id(dropped_fields, kept_fields)):
         return False
+    dropped_text = dropped_entry.get('text') or ''
     others = [entry for entry in document or ()
               if entry is not dropped_entry and entry is not kept_entry
               and id(entry) not in dropped_ids]
+    if _distinct_record_label(code, dropped_fields, kept_fields):
+        return True
     if ((verbatim and not _significant_words(name) <= _rendered_words(kept_fields, rendered))
             or _names_a_sibling(kept_entry, kept_fields, rendered, name)):
         return not any(_names_record(entry.get('text') or '', name)
@@ -283,8 +299,139 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
     if (_distinct_bare_names(dropped_entry, kept_entry,
                              name, _record_name(kept_fields, rendered))
             or _other_journal_same_row(dropped_entry, kept_entry, name, kept_fields)):
-        return not any(_lists_name(entry, name) for entry in others)
+        return not any(_lists_name(entry, name, name_key, code, dropped_text)
+                       for entry in others)
     return False
+
+
+# `_distinct_record_label`: records the text-similarity signals cannot tell apart
+# but the fields can (#666). Each helper names one way two records of a code
+# differ and returns what the dropped record is called, or None.
+
+# The field that tells two records of an appointment code apart: the same title
+# ("Senior Fellow") at two hospitals is two appointments.
+_INSTITUTION_FIELD_BY_CODE = {'D1': 'institution', 'D2': 'institution', 'D3': 'organization'}
+
+
+def _ordered_words(text: str) -> list[str]:
+    """The significant words of `text`, in order."""
+    return [t for t in re.findall(r'[a-z0-9]+', text.lower())
+            if t not in _STOP_WORDS and len(t) > 1]
+
+
+def _is_subsequence(short: list[str], long: list[str]) -> bool:
+    """True when the words of `short` occur in `long`, in order, gaps allowed."""
+    remaining = iter(long)
+    return all(word in remaining for word in short)
+
+
+def _different_institution(code: str | None, dropped_fields: dict,
+                           kept_fields: dict) -> str | None:
+    """The dropped record's institution when the kept record's is another one.
+
+    One name is the other reworded (cut short, a city or a word inserted, a
+    one-letter initial spelled out) when its words occur in the other's, in
+    order. "Acme Regional Clinic" and "Gadget Clinic for Children at Acme
+    Regional" share every word and are still two clinics. A longer
+    abbreviation ("Univ." for "University"), a name split in two ("North
+    Shore", "Northshore") and one half of a dual name are not recognised:
+    they keep both rows (the safe side).
+    """
+    key = _INSTITUTION_FIELD_BY_CODE.get(code or '')
+    dropped, kept = dropped_fields.get(key), kept_fields.get(key)
+    if not (isinstance(dropped, str) and isinstance(kept, str)):
+        return None
+    dropped_words, kept_words = _ordered_words(dropped), _ordered_words(kept)
+    if (not dropped_words or not kept_words
+            or _is_subsequence(dropped_words, kept_words)
+            or _is_subsequence(kept_words, dropped_words)):
+        return None
+    return dropped
+
+
+# A title that sits inside a longer one after "<companion> for" is the companion
+# of that work, not the work: "Study Workbook for <Title>", "Guide to
+# <Title>". Only these nouns say so; "Fundamentals of <Title>" may be the same
+# book reworded.
+_COMPANION_NOUNS = ('guide', 'workbook', 'companion', 'supplement', 'handbook',
+                    'manual', 'syllabus', 'key')
+_COMPANION_CONNECTORS = ('for', 'to', 'of', 'on', 'with')
+# Only a book (S3) has a companion volume; a talk or paper "Guide to X" beside
+# "X" is more likely the same record reworded.
+_COMPANION_CODES = frozenset({'S3'})
+
+
+def _companion_title(code: str | None, dropped_fields: dict,
+                     kept_fields: dict) -> str | None:
+    """The dropped book's title when the kept title holds it after "<companion> for"."""
+    name, kept_name = dropped_fields.get('title'), kept_fields.get('title')
+    if not (code in _COMPANION_CODES and isinstance(name, str) and isinstance(kept_name, str)):
+        return None
+    words = re.findall(r'[a-z0-9]+', name.lower())
+    if not words:
+        return None
+    pattern = (r'(?<![a-z0-9])(?:' + '|'.join(_COMPANION_NOUNS) + r')[^a-z0-9]+(?:'
+               + '|'.join(_COMPANION_CONNECTORS) + r')[^a-z0-9]+'
+               + r'[^a-z0-9]+'.join(words) + r'(?![a-z0-9])')
+    return name if re.search(pattern, kept_name.lower()) else None
+
+
+def _is_word_run(short: list[str], long: list[str]) -> bool:
+    """True when `short` is a run of consecutive words of `long`."""
+    size = len(short)
+    return size > 0 and any(long[i:i + size] == short for i in range(len(long) - size + 1))
+
+
+# A grant row of which only the title was extracted is a fragment of a row
+# whose other cells went elsewhere, not a copy of the kept grant when its title
+# is not the kept grant's.
+_GRANT_CODES = frozenset({'M2A', 'M2B', 'M2C'})
+_GRANT_FRAGMENT_FIELDS = frozenset({'title', 'pi_role'})
+
+
+def _filled_keys(fields: dict) -> set[str]:
+    return {key for key, value in fields.items() if value not in (None, '', [], {})}
+
+
+def _title_only_fragment(code: str | None, dropped_fields: dict,
+                         kept_fields: dict) -> str | None:
+    """The dropped title when it is the one thing extracted of a grant row and
+    differs in a significant word from the kept grant's title and is not a
+    run of consecutive words of it (the kept title plus a suffix is the same
+    grant)."""
+    title, kept_title = dropped_fields.get('title'), kept_fields.get('title')
+    if (code in _GRANT_CODES and isinstance(title, str) and isinstance(kept_title, str)
+            and {'title'} <= _filled_keys(dropped_fields) <= _GRANT_FRAGMENT_FIELDS
+            and _significant_words(title) != _significant_words(kept_title)
+            and not _is_word_run(_ordered_words(title), _ordered_words(kept_title))):
+        return title
+    return None
+
+
+# An invited-talk row that is a place and nothing else names no event: against a
+# kept row that carries a date it is another occasion at that place (a seminar
+# list's undated line between two years), not a copy of it.
+_PLACE_ONLY_EVENT_FIELDS = frozenset({'location'})
+_EVENT_DATE_FIELDS = ('date', 'start_date')
+
+
+def _place_only_event(code: str | None, dropped_fields: dict,
+                      kept_fields: dict) -> str | None:
+    """The dropped place when it is all an R row says and the kept row is dated."""
+    if (code == 'R' and _filled_keys(dropped_fields) == _PLACE_ONLY_EVENT_FIELDS
+            and any(kept_fields.get(key) for key in _EVENT_DATE_FIELDS)):
+        return dropped_fields['location']
+    return None
+
+
+def _distinct_record_label(code: str | None, dropped_fields: dict,
+                           kept_fields: dict) -> str | None:
+    """What the dropped record is called when its fields say it is not the kept
+    record, else None."""
+    return (_different_institution(code, dropped_fields, kept_fields)
+            or _companion_title(code, dropped_fields, kept_fields)
+            or _title_only_fragment(code, dropped_fields, kept_fields)
+            or _place_only_event(code, dropped_fields, kept_fields))
 
 
 def _word_run_pattern(text: str) -> str | None:
@@ -320,17 +467,66 @@ def _names_a_sibling(kept_entry: dict, kept_fields: dict,
     return bool(re.search(name_pattern, residual))
 
 
+# A parenthetical after a name is its acronym or a qualifier ("(ACME)"), not
+# another word of the name.
+_PARENTHETICAL_RE = re.compile(r'\([^)]*\)')
+
+
+# What a long name says after "formerly" is its history, not another record.
+_FORMERLY_RE = re.compile(r'\b(?:formerly|f/k/a)\b.*', re.IGNORECASE | re.DOTALL)
+
+
+def _core_words(name: str) -> set:
+    """The significant words of `name` outside its parentheticals and its
+    "formerly ..." history."""
+    return _significant_words(_FORMERLY_RE.sub(' ', _PARENTHETICAL_RE.sub(' ', name)))
+
+
+# A trailing "journal" is how a row calls the journal, not part of its name:
+# "Widgets Record journal" is "Widgets Record".
+_TRAILING_JOURNAL_RE = re.compile(r'\s+journal\s*$', re.IGNORECASE)
+
+
+def _journal_core_words(name: str) -> set:
+    """`_core_words` of a journal name without a trailing "journal"."""
+    return _core_words(_TRAILING_JOURNAL_RE.sub('', name))
+
+
+# A word that makes what follows a name another body: "Acme Society - Gadget
+# Society Exchange Program" joins two societies, "Acme Society - Council on
+# Widgets" names a council of the one.
+_OTHER_BODY_WORDS = frozenset({
+    'association', 'society', 'college', 'academy', 'federation', 'union',
+    'foundation', 'institute', 'program', 'exchange'})
+
+
+def _is_unit_of(kept_name: str, name: str) -> bool:
+    """True when the kept name opens with the dropped name's words and what
+    follows names no other body: a council or section of the same society, of
+    which a bare "Acme Society" is the parallel listing, not another record."""
+    clean = lambda text: _ordered_words(_FORMERLY_RE.sub(' ', _PARENTHETICAL_RE.sub(' ', text)))
+    words, kept = clean(name), clean(kept_name)
+    return (bool(words) and kept[:len(words)] == words
+            and not _OTHER_BODY_WORDS & set(kept[len(words):]))
+
+
 def _distinct_bare_names(dropped_entry: dict, kept_entry: dict,
                          name: str, kept_name: str | None) -> bool:
-    """True when each entry's text is nothing but its record's name and the
-    names differ in a significant word: a journal list's "Widgets" is
-    contained in "Widgets Quarterly" and is still another journal. Any other
-    text (a date, a role, a venue) is a record a name alone cannot tell
-    apart, and "The Widgets" is still "Widgets"."""
-    return bool(kept_name
-                and _alnum(dropped_entry.get('text') or '') == _alnum(name)
-                and _alnum(kept_entry.get('text') or '') == _alnum(kept_name)
-                and _significant_words(name) != _significant_words(kept_name))
+    """True when the dropped entry's text is nothing but its record's name and
+    the names differ in a significant word: a journal list's "Widgets" is
+    contained in "Widgets Quarterly" and is still another journal. The kept
+    entry is either another bare name or a row whose name holds the dropped
+    one and more ("Acme Society" in the "Gadget Society - Acme Society
+    Exchange Program" row), unless the longer name is a unit of the same body
+    ("Acme Society - Council on Widgets": the bare listing is a duplicate). Any other text (a date, a role, a venue) is a record a name
+    alone cannot tell apart, and "The Widgets" is still "Widgets"."""
+    if not kept_name or _alnum(dropped_entry.get('text') or '') != _alnum(name):
+        return False
+    dropped_words, kept_words = _core_words(name), _core_words(kept_name)
+    if dropped_words == kept_words:
+        return False
+    return (_alnum(kept_entry.get('text') or '') == _alnum(kept_name)
+            or (dropped_words < kept_words and not _is_unit_of(kept_name, name)))
 
 
 # `_other_journal_same_row`: the field that names a journal, and what a row
@@ -365,23 +561,46 @@ def _other_journal_same_row(dropped_entry: dict, kept_entry: dict,
                 and (dropped_entry.get('extracted_fields') or {}).get(_JOURNAL_NAME_FIELD) == name
                 and dropped_residue is not None
                 and dropped_residue == _row_residue(kept_entry.get('text') or '', kept_name)
-                and _significant_words(name) != _significant_words(kept_name))
+                and _journal_core_words(name) != _journal_core_words(kept_name))
 
 
 # `_lists_name`: the separators between the items of a listed text.
 _LIST_ITEM_SEPARATOR_RE = re.compile(r'[,;:|\t\n]')
 
 
-def _lists_name(entry: dict, name: str) -> bool:
-    """True when `entry` carries the record called `name` itself: a
-    `_RECORD_NAME_FIELDS` value or an item of its text is exactly that
-    name. A longer name holding it ("Widgets Quarterly") is another record."""
+def _lists_name(entry: dict, name: str, key: str, code: str | None,
+                dropped_text: str) -> bool:
+    """True when `entry` carries the record called `name` itself.
+
+    Two ways, and no other (#666: a fellowship's `specialty`, a degree's
+    `degree` or a citation's journal vouched for a reviewer row that only
+    shared a word with them):
+
+    - an item of its text is exactly that name, and the entry is of the same
+      code (the record's own list: "Gizmo Review, Widgets");
+    - its `key` field, the one that named the dropped record, holds exactly
+      that name and the row says the same about it as the dropped row
+      (`_same_row`). A longer name holding it ("Widgets Quarterly") is
+      another record.
+    """
     target = _alnum(name)
+    text = entry.get('text') or ''
+    if entry.get('taxonomy_code') == code and any(
+            _alnum(item) == target for item in _LIST_ITEM_SEPARATOR_RE.split(text)):
+        return True
     fields = entry.get('extracted_fields') or {}
-    return (any(_alnum(str(fields.get(key) or '')) == target
-                for key in _RECORD_NAME_FIELDS)
-            or any(_alnum(item) == target
-                   for item in _LIST_ITEM_SEPARATOR_RE.split(entry.get('text') or '')))
+    return (_alnum(str(fields.get(key) or '')) == target
+            and _same_row(text, dropped_text, name))
+
+
+def _same_row(text: str, dropped_text: str, name: str) -> bool:
+    """True when `text` says no more about `name` than the dropped row does: the
+    letters left of each once the name is cut out are the same (role and
+    status; the dates may differ), or `text` is the bare name. "Widgets,
+    Editorial Board" is not "Widgets, Associate Editor"."""
+    residue = _row_residue(text, name)
+    return residue == '' or (residue is not None
+                             and residue == _row_residue(dropped_text, name))
 
 
 # `_names_record`: a long name counts as named by a text that holds this share

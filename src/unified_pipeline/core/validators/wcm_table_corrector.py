@@ -39,6 +39,20 @@ _BOARD = re.compile(
     r"american board of|full name of board|certificate\s*#|board eligible",
     re.I,
 )
+# A board-certification shape beyond the board's name (#1235): a certification
+# word, or a board name plus a year outside an awards/honors/committee/
+# membership context.
+_BOARD_NAME = re.compile(r"american board of", re.I)
+_BOARD_CERT_WORD = re.compile(
+    r"board[\s-]*(?:certif|eligible)|\bdiplomat(?:e|s|es)?\b|re-?certif|\bcertifi(?:ed|cation)\b"
+    r"|certificate\s*(?:#|no\b|number)",
+    re.I,
+)
+_YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
+_NON_CERT_HIERARCHY = re.compile(
+    r"award|honou?r|committee|member|societ|organi[sz]ation", re.I
+)
+_NON_CERT_TEXT = re.compile(r"\b(?:awards?|prizes?|committees?)\b", re.I)
 _LICENSURE = re.compile(
     r"\b(dea|npi)\s*number\b|license\s*number|\blicensure\b|medical\s+license",
     re.I,
@@ -49,6 +63,29 @@ _LICENSURE = re.compile(
 _MENTEE_FROM = {"K1", "K2", "K3", "K4", "K5", "T", "N4"}
 _BOARD_FROM = {"I", "H", "C", "T"}
 _LICENSE_FROM = {"I", "H", "C", "T", "A", "F2"}
+
+
+def _is_board_certification(entry: dict) -> bool:
+    """True when the entry has a board-certification shape, not just a board name."""
+    text = entry.get("text", "") or ""
+    if not _BOARD.search(text):
+        return False
+    # WCM table labels / "board eligible" / certificate # with data (any digit);
+    # the empty table-header row has no digit and is not promoted.
+    if not _BOARD_NAME.search(text):
+        return bool(re.search(r"\d", text))
+    if _NON_CERT_TEXT.search(text):
+        return False
+    if _BOARD_CERT_WORD.search(text):
+        return True
+    return _is_board_name_with_year(entry, text)
+
+
+def _is_board_name_with_year(entry: dict, text: str) -> bool:
+    """Board name plus a year, unless the section says award/committee/membership."""
+    if not _YEAR.search(text):
+        return False
+    return not _NON_CERT_HIERARCHY.search(" ".join(entry.get("hierarchy") or []))
 
 
 def _correct(entry: dict):
@@ -63,12 +100,11 @@ def _correct(entry: dict):
             return ("N3B" if is_past else "N3A"), "WCM mentee table (Mentoring Period + supervision)"
 
     # Board certification (check before licensure: both carry a number).
-    # Require actual data (an explicit "American Board of ..." or any digit, i.e.
-    # a certificate number / date) so the empty WCM table-header row
-    # ("Full Name of Board / Certificate #") is NOT promoted to a content code.
-    if _BOARD.search(text) and (re.search(r"american board of", text, re.I) or re.search(r"\d", text)):
-        if code in _BOARD_FROM:
-            return "F2", "WCM board-certification signature"
+    # Require actual certification data, not the board's name alone (#1235), so
+    # the empty WCM table-header row and an awards/committee/membership line
+    # naming a board are NOT promoted to a content code.
+    if code in _BOARD_FROM and _is_board_certification(entry):
+        return "F2", "WCM board-certification signature"
 
     # Licensure.
     if _LICENSURE.search(text):

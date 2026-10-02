@@ -23,6 +23,12 @@ from datetime import datetime
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_4_5_research_summary"
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm_provenance import (
+    FALLBACK_SERVED_KEY,
+    STAGE4_5_CALL_M1_SCORE,
+    STAGE4_5_CALL_SUMMARY,
+    STAGE4_5_FALLBACK_CALLS_KEY,
+)
 
 # Section weights for biosketch relevance (0 = essential, -1 = not useful)
 # Based on NIH biosketch requirements
@@ -482,6 +488,7 @@ Respond with JSON only:
         'cache_read_tokens': llm_result.get("cache_read_tokens", 0),
         'cache_write_tokens': llm_result.get("cache_write_tokens", 0),
         'cost': llm_result.get("cost", 0.0),
+        'fallback_model': llm_result.get(FALLBACK_SERVED_KEY),
     }
 
     # Parse JSON response
@@ -555,6 +562,7 @@ Generate only the research summary paragraph (150-200 words max), no additional 
         'cache_read_tokens': llm_result.get("cache_read_tokens", 0),
         'cache_write_tokens': llm_result.get("cache_write_tokens", 0),
         'cost': llm_result.get("cost", 0.0),
+        'fallback_model': llm_result.get(FALLBACK_SERVED_KEY),
     }
 
     return result_text, usage
@@ -604,6 +612,31 @@ def _resolve_stage_4_5_input_file(input_path: str) -> Path:
     if not input_file.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
     return input_file
+
+
+def _fallback_calls(call: str, usage: dict) -> list[dict]:
+    """The provenance record of one call when the content-filter fallback served
+    it (#1174), else empty. Write-only: the doctor and the quality score read it."""
+    model = usage.get('fallback_model')
+    return [{"call": call, "model": model}] if model else []
+
+
+def _original_m1_record(m1_entries: list[dict], combined_text: str, m1_score: float,
+                        score_reasoning: str) -> dict:
+    """The existing M1 content a generated summary replaced, for traceability."""
+    return {
+        "entries": [
+            {
+                "text": e.get('text', ''),
+                "element_idx_start": e.get('element_idx_start'),
+                "element_idx_end": e.get('element_idx_end'),
+            }
+            for e in m1_entries
+        ],
+        "total_entries": len(m1_entries),
+        "combined_text": combined_text,
+        "reason_not_used": f"Score {m1_score:.2f} below threshold 0.8 - {score_reasoning}"
+    }
 
 
 def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True) -> str:
@@ -665,6 +698,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
     total_cache_read_tokens = 0
     total_cache_write_tokens = 0
     total_cost = 0.0
+    fallback_calls: list[dict] = []
 
     if existing_m1_content.strip():
         if verbose:
@@ -679,6 +713,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
             total_cache_read_tokens += score_usage.get('cache_read_tokens', 0)
             total_cache_write_tokens += score_usage.get('cache_write_tokens', 0)
             total_cost += score_usage.get('cost', 0.0)
+            fallback_calls += _fallback_calls(STAGE4_5_CALL_M1_SCORE, score_usage)
 
         if verbose:
             print(f"  Score: {m1_score:.2f}")
@@ -734,6 +769,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
             total_cache_read_tokens += gen_usage.get('cache_read_tokens', 0)
             total_cache_write_tokens += gen_usage.get('cache_write_tokens', 0)
             total_cost += gen_usage.get('cost', 0.0)
+            fallback_calls += _fallback_calls(STAGE4_5_CALL_SUMMARY, gen_usage)
 
         if verbose:
             print(f"\nSummary ({generation_method}, {len(research_summary)} chars):")
@@ -751,19 +787,8 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
     original_m1_content = None
     if m1_entries and generation_method == GENERATION_METHOD_LLM:
         # We generated new content, so track what was replaced
-        original_m1_content = {
-            "entries": [
-                {
-                    "text": e.get('text', ''),
-                    "element_idx_start": e.get('element_idx_start'),
-                    "element_idx_end": e.get('element_idx_end'),
-                }
-                for e in m1_entries
-            ],
-            "total_entries": len(m1_entries),
-            "combined_text": existing_m1_content,
-            "reason_not_used": f"Score {m1_score:.2f} below threshold 0.8 - {score_reasoning}"
-        }
+        original_m1_content = _original_m1_record(
+            m1_entries, existing_m1_content, m1_score, score_reasoning)
 
     output_data = {
         "document_uid": document_uid,
@@ -791,6 +816,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
         "total_tokens": total_prompt_tokens + total_completion_tokens,
         "cache_read_tokens": total_cache_read_tokens,
         "cache_write_tokens": total_cache_write_tokens,
+        **({STAGE4_5_FALLBACK_CALLS_KEY: fallback_calls} if fallback_calls else {}),
     }
 
     # Determine output path
