@@ -13,7 +13,7 @@ from docx import Document
 from app.models import (
     InboundFile, InboundFileStatus, InboundMessage, Run, RunBatch, RunState, User,
 )
-from app.services import inbound_autorun, inbound_service
+from app.services import batch_completion, batch_service, inbound_autorun, inbound_service, mailer
 from app.services.pdf_sandbox import PdfText
 from app.storage.local_storage import LocalRunStorage
 from tests.test_inbound_mail import make_eml
@@ -214,3 +214,110 @@ def test_logs_carry_no_filename_or_address(db, storage, sent, queue, caplog, see
     with caplog.at_level(logging.DEBUG):
         _send(db, storage, ["secret-name"])
     assert "secret-name" not in caplog.text and SENDER not in caplog.text
+
+
+def _finish(db, *states):
+    """Put the batch's runs, in order, into the given terminal states."""
+    for run, state in zip(db.query(Run).order_by(Run.id).all(), states, strict=True):
+        run.status = state
+    db.commit()
+
+
+def _completion_mails(sent):
+    return [m for m in sent if m.kind == mailer.MailKind.COMPLETION]
+
+
+def test_an_auto_run_batch_is_marked_email_and_a_web_batch_is_not(db, storage, sent, queue, seed_simple_mode):
+    user = _user(db)
+    web = batch_service.create_batch(db, user, 1)
+    _send(db, storage, ["one"])
+    assert web.source == "web" and db.query(RunBatch).filter(RunBatch.id != web.id).one().source == "email"
+
+
+def test_completion_is_sent_once_when_the_last_run_finishes_and_not_before(db, storage, sent, queue, seed_simple_mode):
+    _user(db)
+    _send(db, storage, ["one", "two", "three"])
+    batch_id = db.query(RunBatch).one().id
+    _finish(db, RunState.COMPLETE, RunState.FAILED, RunState.RUNNING)
+    assert batch_completion.send_if_batch_complete(db, batch_id) is False and _completion_mails(sent) == []
+    _finish(db, RunState.COMPLETE, RunState.FAILED, RunState.CANCELLED)
+    assert batch_completion.send_if_batch_complete(db, batch_id) is True
+    assert batch_completion.send_if_batch_complete(db, batch_id) is False
+    [mail] = _completion_mails(sent)
+    assert mail.to_addr == SENDER and "Your 3 CVs are done: 1 ready to download, 2 failed." in mail.body
+    assert db.query(RunBatch).one().completion_notified_at is not None
+
+
+def test_a_single_cv_batch_gets_the_single_wording_and_the_run_link(db, storage, sent, queue, seed_simple_mode):
+    _user(db)
+    _send(db, storage, ["one"])
+    _finish(db, RunState.FAILED)
+    assert batch_completion.notify_if_batch_complete is not None
+    batch_completion.send_if_batch_complete(db, db.query(RunBatch).one().id)
+    [mail] = _completion_mails(sent)
+    assert "Your CV failed to process. Open the run to retry it" in mail.body
+    assert f"/run/{db.query(Run).one().id}" in mail.body
+
+
+def test_a_web_batch_never_gets_a_completion_email(db, sent, seed_simple_mode):
+    user = _user(db)
+    batch = batch_service.create_batch(db, user, 1)
+    db.add(Run(id="WEBRUN", filename="cv.docx", file_type="docx", status=RunState.COMPLETE, batch_id=batch.id))
+    db.commit()
+    assert batch_completion.send_if_batch_complete(db, batch.id) is False
+    assert sent == [] and db.get(RunBatch, batch.id).completion_notified_at is None
+
+
+def test_two_pods_finishing_the_last_runs_at_once_send_exactly_one_email(db, storage, sent, queue, monkeypatch, seed_simple_mode):
+    _user(db)
+    _send(db, storage, ["one", "two"])
+    batch_id = db.query(RunBatch).one().id
+    _finish(db, RunState.COMPLETE, RunState.COMPLETE)
+    # Both pods read "all terminal" before either claims: only the claim decides.
+    monkeypatch.setattr(batch_completion, "_is_complete", lambda *args: True)
+    results = [batch_completion.send_if_batch_complete(db, batch_id) for _ in range(2)]
+    assert results == [True, False] and len(_completion_mails(sent)) == 1
+
+
+def test_a_batch_still_creating_its_runs_is_not_complete(db, storage, sent, queue, seed_simple_mode):
+    user = _user(db)
+    batch = batch_service.create_batch(db, user, 2, source="email")
+    db.add(Run(id="RUN001", filename="cv.docx", file_type="docx", status=RunState.COMPLETE, batch_id=batch.id))
+    db.commit()
+    assert batch_completion.send_if_batch_complete(db, batch.id) is False
+
+
+def test_a_refused_file_shrinks_the_batch_so_the_rest_can_complete(db, storage, sent, queue, monkeypatch, seed_simple_mode):
+    _user(db)
+    real = inbound_autorun._run_item
+    monkeypatch.setattr(inbound_autorun, "_run_item",
+                        lambda db_, st, u, item, req: False if item.filename == "two.docx" else real(db_, st, u, item, req))
+    _send(db, storage, ["one", "two"])
+    batch = db.query(RunBatch).one()
+    assert batch.files_submitted == 1
+    _finish(db, RunState.COMPLETE)
+    assert batch_completion.send_if_batch_complete(db, batch.id) is True
+
+
+def test_the_mail_flag_off_means_logged_not_sent(db, storage, queue, monkeypatch, caplog, seed_simple_mode):
+    from unittest.mock import MagicMock
+    ses = MagicMock()
+    monkeypatch.setattr(mailer, "_client", lambda: ses)
+    monkeypatch.delenv("CVICHE_MAIL_SEND", raising=False)
+    _user(db)
+    _send(db, storage, ["one"])
+    _finish(db, RunState.COMPLETE)
+    with caplog.at_level(logging.INFO):
+        batch_completion.send_if_batch_complete(db, db.query(RunBatch).one().id)
+    ses.send_email.assert_not_called()
+    assert "would have sent a completion message" in caplog.text and SENDER not in caplog.text
+
+
+def test_completion_mail_carries_no_filename_or_score(db, storage, sent, queue, seed_simple_mode):
+    _user(db)
+    _send(db, storage, ["secret-name"])
+    _finish(db, RunState.COMPLETE)
+    batch_completion.send_if_batch_complete(db, db.query(RunBatch).one().id)
+    [mail] = _completion_mails(sent)
+    for part in (mail.body, mail.html):
+        assert "secret-name" not in part and ".docx" not in part and "score" not in part.lower()

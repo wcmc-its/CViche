@@ -17,7 +17,7 @@ from app.config_loader import get_config
 from app.pipeline import concurrency, run_queue
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.services import auto_retry, notifications
+from app.services import auto_retry, batch_completion, notifications
 
 # Baked into the image by the Dockerfile's IMAGE_TAG build arg (#1239).
 IMAGE_TAG_ENV = "CVICHE_IMAGE_TAG"
@@ -263,6 +263,7 @@ def reconcile_stale_runs(db: Session) -> int:
     now = datetime.now()
     failed_count = 0
     resumed_count = 0
+    failed_batches: set[str | None] = set()
     for run in stale_runs:
         seen_started_at = run.started_at
         last_error_type, start_step_number = _resume_info_for_run(run, db)
@@ -284,8 +285,11 @@ def reconcile_stale_runs(db: Session) -> int:
             continue
         _mark_run_failed(run, db, now)
         failed_count += 1
+        failed_batches.add(run.batch_id)
 
     db.commit()
+    for batch_id in failed_batches:
+        batch_completion.notify_if_batch_complete(batch_id)
     if resumed_count:
         logger.info(
             "Reconciled %d stale run(s) older than %d min at startup "
@@ -916,10 +920,12 @@ def mark_failed(run_id: str, message: str, *, from_statuses: tuple[str, ...]) ->
                 .where(Step.run_id == run_id, Step.status == "running")
                 .values(status="error", completed_at=now)
             )
+        batch_id = db.scalar(select(Run.batch_id).where(Run.id == run_id)) if rowcount else None
         db.commit()
-        return rowcount
     finally:
         db.close()
+    batch_completion.notify_if_batch_complete(batch_id)
+    return rowcount
 
 
 def flip_to_queued(

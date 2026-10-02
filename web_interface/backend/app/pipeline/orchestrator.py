@@ -1028,6 +1028,7 @@ class PipelineOrchestrator:
                 self._persist_cancelled()
                 await self.log(0, "Pipeline cancelled by user", "WARNING")
                 await event_emitter.emit(self.run_id, {"event": "RUN_CANCELLED"})
+                await self._notify_batch_complete(run)
 
         except Exception as e:
             run.status = "failed"
@@ -1157,6 +1158,13 @@ class PipelineOrchestrator:
             )
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Run notification failed for run %s: %s", self.run_id, e)
+        await self._notify_batch_complete(run)
+
+    async def _notify_batch_complete(self, run: Run) -> None:
+        """Send the emailed batch's completion email if this was its last run
+        (#1298). Own session, off the event loop; DB errors are logged inside."""
+        from app.services.batch_completion import notify_if_batch_complete
+        await asyncio.get_running_loop().run_in_executor(None, notify_if_batch_complete, run.batch_id)
 
     async def _run_doctor(self):
         """Run cross-stage lints over this run's artifacts and publish the report.

@@ -33,7 +33,7 @@ from app.services.runs_admin_query import (
     filtered_runs_query, load_feedback_summaries, parse_feedback_filter,
     my_status_counts, parse_run_filters, parse_status_filter, run_by_summary, status_clause,
 )
-from app.services import quality_score_service
+from app.services import batch_completion, quality_score_service
 from app.services.run_quality_report import build_run_quality_report, columns_need_cleanup
 from app.storage import get_storage
 
@@ -658,6 +658,7 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     # that offset (timestamp and duration both) on a non-UTC host.
     run.completed_at = datetime.now()
     db.commit()
+    batch_completion.notify_if_batch_complete(run.batch_id)
 
     from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
 
