@@ -36,6 +36,9 @@ to a specific bug fix:
   - Two-digit-year century: the LLM read "10/08" as 1908. The repair moves a
     19xx year the text holds only as a two-digit token to the century the
     shared pivot (core/two_digit_year.py) gives it -- see the last section.
+  - Class 2 of the 2026-10-02 s7ab autopsy: a "1999-02" source range stored
+    whole as a year-month date, and an "01/09" MM/YY date read as 2001-09.
+    See the two sections after the century repair.
 
 Self-contained: no LLM calls, no I/O, no PII.
 """
@@ -395,3 +398,90 @@ def test_date_field_names_match_declared_date_fields():
     }
 
     assert set(DATE_FIELD_NAMES) == declared_date_fields
+
+
+# --- YYYY-YY source range stored whole in one field (class 2) ---------------
+
+_SHORT_RANGE_REASON = "Read a YYYY-YY source range written into one date field"
+
+
+@pytest.mark.parametrize(
+    "text,fields,expected",
+    [
+        ("Example mentee, MS 1999-02", {"start_date": None, "end_date": "1999-02"},
+         ("1999", "2002")),
+        ("Example mentee, MS 1999-00", {"start_date": "", "end_date": "1999-00"},
+         ("1999", "2000")),
+        ("Example mentee, MS 2001\u201307", {"start_date": "2001-07", "end_date": None},
+         ("2001", "2007")),
+        ("Example mentee, MS 2016 - 19", {"end_date": "2016-19"}, ("2016", "2019")),
+    ],
+)
+def test_short_source_range_splits_into_start_and_end(text, fields, expected):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), "N3B")
+
+    assert (updated["start_date"], updated["end_date"]) == expected
+    assert reformatted["end_date"]["reason"] == _SHORT_RANGE_REASON
+
+
+@pytest.mark.parametrize(
+    "text,fields,code",
+    [
+        # the source has only the year; stage 4 added the month itself
+        ("Example mentee, MPH 2002", {"end_date": "2002-12"}, "N3B"),
+        # the other range field is already set
+        ("Example mentee 1999-02", {"start_date": "1998", "end_date": "1999-02"}, "N3B"),
+        # a full date in the source, not a range
+        ("Example mentee 1999-02-15", {"end_date": "1999-02"}, "N3B"),
+        ("Example mentee 1999-02/03", {"end_date": "1999-02"}, "N3B"),
+        # read as a range it would end in 2103: a month after all
+        ("Example meeting 2005-03", {"end_date": "2005-03"}, "N3B"),
+        # a code whose schema has no date range
+        ("Example award 1999-02", {"end_date": "1999-02"}, "H"),
+    ],
+)
+def test_short_source_range_split_leaves_other_shapes_alone(text, fields, code):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), code)
+
+    assert {key: updated.get(key) for key in fields} == fields
+    assert "start_date" not in reformatted and "end_date" not in reformatted
+
+
+# --- MM/YY source date read as YY/MM (class 2) ------------------------------
+
+_MONTH_SLASH_YEAR_REASON = "Re-read an MM/YY source date stage 4 read as YY/MM"
+
+
+def test_month_slash_year_read_backwards_is_re_read():
+    updated, reformatted = apply_regex_post_processing(
+        "Example mentee, PhD 01/09- 08/14",
+        {"start_date": "2001-09", "end_date": "2014-08"}, "N3B")
+
+    assert (updated["start_date"], updated["end_date"]) == ("2009-01", "2014-08")
+    assert reformatted == {"start_date": {
+        "original": "2001-09", "reformatted": "2009-01", "reason": _MONTH_SLASH_YEAR_REASON}}
+
+
+@pytest.mark.parametrize(
+    "text,fields",
+    [
+        # read the right way round already
+        ("Example mentee 09/16- 2021", {"start_date": "2016-09", "end_date": "2021"}),
+        ("Example mentee 01/09- 08/14", {"start_date": "2009-01", "end_date": "2014-08"}),
+        # the four-digit year is in the text, so it supports the reading
+        ("Example mentee 01/09, joined 2001", {"start_date": "2001-09"}),
+        # both orders in the text: ambiguous, left alone
+        ("Example mentee 01/09 and 09/01", {"start_date": "2001-09"}),
+        # the first number cannot be a month
+        ("Example mentee 20/09", {"start_date": "2020-09"}),
+        # no slash token for the value at all
+        ("Example mentee, joined in December", {"start_date": "2005-12"}),
+        # part of a longer date, not an MM/YY token
+        ("Example mentee 3/01/09", {"start_date": "2001-09"}),
+    ],
+)
+def test_month_slash_year_reading_left_alone_when_text_does_not_show_it(text, fields):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), "N3B")
+
+    assert {key: updated.get(key) for key in fields} == fields
+    assert reformatted == {}
