@@ -85,10 +85,13 @@ TITLE_SEARCH_MAX_HITS = 3
 # with a near-identical title.
 IN_PRESS_YEAR_WINDOW = range(-1, 3)
 
-# "accepted" counts only for publication, not "accepted for presentation" or
-# "accepted as a poster/abstract".
+# "accepted" counts only for publication, not "accepted for presentation",
+# "accepted as a poster" or "Accepted abstract" (a corpus conference
+# abstract). "in press release(s)" is a title idiom ("Exaggerations and
+# Caveats in Press Releases...", PMID 27978540), not a status.
 IN_PRESS_PATTERN = re.compile(
-    r'\b(in[\s-]press|accepted(?!\s+(?:for|as)\s+(?:an?\s+)?(?:presentation|poster|oral|abstract|talk))'
+    r'\b(in[\s-]press(?!\s+releases?\b)'
+    r'|accepted(?!\s+abstract)(?!\s+(?:for|as)\s+(?:an?\s+)?(?:presentation|poster|oral|abstract|talk))'
     r'|(?:e-?pub|online)\s+ahead\s+of\s+print)\b', re.I)
 # An entry that also says it is still under review is not in press (4 of the
 # 63 probe entries said both).
@@ -107,13 +110,21 @@ IN_REVIEW_CODE = 'S7'
 _TITLE_SEARCHABLE_STATUSES = frozenset({'no_identifier', 'doi_not_in_pubmed'})
 
 
-def in_press_phrase(text: str) -> str | None:
+def in_press_phrase(text: str, title: str = '') -> str | None:
     """The phrase that marks the entry as in press, lowercased, or None when
-    there is none or the entry also says it is still under review."""
-    match = IN_PRESS_PATTERN.search(text or '')
-    if not match or NOT_YET_ACCEPTED_PATTERN.search(text):
+    there is none or the entry also says it is still under review.
+
+    A phrase inside the title ("Socially accepted norms") is not a status, so
+    the text must hold more matches than the title does. Counting, not
+    deleting the title from the text, because stage 4's title rarely equals
+    the CV's spelling of it exactly (case, punctuation, truncation). Status
+    phrases trail the citation, so the last match is the one reported."""
+    text = text or ''
+    matches = IN_PRESS_PATTERN.findall(text)
+    if (len(matches) <= len(IN_PRESS_PATTERN.findall(title or ''))
+            or NOT_YET_ACCEPTED_PATTERN.search(text)):
         return None
-    return re.sub(r'\s+', ' ', match.group(1).lower())
+    return re.sub(r'\s+', ' ', matches[-1].lower())
 
 
 def _folded_words(text: str, min_len: int) -> set[str]:
@@ -496,9 +507,7 @@ class PubMedEnricher:
         for entry in pub_entries:
             fields = entry.get('extracted_fields') or {}
             title = fields.get('title') or fields.get('chapter_title') or ''
-            # The phrase must sit outside the title: "Socially accepted norms"
-            # is a title, not a status.
-            phrase = in_press_phrase((entry.get('text') or '').replace(title, ' '))
+            phrase = in_press_phrase(entry.get('text') or '', title)
             if not phrase:
                 continue
             if entry.get('enrichment_status') in _TITLE_SEARCHABLE_STATUSES:

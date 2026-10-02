@@ -651,3 +651,29 @@ def test_publication_year_window():
     assert not plausible_publication_year('2021', 2025)
     assert plausible_publication_year('in press', 2025)
     assert plausible_publication_year(None, 2025)
+
+
+PRESS_RELEASES = ('Sumner P, Vivian-Griffiths S, Boivin J. Exaggerations and caveats in '
+                  'press releases and health-related science news. PLoS One. 2016;11(12):e0168217.')
+
+
+def test_in_press_releases_is_a_title_idiom_not_a_status():
+    # PMID 27978540: stage 4's title absent or spelled differently must not matter.
+    assert in_press_phrase(PRESS_RELEASES) is None
+    assert in_press_phrase(PRESS_RELEASES, 'Exaggerations and Caveats in Press Releases') is None
+
+
+def test_phrase_in_a_differently_spelled_title_needs_a_second_match():
+    text = 'Garcia M. SOCIALLY ACCEPTED NORMS of statin use. JAMA. 2024;1:1.'
+    assert in_press_phrase(text, 'Socially accepted norms of statin use') is None
+    assert in_press_phrase(text + ' Accepted.', 'Socially accepted norms of statin use') == 'accepted'
+
+
+def test_accepted_abstract_is_a_conference_abstract():
+    assert in_press_phrase('Doe J. Hard metal lung disease. Accepted abstract, ATS 2024.') is None
+
+
+def test_status_before_a_word_still_counts():
+    # Corpus shapes: the status is followed by an identifier or a venue, not punctuation.
+    assert in_press_phrase('Doe J. A sling trial. J Urol. In press PMID: 26820550') == 'in press'
+    assert in_press_phrase('Doe J. Learning. [In Press in the 2022 Proceedings of X]') == 'in press'
