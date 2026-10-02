@@ -1361,4 +1361,29 @@ def test_map_hierarchy_node_child_is_not_bound_to_an_earlier_top_level_section()
     second, _ = map_hierarchy_node(pubs, elements, [], nxt, top_level_headers=tops)
     assert first["element_idx"] == 0
     assert second["element_idx"] == 2
-    assert second["children"][0]["element_idx"] != 0
+    assert second["children"][0]["element_idx"] is None
+    sections = compute_section_boundaries([first, second], doc_length=len(elements))
+    pubs_section = next(s for s in sections if s["hierarchy"] == ["Publications"])
+    assert not pubs_section["has_children"]
+    assert (pubs_section["element_idx_start"], pubs_section["element_idx_end"]) == (2, 4)
+
+
+def test_fallback_takes_a_forward_fragment_when_no_exact_line_is_behind_the_cursor():
+    # No exact "Pending Grants" line exists anywhere and no bounded partial
+    # exists behind the cursor, so the forward fragment "Grants" is the node's
+    # only line and must be kept.
+    elements = [
+        _elem(0, "Intro"),
+        _elem(1, "body line"),
+        _elem(2, "Research"),
+        _elem(3, "Grants"),
+        _elem(4, "body line"),
+    ]
+    node = {
+        "text": "Research",
+        "level": "H1",
+        "children": [{"text": "Pending Grants", "level": "H2"}],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 2)
+    assert mapped["element_idx"] == 2
+    assert mapped["children"][0]["element_idx"] == 3
