@@ -459,6 +459,12 @@ def _complex_field(*instr_runs: str) -> str:
      upload_validation.ActiveContent.EXTERNAL_LINK),
     ("file URL naming a host", {_SETTINGS_RELS: _rels("attachedTemplate", "file://evil.example/x.dotm")},
      upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("forward-slash UNC attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "//evil.example/s/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("ftp attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "FTP://evil.example/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("remote image in a header's rels", {"word/_rels/header1.xml.rels": _rels("image", "https://evil.example/x.png")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
     ("file:/// attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file:///C:/x.dotm")}, None),
     ("file://localhost attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file://localhost/x.dotm")},
      None),
@@ -491,6 +497,9 @@ def _complex_field(*instr_runs: str) -> str:
         "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>REF x</w:instrText></w:r>"
         "<w:r><w:fldChar w:fldCharType='separate'/></w:r><w:r><w:instrText>DDE x y</w:instrText></w:r>"
         "<w:r><w:fldChar w:fldCharType='end'/></w:r>")}, None),
+    ("DDE only after an empty field's separate", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+        "<w:r><w:instrText>DDEAUTO x y</w:instrText></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r>")}, None),
     ("a non-DDE field", {"word/document.xml": _document(_complex_field("PAGE"))}, None),
     ("body text DDE", {"word/document.xml": _document("<w:r><w:t>DDE DDEAUTO lab</w:t></w:r>")}, None),
     ("ActiveX part", {
