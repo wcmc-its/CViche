@@ -14,6 +14,7 @@ from app.models import (
     InboundFile, InboundFileStatus, InboundMessage, Run, RunBatch, RunState, User,
 )
 from app.services import inbound_autorun, inbound_service
+from app.services.pdf_sandbox import PdfText
 from app.storage.local_storage import LocalRunStorage
 from tests.test_inbound_mail import make_eml
 
@@ -62,9 +63,8 @@ class SimpleQueue:
 
 @pytest.fixture(autouse=True)
 def _readable_pdfs(monkeypatch):
-    real = inbound_service._extract_text
-    monkeypatch.setattr(inbound_service, "_extract_text",
-                        lambda content, ext: "x" * 600 if ext == ".pdf" else real(content, ext))
+    """The PDF sandbox is its own suite's business; every PDF here has text and no scanned pages."""
+    monkeypatch.setattr(inbound_service, "read_pdf", lambda content: PdfText("x" * 600, 1, []))
 
 
 def _user(db, **fields):

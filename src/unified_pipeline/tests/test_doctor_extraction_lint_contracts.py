@@ -590,6 +590,31 @@ def test_under_extraction_min_records_boundary():
     assert len(lint_under_extraction({"entries": [at]})) == 1
 
 
+
+def _stage4_records_entry(code, field):
+    """An entry whose two stage-4 records carry its whole text; its own
+    field (the last record, as stage 4 leaves it) carries one line."""
+    text = _padded_under_extraction_text(4, UNDER_EXTRACTION_MIN_CHARS + 50)
+    lines = text.split("\n")
+    records = [{field: "\n".join(lines[:2])}, {field: "\n".join(lines[2:])}]
+    return {"element_type": "paragraph", "element_idx_start": 1, "taxonomy_code": code,
+            "text": text, "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records},
+            "extraction_coverage": {"extraction_coverage_percent": 100.0}}
+
+
+def test_under_extraction_ignores_stage4_records_no_renderer_writes():
+    """#1299: T has no fan-out renderer, so its stage-4 records never
+    render and must not count toward coverage."""
+    entry = _stage4_records_entry("T", "title")
+    entry["extracted_fields"] = {"title": "zz", STAGE4_RECORDS_KEY:
+                                 entry["extracted_fields"][STAGE4_RECORDS_KEY]}
+    assert len(lint_under_extraction({"entries": [entry]})) == 1
+
+
+def test_under_extraction_credits_stage4_records_that_fan_out():
+    assert lint_under_extraction({"entries": [_stage4_records_entry("H", "award_name")]}) == []
+
+
 _OVERLAP_WORDS = [''.join(c) for c in itertools.islice(
     itertools.product('abcdefghijklmnopqrstuvwxyz', repeat=5), 100)]
 _OVERLAP_ENTRY_TEXT = " ".join(_OVERLAP_WORDS)
@@ -635,6 +660,79 @@ def test_lint_dedup_drops_repeated_tokens_fully_present_still_safe():
     same = {"code": "A", "metric": "j",
             "dropped_text": "grant grant funded", "kept_text": "funded grant grant x"}
     assert lint_dedup_drops({"dedup_decisions": [same]}) == []
+
+
+# #666: a fully-covered drop whose extracted name differs from the kept entry's
+# and is on the page as no cell of its own.
+
+def _named_decision(dropped_name, kept_name):
+    return {"code": "Q4D", "metric": "containment=1.00",
+            "dropped_text": dropped_name, "kept_text": kept_name,
+            "dropped_fields": {"journal_name": dropped_name},
+            "kept_fields": {"journal_name": kept_name}}
+
+
+def test_dedup_drops_info_when_dropped_name_absent_from_page():
+    report = {"dedup_decisions": [_named_decision("Example Optics", "European Example Optics")]}
+    blocks = [("p", "Reviewer"), ("table", "European Example Optics\nJournal Reviewer")]
+    result = lint_dedup_drops(report, blocks)
+    assert len(result) == 1
+    assert result[0]["severity"] == "INFO" and result[0]["lint"] == "dedup_drops"
+    assert "Q4D" in result[0]["evidence"][0]
+
+
+def test_dedup_drops_quiet_when_dropped_name_is_its_own_cell():
+    report = {"dedup_decisions": [_named_decision("Example Optics", "European Example Optics")]}
+    blocks = [("table", "European Example Optics\nExample Optics")]
+    assert lint_dedup_drops(report, blocks) == []
+
+
+def test_dedup_drops_quiet_when_names_match_after_normalisation():
+    report = {"dedup_decisions": [_named_decision("Example Optics", "example  optics.")]}
+    assert lint_dedup_drops(report, [("p", "unrelated")]) == []
+
+
+def test_dedup_drops_info_needs_rendered_blocks_and_fields():
+    report = {"dedup_decisions": [_named_decision("Example Optics", "European Example Optics")]}
+    assert lint_dedup_drops(report) == []
+    legacy = {"dedup_decisions": [{"code": "Q4D", "metric": "m",
+                                   "dropped_text": "Example Optics",
+                                   "kept_text": "European Example Optics"}]}
+    assert lint_dedup_drops(legacy, [("p", "unrelated")]) == []
+
+
+def test_dedup_drops_info_uses_institution_for_appointments():
+    decision = {"code": "D2", "metric": "jaccard=0.82",
+                "dropped_text": "Example Hospital Example Title 2001",
+                "kept_text": "Sample Hospital Example Hospital Example Title 2001",
+                "dropped_fields": {"institution": "Example Hospital"},
+                "kept_fields": {"institution": "Sample Hospital"}}
+    result = lint_dedup_drops({"dedup_decisions": [decision]},
+                              [("table", "Sample Hospital\nExample Title")])
+    assert [f["severity"] for f in result] == ["INFO"]
+
+
+def test_dedup_drops_quiet_when_only_the_dropped_entry_fills_a_name():
+    decision = _named_decision("Example Optics", "European Example Optics")
+    decision["kept_fields"] = {}
+    assert lint_dedup_drops({"dedup_decisions": [decision]}, [("p", "x")]) == []
+
+
+def test_dedup_drops_info_evidence_is_capped():
+    report = {"dedup_decisions": [
+        _named_decision(f"Example Optics {n}", f"European Example Optics {n} Letters")
+        for n in range(extraction_lints.DEDUP_EVIDENCE_LIMIT + 3)]}
+    result = lint_dedup_drops(report, [("p", "x")])
+    assert len(result[0]["evidence"]) == extraction_lints.DEDUP_EVIDENCE_LIMIT
+    assert str(extraction_lints.DEDUP_EVIDENCE_LIMIT + 3) in result[0]["message"]
+
+
+def test_dedup_drops_reports_warn_and_info_together():
+    poorly = {"code": "N1", "metric": "jaccard",
+              "dropped_text": "alpha beta gamma delta", "kept_text": "alpha"}
+    report = {"dedup_decisions": [poorly, _named_decision("Example Optics", "European Example Optics")]}
+    result = lint_dedup_drops(report, [("p", "x")])
+    assert [f["severity"] for f in result] == ["WARN", "INFO"]
 
 
 def test_alphanumeric_tokens_unicode_diaeresis_folds_to_one_token():

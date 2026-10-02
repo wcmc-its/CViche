@@ -19,9 +19,10 @@ from typing import Any, Callable, NamedTuple, NotRequired, TypedDict
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
+from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
 from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_ENTRY_FALLBACK_KEY
 
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
@@ -378,6 +379,14 @@ def _entry_with_extraction(entry: dict[str, Any], extraction: _EntryExtraction,
     if extraction.records_returned >= _MIN_RECORDS_PER_ENTRY:
         result[STAGE4_RECORDS_RETURNED_KEY] = extraction.records_returned
     return result
+
+
+def _fallback_flags(llm_result: dict[str, Any]) -> dict[str, Any]:
+    """The entry flag recording which model answered, when the content-filter
+    fallback served the group's call (#1174); empty otherwise. Write-only: the
+    doctor and the quality score read it, nothing downstream does."""
+    model = llm_result.get(FALLBACK_SERVED_KEY)
+    return {STAGE4_ENTRY_FALLBACK_KEY: model} if model else {}
 
 # =============================================================================
 # LLM-ASSISTED RECOVERY FOR MESSY TABLE STRUCTURES
@@ -901,7 +910,7 @@ def extract_fields_batch(
                     # reply holds for this entry -- see _extract_entry_items.
                     extraction = _extract_entry_items(
                         entry.get("text", ""), extraction_map[i], entry.get("taxonomy_code", ""))
-                    all_extracted.append(_entry_with_extraction(entry, extraction, {}))
+                    all_extracted.append(_entry_with_extraction(entry, extraction, _fallback_flags(llm_result)))
                 else:
                     # No extraction found - mark as failed
                     all_extracted.append({
@@ -1058,8 +1067,11 @@ def _extract_batches(
             batch, batch_idx, len(batches), cv_owner_name=cv_owner_name, cancel_check=cancel_check,
         )
 
-    # No on_result: extraction.py has no print() calls needing thread-routed stdout.
-    return map_in_order(run_batch, list(enumerate(batches)), workers=workers)
+    return map_in_order(
+        run_batch, list(enumerate(batches)), workers=workers,
+        # [N/M] is the parsed progress-bar contract (orchestrator PROGRESS_PATTERNS).
+        on_result=make_progress_printer(lambda done, _i, _r: [f"[{done}/{len(batches)}] batches extracted"]),
+    )
 
 
 def _split_skippable_entries(

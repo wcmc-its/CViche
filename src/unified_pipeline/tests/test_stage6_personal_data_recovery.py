@@ -1019,3 +1019,232 @@ def test_an_unanswered_visa_row_leaves_the_placeholder_alone(tmp_path):
 
     rows = _personal_data_rows(op)
     assert rows["Is your eligibility to work in the U.S. based on an employment visa?:"] == "Yes/No"
+
+
+# --------------------------------------------------------------------------
+# slot ranking and phone-type keywords (#1222)
+# --------------------------------------------------------------------------
+
+def _contact_rows(tmp_path, entries) -> dict[str, str]:
+    """The Personal Data table as {label cell: value cell}, read from raw
+    w:t nodes so tracked insertions count."""
+    _render(tmp_path, entries)
+    rows = {}
+    for table in Document(str(tmp_path / "out.docx")).tables:
+        for row in table.rows:
+            cells = ["".join(n.text or "" for n in c._tc.iter(W_T)).strip()
+                     for c in row.cells]
+            if len(cells) >= 2 and cells[0].endswith(":"):
+                rows.setdefault(cells[0], cells[1])
+    return rows
+
+
+def test_labelled_work_address_outranks_an_earlier_banner_address(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Example University", {"address": "Example University"}, idx=0),
+        _a("Business Address: 1 Sample Way, Exampleton, ZZ 00000\nPhone: 555-0100",
+           {"address": "1 Sample Way, Exampleton, ZZ 00000",
+            "phone": "555-0100"}, idx=1),
+    ])
+    assert "1 Sample Way" in rows["Office address:"]
+    assert "Example University" not in rows["Office address:"]
+
+
+def test_first_labelled_work_address_is_not_displaced_by_a_later_one(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Office Address: 1 Sample Way, Exampleton, ZZ 00000",
+           {"address": "1 Sample Way, Exampleton, ZZ 00000"}, idx=0),
+        _a("Work Address: 2 Other Road, Exampleton, ZZ 00000",
+           {"address": "2 Other Road, Exampleton, ZZ 00000"}, idx=1),
+    ])
+    assert "1 Sample Way" in rows["Office address:"]
+    assert "2 Other Road" not in rows["Office address:"]
+
+
+def test_unlabelled_address_still_fills_an_empty_slot(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("3 Plain Street, Exampleton, ZZ 00000",
+           {"address": "3 Plain Street, Exampleton, ZZ 00000"}),
+    ])
+    assert "3 Plain Street" in rows["Office address:"]
+
+
+def test_labelled_work_address_never_surfaces_a_home_address(tmp_path):
+    text = _render(tmp_path, [
+        _a("Home Address: 9 Private Lane, Exampleton, ZZ 00000",
+           {"address": "9 Private Lane, Exampleton, ZZ 00000"}, idx=0),
+        _a("Business Address: 1 Sample Way, Exampleton, ZZ 00000",
+           {"address": "1 Sample Way, Exampleton, ZZ 00000"}, idx=1),
+    ])
+    assert "1 Sample Way" in text
+    assert "9 Private Lane" not in text
+
+
+def test_cellular_in_a_department_name_does_not_make_the_phone_a_cell(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Department of Cellular Example Studies\nTel: 555-0100",
+           {"phone": "555-0100"}),
+    ])
+    assert rows["Office telephone:"] == "555-0100"
+    assert rows["Cell phone:"] == ""
+
+
+def test_a_cell_label_still_routes_to_cell_phone(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Cell: 555-0100", {"phone": "555-0100"}),
+    ])
+    assert rows["Cell phone:"] == "555-0100"
+
+
+@pytest.mark.parametrize("text", [
+    "Mobile telephone: 555-0100",
+    "Mobile Phone Number: 555-0100",
+    "555-0100 cell\tdoe@example.com",
+    "Cellphone: 555-0100",
+    "Cell - 555-0100",
+    "Cell/Text: 555-0100",
+    "Mobile Ph: 555-0100",
+    "Cell (preferred): 555-0100",
+    "Cell phone 555-0100",
+    "Name (cell) 555-0100",
+])
+def test_every_written_cell_label_shape_still_routes_to_cell_phone(tmp_path, text):
+    rows = _contact_rows(tmp_path, [_a(text, {"phone": "555-0100"})])
+    assert rows["Cell phone:"] == "555-0100"
+    assert rows["Office telephone:"] == ""
+
+
+def test_labelled_work_phone_outranks_an_earlier_unlabelled_phone(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Dr Example Doe\n1 Plain Street, Exampleton, ZZ 00000\n555-0101",
+           {"phone": "555-0101"}, idx=0),
+        _a("Primary Work Address:\t1 Sample Way\tExampleton, ZZ 00000\tPhone 555-0102",
+           {"phone": "555-0102", "address": "1 Sample Way, Exampleton, ZZ 00000"}, idx=1),
+    ])
+    assert rows["Office telephone:"] == "555-0102"
+    assert "1 Sample Way" in rows["Office address:"]
+
+
+def test_labelled_home_phone_never_fills_the_office_row(tmp_path):
+    text = _render(tmp_path, [
+        _a("Home Phone: 555-0199", {"phone": "555-0199"}, idx=0),
+        _a("Office Phone: 555-0102", {"phone": "555-0102"}, idx=1),
+    ])
+    assert "555-0102" in text
+    assert "555-0199" not in text
+
+
+def test_cell_as_the_first_word_of_a_program_name_is_not_a_label(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Cell Biology Program, Tel. 555-0100", {"phone": "555-0100"}),
+    ])
+    assert rows["Office telephone:"] == "555-0100"
+    assert rows["Cell phone:"] == ""
+
+
+def test_a_number_followed_by_a_cell_subject_is_not_a_cell_label(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Tel 555-0100 cell biology laboratory", {"phone": "555-0100"}),
+    ])
+    assert rows["Office telephone:"] == "555-0100"
+    assert rows["Cell phone:"] == ""
+
+
+@pytest.mark.parametrize("label", [
+    "Office Phone", "Work Telephone", "Work Tel",
+])
+def test_every_work_phone_noun_outranks_a_banner_phone(tmp_path, label):
+    rows = _contact_rows(tmp_path, [
+        _a("Dr Example Doe\n555-0101", {"phone": "555-0101"}, idx=0),
+        _a(f"{label}: 555-0102", {"phone": "555-0102"}, idx=1),
+    ])
+    assert rows["Office telephone:"] == "555-0102"
+
+
+def test_a_residence_line_does_not_rank_an_address_for_the_office_slot(tmp_path):
+    text = _render(tmp_path, [
+        _a("1 Banner Street, Exampleton, ZZ 00000",
+           {"address": "1 Banner Street, Exampleton, ZZ 00000"}, idx=0),
+        _a("Residence: 9 Private Lane, Exampleton, ZZ 00000; Office phone: 555-0102",
+           {"address": "9 Private Lane, Exampleton, ZZ 00000",
+            "phone": "555-0102"}, idx=1),
+    ])
+    assert "1 Banner Street" in text
+    assert "9 Private Lane" not in text
+
+
+def test_a_school_name_before_tel_does_not_displace_a_street_address(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("1 Banner Street, Exampleton, ZZ 00000",
+           {"address": "1 Banner Street, Exampleton, ZZ 00000"}, idx=0),
+        _a("Example Business School, Tel. 555-0102",
+           {"address": "Example Business School", "phone": "555-0102"}, idx=1),
+    ])
+    assert "1 Banner Street" in rows["Office address:"]
+
+
+def test_a_fax_number_does_not_displace_an_office_phone(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Tel: 555-0101", {"phone": "555-0101"}, idx=0),
+        _a("Office Fax Number: 555-0199", {"phone": "555-0199"}, idx=1),
+    ])
+    assert rows["Office telephone:"] == "555-0101"
+
+
+def test_a_displaced_banner_address_is_recovered_not_lost(tmp_path):
+    text = _render(tmp_path, [
+        _a("Example Center for Sample Research",
+           {"address": "Example Center for Sample Research"}, idx=0),
+        _a("Business Address: 1 Sample Way, Exampleton, ZZ 00000",
+           {"address": "1 Sample Way, Exampleton, ZZ 00000"}, idx=1),
+    ])
+    assert "1 Sample Way" in text
+    assert "Example Center for Sample Research" in text
+
+
+def test_a_value_from_a_structured_address_is_not_displaced(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Contact", {"address": {"office_address": "5 Dict Street, Exampleton",
+                                   "home_address": "6 Hidden Lane, Exampleton"}}, idx=0),
+        _a("Business Address: 1 Sample Way, Exampleton, ZZ 00000",
+           {"address": "1 Sample Way, Exampleton, ZZ 00000"}, idx=1),
+    ])
+    assert "5 Dict Street" in rows["Office address:"]
+
+
+@pytest.mark.parametrize("home_line", ["(h) 555-0199", "H: 555-0199"])
+def test_a_displaced_banner_entry_never_surfaces_a_home_lettered_number(
+        tmp_path, home_line):
+    """The pii pass cuts only home WORDS; a displaced entry recovered whole
+    must not print a number labelled "(h)" or "H:" (#1222)."""
+    text = _render(tmp_path, [
+        _a(f"1 Banner Street, Exampleton, ZZ 00000\n{home_line}",
+           {"address": "1 Banner Street, Exampleton, ZZ 00000",
+            "phone": "555-0199"}, idx=0),
+        _a("Business Address: 1 Sample Way, Exampleton, ZZ 00000",
+           {"address": "1 Sample Way, Exampleton, ZZ 00000"}, idx=1),
+    ])
+    assert "1 Sample Way" in text
+    assert "1 Banner Street" in text, "the displaced address was lost"
+    assert "555-0199" not in text, "a home-lettered number was rendered"
+
+
+def test_a_displaced_phone_entry_never_surfaces_a_home_lettered_number(tmp_path):
+    text = _render(tmp_path, [
+        _a("Tel: 555-0101\n(h) 555-0199",
+           {"phone": "555-0101, 555-0199"}, idx=0),
+        _a("Office Phone: 555-0102", {"phone": "555-0102"}, idx=1),
+    ])
+    assert "555-0102" in text
+    assert "555-0199" not in text, "a home-lettered number was rendered"
+
+
+def test_a_cell_label_written_straight_before_a_number_without_punctuation(tmp_path):
+    """The label-end alternative `Cell 555-...` with no colon or dash; the two
+    numbers do not pair with the extracted value, so only the block-level
+    regex can route it."""
+    rows = _contact_rows(tmp_path, [
+        _a("Cell 555-0100, Office 555-0101",
+           {"phone": "555-0100, 555-0101"}),
+    ])
+    assert rows["Cell phone:"] != ""

@@ -27,6 +27,8 @@ export interface RunStatus {
   cv_owner_name?: string | null
   /** Who ran it. Admin only. */
   run_by?: RunBy | null
+  /** A PDF's scanned pages, whose text is missing from the output (#1282). */
+  scanned_pages?: number[]
   steps: StepSummary[]
 }
 

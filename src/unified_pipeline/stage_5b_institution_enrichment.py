@@ -435,14 +435,12 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
             # Prepare for LLM call
             llm_batch = [(inst_id, name, ctx) for inst_id, name, ctx, _, _ in batch]
 
-            results, cost, call_model = lookup_institutions_llm(
-                llm_batch,
-                cv_owner_location,
-                verbose=verbose
-            )
+            results, cost, call_model = lookup_institutions_llm(llm_batch, cv_owner_location, verbose=verbose)
             total_cost += cost
             observed_model = call_model or observed_model
             llm_calls += 1
+            if verbose:  # [N/M] is the parsed progress-bar contract (orchestrator PROGRESS_PATTERNS)
+                logger.info("[%d/%d] institution batches looked up", batch_idx + 1, llm_batches)
 
             # None means the LLM call itself failed — don't cache anything
             if results is None:

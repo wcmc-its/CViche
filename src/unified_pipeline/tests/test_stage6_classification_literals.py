@@ -952,7 +952,7 @@ def test_normalize_institution_falls_through_an_empty_cleaned_name():
                 "institution_enrichment": {"cleaned_name": "Duke Medical Center"}}
     assert _normalize_training_entry(enriched, "C1").institution == "Duke Medical Center"
 
-    official_only = {"extracted_fields": {"institution": "raw inst"},
+    official_only = {"extracted_fields": {"institution": "Fictional Regional Hosp., Springfield"},
                      "institution_enrichment": {"cleaned_name": "",
                                                 "official_name": "Fictional Regional Hospital"}}
     assert _normalize_training_entry(official_only, "C1").institution == "Fictional Regional Hospital"

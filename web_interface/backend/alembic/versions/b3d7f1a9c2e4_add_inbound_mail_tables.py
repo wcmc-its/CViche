@@ -5,7 +5,7 @@ so a re-poll never reads it twice) and one row per CV held in a user's inbox
 until they submit it.
 
 Revision ID: b3d7f1a9c2e4
-Revises: a7c2e5f9b134
+Revises: c4e8a2f6d913
 Create Date: 2026-10-02
 """
 from collections.abc import Sequence
@@ -16,7 +16,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = 'b3d7f1a9c2e4'
-down_revision: str | Sequence[str] | None = 'a7c2e5f9b134'
+down_revision: str | Sequence[str] | None = 'c4e8a2f6d913'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

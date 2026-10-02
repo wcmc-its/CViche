@@ -72,6 +72,16 @@ def test_run_status_carries_owner_and_admin_only_run_by(client, db, seed_simple_
     assert (body["run_by"] or {}).get("display_name") == run_by_name
 
 
+def test_run_status_carries_scanned_pages(client, db, seed_simple_mode):
+    """#1282: the run page warns from these; none stored reads as []."""
+    user, run = _owner_with_run(db, "user")
+    _auth(client, user)
+    assert client.get(f"/api/run/{run.id}/status").json()["scanned_pages"] == []
+    run.scanned_pages = "3,5"
+    db.commit()
+    assert client.get(f"/api/run/{run.id}/status").json()["scanned_pages"] == [3, 5]
+
+
 # ---------------------------------------------------------------------------
 # #801: query-parameter bounds, response models, narrowed quality excepts.
 # ---------------------------------------------------------------------------

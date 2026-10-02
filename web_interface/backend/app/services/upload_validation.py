@@ -16,12 +16,18 @@ from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from lxml.etree import XMLSyntaxError
 
-from app.services.pdf_sandbox import extract_pdf_text
+from app.services.pdf_sandbox import PdfText, extract_pdf_text
 
 logger = logging.getLogger(__name__)
 ZIP_MAGIC = b"PK\x03\x04"
 PDF_MAGIC = b"%PDF-"
 PDF_EXTENSION = ".pdf"
+
+# A PDF whose image-only (scanned) pages reach this share of its pages is
+# refused at upload (#1282): most of its content would be missing from the
+# output, at full cost. Below it, the run goes ahead and /estimate names the
+# pages so the user decides before submitting.
+SCANNED_PAGE_REJECT_SHARE = 0.5
 
 # Minimum extracted text (characters) for a document to be considered readable.
 # A real CV runs into the thousands of characters; anything below this is almost
@@ -107,3 +113,9 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
         return None
     finally:
         os.unlink(tmp_path)
+
+
+def is_mostly_scanned(pdf: PdfText) -> bool:
+    """True when the PDF's image-only pages are SCANNED_PAGE_REJECT_SHARE or
+    more of its pages (#1282); a fully scanned PDF included."""
+    return bool(pdf.pages) and len(pdf.image_only_pages) >= SCANNED_PAGE_REJECT_SHARE * pdf.pages

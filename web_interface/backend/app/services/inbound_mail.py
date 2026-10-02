@@ -50,6 +50,7 @@ class AttachmentReject(StrEnum):
     FILENAME_TOO_LONG = "filename_too_long"
     NESTED_TOO_DEEP = "nested_too_deep"
     NO_READABLE_TEXT = "no_readable_text"
+    SCANNED_PDF = "scanned_pdf"
     UNREADABLE = "unreadable"
 
 

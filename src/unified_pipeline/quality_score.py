@@ -33,7 +33,9 @@ owner name caps the final score regardless of the other dimensions. A third
 gate -- protected personal data in the rendered docx (#820) -- caps the score
 the same way but carries NO weight (``CAP_ONLY_GATES``), so a clean run's raw
 score is unchanged by its existence. A fourth, also cap-only, keeps a run in
-which a stage-4 extraction group failed outright out of GREEN (#1174).
+which a stage-4 extraction group failed outright out of GREEN (#1174). A
+fifth, also cap-only, does the same for a run in which the content-filter
+fallback model served a call (#1174).
 
 Three more cap-only gates (#822) cover source content the pipeline lost before
 the document was written, a thing no weighted dimension measures: an
@@ -110,6 +112,10 @@ from unified_pipeline.core.template_boilerplate import (
 from unified_pipeline.doctor.lints.extraction import lint_under_extraction
 from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
 from unified_pipeline.doctor.shared import _cell_text, _docx_text, docx_body_blocks
+from unified_pipeline.llm_provenance import (
+    STAGE4_5_FALLBACK_CALLS_KEY,
+    STAGE4_ENTRY_FALLBACK_KEY,
+)
 from unified_pipeline.segmentation_regression import (
     count_mega_entries,
     find_lost_blocks,
@@ -562,6 +568,73 @@ def stage4_group_failures(stage_4_data: dict | None) -> Stage4GroupFailures | No
             Counter(str(e.get("taxonomy_code") or "?") for e in failed).items())),
         errors=dict(sorted(Counter(str(e["extraction_error"]) for e in failed).items())),
     )
+
+
+#: A run in which the content-filter fallback model served a call cannot score
+#: GREEN (#1174). Same value as STAGE4_GROUP_FAILURE_CAP and for the same
+#: reason: the run reads YELLOW and the owner-facing "may need cleanup" flag
+#: comes on. The call itself succeeded, so this is deliberately not RED; the
+#: cap says the output of that call came from a model the stage was not tuned
+#: on, nothing more. Derived from BAND_GREEN so the two cannot drift.
+FALLBACK_SERVED_CAP = BAND_GREEN - 1
+
+#: Filename suffix of the stage-4.5 artifact the fallback gate reads. The score
+#: collectors (`scripts/score_one.py`, `quality_score_service`) select
+#: artifacts by suffix, so they import this rather than spell it.
+RESEARCH_SUMMARY_SUFFIX = "_research_summary.json"
+
+#: How a stage-4.5 call is named as a section in a finding.
+_STAGE4_5_SECTION = "research summary"
+
+
+@dataclass(frozen=True)
+class FallbackServedCall:
+    """One section whose LLM call the content-filter fallback served.
+
+    ``count`` is the entries of a stage-4 taxonomy group, or 1 for a stage-4.5
+    call; ``section`` is the taxonomy code, or "research summary (<call>)".
+    """
+
+    stage: str
+    section: str
+    model: str
+    count: int
+
+    def describe(self) -> str:
+        unit = "entries" if self.stage == "4" else "call"
+        return f"stage {self.stage} {self.section} on {self.model} ({self.count} {unit})"
+
+
+def _stage4_fallback_served(stage_4_data: object) -> list[FallbackServedCall]:
+    entries = stage_4_data.get("entries") if isinstance(stage_4_data, dict) else None
+    served = Counter(
+        (str(e.get("taxonomy_code") or "?"), str(e[STAGE4_ENTRY_FALLBACK_KEY]))
+        for e in entries or [] if isinstance(e, dict) and e.get(STAGE4_ENTRY_FALLBACK_KEY))
+    return [FallbackServedCall("4", code, model, n) for (code, model), n in sorted(served.items())]
+
+
+def _stage4_5_fallback_served(stage_4_5_data: object) -> list[FallbackServedCall]:
+    calls = stage_4_5_data.get(STAGE4_5_FALLBACK_CALLS_KEY) if isinstance(stage_4_5_data, dict) else None
+    return [
+        FallbackServedCall("4.5", f"{_STAGE4_5_SECTION} ({c.get('call')})", str(c.get("model")), 1)
+        for c in calls or [] if isinstance(c, dict) and c.get("model")]
+
+
+def llm_fallback_served(stage_4_data: dict | None,
+                        stage_4_5_data: dict | None) -> list[FallbackServedCall]:
+    """The sections whose call the content-filter fallback served, as stages 4
+    and 4.5 recorded them (#1174); empty when none, or when the artifacts are
+    absent, from before the record existed, or not the expected shape. Never
+    raises on a malformed artifact.
+
+    A served call is a SUCCESS, so no error marker records it: stage 4 stamps
+    ``llm_fallback_model`` on the entries of the taxonomy group the fallback
+    answered, stage 4.5 lists the calls under ``llm_fallback_calls``. Stage 2,
+    3b, 5d and 6 calls are not recorded.
+
+    The single source both `score_llm_fallback_served` (the cap) and the
+    doctor's `llm_fallback_served` lint read (§1.5)."""
+    return _stage4_fallback_served(stage_4_data) + _stage4_5_fallback_served(stage_4_5_data)
 
 
 # ---------------------------------------------------------------------------
@@ -1476,6 +1549,19 @@ def score_stage4_group_failures(outputs_dir: Path) -> tuple[float, str, int | No
     return 0.0, "no failed extraction group", None
 
 
+def score_llm_fallback_served(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """A call the content-filter fallback served (#1174): a cap-only gate like
+    `score_stage4_group_failures`, weight 0, so a run without one scores exactly
+    what it did before the gate existed. A missing or unreadable artifact is
+    quiet here: the dimensions that read it already penalise its absence."""
+    stage_4, _ = _load_first(outputs_dir, "*_fields.json")
+    stage_4_5, _ = _load_first(outputs_dir, f"*{RESEARCH_SUMMARY_SUFFIX}")
+    served = llm_fallback_served(stage_4, stage_4_5)
+    if not served:
+        return 0.0, "no call served by the fallback model", None
+    return 1.0, "; ".join(call.describe() for call in served), FALLBACK_SERVED_CAP
+
+
 # ---------------------------------------------------------------------------
 # Dimension registry  -- single source of truth (name, weight, scorer fn)
 # ---------------------------------------------------------------------------
@@ -1502,7 +1588,7 @@ PROTECTED_DATA_CAP = 25
 #: last month is still comparable to one scored today. Same (fraction,
 #: detail, cap) contract as a dimension scorer; only the cap is read.
 #:
-#: ORDER MATTERS for the four caps that sit at the same value (84): the run
+#: ORDER MATTERS for the caps that sit at the same value (84): the run
 #: page's "why is this capped" pointer (`run_quality_report.cap_source`) names
 #: the FIRST flag at the binding cap, and flags are written in this order. They
 #: are listed most specific first: the lost-table gate measures the loss against
@@ -1513,6 +1599,8 @@ PROTECTED_DATA_CAP = 25
 #: that trips several is pointed at the signal most likely to name what it
 #: actually lost (batch IPXFBA: EKGTXD fires under-extraction and fused, and
 #: PBSGQZ fires fused and stage-4; the verified loss in both is the fused entry).
+#: The fallback-served gate (#1174) is LAST: it records only that a backup model
+#: answered, measures no loss, and every other gate names something concrete.
 CAP_ONLY_GATES = [
     ("Protected personal data absent from rendered docx (HARD-FAIL gate)", score_protected_data),
     ("Source table lost before extraction (CAP-ONLY gate)", score_lost_source_table),
@@ -1520,6 +1608,7 @@ CAP_ONLY_GATES = [
      score_fused_entries),
     ("Source records lost: entry under-extracted (CAP-ONLY gate)", score_under_extracted_records),
     ("Stage-4 extraction group failed (caps below GREEN)", score_stage4_group_failures),
+    ("Call served by the content-filter fallback model (caps below GREEN)", score_llm_fallback_served),
 ]
 
 

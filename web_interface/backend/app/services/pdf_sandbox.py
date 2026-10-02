@@ -155,6 +155,16 @@ class ConversionResult:
     image_only_pages: list[int]
 
 
+@dataclass(frozen=True)
+class PdfText:
+    """The upload guard's read of a PDF: every page's text, the page count,
+    and the 1-based pages that hold only images (the converter's rule), so
+    a mostly scanned PDF is refused before it costs a run (#1282)."""
+    text: str
+    pages: int
+    image_only_pages: list[int]
+
+
 # --- parent side ---------------------------------------------------------
 
 
@@ -216,16 +226,26 @@ def run_pdf_job(op: str, args: list[str], timeout_seconds: float,
     return _parse_reply(op, proc.stdout)
 
 
-def extract_pdf_text(content: bytes) -> str:
-    """The text of every page, for the upload's readable-text guard. Never
-    waits for a slot: the request path answers PdfBusyError with a 503."""
+def read_pdf(content: bytes) -> PdfText:
+    """Every page's text plus which pages are image-only, for the upload's
+    readable-text guards. Never waits for a slot: the request path answers
+    PdfBusyError with a 503."""
     with tempfile.NamedTemporaryFile(suffix=".pdf") as tmp:
         tmp.write(content)
         tmp.flush()
         result = run_pdf_job(_OP_TEXT, [tmp.name], PDF_TEXT_TIMEOUT_SECONDS)
-    if not isinstance(result, str):
+    if not isinstance(result, dict):
         raise UnreadablePdfError(f"PDF text child returned {type(result).__name__}")
-    return result
+    text, pages, image_only = result.get("text"), result.get("pages"), result.get("image_only_pages")
+    if (not isinstance(text, str) or not isinstance(pages, int) or not isinstance(image_only, list)
+            or not all(isinstance(n, int) for n in image_only)):
+        raise UnreadablePdfError(f"PDF text child returned {result!r:.80}")
+    return PdfText(text=text, pages=pages, image_only_pages=image_only)
+
+
+def extract_pdf_text(content: bytes) -> str:
+    """The text of every page (read_pdf, text only)."""
+    return read_pdf(content).text
 
 
 def convert_pdf(pdf_path: str | Path, docx_path: str | Path) -> ConversionResult:
@@ -308,15 +328,20 @@ def _counted_pages(path: str) -> int | None:
         return sum(1 for _ in islice(PDFPage.create_pages(doc), PDF_MAX_PAGES + 1))
 
 
-def _page_texts(path: str) -> str:
+def _page_texts(path: str) -> dict:
     import pdfplumber
 
+    from unified_pipeline.core.pdf_to_docx import is_image_only_page
+
     parts = []
+    image_only = []
     with pdfplumber.open(path) as pdf:
-        for page in pdf.pages:
+        for number, page in enumerate(pdf.pages, start=1):
             parts.append(page.extract_text() or "")
+            if is_image_only_page(page):
+                image_only.append(number)
             page.close()  # release the page's parsed objects as we go
-    return "\n".join(parts)
+    return {"text": "\n".join(parts), "pages": len(parts), "image_only_pages": image_only}
 
 
 def _convert(pdf_path: str, docx_path: str) -> dict:

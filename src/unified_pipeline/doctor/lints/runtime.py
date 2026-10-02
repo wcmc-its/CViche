@@ -40,6 +40,18 @@ error such as a content filter) leaves `extraction_error` on its entries and
 refilling the entries. It is a WARN, not an ERROR: its score cap stops short
 of RED (`quality_score.STAGE4_GROUP_FAILURE_CAP`).
 
+`lint_llm_fallback_served` (#1174) reports the success the lints above cannot
+see: a Sonnet-5 call that ended content_filtered and was answered by the
+fallback model. Nothing failed, so nothing marks an error; stage 4 stamps the
+entries of the group and stage 4.5 lists the calls. A WARN for the same
+reason as the group-failure lint (`quality_score.FALLBACK_SERVED_CAP`).
+
+`lint_stage_failure_recorded` (#1174) reports what `lint_pipeline_errors`
+cannot: a stage the driver recorded as failed in the stage-error record
+(#745), which the quality score reads for its fatal gate but the doctor never
+did. It is how a missing stage-4.5 research summary is told apart from a CV
+with no research content.
+
 The transitive-exclusivity fixpoint returned no exclusive helpers at all: this
 domain's only external references are `Dict`/`List`, `_finding`, and the two
 scorer names, all of which already live outside `run_doctor.py`. Nothing moved
@@ -48,17 +60,24 @@ exported before.
 """
 
 from unified_pipeline.quality_score import (
+    FALLBACK_SERVED_CAP,
     FATAL_ERROR_PATTERN,
     NO_OUTPUT_CAP,
     STAGE3B_FALLBACK_HARD_FAIL_CAP,
     STAGE4_GROUP_FAILURE_CAP,
     iter_error_fields,
+    llm_fallback_served,
     no_output_produced,
     stage3b_fallback_ratio_exceeded,
     stage4_group_failures,
 )
 
+from unified_pipeline.stage_errors import StageError
+
 from ..shared import _finding
+
+#: The stage id the drivers record for the research-summary stage.
+STAGE_4_5_ID = "4.5"
 
 
 # --------------------------------------------------------------------------
@@ -219,3 +238,61 @@ def lint_no_output(has_stage4: bool, has_docx: bool, has_report: bool) -> list[d
             f"quality score is capped at {NO_OUTPUT_CAP} (RED, do not "
             f"deliver)")]
     return []
+
+
+# --------------------------------------------------------------------------
+# A call the content-filter fallback served (#1174).
+
+
+def lint_llm_fallback_served(stage_4: dict, stage_4_5: dict | None = None) -> list[dict]:
+    """The quality score's fallback-served gate: a Sonnet-5 call ended
+    content_filtered and the fallback model answered it, so the output of that
+    section came from a model the stage was not tuned on. One finding per
+    section, so the evidence names which section to check.
+
+    WARN, not ERROR: the call succeeded, and the cap
+    (`quality_score.FALLBACK_SERVED_CAP`) keeps the run out of GREEN without
+    putting it in the RED band. ``stage_4_5`` is optional because a run may
+    have no research-summary artifact; an artifact from before the stage
+    recorded provenance is not a finding."""
+    return [
+        _finding(
+            "llm_fallback_served", "WARN",
+            f"stage {call.stage} {call.section}: the content filter blocked the "
+            f"primary model and {call.model} answered ({call.count} "
+            f"{'entries' if call.stage == '4' else 'call'}) — the quality score "
+            f"is capped at {FALLBACK_SERVED_CAP} (never GREEN)",
+            [call.describe()])
+        for call in llm_fallback_served(stage_4, stage_4_5)]
+
+
+# --------------------------------------------------------------------------
+# A stage the driver recorded as failed (#1174, #745).
+
+
+def _stage_failure_message(record: StageError) -> str:
+    """What the failed stage owned, in the reader's terms."""
+    cause = f"{record.exception_type}: {record.message[:120]}"
+    if record.stage == STAGE_4_5_ID:
+        return (f"stage 4.5 failed ({cause}): the research summary is missing "
+                f"because the stage raised, not because the CV has no research content")
+    return f"stage {record.stage} failed ({cause}): whatever it owned is missing from the output"
+
+
+def lint_stage_failure_recorded(records: list[StageError]) -> list[dict]:
+    """A stage the driver recorded as failed in ``<uid>_stage_errors.json``
+    (#745). `quality_score.score_pipeline_errors` reads the same record and
+    treats a fatal one as the cap-40 hard fail, which `lint_pipeline_errors`
+    (an `error`-field scan) never saw, so a run could score RED with a clean
+    doctor. A fatal record is an ERROR, like that gate; a non-fatal one is a
+    WARN. An empty list (a clean run, or one from before the record) is not a
+    finding."""
+    return [
+        _finding(
+            "stage_failure_recorded", "ERROR" if record.fatal else "WARN",
+            _stage_failure_message(record) + (
+                " — the quality score treats a fatal stage failure as a hard "
+                "fail (RED, do not deliver)" if record.fatal else ""),
+            [f"stage={record.stage}", f"exception={record.exception_type}",
+             f"fatal={record.fatal}"])
+        for record in records]

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import UploadPage from './UploadPage'
+import { SingleEstimate } from './upload/UploadSections'
 import { getBatchEstimate, getEstimate, uploadFile } from '../api/upload'
 import type { UploadOptions, UploadResult } from '../api/upload'
 import { getCapacity, getRunStatus, startRun } from '../api/runs'
@@ -130,7 +131,7 @@ describe('UploadPage gating', () => {
   it('offers several files only on behalf of faculty and only in queue mode', async () => {
     await renderPage(QUEUE)
     expect(fileInput().multiple).toBe(true)
-    expect(screen.getByText(/Drop \.docx files here/)).toBeTruthy()
+    expect(screen.getByText(/Drop \.docx or \.pdf files here/)).toBeTruthy()
 
     fireEvent.click(screen.getByLabelText(ROLE_A_LABEL))
     expect(fileInput().multiple).toBe(false)
@@ -181,14 +182,24 @@ describe('UploadPage approved text', () => {
 })
 
 describe('UploadPage batch selection', () => {
-  it('estimates the whole selection in one call and skips non-.docx files', async () => {
+  it('estimates the whole selection in one call, PDFs included, and skips other types (#1273)', async () => {
     await renderPage()
-    await addFiles([docx('a.docx'), docx('b.docx'), new File(['x'], 'c.pdf')])
+    await addFiles([docx('a.docx'), new File(['x'], 'b.pdf'), new File(['x'], 'c.doc')])
     expect(getBatchEstimate).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(getBatchEstimate).mock.calls[0][0].map((f) => f.name)).toEqual(['a.docx', 'b.docx'])
+    expect(vi.mocked(getBatchEstimate).mock.calls[0][0].map((f) => f.name)).toEqual(['a.docx', 'b.pdf'])
     expect(screen.getByText('2 to submit · 1 skipped')).toBeTruthy()
     expect(screen.getByText("Won't be submitted")).toBeTruthy()
-    expect(screen.getByText('Not a .docx file')).toBeTruthy()
+    expect(screen.getByText('Not a .docx or .pdf file')).toBeTruthy()
+  })
+
+  it("shows a PDF row's scanned pages from its estimate (#1282)", async () => {
+    vi.mocked(getBatchEstimate).mockImplementation(async (files) => ({
+      ...batchEstimate(files),
+      files: files.map((f) => ({ filename: f.name, estimate: { ...EST, scanned_pages: [2] }, error: null })),
+    }))
+    await renderPage()
+    await addFiles([new File(['x'], 'scan.pdf')])
+    expect(screen.getByText(/Page 2 of this PDF is a scanned image/)).toBeTruthy()
   })
 
   it('marks a file the estimate refused as won\'t be submitted, with the server reason', async () => {
@@ -247,7 +258,7 @@ describe('UploadPage batch upload wire', () => {
     })
     vi.mocked(startRun).mockImplementation(async (id) => { calls.push(`start:${id}`) })
     await renderPage()
-    await addFiles([docx('a.docx'), new File(['x'], 'skip.pdf'), docx('b.docx')])
+    await addFiles([docx('a.docx'), new File(['x'], 'skip.doc'), new File(['x'], 'b.pdf')])
     tickAttestation()
     fireEvent.click(screen.getByRole('button', { name: 'Submit 2 CVs' }))
     await flush()
@@ -255,7 +266,7 @@ describe('UploadPage batch upload wire', () => {
     expect(calls[0]).toBe('batch:2')
     expect(calls.filter((c) => c.startsWith('upload'))).toEqual([
       'upload:a.docx:BQXZKD:authorized_admin',
-      'upload:b.docx:BQXZKD:authorized_admin',
+      'upload:b.pdf:BQXZKD:authorized_admin',
     ])
     expect(calls.indexOf('start:R1')).toBeGreaterThan(calls.indexOf('upload:a.docx:BQXZKD:authorized_admin'))
     expect(calls).toContain('start:R2')
@@ -609,5 +620,17 @@ describe('UploadPage quota', () => {
     await flush()
     expect(getCurrentUser).toHaveBeenCalledTimes(2)
     expect(screen.getByText('8 of 10 runs left today · 50 of 50 this month')).toBeTruthy()
+  })
+})
+
+describe('SingleEstimate scanned pages (#1282)', () => {
+  it('names the PDF pages whose text cannot be read', () => {
+    render(<SingleEstimate estimate={{ ...EST, scanned_pages: [3, 5] }} showCost={false} />)
+    expect(screen.getByText(/Pages 3, 5 of this PDF are scanned images/)).toBeTruthy()
+  })
+
+  it('says nothing when no page is scanned', () => {
+    render(<SingleEstimate estimate={EST} showCost={false} />)
+    expect(screen.queryByText(/scanned image/)).toBeNull()
   })
 })

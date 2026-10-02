@@ -29,8 +29,10 @@ from app.services.batch_service import MAX_BATCH_FILES
 from app.services.inbound_mail import (
     Attachment, AttachmentReject, ParsedMessage, UnparseableMessage, is_wcm_address, parse_message,
 )
-from app.services.upload_validation import MIN_EXTRACTED_CHARS, _extract_text, _validate_docx_magic
-from app.services.pdf_sandbox import EncryptedPdfError, PdfBusyError, PdfTooComplexError, UnreadablePdfError
+from app.services.upload_validation import (
+    MIN_EXTRACTED_CHARS, PDF_EXTENSION, _extract_text, _validate_docx_magic, is_mostly_scanned,
+)
+from app.services.pdf_sandbox import EncryptedPdfError, PdfBusyError, PdfTooComplexError, UnreadablePdfError, read_pdf
 from app.storage.base import RunStorage
 
 logger = logging.getLogger(__name__)
@@ -101,7 +103,13 @@ def _readable_reject(att: Attachment) -> AttachmentReject | None:
     if ext == ".docx" and not _validate_docx_magic(att.content):
         return AttachmentReject.NOT_A_REAL_FILE
     try:
-        text = _extract_text(att.content, ext)
+        if ext == PDF_EXTENSION:
+            pdf = read_pdf(att.content)
+            if is_mostly_scanned(pdf):
+                return AttachmentReject.SCANNED_PDF
+            text = pdf.text
+        else:
+            text = _extract_text(att.content, ext)
     except PdfBusyError as e:
         raise TransientIntakeError("pdf sandbox busy") from e
     except (EncryptedPdfError, PdfTooComplexError, UnreadablePdfError):

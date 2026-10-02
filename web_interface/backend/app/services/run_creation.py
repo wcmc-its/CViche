@@ -28,12 +28,13 @@ from app.services.config_service import BASE_OVERHEAD_SECONDS, TIME_PER_1K_TOKEN
 from app.services.input_format import detect_input_format_or_none
 from app.services.pdf_sandbox import (
     PDF_BUSY_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, PDF_UNREADABLE_MESSAGE, EncryptedPdfError,
-    PdfBusyError, PdfTooComplexError, UnreadablePdfError,
+    PdfBusyError, PdfText, PdfTooComplexError, UnreadablePdfError, read_pdf,
 )
 from app.services.run_service import UPLOAD_DIR, latest_run_with_hash
 from app.services.template_warning import detect_wcm_template
 from app.services.upload_validation import (
-    MIN_EXTRACTED_CHARS, PDF_EXTENSION, _extract_text, _validate_docx_magic, _validate_pdf_magic,
+    MIN_EXTRACTED_CHARS, PDF_EXTENSION, SCANNED_PAGE_REJECT_SHARE, _extract_text, _validate_docx_magic,
+    _validate_pdf_magic, is_mostly_scanned,
 )
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
@@ -72,11 +73,49 @@ def _estimate_char_count(extracted: str | None) -> int:
     return max(len(extracted), _ESTIMATE_MIN_CHAR_COUNT)
 
 
-async def _extract_text_or_400(content: bytes, file_ext: str) -> str | None:
-    """`_extract_text` off the event loop (#793), shared by /upload and
+def _page_ranges(pages: list[int]) -> str:
+    """1-based page numbers as ranges: [2, 3, 4, 7] -> "2–4, 7"."""
+    runs: list[list[int]] = []
+    for n in pages:
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in runs)
+
+
+def _reject_mostly_scanned_pdf(pdf: PdfText) -> None:
+    """A 400 naming the scanned pages when they are SCANNED_PAGE_REJECT_SHARE
+    or more of the PDF (#1282). Covers a fully scanned PDF too, with a
+    message that says what to do instead of the generic no-text one."""
+    if not is_mostly_scanned(pdf):
+        return
+    logger.info("Rejected mostly scanned PDF (%d of %d pages image-only)",
+                len(pdf.image_only_pages), pdf.pages)
+    noun = "Page" if len(pdf.image_only_pages) == 1 else "Pages"
+    verb = "is a scanned image" if len(pdf.image_only_pages) == 1 else "are scanned images"
+    raise bad_request(
+        f"{noun} {_page_ranges(pdf.image_only_pages)} of this PDF {verb}, so "
+        "their text can't be read. Export the PDF from the original document "
+        "(or run OCR on it) and upload it again, or upload the CV as a .docx."
+    )
+
+
+def _read_upload_text(content: bytes, file_ext: str) -> tuple[str | None, list[int]]:
+    """`_extract_text`, plus a PDF's image-only pages (empty for a docx).
+    Refuses a mostly scanned PDF with a 400."""
+    if file_ext != PDF_EXTENSION:
+        return _extract_text(content, file_ext), []
+    pdf = read_pdf(content)
+    _reject_mostly_scanned_pdf(pdf)
+    return pdf.text, pdf.image_only_pages
+
+
+async def _extract_text_or_400(content: bytes, file_ext: str) -> tuple[str | None, list[int]]:
+    """`_read_upload_text` off the event loop (#793), shared by /upload and
     /estimate: every PDF refusal is a 400, a full PDF sandbox a 503."""
     try:
-        return await run_in_threadpool(_extract_text, content, file_ext)
+        return await run_in_threadpool(_read_upload_text, content, file_ext)
     except EncryptedPdfError:
         raise bad_request(_ENCRYPTED_PDF_MESSAGE)
     except PdfTooComplexError as e:
@@ -438,7 +477,7 @@ async def create_run_from_bytes(
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
     # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
-    extracted = await _extract_text_or_400(content, file_ext)
+    extracted, scanned_pages = await _extract_text_or_400(content, file_ext)
     if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
@@ -540,6 +579,7 @@ async def create_run_from_bytes(
         input_format=input_format,
         input_format_score=input_format_score,
         source_sha256=source_sha256,
+        scanned_pages=",".join(map(str, scanned_pages)) or None,
     )
     db.add(run)
     _add_pending_steps(db, run_id)

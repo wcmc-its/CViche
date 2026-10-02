@@ -37,13 +37,13 @@ from app.services.run_service import UPLOAD_DIR
 from app.services.input_format import detect_input_format_or_none
 from app.services.template_warning import detect_wcm_template
 from app.services.upload_validation import (  # noqa: F401 -- re-exported: tests patch these names here
-    MIN_EXTRACTED_CHARS, PDF_EXTENSION, PDF_MAGIC, ZIP_MAGIC, _DOCX_MAX_ENTRIES,
+    MIN_EXTRACTED_CHARS, PDF_EXTENSION, PDF_MAGIC, SCANNED_PAGE_REJECT_SHARE, ZIP_MAGIC, _DOCX_MAX_ENTRIES,
     _DOCX_MAX_UNCOMPRESSED_BYTES, _DOCX_READ_ERRORS, _extract_text, _validate_docx_magic, _validate_pdf_magic,
 )
 from app.services import run_creation
 from app.services.run_creation import (  # noqa: F401 -- re-exported: other modules and tests import these from here
     DUPLICATE_DATE_FORMAT, DuplicateInfo, RunIdAttemptsExhausted, RunRequest, _RUN_ID_ATTEMPTS,
-    _add_pending_steps, _archive_or_502, _compensate_failed_run, _ENCRYPTED_PDF_MESSAGE,
+    _add_pending_steps, _archive_or_502, _page_ranges, _read_upload_text, _reject_mostly_scanned_pdf, _compensate_failed_run, _ENCRYPTED_PDF_MESSAGE,
     _estimate_char_count, _extract_text_or_400, _PDF_BUSY_RETRY_AFTER_SECONDS, _reject_unconfirmed_duplicate,
     _unlink_best_effort, commit_run_or_compensate, create_run_archive, create_run_from_bytes,
     duplicate_info, estimate_run_seconds, generate_run_id,
@@ -191,6 +191,10 @@ class EstimateResponse(BaseModel):
     # True when the document's text couldn't be read and text_characters is
     # the fixed fallback guess, not a measurement (#794).
     text_characters_is_guess: bool = False
+    # A PDF's image-only pages, 1-based, whose text the run can't read
+    # (#1282). Fewer than SCANNED_PAGE_REJECT_SHARE of its pages, or the
+    # file would have been refused.
+    scanned_pages: list[int] = []
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -338,7 +342,7 @@ async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> 
     # this endpoint used to re-walk the docx paragraphs/tables inline, which
     # could compute a different text_char_count for the same file. Off the
     # event loop, same as /upload (#793).
-    extracted = await _extract_text_or_400(content, file_ext)
+    extracted, scanned_pages = await _extract_text_or_400(content, file_ext)
     if extracted is None:
         # _extract_text already logged the specific read failure (§5.4). No
         # filename here (CODING_STANDARDS §4.7): CV filenames usually carry
@@ -379,6 +383,7 @@ async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> 
         file_size_kb=round(file_size_kb, 1),
         pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
         text_characters_is_guess=extracted is None,
+        scanned_pages=scanned_pages,
     )
 
 

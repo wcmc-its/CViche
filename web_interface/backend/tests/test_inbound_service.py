@@ -19,6 +19,7 @@ from app.models import (
 from app.services import ed_access, inbound_service
 from app.services.inbound_mail import AttachmentReject
 from app.services.mailer import MailKind
+from app.services.pdf_sandbox import PdfText
 from app.storage.local_storage import LocalRunStorage
 from tests.conftest import TestingSessionLocal
 from tests.test_inbound_mail import PDF, SES_FAIL, SES_PASS, make_eml
@@ -49,12 +50,8 @@ def sent(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _readable_pdfs(monkeypatch):
-    """The PDF sandbox is its own suite's business; every PDF here 'has text'."""
-    real = inbound_service._extract_text
-    monkeypatch.setattr(
-        inbound_service, "_extract_text",
-        lambda content, ext: "x" * 600 if ext == ".pdf" else real(content, ext),
-    )
+    """The PDF sandbox is its own suite's business; every PDF here has text and no scanned pages."""
+    monkeypatch.setattr(inbound_service, "read_pdf", lambda content: PdfText("x" * 600, 1, []))
 
 
 def _user(db, email=SENDER, **fields):
@@ -128,7 +125,7 @@ def test_skipped_attachments_are_summarised_and_counted_in_the_ack(db, storage, 
 
 def test_an_unreadable_document_is_skipped(db, storage, sent, monkeypatch):
     _user(db)
-    monkeypatch.setattr(inbound_service, "_extract_text", lambda content, ext: "short")
+    monkeypatch.setattr(inbound_service, "read_pdf", lambda content: PdfText("short", 1, []))
     _process(db, storage, make_eml(attachments=[("a.pdf", PDF)]))
     message = _message(db)
     assert message.reject_reason == InboundRejectReason.NO_VALID_ATTACHMENTS
@@ -252,6 +249,24 @@ def test_a_full_inbox_rejects_further_files(db, storage, sent, monkeypatch):
     assert len(_files(db, user_id=user.id)) == 1
 
 
+def test_a_mostly_scanned_pdf_is_skipped_and_counted_in_the_reply(db, storage, sent, monkeypatch):
+    _user(db)
+    monkeypatch.setattr(inbound_service, "read_pdf", lambda content: PdfText("x" * 600, 4, [2, 3]))  # 2 of 4 pages
+    _process(db, storage, make_eml(attachments=[("scan.pdf", PDF), ("ok.docx", _docx())]))
+    message = _message(db)
+    assert message.status == InboundMessageStatus.ACCEPTED
+    assert message.reject_reason == f"{AttachmentReject.SCANNED_PDF}:1"
+    assert [f.filename for f in _files(db)] == ["ok.docx"]
+    assert "1 other attachment" in sent[0].body and "scan.pdf" not in sent[0].body
+
+
+def test_a_minority_of_scanned_pages_is_accepted(db, storage, sent, monkeypatch):
+    _user(db)
+    monkeypatch.setattr(inbound_service, "read_pdf", lambda content: PdfText("x" * 600, 4, [2]))
+    _process(db, storage, make_eml(attachments=[("ok.pdf", PDF)]))
+    assert [f.filename for f in _files(db)] == ["ok.pdf"]
+
+
 def test_an_oversize_attachment_is_skipped(db, storage, sent, monkeypatch):
     from app.services import inbound_mail
     _user(db)
@@ -319,10 +334,10 @@ def test_a_busy_pdf_sandbox_defers_the_message_to_the_next_poll(db, storage, sen
     _user(db)
     _put(storage, "m1", make_eml(attachments=[("a.pdf", PDF)]))
 
-    def busy(content, ext):
+    def busy(content):
         raise PdfBusyError("full")
 
-    monkeypatch.setattr(inbound_service, "_extract_text", busy)
+    monkeypatch.setattr(inbound_service, "read_pdf", busy)
     inbound_service.poll_once(TestingSessionLocal, storage)
     assert db.query(InboundMessage).count() == 0  # nothing recorded, so it is retried
     assert _files(db) == []

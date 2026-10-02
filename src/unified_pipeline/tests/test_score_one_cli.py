@@ -161,6 +161,27 @@ def test_stage_error_record_is_collected_for_the_scorer(tmp_path, monkeypatch):
     assert "web05_stage_errors.json" in seen["names"], seen
 
 
+def test_research_summary_artifact_is_collected_for_the_scorer(tmp_path, monkeypatch):
+    """#1174: the fallback-served gate reads stage 4.5's provenance from the
+    research summary artifact; it must reach the flattened dir the scorer reads,
+    or a stage-4.5 call the backup model served never caps the score."""
+    cli = _load_cli()
+    seen = {}
+
+    def _capture(outputs_dir, run_id):
+        seen["names"] = sorted(p.name for p in Path(outputs_dir).iterdir())
+        return _REPORT
+
+    monkeypatch.setattr(cli, "score_run", _capture)
+    _stage_artifacts(tmp_path)
+    (tmp_path / "stage_4_5_research_summary").mkdir()
+    (tmp_path / "stage_4_5_research_summary" / "web05_research_summary.json").write_text(
+        "{}", encoding="utf-8")
+
+    assert cli.main([str(tmp_path), "web05"]) == 0
+    assert "web05_research_summary.json" in seen["names"], seen
+
+
 def test_no_artifacts_exits_nonzero_instead_of_scoring_an_empty_dir(tmp_path, capsys, monkeypatch):
     """This is the #435 failure mode: never emit a score for nothing."""
     cli = _load_cli()
