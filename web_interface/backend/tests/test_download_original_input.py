@@ -251,3 +251,17 @@ def test_scan_flag_on_unreadable_tag_fails_closed_with_500(client, db, seed_simp
     resp = client.get(f"/api/run/{run.id}/input", follow_redirects=False)
     assert resp.status_code == 500
     assert store.asked_name is None  # no presigned URL was issued
+
+
+def test_scan_flag_on_absent_original_is_404_before_any_tag_lookup(client, db, seed_simple_mode, monkeypatch):
+    """The scan gate runs after the existence check: a missing original stays a
+    404, not a 409 "still scanning" (local) or a 500 NoSuchKey on the tag read (S3)."""
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    user, run = _user_and_run(db, suffix="-scan-gone", filename=_SYNTHETIC_NAME)
+    _auth(client, user)
+    store = _ScannedS3Storage({}, "NO_THREATS_FOUND")
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: store)
+
+    resp = client.get(f"/api/run/{run.id}/input", follow_redirects=False)
+    assert resp.status_code == 404
+    assert store.scan_lookups == 0
