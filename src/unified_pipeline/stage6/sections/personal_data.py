@@ -350,9 +350,10 @@ _CELL_KEYWORD_AS_LABEL_RE = re.compile(
 )
 # A work-contact label names its own slot (#1222): an address noun for the
 # Office address, an address or phone noun for the Office telephone (a work
-# address block carries its phone). The noun must directly follow office, work
-# or business, so "Business School, Tel." and "Office Fax Number" are not
-# labels, and a residence or mailing line never ranks an address.
+# address block carries its phone). The noun must directly follow the work
+# word, so "Business School, Tel." and "Office Fax Number" are not labels, and
+# a residence or mailing line never ranks an address. The phone label leaves
+# out "business" because the slot's has_work gate never reaches it.
 _WORK_ADDRESS_LABEL_RE = re.compile(
     r'\b(?:office|work|business)\s+address\b',
     re.IGNORECASE)
