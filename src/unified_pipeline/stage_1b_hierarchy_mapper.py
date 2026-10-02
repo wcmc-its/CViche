@@ -253,6 +253,47 @@ def find_header_in_sequence(
     return matches
 
 
+def _is_fragment_hit(elements: list[dict[str, Any]], pos: int, expected_header: str) -> bool:
+    """True when the paragraph at `pos` is only a fragment of the header (a bare
+    "Research" for "Pending Research Grants"), the weakest kind of partial."""
+    return len(normalize_text(elements[pos].get('text', ''))) < len(expected_header)
+
+
+def _fallback_header_search(
+    elements: list[dict[str, Any]],
+    expected_header: str,
+    start_search_idx: int,
+    parent_idx: int,
+    excluded_headers: frozenset[str],
+) -> int | None:
+    """Plain header search for a node the sequence match could not place.
+
+    Forward from `start_search_idx` first. The hierarchy may not match document
+    order, so a miss, or a forward hit that is only a fragment of the header,
+    gives an exact paragraph behind the cursor the chance to win. After that the
+    backward search accepts a partial match only at or after the parent's own
+    line and never on a top-level heading (#916, #1178).
+    """
+    forward = _find_header_element(elements, expected_header, start_search_idx, len(elements))
+    if forward is not None and not _is_fragment_hit(elements, forward[0], expected_header):
+        return forward[1]
+    if start_search_idx > 0:
+        exact = _find_header_element(
+            elements, expected_header, 0, start_search_idx, exact_only=True
+        )
+        if exact is not None:
+            return exact[1]
+    if forward is not None:
+        return forward[1]
+    if start_search_idx > 0:
+        partial = _find_header_element(
+            elements, expected_header, 0, start_search_idx,
+            partial_floor=parent_idx, excluded_headers=excluded_headers,
+        )
+        return partial[1] if partial is not None else None
+    return None
+
+
 def map_hierarchy_node(
     node: HierarchyNode,
     elements: list[dict[str, Any]],
@@ -260,6 +301,7 @@ def map_hierarchy_node(
     start_search_idx: int = 0,
     parent_idx: int = 0,
     top_level_headers: frozenset[str] = frozenset(),
+    parent_mapped: bool = False,
 ) -> tuple[MappedNode, int]:
     """
     Map a single hierarchy node and its children to element indices.
@@ -273,6 +315,7 @@ def map_hierarchy_node(
             fallback accepts a partial match only at or after it (#1178).
         top_level_headers: Normalized texts of the top-level headers. For a
             child, the backward fallback never partial-matches one of them.
+        parent_mapped: True when the parent header has its own element index.
 
     Returns:
         Tuple of (mapped_node, next_search_idx)
@@ -293,37 +336,30 @@ def map_hierarchy_node(
     element_idx: int | None = None
 
     if node_text and not is_synthetic:
-        # Try sequence-based matching with parent context
+        # Sequence-based matching with parent context, only when the parent
+        # has no element of its own. A mapped parent is already the anchor:
+        # re-searching its text from the cursor found a LATER line with the
+        # same name and dragged the child past its own line (#916). A node
+        # with no usable sequence goes to the fallback search below.
         search_sequence = current_path[-min(3, len(current_path)):]  # Use last 3 headers for context
-
-        matches = find_header_in_sequence(elements, search_sequence, start_search_idx)
+        use_sequence = len(search_sequence) > 1 and not parent_mapped
+        matches = (
+            find_header_in_sequence(elements, search_sequence, start_search_idx)
+            if use_sequence
+            else None
+        )
 
         if matches:
             # Found the sequence - use the last match (this node)
             element_idx = matches[-1][1]
         else:
-            # Fallback: Simple text search using word-boundary matching
-            # First try searching forward from start_search_idx
-            # If not found, try searching from the beginning (handles out-of-order hierarchies)
-            normalized_target = normalize_text(node_text)
-
-            def search_for_header(search_start: int, search_end: int) -> int | None:
-                """Search for header in a range of elements."""
-                hit = _find_header_element(elements, normalized_target, search_start, search_end)
-                return hit[1] if hit is not None else None
-
-            # Try forward search first
-            element_idx = search_for_header(start_search_idx, len(elements))
-
-            # If not found and we didn't start from the beginning,
-            # try searching from the beginning (Stage 1a hierarchy may not match document order)
-            if element_idx is None and start_search_idx > 0:
-                hit = _find_header_element(
-                    elements, normalized_target, 0, start_search_idx,
-                    partial_floor=parent_idx,
-                    excluded_headers=top_level_headers if parent_path else frozenset(),
-                )
-                element_idx = hit[1] if hit is not None else None
+            element_idx = _fallback_header_search(
+                elements,
+                normalize_text(node_text),
+                start_search_idx,
+                parent_idx,
+                top_level_headers if parent_path else frozenset(),
+            )
 
     # Build mapped node
     mapped_node: MappedNode = {
@@ -353,6 +389,7 @@ def map_hierarchy_node(
                 child_search_start,
                 child_parent_idx,
                 top_level_headers,
+                element_idx is not None,
             )
             mapped_children.append(mapped_child)
 

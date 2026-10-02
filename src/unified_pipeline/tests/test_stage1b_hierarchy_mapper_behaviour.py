@@ -1268,3 +1268,51 @@ def test_run_stage_1b_passes_the_top_level_headers_to_the_backward_fallback(tmp_
 
     child = output_data["hierarchy_with_indices"][1]["children"][0]
     assert child["element_idx"] is None
+
+
+def test_map_hierarchy_node_mapped_parent_is_not_re_searched_for_the_sequence():
+    # The parent is mapped at 0, so Beta must not look for a second "Research"
+    # line at 4 and take the "Beta Grants" after it (#916 sequence-match path).
+    elements = [
+        _elem(0, "Research"),
+        _elem(1, "Alpha Grants"),
+        _elem(2, "Beta Grants"),
+        _elem(3, "body line"),
+        _elem(4, "Research"),
+        _elem(5, "Beta Grants"),
+    ]
+    node = {
+        "text": "Research",
+        "level": "H1",
+        "children": [
+            {"text": "Alpha Grants", "level": "H2"},
+            {"text": "Beta Grants", "level": "H2"},
+        ],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert [c["element_idx"] for c in mapped["children"]] == [1, 2]
+
+
+def test_fallback_prefers_an_exact_line_behind_the_cursor_to_a_forward_fragment():
+    # The bare "Research" ahead is only a fragment of the header; the exact
+    # line behind the cursor is the node's own.
+    elements = [
+        _elem(0, "Pending Research Grants"),
+        _elem(1, "body line"),
+        _elem(2, "Research"),
+        _elem(3, "body line"),
+    ]
+    mapped, _ = map_hierarchy_node({"text": "Pending Research Grants", "level": "H1"}, elements, [], 1)
+    assert mapped["element_idx"] == 0
+
+
+def test_fallback_keeps_a_forward_partial_that_is_more_than_a_fragment():
+    # "Local talks" holds the whole header, so it still beats an
+    # earlier exact "Local" (that out-of-order case is not widened).
+    elements = [
+        _elem(0, "Local"),
+        _elem(1, "body line"),
+        _elem(2, "Local talks"),
+    ]
+    mapped, _ = map_hierarchy_node({"text": "Local", "level": "H2"}, elements, [], 1)
+    assert mapped["element_idx"] == 2
