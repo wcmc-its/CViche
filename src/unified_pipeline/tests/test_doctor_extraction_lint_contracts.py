@@ -1290,7 +1290,7 @@ def test_implausible_year_lists_every_bad_field_of_one_entry_in_one_finding():
 
 @pytest.mark.parametrize("entry", [
     _fields_entry("H", {"date": "1925"}, text="Society prize, 1925"),       # in the text
-    _fields_entry("H", {"date": "1968"}, text="Prize 196874"),              # fused range
+    _fields_entry("H", {"date": "1925"}, text="Prize 192529"),              # fused range
     _fields_entry("H", {"title": "1902"}, text="11/02"),                    # not a date key
     _fields_entry("H", {"candidate": "1902"}, text="11/02"),
     _fields_entry("H", {"date": "19021"}, text=""),                         # not four digits
@@ -1358,6 +1358,15 @@ def test_implausible_year_degree_floor_applies_only_above_the_fixed_floor():
         _fields_entry("H", {"date": "1929"}, text="'29"))
     assert len(findings) == 1
     assert "no two-digit year resolves below it" in findings[0]["message"]
+
+
+def test_implausible_year_a_pre_floor_degree_year_does_not_mask_a_later_one():
+    """A degree year that is itself a wrong century is not the earliest
+    degree: the next written B1 year sets the floor."""
+    findings = _implausible(_degree("1925"), _degree("1990"),
+                            _fields_entry("H", {"date": "1975"}, text="Prize '75"))
+    assert len(findings) == 1
+    assert "earliest degree year, 1990" in findings[0]["message"]
 
 
 def test_implausible_year_degree_floor_never_drops_below_the_fixed_floor():
