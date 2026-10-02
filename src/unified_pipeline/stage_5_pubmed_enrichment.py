@@ -110,6 +110,16 @@ PUBTYPE_TAXONOMY_CODES = (('Case Reports', 'S6'), ('Review', 'S2'),
                           ('Systematic Review', 'S2'), ('Editorial', 'S2'))
 PUBLISHED_DEFAULT_CODE = 'S1'
 IN_REVIEW_CODE = 'S7'
+# An in-press entry PubMed did not find still is not "In review" (#1166):
+# taxonomy_v7 promotes a paper once accepted. Without a PubMed type to go by,
+# a chapter ("In: ... eds") goes to S4 and anything else to S1. Prompt text
+# alone did not move these: the 2026-09-30 3b A/B left 23 in S7 on web200 and
+# web46 after rule 30 named "in press" explicitly.
+UNMATCHED_CHAPTER_CODE = 'S4'
+UNMATCHED_DEFAULT_CODE = 'S1'
+# "In;" and "(eds Greenwood, ...)" / "(ed Venables)" are both corpus shapes
+# (web200).
+CHAPTER_PATTERN = re.compile(r'\bIn[:;]\s*\S|\(eds?\b|\beds?\.(?=\s|,|$)|\beditors?\b|\bchapter\b', re.I)
 # An in-press entry whose PubMed match another entry already lists as
 # published is a stale duplicate (web200: the same 2006 paper listed both as
 # published and as "in press" in another journal). Compared only against these
@@ -249,6 +259,7 @@ class PubMedEnricher:
             'title_searches': 0,
             'in_press_resolved': 0,
             'in_press_duplicates': 0,
+            'in_press_promoted': 0,
         }
 
         # (operation, status/exception) classes already logged at ERROR this run
@@ -523,7 +534,8 @@ class PubMedEnricher:
         """An entry the CV calls in press is searched by title when it had no
         usable identifier; once matched by any path it takes PubMed's year,
         leaves S7 for its published code, and carries `in_press_note`, the
-        Word comment stage 6 attaches to the tracked change."""
+        Word comment stage 6 attaches to the tracked change. One PubMed did
+        not match still leaves S7, by its own text (#1166)."""
         for entry in pub_entries:
             fields = entry.get('extracted_fields') or {}
             title = fields.get('title') or fields.get('chapter_title') or ''
@@ -536,6 +548,7 @@ class PubMedEnricher:
             if entry.get('enrichment_status') in _TITLE_SEARCHABLE_STATUSES:
                 self._enrich_by_title(entry, title)
             if entry.get('enrichment_status') != 'enriched':
+                self._promote_unmatched_in_press(entry)
                 continue
             if self._lists_as_published(entry, pub_entries):
                 self._record_in_press_duplicate(entry, phrase)
@@ -621,6 +634,24 @@ class PubMedEnricher:
                     and _same_title(fields.get('title') or '', enrichment.get('pubmed_title') or '')):
                 return True
         return False
+
+    def _promote_unmatched_in_press(self, entry: dict) -> None:
+        """An S7 entry the CV calls in press that PubMed did not match (a
+        non-indexed journal, a chapter, a retitled paper) moves to S4 or S1.
+        Stage 4 extracted it with S7's schema, whose venue key is
+        `target_journal`; the citation renderer reads `journal`."""
+        if entry.get('taxonomy_code') != IN_REVIEW_CODE:
+            return
+        is_chapter = bool(CHAPTER_PATTERN.search(entry.get('text') or ''))
+        code = UNMATCHED_CHAPTER_CODE if is_chapter else UNMATCHED_DEFAULT_CODE
+        entry['taxonomy_code'] = code
+        fields = entry.setdefault('extracted_fields', {})
+        if not is_chapter and not fields.get('journal') and fields.get('target_journal'):
+            fields['journal'] = fields['target_journal']
+        if entry.get('classification_reasoning'):
+            entry['classification_reasoning'] += (
+                f" Moved from {IN_REVIEW_CODE} to {code}: the CV lists it as accepted or in press.")
+        self.stats['in_press_promoted'] += 1
 
     def _record_in_press_duplicate(self, entry: dict, phrase: str) -> None:
         """Stage 6 renders this entry as a tracked deletion, not a replacement:
