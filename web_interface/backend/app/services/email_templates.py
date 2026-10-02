@@ -1,13 +1,15 @@
-"""HTML and plain-text bodies for CViche's own emails (#1298).
+"""HTML and plain-text bodies for CViche's own emails (#1298), built to the
+notification-email design in the CViche redesign handoff.
 
-Modeled on WCM's ITS broadcast email: logo banner, small eyebrow, large red
-headline, greeting, one bold underlined call to action, a closing and a help
-footer. Table layout with inline CSS only, so it holds up in Outlook desktop:
-no web fonts, no external images. Logos are CID attachments (the app's host
-resolves to private addresses, so a hotlinked image would not load for a
-recipient off the network); mailer attaches exactly the ones the HTML names.
-
-``EMAIL_BRANDING`` picks where the two logos go (see ``Branding``).
+Layout: ITS logo on a manila ground, a white card (4px red top rule) holding
+the CViche wordmark, headline, greeting, an optional status list, copy and one
+filled button, then the ITS name and help line below the card. Table layout and
+inline CSS so it holds up in Outlook desktop; the only <style> block is a
+small-screen media query (clients that drop it fall back to the desktop sizes).
+No web fonts, no external images: both logos are CID attachments (the app's
+host resolves to private addresses, so a hotlinked image would not load off
+the network); mailer attaches exactly the ones the HTML names. The ITS banner
+has the manila ground multiplied in, because mail clients do not blend.
 
 Every interpolated value is HTML-escaped. Content is counts and fixed wording
 only: callers must never pass a filename.
@@ -27,20 +29,10 @@ LOGO_FILES = {
     CVICHE_LOGO_CID: STATIC_EMAIL_DIR / "cviche-logo.png",
     ITS_LOGO_CID: STATIC_EMAIL_DIR / "wcm-its-logo.png",
 }
-ITS_LOGO_WIDTH_PX = 600
-CVICHE_LOGO_ONLY_WIDTH_PX = 200
-CVICHE_LOGO_SECONDARY_WIDTH_PX = 160
-CVICHE_LOGO_BENEATH_WIDTH_PX = 140
-CVICHE_LOGO_ASPECT = 170 / 520
-
-
-class Branding(StrEnum):
-    ITS_TOP_CVICHE_BOTTOM = "its_top_cviche_bottom"
-    BOTH_TOP = "both_top"
-    CVICHE_ONLY = "cviche_only"
-
-
-EMAIL_BRANDING = Branding.ITS_TOP_CVICHE_BOTTOM
+ITS_LOGO_WIDTH_PX = 280
+ITS_LOGO_HEIGHT_PX = 34  # 703x85 scaled to the width
+CVICHE_LOGO_WIDTH_PX = 120
+CVICHE_LOGO_HEIGHT_PX = 39  # 520x170 scaled to the width
 
 SUPPORT_EMAIL = "support@med.cornell.edu"
 # Tracking parameters dropped on purpose.
@@ -54,11 +46,34 @@ FALLBACK_GREETING = "Hello,"
 _TITLES = frozenset({"dr", "dr.", "prof", "prof.", "professor", "mr", "mr.", "ms", "ms.", "mrs", "mrs."})
 
 WCM_RED = "#B31B1B"
-TEXT_COLOR = "#222222"
-MUTED_COLOR = "#666666"
-FONT_STACK = "Arial, Helvetica, sans-serif"
+MANILA = "#F3EAD7"
+CARD_BORDER = "#E6DAC1"
+LIST_BG = "#FCFAF6"
+INK = "#222222"
+MUTED = "#5F5A50"
+FONT = "Arial, Helvetica, sans-serif"
 MAX_WIDTH_PX = 600
-EYEBROW = "CViche"
+BUTTON_CHAR_PX = 9
+BUTTON_PAD_PX = 48
+BUTTON_MIN_PX = 160
+BUTTON_HEIGHT_PX = 44
+
+
+class StatusKind(StrEnum):
+    PROCESSING = "processing"
+    READY = "ready"
+    FAILED = "failed"
+    WAITING = "waiting"
+    SKIPPED = "skipped"
+
+
+STATUS_COLOURS = {
+    StatusKind.PROCESSING: "#1D4ED8",
+    StatusKind.READY: "#15803D",
+    StatusKind.FAILED: "#B91C1C",
+    StatusKind.WAITING: "#B45309",
+    StatusKind.SKIPPED: "#8A7A58",
+}
 
 
 def greeting_for(display_name: str | None) -> str:
@@ -81,111 +96,166 @@ class Para:
 
 
 @dataclass(frozen=True, slots=True)
+class StatusRow:
+    kind: StatusKind
+    count: int
+    label: str
+
+
+@dataclass(frozen=True, slots=True)
 class EmailContent:
     headline: str
     paragraphs: tuple[Para, ...]
     cta_label: str | None = None
     cta_url: str | None = None
     greeting: str = FALLBACK_GREETING
+    status: tuple[StatusRow, ...] = ()
+
+
+def _visible(rows: tuple[StatusRow, ...]) -> tuple[StatusRow, ...]:
+    """A count of zero is never shown."""
+    return tuple(row for row in rows if row.count > 0)
 
 
 def render_text(content: EmailContent) -> str:
-    lines = [content.greeting]
-    lines += [f"{p.text}: {p.url}" if p.url else p.text for p in content.paragraphs]
+    blocks = [content.headline, content.greeting]
+    if content.paragraphs[:1] and content.paragraphs[0].bold:
+        blocks.append(_para_text(content.paragraphs[0]))
+        rest = content.paragraphs[1:]
+    else:
+        rest = content.paragraphs
+    rows = _visible(content.status)
+    if rows:
+        blocks.append("\n".join(f"- {row.count} {row.label[0].lower()}{row.label[1:]}" for row in rows))
+    blocks += [_para_text(p) for p in rest]
     if content.cta_label and content.cta_url:
-        lines.append(f"{content.cta_label}: {content.cta_url}")
-    lines += [
+        blocks.append(f"{content.cta_label}: {content.cta_url}")
+    blocks += [
         SIGNATURE,
         f"{ABOUT_TEXT} If you have questions, read the HelpDesk article ({HELPDESK_ARTICLE_URL}) "
         f"or contact {SUPPORT_EMAIL}.",
     ]
-    return "\n\n".join(lines) + "\n"
+    return "\n\n".join(blocks) + "\n"
 
 
-def _link(url: str, label: str, style: str) -> str:
-    return f'<a href="{escape(url, quote=True)}" style="{style}">{escape(label)}</a>'
+def _para_text(para: Para) -> str:
+    return f"{para.text}: {para.url}" if para.url else para.text
 
 
-_LINK_STYLE = f"color:{WCM_RED};text-decoration:underline;"
-_CTA_STYLE = f"color:{WCM_RED};font-weight:bold;text-decoration:underline;text-transform:uppercase;letter-spacing:1px;"
+def _link(url: str, label: str) -> str:
+    return f'<a href="{escape(url, quote=True)}" style="color:{WCM_RED};text-decoration:underline;">{escape(label)}</a>'
 
 
-def _row(inner: str, style: str = "") -> str:
-    return f'<tr><td style="{style}font-family:{FONT_STACK};color:{TEXT_COLOR};">{inner}</td></tr>'
+def _row(inner: str, style: str = "", cls: str = "") -> str:
+    attr = f' class="{cls}"' if cls else ""
+    return f'<tr><td{attr} style="font-family:{FONT};color:{INK};{style}">{inner}</td></tr>'
 
 
-def _img(cid: str, width: int, alt: str, height: int | None = None) -> str:
-    h = f' height="{height}"' if height else ""
-    return (f'<img src="cid:{cid}" width="{width}"{h} alt="{escape(alt)}" '
+def _img(cid: str, width: int, height: int, alt: str, cls: str) -> str:
+    return (f'<img class="{cls}" src="cid:{cid}" width="{width}" height="{height}" alt="{escape(alt)}" '
             f'style="display:block;border:0;outline:none;width:{width}px;max-width:100%;height:auto;">')
-
-
-def _cviche_img(width: int) -> str:
-    return _img(CVICHE_LOGO_CID, width, "CViche", round(width * CVICHE_LOGO_ASPECT))
-
-
-def _its_img() -> str:
-    return _img(ITS_LOGO_CID, ITS_LOGO_WIDTH_PX, "Weill Cornell Medicine Information Technologies & Services")
-
-
-def _header_html(branding: Branding) -> str:
-    rule = f"border-bottom:4px solid {WCM_RED};"
-    if branding == Branding.CVICHE_ONLY:
-        return _row(_cviche_img(CVICHE_LOGO_ONLY_WIDTH_PX), f"padding:8px 0 20px 0;{rule}")
-    if branding == Branding.BOTH_TOP:
-        return (_row(_its_img(), "padding:0;")
-                + _row(_cviche_img(CVICHE_LOGO_BENEATH_WIDTH_PX), f"padding:14px 0 16px 0;{rule}"))
-    return _row(_its_img(), f"padding:0 0 10px 0;{rule}")
 
 
 def _para_html(para: Para) -> str:
     weight = "bold" if para.bold else "normal"
-    link = f": {_link(para.url, para.link_label, _LINK_STYLE)}" if para.url else ""
+    link = f": {_link(para.url, para.link_label)}" if para.url else ""
     return _row(f"{escape(para.text)}{link}", f"padding:0 0 14px 0;font-size:15px;line-height:22px;font-weight:{weight};")
+
+
+def _status_row_html(row: StatusRow, first: bool) -> str:
+    divider = "" if first else f"border-top:1px solid {CARD_BORDER};"
+    cell = f"padding:11px 0;background-color:{LIST_BG};{divider}font-family:{FONT};color:{INK};"
+    return (
+        f'<tr><td width="32" style="{cell}padding-left:14px;font-size:20px;line-height:18px;'
+        f'color:{STATUS_COLOURS[row.kind]};">&#9679;</td>'
+        f'<td width="32" style="{cell}font-size:18px;line-height:18px;font-weight:bold;">{row.count}</td>'
+        f'<td style="{cell}padding-right:14px;font-size:14px;line-height:18px;">{escape(row.label)}</td></tr>'
+    )
+
+
+def _status_html(rows: tuple[StatusRow, ...]) -> str:
+    if not rows:
+        return ""
+    body = "".join(_status_row_html(row, index == 0) for index, row in enumerate(rows))
+    table = (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+             f'style="border:1px solid {CARD_BORDER};border-radius:6px;border-collapse:separate;">{body}</table>')
+    return _row(table, "padding:0 0 20px 0;")
+
+
+def _button_html(label: str, url: str) -> str:
+    href = escape(url, quote=True)
+    width = max(BUTTON_MIN_PX, BUTTON_PAD_PX + BUTTON_CHAR_PX * len(label))
+    text_style = f"color:#ffffff;font-family:Arial,sans-serif;font-size:15px;font-weight:bold;"
+    vml = (f'<!--[if mso]><v:roundrect xmlns:v="urn:schemas-microsoft-com:vml" '
+           f'xmlns:w="urn:schemas-microsoft-com:office:word" href="{href}" '
+           f'style="height:{BUTTON_HEIGHT_PX}px;v-text-anchor:middle;width:{width}px;" arcsize="14%" stroke="f" '
+           f'fillcolor="{WCM_RED}"><w:anchorlock/><center style="{text_style}">{escape(label)}</center>'
+           f'</v:roundrect><![endif]-->')
+    anchor = (f'<!--[if !mso]><!--><a class="btn" href="{href}" style="display:inline-block;background-color:{WCM_RED};'
+              f'color:#ffffff;font-family:{FONT};font-size:15px;font-weight:bold;line-height:18px;text-decoration:none;'
+              f'padding:13px 24px;border-radius:6px;text-align:center;">{escape(label)}</a><!--<![endif]-->')
+    return _row(vml + anchor, "padding:8px 0 4px 0;")
 
 
 def _cta_html(content: EmailContent) -> str:
     if not (content.cta_label and content.cta_url):
         return ""
-    return _row(_link(content.cta_url, content.cta_label, _CTA_STYLE), "padding:6px 0 22px 0;font-size:14px;")
+    return _button_html(content.cta_label, content.cta_url)
 
 
-def _footer_html(branding: Branding) -> str:
-    logo = ""
-    if branding == Branding.ITS_TOP_CVICHE_BOTTOM:
-        logo = _row(_cviche_img(CVICHE_LOGO_SECONDARY_WIDTH_PX), "padding:0 0 16px 0;")
-    help_line = (
-        f'If you have questions, read the {_link(HELPDESK_ARTICLE_URL, "HelpDesk article", _LINK_STYLE)} '
-        f'or contact {_link("mailto:" + SUPPORT_EMAIL, SUPPORT_EMAIL, _LINK_STYLE)}.'
-    )
+def _footer_html() -> str:
+    help_line = (f'If you have questions, read the {_link(HELPDESK_ARTICLE_URL, "HelpDesk article")} '
+                 f'or contact {_link("mailto:" + SUPPORT_EMAIL, SUPPORT_EMAIL)}.')
     return (
-        _row(escape(SIGNATURE), "padding:0 0 20px 0;font-size:14px;line-height:20px;font-weight:bold;")
-        + logo
-        + f'<tr><td style="padding:16px 0 0 0;border-top:1px solid #dddddd;font-family:{FONT_STACK};'
-        f'font-size:12px;line-height:18px;color:{MUTED_COLOR};">'
-        f'<strong>About CViche.</strong> {escape(ABOUT_TEXT)} {help_line}</td></tr>'
+        _row(escape(SIGNATURE), "padding:16px 4px 8px 4px;font-size:13px;line-height:19px;font-weight:bold;")
+        + _row(f'<strong style="color:{INK};">About CViche.</strong> {escape(ABOUT_TEXT)} {help_line}',
+               f"padding:0 4px;font-size:12px;line-height:18px;color:{MUTED};")
     )
 
 
-def render_html(content: EmailContent, branding: Branding | None = None) -> str:
+_STYLE = (
+    "@media only screen and (max-width:480px){"
+    ".outer{padding:20px 12px 28px 12px !important;}"
+    ".card{padding:16px 22px 22px 22px !important;}"
+    ".its{width:220px !important;}"
+    ".mark{width:104px !important;}"
+    ".h{font-size:24px !important;line-height:30px !important;}"
+    ".btn{display:block !important;width:100% !important;box-sizing:border-box !important;}}"
+)
+
+
+def _card_html(content: EmailContent) -> str:
+    paragraphs = content.paragraphs
+    lead = _para_html(paragraphs[0]) if paragraphs and paragraphs[0].bold else ""
+    rest = paragraphs[1:] if lead else paragraphs
+    inner = (
+        _row(_img(CVICHE_LOGO_CID, CVICHE_LOGO_WIDTH_PX, CVICHE_LOGO_HEIGHT_PX, "CViche", "mark"), "padding:0 0 22px 0;")
+        + _row(escape(content.headline), "padding:0 0 16px 0;font-size:28px;line-height:34px;font-weight:bold;", "h")
+        + _row(escape(content.greeting), "padding:0 0 14px 0;font-size:15px;line-height:22px;")
+        + lead + _status_html(_visible(content.status)) + "".join(_para_html(p) for p in rest) + _cta_html(content)
+    )
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+            f'style="background-color:#ffffff;border:1px solid {CARD_BORDER};border-top:4px solid {WCM_RED};'
+            f'border-radius:8px;border-collapse:separate;"><tr><td class="card" style="padding:30px 36px 36px 36px;">'
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">{inner}</table>'
+            f'</td></tr></table>')
+
+
+def render_html(content: EmailContent) -> str:
     """The HTML part; logos are referenced as ``cid:`` images."""
-    branding = branding or EMAIL_BRANDING
-    paragraphs = "".join(_para_html(p) for p in content.paragraphs)
+    its = _img(ITS_LOGO_CID, ITS_LOGO_WIDTH_PX, ITS_LOGO_HEIGHT_PX,
+               "Weill Cornell Medicine Information Technologies & Services", "its")
     return (
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f'<title>{escape(content.headline)}</title></head>'
-        '<body style="margin:0;padding:0;background-color:#ffffff;">'
-        '<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
-        'style="background-color:#ffffff;"><tr><td align="center" style="padding:16px;">'
+        f'<title>{escape(content.headline)}</title><style>{_STYLE}</style></head>'
+        f'<body style="margin:0;padding:0;background-color:{MANILA};">'
+        f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" '
+        f'style="background-color:{MANILA};"><tr><td class="outer" align="center" style="padding:32px 24px 40px 24px;">'
         f'<table role="presentation" width="{MAX_WIDTH_PX}" cellpadding="0" cellspacing="0" border="0" '
-        f'style="width:100%;max-width:{MAX_WIDTH_PX}px;background-color:#ffffff;">'
-        f'{_header_html(branding)}'
-        f'<tr><td style="padding:24px 0 6px 0;font-family:{FONT_STACK};font-size:12px;font-weight:bold;'
-        f'color:#000000;text-transform:uppercase;letter-spacing:1px;">{escape(EYEBROW)}</td></tr>'
-        f'<tr><td style="padding:0 0 16px 0;font-family:{FONT_STACK};font-size:32px;line-height:38px;'
-        f'font-weight:bold;color:{WCM_RED};">{escape(content.headline)}</td></tr>'
-        f'{_row(escape(content.greeting), "padding:0 0 14px 0;font-size:15px;line-height:22px;")}'
-        f'{paragraphs}{_cta_html(content)}{_footer_html(branding)}'
+        f'style="width:100%;max-width:{MAX_WIDTH_PX}px;">'
+        f'<tr><td style="padding:0 0 16px 0;">{its}</td></tr>'
+        f'<tr><td>{_card_html(content)}</td></tr>'
+        f'{_footer_html()}'
         '</table></td></tr></table></body></html>'
     )

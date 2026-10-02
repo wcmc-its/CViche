@@ -133,7 +133,7 @@ def test_a_previously_processed_file_is_held_never_run(db, storage, sent, queue,
 
     assert _statuses(db) == {"one.docx": InboundFileStatus.PENDING, "two.docx": InboundFileStatus.SUBMITTED}
     assert db.query(Run).count() == 2 and db.query(RunBatch).one().files_submitted == 1
-    assert "Processing 1 CV" in sent[0].body and "1 CV is waiting for your confirmation" in sent[0].body
+    assert "Processing 1 CV" in sent[0].body and "- 1 waiting for your confirmation" in sent[0].body
 
 
 def test_two_identical_files_in_one_message_run_once(db, storage, sent, queue, seed_simple_mode):
@@ -152,14 +152,14 @@ def test_files_beyond_the_remaining_quota_are_held_in_received_order(db, storage
     statuses = _statuses(db)
     assert [statuses[f"{n}.docx"] for n in ("one", "two", "three", "four")] == [
         InboundFileStatus.SUBMITTED, InboundFileStatus.SUBMITTED, InboundFileStatus.PENDING, InboundFileStatus.PENDING]
-    assert "Processing 2 CVs" in sent[0].body and "2 CVs are waiting for your confirmation" in sent[0].body
+    assert "Processing 2 CVs" in sent[0].body and "- 2 waiting for your confirmation" in sent[0].body
 
 
 def test_a_user_at_their_limit_gets_no_batch_and_every_file_is_held(db, storage, sent, queue, seed_simple_mode):
     _user(db, daily_limit=0)
     _send(db, storage, ["one"])
     assert db.query(Run).count() == 0 and db.query(RunBatch).count() == 0 and queue.cards == []
-    assert "Processing" not in sent[0].body and "1 CV is waiting" in sent[0].body
+    assert "Processing 1" not in sent[0].body and "- 1 waiting" in sent[0].body
 
 
 def test_outdated_consent_holds_everything_and_says_to_sign_in(db, storage, sent, queue, seed_simple_mode):
@@ -169,8 +169,8 @@ def test_outdated_consent_holds_everything_and_says_to_sign_in(db, storage, sent
     assert db.query(Run).count() == 0 and db.query(RunBatch).count() == 0 and queue.enqueued == []
     assert set(_statuses(db).values()) == {InboundFileStatus.PENDING}
     body = sent[0].body.lower()
-    assert "terms have been updated" in body and "sign in to review and accept them" in body and "2 cvs are waiting" in body
-    assert "processing" not in body
+    assert "terms have been updated" in body and "sign in to review and accept them" in body and "- 2 waiting for you in new run" in body
+    assert "- 2 processing" not in body
 
 
 def test_outside_queue_mode_everything_is_held_with_a_warning(db, storage, sent, monkeypatch, caplog, seed_simple_mode):
@@ -206,7 +206,7 @@ def test_an_unexpected_auto_run_failure_keeps_the_files_pending(db, storage, sen
     _send(db, storage, ["one"])
     assert db.query(InboundMessage).one().status == "accepted"
     assert set(_statuses(db).values()) == {InboundFileStatus.PENDING}
-    assert "1 CV is waiting" in sent[0].body
+    assert "- 1 waiting" in sent[0].body
 
 
 def test_logs_carry_no_filename_or_address(db, storage, sent, queue, caplog, seed_simple_mode):
@@ -244,7 +244,7 @@ def test_completion_is_sent_once_when_the_last_run_finishes_and_not_before(db, s
     assert batch_completion.send_if_batch_complete(db, batch_id) is True
     assert batch_completion.send_if_batch_complete(db, batch_id) is False
     [mail] = _completion_mails(sent)
-    assert mail.to_addr == SENDER and "Your 3 CVs are done: 1 ready to download, 2 failed." in mail.body
+    assert mail.to_addr == SENDER and "- 1 ready to download\n- 2 failed" in mail.body
     assert db.query(RunBatch).one().completion_notified_at is not None
 
 
@@ -255,7 +255,7 @@ def test_a_single_cv_batch_gets_the_single_wording_and_the_run_link(db, storage,
     assert batch_completion.notify_if_batch_complete is not None
     batch_completion.send_if_batch_complete(db, db.query(RunBatch).one().id)
     [mail] = _completion_mails(sent)
-    assert "Your CV failed to process. Open the run to retry it" in mail.body
+    assert mail.subject == "Your CV failed to process" and "Open the run to retry it." in mail.body
     assert f"/run/{db.query(Run).one().id}" in mail.body
 
 
