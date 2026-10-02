@@ -1106,13 +1106,69 @@ def test_reclassify_failure_warns_and_counts_when_not_verbose(
 
 def test_reclassify_success_does_not_count_a_failure(monkeypatch, caplog):
     monkeypatch.setattr(
-        s6, 'call_llm', lambda *a, **k: {'content': 'P: Committee member'})
+        s6, 'call_llm', lambda *a, **k: {'content': f'P: {_RECLASSIFY_TEXT}'})
     gen = WCMTemplateGenerator(verbose=False)
     with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
         assert gen._reclassify_entry_segments(_RECLASSIFY_TEXT, 'P')
     assert not _warnings(caplog, S6_LOGGER)
     assert gen.stats[RECLASSIFY_FAILURE_STAT] == 0
     assert gen._reclassify_failure_warnings() == []
+
+
+# ---- reclassify reply must cover its source (#1230) ----
+
+_FUSED_WORDS = ['zeolite', 'marigold', 'quartzite', 'nasturtium', 'basalt',
+                'chrysanthemum', 'obsidian', 'hyacinth', 'feldspar',
+                'delphinium', 'granite', 'snapdragon']
+_FUSED_LINES = [
+    f'Doe J, Roe K. Synthetic study of {word} outcomes. '
+    f'Journal of Invented {word.title()} Findings; volume {i}.'
+    for i, word in enumerate(_FUSED_WORDS)
+]
+_FUSED_TEXT = '\n'.join(_FUSED_LINES)
+
+
+def _reply_llm(content):
+    return lambda *a, **k: {'content': content}
+
+
+def test_reclassify_summary_reply_is_rejected_and_counted(monkeypatch, caplog):
+    """A reply that stands one bracketed line in for the whole list covers a
+    sliver of the source: refused (None, so the caller keeps the entry whole)
+    and counted with the failures."""
+    summary = 'KEEP: [All 12 publication entries follow, first Doe J0 last Doe J11]'
+    monkeypatch.setattr(s6, 'call_llm', _reply_llm(summary))
+    gen = WCMTemplateGenerator(verbose=False)
+    with caplog.at_level(logging.WARNING, logger=S6_LOGGER):
+        assert gen._reclassify_entry_segments(_FUSED_TEXT, 'T') is None
+    assert gen.stats[RECLASSIFY_FAILURE_STAT] == 1
+    assert any('covered under' in w.getMessage()
+               for w in _warnings(caplog, S6_LOGGER))
+
+
+def test_reclassify_faithful_reply_is_accepted(monkeypatch):
+    reply = '\n'.join(f'KEEP: {line}' for line in _FUSED_LINES)
+    monkeypatch.setattr(s6, 'call_llm', _reply_llm(reply))
+    gen = WCMTemplateGenerator(verbose=False)
+    segments = gen._reclassify_entry_segments(_FUSED_TEXT, 'T')
+    assert [text for text, _ in segments] == _FUSED_LINES
+    assert gen.stats[RECLASSIFY_FAILURE_STAT] == 0
+
+
+def test_reconsider_keeps_the_whole_entry_when_the_reply_is_a_summary(
+        monkeypatch):
+    """End to end through `_reconsider_appendix_entries`: the summary reply is
+    refused, so every source line lands in the appendix, none vanishes."""
+    summary = 'KEEP: [All 12 publication entries follow, first Doe J0 last Doe J11]'
+    monkeypatch.setattr(s6, 'call_llm', _reply_llm(summary))
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._appendix_pending = [({'text': _FUSED_TEXT, 'taxonomy_code': 'T',
+                               'extracted_fields': {}}, 5.0)]
+    gen._reconsider_appendix_entries()
+    body = '\n'.join(p.text for p in gen.doc.paragraphs)
+    assert all(line in body for line in _FUSED_LINES)
+    assert 'publication entries follow' not in body
 
 
 def test_reclassify_failure_reaches_the_render_warnings_sidecar(
@@ -1146,7 +1202,7 @@ def test_reclassify_failure_reaches_the_render_warnings_sidecar(
     assert found[0]['evidence'] == ['segment_reclassification_failures=1']
     assert found[0]['section'] == 'appendix'
     assert found[0]['message'] == (
-        '1 appendix entry reclassification(s) failed; those entries stayed in '
+        '1 appendix entry reclassification(s) failed or came back incomplete; those entries stayed in '
         'the appendix whole instead of being split and routed to their sections')
 
 
