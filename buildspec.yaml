@@ -163,7 +163,9 @@ phases:
       # copies src/, key_files/, and config.yaml from the repo root because
       # the orchestrator resolves them through repo-root-relative paths
       # (see web_interface/backend/Dockerfile header for the rationale).
-      - docker build -t $REPO_BE:$TAG -f web_interface/backend/Dockerfile .
+      # IMAGE_TAG is the same $TAG computed in pre_build; the one backend image
+      # runs both the API and the queue worker (#1239).
+      - docker build --build-arg IMAGE_TAG=$TAG -t $REPO_BE:$TAG -f web_interface/backend/Dockerfile .
 
       - echo "Building Frontend..."
       - docker build -t $REPO_FE:$TAG ./web_interface/frontend

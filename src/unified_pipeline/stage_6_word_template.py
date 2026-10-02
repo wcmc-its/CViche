@@ -27,7 +27,7 @@ from types import MappingProxyType
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Dict, List, Any, Literal, Optional, Tuple
+from typing import Dict, List, Any, Literal, NamedTuple, Optional, Tuple
 from collections.abc import Callable
 from datetime import datetime
 from collections import defaultdict
@@ -57,6 +57,7 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm_client import LlmUsage
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.core.render_check import entry_fragments, entry_lines
 # Every name below is re-exported from this module by being imported here: it is
@@ -152,6 +153,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     RENDER_PIECE_MIN_CHARS,
     RENDER_PIECE_WINDOW,
     RENDER_TOKEN_MIN_COUNT,
+    RECLASSIFY_MIN_TOKEN_COVERAGE,
     RENDER_TOKEN_OVERLAP,
     RETIRED_TAXONOMY_CODES,
     UNRENDERED_MIN_RECORD_LINES,
@@ -166,12 +168,17 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     _norm,
     _record_lines,
     _record_rendered,
+    _record_tokens,
     _value_is_datelike,
+    _whole_record_rendered,
     normalize_retired_code,
     segment_already_rendered,
+    segments_cover_source,
+    t_recovery_lines,
 )
-from unified_pipeline.stage4.schemas import FIELD_SCHEMAS
-from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
+from unified_pipeline.stage4.extraction import UnextractedContentReport, calculate_unextracted_content
+from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
+from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS, fan_out_multi_record_entries
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
@@ -206,9 +213,13 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     TeachingSection,
 )
 from unified_pipeline.stage6.sections.appendix import (
+    APPENDIX_MAX_CHARS,
+    _TRUNCATION_MARKER as APPENDIX_TRUNCATION_MARKER,
     APPENDIX_INTRO_TEXT,
     UnmappedEntry,
+    _appendix_drop_reason,
     build_appendix_diversion_warnings,
+    is_t_validation_recoded_m1,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 
@@ -508,6 +519,26 @@ _TAXONOMY_WARNED_CONFUSIONS = frozenset({
 })
 
 
+def rendered_extraction_coverage(entry: Mapping[str, Any]) -> UnextractedContentReport | None:
+    """The entry's stage-4 coverage, counting only the records stage 6 renders.
+
+    Stage 4 measures a multi-record entry over every record it kept under
+    `STAGE4_RECORDS_KEY` (#1265). Fan-out removes that key from every child it
+    renders, so an entry that still carries it after fan-out had its records
+    declined (a T entry has no fan-out renderer at all), and only its own
+    fields render. Crediting the declined records read a lost 18K-character
+    entry as 92% covered and kept it out of the low-coverage overflow (#1299).
+    Run on a stage-4 entry, call `fan_out_multi_record_entries` first.
+    """
+    coverage = entry.get('extraction_coverage')
+    fields = entry.get('extracted_fields')
+    if not isinstance(coverage, dict) or not isinstance(fields, Mapping) \
+            or STAGE4_RECORDS_KEY not in fields:
+        return coverage if isinstance(coverage, dict) else None
+    own = {key: value for key, value in fields.items() if key != STAGE4_RECORDS_KEY}
+    return calculate_unextracted_content(str(entry.get('text') or ''), own)
+
+
 _KEEP_SENTINEL = 'KEEP'
 _TAXONOMY_PATH = Path(__file__).parent / "core" / "taxonomy_v7.json"
 
@@ -563,6 +594,42 @@ def parse_reclassified_segments(
     return segments or None
 
 
+def _t_line_is_scaffolding(line: str, entry: dict) -> bool:
+    """Whether the Appendix's own filter would drop this line of a T entry
+    (template furniture, a confirmed header row, ...). Recovery must not
+    resurrect what the Appendix deliberately omits (#1230)."""
+    return _appendix_drop_reason(
+        line, line, 'T',
+        entry.get('classification_reasoning')) is not None
+
+
+def _recovery_candidates(code: str, entry: dict) -> list[str]:
+    """Lines of an entry the unrendered-record pass should look for.
+
+    A fused multi-record entry (two or more record-shaped lines) for any code.
+    A T entry longer than the Appendix cap is the exception: the cap cut
+    everything past `APPENDIX_MAX_CHARS`, so every record-shaped or dated line
+    of it is a candidate (`t_recovery_lines`), and a single-record entry
+    qualifies (#1230). A T entry the cap did not cut renders whole and has none.
+    """
+    text = str(entry.get('text') or '')
+    if code == 'T':
+        if len(text) <= APPENDIX_MAX_CHARS:
+            return []
+        return t_recovery_lines(text)
+    records = _record_lines(text)
+    return records if len(records) >= UNRENDERED_MIN_RECORD_LINES else []
+
+
+def _other_entry_line_tokens(entries_by_code: dict) -> list[set]:
+    """`_record_tokens` of every line of every non-T entry (#1230). A T line
+    whose tokens all sit in one of them is a record that has its own entry."""
+    return [_record_tokens(line)
+            for code, entries in entries_by_code.items() if code != 'T'
+            for entry in entries
+            for line in str(entry.get('text') or '').split('\n') if line.strip()]
+
+
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
     """The one code a hierarchy mismatch should reroute to, or None to skip.
 
@@ -577,6 +644,140 @@ def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
     if len({TAXONOMY_TO_SECTION.get(code) for code in candidates}) > 1:
         return None
     return min(candidates)
+
+
+# Stage 4.5's `generation_method` when its summary IS the CV's own M1 text,
+# joined verbatim (stage_4_5_research_summary.py); any other method paraphrases.
+# Duplicated rather than imported: stage 6 reads the stage 4.5 artifact as its contract.
+_SUMMARY_METHOD_VERBATIM_M1 = "existing_content"
+
+
+def _recoded_m1_appendix_entries(entries_by_code: dict[str, list[dict]],
+                                 mapped_codes: set[str],
+                                 research_summary_data: dict | None) -> list[dict]:
+    """M1 entries stage 3b's T-validation recoded from T, bound for the
+    Appendix because the rendered research summary paraphrases M1 and so
+    carries none of them (AUTOPSY-s7ab-batch-2026-10-02 class 11). Empty when
+    M1 is already unmapped -- every M1 entry then reaches the Appendix through
+    `generate()`'s unmapped-code loop -- or when the summary is the M1 text verbatim."""
+    if 'M1' not in mapped_codes:
+        return []
+    summary_info = (research_summary_data or {}).get('research_summary') or {}
+    if summary_info.get('generation_method') == _SUMMARY_METHOD_VERBATIM_M1:
+        return []
+    return [e for e in entries_by_code.get('M1', []) if is_t_validation_recoded_m1(e)]
+
+
+# Rendered fields that nearly every record family carries -- when, where, in
+# what capacity -- so holding one says nothing about whether a record is the
+# target code's kind. A K1 course has a `role`, a K5 talk a `location`, and
+# both are rendered by R; without this set either one would pass as fitting
+# R. Read against `_RENDERED_FIELDS`, so a field outside it is never an anchor.
+_REROUTE_GENERIC_FIELDS = frozenset({
+    'date', 'start_date', 'end_date', 'year', 'location', 'role', 'notes', 'status',
+})
+
+# Targets whose renderer is filled by fields narrower than "any rendered,
+# non-generic one". A grant table renders a `title`, but so does nearly every
+# publication, position and talk; a grant is named by its funder or award
+# number. BMAMWE idx 932: a commentary (S2, title only) rerouted to M2C
+# rendered an otherwise empty Pending Funding table.
+_GRANT_ANCHOR_FIELDS = frozenset({'agency', 'grant_number'})
+_REROUTE_ANCHOR_OVERRIDES = MappingProxyType({
+    'M2A': _GRANT_ANCHOR_FIELDS, 'M2B': _GRANT_ANCHOR_FIELDS, 'M2C': _GRANT_ANCHOR_FIELDS,
+})
+
+# Outcomes of a hierarchy-mismatch reroute, one render-warnings record each
+# (per assigned -> target pair). A refusal keeps the classifier's code.
+REROUTE_ACCEPTED_SAME_FAMILY = 'accepted_same_family'
+REROUTE_ACCEPTED_CROSS_FAMILY = 'accepted_cross_family'
+REROUTE_REFUSED_FIELDS = 'refused_fields_do_not_fit'
+
+# Render-warnings `check` value for every reroute record, and each outcome's
+# severity: an accepted cross-family move is a low-confidence guess that moved
+# content between sections, so it reaches the doctor as WARN.
+REROUTE_CHECK = 'hierarchy_mismatch_reroute'
+_REROUTE_SEVERITY = MappingProxyType({
+    REROUTE_ACCEPTED_SAME_FAMILY: 'INFO',
+    REROUTE_ACCEPTED_CROSS_FAMILY: 'WARN',
+    REROUTE_REFUSED_FIELDS: 'INFO',
+})
+
+
+class RerouteDecision(NamedTuple):
+    """One hierarchy-mismatch reroute stage 6 applied or refused."""
+    element_idx_start: object
+    assigned_code: str
+    target_code: str
+    outcome: str
+
+
+def _is_blank_value(value: object) -> bool:
+    """None, an empty dict, or a string that is only whitespace (a list is
+    read item by item by `_filled_field_names`)."""
+    if isinstance(value, str):
+        return not value.strip()
+    return value is None or value == {}
+
+
+def _filled_field_names(entry: Mapping[str, Any]) -> frozenset[str]:
+    """Names of the entry's non-blank stage-4 fields, including those of any
+    record dicts it still holds in a list (a list fan-out declined)."""
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, Mapping):
+        return frozenset()
+    names: set[str] = set()
+    for key, value in fields.items():
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, Mapping):
+                    names |= _filled_field_names({'extracted_fields': item})
+        elif not _is_blank_value(value):
+            names.add(key)
+    return frozenset(names)
+
+
+def _fields_fit_reroute_target(entry: Mapping[str, Any], target_code: str) -> bool:
+    """Whether the target code's renderer can write this record (class 3 of
+    AUTOPSY-s7ab-batch-2026-10-02): it must hold a non-blank field the target
+    renders (`_RENDERED_FIELDS`) beyond the generic date/place/role ones, or
+    for a grant target an agency or award number. A mentee or a course
+    rerouted to S8 holds no author or title, and rendered as a bare numbered
+    item. True when the target renders the entry's text rather
+    than its fields, or the entry has no stage-4 fields, as before this check."""
+    rendered = _RENDERED_FIELDS.get(target_code)
+    filled = _filled_field_names(entry)
+    if rendered is None or not filled:
+        return True
+    anchors = _REROUTE_ANCHOR_OVERRIDES.get(target_code, rendered - _REROUTE_GENERIC_FIELDS)
+    return bool(filled & anchors)
+
+
+def reroute_warnings(decisions: list[RerouteDecision]) -> list[dict[str, Any]]:
+    """One render-warnings record per (outcome, assigned, target), naming the
+    entries by element_idx_start only (never CV text). Sorted, so the sidecar
+    is deterministic."""
+    grouped: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for decision in decisions:
+        key = (decision.outcome, decision.assigned_code, decision.target_code)
+        grouped[key].append(str(decision.element_idx_start))
+    return [{
+        'check': REROUTE_CHECK,
+        'code': assigned,
+        'section': None,
+        'message': (f"hierarchy-mismatch reroute {assigned}->{target} {outcome.replace('_', ' ')}: "
+                    f"{len(idxs)} entr{'y' if len(idxs) == 1 else 'ies'}"),
+        'evidence': [f"element_idx_start {idx}" for idx in idxs],
+        'severity': _REROUTE_SEVERITY[outcome],
+    } for (outcome, assigned, target), idxs in sorted(grouped.items())]
+
+
+def _record_reroute(decisions: list[RerouteDecision] | None, entry: Mapping[str, Any],
+                    assigned_code: str, target_code: str, outcome: str) -> None:
+    """Append one reroute decision when the caller collects them."""
+    if decisions is not None:
+        decisions.append(RerouteDecision(entry.get('element_idx_start'), assigned_code,
+                                         target_code, outcome))
 
 
 def _merge_appendix_diversion_warnings(
@@ -667,7 +868,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     def __init__(self, template_path: str = None, verbose: bool = True,
                  emit_track_changes: bool = True, emit_comments: bool = False,
                  strip_template_instructions: bool = True,
-                 recover_unrendered_records: bool = True):
+                 recover_unrendered_records: bool = True,
+                 llm_usage: LlmUsage | None = None):
+        # Priced result of every call_llm this render makes (geographic scope,
+        # appendix reclassification). The caller passes its own to read the
+        # total back; run_stage6 returns a path, so there is no other channel
+        # for it (#1177).
+        self.llm_usage = llm_usage if llm_usage is not None else LlmUsage()
         # Find a valid template path
         self.template_path = self._find_template(template_path)
         self.verbose = verbose
@@ -781,7 +988,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             f"  - {FALLBACK_TEMPLATES}"
         )
 
-    def _correct_mismatch_if_needed(self, entry: Dict, assigned_code: str) -> str:
+    def _correct_mismatch_if_needed(self, entry: Dict, assigned_code: str,
+                                    decisions: list[RerouteDecision] | None = None) -> str:
         """Correct taxonomy code routing when hierarchy mismatch flag indicates a likely misclassification.
 
         Conservative correction rules:
@@ -792,10 +1000,18 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
           say which one it means, and the longest-code pick only favoured the
           two-character code (#946 item 3: 200 corpus reroutes, most wrong).
         - Cross-family reroutes (e.g., C→K1): only applied when the LLM's confidence
-          was low (< 0.7), since the content analysis may have been uncertain.
+          was low (< 0.7), since the content analysis may have been uncertain,
+          and the record's stage-4 fields fit the target's renderer
+          (`_fields_fit_reroute_target`): mentee, course and committee
+          records rerouted to S8 rendered as bare numbered items, 28 of them
+          on 2 of 10 CVs (class 3, AUTOPSY-s7ab-batch-2026-10-02).
         - Never: a status-routed code (`_STATUS_ROUTED_CODES`, S7), or a
           heading whose expected codes tie across WCM sections
           (`_pick_mismatch_target`) (#946).
+
+        Every reroute applied, and every cross-family one refused for its
+        fields, is appended to *decisions* (`reroute_warnings` turns them into
+        render-warnings records).
 
         Returns:
             The (possibly corrected) taxonomy code to use for routing.
@@ -830,15 +1046,26 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                       f"(same family, hierarchy-guided) [{entry.get('text', '')[:60]}...]")
             entry['taxonomy_code_original'] = assigned_code
             entry['taxonomy_code'] = best_expected
+            _record_reroute(decisions, entry, assigned_code, best_expected,
+                            REROUTE_ACCEPTED_SAME_FAMILY)
             return best_expected
 
         # Cross-family: only if LLM confidence was low
         if confidence < 0.7:
+            if not _fields_fit_reroute_target(entry, best_expected):
+                logger.info("    Mismatch correction refused: %s→%s (cross-family, "
+                            "fields do not fit the target) [element_idx_start %s]",
+                            assigned_code, best_expected, entry.get('element_idx_start'))
+                _record_reroute(decisions, entry, assigned_code, best_expected,
+                                REROUTE_REFUSED_FIELDS)
+                return assigned_code
             if self.verbose:
                 logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
                       f"(cross-family, low confidence {confidence:.2f}) [{entry.get('text', '')[:60]}...]")
             entry['taxonomy_code_original'] = assigned_code
             entry['taxonomy_code'] = best_expected
+            _record_reroute(decisions, entry, assigned_code, best_expected,
+                            REROUTE_ACCEPTED_CROSS_FAMILY)
             return best_expected
 
         return assigned_code
@@ -1026,13 +1253,17 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         """
         entries_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
         mismatch_corrections = 0
-        entries = fan_out_multi_record_entries(entries, FIELD_SCHEMAS)
+        reroutes: list[RerouteDecision] = []
+        entries = fan_out_multi_record_entries(
+            entries, FIELD_SCHEMAS, warnings=self._section_failures,
+            records_key=STAGE4_RECORDS_KEY)
         for entry in entries:
             code = normalize_retired_code(entry)
-            code = self._correct_mismatch_if_needed(entry, code)
+            code = self._correct_mismatch_if_needed(entry, code, reroutes)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
+        self._section_failures.extend(reroute_warnings(reroutes))
 
         if self.verbose:
             logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
@@ -1263,7 +1494,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('bibliography', frozenset({'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'}), lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
         ]
         # In dispatch order; research_support returns the T goals rows it placed in a grant table (#958).
-        section_results = {label: self._render_section(label, fn, codes) for label, codes, fn in section_dispatch}
+        section_results = {label: self._render_section(label, fn, codes, progress=(done, len(section_dispatch)))
+                           for done, (label, codes, fn) in enumerate(section_dispatch, 1)}
         research_summary_rendered = bool(section_results['research_summary'])
 
         # Fill passthrough sections (Employment Status, Institutional Affiliation,
@@ -1285,11 +1517,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # summary, or the template lacks a RESEARCH ACTIVITIES header), the M1
         # entries would otherwise render nowhere AND be excluded from the appendix
         # by being 'mapped' — a silent content loss (#317, C0ZGFW). Route them to
-        # the appendix safety net instead. No-op when the summary rendered.
+        # the appendix safety net instead; when it rendered, only T-validation's M1 recodes go.
         if not research_summary_rendered:
             mapped_codes.discard('M1')
-
-        unmapped_entries: list[dict] = []
+        unmapped_entries = _recoded_m1_appendix_entries(entries_by_code, mapped_codes, research_summary_data)
 
         # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260) and claimed goals rows (#958).
         for code, entries in entries_by_code.items():
@@ -1309,7 +1540,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         written_appendix_entries: list[UnmappedEntry] = []
         if unmapped_entries or self._declined_grant_entries:
             written_appendix_entries = self._render_section(
-                'appendix', lambda: self._fill_appendix(unmapped_entries + self._declined_grant_entries)) or []
+                'appendix', lambda: self._fill_appendix(unmapped_entries + self._declined_grant_entries, cv_owner)) or []
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
@@ -1411,7 +1642,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             "check": RECLASSIFY_FAILURE_STAT,
             "code": None,
             "section": "appendix",
-            "message": (f"{failures} appendix entry reclassification(s) failed; "
+            "message": (f"{failures} appendix entry reclassification(s) failed or "
+                        "came back incomplete; "
                         "those entries stayed in the appendix whole instead of "
                         "being split and routed to their sections"),
             "evidence": [f"{RECLASSIFY_FAILURE_STAT}={failures}"],
@@ -1419,7 +1651,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         }]
 
     def _render_section(self, label: str, fn: Callable[[], Any],
-                         codes: frozenset[str] = frozenset()) -> Any:  # noqa: ANN401
+                         codes: frozenset[str] = frozenset(),
+                         progress: tuple[int, int] | None = None) -> Any:  # noqa: ANN401
         """Call one section-dispatch entry, isolating a raise to this section
         only (#565). Returns fn()'s result on success; on any Exception it
         logs the traceback, records a severity-carrying failure onto
@@ -1436,6 +1669,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         the record (§5.4) -- an isolated section must fail loudly, or the
         isolation trades a whole-document crash for a silent partial render,
         which is worse.
+
+        *progress* ``(done, total)`` logs ``[done/total] sections rendered``
+        once the section finishes, failed or not -- the parsed progress-bar
+        contract (orchestrator PROGRESS_PATTERNS).
         """
         try:
             return fn()
@@ -1453,6 +1690,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             })
             self._failed_section_codes |= codes
             return None
+        finally:
+            if progress is not None:
+                logger.info("[%d/%d] sections rendered", *progress)
 
     def _write_render_warnings_sidecar(self, output_path: str, document_uid: str,
                                         warnings: list[dict[str, Any]], dedup_decisions: list[dict[str, Any]]) -> None:
@@ -1613,6 +1853,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 temperature=0.0,
                 response_format={"type": "json_object"}
             )
+            self.llm_usage.add(llm_result)
 
             result = json.loads(llm_result["content"])
             scope = result.get('scope', 'National')
@@ -1748,12 +1989,17 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             'D3': 'Other Professional Positions',
             'F1': 'Licensure',
             'H': 'HONORS',
-            # Teaching (K codes) - map to specific teaching subsections
+            # Teaching (K codes) - map to specific teaching subsections. Each
+            # string is a substring of the template's own subsection heading
+            # ("Administrative teaching (leadership role ...)", "Continuing
+            # education and professional education as teacher (...)", "Other
+            # education/outreach activities (...)"); a string that matches no
+            # heading sends the segment to the Appendix (#1225).
             'K1': 'Didactic Teaching',
             'K2': 'Clinical Teaching',
-            'K3': 'Mentoring',  # or could go to MENTORING section
-            'K4': 'Curriculum Development',
-            'K5': 'Other Teaching',
+            'K3': 'Administrative teaching',
+            'K4': 'Continuing education',
+            'K5': 'Other education/outreach',
             # Clinical (L codes) - map to clinical subsections
             'L1': 'Clinical Practice',
             'L2': 'Clinical Innovations',
@@ -2265,7 +2511,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 continue
 
             # Get coverage for the comment
-            extraction_coverage = entry.get('extraction_coverage', {})
+            extraction_coverage = rendered_extraction_coverage(entry)
             coverage_pct = extraction_coverage.get('extraction_coverage_percent', 0) if isinstance(extraction_coverage, dict) else 0
 
             # Find this paragraph's position in the document
@@ -2537,9 +2783,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         taxonomy_hint = """
 K1: Didactic Teaching (courses, lectures)
 K2: Clinical Teaching (bedside, rounds)
-K3: Mentoring/Advising
-K4: Curriculum Development
-K5: Other Teaching Activities
+K3: Educational Program Leadership (course, residency or fellowship director)
+K4: Continuing Medical Education (CME) & Professional Education
+K5: Community Education or Patient Outreach
 L1: Clinical Practice activities
 L2: Clinical Innovations
 L3: Clinical/Administrative Leadership
@@ -2599,9 +2845,18 @@ Now analyze the text above:"""
                 # trailing records (#209); the 16K DEFAULT_MAX_TOKENS floor still
                 # bounds a runaway. Never add a tighter cap back.
             )
+            self.llm_usage.add(llm_result)
 
-            return parse_reclassified_segments(
+            segments = parse_reclassified_segments(
                 llm_result["content"], original_code)
+            if segments and not segments_cover_source(
+                    [segment for segment, _ in segments], text):
+                # A reply that summarises instead of splitting would write its
+                # summary line as a record and lose the rest (#1230): keep the
+                # source entry whole, same as an LLM failure.
+                self._record_incomplete_reclassification()
+                return None
+            return segments
 
         except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
             raise
@@ -2615,6 +2870,14 @@ Now analyze the text above:"""
         would otherwise leave every appendix entry unsplit with no record."""
         logger.warning("LLM reclassification failed; entry stays in "
                        "the appendix unsplit", exc_info=True)
+        self.stats[RECLASSIFY_FAILURE_STAT] += 1
+
+    def _record_incomplete_reclassification(self) -> None:
+        """Log and count one reply rejected for not covering its source (#1230).
+        Counted with the failures: the entry stays whole in the appendix."""
+        logger.warning("LLM reclassification covered under %.0f%% of the "
+                       "entry's text; entry stays in the appendix whole",
+                       RECLASSIFY_MIN_TOKEN_COVERAGE * 100)
         self.stats[RECLASSIFY_FAILURE_STAT] += 1
 
     def _insert_reconsidered_segment(self, text: str, taxonomy_code: str,
@@ -2919,20 +3182,35 @@ Now analyze the text above:"""
         if self.recover_unrendered_records:
             line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line)))
                                for line in out_lines]
+            # A line the Appendix cap cut may have lost the tail of its record
+            # (#1230): it vouches only for a line it carries in full.
+            t_line_token_sets = [_record_tokens(line) for line in out_lines
+                                 if not line.endswith(APPENDIX_TRUNCATION_MARKER)]
+            t_cut_token_sets = [_record_tokens(line) for line in out_lines
+                                if line.endswith(APPENDIX_TRUNCATION_MARKER)]
+            # A T entry can repeat a table whose rows are also entries of their
+            # own that render (#1230): a line such a row carries in full is not
+            # lost, however the render reformatted it.
+            t_cut_token_sets += _other_entry_line_tokens(entries_by_code)
 
             for code, entries in entries_by_code.items():
-                if code == 'T':
-                    # Appendix catch-all — _fill_appendix already carries these.
-                    continue
                 for entry in entries:
-                    records = _record_lines(entry.get('text'))
-                    if len(records) < UNRENDERED_MIN_RECORD_LINES:
+                    records = _recovery_candidates(code, entry)
+                    if not records:
                         continue  # not a fused multi-record entry
                     fields = entry.get('extracted_fields') or {}
-                    coverage = (entry.get('extraction_coverage') or {}).get(
+                    coverage = (rendered_extraction_coverage(entry) or {}).get(
                         'extraction_coverage_percent', 0)
                     for line in records:
-                        if _record_rendered(line, haystack, line_token_sets) is not False:
+                        if code == 'T' and _t_line_is_scaffolding(line, entry):
+                            continue
+                        if code == 'T':
+                            rendered = _whole_record_rendered(
+                                line, haystack, t_line_token_sets, t_cut_token_sets)
+                        else:
+                            rendered = _record_rendered(
+                                line, haystack, line_token_sets)
+                        if rendered is not False:
                             # Rendered (possibly reformatted), or too short to
                             # verify either way — never re-insert.
                             continue
@@ -2970,6 +3248,7 @@ Now analyze the text above:"""
                         # precisely because they near-duplicate a kept one, so
                         # exact-squash matching is not enough.
                         haystack += "\x00" + _squash(line)
+                        t_line_token_sets.append(_record_tokens(line))
                         line_token_sets.append(
                             set(_RENDER_TOKEN_RE.findall(_norm(line))))
                         self.stats['unrendered_records_recovered'] += 1
@@ -3162,7 +3441,7 @@ Now analyze the text above:"""
         is_k_code = taxonomy_code.startswith('K')
         has_formatted_text = fields.get('formatted_text') or fields.get('formatting_source') == 'stage_5c_llm'
 
-        extraction_coverage = entry.get('extraction_coverage', {})
+        extraction_coverage = rendered_extraction_coverage(entry)
         if isinstance(extraction_coverage, dict) and not is_k_code and not has_formatted_text:
             coverage_pct = extraction_coverage.get('extraction_coverage_percent', 100)
             if coverage_pct and coverage_pct < 70:
@@ -3660,7 +3939,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
                strip_template_instructions: bool = True,
                recover_unrendered_records: bool = True,
                original_doc_path: str | None = None,
-               discover_original_doc: bool = True) -> str:
+               discover_original_doc: bool = True,
+               llm_usage: LlmUsage | None = None) -> str:
     r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -3730,6 +4010,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         discover_original_doc: False renders with no source document when
             original_doc_path is None, skipping that guess (#732). Only
             scripts/render_gate.py passes it; default True.
+        llm_usage: Optional LlmUsage the render's call_llm results are added
+            to, so a driver can report stage 6's cost (#1177).
 
     Returns:
         Path to generated document
@@ -3740,6 +4022,7 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         emit_comments=emit_comments,
         strip_template_instructions=strip_template_instructions,
         recover_unrendered_records=recover_unrendered_records,
+        llm_usage=llm_usage,
     )
     return generator.generate(input_path, output_path, original_doc_path=original_doc_path,
                               discover_original_doc=discover_original_doc)

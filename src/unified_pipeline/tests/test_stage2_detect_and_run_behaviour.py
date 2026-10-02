@@ -80,6 +80,12 @@ def _llm_result(content_obj, cost=0.001, total_tokens=10, prompt_tokens=8, compl
     }
 
 
+def _raw_llm_result(reply_text):
+    """A call_llm-shaped return whose content is the model's own text, byte
+    for byte -- json.dumps would rewrite the bare number 474.10 as 474.1."""
+    return {**_llm_result(None), "content": reply_text}
+
+
 def _para(idx, text):
     return {"unified_idx": idx, "type": "paragraph", "text": text}
 
@@ -307,7 +313,7 @@ def test_multi_row_entry_keeps_every_row_of_its_span(monkeypatch):
 
 @pytest.mark.parametrize("end", [9.1, 12, 10.3, 9.5])
 def test_unresolvable_row_span_shrinks_to_its_start_and_recovers_the_rest(monkeypatch, end):
-    """An end before the start ("9.10" arrives as the float 9.1), a bare
+    """An end before the start (the model wrote 9.1 after 9.2), a bare
     element, another table's row, or a row the batch doesn't hold: the span
     can't be read row by row, so the entry keeps only its start row and #420
     recovers the rest."""
@@ -320,6 +326,71 @@ def test_unresolvable_row_span_shrinks_to_its_start_and_recovers_the_rest(monkey
     by_idx = {e["element_idx_start"]: e for e in entries}
     assert by_idx["9.2"]["element_idx_end"] == "9.2"
     assert all(f"record number {i} " in _texts(entries) for i in range(4))
+
+
+def _numbered_rows_table(n_rows, unified_idx=474):
+    """One table_content element whose row r reads "row r alpha"."""
+    rows = [[{"text": f"row {r} alpha"}] for r in range(n_rows)]
+    return [{"unified_idx": unified_idx, "type": "table_content", "table_index": 3, "data": rows,
+             "rows": n_rows, "cols": 1}]
+
+
+def _delimiter_reply(start, end, quote, confidence="0.85"):
+    """The model's reply text for one table_row delimiter; ``quote`` is '' for
+    a bare JSON number (how the model writes 474.10) or '"' for a string."""
+    return (f'[{{"element_idx_start": {quote}{start}{quote}, "element_idx_end": {quote}{end}{quote}, '
+            f'"element_type": "table_row", "confidence": {confidence}}}]')
+
+
+@pytest.mark.parametrize("quote", ["", '"'])
+@pytest.mark.parametrize("start, end, last_row", [
+    ("474.10", "474.11", 11),   # a range that STARTS on a row ending in 0 (#1228)
+    ("474.10", "474.10", 10),   # one row ending in 0
+    ("474.9", "474.10", 10),    # a range that ENDS on a row ending in 0
+    ("474.10", "474.20", 20),   # both ends
+])
+def test_row_index_ending_in_zero_names_that_row_not_row_one(monkeypatch, quote, start, end, last_row):
+    """#1228: the model writes a table row's index as a bare JSON number, and
+    474.10 -- row 10 -- parsed to the float 474.1, which is row 1. A range
+    starting there read as rows 1-11. The index must stay the text the model
+    wrote, whether it is a bare number or a string."""
+    elements = _numbered_rows_table(22)
+    first_row = int(start.split(".")[1])
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _raw_llm_result(_delimiter_reply(start, end, quote)))
+    entries, _ = stage2.detect_entries_for_section(["Grants"], elements, 474, 474, element_index_map=_idx_map(elements))
+    by_idx = {e["element_idx_start"]: e for e in entries}
+    claimed = by_idx[start]
+    assert (claimed["element_idx_end"], claimed.get("recovered_row")) == (end, None)
+    assert claimed["text"] == "\n".join(f"row {r} alpha" for r in range(first_row, last_row + 1))
+    assert by_idx["474.1"]["recovered_row"] is True  # row 1 was never claimed by the model
+
+
+def test_pair_entries_survive_a_later_range_that_starts_on_a_row_ending_in_zero(monkeypatch):
+    """#1228 acceptance: 474.2-474.3 ... 474.8-474.9 and then 474.10-474.11 are
+    five per-record entries. The last was read as 474.1-474.11, a span that
+    contained the four before it, and remove_subset_delimiters dropped them."""
+    elements = _numbered_rows_table(12)
+    pairs = [(2, 3), (4, 5), (6, 7), (8, 9), (10, 11)]
+    reply = "[" + ", ".join(
+        f'{{"element_idx_start": 474.{a}, "element_idx_end": 474.{b}, "element_type": "table_row", "confidence": 0.9}}'
+        for a, b in pairs) + "]"
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _raw_llm_result(reply))
+    entries, _ = stage2.detect_entries_for_section(["Grants"], elements, 474, 474, element_index_map=_idx_map(elements))
+    attested = [(e["element_idx_start"], e["element_idx_end"]) for e in entries if not e.get("recovered_row")]
+    assert attested == [(f"474.{a}", f"474.{b}") for a, b in pairs]
+    assert "row 10 alpha\nrow 11 alpha" == entries[-1]["text"]
+
+
+def test_confidence_written_with_a_trailing_zero_stays_a_plain_float(monkeypatch):
+    """Keeping the literal of a decimal must not change what the entry stores
+    for the numbers that are not indices: 0.90 is the float 0.9 in the stage-2
+    artifact, exactly as before."""
+    elements = _numbered_rows_table(12)
+    monkeypatch.setattr(stage2, "call_llm", lambda **kw: _raw_llm_result(_delimiter_reply("474.10", "474.11", "", "0.90")))
+    entries, _ = stage2.detect_entries_for_section(["Grants"], elements, 474, 474, element_index_map=_idx_map(elements))
+    confidence = {e["element_idx_start"]: e["confidence"] for e in entries}["474.10"]
+    assert confidence == 0.9
+    assert json.dumps(confidence) == "0.9"
 
 
 @pytest.mark.parametrize("elem_type", ["table_content", "table"])
@@ -653,6 +724,49 @@ def test_run_stage_2_flat_hierarchy_sorts_headers_content_and_breaks(tmp_path, m
     # What's on disk must match what was returned.
     on_disk = json.loads(output_path.read_text())
     assert on_disk == output_data
+
+
+def test_run_stage_2_promotes_a_heading_stage_1b_could_not_place(tmp_path, monkeypatch):
+    _redirect_output_manager(monkeypatch, tmp_path)
+
+    doc = Document()
+    for text in ["Jane Researcher", "TALKS", "Talk one, 2001", "POSTERS (selected)", "Poster one, 2002"]:
+        doc.add_paragraph(text)
+    docx_path = tmp_path / "unlocated.docx"
+    doc.save(docx_path)
+
+    # 1b kept POSTERS in its hierarchy but found no line for it, so the
+    # TALKS section runs over the POSTERS line.
+    hpath = _write_hierarchy(
+        tmp_path, "unlocated_h.json", "TESTUID3",
+        hierarchy_with_indices=[
+            {"text": "TALKS", "level": "H1", "element_idx": 1, "synthetic": False, "children": []},
+            {"text": "POSTERS", "level": "H1", "element_idx": None, "synthetic": False, "children": []},
+        ],
+        section_boundaries=[
+            {"hierarchy": ["TALKS"], "element_idx_start": 1, "element_idx_end": 4, "has_children": False},
+        ],
+    )
+    _route_call_llm(monkeypatch, {
+        "Personal Data": [{"element_idx_start": 0, "element_idx_end": 0, "element_type": "paragraph", "confidence": 0.9}],
+        "TALKS": [
+            {"element_idx_start": 2, "element_idx_end": 2, "element_type": "paragraph", "confidence": 0.9},
+            {"element_idx_start": 4, "element_idx_end": 4, "element_type": "paragraph", "confidence": 0.9},
+        ],
+    })
+
+    output_data, output_path = stage2.run_stage_2(str(docx_path), str(hpath))
+
+    assert [(e["element_idx_start"], e["element_type"], e["hierarchy"]) for e in output_data["entries"]] == [
+        (0, "paragraph", ["Personal Data"]),
+        (1, "header", ["TALKS"]),
+        (2, "paragraph", ["TALKS"]),
+        (3, "header", ["POSTERS"]),
+        (4, "paragraph", ["POSTERS"]),
+    ]
+    assert output_data["coverage"]["header_entries"] == 2
+    assert output_data["coverage"]["break_entries"] == 0
+    assert json.loads(output_path.read_text()) == output_data
 
 
 def test_run_stage_2_strip_template_instructions_true_drops_instruction_entry(tmp_path, monkeypatch):

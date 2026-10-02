@@ -323,3 +323,24 @@ def test_quiet_mode_suppresses_warning_and_info_on_mocked_failure_path(monkeypat
     assert records == {}
     assert not any(r.levelno == logging.WARNING for r in caplog.records)
     assert not any('❌ API error' in r.getMessage() for r in caplog.records)
+
+
+def test_doi_lookups_log_progress_bar_lines(monkeypatch, caplog, progress_patterns):
+    """Stage 5's slow path is one PubMed search per DOI; each finished lookup
+    logs ``[done/total]`` so the web bar moves. The count continues from the
+    PMID/PMCID entries already done (progress_base). The web driver runs
+    verbose=True; --quiet keeps suppressing it like the other narration."""
+    enricher = PubMedEnricher(verbose=True)
+    monkeypatch.setattr(enricher, "_search_pmid_by_doi", lambda doi: None)
+    monkeypatch.setattr(stage5.time, "sleep", lambda s: None)
+    entries = [({"extracted_fields": {}}, f"10.1/{i}") for i in range(2)]
+
+    with caplog.at_level(logging.INFO, logger=stage5.__name__):
+        enricher._enrich_by_doi(entries, progress_base=3, progress_total=5)
+
+    seen = []
+    for r in caplog.records:
+        match = next((m for p in progress_patterns if (m := p.search(r.getMessage()))), None)
+        if match:
+            seen.append((int(match.group(1)), int(match.group(2))))
+    assert seen == [(4, 5), (5, 5)]

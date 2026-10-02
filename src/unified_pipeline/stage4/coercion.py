@@ -7,6 +7,8 @@ name here. Pure functions over extracted-field dicts: no LLM calls, no I/O.
 import re
 from typing import Any, TypedDict
 
+from unified_pipeline.core.two_digit_year import expand_two_digit_year
+
 
 class ExtractedFields(TypedDict, total=False):
     """One entry's stage-4 extracted fields, keyed by schema field name.
@@ -172,11 +174,12 @@ class ReformattedField(TypedDict):
     Total (no ``total=False``): all three keys are written at every site in
     this module, so a partial record is a bug, not a variant.
 
-    ``original`` is ``Any`` rather than ``str`` because the two producers
+    ``original`` is ``Any`` rather than ``str`` because the producers
     disagree in kind: the regex extractors store the matched source
-    substring (a ``str``), while the date-range repair stores the pre-repair
+    substring (a ``str``), the date-range repair stores the pre-repair
     field value, which is falsy by construction -- ``None`` or ``""`` -- since
-    that repair only runs on an empty field.
+    that repair only runs on an empty field, and the two-digit century repair
+    stores the pre-repair value, which may be an ``int`` year.
     """
 
     original: Any
@@ -197,14 +200,23 @@ class ReformattedFields(TypedDict, total=False):
     """
 
     authors: ReformattedField
+    date: ReformattedField
+    dates_attended: ReformattedField
     doi: ReformattedField
     end_date: ReformattedField
+    expiration_date: ReformattedField
+    issue_date: ReformattedField
+    launch_date: ReformattedField
     orcid: ReformattedField
     percent_effort: ReformattedField
     pmcid: ReformattedField
     pmid: ReformattedField
+    recertification_date: ReformattedField
     start_date: ReformattedField
+    submission_date: ReformattedField
     title: ReformattedField
+    year: ReformattedField
+    year_certified: ReformattedField
 
 
 def coerce_field_value_types(extracted_fields: dict[str, Any]) -> dict[str, Any]:
@@ -619,6 +631,225 @@ def reconcile_date_range(
         }
 
 
+#: Every date-valued field the active schemas declare -- the fields whose year
+#: the two-digit century repair below may rewrite. Hand-kept for the same
+#: reason as DATE_RANGE_TAXONOMY_CODES (coercion.py may not import
+#: stage4.schemas); `test_date_field_names_match_declared_date_fields` is the
+#: drift guard. Undeclared keys the LLM invents are left alone: a repair is
+#: recorded in ReformattedFields, whose key set is closed.
+DATE_FIELD_NAMES = (
+    'date', 'dates_attended', 'end_date', 'expiration_date', 'issue_date',
+    'launch_date', 'recertification_date', 'start_date', 'submission_date',
+    'year', 'year_certified',
+)
+
+#: A 19xx year inside an extracted date value. Only 19xx is a repair
+#: candidate: the observed failure is the LLM reading "03" as 1903, never the
+#: reverse. Pulling 20yy back to 19yy for yy above the pivot would break real
+#: future dates -- the 163-CV farm has a grant whose m/d/yy end date lies
+#: just past the pivot, which the LLM correctly read as 20yy.
+_TWENTIETH_CENTURY_YEAR_PATTERN = re.compile(r'(?<!\d)19(\d\d)(?!\d)')
+
+#: What may precede a two-digit year in the source text for it to count as
+#: one: a one- or two-digit number and a slash -- the month of m/yy, or the
+#: day of m/d/yy -- or an apostrophe ('03, straight or curly). The two digits
+#: themselves must end the number.
+_TWO_DIGIT_YEAR_PREFIX = r"(?:(?<!\d)\d{1,2}/|['\u2018\u2019])"
+
+_TWO_DIGIT_CENTURY_REASON = 'Re-derived the century of a two-digit source year'
+
+
+def _recentury_year(year_match: re.Match[str], original_text: str) -> str:
+    """The year `year_match` matched in a date value, moved to 20yy when the
+    LLM read it off a two-digit token in `original_text` and put it in the
+    wrong century; otherwise the matched year unchanged.
+
+    The year moves only when the 19xx year is not written out anywhere in
+    the text (so the text does not support it) and the text carries its two
+    digits as a two-digit year token. The shared pivot then decides the
+    century, so "5/65" still reads as 1965 and nothing changes.
+    """
+    year, yy = year_match.group(0), year_match.group(1)
+    if re.search(rf'(?<!\d){year}(?!\d)', original_text):
+        return year
+    if not re.search(rf'{_TWO_DIGIT_YEAR_PREFIX}{yy}(?!\d)', original_text):
+        return year
+    return str(expand_two_digit_year(int(yy)))
+
+
+def _recentury_date_string(value: str, original_text: str) -> str:
+    """`value` ("1903-01-14", "1902") with every wrongly-centuried 19xx year
+    in it moved to 20xx (see `_recentury_year`)."""
+    return _TWENTIETH_CENTURY_YEAR_PATTERN.sub(
+        lambda year_match: _recentury_year(year_match, original_text), value
+    )
+
+
+def _recentury_date_value(value: object, original_text: str) -> object:
+    """A date field's value with its century repaired, keeping its type.
+
+    A string is rewritten in place and an int year stays an int. Anything
+    else -- None, a bool, a list, a dict -- is returned as is: no
+    two-digit-sourced year sits inside a nested value in either corpus farm
+    (163 + 12 CVs, measured 2026-10-02).
+    """
+    if isinstance(value, str):
+        return _recentury_date_string(value, original_text)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return int(_recentury_date_string(str(value), original_text))
+    return value
+
+
+def repair_two_digit_year_century(
+    original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
+) -> None:
+    """Move a 19xx year the LLM read off a two-digit source year to 20xx.
+
+    The stage-4 LLM sometimes reads "10/08" or "3/22/05" as 1908 or 1905
+    rather than 2008 or 2005. Nothing downstream can see the error: by stage
+    6 the value is a plain four-digit year. This applies the century pivot
+    stage 6 uses for raw mm/dd/yy strings (core/two_digit_year.py) to each
+    declared date field, rewriting only years the source text does not
+    contain as four digits but does contain as a two-digit token (see
+    `_recentury_year`). Each rewritten field gets a `reformatted` record.
+    """
+    for field_name in DATE_FIELD_NAMES:
+        value = updated.get(field_name)
+        repaired = _recentury_date_value(value, original_text)
+        if repaired == value:
+            continue
+        updated[field_name] = repaired
+        reformatted[field_name] = {
+            'original': value,
+            'reformatted': str(repaired),
+            'reason': _TWO_DIGIT_CENTURY_REASON,
+        }
+
+
+#: The two range fields the two repairs below read and rewrite.
+_RANGE_FIELD_NAMES = ('start_date', 'end_date')
+
+#: A stored date value shaped year-month: "1999-02".
+_YEAR_MONTH_VALUE_PATTERN = re.compile(r'(\d{4})-(\d{2})')
+
+#: The longest span a "YYYY-YY" source token may read as. Past it the two
+#: digits are taken as the month stage 4 read them as ("2005-03" would
+#: otherwise end in 2103). A trainee period or appointment written this way
+#: runs a few years; 20 leaves room without reaching a second century.
+_MAX_SHORT_RANGE_SPAN_YEARS = 20
+
+_SHORT_RANGE_REASON = 'Read a YYYY-YY source range written into one date field'
+_MONTH_SLASH_YEAR_REASON = 'Re-read an MM/YY source date stage 4 read as YY/MM'
+
+
+def _short_range_end_year(start_year: int, yy: int) -> int | None:
+    """The year "YYYY-yy" ends in: the first year after `start_year` whose
+    last two digits are `yy` ("1999-02" -> 2002, "1999-00" -> 2000), or None
+    when that is more than `_MAX_SHORT_RANGE_SPAN_YEARS` away."""
+    end_year = start_year // 100 * 100 + yy
+    if end_year <= start_year:
+        end_year += 100
+    if end_year - start_year > _MAX_SHORT_RANGE_SPAN_YEARS:
+        return None
+    return end_year
+
+
+def _source_writes_short_range(original_text: str, year: str, yy: str) -> bool:
+    """True when the source writes `year`-`yy` as one dash-joined token that
+    is not the start of a longer date ("1999-02-15", "1999-02/03")."""
+    return bool(re.search(
+        rf'(?<![\d/]){year}\s*[-\u2013\u2014]\s*{yy}(?![\d/]|-\d)', original_text))
+
+
+def split_year_short_range(
+    original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
+) -> None:
+    """Split a "YYYY-YY" source range stage 4 stored whole in one field.
+
+    The LLM copies a CV's "1999-02" (1999 to 2002) into end_date, or
+    start_date, verbatim, with the other field empty -- and every reader
+    downstream takes it as February 1999 (class 2, 2026-10-02 s7ab autopsy:
+    RXYBVF, 10 mentee periods rendered blank). Repaired only when the other
+    range field is empty, the stored value is exactly that token, the source
+    text writes it as a dash-joined token, and the end it implies lies
+    after the start and within `_MAX_SHORT_RANGE_SPAN_YEARS`.
+    """
+    for field_name, other_name in (_RANGE_FIELD_NAMES, _RANGE_FIELD_NAMES[::-1]):
+        value = updated.get(field_name)
+        if not isinstance(value, str) or updated.get(other_name):
+            continue
+        token = _YEAR_MONTH_VALUE_PATTERN.fullmatch(value.strip())
+        if token is None:
+            continue
+        year, yy = token.groups()
+        end_year = _short_range_end_year(int(year), int(yy))
+        if end_year is None or not _source_writes_short_range(original_text, year, yy):
+            continue
+        _record_range_repair(updated, reformatted, (year, str(end_year)), _SHORT_RANGE_REASON)
+        return
+
+
+def _record_range_repair(
+    updated: ExtractedFields, reformatted: ReformattedFields,
+    new_range: tuple[str, str], reason: str,
+) -> None:
+    """Write `new_range` into start_date/end_date, recording both fields.
+    The caller has checked that one was empty and the other held the whole
+    range, so both change."""
+    for field_name, new_value in zip(_RANGE_FIELD_NAMES, new_range):
+        original = updated.get(field_name)
+        updated[field_name] = new_value
+        reformatted[field_name] = {
+            'original': original, 'reformatted': new_value, 'reason': reason,
+        }
+
+
+def _month_slash_year_reading(value: str, original_text: str) -> str | None:
+    """`value` ("2001-09") re-read as month/year when stage 4 took the source
+    token "01/09" as year/month; None when the source does not show that.
+
+    It is the misreading only when the four-digit year is nowhere in the
+    text, the text has "<yy>/<mm>" for it, the first number is a valid month,
+    and the text does not also have "<mm>/<yy>" (which would support the
+    reading stage 4 made).
+    """
+    token = _YEAR_MONTH_VALUE_PATTERN.fullmatch(value.strip())
+    if token is None:
+        return None
+    year, month = token.groups()
+    yy = year[2:]
+    if re.search(rf'(?<!\d){year}(?!\d)', original_text) or not 1 <= int(yy) <= 12:
+        return None
+    if not re.search(rf'(?<![\d/]){yy}/{month}(?![\d/])', original_text):
+        return None
+    if re.search(rf'(?<![\d/]){month}/{yy}(?![\d/])', original_text):
+        return None
+    return f"{expand_two_digit_year(int(month))}-{yy}"
+
+
+def reread_month_slash_year(
+    original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
+) -> None:
+    """Re-read an MM/YY source date stage 4 read as YY/MM.
+
+    "01/09- 08/14" is January 2009 to August 2014; the LLM stored the start
+    as "2001-09" while reading the end correctly (class 2, 2026-10-02 s7ab
+    autopsy: MQSUIC). Each range field is checked on its own against the
+    source text (`_month_slash_year_reading`).
+    """
+    for field_name in _RANGE_FIELD_NAMES:
+        value = updated.get(field_name)
+        if not isinstance(value, str):
+            continue
+        reread = _month_slash_year_reading(value, original_text)
+        if reread is None:
+            continue
+        updated[field_name] = reread
+        reformatted[field_name] = {
+            'original': value, 'reformatted': reread, 'reason': _MONTH_SLASH_YEAR_REASON,
+        }
+
+
 def _normalize_pmid(original_text: str, updated: ExtractedFields, reformatted: ReformattedFields) -> None:
     """Extract a PMID from the source text if the LLM didn't already fill it in."""
     if updated.get('pmid'):
@@ -797,7 +1028,8 @@ def apply_regex_post_processing(
 
     Also tracks reformatted values for transparency. Each distinct concern
     (identifiers, DOI, ORCID, author formatting, title cleanup, grant effort,
-    date-range reconciliation) is a small helper above; this function is the
+    MM/YY re-reading, YYYY-YY range split, two-digit-year century, date-range
+    reconciliation) is a small helper above; this function is the
     orchestrator that decides, per taxonomy code, which ones apply, in the
     same order as before the split.
 
@@ -843,6 +1075,18 @@ def apply_regex_post_processing(
     # Extract percent effort/FTE for grant entries
     if taxonomy_code.startswith(GRANT_EFFORT_TAXONOMY_PREFIX):
         _normalize_grant_effort(original_text, updated, reformatted)
+
+    # Re-read a two-digit-year date stage 4 took the wrong way round
+    # ("01/09" as 2001-09), then split a "1999-02" range stored whole in one
+    # field. Both before the century repair and the range repair, which read
+    # the dates these rewrite.
+    reread_month_slash_year(original_text, updated, reformatted)
+    if taxonomy_code in DATE_RANGE_TAXONOMY_CODES:
+        split_year_short_range(original_text, updated, reformatted)
+
+    # Move a 19xx year read off a two-digit source year ("10/08") to 20xx.
+    # Before the range repair, so it compares against the corrected start.
+    repair_two_digit_year_century(original_text, updated, reformatted)
 
     # Restore a dropped end_date when the schema declares both dates and the
     # source text unambiguously carries the closed range (#556)

@@ -11,6 +11,7 @@ This is significantly cheaper and faster than vision-based approaches.
 import json
 import logging
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, TypedDict
 from docx import Document
@@ -18,6 +19,7 @@ from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml.text.paragraph import CT_P
+from docx.oxml.xmlchemy import BaseOxmlElement
 from docx.oxml.table import CT_Tbl
 from docx.table import _Cell, _Row, Table
 from docx.text.paragraph import Paragraph
@@ -30,6 +32,12 @@ from unified_pipeline.stage6.normalization.pii import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Word stores a text box as mc:AlternateContent: a DrawingML copy under
+# mc:Choice and a VML copy of the same text under mc:Fallback (#1236).
+_MC_NS = 'http://schemas.openxmlformats.org/markup-compatibility/2006'
+_MC_CHOICE = f'{{{_MC_NS}}}Choice'
+_MC_FALLBACK = f'{{{_MC_NS}}}Fallback'
 
 
 def rgb_to_hex(rgb: RGBColor | None) -> str:
@@ -46,6 +54,25 @@ def pt_to_inches(pt: Pt | None) -> float:
     return pt.inches if hasattr(pt, 'inches') else 0.0
 
 
+def _iter_text_nodes(parent: BaseOxmlElement, tags: tuple[str, ...]) -> Iterator[BaseOxmlElement]:
+    """The descendants of `parent` whose tag is in `tags`, in document order,
+    reading ONE branch of each mc:AlternateContent (#1236).
+
+    A plain `parent.iter(...)` descends into both the mc:Choice and the
+    mc:Fallback copy of a text box and returns its text twice. This reads the
+    Choice and skips a Fallback that has a Choice sibling; a Fallback with no
+    Choice sibling is the only copy and is read. The skip applies only below
+    `parent`, so asking for a paragraph that itself sits inside a Fallback
+    still reads that paragraph.
+    """
+    for child in parent:
+        if child.tag == _MC_FALLBACK and parent.find(_MC_CHOICE) is not None:
+            continue
+        if child.tag in tags:
+            yield child
+        yield from _iter_text_nodes(child, tags)
+
+
 def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
     """Extract all text from a paragraph, including nested structures.
 
@@ -55,6 +82,8 @@ def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
     - w:hyperlink
     - w:sdt (structured document tags / content controls)
     - w:ins (tracked-change insertions) -- see #557
+    - mc:AlternateContent (text boxes), read once: the mc:Choice copy, never
+      the mc:Fallback copy of the same text -- see #1236
 
     Without this, paragraphs using smartTags appear empty even though they contain text.
     """
@@ -65,11 +94,11 @@ def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
     # mashed multi-line paragraphs into run-on text ("CURRICULUM VITAEZachary..."),
     # which hid sub-headers from the chunk LLM once stage 1a converged onto this reader.
     # w:tab -> tab_char (space by default) on purpose: a literal tab would trip the
-    # mega-entry record heuristic downstream. iter() also descends into
+    # mega-entry record heuristic downstream. The walk also descends into
     # smartTag/hyperlink/sdt/ins.
     WT, WBR, WCR, WTAB = qn('w:t'), qn('w:br'), qn('w:cr'), qn('w:tab')
     parts = []
-    for node in para._p.iter(WT, WBR, WCR, WTAB):
+    for node in _iter_text_nodes(para._p, (WT, WBR, WCR, WTAB)):
         if node.tag == WT:
             if node.text:
                 parts.append(node.text)
@@ -90,6 +119,75 @@ def get_cell_text(cell, tab_char: str = ' ') -> str:
     logic per paragraph rather than re-deriving it here.
     """
     return '\n'.join(get_paragraph_text(p, tab_char=tab_char) for p in cell.paragraphs)
+
+
+def _unique_row_cells(table: Table) -> list[list[_Cell]]:
+    """Each row's cells, with a horizontally merged cell listed once."""
+    rows = []
+    for row in table.rows:
+        seen: set[Any] = set()
+        cells = []
+        for cell in row.cells:
+            if cell._tc not in seen:
+                seen.add(cell._tc)
+                cells.append(cell)
+        rows.append(cells)
+    return rows
+
+
+def _iter_cell_paragraphs(cell: _Cell) -> Iterator[Paragraph]:
+    """Yield a cell's paragraphs in document order, descending into any table
+    nested in the cell (#1231). `cell.paragraphs` skips nested tables."""
+    for item in cell.iter_inner_content():
+        if isinstance(item, Table):
+            seen_cells: set[Any] = set()   # a merged cell repeats across spanned rows/cols
+            for row in item.rows:
+                for nested_cell in row.cells:
+                    if nested_cell._tc in seen_cells:
+                        continue
+                    seen_cells.add(nested_cell._tc)
+                    yield from _iter_cell_paragraphs(nested_cell)
+        else:
+            yield item
+
+
+def _cell_has_nested_table(cell: _Cell) -> bool:
+    return bool(cell._tc.findall(qn('w:tbl')))
+
+
+def _nested_table_lines(table: Table, tab_char: str) -> list[str]:
+    """One line per non-empty row of a nested table: its cells' text, space-joined."""
+    lines = []
+    for cells in _unique_row_cells(table):
+        row_text = ' '.join(
+            t for t in (_cell_text_in_order(c, tab_char).strip() for c in cells) if t
+        )
+        if row_text:
+            lines.append(row_text)
+    return lines
+
+
+def _cell_text_in_order(cell: _Cell, tab_char: str = ' ') -> str:
+    """Cell text in document order, with each nested table's rows as lines (#1231).
+
+    Same as `get_cell_text` for a cell with no nested table."""
+    lines = []
+    for item in cell.iter_inner_content():
+        if isinstance(item, Table):
+            lines.extend(_nested_table_lines(item, tab_char))
+        else:
+            lines.append(get_paragraph_text(item, tab_char=tab_char))
+    return '\n'.join(lines)
+
+
+def get_cell_text_with_nested(cell: _Cell) -> str:
+    """`get_cell_text`, plus the rows of any table nested in a cell that has text
+    of its own, in document order (#1231). A cell holding ONLY a nested table
+    returns "" as before, so callers' itertext() fallback is unchanged."""
+    text = get_cell_text(cell)
+    if text.strip() and _cell_has_nested_table(cell):
+        return _cell_text_in_order(cell)
+    return text
 
 
 def extract_paragraph_metadata(para: Paragraph, idx: int | None) -> dict[str, Any]:
@@ -234,6 +332,21 @@ def _fit_lines_to_slots(lines: list[str], slots: int) -> list[str]:
     return lines + [""] * (slots - len(lines))
 
 
+_GRID_KEYS = ("grid_col", "grid_span")
+
+
+def _carry_grid_metadata(source_row: list[Any], new_row: list[Any]) -> None:
+    """Copy each source cell's layout-column keys onto the cell built at the
+    same position, so a split row still maps its cells to layout columns
+    (`_cell_at_grid_col`). Metadata only; the text is untouched."""
+    for src, new in zip(source_row, new_row):
+        if new is src or not isinstance(src, dict) or not isinstance(new, dict):
+            continue
+        for key in _GRID_KEYS:
+            if key in src:
+                new.setdefault(key, src[key])
+
+
 def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, min_newlines: int = 2) -> list[list[dict[str, Any]]]:
     """
     Split a table row into multiple rows if any cell contains merged content.
@@ -358,6 +471,7 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
                     # Don't duplicate non-split cells - often labels that shouldn't repeat
                     new_row.append({"text": ""})
 
+        _carry_grid_metadata(row, new_row)
         split_rows.append(new_row)
 
     padded_cols = {i for i, sp in enumerate(cell_splits) if sp is not None and len(sp) < max_splits}
@@ -470,6 +584,31 @@ def is_column_header_row(cell_texts: list[str], marked_repeat_header: bool) -> b
     return _is_column_header_row(" | ".join(sorted(filled)))
 
 
+def _distinct_row_cells(row: _Row) -> list[tuple[int, int, _Cell]]:
+    """The row's cells as ``(grid_col, grid_span, cell)``, one per distinct
+    ``<w:tc>`` (#1229).
+
+    python-docx's ``row.cells`` repeats a gridSpan-merged cell once per layout
+    column it spans, so a merged cell's text would reach stage 2 several
+    times. Dedupe within the row only, by element identity: two distinct
+    cells with equal text are both kept. ``grid_col`` is the cell's first
+    layout column and ``grid_span`` how many it covers, so a consumer that
+    pairs cells across rows by column (``_scrub_pre_llm_pii_column``) still
+    lines up when rows merge cells differently. A vertically merged cell is
+    a distinct ``<w:tc>`` in each row (python-docx hands back the top cell
+    for a continuation row) and keeps its existing row-by-row behaviour.
+    """
+    cells: list[tuple[int, int, _Cell]] = []
+    for grid_col, cell in enumerate(row.cells):
+        for i, (start, span, kept) in enumerate(cells):
+            if cell._tc is kept._tc:
+                cells[i] = (start, span + 1, kept)
+                break
+        else:
+            cells.append((grid_col, 1, cell))
+    return cells
+
+
 def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
     """
     Extract table structure and content.
@@ -486,10 +625,10 @@ def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
 
     for row_idx, row in enumerate(table.rows):
         cells_data = []
-        for col_idx, cell in enumerate(row.cells):
+        for col_idx, (grid_col, grid_span, cell) in enumerate(_distinct_row_cells(row)):
             # FIX: cell.text sometimes returns empty string for cells with complex formatting
             # or malformed XML (e.g., <w:rPr> inside <w:t> instead of as sibling)
-            cell_text = get_cell_text(cell).strip()
+            cell_text = get_cell_text_with_nested(cell).strip()
 
             # Fallback: Extract text directly from XML using recursive text extraction.
             # No try/except: lxml's itertext() on a parsed element does not raise,
@@ -501,6 +640,8 @@ def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
             cell_data = {
                 "row": row_idx,
                 "col": col_idx,
+                "grid_col": grid_col,
+                "grid_span": grid_span,
                 "text": cell_text
             }
 
@@ -661,16 +802,12 @@ def row_has_nonblank_value_cells(row: list[dict[str, Any]]) -> bool:
     whose trailing cells just echo cell 0's own text, has nothing to lose by
     being emitted as a header (see issue #811).
 
-    The row[0]-text exclusion is the predicate-only alternative to deduping
-    `extract_table_metadata`'s `data` rows by `_tc` identity (#811 round 3,
-    finding 1): that dedup shrank the cell count of every gridSpan CONTENT
-    row too, silently changing the row shape stage 2 reads off `data` for
-    `split_merged_row_into_pseudo_rows`. This predicate reads `data` as-is
-    (unchanged from origin/dev) and only affects header/content routing
-    here in `extract_unified_elements`. Trade-off: a row with two textually
-    IDENTICAL but structurally distinct trailing cells (not a gridSpan
-    duplicate) is now indistinguishable from a genuine merge and is treated
-    the same way -- not observed in the corpus.
+    `extract_table_metadata` now emits a gridSpan-merged cell once (#1229), so
+    a merged row's trailing cells no longer echo cell 0. The row[0]-text
+    exclusion stays for rows whose cells are still repeated, and has the
+    trade-off that a row with two textually IDENTICAL but structurally
+    distinct trailing cells is treated like a merge -- not observed in the
+    corpus.
     """
     if not row:
         return False
@@ -718,6 +855,22 @@ def is_header_left_content_right_row(cell_text: str, header_confidence: float) -
     )
 
 
+def _host_header_first(cell: _Cell, text: str) -> str:
+    """Keep a host cell's own header line first when a nested table precedes it (#1231).
+
+    `text` is in document order, so a nested table ahead of the host's own header
+    paragraph would push that header off line 1 and `looks_like_section_header`
+    would fail, demoting a table that was a `table_header` before the nested text
+    was read. Hoist the cell's own first line only when it is itself header-like
+    and the nested lines would otherwise lead; no text is dropped."""
+    own = next((t for t in (p.strip() for p in get_cell_text(cell).split('\n')) if t), '')
+    lines = text.split('\n')
+    if not own or lines[0].strip() == own or not looks_like_section_header(own)[0]:
+        return text
+    lines.pop(next(i for i, ln in enumerate(lines) if ln.strip() == own))
+    return '\n'.join([own, *lines])
+
+
 def get_table_first_cell_text(table: Table) -> str:
     """Extract text from the first cell of first row of a table."""
     if not table.rows:
@@ -727,7 +880,7 @@ def get_table_first_cell_text(table: Table) -> str:
         return ""
     first_cell = first_row.cells[0]
 
-    cell_text = get_cell_text(first_cell).strip()
+    cell_text = _host_header_first(first_cell, get_cell_text_with_nested(first_cell).strip())
 
     # Fallback extraction if needed
     if not cell_text and first_cell._element is not None:
@@ -972,6 +1125,37 @@ def _row_already_resolved(row: list[Any], col_idx: int) -> bool:
     return False
 
 
+def _cell_at_grid_col(row: list[Any], grid_col: int) -> dict[str, Any] | None:
+    """The cell of `row` covering layout column `grid_col`, or None. Cells
+    carry `grid_col`/`grid_span` from `extract_table_metadata`; a cell dict
+    without them is one column wide at its list position."""
+    for idx, cell in enumerate(row):
+        if not isinstance(cell, dict):
+            continue
+        start = cell.get("grid_col", idx)
+        if start <= grid_col < start + cell.get("grid_span", 1):
+            return cell
+    return None
+
+
+def _scrub_cells_below(
+    next_row: list[Any], label: dict[str, Any], col_idx: int, category: str
+) -> None:
+    """Scrub each distinct cell of `next_row` overlapping any layout column
+    the label cell covers (a merged label spans several)."""
+    start = label.get("grid_col", col_idx)
+    seen: set[int] = set()
+    for grid_col in range(start, start + label.get("grid_span", 1)):
+        below = _cell_at_grid_col(next_row, grid_col)
+        if not isinstance(below, dict) or id(below) in seen:
+            continue
+        seen.add(id(below))
+        if isinstance(below.get("text"), str):
+            below["text"] = redact_pre_llm_value_of_category(
+                below["text"], category, cross_boundary=True
+            )
+
+
 def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
     """Round 3 (#847 residual): a two-row FORM table -- a label cell
     ("Date of Birth") with its value directly below it in the SAME COLUMN
@@ -982,7 +1166,7 @@ def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
     pairs: a cell that is nothing but a bare DOB/SSN label, with no value
     ALREADY resolved beside it in its own row (`_row_already_resolved`),
     has its value, if any, scrubbed out of the cell directly BELOW it
-    (same column index) in the next row. `cross_boundary=True`: a cell one
+    (same layout column, every column a merged label spans) in the next row. `cross_boundary=True`: a cell one
     row down is a lower-confidence position than the same row, so its
     value must open that cell and be a whole date -- "Appointed
     07/01/2005" or "Date of Appointment: 07/01/2005" below a blank "Date
@@ -992,16 +1176,12 @@ def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
         if not isinstance(row, list) or not isinstance(next_row, list):
             continue
         for col_idx, cell in enumerate(row):
-            if not isinstance(cell, dict) or col_idx >= len(next_row):
+            if not isinstance(cell, dict):
                 continue
             category = pre_llm_bare_label_category(cell.get("text"))
             if category is None or _row_already_resolved(row, col_idx):
                 continue
-            below = next_row[col_idx]
-            if isinstance(below, dict) and isinstance(below.get("text"), str):
-                below["text"] = redact_pre_llm_value_of_category(
-                    below["text"], category, cross_boundary=True
-                )
+            _scrub_cells_below(next_row, cell, col_idx, category)
 
 
 def _scrub_pre_llm_value_of_category_in_element(el: dict[str, Any], category: str) -> None:
@@ -1203,7 +1383,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
             # buried 35 paragraphs). Explode the cell paragraphs into individual paragraph
             # elements so header detection and stage-2 splitting see them. Multi-column rows
             # are real data (Year | Institution | Degree) and keep the joined path below.
-            # ponytail: direct cell paragraphs only; a nested table inside a cell (rare) still blobs via cell.text.
+            # A table nested in the cell is exploded the same way, in document order (#1231).
             if table.rows and all(len(row.cells) == 1 for row in table.rows):
                 seen_cells = set()
                 for row in table.rows:
@@ -1211,7 +1391,7 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                     if cell._tc in seen_cells:   # vertical merge repeats one cell across rows
                         continue
                     seen_cells.add(cell._tc)
-                    for cell_para in cell.paragraphs:
+                    for cell_para in _iter_cell_paragraphs(cell):
                         if not get_paragraph_text(cell_para).strip():
                             continue
                         para_data = extract_paragraph_metadata(cell_para, None)

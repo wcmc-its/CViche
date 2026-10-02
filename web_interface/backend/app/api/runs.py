@@ -7,15 +7,15 @@ from datetime import datetime
 import redis
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Query as SAQuery, Session, selectinload
 from pathlib import Path
 
 from app.database import get_db
 from app.models import Run, RunState, Step, User
 from app.schemas import (
     RunFilterOptions, RunStatus, RunSummary, StepSummary, PaginatedRuns,
-    CapacityResponse, RunActionResponse, RestartRunResponse,
-    RunQualityReport, RunReviewNote,
+    CapacityResponse, RunActionResponse, RestartRunResponse, StatusFilterCounts,
+    RunFeedbackSummary, RunQualityReport, RunReviewNote,
 )
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
@@ -27,12 +27,13 @@ from app.services.run_service import (
     flip_to_queued, revert_queued, StepSnapshot,
 )
 from app.rate_limiter import check_rate_limit
-from app.errors import not_found, bad_request, conflict
+from app.errors import not_found, bad_request, conflict, forbidden
 from app.services.runs_admin_query import (
-    RunScope, build_filter_options, filtered_runs_query, parse_run_filters,
-    run_by_summary,
+    RunScope, StatusFilter, build_filter_options, empty_feedback_summary, feedback_clause,
+    filtered_runs_query, load_feedback_summaries, parse_feedback_filter,
+    my_status_counts, parse_run_filters, parse_status_filter, run_by_summary, status_clause,
 )
-from app.services import quality_score_service
+from app.services import batch_completion, quality_score_service
 from app.services.run_quality_report import build_run_quality_report, columns_need_cleanup
 from app.storage import get_storage
 
@@ -130,6 +131,8 @@ def _dispatch_queue(
                     "message": "The run queue is unavailable right now -- please try again shortly."},
         )
 
+    # A batch run's token goes on the batch queue (#1114), on every branch below.
+    queue = run_queue.queue_for(run.batch_id)
     prior = flip_to_queued(db, run.id, allowed_from, resume_from_step=start_step, on_flip=on_flip)
 
     if not prior.flipped and prior.prior_status != RunState.QUEUED:
@@ -142,7 +145,7 @@ def _dispatch_queue(
                 content={"message": f"Run {run.id} already queued", "status": "queued"},
             )
         try:
-            run_queue.enqueue(run.id)
+            run_queue.enqueue(run.id, queue)
         except redis.exceptions.RedisError as e:
             logger.exception("Re-enqueue failed for already-queued run %s", run.id)
             raise HTTPException(
@@ -156,7 +159,7 @@ def _dispatch_queue(
         )
 
     try:
-        run_queue.enqueue(run.id)
+        run_queue.enqueue(run.id, queue)
     except redis.exceptions.RedisError as e:
         logger.exception("Enqueue failed for run %s; reverting the flip", run.id)
         if not revert_queued(db, run.id, prior):
@@ -200,15 +203,65 @@ def get_run_filter_options(
     run_by: str | None = Query(None),
     faculty: str | None = Query(None),
     department: str | None = Query(None),
+    feedback: str | None = Query(None),
+    input_format: str | None = Query(None),
+    status: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_view_all_runs),
 ) -> RunFilterOptions:
     """Options and run counts for the runs filters (scope=all, admin or staff).
 
-    Each list's counts apply the other two filters but not its own."""
+    Each facet's counts apply the other filters but not its own."""
     if scope != RunScope.ALL:
         raise bad_request("filter-options is only available with scope=all")
-    return build_filter_options(db, parse_run_filters(run_by, faculty, department))
+    return build_filter_options(
+        db, parse_run_filters(run_by, faculty, department, feedback, input_format, status))
+
+
+@router.get("/runs/my-status-counts", response_model=StatusFilterCounts)
+def get_my_status_counts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> StatusFilterCounts:
+    """The status pill counts over the caller's own runs (any role): never other users' runs."""
+    return my_status_counts(db, current_user.id)
+
+
+def _run_summary(current_user: User, run: Run, all_scope: bool,
+                 feedback: RunFeedbackSummary) -> RunSummary:
+    return RunSummary(
+        run_id=run.id,
+        filename=run.filename,
+        status=run.status,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        total_cost=visible_cost(current_user, run.total_cost),
+        total_duration_seconds=_run_duration_seconds(run),
+        cv_owner_name=run.cv_owner_name,
+        submission_type=run.submission_type,
+        run_by=run_by_summary(run.user) if all_scope else None,
+        # Score columns need scope=all (admin or staff): never on scope=mine.
+        quality_score=run.quality_score if all_scope else None,
+        quality_band=run.quality_band if all_scope else None,
+        quality_cap=run.quality_cap if all_scope else None,
+        feedback=feedback,
+        batch_id=run.batch_id,
+    )
+
+
+def _my_runs_query(db: Session, current_user: User, feedback: str | None,
+                   status: str | None) -> SAQuery:
+    """scope=mine: the caller's own runs, narrowed by ``feedback`` and ``status``.
+    status=red is the admin score filter: 403 here."""
+    query = db.query(Run).filter(Run.user_id == current_user.id)
+    status_filter = parse_status_filter(status)
+    if status_filter is StatusFilter.RED:
+        raise forbidden("The red-score filter is admin only")
+    for clause in (feedback_clause(parse_feedback_filter(feedback)),
+                   status_clause(status_filter)):
+        if clause is not None:
+            query = query.filter(clause)
+    return query
 
 
 @router.get("/runs", response_model=PaginatedRuns)
@@ -219,45 +272,46 @@ async def list_runs(
     run_by: str | None = Query(None),
     faculty: str | None = Query(None),
     department: str | None = Query(None),
+    feedback: str | None = Query(None),
+    input_format: str | None = Query(None),
+    status: str | None = Query(None),
+    batch_id: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """List pipeline runs, most recent first.
 
     scope=mine (default): the current user's runs. scope=all (admin or staff): every
-    user's runs, optionally filtered by run_by (user id or "self"), faculty (the
-    CV owner's name) and department (the running user's ED department); the
-    filters are ignored under scope=mine.
+    user's runs, optionally filtered by run_by (user id, "self" or "on_behalf"), faculty (the
+    CV owner's name) and department (the running user's ED department); those
+    three, and ``input_format`` ("wcm" = written in the WCM CV template, "other",
+    "unknown" = not classified), are ignored under scope=mine. ``feedback`` ("given" = any reviewer left
+    feedback, "needed" = complete with none) and ``status`` ("running" = queued or
+    running, "failed" = failed; "red" = score band RED, scope=all only: 403 under scope=mine) apply in both
+    scopes. Every run
+    carries a ``feedback`` summary; scope=all adds the reviewer list.
+    ``batch_id`` (#1114) narrows either scope to one batch's runs; every row
+    carries its ``batch_id`` so the list can tag batch runs.
     """
     all_scope = scope == RunScope.ALL
     if all_scope:
         require_view_all_runs(current_user)
-        query = filtered_runs_query(db, parse_run_filters(run_by, faculty, department))
+        query = filtered_runs_query(
+            db, parse_run_filters(run_by, faculty, department, feedback, input_format, status))
     else:
-        query = db.query(Run).filter(Run.user_id == current_user.id)
+        query = _my_runs_query(db, current_user, feedback, status)
+    if batch_id:
+        query = query.filter(Run.batch_id == batch_id)
     total = query.count()
     runs = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()
 
-    results = []
-    for run in runs:
-        total_duration_seconds = _run_duration_seconds(run)
-
-        results.append(RunSummary(
-            run_id=run.id,
-            filename=run.filename,
-            status=run.status,
-            started_at=run.started_at,
-            completed_at=run.completed_at,
-            total_cost=visible_cost(current_user, run.total_cost),
-            total_duration_seconds=total_duration_seconds,
-            cv_owner_name=run.cv_owner_name,
-            submission_type=run.submission_type,
-            run_by=run_by_summary(run.user) if all_scope else None,
-            # Score columns need scope=all (admin or staff): never on scope=mine.
-            quality_score=run.quality_score if all_scope else None,
-            quality_band=run.quality_band if all_scope else None,
-            quality_cap=run.quality_cap if all_scope else None,
-        ))
+    summaries = load_feedback_summaries(
+        db, [run.id for run in runs], current_user.id, with_reviewers=all_scope)
+    no_feedback = empty_feedback_summary(with_reviewers=all_scope)
+    results = [
+        _run_summary(current_user, run, all_scope, summaries.get(run.id, no_feedback))
+        for run in runs
+    ]
 
     return PaginatedRuns(
         runs=results,
@@ -317,6 +371,7 @@ async def get_run_status(
         error_message=run.error_message,
         cv_owner_name=run.cv_owner_name,
         run_by=run_by_summary(run.user) if can_view_all_runs(current_user) else None,
+        scanned_pages=run.scanned_page_numbers,
         steps=step_summaries
     )
 
@@ -549,6 +604,7 @@ async def restart_run(
         show_track_changes=original_run.show_track_changes,
         show_pipeline_comments=original_run.show_pipeline_comments,
         strip_template_instructions=original_run.strip_template_instructions,
+        scanned_pages=original_run.scanned_pages,  # same file, same pages (#1282)
     )
     db.add(new_run)
 
@@ -603,6 +659,7 @@ def _cancel_run_record(db: Session, run: Run) -> None:
     # that offset (timestamp and duration both) on a non-UTC host.
     run.completed_at = datetime.now()
     db.commit()
+    batch_completion.notify_if_batch_complete(run.batch_id)
 
     from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
 

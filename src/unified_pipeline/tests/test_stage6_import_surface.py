@@ -60,6 +60,10 @@ STAGE6_IMPORT_SURFACE = (
     "PII_REDACTED_NOTICE",
     "RECLASSIFY_FAILURE_STAT",
     "RENDER_ROUTED_CODES",
+    "REROUTE_ACCEPTED_CROSS_FAMILY",
+    "REROUTE_ACCEPTED_SAME_FAMILY",
+    "REROUTE_CHECK",
+    "REROUTE_REFUSED_FIELDS",
     "RETIRED_TAXONOMY_CODES",
     "TAXONOMY_TO_SECTION",
     "TEMPLATE_PATH",
@@ -85,6 +89,7 @@ STAGE6_IMPORT_SURFACE = (
     "grant_status_rebucket_target",
     "normalize_retired_code",
     "parse_reclassified_segments",
+    "rendered_extraction_coverage",
     "run_stage6",
     "segment_already_rendered",
     "split_fused_citation_entries",
@@ -144,6 +149,7 @@ RELOCATED_BY_398_RESIDUE = {
     ),
     "unified_pipeline.stage6.render_check": (
         "RECORD_DATE_LINE_MIN_CHARS",
+        "RECLASSIFY_MIN_TOKEN_COVERAGE",
         "RENDER_PIECE_MIN_CHARS",
         "RENDER_PIECE_WINDOW",
         "RENDER_TOKEN_MIN_COUNT",
@@ -161,9 +167,13 @@ RELOCATED_BY_398_RESIDUE = {
         "_norm",
         "_record_lines",
         "_record_rendered",
+        "_record_tokens",
         "_value_is_datelike",
+        "_whole_record_rendered",
         "normalize_retired_code",
         "segment_already_rendered",
+        "segments_cover_source",
+        "t_recovery_lines",
     ),
 }
 
@@ -171,9 +181,12 @@ RELOCATED_BY_398_RESIDUE = {
 #: re-export, so they cannot sit in RELOCATED_BY_398_RESIDUE (whose test asserts
 #: the legacy address resolves to the same object). Found by the live walk (#667).
 HOME_ONLY_IMPORTS = {
-    "unified_pipeline.stage6.dedup": ("_dates_compatible", "_distinct_bare_names", "_lists_name",
+    "unified_pipeline.stage6.dedup": ("_companion_title", "_dates_compatible", "_different_institution",
+                                      "_distinct_bare_names", "_lists_name",
                                       "_names_a_sibling", "_names_record", "_other_journal_same_row",
-                                      "_record_name", "recovered_row_already_rendered","_row_residue"),
+                                      "_place_only_event", "_record_name", "_title_only_fragment",
+                                      "recovered_row_already_rendered","_row_residue",
+                                      "_DECISION_FIELD_MAX_CHARS", "_decision_fields"),
 }
 
 _RELOCATED_CASES = [
@@ -213,7 +226,7 @@ def test_relocated_name_resolves_in_its_new_home(home, name):
 
 
 def test_the_relocated_surface_is_not_silently_empty():
-    assert len(_RELOCATED_CASES) == 29, (
+    assert len(_RELOCATED_CASES) == 34, (
         "the #398-residue relocation pin changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
@@ -280,7 +293,7 @@ def test_the_surface_list_is_not_silently_empty():
     A refactor that reduced these tuples to () would make every test above
     vacuously pass by generating zero cases. Pin the counts measured on dev.
     """
-    assert len(STAGE6_IMPORT_SURFACE) == 33, (
+    assert len(STAGE6_IMPORT_SURFACE) == 38, (
         "the pinned stage 6 import surface changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )

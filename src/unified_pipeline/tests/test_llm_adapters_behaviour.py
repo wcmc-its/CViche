@@ -271,6 +271,136 @@ def test_validate_json_response_strips_fence_before_parsing() -> None:
     assert bedrock._validate_json_response(fenced, {"type": "json_object"}) is True
 
 
+# A self-correcting json_object response (#1218): the model answers, writes a
+# line of prose saying it noticed a mistake, then answers again. Fictional
+# values only.
+_FIRST_ANSWER = {"entries": [{"entry_index": 0, "role": "Member", "end_date": "2010"}]}
+_CORRECTED_ANSWER = {"entries": [{"entry_index": 0, "role": "Member; Chair", "end_date": "2012"}]}
+_PROSE = "For entry 0, there is a second role that should also be captured:"
+_JSON_FORMAT = {"type": "json_object"}
+
+
+def _as_json(value: dict) -> str:
+    return json.dumps(value, indent=2)
+
+
+def _self_correcting_shapes() -> dict[str, str]:
+    first, second = _as_json(_FIRST_ANSWER), _as_json(_CORRECTED_ANSWER)
+    return {
+        # What the model wrote when it fenced both blocks.
+        "fenced": f"```json\n{first}\n```\n\n{_PROSE}\n\n```json\n{second}\n```",
+        # The same, after _strip_markdown_fences removed only the outer pair
+        # (what the prompt logs hold).
+        "outer_stripped": f"{first}\n```\n\n{_PROSE}\n\n```json\n{second}",
+        # No fence anywhere.
+        "unfenced": f"{first}\n\n{_PROSE}\n\n{second}",
+        # A closing fence after the last object that no opening fence matches.
+        "trailing_fence": f"{first}\n\n{_PROSE}\n\n{second}\n```",
+    }
+
+
+@pytest.mark.parametrize("shape", ["fenced", "outer_stripped", "unfenced", "trailing_fence"])
+def test_select_final_json_object_takes_the_corrected_answer(shape: str) -> None:
+    content = _self_correcting_shapes()[shape]
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(bedrock._strip_markdown_fences(content))  # the defect
+
+    selected = bedrock._select_final_json_object(content, _JSON_FORMAT, "stage_4")
+
+    assert json.loads(selected) == _CORRECTED_ANSWER
+
+
+def test_select_final_json_object_takes_the_last_of_three(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    third = {"entries": []}
+    content = f"{_as_json(_FIRST_ANSWER)}\n\nOops.\n\n{_as_json(_CORRECTED_ANSWER)}\n\nAgain.\n\n{_as_json(third)}"
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"):
+        selected = bedrock._select_final_json_object(content, _JSON_FORMAT, "stage_4")
+
+    assert json.loads(selected) == third
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "stage=stage_4" in warnings[0]
+    assert "3 objects" in warnings[0] and "discarding 2" in warnings[0]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        _as_json(_FIRST_ANSWER),                                  # one object
+        f"```json\n{_as_json(_FIRST_ANSWER)}\n```",               # one fenced object
+        "[1, 2, 3]",                                              # valid, not an object
+        "plain prose, no JSON at all",
+        "",
+    ],
+)
+def test_select_final_json_object_leaves_everything_that_parses_or_is_not_json(
+    content: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"):
+        assert bedrock._select_final_json_object(content, _JSON_FORMAT, "stage_4") is content
+    assert caplog.records == []
+
+
+def test_select_final_json_object_ignores_a_response_that_is_not_json_or_not_text() -> None:
+    # No JSON was requested, so two objects with prose between them are text.
+    shaped = _self_correcting_shapes()["unfenced"]
+    assert bedrock._select_final_json_object(shaped, None, "stage_4") is shaped
+    assert bedrock._select_final_json_object(None, _JSON_FORMAT, "stage_4") is None
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        # An object cut off by max_tokens, after a complete one.
+        f'{_as_json(_FIRST_ANSWER)}\n\n{_PROSE}\n\n{{"entries": [{{"entry_index": 0',
+        # A single truncated object: the complete inner object is not the answer.
+        '{"entries": {"entry_index": 0}',
+        # A truncated array of objects: the complete elements are not the answer.
+        '[{"entry_index": 0}, {"entry_index": 1}',
+        # Two objects and nothing between them: may be two records, not a correction.
+        f'{_as_json(_FIRST_ANSWER)}\n{_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)}\n```\n```json\n{_as_json(_CORRECTED_ANSWER)}',
+        # Text before the first object.
+        f'Here you go:\n{_as_json(_FIRST_ANSWER)}\n\n{_PROSE}\n\n{_as_json(_CORRECTED_ANSWER)}',
+        # One object followed by prose: nothing was corrected.
+        f'{_as_json(_FIRST_ANSWER)}\n\nHope this helps.',
+        # A brace in the prose that does not open an object.
+        f'{_as_json(_FIRST_ANSWER)}\n\nUse the {{placeholder}} form.\n\n{_as_json(_CORRECTED_ANSWER)}',
+        # Records joined by a comma or a semicolon, not by prose: a list of
+        # records without its brackets.
+        f'{_as_json(_FIRST_ANSWER)}, {_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)},\n{_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)};\n{_as_json(_CORRECTED_ANSWER)}',
+        # Prose, then an array: its elements are not the answer.
+        f'{_as_json(_FIRST_ANSWER)}\nNote\n[{_as_json(_FIRST_ANSWER)}, {_as_json(_CORRECTED_ANSWER)}]',
+        f'{_as_json(_FIRST_ANSWER)}\nNote\n[{_as_json(_CORRECTED_ANSWER)}]',
+        # Text after the last object that is not a fence: a stray bracket, or prose.
+        f'{_as_json(_FIRST_ANSWER)}\nfix\n{_as_json(_CORRECTED_ANSWER)}\n]',
+        f'{_as_json(_FIRST_ANSWER)}\n\n{_PROSE}\n\n{_as_json(_CORRECTED_ANSWER)}\n\nHope this helps.',
+        # A comma after the earlier object, or an array opened before the later one.
+        f'{_as_json(_FIRST_ANSWER)},\nNote\n{_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)}\nNote\n[{_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)}\nNote\n[\n{_as_json(_CORRECTED_ANSWER)}',
+        # No line that carries a letter between the objects.
+        f'{_as_json(_FIRST_ANSWER)}\n--\n{_as_json(_CORRECTED_ANSWER)}',
+        # One complete object with a stray fence is not two objects.
+        f'{_as_json(_FIRST_ANSWER)}\n```',
+        f'```json\n{_as_json(_FIRST_ANSWER)}',
+        # A truncated outer object: its inner object is not the first answer.
+        '{"entries": {"entry_index": 0}\n\nNote\n\n{"entries": []}',
+        # Prose on the same line as an object.
+        f'{_as_json(_FIRST_ANSWER)} Oops: {_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)}\nOops: {_as_json(_CORRECTED_ANSWER)}',
+    ],
+)
+def test_select_final_json_object_keeps_malformed_text_malformed(content: str) -> None:
+    assert bedrock._select_final_json_object(content, _JSON_FORMAT, "stage_4") is content
+    assert bedrock._validate_json_response(content, _JSON_FORMAT) is False
+
+
 def test_extract_cache_tokens_empty_usage() -> None:
     assert bedrock._extract_cache_tokens(None) == (0, 0)
     assert bedrock._extract_cache_tokens({}) == (0, 0)
@@ -661,6 +791,86 @@ def test_handle_bedrock_strips_fence_without_triggering_repair(monkeypatch: pyte
 
     assert result["content"] == '{"x": 2}'
     assert len(fake.calls) == 1  # fence-wrapped-but-valid never triggers the repair call
+
+
+def test_handle_bedrock_self_correcting_response_needs_no_repair_call(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # #1218: answer, prose, corrected answer. The last object is returned and
+    # the repair call (which only repeated the shape) is never spent.
+    canned = _converse_response(
+        _self_correcting_shapes()["fenced"], input_tokens=30, output_tokens=7)
+    fake = _FakeBedrockClient([canned])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"):
+        result = bedrock._handle_bedrock(
+            [{"role": "user", "content": "hi"}],
+            response_format=_JSON_FORMAT,
+            cfg=_bedrock_cfg(stage="stage_4"),
+        )
+
+    assert json.loads(result["content"]) == _CORRECTED_ANSWER
+    assert len(fake.calls) == 1
+    assert result["prompt_tokens"] == 30 and result["completion_tokens"] == 7
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("stage=stage_4" in m and "discarding 1" in m for m in messages)
+    assert not any("not valid JSON" in m for m in messages)
+
+
+def test_handle_bedrock_repair_that_repeats_the_shape_is_still_usable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The first response is plain garbage, so the repair runs; the repair then
+    # self-corrects the way both stored failures did.
+    first = _converse_response("not json at all")
+    repaired = _converse_response(_self_correcting_shapes()["unfenced"])
+    fake = _FakeBedrockClient([first, repaired])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}],
+        response_format=_JSON_FORMAT,
+        cfg=_bedrock_cfg(stage="stage_4"),
+    )
+
+    assert json.loads(result["content"]) == _CORRECTED_ANSWER
+    assert len(fake.calls) == 2
+
+
+def test_handle_bedrock_truncated_multi_object_response_still_goes_to_repair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    truncated = f'{_as_json(_FIRST_ANSWER)}\n\n{_PROSE}\n\n{{"entries": [{{"entry_index": 0'
+    repaired = _converse_response(_as_json(_CORRECTED_ANSWER))
+    fake = _FakeBedrockClient([_converse_response(truncated), repaired])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}],
+        response_format=_JSON_FORMAT,
+        cfg=_bedrock_cfg(stage="stage_4"),
+    )
+
+    assert json.loads(result["content"]) == _CORRECTED_ANSWER  # from the repair call
+    assert len(fake.calls) == 2
+
+
+def test_handle_bedrock_valid_single_object_content_is_returned_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = _as_json(_FIRST_ANSWER)
+    fake = _FakeBedrockClient([_converse_response(text)])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        [{"role": "user", "content": "hi"}],
+        response_format=_JSON_FORMAT,
+        cfg=_bedrock_cfg(stage="stage_4"),
+    )
+
+    assert result["content"] == text
+    assert len(fake.calls) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1512,3 +1722,201 @@ def test_call_with_retry_retries_transport_errors_botocore_no_longer_retries(
     result, _ = retry._call_with_retry(flaky, retry_count=3)
     assert result == "ok"
     assert len(calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# bedrock.py -- content_filtered fallback to Sonnet 4.6 (#1174)
+# ---------------------------------------------------------------------------
+
+SONNET_5 = "us.anthropic.claude-sonnet-5"
+_USER_MSG = [{"role": "user", "content": "synthetic request"}]
+
+
+def _empty_response(stop_reason: str, *, input_tokens: int = 100) -> dict:
+    return {
+        "output": {"message": {"content": []}},
+        "stopReason": stop_reason,
+        "usage": {"inputTokens": input_tokens, "outputTokens": 1},
+    }
+
+
+def _filtered_empty_pair() -> list[dict]:
+    """First call and its JSON-repair retry, both empty and filtered."""
+    return [_empty_response("content_filtered"), _empty_response("content_filtered")]
+
+
+def _model_ids(fake: _FakeBedrockClient) -> list[str]:
+    return [call["modelId"] for call in fake.calls]
+
+
+def test_content_filtered_empty_falls_back_once_to_sonnet_4_6(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ok = _converse_response("hello", input_tokens=10, output_tokens=5)
+    fake = _FakeBedrockClient(_filtered_empty_pair() + [ok])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == [SONNET_5, SONNET_5, bedrock.CONTENT_FILTER_FALLBACK_MODEL]
+    assert bedrock.CONTENT_FILTER_FALLBACK_MODEL == "us.anthropic.claude-sonnet-4-6"
+    assert result["content"] == "hello"
+    assert result["model"] == bedrock.CONTENT_FILTER_FALLBACK_MODEL
+    # The fallback is priced at its own rate, plus the two billed filtered calls.
+    fallback_cost = pipeline_config.calculate_cost(
+        10, 5, model=bedrock.CONTENT_FILTER_FALLBACK_MODEL, provider="bedrock")
+    filtered_cost = pipeline_config.calculate_cost(
+        200, 2, model=SONNET_5, provider="bedrock")
+    assert fallback_cost > 0
+    assert result["cost"] == pytest.approx(fallback_cost + filtered_cost)
+
+
+def test_fallback_served_result_names_the_model_that_answered_and_a_normal_one_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The write-only provenance key (#1174): stage 4 and 4.5 read it to record
+    that the fallback served the call. Absent on an ordinary Sonnet 5 result."""
+    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY
+
+    ok = _converse_response("hello", input_tokens=10, output_tokens=5)
+    fake = _FakeBedrockClient(_filtered_empty_pair() + [ok])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+    served = bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+    assert served[FALLBACK_SERVED_KEY] == bedrock.CONTENT_FILTER_FALLBACK_MODEL
+
+    plain = _FakeBedrockClient([_converse_response("hi", input_tokens=10, output_tokens=5)])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: plain)
+    assert FALLBACK_SERVED_KEY not in bedrock._handle_bedrock(
+        _USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+
+def test_content_filtered_fallback_request_drops_sonnet_5_only_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeBedrockClient(_filtered_empty_pair() + [_converse_response("hello")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    assert "additionalModelRequestFields" in fake.calls[0]
+    assert "additionalModelRequestFields" not in fake.calls[2]
+    assert fake.calls[2]["inferenceConfig"]["temperature"] == 0.2
+
+
+def test_content_filtered_partial_text_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Mid-stream truncation: non-empty text, never BedrockEmptyResponseError.
+    truncated = _converse_response('{"a": ', stop_reason="content_filtered")
+    ok = _converse_response('{"a": 1}')
+    fake = _FakeBedrockClient([truncated, truncated, ok])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(
+        _USER_MSG, {"type": "json_object"}, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == [SONNET_5, SONNET_5, bedrock.CONTENT_FILTER_FALLBACK_MODEL]
+    assert json.loads(result["content"]) == {"a": 1}
+    assert result["finish_reason"] == "stop"
+
+
+def test_content_filtered_schema_tool_path_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "extract_v1", "schema": {"type": "object"}},
+    }
+    filtered = _empty_response("content_filtered")
+    tool_ok = {
+        "output": {"message": {"content": [{"toolUse": {"input": {"foo": "bar"}}}]}},
+        "stopReason": "tool_use",
+        "usage": {"inputTokens": 10, "outputTokens": 5},
+    }
+    fake = _FakeBedrockClient([filtered, tool_ok])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(_USER_MSG, response_format, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == [SONNET_5, bedrock.CONTENT_FILTER_FALLBACK_MODEL]
+    assert json.loads(result["content"]) == {"foo": "bar"}
+
+
+def test_second_content_filter_on_fallback_raises_and_never_loops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeBedrockClient(_filtered_empty_pair() + _filtered_empty_pair())
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockEmptyResponseError, match="content_filtered"):
+        bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    # primary + its repair, fallback + its repair: no third model, no more calls.
+    assert _model_ids(fake) == [SONNET_5, SONNET_5] + [bedrock.CONTENT_FILTER_FALLBACK_MODEL] * 2
+
+
+def test_second_content_filter_with_partial_text_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    truncated = _converse_response('{"a": ', stop_reason="content_filtered")
+    fake = _FakeBedrockClient([truncated] * 4)
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockContentFilteredError):
+        bedrock._handle_bedrock(
+            _USER_MSG, {"type": "json_object"}, _bedrock_cfg(model=SONNET_5))
+
+    assert len(fake.calls) == 4
+
+
+@pytest.mark.parametrize(
+    "stop_reason", ["guardrail_intervened", "max_tokens", "malformed_model_output"])
+def test_other_stop_reasons_never_fall_back(
+    monkeypatch: pytest.MonkeyPatch, stop_reason: str,
+) -> None:
+    fake = _FakeBedrockClient([_empty_response(stop_reason), _empty_response(stop_reason)])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockEmptyResponseError):
+        bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == [SONNET_5, SONNET_5]
+
+
+def test_non_filtered_result_on_sonnet_5_makes_one_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeBedrockClient([_converse_response("hello", stop_reason="guardrail_intervened")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    result = bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+    assert _model_ids(fake) == [SONNET_5]
+    assert result["model"] == SONNET_5
+
+
+@pytest.mark.parametrize(
+    "model", [BEDROCK_MODEL, "us.anthropic.claude-sonnet-4-6", "anthropic.claude-sonnet-4-5"])
+def test_content_filtered_on_non_sonnet_5_model_does_not_fall_back(
+    monkeypatch: pytest.MonkeyPatch, model: str,
+) -> None:
+    fake = _FakeBedrockClient(_filtered_empty_pair())
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with pytest.raises(bedrock.BedrockEmptyResponseError):
+        bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=model))
+
+    assert _model_ids(fake) == [model, model]
+
+
+def test_content_filter_fallback_warning_names_the_stage(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = _FakeBedrockClient(_filtered_empty_pair() + [_converse_response("hello")])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.llm.bedrock"):
+        bedrock._handle_bedrock(
+            _USER_MSG, None, _bedrock_cfg(model=SONNET_5, stage="stage_4_synthetic"))
+
+    assert any(
+        "stage_4_synthetic" in r.getMessage() and "fallback" in r.getMessage()
+        for r in caplog.records if r.levelno == logging.WARNING
+    )
+
+
+def test_resolve_call_config_carries_the_stage_for_provider_log_lines() -> None:
+    from unified_pipeline import llm_client
+    assert llm_client._resolve_call_config("stage_4", {})["stage"] == "stage_4"

@@ -36,6 +36,7 @@ this path -- see that file before renaming or dropping any of them.
 import time
 import threading
 from collections import Counter
+from dataclasses import dataclass, field
 
 from unified_pipeline.config import get_stage_config
 from unified_pipeline.core.prompt_logger import (
@@ -64,6 +65,42 @@ from unified_pipeline.llm.retry import (
 # name patches the same global attribute.
 
 
+@dataclass
+class LlmUsage:
+    """Running cost and token totals for the call_llm results a caller feeds it.
+
+    Stages that keep no cost of their own (1a's segmentation calls, stage 6)
+    take one of these and ``add`` every call_llm result, so the driver reports
+    what the client actually priced instead of an estimate (#1177). Thread-safe:
+    stage code may call from pool threads.
+    """
+
+    cost: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
+
+    def token_totals(self) -> dict:
+        """The token counts under the key names stage metadata uses."""
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+        }
+
+    def add(self, llm_result: dict) -> None:
+        """Fold one call_llm result into the totals."""
+        with self._lock:
+            self.cost += llm_result.get("cost", 0.0)
+            self.prompt_tokens += llm_result.get("prompt_tokens", 0)
+            self.completion_tokens += llm_result.get("completion_tokens", 0)
+            self.cache_read_tokens += llm_result.get("cache_read_tokens", 0)
+            self.cache_write_tokens += llm_result.get("cache_write_tokens", 0)
+
+
 # Keys call_llm consumes itself; everything else in **kwargs is forwarded to the
 # provider SDK untouched.
 _EXPLICIT_KWARGS = frozenset({
@@ -76,6 +113,8 @@ def _resolve_call_config(stage: str, kwargs: dict) -> dict:
     """Merge the stage's YAML config with per-call kwarg overrides."""
     config = get_stage_config(stage)
     return {
+        # For provider-layer log lines (e.g. the #1174 content-filter fallback).
+        "stage": stage,
         "provider": kwargs.get("provider", config["provider"]),
         "model": kwargs.get("model", config["model"]),
         "temperature": kwargs.get("temperature", config["temperature"]),

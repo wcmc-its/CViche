@@ -4,8 +4,8 @@ The shortest section in the template and one of the longest writers, because
 almost nothing about a CV's contact block is structured. The work is in order:
 
 1. Resolve the name. `cv_owner` first, then a LinkedIn slug in the A entries,
-   then the document uid via `_extract_name_from_uid`. A bare surname does not
-   count as complete and keeps the fallbacks running.
+   then the document uid via `_extract_name_from_uid` (empty for a run id, #457).
+   A bare surname does not count as complete and keeps the fallbacks running.
 2. Classify each A entry into one of six slots by reading the LABEL in the
    source text, not the extracted field -- "Cell phone:" and "Office:" are what
    distinguish two otherwise identical phone numbers, and one entry can carry
@@ -57,6 +57,7 @@ docstring, `scripts/render_gate.py`'s module docstring and
 """
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -329,6 +330,36 @@ _CELL_LABEL_AFTER_NUMBER_RE = re.compile(
 )
 _PHONE_LABEL_CELL = 'cell'
 _PHONE_LABEL_HOME = 'home'
+# A cell keyword counts at the block level only when it is written as a label
+# (#1222): "(cell)", "Cellphone:", "Cell - 212-...", "Mobile Ph:", "Cell
+# (preferred):", or trailing a number "212-555-0100 cell" -- never as a word
+# inside an organisation or department name ("Department of Cellular Example
+# Studies", "Cell Biology"), which routed the office phone to Cell phone.
+# Blanks inside a label stay on one line.
+_CELL_KEYWORD = rf'(?:{_CELL_WORDS}|mob)'
+_CELL_BLOCK_COMBINED = r'(?:[ \t]*/[ \t]*(?:home|work|office|text|sms))?'
+_CELL_BLOCK_NOUNS = r'(?:[ \t]*(?:phone|telephone|tel|ph|no|number|#))*'
+_CELL_BLOCK_QUALIFIER = r'(?:[ \t]*\([^)\n]{0,20}\))?'
+_CELL_BLOCK_LABEL_END = r'[ \t]*(?:[:.]|(?:[-\u2013\u2014][ \t]*)?(?=[+(]?\d))'
+_CELL_KEYWORD_AS_LABEL_RE = re.compile(
+    rf'\({_CELL_KEYWORD}\)'
+    rf'|\b{_CELL_KEYWORD}{_CELL_BLOCK_COMBINED}{_CELL_BLOCK_NOUNS}'
+    rf'{_CELL_BLOCK_QUALIFIER}{_CELL_BLOCK_LABEL_END}'
+    rf'|\d\)?[ ]*[-,;]?[ ]*{_CELL_KEYWORD}\b(?![ ]+[a-z])',
+    re.IGNORECASE,
+)
+# A work-contact label names its own slot (#1222): an address noun for the
+# Office address, an address or phone noun for the Office telephone (a work
+# address block carries its phone). The noun must directly follow the work
+# word, so "Business School, Tel." and "Office Fax Number" are not labels, and
+# a residence or mailing line never ranks an address. The phone label leaves
+# out "business" because the slot's has_work gate never reaches it.
+_WORK_ADDRESS_LABEL_RE = re.compile(
+    r'\b(?:office|work|business)\s+address\b',
+    re.IGNORECASE)
+_WORK_PHONE_LABEL_RE = re.compile(
+    r'\b(?:office|work)\s+(?:address|phone|telephone|tel)\b',
+    re.IGNORECASE)
 # A number found in the text is the extracted one when the two digit strings
 # agree once a country prefix (at most three digits, ITU E.164) is ignored.
 # Below the minimum the suffix test could pair two unrelated short numbers;
@@ -394,8 +425,61 @@ def _cell_and_home_signals(phone: _JsonValue, text: str,
     nearest = _nearest_phone_label(_PhoneNumber.parse(phone), text)
     if nearest is not None:
         return nearest == _PHONE_LABEL_CELL, nearest == _PHONE_LABEL_HOME
-    return (('cell' in text or 'mobile' in text),
+    return (bool(_CELL_KEYWORD_AS_LABEL_RE.search(text)),
             _label_word_present('home', text, pii_fragments))
+
+
+def _without_home_numbers(entry: dict) -> dict:
+    """`entry`, or a copy whose text lacks every number a home label ("(h)",
+    "h:", "Home tel") introduces (#1222). The pii pass cuts only the home
+    WORDS, so a displaced entry handed to the Appendix whole would print a
+    number this module withholds as home."""
+    text = entry.get('text', '') or ''
+    scrubbed = _LABELLED_NUMBER_RE.sub(
+        lambda m: '' if m.group('home') else m.group(0), text)
+    return entry if scrubbed == text else {**entry, 'text': scrubbed}
+
+
+@dataclass
+class _SlotRank:
+    """An Office slot's ranking state: its own work-contact label, whether the
+    current value carries it, and the entry that supplied that value."""
+    label_re: re.Pattern[str]
+    cell_text: Callable[[_JsonValue, str], str | None]
+    unconsumed: list[dict]
+    labelled: bool = False
+    source: dict | None = None
+
+    def offer(self, current: str | None, extracted: _JsonValue,
+              entry: dict) -> str | None:
+        """The slot value after offering `extracted`, taken from `entry`.
+
+        The first value still wins its slot, except that a value whose entry
+        carries the slot's own label outranks an unlabelled one (#1222): a
+        banner line or a bare institution name read as an address came first
+        and blocked the labelled Work address that followed. A displaced
+        value's entry is handed back to `unconsumed`, so the post-render
+        recovery can place it."""
+        is_labelled = bool(self.label_re.search(entry.get('text', '')))
+        candidate = self.cell_text(extracted, 'office')
+        if not candidate:
+            return current
+        if current and not (is_labelled and not self.labelled
+                            and self.source is not None):
+            return current
+        if self.source is not None:
+            handed_back = _without_home_numbers(self.source)
+            if all(e is not self.source and e.get('text') != handed_back.get('text')
+                   for e in self.unconsumed):
+                self.unconsumed.append(handed_back)
+        self.labelled, self.source = is_labelled, entry
+        return candidate
+
+
+def _office_slot_ranks(unconsumed: list[dict]) -> tuple[_SlotRank, _SlotRank]:
+    """The (address, telephone) ranking state for the two Office slots."""
+    return (_SlotRank(_WORK_ADDRESS_LABEL_RE, _address_cell_text, unconsumed),
+            _SlotRank(_WORK_PHONE_LABEL_RE, _phone_cell_text, unconsumed))
 
 
 # #946: consumer mail domains. An address at one of these is the owner's
@@ -749,6 +833,7 @@ class PersonalDataSection:
         # re-listing the fields this loop reads, so it cannot drift out of step
         # when the loop learns to read a new one.
         unconsumed = []
+        address_rank, phone_rank = _office_slot_ranks(unconsumed)
 
         for entry in entries:
             fields = entry.get('extracted_fields', {}) or {}
@@ -836,8 +921,7 @@ class PersonalDataSection:
                     if not home_phone:
                         home_phone = _phone_cell_text(extracted_phone, 'home')
                 elif has_work or not office_phone:
-                    if not office_phone:
-                        office_phone = _phone_cell_text(extracted_phone, 'office')
+                    office_phone = phone_rank.offer(office_phone, extracted_phone, entry)
 
             # Classify address by type
             if extracted_address:
@@ -855,8 +939,7 @@ class PersonalDataSection:
                     if not home_address:
                         home_address = _address_cell_text(extracted_address, 'home')
                 elif 'office' in text or 'work' in text or 'business' in text or not office_address:
-                    if not office_address:
-                        office_address = _address_cell_text(extracted_address, 'office')
+                    office_address = address_rank.offer(office_address, extracted_address, entry)
 
             # Classify email by type
             if extracted_email:

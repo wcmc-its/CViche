@@ -100,6 +100,17 @@ or bold font for your name") is dropped as `template-instruction` when the
 reasoning calls it instruction text and the text closes a parenthesis it never
 opened or addresses the author (`_is_wrapped_instruction_tail`).
 
+Three more shapes close #1221. A rule line (underscores, hyphens, equals signs
+or dashes, five or more) is dropped on its text alone (`_RULE_LINE_RE`, T-only
+like `_BARE_YEAR_RE`). A signature block ("(Date) (Signature of Candidate)",
+"Signed: <owner>", a date beside the owner's name) is dropped as
+`signature-block` only when 3b's reasoning says signature, signed, footer or
+structural artifact AND `_is_signature_block` finds nothing in the text but
+dates, blanks, the owner's own name tokens (`_owner_signature_tokens`, read from
+the `cv_owner` stage 6 already holds) and the words Date, Signature, Signed and
+the phrase "Signature of Candidate", with at least one of those words present. `_DATE_STAMP_RE` now also takes a numeric date, parentheses,
+and a full date alone on its line.
+
 What was dropped is reported ONCE, as a single Word comment on the introductory
 paragraph, rather than per entry -- N comments saying so is itself noise.
 
@@ -118,12 +129,15 @@ inputs, and its current appendix has a single entry under that heading, so
 Numbering restarts under each heading. Bodies are capped at
 `APPENDIX_MAX_CHARS` characters, the marker that shows the cut included: the
 appendix is a pointer back to the original document, not a second copy of it.
+The cap is not what keeps a T entry's records: `_recover_unrendered_records`
+re-scans T entries too (#1230) and writes every record line the cap cut, in
+full, as an uncapped bullet.
 """
 import logging
 import re
 from collections import Counter
-from collections.abc import Sequence
-from typing import TypedDict
+from collections.abc import Mapping, Sequence
+from typing import NamedTuple, TypedDict
 
 from ...core.template_boilerplate import (
     is_foreign_template_instruction,
@@ -178,6 +192,8 @@ DROP_TEMPLATE_LABEL = "template-label"
 DROP_CV_TITLE = "cv-title"
 DROP_DATE_STAMP = "date-stamp"
 DROP_SECTION_HEADER = "section-header"
+DROP_RULE_LINE = "rule-line"
+DROP_SIGNATURE_BLOCK = "signature-block"
 DROP_REASONS = (
     DROP_BLANK,
     DROP_TEMPLATE_INSTRUCTION,
@@ -193,6 +209,8 @@ DROP_REASONS = (
     DROP_CV_TITLE,
     DROP_DATE_STAMP,
     DROP_SECTION_HEADER,
+    DROP_RULE_LINE,
+    DROP_SIGNATURE_BLOCK,
 )
 
 # The taxonomy code this whole module exists for (CODING_STANDARDS.md 8.2:
@@ -231,6 +249,11 @@ _STATUS_MARKER_WORDS = frozenset({
 # zero other entries in the #885 corpus.
 _TOC_LINE_RE = re.compile(r"^.{1,90}?[ \t]Page\s+\d+(?:[-–—]\d+)?\s*$")
 
+# #1221: a rule line -- nothing but underscores, hyphens, equals signs or
+# dashes, five or more of them. Text-only like `_BARE_YEAR_RE`: a rule is not
+# content under any code, so no reasoning signal is needed.
+_RULE_LINE_RE = re.compile(r"^[_=\-–—]{5,}$")
+
 
 # #885 residual: four structural shapes that need TWO independent signals, so
 # neither the free-text reasoning nor the raw text carries the drop alone.
@@ -253,10 +276,36 @@ _MONTH_YEAR = rf"{_MONTH}\.?,?\s*(?:\d{{1,2}}(?:st|nd|rd|th)?,?\s*)?(?:19|20)\d{
 
 # "Date May 30th, 2020", "As of August 10, 2022", "*Revised June 29, 2018":
 # a stamp word, then nothing but a date.
+#
+# #1221: the date may also be numeric ("(As of 02/14/2017)"), the stamp may sit
+# in parentheses, and a FULL date (day included) alone on its line is a stamp
+# without its word. A bare month-year ("May 2020") is not: that shape is also
+# a real record's date fragment.
+_NUMERIC_DATE = r"\d{1,2}[/.-]\d{1,2}[/.-]\d{4}"
+_FULL_DATE = rf"(?:{_MONTH}\.?,?\s*\d{{1,2}}(?:st|nd|rd|th)?,?\s*(?:19|20)\d{{2}}|{_NUMERIC_DATE})"
+_STAMP_WORD = r"(?:date|as\s+of|revised|last\s+updated|updated|revision\s+date)"
 _DATE_STAMP_RE = re.compile(
-    rf"^\*?(?:date|as\s+of|revised|last\s+updated|updated|revision\s+date)\s*:?\s*{_MONTH_YEAR}$",
+    rf"^\*?\(?\s*{_STAMP_WORD}\s*:?\s*(?:{_MONTH_YEAR}|{_NUMERIC_DATE})\s*\)?$"
+    rf"|^\(?\s*{_FULL_DATE}\s*\)?$",
     re.IGNORECASE,
 )
+
+# #1221: a signature block ("(Date) (Signature of Candidate)", "Signed: <owner>",
+# a date beside the owner's name). Signal 1 is 3b's wording, anywhere in the
+# lead; signal 2 is `_is_signature_block`'s shape.
+# Word-bounded, so "assigned" and "designed" are not "signed", and a negated
+# phrase ("not a structural artifact") is not a signal.
+_SIGNATURE_REASONING_RE = re.compile(
+    r"(?<!not )(?<!not a )\b(?:signature|signed|footer|structural artifact)\b"
+)
+# "Candidate" and "of" count only inside this phrase, so "PhD Candidate, May 2019"
+# keeps its word "candidate" and is not a signature block.
+_SIGNATURE_PHRASE_RE = re.compile(r"\bsignature\s+of\s+candidate\b")
+_SIGNATURE_VOCAB = frozenset({"date", "signature", "signed"})
+_SIGNATURE_DATE_RE = re.compile(rf"{_FULL_DATE}|{_MONTH_YEAR}", re.IGNORECASE)
+_BLANK_RUN_RE = re.compile(r"_+")
+_WORD_RE = re.compile(r"[a-z0-9]+")
+_OWNER_NAME_FIELDS = ("first_name", "middle_name", "last_name")
 
 # The CV's own title, up to two leading words ("Medico-legal Curriculum
 # Vitae"), an optional "& Bibliography", and optionally a date line under it.
@@ -274,7 +323,7 @@ _HEADER_ROW_MAX_CELL_WORDS = 8
 
 _KIND_REASONING = {
     DROP_CV_TITLE: re.compile(r"(?:document|cv|curriculum vitae)[^.;]{0,25}(?:title|header)"),
-    DROP_DATE_STAMP: re.compile(r"date (?:stamp|line)|revision date"),
+    DROP_DATE_STAMP: re.compile(r"date (?:stamp|line|marker)|revision date|timestamp"),
     DROP_COLUMN_HEADER: re.compile(r"(?:column|table)?\s*header row|column header"),
     DROP_SECTION_HEADER: re.compile(
         # The verdict must be a SECTION header/label, not a looser
@@ -353,6 +402,49 @@ def _is_wrapped_instruction_tail(text: str) -> bool:
     return closes_unopened or bool(_AUTHOR_DIRECTIVE_RE.search(body))
 
 
+class OwnerTokens(NamedTuple):
+    """The owner's word tokens for the signature-block shape (#1221).
+
+    `removable` is everything the shape may subtract from a line: name words,
+    credentials ("MD", "FACP") and single initials. They are only subtracted, never
+    evidence: a signature block needs a Date, Signature or Signed word."""
+
+    removable: frozenset[str] = frozenset()
+
+
+def _name_words(value: object) -> set[str]:
+    if not isinstance(value, str):
+        return set()
+    return set(_WORD_RE.findall(value.replace(".", "").lower()))
+
+
+def _owner_signature_tokens(cv_owner: Mapping[str, object] | None) -> OwnerTokens:
+    """Lower-cased word tokens of the owner name stage 6 already carries in
+    `cv_owner` (periods dropped, so "D.V.M." and "DVM" agree), plus the initial
+    of each (#1221)."""
+    owner = cv_owner or {}
+    removable = _name_words(owner.get("full_name_with_credentials"))
+    for field in _OWNER_NAME_FIELDS:
+        removable |= _name_words(owner.get(field))
+    # A name written with a middle initial ("Jane Q. Doe" as "J. Doe") still has the
+    # owner's tokens: an initial of any owner token counts as one.
+    removable |= {token[0] for token in removable}
+    return OwnerTokens(frozenset(removable))
+
+
+def _is_signature_block(text: str, owner_tokens: OwnerTokens) -> bool:
+    """True when, once dates, blanks and the owner's name tokens are removed,
+    nothing is left but the signature vocabulary, and at least one Date,
+    Signature or Signed word remains (#1221). A real record carries some other
+    word, so it never matches, and a name plus a date alone is not enough
+    ("PhD, May 2019" is a degree record)."""
+    body = _SIGNATURE_PHRASE_RE.sub("signature", text.lower())
+    body = _SIGNATURE_DATE_RE.sub(" ", _BLANK_RUN_RE.sub(" ", body))
+    words = _WORD_RE.findall(body.replace(".", ""))
+    rest = [w for w in words if w not in owner_tokens.removable]
+    return bool(rest) and all(w in _SIGNATURE_VOCAB for w in rest)
+
+
 _KIND_SHAPE = {
     DROP_TEMPLATE_INSTRUCTION: _is_wrapped_instruction_tail,
     DROP_CV_TITLE: lambda t: bool(_CV_TITLE_RE.match(t)),
@@ -362,7 +454,11 @@ _KIND_SHAPE = {
 }
 
 
-def _confirmed_structural_reason(text: str, reasoning: str | None) -> str | None:
+def _confirmed_structural_reason(
+    text: str,
+    reasoning: str | None,
+    owner_tokens: OwnerTokens = OwnerTokens(),
+) -> str | None:
     """The `DROP_*` reason for a T entry that BOTH stage 3b's T-validation
     confirmed as structural of a named kind AND whose raw text has that kind's
     positive shape (#885 residual), else None."""
@@ -372,6 +468,8 @@ def _confirmed_structural_reason(text: str, reasoning: str | None) -> str | None
     for reason, kind_re in _KIND_REASONING.items():
         if kind_re.search(lead) and _KIND_SHAPE[reason](text.strip()):
             return reason
+    if _SIGNATURE_REASONING_RE.search(lead) and _is_signature_block(text, owner_tokens):
+        return DROP_SIGNATURE_BLOCK
     return None
 
 
@@ -435,6 +533,16 @@ REASON_INVALID_CODE = "invalid_code"
 _QUARANTINE_MARKER_KEY = "taxonomy_code_quarantine_reason"
 _QUARANTINE_MARKER_INVALID_CODE = "invalid_taxonomy_code"
 
+# Stage 3b's T-validation pass recoded this entry from T to M1. The research
+# summary only paraphrases M1, so such an entry (a website, a project note) is
+# diverted here rather than lost (AUTOPSY-s7ab-batch-2026-10-02 class 11:
+# RGUNJV 3038/3040, BMAMWE 1282..). Keyed off stage 3b's `t_validation_applied`
+# marker, which on a non-T entry means T-validation moved it off T
+# (stage3b/classify.py `validate_t_classifications`); the string is duplicated
+# rather than imported, as with the quarantine marker above.
+REASON_T_VALIDATION_RECODED = "t_validation_recoded"
+_T_VALIDATION_MARKER_KEY = "t_validation_applied"
+
 # E, G and J -- the three passthrough sections. None of the three is in
 # `RENDER_ROUTED_CODES` (they have no taxonomy-code dispatch of their own --
 # the passthrough writers select by source hierarchy, not code), so an
@@ -480,6 +588,13 @@ _REASON_TEXT = {
 }
 
 
+def is_t_validation_recoded_m1(entry: Mapping[str, object]) -> bool:
+    """True when stage 3b's T-validation pass moved *entry* from T to M1 --
+    content the research summary does not render (REASON_T_VALIDATION_RECODED)."""
+    return (entry.get("taxonomy_code") == _RESEARCH_SUMMARY_CODE
+            and entry.get(_T_VALIDATION_MARKER_KEY) is True)
+
+
 def _plural_entries(count: int) -> str:
     """'entry' for 1, 'entries' otherwise -- the noun in `_diversion_message`."""
     return "entry" if count == 1 else "entries"
@@ -521,6 +636,8 @@ def _diversion_message(code: str, count: int, reason: str,
       any of the ~20 routed sections could be the one whose renderer raised
       -- and points at the section-failure record rather than repeating the
       section name (`_diversion_message` has no `label`, only `code`).
+    - REASON_T_VALIDATION_RECODED (and REASON_INVALID_CODE): stage 3b's
+      recode named as the cause, checked before any routing-based reason.
     - Everything else (REASON_NO_RENDER_ROUTE, and REASON_RENDERER_DECLINED
       for `_RESEARCH_SUMMARY_CODE`): the shared `_REASON_TEXT` lookup.
     """
@@ -530,6 +647,10 @@ def _diversion_message(code: str, count: int, reason: str,
                 f"quarantined {'it' if count == 1 else 'them'}: the stage 3b "
                 f"taxonomy code was not a valid taxonomy code (see "
                 f"original_taxonomy_code in the stage 4 artifact)")
+    if reason == REASON_T_VALIDATION_RECODED:
+        return (f"{code}: {count} {noun} diverted to the Appendix — stage 3b "
+                f"T-validation recoded {'it' if count == 1 else 'them'} from T "
+                f"to {code}, which only the research summary renders")
     if reason == REASON_RECOVERED_UNRENDERED:
         verb = _plural_was(count)
         return (f"{code}: {count} {noun} classified {code} {verb} not "
@@ -641,6 +762,8 @@ def build_appendix_diversion_warnings(
         code = entry.get("taxonomy_code") or "?"
         if entry.get(_QUARANTINE_MARKER_KEY) == _QUARANTINE_MARKER_INVALID_CODE:
             reason = REASON_INVALID_CODE
+        elif is_t_validation_recoded_m1(entry):
+            reason = REASON_T_VALIDATION_RECODED
         else:
             reason = _appendix_diversion_reason(code, render_routed_codes, passthrough_codes)
         counts[(code, reason)] += 1
@@ -667,22 +790,25 @@ def _appendix_drop_reason(
     rendered: str,
     taxonomy_code: str | None = None,
     reasoning: str | None = None,
+    owner_tokens: OwnerTokens = OwnerTokens(),
 ) -> str | None:
     """The `DROP_*` reason *text* stays out of the appendix, or None to keep it.
 
     *rendered* is *text* with the readers' cell separators collapsed; it is
     passed in rather than recomputed so each survivor is rendered once.
 
-    *taxonomy_code* gates the three #885 structural checks (bare year, status
-    marker, ToC line -- see the module docstring and the comments above
+    *taxonomy_code* gates the four structural checks (bare year, status
+    marker, ToC line, rule line -- see the module docstring and the comments above
     `_BARE_YEAR_RE`) to T-coded entries only. Optional, defaulting to None
-    (which skips those three checks), so a caller checking only text shape --
+    (which skips those four checks), so a caller checking only text shape --
     `test_stage6_appendix_header_row_filter.py`'s unit tests among them --
     is unaffected.
 
     *reasoning* (the entry's `classification_reasoning`) feeds the #885
     residual check, `_confirmed_structural_reason`, which is likewise T-only
-    and additionally needs the text's own positive shape.
+    and additionally needs the text's own positive shape. *owner_tokens* (the
+    owner name stage 6 holds, see `_owner_signature_tokens`) lets the signature-block
+    shape recognise "Signed: <owner>" (#1221); empty skips that recognition.
     """
     if not text.strip():
         return DROP_BLANK
@@ -702,6 +828,8 @@ def _appendix_drop_reason(
             return DROP_STATUS_MARKER
         if _TOC_LINE_RE.match(text):
             return DROP_TOC_LINE
+        if _RULE_LINE_RE.match(stripped):
+            return DROP_RULE_LINE
     if is_near_template_instruction(text):
         return DROP_NEAR_TEMPLATE_INSTRUCTION
     if is_unanswered_prompt(text):
@@ -711,12 +839,13 @@ def _appendix_drop_reason(
     # Last, so every older check keeps the drop it already claimed; only
     # entries nothing else caught reach the two-signal residual test.
     if taxonomy_code == _APPENDIX_TAXONOMY_CODE:
-        return _confirmed_structural_reason(text, reasoning)
+        return _confirmed_structural_reason(text, reasoning, owner_tokens)
     return None
 
 
 def _filter_unmapped_entries(
     entries: Sequence[UnmappedEntry],
+    owner_tokens: OwnerTokens = OwnerTokens(),
 ) -> tuple[list[AppendixLine], Counter[str]]:
     """Split *entries* into the lines the appendix will show and a count of
     drops per `DROP_*` reason."""
@@ -730,6 +859,7 @@ def _filter_unmapped_entries(
             rendered,
             entry.get("taxonomy_code"),
             entry.get("classification_reasoning"),
+            owner_tokens,
         )
         if reason is None:
             kept.append((entry, rendered))
@@ -779,7 +909,9 @@ class AppendixSection:
     """Section T writers, mixed into `WCMTemplateGenerator`."""
 
     def _fill_appendix(
-        self, unmapped_entries: Sequence[UnmappedEntry]
+        self,
+        unmapped_entries: Sequence[UnmappedEntry],
+        cv_owner: Mapping[str, object] | None = None,
     ) -> list[UnmappedEntry]:
         """Write Section T for the entries that reached no other section.
 
@@ -798,7 +930,8 @@ class AppendixSection:
         if not unmapped_entries:
             return []
 
-        lines, dropped = _filter_unmapped_entries(unmapped_entries)
+        lines, dropped = _filter_unmapped_entries(
+            unmapped_entries, _owner_signature_tokens(cv_owner))
         if dropped:
             logger.info("Appendix: %s", _describe_dropped(dropped))
         if not lines:

@@ -7,6 +7,6 @@
   "5.4 blind `except Exception` (BLE001)": 80,
   "7.1 print() in library code (T201)": 676,
   "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4,
-  "8.3 missing annotations (ANN*, RUF012)": 523,
-  "8.3 typing syntax (UP*, RUF013)": 220
+  "8.3 missing annotations (ANN*, RUF012)": 519,
+  "8.3 typing syntax (UP*, RUF013)": 218
 }

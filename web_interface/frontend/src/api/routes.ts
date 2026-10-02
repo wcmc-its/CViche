@@ -46,6 +46,8 @@ export const runRoutes = {
    *  admin scope/filter query string, see buildRunListQuery) */
   list: (offset: number, limit: number, extra = '') =>
     `/api/runs?offset=${offset}&limit=${limit}${extra ? `&${extra}` : ''}`,
+  /** GET /api/runs/my-status-counts  (any user; counts over the caller's own runs only) */
+  myStatusCounts: () => '/api/runs/my-status-counts' as const,
   /** GET /api/runs/filter-options?:params  (admin; caller passes a pre-built query string) */
   filterOptions: (params: string) => `/api/runs/filter-options?${params}` as const,
   /** GET /api/runs/feedback-status */
@@ -59,6 +61,8 @@ export const feedbackRoutes = {
   get: (id: string) => `/api/run/${id}/feedback` as const,
   /** POST /api/run/:id/feedback  (submit feedback) */
   submit: (id: string) => `/api/run/${id}/feedback` as const,
+  /** GET /api/run/:id/feedback/all  (every reviewer's feedback; owner, admin or staff) */
+  all: (id: string) => `/api/run/${id}/feedback/all` as const,
 } as const
 
 export const adminRoutes = {
@@ -74,6 +78,8 @@ export const adminRoutes = {
   runScore: (runId: string) => `/api/admin/run/${runId}/score` as const,
   /** GET/PUT /api/admin/config */
   config: () => `/api/admin/config` as const,
+  /** GET (preview) / POST (publish) /api/admin/consent/publish */
+  consentPublish: () => `/api/admin/consent/publish` as const,
   /** GET/href /api/admin/export/:type  (csv export; type ∈ runs|users|consent|feedback) */
   export: (type: string) => `/api/admin/export/${type}` as const,
   /** Convenience for the single hard-coded feedback export (== export('feedback')) */
@@ -113,6 +119,24 @@ export const uploadRoutes = {
   upload: () => `/api/upload` as const,
 } as const
 
+export const batchRoutes = {
+  /** GET/POST /api/batches  (list visible batches / create one before uploading) */
+  batches: () => `/api/batches` as const,
+  /** GET /api/batches/:id  (the batch view) */
+  detail: (id: string) => `/api/batches/${encodeURIComponent(id)}` as const,
+  /** GET /api/queue  (dispatch mode and per-queue wait) */
+  queue: () => `/api/queue` as const,
+} as const
+
+export const inboxRoutes = {
+  /** GET /api/inbox  (the caller's emailed CVs held for confirmation) */
+  list: () => `/api/inbox` as const,
+  /** POST /api/inbox/:id/discard */
+  discard: (id: number) => `/api/inbox/${id}/discard` as const,
+  /** POST /api/inbox/submit  (create runs from held items) */
+  submit: () => `/api/inbox/submit` as const,
+} as const
+
 export const wsRoutes = {
   /** WS /ws/run/:id/stream  (live pipeline event stream; passed to getWebSocketUrl) */
   runStream: (id: string) => `/ws/run/${id}/stream` as const,
@@ -126,6 +150,8 @@ export const routes = {
   auth: authRoutes,
   consent: consentRoutes,
   upload: uploadRoutes,
+  batch: batchRoutes,
+  inbox: inboxRoutes,
   ws: wsRoutes,
 } as const
 

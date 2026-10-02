@@ -16,6 +16,7 @@ that decides *how a value should read* belongs in normalization.
 from .dates import (  # noqa: F401
     DATE_FORMATS,
     _MONTH_NAMES,
+    _source_leaves_year_open,
     format_date_for_section,
     format_date_range,
     normalize_iso_dates_in_text,

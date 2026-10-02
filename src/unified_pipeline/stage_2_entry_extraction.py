@@ -334,6 +334,96 @@ def collect_header_info(hierarchy_with_indices: list[dict]) -> dict[int, list[st
     return header_info
 
 
+# How much text may follow an unlocated heading's own words on its line and
+# still count as that heading -- room for a parenthetical note such as
+# "(selected)" or "(2015-2020)", not for a content line that merely opens
+# with the same word.
+_MAX_HEADING_SUFFIX_CHARS = 80
+
+
+class _UnlocatedHeading(NamedTuple):
+    """A stage-1a heading stage 1b kept in its hierarchy but could not place
+    on a document line (``element_idx`` None, not synthetic)."""
+    path: tuple[str, ...]
+
+
+def collect_unlocated_headings(hierarchy_with_indices: list[dict]) -> list[_UnlocatedHeading]:
+    """Every non-synthetic heading in stage 1b's hierarchy with no element_idx,
+    with its full hierarchy path, in document-outline order."""
+    found: list[_UnlocatedHeading] = []
+    pending = [(item, ()) for item in reversed(hierarchy_with_indices)]
+    while pending:
+        item, parent_path = pending.pop()
+        text = (item.get("text") or "").strip()
+        path = parent_path + (text,) if text else parent_path
+        if text and item.get("element_idx") is None and not item.get("synthetic"):
+            found.append(_UnlocatedHeading(path))
+        pending.extend((child, path) for child in reversed(item.get("children") or []))
+    return found
+
+
+def _collapse_whitespace(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _line_is_heading(line_text: str, heading_text: str) -> bool:
+    """True when the line is the heading, or the heading followed by a short
+    non-word suffix ("ABSTRACTS (selected)"). Case-sensitive: 1a copies the
+    heading's text from the line itself."""
+    line = _collapse_whitespace(line_text)
+    heading = _collapse_whitespace(heading_text)
+    if not heading or not line.startswith(heading):
+        return False
+    suffix = line[len(heading):]
+    if not suffix:
+        return True
+    return not suffix[0].isalnum() and len(suffix) <= _MAX_HEADING_SUFFIX_CHARS
+
+
+def _repath_section_tail(entries: list[dict], heading_pos: int, new_path: list[str]) -> int:
+    """Move the entries after ``entries[heading_pos]`` that share its section
+    under ``new_path``, stopping at the next header or section change.
+    Returns how many entries moved."""
+    old_path = entries[heading_pos]["hierarchy"]
+    moved = 0
+    for entry in entries[heading_pos + 1:]:
+        if entry["element_type"] == "header" or entry["hierarchy"] != old_path:
+            break
+        entry["hierarchy"] = list(new_path)
+        moved += 1
+    return moved
+
+
+def promote_unlocated_headings(entries: list[dict], hierarchy_with_indices: list[dict]) -> list[dict]:
+    """Restore a heading stage 1b failed to place (autopsy 2026-10-02, class 6).
+
+    1b leaves such a heading's line inside the previous section, the LLM
+    rightly claims no entry for it, and it was emitted as a ``break`` -- so
+    every entry under it inherited the previous section's hierarchy (an
+    ABSTRACTS heading lost, so 3b coded its abstracts as articles). A break whose
+    line is that heading becomes a ``header`` carrying the heading's path, and
+    the rest of its section moves under it. Only a heading with exactly one
+    matching break is promoted; an ambiguous one is logged and left alone.
+    ``entries`` must be sorted by element index; it is updated in place and
+    returned.
+    """
+    for heading in collect_unlocated_headings(hierarchy_with_indices):
+        positions = [
+            pos for pos, entry in enumerate(entries)
+            if entry["element_type"] == "break" and _line_is_heading(entry.get("text") or "", heading.path[-1])
+        ]
+        if len(positions) != 1:
+            if positions:
+                logger.warning(f"  Unlocated heading {list(heading.path)} matches {len(positions)} break lines; left as breaks")
+            continue
+        pos = positions[0]
+        moved = _repath_section_tail(entries, pos, list(heading.path))
+        entries[pos]["element_type"] = "header"
+        entries[pos]["hierarchy"] = list(heading.path)
+        logger.info(f"  Promoted break at {entries[pos]['element_idx_start']} to unlocated heading {list(heading.path)}; {moved} entries moved under it")
+    return entries
+
+
 def remove_subset_delimiters(delimiters: list) -> list:
     """
     Remove delimiters that are subsets of larger delimiters.
@@ -351,11 +441,12 @@ def remove_subset_delimiters(delimiters: list) -> list:
         return delimiters
 
     def normalize_idx(idx):
-        """Convert index to sortable tuple (main_idx, sub_idx)."""
+        """Convert index to a sortable tuple, one float per dotted part:
+        (main_idx, row) or, for a pseudo-row, (main_idx, row, pseudo_row).
+        "92.5.10" must not read as "92.5.1" -- float("5.10") is 5.1."""
         if isinstance(idx, str):
             if "." in idx:
-                parts = idx.split(".", 1)
-                return (float(parts[0]), float(parts[1]))
+                return tuple(float(part) for part in idx.split("."))
             elif idx.startswith("table_"):
                 return (1000000 + int(idx.split("_")[1]), 0)
             else:
@@ -366,7 +457,7 @@ def remove_subset_delimiters(delimiters: list) -> list:
         """True when idx carries no ".row" sub-index (i.e. a whole element)."""
         return not (isinstance(idx, str) and "." in idx)
 
-    def normalize_span(d: dict) -> tuple[tuple[float, float], tuple[float, float]]:
+    def normalize_span(d: dict) -> tuple[tuple[float, ...], tuple[float, ...]]:
         """Return (start, end) sort keys for a delimiter.
 
         A mixed delimiter -- a sub-indexed start ("9.1") paired with a bare
@@ -493,6 +584,36 @@ def remove_subset_delimiters(delimiters: list) -> list:
     return kept
 
 
+class _ExactNumber(float):
+    """A JSON decimal that remembers the digits the model wrote.
+
+    A table row's index is the text ``"<table>.<row>"``, and the model writes it
+    as a bare JSON number: ``474.10`` is row 10 of table 474. As a float it is
+    474.1, which is row 1 (#1228) -- the same row key as the model's own row-1
+    entries, so a range starting at row 10 read as a range starting at row 1.
+    The literal is the only thing that names the row.
+    """
+
+    __slots__ = ("literal",)
+
+    def __new__(cls, literal: str) -> _ExactNumber:
+        number = super().__new__(cls, literal)
+        number.literal = literal
+        return number
+
+
+def parse_delimiter_reply(reply_text: str) -> list | dict:
+    """``json.loads`` for a stage-2 reply, with every decimal keeping its literal
+    text for ``delimiter_index_text``. Numbers still behave as floats."""
+    return json.loads(reply_text, parse_float=_ExactNumber)
+
+
+def delimiter_index_text(value: object) -> str:
+    """The row-index text the model wrote: ``474.10`` for a decimal parsed by
+    ``parse_delimiter_reply``, ``str(value)`` for anything else."""
+    return value.literal if isinstance(value, _ExactNumber) else str(value)
+
+
 def row_range_entry(start_key: str, end_key: str, batch_elem_lookup: dict,
                     confidence: float) -> tuple[dict | None, list[str]]:
     """The entry for a delimiter on table sub-rows, and the row keys it claims.
@@ -503,9 +624,10 @@ def row_range_entry(start_key: str, end_key: str, batch_elem_lookup: dict,
     let that drop the #420-recovered rows as "contained" -- AV00TQ's 24
     teaching lines in row 80.2 vanished behind a header-row-only entry
     (#1126). When the span can't be resolved row by row (another table, an
-    end before the start -- "80.10" arrives as the float 80.1 -- or a row
-    missing from the batch), the entry shrinks to its start row, so the span
-    stays honest and #420 recovery emits the rest.
+    end before the start, or a row missing from the batch), the entry shrinks
+    to its start row, so the span stays honest and #420 recovery emits the
+    rest. The keys must be the index text the model wrote
+    (``delimiter_index_text``): a float-parsed "80.10" is "80.1", row 1.
 
     Returns (None, []) when the start row is not in the batch.
     """
@@ -540,11 +662,12 @@ def recover_unclaimed_table_rows(batch_elements: list, claimed_row_keys: set) ->
     """Return entries for table rows no delimiter claimed (#420).
 
     The model returns sub-row indices as JSON NUMBERS, so a row index with a
-    trailing zero collapses: "114.10" parses to the float 114.1, ``str()``
-    renders it back as "114.1", and the lookup lands on row 1 -- row 10 is
+    trailing zero used to collapse: "114.10" parsed to the float 114.1, ``str()``
+    rendered it back as "114.1", and the lookup landed on row 1 -- row 10 was
     unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50 exactly this way,
-    and element 109 lost row 10. Rows the model simply omitted disappear
-    identically. Either way the content survived only inside whatever
+    and element 109 lost row 10. ``parse_delimiter_reply`` now keeps the index
+    text (#1228), so this recovers only rows the model simply omitted, which
+    disappear identically. Either way the content survived only inside whatever
     whole-table entry the model happened to emit, which is what made those
     blobs load-bearing (and what made #227's dedup drop real content loss).
 
@@ -581,7 +704,8 @@ def _dedup_idx_key(idx):
     """Normalize an element index to a comparable (main, sub) tuple.
 
     Handles the mixed representations stage 2 emits for the SAME element:
-    int 30, float 30.0, str "30.0", sub-row "22.2", and "table_3".
+    int 30, float 30.0, str "30.0", sub-row "22.2", pseudo-row "22.2.1" (one
+    float per dotted part, so "22.2.10" is not "22.2.1"), and "table_3".
     """
     if isinstance(idx, str):
         if idx.startswith("table_"):
@@ -590,9 +714,8 @@ def _dedup_idx_key(idx):
             except (ValueError, IndexError):
                 return (str(idx), 0.0)
         if "." in idx:
-            parts = idx.split(".", 1)
             try:
-                return (float(parts[0]), float(parts[1]))
+                return tuple(float(part) for part in idx.split("."))
             except ValueError:
                 return (str(idx), 0.0)
     try:
@@ -1007,7 +1130,7 @@ Respond **only** with a JSON array containing the identified entries. If no entr
             )
 
             result_text = llm_result["content"]
-            result = json.loads(result_text)
+            result = parse_delimiter_reply(result_text)
 
             # Accumulate cost
             total_cost += llm_result["cost"]
@@ -1056,8 +1179,8 @@ Respond **only** with a JSON array containing the identified entries. If no entr
 
                     # Handle row sub-indices (floats like 22.2 or strings like "22.2")
                     # These come from table_content rows with format "parent_idx.row_idx"
-                    start_idx_str = str(start_idx)
-                    end_idx_str = str(end_idx)
+                    start_idx_str = delimiter_index_text(start_idx)
+                    end_idx_str = delimiter_index_text(end_idx)
                     if "." in start_idx_str or "." in end_idx_str:
                         # Row sub-index - look up in batch elements by string key
                         entry, row_keys = row_range_entry(
@@ -1101,10 +1224,10 @@ Respond **only** with a JSON array containing the identified entries. If no entr
             # blob whose rows are now all present becomes a provable duplicate and
             # is collapsed by the #418 coverage check.
             #
-            # ponytail: a backstop, not a cure. The real fix is to stop round
-            # tripping these indices through JSON numbers -- emit them as strings
-            # ("114.10") or renumber rows to unique ints. Do that and this loop
-            # only ever recovers rows the model genuinely skipped.
+            # The indices no longer round trip through floats (#1228): this loop
+            # only recovers rows the model genuinely skipped. A row key that is
+            # not exactly the text the model wrote would bring the old collapse
+            # back, which is why delimiter_index_text exists.
             recovered = recover_unclaimed_table_rows(batch_elements, claimed_row_keys)
             all_validated_entries.extend(recovered)
             if recovered:
@@ -1470,6 +1593,22 @@ def _drop_foreign_template_instructions(entries: list[dict]) -> list[dict]:
     ]
 
 
+def _entry_sort_key(entry: dict) -> tuple[float, float]:
+    """Sort key over mixed int/string element indices (e.g., 22 vs "22.2")."""
+    idx = entry["element_idx_start"]
+    if isinstance(idx, str) and "." in idx:
+        # Row sub-index like "22.2" -> (22, 2)
+        parts = idx.split(".", 1)
+        return (float(parts[0]), float(parts[1]) if len(parts) > 1 else 0)
+    elif isinstance(idx, str):
+        # String index like "table_0" -> (1000000 + idx number)
+        if idx.startswith("table_"):
+            return (1000000 + int(idx.split("_")[1]), 0)
+        return (float(idx), 0)
+    else:
+        return (float(idx), 0)
+
+
 def run_stage_2(
     docx_path: str,
     hierarchy_json_path: str = None,
@@ -1654,22 +1793,7 @@ def run_stage_2(
         all_entries.extend(section_entries)
 
     # Sort entries by element_idx_start for consistent output
-    # Handle mixed int/string indices (e.g., 22 vs "22.2")
-    def sort_key(entry):
-        idx = entry["element_idx_start"]
-        if isinstance(idx, str) and "." in idx:
-            # Row sub-index like "22.2" -> (22, 2)
-            parts = idx.split(".", 1)
-            return (float(parts[0]), float(parts[1]) if len(parts) > 1 else 0)
-        elif isinstance(idx, str):
-            # String index like "table_0" -> (1000000 + idx number)
-            if idx.startswith("table_"):
-                return (1000000 + int(idx.split("_")[1]), 0)
-            return (float(idx), 0)
-        else:
-            return (float(idx), 0)
-
-    all_entries.sort(key=sort_key)
+    all_entries.sort(key=_entry_sort_key)
 
     # Calculate coverage statistics
     content_entries = [e for e in all_entries if e["element_type"] not in ("header", "break")]
@@ -1688,6 +1812,7 @@ def run_stage_2(
     # Drop empty content entries and exact duplicates (#211). Unconditional:
     # unlike the instruction filter above, this never removes real content.
     all_entries = filter_extraction_noise(all_entries)
+    all_entries = promote_unlocated_headings(all_entries, hierarchy)
 
     # Recompute coverage buckets after filtering so reported counts are accurate.
     content_entries = [e for e in all_entries if e["element_type"] not in ("header", "break")]

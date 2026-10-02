@@ -49,7 +49,7 @@ const ANSWER_FIELDS: { key: keyof FeedbackData; label: string }[] = [
   { key: 'issue_split_merged', label: 'Split / merged' },
   { key: 'issue_wrong_section', label: 'Wrong section' },
   { key: 'issue_inaccurate', label: 'Inaccurate' },
-  { key: 'issue_ai_enrichment', label: 'AI enrichment' },
+  { key: 'issue_ai_enrichment', label: 'PubMed enrichment' },
   { key: 'issue_formatting', label: 'Formatting' },
   { key: 'issue_locations', label: 'Issue locations' },
   { key: 'likelihood_to_recommend', label: 'Likelihood to recommend (1-5)' },

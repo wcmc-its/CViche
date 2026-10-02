@@ -19,6 +19,8 @@ import logging
 import re
 from typing import NamedTuple
 
+from unified_pipeline.core.run_id import is_run_id
+
 logger = logging.getLogger(__name__)
 
 # The document-uid convention this module parses: an optional "CV_" prefix,
@@ -53,9 +55,13 @@ _APPENDED_INITIALS_MIN_BASE_CHARS = 3
 
 
 def _extract_name_from_uid(uid: str) -> str:
-    """Extract formatted name from document UID."""
+    """Extract formatted name from document UID; '' for a run id (#457), which
+    names nobody -- the cover then reads as missing, not as the title-cased id."""
+    stem = uid.removeprefix(_UID_PREFIX)
+    if is_run_id(stem):
+        return ''
     # Remove year prefix (e.g., "2015_Wende" -> "Wende")
-    parts = uid.removeprefix(_UID_PREFIX).split('_')
+    parts = stem.split('_')
 
     # Filter out year
     parts = [p for p in parts if not p.isdigit() and len(p) > 2]
@@ -77,8 +83,14 @@ def _extract_last_name_from_uid(uid: str) -> str:
     one call site that can check it against real citation text --
     `_resolve_uid_owner_surname` in sections/bibliography.py, which uses
     `_strip_appended_initials` below (#665 item 1).
+
+    Returns '' for a run id (#457): it names nobody, and a letters-only one
+    would otherwise become a surname to match citation authors against.
     """
-    parts = uid.removeprefix(_UID_PREFIX).split('_')
+    stem = uid.removeprefix(_UID_PREFIX)
+    if is_run_id(stem):
+        return ''
+    parts = stem.split('_')
 
     # Filter out years and very short parts
     parts = [p for p in parts if not p.isdigit() and len(p) >= _UID_NAME_PART_MIN_CHARS]

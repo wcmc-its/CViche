@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import type { Stats } from '../types'
 import { getAdminStats } from '../api/admin'
@@ -15,12 +16,22 @@ type TabName = typeof TABS[number]
 // (#1111), Settings is user management and config.
 const STAFF_TABS: readonly TabName[] = ['Feedback']
 
+/** Query param that opens a tab directly, e.g. /admin?tab=Feedback. */
+const TAB_PARAM = 'tab'
+
+/** The tab the param names, if this viewer has it; else their first tab, so
+ *  /admin?tab=Runs never opens a cost tab for staff. */
+function tabFromParam(value: string | null, tabs: readonly TabName[]): TabName {
+  return tabs.find((tab) => tab === value) ?? tabs[0]
+}
+
 export default function AdminDashboard() {
   const isAdmin = useIsAdmin()
   const tabs = isAdmin ? TABS : STAFF_TABS
   const [stats, setStats] = useState<Stats | null>(null)
   const [loading, setLoading] = useState(isAdmin)
-  const [activeTab, setActiveTab] = useState<TabName>(tabs[0])
+  const [searchParams] = useSearchParams()
+  const [activeTab, setActiveTab] = useState<TabName>(() => tabFromParam(searchParams.get(TAB_PARAM), tabs))
 
   const fetchStats = async () => {
     try {

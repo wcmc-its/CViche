@@ -201,7 +201,8 @@ def _normalize_training_entry(
         location_is_enriched=location_is_enriched,
         # Dates - format according to C/C1/C2/C3 requirements (mm/yy - mm/yy)
         dates=format_date_range(fields.get('start_date', ''),
-                                fields.get('end_date', ''), taxonomy_code),
+                                fields.get('end_date', ''), taxonomy_code,
+                                entry.get('text', '')),
         source_entry=entry,
     )
 

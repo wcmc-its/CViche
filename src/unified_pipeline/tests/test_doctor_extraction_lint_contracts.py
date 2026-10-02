@@ -18,6 +18,7 @@ Run:
     python3 -m pytest src/unified_pipeline/tests/test_doctor_extraction_lint_contracts.py -q -p no:cacheprovider
 """
 import itertools
+import json
 from collections import Counter
 import sys
 from pathlib import Path
@@ -57,9 +58,19 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_under_extraction,
     lint_wrong_start_date,
 )
+from unified_pipeline.doctor.lints import extraction as extraction_lints  # noqa: E402
+from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
+    DEGREE_YEAR_LEAD,
+    FIELD_EVIDENCE_MAX_VALUES,
+    FIELD_EVIDENCE_VALUE_CHARS,
+    IMPLAUSIBLE_YEAR_FLOOR,
+    lint_implausible_year,
+    lint_offschema_fields,
+)
 from unified_pipeline.doctor.shared import (  # noqa: E402
     _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack)
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 
 
 # ==========================================================================
@@ -579,6 +590,31 @@ def test_under_extraction_min_records_boundary():
     assert len(lint_under_extraction({"entries": [at]})) == 1
 
 
+
+def _stage4_records_entry(code, field):
+    """An entry whose two stage-4 records carry its whole text; its own
+    field (the last record, as stage 4 leaves it) carries one line."""
+    text = _padded_under_extraction_text(4, UNDER_EXTRACTION_MIN_CHARS + 50)
+    lines = text.split("\n")
+    records = [{field: "\n".join(lines[:2])}, {field: "\n".join(lines[2:])}]
+    return {"element_type": "paragraph", "element_idx_start": 1, "taxonomy_code": code,
+            "text": text, "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records},
+            "extraction_coverage": {"extraction_coverage_percent": 100.0}}
+
+
+def test_under_extraction_ignores_stage4_records_no_renderer_writes():
+    """#1299: T has no fan-out renderer, so its stage-4 records never
+    render and must not count toward coverage."""
+    entry = _stage4_records_entry("T", "title")
+    entry["extracted_fields"] = {"title": "zz", STAGE4_RECORDS_KEY:
+                                 entry["extracted_fields"][STAGE4_RECORDS_KEY]}
+    assert len(lint_under_extraction({"entries": [entry]})) == 1
+
+
+def test_under_extraction_credits_stage4_records_that_fan_out():
+    assert lint_under_extraction({"entries": [_stage4_records_entry("H", "award_name")]}) == []
+
+
 _OVERLAP_WORDS = [''.join(c) for c in itertools.islice(
     itertools.product('abcdefghijklmnopqrstuvwxyz', repeat=5), 100)]
 _OVERLAP_ENTRY_TEXT = " ".join(_OVERLAP_WORDS)
@@ -624,6 +660,79 @@ def test_lint_dedup_drops_repeated_tokens_fully_present_still_safe():
     same = {"code": "A", "metric": "j",
             "dropped_text": "grant grant funded", "kept_text": "funded grant grant x"}
     assert lint_dedup_drops({"dedup_decisions": [same]}) == []
+
+
+# #666: a fully-covered drop whose extracted name differs from the kept entry's
+# and is on the page as no cell of its own.
+
+def _named_decision(dropped_name, kept_name):
+    return {"code": "Q4D", "metric": "containment=1.00",
+            "dropped_text": dropped_name, "kept_text": kept_name,
+            "dropped_fields": {"journal_name": dropped_name},
+            "kept_fields": {"journal_name": kept_name}}
+
+
+def test_dedup_drops_info_when_dropped_name_absent_from_page():
+    report = {"dedup_decisions": [_named_decision("Example Optics", "European Example Optics")]}
+    blocks = [("p", "Reviewer"), ("table", "European Example Optics\nJournal Reviewer")]
+    result = lint_dedup_drops(report, blocks)
+    assert len(result) == 1
+    assert result[0]["severity"] == "INFO" and result[0]["lint"] == "dedup_drops"
+    assert "Q4D" in result[0]["evidence"][0]
+
+
+def test_dedup_drops_quiet_when_dropped_name_is_its_own_cell():
+    report = {"dedup_decisions": [_named_decision("Example Optics", "European Example Optics")]}
+    blocks = [("table", "European Example Optics\nExample Optics")]
+    assert lint_dedup_drops(report, blocks) == []
+
+
+def test_dedup_drops_quiet_when_names_match_after_normalisation():
+    report = {"dedup_decisions": [_named_decision("Example Optics", "example  optics.")]}
+    assert lint_dedup_drops(report, [("p", "unrelated")]) == []
+
+
+def test_dedup_drops_info_needs_rendered_blocks_and_fields():
+    report = {"dedup_decisions": [_named_decision("Example Optics", "European Example Optics")]}
+    assert lint_dedup_drops(report) == []
+    legacy = {"dedup_decisions": [{"code": "Q4D", "metric": "m",
+                                   "dropped_text": "Example Optics",
+                                   "kept_text": "European Example Optics"}]}
+    assert lint_dedup_drops(legacy, [("p", "unrelated")]) == []
+
+
+def test_dedup_drops_info_uses_institution_for_appointments():
+    decision = {"code": "D2", "metric": "jaccard=0.82",
+                "dropped_text": "Example Hospital Example Title 2001",
+                "kept_text": "Sample Hospital Example Hospital Example Title 2001",
+                "dropped_fields": {"institution": "Example Hospital"},
+                "kept_fields": {"institution": "Sample Hospital"}}
+    result = lint_dedup_drops({"dedup_decisions": [decision]},
+                              [("table", "Sample Hospital\nExample Title")])
+    assert [f["severity"] for f in result] == ["INFO"]
+
+
+def test_dedup_drops_quiet_when_only_the_dropped_entry_fills_a_name():
+    decision = _named_decision("Example Optics", "European Example Optics")
+    decision["kept_fields"] = {}
+    assert lint_dedup_drops({"dedup_decisions": [decision]}, [("p", "x")]) == []
+
+
+def test_dedup_drops_info_evidence_is_capped():
+    report = {"dedup_decisions": [
+        _named_decision(f"Example Optics {n}", f"European Example Optics {n} Letters")
+        for n in range(extraction_lints.DEDUP_EVIDENCE_LIMIT + 3)]}
+    result = lint_dedup_drops(report, [("p", "x")])
+    assert len(result[0]["evidence"]) == extraction_lints.DEDUP_EVIDENCE_LIMIT
+    assert str(extraction_lints.DEDUP_EVIDENCE_LIMIT + 3) in result[0]["message"]
+
+
+def test_dedup_drops_reports_warn_and_info_together():
+    poorly = {"code": "N1", "metric": "jaccard",
+              "dropped_text": "alpha beta gamma delta", "kept_text": "alpha"}
+    report = {"dedup_decisions": [poorly, _named_decision("Example Optics", "European Example Optics")]}
+    result = lint_dedup_drops(report, [("p", "x")])
+    assert [f["severity"] for f in result] == ["WARN", "INFO"]
 
 
 def test_alphanumeric_tokens_unicode_diaeresis_folds_to_one_token():
@@ -1049,6 +1158,393 @@ def test_dedup_and_render_tokens_are_unicode_aware():
     # #722: CJK never forms a token (excluded, not measured).
     assert _long_word_tokens("東京大学医学部教授 한국어로된논문제목") == set()
     assert _long_word_tokens("東京大学医学部 Blorvane") == {"blorvane"}
+
+
+# ==========================================================================
+# lint_offschema_fields: a value under a key no renderer reads. Every value
+# below is invented.
+
+def _fields_entry(code, fields, text="Example entry", idx=11):
+    return {"taxonomy_code": code, "element_idx_start": idx, "text": text,
+            "extracted_fields": fields}
+
+
+def _offschema(*entries):
+    return lint_offschema_fields({"entries": list(entries)})
+
+
+# One non-date schema value per code, so the entry renders from its fields
+# rather than falling back to its raw text (the lint skips that case).
+_ANCHOR = {"R": {"title": "Talk one"}, "I": {"organization": "Society A"},
+           "D1": {"title": "Lecturer"}, "P": {"institution": "Example College"},
+           "N3B": {"mentee_name": "A. Mentee"}, "B1": {"degree": "BA"},
+           "K1": {"course_title": "Course"}, "S1": {"title": "Paper"},
+           "S8": {"title": "Paper"}, "R1": {"title": "Talk"}, "M2C": {"title": "Grant"},
+           "H": {"award_name": "Prize"}, "A": {"name": "Owner"},
+           "T": {"description": "x"}, "G": {"organization": "Example Org"}}
+
+
+def _anchored(code, fields, **kwargs):
+    return _fields_entry(code, {**_ANCHOR[code], **fields}, **kwargs)
+
+
+def test_offschema_record_dict_sharing_a_schema_key_is_warn():
+    findings = _offschema(_anchored("R", {
+        "title": "Talk one",
+        "additional_entry": {"title": "Talk two", "location": "Springfield"}}))
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "offschema_fields"
+    assert findings[0]["severity"] == "WARN"
+    assert "`additional_entry`" in findings[0]["message"]
+    assert "1 R entry" in findings[0]["message"]
+    assert "1 holds a whole record" in findings[0]["message"]
+    assert findings[0]["evidence"] == [
+        'entry 11: {"title": "Talk two", "location": "Springfield"}']
+
+
+def test_offschema_dict_sharing_no_schema_key_is_info():
+    findings = _offschema(_anchored("R", {"extra": {"colour": "blue"}}))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_numbered_schema_field_is_warn():
+    findings = _offschema(_anchored(
+        "I", {"organization": "Society A", "organization_2": "Society B"}))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "`organization_2`" in findings[0]["message"]
+
+
+def test_offschema_numbered_key_off_the_schema_is_info():
+    findings = _offschema(_anchored("I", {"widget_2": "Society B"}))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_single_record_list_is_warn():
+    findings = _offschema(_anchored("D1", {"appointments": [
+        {"title": "Lecturer", "institution": "Example College"}]}))
+    assert [f["severity"] for f in findings] == ["WARN"]
+
+
+def test_offschema_list_of_strings_is_info():
+    findings = _offschema(_anchored("D1", {"keywords": ["one", "two"]}))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_scalar_is_info_and_names_the_fact():
+    findings = _offschema(_anchored("B1", {"degree": "BA", "honors": "with distinction"}))
+    assert [f["severity"] for f in findings] == ["INFO"]
+    assert "each holds one fact" in findings[0]["message"]
+    assert findings[0]["evidence"] == ["entry 11: with distinction"]
+
+
+def test_offschema_a_record_list_fan_out_splits_is_not_reported():
+    """Stage 6 renders each record of this list as its own child entry."""
+    entry = _anchored("P", {"committees": [
+        {"committee_name": "Alpha Board", "role": "Chair"},
+        {"committee_name": "Beta Panel", "role": "Member"}]},
+        text="Alpha Board Chair\tBeta Panel Member")
+    assert _offschema(entry) == []
+
+
+def test_offschema_a_record_list_fan_out_declines_is_warn():
+    """Same list, but the text holds a token no rendered field carries, so
+    fan-out keeps the entry whole and the list is never read."""
+    entry = _anchored("P", {"committees": [
+        {"committee_name": "Alpha Board", "role": "Chair"},
+        {"committee_name": "Beta Panel", "role": "Member"}]},
+        text="Alpha Board Chair\tBeta Panel Member Gamma")
+    assert [f["severity"] for f in _offschema(entry)] == ["WARN"]
+
+
+def test_offschema_stage4_records_fan_out_splits_is_not_reported():
+    """Stage 4 keeps every record the LLM returned under `stage4_records`, and
+    stage 6 hands that key to fan-out, which renders each as its own row."""
+    entry = _anchored("I", {"organization": "Society B", STAGE4_RECORDS_KEY: [
+        {"organization": "Society A", "membership_type": "Member"},
+        {"organization": "Society B", "membership_type": "Fellow"}]},
+        text="Societies: Society A Member\tSociety B Fellow")
+    # "Societies" is held by no field, so the generic list rule would decline;
+    # only the stage-4 records path splits this entry.
+    assert _offschema(entry) == []
+
+
+def test_offschema_stage4_records_fan_out_declines_is_warn():
+    """A record with no value its section writes makes fan-out decline the
+    whole list, so the records are never read."""
+    entry = _anchored("I", {"organization": "Society B", STAGE4_RECORDS_KEY: [
+        {"notes": "Founding member"},
+        {"organization": "Society B", "membership_type": "Fellow"}]},
+        text="Founding member\tSociety B Fellow")
+    findings = _offschema(entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert f"`{STAGE4_RECORDS_KEY}`" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("entry", [
+    _anchored("I", {"organization": "Society A"}),             # built-in schema key
+    _anchored("R", {"scope": "National"}),                     # config-only, extract false
+    _anchored("N3B", {"thesis_title": "Example thesis"}),     # built-in only
+    _anchored("R", {"pmid": "123"}),                           # stage-4 identifiers
+    _anchored("R", {"pmcid": "PMC1"}),
+    _anchored("R", {"doi": "10.1/x"}),
+    _anchored("R1", {"extra": "x"}),                           # no schema at all
+    _anchored("M2C", {"percent_effort": "5%"}),                # stage-4 effort
+    _anchored("H", {"date_range": "2001-2003"}),               # date-named
+    _anchored("H", {"start_date_1": "2001"}),                  # numbered date
+    _anchored("B1", {"dates_attended": {"start_date": "1990"}}),
+    _anchored("I", {"extra": ""}),                             # blank values
+    _anchored("I", {"extra": None}),
+    _anchored("I", {"extra": []}),
+    _anchored("I", {"extra": {}}),
+    _anchored("A", {"school": "Example School"}),              # personal data
+    _anchored("T", {"extra": "x"}),                            # text-rendered
+    _anchored("G", {"extra": "x"}),
+    _anchored("S1", {"other_id": "x"}),                        # publication (5d)
+    _anchored("S1", {"notes": "x"}),
+    _anchored("K1", {"description": "x"}),                     # teaching (5c)
+    _fields_entry("I", {"extra": "x"}),                            # renders its text:
+    _fields_entry("I", {"start_date": "2001", "extra": "x"}),      # a one-fact value
+    _fields_entry("I", {"organization": "", "end_date": "2001", "extra": "x"}),  # skipped
+    _anchored("S8", {"journal_or_source": "x"}),
+    _fields_entry("I", "not an object"),                           # malformed fields
+    _fields_entry("I", None),
+])
+def test_offschema_silent_when_a_renderer_or_a_rule_accounts_for_the_key(entry):
+    assert _offschema(entry) == []
+
+
+@pytest.mark.parametrize("fields", [
+    {"start_date": "2001", "appointments": [
+        {"title": "Lecturer", "institution": "Example College"}]},  # list of objects
+    {"start_date": "2001", "organization_2": "Society B"},           # numbered field
+    {"end_date": "2001", "extra": {"organization": "Society B"}},    # schema-key object
+])
+def test_offschema_record_on_an_entry_rendering_its_text_is_warn(fields):
+    """The raw text an entry with only dates falls back to does not carry a
+    whole record, so the one-fact skip never covers a record-shaped value."""
+    findings = _offschema(_fields_entry("I", fields))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "1 holds a whole record" in findings[0]["message"]
+
+
+def test_offschema_entry_rendering_its_text_reports_its_record_but_not_its_fact():
+    findings = _offschema(_fields_entry("D1", {
+        "start_date": "2001", "note": "visiting",
+        "appointments": [{"title": "Lecturer"}, {"title": "Reader"}]}))
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "appointments")]
+
+
+def test_field_lint_constants_are_pinned():
+    assert FIELD_EVIDENCE_VALUE_CHARS == 100
+    assert FIELD_EVIDENCE_MAX_VALUES == 3
+    assert DEGREE_YEAR_LEAD == 10
+
+
+def test_offschema_a_key_merely_containing_date_is_not_a_date_key():
+    findings = _offschema(_anchored("I", {"candidate": "x", "update": "y"}))
+    assert [f["message"].split("`")[1] for f in findings] == ["candidate", "update"]
+
+
+def test_offschema_list_mixing_objects_and_strings_is_info():
+    findings = _offschema(_anchored("D1", {"appointments": [
+        {"title": "Lecturer"}, "Reader"]}))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_config_comment_entries_and_null_fields_are_tolerated(
+        monkeypatch, tmp_path):
+    config = tmp_path / "schemas.json"
+    config.write_text(json.dumps({"schemas": {
+        "__NOTE_example": "a comment string, not a schema",
+        "I": {"fields": {"region": {"extract": False}}},
+        "R": {"fields": None}}}))
+    monkeypatch.setattr(extraction_lints, "FIELD_SCHEMA_CONFIG_PATH", config)
+    assert _offschema(_anchored("I", {"region": "North"})) == []
+    # `scope` is declared only by the real config file, not the built-ins.
+    assert len(_offschema(_anchored("R", {"scope": "National"}))) == 1
+
+
+def test_offschema_a_rendered_field_outside_both_schemas_is_not_reported(monkeypatch):
+    """`fan_out._RENDERED_FIELDS` is the third source of 'something reads
+    this key'; no code needs it today, so plant one."""
+    monkeypatch.setattr(extraction_lints, "_RENDERED_FIELDS",
+                        {"I": frozenset({"chapter"})})
+    assert _offschema(_anchored("I", {"chapter": "Local"})) == []
+    assert len(_offschema(_anchored("I", {"region": "Local"}))) == 1
+
+
+def test_offschema_one_finding_per_code_and_key_sorted_with_capped_evidence():
+    entries = [_anchored("N3B", {"outcome": f"result {i}"}, idx=i)
+               for i in range(FIELD_EVIDENCE_MAX_VALUES + 2)]
+    entries.append(_anchored("B1", {"honors": "cum laude"}, idx=90))
+    entries.append(_anchored("B1", {"honors": "magna"}, idx=91))
+    findings = _offschema(*entries)
+    assert [f["message"].split(":")[0] for f in findings] == [
+        "2 B1 entries", f"{FIELD_EVIDENCE_MAX_VALUES + 2} N3B entries"]
+    assert len(findings[1]["evidence"]) == FIELD_EVIDENCE_MAX_VALUES
+    assert findings[1]["evidence"][0] == "entry 0: result 0"
+
+
+def test_offschema_warn_when_any_value_of_the_key_is_a_record():
+    findings = _offschema(
+        _anchored("R", {"additional_entry": "free text"}, idx=1),
+        _anchored("R", {"additional_entry": {"title": "Talk"}}, idx=2),
+        _anchored("R", {"additional_entry": {"title": "Talk 2"}}, idx=3))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "2 hold a whole record" in findings[0]["message"]
+
+
+def test_offschema_evidence_value_is_truncated():
+    long_value = "x" * (FIELD_EVIDENCE_VALUE_CHARS + 50)
+    findings = _offschema(_anchored("I", {"extra": long_value}))
+    assert findings[0]["evidence"] == [
+        "entry 11: " + "x" * FIELD_EVIDENCE_VALUE_CHARS]
+
+
+def test_offschema_reads_the_config_file_and_fails_closed_without_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(extraction_lints, "FIELD_SCHEMA_CONFIG_PATH",
+                        tmp_path / "absent.json")
+    with pytest.raises(FileNotFoundError):
+        _offschema(_anchored("I", {"organization": "Society A"}))
+
+
+def test_offschema_leaves_the_entry_alone():
+    entry = _anchored("P", {"committees": [
+        {"committee_name": "Alpha Board", "role": "Chair"},
+        {"committee_name": "Beta Panel", "role": "Member"}]},
+        text="Alpha Board Chair\tBeta Panel Member")
+    before = json.dumps(entry, sort_keys=True)
+    _offschema(entry)
+    assert json.dumps(entry, sort_keys=True) == before
+
+
+# ==========================================================================
+# lint_implausible_year: a two-digit year given the wrong century.
+
+def _implausible(*entries):
+    return lint_implausible_year({"entries": list(entries)})
+
+
+def test_implausible_year_fires_on_a_two_digit_year_given_the_wrong_century():
+    findings = _implausible(_fields_entry(
+        "R", {"date": "1902-11"}, text="Invited talk, Example City 11/02", idx=40))
+    assert len(findings) == 1
+    assert findings[0]["lint"] == "implausible_year"
+    assert findings[0]["severity"] == "WARN"
+    assert "entry 40 (R): date=1902" in findings[0]["message"]
+    assert f"before {IMPLAUSIBLE_YEAR_FLOOR}" in findings[0]["message"]
+    assert findings[0]["evidence"] == ["Invited talk, Example City 11/02"]
+
+
+def test_implausible_year_floor_is_1930_and_exclusive():
+    assert IMPLAUSIBLE_YEAR_FLOOR == 1930
+    fires = _implausible(_fields_entry("D1", {"start_date": "1929"}, text="7/29"))
+    silent = _implausible(_fields_entry("D1", {"start_date": "1930"}, text="7/30"))
+    assert len(fires) == 1 and silent == []
+
+
+def test_implausible_year_lists_every_bad_field_of_one_entry_in_one_finding():
+    findings = _implausible(_fields_entry(
+        "P", {"start_date": "1902", "end_date": "1904", "year": "2012"},
+        text="Committee 9/02-4/04, renewed 2012"))
+    assert len(findings) == 1
+    assert "start_date=1902, end_date=1904 --" in findings[0]["message"]
+    assert "year=" not in findings[0]["message"]
+
+
+@pytest.mark.parametrize("entry", [
+    _fields_entry("H", {"date": "1925"}, text="Society prize, 1925"),       # in the text
+    _fields_entry("H", {"date": "1925"}, text="Prize 192529"),              # fused range
+    _fields_entry("H", {"title": "1902"}, text="11/02"),                    # not a date key
+    _fields_entry("H", {"candidate": "1902"}, text="11/02"),
+    _fields_entry("H", {"date": "19021"}, text=""),                         # not four digits
+    _fields_entry("H", {"date": "21902"}, text=""),
+    _fields_entry("A", {"date_of_birth": "1902"}, text="11/02"),           # personal data
+    _fields_entry("H", {"date": "2002-11"}, text="11/02"),                 # right century
+    _fields_entry("H", {"date": True}, text=""),                           # not a year
+    _fields_entry("H", "not an object", text=""),
+])
+def test_implausible_year_silent(entry):
+    assert _implausible(entry) == []
+
+
+@pytest.mark.parametrize("value", [
+    {"start_date": "1905"},   # nested object
+    ["1905"],                 # list
+    1905,                     # integer
+])
+def test_implausible_year_reads_nested_and_integer_values(value):
+    assert len(_implausible(_fields_entry("B1", {"dates_attended": value}, text="'05"))) == 1
+
+
+def _degree(year, text=None, code="B1"):
+    return _fields_entry(code, {"degree": "MD", "year": year},
+                         text=f"MD, Example University {year}" if text is None else text)
+
+
+def test_implausible_year_floor_rises_to_ten_years_before_the_earliest_degree():
+    floor = 1990 - DEGREE_YEAR_LEAD
+    old = _fields_entry("H", {"date": str(floor - 1)}, text="Prize '79")
+    edge = _fields_entry("H", {"date": str(floor)}, text="Prize '80")
+    findings = _implausible(_degree("1995"), _degree("1990"), old, edge)
+    assert len(findings) == 1
+    assert f"date={floor - 1}" in findings[0]["message"]
+    assert f"earliest degree year, 1990" in findings[0]["message"]
+
+
+@pytest.mark.parametrize("degree", [
+    _degree("1990", text="MD, Example University '90"),   # degree year not written
+    _degree("1990", code="B2"),                           # not an academic degree
+    _degree("1925"),                                      # degree itself pre-floor
+])
+def test_implausible_year_degree_floor_needs_a_written_plausible_b1_year(degree):
+    later = _fields_entry("H", {"date": "1975"}, text="Prize '75")
+    assert _implausible(degree, later) == []
+
+
+def test_implausible_year_text_match_is_bounded_on_the_left():
+    """1902 inside a longer number is not the year written."""
+    findings = _implausible(_fields_entry("R", {"date": "1902"}, text="No. 21902, 11/02"))
+    assert len(findings) == 1
+
+
+def test_implausible_year_evidence_is_the_truncated_entry_text():
+    text = "11/02 " + "y" * (FIELD_EVIDENCE_VALUE_CHARS + 20)
+    findings = _implausible(_fields_entry("R", {"date": "1902"}, text=text))
+    assert findings[0]["evidence"] == [text[:FIELD_EVIDENCE_VALUE_CHARS]]
+
+
+def test_implausible_year_degree_floor_applies_only_above_the_fixed_floor():
+    """A degree exactly DEGREE_YEAR_LEAD years above the fixed floor sets no
+    floor of its own: the fixed floor and its reason stand."""
+    findings = _implausible(
+        _degree(str(IMPLAUSIBLE_YEAR_FLOOR + DEGREE_YEAR_LEAD)),
+        _fields_entry("H", {"date": "1929"}, text="'29"))
+    assert len(findings) == 1
+    assert "no two-digit year resolves below it" in findings[0]["message"]
+
+
+def test_implausible_year_a_pre_floor_degree_year_does_not_mask_a_later_one():
+    """A degree year that is itself a wrong century is not the earliest
+    degree: the next written B1 year sets the floor."""
+    findings = _implausible(_degree("1925"), _degree("1990"),
+                            _fields_entry("H", {"date": "1975"}, text="Prize '75"))
+    assert len(findings) == 1
+    assert "earliest degree year, 1990" in findings[0]["message"]
+
+
+def test_implausible_year_degree_floor_never_drops_below_the_fixed_floor():
+    findings = _implausible(_degree("1935"),
+                            _fields_entry("H", {"date": "1929"}, text="'29"))
+    assert len(findings) == 1
+    assert f"before {IMPLAUSIBLE_YEAR_FLOOR}" in findings[0]["message"]
+
+
+def test_implausible_year_leaves_the_value_alone():
+    entry = _fields_entry("R", {"date": "1902-11"}, text="11/02")
+    _implausible(entry)
+    assert entry["extracted_fields"] == {"date": "1902-11"}
 
 
 if __name__ == "__main__":

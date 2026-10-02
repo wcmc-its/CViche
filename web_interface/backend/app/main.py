@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 from app.database import init_db, get_db
 from app.middleware.request_id import RequestIDMiddleware
-from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes
+from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes, batches, inbox
 from app.config_loader import get_config
 # Allowed origins live in app/origins.py so the WebSocket endpoint can share
 # the same allowlist (a WS upgrade gets neither a CORS check nor CSRFMiddleware).
@@ -516,6 +516,8 @@ app.include_router(auth_routes.router, prefix="/api", tags=["auth"])
 app.include_router(consent_routes.router, prefix="/api", tags=["consent"])
 app.include_router(upload.router, prefix="/api", tags=["upload"])
 app.include_router(runs.router, prefix="/api", tags=["runs"])
+app.include_router(batches.router, prefix="/api", tags=["batches"])
+app.include_router(inbox.router, prefix="/api", tags=["inbox"])
 app.include_router(steps.router, prefix="/api", tags=["steps"])
 app.include_router(feedback_routes.router, prefix="/api", tags=["feedback"])
 app.include_router(admin_routes.router, prefix="/api", tags=["admin"])

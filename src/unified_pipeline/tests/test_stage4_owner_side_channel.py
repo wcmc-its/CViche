@@ -338,7 +338,7 @@ def test_extraction_passes_docx_path_to_extract_cv_owner_name(monkeypatch):
     """m7b: extract_fields_from_mapped_entries -> extract_cv_owner_name."""
     captured = {}
 
-    def fake_owner_name(document_uid, mapped_entries, docx_path=None):
+    def fake_owner_name(document_uid, mapped_entries, docx_path=None, usage=None):
         captured["docx_path"] = docx_path
         return {
             "first_name": "", "middle_name": "", "last_name": "",

@@ -1,10 +1,10 @@
 """Pydantic schemas for API request/response validation."""
-from pydantic import BaseModel, PlainSerializer
+from pydantic import BaseModel, Field, PlainSerializer
 from typing import Annotated, Literal
 from datetime import datetime
 
 
-def _iso_with_offset(dt: datetime) -> str:
+def iso_with_offset(dt: datetime) -> str:
     """Serialize a datetime to ISO 8601 with an explicit UTC offset.
 
     Timestamps are written with naive ``datetime.now()`` (and ``func.now()``),
@@ -27,7 +27,7 @@ def _iso_with_offset(dt: datetime) -> str:
 # Python-mode access (``model.started_at``) a real datetime for internal callers
 # and only rewrites the JSON the browser receives.
 TZDateTime = Annotated[
-    datetime, PlainSerializer(_iso_with_offset, return_type=str, when_used="json")
+    datetime, PlainSerializer(iso_with_offset, return_type=str, when_used="json")
 ]
 
 
@@ -91,6 +91,8 @@ class RunStatus(BaseModel):
     cv_owner_name: str | None = None
     # Who ran it. Admin only; null for everyone else and for user-less runs.
     run_by: RunBySummary | None = None
+    # A PDF's scanned pages, whose text is missing from the output (#1282).
+    scanned_pages: list[int] = []
     steps: list[StepSummary]
 
     class Config:
@@ -113,6 +115,23 @@ class StepSummary(BaseModel):
         from_attributes = True
 
 
+class FeedbackReviewer(BaseModel):
+    """One reviewer's submission on a run, as the admin runs table lists it."""
+    display_name: str
+    role: str  # Feedback.reviewer_role
+    submitted_at: TZDateTime | None = None
+
+
+class RunFeedbackSummary(BaseModel):
+    """Feedback left on a run by ANY reviewer (including feedback others left
+    on the caller's own run). ``reviewers`` is populated only by
+    GET /runs?scope=all (admin), newest first; null under scope=mine."""
+    count: int = 0
+    given_by_me: bool = False
+    last_at: TZDateTime | None = None
+    reviewers: list[FeedbackReviewer] | None = None
+
+
 class RunSummary(BaseModel):
     """Summary of a run for the history list."""
     run_id: str
@@ -133,6 +152,9 @@ class RunSummary(BaseModel):
     quality_score: int | None = None
     quality_band: str | None = None
     quality_cap: int | None = None
+    feedback: RunFeedbackSummary = RunFeedbackSummary()
+    # The batch upload this run belongs to (#1114), null for a single upload.
+    batch_id: str | None = None
 
     class Config:
         from_attributes = True
@@ -153,12 +175,38 @@ class RunByOption(RunBySummary):
     count: int
 
 
+class FeedbackFilterCounts(BaseModel):
+    """Runs matching each value of the ``feedback`` filter."""
+    given: int
+    needed: int
+
+
+class InputFormatFilterCounts(BaseModel):
+    """Runs matching each value of the ``input_format`` filter."""
+    wcm: int
+    other: int
+    unknown: int
+
+
+class StatusFilterCounts(BaseModel):
+    """Runs behind each status pill (every filter applies except ``status``)."""
+    all: int
+    running: int
+    awaiting_feedback: int
+    failed: int
+    red: int
+
+
 class RunFilterOptions(BaseModel):
     """GET /runs/filter-options: the options each admin runs filter offers."""
     departments: list[FilterCount]
     faculty: list[FacultyOption]
     run_by: list[RunByOption]
     self_count: int
+    on_behalf_count: int
+    status: StatusFilterCounts
+    feedback: FeedbackFilterCounts
+    input_format: InputFormatFilterCounts
 
 
 class PaginatedRuns(BaseModel):
@@ -387,6 +435,34 @@ class FeedbackResponse(BaseModel):
         from_attributes = True
 
 
+class FeedbackDetail(BaseModel):
+    """One stored Feedback row plus its reviewer's display name
+    (GET /run/{run_id}/feedback/all)."""
+    id: int
+    run_id: str
+    user_id: int
+    display_name: str
+    reviewer_role: str
+    overall_accuracy: int | None = None
+    overall_completeness: int | None = None
+    overall_usefulness: int
+    manual_conversion_effort: str
+    correction_effort: str
+    enrichment_quality: int | None = None
+    summary_generated: int | None = None  # boolean stored as int
+    summary_quality: int | None = None
+    issue_missing_content: str | None = None
+    issue_split_merged: str | None = None
+    issue_wrong_section: str | None = None
+    issue_inaccurate: str | None = None
+    issue_ai_enrichment: str | None = None
+    issue_formatting: str | None = None
+    issue_locations: list[str] | None = None
+    biggest_issue: str | None = None
+    likelihood_to_recommend: int
+    submitted_at: TZDateTime | None = None
+
+
 class RunFeedbackStatus(BaseModel):
     """Feedback status for a single run."""
     run_id: str
@@ -425,6 +501,20 @@ class AdminStepAvg(BaseModel):
     avg_seconds: float
 
 
+class DepartmentSubmissions(BaseModel):
+    """Runs one department's submitters filed, by who submitted them."""
+    department: str | None  # None: the submitter has no ED department ("Unknown")
+    own_cv: int
+    on_behalf: int
+
+
+class SubmissionSplit(BaseModel):
+    """Who submits CVs: faculty themselves (own_cv) vs on their behalf (authorized_admin)."""
+    own_cv: int = 0
+    on_behalf: int = 0
+    departments: list[DepartmentSubmissions] = []
+
+
 class AdminStats(BaseModel):
     """Overview statistics for the admin dashboard."""
     total_runs: int
@@ -437,6 +527,7 @@ class AdminStats(BaseModel):
     p95_duration_seconds: int | None = None
     # Per-stage average duration over completed runs, in pipeline order.
     step_avg_seconds: list[AdminStepAvg] = []
+    submissions: SubmissionSplit = SubmissionSplit()
 
 
 class AdminUser(BaseModel):
@@ -530,13 +621,29 @@ class QueueDbView(BaseModel):
     oldest_running_age_s: float | None = None
 
 
+class QueueStreamStats(BaseModel):
+    """One queue's stream as ``run_queue.stats`` reads it (#1114): depth,
+    group pending/lag/consumers, per-consumer pending, dead-letter count."""
+    stream_length: int
+    pending: int | None = None
+    lag: int | None = None
+    consumers: int
+    owners: list[dict] = []
+    dead: int
+
+
 class QueueStatsResponse(BaseModel):
     """Run-queue depth and ownership (Valkey), beside the DB view, for the
     admin dashboard (#701). ``enabled`` is ``dispatch_mode() == "queue"``,
     independent of whether ``CVICHE_REDIS_URL`` happens to be set (other
     features share that same URL). ``error`` is a stable code
     (``valkey_unavailable`` / ``valkey_not_configured``) -- never raw
-    exception text, which can carry a host:port."""
+    exception text, which can carry a host:port.
+
+    The top-level stream fields are the single-run queue's, as before batch
+    upload; ``queues`` has every queue's, keyed by short name (``single``,
+    ``batch``, #1114), so the batch stream and its dead-letter count show
+    without renaming a field an existing reader uses."""
     enabled: bool
     db: QueueDbView
     error: str | None = None
@@ -546,6 +653,86 @@ class QueueStatsResponse(BaseModel):
     consumers: int | None = None
     owners: list[dict] = []
     dead: int | None = None
+    queues: dict[str, QueueStreamStats] = {}
+
+
+# ============================================================
+# Batch upload Schemas (#1114)
+# ============================================================
+
+class BatchCreateRequest(BaseModel):
+    """POST /api/batches: how many valid files the user is about to upload,
+    and whether to email them when every run is finished (#1335)."""
+    files_submitted: int = Field(ge=1)
+    notify_on_complete: bool = False
+
+
+class BatchCreateResponse(BaseModel):
+    id: str
+
+
+class BatchSummary(BaseModel):
+    """One batch in GET /api/batches (the Runs page's Batch filter)."""
+    id: str
+    submitted_by: RunBySummary | None = None
+    created_at: TZDateTime
+    run_count: int
+    files_submitted: int
+
+
+class BatchListResponse(BaseModel):
+    batches: list[BatchSummary]
+
+
+class BatchStatusCounts(BaseModel):
+    """How many of a batch's runs are in each status. ``created`` is a run
+    uploaded but not yet started (the client starts each right after upload)."""
+    complete: int = 0
+    running: int = 0
+    queued: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    created: int = 0
+
+
+class BatchRunRow(BaseModel):
+    """One run in the batch view. ``queue_position`` is set on queued rows
+    only: how many queued batch runs entered the queue before this one.
+    ``quality_score`` is admin-only, like the Runs list's Score column."""
+    run_id: str
+    filename: str
+    cv_owner_name: str | None = None
+    status: str
+    queue_position: int | None = None
+    quality_score: int | None = None
+
+
+class BatchDetail(BatchSummary):
+    """GET /api/batches/{id}: the batch view's header and rows, oldest run first."""
+    status_counts: BatchStatusCounts
+    runs: list[BatchRunRow]
+
+
+class QueueLane(BaseModel):
+    """One queue in GET /api/queue. ``workers`` counts live consumers of the
+    queue (null when Valkey can't be read); ``ahead`` is runs waiting in it;
+    ``est_wait_minutes`` is (ahead + that kind's running runs) x the recent
+    median run time / workers, null when either is unknown. The batch figure
+    is a best case: single runs can take the flex workers too."""
+    workers: int | None
+    ahead: int
+    est_wait_minutes: int | None
+
+
+class QueueOverview(BaseModel):
+    """GET /api/queue, for any signed-in user. ``single``/``batch`` are null
+    unless ``dispatch_mode`` is ``queue`` -- in-process dispatch has no queue.
+    ``completion_email_available``: the server can send mail, so the page
+    offers "Email me when job completes" (#1335)."""
+    dispatch_mode: str
+    completion_email_available: bool = False
+    single: QueueLane | None = None
+    batch: QueueLane | None = None
 
 
 class AdminConfigResponse(BaseModel):
@@ -556,6 +743,18 @@ class AdminConfigResponse(BaseModel):
     rate_limit_monthly: int = 50
     consent_version: str = "1.0"
     auth_mode: str = "simple"
+
+
+class ConsentPublishPreview(BaseModel):
+    """What publishing the next consent version would do, before it is published."""
+    current_version: str
+    next_version: str
+    users_to_reconsent: int  # active users whose consent_version is not next_version
+
+
+class ConsentPublishRequest(BaseModel):
+    """The version the admin was shown; must still be the next version."""
+    version: str
 
 
 class AdminConfigUpdate(BaseModel):
@@ -574,10 +773,27 @@ QualityBand = Literal["GREEN", "YELLOW", "RED"]
 
 
 class QualityDimension(BaseModel):
-    """One weighted scorer dimension: ``points`` earned out of ``weight``."""
-    name: str
+    """One weighted scorer dimension: ``points`` earned out of ``weight``. The
+    wording fields are null for a row named by an older scorer build."""
+    name: str  # the scorer's technical name
     weight: int
     points: float
+    label: str | None = None  # plain label
+    checks: str | None = None  # what the row checks
+    scoring: str | None = None  # how it loses points, or the cap it applies
+    if_lost: str | None = None  # what to do when it loses points
+    can_cap: bool = False
+
+
+class QualityGate(BaseModel):
+    """A weight-0 score row whose cap fired; it carries no points."""
+    name: str
+    cap: int
+    lint: str  # the doctor lint that reports the same condition
+    label: str | None = None
+    checks: str | None = None
+    scoring: str | None = None
+    if_lost: str | None = None
 
 
 class DoctorSeverityCounts(BaseModel):
@@ -592,6 +808,8 @@ class DoctorFindingGroup(BaseModel):
     lint: str
     severity: DoctorSeverity  # the most severe of the lint's instances
     message: str  # plain-English explanation of the lint
+    title: str | None = None  # plain title; null for a lint with no wording yet
+    what_to_do: str | None = None
     count: int  # instances of this lint in the run
     prevalence: float | None = None  # share of runs it fires on; None if unmeasured
     caps_score: bool = False  # this lint is the gate behind the run's applied cap
@@ -618,6 +836,7 @@ class RunQualityReport(BaseModel):
     total_weight: int | None = None
     data_complete: bool | None = None
     dimensions: list[QualityDimension] = []
+    gates_fired: list[QualityGate] = []  # weight-0 rows whose cap fired
     doctor: RunDoctorReport | None = None
 
 

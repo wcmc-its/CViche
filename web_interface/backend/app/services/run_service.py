@@ -11,14 +11,23 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
-from app.models import Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics
+from app.models import Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics, can_view_all_runs
 from app.errors import not_found, forbidden
-from app.auth import can_view_all_runs
 from app.config_loader import get_config
 from app.pipeline import concurrency, run_queue
 from app.storage import get_storage
 from app.storage.base import RunStorage
-from app.services import auto_retry, notifications
+from app.services import auto_retry, batch_completion, notifications
+
+# Baked into the image by the Dockerfile's IMAGE_TAG build arg (#1239).
+IMAGE_TAG_ENV = "CVICHE_IMAGE_TAG"
+
+
+def current_image_tag() -> str | None:
+    """The tag of the image this process runs, or None when it was built
+    without one (local dev, or an image built before #1239)."""
+    return os.environ.get(IMAGE_TAG_ENV, "").strip() or None
+
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +73,13 @@ DEFAULT_ORPHAN_REAP_HOURS = 24
 # own (CODING STANDARDS section 1.5: one definition of a shared path).
 UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def latest_run_with_hash(db: Session, sha256: str) -> Run | None:
+    """The most recently started run (any submitter) whose upload hashed to ``sha256``."""
+    return db.scalars(
+        select(Run).where(Run.source_sha256 == sha256).order_by(Run.started_at.desc()).limit(1)
+    ).first()
 
 
 def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> None:
@@ -247,6 +263,7 @@ def reconcile_stale_runs(db: Session) -> int:
     now = datetime.now()
     failed_count = 0
     resumed_count = 0
+    failed_batches: set[str | None] = set()
     for run in stale_runs:
         seen_started_at = run.started_at
         last_error_type, start_step_number = _resume_info_for_run(run, db)
@@ -268,8 +285,11 @@ def reconcile_stale_runs(db: Session) -> int:
             continue
         _mark_run_failed(run, db, now)
         failed_count += 1
+        failed_batches.add(run.batch_id)
 
     db.commit()
+    for batch_id in failed_batches:
+        batch_completion.notify_if_batch_complete(batch_id)
     if resumed_count:
         logger.info(
             "Reconciled %d stale run(s) older than %d min at startup "
@@ -339,7 +359,7 @@ def reconcile_queued_runs(db: Session) -> int:
     for run in stranded:
         if run.id in live_ids or not run_queue.claim_reenqueue_slot(run.id):
             continue
-        run_queue.enqueue(run.id)
+        run_queue.enqueue(run.id, run_queue.queue_for(run.batch_id))
         requeued += 1
         logger.warning("requeued_stranded run_id=%s queued_at=%s", run.id, run.queued_at)
 
@@ -572,6 +592,7 @@ def _transition_run_for_retry(
     if not _claim_stale_run(
         db, run, seen_started_at,
         attempt_count=Run.attempt_count + 1,
+        image_tag=current_image_tag(),
         started_at=datetime.now(),
         error_message=None,
         completed_at=None,
@@ -745,11 +766,12 @@ def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set)
     guarantees the winning row is actually modified.
 
     ``status_criteria`` are SQLAlchemy expressions on ``Run.status``; ``also_set``
-    are extra columns written in the same statement. Does not commit: the caller
+    are extra columns written in the same statement. Also stamps ``image_tag``
+    with the executing image (#1239). Does not commit: the caller
     commits on a win, and on a loss holds nothing to undo.
     """
     result = db.query(Run).filter(Run.id == run_id, *status_criteria).update(
-        {"status": "running", **also_set}, synchronize_session="evaluate"
+        {"status": "running", "image_tag": current_image_tag(), **also_set}, synchronize_session="evaluate"
     )
     return result == 1
 
@@ -863,6 +885,7 @@ def claim_queued(run_id: str) -> ClaimResult:
             update(Run)
             .where(Run.id == run_id, Run.status == RunState.QUEUED)
             .values(status=RunState.RUNNING, started_at=datetime.now(),
+                    image_tag=current_image_tag(),
                     error_message=None, completed_at=None)
         ).rowcount == 1
         db.commit()
@@ -906,10 +929,12 @@ def mark_failed(run_id: str, message: str, *, from_statuses: tuple[str, ...]) ->
                 .where(Step.run_id == run_id, Step.status == "running")
                 .values(status="error", completed_at=now)
             )
+        batch_id = db.scalar(select(Run.batch_id).where(Run.id == run_id)) if rowcount else None
         db.commit()
-        return rowcount
     finally:
         db.close()
+    batch_completion.notify_if_batch_complete(batch_id)
+    return rowcount
 
 
 def flip_to_queued(

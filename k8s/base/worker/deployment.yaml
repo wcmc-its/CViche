@@ -50,6 +50,14 @@ spec:
           env:
             - name: CVICHE_RUN_MIGRATIONS
               value: "0" # Alembic owns schema; the backend's initContainer runs migrations
+            # Emailed-CV intake (#1298), OFF by default. Enable on ONE worker pool; it also
+            # needs the ED_LDAP_* settings and an IRSA role that can read inbound/.
+            # The SES receipt rule must have ScanEnabled: true: a message without
+            # X-SES-Virus-Verdict: PASS is rejected, so without scanning every one is (#1332).
+            # - name: CVICHE_EMAIL_INTAKE
+            #   value: "1"
+            # - name: CVICHE_MAIL_SEND
+            #   value: "1" # send acknowledgements through SESv2 (needs ses:SendEmail)
             - name: CVICHE_INIT_DB
               value: "0" # No metadata.create_all() DDL at boot (#191)
           # Readiness: main() touches READY_FILE only after every startup

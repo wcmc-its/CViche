@@ -10,6 +10,8 @@ import AppHeader from './components/AppHeader'
 import RunsPage from './components/RunsPage'
 import AdminDashboard from './components/AdminDashboard'
 import HelpPage from './components/HelpPage'
+import TermsPage from './components/TermsPage'
+import { InboxProvider } from './contexts/InboxContext'
 import ErrorBoundary from './components/ErrorBoundary'
 import { Loader2 } from 'lucide-react'
 
@@ -20,6 +22,12 @@ import { Loader2 } from 'lucide-react'
  */
 function RoutedErrorBoundary({ children }: { children: React.ReactNode }) {
   const location = useLocation()
+  // BrowserRouter keeps the window's scroll offset across navigations, so a
+  // run opened from low in the Runs list landed mid-page. Hash links
+  // (#feedback, help anchors) do their own scrolling.
+  useEffect(() => {
+    if (!location.hash) window.scrollTo(0, 0)
+  }, [location.pathname, location.hash])
   return <ErrorBoundary key={location.pathname}>{children}</ErrorBoundary>
 }
 
@@ -184,6 +192,7 @@ function App() {
   return (
     <BrowserRouter>
       <AuthErrorHandler />
+      <InboxProvider>
       <div className="min-h-screen">
         <RoutedErrorBoundary>
         <Routes>
@@ -252,6 +261,18 @@ function App() {
             }
           />
           <Route
+            path="/terms"
+            element={
+              <RequireAuth>
+                <RequireConsent>
+                  <WithHeader>
+                    <TermsPage />
+                  </WithHeader>
+                </RequireConsent>
+              </RequireAuth>
+            }
+          />
+          <Route
             path="/admin"
             element={
               <RequireAuth>
@@ -266,6 +287,7 @@ function App() {
         </Routes>
         </RoutedErrorBoundary>
       </div>
+      </InboxProvider>
     </BrowserRouter>
   )
 }

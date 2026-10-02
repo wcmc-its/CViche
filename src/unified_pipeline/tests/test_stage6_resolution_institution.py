@@ -202,3 +202,29 @@ def test_bad_neighbour_start_is_skipped():
     target = _e(20, "C2")
     entries = [_e("x", "C", "Bad Index Hospital"), target]
     assert _recover_institution_from_nearby_entries(target, entries) == ""
+
+
+def test_a_lookup_of_another_institution_contributes_no_location():
+    """#817 follow-up: stage 5b identified the entry as some other place. Its
+    city is that place's, so the entry keeps its own location field."""
+    entry = {"text": "Kestrel Therapy Society (KTS), online",
+             "extracted_fields": {"institution": "Kestrel Therapy Society (KTS), online",
+                                  "location": ""},
+             "institution_enrichment": {"cleaned_name": "",
+                                        "official_name": "Institut Supérieur de Lumière",
+                                        "city": "Lille", "state": "Hauts-de-France",
+                                        "country": "France", "country_code": "FR"}}
+    assert _get_institution_location(entry) == ("", False)
+    # Stage 5b also copies the rejected lookup's location into the fields.
+    entry["extracted_fields"]["location"] = "Lille, Hauts-de-France, France"
+    entry["enriched_fields"] = ["city", "state", "country", "location"]
+    assert _get_institution_location(entry) == ("", False)
+
+
+def test_a_lookup_sharing_a_distinctive_word_keeps_its_location():
+    entry = {"text": "Kestrel Harbor Univ.",
+             "extracted_fields": {"institution": "Kestrel Harbor Univ."},
+             "institution_enrichment": {"official_name": "Kestrel Harbor University",
+                                        "city": "Lille", "country": "France",
+                                        "country_code": "FR"}}
+    assert _get_institution_location(entry) == ("Lille", True)

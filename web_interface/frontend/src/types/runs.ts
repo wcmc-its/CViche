@@ -12,6 +12,8 @@ export interface RunStatus {
   run_id: string
   filename: string
   status: string
+  /** When the run was created (ISO, from GET /run/{id}/status). */
+  started_at?: string
   total_cost: number | null
   total_tokens: number
   input_tokens: number
@@ -25,6 +27,8 @@ export interface RunStatus {
   cv_owner_name?: string | null
   /** Who ran it. Admin only. */
   run_by?: RunBy | null
+  /** A PDF's scanned pages, whose text is missing from the output (#1282). */
+  scanned_pages?: number[]
   steps: StepSummary[]
 }
 
@@ -35,6 +39,22 @@ export interface RunBy {
   cwid: string | null
   email: string | null
   department: string | null
+}
+
+/** One reviewer's submission on a run (scope=all only). */
+export interface FeedbackReviewer {
+  display_name: string
+  role: string
+  submitted_at: string | null
+}
+
+/** Feedback left on a run by ANY reviewer, including others on your own run. */
+export interface RunFeedbackSummary {
+  count: number
+  given_by_me: boolean
+  last_at: string | null
+  /** Admin scope=all only, newest first; null under scope=mine. */
+  reviewers: FeedbackReviewer[] | null
 }
 
 export interface RunSummary {
@@ -57,15 +77,39 @@ export interface RunSummary {
   quality_band?: QualityBand | null
   /** The hard-fail cap that lowered the score, else null. Admin scope=all only. */
   quality_cap?: number | null
+  feedback: RunFeedbackSummary
+  /** The batch upload this run belongs to; null for a single upload. */
+  batch_id?: string | null
 }
 
 export type QualityBand = 'GREEN' | 'YELLOW' | 'RED'
 export type DoctorSeverity = 'ERROR' | 'WARN' | 'INFO'
 
-export interface QualityDimension {
+/** Plain wording for a score row; every field is null for a row named by an
+ *  older scorer build. */
+export interface ScoreRowWording {
+  /** The scorer's technical name. */
   name: string
+  label: string | null
+  /** What the row checks. */
+  checks: string | null
+  /** How the row loses points, or the cap it applies. */
+  scoring: string | null
+  /** What to do when it loses points. */
+  if_lost: string | null
+}
+
+export interface QualityDimension extends ScoreRowWording {
   weight: number
   points: number
+  can_cap: boolean
+}
+
+/** A weight-0 score row whose cap fired. */
+export interface QualityGate extends ScoreRowWording {
+  cap: number
+  /** The doctor lint that reports the same condition. */
+  lint: string
 }
 
 export interface DoctorFindingGroup {
@@ -74,6 +118,9 @@ export interface DoctorFindingGroup {
   severity: DoctorSeverity
   /** Plain-English explanation of the lint. */
   message: string
+  /** Plain title; null for a lint with no wording yet. */
+  title: string | null
+  what_to_do: string | null
   /** Instances of this lint in the run. */
   count: number
   /** Share of runs the lint fires on (0-1); null when unmeasured. */
@@ -109,6 +156,8 @@ export interface RunQualityReport {
   data_complete: boolean | null
   /** Weighted dimensions in the scorer's order. */
   dimensions: QualityDimension[]
+  /** Weight-0 rows whose cap fired. */
+  gates_fired: QualityGate[]
   doctor: RunDoctorReport | null
 }
 
@@ -121,9 +170,23 @@ export type RunListScope = 'mine' | 'all'
 
 /** Query params for GET /api/runs and /api/runs/filter-options. The filters are
  *  honoured only with scope 'all' (admin or staff); `run_by` is a user id or 'self'. */
+export type RunFeedbackFilter = 'given' | 'needed'
+
+/** Whether the uploaded CV was written in the WCM CV template; 'unknown' = not classified. */
+export type RunInputFormatFilter = 'wcm' | 'other' | 'unknown'
+
+/** Status pills: 'running' = queued or running; 'failed' = failed runs; 'red' = score band RED (scope 'all' only: 403 under scope 'mine'). */
+export type RunStatusFilter = 'running' | 'failed' | 'red'
+
 export interface RunListParams {
   scope?: RunListScope
-  run_by?: number | 'self'
+  /** 'given' = any reviewer left feedback; 'needed' = complete run with none. Both scopes. */
+  feedback?: RunFeedbackFilter
+  input_format?: RunInputFormatFilter
+  /** A user id, 'self' (the faculty member uploaded it) or 'on_behalf' (an authorized admin did). */
+  run_by?: number | 'self' | 'on_behalf'
+  /** Both scopes; 'red' is admin only. */
+  status?: RunStatusFilter
   faculty?: string
   department?: string
 }
@@ -142,12 +205,28 @@ export interface RunByOption extends RunBy {
   count: number
 }
 
+/** Runs behind each status pill; applies every filter except status. */
+export interface StatusFilterCounts {
+  all: number
+  running: number
+  awaiting_feedback: number
+  failed: number
+  red: number
+}
+
 export interface RunFilterOptions {
   departments: FilterCount[]
   faculty: FacultyOption[]
   run_by: RunByOption[]
   /** Runs where the faculty member uploaded their own CV (run_by = 'self'). */
   self_count: number
+  /** Runs an authorized admin submitted on the faculty member's behalf (run_by = 'on_behalf'). */
+  on_behalf_count: number
+  status: StatusFilterCounts
+  /** Runs per feedback filter value; applies every filter except feedback. */
+  feedback: { given: number; needed: number }
+  /** Runs per input-format filter value; applies every filter except input format. */
+  input_format: { wcm: number; other: number; unknown: number }
 }
 
 export interface FeedbackStatus {

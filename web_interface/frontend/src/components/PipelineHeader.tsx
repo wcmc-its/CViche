@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { ArrowLeft, Ban, CheckCircle2, Download, Loader2, XCircle } from 'lucide-react'
 import { runRoutes } from '../api/routes'
-import { formatCost, formatDuration } from '../utils'
+import { formatCost, formatDate, formatDuration, formatTimeLeft } from '../utils'
 import { useCanSeeCost } from '../contexts/AuthContext'
 import { groupStepsIntoPhases } from './StepSidebar'
 
@@ -17,6 +17,8 @@ interface PipelineHeaderProps {
   filename: string
   /** Heading text; defaults to the filename. A finished run passes the faculty name. */
   title?: string
+  /** When the run was created (ISO); shown once the run is no longer live. */
+  runDate?: string | null
   /** Admin only: who ran it. */
   runByName?: string | null
   status: string
@@ -27,6 +29,8 @@ interface PipelineHeaderProps {
   inputTokens: number
   outputTokens: number
   elapsedSeconds: number
+  /** The run's own estimate (estimated_duration_seconds); null/absent hides the time left. */
+  estimatedSeconds?: number | null
   isCancelling: boolean
   /** Omitted for a viewer who may not act on the run (staff on another user's
    *  run): the Cancel button is not rendered. */
@@ -87,6 +91,7 @@ export default function PipelineHeader({
   runId,
   filename,
   title,
+  runDate,
   runByName,
   status,
   steps,
@@ -96,6 +101,7 @@ export default function PipelineHeader({
   inputTokens,
   outputTokens,
   elapsedSeconds,
+  estimatedSeconds,
   isCancelling,
   onCancel,
   onBack,
@@ -105,6 +111,7 @@ export default function PipelineHeader({
 }: PipelineHeaderProps) {
   const showCost = useCanSeeCost()
   const isRunning = status === 'running'
+  const timeLeft = isRunning ? formatTimeLeft(estimatedSeconds, elapsedSeconds) : null
 
   // The API gives elapsed time but no start timestamp, so the start is derived
   // once from the first elapsed reading of a live run.
@@ -178,6 +185,7 @@ export default function PipelineHeader({
               {isRunning && startedAt !== null && (
                 <span>Started {new Date(startedAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</span>
               )}
+              {!isRunning && runDate && <span>{formatDate(runDate)}</span>}
               {!isRunning && elapsedSeconds > 0 && <span>{formatDuration(elapsedSeconds)}</span>}
               {runByName && <span className="min-w-0 [overflow-wrap:anywhere]">Run by {runByName}</span>}
               {!isRunning && showCost && totalCost !== null && <span>{formatCost(totalCost, 2)}</span>}
@@ -191,6 +199,12 @@ export default function PipelineHeader({
                   <span>Elapsed</span>
                   <span className="text-gray-900 font-semibold text-[15px] tabular-nums">{formatTotalTime(elapsedSeconds)}</span>
                 </div>
+                {timeLeft && (
+                  <div className="flex flex-col">
+                    <span>Estimate</span>
+                    <span className="text-gray-900 font-semibold text-[15px] tabular-nums">{timeLeft}</span>
+                  </div>
+                )}
                 {showCost && (
                   <div className="flex flex-col">
                     <span>Cost so far</span>

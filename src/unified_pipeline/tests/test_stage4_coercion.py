@@ -33,6 +33,12 @@ to a specific bug fix:
     post-processing pass. `ExtractedFields`' key set is hand-kept (this
     module may not import stage4.schemas), so it needs the same drift
     guard `DATE_RANGE_TAXONOMY_CODES` has -- see the last two tests.
+  - Two-digit-year century: the LLM read "10/08" as 1908. The repair moves a
+    19xx year the text holds only as a two-digit token to the century the
+    shared pivot (core/two_digit_year.py) gives it -- see the last section.
+  - Class 2 of the 2026-10-02 s7ab autopsy: a "1999-02" source range stored
+    whole as a year-month date, and an "01/09" MM/YY date read as 2001-09.
+    See the two sections after the century repair.
 
 Self-contained: no LLM calls, no I/O, no PII.
 """
@@ -46,6 +52,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage4.coercion import (  # noqa: E402
+    DATE_FIELD_NAMES,
     ExtractedFields,
     ReformattedField,
     ReformattedFields,
@@ -286,3 +293,195 @@ def test_percent_effort_already_extracted_is_not_overwritten():
 
     assert updated["percent_effort"] == "25%"
     assert "percent_effort" not in reformatted
+
+
+# --- Two-digit source year read into the wrong century ----------------------
+
+_CENTURY_REASON = "Re-derived the century of a two-digit source year"
+
+
+@pytest.mark.parametrize(
+    "text,fields,expected",
+    [
+        # m/yy, the bare month-year shape
+        ("Invited talk, Example Society 10/08", {"date": "1908-10"}, {"date": "2008-10"}),
+        # m/d/yy
+        ("Grand rounds, Example Hospital 3/22/05", {"date": "1905-03-22"}, {"date": "2005-03-22"}),
+        # m/yy-yyyy: only the two-digit start is wrong; the 4-digit end is in the text
+        (
+            "Example Committee, member 4/07-2013",
+            {"start_date": "1907", "end_date": "2013"},
+            {"start_date": "2007", "end_date": "2013"},
+        ),
+        # m/d/yy-m/d/yy: both ends of the range move
+        (
+            "Example Award 8/1/08- 7/31/12",
+            {"start_date": "1908-08-01", "end_date": "1912-07-31"},
+            {"start_date": "2008-08-01", "end_date": "2012-07-31"},
+        ),
+        # apostrophe forms: straight, left and right curly quotes
+        ("Example Prize '04", {"year": "1904"}, {"year": "2004"}),
+        ("Example Prize \u201804", {"year": "1904"}, {"year": "2004"}),
+        ("Example Prize \u201904", {"year": "1904"}, {"year": "2004"}),
+        # an int year keeps its type
+        ("Example Prize '04", {"year": 1904}, {"year": 2004}),
+        # a 5-digit number in the text is not the 4-digit year written out
+        ("Example grant 19031, awarded 5/03", {"date": "1903-05"}, {"date": "2003-05"}),
+    ],
+)
+def test_two_digit_source_year_moves_to_the_pivot_century(text, fields, expected):
+    updated, _ = apply_regex_post_processing(text, fields, "R")
+
+    assert {key: updated[key] for key in expected} == expected
+
+
+def test_two_digit_century_repair_records_what_it_changed():
+    updated, reformatted = apply_regex_post_processing(
+        "Invited talk, Example Society 10/08", {"date": "1908-10", "title": "Example"}, "R"
+    )
+
+    assert updated == {"date": "2008-10", "title": "Example"}
+    assert reformatted == {
+        "date": {"original": "1908-10", "reformatted": "2008-10", "reason": _CENTURY_REASON},
+    }
+
+
+@pytest.mark.parametrize(
+    "text,fields",
+    [
+        # a 1960s two-digit date: the pivot reads "65" as 1965, so it stays
+        ("Example Society member 6/65", {"date": "1965-06"}),
+        # a 20yy year above the pivot is never pulled back to 19yy: a grant
+        # ending "8/31/32" really does end in 2032
+        ("Example grant 9/1/27-8/31/32", {"start_date": "2027-09-01", "end_date": "2032-08-31"}),
+        # the 19xx year is written out in the text, so the text supports it
+        ("Example Society, founded 1903; member 5/03", {"date": "1903"}),
+        # no two-digit token at all
+        ("Example Society, early member", {"date": "1903"}),
+        # the two digits are part of a longer number, not a year token
+        ("Example Society, ref 112/03", {"date": "1903"}),
+        ("Example Society, ref 5/031", {"date": "1903"}),
+        # a 5-digit number in a value is not a year
+        ("Example Society 5/03", {"date": "19035"}),
+        ("Example Society 5/03", {"date": "21903"}),
+        # non-string, non-int values pass through
+        ("Example Society 5/03", {"dates_attended": {"start": "1903"}}),
+        ("Example Society 5/03", {"year": True}),
+    ],
+)
+def test_two_digit_century_repair_leaves_supported_years_alone(text, fields):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), "R")
+
+    assert updated == fields
+    assert reformatted == {}
+
+
+def test_two_digit_century_repair_runs_before_the_date_range_repair():
+    # The range repair restores a dropped end_date only when start_date agrees
+    # with the text's closed range. Run after the century repair, it sees the
+    # corrected 2003 and fills the end; run before, it sees 1903 and skips.
+    updated, _ = apply_regex_post_processing(
+        "Example Committee member 9/03, term 2003-2005",
+        {"start_date": "1903", "end_date": None},
+        "P",
+    )
+
+    assert (updated["start_date"], updated["end_date"]) == ("2003", "2005")
+
+
+def test_date_field_names_match_declared_date_fields():
+    # DATE_FIELD_NAMES is hand-kept (coercion.py may not import
+    # stage4.schemas); ExtractedFields is itself pinned to the active schemas
+    # above, so this pins the date subset to it.
+    declared_date_fields = {
+        name for name in ExtractedFields.__annotations__ if "date" in name or "year" in name
+    }
+
+    assert set(DATE_FIELD_NAMES) == declared_date_fields
+
+
+# --- YYYY-YY source range stored whole in one field (class 2) ---------------
+
+_SHORT_RANGE_REASON = "Read a YYYY-YY source range written into one date field"
+
+
+@pytest.mark.parametrize(
+    "text,fields,expected",
+    [
+        ("Example mentee, MS 1999-02", {"start_date": None, "end_date": "1999-02"},
+         ("1999", "2002")),
+        ("Example mentee, MS 1999-00", {"start_date": "", "end_date": "1999-00"},
+         ("1999", "2000")),
+        ("Example mentee, MS 2001\u201307", {"start_date": "2001-07", "end_date": None},
+         ("2001", "2007")),
+        ("Example mentee, MS 2016 - 19", {"end_date": "2016-19"}, ("2016", "2019")),
+    ],
+)
+def test_short_source_range_splits_into_start_and_end(text, fields, expected):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), "N3B")
+
+    assert (updated["start_date"], updated["end_date"]) == expected
+    assert reformatted["end_date"]["reason"] == _SHORT_RANGE_REASON
+
+
+@pytest.mark.parametrize(
+    "text,fields,code",
+    [
+        # the source has only the year; stage 4 added the month itself
+        ("Example mentee, MPH 2002", {"end_date": "2002-12"}, "N3B"),
+        # the other range field is already set
+        ("Example mentee 1999-02", {"start_date": "1998", "end_date": "1999-02"}, "N3B"),
+        # a full date in the source, not a range
+        ("Example mentee 1999-02-15", {"end_date": "1999-02"}, "N3B"),
+        ("Example mentee 1999-02/03", {"end_date": "1999-02"}, "N3B"),
+        # read as a range it would end in 2103: a month after all
+        ("Example meeting 2005-03", {"end_date": "2005-03"}, "N3B"),
+        # a code whose schema has no date range
+        ("Example award 1999-02", {"end_date": "1999-02"}, "H"),
+    ],
+)
+def test_short_source_range_split_leaves_other_shapes_alone(text, fields, code):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), code)
+
+    assert {key: updated.get(key) for key in fields} == fields
+    assert "start_date" not in reformatted and "end_date" not in reformatted
+
+
+# --- MM/YY source date read as YY/MM (class 2) ------------------------------
+
+_MONTH_SLASH_YEAR_REASON = "Re-read an MM/YY source date stage 4 read as YY/MM"
+
+
+def test_month_slash_year_read_backwards_is_re_read():
+    updated, reformatted = apply_regex_post_processing(
+        "Example mentee, PhD 01/09- 08/14",
+        {"start_date": "2001-09", "end_date": "2014-08"}, "N3B")
+
+    assert (updated["start_date"], updated["end_date"]) == ("2009-01", "2014-08")
+    assert reformatted == {"start_date": {
+        "original": "2001-09", "reformatted": "2009-01", "reason": _MONTH_SLASH_YEAR_REASON}}
+
+
+@pytest.mark.parametrize(
+    "text,fields",
+    [
+        # read the right way round already
+        ("Example mentee 09/16- 2021", {"start_date": "2016-09", "end_date": "2021"}),
+        ("Example mentee 01/09- 08/14", {"start_date": "2009-01", "end_date": "2014-08"}),
+        # the four-digit year is in the text, so it supports the reading
+        ("Example mentee 01/09, joined 2001", {"start_date": "2001-09"}),
+        # both orders in the text: ambiguous, left alone
+        ("Example mentee 01/09 and 09/01", {"start_date": "2001-09"}),
+        # the first number cannot be a month
+        ("Example mentee 20/09", {"start_date": "2020-09"}),
+        # no slash token for the value at all
+        ("Example mentee, joined in December", {"start_date": "2005-12"}),
+        # part of a longer date, not an MM/YY token
+        ("Example mentee 3/01/09", {"start_date": "2001-09"}),
+    ],
+)
+def test_month_slash_year_reading_left_alone_when_text_does_not_show_it(text, fields):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), "N3B")
+
+    assert {key: updated.get(key) for key in fields} == fields
+    assert reformatted == {}

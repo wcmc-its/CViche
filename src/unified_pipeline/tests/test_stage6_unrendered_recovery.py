@@ -16,8 +16,11 @@ Self-contained: no DB, no LLM calls. Loads the bundled WCM template like
 test_stage6_funding_appendix.py does.
 """
 
+import ast
+import inspect
 import json
 import sys
+import textwrap
 import unicodedata
 from pathlib import Path
 
@@ -41,6 +44,8 @@ from unified_pipeline.stage6.render_check import (  # noqa: E402
     _RENDER_TOKEN_RE,
     _norm,
     _record_rendered,
+    _whole_record_rendered,
+    segments_cover_source,
 )
 
 
@@ -682,6 +687,114 @@ def test_reconsider_insert_failure_falls_back_to_appendix(monkeypatch):
     assert any("Custodian of Improbable Ledgers" in t for t in texts)
 
 
+# ------------------------------------- K3/K4/K5 teaching anchors (#1225)
+
+# The template's own K subsection headings, written out here rather than read
+# back from the map under test: `_get_wcm_section_header` once returned strings
+# that were substrings of no heading ("Curriculum Development", "Other
+# Teaching"), so K4/K5 segments fell to the Appendix, and K3's "Mentoring"
+# matched the MENTORING section instead of "Administrative teaching".
+_K_SUBSECTION_HEADINGS = {
+    "K1": "Didactic teaching",
+    "K2": "Clinical teaching",
+    "K3": "Administrative teaching",
+    "K4": "Continuing education and professional education",
+    "K5": "Other education/outreach activities",
+}
+
+
+def _heading_above(gen, text):
+    """Text of the nearest bold paragraph above the first paragraph holding
+    `text` -- the subsection heading that bullet sits under."""
+    paras = gen.doc.paragraphs
+    idx = next(i for i, p in enumerate(paras) if text in p.text)
+    for para in reversed(paras[:idx]):
+        if para.text.strip() and para.runs and para.runs[0].bold:
+            return para.text.strip()
+    return None
+
+
+def _section_header_map_codes():
+    """Every code `_get_wcm_section_header` maps explicitly. The map is a local
+    of that method, so read its keys from the source instead of copying them
+    into the test, where the copy could drift from the map."""
+    tree = ast.parse(textwrap.dedent(
+        inspect.getsource(WCMTemplateGenerator._get_wcm_section_header)))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "subsection_map"
+                        for t in node.targets)):
+            return list(ast.literal_eval(node.value))
+    raise AssertionError("subsection_map not found in _get_wcm_section_header")
+
+
+@pytest.mark.parametrize("code", sorted(_K_SUBSECTION_HEADINGS))
+def test_reconsidered_k_segment_lands_under_its_own_template_subsection(code):
+    gen = _generator()
+    segment = f"Synthetic {code} teaching segment, Example University, 2015"
+
+    assert gen._insert_reconsidered_segment(segment, code) is True
+
+    assert _heading_above(gen, segment).startswith(_K_SUBSECTION_HEADINGS[code])
+
+
+def test_every_section_header_map_code_anchors_in_the_blank_template():
+    codes = _section_header_map_codes()
+    assert {"K3", "K4", "K5"} <= set(codes), "map harvest is vacuous"
+    gen = _generator()
+
+    unanchored = [c for c in codes
+                  if not gen._insert_reconsidered_segment(
+                      f"Synthetic {c} segment, Example University", c)]
+
+    assert unanchored == []
+
+
+@pytest.mark.parametrize("code", ["K3", "K4", "K5"])
+def test_table_cell_overflow_for_k3_k4_k5_stays_in_the_teaching_section(code):
+    """The third `_get_wcm_section_header` caller: a K entry whose paragraph
+    sits in a table cell is inserted at the end of the teaching section, and
+    queued for the Appendix only when no header resolves."""
+    gen = _generator()
+    cell_para = gen.doc.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0]
+    text = f"Synthetic {code} overflow prose, Example University, 2015"
+    gen._overflow_entries = [(
+        {"taxonomy_code": code, "text": text,
+         "extraction_coverage": {"extraction_coverage_percent": 12}},
+        cell_para, code)]
+
+    gen._route_overflow_entries()
+
+    assert gen._appendix_pending == []
+    assert gen.stats["overflow_bullets_added"] == 1
+    texts = [p.text for p in gen.doc.paragraphs]
+    start = next(i for i, t in enumerate(texts) if t.strip() == "EDUCATIONAL CONTRIBUTIONS")
+    end = next(i for i, t in enumerate(texts) if t.startswith("CLINICAL PRACTICE, INNOVATION"))
+    assert start < texts.index(text) < end
+
+
+def test_reconsider_prompt_names_k3_k4_k5_by_their_taxonomy_labels(monkeypatch):
+    """The prompt's code hint was stale in the same way as the anchors (K3
+    "Mentoring/Advising", K4 "Curriculum Development"), so the model coded
+    segments to meanings the taxonomy does not give those codes (#1225)."""
+    prompts = []
+
+    def fake_llm(*args, **kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return {**_PRICED_LLM_RESULT, "content": "D1: Synthetic position"}
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm", fake_llm)
+    taxonomy = json.loads(
+        (_SRC / "unified_pipeline" / "core" / "taxonomy_v7.json").read_text())
+    labels = {c["code"]: c["label"] for c in taxonomy["codes"]}
+
+    _generator()._reclassify_entry_segments("Synthetic position, Example University", "D1")
+
+    hint_lines = prompts[0].splitlines()
+    for code in ("K3", "K4", "K5"):
+        assert any(line.startswith(f"{code}: {labels[code]}") for line in hint_lines)
+
+
 def test_option_off_restores_old_behavior():
     gen = _generator(recover_unrendered_records=False)
     before = len(gen.doc.paragraphs)
@@ -832,6 +945,55 @@ def test_stage6_llm_outage_propagates_but_other_errors_default(monkeypatch, call
     assert run() == ("National" if call == "geographic_scope" else None)
 
 
+_PRICED_LLM_RESULT = {"content": '{"scope": "National"}', "cost": 0.125,
+                      "prompt_tokens": 11, "completion_tokens": 5,
+                      "cache_read_tokens": 2, "cache_write_tokens": 1}
+
+
+@pytest.mark.parametrize("call", ["geographic_scope", "reclassify"])
+def test_stage6_llm_calls_are_added_to_the_generators_usage(monkeypatch, call):
+    """#1177: stage 6 reported no cost at all; both of its call_llm sites now
+    feed the generator's LlmUsage."""
+    gen = _generator()
+    gen.cv_owner_location = {"primary_location": {"institution": "Example Medical College",
+                                                  "city": "Springfield", "state": "ZZ"}}
+    entry = {"text": "Visiting Lecturer", "extracted_fields": {"organization": "Example Institute"}}
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: dict(_PRICED_LLM_RESULT))
+
+    if call == "geographic_scope":
+        gen._classify_geographic_scope(entry)
+    else:
+        gen._reclassify_entry_segments("Visiting Lecturer, Example Institute, 2010", "P")
+
+    assert gen.llm_usage.cost == pytest.approx(0.125)
+    assert gen.llm_usage.prompt_tokens == 11
+    assert gen.llm_usage.completion_tokens == 5
+    assert gen.llm_usage.cache_read_tokens == 2
+    assert gen.llm_usage.cache_write_tokens == 1
+
+
+def test_run_stage6_hands_the_callers_usage_to_the_generator(monkeypatch):
+    from unified_pipeline import stage_6_word_template as stage6
+    from unified_pipeline.llm_client import LlmUsage
+
+    seen = {}
+
+    class _FakeGenerator:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def generate(self, *args, **kwargs):
+            return "unused.docx"
+
+    monkeypatch.setattr(stage6, "WCMTemplateGenerator", _FakeGenerator)
+    usage = LlmUsage()
+
+    stage6.run_stage6("unused.json", llm_usage=usage)
+
+    assert seen["llm_usage"] is usage
+
+
 def test_remaining_appendix_intro_is_the_shared_accurate_banner():
     # #534: the bullet writer creates T. APPENDIX with the same one-line intro
     # as _fill_appendix -- italic, and never claiming the entries appear
@@ -865,3 +1027,269 @@ def test_add_remaining_to_appendix_drops_foreign_template_scaffolding():
     bullets = _bulleted_texts(gen.doc.paragraphs)
     assert "Served on the sample review panel for the Example Society" in bullets
     assert not any("Sample Appointments" in t or "Sample Leave" in t for t in bullets)
+
+
+# ------------------------------------------- #1230: T-coded fused entries
+
+_T_ROWS = [
+    f"Example Grant Title {title} | Example Funder {funder} | Role {n} | {n}7% | ${n}1,500 | 19{n}1-19{n}2"
+    for n, (title, funder) in enumerate((("Zeolite Catalysis", "Marigold Foundation"),
+                                         ("Quartzite Weathering", "Nasturtium Institute"),
+                                         ("Obsidian Fracturing", "Hyacinth Society")), start=3)
+]
+
+
+def _t_entry():
+    return {
+        "element_idx_start": 7,
+        "element_type": "table_row",
+        "hierarchy": ["COMPLETED GRANTS"],
+        "taxonomy_code": "T",
+        "text": "\n".join(_T_ROWS),
+        "extraction_coverage": {"extraction_coverage_percent": 3.0},
+        "extracted_fields": {},
+    }
+
+
+def test_t_fused_entry_rows_cut_by_the_appendix_cap_are_recovered():
+    """`_fill_appendix` caps a body at APPENDIX_MAX_CHARS, so the rows after the
+    cap reach no page; the recovery pass, no longer skipping T, writes them."""
+    gen = _generator()
+    entry = _t_entry()
+    gen._fill_appendix([entry])
+    capped = "\n".join(p.text for p in gen.doc.paragraphs)
+    assert _T_ROWS[2] not in capped  # the cap really cut it
+
+    gen._recover_unrendered_records({"T": [entry]})
+
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert _T_ROWS[2] in bullets
+    assert gen.stats["unrendered_records_recovered"] >= 1
+
+
+def test_t_row_already_on_the_page_is_not_duplicated():
+    gen = _generator()
+    entry = _t_entry()
+    gen.doc.add_paragraph(_T_ROWS[0])  # rendered whole, e.g. by another section
+    gen._recover_unrendered_records({"T": [entry]})
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert _T_ROWS[0] not in bullets
+    assert _T_ROWS[1] in bullets and _T_ROWS[2] in bullets
+
+
+def test_t_row_whose_title_cell_alone_renders_is_still_recovered():
+    """The per-cell check treats a rendered title as the record rendered; for T
+    the whole line must be accounted for, so funder and amount are not lost."""
+    gen = _generator()
+    entry = _t_entry()
+    gen.doc.add_paragraph("Example Grant Title Quartzite Weathering")
+    gen._recover_unrendered_records({"T": [entry]})
+    assert _T_ROWS[1] in _bulleted_texts(gen.doc.paragraphs)
+
+
+def test_whole_record_rendered_verdicts():
+    row = _T_ROWS[0]
+    sets = [set(_RENDER_TOKEN_RE.findall(_norm(row)))]
+    assert _whole_record_rendered(row, _squash_text(row), sets) is True
+    assert _whole_record_rendered(_T_ROWS[1], "", sets) is False
+    assert _whole_record_rendered("A | B | 1", "", []) is None
+
+
+def test_whole_record_rendered_cut_line_vouches_only_for_a_record_it_carries_whole():
+    from unified_pipeline.stage6.render_check import _record_tokens
+    carried = "Example Grant Title Zeolite Catalysis | Example Funder Marigold Foundation | 1987"
+    cut = [_record_tokens(carried + " | extra words here ...")]
+    assert _whole_record_rendered(carried, "", [], cut) is True
+    longer = carried + " | with a tail the cut line lost entirely"
+    assert _whole_record_rendered(longer, "", [], cut) is False
+
+
+def _squash_text(text):
+    from unified_pipeline.stage6.normalization import _squash
+    return _squash(text)
+
+
+def test_segments_cover_source_threshold():
+    words = ["zeolite", "marigold", "quartzite", "nasturtium", "basalt",
+             "chrysanthemum", "obsidian", "hyacinth", "feldspar", "delphinium"] * 2
+    source = "\n".join(f"Synthetic Record {w}{'x' * i} Entry" for i, w in enumerate(words))
+    faithful = source.split("\n")
+    assert segments_cover_source(faithful, source) is True
+    assert segments_cover_source(["[all 20 records follow]"], source) is False
+    assert segments_cover_source(faithful[:10], source) is False
+    assert segments_cover_source([], "tiny") is True  # too few tokens to judge
+
+
+def test_t_header_rows_the_appendix_would_drop_are_not_recovered():
+    """A T entry stage 3b confirmed as a table header row is scaffolding the
+    Appendix drops; recovery must not resurrect its lines."""
+    header_rows = [
+        "Years Inclusive | Grant Number and Title | Source | Annual Direct Costs",
+        "Years Inclusive | Years Inclusive | Grant Number and Title | Source",
+    ] * 4  # past APPENDIX_MAX_CHARS, so the entry reaches the candidate scan
+    entry = {
+        "element_idx_start": 3, "element_type": "table_row",
+        "hierarchy": ["GRANTS"], "taxonomy_code": "T",
+        "text": "\n".join(header_rows),
+        "classification_reasoning":
+            "[T-validation confirmed] Column header row - structural artifact",
+        "extraction_coverage": {"extraction_coverage_percent": 0.0},
+        "extracted_fields": {},
+    }
+    gen = _generator()
+    gen._recover_unrendered_records({"T": [entry]})
+    assert not any("Years Inclusive" in t
+                   for t in _bulleted_texts(gen.doc.paragraphs))
+
+
+def test_t_sibling_row_differing_only_in_amount_and_years_is_recovered():
+    """Two rows share title, funder and role words and differ in amount and
+    years. The one on the page must not vouch for the other (#1230)."""
+    base = "Example Grant Title Zeolite Catalysis | Example Funder Marigold Foundation | Site Lead | "
+    on_page = base + "$1,500 | 1991-1992"
+    sibling = base + "$8,200 | 1987-1988"
+    entry = _t_entry()
+    entry["text"] = "\n".join([on_page, sibling, _T_ROWS[1]])
+    gen = _generator()
+    gen.doc.add_paragraph(on_page)
+    gen._recover_unrendered_records({"T": [entry]})
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert sibling in bullets
+    assert on_page not in bullets
+
+
+def test_t_prose_lines_past_the_cap_are_recovered():
+    """Lines of a capped T entry that are not record-shaped (no pipe, tab or
+    dated prefix) are recovered too: the cap cut them just the same."""
+    lines = [f"Doe J. Synthetic {w} lecture series, Example University, 200{i}."
+             for i, w in enumerate(("zeolite", "marigold", "quartzite", "nasturtium",
+                                    "basalt", "obsidian"))]
+    entry = _t_entry()
+    entry["text"] = "\n".join(lines)
+    gen = _generator()
+    gen._fill_appendix([entry])
+    gen._recover_unrendered_records({"T": [entry]})
+    body = "\n".join(p.text for p in gen.doc.paragraphs)
+    assert all(line in body for line in lines)
+
+
+def test_t_single_record_entry_cut_by_the_cap_is_recovered():
+    long_line = ("Doe J. 2003. Synthetic invited lecture on zeolite catalysis at the Example "
+                 "Symposium, hosted by the Marigold Institute, Example City, with a "
+                 "long tail of detail that lies well past the two hundred character cap.")
+    entry = _t_entry()
+    entry["text"] = long_line
+    gen = _generator()
+    gen._fill_appendix([entry])
+    gen._recover_unrendered_records({"T": [entry]})
+    assert long_line in "\n".join(p.text for p in gen.doc.paragraphs)
+
+
+def test_t_undated_prose_and_undated_merged_cell_rows_are_not_recovered():
+    """A line with no year and no row shape (template text, an objective) is
+    not a record, and neither is a merged-cell row that collapses to one such
+    cell: recovery leaves both to the Appendix pointer."""
+    prose = ("Example instruction: list every activity in reverse order and "
+             "describe each briefly, with the role held and the venue used. " * 2)
+    merged = " | ".join(["Example label for a category of activities"] * 3)
+    entry = _t_entry()
+    entry["text"] = "\n".join([prose, merged])
+    gen = _generator()
+    gen._recover_unrendered_records({"T": [entry]})
+    assert gen.stats["unrendered_records_recovered"] == 0
+    body = "\n".join(p.text for p in gen.doc.paragraphs)
+    assert "Example instruction" not in body and "Example label for" not in body
+
+
+def test_t_merged_cell_description_after_a_record_is_recovered_once():
+    """A description spanning six grid columns is flattened to six copies; the
+    recovered line carries it once."""
+    description = ("Funding for a synthetic pilot study of zeolite weathering "
+                   "in Example County, used to collect first-round samples.")
+    entry = _t_entry()
+    entry["text"] = "\n".join([_T_ROWS[0], " | ".join([description] * 6), _T_ROWS[1]])
+    gen = _generator()
+    gen._fill_appendix([entry])
+    gen._recover_unrendered_records({"T": [entry]})
+    body = "\n".join(p.text for p in gen.doc.paragraphs)
+    assert description in body
+    assert description + " | " + description not in body
+
+
+def test_t_description_row_after_a_record_is_recovered():
+    """An undated description row directly after a grant row travels with it."""
+    description = ("Funding for a synthetic pilot study of zeolite weathering "
+                   "in Example County, used to collect first-round samples.")
+    entry = _t_entry()
+    entry["text"] = "\n".join([_T_ROWS[0], description, _T_ROWS[1]])
+    gen = _generator()
+    gen._fill_appendix([entry])
+    gen._recover_unrendered_records({"T": [entry]})
+    assert description in "\n".join(p.text for p in gen.doc.paragraphs)
+
+
+def test_t_entry_under_the_cap_is_left_alone():
+    entry = _t_entry()
+    entry["text"] = "Doe J. Short synthetic note, Example University."
+    gen = _generator()
+    gen._recover_unrendered_records({"T": [entry]})
+    assert gen.stats["unrendered_records_recovered"] == 0
+
+
+def test_segments_cover_source_rejects_a_reply_that_summarises_a_few_lines():
+    """17 of 20 lines kept verbatim plus one bracketed summary: pooled coverage
+    is high, but three source lines are carried by no segment (#1230)."""
+    words = ["zeolite", "marigold", "quartzite", "nasturtium", "basalt",
+             "chrysanthemum", "obsidian", "hyacinth", "feldspar", "delphinium",
+             "granite", "snapdragon", "tourmaline", "gardenia", "pumice",
+             "lavender", "dolomite", "begonia", "gypsum", "camellia"]
+    lines = [f"Doe J. Synthetic {w} outcomes. Journal of Invented {w.title()} stuff {i}."
+             for i, w in enumerate(words)]
+    source = "\n".join(lines)
+    reply = lines[:17] + ["[3 further publications follow]"]
+    assert segments_cover_source(lines, source) is True
+    assert segments_cover_source(reply, source) is False
+
+
+def test_segments_cover_source_ignores_a_repeated_page_header_the_reply_drops():
+    """A page-break header repeats in the source and a faithful reply rightly
+    drops it; that must not reject the reply (#1230)."""
+    pairs = (("zeolite", "geyser"), ("marigold", "estuary"), ("quartzite", "lagoon"),
+             ("nasturtium", "tundra"), ("basalt", "savanna"), ("obsidian", "fjord"),
+             ("hyacinth", "canyon"), ("feldspar", "glacier"))
+    lines = [f"Doe J. Synthetic {a} and {b} outcomes {i}." for i, (a, b) in enumerate(pairs)]
+    header = "Example Header Continued"
+    source = "\n".join(lines[:4] + [header] + lines[4:] + [header])
+    assert segments_cover_source(lines, source) is True
+    assert segments_cover_source(lines[:-1], source) is False
+
+
+def test_t_sibling_rows_differing_only_in_one_name_are_all_recovered():
+    """Committee rows with the same years and place, told apart by one word:
+    the complete row on the page must not vouch for its siblings (#1230)."""
+    names = ("Zeolite", "Marigold", "Quartzite", "Nasturtium", "Obsidian", "Hyacinth")
+    rows = [f"Member | {n} Committee | Example Department of Synthetic Geology | Example College of Sciences | Example University | 1987-1992"
+            for n in names]
+    entry = _t_entry()
+    entry["text"] = "\n".join(rows)
+    gen = _generator()
+    gen.doc.add_paragraph(rows[0])
+    gen._recover_unrendered_records({"T": [entry]})
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert all(row in bullets for row in rows[1:])
+    assert rows[0] not in bullets
+
+
+def test_t_row_that_is_its_own_non_t_entry_is_not_recovered():
+    """A T entry that repeats a table whose rows are entries of their own: the
+    row renders from its entry, reformatted, so recovering it duplicates it."""
+    row = _T_ROWS[1]
+    own = dict(_t_entry(), taxonomy_code="N", text=row)
+    entry = _t_entry()
+    entry["text"] = "\n".join(_T_ROWS)
+    gen = _generator()
+    gen.doc.add_paragraph("Reformatted Zeolite")  # the entry rendered, differently
+    gen._recover_unrendered_records({"T": [entry], "N": [own]})
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert row not in bullets
+    assert _T_ROWS[2] in bullets

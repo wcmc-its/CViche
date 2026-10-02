@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import logging
+import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import object_session
 
 from app.api import upload as upload_module
+from app.services import upload_validation
 from app.api.upload import _extract_text, _validate_docx_magic
 from app.models import User, Run, Step
 from app.pipeline.step_registry import STEP_REGISTRY
@@ -68,12 +70,12 @@ def _bypass_file_validation(tmp_path):
     byte payload reaches the storage step, and redirect the ephemeral pod-local
     write into tmp_path. Returns a list of patch context managers."""
     return [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
         # None == "couldn't extract"; the endpoint fails open and skips the
         # min-text gate, which is all we need to reach the storage step.
-        patch("app.api.upload._extract_text", return_value=None),
-        patch("app.api.upload.detect_wcm_template", return_value=(False, None)),
+        patch("app.services.run_creation._extract_text", return_value=None),
+        patch("app.services.run_creation.detect_wcm_template", return_value=(False, None)),
     ]
 
 
@@ -95,7 +97,7 @@ def test_upload_aborts_and_creates_no_run_when_archive_fails(client, db, seed_si
     storage.put_file_exclusive.side_effect = Exception("S3 unavailable")
 
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     for p in patches:
         p.start()
     try:
@@ -122,7 +124,7 @@ def test_upload_succeeds_when_by_submitter_index_fails(client, db, seed_simple_m
     storage.put_global.side_effect = Exception("index write failed")
 
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     for p in patches:
         p.start()
     try:
@@ -180,7 +182,7 @@ def _real_storage_patches(tmp_path):
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     patches = _bypass_file_validation(upload_dir)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     return storage, upload_dir, patches
 
 
@@ -211,8 +213,8 @@ def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_
     storage = MagicMock()
     rate_limit = MagicMock(return_value=None)
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload.get_storage", return_value=storage),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation.get_storage", return_value=storage),
         patch("app.api.upload.check_rate_limit", rate_limit),
     ]
     resp = _run_patches(patches, lambda: _post_upload(client, filename, b"MZ\x90\x00not-a-cv"))
@@ -253,13 +255,64 @@ def test_estimate_measures_pdf_text(client, db, seed_simple_mode, filename, cv_p
     assert body["text_characters"] > upload_module.MIN_EXTRACTED_CHARS
 
 
+def test_upload_rejects_mostly_scanned_pdf(client, db, seed_simple_mode, cv_pdf):
+    """#1282: one text page clears MIN_EXTRACTED_CHARS, but a PDF whose
+    image-only pages reach SCANNED_PAGE_REJECT_SHARE is refused, naming them."""
+    user = _make_user(db)
+    _auth(client, user)
+    resp = client.post(
+        "/api/upload",
+        files={"file": ("cv.pdf", cv_pdf(image_pages=(1, 2)), "application/pdf")},
+        data={"submission_type": "own_cv"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["message"].startswith("Pages 2–3 of this PDF are scanned images")
+    assert db.query(Run).count() == 0
+
+
+def test_estimate_names_a_minority_of_scanned_pages(client, db, seed_simple_mode, cv_pdf):
+    """#1282: below the reject share the file is accepted and /estimate
+    names the scanned pages, so the New run page can warn before submit."""
+    user = _make_user(db)
+    _auth(client, user)
+    resp = client.post(
+        "/api/estimate",
+        files={"file": ("cv.pdf", cv_pdf(image_pages=(2,), text_pages=2), "application/pdf")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["scanned_pages"] == [3]
+
+
+def test_upload_records_a_minority_of_scanned_pages(client, db, seed_simple_mode, cv_pdf, tmp_path):
+    """#1282: an accepted PDF's scanned pages are stored on the run, for
+    the run page's warning; a docx's are not (NULL, not "")."""
+    user = _make_user(db)
+    _auth(client, user)
+    patches = [patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+               patch("app.services.run_creation.get_storage", return_value=MagicMock())]
+    resp = _run_patches(patches, lambda: _post_upload(
+        client, "cv.pdf", cv_pdf(image_pages=(2,), text_pages=2), "application/pdf"))
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).scanned_pages == "3"
+
+    patches = _bypass_file_validation(tmp_path) + [patch("app.services.run_creation.get_storage", return_value=MagicMock())]
+    resp = _run_patches(patches, lambda: _post_upload(
+        client, "cv.docx", b"PK\x03\x04dummy-docx-bytes", DOCX_MIME, data={"confirm_duplicate": "true"}))
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).scanned_pages is None
+
+
+def test_page_ranges_collapses_runs():
+    assert upload_module._page_ranges([2, 3, 4, 7, 9, 10]) == "2–4, 7, 9–10"
+
+
 def test_upload_still_accepts_docx_after_pdf_rejection(client, db, seed_simple_mode, tmp_path):
     """#524 regression, kept through #806: changing what .pdf does must not
     disturb the .docx path."""
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
     resp = _run_patches(
         patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy-docx-bytes", DOCX_MIME)
     )
@@ -298,8 +351,8 @@ def test_upload_rejects_docx_with_bad_zip_structure(client, db, seed_simple_mode
     _auth(client, user)
     storage = MagicMock()
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload.get_storage", return_value=storage),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation.get_storage", return_value=storage),
     ]
     with caplog.at_level(logging.WARNING):
         resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", payload, DOCX_MIME))
@@ -330,7 +383,7 @@ def test_validate_docx_magic_rejects_a_high_ratio_docx(monkeypatch):
     """#793: expansion is bounded before python-docx parses. A docx whose
     declared uncompressed total exceeds the cap is rejected, and one within
     it passes (cap patched small so the fixture stays tiny)."""
-    import app.api.upload as upload
+    import app.services.upload_validation as upload
     bomb = _docx_bytes("A" * 50_000)  # deflates to a few hundred bytes
     monkeypatch.setattr(upload, "_DOCX_MAX_UNCOMPRESSED_BYTES", 40_000)
     assert len(bomb) < 40_000
@@ -341,7 +394,7 @@ def test_validate_docx_magic_rejects_a_high_ratio_docx(monkeypatch):
 
 def test_validate_docx_magic_rejects_too_many_entries(monkeypatch):
     """#793: the entry-count bound, at and past the cap."""
-    import app.api.upload as upload
+    import app.services.upload_validation as upload
     content = _docx_bytes("hello")
     with zipfile.ZipFile(io.BytesIO(content)) as z:
         n = len(z.infolist())
@@ -349,6 +402,215 @@ def test_validate_docx_magic_rejects_too_many_entries(monkeypatch):
     assert _validate_docx_magic(content) is True
     monkeypatch.setattr(upload, "_DOCX_MAX_ENTRIES", n - 1)
     assert _validate_docx_magic(content) is False
+
+
+# --- #1334: macros, network-linked parts and DDE fields are refused ----------
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_W_STRICT_NS = "http://purl.oclc.org/ooxml/wordprocessingml/main"
+_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+_SETTINGS_RELS = "word/_rels/settings.xml.rels"
+
+
+def _docx_with_parts(parts: dict[str, str | bytes]) -> bytes:
+    """A real python-docx file with ``parts`` added, or replacing the part of
+    the same name."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(_docx_bytes("Synthetic CV paragraph. " * 40))) as src, \
+            zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for entry in src.infolist():
+            if entry.filename not in parts:
+                dst.writestr(entry, src.read(entry))
+        for name, body in parts.items():
+            dst.writestr(name, body)
+    return out.getvalue()
+
+
+def _rels(rel_type: str, target: str, mode: str = "External") -> str:
+    return (
+        "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>"
+        f"<Relationship Id='rId1' Type='{_REL_TYPE}{rel_type}' Target='{target}' TargetMode='{mode}'/>"
+        "</Relationships>"
+    )
+
+
+def _document(body: str) -> str:
+    return f"<w:document xmlns:w='{_W_NS}'><w:body><w:p>{body}</w:p></w:body></w:document>"
+
+
+def _complex_field(*instr_runs: str) -> str:
+    runs = "".join(f"<w:r><w:instrText>{text}</w:instrText></w:r>" for text in instr_runs)
+    return (
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r>" + runs
+        + "<w:r><w:fldChar w:fldCharType='separate'/></w:r><w:r><w:t>result</w:t></w:r>"
+        "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+    )
+
+
+@pytest.mark.parametrize("label, parts, expected", [
+    ("plain docx", {}, None),
+    ("vbaProject.bin", {"word/vbaProject.bin": b"\x00" * 64}, upload_validation.ActiveContent.MACRO),
+    ("vbaProject.bin under a backslash zip name", {"word\\vbaProject.bin": b"\x00" * 64},
+     upload_validation.ActiveContent.MACRO),
+    ("VBA project under another name, found by its relationship", {
+        "word/foo.bin": b"\x00" * 64,
+        "word/_rels/document.xml.rels": (
+            "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>"
+            "<Relationship Id='rId99' Type='http://schemas.microsoft.com/office/2006/relationships/vbaProject'"
+            " Target='foo.bin'/></Relationships>"),
+    }, upload_validation.ActiveContent.MACRO),
+    ("https attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "https://evil.example/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("UNC attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "\\\\10.0.0.1\\s\\x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("percent-encoded UNC", {_SETTINGS_RELS: _rels("attachedTemplate", "%5C%5Chost%5Cs%5Cx.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("https after leading spaces", {_SETTINGS_RELS: _rels("attachedTemplate", "  HTTPS://evil.example/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("file URL naming a host", {_SETTINGS_RELS: _rels("attachedTemplate", "file://evil.example/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("file: with a backslash UNC", {_SETTINGS_RELS: _rels("attachedTemplate", "file:\\\\evil.example\\s\\x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("forward-slash UNC attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "//evil.example/s/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("ftp attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "FTP://evil.example/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("remote image in a header's rels", {"word/_rels/header1.xml.rels": _rels("image", "https://evil.example/x.png")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("upper-case rels part name", {"word/_rels/settings.xml.RELS": _rels("attachedTemplate", "https://e.example/x")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("file:/// attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file:///C:/x.dotm")}, None),
+    ("file://localhost attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file://localhost/x.dotm")},
+     None),
+    ("file://LocalHost attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file://LocalHost/x.dotm")},
+     None),
+    ("Macintosh HD attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "Macintosh%20HD:Users:x.dotx")},
+     None),
+    ("Mac Word file://// attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file:////Users/x.dotx")},
+     None),
+    ("internal https-looking target", {_SETTINGS_RELS: _rels("attachedTemplate", "https://x/y.dotm", "Internal")},
+     None),
+    ("external https hyperlink", {"word/_rels/document.xml.rels": _rels("hyperlink", "https://example.org/")},
+     None),
+    ("fldSimple DDEAUTO", {"word/document.xml": _document("<w:fldSimple w:instr=' DDEAUTO c:\\\\x \"y\"'/>")},
+     upload_validation.ActiveContent.DDE),
+    ("complex DDE split across two instrText runs",
+     {"word/document.xml": _document(_complex_field(" DD", "E c:\\\\x y"))}, upload_validation.ActiveContent.DDE),
+    ("lowercase ddeauto in a footer", {"word/footer1.xml": _document(_complex_field("ddeauto x y"))},
+     upload_validation.ActiveContent.DDE),
+    ("DDE nested inside an IF field", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>IF 1 = 1 </w:instrText></w:r>"
+        + _complex_field("DDEAUTO x y") + "<w:r><w:fldChar w:fldCharType='end'/></w:r>")},
+     upload_validation.ActiveContent.DDE),
+    ("DDE after a complete nested field", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r>" + _complex_field("PAGE")
+        + "<w:r><w:instrText>DDEAUTO x y</w:instrText></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r>")},
+     upload_validation.ActiveContent.DDE),
+    ("unterminated DDE field", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>DDE x y</w:instrText></w:r>")},
+     upload_validation.ActiveContent.DDE),
+    ("DDE only after the field's separate", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>REF x</w:instrText></w:r>"
+        "<w:r><w:fldChar w:fldCharType='separate'/></w:r><w:r><w:instrText>DDE x y</w:instrText></w:r>"
+        "<w:r><w:fldChar w:fldCharType='end'/></w:r>")}, None),
+    ("DDE only after an empty field's separate", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+        "<w:r><w:instrText>DDEAUTO x y</w:instrText></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r>")}, None),
+    ("DDE in an upper-case part name", {"WORD/FOOTER9.XML": _document("<w:fldSimple w:instr='DDEAUTO x y'/>")},
+     upload_validation.ActiveContent.DDE),
+    ("strict-OOXML fldSimple DDEAUTO", {"word/footer8.xml": _document("<w:fldSimple w:instr='DDEAUTO x y'/>").replace(
+        _W_NS, _W_STRICT_NS)}, upload_validation.ActiveContent.DDE),
+    ("strict-OOXML complex DDE", {"word/footer7.xml": _document(_complex_field("DDE x y")).replace(
+        _W_NS, _W_STRICT_NS)}, upload_validation.ActiveContent.DDE),
+    ("a non-DDE field", {"word/document.xml": _document(_complex_field("PAGE"))}, None),
+    ("body text DDE", {"word/document.xml": _document("<w:r><w:t>DDE DDEAUTO lab</w:t></w:r>")}, None),
+    ("ActiveX part", {
+        "word/activeX/activeX1.xml": "<ax:ocx xmlns:ax='http://schemas.microsoft.com/office/2006/activeX'/>",
+        "word/activeX/activeX1.bin": b"\x01" * 64,
+        "word/activeX/_rels/activeX1.xml.rels": _rels("activeXControlBinary", "activeX1.bin", "Internal"),
+    }, None),
+])
+def test_docx_active_content(label, parts, expected):
+    """#1334: each refused kind, and the real-CV shapes the corpus census says
+    must pass (local template paths, hyperlinks, ActiveX, body text "DDE")."""
+    content = _docx_with_parts(parts)
+    assert _validate_docx_magic(content) is True, label  # the scan runs only after this passes
+    assert upload_validation.docx_active_content(content) == expected, label
+
+
+def test_docx_active_content_logs_the_category_and_no_filename(caplog):
+    with caplog.at_level(logging.WARNING, logger="app.services.upload_validation"):
+        upload_validation.docx_active_content(_docx_with_parts({"word/vbaProject.bin": b"\x00"}))
+    assert [r.getMessage() for r in caplog.records] == ["[SECURITY] Refused docx carrying active content: macro"]
+
+
+def test_docx_active_content_still_scans_past_an_unreadable_part(caplog):
+    """Malformed XML is not a refusal by itself (python-docx's read handles
+    it), but it does not hide a network template in another part."""
+    content = _docx_with_parts({
+        "word/_rels/document.xml.rels": "<<<not xml",
+        _SETTINGS_RELS: _rels("attachedTemplate", "https://evil.example/x.dotm"),
+    })
+    with caplog.at_level(logging.WARNING, logger="app.services.upload_validation"):
+        assert upload_validation.docx_active_content(content) == upload_validation.ActiveContent.EXTERNAL_LINK
+    skipped = [r for r in caplog.records if "skipped an unreadable part" in r.getMessage()]
+    assert len(skipped) == 1 and skipped[0].exc_info is not None
+    assert upload_validation.docx_active_content(_docx_with_parts({"word/document.xml": "<<<not xml"})) is None
+
+
+@pytest.mark.parametrize("label, mark", [
+    ("encrypted", lambda info: setattr(info, "flag_bits", info.flag_bits | 0x1)),
+    ("unsupported compression", lambda info: setattr(info, "compress_type", 99)),
+])
+def test_docx_active_content_skips_an_orphan_part_zipfile_cannot_read(label, mark):
+    """An orphan part python-docx never reads, but zipfile refuses to (it raises
+    RuntimeError / NotImplementedError), is skipped like any unreadable part,
+    never a 500."""
+    out = io.BytesIO(_docx_with_parts({}))
+    with zipfile.ZipFile(out, "a") as zf:
+        zf.writestr("word/orphan.xml", _document("<w:fldSimple w:instr='PAGE'/>"))
+        mark(zf.filelist[-1])  # rewrites the central directory entry on close
+    content = out.getvalue()
+    assert _validate_docx_magic(content) is True, label
+    assert upload_validation.docx_active_content(content) is None, label
+
+
+def test_docx_active_content_resolves_no_entities(tmp_path):
+    """The parser never resolves an entity (no XXE): a field whose instruction
+    would read DDEAUTO only if a local file were pulled in stays unread."""
+    payload = tmp_path / "payload.txt"
+    payload.write_text("DDEAUTO x y")
+    document = (
+        f"<!DOCTYPE w:document [<!ENTITY t SYSTEM '{payload.as_uri()}'>]>"
+        + _document("<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>&t;</w:instrText></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r>")
+    )
+    assert upload_validation.docx_active_content(_docx_with_parts({"word/document.xml": document})) is None
+
+
+@pytest.mark.parametrize("endpoint, data", [
+    ("/api/upload", {"submission_type": "own_cv"}),
+    ("/api/estimate", None),
+])
+def test_upload_and_estimate_refuse_a_docx_with_a_macro(client, db, seed_simple_mode, tmp_path, endpoint, data):
+    """#1334: a distinct 400, not the generic "does not match .docx", and no run."""
+    user = _make_user(db)
+    _auth(client, user)
+    storage = MagicMock()
+    patches = [
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation.get_storage", return_value=storage),
+    ]
+    content = _docx_with_parts({"word/vbaProject.bin": b"\x00" * 64})
+    resp = _run_patches(patches, lambda: client.post(
+        endpoint, files={"file": ("cv.docx", content, DOCX_MIME)}, data=data,
+    ))
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == {"error": "bad_request", "message": upload_validation.ACTIVE_CONTENT_MESSAGE}
+    storage.put_file_exclusive.assert_not_called()
+    assert db.query(Run).count() == 0
+    assert list(tmp_path.iterdir()) == []
 
 
 # --- #865 review: _extract_text catches only the measured read failures ------
@@ -414,7 +676,7 @@ def test_extract_text_lets_an_unexpected_error_surface():
     read failure is a bug in the reader, and it propagates instead of being
     swallowed into a fail-open None (§5.4). Widening the tuple back to
     ``Exception`` fails this test."""
-    with patch("app.api.upload.Document", side_effect=RuntimeError("reader bug")):
+    with patch("app.services.upload_validation.Document", side_effect=RuntimeError("reader bug")):
         with pytest.raises(RuntimeError):
             _extract_text(_docx_bytes("hello"), ".docx")
 
@@ -439,10 +701,10 @@ def test_upload_rejects_password_protected_document(client, db, seed_simple_mode
     _auth(client, user)
     storage = MagicMock()
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", return_value=""),
-        patch("app.api.upload.get_storage", return_value=storage),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value=""),
+        patch("app.services.run_creation.get_storage", return_value=storage),
     ]
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
@@ -470,11 +732,11 @@ def test_upload_returns_wcm_template_warning(client, db, seed_simple_mode, tmp_p
     extracted = "x" * 600  # above MIN_EXTRACTED_CHARS so the readability gate passes
     detect = MagicMock(return_value=(warning, ratio))
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", return_value=extracted),
-        patch("app.api.upload.detect_wcm_template", detect),
-        patch("app.api.upload.get_storage", return_value=MagicMock()),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value=extracted),
+        patch("app.services.run_creation.detect_wcm_template", detect),
+        patch("app.services.run_creation.get_storage", return_value=MagicMock()),
     ]
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
@@ -485,6 +747,127 @@ def test_upload_returns_wcm_template_warning(client, db, seed_simple_mode, tmp_p
     detect.assert_called_once()
     assert detect.call_args.args[0] == extracted  # reuses the extracted text, no re-parse
     assert db.query(Run).filter(Run.id == body["run_id"]).first().status == "created"
+
+
+# --- input format (WCM template vs other) recorded on the run -----------------
+
+# Synthetic text: the template's own section headings, nothing from a real CV.
+_WCM_TEMPLATE_TEXT = "\n".join([
+    "PERSONAL DATA", "EMPLOYMENT STATUS", "INSTITUTIONAL/HOSPITAL AFFILIATION",
+    "LICENSURE, BOARD CERTIFICATION", "PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES",
+    "EDUCATIONAL CONTRIBUTIONS", "CLINICAL PRACTICE, INNOVATION, and LEADERSHIP",
+    "INSTITUTIONAL LEADERSHIP ACTIVITIES", "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES",
+    "INVITATIONS TO SPEAK/PRESENT", "Synthetic filler line so the text is long enough. " * 12,
+])
+
+
+def _upload_with_text(client, db, tmp_path, extracted, input_format_patch=None):
+    user = _make_user(db)
+    _auth(client, user)
+    patches = [
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value=extracted),
+        patch("app.services.run_creation.detect_wcm_template", return_value=(False, None)),
+        patch("app.services.run_creation.get_storage", return_value=MagicMock()),
+    ]
+    if input_format_patch is not None:
+        patches.append(input_format_patch)
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+    assert resp.status_code == 200, resp.text
+    return db.query(Run).filter(Run.id == resp.json()["run_id"]).one()
+
+
+@pytest.mark.parametrize("text, fmt", [(_WCM_TEMPLATE_TEXT, "wcm"), ("Plain CV text. " * 60, "other")],
+                         ids=["wcm", "other"])
+def test_upload_records_input_format_on_the_run(client, db, seed_simple_mode, tmp_path, text, fmt):
+    run = _upload_with_text(client, db, tmp_path, text)
+    assert run.input_format == fmt
+    assert run.input_format_score is not None
+
+
+def test_upload_survives_an_input_format_detector_failure(client, db, seed_simple_mode, tmp_path, caplog):
+    boom = patch("app.services.input_format.detect_input_format", side_effect=RuntimeError("boom"))
+    with caplog.at_level("WARNING", logger="app.services.input_format"):
+        run = _upload_with_text(client, db, tmp_path, _WCM_TEMPLATE_TEXT, boom)
+    assert run.input_format is None and run.input_format_score is None
+    assert any("Input-format detection failed" in r.message for r in caplog.records)
+
+
+# --- #1286: ask before re-processing a file already run -----------------------
+
+_DUP_BYTES = b"PK\x03\x04synthetic-duplicate-bytes"
+_DUP_SHA = hashlib.sha256(_DUP_BYTES).hexdigest()
+
+
+def _seed_prior_run(db, owner, run_id="P00001", sha=_DUP_SHA, started=datetime(2026, 3, 4, 10, 0)):
+    db.add(Run(id=run_id, filename="old.docx", file_type="docx", status="complete",
+               user_id=owner.id, started_at=started, source_sha256=sha))
+    db.commit()
+
+
+def _dup_upload(client, tmp_path, data=None):
+    """Upload the duplicate bytes with a real LocalRunStorage; returns (response, storage)."""
+    root = tmp_path / uuid.uuid4().hex
+    root.mkdir()
+    storage, _, patches = _real_storage_patches(root)
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", _DUP_BYTES, DOCX_MIME, data))
+    return resp, root
+
+
+def test_upload_stores_source_sha256(client, db, seed_simple_mode, tmp_path):
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path)
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).source_sha256 == _DUP_SHA
+
+
+def test_duplicate_upload_stops_without_creating_or_archiving(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other)
+    _auth(client, _make_user(db))
+    resp, root = _dup_upload(client, tmp_path)
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "duplicate_file"
+    assert "March 4, 2026" in detail["message"]
+    assert db.query(Run).count() == 1  # only the seeded prior run
+    assert [p for p in root.rglob("*") if p.is_file()] == []  # nothing archived or written locally
+
+
+def test_confirm_duplicate_proceeds(client, db, seed_simple_mode, tmp_path):
+    _seed_prior_run(db, _make_user(db, email="other@example.com"))
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path, {"confirm_duplicate": "true"})
+
+    assert resp.status_code == 200, resp.text
+    assert db.query(Run).filter(Run.source_sha256 == _DUP_SHA).count() == 2
+
+
+def test_duplicate_notice_hides_other_submitters_run_from_non_admin(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other, run_id="ZZ9999")
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path)
+
+    assert resp.status_code == 409
+    assert "run_id" not in resp.json()["detail"]
+    for leaked in ("ZZ9999", "other@example.com", "Test User"):
+        assert leaked not in resp.text
+
+
+def test_duplicate_notice_shows_run_id_to_admin_and_to_its_own_submitter(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other, run_id="ZZ9999")
+    admin = _make_user(db, email="admin@example.com", role="admin")
+    _auth(client, admin)
+    assert _dup_upload(client, tmp_path)[0].json()["detail"]["run_id"] == "ZZ9999"
+
+    me = _make_user(db, email="me@example.com")
+    _seed_prior_run(db, me, run_id="MINE01", started=datetime(2026, 5, 1))
+    _auth(client, me)
+    assert _dup_upload(client, tmp_path)[0].json()["detail"]["run_id"] == "MINE01"
 
 
 # --- #793: bounded read + off-event-loop extraction -------------------------
@@ -549,9 +932,9 @@ def test_read_bounded_pins_the_size_boundary():
     assert exc_info.value.status_code == 400
 
 
-def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db, seed_simple_mode, tmp_path):
-    """#793 item 3: `_extract_text` and `detect_wcm_template` are dispatched
-    through `run_in_threadpool`, not called synchronously inside the async
+def test_upload_offloads_extraction_and_template_checks_to_threadpool(client, db, seed_simple_mode, tmp_path):
+    """#793 item 3: `_extract_text`, `detect_wcm_template` and
+    `detect_input_format_or_none` are dispatched through `run_in_threadpool`, not called synchronously inside the async
     handler. Reverting either `await run_in_threadpool(fn, ...)` call back to
     a bare `fn(...)` leaves the response unchanged but this test catches it,
     since it asserts run_in_threadpool was the actual dispatch mechanism for
@@ -560,6 +943,7 @@ def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db,
     _auth(client, user)
     extract_mock = MagicMock(return_value="x" * 600)
     detect_mock = MagicMock(return_value=(False, None))
+    format_mock = MagicMock(return_value=(None, None))
     real_run_in_threadpool = upload_module.run_in_threadpool
     dispatched: list[object] = []
 
@@ -568,17 +952,23 @@ def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db,
         return await real_run_in_threadpool(func, *args, **kwargs)
 
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", extract_mock),
-        patch("app.api.upload.detect_wcm_template", detect_mock),
-        patch("app.api.upload.get_storage", return_value=MagicMock()),
-        patch("app.api.upload.run_in_threadpool", spy),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", extract_mock),
+        patch("app.services.run_creation.detect_wcm_template", detect_mock),
+        patch("app.services.run_creation.detect_input_format_or_none", format_mock),
+        patch("app.services.run_creation.get_storage", return_value=MagicMock()),
+        patch("app.services.run_creation.run_in_threadpool", spy),
     ]
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 200, resp.text
-    assert dispatched == [extract_mock, detect_mock]
+    # _read_upload_text wraps _extract_text, adding the PDF scanned-page gate (#1282);
+    # the #1334 active-content scan runs off the loop first.
+    assert dispatched == [
+        upload_validation.docx_active_content, upload_module._read_upload_text, detect_mock, format_mock,
+    ]
+    extract_mock.assert_called_once()
 
 
 def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode):
@@ -599,9 +989,9 @@ def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode
         return await real_run_in_threadpool(func, *args, **kwargs)
 
     patches = [
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", extract_mock),
-        patch("app.api.upload.run_in_threadpool", spy),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", extract_mock),
+        patch("app.services.run_creation.run_in_threadpool", spy),
     ]
     resp = _run_patches(
         patches,
@@ -612,7 +1002,8 @@ def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode
     )
 
     assert resp.status_code == 200, resp.text
-    assert dispatched == [extract_mock]
+    assert dispatched == [upload_validation.docx_active_content, upload_module._read_upload_text]
+    extract_mock.assert_called_once()
 
 
 # --- item 9: render options persisted --------------------------------------
@@ -635,7 +1026,7 @@ def test_upload_persists_render_options(client, db, seed_simple_mode, tmp_path, 
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
     resp = _run_patches(
         patches,
         lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME, data=form),
@@ -661,7 +1052,7 @@ def test_upload_requires_and_persists_submission_type(client, db, seed_simple_mo
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
     resp = _run_patches(
         patches,
         lambda: client.post(
@@ -739,7 +1130,7 @@ def test_upload_creates_pending_step_rows(client, db, seed_simple_mode, tmp_path
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 200, resp.text
@@ -767,7 +1158,7 @@ def test_upload_enforces_rate_limit(client, db, seed_simple_mode, tmp_path, role
     _auth(client, user)
     storage = MagicMock()
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == expected_status, resp.text
@@ -794,8 +1185,8 @@ def test_upload_validates_extension_before_rate_limit(client, db, seed_simple_mo
     user = _make_user(db, daily_limit=0)
     _auth(client, user)
     patches = [
-        patch("app.api.upload.UPLOAD_DIR", tmp_path),
-        patch("app.api.upload.get_storage", return_value=MagicMock()),
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation.get_storage", return_value=MagicMock()),
     ]
     resp = _run_patches(patches, lambda: _post_upload(client, "cv.exe", b"MZ"))
 
@@ -822,8 +1213,8 @@ def test_upload_removes_local_file_after_fatal_storage_failure(client, db, seed_
     storage = MagicMock()
     storage.put_file_exclusive.side_effect = Exception("S3 unavailable")
     patches = _bypass_file_validation(upload_dir)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", return_value="FATAL1"))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="FATAL1"))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 502, resp.text
@@ -860,7 +1251,7 @@ def test_upload_content_write_failure_after_manifest_is_fatal(client, db, seed_s
     put_global = MagicMock()
     patches.append(patch.object(storage, "put_file_exclusive", put))
     patches.append(patch.object(storage, "put_global", put_global))
-    patches.append(patch("app.api.upload.generate_run_id", return_value="ORPHN1"))
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="ORPHN1"))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 502, resp.text
@@ -938,7 +1329,7 @@ def test_upload_db_commit_failure_compensates_the_archive_and_creates_no_run(cli
     user = _make_user(db)
     _auth(client, user)
     storage, upload_dir, patches = _real_storage_patches(tmp_path)
-    patches.append(patch("app.api.upload.generate_run_id", return_value="DBFA1L"))
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="DBFA1L"))
     patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
@@ -977,8 +1368,8 @@ def test_upload_compensates_archive_when_commit_fails(client, db, seed_simple_mo
     storage.put_file_exclusive.return_value = None
     storage.put_global.return_value = None
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", return_value="CMFAIL"))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="CMFAIL"))
     patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
 
     # Wraps the real rollback (so the session actually rolls back) while
@@ -1024,8 +1415,8 @@ def test_upload_compensation_failure_does_not_mask_commit_error(client, db, seed
     storage.delete_run.side_effect = Exception("delete_run also failed")
     storage.delete_global_prefix.side_effect = Exception("delete_global_prefix also failed")
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", return_value="CMFAI2"))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", return_value="CMFAI2"))
     patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
     with caplog.at_level(logging.ERROR, logger="app.api.upload"):
         resp = _run_patches(patches, lambda: _post_dummy_upload(client))
@@ -1064,7 +1455,7 @@ def test_upload_rejects_filename_over_column_width_before_archive(client, db, se
 
     storage = MagicMock()
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     filename = "x" * 256 + ".docx"  # 261 chars; Run.filename is String(255)
     resp = _run_patches(
         patches,
@@ -1122,7 +1513,7 @@ def test_upload_requires_current_consent(client, db, seed_simple_mode, tmp_path,
     storage = MagicMock()
     rate_limit = MagicMock(return_value=None)
     patches = _bypass_file_validation(tmp_path)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
     patches.append(patch("app.api.upload.check_rate_limit", rate_limit))
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
@@ -1134,3 +1525,151 @@ def test_upload_requires_current_consent(client, db, seed_simple_mode, tmp_path,
     rate_limit.assert_not_called()
     storage.put_file_exclusive.assert_not_called()
     assert db.query(Run).count() == 0
+
+
+# --- #1114: batch upload ------------------------------------------------------
+
+def _add_batch(db, owner, batch_id="BATCHA"):
+    from app.models import RunBatch
+    db.add(RunBatch(id=batch_id, user_id=owner.id, files_submitted=2))
+    db.commit()
+
+
+def test_upload_with_the_callers_batch_id_puts_the_run_in_the_batch(client, db, seed_simple_mode, tmp_path):
+    user = _make_user(db)
+    _add_batch(db, user)
+    _auth(client, user)
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
+
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
+                                                      data={"batch_id": "BATCHA"}))
+
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).batch_id == "BATCHA"
+
+
+def test_upload_without_a_batch_id_is_a_single_run(client, db, seed_simple_mode, tmp_path):
+    user = _make_user(db)
+    _auth(client, user)
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.services.run_creation.get_storage", return_value=MagicMock()))
+
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).batch_id is None
+
+
+@pytest.mark.parametrize("batch_owner", ["nobody", "someone else", "admin"])
+def test_upload_into_a_batch_the_caller_does_not_own_is_refused_before_storage(
+    client, db, seed_simple_mode, tmp_path, batch_owner,
+):
+    """A batch_id must name one of the caller's own batches. Another user's
+    batch answers the same 404 as one that doesn't exist, as GET
+    /batches/{id} does, so /upload discloses no batch's existence (the caller
+    is an admin in the last arm -- admins see every batch, but only the
+    submitter adds runs)."""
+    uploader = _make_user(db, role="admin" if batch_owner == "admin" else "user")
+    if batch_owner != "nobody":
+        _add_batch(db, _make_user(db, email="sam@example.com"))
+    _auth(client, uploader)
+    storage = MagicMock()
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
+                                                      data={"batch_id": "BATCHA"}))
+
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == {"error": "not_found", "message": "Batch not found"}
+    storage.put_file_exclusive.assert_not_called()
+    assert db.query(Run).count() == 0
+
+
+def _post_estimates(client, *names):
+    return client.post(
+        "/api/estimate",
+        files=[("files", (name, b"PK\x03\x04dummy-docx-bytes", "application/octet-stream")) for name in names],
+    )
+
+
+@pytest.mark.parametrize("role, cost_visible", [("admin", True), ("user", False)])
+def test_estimate_many_files_returns_a_row_per_file_and_totals(client, db, seed_simple_mode, role, cost_visible):
+    user = _make_user(db, role=role)
+    _auth(client, user)
+    patches = [
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value="x" * 4000),
+    ]
+
+    resp = _run_patches(patches, lambda: _post_estimates(client, "a.docx", "b.docx", "c.docx"))
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [row["filename"] for row in body["files"]] == ["a.docx", "b.docx", "c.docx"]
+    assert all(row["error"] is None for row in body["files"])
+    one = body["files"][0]["estimate"]
+    assert body["estimated_time_seconds_min"] == 3 * one["estimated_time_seconds_min"]
+    assert body["estimated_time_seconds_max"] == 3 * one["estimated_time_seconds_max"]
+    if cost_visible:
+        assert body["estimated_cost_min"] == pytest.approx(3 * one["estimated_cost_min"])
+        assert body["pricing_model"]
+    else:
+        assert (body["estimated_cost_min"], body["estimated_cost_max"], one["estimated_cost_min"]) == (None, None, None)
+        assert body["pricing_model"] is None
+
+
+def test_estimate_many_files_reports_a_bad_file_on_its_row_and_totals_the_rest(client, db, seed_simple_mode):
+    user = _make_user(db)
+    _auth(client, user)
+    patches = [
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value="x" * 4000),
+    ]
+
+    resp = _run_patches(patches, lambda: _post_estimates(client, "a.docx", "notes.txt"))
+
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["files"]
+    assert rows[1]["estimate"] is None
+    assert rows[1]["error"].startswith("Unsupported file type: .txt.")
+    assert resp.json()["estimated_time_seconds_min"] == rows[0]["estimate"]["estimated_time_seconds_min"]
+
+
+def test_estimate_many_files_counts_as_one_call_against_the_estimate_limit(client, db, seed_simple_mode):
+    user = _make_user(db)
+    _auth(client, user)
+    one_call = upload_module._EstimatePerUserWindow(max_calls=1, window_seconds=300)
+    patches = [
+        patch("app.api.upload._estimate_rate_limiter", one_call),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value="x" * 4000),
+    ]
+
+    def two_calls():
+        names = [f"cv{n}.docx" for n in range(upload_module.MAX_BATCH_FILES)]
+        return _post_estimates(client, *names), _post_estimates(client, "again.docx")
+
+    batch_resp, next_resp = _run_patches(patches, two_calls)
+
+    assert batch_resp.status_code == 200, batch_resp.text
+    assert len(batch_resp.json()["files"]) == upload_module.MAX_BATCH_FILES
+    assert next_resp.status_code == 429
+
+
+def test_estimate_refuses_more_than_fifty_files_or_both_shapes_at_once(client, db, seed_simple_mode):
+    user = _make_user(db)
+    _auth(client, user)
+    names = [f"cv{n}.docx" for n in range(upload_module.MAX_BATCH_FILES + 1)]
+
+    too_many = _post_estimates(client, *names)
+    both = client.post("/api/estimate", files=[
+        ("file", ("a.docx", b"PK", "application/octet-stream")),
+        ("files", ("b.docx", b"PK", "application/octet-stream")),
+    ])
+    neither = client.post("/api/estimate", data={"unrelated": "x"})
+
+    assert too_many.status_code == 400
+    assert both.status_code == 400
+    assert neither.status_code == 400

@@ -8,6 +8,7 @@ is rendered.
 """
 import logging
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import TypedDict
 
@@ -29,11 +30,57 @@ class InstitutionEnrichment(TypedDict, total=False):
 class InstitutionEnrichmentEntry(TypedDict, total=False):
     """A stage-4/5 entry insofar as `_get_cleaned_institution_name` reads it.
 
-    Entries carry many more keys; naming only the one this function touches
+    Entries carry many more keys; naming only the ones this function touches
     keeps the annotation honest. The value may be present and explicitly
     None (#559).
     """
     institution_enrichment: InstitutionEnrichment | None
+    extracted_fields: Mapping[str, object]
+
+
+#: Words too common in institution names to show that two names are the same
+#: place: "University Hospital" and "Institut Supérieur de ..." share nothing
+#: once these are set aside.
+_GENERIC_INSTITUTION_WORDS = frozenset({
+    "university", "universidad", "universite", "universita", "college", "school",
+    "institute", "institut", "instituto", "hospital", "hospitals", "center",
+    "centre", "medical", "medicine", "department", "departments", "society",
+    "national", "international", "american", "association", "foundation",
+    "health", "system", "sciences", "science", "research", "faculty", "division",
+    "program", "clinic", "clinical", "state", "city", "county", "group",
+    "council", "academy", "board", "general", "memorial", "community",
+    "children", "online"})
+_INSTITUTION_WORD_RE = re.compile(r"[a-z]{4,}")
+
+
+def _distinctive_words(name: str) -> set[str]:
+    """Accent-folded words of 4+ letters, minus the generic ones. A name in a
+    non-Latin script has none."""
+    folded = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
+    return set(_INSTITUTION_WORD_RE.findall(folded)) - _GENERIC_INSTITUTION_WORDS
+
+
+def enrichment_names_the_institution(entry: InstitutionEnrichmentEntry) -> bool:
+    """Whether stage 5b's lookup is of the institution the CV wrote.
+
+    A `cleaned_name` is the CV's own value without its location, so it always
+    is. An `official_name` alone is the LLM's identification and is believed
+    only when it shares a distinctive word with the entry's `institution`:
+    "International Society for ECT and Neurostimulation (ISEN), online" came
+    back as a French engineering school in Lille, and the retired ROR lookup's
+    names are often in another script. With no raw value there is nothing to
+    contradict. Its city and country belong to the same lookup, so a caller
+    that rejects the name rejects the location too.
+    """
+    enrichment = entry.get('institution_enrichment') or {}
+    if not isinstance(enrichment, Mapping) or enrichment.get('cleaned_name'):
+        return True
+    official = enrichment.get('official_name') or ''
+    fields = entry.get('extracted_fields')
+    raw = fields.get('institution') if isinstance(fields, Mapping) else None
+    if not official or not isinstance(raw, str) or not raw.strip():
+        return True
+    return bool(_distinctive_words(official) & _distinctive_words(raw))
 
 
 def _get_cleaned_institution_name(
@@ -44,7 +91,8 @@ def _get_cleaned_institution_name(
     preferring it stops "Duke Medical Center, Durham, NC, Durham, NC". The
     fallback to `official_name` is not belt and braces: stage 5b routinely
     returns an empty `cleaned_name` beside a correctly populated
-    `official_name`.
+    `official_name`. An `official_name` that shares no distinctive word with
+    the entry's own `institution` names some other place, and is not used.
     """
     enrichment = entry.get('institution_enrichment') or {}
     if not isinstance(enrichment, Mapping):
@@ -58,7 +106,10 @@ def _get_cleaned_institution_name(
     cleaned = enrichment.get('cleaned_name', '')
     if cleaned:
         return cleaned
-    # Fall back to official_name — always the institution without embedded location
+    # Fall back to official_name, the institution without its location -- but
+    # only when it names the institution the CV wrote.
+    if not enrichment_names_the_institution(entry):
+        return None
     official = enrichment.get('official_name', '')
     return official if official else None
 

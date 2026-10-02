@@ -20,7 +20,7 @@ Cost estimate: ~$0.05-$0.15 per CV for most CVs, ~$0.30-$0.50 for very large CVs
 import os
 import sys
 from dataclasses import dataclass, field
-from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm_client import LlmUsage, call_llm
 import re
 import tiktoken
 
@@ -154,7 +154,8 @@ def split_into_chunks(paragraphs: list[str], max_tokens: int = 10000) -> list[st
     return chunks
 
 
-def extract_headers_from_chunk(chunk_text: str, chunk_num: int, total_chunks: int) -> str:
+def extract_headers_from_chunk(chunk_text: str, chunk_num: int, total_chunks: int,
+                               usage: LlmUsage | None = None) -> str:
     """
     Extract CV headers from a single chunk of text.
 
@@ -162,6 +163,7 @@ def extract_headers_from_chunk(chunk_text: str, chunk_num: int, total_chunks: in
         chunk_text: Text content of this chunk
         chunk_num: Chunk number (1-indexed)
         total_chunks: Total number of chunks
+        usage: Optional LlmUsage that receives the call's priced result (#1177)
 
     Returns:
         Text outline in [H1]/[H2]/[H3] format for this chunk
@@ -214,6 +216,8 @@ CHUNK CONTENT:
         ],
         temperature=0.0,
     )
+    if usage is not None:
+        usage.add(result)
 
     outline_text = result["content"].strip()
 
@@ -294,28 +298,25 @@ def get_cv_hierarchy_chunked(cv_path: str, max_chunk_tokens: int = 10000) -> tup
     # Step 3: Extract headers from each chunk
     print(f"\nStep 3: Extracting headers from each chunk...")
     chunk_outlines = []
-    total_input_tokens = 0
-    total_output_tokens = 0
+    # Every call_llm in this stage -- the chunk calls here and the two
+    # normalization passes and the validation pass below -- feeds this, so the
+    # reported cost is what the client priced, not an estimate (#1177).
+    usage = LlmUsage()
 
     for i, chunk in enumerate(chunks, 1):
         print(f"  Processing chunk {i}/{len(chunks)}...", end=" ")
-        outline = extract_headers_from_chunk(chunk, i, len(chunks))
+        outline = extract_headers_from_chunk(chunk, i, len(chunks), usage=usage)
         chunk_outlines.append(outline)
-
-        # Estimate tokens (rough approximation)
-        input_tokens = count_tokens(chunk) + 200  # chunk + system prompt
-        output_tokens = count_tokens(outline)
-        total_input_tokens += input_tokens
-        total_output_tokens += output_tokens
 
         # Count headers in this chunk
         header_count = outline.count("[H1]") + outline.count("[H2]") + outline.count("[H3]")
         print(f"✓ ({header_count} headers)")
 
     print(f"  ✓ Extraction completed")
-    print(f"  Total tokens: {total_input_tokens} input + {total_output_tokens} output = {total_input_tokens + total_output_tokens} total")
-    extraction_cost = (total_input_tokens * 2.50 / 1_000_000) + (total_output_tokens * 10.00 / 1_000_000)
-    print(f"  Estimated extraction cost: ${extraction_cost:.4f}")
+    chunk_input_tokens = usage.prompt_tokens
+    chunk_output_tokens = usage.completion_tokens
+    print(f"  Total tokens: {chunk_input_tokens} input + {chunk_output_tokens} output = {chunk_input_tokens + chunk_output_tokens} total")
+    print(f"  Estimated extraction cost: ${usage.cost:.4f}")
 
     # Step 4: Combine chunk outlines
     print(f"\nStep 4: Combining chunk outlines...")
@@ -329,17 +330,17 @@ def get_cv_hierarchy_chunked(cv_path: str, max_chunk_tokens: int = 10000) -> tup
 
     # Step 5: Apply Step 7 normalization (first pass - can add synthetic headers)
     print(f"\nStep 5: Applying Step 7 normalization (semantic grouping, synthetic headers)...")
-    normalized_pass1 = normalize_hierarchy_with_llm(combined_hierarchy, pass_number=1)
+    normalized_pass1 = normalize_hierarchy_with_llm(combined_hierarchy, pass_number=1, usage=usage)
     print(f"  ✓ After normalization pass 1: {len(normalized_pass1)} headers")
 
     # Step 6: Apply Step 8 validation (filter out body text and year labels)
     print(f"\nStep 6: Applying Step 8 validation (filter non-headers)...")
-    validated_hierarchy = validate_headers_vs_entries(normalized_pass1)
+    validated_hierarchy = validate_headers_vs_entries(normalized_pass1, usage=usage)
     print(f"  ✓ After validation: {len(validated_hierarchy)} headers")
 
     # Step 7: Apply Step 9 normalization (second pass - no synthetic headers)
     print(f"\nStep 7: Applying Step 9 normalization (final cleanup)...")
-    normalized_pass2 = normalize_hierarchy_with_llm(validated_hierarchy, pass_number=2)
+    normalized_pass2 = normalize_hierarchy_with_llm(validated_hierarchy, pass_number=2, usage=usage)
     print(f"  ✓ After normalization pass 2: {len(normalized_pass2)} headers")
 
     # Step 8: deterministic, no LLM: a geographic sub-label listed after a later
@@ -350,9 +351,11 @@ def get_cv_hierarchy_chunked(cv_path: str, max_chunk_tokens: int = 10000) -> tup
     stats = {
         'document_tokens': total_tokens,
         'num_chunks': len(chunks),
-        'extraction_input_tokens': total_input_tokens,
-        'extraction_output_tokens': total_output_tokens,
-        'extraction_cost': extraction_cost,
+        'extraction_input_tokens': usage.prompt_tokens,
+        'extraction_output_tokens': usage.completion_tokens,
+        'extraction_cache_read_tokens': usage.cache_read_tokens,
+        'extraction_cache_write_tokens': usage.cache_write_tokens,
+        'extraction_cost': usage.cost,
         'raw_headers': len(combined_hierarchy),
         'after_pass1': len(normalized_pass1),
         'after_validation': len(validated_hierarchy),

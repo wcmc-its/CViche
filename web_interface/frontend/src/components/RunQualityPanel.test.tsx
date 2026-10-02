@@ -1,0 +1,141 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, RunQualitySections, seenOn } from './RunQualityPanel'
+import { getRunQuality } from '../api/runs'
+import type { RunQualityReport } from '../types'
+
+vi.mock('../api/runs', () => ({
+  getRunQuality: vi.fn(),
+  getRunReviewNote: vi.fn(),
+}))
+
+const EMPTY: RunQualityReport = {
+  run_id: 'ABCDEF', score: null, band: null, band_meaning: null, provisional: true,
+  cap: null, cap_reason: null, cap_lint: null, earned: null, total_weight: null,
+  data_complete: null, dimensions: [], gates_fired: [], doctor: null,
+}
+const SCORED: RunQualityReport = { ...EMPTY, score: 87, band: 'GREEN', band_meaning: 'Ship', earned: 87, total_weight: 95 }
+
+const NO_SCORE = 'No quality score is stored for this run.'
+
+// Lets the resolved getRunQuality promise and the resulting state update land.
+const flush = () => act(async () => { await Promise.resolve() })
+const tick = () => act(async () => { await vi.advanceTimersByTimeAsync(EMPTY_REPORT_RETRY_MS) })
+
+describe('RunQualitySections', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { cleanup(); vi.useRealTimers(); vi.mocked(getRunQuality).mockReset() })
+
+  it('fetches again when the report is empty, and shows the score once it is written', async () => {
+    vi.mocked(getRunQuality).mockResolvedValueOnce(EMPTY).mockResolvedValueOnce(SCORED)
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    expect(screen.getByText(NO_SCORE)).toBeTruthy()
+
+    await tick()
+    expect(getRunQuality).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText(NO_SCORE)).toBeNull()
+    expect(screen.getByText('87')).toBeTruthy()
+
+    await tick()
+    expect(getRunQuality).toHaveBeenCalledTimes(2)
+  })
+
+  it('stops after EMPTY_REPORT_RETRIES when nothing is ever stored', async () => {
+    vi.mocked(getRunQuality).mockResolvedValue(EMPTY)
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    for (let i = 0; i < EMPTY_REPORT_RETRIES + 3; i++) await tick()
+    expect(getRunQuality).toHaveBeenCalledTimes(1 + EMPTY_REPORT_RETRIES)
+    expect(screen.getByText(NO_SCORE)).toBeTruthy()
+  })
+
+  it('does not fetch again when the first report already has a score', async () => {
+    vi.mocked(getRunQuality).mockResolvedValue(SCORED)
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    await tick()
+    expect(getRunQuality).toHaveBeenCalledTimes(1)
+  })
+
+  it('cancels a pending retry on unmount', async () => {
+    vi.mocked(getRunQuality).mockResolvedValue(EMPTY)
+    const { unmount } = render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    unmount()
+    await tick()
+    expect(getRunQuality).toHaveBeenCalledTimes(1)
+  })
+
+  it('links the cap banner to its Run Doctor row by the plain title', async () => {
+    const lint = 'owner_contact_missing'
+    vi.mocked(getRunQuality).mockResolvedValue({
+      ...SCORED, cap: 25, cap_reason: 'owner name missing', cap_lint: lint,
+      doctor: {
+        counts: { error: 1, warn: 0, info: 0 }, not_run: 0,
+        findings: [{ lint, severity: 'ERROR', message: 'No name', title: 'Owner name not found', what_to_do: 'Rerun.', count: 1, prevalence: null, caps_score: true }],
+      },
+    })
+    const { container } = render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    const link = screen.getByRole('link', { name: 'Owner name not found' })
+    const target = link.getAttribute('href')!.slice(1)
+    expect(container.querySelector(`[id="${target}"]`)).toBeTruthy()
+  })
+
+  it('shows a finding as title, what to do, and Once / N times', async () => {
+    const finding = { severity: 'WARN' as const, message: 'm', what_to_do: 'Delete the repeat.', prevalence: 0.12, caps_score: false }
+    vi.mocked(getRunQuality).mockResolvedValue({
+      ...SCORED,
+      doctor: {
+        counts: { error: 0, warn: 2, info: 0 }, not_run: 0,
+        findings: [
+          { ...finding, lint: 'duplicate_records', title: 'Repeated numbered entry', count: 1 },
+          { ...finding, lint: 'pipe_leaks', title: null, what_to_do: null, count: 3 },
+        ],
+      },
+    })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    expect(screen.getByText('Repeated numbered entry')).toBeTruthy()
+    expect(screen.getByText('Delete the repeat.')).toBeTruthy()
+    expect(screen.getByText('Once')).toBeTruthy()
+    expect(screen.getByText('3 times')).toBeTruthy()
+    expect(screen.getByText('pipe_leaks')).toBeTruthy()
+    expect(screen.getAllByText('Seen on 12% of runs')).toHaveLength(2)
+  })
+
+  it('opens a row card on focus and lists a fired gate with its cap', async () => {
+    const wording = { checks: 'Checks tables.', scoring: 'Caps at 84.', if_lost: 'Re-enter rows.' }
+    vi.mocked(getRunQuality).mockResolvedValue({
+      ...SCORED,
+      dimensions: [{ name: 'Sparse tables', label: 'Tables filled in', weight: 12, points: 10, can_cap: false, ...wording }],
+      gates_fired: [{ name: 'Lost table gate', label: 'Source tables read in full', cap: 84, lint: 'table_lost', ...wording }],
+    })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    expect(screen.queryByRole('tooltip')).toBeNull()
+    fireEvent.focus(screen.getByText('Tables filled in').parentElement!)
+    expect(screen.getByRole('tooltip').textContent).toContain('Scored as \u201cSparse tables\u201d \u00b7 weight 12')
+    expect(screen.getByRole('link', { name: 'Caps score at 84' }).getAttribute('href')).toBe('#doctor-lint-table_lost')
+  })
+
+  it('reads a rate that rounds to 0% as under 1%', () => {
+    expect([seenOn(0.001), seenOn(0.005), seenOn(0.12)]).toEqual(['under 1%', '1%', '12%'])
+  })
+
+  it('labels a gate card as cap-only', async () => {
+    vi.mocked(getRunQuality).mockResolvedValue({
+      ...SCORED,
+      dimensions: [{ name: 'Dup', label: null, weight: 10, points: 10, can_cap: false, checks: null, scoring: null, if_lost: null }],
+      gates_fired: [{ name: 'Gate', label: 'Source tables read in full', cap: 84, lint: 'table_lost', checks: null, scoring: null, if_lost: 'Re-enter rows.' }],
+    })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    fireEvent.focus(screen.getByText('Source tables read in full').parentElement!)
+    const card = screen.getByRole('tooltip').textContent
+    expect(card).toContain('If it fires:')
+    expect(card).toContain('caps only, no points')
+  })
+})

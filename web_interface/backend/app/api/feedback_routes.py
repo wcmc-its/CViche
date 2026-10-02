@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Run, Step, Feedback, User
-from app.schemas import FeedbackSubmit, FeedbackResponse, RunFeedbackStatus
+from app.schemas import iso_with_offset, FeedbackDetail, FeedbackSubmit, FeedbackResponse, RunFeedbackStatus
 from app.auth import get_current_user
 from app.services.run_service import check_run_access
+from app.services.runs_admin_query import load_run_feedback_with_reviewers
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,35 @@ def _get_populated_wcm_sections(run_id: str) -> list[dict]:
     return populated
 
 
+def serialize_feedback(feedback: Feedback) -> dict:
+    """Every stored answer field of a Feedback row, JSON-ready (the one
+    per-field serialisation; GET /run/{id}/feedback and /feedback/all share it)."""
+    return {
+        "id": feedback.id,
+        "run_id": feedback.run_id,
+        "user_id": feedback.user_id,
+        "reviewer_role": feedback.reviewer_role,
+        "overall_accuracy": feedback.overall_accuracy,
+        "overall_completeness": feedback.overall_completeness,
+        "overall_usefulness": feedback.overall_usefulness,
+        "manual_conversion_effort": feedback.manual_conversion_effort,
+        "correction_effort": feedback.correction_effort,
+        "enrichment_quality": feedback.enrichment_quality,
+        "summary_generated": feedback.summary_generated,
+        "summary_quality": feedback.summary_quality,
+        "issue_missing_content": feedback.issue_missing_content,
+        "issue_split_merged": feedback.issue_split_merged,
+        "issue_wrong_section": feedback.issue_wrong_section,
+        "issue_inaccurate": feedback.issue_inaccurate,
+        "issue_ai_enrichment": feedback.issue_ai_enrichment,
+        "issue_formatting": feedback.issue_formatting,
+        "issue_locations": json.loads(feedback.issue_locations) if feedback.issue_locations else None,
+        "biggest_issue": feedback.biggest_issue,
+        "likelihood_to_recommend": feedback.likelihood_to_recommend,
+        "submitted_at": iso_with_offset(feedback.submitted_at) if feedback.submitted_at else None,
+    }
+
+
 @router.get("/run/{run_id}/feedback")
 async def get_feedback(
     run_id: str,
@@ -162,32 +192,7 @@ async def get_feedback(
         Feedback.user_id == current_user.id,
     ).first()
 
-    feedback_data = None
-    if feedback:
-        feedback_data = {
-            "id": feedback.id,
-            "run_id": feedback.run_id,
-            "user_id": feedback.user_id,
-            "reviewer_role": feedback.reviewer_role,
-            "overall_accuracy": feedback.overall_accuracy,
-            "overall_completeness": feedback.overall_completeness,
-            "overall_usefulness": feedback.overall_usefulness,
-            "manual_conversion_effort": feedback.manual_conversion_effort,
-            "correction_effort": feedback.correction_effort,
-            "enrichment_quality": feedback.enrichment_quality,
-            "summary_generated": feedback.summary_generated,
-            "summary_quality": feedback.summary_quality,
-            "issue_missing_content": feedback.issue_missing_content,
-            "issue_split_merged": feedback.issue_split_merged,
-            "issue_wrong_section": feedback.issue_wrong_section,
-            "issue_inaccurate": feedback.issue_inaccurate,
-            "issue_ai_enrichment": feedback.issue_ai_enrichment,
-            "issue_formatting": feedback.issue_formatting,
-            "issue_locations": json.loads(feedback.issue_locations) if feedback.issue_locations else None,
-            "biggest_issue": feedback.biggest_issue,
-            "likelihood_to_recommend": feedback.likelihood_to_recommend,
-            "submitted_at": feedback.submitted_at.isoformat() if feedback.submitted_at else None,
-        }
+    feedback_data = serialize_feedback(feedback) if feedback else None
 
     # Query completed stages from Step table
     completed_steps = (
@@ -212,6 +217,24 @@ async def get_feedback(
             "wcm_sections": wcm_sections,
         },
     }
+
+
+@router.get("/run/{run_id}/feedback/all", response_model=list[FeedbackDetail])
+def get_all_feedback(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> list[FeedbackDetail]:
+    """Every reviewer's feedback on this run, newest first.
+
+    Run owner, admin or staff only (403 otherwise, 404 for an unknown run).
+    """
+    check_run_access(run_id, current_user, db, read_only=True)
+    rows = load_run_feedback_with_reviewers(db, run_id)
+    return [
+        FeedbackDetail(**serialize_feedback(feedback), display_name=display_name)
+        for feedback, display_name in rows
+    ]
 
 
 @router.post("/run/{run_id}/feedback", response_model=FeedbackResponse, status_code=201)
@@ -342,6 +365,9 @@ async def get_feedback_status(
 
     For each completed run owned by the user, indicates whether feedback
     has been submitted.
+
+    Kept for compatibility only: the runs table no longer uses it (GET /runs
+    carries a per-run ``feedback`` summary covering every reviewer).
     """
     # Get all completed runs for this user
     completed_runs = (

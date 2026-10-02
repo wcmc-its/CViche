@@ -204,6 +204,23 @@ class RunStorage(ABC):
         ...
 
     @abstractmethod
+    def get_global(self, key: str) -> bytes:
+        """Read a top-level object written via put_global, or by something
+        outside the app (SES writes ``inbound/`` mail here, #1298).
+
+        Raises:
+            StorageKeyNotFound: If the object does not exist.
+        """
+        ...
+
+    @abstractmethod
+    def list_global(self, prefix: str) -> list[str]:
+        """Every top-level key under ``prefix`` (a literal key-prefix match,
+        like S3's Prefix), as full relative keys, sorted. ``prefix`` must be
+        non-empty."""
+        ...
+
+    @abstractmethod
     def delete_run(self, run_id: str) -> int:
         """Delete every stored artifact for a run (its whole namespace).
 
@@ -303,5 +320,19 @@ class RunStorage(ABC):
 
         Returns:
             True if the file exists, False otherwise.
+        """
+        ...
+
+    @abstractmethod
+    def get_malware_scan_status(self, run_id: str, key: str) -> str | None:
+        """Read the verdict GuardDuty Malware Protection tagged a file with (#1333).
+
+        Args:
+            run_id: The run identifier.
+            key: Relative path within the run's storage.
+
+        Returns:
+            The object's GuardDutyMalwareScanStatus tag value, or None when it
+            has no such tag: not scanned yet, or a backend with no object tags.
         """
         ...

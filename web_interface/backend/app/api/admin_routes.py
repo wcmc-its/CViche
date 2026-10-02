@@ -24,16 +24,22 @@ from app.schemas import (
     AdminRunsResponse,
     AdminConfigResponse,
     AdminConfigUpdate,
+    ConsentPublishPreview,
+    ConsentPublishRequest,
     AdminUserUpdate,
     QualityScoreResult,
     QueueDbView,
     QueueStatsResponse,
+    QueueStreamStats,
 )
+from app.consent import get_current_consent_document
+from app.services.consent_service import count_users_to_reconsent, next_consent_version
+from app.services.runs_admin_query import submission_split
 from app.services.admin_service import get_step_avg_seconds, get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import (
     get_cached_score, compute_and_cache_score, persist_score_columns,
 )
-from app.audit_events import RUN_DELETED
+from app.audit_events import CONSENT_VERSION_PUBLISHED, RUN_DELETED
 from app.services.run_service import delete_run_and_artifacts, find_run, reap_orphaned_created_runs, queue_db_view
 from app.config_loader import get_config as read_config  # a route below is named get_config
 from app.pipeline import concurrency, run_queue
@@ -113,6 +119,7 @@ async def get_stats(
         avg_duration_seconds=avg_duration_seconds,
         p95_duration_seconds=p95_duration_seconds,
         step_avg_seconds=step_avg_seconds,
+        submissions=submission_split(db),
     )
 
 
@@ -148,6 +155,8 @@ async def update_user(
     # Validate: can't remove last admin
     if body.role is not None and body.role != target.role:
         if target.role == "admin" and body.role == "user":
+            if target.id == admin.id:
+                raise validation_error("Cannot remove your own admin role.")
             admin_count = (
                 db.query(func.count(User.id))
                 .filter(User.role == "admin", User.status == "active")
@@ -307,6 +316,10 @@ def get_queue_stats(
     has claimed yet -- so a non-zero lag does not by itself rule stranding
     out.
 
+    The top-level stream fields are the single-run queue's (unchanged since
+    #701); ``queues`` repeats them per queue, adding the batch stream and its
+    dead-letter count (#1114).
+
     Plain ``def``: both ``queue_db_view`` (sync Session) and ``run_queue``'s
     Valkey calls (sync redis-py) are blocking, so FastAPI runs this in the
     threadpool instead of stalling the event loop (#701 admin_routes.py
@@ -320,7 +333,7 @@ def get_queue_stats(
     if not url:
         return QueueStatsResponse(enabled=True, db=db_view, error="valkey_not_configured")
     try:
-        stats = run_queue.stats()
+        per_queue = {queue.name: run_queue.stats(queue) for queue in run_queue.QUEUES_BY_NAME.values()}
     except redis.exceptions.RedisError as e:
         # The endpoint that diagnoses a stuck queue must still answer when
         # Valkey itself is the problem. The exception's own text can carry a
@@ -328,7 +341,10 @@ def get_queue_stats(
         # only to the log, never the response.
         logger.warning("Queue stats unavailable: %s: %s", type(e).__name__, e)
         return QueueStatsResponse(enabled=True, db=db_view, error="valkey_unavailable")
-    return QueueStatsResponse(enabled=True, db=db_view, **stats)
+    return QueueStatsResponse(
+        enabled=True, db=db_view, **per_queue[run_queue.SINGLE.name],
+        queues={name: QueueStreamStats(**stats) for name, stats in per_queue.items()},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +622,54 @@ async def update_config(
 
     # Return updated config
     return await get_config(db=db, admin=admin)
+
+
+# ---------------------------------------------------------------------------
+# GET/POST /api/admin/consent/publish  -- publish the next consent version
+# ---------------------------------------------------------------------------
+def _consent_publish_preview(db: Session) -> ConsentPublishPreview:
+    current = get_current_consent_document(db).version
+    try:
+        proposed = next_consent_version(current)
+    except ValueError as exc:
+        raise validation_error(str(exc)) from exc
+    return ConsentPublishPreview(
+        current_version=current,
+        next_version=proposed,
+        users_to_reconsent=count_users_to_reconsent(db, proposed),
+    )
+
+
+@router.get("/admin/consent/publish", response_model=ConsentPublishPreview)
+async def preview_consent_publish(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> ConsentPublishPreview:
+    """The next consent version and how many active users must agree again if it is published."""
+    return _consent_publish_preview(db)
+
+
+@router.post("/admin/consent/publish", response_model=ConsentPublishPreview)
+async def publish_consent_version(
+    body: ConsentPublishRequest,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> ConsentPublishPreview:
+    """Publish the next consent version. ``body.version`` is the one the admin was
+    shown; if another admin published first it is no longer the next one (409)."""
+    preview = _consent_publish_preview(db)
+    if body.version != preview.next_version:
+        raise conflict(
+            f"The next consent version is now {preview.next_version}, not {body.version}. "
+            "Reload and review before publishing."
+        )
+    await update_config(AdminConfigUpdate(consent_version=preview.next_version), db=db, admin=admin)
+    logger.info(
+        CONSENT_VERSION_PUBLISHED,
+        extra={"admin": admin.email, "old_version": preview.current_version,
+               "new_version": preview.next_version, "users_to_reconsent": preview.users_to_reconsent},
+    )
+    return preview
 
 
 # ---------------------------------------------------------------------------

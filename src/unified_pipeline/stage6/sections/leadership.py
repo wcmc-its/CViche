@@ -18,6 +18,7 @@ parsed role titles back into the activity text, because its table has no role
 column for them.
 """
 import logging
+import re
 from typing import List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
@@ -61,6 +62,42 @@ def _wrapped_leadership_row(entry: dict) -> str | None:
     if max(len(entry_lines(cell)) for cell in cells) > _MAX_WRAPPED_CELL_LINES:
         return None
     return row_text
+
+
+# A run of letters or digits, case-folded: what `_with_division` compares, so
+# the ", " it writes and the source's own punctuation do not count as content.
+_DIVISION_WORD_RE = re.compile(r"[^\W_]+")
+# Function words that do not make a division a different thing: "Division of
+# Cardiology" is already said by "Chief, Cardiology Division". The same set
+# sibling P uses to fold its institution into a name cell (#985).
+_DIVISION_STOPWORDS = frozenset({'of', 'the', 'for', 'and', 'at', 'in'})
+
+
+def _division_words(text: str) -> set[str]:
+    """The content words of `text`, case-folded, function words dropped."""
+    return {word for word in _DIVISION_WORD_RE.findall(text.casefold())
+            if word not in _DIVISION_STOPWORDS}
+
+
+def _with_division(institution: object, division_department: object, role: object) -> str:
+    """The Institution/Location cell: the division, department or program the
+    role sits in, then the institution ("Division, Institution").
+
+    Stage 4 fills `division_department` on O entries although the schema marks
+    it `extract: false`, and the cell used to read it only when the institution
+    was empty -- so in the normal case, institution set, the program or
+    division that tells one leadership row from the next was dropped. It is
+    left out when every one of its words is already in the role or the
+    institution, so "Director, Cardiology Program" does not repeat its program.
+    """
+    institution_text = _committee_cell_text(institution)
+    division = _committee_cell_text(division_department)
+    if not institution_text:
+        return division
+    said = _division_words(f"{_committee_cell_text(role)} {institution_text}")
+    if _division_words(division) <= said:
+        return institution_text
+    return f"{division}, {institution_text}"
 
 
 def _looks_like_leadership_table(table) -> bool:
@@ -131,13 +168,13 @@ class LeadershipSection:
 
             # Check for leadership_role field (O code schema) as well as generic role/position
             role = fields.get('leadership_role') or fields.get('role') or fields.get('position') or ''
-            institution = fields.get('institution') or fields.get('organization') or ''
-            # Also check division_department for O codes
-            if not institution:
-                institution = fields.get('division_department') or ''
+            institution = _with_division(
+                fields.get('institution') or fields.get('organization') or '',
+                fields.get('division_department'), role)
             start_date = fields.get('start_date') or ''
             end_date = fields.get('end_date') or ''
-            dates = format_date_range(start_date, end_date, taxonomy_code) or ''
+            dates = format_date_range(start_date, end_date, taxonomy_code,
+                                      original_text) or ''
 
             # Check if this entry contains multiple items (newline-separated)
             lines = entry_lines(original_text)

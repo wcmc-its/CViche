@@ -109,10 +109,85 @@ def test_staff_can_read_but_not_submit_feedback_on_another_users_run(client, db,
 
     with _as_user(staff):
         read = client.get(f"/api/run/{_RUN_ID}/feedback")
+        read_all = client.get(f"/api/run/{_RUN_ID}/feedback/all")
         write = client.post(f"/api/run/{_RUN_ID}/feedback", json=_VALID_BODY)
 
     assert read.status_code == 200
+    assert read_all.status_code == 200
     assert write.status_code == 403
     notify.assert_not_called()
     from app.models import Feedback
     assert db.query(Feedback).filter(Feedback.run_id == _RUN_ID).count() == 0
+
+
+def _add_feedback(db, user, at, **overrides):
+    from app.models import Feedback
+
+    fields = dict(
+        run_id=_RUN_ID, user_id=user.id, reviewer_role="self", overall_usefulness=4,
+        manual_conversion_effort="1-2 hours", correction_effort="1-2 hours",
+        likelihood_to_recommend=5, submitted_at=at, issue_locations='["A", "M2"]',
+        biggest_issue="Jane Testperson grants are missing",
+    )
+    fields.update(overrides)
+    db.add(Feedback(**fields))
+    db.commit()
+
+
+def _other_user(db, email, role="user"):
+    from app.models import User
+
+    user = User(email=email, display_name="Other Reviewer", role=role)
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def test_feedback_all_lists_every_reviewer_newest_first(client, db):
+    owner = _seed_run(db)
+    other = _other_user(db, "other@example.com")
+    _add_feedback(db, owner, datetime(2026, 9, 1))
+    _add_feedback(db, other, datetime(2026, 9, 2), reviewer_role="colleague")
+
+    with _as_user(owner):
+        resp = client.get(f"/api/run/{_RUN_ID}/feedback/all")
+
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert [(r["display_name"], r["reviewer_role"]) for r in rows] == [
+        ("Other Reviewer", "colleague"), ("Reviewer", "self")]
+    submitted = datetime.fromisoformat(rows[0]["submitted_at"])
+    assert submitted.tzinfo is not None  # carries a UTC offset (schemas.py rule)
+    assert submitted.replace(tzinfo=None) == datetime(2026, 9, 2)
+    assert rows[0]["issue_locations"] == ["A", "M2"]
+    assert rows[0]["biggest_issue"] == "Jane Testperson grants are missing"
+    assert rows[0]["overall_usefulness"] == 4
+    assert rows[0]["summary_generated"] is None
+
+
+def test_feedback_all_is_open_to_an_admin_and_closed_to_a_stranger(client, db):
+    owner = _seed_run(db)
+    _add_feedback(db, owner, datetime(2026, 9, 1))
+    admin = _other_user(db, "root@example.com", role="admin")
+    stranger = _other_user(db, "stranger@example.com")
+
+    with _as_user(admin):
+        assert client.get(f"/api/run/{_RUN_ID}/feedback/all").status_code == 200
+    with _as_user(stranger):
+        assert client.get(f"/api/run/{_RUN_ID}/feedback/all").status_code == 403
+    with _as_user(admin):
+        assert client.get("/api/run/NOSUCH/feedback/all").status_code == 404
+
+
+def test_feedback_all_matches_the_single_feedback_serialisation(client, db):
+    """One per-field serialisation: /feedback/all adds only display_name."""
+    owner = _seed_run(db)
+    _add_feedback(db, owner, datetime(2026, 9, 1))
+
+    with _as_user(owner):
+        single = client.get(f"/api/run/{_RUN_ID}/feedback").json()["feedback"]
+        listed = client.get(f"/api/run/{_RUN_ID}/feedback/all").json()[0]
+
+    listed.pop("display_name")
+    assert listed == single

@@ -34,7 +34,9 @@ shape alone cannot do it (#573):
 - the `license_type` field, when stage 4 extracted one;
 - else the word "NPI" or "DEA" in the entry's raw text, at a word start and
   not running on into letters (a fused "NPI15180546000" still counts) -- the
-  old substring test fired on any entry mentioning "Dean";
+  old substring test fired on any entry mentioning "Dean"; the agency's full
+  name ("Drug Enforcement Administration") counts as the DEA label, in the
+  raw text or in the state field it was extracted into (#1217);
 - else, and only when the entry names no state, the number's shape: an NPI
   is 10 or 11 digits, a DEA-LIKE number two letters plus seven alphanumerics
   (wider than the real two-letters-plus-seven-DIGITS format on purpose --
@@ -44,11 +46,13 @@ shape alone cannot do it (#573):
   NPI by shape, which is why a stated jurisdiction disables the tiebreak.
 
 Either match consumes the entry -- it is pulled out of the licence list, not
-copied -- so a DEA number never also appears as a row in the state table. The
-unstructured fallback is guarded by the same two label tests for the same
-reason. The NPI and DEA slots are single-valued; a second, different
-candidate is ignored with a warning rather than silently overwriting the
-first (#573).
+copied -- so a DEA number never also appears as a row in the state table. A DEA
+number that the reader fused into ANOTHER licence entry's number cell (stacked
+paragraphs read as one row) is cut out of that cell instead, and withheld with
+the same notice (#1217). The unstructured fallback is guarded by the same two
+label tests for the same reason. The NPI and DEA slots are single-valued; a
+second, different candidate is ignored with a warning rather than silently
+overwriting the first (#573).
 
 `_fill_dea_npi` finds its table by scanning every table in the document for a
 cell containing "DEA number", not by position. The template revision history has
@@ -67,7 +71,7 @@ what that guard checks.
 import logging
 import re
 from collections.abc import Mapping, MutableMapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 try:
@@ -91,7 +95,13 @@ logger = logging.getLogger(__name__)
 # and a plain \b would reject exactly those. Shape tests are a tiebreak
 # only -- see _classify_licensure_entry.
 _NPI_LABEL_RE = re.compile(r'\bNPI(?![A-Za-z])', re.IGNORECASE)
-_DEA_LABEL_RE = re.compile(r'\bDEA(?![A-Za-z])', re.IGNORECASE)
+# The DEA label is the acronym OR the agency's full name (#1217): a row whose
+# first column spells out "Drug Enforcement Administration" (or the common
+# misnomer "Agency") carries no "DEA" token at all, so the acronym test alone
+# let its number render as an ordinary licence row.
+_DEA_LABEL_RE = re.compile(
+    r'\bDEA(?![A-Za-z])|\bDrug\s+Enforcement\s+(?:Administration|Agency)\b',
+    re.IGNORECASE)
 _NPI_SHAPE_RE = re.compile(r'^\d{10,11}$')
 
 # Two DEA shapes, deliberately different widths, because the two callers
@@ -118,8 +128,25 @@ _NPI_SHAPE_RE = re.compile(r'^\d{10,11}$')
 # check before splitting the two (both farms, 196 F1 entries): zero
 # `license_number` values match the loose shape but not the tight one, so
 # the split changes no rendered output today.
-_DEA_NUMBER_RE = re.compile(r'^[A-Za-z]{2}\d{7}$')
+_DEA_NUMBER_SHAPE = r'[A-Za-z]{2}\d{7}'
+_DEA_NUMBER_RE = re.compile(rf'^{_DEA_NUMBER_SHAPE}$')
 _DEA_LIKE_SHAPE_RE = re.compile(r'^[A-Za-z]{2}[A-Za-z0-9]{7}$')
+
+# A DEA-number token inside a fused `license_number` cell (#1217), cut out by
+# `_strip_dea_number_tokens`. The tight shape, as for `_strip_dea_lines`: this
+# predicate deletes, so it must not match a nine-letter word. A leading '#' (a
+# "#AB1234567" the source wrote that way) goes with the token.
+_FUSED_DEA_TOKEN_RE = re.compile(
+    rf'(?<![A-Za-z0-9])#?{_DEA_NUMBER_SHAPE}(?![A-Za-z0-9])')
+_NUMBER_SEPARATOR_RE = re.compile(r'[\s,;/]+')
+_SEPARATOR_RUN_RE = re.compile(r'(?:\s*[,;/]\s*){2,}')
+# How many tokens a number cell needs before a DEA-shaped one is cut. A licence
+# cell needs two: a lone token beside a stated jurisdiction can be a real state
+# licence number of the same shape (#573). An NPI cell needs one: an NPI is ten
+# or eleven digits and is never DEA-shaped, so a DEA-shaped token there is not
+# the NPI wherever it sits.
+_MIN_TOKENS_LICENSE_CELL = 2
+_MIN_TOKENS_NPI_CELL = 1
 
 # Classification results for one F1 entry.
 KIND_LICENSE = 'license'
@@ -220,7 +247,7 @@ def _classify_licensure_entry(state: str, license_number: str,
         return KIND_DEA
     if _NPI_LABEL_RE.search(text):
         return KIND_NPI
-    if _DEA_LABEL_RE.search(text):
+    if _DEA_LABEL_RE.search(text) or _DEA_LABEL_RE.search(str(state or '')):
         return KIND_DEA
     if not license_number:
         return KIND_LICENSE
@@ -333,6 +360,43 @@ def _strip_dea_lines(text: str) -> str:
     return '\n'.join(kept)
 
 
+def _strip_dea_number_tokens(number: str, min_tokens: int) -> str:
+    """Cut DEA-number tokens out of a fused licence or NPI number cell.
+
+    The reader sometimes leaves several stacked credentials' numbers in ONE
+    entry's number cell ("<licence>, <licence>, <npi>, <dea>"); the DEA
+    registration that rode along is not the entry's own, so
+    `_classify_licensure_entry` (one verdict per entry) cannot see it (#1217).
+    Only the tight DEA shape is cut (`_FUSED_DEA_TOKEN_RE`), and only from a
+    cell of at least `min_tokens` tokens (`_MIN_TOKENS_LICENSE_CELL`,
+    `_MIN_TOKENS_NPI_CELL`: why the two kinds differ is on those constants).
+    Returns `number` unchanged when no token matched.
+    """
+    if len(_NUMBER_SEPARATOR_RE.split(number.strip())) < min_tokens:
+        return number
+    if not _FUSED_DEA_TOKEN_RE.search(number):
+        return number
+    cut = _SEPARATOR_RUN_RE.sub(', ', _FUSED_DEA_TOKEN_RE.sub('', number))
+    return cut.strip(' ,;/')
+
+
+def _withhold_fused_dea(raw: MutableMapping[str, Any], entry: LicensureEntry,
+                        min_tokens: int) -> tuple[LicensureEntry, bool]:
+    """Withhold a DEA number riding in a licence or NPI entry's number cell.
+
+    Returns the entry with the token cut out and True when one was; the
+    entry is returned untouched with False otherwise. The entry keeps the
+    kind it was classified as -- only the token is not its own. A cut also
+    strips the DEA line from `raw['text']`, the text the #221 recovery pass
+    re-reads, exactly as for a DEA-classified entry (see `_resolve_licensure`).
+    """
+    number = _strip_dea_number_tokens(entry.number, min_tokens)
+    if number == entry.number:
+        return entry, False
+    raw['text'] = _strip_dea_lines(entry.original_text)
+    return replace(entry, number=number), True
+
+
 def _resolve_licensure(
         entries: Sequence[MutableMapping[str, Any]]) -> LicensureResult:
     """Decide the whole of section F1 without touching a document.
@@ -382,13 +446,21 @@ def _resolve_licensure(
         kind = _classify_licensure_entry(entry.state, entry.number,
                                          entry.license_type,
                                          entry.original_text)
-        if kind == KIND_NPI:
-            npi_number = _claim_identifier_slot(
-                'NPI', npi_number, entry.number, entry.original_text)
-            continue
         if kind == KIND_DEA:
             dea_withheld = True
             raw['text'] = _strip_dea_lines(entry.original_text)
+            continue
+
+        # A DEA number fused into this NPI's or licence's number cell
+        # (#1217): the entry keeps its kind, the token is not its own.
+        min_tokens = (_MIN_TOKENS_NPI_CELL if kind == KIND_NPI
+                      else _MIN_TOKENS_LICENSE_CELL)
+        entry, fused = _withhold_fused_dea(raw, entry, min_tokens)
+        dea_withheld = dea_withheld or fused
+
+        if kind == KIND_NPI:
+            npi_number = _claim_identifier_slot(
+                'NPI', npi_number, entry.number, entry.original_text)
             continue
 
         record = _license_record(entry)

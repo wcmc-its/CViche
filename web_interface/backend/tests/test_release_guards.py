@@ -256,8 +256,8 @@ class TestEmptyUploadRejection:
         assert db.query(Run).count() == 0
 
     def test_upload_rejects_image_only_pdf(self, client, db, seed_simple_mode):
-        # #806: a fully scanned PDF yields no text, so the same readable-text
-        # floor that rejects a blank docx rejects it before any LLM spend.
+        # #806: a fully scanned PDF is rejected before any LLM spend, and
+        # (#1282) the message says it is scanned and how to fix it.
         from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
         user = _make_user(db)
         _auth_cookie(client, user)
@@ -267,7 +267,7 @@ class TestEmptyUploadRejection:
             data={"submission_type": "own_cv"},
         )
         assert resp.status_code == 400
-        assert "couldn't read any text" in resp.json()["detail"]["message"]
+        assert resp.json()["detail"]["message"].startswith("Page 1 of this PDF is a scanned image")
         assert db.query(Run).count() == 0
 
     def test_upload_rejects_unreadable_docx(self, client, db, seed_simple_mode):
@@ -422,7 +422,7 @@ class TestRetryStepQueueModeEnqueueFailure:
         upload_file = UPLOAD_DIR / "RETRYQ1.docx"
         upload_file.write_bytes(b"dummy")
 
-        def enqueue_fails(run_id):
+        def enqueue_fails(run_id, queue):
             raise redis.exceptions.ConnectionError("valkey unreachable")
         monkeypatch.setattr(run_queue, "enqueue", enqueue_fails)
 
@@ -442,7 +442,7 @@ class TestRetryStepQueueModeEnqueueFailure:
 
             # Second retry: enqueue now works.
             enqueued = []
-            monkeypatch.setattr(run_queue, "enqueue", lambda run_id: enqueued.append(run_id) or "1-0")
+            monkeypatch.setattr(run_queue, "enqueue", lambda run_id, queue: enqueued.append(run_id) or "1-0")
 
             resp2 = client.post("/api/run/RETRYQ1/retry/6")
 

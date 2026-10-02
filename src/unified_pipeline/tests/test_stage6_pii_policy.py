@@ -99,8 +99,14 @@ A, APPENDIX, CONTENT = "A", "T", "S4"
 DENIED, ALLOWED = True, False
 
 
+def _probe_matches(text: str, code: str):
+    """The matches `run_pii_pass` finds in an entry of `code`: the same scope,
+    and the Personal Data block's own dash-label rule for an A-coded entry."""
+    return _pii_matches(text, _entry_scope(code, RENDER_ROUTED_CODES), personal_data=code == A)
+
+
 def _denied(text: str, code: str) -> bool:
-    return bool(_pii_fragments(text, _entry_scope(code, RENDER_ROUTED_CODES)))
+    return bool(_probe_matches(text, code))
 
 
 # --------------------------------------------------------------------------
@@ -113,6 +119,9 @@ def _denied(text: str, code: str) -> bool:
 _ALL = {A: DENIED, APPENDIX: DENIED, CONTENT: DENIED}
 _PERSONAL_ONLY = {A: DENIED, APPENDIX: DENIED, CONTENT: ALLOWED}
 _NEVER = {A: ALLOWED, APPENDIX: ALLOWED, CONTENT: ALLOWED}
+#: A dash family label with no `Family` label ahead of it (#1223): withheld in
+#: the Personal Data block only.
+_DASH_PERSONAL_DATA_ONLY = {A: DENIED, APPENDIX: ALLOWED, CONTENT: ALLOWED}
 
 PROBE_TABLE = [
     # --- #820's 16 DOB shapes ------------------------------------------
@@ -230,7 +239,32 @@ PROBE_TABLE = [
     ("Spouse and Children: Pat Example; Kim, Lee", CAT_SPOUSE, _ALL),
     ("Wife/Children: Pat Example, Kim", CAT_SPOUSE, _ALL),
     ("Names of Children: Kim (1990), Lee (1992)", CAT_CHILDREN, _PERSONAL_ONLY),
-    ("Name of Spouse \u2013 A Documentary Film Review", None, _NEVER),
+    # #1223: an A-coded entry is the Personal Data block, which holds no
+    # titles, so this #473 control is withheld there only
+    # (`_DASH_PERSONAL_DATA_ONLY`).
+    ("Name of Spouse \u2013 A Documentary Film Review", CAT_SPOUSE, _DASH_PERSONAL_DATA_ONLY),
+    # #1223: family prose with no label, and the wider family label.
+    ("Married (Pat), two children (Kim and Lee)", CAT_SPOUSE, _PERSONAL_ONLY),
+    ("2 children (Kim and Lee)", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("Kim born [withheld]", CAT_BIRTH, _PERSONAL_ONLY),
+    ("Family Information: Pat Example", CAT_FAMILY, _PERSONAL_ONLY),
+    ("Family Data: Pat Example", CAT_FAMILY, _PERSONAL_ONLY),
+    # ...whose negative controls: the same words inside a sentence or a title.
+    ("Married couples (n=40) in clinical trials", None, _NEVER),
+    ("A method married (loosely) to practice", None, _NEVER),
+    ("Three children's hospitals (a survey)", None, _NEVER),
+    ("the clinic, born 1970, was founded", None, _NEVER),
+    ("Family Medicine: A Review", None, _NEVER),
+    # The dash form is accepted under a `Family` label at A and T, and with no
+    # label at all in an A-coded entry (the Personal Data block holds no
+    # titles). So these title-shaped controls are withheld at A, and stay
+    # clean at T and in a routed entry (see the #1223 section below).
+    ("Children - A Review of the Literature", CAT_CHILDREN, _DASH_PERSONAL_DATA_ONLY),
+    ("Spouse- A Documentary Film Review", CAT_SPOUSE, _DASH_PERSONAL_DATA_ONLY),
+    ("Family- wise error rate in gene association studies", CAT_FAMILY, _DASH_PERSONAL_DATA_ONLY),
+    # A spelled-out child count, with no spouse span ahead of it to cover it.
+    ("two children (Kim and Lee)", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("three sons (Bob, Cy and Dee)", CAT_CHILDREN, _PERSONAL_ONLY),
 ]
 
 
@@ -252,8 +286,7 @@ def test_probe_table(text, category, dest, expected):
     assert _denied(text, dest) is expected, (
         f"{text!r} at {dest}: expected {'denied' if expected else 'allowed'}")
     if expected:
-        scope = _entry_scope(dest, RENDER_ROUTED_CODES)
-        assert [m.category for m in _pii_matches(text, scope)] == [category]
+        assert [m.category for m in _probe_matches(text, dest)] == [category]
 
 
 def test_every_policy_row_has_a_probe_that_reaches_it():
@@ -492,12 +525,22 @@ def test_1041_child_count_inside_prose_is_not_withheld(text):
     "Visa\u2014free travel policy review",
     "Visa\u2013sponsored scholars program",
     # Rows left colon-only: their labels open real titles.
-    "Spouse \u2013 A Documentary Film Review",
     "Honorarium - Grand Rounds lecture",
 ])
 def test_1041_dash_joined_non_pii_line_is_not_newly_withheld(text):
     assert not _denied(text, A)
     assert not _denied(text, APPENDIX)
+
+
+def test_1041_the_spouse_title_control_is_withheld_only_in_the_personal_data_block():
+    """#1223 took the dash form of a children / spouse / family label in an
+    A-coded entry (the Personal Data block, which holds no titles), so this
+    #1041 control is withheld there. In an Appendix-bound entry, which can
+    hold a title, it still needs a `Family` label ahead of it."""
+    text = "Spouse \u2013 A Documentary Film Review"
+    assert _denied(text, A)
+    assert not _denied(text, APPENDIX)
+    assert not _denied(text, CONTENT)
 
 
 @pytest.mark.parametrize("label", [
@@ -1886,3 +1929,253 @@ def test_redact_pre_llm_values_children_label_after_a_known_field_takes_every_wh
 ])
 def test_redact_pre_llm_values_a_date_opening_a_children_value_is_a_child_item(text, expected):
     assert redact_pre_llm_values(text) == expected
+
+
+# --------------------------------------------------------------------------
+# #1223: the withhold cuts the whole family / birth / home-contact value, not
+# only the matched label's own fragment. All names, dates and numbers are
+# synthetic.
+# --------------------------------------------------------------------------
+
+def _withheld_residual(text: str, code: str = A) -> tuple[str, list[WithheldItem]]:
+    entry = {"text": text, "taxonomy_code": code, "extracted_fields": {}}
+    result = _run({code: [entry]})
+    return entry["text"], result.withheld
+
+
+@pytest.mark.parametrize("text", [
+    # a children list whose members each sit in a cell of their own
+    "Children:   Kim Example - 5/6/71\tBob Example - 8/21/73\tCy Example - 11/2/75",
+    # ...or are joined by a semicolon
+    "Children: Kim (1971); Bob (1973); Cy (1975)",
+    # a wider family label, its member in the next gap-separated cell
+    "Family Information:   Wife:   Pat Example - Married 1969",
+    # the place of birth in the cell after a date of birth the scrub already replaced
+    f"Date of Birth:    {PRE_LLM_PLACEHOLDER}\tExample City, Examplestan",
+    # the second address line and the phone in the cells after a home address
+    "Home Address:   1 Example St\tSpringfield, XX 00000\t555-010-2030",
+])
+def test_1223_a_withheld_label_takes_the_unlabelled_cells_that_continue_it(text):
+    residual, withheld = _withheld_residual(text)
+    assert residual == ""
+    assert withheld
+
+
+def test_1223_unlabelled_marital_prose_and_a_phone_cell_do_not_survive_a_personal_information_block():
+    text = ("Personal Information:\tMarried (Pat), two children (Kim and Lee)"
+            "\tHome Address: 1 Example St, Springfield, XX 00000\t555-010-2030")
+    residual, withheld = _withheld_residual(text)
+    assert residual == "Personal Information:"
+    assert {item.category for item in withheld} == {CAT_SPOUSE, CAT_HOME_CONTACT}
+
+
+@pytest.mark.parametrize("text", [
+    f"Kim born {PRE_LLM_PLACEHOLDER}",
+    "Kim Example, born 01/02/1972",
+])
+def test_1223_a_birth_statement_takes_the_name_before_it(text):
+    residual, withheld = _withheld_residual(text)
+    assert residual == ""
+    assert [item.category for item in withheld] == [CAT_BIRTH]
+
+
+@pytest.mark.parametrize("text, kept", [
+    # the next labelled cell is the next field, never this label's value
+    ("Date of Birth: 01/02/1970\tCitizenship: US", "Citizenship: US"),
+    ("Home Address: 1 Example St\tOffice Phone: 212-555-0100", "Office Phone: 212-555-0100"),
+    # a known label part-way through a cell ends the cut there
+    ("Children: Kim (1971)\tBob (1973) Citizenship: US", "Citizenship: US"),
+    # a line break is the one boundary the source drew
+    ("Children: Kim (1971)\nOffice phone 212-555-0100", "Office phone 212-555-0100"),
+    # a category outside the continuation set keeps its single-fragment cut
+    ("Marital Status: Married\tUS citizen", "US citizen"),
+])
+def test_1223_the_continuation_stops_where_the_next_field_begins(text, kept):
+    residual, withheld = _withheld_residual(text)
+    assert residual == kept
+    assert withheld
+
+
+def test_1223_a_routed_content_entry_keeps_its_single_fragment_cut():
+    """The continuation is a Personal Data / Appendix rule: a routed entry
+    (S4 here) only ever loses the label's own fragment."""
+    residual, _ = _withheld_residual("Date of Birth: 01/02/1970\tExample Study, Springfield", code=CONTENT)
+    assert residual == "Example Study, Springfield"
+
+
+def test_1223_a_children_line_under_a_family_label_in_an_appendix_entry_is_withheld():
+    text = ("Publications\n\nFamily:\n     Married to Pat Example, 1968\n"
+            "     Children- Kim (2/1971), Lee (9/1973)\n\nTravel:\n     Example Country, 1966")
+    residual, withheld = _withheld_residual(text, code=APPENDIX)
+    assert "Kim" not in residual and "Lee" not in residual and "Pat" not in residual
+    assert "Publications" in residual and "Example Country, 1966" in residual
+    assert [item.category for item in withheld] == [CAT_FAMILY, CAT_SPOUSE, CAT_CHILDREN]
+
+
+@pytest.mark.parametrize("text, categories", [
+    ("Family:\n     Children- Kim (2/1971), Bob (9/1973)", [CAT_FAMILY, CAT_CHILDREN]),
+    ("Family:\n     Wife - Pat Example\n     Children – Kim (1971)",
+     [CAT_FAMILY, CAT_SPOUSE, CAT_CHILDREN]),
+    ("Family Information:\tChildren- Kim (1971)", [CAT_FAMILY, CAT_CHILDREN]),
+])
+def test_1223_the_dash_form_of_a_family_label_is_withheld_under_a_family_label(text, categories):
+    assert [m.category for m in _pii_matches(text)] == categories
+
+
+@pytest.mark.parametrize("text", [
+    "Children- Kim (1971), Bob (1973)",             # no Family label at all
+    "Spouse- Pat Example",
+    "Family:\n\nChildren- Kim (1971)",              # a blank line closes the block
+    "Children - A Review of the Literature",
+    "Family Medicine: A Review\nChildren- an essay",  # not a Family label
+])
+def test_1223_the_dash_form_of_a_family_label_outside_a_family_block_is_not_withheld(text):
+    assert [m.category for m in _pii_matches(text) if m.category != CAT_FAMILY] == []
+
+
+def test_1223_the_dash_form_is_a_personal_data_and_appendix_rule():
+    assert _pii_matches("Family:\n     Children- Kim (1971)", SCOPE_ALL_CODES) == []
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A DOB or SSN label after labelless family prose keeps its value scrub:
+    # the new render-time rows are not part of the pre-LLM value scrub, so
+    # their spans cannot swallow the label that follows them.
+    ("Married (Pat), Born: 01/02/1970", f"Married (Pat), Born: {PRE_LLM_PLACEHOLDER}"),
+    ("Family:\n     Wife- Pat, Born: 01/02/1970",
+     f"Family:\n     Wife- Pat, Born: {PRE_LLM_PLACEHOLDER}"),
+    ("Married (Pat), Date of Birth: 01/02/1970",
+     f"Married (Pat), Date of Birth: {PRE_LLM_PLACEHOLDER}"),
+    ("2 children (Kim and Lee) DOB: 01/02/1970",
+     f"2 children (Kim and Lee) DOB: {PRE_LLM_PLACEHOLDER}"),
+    ("two children (Kim and Lee), SSN: 123-45-6789",
+     f"two children (Kim and Lee), SSN: {PRE_LLM_PLACEHOLDER}"),
+    # "Family Information:" / "Family Data:" widen the render-time family label
+    # only. As a pre-LLM row they would absorb the DOB or SSN in the same
+    # fragment into a `family` span (a merged span keeps the leftmost category),
+    # and the scrub would stop replacing it.
+    ("Family Information: 123-45-6789", f"Family Information: {PRE_LLM_PLACEHOLDER}"),
+    ("Family Data: SSN: 123-45-6789", f"Family Data: SSN: {PRE_LLM_PLACEHOLDER}"),
+    ("Family Information: Date of Birth: 01/02/1970",
+     f"Family Information: Date of Birth: {PRE_LLM_PLACEHOLDER}"),
+    ("Family Information: Date of Birth 01/02/1970",
+     f"Family Information: Date of Birth {PRE_LLM_PLACEHOLDER}"),
+    ("Family Information: Pat Example (DOB 01/02/1970)",
+     f"Family Information: Pat Example (DOB {PRE_LLM_PLACEHOLDER})"),
+    ("Family Information: born 01/02/1970", f"Family Information: born {PRE_LLM_PLACEHOLDER}"),
+    # ...and the dash children/spouse labels are not part of it either.
+    ("Spouse- Pat, DOB: 01/02/1970", f"Spouse- Pat, DOB: {PRE_LLM_PLACEHOLDER}"),
+    # The scrub stays idempotent: a second pass finds no date left to take, and
+    # the year after a scrubbed birth statement is not a birth year.
+    (f"Kim born {PRE_LLM_PLACEHOLDER}, 1981 graduate", f"Kim born {PRE_LLM_PLACEHOLDER}, 1981 graduate"),
+    ("Kim Example, born 01/02/1972", f"Kim Example, born {PRE_LLM_PLACEHOLDER}"),
+])
+def test_1223_the_pre_llm_value_scrub_is_unchanged_by_the_render_time_family_rows(text, expected):
+    assert redact_pre_llm_values(text) == expected
+    assert redact_pre_llm_values(expected) == expected
+
+
+def test_1223_a_birth_statement_with_no_name_before_it_matches_nothing_new():
+    """The row exists for the name that precedes "born": a bare "born
+    [withheld]" has no protected value left, and "Born on <date>" is the
+    colon-less date-of-birth row's, with its own category."""
+    assert _pii_matches(f"born {PRE_LLM_PLACEHOLDER}") == []
+    assert [m.category for m in _pii_matches("Born on January 2, 1970")] == [CAT_DATE_OF_BIRTH]
+
+
+def test_1223_a_labelless_family_shape_does_not_take_the_cell_after_it():
+    """Only a label has a value that continues in the next cell. The cell after
+    "Married (<name>)" is another field, here a citizenship (a #821 "render" item)."""
+    residual, withheld = _withheld_residual("Married (Pat)\tUS citizen")
+    assert residual == "US citizen"
+    assert [item.category for item in withheld] == [CAT_SPOUSE]
+
+
+@pytest.mark.parametrize("text, categories", [
+    ("Children- Kim (1971), Bob (1973)", [CAT_CHILDREN]),
+    ("Children - Kim (1971)", [CAT_CHILDREN]),
+    ("Spouse- Pat Example", [CAT_SPOUSE]),
+    ("Wife- Pat", [CAT_SPOUSE]),
+    ("Husband - Pat", [CAT_SPOUSE]),
+    ("Family- Married to Pat Example", [CAT_FAMILY]),
+    # ...so the title-shaped controls are withheld there too (the issue's own,
+    # and #473's spouse-title control), though not in an Appendix entry below.
+    ("Children - A Review of the Literature", [CAT_CHILDREN]),
+    ("Spouse- A Documentary Film Review", [CAT_SPOUSE]),
+    ("Family- wise error rate in gene association studies", [CAT_FAMILY]),
+    ("Name of Spouse \u2013 A Documentary Film Review", [CAT_SPOUSE]),
+])
+def test_1223_the_dash_form_of_a_family_label_in_the_personal_data_block_is_withheld(text, categories):
+    """An A-coded entry is the Personal Data block: it holds no titles, so the
+    dash form needs no `Family` label ahead of it there."""
+    residual, withheld = _withheld_residual(text, code=A)
+    assert residual == ""
+    assert [item.category for item in withheld] == categories
+
+
+@pytest.mark.parametrize("text", [
+    "Children- Kim (1971), Bob (1973)",
+    "Spouse- Pat Example",
+    "Children - A Review of the Literature",
+    "Spouse- A Documentary Film Review",
+])
+def test_1223_the_dash_form_outside_a_family_block_in_an_appendix_entry_is_kept(text):
+    """The issue's own negative control: an Appendix-bound entry can hold a
+    title, so without a `Family` label ahead of it a dash label is left alone."""
+    residual, withheld = _withheld_residual(text, code=APPENDIX)
+    assert residual == text
+    assert withheld == []
+
+
+@pytest.mark.parametrize("text, kept", [
+    # a list that goes on over the next lines of the entry
+    ("Children: Kim Example\nBob Example", ""),
+    ("Children: Kim (1971)\nBob (1973)\nCy (1975)", ""),
+    ("Children:\nKim Example, 1971\nBob Example, 1973", ""),
+    ("Family: Pat Example\nKim Example - 5/6/71\nBob Example - 8/21/73", ""),
+    ("Children: Kim Example and Bob Example\nCy Example & Dee Example", ""),
+    # ...up to the next labelled field, a blank line, or a line that is not a list
+    ("Children: Kim (1971)\nBob (1973)\nCitizenship: US", "Citizenship: US"),
+    ("Children: Kim Example\n\nBob Example", "Bob Example"),
+    ("Children: Kim Example\nawarded the prize", "awarded the prize"),
+    ("Children: Kim Example\nSee 12 Example Street", "See 12 Example Street"),
+    ("Children: Kim Example\nBob", "Bob"),
+    # the whole line must be the list: a line that goes on in prose is not one
+    ("Children: Kim (1971)\nBob (1973) attends Example School", "Bob (1973) attends Example School"),
+    # a category that has no list (a spouse, a date of birth) never takes the next line
+    ("Spouse: Pat Example\nKim Example", "Kim Example"),
+    ("Date of Birth: 01/02/1970\nKim Example", "Kim Example"),
+])
+def test_1223_a_children_or_family_list_takes_the_list_lines_that_go_on_after_it(text, kept):
+    residual, withheld = _withheld_residual(text)
+    assert residual == kept
+    assert withheld
+
+
+def test_1223_a_routed_content_entry_keeps_a_children_list_whole():
+    """Children and family labels are Personal Data / Appendix rows: a routed
+    entry matches neither, so no list line of it is cut."""
+    text = "Children: Kim Example\nBob Example"
+    assert _withheld_residual(text, code=CONTENT) == (text, [])
+
+
+def test_1223_the_list_line_shape_is_linear_in_the_length_of_a_line():
+    """A long run of name-like tokens that never becomes a list line must not
+    be rescanned at every offset."""
+    start = time.perf_counter()
+    for text in ("Children: Kim\n" + "Example " * 4000 + "x",
+                 "Children: Kim\n" + "Example, " * 4000 + "x",
+                 "Children: Kim\n" + " " * 8000 + "Example\t" * 2000 + "1"):
+        _withheld_residual(text)
+    assert time.perf_counter() - start < 2.0
+
+
+def test_1223_the_price_of_the_continuation_is_an_unlabelled_neighbour_after_the_label():
+    """Stated cost, pinned so a reviewer sees it: a cell that follows a date of
+    birth, children, spouse, family or home-address label with no label of its
+    own is cut with the value ("US citizen" is a #821 "render" item), and a
+    line of capitalised words after a children or family list is cut as a list
+    line. Never a leak; possibly a loss."""
+    assert _withheld_residual("Date of Birth: 01/02/1970\tUS citizen")[0] == ""
+    assert _withheld_residual("Children: Kim Example\nUS Citizen")[0] == ""
+

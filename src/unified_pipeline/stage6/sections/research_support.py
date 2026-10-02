@@ -58,6 +58,7 @@ from ..formatting import (
     _set_cell_vertical_alignment,
     _set_font,
     _set_table_border,
+    format_date_for_section,
     format_date_range,
 )
 from ..normalization import (
@@ -144,6 +145,9 @@ class GrantFields(TypedDict, total=False):
     # `annual_direct_costs` above is the older spelling, kept as the first read.
     annual_funding: str | int | float | None
     total_funding: str | int | float | None
+    # M2C's schema spells a pending grant's amount and date these two ways (#1299).
+    total_funding_requested: str | int | float | None
+    submission_date: str | None
     pi_name: str | None
     principal_investigator: str | None
     date: str | None
@@ -175,12 +179,32 @@ class GrantFields(TypedDict, total=False):
 CONSUMED_GRANT_FIELDS: frozenset[str] = GrantFields.__optional_keys__
 
 # "Individual's role in project including percent effort" and its variants: a
-# source-table header row, not a grant. Searched over the first 60 characters
-# only, so a real grant that happens to mention a role further in survives.
-ROLE_EFFORT_HEADER_RE = re.compile(
-    r"(?:Individual's role|your role|role in project|percent effort)",
-    re.IGNORECASE
+# source-table header row, not a grant. The phrase is searched over the first 60
+# characters of the entry's FIRST line only (see `is_role_effort_header`), so a
+# real grant that happens to mention a role or an effort further in survives.
+_ROLE_EFFORT_PHRASES = r"(?:Individual's role|your role|role in project|percent effort)"
+ROLE_EFFORT_HEADER_RE = re.compile(_ROLE_EFFORT_PHRASES, re.IGNORECASE)
+
+# The same phrase followed, on its line, by a colon or pipe and then a value:
+# "Percent Effort: | 35", "Role and percent effort: Example Co-I". That is a
+# label|value grant row, not the template's header sentence, which is a bare
+# phrase with nothing after it. The value must be something other than
+# whitespace or a pipe, so "Percent Effort: |" (a label with a blank value cell)
+# still reads as having no value.
+ROLE_EFFORT_FIELD_ROW_RE = re.compile(
+    _ROLE_EFFORT_PHRASES + r"[^\n]*?[:|]\s*[^\s|]", re.IGNORECASE
 )
+# A digit anywhere on the first line is a value written without a colon or pipe
+# ("Percent effort 35%", "Role in project PI, 35% effort", "Example Agency
+# Grant; role in project Co-I 55%"). The template's header sentence is words
+# only, so a digit means a grant row, wherever on the line it sits.
+ROLE_EFFORT_DIGIT_RE = re.compile(r"\d")
+# How much of the first line is searched for the header PHRASE (unchanged from
+# when the whole entry text was searched at this width). Only the phrase search
+# is windowed: the digit and field-row checks read the whole first line, because
+# a long label can put its value past this width ("Role in project and percent
+# effort (calendar months per year): 1.2").
+ROLE_EFFORT_HEADER_WINDOW = 60
 
 # The only buckets a status rebucket may move a grant INTO. M2A is deliberately
 # absent: `grant_status_rebucket_target` returns 'M2B', 'M2C' or None
@@ -281,8 +305,8 @@ def normalize_percent_effort(effort_value: str) -> str | None:
     needs no guard -- it compares fine and the range check below already
     discards it, in both signs.
 
-    Not reachable from the sole production call site, the
-    `PROJECT_EFFORT_LINE_RE` match inside `filter_role_effort_headers`: group 2
+    Not reachable from the production call sites, the `PROJECT_EFFORT_LINE_RE`
+    matches inside `_is_effort_pair` and `filter_role_effort_headers`: group 2
     is digits with at most one decimal point and no letter, so it can never
     hand over the string "nan". Stage 6 renders
     the same bytes either way -- this is a contract fix, not a bug fix.
@@ -347,6 +371,70 @@ def copy_entries_for_render(entries: list[dict]) -> list[dict]:
     return copies
 
 
+def _is_effort_pair(line: str) -> bool:
+    """True for a "<project> <effort>" line whose effort is a real percent effort.
+
+    The shape alone (`PROJECT_EFFORT_LINE_RE`: anything, whitespace, a number at
+    the end of the line) also fits "Years Inclusive: | 2031 - 2033" and "Total
+    Direct Costs: | 12345", so the number has to normalize as well. The filter
+    harvests nothing from a pair whose effort `normalize_percent_effort`
+    rejects, so such a line is not something it reads.
+    """
+    match = PROJECT_EFFORT_LINE_RE.search(line)
+    return match is not None and normalize_percent_effort(match.group(2)) is not None
+
+
+def is_role_effort_header(text: str) -> bool:
+    """True when an entry's text is the template's role/effort header row.
+
+    The header is the entry's FIRST line, a bare phrase such as "Individual's
+    role in project including percent effort", with the "<project> <effort>"
+    pairs on the lines below it. Three things this refuses that the old
+    first-60-characters test accepted, each of which silently dropped real
+    grant values (#1227):
+
+    * a phrase that only appears on a later line -- "Years Inclusive: | ...",
+      then "Percent Effort: | 5" -- because the 60-character window reached
+      across the newline;
+    * a first line that is itself a label|value row, "Percent Effort: | 35":
+      the phrase is a field label there, and what follows it is the value;
+    * a first line carrying a value with no colon or pipe, "Percent effort
+      35%" or "Role in project PI, 35% effort": the header sentence is words
+      only, so a digit anywhere on that line marks a grant row.
+
+    The digit and field-row checks read the WHOLE first line; only the phrase
+    search is limited to the first 60 characters. A long label that puts its
+    value past character 60 is still a grant row.
+
+    One more refusal comes from the lines BELOW the first: every non-blank one
+    must be a "<project> <effort>" pair whose effort normalizes (`_is_effort_pair`),
+    the only thing `filter_role_effort_headers` reads out of a header. A first
+    line that is a blank label ("Percent Effort: |") with "Total Direct Costs: |
+    ..." or "Years Inclusive: | 2031 - 2033" under it is a grant fragment, not a
+    header, and the filter would otherwise drop those rows with it. So a header
+    is removed only when nothing is left under it or everything under it is a
+    pair the filter reads. A pair whose effort `normalize_percent_effort`
+    rejects (0, 150, a year) is not one, so a header over such a row is kept
+    and surfaces, rather than losing the row. A blank label on its own, with
+    nothing below it, still counts as a header row: there is nothing to lose
+    and it keeps an empty line out of the Appendix.
+
+    The decision is made on text shape, not on the stage-4 fields, because the
+    real header row has fields too: stage 4 reads a `title` and a
+    `percent_effort` off its first project line.
+    """
+    first_line, _, body = text.partition('\n')
+    window = first_line[:ROLE_EFFORT_HEADER_WINDOW]
+    if not ROLE_EFFORT_HEADER_RE.search(window):
+        return False
+    if ROLE_EFFORT_DIGIT_RE.search(first_line):
+        return False
+    if ROLE_EFFORT_FIELD_ROW_RE.search(first_line):
+        return False
+    body_lines = [line.strip() for line in body.split('\n') if line.strip()]
+    return all(_is_effort_pair(line) for line in body_lines)
+
+
 def filter_role_effort_headers(
     entries: list[dict], effort_lookup: dict[str, str]
 ) -> tuple[list[dict], list[str]]:
@@ -366,7 +454,7 @@ def filter_role_effort_headers(
     messages: list[str] = []
     for entry in entries:
         text = entry.get('text', '')
-        if not ROLE_EFFORT_HEADER_RE.search(text[:60]):
+        if not is_role_effort_header(text):
             filtered.append(entry)
             continue
         for line in text.split('\n')[1:]:  # Skip the header line
@@ -883,6 +971,10 @@ TOTAL_AWARD_LABEL = 'Total award:'
 STATUS_LABEL = 'Status:'
 NOTES_LABEL = 'Notes:'
 CO_INVESTIGATORS_LABEL = 'Co-Investigators:'
+# A pending grant's amount is a request, not an award, so it gets its own label
+# rather than "Total award:" (#1299, the #982 rule).
+TOTAL_REQUESTED_LABEL = 'Total requested:'
+SUBMISSION_DATE_LABEL = 'Submitted:'
 
 
 def _optional_grant_rows(
@@ -896,6 +988,10 @@ def _optional_grant_rows(
     its own keeps them without touching the PI cell; a value identical to the
     resolved PI is dropped, since it would repeat the row above it.
 
+    Total requested and Submitted (#1299) carry the two M2C schema fields
+    nothing else reads: a pending grant's requested amount and its submission
+    date.
+
     Status and Notes (#982) keep a grant's own status word and labelled remark
     ("Update: withdrawn"), which reached no cell before. Major project goals
     (major_goals, description or narrative) is the older optional row, moved here
@@ -908,6 +1004,12 @@ def _optional_grant_rows(
     co_investigators = str(fields.get('co_investigators') or '').strip()
     if co_investigators and co_investigators.lower() != (pi_name or '').strip().lower():
         rows.append((CO_INVESTIGATORS_LABEL, co_investigators))
+    requested = _format_currency(fields.get('total_funding_requested'))
+    if requested:
+        rows.append((TOTAL_REQUESTED_LABEL, requested))
+    submitted = format_date_for_section(fields.get('submission_date') or '', 'M2C')
+    if submitted:
+        rows.append((SUBMISSION_DATE_LABEL, submitted))
     status = str(fields.get('status') or '').strip()
     if status:
         rows.append((STATUS_LABEL, status))
@@ -1247,7 +1349,7 @@ class ResearchSupportSection:
             ('Project title:', title),
             *cost_rows,
             ('Non-financial support:', fields.get('non_financial_support', '')),
-            ('Duration of support:', self._format_grant_duration(fields, code)),
+            ('Duration of support:', self._format_grant_duration(fields, code, raw_text)),
             ('Name of Principal Investigator:', pi_name),
             ('Your role:', role),
             ('Your percent (%) effort:', percent_effort),
@@ -1310,14 +1412,16 @@ class ResearchSupportSection:
         return table
 
     def _format_grant_duration(
-        self, fields: GrantFields, taxonomy_code: str = 'M2A'
+        self, fields: GrantFields, taxonomy_code: str = 'M2A', source_text: str = ''
     ) -> str:
         """Format grant duration according to WCM requirements.
 
         Grants use mm/yy format per the template.
         Clinical trials may use 'date' instead of 'start_date'.
+        `source_text` is the entry's text: a start-only grant renders its
+        start alone unless the source leaves it open (class 13).
         """
         start = fields.get('start_date', '') or fields.get('date', '')
         end = fields.get('end_date', '')
 
-        return format_date_range(start, end, taxonomy_code)
+        return format_date_range(start, end, taxonomy_code, source_text)

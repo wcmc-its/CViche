@@ -1,10 +1,12 @@
 import type { RunSummary } from '../../types'
+import { feedbackRank, feedbackState } from './runFeedback'
 
 export type SortField = 'status' | 'cv' | 'started_at' | 'total_duration_seconds' | 'total_cost' | 'feedback' | 'quality_score'
 export type SortDir = 'asc' | 'desc'
 
 export const OWNER_UNKNOWN_LABEL = 'Owner not yet identified'
 export const SELF_RUN_BY_LABEL = 'Faculty themselves'
+export const ON_BEHALF_RUN_BY_LABEL = 'On their behalf'
 
 /** One row of the table: the latest run of a faculty member plus their earlier reruns. */
 export interface RunGroup {
@@ -47,11 +49,6 @@ export function groupRuns(runs: RunSummary[]): RunGroup[] {
   })
 }
 
-function feedbackRank(runId: string, feedbackMap: Record<string, boolean>): number {
-  if (feedbackMap[runId] === true) return 2
-  return feedbackMap[runId] === false ? 1 : 0
-}
-
 /** Score order with unscored runs after every scored one. */
 function compareScores(a: number | null | undefined, b: number | null | undefined): number {
   if (a == null || b == null) return a == null && b == null ? 0 : a == null ? 1 : -1
@@ -63,7 +60,8 @@ export function compareRuns(
   a: RunSummary,
   b: RunSummary,
   field: SortField,
-  feedbackMap: Record<string, boolean>,
+  currentUserId: number | undefined,
+  isAdmin: boolean,
 ): number {
   switch (field) {
     case 'status':
@@ -77,7 +75,7 @@ export function compareRuns(
     case 'total_cost':
       return (a.total_cost ?? 0) - (b.total_cost ?? 0)
     case 'feedback':
-      return feedbackRank(a.run_id, feedbackMap) - feedbackRank(b.run_id, feedbackMap)
+      return feedbackRank(feedbackState(a, currentUserId, isAdmin)) - feedbackRank(feedbackState(b, currentUserId, isAdmin))
     case 'quality_score':
       return compareScores(a.quality_score, b.quality_score)
   }
@@ -89,11 +87,32 @@ export function compareRunsDir(
   b: RunSummary,
   field: SortField,
   dir: SortDir,
-  feedbackMap: Record<string, boolean>,
+  currentUserId: number | undefined,
+  isAdmin: boolean,
 ): number {
-  const cmp = compareRuns(a, b, field, feedbackMap)
+  const cmp = compareRuns(a, b, field, currentUserId, isAdmin)
   const unscored = field === 'quality_score' && (a.quality_score == null || b.quality_score == null)
   return dir === 'asc' || unscored ? cmp : -cmp
+}
+
+/** True when an earlier run in the group has feedback (the latest run's cell then reads "Given on an earlier run"). */
+export function earlierRunHasFeedback(group: RunGroup): boolean {
+  return group.older.some((run) => run.feedback.count > 0)
+}
+
+/** Order two groups; the Feedback column ranks the group's own state, the rest ranks the latest run. */
+export function compareGroupsDir(
+  a: RunGroup,
+  b: RunGroup,
+  field: SortField,
+  dir: SortDir,
+  currentUserId: number | undefined,
+  isAdmin: boolean,
+): number {
+  if (field !== 'feedback') return compareRunsDir(a.latest, b.latest, field, dir, currentUserId, isAdmin)
+  const rank = (g: RunGroup) => feedbackRank(feedbackState(g.latest, currentUserId, isAdmin, earlierRunHasFeedback(g)))
+  const cmp = rank(a) - rank(b)
+  return dir === 'asc' ? cmp : -cmp
 }
 
 /** Display label for who ran a run; null when unknown. */

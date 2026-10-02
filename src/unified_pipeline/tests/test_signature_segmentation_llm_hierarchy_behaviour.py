@@ -1535,16 +1535,16 @@ def test_get_cv_hierarchy_chunked_restores_sub_label_order(monkeypatch):
     from unified_pipeline.segmentation import chunked_chat_hierarchy_extractor as cce
     lines = ["Talks", "International", "Papers"]
     monkeypatch.setattr(cce, "extract_text_from_docx", lambda path: lines)
-    monkeypatch.setattr(cce, "extract_headers_from_chunk", lambda chunk, i, n: "")
+    monkeypatch.setattr(cce, "extract_headers_from_chunk", lambda chunk, i, n, usage=None: "")
     monkeypatch.setattr(cce, "ensure_personal_data_first", lambda h: h)
-    monkeypatch.setattr(cce, "validate_headers_vs_entries", lambda h: h)
+    monkeypatch.setattr(cce, "validate_headers_vs_entries", lambda h, usage=None: h)
     pass_1 = [_h("Talks"), _h("Papers"), _h("International")]
     pass_2 = [_h("Talks"), _h("Papers"), _h("International")]
     label = pass_2[2]
     passes = {1: pass_1, 2: pass_2}
     seen = []
 
-    def fake_normalize(h, pass_number):
+    def fake_normalize(h, pass_number, usage=None):
         seen.append((pass_number, h))
         return passes[pass_number]
 
@@ -1559,3 +1559,60 @@ def test_get_cv_hierarchy_chunked_restores_sub_label_order(monkeypatch):
     assert [n["text"] for n in hierarchy] == ["Talks", "International", "Papers"]
     assert hierarchy[1] is label
     assert stats["final_headers"] == len(pass_2)
+
+
+# ============================================================ stage 1a cost (#1177)
+# Stage 1a's reported cost must be what call_llm priced, summed over every call
+# the stage makes -- chunk calls, validation and both normalization passes on
+# the chunked path; classification as well on the signature path. It used to be
+# a token estimate at hardcoded GPT-4o rates that ignored the segmentation calls.
+
+_PRICED_CALL_COSTS = (0.011, 0.22, 3.3, 44.0)  # distinct so a missed call changes the sum
+_PRICED_PROMPT_TOKENS = 7
+_PRICED_COMPLETION_TOKENS = 3
+_CHUNK_SYSTEM_PREFIX = "You are an expert in academic CV structure"
+
+
+def _priced(inner, calls):
+    """Wrap a call_llm stub so every call reports a distinct, known cost."""
+    def fake_call_llm(stage, messages, response_format=None, **kwargs):
+        if messages[0]["content"].startswith(_CHUNK_SYSTEM_PREFIX):
+            result = {"content": "[H1] EDUCATION\n[H1] PUBLICATIONS"}
+        else:
+            result = inner(stage, messages, response_format=response_format, **kwargs)
+        result = dict(result, cost=_PRICED_CALL_COSTS[len(calls)],
+                      prompt_tokens=_PRICED_PROMPT_TOKENS,
+                      completion_tokens=_PRICED_COMPLETION_TOKENS)
+        calls.append(stage)
+        return result
+    return fake_call_llm
+
+
+def test_get_cv_hierarchy_chunked_reports_the_summed_priced_cost_of_every_call(monkeypatch):
+    from unified_pipeline.segmentation import chunked_chat_hierarchy_extractor as cce
+    import signature_based_segmentation as bare  # the module cce binds by bare name
+
+    calls = []
+    stub = _priced(_make_end_to_end_call_llm_stub(), calls)
+    monkeypatch.setattr(cce, "call_llm", stub)
+    monkeypatch.setattr(bare, "call_llm", stub)
+    monkeypatch.setattr(cce, "extract_text_from_docx", lambda path: ["EDUCATION", "PUBLICATIONS"])
+
+    _, stats = cce.get_cv_hierarchy_chunked("unused.docx")
+
+    assert len(calls) == 4  # one chunk + validation + two normalization passes
+    assert stats["extraction_cost"] == pytest.approx(sum(_PRICED_CALL_COSTS))
+    assert stats["extraction_input_tokens"] == 4 * _PRICED_PROMPT_TOKENS
+    assert stats["extraction_output_tokens"] == 4 * _PRICED_COMPLETION_TOKENS
+
+
+def test_segment_cv_with_signatures_reports_the_summed_priced_cost_of_every_call(tmp_path, monkeypatch):
+    docx_path = tmp_path / "cv.docx"
+    _build_synthetic_cv_docx(docx_path)
+    calls = []
+    monkeypatch.setattr(sbs, "call_llm", _priced(_make_end_to_end_call_llm_stub(), calls))
+
+    result = sbs.segment_cv_with_signatures(str(docx_path), str(tmp_path / "out.json"))
+
+    assert len(calls) == 4  # classification + validation + two normalization passes
+    assert result["meta"]["extraction_cost"] == pytest.approx(sum(_PRICED_CALL_COSTS))

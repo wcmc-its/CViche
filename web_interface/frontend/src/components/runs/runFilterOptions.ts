@@ -1,7 +1,8 @@
 import type { RunFilterOptions, RunSummary } from '../../types'
 import { formatRelativeDate } from '../../utils'
-import { RUN_BY_SELF } from './runFilters'
-import { SELF_RUN_BY_LABEL } from './runGroups'
+import { INPUT_FORMAT_VALUE_LABEL, RUN_BY_ON_BEHALF, RUN_BY_SELF } from './runFilters'
+import { FEEDBACK_VALUE_LABEL } from './runFeedback'
+import { ON_BEHALF_RUN_BY_LABEL, SELF_RUN_BY_LABEL } from './runGroups'
 
 /** One selectable entry in a filter popover. id '' is the "any" entry. */
 export interface ComboOption {
@@ -16,6 +17,8 @@ export interface ComboOption {
 export interface ComboModel {
   /** Always-on entries shown above the list while the search box is empty. */
   pinned: ComboOption[]
+  /** The caller's recent entries, under a "Recent" heading below the pinned ones. */
+  recent?: ComboOption[]
   items: ComboOption[]
 }
 
@@ -57,6 +60,32 @@ export function buildFacultyModel(options: RunFilterOptions): ComboModel {
   }
 }
 
+/** Any / Feedback given / Needs feedback, with counts from filter-options; all pinned, no search. */
+export function buildFeedbackModel(options: RunFilterOptions): ComboModel {
+  return {
+    pinned: [
+      { id: '', label: 'Any', search: '' },
+      { id: 'given', label: FEEDBACK_VALUE_LABEL.given, count: options.feedback.given, search: '' },
+      { id: 'needed', label: FEEDBACK_VALUE_LABEL.needed, count: options.feedback.needed, search: '' },
+    ],
+    items: [],
+  }
+}
+
+/** Any / WCM template / Other format / Not classified, with counts from filter-options; all pinned, no search. */
+export function buildInputFormatModel(options: RunFilterOptions): ComboModel {
+  const { wcm, other, unknown } = options.input_format
+  return {
+    pinned: [
+      { id: '', label: 'Any', search: '' },
+      { id: 'wcm', label: INPUT_FORMAT_VALUE_LABEL.wcm, count: wcm, search: '' },
+      { id: 'other', label: INPUT_FORMAT_VALUE_LABEL.other, count: other, search: '' },
+      { id: 'unknown', label: INPUT_FORMAT_VALUE_LABEL.unknown, count: unknown, search: '' },
+    ],
+    items: [],
+  }
+}
+
 /** Distinct run-by user ids from the loaded runs, newest first, excluding the current user. */
 export function recentRunByIds(runs: RunSummary[], currentUserId: number | undefined): number[] {
   const ids: number[] = []
@@ -76,9 +105,10 @@ export function buildRunByModel(
 ): ComboModel {
   const byId = new Map(options.run_by.map((p) => [p.id, p]))
   const pinned: ComboOption[] = [{ id: '', label: 'Anyone', search: '' }]
-  const me = currentUserId === undefined ? undefined : byId.get(currentUserId)
-  if (me) {
-    pinned.push({ id: String(me.id), label: 'Me', meta: currentUserEmail, count: me.count, search: '' })
+  if (currentUserId !== undefined) {
+    // Always offered, even when the admin has run nothing (count 0).
+    pinned.push({ id: String(currentUserId), label: 'Me', meta: currentUserEmail,
+      count: byId.get(currentUserId)?.count ?? 0, search: '' })
   }
   if (options.self_count > 0) {
     pinned.push({
@@ -89,13 +119,21 @@ export function buildRunByModel(
       search: '',
     })
   }
+  if (options.on_behalf_count > 0) {
+    pinned.push({
+      id: RUN_BY_ON_BEHALF,
+      label: ON_BEHALF_RUN_BY_LABEL,
+      meta: 'Submitted by someone else',
+      count: options.on_behalf_count,
+      search: '',
+    })
+  }
+  const recent: ComboOption[] = []
   for (const id of recentIds) {
     const person = byId.get(id)
-    if (person) {
-      pinned.push({ id: String(id), label: person.display_name, meta: 'Recent', count: person.count, search: '' })
-    }
+    if (person) recent.push({ id: String(id), label: person.display_name, count: person.count, search: '' })
   }
-  const pinnedIds = new Set(pinned.map((p) => p.id))
+  const pinnedIds = new Set([...pinned, ...recent].map((p) => p.id))
   const items = options.run_by
     .filter((p) => !pinnedIds.has(String(p.id)))
     .map((p) => ({
@@ -108,5 +146,5 @@ export function buildRunByModel(
         .join(' ')
         .toLowerCase(),
     }))
-  return { pinned, items }
+  return { pinned, recent, items }
 }

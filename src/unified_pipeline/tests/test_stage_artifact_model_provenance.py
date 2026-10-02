@@ -11,7 +11,7 @@ the 100-CV corpus of the 2026-07-25 batch:
     stage_5c   91/100
     stage_5d   98/100
 
-stage_3b is the one that matters most: it is deliberately on Haiku 4.5, so its
+stage_3b is the one that matters most: it was deliberately on Haiku 4.5, so its
 artifacts claiming a different model defeats exactly the comparison the field
 exists for. Same root cause as #444 -- a model asserted at the write site rather
 than observed from the call. stage_3b's `model` parameter was later removed

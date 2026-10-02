@@ -1,10 +1,13 @@
 """SQLAlchemy database models."""
 from enum import StrEnum
 
-from sqlalchemy import Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint, text
+from sqlalchemy import Boolean, Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint, false, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.base_class import Base
+
+# Length of a hex-encoded sha256 digest.
+SHA256_HEX_LENGTH = 64
 
 
 class RunState(StrEnum):
@@ -34,7 +37,7 @@ class UserRole(StrEnum):
 
     STAFF is read-only elevated access: every run
     and its pipeline detail, but no cost and no admin writes (see
-    ``app.auth.can_view_all_runs``). Used on the lines the staff role adds or
+    ``can_view_all_runs``, after ``User``). Used on the lines the staff role adds or
     changes; existing "admin"/"user" literals elsewhere are left as they are
     (no drive-by conversions, CODING STANDARDS section 8.1).
     """
@@ -83,6 +86,21 @@ class User(Base):
     runs = relationship("Run", back_populates="user", lazy="raise_on_sql", passive_deletes=True)
     consents = relationship("Consent", back_populates="user", lazy="raise_on_sql", passive_deletes=True)
     feedback = relationship("Feedback", back_populates="user", lazy="raise_on_sql", passive_deletes=True)
+
+
+def can_view_all_runs(user: User) -> bool:
+    """Read-only access to every user's runs: the runs list, run detail, "Run
+    by", run quality, batches, pipeline logs/prompts/stage JSON, and feedback
+    insights.
+
+    Admin or staff. Grants READS only -- every write
+    (admin config, user management, deleting feedback or runs, acting on
+    another user's run) stays behind require_admin or ownership, and cost stays
+    behind can_see_cost. Lives here, not in app.auth, so services the worker
+    imports (run_service, batch_service) need not import app.auth, which reads
+    CVICHE_SESSION_SECRET at import (see services/ed_access.py).
+    """
+    return user.role in (UserRole.ADMIN, UserRole.STAFF)
 
 
 class Consent(Base):
@@ -226,6 +244,33 @@ class Run(Base):
     show_track_changes = Column(Integer, default=1)
     show_pipeline_comments = Column(Integer, default=0)
     strip_template_instructions = Column(Integer, default=1, server_default="1", nullable=False)
+    # Image tag of the process that last moved this run to "running" (#1239):
+    # stamped at the worker's claim (and at each resume or retry, so the latest
+    # executing image wins), not at upload. NULL for runs that predate the
+    # column or when the image was built without a tag.
+    image_tag = Column(String(128), nullable=True)
+    # Whether the uploaded CV was written in the WCM faculty CV template ("wcm")
+    # or another format ("other"), and the count of template signals behind it
+    # (app.services.input_format). NULL when undetermined: runs that predate the
+    # columns, unreadable text, or a detector failure at upload.
+    input_format = Column(String(10), nullable=True, index=True)
+    input_format_score = Column(Integer, nullable=True)
+    # sha256 (hex) of the uploaded bytes (#1286): the upload endpoint matches it
+    # against every run, any submitter, to ask before re-processing a file.
+    # NULL for runs that predate the column until the backfill fills it.
+    source_sha256 = Column(String(SHA256_HEX_LENGTH), nullable=True, index=True)
+    # A PDF's image-only (scanned) pages, 1-based and comma-joined (#1282):
+    # their text never reaches the pipeline, so the run page warns. Set at
+    # upload; NULL for a docx, a PDF with none, and runs that predate it.
+    scanned_pages = Column(Text, nullable=True)
+
+    @property
+    def scanned_page_numbers(self) -> list[int]:
+        return [int(n) for n in self.scanned_pages.split(",")] if self.scanned_pages else []
+    # The batch upload this run belongs to (#1114), NULL for a single upload.
+    # Also routes the run's queue token to the batch queue
+    # (run_queue.queue_for) and suppresses its Teams "started" card.
+    batch_id = Column(String(8), ForeignKey("run_batches.id"), nullable=True, index=True)
 
     # ORM relationships (see User for the lazy/cascade rationale). user_id is
     # nullable, so run.user can be None for anonymous/simple-mode runs.
@@ -235,6 +280,39 @@ class Run(Base):
     llm_usage = relationship("LLMUsage", back_populates="run", lazy="raise_on_sql", passive_deletes=True)
     feedback = relationship("Feedback", back_populates="run", lazy="raise_on_sql", passive_deletes=True)
     metrics = relationship("RunMetrics", back_populates="run", uselist=False, lazy="raise_on_sql", passive_deletes=True)
+
+
+class BatchSource(StrEnum):
+    """``run_batches.source`` (#1298)."""
+    WEB = "web"
+    EMAIL = "email"
+
+
+class RunBatch(Base):
+    """One batch upload (#1114): a set of runs a user submitted together.
+
+    A table rather than only ``runs.batch_id``: the batch view reports files
+    that never became runs (``files_submitted`` minus the run count), and the
+    Runs page's Batch filter lists batches with their submitter and time.
+    """
+    __tablename__ = "run_batches"
+
+    # Letters only, like run ids (#1192), generated by batch_service.
+    id = Column(String(8), primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    # Valid files the user selected when creating the batch.
+    files_submitted = Column(Integer, nullable=False)
+    # Where the batch came from (#1298): an "email" batch always gets the
+    # completion email.
+    source = Column(String(10), nullable=False, default=BatchSource.WEB, server_default=BatchSource.WEB)
+    # A web batch whose submitter ticked "Email me when job completes" (#1335)
+    # gets it too.
+    notify_on_complete = Column(Boolean, nullable=False, default=False, server_default=false())
+    # Set once, by a conditional UPDATE, by whichever pod sends the completion email.
+    completion_notified_at = Column(DateTime, nullable=True)
+
+    user = relationship("User", lazy="raise_on_sql")
 
 
 class Step(Base):
@@ -312,3 +390,70 @@ class RunMetrics(Base):
     computed_at = Column(DateTime, server_default=func.now())
 
     run = relationship("Run", back_populates="metrics", lazy="raise_on_sql")
+
+
+class InboundMessageStatus(StrEnum):
+    """``inbound_messages.status`` (#1298)."""
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    # Read from S3 but not yet decided: the poller crashed or failed mid-message.
+    FAILED = "failed"
+
+
+class InboundRejectReason(StrEnum):
+    """Why a whole message was dropped (``inbound_messages.reject_reason``).
+
+    Never carries a filename, subject or address (CODING_STANDARDS 4.7)."""
+    UNPARSEABLE = "unparseable"
+    NOT_AUTHENTICATED = "not_authenticated"
+    SPAM_OR_VIRUS = "spam_or_virus"
+    SENDER_DOMAIN = "sender_domain"
+    UNKNOWN_USER = "unknown_user"
+    NEVER_CONSENTED = "never_consented"
+    USER_DISABLED = "user_disabled"
+    NOT_IN_ACCESS_GROUP = "not_in_access_group"
+    NO_VALID_ATTACHMENTS = "no_valid_attachments"
+    TOO_MANY_FILES = "too_many_files"
+    INBOX_FULL = "inbox_full"
+    PROCESSING_ERROR = "processing_error"
+
+
+class InboundFileStatus(StrEnum):
+    """``inbound_files.status`` (#1298)."""
+    PENDING = "pending"
+    SUBMITTED = "submitted"
+    DISCARDED = "discarded"
+    EXPIRED = "expired"
+
+
+class InboundMessage(Base):
+    """One raw message SES wrote under ``inbound/`` (#1298). Unique on the S3
+    key so a re-poll never reads the same message twice."""
+    __tablename__ = "inbound_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    s3_key = Column(String(512), nullable=False, unique=True)
+    message_id = Column(String(255), nullable=True)
+    from_addr = Column(String(255), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    received_at = Column(DateTime, nullable=False, server_default=func.now())
+    status = Column(String(20), nullable=False)
+    reject_reason = Column(String(120), nullable=True)
+    file_count = Column(Integer, nullable=False, default=0)
+
+
+class InboundFile(Base):
+    """One CV held in a user's inbox, waiting for them to submit it (#1298)."""
+    __tablename__ = "inbound_files"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    inbound_message_id = Column(Integer, ForeignKey("inbound_messages.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    filename = Column(String(255), nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    sha256 = Column(String(64), nullable=False)
+    # Global storage prefix holding the bytes; deleted on discard/expiry.
+    storage_key = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False, default=InboundFileStatus.PENDING)
+    run_id = Column(String(10), ForeignKey("runs.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())

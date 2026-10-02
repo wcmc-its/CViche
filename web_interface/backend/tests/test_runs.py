@@ -17,7 +17,7 @@ import pytest
 from sqlalchemy.orm import object_session
 
 from app.auth import COOKIE_NAME, create_session_cookie
-from app.models import Run, Step, User
+from app.models import Feedback, Run, Step, User
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.schemas import CapacityResponse, RestartRunResponse, RunActionResponse
 
@@ -71,6 +71,16 @@ def test_run_status_carries_owner_and_admin_only_run_by(client, db, seed_simple_
     body = client.get(f"/api/run/{run.id}/status").json()
     assert body["cv_owner_name"] == "Jane Testperson"
     assert (body["run_by"] or {}).get("display_name") == run_by_name
+
+
+def test_run_status_carries_scanned_pages(client, db, seed_simple_mode):
+    """#1282: the run page warns from these; none stored reads as []."""
+    user, run = _owner_with_run(db, "user")
+    _auth(client, user)
+    assert client.get(f"/api/run/{run.id}/status").json()["scanned_pages"] == []
+    run.scanned_pages = "3,5"
+    db.commit()
+    assert client.get(f"/api/run/{run.id}/status").json()["scanned_pages"] == [3, 5]
 
 
 # ---------------------------------------------------------------------------
@@ -292,8 +302,8 @@ def test_restart_body_is_byte_identical(client, db, seed_simple_mode, run_with_i
     storage = MagicMock()
     monkeypatch.setattr(runs_api, "check_rate_limit", lambda *a: None)
     monkeypatch.setattr(runs_api, "get_storage", lambda: storage)
-    monkeypatch.setattr("app.api.upload.UPLOAD_DIR", tmp_path)
-    monkeypatch.setattr("app.api.upload.get_storage", lambda: storage)
+    monkeypatch.setattr("app.services.run_creation.UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr("app.services.run_creation.get_storage", lambda: storage)
     _auth(client, user)
     resp = client.post(f"/api/run/{run.id}/restart")
     assert resp.status_code == 200, resp.text
@@ -432,6 +442,194 @@ def test_filter_options_requires_scope_all(client, db, seed_simple_mode):
 
 
 # ---------------------------------------------------------------------------
+# Feedback summary on GET /runs, the `feedback` filter, filter-options counts
+# ---------------------------------------------------------------------------
+
+def _leave_feedback(db, run_id, user, role="self", at=None):
+    db.add(Feedback(run_id=run_id, user_id=user.id, reviewer_role=role,
+                    overall_usefulness=4, manual_conversion_effort="1-2 hours",
+                    correction_effort="1-2 hours", likelihood_to_recommend=4,
+                    submitted_at=at or datetime(2026, 9, 10)))
+    db.commit()
+
+
+def _seed_feedback_view(db):
+    """ADM001 has feedback from bob (older) and admin (newer); ADM003 has
+    feedback from alice (the owner is bob); ADM005 is a failed run, no feedback."""
+    users = _seed_admin_view(db)
+    db.get(Run, "ADM005").status = "failed"
+    db.commit()
+    _leave_feedback(db, "ADM001", users["bob"], "colleague", datetime(2026, 9, 10))
+    _leave_feedback(db, "ADM001", users["admin"], "admin_reviewer", datetime(2026, 9, 11))
+    _leave_feedback(db, "ADM003", users["alice"], "self", datetime(2026, 9, 12))
+    return users
+
+
+def test_runs_feedback_summary_counts_any_reviewer_and_flags_mine(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["alice"])
+    by_id = {r["run_id"]: r["feedback"] for r in client.get("/api/runs").json()["runs"]}
+    # Alice owns ADM001: bob and the admin reviewed it, she did not.
+    last_at = by_id["ADM001"].pop("last_at")
+    assert last_at.startswith("2026-09-11T00:00:00")  # TZDateTime appends the server offset
+    assert by_id["ADM001"] == {"count": 2, "given_by_me": False, "reviewers": None}
+    assert by_id["ADM002"] == {"count": 0, "given_by_me": False, "last_at": None,
+                               "reviewers": None}
+
+
+def test_scope_all_feedback_lists_reviewers_newest_first(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["admin"])
+    by_id = {r["run_id"]: r["feedback"] for r in client.get("/api/runs?scope=all").json()["runs"]}
+    reviewers = by_id["ADM001"]["reviewers"]
+    assert [(r["display_name"], r["role"]) for r in reviewers] == [
+        ("Root Admin", "admin_reviewer"), ("Bob Tester", "colleague")]
+    assert reviewers[0]["submitted_at"].startswith("2026-09-11T00:00:00")
+    assert reviewers[1]["submitted_at"].startswith("2026-09-10T00:00:00")
+    assert by_id["ADM001"]["given_by_me"] is True  # the admin is one of the reviewers
+    assert by_id["ADM003"]["given_by_me"] is False
+    assert by_id["ADM002"]["reviewers"] == []
+
+
+def test_feedback_summary_loads_in_a_fixed_number_of_queries(client, db, seed_simple_mode):
+    from sqlalchemy import event
+    users = _seed_feedback_view(db)
+    _auth(client, users["admin"])
+    statements = []
+    engine = db.get_bind()
+    listener = lambda conn, cur, stmt, *a: statements.append(stmt)  # noqa: E731
+    event.listen(engine, "before_cursor_execute", listener)
+    try:
+        assert client.get("/api/runs?scope=all").status_code == 200
+    finally:
+        event.remove(engine, "before_cursor_execute", listener)
+    feedback_queries = [s for s in statements if "FROM feedback" in s and "FROM runs" not in s]
+    assert len(feedback_queries) == 2  # one GROUP BY, one reviewer query
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("given", ["ADM003", "ADM001"]),
+    ("needed", ["ADM006", "ADM004", "ADM002"]),  # ADM005 failed: not "needed"
+])
+def test_scope_all_feedback_filter(client, db, seed_simple_mode, value, expected):
+    users = _seed_feedback_view(db)
+    _auth(client, users["admin"])
+    resp = client.get(f"/api/runs?scope=all&feedback={value}")
+    assert _ids(resp) == expected
+    assert resp.json()["total"] == len(expected)
+
+
+def test_scope_mine_feedback_filter_counts_feedback_from_others(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["alice"])
+    assert _ids(client.get("/api/runs?feedback=given")) == ["ADM001"]
+    assert _ids(client.get("/api/runs?feedback=needed")) == ["ADM002"]
+
+
+def test_feedback_filter_rejects_unknown_value(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["admin"])
+    assert client.get("/api/runs?scope=all&feedback=maybe").status_code == 422
+    assert client.get("/api/runs?feedback=maybe").status_code == 422
+
+
+def test_filter_options_feedback_counts_cascade(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["admin"])
+    body = client.get("/api/runs/filter-options?scope=all").json()
+    assert body["feedback"] == {"given": 2, "needed": 3}
+    # Its own filter is ignored, other filters apply.
+    body = client.get("/api/runs/filter-options?scope=all&feedback=given&department=Library").json()
+    assert body["feedback"] == {"given": 1, "needed": 1}
+    # ...and the other facets honour the feedback filter.
+    assert [o["count"] for o in body["run_by"]] == [1]  # bob: ADM003 only
+    assert body["self_count"] == 0
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("running", ["ADM006"]),
+    ("failed", ["ADM005"]),
+    ("red", ["ADM003"]),
+])
+def test_scope_all_status_filter(client, db, seed_simple_mode, value, expected):
+    users = _seed_feedback_view(db)
+    db.get(Run, "ADM006").status = "running"
+    db.get(Run, "ADM003").quality_band = "RED"
+    db.commit()
+    _auth(client, users["admin"])
+    resp = client.get(f"/api/runs?scope=all&status={value}")
+    assert _ids(resp) == expected
+    assert resp.json()["total"] == len(expected)
+
+
+def test_scope_all_run_by_on_behalf_and_its_option_count(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    _auth(client, users["admin"])
+    assert _ids(client.get("/api/runs?scope=all&run_by=on_behalf")) == [
+        "ADM006", "ADM005", "ADM004", "ADM003", "ADM002"]
+    assert client.get("/api/runs/filter-options?scope=all").json()["on_behalf_count"] == 5
+
+
+def test_scope_mine_status_filter_sees_only_own_runs(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    db.get(Run, "ADM001").status = "failed"  # Alice's own Jane run
+    db.get(Run, "ADM004").status = "running"  # Bob's
+    db.commit()
+    _auth(client, users["alice"])
+    assert _ids(client.get("/api/runs?status=failed")) == ["ADM001"]
+    assert _ids(client.get("/api/runs?status=running")) == []
+    _auth(client, users["bob"])
+    # Alice's failed run is not Bob's to see.
+    assert _ids(client.get("/api/runs?status=failed")) == []
+    assert _ids(client.get("/api/runs?status=running")) == ["ADM004"]
+
+
+def test_my_status_counts_never_include_other_users_runs(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    db.get(Run, "ADM001").status = "failed"  # Alice's
+    db.get(Run, "ADM004").status = "running"  # Bob's
+    db.commit()
+    _auth(client, users["alice"])
+    alice = client.get("/api/runs/my-status-counts").json()
+    assert alice["all"] == len(_ids(client.get("/api/runs")))
+    assert (alice["failed"], alice["running"], alice["red"]) == (1, 0, 0)
+    _auth(client, users["bob"])
+    bob = client.get("/api/runs/my-status-counts").json()
+    assert bob["all"] == len(_ids(client.get("/api/runs")))
+    assert (bob["failed"], bob["running"]) == (0, 1)
+
+
+def test_scope_all_runs_carry_cost_for_admins(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    db.get(Run, "ADM001").total_cost = 2.5
+    db.commit()
+    _auth(client, users["admin"])
+    costs = {r["run_id"]: r["total_cost"] for r in client.get("/api/runs?scope=all").json()["runs"]}
+    assert costs["ADM001"] == 2.5
+
+
+def test_filter_options_cascade_applies_the_status_filter(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    db.get(Run, "ADM006").status = "running"
+    db.commit()
+    _auth(client, users["admin"])
+    body = client.get("/api/runs/filter-options?scope=all&status=running").json()
+    assert [(f["value"], f["count"]) for f in body["faculty"]] == [("Omar Testperson", 1)]
+    assert body["status"]["all"] == 6  # the pill counts ignore the status filter itself
+
+
+def test_red_status_is_admin_only_and_bad_status_is_422(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["alice"])
+    assert client.get("/api/runs?status=red").status_code == 403
+    assert client.get("/api/runs?scope=all&status=red").status_code == 403
+    assert client.get("/api/runs?status=green").status_code == 422
+    _auth(client, users["admin"])
+    assert client.get("/api/runs?scope=all&status=green").status_code == 422
+    assert client.get("/api/runs/filter-options?scope=all&status=red").status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # Run score: list columns (admin), run-quality report (admin), review note
 # ---------------------------------------------------------------------------
 
@@ -506,10 +704,13 @@ def test_run_quality_report_shape(client, db, seed_simple_mode, monkeypatch):
         "provisional": True, "cap": 25, "cap_reason": "owner name missing",
         "cap_lint": "owner_contact_missing", "earned": 80, "total_weight": 10,
         "data_complete": True,
-        "dimensions": [{"name": "Duplicate entries", "weight": 10, "points": 8.0}]}
+        "dimensions": [{"name": "Duplicate entries", "weight": 10, "points": 8.0, "label": None,
+                        "checks": None, "scoring": None, "if_lost": None, "can_cap": False}]}
+    assert body["gates_fired"] == []
     assert [(f["lint"], f["severity"], f["count"], f["caps_score"])
             for f in body["doctor"]["findings"]] == [
         ("owner_contact_missing", "ERROR", 1, True), ("table_shape", "INFO", 1, False)]
+    assert body["doctor"]["findings"][0]["title"] == "Owner name not found"
     assert body["doctor"]["counts"] == {"error": 1, "warn": 0, "info": 1}
 
 
@@ -616,3 +817,85 @@ def test_review_note_is_for_the_owner_and_admins_only(client, db, seed_simple_mo
     assert client.get("/api/run/ADM001/review-note").status_code == 403
     _auth(client, users["admin"])
     assert client.get("/api/run/ADM001/review-note").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# #1114: batch_id on every /runs row, and the batch_id filter.
+# ---------------------------------------------------------------------------
+
+def _runs_in_and_out_of_a_batch(db, role="user"):
+    from app.models import RunBatch
+    user = User(email=f"batch-{role}@example.com", display_name="B", role=role, consent_version="1.0")
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    db.add(RunBatch(id="BATCHA", user_id=user.id, files_submitted=2))
+    db.add_all([
+        Run(id="INBATA", user_id=user.id, status="complete", filename="a.docx", file_type="docx",
+            batch_id="BATCHA", started_at=datetime(2026, 10, 1, 9, 0)),
+        Run(id="INBATB", user_id=user.id, status="queued", filename="b.docx", file_type="docx",
+            batch_id="BATCHA", started_at=datetime(2026, 10, 1, 9, 1)),
+        Run(id="SINGLE", user_id=user.id, status="complete", filename="c.docx", file_type="docx",
+            started_at=datetime(2026, 10, 1, 9, 2)),
+    ])
+    db.commit()
+    return user
+
+
+def test_run_list_rows_carry_their_batch_id(client, db, seed_simple_mode):
+    user = _runs_in_and_out_of_a_batch(db)
+    _auth(client, user)
+    rows = client.get("/api/runs").json()["runs"]
+    assert {r["run_id"]: r["batch_id"] for r in rows} == {"INBATA": "BATCHA", "INBATB": "BATCHA", "SINGLE": None}
+
+
+@pytest.mark.parametrize("role, scope", [("user", "mine"), ("admin", "all")])
+def test_run_list_filters_to_one_batch_in_either_scope(client, db, seed_simple_mode, role, scope):
+    user = _runs_in_and_out_of_a_batch(db, role)
+    _auth(client, user)
+    body = client.get(f"/api/runs?scope={scope}&batch_id=BATCHA").json()
+    assert sorted(r["run_id"] for r in body["runs"]) == ["INBATA", "INBATB"]
+    assert body["total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# input_format filter: GET /runs?scope=all&input_format= and filter-options
+# ---------------------------------------------------------------------------
+
+def _seed_input_formats(db):
+    users = _seed_admin_view(db)
+    for run_id, fmt in [("ADM001", "wcm"), ("ADM002", "other"), ("ADM003", "wcm"), ("ADM004", "other")]:
+        db.query(Run).filter(Run.id == run_id).update({Run.input_format: fmt})
+    db.commit()  # ADM005 and ADM006 stay NULL
+    return users
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("wcm", ["ADM003", "ADM001"]),
+    ("other", ["ADM004", "ADM002"]),
+    ("unknown", ["ADM006", "ADM005"]),
+])
+def test_scope_all_input_format_filter(client, db, seed_simple_mode, value, expected):
+    users = _seed_input_formats(db)
+    _auth(client, users["admin"])
+    resp = client.get(f"/api/runs?scope=all&input_format={value}")
+    assert _ids(resp) == expected
+    assert resp.json()["total"] == len(expected)
+
+
+def test_input_format_filter_rejects_unknown_value(client, db, seed_simple_mode):
+    users = _seed_input_formats(db)
+    _auth(client, users["admin"])
+    assert client.get("/api/runs?scope=all&input_format=docx").status_code == 422
+
+
+def test_filter_options_input_format_counts_cascade(client, db, seed_simple_mode):
+    users = _seed_input_formats(db)
+    _auth(client, users["admin"])
+    counts = client.get("/api/runs/filter-options?scope=all").json()["input_format"]
+    assert counts == {"wcm": 2, "other": 2, "unknown": 2}
+    # Other filters narrow the counts; the input_format filter itself does not.
+    narrowed = client.get(
+        "/api/runs/filter-options?scope=all&department=Library&input_format=wcm").json()
+    assert narrowed["input_format"] == {"wcm": 1, "other": 1, "unknown": 0}
+

@@ -2,12 +2,35 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import FeedbackForm from './FeedbackForm'
-import { getFeedback, submitFeedback } from '../api/feedback'
+import { getFeedback, getRunFeedbackAll, submitFeedback } from '../api/feedback'
+import type { FeedbackDetail } from '../types'
+import { QUESTION_LABELS } from './feedbackQuestions'
 
 vi.mock('../api/feedback', () => ({
   getFeedback: vi.fn(),
   submitFeedback: vi.fn(),
+  getRunFeedbackAll: vi.fn(),
 }))
+
+vi.mock('../contexts/AuthContext', () => ({
+  useAuth: () => ({ user: { role: 'user' } }),
+  useCanViewAllRuns: () => false,
+}))
+
+const SUBMISSION = {
+  id: 1,
+  run_id: 'run-1',
+  user_id: 7,
+  display_name: 'Jane Testperson',
+  reviewer_role: 'cv_owner',
+  overall_usefulness: 4,
+  manual_conversion_effort: '0 minutes',
+  correction_effort: '0 minutes',
+  summary_generated: 1,
+  issue_locations: ['B1'],
+  likelihood_to_recommend: 5,
+  submitted_at: '2026-09-02T00:00:00+00:00',
+} as unknown as FeedbackDetail
 
 const ISSUE_KEYS = [
   'issue_missing_content',
@@ -28,6 +51,7 @@ const LABELS = [
 
 beforeEach(() => {
   vi.mocked(getFeedback).mockResolvedValue({ feedback: null, run_context: { wcm_sections: [] } })
+  vi.mocked(getRunFeedbackAll).mockResolvedValue([SUBMISSION])
   vi.mocked(submitFeedback).mockResolvedValue({ status: 201 } as Response)
 })
 
@@ -77,7 +101,7 @@ describe('FeedbackForm problem cards', () => {
       fireEvent.click(within(screen.getByRole('radiogroup', { name: group })).getByRole('radio', { name }))
     pick('Department administrator', 'Your role')
     pick('3', 'How useful was the CViche output?')
-    pick('0 minutes', 'Without CViche, how long would it take to manually convert this CV to WCM format?')
+    pick('0 minutes', QUESTION_LABELS.manual_conversion_effort)
     pick('0 minutes', 'How long did it take to correct the CViche output?')
     pick('4', 'How likely are you to recommend CViche to a colleague?')
 
@@ -95,5 +119,33 @@ describe('FeedbackForm problem cards', () => {
     expect(payload.issue_missing_content).toBe('Section B2')
     expect(payload.issue_formatting).toBeNull()
     expect(payload.issue_split_merged).toBeNull()
+  })
+})
+
+describe('FeedbackForm summary', () => {
+  it('shows the summary instead of the form when the viewer already reviewed the run', async () => {
+    vi.mocked(getFeedback).mockResolvedValue({
+      feedback: SUBMISSION,
+      run_context: { wcm_sections: [{ section_id: 'B1', section_name: 'Appointments' }] },
+    } as unknown as Awaited<ReturnType<typeof getFeedback>>)
+    render(<FeedbackForm runId="run-1" />)
+    expect(await screen.findByText('Jane Testperson')).toBeTruthy()
+    expect(screen.getByText('B1: Appointments')).toBeTruthy()
+    expect(screen.getByText('Yes')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Submit review' })).toBeNull()
+  })
+
+  it('replaces the form with the summary after a submit', async () => {
+    await renderForm()
+    const pick = (name: string, group: string) =>
+      fireEvent.click(within(screen.getByRole('radiogroup', { name: group })).getByRole('radio', { name }))
+    pick('Department administrator', 'Your role')
+    pick('3', 'How useful was the CViche output?')
+    pick('0 minutes', QUESTION_LABELS.manual_conversion_effort)
+    pick('0 minutes', 'How long did it take to correct the CViche output?')
+    pick('4', 'How likely are you to recommend CViche to a colleague?')
+    fireEvent.click(screen.getByRole('button', { name: 'Submit review' }))
+    expect(await screen.findByText('Jane Testperson')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Submit review' })).toBeNull()
   })
 })

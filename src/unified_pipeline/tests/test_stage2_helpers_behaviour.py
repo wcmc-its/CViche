@@ -4,7 +4,8 @@ Covers: get_hierarchy_path, build_element_index_map, get_element_text,
 split_merged_row_into_pseudo_rows, extract_leaf_sections_with_boundaries,
 collect_header_indices, collect_header_info, remove_subset_delimiters,
 recover_unclaimed_table_rows, _dedup_idx_key, filter_extraction_noise,
-fold_labelled_detail_entries (#986).
+fold_labelled_detail_entries (#986), collect_unlocated_headings and
+promote_unlocated_headings (autopsy 2026-10-02 class 6), _entry_sort_key.
 
 The first seven of those have NO existing coverage anywhere in the test
 suite. The last four (remove_subset_delimiters, recover_unclaimed_table_rows,
@@ -30,6 +31,7 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage2_helpers_behaviour.py -p no:cacheprovider
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -55,6 +57,9 @@ remove_subset_delimiters = stage2.remove_subset_delimiters
 recover_unclaimed_table_rows = stage2.recover_unclaimed_table_rows
 _dedup_idx_key = stage2._dedup_idx_key
 filter_extraction_noise = stage2.filter_extraction_noise
+parse_delimiter_reply = stage2.parse_delimiter_reply
+delimiter_index_text = stage2.delimiter_index_text
+row_range_entry = stage2.row_range_entry
 
 
 # --------------------------------------------------------- get_hierarchy_path
@@ -450,6 +455,157 @@ def test_collect_header_info_empty_hierarchy_returns_empty_dict():
     assert collect_header_info([]) == {}
 
 
+# ------------------------------------------- promote_unlocated_headings
+
+def _entry(idx, etype, text, path):
+    return {"element_idx_start": idx, "element_idx_end": idx, "element_type": etype,
+            "confidence": 1.0, "text": text, "hierarchy": list(path)}
+
+
+def _unlocated_fixture():
+    # 1b placed TALKS (idx 0) and LECTURES (idx 9) but not POSTERS, so the
+    # POSTERS line (idx 5) sits inside TALKS as a break.
+    hierarchy = [
+        {"text": "TALKS", "level": "H1", "element_idx": 0, "synthetic": False, "children": []},
+        {"text": "POSTERS", "level": "H1", "element_idx": None, "synthetic": False, "children": []},
+        {"text": "LECTURES", "level": "H1", "element_idx": 9, "synthetic": False, "children": []},
+    ]
+    entries = [
+        _entry(0, "header", "TALKS", ["TALKS"]),
+        _entry(1, "paragraph", "Talk one, 2001", ["TALKS"]),
+        _entry(4, "break", "", ["TALKS"]),
+        _entry(5, "break", "POSTERS (selected, 2001-2010)", ["TALKS"]),
+        _entry(6, "paragraph", "Poster one, 2002", ["TALKS"]),
+        _entry(7, "break", "", ["TALKS"]),
+        _entry(8, "paragraph", "Poster two, 2003", ["TALKS"]),
+        _entry(9, "header", "LECTURES", ["LECTURES"]),
+        _entry(10, "paragraph", "Lecture one, 2004", ["LECTURES"]),
+    ]
+    return entries, hierarchy
+
+
+def test_collect_unlocated_headings_keeps_nested_paths_and_skips_placed_and_synthetic():
+    hierarchy = [
+        {"text": "GROUP", "element_idx": None, "synthetic": True, "children": [
+            {"text": "Placed", "element_idx": 3},
+            {"text": "Lost child", "element_idx": None, "synthetic": False},
+        ]},
+        {"text": "Lost top", "element_idx": None, "synthetic": False},
+        {"text": "", "element_idx": None},
+    ]
+    assert stage2.collect_unlocated_headings(hierarchy) == [
+        stage2._UnlocatedHeading(("GROUP", "Lost child")),
+        stage2._UnlocatedHeading(("Lost top",)),
+    ]
+
+
+def test_promote_unlocated_heading_turns_its_break_into_a_header_and_moves_the_section_tail():
+    entries, hierarchy = _unlocated_fixture()
+
+    result = stage2.promote_unlocated_headings(entries, hierarchy)
+
+    assert [(e["element_idx_start"], e["element_type"], e["hierarchy"]) for e in result] == [
+        (0, "header", ["TALKS"]),
+        (1, "paragraph", ["TALKS"]),
+        (4, "break", ["TALKS"]),
+        (5, "header", ["POSTERS"]),
+        (6, "paragraph", ["POSTERS"]),
+        (7, "break", ["POSTERS"]),
+        (8, "paragraph", ["POSTERS"]),
+        (9, "header", ["LECTURES"]),
+        (10, "paragraph", ["LECTURES"]),
+    ]
+    assert result[3]["text"] == "POSTERS (selected, 2001-2010)"
+
+
+def test_promote_unlocated_heading_stops_at_a_section_change_without_a_header():
+    entries, hierarchy = _unlocated_fixture()
+    entries[6]["hierarchy"] = ["OTHER"]  # idx 8 sits in another section
+
+    stage2.promote_unlocated_headings(entries, hierarchy)
+
+    assert entries[5]["hierarchy"] == ["POSTERS"]
+    assert entries[6]["hierarchy"] == ["OTHER"]
+
+
+@pytest.mark.parametrize("line", [
+    "POSTERSHIP, 2001",                # heading word runs on into another word
+    "Posters (selected)",              # case differs from the 1a heading text
+    "POSTERS " + "x" * 81,             # suffix longer than a parenthetical note
+])
+def test_promote_unlocated_heading_leaves_a_line_that_is_not_the_heading(line):
+    entries, hierarchy = _unlocated_fixture()
+    entries[3]["text"] = line
+
+    stage2.promote_unlocated_headings(entries, hierarchy)
+
+    assert entries[3]["element_type"] == "break"
+    assert all(e["hierarchy"] == ["TALKS"] for e in entries[1:7])
+
+
+def test_promote_unlocated_heading_accepts_the_bare_heading_and_a_suffix_at_the_cap():
+    for line in ["POSTERS", "POSTERS " + "x" * 79]:
+        entries, hierarchy = _unlocated_fixture()
+        entries[3]["text"] = line
+
+        stage2.promote_unlocated_headings(entries, hierarchy)
+
+        assert entries[3]["element_type"] == "header"
+
+
+def test_promote_unlocated_heading_ignores_a_content_entry_with_the_heading_text():
+    entries, hierarchy = _unlocated_fixture()
+    entries[3]["element_type"] = "paragraph"
+
+    stage2.promote_unlocated_headings(entries, hierarchy)
+
+    assert entries[3]["element_type"] == "paragraph"
+    assert entries[4]["hierarchy"] == ["TALKS"]
+
+
+def test_promote_unlocated_heading_with_two_matching_breaks_is_left_alone(caplog):
+    entries, hierarchy = _unlocated_fixture()
+    entries[5]["text"] = "POSTERS"
+
+    with caplog.at_level("WARNING", logger=stage2.__name__):
+        stage2.promote_unlocated_headings(entries, hierarchy)
+
+    assert [e["element_type"] for e in entries[3:6]] == ["break", "paragraph", "break"]
+    assert entries[4]["hierarchy"] == ["TALKS"]
+    assert "matches 2 break lines" in caplog.text
+
+
+def test_promote_unlocated_heading_matches_across_collapsed_whitespace():
+    entries, hierarchy = _unlocated_fixture()
+    hierarchy[1]["text"] = "POSTER SESSIONS"
+    entries[3]["text"] = "POSTER \t SESSIONS (selected)"
+
+    stage2.promote_unlocated_headings(entries, hierarchy)
+
+    assert entries[3]["element_type"] == "header"
+    assert entries[3]["hierarchy"] == ["POSTER SESSIONS"]
+
+
+def test_promote_unlocated_heading_stops_at_a_header_in_the_same_section():
+    entries, hierarchy = _unlocated_fixture()
+    entries[5]["element_type"] = "header"  # idx 7: a placed header sharing the old path
+    entries[5]["text"] = "TALKS"
+
+    stage2.promote_unlocated_headings(entries, hierarchy)
+
+    assert entries[4]["hierarchy"] == ["POSTERS"]
+    assert [e["hierarchy"] for e in entries[5:7]] == [["TALKS"], ["TALKS"]]
+
+
+def test_promote_unlocated_heading_never_touches_a_placed_heading():
+    entries, hierarchy = _unlocated_fixture()
+    hierarchy[1]["element_idx"] = 5  # 1b placed POSTERS after all
+
+    stage2.promote_unlocated_headings(entries, hierarchy)
+
+    assert entries[3]["element_type"] == "break"
+
+
 # ---------------------------------------------------- remove_subset_delimiters
 
 def _d(start, end=None, text=""):
@@ -672,6 +828,57 @@ def test_recover_unclaimed_table_rows_separator_only_row_not_recovered():
     assert [r["element_idx_start"] for r in recovered] == ["9.4"]
 
 
+# ------------------------------------- parse_delimiter_reply / delimiter_index_text
+
+def test_parse_delimiter_reply_keeps_the_text_of_a_row_index_ending_in_zero():
+    """#1228: 474.10 is row 10 of table 474. json.loads gives the float 474.1,
+    which is row 1; the literal is the only thing that names row 10."""
+    delimiter = parse_delimiter_reply('[{"element_idx_start": 474.10, "element_idx_end": 474.11}]')[0]
+    assert delimiter_index_text(delimiter["element_idx_start"]) == "474.10"
+    assert delimiter_index_text(delimiter["element_idx_end"]) == "474.11"
+    assert delimiter["element_idx_start"] == 474.1  # still a number to anything that does arithmetic
+
+
+def test_parse_delimiter_reply_leaves_ints_strings_and_confidence_as_they_were():
+    reply = parse_delimiter_reply(
+        '{"delimiters": [{"element_idx_start": 12, "element_idx_end": "9.10", "confidence": 0.90}]}')
+    delimiter = reply["delimiters"][0]
+    assert (delimiter["element_idx_start"], delimiter["element_idx_end"]) == (12, "9.10")
+    assert (delimiter_index_text(12), delimiter_index_text("9.10")) == ("12", "9.10")
+    assert delimiter["confidence"] == 0.9
+    assert json.dumps(delimiter["confidence"]) == "0.9"  # the artifact is written as it always was
+
+
+def test_row_range_entry_reads_row_10_and_row_1_as_two_different_rows():
+    lookup = {f"474.{r}": _row(f"474.{r}", f"row {r} alpha", parent_idx=474) for r in range(12)}
+    entry, claimed = row_range_entry("474.10", "474.11", lookup, 0.9)
+    assert claimed == ["474.10", "474.11"]
+    assert entry["text"] == "row 10 alpha\nrow 11 alpha"
+    assert entry["element_idx_start"] == "474.10"
+
+
+def test_remove_subset_delimiters_keeps_pseudo_row_10_apart_from_pseudo_row_1():
+    """A merged row split into pseudo-rows is keyed "<table>.<row>.<k>". Read as
+    one float, "92.5.10" is 92.5.1 and the tenth line was dropped as a duplicate
+    of the first; "92.5.2" also sorted after it."""
+    kept = remove_subset_delimiters([
+        _d("92.5.10", "92.5.10", "tenth line of the cell"), _d("92.5.1", "92.5.1", "first line of the cell"),
+        _d("92.5.2", "92.5.2", "second line of the cell"),
+    ])
+    assert [d["element_idx_start"] for d in kept] == ["92.5.1", "92.5.2", "92.5.10"]
+
+
+def test_remove_subset_delimiters_keeps_row_1_row_10_and_the_pairs_between_apart():
+    """The keys the delimiter handling now produces ("474.10", not "474.1") are
+    distinct to remove_subset_delimiters: nothing here contains anything else."""
+    kept = remove_subset_delimiters([
+        _d("474.1", "474.1", "row 1"), _d("474.2", "474.3", "rows 2-3"), _d("474.10", "474.11", "rows 10-11"),
+    ])
+    assert [(d["element_idx_start"], d["element_idx_end"]) for d in kept] == [
+        ("474.1", "474.1"), ("474.2", "474.3"), ("474.10", "474.11"),
+    ]
+
+
 # ---------------------------------------------------------------- _dedup_idx_key
 
 def test_dedup_idx_key_malformed_strings_fall_back_to_string_identity():
@@ -682,6 +889,16 @@ def test_dedup_idx_key_malformed_strings_fall_back_to_string_identity():
 
 def test_dedup_idx_key_plain_numeric_string_without_dot_converts():
     assert _dedup_idx_key("42") == (42.0, 0.0)
+
+
+def test_dedup_idx_key_row_10_is_not_row_1():
+    assert _dedup_idx_key("474.10") == (474.0, 10.0)
+    assert _dedup_idx_key("474.10") != _dedup_idx_key("474.1")
+
+
+def test_dedup_idx_key_pseudo_row_10_is_not_pseudo_row_1():
+    assert _dedup_idx_key("92.5.10") == (92.0, 5.0, 10.0)
+    assert _dedup_idx_key("92.5.10") != _dedup_idx_key("92.5.1")
 
 
 # ------------------------------------------------------- filter_extraction_noise
@@ -956,3 +1173,11 @@ def test_join_row_cells_ignores_leading_and_trailing_blank_lines_in_cell_zero():
 def test_join_row_cells_keeps_old_shape_when_another_cell_spans_lines():
     # The trailing paragraphs could not be told from the org cell's own lines.
     assert stage2.join_row_cells(["Title\n- a", "Org\nCity", "2024"]) == "Title\n- a | Org\nCity | 2024"
+
+
+# ------------------------------------------------------------ _entry_sort_key
+
+def test_entry_sort_key_orders_rows_within_a_table_and_tables_after_paragraphs():
+    entries = [{"element_idx_start": i} for i in ["22.10", 23, "table_0", "22.2", 22]]
+    entries.sort(key=stage2._entry_sort_key)
+    assert [e["element_idx_start"] for e in entries] == [22, "22.2", "22.10", 23, "table_0"]

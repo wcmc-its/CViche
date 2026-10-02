@@ -26,8 +26,10 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
+    SKIPPED_ROW_CHECK,
     CERTIFICATE_NUMBER_PATTERN,
     _classify_cert_token,
+    _format_certification_date_str,
     _is_certification_header_line,
     _is_fused_certification,
     _reconstruct_certification_rows,
@@ -1161,3 +1163,196 @@ class TestCertificateNumberSeparatorHeuristic:
             ("Board B", "222", "2012"),
             ("Board C", "333", "2014"),
         ]
+
+
+class TestSpecialtyOnlyRecordTakesTheStructuredPath:
+    """#1234: a record with a specialty and dates but no board name or number
+    used to fall to the raw-text reparse, which put the whole source line in
+    the name cell. A year-only line was then skipped without any record."""
+
+    def test_specialty_and_dates_render_as_clean_cells(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Certification in Example Medicine 2010 - 2020",
+             "extracted_fields": {"specialty": "Example Medicine",
+                                  "start_date": "2010", "end_date": "2020"}},
+        ])
+        assert _rows_after_board(gen) == [("Example Medicine", "", "2010-2020")]
+
+    def test_specialty_without_dates_renders_the_specialty_alone(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine: Board Certified",
+             "extracted_fields": {"specialty": "Example Medicine"}},
+        ])
+        assert _rows_after_board(gen) == [("Example Medicine", "", "")]
+
+    def test_year_only_line_is_skipped_with_a_render_warning(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "1977", "extracted_fields": {}},
+        ])
+        assert _rows_after_board(gen) == []
+        assert [w["check"] for w in gen._section_failures] == [SKIPPED_ROW_CHECK]
+        assert gen._section_failures[0]["severity"] == "WARN"
+        assert gen._section_failures[0]["evidence"] == ["year=1977"]
+
+    def test_a_rendered_row_records_no_warning(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2012",
+             "extracted_fields": {"specialty": "Example Medicine", "year_certified": "2012"}},
+        ])
+        assert gen._section_failures == []
+
+    def test_a_reparsed_row_that_renders_records_no_warning(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2012", "extracted_fields": {}},
+        ])
+        assert len(_rows_after_board(gen)) == 1
+        assert gen._section_failures == []
+
+    def test_multi_line_specialty_only_text_keeps_every_line(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2010\nSample Surgery 2012",
+             "extracted_fields": {"specialty": "Example Medicine"}},
+        ])
+        names = [r[0] for r in _rows_after_board(gen)]
+        assert len(names) == 2
+        assert "Sample Surgery" in names[1]
+
+    def test_multi_line_specialty_with_a_date_keeps_every_line(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2010\nSample Surgery 2012",
+             "extracted_fields": {"specialty": "Example Medicine",
+                                  "start_date": "2010"}},
+        ])
+        assert len(_rows_after_board(gen)) == 2
+
+    def test_list_specialty_never_renders_a_python_repr(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2010\nSample Surgery 2012",
+             "extracted_fields": {"specialty": ["Example Medicine", "Sample Surgery"]}},
+        ])
+        rows = _rows_after_board(gen)
+        assert rows and not any("[" in r[0] or "'" in r[0] for r in rows)
+
+    def test_blank_specialty_keeps_the_source_line(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "Example Medicine 2010",
+             "extracted_fields": {"specialty": "   ", "start_date": "2010"}},
+        ])
+        assert [r[0] for r in _rows_after_board(gen)] == ["Example Medicine 2010"]
+
+
+_RECERT_RANGE = {"start_date": "2008", "end_date": "2018"}
+
+
+class TestDictValuedCertificationDates:
+    """#1233: stage 4 sometimes returns `recertification_date` as a
+    `{start_date, end_date}` dict. `_format_certification_date_str` wrapped it
+    in `str()` first, no year is findable in the repr, and the Dates cell
+    printed the repr. It now reads as the range, the same text the equivalent
+    "2008-2018" string has always produced."""
+
+    def test_a_dict_recertification_date_reads_as_the_range(self):
+        fields = {"year_certified": "2001", "recertification_date": _RECERT_RANGE}
+        assert _format_certification_date_str(fields) == "2001-2008-2018"
+
+    def test_the_dict_renders_the_same_as_the_equivalent_string(self):
+        as_dict = {"year_certified": "2001", "recertification_date": _RECERT_RANGE}
+        as_text = {"year_certified": "2001", "recertification_date": "2008-2018"}
+        assert _format_certification_date_str(as_dict) == _format_certification_date_str(as_text)
+
+    def test_a_dict_with_no_year_certified_is_just_the_range(self):
+        assert _format_certification_date_str({"recertification_date": _RECERT_RANGE}) == "2008-2018"
+
+    def test_a_string_recertification_date_is_unchanged(self):
+        fields = {"year_certified": "2001", "recertification_date": "2008"}
+        assert _format_certification_date_str(fields) == "2001-2008"
+
+    def test_a_dict_year_certified_never_renders_as_its_repr(self):
+        fields = {"year_certified": {"start_date": "2001", "end_date": "2003"},
+                  "recertification_date": "2008"}
+        assert _format_certification_date_str(fields) == "2001-2003-2008"
+
+    def test_the_dates_cell_never_holds_a_python_repr(self):
+        gen = _generator()
+        gen._fill_board_certification([{
+            "extracted_fields": {
+                "certifying_board": "Example Board of Testing",
+                "certificate_number": "A12345",
+                "year_certified": "2001",
+                "recertification_date": _RECERT_RANGE,
+            },
+            "text": "Example Board of Testing",
+        }])
+        assert _rows_after_board(gen) == [
+            ("Example Board of Testing", "A12345", "2001-2008-2018"),
+        ]
+
+
+def _certification(label, certified, recertified):
+    return {
+        "extracted_fields": {
+            "certifying_board": label,
+            "certificate_number": "A12345",
+            "year_certified": certified,
+            "recertification_date": recertified,
+        },
+        "text": label,
+    }
+
+
+def _board_order(entries):
+    gen = _generator()
+    gen._fill_board_certification(entries)
+    return [row[0] for row in _rows_after_board(gen)]
+
+
+_SHARED_RANGE = {"start_date": "2009", "end_date": "2019"}
+
+
+class TestRangeValuedRecertificationDoesNotReorderRows:
+    """#1233: a `{start_date, end_date}` recertification_date is left out of the
+    F2 sort key, as it was while its repr held no year and as the string form of
+    a range still is. Two rows sharing one range therefore order by
+    `year_certified`, newest first, whatever order stage 4 listed them in."""
+
+    def test_rows_sharing_a_range_read_newest_certified_first(self):
+        entries = [
+            _certification("Example Older Board", "1994", _SHARED_RANGE),
+            _certification("Example Newer Board", "1999", _SHARED_RANGE),
+        ]
+        assert _board_order(entries) == ["Example Newer Board", "Example Older Board"]
+
+    def test_the_order_does_not_depend_on_the_input_order(self):
+        entries = [
+            _certification("Example Newer Board", "1999", _SHARED_RANGE),
+            _certification("Example Older Board", "1994", _SHARED_RANGE),
+        ]
+        assert _board_order(entries) == ["Example Newer Board", "Example Older Board"]
+
+    def test_the_dict_range_orders_the_rows_as_the_equivalent_string_does(self):
+        text_entries = [
+            _certification("Example Older Board", "1994", "2009-2019"),
+            _certification("Example Newer Board", "1999", "2009-2019"),
+        ]
+        dict_entries = [
+            _certification("Example Older Board", "1994", _SHARED_RANGE),
+            _certification("Example Newer Board", "1999", _SHARED_RANGE),
+        ]
+        assert _board_order(dict_entries) == _board_order(text_entries)
+
+    def test_a_later_range_does_not_lift_an_earlier_certification(self):
+        later_range = {"start_date": "2014", "end_date": "2024"}
+        entries = [
+            _certification("Example Older Board", "1994", later_range),
+            _certification("Example Newer Board", "1999", _SHARED_RANGE),
+        ]
+        assert _board_order(entries) == ["Example Newer Board", "Example Older Board"]

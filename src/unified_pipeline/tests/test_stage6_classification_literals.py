@@ -883,6 +883,19 @@ def test_c_role_trails_the_training_type_cell():
 # taxonomy default.
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("1989 Post-doctoral Fellow, Fictional University (Epidemiology)", "1989"),
+    ("1989- Post-doctoral Fellow, Fictional University (Epidemiology)", "1989-Present"),
+])
+def test_normalize_start_only_dates_read_the_entry_source_text(text, expected):
+    """Class 13 (2026-10-02): a 1989 postdoc with no end date rendered
+    "1989-Present"; the source text decides whether the year is left open."""
+    record = _normalize_training_entry(
+        {"text": text, "extracted_fields": {"training_type": "Post-doctoral Fellow",
+                                            "start_date": "1989"}}, "C")
+    assert record.dates == expected
+
+
 def test_normalize_prefers_training_type_over_title():
     """Precedence, both aliases present and non-empty."""
     record = _normalize_training_entry(
@@ -952,7 +965,7 @@ def test_normalize_institution_falls_through_an_empty_cleaned_name():
                 "institution_enrichment": {"cleaned_name": "Duke Medical Center"}}
     assert _normalize_training_entry(enriched, "C1").institution == "Duke Medical Center"
 
-    official_only = {"extracted_fields": {"institution": "raw inst"},
+    official_only = {"extracted_fields": {"institution": "Fictional Regional Hosp., Springfield"},
                      "institution_enrichment": {"cleaned_name": "",
                                                 "official_name": "Fictional Regional Hospital"}}
     assert _normalize_training_entry(official_only, "C1").institution == "Fictional Regional Hospital"

@@ -23,6 +23,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS  # noqa: E402
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY as _RECORDS  # noqa: E402
 from unified_pipeline.stage6 import fan_out  # noqa: E402
 from unified_pipeline.stage6.fan_out import (  # noqa: E402
     FANNED_OUT_FROM,
@@ -424,7 +425,8 @@ class TestParentOwnRecord:
 
 
 @pytest.mark.parametrize('key,expected', [('start_date', True), ('date', True), ('year', True),
-                                          ('end_date', True), ('role', False), ('mentee_name', False)])
+                                          ('end_date', True), ('dates_attended', True),
+                                          ('dates_attended_start_date', True), ('role', False), ('mentee_name', False)])
 def test_date_keys_never_count_as_a_parents_identity(key, expected):
     from unified_pipeline.stage6.fan_out import _is_date_key
     assert _is_date_key(key) is expected
@@ -501,3 +503,246 @@ def test_the_renderer_map_names_only_schema_fields_and_never_narrative():
 
 def test_every_code_with_a_schema_is_in_the_renderer_map_except_text_codes_and_personal_data():
     assert set(FIELD_SCHEMAS) - set(fan_out._RENDERED_FIELDS) == fan_out._TEXT_RENDERED_CODES | {'A'}
+
+
+# --- #1187: B1 degrees carrying dates_attended, and the warning for a refusal ---
+
+def _degree(degree, institution, year, **dates):
+    return {'degree': degree, 'institution': institution, 'year': year, **dates}
+
+
+def _two_degrees(dates_attended):
+    first = _degree('BSc', 'Harrowfield University', '2005', **dates_attended[0])
+    second = _degree('MSc', 'Birch Hollow University', '2008', **dates_attended[1])
+    return {'taxonomy_code': 'B1', 'element_idx_start': 3,
+            'text': 'BSc Harrowfield University 2001 2005 2005\tMSc Birch Hollow University 2006 2008 2008',
+            'extracted_fields': {'degrees': [first, second]}}
+
+
+_NESTED_DATES = [{'dates_attended': {'start_date': '2001', 'end_date': '2005'}},
+                 {'dates_attended': {'start_date': '2006', 'end_date': '2008'}}]
+
+
+class TestB1DatesAttended:
+    def test_two_degrees_with_dates_attended_fan_out(self):
+        children = _fan(_two_degrees(_NESTED_DATES))
+        assert [c['extracted_fields']['degree'] for c in children] == ['BSc', 'MSc']
+        assert children[1]['extracted_fields']['dates_attended'] == _NESTED_DATES[1]['dates_attended']
+
+    def test_a_degree_key_nobody_reads_still_keeps_the_list_whole(self):
+        entry = _two_degrees(_NESTED_DATES)
+        entry['extracted_fields']['degrees'][0]['gpa'] = '3.9'
+        assert _fan(entry) == [entry]
+
+    def test_a_string_dates_attended_holds_its_tokens_when_no_start_end_exists(self):
+        # The B1 renderer writes a string `dates_attended` into the Dates cell
+        # when no start/end builds a range, so the 2001/2006 start years the
+        # entry's text names are held and the degrees fan out.
+        string_dates = [{'dates_attended': '2001-2005'}, {'dates_attended': '2006-2008'}]
+        children = _fan(_two_degrees(string_dates))
+        assert [c['extracted_fields']['degree'] for c in children] == ['BSc', 'MSc']
+
+    def test_a_string_dates_attended_holds_nothing_beside_a_start_date(self):
+        # With a flat start/end the renderer builds the range from those and
+        # never writes the string, so its tokens are not held.
+        entry = _two_degrees([{'dates_attended': '2001-2005', 'start_date': '2005'},
+                              {'dates_attended': '2006-2008', 'start_date': '2008'}])
+        assert _fan(entry) == [entry]
+
+    def test_discipline_is_a_rendered_field_so_a_degree_with_one_fans_out(self):
+        entry = _two_degrees(_NESTED_DATES)
+        entry['text'] += ' Zzfield'
+        entry['extracted_fields']['degrees'][0]['discipline'] = 'Zzfield'
+        assert [c['extracted_fields']['degree'] for c in _fan(entry)] == ['BSc', 'MSc']
+
+    def test_both_degrees_render(self, tmp_path):
+        import json
+
+        from docx import Document
+
+        from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+        source, target = tmp_path / 'in.json', tmp_path / 'out.docx'
+        source.write_text(json.dumps({'document_uid': 'TESTAA',
+                                      'entries': [_two_degrees(_NESTED_DATES)]}))
+        WCMTemplateGenerator(verbose=False).generate(
+            str(source), str(target), research_summary_path=None)
+        body = ' '.join(t.text or '' for t in Document(str(target)).element.body.iter(
+            '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t'))
+        for name in ('Harrowfield University', 'Birch Hollow University', 'BSc', 'MSc'):
+            assert name in body
+
+
+class TestRejectedListWarning:
+    def _warnings(self, *entries):
+        warnings = []
+        fan_out_multi_record_entries(list(entries), FIELD_SCHEMAS, warnings)
+        return warnings
+
+    def test_an_unknown_item_key_warns_with_key_names_only(self):
+        entry = _two_degrees(_NESTED_DATES)
+        entry['extracted_fields']['degrees'][0]['gpa'] = '3.9'
+        (warning,) = self._warnings(entry)
+        assert warning['check'] == fan_out.REJECTED_LIST_CHECK
+        assert (warning['code'], warning['severity']) == ('B1', 'WARN')
+        assert 'gpa' in warning['evidence']
+        assert '3.9' not in str(warning)
+
+    def test_a_declined_record_list_warns_without_stray_keys(self):
+        entry = _two_degrees([{}, {}])
+        entry['text'] = entry['text'] + ' Zzunheld'
+        (warning,) = self._warnings(entry)
+        assert warning['evidence'] == ['B1.degrees: 1 entry']
+
+    def test_a_code_that_keeps_the_entry_text_does_not_warn(self):
+        entry = _two_degrees([{}, {}])
+        entry['text'] = entry['text'] + ' Zzunheld'
+        entry['taxonomy_code'] = 'K4'
+        assert self._warnings(entry) == []
+
+    def test_one_warning_per_code_and_key_counts_the_entries(self):
+        entry = _two_degrees(_NESTED_DATES)
+        entry['extracted_fields']['degrees'][0]['gpa'] = '3.9'
+        (warning,) = self._warnings(entry, copy.deepcopy(entry))
+        assert warning['evidence'][0] == 'B1.degrees: 2 entries'
+
+    def test_a_fanned_out_or_single_record_entry_does_not_warn(self):
+        single = {'taxonomy_code': 'B1', 'text': 'BSc Harrowfield University 2005',
+                  'extracted_fields': _degree('BSc', 'Harrowfield University', '2005')}
+        assert self._warnings(_two_degrees(_NESTED_DATES), single) == []
+
+    def test_no_warnings_list_is_backward_compatible(self):
+        assert len(_fan(_two_degrees(_NESTED_DATES))) == 2
+
+    def test_the_generator_puts_the_warning_in_the_sidecar_list(self):
+        from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+        entry = _two_degrees(_NESTED_DATES)
+        entry['extracted_fields']['degrees'][0]['gpa'] = '3.9'
+        generator = WCMTemplateGenerator(verbose=False)
+        generator._group_entries_by_code([entry])
+        assert [w['check'] for w in generator._section_failures] == [fan_out.REJECTED_LIST_CHECK]
+
+
+# --- the list stage 4 keeps when one reply held several items for an entry ---
+# Invented values. The entry's scalars are the LAST record, as stage 4 leaves
+# them; `_RECORDS` is the name stage 6 hands in (`STAGE4_RECORDS_KEY`).
+
+
+def _committee(name, role='Member', start='2001', end='2003'):
+    return {'committee_name': name, 'role': role, 'institution': 'Ashby University',
+            'start_date': start, 'end_date': end}
+
+
+def _stage4_entry(records, text=None, code='P', **entry_keys):
+    return {'taxonomy_code': code, 'element_idx_start': 4,
+            'text': text or 'Committees: Glade Board, Fern Council and Moss Panel, Ashby University',
+            'extracted_fields': {**records[-1], _RECORDS: records}, **entry_keys}
+
+
+_THREE_COMMITTEES = [_committee('Glade Board', 'Chair', '1999', '2001'),
+                     _committee('Fern Council'), _committee('Moss Panel', start='2004', end='2006')]
+
+
+def _fan4(*entries):
+    return fan_out_multi_record_entries(list(entries), FIELD_SCHEMAS, records_key=_RECORDS)
+
+
+class TestStage4Records:
+    def test_one_child_per_record_and_the_last_is_the_parent(self):
+        parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES))
+        children = _fan4(parent)
+        assert [c['extracted_fields']['committee_name'] for c in children] == [
+            'Glade Board', 'Fern Council', 'Moss Panel']
+        last = children[-1]
+        assert last['text'] == parent['text']
+        assert last['extracted_fields'] == _THREE_COMMITTEES[-1]
+        assert FANNED_OUT_FROM not in last
+        assert [c[FANNED_OUT_FROM] for c in children[:-1]] == [
+            {'key': _RECORDS, 'index': 0, 'count': 3}, {'key': _RECORDS, 'index': 1, 'count': 3}]
+
+    def test_an_earlier_record_inherits_no_scalar_from_the_last(self):
+        records = [{'committee_name': 'Glade Board'}, _committee('Moss Panel')]
+        first, last = _fan4(_stage4_entry(records))
+        assert first['extracted_fields'] == {'committee_name': 'Glade Board'}
+        assert last['extracted_fields']['role'] == 'Member'
+
+    def test_a_stage5_annotation_stays_on_the_last_record_only(self):
+        # Every entry key stage 5 writes, named here rather than read off the
+        # module, so dropping one from `_STAGE5_ENTRY_KEYS` fails this test.
+        annotations = {'enriched_fields': ['city'], 'enrichment_data': {'pmid': '1'},
+                       'enrichment_rejected': True, 'enrichment_source': 'llm',
+                       'enrichment_status': 'ok',
+                       'institution_enrichment': {'cleaned_name': 'Ashby University'}}
+        parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), **annotations)
+        children = _fan4(parent)
+        for child in children[:-1]:
+            assert not set(child) & set(annotations)
+        assert {key: children[-1][key] for key in annotations} == annotations
+
+    def test_a_scalar_stage5_added_to_the_parent_stays_on_the_last_record(self):
+        parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES))
+        parent['extracted_fields']['city'] = 'Ashby'
+        children = _fan4(parent)
+        assert children[-1]['extracted_fields']['city'] == 'Ashby'
+        assert 'city' not in children[0]['extracted_fields']
+
+    def test_tab_segments_are_the_earlier_records_texts_when_the_counts_line_up(self):
+        text = 'Chair, Glade Board 1999-2001\tMember, Fern Council 2001-2003\tMember, Moss Panel 2004-2006'
+        children = _fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES), text=text))
+        assert [c['text'] for c in children] == [
+            'Chair, Glade Board 1999-2001', 'Member, Fern Council 2001-2003', text]
+
+    def test_a_record_key_outside_the_schema_does_not_decline_the_list(self):
+        records = copy.deepcopy(_THREE_COMMITTEES)
+        records[0]['site_note'] = 'east wing'
+        assert len(_fan4(_stage4_entry(records))) == 3
+
+    def test_text_the_records_do_not_hold_does_not_decline_the_list(self):
+        # The parent alone never held it either: the last child keeps the text.
+        text = 'Zzunheld Qqunheld: Glade Board, Fern Council, Moss Panel'
+        assert len(_fan4(_stage4_entry(copy.deepcopy(_THREE_COMMITTEES), text=text))) == 3
+
+    @pytest.mark.parametrize('why', ['text_rendered_code', 'formatted', 'empty_record'])
+    def test_a_declined_list_leaves_the_entry_as_it_was(self, why):
+        records = copy.deepcopy(_THREE_COMMITTEES)
+        entry = _stage4_entry(records, code='K2' if why == 'text_rendered_code' else 'P')
+        if why == 'formatted':
+            entry['extracted_fields']['formatted_text'] = 'Glade Board; Fern Council; Moss Panel'
+        if why == 'empty_record':
+            records[1] = {'description': 'nothing a P row writes'}
+        assert _fan4(entry) == [entry]
+
+    @pytest.mark.parametrize('value', [['Glade Board', 'Fern Council'], [_committee('Glade Board')]],
+                             ids=['strings', 'one_record'])
+    def test_a_value_that_is_not_two_or_more_records_is_left_alone(self, value):
+        entry = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES))
+        entry['extracted_fields'][_RECORDS] = value
+        assert _fan4(entry) == [entry]
+
+    def test_a_declined_list_is_not_split_by_the_generic_rules(self):
+        # The second record writes nothing in a P row, so this list declines;
+        # the generic rules, handed it, would split it into an empty row.
+        records = [{'committee_name': 'Glade Board', 'role': 'Chair'}, {'description': 'Zz'}]
+        entry = _stage4_entry(records, text='Glade Board Chair')
+        assert len(fan_out_multi_record_entries([entry], FIELD_SCHEMAS)) == 2
+        assert _fan4(entry) == [entry]
+
+    def test_a_record_list_in_the_scalars_is_left_to_the_generic_rules(self):
+        # The last record carried its own off-schema list: that list splits as
+        # it did before the stage-4 list existed, and the stage-4 list goes.
+        last = {'role': 'Member', 'committees': [_committee('Fern Council'), _committee('Moss Panel')]}
+        entry = {'taxonomy_code': 'P', 'text': 'Member, Fern Council\tMember, Moss Panel',
+                 'extracted_fields': {**last, _RECORDS: [_committee('Glade Board'), last]}}
+        children = _fan4(entry)
+        assert [c['extracted_fields']['committee_name'] for c in children] == [
+            'Fern Council', 'Moss Panel']
+        assert all(_RECORDS not in c['extracted_fields'] for c in children)
+        assert [c[FANNED_OUT_FROM]['key'] for c in children] == ['committees', 'committees']
+
+    def test_the_parent_is_not_mutated(self):
+        parent = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES), institution_enrichment={'city': 'Ashby'})
+        original = copy.deepcopy(parent)
+        children = _fan4(parent)
+        children[-1]['extracted_fields']['role'] = 'changed'
+        children[-1]['institution_enrichment']['city'] = 'changed'
+        children[0]['extracted_fields']['role'] = 'changed'
+        assert parent == original

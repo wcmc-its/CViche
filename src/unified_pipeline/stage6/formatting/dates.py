@@ -16,10 +16,19 @@ only its presentation.
 Parsing the string into components is `parsing/dates.py`, imported below. That
 direction is one-way and must stay so.
 """
+from collections.abc import Mapping
 from types import MappingProxyType
+import logging
 import re
 
-from ..parsing.dates import _parse_date_components, _year_of_calendar_invalid_date
+from ..parsing.dates import (
+    RANGE_END_KEY,
+    RANGE_START_KEY,
+    _parse_date_components,
+    _year_of_calendar_invalid_date,
+)
+
+logger = logging.getLogger(__name__)
 
 # Taxonomy codes whose entries are single occasions, so a record with a start
 # date and no end date happened in that year -- it is not still going on
@@ -34,6 +43,8 @@ from ..parsing.dates import _parse_date_components, _year_of_calendar_invalid_da
 #       rows": a year alone on a committee or event row names that year.
 #   Q2  Service on Boards/Committees -- the extramural counterpart of P.
 #   Q3  Grant Reviewing / Study Sections -- a review panel sits per cycle.
+#   B2  Other Educational Experiences -- a workshop, course or conference
+#       attended once; the table's column is "Dates attended" (#1220).
 # Not members, and unchanged: every D code (the D1 rank ladder is decided in
 # sections/positions.py), O and Q1 (leadership posts held for a term), I
 # (memberships are ongoing), Q4/Q4A/Q4B/Q4C (editorial posts held for a
@@ -41,12 +52,27 @@ from ..parsing.dates import _parse_date_components, _year_of_calendar_invalid_da
 # H, R and K4 reach no `format_date_range` caller today -- their renderers
 # format a single date -- so for them this set only fixes what a future
 # range caller would print.
-POINT_IN_TIME_CODES = frozenset({'H', 'R', 'K4', 'P', 'Q2', 'Q3'})
+# A member renders the bare start even when its caller passes no source text.
+# Every other code gets the same rule wherever its caller does pass the
+# entry's text: a start with no end is that year alone, unless the source
+# leaves it open (decision 2026-10-02 on the s7ab autopsy's class 13: a one-
+# year chair, a guest-edited issue or a 1989 postdoc read "-Present"). A
+# caller that passes no text keeps "<start>-Present" for a non-member.
+POINT_IN_TIME_CODES = frozenset({'H', 'R', 'K4', 'P', 'Q2', 'Q3', 'B2'})
+
+
+# The words that close a range as still open, after the record's own year
+# and a dash or "to": "2011 - present", "2011 to current" (decision
+# 2026-10-02, class 13). Anchored on the year because a row routinely says
+# "now Professor at ..." or names "Current Opinion in ..." about something
+# else; a spaced dash followed by text is otherwise a column separator.
+_ONGOING_RANGE_END_WORDS = r'(?:present|current|now)\b'
 
 
 def _source_leaves_year_open(source_text: str, year: int | None) -> bool:
     """True when the source writes `year` as an open range: "2020-",
-    "(2011-", "11/2019- Clinical ...", "2024 -<tab>Member".
+    "(2011-", "11/2019- Clinical ...", "2024 -<tab>Member", or closes it in
+    words: "2011 - present", "2011 to current", "2011 - now".
 
     Stage 4 records "2020-" as a start date with no end date, the same as a
     bare "2020", but the author wrote the open dash on purpose -- it is how a
@@ -57,8 +83,9 @@ def _source_leaves_year_open(source_text: str, year: int | None) -> bool:
     if not source_text or year is None:
         return False
     open_range = re.compile(
-        rf'(?<!\d){year}(?:[-\u2013\u2014](?!\s*\d)|\s+[-\u2013\u2014][ ]*(?:\t|\)|$))',
-        re.MULTILINE)
+        rf'(?<!\d){year}(?:[-\u2013\u2014](?!\s*\d)|\s+[-\u2013\u2014][ ]*(?:\t|\)|$)'
+        rf'|\s*(?:[-\u2013\u2014]|\bto\b)\s*{_ONGOING_RANGE_END_WORDS})',
+        re.MULTILINE | re.IGNORECASE)
     return bool(open_range.search(source_text))
 
 # Date format specifications per WCM template section
@@ -111,12 +138,37 @@ DATE_FORMATS = MappingProxyType({
 })
 
 
-def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool = False) -> str:
+def _format_date_mapping(value: Mapping, taxonomy_code: str) -> str:
+    """A `{start_date, end_date}` mapping read as the range it states (#1233).
+
+    Every caller hands `format_date_for_section` the raw stage-4 field, and
+    before this a mapping fell through to `str(value)`: no year is findable in
+    the repr, so the "not a date at all" passthrough returned the repr and
+    `{'start_date': '2008', 'end_date': '2018'}` was printed into the cell. It
+    reads as the range here, so it renders exactly as the same two dates do
+    from a `format_date_range` call.
+
+    A mapping with neither key holds no date this module can find, so it
+    renders blank and says so in the log -- never as its repr.
+    """
+    if RANGE_START_KEY not in value and RANGE_END_KEY not in value:
+        logger.warning(
+            "date value is a mapping without %s/%s keys (keys: %s) -- "
+            "rendering it blank rather than as its repr (#1233)",
+            RANGE_START_KEY, RANGE_END_KEY, sorted(map(str, value)))
+        return ''
+    return format_date_range(value.get(RANGE_START_KEY) or '',
+                             value.get(RANGE_END_KEY) or '', taxonomy_code)
+
+
+def format_date_for_section(date_str: str | Mapping, taxonomy_code: str,
+                            is_end_date: bool = False) -> str:
     """
     Format a date string according to the WCM template requirements for a section.
 
     Args:
-        date_str: Input date string (various formats)
+        date_str: Input date string (various formats), or a
+            `{start_date, end_date}` mapping, which formats as the range
         taxonomy_code: Taxonomy code to determine required format
         is_end_date: True if this is an end date (affects 'present' handling)
 
@@ -125,6 +177,9 @@ def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool
     """
     if not date_str:
         return ''
+
+    if isinstance(date_str, Mapping):
+        return _format_date_mapping(date_str, taxonomy_code)
 
     date_str = str(date_str).strip()
 
@@ -177,16 +232,17 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
     """
     Format a date range according to WCM template requirements.
 
-    A start with no end renders "<start>-Present", except for a
-    `POINT_IN_TIME_CODES` code, which renders the bare start unless
-    `source_text` leaves that year open (#946).
+    A start with no end renders the bare start unless `source_text` leaves
+    that year open, for a `POINT_IN_TIME_CODES` code (#946) and for any code
+    whose caller passes `source_text` (class 13, 2026-10-02). Otherwise it
+    renders "<start>-Present".
 
     Args:
         start_date: Start date string
         end_date: End date string (may be 'present', empty, or a date)
         taxonomy_code: Taxonomy code to determine required format
-        source_text: The entry's source text, read only for a
-            `POINT_IN_TIME_CODES` code with no end date
+        source_text: The entry's source text, read only when there is a
+            start and no end date
 
     Returns:
         Formatted date range string (e.g., "08/17-07/21" or "2017-Present")
@@ -203,7 +259,7 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
         # Avoid "Present-Present" when start is already 'Present'
         if formatted_start == 'Present':
             return 'Present'
-        if taxonomy_code in POINT_IN_TIME_CODES:
+        if taxonomy_code in POINT_IN_TIME_CODES or source_text:
             start_year = _parse_date_components(str(start_date).strip())[0]
             if not _source_leaves_year_open(source_text, start_year):
                 return formatted_start

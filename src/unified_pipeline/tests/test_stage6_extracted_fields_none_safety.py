@@ -113,7 +113,7 @@ def test_mentoring_none_extracted_fields_renders_as_a_summary_line(code, heading
 def test_normalize_mentee_tolerates_none_extracted_fields():
     """The table-fill loops read fields through `_normalize_mentee`; an
     explicit None yields an empty record (no name), never an AttributeError."""
-    record = _normalize_mentee({'taxonomy_code': 'N3A', 'extracted_fields': None})
+    record = _normalize_mentee({'taxonomy_code': 'N3A', 'extracted_fields': None}, ongoing=True)
     assert record.name == ''
     assert record.site_position == ''
     assert record.mentoring_period == ''
@@ -184,9 +184,6 @@ def test_n2_none_extracted_fields_renders_as_its_raw_text():
     {'start_date': '2019', 'end_date': 'ongoing'},
     {'start_date': '2019', 'end_date': 'current'},
     {'start_date': '2019', 'end_date': 'now'},
-    {'start_date': '2019'},                    # start but no end at all
-    {'start_date': '2019', 'end_date': ''},    # start but empty end
-    {'start_date': '2019', 'end_date': None},  # start but null end
 ], ids=lambda f: repr(f.get('end_date', '<absent>')))
 def test_partition_moves_ongoing_past_mentee_to_current(fields):
     entry = _mentee('N3B', 'Ada Lovelace', **fields)
@@ -196,9 +193,53 @@ def test_partition_moves_ongoing_past_mentee_to_current(fields):
     assert partition.moved_to_current == 1
 
 
+@pytest.mark.parametrize("text", [
+    "Ada Lovelace, PhD student, 2019-",
+    "Ada Lovelace (2019- ) PhD student",
+    "Ada Lovelace, PhD student, 2019 - present",
+    "Ada Lovelace, PhD student, 2019 \u2013 Current",
+    "Ada Lovelace, PhD student, 2019 to date",
+    "Ada Lovelace, PhD student, 09/2019-Present",
+])
+@pytest.mark.parametrize("end_date", ['', None, '<absent>'])
+def test_partition_moves_start_only_mentee_when_source_leaves_range_open(text, end_date):
+    """A start date with no end date is current only when the entry's own
+    text writes the range as open (class 1, 2026-10-02 s7ab autopsy)."""
+    fields = {'start_date': '2019'}
+    if end_date != '<absent>':
+        fields['end_date'] = end_date
+    entry = _mentee('N3B', 'Ada Lovelace', **fields)
+    entry['text'] = text
+    partition = _partition_mentoring_entries({'N3B': [entry]})
+    assert partition.current == (entry,)
+    assert partition.past == ()
+    assert partition.moved_to_current == 1
+
+
+@pytest.mark.parametrize("text", [
+    "Ada Lovelace, PhD 2019",
+    "2019 Ada Lovelace, MD thesis; now Assistant Professor",
+    "Ada Lovelace, Summer student 2019. Current position: Resident",
+    "Ada Lovelace, 2019 - Excellence Award winner",
+    "Ada Lovelace, MD 2019; Fellow - now Assistant Professor",
+    "Ada Lovelace, class of 2019, present address withheld",
+])
+def test_partition_keeps_start_only_mentee_with_a_lone_year_in_past(text):
+    """A lone completion, visit or class year stored as start_date stays a
+    past mentee. "now"/"Current"/"present" that describe the mentee, not the
+    range, and a dash used as a column separator, do not make it ongoing."""
+    entry = _mentee('N3B', 'Ada Lovelace', start_date='2019', end_date=None)
+    entry['text'] = text
+    partition = _partition_mentoring_entries({'N3B': [entry]})
+    assert partition.past == (entry,)
+    assert partition.current == ()
+    assert partition.moved_to_current == 0
+
+
 @pytest.mark.parametrize("fields", [
     {'start_date': '2015', 'end_date': '2019'},
     {'end_date': '2019'},
+    {'start_date': '2019'},                    # lone year, text not open
     {},                                        # no dates at all: not ongoing
 ], ids=lambda f: repr(f))
 def test_partition_keeps_ended_or_undated_past_mentee_in_past(fields):
@@ -224,6 +265,70 @@ def test_ongoing_past_mentee_renders_under_current_mentees():
         ('tbl', 'Ada Lovelace'), ('p', '')]
     assert _body_after(gen.doc, "Past Mentees:", 2) == [
         ('tbl', 'Grace Hopper'), ('p', '')]
+
+
+def _mentoring_period_cell(doc, name: str) -> str:
+    """The Mentoring Period value of the mentee table headed `name`."""
+    for table in doc.tables:
+        if table.rows[0].cells[1].text == name:
+            return table.rows[2].cells[1].text
+    raise AssertionError(f"no mentee table for {name!r}")
+
+
+def test_start_only_past_mentee_renders_bare_year_under_past_mentees():
+    """The class-1 render: a past mentee with one stored year (month added
+    by stage 4) renders that year under "Past Mentees:", not "-present"
+    under "Current Mentees:". A current mentee keeps "-present"."""
+    gen = _mentoring_doc()
+    past = _mentee('N3B', 'Ada Lovelace', start_date='2007-05', end_date=None)
+    past['text'] = "Ada Lovelace, MS 2007"
+    current = _mentee('N3A', 'Grace Hopper', start_date='2021', end_date=None)
+
+    gen._fill_mentoring({'N3A': [current], 'N3B': [past]})
+
+    assert _body_after(gen.doc, "Past Mentees:", 1) == [('tbl', 'Ada Lovelace')]
+    assert _body_after(gen.doc, "Current Mentees:", 1) == [('tbl', 'Grace Hopper')]
+    assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '2007'
+    assert _mentoring_period_cell(gen.doc, 'Grace Hopper') == '2021-present'
+
+
+def test_end_only_past_mentee_renders_bare_year():
+    """Class 2: an end date with no start renders that year, not an empty
+    Mentoring Period cell."""
+    gen = _mentoring_doc()
+    entry = _mentee('N3B', 'Ada Lovelace', start_date=None, end_date='2004-12')
+    entry['text'] = "Ada Lovelace, MPH 2004"
+
+    gen._fill_mentoring({'N3B': [entry]})
+
+    assert _body_after(gen.doc, "Past Mentees:", 1) == [('tbl', 'Ada Lovelace')]
+    assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '2004'
+
+
+def test_end_only_period_written_in_source_renders_as_written():
+    """The renderer hands the entry's text to the period formatter: a CV's
+    own "1999-02" range, stored as a year-month end date, renders as the
+    author wrote it, not as the single year 1999."""
+    gen = _mentoring_doc()
+    entry = _mentee('N3B', 'Ada Lovelace', start_date=None, end_date='1999-02')
+    entry['text'] = "Ada Lovelace, MS 1999-02"
+
+    gen._fill_mentoring({'N3B': [entry]})
+
+    assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '1999-02'
+
+
+def test_start_only_mentee_moved_to_current_renders_open_range():
+    """An N3B entry the ongoing rule moves renders "-present" under
+    "Current Mentees:"."""
+    gen = _mentoring_doc()
+    entry = _mentee('N3B', 'Ada Lovelace', start_date='2019', end_date=None)
+    entry['text'] = "Ada Lovelace, PhD student, 2019-"
+
+    gen._fill_mentoring({'N3B': [entry]})
+
+    assert _body_after(gen.doc, "Current Mentees:", 1) == [('tbl', 'Ada Lovelace')]
+    assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '2019-present'
 
 
 # --- mentoring: summary and N4 outcome lines ------------------------------------
@@ -328,7 +433,7 @@ def _insertions(cell) -> list[tuple[str, str]]:
     ({'start_date': '2017-08', 'end_date': '2021-07', 'year': '2019'},
      'Certificate, August 2020', '08/17-07/21', False),
     ({'start_date': '2017-08', 'year': '2019'}, 'Certificate, August 2020',
-     '08/17-Present', False),
+     '08/17', False),
     ({'end_date': '2021-07', 'year': '2019'}, 'Certificate, August 2020',
      '07/21', False),
     ({'year': '2019'}, 'Certificate, August 2020', '2019', False),
@@ -336,9 +441,13 @@ def _insertions(cell) -> list[tuple[str, str]]:
     ({}, 'Certificate in Epidemiology, August 2020', '2020', True),
     ({}, 'Certificate 2019-2021', '2021', True),
     ({}, 'Certificate in Epidemiology', '', False),
+    ({'start_date': '2020'}, 'Workshop, Example Institute, 2020', '2020', False),
+    ({'start_date': '2020'}, 'Workshop, Example Institute, 2020-', '2020-Present', False),
+    ({'start_date': '2020', 'end_date': 'present'}, 'Workshop, 2020', '2020-Present', False),
 ], ids=['range-beats-year-and-text', 'start-only-beats-year', 'end-only-beats-year',
         'year-beats-text', 'year_awarded-beats-text', 'text-month-year',
-        'text-range-takes-end-year', 'nothing'])
+        'text-range-takes-end-year', 'nothing', 'start-only-is-one-occasion',
+        'start-only-open-dash-in-source', 'end-says-present'])
 def test_b2_date_precedence(fields, text, dates, from_text):
     """start/end -> year (year, then year_awarded) -> raw text, each step
     winning outright; only the raw-text step is marked as inferred."""
@@ -346,6 +455,19 @@ def test_b2_date_precedence(fields, text, dates, from_text):
         {'taxonomy_code': 'B2', 'text': text,
          'extracted_fields': {'program_name': 'Certificate', **fields}})
     assert (record.dates, record.dates_from_text) == (dates, from_text)
+
+
+def test_b2_start_only_renders_the_bare_date_in_the_table():
+    """#1220: one date in the source is the date attended, not an open range."""
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Workshop, Example Institute, 2020',
+         'extracted_fields': {'program_name': 'Workshop', 'start_date': '2020'}},
+        {'taxonomy_code': 'B2', 'text': 'Course, Example Institute, 06/2019-',
+         'extracted_fields': {'program_name': 'Course', 'start_date': '2019-06'}}])
+
+    dates = {row.cells[0].text: row.cells[2].text for row in gen.doc.tables[0].rows[1:]}
+    assert dates == {'Workshop': '2020', 'Course': '06/19-Present'}
 
 
 def test_b2_text_extracted_year_renders_as_a_tracked_insertion():

@@ -38,6 +38,7 @@ def test_restart_inherits_render_options(db, tmp_path):
         show_track_changes=0,
         show_pipeline_comments=1,
         strip_template_instructions=0,
+        scanned_pages="2,4",
     )
     db.add(original)
     db.commit()
@@ -54,8 +55,8 @@ def test_restart_inherits_render_options(db, tmp_path):
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=MagicMock()), \
          patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.get_storage", return_value=MagicMock()), \
+         patch("app.services.run_creation.UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.get_storage", return_value=MagicMock()), \
          patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
          patch("pathlib.Path.unlink", return_value=None), \
          patch("pathlib.Path.exists", return_value=True):
@@ -70,5 +71,6 @@ def test_restart_inherits_render_options(db, tmp_path):
     assert new_run.show_track_changes == 0, "restart must inherit track-changes OFF"
     assert new_run.show_pipeline_comments == 1, "restart must inherit comments ON"
     assert new_run.strip_template_instructions == 0, "restart must inherit strip-instructions OFF"
+    assert new_run.scanned_pages == "2,4", "restart must keep the file's scanned pages (#1282)"
     # And the previously-inherited field still works.
     assert new_run.submission_type == "standard"

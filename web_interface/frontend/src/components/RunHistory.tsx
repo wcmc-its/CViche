@@ -1,13 +1,18 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { FileText, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
-import { getRuns, getFeedbackStatuses, getRunFilterOptions } from '../api/runs'
-import type { FeedbackStatus, RunFilterOptions, RunSummary } from '../types'
+import { getMyStatusCounts, getRuns, getRunFilterOptions } from '../api/runs'
+import { listBatches } from '../api/batches'
+import type { BatchSummary, RunFilterOptions, RunSummary, StatusFilterCounts } from '../types'
+import { NARROW_FILTERS_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import ErrorBanner from './ErrorBanner'
 import { useAuth, useCanSeeCost, useCanViewAllRuns } from '../contexts/AuthContext'
 import RunTable from './runs/RunTable'
-import { ActiveFilterChips, RunFilterCombos } from './runs/RunFilterBar'
-import { toListParams, useRunFilters } from './runs/runFilters'
-import { compareRunsDir, groupRuns } from './runs/runGroups'
+import { ActiveFilterChips, FiltersPanel, RunFilterCombos, StatusPills } from './runs/RunFilterBar'
+import { countPanelFilters, hasActiveFilters, toListParams, toMemberListParams, useBatchFilter, useRunFilters } from './runs/runFilters'
+import type { RunFilterControls } from './runs/runFilters'
+import { BatchFilterCombo, batchLabel } from './runs/BatchFilter'
+import BatchView from './runs/BatchView'
+import { compareGroupsDir, groupRuns } from './runs/runGroups'
 import type { SortDir, SortField } from './runs/runGroups'
 
 interface RunHistoryProps {
@@ -48,6 +53,65 @@ function getPageNumbers(currentPage: number, totalPages: number): (number | 'ell
   return pages
 }
 
+/** Batches the caller may see, for the Batch filter; [] until loaded or when none. */
+function useBatches(onError: (message: string) => void): BatchSummary[] {
+  const [batches, setBatches] = useState<BatchSummary[]>([])
+  useEffect(() => {
+    let cancelled = false
+    listBatches()
+      .then((data) => { if (!cancelled) setBatches(data) })
+      .catch((err) => {
+        console.error('Error fetching batches:', err)
+        if (!cancelled) onError('Unable to load the batch list. Please refresh the page to try again.')
+      })
+    return () => { cancelled = true }
+  }, [])
+  return batches
+}
+
+interface FilterRowProps {
+  allRunsView: boolean
+  controls: RunFilterControls
+  options: RunFilterOptions | null
+  /** Status pill counts: the filter-options' for admins and staff, the caller's own for members. */
+  statusCounts: StatusFilterCounts | null
+  runs: RunSummary[]
+  currentUserId: number | undefined
+  currentUserEmail: string | undefined
+  batches: BatchSummary[]
+  batchId: string
+  setBatch: (batchId: string) => void
+}
+
+/** The status pills, the filter combos (all-runs filters, then Batch for anyone with a batch) and the active chips.
+ *  The pills are hidden in a batch view, which they do not filter. */
+function RunFilterRow({ allRunsView, batches, batchId, setBatch, currentUserEmail, statusCounts, ...bar }: FilterRowProps) {
+  const narrow = useMediaQuery(NARROW_FILTERS_QUERY)
+  const inPanel = allRunsView && narrow
+  const batchCombo = (batches.length > 0 || batchId) && (
+    <BatchFilterCombo batches={batches} batchId={batchId} currentUserId={bar.currentUserId} onPick={setBatch} fullWidth={inPanel} />
+  )
+  const selected = batches.find((b) => b.id === batchId)
+  const batchChip = batchId ? { value: selected ? batchLabel(selected) : batchId, onRemove: () => setBatch('') } : undefined
+  return (
+    <div className="mt-6">
+      {!batchId && <StatusPills controls={bar.controls} counts={statusCounts} allRunsView={allRunsView} />}
+      {(allRunsView || batchCombo) && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          {inPanel ? (
+            <FiltersPanel activeCount={countPanelFilters(bar.controls.filters, batchId)}>
+              <RunFilterCombos {...bar} currentUserEmail={currentUserEmail} extra={batchCombo} stacked />
+            </FiltersPanel>
+          ) : allRunsView
+            ? <RunFilterCombos {...bar} currentUserEmail={currentUserEmail} extra={batchCombo} />
+            : <div className="flex flex-wrap gap-2 sm:ml-auto">{batchCombo}</div>}
+        </div>
+      )}
+      <ActiveFilterChips {...bar} batchChip={batchChip} />
+    </div>
+  )
+}
+
 export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const { user } = useAuth()
   // Admin or staff: the all-runs view (scope=all, filters, Run by, Score).
@@ -55,13 +119,13 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const showCost = useCanSeeCost()
   const controls = useRunFilters(allRunsView)
   const { filters } = controls
-  const listParams = useMemo(() => (allRunsView ? toListParams(filters) : undefined), [allRunsView, filters])
+  const listParams = useMemo(() => (allRunsView ? toListParams(filters) : toMemberListParams(filters)), [allRunsView, filters])
   const filterKey = JSON.stringify(listParams ?? {})
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [total, setTotal] = useState(0)
-  const [feedbackMap, setFeedbackMap] = useState<Record<string, boolean>>({})
   const [filterOptions, setFilterOptions] = useState<RunFilterOptions | null>(null)
+  const [myCounts, setMyCounts] = useState<StatusFilterCounts | null>(null)
   const [currentPage, setCurrentPage] = useState(0)
   const [pageFilterKey, setPageFilterKey] = useState(filterKey)
   const [sortField, setSortField] = useState<SortField>('started_at')
@@ -69,22 +133,13 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const [error, setError] = useState<string | null>(null)
   const containerRef = useRef<HTMLElement>(null)
   const requestSeq = useRef(0)
+  const [batchId, setBatch] = useBatchFilter()
+  const batches = useBatches(setError)
 
   // A changed filter restarts paging; done during render so no fetch runs at the stale page.
   if (pageFilterKey !== filterKey) {
     setPageFilterKey(filterKey)
     setCurrentPage(0)
-  }
-
-  const fetchFeedbackStatus = async () => {
-    try {
-      const data: FeedbackStatus[] = await getFeedbackStatuses()
-      const map: Record<string, boolean> = {}
-      data.forEach((item) => { map[item.run_id] = item.has_feedback })
-      setFeedbackMap(map)
-    } catch (err) {
-      console.error('Error fetching feedback status:', err)
-    }
   }
 
   const fetchRuns = useCallback(async (offset: number) => {
@@ -102,8 +157,6 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
     }
   }, [listParams])
 
-  useEffect(() => { fetchFeedbackStatus() }, [])
-
   useEffect(() => {
     if (!allRunsView) return
     let cancelled = false
@@ -115,6 +168,16 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
       })
     return () => { cancelled = true }
   }, [allRunsView, filters])
+
+  // Members have no filter-options: their pill counts come from their own runs only.
+  useEffect(() => {
+    if (allRunsView) return
+    let cancelled = false
+    getMyStatusCounts()
+      .then((data) => { if (!cancelled) setMyCounts(data) })
+      .catch((err) => { console.error('Error fetching status counts:', err) })
+    return () => { cancelled = true }
+  }, [allRunsView, filterKey])
 
   useEffect(() => {
     fetchRuns(currentPage * PAGE_SIZE).then(() => {
@@ -135,7 +198,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
 
   // Grouping is per loaded page: reruns of the same faculty member that fall on
   // another page are not merged into this page's group.
-  const groups = groupRuns(runs).sort((a, b) => compareRunsDir(a.latest, b.latest, sortField, sortDir, feedbackMap))
+  const groups = groupRuns(runs).sort((a, b) => compareGroupsDir(a, b, sortField, sortDir, user?.user_id, allRunsView))
 
   const totalPages = Math.ceil(total / PAGE_SIZE)
   const startIndex = currentPage * PAGE_SIZE
@@ -150,9 +213,9 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
     )
   }
 
-  const filterBarProps = { controls, options: filterOptions, runs, currentUserId: user?.user_id }
+  const filterBarProps = { controls, options: filterOptions, statusCounts: allRunsView ? filterOptions?.status ?? null : myCounts, runs, currentUserId: user?.user_id }
 
-  if (runs.length === 0 && !error && !controls.filters.department && !controls.filters.faculty && !controls.filters.runBy) {
+  if (runs.length === 0 && !error && !hasActiveFilters(controls.filters) && !batchId) {
     return (
       <section ref={containerRef} aria-label="Previous runs" className="mt-6 bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-6">
         <div className="flex flex-col items-center justify-center py-12">
@@ -166,87 +229,91 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
 
   return (
     <>
-      {allRunsView && (
-        <div className="mt-6">
-          <div className="flex flex-wrap items-center gap-2">
-            <RunFilterCombos {...filterBarProps} currentUserEmail={user?.email} />
-          </div>
-          <ActiveFilterChips {...filterBarProps} />
-        </div>
-      )}
-      <section ref={containerRef} aria-label="Previous runs" className="mt-4 bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] overflow-hidden">
+      <RunFilterRow
+        {...filterBarProps}
+        allRunsView={allRunsView}
+        currentUserEmail={user?.email}
+        batches={batches}
+        batchId={batchId}
+        setBatch={setBatch}
+      />
+      {batchId ? (
+        <BatchView batchId={batchId} allRunsView={allRunsView} currentUserId={user?.user_id} onSelectRun={onSelectRun} />
+      ) : (
+        <section ref={containerRef} aria-label="Previous runs" className="mt-4 bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] overflow-hidden">
 
-        {error && (
-          <div className="mb-4">
-            <ErrorBanner message={error} onDismiss={() => { setError(null); fetchRuns(currentPage * PAGE_SIZE) }} />
-          </div>
-        )}
+          {error && (
+            <div className="mb-4">
+              <ErrorBanner message={error} onDismiss={() => { setError(null); fetchRuns(currentPage * PAGE_SIZE) }} />
+            </div>
+          )}
 
-        {runs.length === 0 && !error && (
-          <p className="px-5 py-8 text-center text-sm text-gray-500">No runs match these filters.</p>
-        )}
+          {runs.length === 0 && !error && (
+            <p className="px-5 py-8 text-center text-sm text-gray-500">No runs match these filters.</p>
+          )}
 
-        {runs.length > 0 && (
-          <>
-            <RunTable
-              groups={groups}
-              allRunsView={allRunsView}
-              showCost={showCost}
-              feedbackMap={feedbackMap}
-              currentUserId={user?.user_id}
-              sortField={sortField}
-              sortDir={sortDir}
-              onSort={handleSort}
-              onSelectRun={onSelectRun}
-              onFilter={controls.setFilter}
-            />
+          {runs.length > 0 && (
+            <>
+              <RunTable
+                groups={groups}
+                allRunsView={allRunsView}
+                showCost={showCost}
+                currentUserId={user?.user_id}
+                sortField={sortField}
+                sortDir={sortDir}
+                onSort={handleSort}
+                onSelectRun={onSelectRun}
+                onFilter={controls.setFilter}
+                onOpenBatch={setBatch}
+              />
 
-            {totalPages > 1 && (
-              <div className="flex items-center justify-between px-5 py-3 border-t border-sand-200">
-                <span className="text-sm text-gray-500">
-                  Showing {startIndex + 1}{'\u2013'}{endIndex} of {total} runs
-                </span>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
-                    disabled={currentPage === 0}
-                    aria-label="Previous page"
-                    className={`p-1 rounded-md ${currentPage === 0 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
-                  >
-                    <ChevronLeft className="w-4 h-4" aria-hidden="true" />
-                  </button>
-                  {getPageNumbers(currentPage, totalPages).map((page, i) =>
-                    page === 'ellipsis' ? (
-                      <span key={`ellipsis-${i}`} className="px-2 text-sm text-gray-400">&hellip;</span>
-                    ) : (
-                      <button
-                        key={page}
-                        onClick={() => setCurrentPage(page)}
-                        className={`min-w-[32px] h-8 px-3 py-1 rounded-md text-sm ${
-                          page === currentPage
-                            ? 'bg-primary-600 text-white'
-                            : 'text-gray-600 hover:bg-gray-100'
-                        }`}
-                      >
-                        {page + 1}
-                      </button>
-                    )
-                  )}
-                  <button
-                    onClick={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
-                    disabled={currentPage === totalPages - 1}
-                    aria-label="Next page"
-                    className={`p-1 rounded-md ${currentPage === totalPages - 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
-                  >
-                    <ChevronRight className="w-4 h-4" aria-hidden="true" />
-                  </button>
+              {totalPages > 1 && (
+                <div className="flex items-center justify-between px-5 py-3 border-t border-sand-200">
+                  <span className="text-sm text-gray-500">
+                    Showing {startIndex + 1}{'\u2013'}{endIndex} of {total} runs
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={() => setCurrentPage(p => Math.max(0, p - 1))}
+                      disabled={currentPage === 0}
+                      aria-label="Previous page"
+                      className={`p-1 rounded-md ${currentPage === 0 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
+                    >
+                      <ChevronLeft className="w-4 h-4" aria-hidden="true" />
+                    </button>
+                    {getPageNumbers(currentPage, totalPages).map((page, i) =>
+                      page === 'ellipsis' ? (
+                        <span key={`ellipsis-${i}`} className="px-2 text-sm text-gray-400">&hellip;</span>
+                      ) : (
+                        <button
+                          key={page}
+                          onClick={() => setCurrentPage(page)}
+                          className={`min-w-[32px] h-8 px-3 py-1 rounded-md text-sm ${
+                            page === currentPage
+                              ? 'bg-primary-600 text-white'
+                              : 'text-gray-600 hover:bg-gray-100'
+                          }`}
+                        >
+                          {page + 1}
+                        </button>
+                      )
+                    )}
+                    <button
+                      onClick={() => setCurrentPage(p => Math.min(totalPages - 1, p + 1))}
+                      disabled={currentPage === totalPages - 1}
+                      aria-label="Next page"
+                      className={`p-1 rounded-md ${currentPage === totalPages - 1 ? 'text-gray-300 cursor-not-allowed' : 'text-gray-600 hover:bg-gray-100'}`}
+                    >
+                      <ChevronRight className="w-4 h-4" aria-hidden="true" />
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
-          </>
-        )}
-      </section>
+            </>
+          )}
+        </section>
+      )}
     </>
   )
 }

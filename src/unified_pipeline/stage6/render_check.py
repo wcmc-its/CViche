@@ -26,6 +26,7 @@ RECORD_DATE_LINE_MIN_CHARS, _RECORD_DATE_PREFIX_RE), and its `_record_lines`/
 comment above them.
 """
 import re
+from collections import Counter
 
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.retired_taxonomy_codes import RETIRED_TAXONOMY_CODES
@@ -161,6 +162,20 @@ def segment_already_rendered(segment_text: str, extracted_fields: dict) -> bool:
 
 RENDER_TOKEN_MIN_COUNT = 3
 RENDER_TOKEN_OVERLAP = 0.7
+# A reclassify reply must carry at least this share of its source entry's
+# distinct tokens, pooled across segments, to be believed (#1230). Measured on
+# the three stored replies in the IPXFBA batch: a reply that stood a bracketed
+# one-line summary in for 54 publications covered 0.44 of the source; two
+# faithful splits covered 0.94 and 0.98.
+RECLASSIFY_MIN_TOKEN_COVERAGE = 0.8
+# A T-coded record line counts as rendered only when ALL its letter and number
+# tokens sit in ONE output line (#1230). Sibling rows share their words and
+# differ in an amount, a year or a single name (six committee rows that differ
+# only in the committee name); any partial-overlap threshold lets the complete
+# row on the page vouch for its siblings. A row reformatted by the render that
+# drops a token is covered instead by the entry-line check in
+# `_recover_unrendered_records`.
+T_RECORD_OVERLAP = 1.0
 # Unicode letters only (no digits/underscore): [a-z]{5,} on ASCII input (#541).
 #
 # CJK is EXCLUDED, not measured (#722). The 5-letter floor and
@@ -263,6 +278,97 @@ def _record_lines(text) -> list[str]:
                 and _RECORD_DATE_PREFIX_RE.match(line.strip()))]
 
 
+def _record_tokens(text: str | None) -> set[str]:
+    """Letter tokens plus number runs (amounts, years) of a line, lowercased.
+    Digits separate sibling records that share their vocabulary (#1230)."""
+    norm = re.sub(r"(?<=\d)[,.](?=\d)", "", _norm(text))
+    return set(_RENDER_TOKEN_RE.findall(norm)) | set(re.findall(r"\d{2,}", norm))
+
+
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+
+
+def _collapse_repeated_cells(line: str) -> str:
+    """A pipe row's distinct non-empty cells in order, joined by " | ".
+
+    A merged table cell is flattened once per grid column it spans, so one
+    description reads "text | text | text | text" (#1230). The collapsed row is
+    the record's real content; a row with no repeated cell is returned as is.
+    """
+    cells = [cell.strip() for cell in line.split("|") if cell.strip()]
+    distinct = list(dict.fromkeys(cells))
+    return line if len(distinct) == len(cells) else " | ".join(distinct)
+
+
+def _is_record_or_dated(line: str) -> bool:
+    return bool(_looks_like_record(line) or _RECORD_DATE_PREFIX_RE.match(line)
+                or _YEAR_RE.search(line))
+
+
+def t_recovery_lines(text: str | None) -> list[str]:
+    """Lines of a capped T entry the recovery pass should look for (#1230).
+
+    Every non-blank line that is record-shaped (`_looks_like_record`, or a
+    date-range prefix) or carries a year, plus the one line directly after such
+    a record when it has neither (a grant's description row follows its row).
+    Merged-cell repeats are collapsed (`_collapse_repeated_cells`). A line with
+    no year and no row shape that does not follow a record (an objective
+    statement, a template instruction, an abbreviation key) is not a record and
+    is left to the Appendix pointer: recovering it re-inserts template text as
+    often as it saves content.
+    """
+    lines = [_collapse_repeated_cells(line.strip())
+             for line in str(text or "").split("\n") if line.strip()]
+    kept = []
+    after_record = False
+    for line in lines:
+        is_record = _is_record_or_dated(line)
+        if is_record or after_record:
+            kept.append(line)
+        after_record = is_record
+    return kept
+
+
+def _line_carried(line: str, carried: set[str]) -> bool:
+    """Whether `RECLASSIFY_MIN_TOKEN_COVERAGE` of a line's letter and number
+    tokens are in `carried`. A line too short to verify counts as carried."""
+    if len(set(_RENDER_TOKEN_RE.findall(_norm(line)))) < RENDER_TOKEN_MIN_COUNT:
+        return True
+    tokens = _record_tokens(line)
+    return len(tokens & carried) / len(tokens) >= RECLASSIFY_MIN_TOKEN_COVERAGE
+
+
+def segments_cover_source(segments: list[str], source_text: str) -> bool:
+    """Whether a reclassify reply's segments carry the source entry's text.
+
+    `segments` is a list of segment strings. Two checks, both must pass:
+    pooled distinct-token coverage (`_RENDER_TOKEN_RE` tokens of the source
+    found in some segment) of at least `RECLASSIFY_MIN_TOKEN_COVERAGE`, and
+    every source line that occurs ONCE carried at that same share by the
+    segments' pooled letter and number tokens. The pooled check catches a reply
+    that stands a one-line summary in for a list ("[all 54 entries follow
+    ...]"); the per-line check catches a reply that keeps most lines and
+    summarises a few, which pooled coverage forgives (#209, #1230). A line that
+    repeats in the source is skipped: a page-break header the reply rightly
+    drops repeats, and a repeated record that matters is carried by its first
+    copy. A rejected reply is safe: the caller keeps the entry whole. A source
+    with fewer than `RENDER_TOKEN_MIN_COUNT` tokens cannot be verified either
+    way and is accepted.
+    """
+    source_tokens = set(_RENDER_TOKEN_RE.findall(_norm(source_text)))
+    if len(source_tokens) < RENDER_TOKEN_MIN_COUNT:
+        return True
+    carried = set()
+    for segment in segments:
+        carried.update(_RENDER_TOKEN_RE.findall(_norm(segment)))
+    if len(source_tokens & carried) / len(source_tokens) < RECLASSIFY_MIN_TOKEN_COVERAGE:
+        return False
+    pooled = set().union(*(_record_tokens(segment) for segment in segments))
+    lines = [line.strip() for line in str(source_text or "").split("\n") if line.strip()]
+    counts = Counter(lines)
+    return all(_line_carried(line, pooled) for line in lines if counts[line] == 1)
+
+
 def _entry_pieces(text) -> list[str]:
     """Squashed fragments of an entry long enough to be looked up verbatim in
     the rendered-output haystack."""
@@ -272,6 +378,34 @@ def _entry_pieces(text) -> list[str]:
         if len(squashed) >= RENDER_PIECE_MIN_CHARS:
             pieces.append(squashed[:RENDER_PIECE_WINDOW])
     return pieces
+
+
+def _whole_record_rendered(line: str, haystack: str,
+                           line_token_sets: list[set],
+                           cut_token_sets: list[set] | None = None) -> bool | None:
+    """`_record_rendered` judged on the WHOLE line, for T-coded entries (#1230).
+
+    `_record_rendered` lets any one verbatim cell piece vouch for the line, so
+    a grant row whose title cell renders elsewhere reads as rendered while its
+    funder, role and amount cells appear nowhere. A T entry reaches the
+    Appendix capped, so that leniency loses the cells. Here the squashed line
+    must sit in the output verbatim, or share `T_RECORD_OVERLAP` of its letter
+    and number tokens with ONE output line (a rendered row is emitted joined,
+    so a structured row still matches; numbers keep sibling rows that differ
+    only in amount or years apart). `line_token_sets` are `_record_tokens` of
+    each output line. `cut_token_sets` are those of output lines the Appendix
+    cap cut: they only vouch for a line whose tokens ALL sit in them, since a
+    cut line may have lost the tail of the record. A line with too few distinctive letter tokens is None,
+    as in `_record_rendered`.
+    """
+    if _squash(line) in haystack:
+        return True
+    if len(set(_RENDER_TOKEN_RE.findall(_norm(line)))) < RENDER_TOKEN_MIN_COUNT:
+        return None
+    tokens = _record_tokens(line)
+    return (any(len(tokens & line_tokens) / len(tokens) >= T_RECORD_OVERLAP
+                for line_tokens in line_token_sets)
+            or any(tokens <= cut for cut in cut_token_sets or ()))
 
 
 def _record_rendered(line: str, haystack: str,

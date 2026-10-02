@@ -167,11 +167,43 @@ def test_a_real_dea_value_reaching_licensure_is_flagged():
     assert "AB1234567" not in findings[0]["message"]
 
 
-def test_a_state_licence_number_of_the_same_shape_is_not_flagged():
-    """The Licensure-section DEA probe requires the block to name "DEA" --
-    an ordinary state licence table (no such mention) must not false-
-    positive on a coincidentally DEA-shaped licence number."""
-    blocks = [_p("LICENSURE"), _t("New York\tAB1234567\t03/2019\t03/2021")]
+def test_a_state_licence_number_of_another_shape_is_not_flagged():
+    """The Licensure-section probe without a "DEA" label in the block is the
+    real DEA format only (two letters, seven digits -- see
+    `_DEA_NUMBER_VALUE_RE`), so an ordinary state licence table must not
+    false-positive on a licence number of any other shape, nor on a nine-letter
+    word (#1217 narrowed this from "any DEA-shaped number": a bare one is now
+    a finding, see the tests below)."""
+    for row in ("New York\tAB123456\t03/2019\t03/2021",
+                "New York\t1234567890\t03/2019\t03/2021",
+                "Wisconsin\t12345A, B\t03/2019\t03/2021",
+                "New York\tXAB12345678\t03/2019\t03/2021"):
+        assert lint_protected_data_in_output([_p("LICENSURE"), _t(row)]) == [], row
+
+
+def test_a_bare_dea_shaped_number_in_a_licence_row_is_flagged_without_a_label():
+    """#1217: the row names no "DEA" -- its first column is a state, or the
+    agency spelled out, or the number sits fused in another credential's
+    cell -- so the label-gated probe above never saw it."""
+    for row in ("New York\tAB1234567\t03/2019\t03/2021",
+                "Drug Enforcement Administration\tAB1234567\t2011\tPresent",
+                "Example State\t#12345A, 1234567890, #AB1234567\t2005\tPresent"):
+        findings = lint_protected_data_in_output([_p("LICENSURE"), _t(row)])
+        assert len(findings) == 1, row
+        assert "(DEA number)" in findings[0]["message"]
+        assert "AB1234567" not in findings[0]["message"]
+
+
+def test_a_bare_dea_shaped_number_is_flagged_under_the_real_templates_header():
+    blocks = [_p("LICENSURE, BOARD CERTIFICATION"),
+              _t("Example State\tAB1234567\t2005\tPresent")]
+    assert len(lint_protected_data_in_output(blocks)) == 1
+
+
+def test_a_bare_dea_shaped_number_outside_licensure_is_not_flagged():
+    """Scope: the probe is Licensure-only. A grant or compound code of the same
+    shape elsewhere is ordinary content."""
+    blocks = [_p("HONORS"), _t("Example Award\tAB1234567\t2019")]
     assert lint_protected_data_in_output(blocks) == []
 
 
@@ -232,6 +264,51 @@ def test_the_real_templates_licensure_section_is_not_flagged_when_dea_is_withhel
          "extracted_fields": {"license_number": "AB1234567"}},
     ])
     assert lint_protected_data_in_output(docx_body_blocks(gen.doc)) == []
+
+
+def _licence_number_cell(gen):
+    for table in gen.doc.tables:
+        for row in table.rows:
+            if row.cells[0].text == "Example State":
+                return row.cells[1]
+    raise AssertionError("rendered licence row not found")
+
+
+def test_a_dea_number_in_a_rendered_licence_row_is_flagged_and_the_fixed_render_is_clean():
+    """#1217, on the real template. The fused-number entry is rendered by
+    `_fill_licensure` (which now cuts the DEA token out): that document is
+    clean. Hand-editing the token back into the Number cell -- the state of
+    the pre-fix documents -- is a finding. Two, as in the test above:
+    `_table_lines` emits the per-cell line and the joined row line."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_licensure([
+        {"taxonomy_code": "F1",
+         "text": "Licensed Physician, Example State | #12345A\n #AB1234567",
+         "extracted_fields": {"state_country": "Example State",
+                             "license_number": "#12345A, #AB1234567"}},
+    ])
+    assert lint_protected_data_in_output(docx_body_blocks(gen.doc)) == []
+
+    _licence_number_cell(gen).text = "#12345A, #AB1234567"
+    findings = lint_protected_data_in_output(docx_body_blocks(gen.doc))
+    assert len(findings) == 2
+    assert all("(DEA number)" in f["message"] for f in findings)
+
+
+def test_quality_score_caps_red_on_a_bare_dea_number_in_a_licence_table(tmp_path):
+    """The scorer calls the same scan (#825): the leak the doctor reports
+    is the leak the score caps on."""
+    doc = Document()
+    doc.add_paragraph("LICENSURE, BOARD CERTIFICATION")
+    table = doc.add_table(rows=1, cols=4)
+    for cell, text in zip(table.rows[0].cells,
+                          ("Example State", "AB1234567", "2005", "Present")):
+        cell.text = text
+    doc.add_paragraph("EDUCATION")
+    doc.save(str(tmp_path / f"{_UID}_wcm.docx"))
+    fraction, detail, cap = score_protected_data(tmp_path)
+    assert cap == PROTECTED_DATA_CAP
 
 
 # --------------------------------------------------------------------------
@@ -409,6 +486,37 @@ def test_1071_dob_label_parenthetical_and_race_ethnicity_are_findings():
     body = [_p("HONORS"), _p("Birth Date (01/02/1970):"), _p("Race/Ethnicity: Example")]
     assert [f["message"].split("(")[1].split(")")[0]
             for f in lint_protected_data_in_output(body)] == ["date of birth"]
+
+
+def test_1223_unlabelled_family_prose_is_a_finding_in_the_appendix_only():
+    """#1223: the lint reads the same policy rows, so the labelless family
+    shapes the pass now cuts are findings if one ever reaches the Appendix --
+    and a title that merely starts the same way is not."""
+    appendix = [_p("T. APPENDIX"), _p("Married (Pat), two children (Kim and Lee)"),
+                _p("Kim born [withheld]"), _p("2 children (Kim and Lee)"),
+                _p("Children - A Review of the Literature"), _p("Married couples (n=40)")]
+    messages = [f["message"] for f in lint_protected_data_in_output(appendix)]
+    assert [m.split("(")[1].split(")")[0] for m in messages] == [
+        "spouse", "date or place of birth", "children / dependents"]
+    assert all("Pat" not in m and "Kim" not in m for m in messages)
+    body = [_p("HONORS"), _p("Married (Pat), two children (Kim and Lee)")]
+    assert lint_protected_data_in_output(body) == []
+
+
+def test_1223_a_dash_family_label_is_a_finding_in_the_personal_data_block_only_or_under_a_family_label():
+    """#1223: the Personal Data block holds no titles, so the dash form of a
+    children / spouse label is a finding there; in the Appendix it needs a
+    `Family` label ahead of it, and a title is left alone."""
+    personal = [_p("PERSONAL DATA"), _t("Spouse- Pat\nChildren - Kim (1971)")]
+    assert [f["message"].split("(")[1].split(")")[0]
+            for f in lint_protected_data_in_output(personal)] == ["spouse", "children / dependents"]
+    under_family = [_p("T. APPENDIX"), _p("Family:\nChildren- Kim (1971)")]
+    assert [f["message"].split("(")[1].split(")")[0]
+            for f in lint_protected_data_in_output(under_family)] == ["family", "children / dependents"]
+    title = [_p("T. APPENDIX"), _p("Children - A Review of the Literature")]
+    assert lint_protected_data_in_output(title) == []
+    body = [_p("HONORS"), _p("Spouse- Pat")]
+    assert lint_protected_data_in_output(body) == []
 
 
 def test_unambiguous_label_is_a_finding_in_any_section():

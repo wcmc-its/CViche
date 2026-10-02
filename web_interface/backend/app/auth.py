@@ -14,15 +14,13 @@ from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.exc import OperationalError
 
 from app.database import get_db
-from app.models import User, UserRole
+from app.models import User, UserRole, can_view_all_runs  # can_view_all_runs re-exported
 from app.config_loader import get_config_value
+from app.services import ed_access
 from app.ed_group_lookup import (
     check_ed_membership,
-    EdUnavailableError,
-    LDAPConfig,
     MembershipResult,
 )
-from pydantic import SecretStr
 from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
 from app.session_idle import get_idle_store, SessionStoreUnavailable
 from app.audit_events import (
@@ -509,58 +507,23 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
 
     Re-verifies on every request that the user is still in the access group and
     syncs their role from the admin and staff groups; a removal takes effect on
-    the next request rather than at the next login.
+    the next request rather than at the next login. The check itself is
+    ``ed_access.verify_ed_access`` (shared with the emailed-CV intake, #1298);
+    this wraps it with the 401s and audit events.
     """
-    if user.auth_method != "saml":
-        return
-    if not get_config_value(db, "ed_enabled"):
-        return
-    if not user.cwid:
+    try:
+        membership = ed_access.verify_ed_access(user, db, check_ed_membership)
+    except ed_access.EdCwidMissing:
         # Legacy session provisioned before CWID anchoring -- force a clean
         # re-login so the cwid gets set (see provision_user).
         raise HTTPException(status_code=401, detail=_SESSION_INVALID_DETAIL)
-
-    # check_ed_membership owns the whole cache-aside flow (live cache -> LDAP ->
-    # stale fallback). use_cache=True keeps today's behavior on this path: a
-    # re-check of an already-authorized session may ride the 5-minute live
-    # cache, and an ED outage must not evict the session. The login path
-    # (saml_routes) passes use_cache=False, so minting a NEW session always
-    # costs a fresh ED query.
-    from app.config_loader import get_config
-
-    ed_access_group = get_config_value(db, "ed_access_group") or ""
-    ed_admin_group = get_config_value(db, "ed_admin_group") or ""
-    ed_staff_group = get_config_value(db, "ed_staff_group") or ""
-    ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
-    ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
-    bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
-    ldap_cfg = LDAPConfig(
-        ldap_url=ldap_url, bind_dn=ldap_bind_dn,
-        bind_password=SecretStr(bind_password),
-    )
-    try:
-        membership = check_ed_membership(
-            cwid=user.cwid,
-            access_group=ed_access_group,
-            admin_group=ed_admin_group,
-            staff_group=ed_staff_group,
-            cfg=ldap_cfg,
-            use_cache=True,
-        )
-    except EdUnavailableError:
-        # ED unreachable (or misconfigured -- EdConfigurationError is a
-        # subclass) and no usable stale answer: cannot verify membership.
+    except ed_access.EdUnverifiable:
+        # ED unreachable or misconfigured with no usable stale answer, or no
+        # access group configured: fail closed, never a 500, never an approval.
         logger.warning("ED unavailable during per-request check for %s", user.cwid)
         logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
         raise HTTPException(status_code=401, detail=_ED_UNVERIFIABLE_DETAIL)
-    except ValueError:
-        # No ED access group configured. Fail closed exactly as an unreachable
-        # directory does -- never a 500, never an approval.
-        logger.error("ED access group is not configured; denying %s", user.cwid)
-        logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
-        raise HTTPException(status_code=401, detail=_ED_UNVERIFIABLE_DETAIL)
-
-    if not membership.in_access_group:
+    except ed_access.EdNotInAccessGroup:
         # User removed from access group -- deny
         logger.warning("Per-request ED check: %s no longer in access group", user.cwid)
         logger.info(
@@ -568,6 +531,8 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
             extra={"user_id": user.id, "cwid": user.cwid},
         )
         raise HTTPException(status_code=401, detail=_NOT_AUTHORIZED_DETAIL)
+    if membership is None:
+        return
 
     # Sync role from ED group membership
     new_role = role_for_membership(membership)
@@ -619,18 +584,6 @@ def role_for_membership(membership: MembershipResult) -> UserRole:
     if membership.in_staff_group:
         return UserRole.STAFF
     return UserRole.USER
-
-
-def can_view_all_runs(user: User) -> bool:
-    """Read-only access to every user's runs: the runs list, run detail, "Run
-    by", run quality, pipeline logs/prompts/stage JSON, and feedback insights.
-
-    Admin or staff. Grants READS only -- every write
-    (admin config, user management, deleting feedback or runs, acting on
-    another user's run) stays behind require_admin or ownership, and cost stays
-    behind can_see_cost.
-    """
-    return user.role in (UserRole.ADMIN, UserRole.STAFF)
 
 
 def can_see_cost(user: User) -> bool:
