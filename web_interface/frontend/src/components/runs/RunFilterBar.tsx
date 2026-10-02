@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { X } from 'lucide-react'
+import { ChevronDown, X } from 'lucide-react'
 import type { RunByOption, RunFilterOptions, RunSummary, StatusFilterCounts } from '../../types'
 import RunFilterCombo from './RunFilterCombo'
 import {
@@ -134,13 +134,14 @@ export function StatusPills({ controls, counts, isAdmin }: StatusPillsProps) {
 }
 
 /** The five admin filter comboboxes, shown right-aligned in the filter row; `extra` (the Batch filter) follows them. */
-export function RunFilterCombos({ controls, options, runs, currentUserId, currentUserEmail, extra }: RunFilterBarProps & { extra?: React.ReactNode }) {
+export function RunFilterCombos({ controls, options, runs, currentUserId, currentUserEmail, extra, stacked = false }: RunFilterBarProps & { extra?: React.ReactNode; stacked?: boolean }) {
   const { filters, setFilter } = controls
   const data = options ?? EMPTY_OPTIONS
   const runByLabel = filters.runBy ? runByValueLabel(filters.runBy, data.run_by, runs, currentUserId) : 'Anyone'
   return (
-    <div className="flex flex-wrap gap-2 sm:ml-auto">
+    <div className={stacked ? 'flex flex-col gap-2' : 'flex flex-wrap gap-2 sm:ml-auto'}>
       <RunFilterCombo
+        fullWidth={stacked}
         label="Department"
         valueLabel={filters.department || 'All'}
         activeId={filters.department}
@@ -149,6 +150,7 @@ export function RunFilterCombos({ controls, options, runs, currentUserId, curren
         onPick={(id) => setFilter('department', id)}
       />
       <RunFilterCombo
+        fullWidth={stacked}
         label="Faculty"
         valueLabel={filters.faculty || 'All'}
         activeId={filters.faculty}
@@ -157,6 +159,7 @@ export function RunFilterCombos({ controls, options, runs, currentUserId, curren
         onPick={(id) => setFilter('faculty', id)}
       />
       <RunFilterCombo
+        fullWidth={stacked}
         label="Run by"
         valueLabel={runByLabel}
         activeId={filters.runBy}
@@ -165,6 +168,7 @@ export function RunFilterCombos({ controls, options, runs, currentUserId, curren
         onPick={(id) => setFilter('runBy', id)}
       />
       <RunFilterCombo
+        fullWidth={stacked}
         label="Feedback"
         valueLabel={feedbackValueLabel(filters.feedback) || 'Any'}
         activeId={filters.feedback}
@@ -174,6 +178,7 @@ export function RunFilterCombos({ controls, options, runs, currentUserId, curren
         onPick={(id) => setFilter('feedback', id)}
       />
       <RunFilterCombo
+        fullWidth={stacked}
         label="Input format"
         valueLabel={inputFormatValueLabel(filters.inputFormat) || 'Any'}
         activeId={filters.inputFormat}
@@ -183,6 +188,49 @@ export function RunFilterCombos({ controls, options, runs, currentUserId, curren
         onPick={(id) => setFilter('inputFormat', id)}
       />
       {extra}
+    </div>
+  )
+}
+
+interface FiltersPanelProps {
+  /** How many filters inside the panel are on; shown on the button. */
+  activeCount: number
+  /** The combos, stacked. */
+  children: React.ReactNode
+}
+
+/** Narrow screens: one "Filters (n)" button that opens the combos in a panel under it.
+ *  Escape closes the panel (unless it closed an open combo) and returns focus to the button. */
+export function FiltersPanel({ activeCount, children }: FiltersPanelProps) {
+  const [open, setOpen] = useState(false)
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  return (
+    <div
+      className="w-full"
+      onKeyDown={(e) => {
+        if (e.key !== 'Escape' || e.defaultPrevented || !open) return
+        setOpen(false)
+        buttonRef.current?.focus()
+      }}
+    >
+      <button
+        ref={buttonRef}
+        type="button"
+        aria-expanded={open}
+        aria-controls="run-filters-panel"
+        onClick={() => setOpen((o) => !o)}
+        className={`flex h-9 items-center gap-1.5 rounded-lg border bg-white pl-3 pr-2.5 text-[13px] font-medium text-gray-900 hover:border-sand-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
+          activeCount > 0 ? 'border-ink' : 'border-sand-400'
+        }`}
+      >
+        {activeCount > 0 ? `Filters (${activeCount})` : 'Filters'}
+        <ChevronDown className={`h-3.5 w-3.5 text-gray-500 transition-transform ${open ? 'rotate-180' : ''}`} aria-hidden="true" />
+      </button>
+      {open && (
+        <div id="run-filters-panel" role="group" aria-label="Filters" className="mt-2 rounded-xl border border-sand-300 bg-sand-50 p-3">
+          {children}
+        </div>
+      )}
     </div>
   )
 }

@@ -5,6 +5,7 @@ import { MemoryRouter, useLocation } from 'react-router-dom'
 import RunHistory from './RunHistory'
 import { getMyStatusCounts, getRunFilterOptions, getRuns } from '../api/runs'
 import { getBatch, getQueue, listBatches } from '../api/batches'
+import { clearViewport, mockViewport } from '../hooks/mockViewport'
 import type { BatchDetail, BatchSummary, RunFilterOptions, RunSummary, User } from '../types'
 
 vi.mock('../api/runs', () => ({ getRuns: vi.fn(), getRunFilterOptions: vi.fn(), getMyStatusCounts: vi.fn() }))
@@ -57,7 +58,7 @@ beforeEach(() => {
   vi.mocked(getBatch).mockResolvedValue(DETAIL)
   vi.mocked(getQueue).mockResolvedValue({ dispatch_mode: 'queue', single: null, batch: null })
 })
-afterEach(() => { cleanup(); vi.resetAllMocks() })
+afterEach(() => { cleanup(); clearViewport(); vi.resetAllMocks() })
 
 describe('RunHistory batch filter', () => {
   it('shows the batch view for ?batch= with a removable Batch chip', async () => {
@@ -163,5 +164,59 @@ describe('RunHistory status pills', () => {
     expect(lastParams()).toEqual({ scope: 'all', run_by: 'on_behalf' })
     const chip = screen.getByRole('button', { name: 'Remove Run by filter' }).parentElement!
     expect(within(chip).getByText('On their behalf')).toBeTruthy()
+  })
+})
+
+describe('RunHistory narrow Filters panel', () => {
+  const asAdmin = async (url: string, width: number) => {
+    currentUser = ADMIN
+    mockViewport(width)
+    vi.mocked(getRunFilterOptions).mockResolvedValue(OPTIONS)
+    await renderAt(url)
+  }
+
+  it('shows the five combos in a row from 1024px up, with no Filters button', async () => {
+    await asAdmin('/runs?department=Medicine', 1024)
+    expect(screen.queryByRole('button', { name: /^Filters/ })).toBeNull()
+    expect(screen.getByRole('button', { name: /^Department:/ })).toBeTruthy()
+  })
+
+  it('below 1024px swaps them for one Filters (n) button that opens the combos', async () => {
+    await asAdmin('/runs?department=Medicine&batch=BQXZKD', 1023)
+    expect(screen.queryByRole('button', { name: /^Department:/ })).toBeNull()
+    const button = screen.getByRole('button', { name: 'Filters (2)' })
+    expect(button.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(button)
+    expect(button.getAttribute('aria-expanded')).toBe('true')
+    const panel = screen.getByRole('group', { name: 'Filters' })
+    for (const label of ['Department', 'Faculty', 'Run by', 'Feedback', 'Input format', 'Batch']) {
+      expect(within(panel).getByRole('button', { name: new RegExp(`^${label}:`) })).toBeTruthy()
+    }
+  })
+
+  it('does not count the status pill, and drops the number at zero', async () => {
+    await asAdmin('/runs?status=failed', 360)
+    expect(screen.getByRole('button', { name: 'Filters' })).toBeTruthy()
+  })
+
+  it('keeps the chips and Clear all working, and Escape closes the panel', async () => {
+    await asAdmin('/runs?department=Medicine', 360)
+    expect(screen.getByRole('button', { name: 'Remove Department filter' })).toBeTruthy()
+    const button = screen.getByRole('button', { name: 'Filters (1)' })
+    fireEvent.click(button)
+    fireEvent.keyDown(screen.getByRole('group', { name: 'Filters' }), { key: 'Escape' })
+    expect(screen.queryByRole('group', { name: 'Filters' })).toBeNull()
+    expect(document.activeElement).toBe(button)
+    fireEvent.click(screen.getByRole('button', { name: 'Clear all' }))
+    await flush()
+    expect(search).toBe('')
+    expect(screen.getByRole('button', { name: 'Filters' })).toBeTruthy()
+  })
+
+  it('gives a member no Filters button, only their Batch filter', async () => {
+    mockViewport(360)
+    await renderAt('/runs')
+    expect(screen.queryByRole('button', { name: /^Filters/ })).toBeNull()
+    expect(screen.getByRole('button', { name: /^Batch:/ })).toBeTruthy()
   })
 })

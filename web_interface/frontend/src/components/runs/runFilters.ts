@@ -72,6 +72,13 @@ export function hasActiveFilters(filters: RunFilters): boolean {
   return FILTER_KEYS.some((key) => filters[key] !== '')
 }
 
+/** Active filters behind the narrow-screen "Filters" button: the five admin combos plus the Batch filter.
+ *  The status pills are always on screen and are not counted. */
+export function countPanelFilters(filters: RunFilters, batchId: string): number {
+  const combos = [filters.department, filters.faculty, filters.runBy, filters.feedback, filters.inputFormat, batchId]
+  return combos.filter((value) => value !== '').length
+}
+
 /** Filters to send to the API; run_by must be 'self' or a numeric id, anything else is dropped. */
 export function toListParams(filters: RunFilters): RunListParams {
   const params: RunListParams = { scope: 'all' }
