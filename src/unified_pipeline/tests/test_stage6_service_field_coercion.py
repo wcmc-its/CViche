@@ -812,16 +812,38 @@ def test_q3_start_only_row_reads_its_own_source_text_end_to_end(tmp_path, text, 
     assert rows[0][2] == expected
 
 
-def test_q1_start_only_row_keeps_present_end_to_end(tmp_path):
+@pytest.mark.parametrize("text, expected", [
+    ("2019 President, Fictional Society Four", "2019"),
+    ("2019- President, Fictional Society Four", "2019-Present"),
+])
+def test_q1_start_only_row_reads_its_own_source_text_end_to_end(tmp_path, text, expected):
+    """Class 13 (2026-10-02): a one-year chair read "2019-Present"."""
     entries = [
         _entry("A", name="Jane Q. Public, MD"),
-        _entry("Q1", organization="Fictional Society Four", role="President",
-               start_date="2019", end_date=""),
+        _with_text(_entry("Q1", organization="Fictional Society Four", role="President",
+                          start_date="2019", end_date=""), text),
     ]
     doc = _render(tmp_path, entries)
     rows = list(_rows_containing(doc, "Fictional Society Four"))
     assert len(rows) == 1
-    assert rows[0][-1] == "2019-Present"
+    assert rows[0][-1] == expected
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("Reviewer, Fictional Journal Five, 2018", "2018"),
+    ("Reviewer, Fictional Journal Five, 2018-", "2018-Present"),
+])
+def test_q4d_start_only_row_reads_its_own_source_text_end_to_end(tmp_path, text, expected):
+    """Class 13: a one-time journal review read "2018-Present"."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _with_text(_entry("Q4D", organization="Fictional Journal Five",
+                          start_date="2018", end_date=""), text),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Journal Five"))
+    assert len(rows) == 1
+    assert rows[0][1] == expected
 
 
 # ---------------------------------------------------------------------------

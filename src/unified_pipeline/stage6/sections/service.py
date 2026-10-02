@@ -925,7 +925,7 @@ class ServiceSection:
             # If we have at least organization or role from extraction, use that
             # The LLM extraction is more reliable than trying to parse garbled table text
             if organization or role:
-                dates = format_date_range(start_date, end_date, 'Q1')
+                dates = format_date_range(start_date, end_date, 'Q1', original_text)
                 if not organization:
                     organization = _organization_left_in_text(
                         original_text, role, start_date, end_date)
@@ -1139,7 +1139,8 @@ class ServiceSection:
             # structured value's Python repr into the cell).
             start_date = _cell_text(fields.get('start_date', '') or fields.get('year', ''))
             end_date = _cell_text(fields.get('end_date', ''))
-            dates = format_date_range(start_date, end_date, taxonomy_code)
+            dates = format_date_range(start_date, end_date, taxonomy_code,
+                                      entry.get('text', ''))
 
             if not journal:
                 # Parse from raw text, but clean up common patterns

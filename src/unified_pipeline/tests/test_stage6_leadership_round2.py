@@ -46,6 +46,7 @@ Run with:
 import sys
 from pathlib import Path
 
+import pytest
 from docx import Document
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -555,3 +556,29 @@ class TestDivisionDepartmentReachesTheInstitutionCell:
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
+
+
+class TestStartOnlyLeadershipDatesReadTheSource:
+    """Class 13 (2026-10-02): a one-year chair rendered "<year>-Present"
+    because the O table's dates never read the entry's own text."""
+
+    @pytest.mark.parametrize("text, expected", [
+        ("2008 Chair, Fictional Search Committee", "2008"),
+        ("2008- Chair, Fictional Search Committee", "2008-Present"),
+    ])
+    def test_start_only_row_reads_its_own_source_text(self, text, expected):
+        gen = _real_template_generator()
+        entry = {
+            "text": text,
+            "extracted_fields": {"leadership_role": "Chair",
+                                 "organization": "Fictional Search Committee",
+                                 "start_date": "2008"},
+            "taxonomy_code": "O",
+        }
+
+        gen._fill_leadership([entry])
+
+        section_idx = gen._find_paragraph_exact(CANONICAL_HEADER)
+        table = gen._find_table_after_paragraph(section_idx)
+        data_rows = [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+        assert [row[-1] for row in data_rows] == [expected]
