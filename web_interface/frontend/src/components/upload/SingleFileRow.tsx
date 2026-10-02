@@ -7,13 +7,13 @@ export function formatFileSize(bytes: number): string {
 }
 
 /** The chosen file of a single run, with its remove button. */
-export default function SingleFileRow({ file, disabled, onRemove }: { file: File; disabled: boolean; onRemove: () => void }) {
+export default function SingleFileRow({ file, size = file.size, disabled, onRemove }: { file: File; /** Shown size; an emailed CV's placeholder file has none. */ size?: number; disabled: boolean; onRemove: () => void }) {
   return (
     <div className="flex items-center gap-3 rounded-lg border border-sand-200 px-3.5 py-3">
       <FileText className="h-5 w-5 flex-none text-primary-600" aria-hidden="true" />
       <div className="min-w-0 flex-1">
         <div className="truncate font-medium text-gray-900">{file.name}</div>
-        <div className="text-xs text-gray-500">{formatFileSize(file.size)}</div>
+        <div className="text-xs text-gray-500">{formatFileSize(size)}</div>
       </div>
       <button
         type="button"

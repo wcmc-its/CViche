@@ -8,9 +8,9 @@ import {
   MAX_BATCH_FILES, MAX_UPLOADS_IN_FLIGHT, classifyFailure, inboxFailure, isValidRow, makeInboxRow, makeRow, mayAlreadyBeStarted, runPool,
   startFailure, wasStarted,
 } from './batchRows'
-import type { BatchRow } from './batchRows'
+import type { BatchRow, HeldFile } from './batchRows'
 import type { SubmissionType } from './consentText'
-import type { Estimate, InboxItem } from '../../types'
+import type { Estimate } from '../../types'
 
 export type BatchPhase = 'edit' | 'uploading' | 'done'
 
@@ -120,7 +120,7 @@ export interface BatchUpload {
   clearError: () => void
   addFiles: (files: File[]) => void
   /** Add emailed CVs (#1298) to the table; they are submitted from the server, not uploaded. */
-  addInbox: (items: InboxItem[]) => void
+  addInbox: (items: HeldFile[]) => void
   removeRow: (key: string) => void
   /** Start the table from a file already chosen in the single-file picker. */
   adopt: (file: File, estimate: Estimate | null) => void
@@ -166,7 +166,7 @@ export function useBatchUpload(onConsentRequired: () => void, onFilesChange: () 
     if (toEstimate.length) void estimateRows(toEstimate, patchMany, setError)
   }
 
-  const addInbox = (items: InboxItem[]) => {
+  const addInbox = (items: HeldFile[]) => {
     const held = new Set(rows.flatMap((r) => (r.inbox ? [r.inbox.id] : [])))
     changeFiles((prev) => [...prev, ...items.filter((i) => !held.has(i.id)).map((i) => makeInboxRow(i, nextKey()))])
   }

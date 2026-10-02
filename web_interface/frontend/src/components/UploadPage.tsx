@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 import { useInbox } from '../contexts/InboxContext'
-import type { InboxItem, QueueOverview, QuotaInfo } from '../types'
+import type { QueueOverview, QuotaInfo } from '../types'
 import ErrorBanner from './ErrorBanner'
 import BatchFileTable from './upload/BatchFileTable'
 import { DoneCard, UploadingBanner } from './upload/BatchStatus'
@@ -11,6 +11,7 @@ import {
   MAX_BATCH_FILES, countText, estimateMinutes, estimateText, finishText, isValidRow, missingItems, quotaText,
   sendProgress, totalsOf,
 } from './upload/batchRows'
+import type { HeldFile } from './upload/batchRows'
 import ConsentSection from './upload/ConsentSection'
 import type { SubmissionType } from './upload/consentText'
 import DropZone from './upload/DropZone'
@@ -71,7 +72,7 @@ function SingleFiles({ single, run }: { single: SingleFile; run: SingleRun }) {
         hint=".docx or .pdf (text-based PDFs work best). One file per run."
         onFiles={(files) => void single.pick(files[0])}
       />
-      {single.file && <SingleFileRow file={single.file} disabled={run.uploading} onRemove={single.clear} />}
+      {single.file && <SingleFileRow file={single.file} size={single.held?.size_bytes} disabled={run.uploading} onRemove={single.clear} />}
     </>
   )
 }
@@ -167,9 +168,11 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     setAttested(false)
     const nextMulti = queueMode && value === 'authorized_admin'
     if (nextMulti === multi) return
-    if (nextMulti && single.file) batch.adopt(single.file, single.estimate)
+    if (nextMulti && single.held) batch.addInbox([single.held])
+    else if (nextMulti && single.file) batch.adopt(single.file, single.estimate)
     const carried = batch.rows.find(isValidRow)
-    if (!nextMulti && carried) single.adopt(carried.file, carried.estimate ?? null)
+    if (!nextMulti && carried?.inbox) single.adoptHeld({ id: carried.inbox.id, filename: carried.file.name, size_bytes: carried.inbox.sizeBytes })
+    else if (!nextMulti && carried) single.adopt(carried.file, carried.estimate ?? null)
     if (nextMulti) single.clear()
     else batch.reset()
   }
@@ -177,12 +180,12 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   // Emailed CVs still waiting, less those already in the table.
   const inbox = useInbox()
   const inTable = new Set(batch.rows.flatMap((r) => (r.inbox ? [r.inbox.id] : [])))
-  const waiting = inbox.items.filter((item) => !inTable.has(item.id))
+  const waiting = inbox.items.filter((item) => !inTable.has(item.id) && item.id !== single.held?.id)
 
-  // Loading emailed CVs needs the batch table, so switch to "On behalf of faculty" first.
-  const addInbox = (items: InboxItem[]) => {
-    if (!multi) chooseWho('authorized_admin')
-    batch.addInbox(items)
+  // The role toggle is left as the user set it: a batch takes the items, a single run takes one.
+  const addInbox = (items: HeldFile[]) => {
+    if (multi) batch.addInbox(items)
+    else single.adoptHeld(items[0])
   }
 
   const discardInbox = async (id: number) => {
@@ -208,7 +211,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   const handleStart = async () => {
     if (submitsAsSingle(multi, batch)) {
       const file = multi ? batch.rows[0].file : single.file
-      if (file) await run.start(file)
+      if (file) await run.start(file, multi ? null : single.held)
       return
     }
     setAheadBefore(queue?.batch?.ahead ?? 0)
@@ -245,7 +248,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
         )}
 
         {editable && (
-          <InboxSection items={waiting} onAdd={addInbox} onDiscard={(id) => void discardInbox(id)} canAdd={queueMode} />
+          <InboxSection items={waiting} onAdd={addInbox} onDiscard={(id) => void discardInbox(id)} canAddAll={multi} />
         )}
 
         <section className="bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)] p-5 sm:p-6">

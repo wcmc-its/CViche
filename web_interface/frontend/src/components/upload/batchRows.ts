@@ -87,8 +87,11 @@ export function makeRow(file: File, key: string, estimate: Estimate | null | und
   }
 }
 
+/** What a held emailed CV needs to be shown and submitted. */
+export type HeldFile = Pick<InboxItem, 'id' | 'filename' | 'size_bytes'>
+
 /** A row for an emailed CV. The server already validated it, and it has no estimate (the bytes are not here). */
-export function makeInboxRow(item: InboxItem, key: string): BatchRow {
+export function makeInboxRow(item: HeldFile, key: string): BatchRow {
   return { ...makeRow(new File([], item.filename), key, null), inbox: { id: item.id, sizeBytes: item.size_bytes } }
 }
 
