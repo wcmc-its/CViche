@@ -66,6 +66,7 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     _describe_dropped,
     _filter_unmapped_entries,
     _group_by_source_heading,
+    OwnerTokens,
     _owner_signature_tokens,
     _truncate_appendix_text,
 )
@@ -1127,6 +1128,11 @@ def test_signature_blocks_are_dropped_with_both_signals(text, sentence):
     # Degree candidacy lines hold a date and the owner's credential.
     ("PhD Candidate, May 2019", "Structural artifact."),
     ("MD Candidate, June 2010", "Structural artifact."),
+    # A credential or an initial plus a date is not the owner's name plus a date.
+    ("PhD, May 2019", "Structural artifact."),
+    ("M.D., June 2010", "Structural artifact."),
+    ("J. 03/04/2019", "Structural artifact."),
+    ("FACP 3/4/2020", "Signature line."),
 ])
 def test_signature_shape_never_drops_a_real_record(text, sentence):
     assert _sig(text, _confirmed(sentence)) is None
@@ -1157,7 +1163,7 @@ def test_signature_blocks_survive_when_not_t_coded():
 
 def test_signed_owner_needs_the_owner_signature_tokens():
     text = "Signed:   Jane Q. Doe, MD"
-    assert _sig(text, _confirmed("Signature line."), tokens=frozenset()) is None
+    assert _sig(text, _confirmed("Signature line."), tokens=OwnerTokens()) is None
 
 
 @pytest.mark.parametrize("text, sentence", [
@@ -1184,9 +1190,10 @@ def test_date_stamp_shape_never_drops_a_record_that_holds_a_date(text):
 
 
 def test_owner_signature_tokens_normalise_periods_and_tolerate_missing_owner():
-    assert {"jane", "q", "doe", "md", "facp", "j", "d", "m", "f"} <= _OWNER_TOKENS
-    assert _owner_signature_tokens(None) == frozenset()
-    assert _owner_signature_tokens({"first_name": None}) == frozenset()
+    assert {"jane", "q", "doe", "md", "facp", "j", "d", "m", "f"} <= _OWNER_TOKENS.removable
+    assert _OWNER_TOKENS.names == {"jane", "doe"}  # no credential, no initial
+    assert _owner_signature_tokens(None) == OwnerTokens()
+    assert _owner_signature_tokens({"first_name": None}) == OwnerTokens()
 
 
 def test_signature_and_rule_drops_are_counted_and_described():

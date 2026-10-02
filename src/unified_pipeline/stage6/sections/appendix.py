@@ -134,7 +134,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from typing import TypedDict
+from typing import NamedTuple, TypedDict
 
 from ...core.template_boilerplate import (
     is_foreign_template_instruction,
@@ -302,7 +302,7 @@ _SIGNATURE_VOCAB = frozenset({"date", "signature", "signed"})
 _SIGNATURE_DATE_RE = re.compile(rf"{_FULL_DATE}|{_MONTH_YEAR}", re.IGNORECASE)
 _BLANK_RUN_RE = re.compile(r"_+")
 _WORD_RE = re.compile(r"[a-z0-9]+")
-_OWNER_NAME_FIELDS = ("first_name", "middle_name", "last_name", "full_name_with_credentials")
+_OWNER_NAME_FIELDS = ("first_name", "middle_name", "last_name")
 
 # The CV's own title, up to two leading words ("Medico-legal Curriculum
 # Vitae"), an optional "& Bibliography", and optionally a date line under it.
@@ -399,35 +399,59 @@ def _is_wrapped_instruction_tail(text: str) -> bool:
     return closes_unopened or bool(_AUTHOR_DIRECTIVE_RE.search(body))
 
 
-def _owner_signature_tokens(cv_owner: Mapping[str, object] | None) -> frozenset[str]:
+class OwnerTokens(NamedTuple):
+    """The owner's word tokens for the signature-block shape (#1221).
+
+    `removable` is everything the shape may subtract from a line: name words,
+    credentials ("MD", "FACP") and single initials. `names` is only the name words
+    longer than one character, the one kind that counts as OWNER EVIDENCE: a
+    credential or an initial alone must never make a record line a signature."""
+
+    removable: frozenset[str] = frozenset()
+    names: frozenset[str] = frozenset()
+
+
+def _name_words(value: object) -> set[str]:
+    if not isinstance(value, str):
+        return set()
+    return set(_WORD_RE.findall(value.replace(".", "").lower()))
+
+
+def _owner_signature_tokens(cv_owner: Mapping[str, object] | None) -> OwnerTokens:
     """Lower-cased word tokens of the owner name stage 6 already carries in
     `cv_owner` (periods dropped, so "D.V.M." and "DVM" agree), plus the initial
-    of each (#1221)."""
-    tokens: set[str] = set()
+    of each (#1221). Name evidence is the first, middle and last name words only;
+    the credentials after the first comma of `full_name_with_credentials` are
+    removable but never evidence."""
+    owner = cv_owner or {}
+    names: set[str] = set()
     for field in _OWNER_NAME_FIELDS:
-        value = (cv_owner or {}).get(field)
-        if isinstance(value, str):
-            tokens.update(_WORD_RE.findall(value.replace(".", "").lower()))
+        names |= _name_words(owner.get(field))
+    full = owner.get("full_name_with_credentials")
+    names |= _name_words(full.split(",")[0] if isinstance(full, str) else None)
+    removable = _name_words(full) | names
     # A name written with a middle initial ("Jane Q. Doe" as "J. Doe") still has the
     # owner's tokens: an initial of any owner token counts as one.
-    tokens.update(token[0] for token in tuple(tokens))
-    return frozenset(tokens)
+    removable |= {token[0] for token in removable}
+    return OwnerTokens(frozenset(removable), frozenset(n for n in names if len(n) > 1))
 
 
-def _is_signature_block(text: str, owner_tokens: frozenset[str]) -> bool:
+def _is_signature_block(text: str, owner_tokens: OwnerTokens) -> bool:
     """True when, once dates, blanks and the owner's name tokens are removed,
-    nothing is left but the signature vocabulary, and at least one of date,
-    "Signature" or "Signed" is present (#1221). A real record carries some
-    other word, so it never matches."""
+    nothing is left but the signature vocabulary, and a date, "Signature",
+    "Signed" or a name word of the owner is present (#1221). A real record carries
+    some other word, so it never matches, and a credential or an initial alone is
+    not a name word ("PhD, May 2019" is a degree record)."""
     body = _SIGNATURE_PHRASE_RE.sub("signature", text.lower())
     body = _SIGNATURE_DATE_RE.sub(" ", _BLANK_RUN_RE.sub(" ", body))
     words = _WORD_RE.findall(body.replace(".", ""))
     if not words:
         return False
-    rest = [w for w in words if w not in owner_tokens]
+    rest = [w for w in words if w not in owner_tokens.removable]
     if any(w not in _SIGNATURE_VOCAB for w in rest):
         return False
-    return bool(_SIGNATURE_DATE_RE.search(text)) or bool(rest)
+    names_owner = any(w in owner_tokens.names for w in words)
+    return bool(rest) or (names_owner and bool(_SIGNATURE_DATE_RE.search(text)))
 
 
 _KIND_SHAPE = {
@@ -442,7 +466,7 @@ _KIND_SHAPE = {
 def _confirmed_structural_reason(
     text: str,
     reasoning: str | None,
-    owner_tokens: frozenset[str] = frozenset(),
+    owner_tokens: OwnerTokens = OwnerTokens(),
 ) -> str | None:
     """The `DROP_*` reason for a T entry that BOTH stage 3b's T-validation
     confirmed as structural of a named kind AND whose raw text has that kind's
@@ -750,7 +774,7 @@ def _appendix_drop_reason(
     rendered: str,
     taxonomy_code: str | None = None,
     reasoning: str | None = None,
-    owner_tokens: frozenset[str] = frozenset(),
+    owner_tokens: OwnerTokens = OwnerTokens(),
 ) -> str | None:
     """The `DROP_*` reason *text* stays out of the appendix, or None to keep it.
 
@@ -758,9 +782,9 @@ def _appendix_drop_reason(
     passed in rather than recomputed so each survivor is rendered once.
 
     *taxonomy_code* gates the four structural checks (bare year, status
-    marker, ToC line -- see the module docstring and the comments above
+    marker, ToC line, rule line -- see the module docstring and the comments above
     `_BARE_YEAR_RE`) to T-coded entries only. Optional, defaulting to None
-    (which skips those three checks), so a caller checking only text shape --
+    (which skips those four checks), so a caller checking only text shape --
     `test_stage6_appendix_header_row_filter.py`'s unit tests among them --
     is unaffected.
 
@@ -805,7 +829,7 @@ def _appendix_drop_reason(
 
 def _filter_unmapped_entries(
     entries: Sequence[UnmappedEntry],
-    owner_tokens: frozenset[str] = frozenset(),
+    owner_tokens: OwnerTokens = OwnerTokens(),
 ) -> tuple[list[AppendixLine], Counter[str]]:
     """Split *entries* into the lines the appendix will show and a count of
     drops per `DROP_*` reason."""
