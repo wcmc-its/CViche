@@ -64,6 +64,56 @@ def test_research_summary_artifact_reaches_the_scorer(monkeypatch):
     assert seen["names"] == ["R1_fields.json", "R1_research_summary.json"]
 
 
+def _scored_dir_listing(monkeypatch, storage):
+    """Run compute_and_cache_score against ``storage`` and return the file tree
+    the scorer was handed, as sorted relative paths."""
+    seen = {}
+
+    def _score_run(outputs_dir, run_id):
+        root = Path(outputs_dir)
+        seen["tree"] = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
+        return {"totalScore": 40}
+
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run", _score_run)
+    assert svc.compute_and_cache_score("R1") == {"totalScore": 40}
+    return seen["tree"]
+
+
+def test_the_original_docx_reaches_the_scorer_under_the_source_subdir(monkeypatch):
+    """#822: the lost-source-table gate reads the uploaded CV, archived under
+    input/, from source/ beside the stage artifacts."""
+    storage = _Storage({
+        "outputs/R1_fields.json": b"{}",
+        "input/R1.docx": b"original",
+        "input/manifest.json": b"{}",
+    })
+    assert _scored_dir_listing(monkeypatch, storage) == ["R1_fields.json", "source/R1.docx"]
+
+
+@pytest.mark.parametrize("input_keys", [
+    ["input/R1.pdf"],                      # a PDF upload has no readable docx source
+    ["input/R1.docx", "input/R1_b.docx"],  # ambiguous: never guess which is the CV
+    [],
+])
+def test_no_single_docx_original_means_no_source_subdir(monkeypatch, input_keys):
+    files = {"outputs/R1_fields.json": b"{}", **{k: b"x" for k in input_keys}}
+    assert _scored_dir_listing(monkeypatch, _Storage(files)) == ["R1_fields.json"]
+
+
+def test_a_storage_error_staging_the_source_still_scores_the_run(monkeypatch, caplog):
+    class _FailingInput(_Storage):
+        def list_files(self, run_id, prefix=""):
+            if prefix == "input/":
+                raise OSError("storage unavailable")
+            return super().list_files(run_id, prefix)
+
+    storage = _FailingInput({"outputs/R1_fields.json": b"{}"})
+    with caplog.at_level("WARNING"):
+        assert _scored_dir_listing(monkeypatch, storage) == ["R1_fields.json"]
+    assert "Could not stage the source docx for run R1" in caplog.text
+
+
 # --- parsed snapshot and the runs.quality_* columns --------------------------
 
 def _cached(total=72, raw=72.4, caps=(), dims=None, flags=()):

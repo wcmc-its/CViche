@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Score a single local pipeline run; print a one-line TSV summary.
 
-    PYTHONPATH=src python3 scripts/score_one.py <outputs_root> <uid> [wcm_docx] [score_json_out]
+    PYTHONPATH=src python3 scripts/score_one.py <outputs_root> <uid> [wcm_docx] [score_json_out] [--source cv.docx]
 
 <outputs_root> is the dir holding the stage_* subdirs (i.e. src/unified_pipeline/outputs).
 If score_json_out is given, the full score_run dict is written there.
+--source is the run's original CV: with it the lost-source-table gate is evaluated, without it
+that gate is skipped (a score without it can differ from the web app's).
 
 The scorer wants every artifact in ONE directory, but a local run scatters them
 across stage_* subdirs, so they are collected into a temp dir first -- the same
@@ -27,7 +29,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from unified_pipeline.quality_score import RESEARCH_SUMMARY_SUFFIX, score_run
+from unified_pipeline.quality_score import RESEARCH_SUMMARY_SUFFIX, SOURCE_DOCX_SUBDIR, score_run
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX
 
 logger = logging.getLogger(__name__)
@@ -39,9 +41,15 @@ NEEDED_SUFFIXES = ("_classified.json", "_fields.json", "_entries.json", STAGE_ER
                    RESEARCH_SUMMARY_SUFFIX)
 
 
-def collect(outputs_root: Path, uid: str, wcm_docx: Path, dest: Path) -> int:
-    """Flatten this run's scorable artifacts into dest. Returns how many landed."""
+def collect(outputs_root: Path, uid: str, wcm_docx: Path, dest: Path,
+            source_docx: Path | None = None) -> int:
+    """Flatten this run's scorable artifacts into dest. Returns how many landed.
+    The original CV, when given, goes under SOURCE_DOCX_SUBDIR for the scorer's
+    lost-source-table gate; it is not counted (the gate is optional evidence)."""
     found = 0
+    if source_docx and source_docx.exists():
+        (dest / SOURCE_DOCX_SUBDIR).mkdir()
+        shutil.copy(source_docx, dest / SOURCE_DOCX_SUBDIR / source_docx.name)
     for suffix in NEEDED_SUFFIXES:
         # stage_* subdirs only; a flat outputs_root works too since glob('*')
         # over files simply matches nothing.
@@ -63,6 +71,9 @@ def main(argv=None):
                     help="generated WCM .docx; enables the render dimensions")
     ap.add_argument("score_json_out", nargs="?", default=None,
                     help="write the full score_run dict here as JSON")
+    ap.add_argument("--source", default=None,
+                    help="the run's original .docx; enables the lost-source-table gate "
+                         "(without it that gate is not evaluated)")
     args = ap.parse_args(argv)
 
     root = Path(args.outputs_root)
@@ -90,7 +101,7 @@ def main(argv=None):
 
     tmp = Path(tempfile.mkdtemp(prefix=f"score_{args.uid}_"))
     try:
-        found = collect(root, args.uid, docx, tmp)
+        found = collect(root, args.uid, docx, tmp, Path(args.source) if args.source else None)
         if not found:
             logger.error("no scorable artifacts for uid=%s under %s", args.uid, root)
             return 1

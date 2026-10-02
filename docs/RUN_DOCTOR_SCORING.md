@@ -15,7 +15,10 @@ score's hard-fail gates, each as an ERROR lint that calls the scorer's own
 predicate, so the two cannot drift apart — that is the whole overlap. A sixth
 cap, stage 4's failed extraction groups (below), stops short of RED and so is a
 WARN lint on the same shared predicate; so is a seventh, a call the
-content-filter fallback served.
+content-filter fallback served. Three more caps (#822, below) cover
+source content lost before the document was written; they also stop one point
+under GREEN, and each calls the signal behind an existing doctor lint
+(`under_extraction`, `segmentation`, `table_lost`).
 
 ## Part 1: the doctor's verdict
 
@@ -192,10 +195,17 @@ confirmation that the gate is calibrated.
   Doctor lint: `llm_fallback_served` (WARN, one finding per section: the
   taxonomy code, or the research summary call).
 
-  What it does not see: a fallback-served call in stage 2, 3b, 5d or 6, or in
-  stage 4's recovery pass, because those stages do not record the model; and a
-  call that the fallback also filtered, which is a failed group (above) or a
-  recorded stage failure (below).
+  What it does not see: a fallback-served call in stage 1a, 2, 3a, 3b, 5b to
+  5d or 6, or in stage 4's recovery, owner-name or location calls. Those stages
+  record at most one observed model per run, which cannot show that a single
+  call was served by the fallback. Also unseen: a call that the fallback also
+  filtered, which is a failed group (above) or a recorded stage failure
+  (below). The gap is tracked in the residual of #1174.
+
+  Order: the gate sits last in `CAP_ONLY_GATES`. The run page's cap pointer
+  names the first flag at the binding cap (see the ORDER MATTERS note there),
+  and this gate measures no loss, so every gate that names something concrete
+  goes first.
 
 ### A recorded stage failure
 
@@ -205,9 +215,48 @@ stage the driver recorded as failed in `stage_errors/<uid>_stage_errors.json`
 the doctor did not, so a run could score RED with a clean doctor. A fatal
 record is an ERROR, like the gate it mirrors, and a non-fatal one a WARN. For
 stage 4.5 the finding says the research summary is missing because the stage
-raised, as opposed to a CV with no research content. Whether a missing summary
+raised, as opposed to a CV with no research content. The lint can only fire on
+the CLI or batch path: on the web path a raising stage fails the run, and the
+doctor runs only after a terminal success. Whether a missing summary
 should fail a web run at all is a separate decision (#1174) and is not made
 here.
+
+### The three content-loss caps (#822)
+
+Cap-only gates like protected data (`CAP_ONLY_GATES`, weight 0, so no run's raw
+score moves), but soft: each caps a run at `CONTENT_LOSS_CAP` (84, one point
+under GREEN), so a run that lost source content cannot read "ship" and is not
+pushed toward RED. No weighted dimension measures lost content; these call the
+doctor's own signals, restricted to the ones batch IPXFBA hand-checked as real.
+
+- `score_under_extracted_records()` — the doctor's `under_extraction` lint, any
+  finding (in IPXFBA all 4 findings were true positives, but only 2 lost
+  records outright; outside IPXFBA a finding can fire with nothing lost).
+- `score_fused_entries()` — `mega_entries` (`count_mega_entries`) at
+  `MEGA_ENTRIES_CAP_MIN` (2) or more entries; one fused entry is common and
+  harmless, so the threshold is a count (7 of 9 flagged entries were real).
+- `score_lost_source_table()` — the primitive behind `table_lost`
+  (`find_lost_blocks`), worst lost table at `LOST_TABLE_CAP_MIN_LINES` (5) or
+  more lines. It reads the original uploaded `.docx` from the
+  `SOURCE_DOCX_SUBDIR` (`source/`) of the scored directory; the web service
+  stages `input/*.docx` there and `score_one.py --source` does the same. With no
+  readable source the gate is not evaluated, so a score computed without it can
+  sit above the web app's.
+
+Both thresholds were fitted to one batch and are named in the code to be revisited.
+
+Which cap the run page names when several sit at 84: the three content-loss caps
+and the stage-4 cap share a value, and the run page's reason and doctor-lint
+pointer (`run_quality_report.cap_source`) is the first matching flag, in
+`CAP_ONLY_GATES` order. The order is most specific first: lost table (the loss
+is measured against the delivered docx), fused entries (a count of swallowed
+records), under-extraction (fires on any finding, including ones that lost
+nothing), then stage 4's failed group (a call failed and was retried; no loss is
+measured). The score and band do not depend on the order, only the pointer.
+In batch IPXFBA it decides two runs: EKGTXD (under-extraction and fused entries)
+and PBSGQZ (fused entries and a stage-4 failure) both point at the fused-entries
+reason, which is where their verified loss is (EKGTXD's two under-extraction
+findings lost no records).
 
 ### Bands
 

@@ -134,6 +134,23 @@ def test_doi_pmid_and_grant_digit_runs_are_not_phone_numbers(tmp_path):
     assert fraction == 0.0
 
 
+def test_a_certificate_number_then_a_year_is_not_a_phone_number(tmp_path):
+    """#822: a six-digit certificate number followed by a year read as a
+    phone number, so a CV with no contact details lost 4.5 points."""
+    fraction, detail, _ = _no_contact_score(
+        tmp_path,
+        "Example Board of Medicine, Certificate #123456 2005, Example State",
+        "License 654321 2012, Example Agency")
+    assert "source_contact=False" in detail
+    assert fraction == 0.0
+
+
+def test_a_phone_without_a_separator_after_the_parenthesised_area_code_still_counts(tmp_path):
+    for phone in ("(212)555-0100", "212 555 0100"):
+        _, detail, _ = _no_contact_score(tmp_path, f"Tel: {phone}")
+        assert "source_contact=True" in detail, phone
+
+
 def test_extracted_contact_does_not_consult_the_source(tmp_path):
     _entries(tmp_path, "no contact here")
     _, detail, _ = score_cv_owner(_fields(tmp_path, {"email": "x"}))
