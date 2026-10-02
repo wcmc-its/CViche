@@ -57,6 +57,7 @@ class AttachmentReject(StrEnum):
     NO_READABLE_TEXT = "no_readable_text"
     SCANNED_PDF = "scanned_pdf"
     UNREADABLE = "unreadable"
+    ACTIVE_CONTENT = "active_content"
 
 
 @dataclass(frozen=True, slots=True)

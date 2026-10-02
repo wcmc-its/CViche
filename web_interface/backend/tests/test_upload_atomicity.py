@@ -29,6 +29,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import object_session
 
 from app.api import upload as upload_module
+from app.services import upload_validation
 from app.api.upload import _extract_text, _validate_docx_magic
 from app.models import User, Run, Step
 from app.pipeline.step_registry import STEP_REGISTRY
@@ -403,6 +404,215 @@ def test_validate_docx_magic_rejects_too_many_entries(monkeypatch):
     assert _validate_docx_magic(content) is False
 
 
+# --- #1334: macros, network-linked parts and DDE fields are refused ----------
+
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_W_STRICT_NS = "http://purl.oclc.org/ooxml/wordprocessingml/main"
+_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
+_SETTINGS_RELS = "word/_rels/settings.xml.rels"
+
+
+def _docx_with_parts(parts: dict[str, str | bytes]) -> bytes:
+    """A real python-docx file with ``parts`` added, or replacing the part of
+    the same name."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(_docx_bytes("Synthetic CV paragraph. " * 40))) as src, \
+            zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for entry in src.infolist():
+            if entry.filename not in parts:
+                dst.writestr(entry, src.read(entry))
+        for name, body in parts.items():
+            dst.writestr(name, body)
+    return out.getvalue()
+
+
+def _rels(rel_type: str, target: str, mode: str = "External") -> str:
+    return (
+        "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>"
+        f"<Relationship Id='rId1' Type='{_REL_TYPE}{rel_type}' Target='{target}' TargetMode='{mode}'/>"
+        "</Relationships>"
+    )
+
+
+def _document(body: str) -> str:
+    return f"<w:document xmlns:w='{_W_NS}'><w:body><w:p>{body}</w:p></w:body></w:document>"
+
+
+def _complex_field(*instr_runs: str) -> str:
+    runs = "".join(f"<w:r><w:instrText>{text}</w:instrText></w:r>" for text in instr_runs)
+    return (
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r>" + runs
+        + "<w:r><w:fldChar w:fldCharType='separate'/></w:r><w:r><w:t>result</w:t></w:r>"
+        "<w:r><w:fldChar w:fldCharType='end'/></w:r>"
+    )
+
+
+@pytest.mark.parametrize("label, parts, expected", [
+    ("plain docx", {}, None),
+    ("vbaProject.bin", {"word/vbaProject.bin": b"\x00" * 64}, upload_validation.ActiveContent.MACRO),
+    ("vbaProject.bin under a backslash zip name", {"word\\vbaProject.bin": b"\x00" * 64},
+     upload_validation.ActiveContent.MACRO),
+    ("VBA project under another name, found by its relationship", {
+        "word/foo.bin": b"\x00" * 64,
+        "word/_rels/document.xml.rels": (
+            "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>"
+            "<Relationship Id='rId99' Type='http://schemas.microsoft.com/office/2006/relationships/vbaProject'"
+            " Target='foo.bin'/></Relationships>"),
+    }, upload_validation.ActiveContent.MACRO),
+    ("https attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "https://evil.example/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("UNC attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "\\\\10.0.0.1\\s\\x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("percent-encoded UNC", {_SETTINGS_RELS: _rels("attachedTemplate", "%5C%5Chost%5Cs%5Cx.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("https after leading spaces", {_SETTINGS_RELS: _rels("attachedTemplate", "  HTTPS://evil.example/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("file URL naming a host", {_SETTINGS_RELS: _rels("attachedTemplate", "file://evil.example/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("file: with a backslash UNC", {_SETTINGS_RELS: _rels("attachedTemplate", "file:\\\\evil.example\\s\\x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("forward-slash UNC attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "//evil.example/s/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("ftp attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "FTP://evil.example/x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("remote image in a header's rels", {"word/_rels/header1.xml.rels": _rels("image", "https://evil.example/x.png")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("upper-case rels part name", {"word/_rels/settings.xml.RELS": _rels("attachedTemplate", "https://e.example/x")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("file:/// attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file:///C:/x.dotm")}, None),
+    ("file://localhost attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file://localhost/x.dotm")},
+     None),
+    ("file://LocalHost attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file://LocalHost/x.dotm")},
+     None),
+    ("Macintosh HD attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "Macintosh%20HD:Users:x.dotx")},
+     None),
+    ("Mac Word file://// attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file:////Users/x.dotx")},
+     None),
+    ("internal https-looking target", {_SETTINGS_RELS: _rels("attachedTemplate", "https://x/y.dotm", "Internal")},
+     None),
+    ("external https hyperlink", {"word/_rels/document.xml.rels": _rels("hyperlink", "https://example.org/")},
+     None),
+    ("fldSimple DDEAUTO", {"word/document.xml": _document("<w:fldSimple w:instr=' DDEAUTO c:\\\\x \"y\"'/>")},
+     upload_validation.ActiveContent.DDE),
+    ("complex DDE split across two instrText runs",
+     {"word/document.xml": _document(_complex_field(" DD", "E c:\\\\x y"))}, upload_validation.ActiveContent.DDE),
+    ("lowercase ddeauto in a footer", {"word/footer1.xml": _document(_complex_field("ddeauto x y"))},
+     upload_validation.ActiveContent.DDE),
+    ("DDE nested inside an IF field", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>IF 1 = 1 </w:instrText></w:r>"
+        + _complex_field("DDEAUTO x y") + "<w:r><w:fldChar w:fldCharType='end'/></w:r>")},
+     upload_validation.ActiveContent.DDE),
+    ("DDE after a complete nested field", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r>" + _complex_field("PAGE")
+        + "<w:r><w:instrText>DDEAUTO x y</w:instrText></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r>")},
+     upload_validation.ActiveContent.DDE),
+    ("unterminated DDE field", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>DDE x y</w:instrText></w:r>")},
+     upload_validation.ActiveContent.DDE),
+    ("DDE only after the field's separate", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>REF x</w:instrText></w:r>"
+        "<w:r><w:fldChar w:fldCharType='separate'/></w:r><w:r><w:instrText>DDE x y</w:instrText></w:r>"
+        "<w:r><w:fldChar w:fldCharType='end'/></w:r>")}, None),
+    ("DDE only after an empty field's separate", {"word/document.xml": _document(
+        "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:fldChar w:fldCharType='separate'/></w:r>"
+        "<w:r><w:instrText>DDEAUTO x y</w:instrText></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r>")}, None),
+    ("DDE in an upper-case part name", {"WORD/FOOTER9.XML": _document("<w:fldSimple w:instr='DDEAUTO x y'/>")},
+     upload_validation.ActiveContent.DDE),
+    ("strict-OOXML fldSimple DDEAUTO", {"word/footer8.xml": _document("<w:fldSimple w:instr='DDEAUTO x y'/>").replace(
+        _W_NS, _W_STRICT_NS)}, upload_validation.ActiveContent.DDE),
+    ("strict-OOXML complex DDE", {"word/footer7.xml": _document(_complex_field("DDE x y")).replace(
+        _W_NS, _W_STRICT_NS)}, upload_validation.ActiveContent.DDE),
+    ("a non-DDE field", {"word/document.xml": _document(_complex_field("PAGE"))}, None),
+    ("body text DDE", {"word/document.xml": _document("<w:r><w:t>DDE DDEAUTO lab</w:t></w:r>")}, None),
+    ("ActiveX part", {
+        "word/activeX/activeX1.xml": "<ax:ocx xmlns:ax='http://schemas.microsoft.com/office/2006/activeX'/>",
+        "word/activeX/activeX1.bin": b"\x01" * 64,
+        "word/activeX/_rels/activeX1.xml.rels": _rels("activeXControlBinary", "activeX1.bin", "Internal"),
+    }, None),
+])
+def test_docx_active_content(label, parts, expected):
+    """#1334: each refused kind, and the real-CV shapes the corpus census says
+    must pass (local template paths, hyperlinks, ActiveX, body text "DDE")."""
+    content = _docx_with_parts(parts)
+    assert _validate_docx_magic(content) is True, label  # the scan runs only after this passes
+    assert upload_validation.docx_active_content(content) == expected, label
+
+
+def test_docx_active_content_logs_the_category_and_no_filename(caplog):
+    with caplog.at_level(logging.WARNING, logger="app.services.upload_validation"):
+        upload_validation.docx_active_content(_docx_with_parts({"word/vbaProject.bin": b"\x00"}))
+    assert [r.getMessage() for r in caplog.records] == ["[SECURITY] Refused docx carrying active content: macro"]
+
+
+def test_docx_active_content_still_scans_past_an_unreadable_part(caplog):
+    """Malformed XML is not a refusal by itself (python-docx's read handles
+    it), but it does not hide a network template in another part."""
+    content = _docx_with_parts({
+        "word/_rels/document.xml.rels": "<<<not xml",
+        _SETTINGS_RELS: _rels("attachedTemplate", "https://evil.example/x.dotm"),
+    })
+    with caplog.at_level(logging.WARNING, logger="app.services.upload_validation"):
+        assert upload_validation.docx_active_content(content) == upload_validation.ActiveContent.EXTERNAL_LINK
+    skipped = [r for r in caplog.records if "skipped an unreadable part" in r.getMessage()]
+    assert len(skipped) == 1 and skipped[0].exc_info is not None
+    assert upload_validation.docx_active_content(_docx_with_parts({"word/document.xml": "<<<not xml"})) is None
+
+
+@pytest.mark.parametrize("label, mark", [
+    ("encrypted", lambda info: setattr(info, "flag_bits", info.flag_bits | 0x1)),
+    ("unsupported compression", lambda info: setattr(info, "compress_type", 99)),
+])
+def test_docx_active_content_skips_an_orphan_part_zipfile_cannot_read(label, mark):
+    """An orphan part python-docx never reads, but zipfile refuses to (it raises
+    RuntimeError / NotImplementedError), is skipped like any unreadable part,
+    never a 500."""
+    out = io.BytesIO(_docx_with_parts({}))
+    with zipfile.ZipFile(out, "a") as zf:
+        zf.writestr("word/orphan.xml", _document("<w:fldSimple w:instr='PAGE'/>"))
+        mark(zf.filelist[-1])  # rewrites the central directory entry on close
+    content = out.getvalue()
+    assert _validate_docx_magic(content) is True, label
+    assert upload_validation.docx_active_content(content) is None, label
+
+
+def test_docx_active_content_resolves_no_entities(tmp_path):
+    """The parser never resolves an entity (no XXE): a field whose instruction
+    would read DDEAUTO only if a local file were pulled in stays unread."""
+    payload = tmp_path / "payload.txt"
+    payload.write_text("DDEAUTO x y")
+    document = (
+        f"<!DOCTYPE w:document [<!ENTITY t SYSTEM '{payload.as_uri()}'>]>"
+        + _document("<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:instrText>&t;</w:instrText></w:r>"
+                    "<w:r><w:fldChar w:fldCharType='end'/></w:r>")
+    )
+    assert upload_validation.docx_active_content(_docx_with_parts({"word/document.xml": document})) is None
+
+
+@pytest.mark.parametrize("endpoint, data", [
+    ("/api/upload", {"submission_type": "own_cv"}),
+    ("/api/estimate", None),
+])
+def test_upload_and_estimate_refuse_a_docx_with_a_macro(client, db, seed_simple_mode, tmp_path, endpoint, data):
+    """#1334: a distinct 400, not the generic "does not match .docx", and no run."""
+    user = _make_user(db)
+    _auth(client, user)
+    storage = MagicMock()
+    patches = [
+        patch("app.services.run_creation.UPLOAD_DIR", tmp_path),
+        patch("app.services.run_creation.get_storage", return_value=storage),
+    ]
+    content = _docx_with_parts({"word/vbaProject.bin": b"\x00" * 64})
+    resp = _run_patches(patches, lambda: client.post(
+        endpoint, files={"file": ("cv.docx", content, DOCX_MIME)}, data=data,
+    ))
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == {"error": "bad_request", "message": upload_validation.ACTIVE_CONTENT_MESSAGE}
+    storage.put_file_exclusive.assert_not_called()
+    assert db.query(Run).count() == 0
+    assert list(tmp_path.iterdir()) == []
+
+
 # --- #865 review: _extract_text catches only the measured read failures ------
 
 def _zip_bytes(**members: str) -> bytes:
@@ -753,8 +963,11 @@ def test_upload_offloads_extraction_and_template_checks_to_threadpool(client, db
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 200, resp.text
-    # _read_upload_text wraps _extract_text, adding the PDF scanned-page gate (#1282).
-    assert dispatched == [upload_module._read_upload_text, detect_mock, format_mock]
+    # _read_upload_text wraps _extract_text, adding the PDF scanned-page gate (#1282);
+    # the #1334 active-content scan runs off the loop first.
+    assert dispatched == [
+        upload_validation.docx_active_content, upload_module._read_upload_text, detect_mock, format_mock,
+    ]
     extract_mock.assert_called_once()
 
 
@@ -789,7 +1002,7 @@ def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode
     )
 
     assert resp.status_code == 200, resp.text
-    assert dispatched == [upload_module._read_upload_text]
+    assert dispatched == [upload_validation.docx_active_content, upload_module._read_upload_text]
     extract_mock.assert_called_once()
 
 

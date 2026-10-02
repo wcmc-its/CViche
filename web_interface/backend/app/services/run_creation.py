@@ -33,8 +33,8 @@ from app.services.pdf_sandbox import (
 from app.services.run_service import UPLOAD_DIR, latest_run_with_hash
 from app.services.template_warning import detect_wcm_template
 from app.services.upload_validation import (
-    MIN_EXTRACTED_CHARS, PDF_EXTENSION, SCANNED_PAGE_REJECT_SHARE, _extract_text, _validate_docx_magic,
-    _validate_pdf_magic, is_mostly_scanned,
+    ACTIVE_CONTENT_MESSAGE, MIN_EXTRACTED_CHARS, PDF_EXTENSION, SCANNED_PAGE_REJECT_SHARE, _extract_text,
+    _validate_docx_magic, _validate_pdf_magic, docx_active_content, is_mostly_scanned,
 )
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
@@ -109,6 +109,13 @@ def _read_upload_text(content: bytes, file_ext: str) -> tuple[str | None, list[i
     pdf = read_pdf(content)
     _reject_mostly_scanned_pdf(pdf)
     return pdf.text, pdf.image_only_pages
+
+
+async def _reject_active_docx_content(content: bytes) -> None:
+    """A 400 for a .docx carrying macros, a network-linked part or a DDE field
+    (#1334), shared by /upload and /estimate; scanned off the event loop."""
+    if await run_in_threadpool(docx_active_content, content) is not None:
+        raise bad_request(ACTIVE_CONTENT_MESSAGE)
 
 
 async def _extract_text_or_400(content: bytes, file_ext: str) -> tuple[str | None, list[int]]:
@@ -467,6 +474,8 @@ async def create_run_from_bytes(
     if file_ext == ".docx" and not _validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected upload: file claims .docx but magic bytes do not match (user=%s)", current_user.email)
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
+    if file_ext == ".docx":
+        await _reject_active_docx_content(content)
 
     # Same bytes already run by anyone? Ask first (nothing archived or charged yet).
     source_sha256 = hashlib.sha256(content).hexdigest()

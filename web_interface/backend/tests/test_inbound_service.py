@@ -8,6 +8,7 @@ mailer is replaced by a recorder.
 import io
 import json
 import logging
+import zipfile
 from datetime import datetime, timedelta
 
 import pytest
@@ -267,6 +268,19 @@ def test_a_mostly_scanned_pdf_is_skipped_and_counted_in_the_reply(db, storage, s
     assert message.reject_reason == f"{AttachmentReject.SCANNED_PDF}:1"
     assert [f.filename for f in _files(db)] == ["ok.docx"]
     assert "- 1 attachment skipped" in sent[0].body and "scan.pdf" not in sent[0].body
+
+
+def test_a_docx_with_a_macro_is_skipped_and_counted(db, storage, sent):
+    """#1334: the email intake refuses active content the way /upload does."""
+    _user(db)
+    buffer = io.BytesIO(_docx("m"))
+    with zipfile.ZipFile(buffer, "a") as z:
+        z.writestr("word/vbaProject.bin", b"\x00" * 64)
+    _process(db, storage, make_eml(attachments=[("macro.docx", buffer.getvalue()), ("ok.docx", _docx())]))
+    message = _message(db)
+    assert message.status == InboundMessageStatus.ACCEPTED
+    assert message.reject_reason == f"{AttachmentReject.ACTIVE_CONTENT}:1"
+    assert [f.filename for f in _files(db)] == ["ok.docx"]
 
 
 def test_a_minority_of_scanned_pages_is_accepted(db, storage, sent, monkeypatch):
