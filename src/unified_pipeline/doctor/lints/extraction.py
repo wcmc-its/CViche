@@ -937,12 +937,13 @@ _OFFSCHEMA_SKIPPED_CODE_PREFIX = IDENTIFIER_TAXONOMY_PREFIX
 
 #: Keys stage 4's own post-processing writes onto entries whose schema may
 #: not declare them -- bookkeeping, not a value the model misfiled:
-#: `owner_name.add_target_names` sets `target_name` on S and R entries, and
-#: `coercion.apply_regex_post_processing` sets the identifiers and
-#: `percent_effort` on the codes its own constants name. (Its `orcid` goes
-#: only on A and S0, which are skipped above.)
+#: `owner_name.add_target_names` sets `target_name` on S and R* entries, and
+#: `coercion.apply_regex_post_processing` sets the identifiers on S,
+#: `IDENTIFIER_TAXONOMY_CODES` and `percent_effort` on M2*. Only the codes
+#: this lint inspects are listed: S, N4 (text-rendered) and the `orcid` codes
+#: A and S0 are skipped above.
 _TARGET_NAME_KEY = "target_name"
-_TARGET_NAME_CODE_PREFIXES = ("S", "R")
+_TARGET_NAME_CODE_PREFIX = "R"
 _IDENTIFIER_KEYS = frozenset({"pmid", "pmcid", "doi"})
 _PERCENT_EFFORT_KEY = "percent_effort"
 
@@ -978,9 +979,9 @@ def _declared_fields() -> dict[str, frozenset[str]]:
 
 def _stage4_bookkeeping_keys(code: str) -> frozenset[str]:
     keys: set[str] = set()
-    if code.startswith(_TARGET_NAME_CODE_PREFIXES):
+    if code.startswith(_TARGET_NAME_CODE_PREFIX):
         keys.add(_TARGET_NAME_KEY)
-    if code.startswith(IDENTIFIER_TAXONOMY_PREFIX) or code in IDENTIFIER_TAXONOMY_CODES:
+    if code in IDENTIFIER_TAXONOMY_CODES:
         keys |= _IDENTIFIER_KEYS
     if code.startswith(GRANT_EFFORT_TAXONOMY_PREFIX):
         keys.add(_PERCENT_EFFORT_KEY)
@@ -1003,7 +1004,7 @@ def _is_record_shaped(key: str, value: object, declared: frozenset[str]) -> bool
     """A whole record rather than one fact: a list of objects, an object that
     shares a key with the code's schema, or a numbered schema field."""
     if isinstance(value, list):
-        return bool(value) and all(isinstance(item, Mapping) for item in value)
+        return all(isinstance(item, Mapping) for item in value)
     if isinstance(value, Mapping):
         return bool(set(value) & declared)
     numbered = _NUMBERED_FIELD_RE.match(key)
@@ -1024,9 +1025,8 @@ def _offschema_values(entry: _FieldsEntry, declared_by_code: dict[str, frozenset
     candidates = {key: value for key, value in entry.fields.items()
                   if key not in readable and not _is_blank(value)
                   and not _DATE_NAMED_KEY_RE.search(key)}
-    if any(isinstance(value, list) for value in candidates.values()):
-        for key in _fanned_out_keys(entry):
-            candidates.pop(key, None)
+    for key in _fanned_out_keys(entry):
+        candidates.pop(key, None)
     return {key: OffschemaValue(entry.element_idx, value,
                                 _is_record_shaped(key, value, declared))
             for key, value in candidates.items()}
@@ -1108,7 +1108,7 @@ def _leaf_strings(value: object) -> list[str]:
         return [s for item in value.values() for s in _leaf_strings(item)]
     if isinstance(value, list):
         return [s for item in value for s in _leaf_strings(item)]
-    if isinstance(value, (str, int)) and not isinstance(value, bool):
+    if isinstance(value, (str, int)):
         return [str(value)]
     return []
 

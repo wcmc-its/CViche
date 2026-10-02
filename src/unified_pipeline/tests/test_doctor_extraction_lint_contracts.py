@@ -1146,7 +1146,9 @@ def test_offschema_a_record_list_fan_out_declines_is_warn():
     _fields_entry("I", {"organization": "Society A"}),             # built-in schema key
     _fields_entry("R", {"scope": "National"}),                     # config-only, extract false
     _fields_entry("N3B", {"thesis_title": "Example thesis"}),     # built-in only
-    _fields_entry("R", {"pmid": "123"}),                           # stage-4 identifier
+    _fields_entry("R", {"pmid": "123"}),                           # stage-4 identifiers
+    _fields_entry("R", {"pmcid": "PMC1"}),
+    _fields_entry("R", {"doi": "10.1/x"}),
     _fields_entry("R1", {"target_name": "Doe J"}),                 # stage-4 target name
     _fields_entry("M2C", {"percent_effort": "5%"}),                # stage-4 effort
     _fields_entry("H", {"date_range": "2001-2003"}),               # date-named
@@ -1166,6 +1168,36 @@ def test_offschema_a_record_list_fan_out_declines_is_warn():
 ])
 def test_offschema_silent_when_a_renderer_or_a_rule_accounts_for_the_key(entry):
     assert _offschema(entry) == []
+
+
+def test_field_lint_constants_are_pinned():
+    assert FIELD_EVIDENCE_VALUE_CHARS == 100
+    assert FIELD_EVIDENCE_MAX_VALUES == 3
+    assert DEGREE_YEAR_LEAD == 10
+
+
+def test_offschema_a_key_merely_containing_date_is_not_a_date_key():
+    findings = _offschema(_fields_entry("I", {"candidate": "x", "update": "y"}))
+    assert [f["message"].split("`")[1] for f in findings] == ["candidate", "update"]
+
+
+def test_offschema_list_mixing_objects_and_strings_is_info():
+    findings = _offschema(_fields_entry("D1", {"appointments": [
+        {"title": "Lecturer"}, "Reader"]}))
+    assert [f["severity"] for f in findings] == ["INFO"]
+
+
+def test_offschema_config_comment_entries_and_null_fields_are_tolerated(
+        monkeypatch, tmp_path):
+    config = tmp_path / "schemas.json"
+    config.write_text(json.dumps({"schemas": {
+        "__NOTE_example": "a comment string, not a schema",
+        "I": {"fields": {"region": {"extract": False}}},
+        "R": {"fields": None}}}))
+    monkeypatch.setattr(extraction_lints, "FIELD_SCHEMA_CONFIG_PATH", config)
+    assert _offschema(_fields_entry("I", {"region": "North"})) == []
+    # `scope` is declared only by the real config file, not the built-ins.
+    assert len(_offschema(_fields_entry("R", {"scope": "National"}))) == 1
 
 
 def test_offschema_a_rendered_field_outside_both_schemas_is_not_reported(monkeypatch):
@@ -1260,6 +1292,9 @@ def test_implausible_year_lists_every_bad_field_of_one_entry_in_one_finding():
     _fields_entry("H", {"date": "1925"}, text="Society prize, 1925"),       # in the text
     _fields_entry("H", {"date": "1968"}, text="Prize 196874"),              # fused range
     _fields_entry("H", {"title": "1902"}, text="11/02"),                    # not a date key
+    _fields_entry("H", {"candidate": "1902"}, text="11/02"),
+    _fields_entry("H", {"date": "19021"}, text=""),                         # not four digits
+    _fields_entry("H", {"date": "21902"}, text=""),
     _fields_entry("A", {"date_of_birth": "1902"}, text="11/02"),           # personal data
     _fields_entry("H", {"date": "2002-11"}, text="11/02"),                 # right century
     _fields_entry("H", {"date": True}, text=""),                           # not a year
@@ -1301,6 +1336,28 @@ def test_implausible_year_floor_rises_to_ten_years_before_the_earliest_degree():
 def test_implausible_year_degree_floor_needs_a_written_plausible_b1_year(degree):
     later = _fields_entry("H", {"date": "1975"}, text="Prize '75")
     assert _implausible(degree, later) == []
+
+
+def test_implausible_year_text_match_is_bounded_on_the_left():
+    """1902 inside a longer number is not the year written."""
+    findings = _implausible(_fields_entry("R", {"date": "1902"}, text="No. 21902, 11/02"))
+    assert len(findings) == 1
+
+
+def test_implausible_year_evidence_is_the_truncated_entry_text():
+    text = "11/02 " + "y" * (FIELD_EVIDENCE_VALUE_CHARS + 20)
+    findings = _implausible(_fields_entry("R", {"date": "1902"}, text=text))
+    assert findings[0]["evidence"] == [text[:FIELD_EVIDENCE_VALUE_CHARS]]
+
+
+def test_implausible_year_degree_floor_applies_only_above_the_fixed_floor():
+    """A degree exactly DEGREE_YEAR_LEAD years above the fixed floor sets no
+    floor of its own: the fixed floor and its reason stand."""
+    findings = _implausible(
+        _degree(str(IMPLAUSIBLE_YEAR_FLOOR + DEGREE_YEAR_LEAD)),
+        _fields_entry("H", {"date": "1929"}, text="'29"))
+    assert len(findings) == 1
+    assert "no two-digit year resolves below it" in findings[0]["message"]
 
 
 def test_implausible_year_degree_floor_never_drops_below_the_fixed_floor():

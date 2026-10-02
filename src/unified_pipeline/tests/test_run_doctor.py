@@ -2329,6 +2329,14 @@ def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
     assert "entry 96 (R): date=1902" in hits[0]["message"]
 
 
+def test_field_lint_prevalence_is_the_measured_wave1_fraction():
+    """Measured 2026-10-02 over the 163-CV wave-1 stage-4 farm (one fire per
+    CV at any severity); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["offschema_fields"] == round(42 / 163, 3)
+    assert LINT_PREVALENCE["implausible_year"] == round(6 / 163, 3)
+
+
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
     """_ready's contract: a None input is an ERROR "unreadable" when the file
     existed but would not parse, never the benign "missing". The error scan
