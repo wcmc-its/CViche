@@ -330,13 +330,17 @@ _CELL_LABEL_AFTER_NUMBER_RE = re.compile(
 _PHONE_LABEL_CELL = 'cell'
 _PHONE_LABEL_HOME = 'home'
 # A cell keyword counts at the block level only when it is written as a label
-# (#1222): "(cell)", "Cell:", "Cell phone 212-..." -- never as a word inside an
-# organisation or department name ("Department of Cellular and Integrative
-# Physiology", "Cell Biology"), which routed the office phone to Cell phone.
+# (#1222): "(cell)", "Mobile telephone:", "Cell phone 212-...", or trailing a
+# number "212-555-0100 cell" -- never as a word inside an organisation or
+# department name ("Department of Cellular and Integrative Physiology",
+# "Cell Biology"), which routed the office phone to Cell phone.
+_CELL_KEYWORD = rf'(?:{_CELL_WORDS}|mob)'
+_CELL_PHONE_NOUNS = r'(?:\s*(?:phone|telephone|tel|no|number|#))*'
 _CELL_KEYWORD_AS_LABEL_RE = re.compile(
-    rf'\((?:{_CELL_WORDS}|mob)\)'
-    rf'|\b(?:{_CELL_WORDS}|mob)\b{_COMBINED_WITH_ANOTHER_KIND}{_CELL_NOUN}'
-    r'\s*(?:[:.]|(?=[+(]?\d))',
+    rf'\({_CELL_KEYWORD}\)'
+    rf'|\b{_CELL_KEYWORD}\b{_COMBINED_WITH_ANOTHER_KIND}{_CELL_PHONE_NOUNS}'
+    r'\s*(?:[:.]|(?=[+(]?\d))'
+    rf'|\d\)?[ ]*[-,;]?[ ]*{_CELL_KEYWORD}\b(?![ ]+[a-z])',
     re.IGNORECASE,
 )
 # A work-address label (#1222): office, work or business, then the word

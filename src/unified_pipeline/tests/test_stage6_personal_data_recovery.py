@@ -1094,3 +1094,14 @@ def test_a_cell_label_still_routes_to_cell_phone(tmp_path):
         _a("Cell: 555-0100", {"phone": "555-0100"}),
     ])
     assert rows["Cell phone:"] == "555-0100"
+
+
+@pytest.mark.parametrize("text", [
+    "Mobile telephone: 555-0100",
+    "Mobile Phone Number: 555-0100",
+    "555-0100 cell\tdoe@example.com",
+])
+def test_every_written_cell_label_shape_still_routes_to_cell_phone(tmp_path, text):
+    rows = _contact_rows(tmp_path, [_a(text, {"phone": "555-0100"})])
+    assert rows["Cell phone:"] == "555-0100"
+    assert rows["Office telephone:"] == ""
