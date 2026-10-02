@@ -1057,7 +1057,9 @@ def test_a_kept_name_with_an_acronym_or_history_is_the_same_name(kept_name):
     assert _distinct_bare_names({"text": "Acme Society"}, {"text": kept_name},
                                 "Acme Society", "Beta Society - Acme Society Exchange Program") is True
     assert _distinct_bare_names({"text": "Acme Society"}, {"text": kept_name},
-                                "Acme Society", "Acme Society Exchange Program") is False
+                                "Acme Society", "Acme Society Council on Widgets") is False
+    assert _distinct_bare_names({"text": "Acme Society"}, {"text": kept_name},
+                                "Acme Society", "Acme Society - Gadget Society Exchange Program") is True
 
 
 def test_bare_name_differing_only_in_a_stop_word_is_still_dropped():
@@ -1459,6 +1461,10 @@ def test_a_membership_beside_a_unit_of_the_same_society_is_still_dropped():
     # follows is a council of that society, not another organization.
     kept = _entry("I", "Member, Acme Society - Council on Widgets",
                   organization="Acme Society - Council on Widgets", membership_type="Member")
+    other = _entry("I", "Member, Acme Society - Gadget Society Exchange Program",
+                   organization="Acme Society - Gadget Society Exchange Program",
+                   membership_type="Member")
+    assert _kept_both("I", _entry("I", "Acme Society", organization="Acme Society"), other)
     dropped = _entry("I", "Acme Society", organization="Acme Society")
     assert not _kept_both("I", dropped, kept)
 

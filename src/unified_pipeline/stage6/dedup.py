@@ -469,13 +469,22 @@ def _journal_core_words(name: str) -> set:
     return _core_words(_TRAILING_JOURNAL_RE.sub('', name))
 
 
-def _leads(kept_name: str, name: str) -> bool:
-    """True when the kept name opens with the dropped name's words: what
-    follows is a unit of the same body ("Acme Society - Council on Widgets"),
-    and a bare "Acme Society" is its parallel listing, not another record."""
-    words = _ordered_words(_FORMERLY_RE.sub(' ', _PARENTHETICAL_RE.sub(' ', name)))
-    kept = _ordered_words(_FORMERLY_RE.sub(' ', _PARENTHETICAL_RE.sub(' ', kept_name)))
-    return bool(words) and kept[:len(words)] == words
+# A word that makes what follows a name another body: "Acme Society - Gadget
+# Society Exchange Program" joins two societies, "Acme Society - Council on
+# Widgets" names a council of the one.
+_OTHER_BODY_WORDS = frozenset({
+    'association', 'society', 'college', 'academy', 'federation', 'union',
+    'foundation', 'institute', 'program', 'exchange'})
+
+
+def _is_unit_of(kept_name: str, name: str) -> bool:
+    """True when the kept name opens with the dropped name's words and what
+    follows names no other body: a council or section of the same society, of
+    which a bare "Acme Society" is the parallel listing, not another record."""
+    clean = lambda text: _ordered_words(_FORMERLY_RE.sub(' ', _PARENTHETICAL_RE.sub(' ', text)))
+    words, kept = clean(name), clean(kept_name)
+    return (bool(words) and kept[:len(words)] == words
+            and not _OTHER_BODY_WORDS & set(kept[len(words):]))
 
 
 def _distinct_bare_names(dropped_entry: dict, kept_entry: dict,
@@ -484,10 +493,9 @@ def _distinct_bare_names(dropped_entry: dict, kept_entry: dict,
     the names differ in a significant word: a journal list's "Widgets" is
     contained in "Widgets Quarterly" and is still another journal. The kept
     entry is either another bare name or a row whose name holds the dropped
-    one and more elsewhere than at its start ("Acme Society" in the "Beta
-    Society - Acme Society Exchange Program" row; "Acme Society - Council on
-    Widgets" is a unit of the same society and keeps the bare listing a
-    duplicate). Any other text (a date, a role, a venue) is a record a name
+    one and more ("Acme Society" in the "Gadget Society - Acme Society
+    Exchange Program" row), unless the longer name is a unit of the same body
+    ("Acme Society - Council on Widgets": the bare listing is a duplicate). Any other text (a date, a role, a venue) is a record a name
     alone cannot tell apart, and "The Widgets" is still "Widgets"."""
     if not kept_name or _alnum(dropped_entry.get('text') or '') != _alnum(name):
         return False
@@ -495,7 +503,7 @@ def _distinct_bare_names(dropped_entry: dict, kept_entry: dict,
     if dropped_words == kept_words:
         return False
     return (_alnum(kept_entry.get('text') or '') == _alnum(kept_name)
-            or (dropped_words < kept_words and not _leads(kept_name, name)))
+            or (dropped_words < kept_words and not _is_unit_of(kept_name, name)))
 
 
 # `_other_journal_same_row`: the field that names a journal, and what a row
