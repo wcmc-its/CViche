@@ -1200,3 +1200,13 @@ def test_a_displaced_banner_address_is_recovered_not_lost(tmp_path):
     ])
     assert "1 Sample Way" in text
     assert "Example Center for Sample Research" in text
+
+
+def test_a_value_from_a_structured_address_is_not_displaced(tmp_path):
+    rows = _contact_rows(tmp_path, [
+        _a("Contact", {"address": {"office_address": "5 Dict Street, Exampleton",
+                                   "home_address": "6 Hidden Lane, Exampleton"}}, idx=0),
+        _a("Business Address: 1 Sample Way, Exampleton, ZZ 00000",
+           {"address": "1 Sample Way, Exampleton, ZZ 00000"}, idx=1),
+    ])
+    assert "5 Dict Street" in rows["Office address:"]

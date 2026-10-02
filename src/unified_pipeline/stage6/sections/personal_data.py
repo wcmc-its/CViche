@@ -354,7 +354,7 @@ _CELL_KEYWORD_AS_LABEL_RE = re.compile(
 # or business, so "Business School, Tel." and "Office Fax Number" are not
 # labels, and a residence or mailing line never ranks an address.
 _WORK_ADDRESS_LABEL_RE = re.compile(
-    r'\b(?:office|work|business|hospital)\s+(?:mailing\s+)?address\b',
+    r'\b(?:office|work|business)\s+address\b',
     re.IGNORECASE)
 _WORK_PHONE_LABEL_RE = re.compile(
     r'\b(?:office|work)\s+(?:address|phone|telephone|tel)\b',
