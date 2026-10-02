@@ -24,6 +24,7 @@ from app.models import (
     InboundFile, InboundFileStatus, InboundMessage, InboundMessageStatus, InboundRejectReason, User,
 )
 from app.services import ed_access, mailer
+from app.services.inbound_autorun import AutoRunResult, auto_run
 from app.services.batch_service import MAX_BATCH_FILES
 from app.services.inbound_mail import (
     Attachment, AttachmentReject, ParsedMessage, UnparseableMessage, is_wcm_address, parse_message,
@@ -134,20 +135,22 @@ def _summarise(rejected: Counter) -> str | None:
 
 
 def _hold_files(db: Session, message: InboundMessage, user: User, files: list[Attachment],
-                storage: RunStorage) -> list[str]:
+                storage: RunStorage) -> tuple[list[str], list[InboundFile]]:
     """Store each CV's bytes and add its row; returns the storage prefixes
-    written, so a failed commit can delete them."""
-    written = []
+    written (so a failed commit can delete them) and the rows, in received order."""
+    written, rows = [], []
     for att in files:
         prefix = f"{HELD_PREFIX}{secrets.token_hex(16)}/"
         storage.put_global(f"{prefix}{HELD_OBJECT_NAME}", att.content)
         written.append(prefix)
-        db.add(InboundFile(
+        row = InboundFile(
             inbound_message_id=message.id, user_id=user.id, filename=att.filename,
             size_bytes=len(att.content), sha256=sha256(att.content).hexdigest(), storage_key=prefix,
             status=InboundFileStatus.PENDING,
-        ))
-    return written
+        )
+        db.add(row)
+        rows.append(row)
+    return written, rows
 
 
 def _decide(db: Session, parsed: ParsedMessage, message: InboundMessage) -> tuple[Verdict, list[Attachment]]:
@@ -172,14 +175,17 @@ def _decide(db: Session, parsed: ParsedMessage, message: InboundMessage) -> tupl
     return Verdict(verdict.user, reason), files
 
 
-def _notify(parsed: ParsedMessage, verdict: Verdict, file_count: int) -> None:
+def _notify(parsed: ParsedMessage, verdict: Verdict, result: AutoRunResult | None) -> None:
     """Mail the known, DMARC-passed sender (never anyone else), at the
     address on their account rather than the header they sent."""
     user = verdict.user
     if user is None or not user.email:
         return
-    if verdict.reason is None:
-        mailer.send(mailer.acknowledgement(user.email, file_count, skipped=sum(parsed.rejected.values())))
+    if verdict.reason is None and result is not None:
+        mailer.send(mailer.processing_notice(
+            user.email, runs=result.runs, held=result.held, batch_id=result.batch_id,
+            outdated_consent=result.outdated_consent, skipped=sum(parsed.rejected.values()),
+        ))
     elif verdict.reason in mailer.REPLYABLE_REASONS:
         mailer.send(mailer.rejection(user.email, verdict.reason))
 
@@ -216,7 +222,7 @@ def process_message(db: Session, storage: RunStorage, s3_key: str, raw: bytes) -
     message.user_id = verdict.user.id if verdict.user else None
     written: list[str] = []
     try:
-        written = _hold_files(db, message, verdict.user, files, storage) if files else []
+        written, rows = _hold_files(db, message, verdict.user, files, storage) if files else ([], [])
         db.commit()
     except Exception:
         db.rollback()
@@ -224,8 +230,20 @@ def process_message(db: Session, storage: RunStorage, s3_key: str, raw: bytes) -
         raise
     logger.info("inbound message decided status=%s reason=%s files=%d",
                 message.status, message.reject_reason, message.file_count)
-    _notify(parsed, verdict, len(files))
+    result = _auto_run_or_hold(db, storage, verdict.user, rows) if rows else None
+    _notify(parsed, verdict, result)
     return True
+
+
+def _auto_run_or_hold(db: Session, storage: RunStorage, user: User, rows: list[InboundFile]) -> AutoRunResult:
+    """Start what may start; if that fails for any reason the files stay
+    pending in the inbox and the sender is told they are waiting."""
+    try:
+        return auto_run(db, storage, user, rows)
+    except Exception:
+        db.rollback()
+        logger.exception("inbound auto-run failed; the files stay pending")
+        return AutoRunResult(0, len(rows))
 
 
 def _record_failure(session_factory: Callable[[], Session], s3_key: str) -> None:

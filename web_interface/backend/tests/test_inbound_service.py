@@ -95,6 +95,7 @@ def test_accepted_message_holds_each_cv_and_acknowledges_with_a_count(db, storag
         assert storage.get_global(f"{f.storage_key}{inbound_service.HELD_OBJECT_NAME}")
     assert [(m.kind, m.to_addr) for m in sent] == [(MailKind.ACKNOWLEDGEMENT, SENDER)]
     assert "2 CVs" in sent[0].body and "one.docx" not in sent[0].body and "two.pdf" not in sent[0].body
+    assert [f.status for f in files] == [InboundFileStatus.PENDING] * 2  # in_process dispatch: all held
 
 
 def test_nested_eml_attachments_are_held(db, storage, sent):

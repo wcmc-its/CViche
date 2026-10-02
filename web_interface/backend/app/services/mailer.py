@@ -72,15 +72,36 @@ def _new_run_url() -> str:
     return (explicit or notifications._run_link_base()).rstrip("/") + "/"
 
 
-def acknowledgement(to_addr: str, file_count: int, skipped: int = 0) -> OutboundMail:
-    noun = "CV" if file_count == 1 else "CVs"
-    skipped_line = f"{skipped} other attachment(s) could not be used and were skipped.\n\n" if skipped else ""
+def _runs_batch_url(batch_id: str) -> str:
+    return f"{_new_run_url()}runs?batch={batch_id}"
+
+
+def processing_notice(
+    to_addr: str, *, runs: int, held: int, batch_id: str | None = None,
+    outdated_consent: bool = False, skipped: int = 0,
+) -> OutboundMail:
+    """The reply to an accepted message: how many CVs are processing (with a link
+    to their batch in Runs) and how many wait for the sender in New run. Counts
+    only, never a filename."""
+    lines = []
+    if outdated_consent:
+        lines.append("Please sign in to CViche to review the updated terms. "
+                     f"Your {_cvs(held)} are waiting: {_new_run_url()}")
+    else:
+        if runs:
+            lines.append(f"Processing {_cvs(runs)}. Follow progress in Runs: {_runs_batch_url(batch_id)}")
+        if held:
+            lines.append(f"{_cvs(held)} {'is' if held == 1 else 'are'} waiting for your confirmation "
+                         f"in New run: {_new_run_url()}")
+    if skipped:
+        lines.append(f"{skipped} other attachment(s) could not be used and were skipped.")
     return OutboundMail(
-        MailKind.ACKNOWLEDGEMENT, to_addr, f"CViche received {file_count} {noun}",
-        f"We received {file_count} {noun} by email.\n\n{skipped_line}"
-        f"Review and submit them in CViche: {_new_run_url()}\n\n"
-        "Nothing runs until you sign in and submit.\n",
+        MailKind.ACKNOWLEDGEMENT, to_addr, f"CViche received {_cvs(runs + held)}", "\n\n".join(lines) + "\n",
     )
+
+
+def _cvs(count: int) -> str:
+    return f"{count} CV" if count == 1 else f"{count} CVs"
 
 
 def rejection(to_addr: str, reason: InboundRejectReason) -> OutboundMail:

@@ -20,7 +20,7 @@ def ses(monkeypatch):
 def test_send_is_off_by_default_and_logs_only_the_kind(ses, monkeypatch, caplog):
     monkeypatch.delenv("CVICHE_MAIL_SEND", raising=False)
     with caplog.at_level(logging.INFO, logger="app.services.mailer"):
-        sent = mailer.send(mailer.acknowledgement("pat@med.cornell.edu", 2))
+        sent = mailer.send(mailer.processing_notice("pat@med.cornell.edu", runs=2, held=0, batch_id="BATCHA"))
     assert sent is False
     ses.send_email.assert_not_called()
     assert "would have sent" in caplog.text
@@ -30,7 +30,7 @@ def test_send_is_off_by_default_and_logs_only_the_kind(ses, monkeypatch, caplog)
 def test_send_calls_ses_when_the_flag_is_on(ses, monkeypatch):
     monkeypatch.setenv("CVICHE_MAIL_SEND", "true")
     monkeypatch.setenv("CVICHE_MAIL_FROM", "no-reply@mail.example.org")
-    assert mailer.send(mailer.acknowledgement("pat@med.cornell.edu", 2)) is True
+    assert mailer.send(mailer.processing_notice("pat@med.cornell.edu", runs=2, held=0, batch_id="BATCHA")) is True
     kwargs = ses.send_email.call_args.kwargs
     assert kwargs["FromEmailAddress"] == "no-reply@mail.example.org"
     assert kwargs["Destination"] == {"ToAddresses": ["pat@med.cornell.edu"]}
@@ -39,16 +39,46 @@ def test_send_calls_ses_when_the_flag_is_on(ses, monkeypatch):
 def test_default_sender_is_the_cviche_no_reply_address(ses, monkeypatch):
     monkeypatch.setenv("CVICHE_MAIL_SEND", "1")
     monkeypatch.delenv("CVICHE_MAIL_FROM", raising=False)
-    mailer.send(mailer.acknowledgement("pat@med.cornell.edu", 1))
+    mailer.send(mailer.processing_notice("pat@med.cornell.edu", runs=1, held=0, batch_id="BATCHA"))
     assert ses.send_email.call_args.kwargs["FromEmailAddress"] == "no-reply@cviche.weill.cornell.edu"
 
 
-def test_acknowledgement_has_the_count_and_the_new_run_link_and_no_filename(monkeypatch):
+def _notice(**kwargs):
+    kwargs.setdefault("batch_id", "BATCHA")
+    return mailer.processing_notice("pat@med.cornell.edu", **kwargs).body
+
+
+def test_notice_for_runs_only_links_to_the_batch(monkeypatch):
     monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org/")
-    mail = mailer.acknowledgement("pat@med.cornell.edu", 3)
-    assert "3 CVs" in mail.body
-    assert "https://cviche.example.org/" in mail.body
-    assert ".docx" not in mail.body and ".pdf" not in mail.body
+    body = _notice(runs=3, held=0)
+    assert "Processing 3 CVs" in body and "https://cviche.example.org/runs?batch=BATCHA" in body
+    assert "waiting" not in body
+
+
+def test_notice_with_held_files_also_links_to_new_run(monkeypatch):
+    monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
+    body = _notice(runs=2, held=1)
+    assert "Processing 2 CVs" in body and "1 CV is waiting for your confirmation" in body
+    assert "https://cviche.example.org/runs?batch=BATCHA" in body and "https://cviche.example.org/ " not in body
+    assert body.count("https://cviche.example.org/\n") == 1  # the New run link
+
+
+def test_notice_when_everything_is_held():
+    body = _notice(runs=0, held=4, batch_id=None)
+    assert "Processing" not in body and "4 CVs are waiting for your confirmation" in body
+
+
+def test_notice_for_outdated_consent_says_to_sign_in(monkeypatch):
+    monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
+    body = _notice(runs=0, held=3, batch_id=None, outdated_consent=True)
+    assert "sign in to cviche to review the updated terms" in body.lower() and "3 CVs are waiting" in body
+    assert "Processing" not in body
+
+
+def test_notices_never_carry_a_filename():
+    for kwargs in ({"runs": 2, "held": 1}, {"runs": 0, "held": 2, "outdated_consent": True}, {"runs": 1, "held": 0, "skipped": 2}):
+        body = _notice(**kwargs)
+        assert ".docx" not in body and ".pdf" not in body
 
 
 def test_header_values_lose_cr_and_lf(ses, monkeypatch):
@@ -64,7 +94,7 @@ def test_a_ses_error_is_swallowed(ses, monkeypatch):
     from botocore.exceptions import ClientError
     monkeypatch.setenv("CVICHE_MAIL_SEND", "1")
     ses.send_email.side_effect = ClientError({"Error": {"Code": "MessageRejected"}}, "SendEmail")
-    assert mailer.send(mailer.acknowledgement("pat@med.cornell.edu", 1)) is False
+    assert mailer.send(mailer.processing_notice("pat@med.cornell.edu", runs=1, held=0, batch_id="BATCHA")) is False
 
 
 @pytest.mark.parametrize("reason", sorted(mailer.REPLYABLE_REASONS))
