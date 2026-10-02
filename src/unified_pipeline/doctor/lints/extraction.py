@@ -1086,10 +1086,10 @@ def lint_offschema_fields(stage4: dict) -> list[dict]:
 # --- implausible_year --------------------------------------------------------
 #
 # Given a two-digit year (`m/yy`, `m/d/yy`, `m/yy-yyyy`), the stage-4 model
-# sometimes picks the wrong century: 2002-2004 came back as 1902-1904 and
-# rendered that way (pilot batch 2026-10-02: YOXXOH, WIANVH). Nothing after
-# stage 4 can see it -- stage 6's own century pivot applies only to a raw
-# two-digit string, and the value is four digits by then.
+# sometimes picks the wrong century: dates from the 2000s came back in the
+# 1900s and rendered that way (pilot batch 2026-10-02: YOXXOH, WIANVH).
+# Nothing after stage 4 can see it -- stage 6's own century pivot applies
+# only to a raw two-digit string, and the value is four digits by then.
 
 #: Under `TWO_DIGIT_YEAR_PIVOT` a two-digit yy <= 30 means 20yy, so a 19yy year
 #: below 1930 is exactly a year no two-digit date can produce correctly -- and
@@ -1137,7 +1137,7 @@ def _year_in_text(year: int, text: str) -> bool:
     """The entry's own text writes this year in four digits: the value is the
     source's, whatever it says. Bounded on the left only, because a range
     whose dash the source reader dropped fuses into one digit run
-    ("1968-74" read as "196874": web200's school and degree rows)."""
+    ("1985-89" read as "198589"; web200's school and degree rows)."""
     return re.search(rf"(?<!\d){year}", text) is not None
 
 

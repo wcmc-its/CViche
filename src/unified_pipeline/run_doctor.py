@@ -103,7 +103,7 @@ Lints, ranked by the severity of the failure class they catch:
                           1930 (or 10 years before the owner's earliest
                           degree) and that the entry's text never writes --
                           a two-digit year given the wrong century (YOXXOH's
-                          2002-2004 talks rendered as 1902-1904); WARN
+                          talks from the 2000s rendered in the 1900s); WARN
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
