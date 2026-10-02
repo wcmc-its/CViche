@@ -1316,3 +1316,49 @@ def test_fallback_keeps_a_forward_partial_that_is_more_than_a_fragment():
     ]
     mapped, _ = map_hierarchy_node({"text": "Local", "level": "H2"}, elements, [], 1)
     assert mapped["element_idx"] == 2
+
+
+def test_map_hierarchy_node_child_floor_is_the_mapped_parent_line():
+    # The parent maps to line 1; the child's only match is a partial line
+    # before it. The recursion must hand the child the parent's line as the
+    # partial floor, not 0 (#1178).
+    elements = [_elem(0, "Teaching Assistant"), _elem(1, "Service"), _elem(2, "body line")]
+    node = {"text": "Service", "level": "H1", "children": [{"text": "Teaching", "level": "H2"}]}
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["element_idx"] == 1
+    assert mapped["children"][0]["element_idx"] is None
+
+
+def test_map_hierarchy_node_top_level_node_may_partial_match_a_top_level_heading():
+    # The top-level exclusion protects only children; a top-level node has no
+    # parent path, so it keeps the partial match.
+    elements = [_elem(0, "Teaching"), _elem(1, "body line")]
+    mapped, _ = map_hierarchy_node(
+        {"text": "Teaching Assignments", "level": "H1"}, elements, [], 1,
+        top_level_headers=frozenset({"teaching"}),
+    )
+    assert mapped["element_idx"] == 0
+
+
+def test_map_hierarchy_node_child_is_not_bound_to_an_earlier_top_level_section():
+    # #1178's own shape: a child heading must not bind onto an earlier
+    # top-level section whose heading text it merely contains; the child
+    # stays unmapped and its parent stays a leaf with its body.
+    elements = [
+        _elem(0, "Presentations"),
+        _elem(1, "body line"),
+        _elem(2, "Publications"),
+        _elem(3, "PosterPresentations:"),
+        _elem(4, "body line"),
+    ]
+    pubs = {
+        "text": "Publications",
+        "level": "H1",
+        "children": [{"text": "Poster Presentations", "level": "H2"}],
+    }
+    tops = frozenset({"presentations", "publications"})
+    first, nxt = map_hierarchy_node({"text": "Presentations", "level": "H1"}, elements, [], 0, top_level_headers=tops)
+    second, _ = map_hierarchy_node(pubs, elements, [], nxt, top_level_headers=tops)
+    assert first["element_idx"] == 0
+    assert second["element_idx"] == 2
+    assert second["children"][0]["element_idx"] != 0
