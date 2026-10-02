@@ -88,7 +88,7 @@ _TOKEN_RE = re.compile(r'[a-z0-9]+')
 # L1, L2, M1, M2, N1, N3, N4, S0, T; `_TEXT_RENDERED_CODES`): a child of one would
 # render only its built text, which does not carry the parent's scalars.
 _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
-    'B1': frozenset({'degree', 'institution', 'year'}),
+    'B1': frozenset({'degree', 'discipline', 'institution', 'year'}),
     'B2': frozenset({'institution', 'program_name', 'year'}),
     'C': frozenset({'end_date', 'institution', 'role', 'specialty', 'start_date', 'training_type'}),
     'D1': frozenset({'department', 'end_date', 'institution', 'start_date', 'title'}),
@@ -168,9 +168,9 @@ _LIST_LOST_WHEN_KEPT_WHOLE = frozenset({'B1'})
 # #1187: the attendance dates `sections/education.py` writes into B1's Dates
 # column on top of `_RENDERED_FIELDS['B1']`: flat, generic, and the nested
 # `dates_attended: {start_date, end_date}` dict. A STRING `dates_attended` is
-# not among them -- the renderer ignores it -- so it holds no token. Without
-# these a degree child whose dates the text also names would always be refused
-# by `_fields_carry_text`, and the entry would still vanish.
+# written too, but only when no start/end builds a range (`_is_written_date`). Without these a degree child whose dates the text also
+# names would always be refused by `_fields_carry_text`, and the entry would
+# still vanish.
 _RENDERED_DATE_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'B1': frozenset({'dates_attended_start_date', 'dates_attended_end_date',
                      'start_date', 'end_date'}),
@@ -219,12 +219,19 @@ def _rendered_text(key: str, value: object, code: str) -> str:
     return format_date_for_section(text, code) if _is_date_key(key) else text
 
 
-def _is_written_date(code: str, key: str, value: object) -> bool:
-    """Whether B1's renderer writes this attendance-date field (#1187)."""
-    if key in _RENDERED_DATE_FIELDS.get(code, frozenset()):
+def _is_written_date(code: str, key: str, value: object,
+                     fields: Mapping[str, Any]) -> bool:
+    """Whether B1's renderer writes this attendance-date field (#1187). A
+    string `dates_attended` is written only when no flat or generic start/end
+    is there to build the range from."""
+    bounds = _RENDERED_DATE_FIELDS.get(code, frozenset())
+    if key in bounds:
         return True
-    return code in _RENDERED_DATE_FIELDS and key == _NESTED_DATES_KEY \
-        and isinstance(value, Mapping)
+    if code not in _RENDERED_DATE_FIELDS or key != _NESTED_DATES_KEY:
+        return False
+    if isinstance(value, Mapping):
+        return True
+    return isinstance(value, str) and not any(fields.get(k) for k in bounds)
 
 
 def _fields_carry_text(entry: Mapping[str, Any],
@@ -243,7 +250,7 @@ def _fields_carry_text(entry: Mapping[str, Any],
         for key, value in fields.items():
             if key in rendered:
                 held += _tokens(_rendered_text(key, value, code))
-            elif _is_written_date(code, key, value):
+            elif _is_written_date(code, key, value, fields):
                 held += _tokens(_leaf_text(value))
     return not _tokens(str(entry.get('text') or '')) - held
 

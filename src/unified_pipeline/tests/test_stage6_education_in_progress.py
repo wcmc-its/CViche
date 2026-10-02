@@ -697,3 +697,66 @@ def test_a_city_named_institution_still_gets_its_location():
     # the name is plain text; the location is the enrichment tracked change
     assert row.cells[1].text == "Crab Hollow University"
     assert _cell_ins_parts(row.cells[1]) == [(", Crab Hollow, NY", "Institution Enrichment")]
+
+
+class TestDisciplineAndStringDates:
+    """#1187: the degree cell is "Degree, field of study" from stage 4's
+    `discipline`, and a STRING `dates_attended` fills the Dates cell when no
+    start/end range exists. Synthetic values only."""
+
+    @staticmethod
+    def _render(**fields):
+        gen = _generator()
+        gen._fill_education([{
+            "text": "x",
+            "extracted_fields": {"institution": "Quillfeather University", **fields},
+        }])
+        return _first_data_row(gen)
+
+    def test_discipline_is_appended_to_the_degree(self):
+        row = self._render(degree="PhD", discipline="Zymology")
+        assert row.cells[0].text == "PhD, Zymology"
+
+    @pytest.mark.parametrize("degree", [
+        "PhD in Zymology", "phd, ZYMOLOGY", "Ph.D. (Zym-ology)"])
+    def test_discipline_the_degree_already_holds_is_not_repeated(self, degree):
+        discipline = "Zym ology" if "Zym-ology" in degree else "Zymology"
+        row = self._render(degree=degree, discipline=discipline)
+        assert row.cells[0].text == degree
+
+    def test_discipline_is_added_after_major_unless_major_holds_it(self):
+        assert self._render(degree="MS", major="Zymology",
+                            discipline="Brewing").cells[0].text == "MS, Zymology, Brewing"
+        assert self._render(degree="MS", major="Zymology",
+                            discipline="zymology").cells[0].text == "MS, Zymology"
+
+    def test_a_blank_or_none_discipline_changes_nothing(self):
+        assert self._render(degree="PhD", discipline=None).cells[0].text == "PhD"
+        assert self._render(degree="PhD", discipline="  ").cells[0].text == "PhD"
+
+    def test_a_discipline_alone_does_not_create_a_row(self):
+        gen = _generator()
+        gen._fill_education([{"text": "x", "extracted_fields": {"discipline": "Zymology"}}])
+        assert _education_rows(gen) == []
+
+    def test_string_dates_attended_fills_an_empty_dates_cell_verbatim(self):
+        row = self._render(degree="PhD", dates_attended="Sept 2001 - May 2005")
+        assert row.cells[2].text == "Sept 2001 - May 2005"
+
+    def test_string_dates_attended_yields_to_a_start_end_range(self):
+        expected = format_date_range("2001-09-01", "2005-05-01", "B1")
+        row = self._render(degree="PhD", dates_attended="1999-2000",
+                           start_date="2001-09-01", end_date="2005-05-01")
+        assert row.cells[2].text == expected
+
+    def test_a_blank_string_dates_attended_leaves_the_cell_empty(self):
+        assert self._render(degree="PhD", dates_attended="  ").cells[2].text == ""
+
+    def test_string_dates_attended_is_formatted_like_other_b1_dates(self):
+        row = self._render(degree="PhD", dates_attended="1998-06")
+        assert row.cells[2].text == "06/1998"
+
+    def test_string_dates_attended_repeating_the_year_awarded_is_skipped(self):
+        row = self._render(degree="PhD", dates_attended="1987", year_awarded="1987")
+        assert row.cells[2].text == ""
+        assert row.cells[3].text == "1987"
