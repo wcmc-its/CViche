@@ -3,6 +3,7 @@ import type { RunStatus } from '../types'
 import { getRunStatus, getRunStep, getPromptLogs } from '../api/runs'
 import { getWebSocketUrl } from '../api/websocket'
 import { wsRoutes } from '../api/routes'
+import { clockTime, formatLogLine, mergeLogLines } from '../utils/logLines'
 
 // Tuning Constants matching your design requirements
 // Fallback only — runs now carry a per-document estimated_duration_seconds; this
@@ -163,12 +164,10 @@ export function usePipelineRun(runId: string) {
         const data = await getRunStep(runId, currentStep)
         if (!isMounted || !data.logs || data.logs.length === 0) return
 
-        const formattedLogs = data.logs.map((log: any) => `[${log.time}] ${log.message}`)
+        const formattedLogs = data.logs.map((log: any) => formatLogLine(log.time, log.message))
         setLogs((prev) => {
-          const currentStepLogs = prev[currentStep] || []
-          const uniqueNewLogs = formattedLogs.filter((log: string) => !currentStepLogs.includes(log))
-          if (uniqueNewLogs.length === 0) return prev
-          return { ...prev, [currentStep]: [...currentStepLogs, ...uniqueNewLogs] }
+          const merged = mergeLogLines(prev[currentStep] || [], formattedLogs)
+          return merged === prev[currentStep] ? prev : { ...prev, [currentStep]: merged }
         })
       } catch (err) {
         console.error('Error fetching step logs:', err)
@@ -209,13 +208,10 @@ export function usePipelineRun(runId: string) {
           setStepProgress((prev) => ({ ...prev, [data.step]: { current: 0, total: 0, message: '' } }))
           break
         case 'LOG':
-          const logMessage = data.timestamp
-            ? `[${new Date(data.timestamp).toLocaleTimeString()}] ${data.message}`
-            : data.message
-          setLogs((prev) => ({
-            ...prev,
-            [data.step]: [...(prev[data.step] || []), logMessage],
-          }))
+          {
+            const line = formatLogLine(clockTime(data.timestamp), data.message)
+            setLogs((prev) => ({ ...prev, [data.step]: mergeLogLines(prev[data.step] || [], [line]) }))
+          }
           break
         case 'PROGRESS':
           setStepProgress((prev) => ({

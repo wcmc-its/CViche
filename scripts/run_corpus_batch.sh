@@ -176,7 +176,7 @@ for f in "$INPUT_DIR"/*.docx; do
   # only the web backend does, into storage -- so with stderr suppressed it was a
   # silent no-op and no batch ever captured a score (#435).
   sline=$(PYTHONPATH=src python3 scripts/score_one.py "$OUTPUTS_ROOT" "$stem" \
-            "$OUTDIR/${stem}_wcm.docx" "$OUTDIR/${stem}_quality.json" 2>>"$log") \
+            "$OUTDIR/${stem}_wcm.docx" "$OUTDIR/${stem}_quality.json" --source "$f" 2>>"$log") \
     || sline=$'error\t\t\t'
   printf '%s\t%s\t%s\t%s\n' "$ts" "$SHA" "$stem" "$sline" >> "$SCORES_TSV"
   echo "   score: $(printf '%s' "$sline" | cut -f1) $(printf '%s' "$sline" | cut -f2)"

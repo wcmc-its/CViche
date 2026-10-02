@@ -44,6 +44,7 @@ from unified_pipeline.stage4.coercion import (
 from unified_pipeline.stage4.schemas import (
     FIELD_SCHEMA_CONFIG_PATH,
     FIELD_SCHEMAS,
+    NUMBERED_FIELD_RE,
     STAGE4_RECORDS_KEY,
 )
 from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
@@ -950,11 +951,6 @@ _OFFSCHEMA_SKIPPED_CODES = (frozenset({PERSONAL_DATA_CODE}) | _TEXT_RENDERED_COD
 _IDENTIFIER_KEYS = frozenset({"pmid", "pmcid", "doi"})
 _PERCENT_EFFORT_KEY = "percent_effort"
 
-#: `<declared field>_<n>`: a numbered second copy of a schema field, which is
-#: a second record (`organization_2` held the second column of a two-column
-#: memberships list).
-_NUMBERED_FIELD_RE = re.compile(r"^(?P<field>.+)_\d+$")
-
 
 class OffschemaValue(NamedTuple):
     """One non-empty value under a key no renderer reads."""
@@ -1009,7 +1005,7 @@ def _is_record_shaped(key: str, value: object, declared: frozenset[str]) -> bool
         return all(isinstance(item, Mapping) for item in value)
     if isinstance(value, Mapping):
         return bool(set(value) & declared)
-    numbered = _NUMBERED_FIELD_RE.match(key)
+    numbered = NUMBERED_FIELD_RE.match(key)
     return bool(numbered and numbered.group("field") in declared)
 
 
