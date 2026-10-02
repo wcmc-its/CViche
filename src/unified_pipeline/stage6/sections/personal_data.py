@@ -4,8 +4,8 @@ The shortest section in the template and one of the longest writers, because
 almost nothing about a CV's contact block is structured. The work is in order:
 
 1. Resolve the name. `cv_owner` first, then a LinkedIn slug in the A entries,
-   then the document uid via `_extract_name_from_uid`. A bare surname does not
-   count as complete and keeps the fallbacks running.
+   then the document uid via `_extract_name_from_uid` (empty for a run id, #457).
+   A bare surname does not count as complete and keeps the fallbacks running.
 2. Classify each A entry into one of six slots by reading the LABEL in the
    source text, not the extracted field -- "Cell phone:" and "Office:" are what
    distinguish two otherwise identical phone numbers, and one entry can carry

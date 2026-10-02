@@ -2,7 +2,7 @@
 
 Moved verbatim from `stage_4_field_extractor.py` (#498), which re-exports every
 name here. `extract_cv_owner_name` carries the uid surname fallback
-(`fallback_from_uid`, #457/#464) unchanged.
+(`fallback_from_uid`, #457/#464); it refuses a run id (`core.run_id`).
 """
 
 import json
@@ -16,6 +16,7 @@ from docx.opc.exceptions import PackageNotFoundError
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from unified_pipeline.core.docx_structure_extractor import extract_owner_side_channel
+from unified_pipeline.core.run_id import is_run_id
 from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.llm.retry import RETRYABLE_ERRORS, LLMOutageError
 
@@ -185,20 +186,25 @@ def _owner_name_window(mapped_entries: list[dict[str, Any]]) -> list[str]:
     entries that is short enough to be a header-style line (under
     OWNER_NAME_ENTRY_MAX_CHARS).
 
-    When that filter selects nothing -- a narrative CV whose stage 2 output is
-    a few very long entries -- return each of those entries truncated to
-    OWNER_NAME_ENTRY_MAX_CHARS instead of dropping them (#457): the owner's
-    name sits at the top of the document, so a prefix is usable where an empty
-    window meant name extraction never ran. A CV with at least one short entry
-    keeps the pre-#457 window exactly, so no CV that already had a window sees
-    its prompt change.
+    The owner's name sits at the top of the document, so the first non-empty
+    entry is always in the window: truncated to OWNER_NAME_ENTRY_MAX_CHARS when
+    it is long, ahead of the short entries (#457). Stage 2 can fuse the name
+    line with the contact lines and a text box's prose into one entry of 500+
+    characters, and dropping it for being long sent the model nothing but
+    committee roles.
+
+    When no entry is short -- a narrative CV whose stage 2 output is a few very
+    long entries -- every one of them is returned truncated instead of dropped.
+    A CV whose first entry is short keeps the pre-#457 window exactly.
     """
     texts = [entry.get('text', '').strip() for entry in mapped_entries[:OWNER_NAME_WINDOW_ENTRIES]]
     texts = [text for text in texts if text]
     short = [text for text in texts if len(text) < OWNER_NAME_ENTRY_MAX_CHARS]
-    if short:
-        return short
-    return [text[:OWNER_NAME_ENTRY_MAX_CHARS] for text in texts]
+    if not short:
+        return [text[:OWNER_NAME_ENTRY_MAX_CHARS] for text in texts]
+    if len(texts[0]) >= OWNER_NAME_ENTRY_MAX_CHARS:
+        return [texts[0][:OWNER_NAME_ENTRY_MAX_CHARS], *short]
+    return short
 
 
 def extract_cv_owner_name(
@@ -263,14 +269,19 @@ def extract_cv_owner_name(
             uid_clean = re.sub(r'_cv$', '', document_uid, flags=re.IGNORECASE)
             # Remove random prefix like "WSP0KQ_"
             uid_clean = re.sub(r'^[A-Z0-9]{6}_', '', uid_clean)
+            # A run id is an identifier, not a name (#457). The isalpha() test
+            # below stopped telling the two apart when #1192 made run ids
+            # letters-only, so a web run's every name miss wrote the id in.
+            if is_run_id(uid_clean):
+                return
             parts = uid_clean.split('_')
             # A year token, without the regex engine. Also strictly correct
             # where the regex was not: Python's '$' matches before a trailing
             # newline, so re.match(r'^\d{4}$', '2026\n') is a match.
             name_parts = [p for p in parts
                           if not (len(p) == 4 and p.isdigit()) and len(p) > 1]
-            # Only a purely alphabetic token can be a surname. 'web151' and
-            # 'I5NKUG' are identifiers, not names.
+            # Only a purely alphabetic token can be a surname. 'web151' is an
+            # identifier, not a name (a run id is refused above).
             if name_parts and name_parts[-1].isalpha():
                 result['last_name'] = name_parts[-1]
 

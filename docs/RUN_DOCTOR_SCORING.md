@@ -12,7 +12,9 @@ answer different questions.
 
 The doctor does not compute a 0-100 score. It reports all five of the quality
 score's hard-fail gates, each as an ERROR lint that calls the scorer's own
-predicate, so the two cannot drift apart — that is the whole overlap.
+predicate, so the two cannot drift apart — that is the whole overlap. A sixth
+cap, stage 4's failed extraction groups (below), stops short of RED and so is a
+WARN lint on the same shared predicate.
 
 ## Part 1: the doctor's verdict
 
@@ -146,6 +148,33 @@ Every predicate lives in `quality_score.py` (or, for protected data, in the
 shared lint it calls), and the doctor's matching lint uses the same function,
 so the doctor reports the gate rather than a second definition of it. What that buys is that they cannot drift apart — **not** independent
 confirmation that the gate is calibrated.
+
+### The stage-4 group-failure cap (not a hard fail)
+
+- **cap 84** — `stage4_group_failures()`: stage 4 extracts one taxonomy group per
+  LLM call, and a call that fails (an invalid reply, a timeout, a provider
+  error such as a content filter) writes `extraction_error` on every entry of
+  the group (#1174). The recovery pass then retries those entries on their own
+  prompt; one it fills in keeps its `extraction_error` and gains
+  `extraction_success=True`, so neither `stats.extraction_failed` (counted after
+  recovery) nor the error-string scan above (it reads only a key named exactly
+  `error`) sees a group that was rescued in full. Cap-only gate in
+  `CAP_ONLY_GATES`, weight 0, so no clean run's raw score moves. The cap is
+  `BAND_GREEN - 1`: a run with a failed group cannot be GREEN, and reads
+  YELLOW. Doctor lint: `stage4_group_failures` (WARN, evidence names the
+  taxonomy codes, the cause, and how many entries were rescued).
+
+  What it counts: entries whose `extraction_error` is set, other than the
+  per-entry "No matching extraction in LLM response" (a successful call whose
+  reply omitted one entry, already counted by the sparseness dimension), plus
+  `stats.failed_batches > 0`. A rescued group counts: the rescued entries were
+  read on a different prompt and can carry wrong values.
+
+  What it deliberately does not do: grade the cap by the share of entries left
+  unextracted. No measurement supports a threshold, and a failed group is
+  rare (3 of 163 corpus CVs), so a flat cap is the claim the evidence supports.
+  It also does not see a call served by the Sonnet 4.6 content-filter fallback
+  (#1207) that succeeded, because stage 4 does not record which model answered.
 
 ### Bands
 

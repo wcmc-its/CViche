@@ -328,7 +328,7 @@ def _insertions(cell) -> list[tuple[str, str]]:
     ({'start_date': '2017-08', 'end_date': '2021-07', 'year': '2019'},
      'Certificate, August 2020', '08/17-07/21', False),
     ({'start_date': '2017-08', 'year': '2019'}, 'Certificate, August 2020',
-     '08/17-Present', False),
+     '08/17', False),
     ({'end_date': '2021-07', 'year': '2019'}, 'Certificate, August 2020',
      '07/21', False),
     ({'year': '2019'}, 'Certificate, August 2020', '2019', False),
@@ -336,9 +336,13 @@ def _insertions(cell) -> list[tuple[str, str]]:
     ({}, 'Certificate in Epidemiology, August 2020', '2020', True),
     ({}, 'Certificate 2019-2021', '2021', True),
     ({}, 'Certificate in Epidemiology', '', False),
+    ({'start_date': '2020'}, 'Workshop, Example Institute, 2020', '2020', False),
+    ({'start_date': '2020'}, 'Workshop, Example Institute, 2020-', '2020-Present', False),
+    ({'start_date': '2020', 'end_date': 'present'}, 'Workshop, 2020', '2020-Present', False),
 ], ids=['range-beats-year-and-text', 'start-only-beats-year', 'end-only-beats-year',
         'year-beats-text', 'year_awarded-beats-text', 'text-month-year',
-        'text-range-takes-end-year', 'nothing'])
+        'text-range-takes-end-year', 'nothing', 'start-only-is-one-occasion',
+        'start-only-open-dash-in-source', 'end-says-present'])
 def test_b2_date_precedence(fields, text, dates, from_text):
     """start/end -> year (year, then year_awarded) -> raw text, each step
     winning outright; only the raw-text step is marked as inferred."""
@@ -346,6 +350,19 @@ def test_b2_date_precedence(fields, text, dates, from_text):
         {'taxonomy_code': 'B2', 'text': text,
          'extracted_fields': {'program_name': 'Certificate', **fields}})
     assert (record.dates, record.dates_from_text) == (dates, from_text)
+
+
+def test_b2_start_only_renders_the_bare_date_in_the_table():
+    """#1220: one date in the source is the date attended, not an open range."""
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Workshop, Example Institute, 2020',
+         'extracted_fields': {'program_name': 'Workshop', 'start_date': '2020'}},
+        {'taxonomy_code': 'B2', 'text': 'Course, Example Institute, 06/2019-',
+         'extracted_fields': {'program_name': 'Course', 'start_date': '2019-06'}}])
+
+    dates = {row.cells[0].text: row.cells[2].text for row in gen.doc.tables[0].rows[1:]}
+    assert dates == {'Workshop': '2020', 'Course': '06/19-Present'}
 
 
 def test_b2_text_extracted_year_renders_as_a_tracked_insertion():

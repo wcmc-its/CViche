@@ -46,6 +46,38 @@ def test_cap_source_parses_the_real_scorers_flag_text(tmp_path):
         "No rendered output produced at all (HARD-FAIL gate)"]
 
 
+def test_cap_source_names_the_stage4_group_failure_gate_from_the_real_scorer(tmp_path):
+    """#1174: a run that would score exactly 85 GREEN but for one failed
+    stage-4 extraction group is capped at 84, and the report names that gate
+    and its doctor lint (run through the real scorer, not a hand-copied flag)."""
+    import json
+    from docx import Document
+
+    (tmp_path / "T1_fields.json").write_text(json.dumps({
+        "cv_owner": {"full_name": "Jane Q. Public"},
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "stats": {"failed_batches": 1},
+        "entries": [{"taxonomy_code": "P", "extraction_success": True,
+                     "extraction_error": "llm_response_invalid",
+                     "extracted_fields": {"email": "j@x.org"}}]}))
+    (tmp_path / "T1_classified.json").write_text(json.dumps({"meta": {
+        "total_entries": 4, "duplicate_entries": 0, "code_distribution": {"A": 3, "T": 1}}}))
+    (tmp_path / "T1_entries.json").write_text(json.dumps({"coverage": {"coverage_percentage": 100}}))
+    doc = Document()
+    doc.add_paragraph("clean")
+    row = doc.add_table(rows=1, cols=2).rows[0]
+    row.cells[0].text, row.cells[1].text = "a", "b"
+    doc.save(tmp_path / "T1_wcm.docx")
+
+    result = scorer.score_run(tmp_path, "T1")
+    source = rqr.cap_source(qss.parse_score(result))
+
+    assert (result["raw_score_before_caps"], result["totalScore"]) == (85.0, 84)
+    assert source == rqr.CapSource(
+        "field extraction failed for a group of entries", "stage4_group_failures")
+    assert source in rqr.CAP_SOURCE_BY_GATE_NAME.values()
+
+
 def test_every_known_lint_has_a_plain_english_line():
     assert set(KNOWN_LINTS) <= set(rqr.LINT_EXPLANATIONS)
 

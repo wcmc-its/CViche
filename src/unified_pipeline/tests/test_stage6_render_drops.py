@@ -209,6 +209,20 @@ def test_grouping_replaces_a_multi_record_entry_with_one_entry_per_record() -> N
     assert [e["fanned_out_from"]["index"] for e in groups["H"]] == [0, 1, 2]
 
 
+def test_grouping_splits_the_records_stage4_kept_for_one_entry() -> None:
+    """Stage 6 hands fan-out stage 4's records key: without it the list below
+    would go to the generic rules, which find the parent an extra record."""
+    from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+    records = [{"committee_name": "Glade Board", "role": "Chair"},
+               {"committee_name": "Fern Council", "role": "Member"}]
+    entry = {"taxonomy_code": "P", "element_idx_start": 3,
+             "text": "Chair, Glade Board\tMember, Fern Council\tAshby University",
+             "extracted_fields": {**records[-1], STAGE4_RECORDS_KEY: records}}
+    groups = WCMTemplateGenerator(verbose=False)._group_entries_by_code([entry])
+    assert [e["extracted_fields"]["committee_name"] for e in groups["P"]] == [
+        "Glade Board", "Fern Council"]
+
+
 def test_fanned_out_records_each_go_through_the_pii_pass() -> None:
     """A PII-keyed scalar the children inherit is dropped from EACH child, and
     a labelled fragment in one child's own text is cut from that child only."""

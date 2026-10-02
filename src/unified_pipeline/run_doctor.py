@@ -91,12 +91,35 @@ Lints, ranked by the severity of the failure class they catch:
                           meta.stats: it failed and left its entries
                           unchanged; WARN, the run completes (#818)
 
-14f. python_repr_in_output a Python dict or list repr rendered as document text
+14f. offschema_fields     a stage-4 value under a key that is in neither
+                          field schema, not rendered for its code, not
+                          stage-4 bookkeeping, and not a record list fan-out
+                          splits -- no renderer reads it, so it never reaches
+                          the document (TXTATQ's `organization_2`: 6
+                          memberships); WARN for a whole record, INFO for one
+                          fact (#817)
+
+14g. implausible_year     a stage-4 date-named field whose year is below
+                          1930 (or 10 years before the owner's earliest
+                          degree) and that the entry's text never writes --
+                          a two-digit year given the wrong century (YOXXOH's
+                          talks from the 2000s rendered in the 1900s); WARN
+
+14h. stage4_group_failures a stage-4 taxonomy group's extraction call failed
+                          (invalid reply, timeout, provider error such as a
+                          content filter): its entries were written empty and
+                          the recovery pass retried them, so the failure hides
+                          in the artifact -- `extraction_error` on the entries
+                          and `stats.failed_batches`, never an `error` key.
+                          WARN: it caps the quality score at 84, one point
+                          under GREEN, not into the RED band (#1174)
+
+14i. python_repr_in_output a Python dict or list repr rendered as document text
                           (`<year>-{'start_date': ..., 'end_date': ...}`):
                           a structured field was `str()`-ed into a cell
                           instead of formatted (#1233); WARN on any hit
 
-14g. llm_refusal_in_output language-model refusal or request-for-input text
+14j. llm_refusal_in_output language-model refusal or request-for-input text
                           rendered as document text ("I don't have access to
                           specific CV details ..."): stage 4.5 summarised an
                           empty CV context and the reply was delivered (#1224);
@@ -223,7 +246,9 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
+    lint_implausible_year,
     lint_invented_records,
+    lint_offschema_fields,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
     lint_wrong_start_date,
@@ -295,6 +320,7 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_pipeline_errors,
     lint_stage3b_fallback_ratio,
     lint_stage3b_second_pass_errors,
+    lint_stage4_group_failures,
 )
 
 
@@ -363,6 +389,9 @@ KNOWN_LINTS = (
     "table_lost",
     "date_only_lines",
     "stage3b_second_pass_error",
+    "offschema_fields",
+    "implausible_year",
+    "stage4_group_failures",
     "python_repr_in_output",
     "llm_refusal_in_output",
     "owner_contact_missing",
@@ -443,6 +472,20 @@ LINT_PREVALENCE = {
     # 0.001 floor; this row now carries its own measured value rather than
     # borrowing theirs.
     "invented_records": 0.011,
+    # Both measured 2026-10-02 on the 163-CV wave-1 stage-4 farm, one fire
+    # per CV at any severity: offschema_fields 37/163 (16 of 23 sampled
+    # findings a value missing from the rendered docx, before record-shaped
+    # values on text-rendered entries were reported too: 20 more values, 11
+    # with a string the docx lacks), implausible_year 6/163 (every one of
+    # its 17 findings a hand-checked wrong century).
+    "offschema_fields": 0.227,
+    "implausible_year": 0.037,
+    # #1174: 3 of 163 corpus CVs (the 126-CV census farm + the 37 uids of the
+    # 2026-10-02 IPXFBA batch, scripts/doctor_gate.py, measured 2026-10-02):
+    # two batch uids whose stage-4 group call returned two JSON objects, and
+    # one older-build census uid whose group call hit a provider error. Same
+    # mixed-corpus caveat as duplicate_records above.
+    "stage4_group_failures": 0.018,
     # python_repr_in_output and llm_refusal_in_output (#1233, #1224): fire
     # counts on the 163 stage-6 renders of the 2026-10 wave-1 corpus (126
     # census + 37 IPXFBA CVs) as rendered by origin/dev e59aaf44, which still
@@ -921,6 +964,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("table_lost", lint_table_lost, ("source_block_lines", "stage_2")),
     LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
     LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
+    LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",)),
+    LintSpec("implausible_year", lint_implausible_year, ("stage_4",)),
+    LintSpec("stage4_group_failures", lint_stage4_group_failures, ("stage_4",)),
     LintSpec("python_repr_in_output", lint_python_repr_in_output, ("blocks",)),
     LintSpec("llm_refusal_in_output", lint_llm_refusal_in_output, ("blocks",)),
 )
