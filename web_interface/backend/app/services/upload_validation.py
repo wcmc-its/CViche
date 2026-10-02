@@ -105,8 +105,11 @@ _URI_SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):")
 _UNC_PREFIX = re.compile(r"[\\/]{2}")
 _FIELD_CODE = re.compile(r"\s*([A-Za-z]+)")
 # What reading one part can raise on a zip whose directory _validate_docx_magic
-# accepted: a CRC mismatch, a corrupt deflate stream, malformed XML.
-_PART_READ_ERRORS = (zipfile.BadZipFile, zlib.error, XMLSyntaxError)
+# accepted: a CRC mismatch, a corrupt deflate stream, malformed XML, an
+# unsupported compression method (NotImplementedError), an encrypted entry
+# (RuntimeError). python-docx never reads an orphan part, so on dev such a
+# file uploads; the scan must not turn it into a 500.
+_PART_READ_ERRORS = (zipfile.BadZipFile, zlib.error, XMLSyntaxError, NotImplementedError, RuntimeError)
 
 
 def docx_active_content(content: bytes) -> ActiveContent | None:

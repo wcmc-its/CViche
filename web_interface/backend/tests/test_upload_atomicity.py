@@ -407,6 +407,7 @@ def test_validate_docx_magic_rejects_too_many_entries(monkeypatch):
 # --- #1334: macros, network-linked parts and DDE fields are refused ----------
 
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+_W_STRICT_NS = "http://purl.oclc.org/ooxml/wordprocessingml/main"
 _REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/"
 _SETTINGS_RELS = "word/_rels/settings.xml.rels"
 
@@ -476,6 +477,8 @@ def _complex_field(*instr_runs: str) -> str:
      upload_validation.ActiveContent.EXTERNAL_LINK),
     ("remote image in a header's rels", {"word/_rels/header1.xml.rels": _rels("image", "https://evil.example/x.png")},
      upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("upper-case rels part name", {"word/_rels/settings.xml.RELS": _rels("attachedTemplate", "https://e.example/x")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
     ("file:/// attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file:///C:/x.dotm")}, None),
     ("file://localhost attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file://localhost/x.dotm")},
      None),
@@ -513,6 +516,12 @@ def _complex_field(*instr_runs: str) -> str:
     ("DDE only after an empty field's separate", {"word/document.xml": _document(
         "<w:r><w:fldChar w:fldCharType='begin'/></w:r><w:r><w:fldChar w:fldCharType='separate'/></w:r>"
         "<w:r><w:instrText>DDEAUTO x y</w:instrText></w:r><w:r><w:fldChar w:fldCharType='end'/></w:r>")}, None),
+    ("DDE in an upper-case part name", {"WORD/FOOTER9.XML": _document("<w:fldSimple w:instr='DDEAUTO x y'/>")},
+     upload_validation.ActiveContent.DDE),
+    ("strict-OOXML fldSimple DDEAUTO", {"word/footer8.xml": _document("<w:fldSimple w:instr='DDEAUTO x y'/>").replace(
+        _W_NS, _W_STRICT_NS)}, upload_validation.ActiveContent.DDE),
+    ("strict-OOXML complex DDE", {"word/footer7.xml": _document(_complex_field("DDE x y")).replace(
+        _W_NS, _W_STRICT_NS)}, upload_validation.ActiveContent.DDE),
     ("a non-DDE field", {"word/document.xml": _document(_complex_field("PAGE"))}, None),
     ("body text DDE", {"word/document.xml": _document("<w:r><w:t>DDE DDEAUTO lab</w:t></w:r>")}, None),
     ("ActiveX part", {
@@ -547,6 +556,23 @@ def test_docx_active_content_still_scans_past_an_unreadable_part(caplog):
     skipped = [r for r in caplog.records if "skipped an unreadable part" in r.getMessage()]
     assert len(skipped) == 1 and skipped[0].exc_info is not None
     assert upload_validation.docx_active_content(_docx_with_parts({"word/document.xml": "<<<not xml"})) is None
+
+
+@pytest.mark.parametrize("label, mark", [
+    ("encrypted", lambda info: setattr(info, "flag_bits", info.flag_bits | 0x1)),
+    ("unsupported compression", lambda info: setattr(info, "compress_type", 99)),
+])
+def test_docx_active_content_skips_an_orphan_part_zipfile_cannot_read(label, mark):
+    """An orphan part python-docx never reads, but zipfile refuses to (it raises
+    RuntimeError / NotImplementedError), is skipped like any unreadable part,
+    never a 500."""
+    out = io.BytesIO(_docx_with_parts({}))
+    with zipfile.ZipFile(out, "a") as zf:
+        zf.writestr("word/orphan.xml", _document("<w:fldSimple w:instr='PAGE'/>"))
+        mark(zf.filelist[-1])  # rewrites the central directory entry on close
+    content = out.getvalue()
+    assert _validate_docx_magic(content) is True, label
+    assert upload_validation.docx_active_content(content) is None, label
 
 
 def test_docx_active_content_resolves_no_entities(tmp_path):
