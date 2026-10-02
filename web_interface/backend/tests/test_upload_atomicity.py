@@ -331,7 +331,7 @@ def test_validate_docx_magic_rejects_a_high_ratio_docx(monkeypatch):
     """#793: expansion is bounded before python-docx parses. A docx whose
     declared uncompressed total exceeds the cap is rejected, and one within
     it passes (cap patched small so the fixture stays tiny)."""
-    import app.api.upload as upload
+    import app.services.upload_validation as upload
     bomb = _docx_bytes("A" * 50_000)  # deflates to a few hundred bytes
     monkeypatch.setattr(upload, "_DOCX_MAX_UNCOMPRESSED_BYTES", 40_000)
     assert len(bomb) < 40_000
@@ -342,7 +342,7 @@ def test_validate_docx_magic_rejects_a_high_ratio_docx(monkeypatch):
 
 def test_validate_docx_magic_rejects_too_many_entries(monkeypatch):
     """#793: the entry-count bound, at and past the cap."""
-    import app.api.upload as upload
+    import app.services.upload_validation as upload
     content = _docx_bytes("hello")
     with zipfile.ZipFile(io.BytesIO(content)) as z:
         n = len(z.infolist())
@@ -415,7 +415,7 @@ def test_extract_text_lets_an_unexpected_error_surface():
     read failure is a bug in the reader, and it propagates instead of being
     swallowed into a fail-open None (§5.4). Widening the tuple back to
     ``Exception`` fails this test."""
-    with patch("app.api.upload.Document", side_effect=RuntimeError("reader bug")):
+    with patch("app.services.upload_validation.Document", side_effect=RuntimeError("reader bug")):
         with pytest.raises(RuntimeError):
             _extract_text(_docx_bytes("hello"), ".docx")
 

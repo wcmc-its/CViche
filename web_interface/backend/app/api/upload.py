@@ -1,16 +1,11 @@
 """File upload API endpoint."""
 import hashlib
-import io
 import json
 import logging
-import os
 import secrets
 import string
-import tempfile
 import threading
 import time
-import zipfile
-import zlib
 from pathlib import Path
 from collections.abc import Callable
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
@@ -20,9 +15,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pydantic import BaseModel
 from typing import Literal, NamedTuple, Optional
-from docx import Document
-from docx.opc.exceptions import PackageNotFoundError
-from lxml.etree import XMLSyntaxError
 
 from app.database import get_db
 from app.models import Run, Step, User
@@ -44,15 +36,16 @@ from app.services.batch_service import MAX_BATCH_FILES, get_owned_batch
 from app.services.run_service import UPLOAD_DIR
 from app.services.input_format import detect_input_format_or_none
 from app.services.template_warning import detect_wcm_template
+from app.services.upload_validation import (  # noqa: F401 -- re-exported: tests patch these names here
+    MIN_EXTRACTED_CHARS, PDF_EXTENSION, PDF_MAGIC, ZIP_MAGIC, _DOCX_MAX_ENTRIES,
+    _DOCX_MAX_UNCOMPRESSED_BYTES, _DOCX_READ_ERRORS, _extract_text, _validate_docx_magic, _validate_pdf_magic,
+)
 from app.services.pdf_sandbox import (
     PDF_BUSY_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, PDF_UNREADABLE_MESSAGE, EncryptedPdfError,
-    PdfBusyError, PdfTooComplexError, UnreadablePdfError, extract_pdf_text,
+    PdfBusyError, PdfTooComplexError, UnreadablePdfError,
 )
 
 logger = logging.getLogger(__name__)
-ZIP_MAGIC = b"PK\x03\x04"
-PDF_MAGIC = b"%PDF-"
-PDF_EXTENSION = ".pdf"
 # How the duplicate notice words the date a file was last processed.
 DUPLICATE_DATE_FORMAT = "%B %-d, %Y"
 
@@ -73,10 +66,6 @@ _ENCRYPTED_PDF_MESSAGE = (
     "password, or upload the CV as a .docx."
 )
 
-# Minimum extracted text (characters) for a document to be considered readable.
-# A real CV runs into the thousands of characters; anything below this is almost
-# certainly a scanned image, a password-protected file, or effectively blank.
-MIN_EXTRACTED_CHARS = 500
 
 # /estimate's placeholder char count when _extract_text couldn't read the
 # document at all (#794) -- a mid-range guess so the quote shown is neither
@@ -95,87 +84,6 @@ def _estimate_char_count(extracted: str | None) -> int:
     if extracted is None:
         return _ESTIMATE_FALLBACK_CHAR_COUNT
     return max(len(extracted), _ESTIMATE_MIN_CHAR_COUNT)
-
-
-# Expansion bound checked before python-docx parses (#793). zipfile stops
-# inflating each entry at its declared file_size, so capping the declared
-# totals caps what a parse can expand to. The 392 local corpus CVs top out at
-# 37 entries and 7.2 MB uncompressed; a zip bomb declares gigabytes.
-_DOCX_MAX_ENTRIES = 1000
-_DOCX_MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
-
-
-def _validate_pdf_magic(content: bytes) -> bool:
-    """Check if content starts with the PDF header."""
-    return content[:len(PDF_MAGIC)] == PDF_MAGIC
-
-
-def _validate_docx_magic(content: bytes) -> bool:
-    """Check if content is a ZIP archive containing Word document structure,
-    within the entry-count and uncompressed-size bounds above."""
-    if content[:4] != ZIP_MAGIC:
-        return False
-    try:
-        with zipfile.ZipFile(io.BytesIO(content)) as zf:
-            entries = zf.infolist()
-            if (len(entries) > _DOCX_MAX_ENTRIES
-                    or sum(e.file_size for e in entries) > _DOCX_MAX_UNCOMPRESSED_BYTES):
-                logger.warning("Rejected docx: %d entries, %d bytes uncompressed",
-                               len(entries), sum(e.file_size for e in entries))
-                return False
-            return "word/document.xml" in zf.namelist()
-    except (zipfile.BadZipFile, Exception):
-        return False
-
-
-# What python-docx raises on a zip-shaped upload it cannot read (measured on
-# 1.2.0): a zip missing its parts -> KeyError; malformed part XML ->
-# XMLSyntaxError; a truncated zip -> BadZipFile; not an OPC package at all ->
-# PackageNotFoundError; the tempfile round-trip -> OSError. Anything else is a
-# bug and must surface, not be swallowed (§5.4).
-_DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSyntaxError, OSError,
-                     zlib.error)
-
-
-def _extract_text(content: bytes, file_ext: str) -> str | None:
-    """Best-effort text extraction for the empty-document guard.
-
-    Returns the extracted text, an empty string when the file is readable but
-    contains no text (scan/blank), or ``None`` when the document could not be
-    read at all (a known python-docx read failure, see ``_DOCX_READ_ERRORS``).
-    Callers treat ``None`` as "cannot determine" and skip the guard rather
-    than block a possibly-valid upload.
-
-    A PDF never fails open (#806): the run's conversion uses the same parser
-    under the same limits, so a PDF this cannot read, the run cannot either.
-
-    Raises:
-        EncryptedPdfError: a password-protected PDF.
-        PdfTooComplexError: a PDF over pdf_sandbox's page, memory or time limit.
-        UnreadablePdfError: any other PDF parse failure.
-        PdfBusyError: every PDF child slot is taken.
-    """
-    if file_ext == PDF_EXTENSION:
-        return extract_pdf_text(content)
-    if file_ext != ".docx":
-        return None
-    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
-        tmp.write(content)
-        tmp_path = tmp.name
-    try:
-        doc = Document(tmp_path)
-        parts = [p.text for p in doc.paragraphs if p.text.strip()]
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    if cell.text.strip():
-                        parts.append(cell.text)
-        return "\n".join(parts)
-    except _DOCX_READ_ERRORS as e:
-        logger.warning("Text extraction for empty-doc guard failed (%s): %s", file_ext, e, exc_info=True)
-        return None
-    finally:
-        os.unlink(tmp_path)
 
 
 async def _extract_text_or_400(content: bytes, file_ext: str) -> str | None:

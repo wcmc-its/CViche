@@ -929,7 +929,7 @@ class TestUploadValidation:
         doc.add_paragraph("A" * 50_000)
         buf = io.BytesIO()
         doc.save(buf)
-        with patch("app.api.upload._DOCX_MAX_UNCOMPRESSED_BYTES", 40_000), \
+        with patch("app.services.upload_validation._DOCX_MAX_UNCOMPRESSED_BYTES", 40_000), \
                 patch("app.api.upload._extract_text") as extract:
             response = client.post(
                 endpoint,

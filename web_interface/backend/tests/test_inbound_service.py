@@ -12,12 +12,11 @@ from datetime import datetime, timedelta
 
 import pytest
 from docx import Document
-from fastapi import HTTPException
 
 from app.models import (
     InboundFile, InboundFileStatus, InboundMessage, InboundMessageStatus, InboundRejectReason, User,
 )
-from app.services import inbound_service
+from app.services import ed_access, inbound_service
 from app.services.inbound_mail import AttachmentReject
 from app.services.mailer import MailKind
 from app.storage.local_storage import LocalRunStorage
@@ -213,21 +212,21 @@ def test_a_user_out_of_the_ed_access_group_is_refused(db, storage, sent, seed_ed
     def unavailable(**kwargs):
         raise EdUnavailableError("directory down")
 
-    monkeypatch.setattr("app.auth.check_ed_membership", unavailable)
+    monkeypatch.setattr("app.services.ed_access.check_ed_membership", unavailable)
     _process(db, storage, make_eml(attachments=[("a.docx", _docx())]))
     assert _rejected(db) == InboundRejectReason.NOT_IN_ACCESS_GROUP  # fails closed
     assert [m.kind for m in sent] == [MailKind.REJECTION]
 
 
-def test_ed_check_runs_through_the_auth_function(db, storage, sent, monkeypatch):
+def test_ed_check_runs_through_the_shared_service(db, storage, sent, monkeypatch):
     _user(db)
     calls = []
 
     def deny(user, db):
         calls.append(user.email)
-        raise HTTPException(status_code=401, detail={"error": "not_authorized"})
+        raise ed_access.EdNotInAccessGroup()
 
-    monkeypatch.setattr("app.auth._recheck_ed_membership", deny)
+    monkeypatch.setattr("app.services.ed_access.verify_ed_access", deny)
     _process(db, storage, make_eml(attachments=[("a.docx", _docx())]))
     assert calls == [SENDER]
     assert _rejected(db) == InboundRejectReason.NOT_IN_ACCESS_GROUP

@@ -1125,3 +1125,24 @@ def test_email_intake_poller_starts_a_thread_when_flagged(monkeypatch):
     assert thread is not None
     thread.join(timeout=5)
     assert started.is_set()
+
+
+def test_email_intake_does_not_pull_app_auth_or_app_api_into_the_worker():
+    """#1298: the worker boundary (run_service.UPLOAD_DIR) -- with intake on, the
+    worker imports neither app.auth (which needs CVICHE_SESSION_SECRET at import)
+    nor anything under app.api. Fresh interpreter, no session secret."""
+    import subprocess
+    import sys
+    code = (
+        "import sys\n"
+        "from app import worker\n"
+        "from app.services import inbound_service\n"
+        "bad = [m for m in sys.modules if m == 'app.auth' or m == 'app.api' or m.startswith('app.api.')]\n"
+        "print(bad)\n"
+        "sys.exit(1 if bad else 0)\n"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "CVICHE_SESSION_SECRET"}
+    env["CVICHE_EMAIL_INTAKE"] = "1"
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
+                            cwd=str(Path(__file__).resolve().parents[1]))
+    assert result.returncode == 0, result.stdout + result.stderr
