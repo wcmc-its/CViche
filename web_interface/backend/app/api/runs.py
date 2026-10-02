@@ -7,14 +7,14 @@ from datetime import datetime
 import redis
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Query as SAQuery, Session, selectinload
 from pathlib import Path
 
 from app.database import get_db
 from app.models import Run, RunState, Step, User
 from app.schemas import (
     RunFilterOptions, RunStatus, RunSummary, StepSummary, PaginatedRuns,
-    CapacityResponse, RunActionResponse, RestartRunResponse,
+    CapacityResponse, RunActionResponse, RestartRunResponse, StatusFilterCounts,
     RunFeedbackSummary, RunQualityReport, RunReviewNote,
 )
 from app.pipeline.orchestrator import PipelineOrchestrator
@@ -27,11 +27,11 @@ from app.services.run_service import (
     flip_to_queued, revert_queued, StepSnapshot,
 )
 from app.rate_limiter import check_rate_limit
-from app.errors import not_found, bad_request, conflict
+from app.errors import not_found, bad_request, conflict, forbidden
 from app.services.runs_admin_query import (
-    RunScope, build_filter_options, empty_feedback_summary, feedback_clause,
+    RunScope, StatusFilter, build_filter_options, empty_feedback_summary, feedback_clause,
     filtered_runs_query, load_feedback_summaries, parse_feedback_filter,
-    parse_run_filters, run_by_summary,
+    my_status_counts, parse_run_filters, parse_status_filter, run_by_summary, status_clause,
 )
 from app.services import quality_score_service
 from app.services.run_quality_report import build_run_quality_report, columns_need_cleanup
@@ -204,6 +204,8 @@ def get_run_filter_options(
     faculty: str | None = Query(None),
     department: str | None = Query(None),
     feedback: str | None = Query(None),
+    input_format: str | None = Query(None),
+    status: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ) -> RunFilterOptions:
@@ -212,7 +214,17 @@ def get_run_filter_options(
     Each facet's counts apply the other filters but not its own."""
     if scope != RunScope.ALL:
         raise bad_request("filter-options is only available with scope=all")
-    return build_filter_options(db, parse_run_filters(run_by, faculty, department, feedback))
+    return build_filter_options(
+        db, parse_run_filters(run_by, faculty, department, feedback, input_format, status))
+
+
+@router.get("/runs/my-status-counts", response_model=StatusFilterCounts)
+def get_my_status_counts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> StatusFilterCounts:
+    """The status pill counts over the caller's own runs (any role): never other users' runs."""
+    return my_status_counts(db, current_user.id)
 
 
 def _run_summary(current_user: User, run: Run, all_scope: bool,
@@ -237,6 +249,21 @@ def _run_summary(current_user: User, run: Run, all_scope: bool,
     )
 
 
+def _my_runs_query(db: Session, current_user: User, feedback: str | None,
+                   status: str | None) -> SAQuery:
+    """scope=mine: the caller's own runs, narrowed by ``feedback`` and ``status``.
+    status=red is the admin score filter: 403 here."""
+    query = db.query(Run).filter(Run.user_id == current_user.id)
+    status_filter = parse_status_filter(status)
+    if status_filter is StatusFilter.RED:
+        raise forbidden("The red-score filter is admin only")
+    for clause in (feedback_clause(parse_feedback_filter(feedback)),
+                   status_clause(status_filter)):
+        if clause is not None:
+            query = query.filter(clause)
+    return query
+
+
 @router.get("/runs", response_model=PaginatedRuns)
 async def list_runs(
     offset: int = Query(0, ge=0),
@@ -246,6 +273,8 @@ async def list_runs(
     faculty: str | None = Query(None),
     department: str | None = Query(None),
     feedback: str | None = Query(None),
+    input_format: str | None = Query(None),
+    status: str | None = Query(None),
     batch_id: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -253,10 +282,13 @@ async def list_runs(
     """List pipeline runs, most recent first.
 
     scope=mine (default): the current user's runs. scope=all (admin only): every
-    user's runs, optionally filtered by run_by (user id or "self"), faculty (the
+    user's runs, optionally filtered by run_by (user id, "self" or "on_behalf"), faculty (the
     CV owner's name) and department (the running user's ED department); those
-    three are ignored under scope=mine. ``feedback`` ("given" = any reviewer left
-    feedback, "needed" = complete with none) applies in both scopes. Every run
+    three, and ``input_format`` ("wcm" = written in the WCM CV template, "other",
+    "unknown" = not classified), are ignored under scope=mine. ``feedback`` ("given" = any reviewer left
+    feedback, "needed" = complete with none) and ``status`` ("running" = queued or
+    running, "failed" = failed; "red" = score band RED, admin only: 403 under scope=mine) apply in both
+    scopes. Every run
     carries a ``feedback`` summary; scope=all adds the reviewer list.
     ``batch_id`` (#1114) narrows either scope to one batch's runs; every row
     carries its ``batch_id`` so the list can tag batch runs.
@@ -264,12 +296,10 @@ async def list_runs(
     all_scope = scope == RunScope.ALL
     if all_scope:
         require_admin(current_user)
-        query = filtered_runs_query(db, parse_run_filters(run_by, faculty, department, feedback))
+        query = filtered_runs_query(
+            db, parse_run_filters(run_by, faculty, department, feedback, input_format, status))
     else:
-        query = db.query(Run).filter(Run.user_id == current_user.id)
-        mine_feedback = feedback_clause(parse_feedback_filter(feedback))
-        if mine_feedback is not None:
-            query = query.filter(mine_feedback)
+        query = _my_runs_query(db, current_user, feedback, status)
     if batch_id:
         query = query.filter(Run.batch_id == batch_id)
     total = query.count()

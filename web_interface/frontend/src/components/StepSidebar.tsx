@@ -62,6 +62,13 @@ export function StepStatusIcon({ status, className = 'w-5 h-5' }: { status: stri
   }
 }
 
+/** Row look: the running step is tinted blue, the selected step carries the ink ring on sand, and a step can be both. */
+export function stepRowClass(selected: boolean, running: boolean): string {
+  const ring = selected ? 'border-ink' : 'border-transparent'
+  if (running) return `${ring} bg-primary-50`
+  return selected ? `${ring} bg-sand-50` : `${ring} hover:bg-sand-50`
+}
+
 export default function StepSidebar({
   steps,
   currentStep,
@@ -101,9 +108,7 @@ export default function StepSidebar({
                       aria-current={isActive ? 'step' : undefined}
                       style={{ touchAction: 'manipulation' }}
                       className={`w-full grid grid-cols-[20px_minmax(0,1fr)_auto] items-center gap-2.5 text-left px-2.5 py-2 rounded-lg border-[1.5px] transition-colors cursor-pointer focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none ${
-                        isActive
-                          ? 'border-ink bg-primary-50'
-                          : 'border-transparent hover:bg-sand-50'
+                        stepRowClass(isActive, step.status === 'running')
                       }`}
                     >
                       <StepStatusIcon status={step.status} />

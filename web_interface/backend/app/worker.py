@@ -416,6 +416,14 @@ def main() -> int:
     except ValueError:
         logger.exception("worker refusing to start: CVICHE_WORKER_STREAMS is invalid")
         return 2
+    # Every run's terminal Teams card is posted from here, not the backend
+    # (CVICHE_DISPATCH_MODE=queue), so a worker without the webhook drops them
+    # all silently. Warn, don't refuse: notifications are best-effort.
+    from app.services.notifications import validate_configuration
+    notif_status = validate_configuration()
+    if not notif_status["valid"]:
+        logger.warning("worker %s will post no Teams run cards: CVICHE_TEAMS_WEBHOOK_URL "
+                       "configured=%s valid=%s", CONSUMER, notif_status["configured"], notif_status["valid"])
     # Publish side of the broker only, wired like app.main's lifespan; the
     # backend replicas run the subscriber that fans out to WebSockets.
     from app.pipeline import orchestrator as orchestrator_module

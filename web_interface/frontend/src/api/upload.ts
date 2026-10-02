@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { ApiError } from './client'
 import { uploadRoutes } from './routes'
 import type { BatchEstimate, Estimate } from '../types'
 
@@ -37,6 +38,17 @@ export interface UploadOptions {
   submissionType: 'own_cv' | 'authorized_admin'
   /** The batch this file joins (POST /api/batches); absent for a single upload. */
   batchId?: string
+  /** Resend of a file the server already ran, after the user agreed to run it again. */
+  confirmDuplicate?: boolean
+}
+
+const HTTP_CONFLICT = 409
+const DUPLICATE_FILE_CODE = 'duplicate_file'
+
+/** POST /upload refused because this exact file was already processed (#1286); err.message says when. */
+export function isDuplicateError(err: unknown): boolean {
+  const { status, code } = (err ?? {}) as Partial<ApiError>
+  return status === HTTP_CONFLICT && code === DUPLICATE_FILE_CODE
 }
 
 export async function uploadFile(file: File, options: UploadOptions): Promise<UploadResult> {
@@ -48,5 +60,6 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
   formData.append('strip_wcm_instructions', String(options.stripWcmInstructions))
   formData.append('include_track_changes', 'true')
   if (options.batchId) formData.append('batch_id', options.batchId)
+  if (options.confirmDuplicate) formData.append('confirm_duplicate', 'true')
   return api.post<UploadResult>(uploadRoutes.upload(), formData)
 }

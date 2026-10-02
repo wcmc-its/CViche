@@ -781,6 +781,23 @@ def test_main_writes_the_ready_file_only_after_config_checks_and_ensure_group(mo
     assert ready_file.exists()
 
 
+
+@pytest.mark.parametrize(("webhook", "warned"), [("", True), ("https://example.webhook.office.com/x", False)])
+def test_main_warns_when_the_teams_webhook_is_missing(monkeypatch, tmp_path, caplog, webhook, warned):
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://x")
+    monkeypatch.setenv("CVICHE_STORAGE_BACKEND", "s3")
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", webhook)
+    monkeypatch.setattr(worker, "configure_logging", lambda: None)
+    monkeypatch.setattr(worker, "READY_FILE", tmp_path / "ready")
+    monkeypatch.setattr(run_queue, "ensure_group", lambda queue: None)
+    monkeypatch.setattr(worker, "loop", lambda queues: None)
+
+    with caplog.at_level("WARNING"):
+        assert worker.main() == 0
+
+    assert ("will post no Teams run cards" in caplog.text) is warned
+
+
 # --- two queues (#1114) -------------------------------------------------------
 
 BOTH = (run_queue.SINGLE, run_queue.BATCH)

@@ -67,4 +67,20 @@ describe('RunQualitySections', () => {
     await tick()
     expect(getRunQuality).toHaveBeenCalledTimes(1)
   })
+
+  it('links the cap banner lint to its Run Doctor row', async () => {
+    const lint = 'missing_required_section'
+    vi.mocked(getRunQuality).mockResolvedValue({
+      ...SCORED, cap: 60, cap_reason: 'Hard fail', cap_lint: lint,
+      doctor: {
+        counts: { error: 1, warn: 0, info: 0 }, not_run: 0,
+        findings: [{ lint, severity: 'ERROR', message: 'A section is missing', count: 1, prevalence: null, caps_score: true }],
+      },
+    })
+    const { container } = render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    const link = screen.getByRole('link', { name: lint })
+    const target = link.getAttribute('href')!.slice(1)
+    expect(container.querySelector(`[id="${target}"]`)).toBeTruthy()
+  })
 })

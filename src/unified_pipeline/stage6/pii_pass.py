@@ -48,6 +48,11 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from .normalization.pii import (  # noqa: F401
+    CAT_CHILDREN,
+    CAT_DATE_OF_BIRTH,
+    CAT_FAMILY,
+    CAT_HOME_CONTACT,
+    CAT_SPOUSE,
     CAT_THIRD_PARTY_CONTACT,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
@@ -498,6 +503,93 @@ def _extend_bare_label_span(text: str, start: int, end: int) -> _BareLabelSpan:
     return _BareLabelSpan(known.start() if known else limit, False)
 
 
+#: #1223: the categories whose value continues in the cells after the
+#: label's own fragment. A family list ("Children: <a>\t<b>\t<c>"), the place
+#: of birth in the cell after a date of birth, and the second address line or
+#: phone in the cells after a home address each sit in a cell of their own,
+#: with no label, so the cut that stops at the first hard delimiter left them
+#: in the Appendix. Every other row keeps its single-fragment cut: a
+#: citizenship, an office phone or a work email is a #821 "render" item that
+#: an unlabelled neighbour must not be able to take with it.
+_CONTINUATION_CATEGORIES = frozenset({
+    CAT_DATE_OF_BIRTH, CAT_CHILDREN, CAT_SPOUSE, CAT_FAMILY, CAT_HOME_CONTACT,
+})
+
+
+def _absorb_continuation_cells(text: str, end: int) -> int:
+    """The offset a cut ending at `end` runs to once the unlabelled cells
+    that follow it on the same line are taken in (#1223).
+
+    A cell is one run between hard delimiters (`_PII_FRAGMENT_SPLIT_RE`:
+    a tab, `|`, `;` or a 3+-space gap). The run stops where the NEXT FIELD
+    begins, never where a value is guessed to end: at a newline (the line
+    break is the one boundary the source drew, as in
+    `_extend_bare_label_span`), at a cell that opens with a labelled field
+    (`_SIBLING_LABEL_RE`), or part-way through a cell at a label this
+    codebase knows (`_KNOWN_FIELD_LABEL_RE`). The price is the one
+    `_extend_bare_label_span` states: an unlabelled sibling cell that is not
+    protected is cut with the value it follows, never leaked."""
+    while True:
+        delim = _PII_FRAGMENT_SPLIT_RE.match(text, end)
+        if delim is None or "\n" in delim.group():
+            return end
+        after = text[delim.end():]
+        value_start = delim.end() + (len(after) - len(after.lstrip(" \t")))
+        if value_start >= len(text) or text[value_start] == "\n":
+            return end
+        if _SIBLING_LABEL_RE.match(text, value_start):
+            return end
+        nxt = _PII_FRAGMENT_SPLIT_RE.search(text, value_start)
+        limit = nxt.start() if nxt else len(text)
+        known = _KNOWN_FIELD_LABEL_RE.search(text, value_start, limit)
+        if known:
+            return known.start()
+        end = limit
+
+
+#: #1223: a family list that goes on over the next lines of one entry
+#: ("Children: <a>\n<b>\n<c>"). Unlike a cell, a line is only taken when the
+#: WHOLE line is shaped like a list of people: items of capitalised name
+#: tokens (two or more, or one with a year or date), separated by `,`, `;`,
+#: `&` or "and". A line with a lowercase word, a colon, a number that is not
+#: a date in a name's detail, or a blank line before it is never one. The
+#: price is stated: an unlabelled line of capitalised words straight after a
+#: children or family list ("US Citizen") is cut with it, never leaked.
+_LIST_NAME = r"[A-ZÀ-ÖØ-Þ](?:[^\W\d_]|['’.-])*"
+_LIST_DETAIL = r"(?:\((?=[^()\n]*\d)[^()\n]{1,30}\)|[-–—,][ \t]*\d[\d/.-]{2,9})"
+_LIST_ITEM = (r"(?:" + _LIST_NAME + r"(?:[ \t]+" + _LIST_NAME + r"){1,3}(?:[ \t]*" + _LIST_DETAIL + r")?"
+              r"|" + _LIST_NAME + r"[ \t]*" + _LIST_DETAIL + r")")
+_LIST_LINE_RE = re.compile(
+    r"[ \t]*\n[ \t]*" + _LIST_ITEM
+    + r"(?:[ \t]*(?:[,;&]|\band\b)[ \t]*" + _LIST_ITEM + r")*[ \t]*(?=\n|$)")
+_LIST_LINE_CATEGORIES = frozenset({CAT_CHILDREN, CAT_FAMILY})
+
+
+def _absorb_list_lines(text: str, end: int) -> int:
+    """The offset a cut ending at `end` runs to once the lines that go on
+    with the list it ends (`_LIST_LINE_RE`) are taken in (#1223)."""
+    while (line := _LIST_LINE_RE.match(text, end)) is not None:
+        end = line.end()
+    return end
+
+
+def _extend_label_span(text: str, match: PiiMatch, scope: str) -> _BareLabelSpan:
+    """`match`'s cut: its own bare-label extension, then, at the full
+    (Personal Data / Appendix) scope for a `_CONTINUATION_CATEGORIES` label,
+    the unlabelled cells that continue it and, for a children or family
+    list, the list lines that go on after it (#1223). Only a label has a
+    value that continues: a labelless shape ("Married (<name>)") is the
+    whole of what it matched, and the cell after it is somebody else's."""
+    span = _extend_bare_label_span(text, match.start, match.end)
+    if (scope == SCOPE_PERSONAL_AND_APPENDIX and match.category in _CONTINUATION_CATEGORIES
+            and _KNOWN_FIELD_LABEL_RE.match(text, match.start)):
+        end = _absorb_continuation_cells(text, span.end)
+        if match.category in _LIST_LINE_CATEGORIES:
+            end = _absorb_list_lines(text, end)
+        return span._replace(end=end)
+    return span
+
+
 def _cut_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
     """`text` with each (start, end) span removed, by OFFSET -- the spans
     are `pii.py`'s own, so the right occurrence is always the one cut even
@@ -576,7 +668,8 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
         for entry in entries:
             index += 1
             raw_text = entry.get("text", "") or ""
-            matches = _pii_matches(raw_text, scope) if raw_text else []
+            matches = (_pii_matches(raw_text, scope, personal_data=code == PERSONAL_DATA_CODE)
+                       if raw_text else [])
             # #833: an Appendix-bound entry also gets the value-shape
             # third-party-contact check -- scope already excludes every
             # routed content code (SCOPE_ALL_CODES). #920 review: an
@@ -614,8 +707,7 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             # in its orphaned value BEFORE any offset is used for anything
             # -- both the cut and the recorded fragment read the extended
             # span, so `_pii_fragments` reflects what was actually removed.
-            spans = [_extend_bare_label_span(raw_text, m.start, m.end)
-                     for m in matches]
+            spans = [_extend_label_span(raw_text, m, scope) for m in matches]
             entry["_pii_fragments"] = [raw_text[m.start:s.end]
                                        for m, s in zip(matches, spans)]
             entry["_pii_withheld"] = True

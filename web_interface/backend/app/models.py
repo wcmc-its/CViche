@@ -6,6 +6,9 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.base_class import Base
 
+# Length of a hex-encoded sha256 digest.
+SHA256_HEX_LENGTH = 64
+
 
 class RunState(StrEnum):
     """Canonical ``runs.status`` vocabulary (CODING STANDARDS section 1.5: one
@@ -210,6 +213,21 @@ class Run(Base):
     show_track_changes = Column(Integer, default=1)
     show_pipeline_comments = Column(Integer, default=0)
     strip_template_instructions = Column(Integer, default=1, server_default="1", nullable=False)
+    # Image tag of the process that last moved this run to "running" (#1239):
+    # stamped at the worker's claim (and at each resume or retry, so the latest
+    # executing image wins), not at upload. NULL for runs that predate the
+    # column or when the image was built without a tag.
+    image_tag = Column(String(128), nullable=True)
+    # Whether the uploaded CV was written in the WCM faculty CV template ("wcm")
+    # or another format ("other"), and the count of template signals behind it
+    # (app.services.input_format). NULL when undetermined: runs that predate the
+    # columns, unreadable text, or a detector failure at upload.
+    input_format = Column(String(10), nullable=True, index=True)
+    input_format_score = Column(Integer, nullable=True)
+    # sha256 (hex) of the uploaded bytes (#1286): the upload endpoint matches it
+    # against every run, any submitter, to ask before re-processing a file.
+    # NULL for runs that predate the column until the backfill fills it.
+    source_sha256 = Column(String(SHA256_HEX_LENGTH), nullable=True, index=True)
     # The batch upload this run belongs to (#1114), NULL for a single upload.
     # Also routes the run's queue token to the batch queue
     # (run_queue.queue_for) and suppresses its Teams "started" card.
