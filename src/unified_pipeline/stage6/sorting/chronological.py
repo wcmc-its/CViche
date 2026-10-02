@@ -100,7 +100,18 @@ def extract_sort_date(entry: dict) -> tuple:
     return (0, 0, 0)
 
 
-def sort_entries_reverse_chronological(entries: list[dict]) -> list[dict]:
+def _field_sort_date(entry: dict, field: str) -> tuple:
+    """`entry`'s sort key read from `field` alone: `extract_sort_date` over a
+    copy that carries nothing else. A non-mapping `extracted_fields` is a
+    missing one, as it is in `extract_sort_date`."""
+    raw_fields = entry.get('extracted_fields')
+    value = raw_fields.get(field) if isinstance(raw_fields, Mapping) else None
+    return extract_sort_date({'extracted_fields': {field: value}})
+
+
+def sort_entries_reverse_chronological(
+    entries: list[dict], then_by: str | None = None
+) -> list[dict]:
     """
     Sort entries in reverse chronological order (most recent first).
 
@@ -109,8 +120,16 @@ def sort_entries_reverse_chronological(entries: list[dict]) -> list[dict]:
 
     Args:
         entries: List of entry dictionaries
+        then_by: Optional date field that orders entries whose keys tie, most
+            recent first (#1233). Default: ties keep their input order.
 
     Returns:
         Sorted list of entries
     """
-    return sorted(entries, key=extract_sort_date, reverse=True)
+    if then_by is None:
+        return sorted(entries, key=extract_sort_date, reverse=True)
+    return sorted(
+        entries,
+        key=lambda entry: (extract_sort_date(entry), _field_sort_date(entry, then_by)),
+        reverse=True,
+    )

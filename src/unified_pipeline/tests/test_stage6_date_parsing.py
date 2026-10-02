@@ -708,3 +708,49 @@ def test_a_mapping_dated_entry_sorts_among_string_dated_entries():
     ]
     ordered = [e["extracted_fields"]["label"] for e in sort_entries_reverse_chronological(entries)]
     assert ordered == ["newest-mapping", "newer-string", "oldest-string"]
+
+
+def _tied_on_recertification(label, certified):
+    return {"extracted_fields": {
+        "label": label,
+        "year_certified": certified,
+        "recertification_date": {"start_date": "2009", "end_date": "2019"},
+    }}
+
+
+def _labels(entries):
+    return [e["extracted_fields"]["label"] for e in entries]
+
+
+def test_then_by_orders_entries_whose_date_keys_tie_most_recent_first():
+    from unified_pipeline.stage6.sorting import sort_entries_reverse_chronological
+    entries = [_tied_on_recertification("older", "1994"),
+               _tied_on_recertification("newer", "1999")]
+    ordered = sort_entries_reverse_chronological(entries, then_by="year_certified")
+    assert _labels(ordered) == ["newer", "older"]
+
+
+def test_without_then_by_tied_entries_keep_their_input_order():
+    from unified_pipeline.stage6.sorting import sort_entries_reverse_chronological
+    entries = [_tied_on_recertification("older", "1994"),
+               _tied_on_recertification("newer", "1999")]
+    assert _labels(sort_entries_reverse_chronological(entries)) == ["older", "newer"]
+
+
+def test_then_by_never_overrides_a_differing_date_key():
+    from unified_pipeline.stage6.sorting import sort_entries_reverse_chronological
+    entries = [
+        {"extracted_fields": {"label": "later-range", "year_certified": "1994",
+                              "recertification_date": "2024"}},
+        {"extracted_fields": {"label": "later-certified", "year_certified": "1999",
+                              "recertification_date": "2019"}},
+    ]
+    ordered = sort_entries_reverse_chronological(entries, then_by="year_certified")
+    assert _labels(ordered) == ["later-range", "later-certified"]
+
+
+def test_then_by_is_total_over_a_malformed_entry():
+    from unified_pipeline.stage6.sorting import sort_entries_reverse_chronological
+    entries = [{"extracted_fields": ["stray"]}, _tied_on_recertification("dated", "1999")]
+    ordered = sort_entries_reverse_chronological(entries, then_by="year_certified")
+    assert ordered[0]["extracted_fields"]["label"] == "dated"
