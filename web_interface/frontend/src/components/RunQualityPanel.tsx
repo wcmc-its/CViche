@@ -108,6 +108,9 @@ function ScoreBox({ report }: { report: RunQualityReport }) {
   )
 }
 
+/** Id of a Run Doctor finding row; the cap banner links to it. */
+export const doctorRowId = (lint: string): string => `doctor-lint-${lint}`
+
 function CapBanner({ report }: { report: RunQualityReport }) {
   return (
     <div className="flex items-start gap-3 rounded-[10px] border border-red-200 bg-error-50 px-3.5 py-3">
@@ -119,7 +122,7 @@ function CapBanner({ report }: { report: RunQualityReport }) {
         <span className="text-[13px] [overflow-wrap:anywhere]">
           {report.earned != null && <>The weighted dimensions alone would score {report.earned}. </>}
           A hard-fail cap overrides that.
-          {report.cap_lint && <> See <span className={MONO}>{report.cap_lint}</span> in Run Doctor below.</>}
+          {report.cap_lint && <> See <a href={`#${doctorRowId(report.cap_lint)}`} className={`${MONO} underline`}>{report.cap_lint}</a> in Run Doctor below.</>}
         </span>
       </div>
     </div>
@@ -197,7 +200,7 @@ function FindingRow({ finding, capValue, style }: { finding: DoctorFindingGroup;
   const tied = finding.caps_score
   const { Icon } = style
   return (
-    <div className={`grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-3 border-t border-l-[3px] border-t-sand-200 px-3.5 py-3 ${tied ? 'border-l-error-700 bg-error-50' : 'border-l-transparent'}`}>
+    <div id={doctorRowId(finding.lint)} className={`grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-3 border-t border-l-[3px] border-t-sand-200 px-3.5 py-3 ${tied ? 'border-l-error-700 bg-error-50' : 'border-l-transparent'}`}>
       <Icon className={`mt-0.5 h-4 w-4 flex-none ${style.text}`} aria-hidden="true" />
       <div className="flex min-w-0 flex-col gap-[3px]">
         <div className="flex flex-wrap items-center gap-2">

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { classifyFailure, inFlightText, mayAlreadyBeStarted, quotaShortfall, wasStarted } from './batchRows'
+import {
+  MAX_UPLOAD_BYTES, NOT_DOCX_REASON, TOO_LARGE_REASON, classifyFailure, inFlightText, makeRow, mayAlreadyBeStarted, quotaShortfall, wasStarted,
+} from './batchRows'
 import type { QuotaInfo } from '../../types'
 
 const QUOTA: QuotaInfo = {
@@ -42,5 +44,24 @@ describe('inFlightText', () => {
     expect(inFlightText(2)).toBe('Two files at a time')
     expect(inFlightText(1)).toBe('One file at a time')
     expect(inFlightText(12)).toBe('12 files at a time')
+  })
+})
+
+describe('makeRow size check', () => {
+  const sized = (name: string, size: number) => {
+    const file = new File(['x'], name)
+    Object.defineProperty(file, 'size', { value: size })
+    return file
+  }
+
+  it("marks a file over the cap as won't-be-submitted, with no estimate pending", () => {
+    const row = makeRow(sized('big.docx', MAX_UPLOAD_BYTES + 1), 'k')
+    expect(row.invalidReason).toBe(TOO_LARGE_REASON)
+    expect(row.estimate).toBeNull()
+  })
+
+  it('accepts a file exactly at the cap and keeps the wrong-type reason first', () => {
+    expect(makeRow(sized('ok.docx', MAX_UPLOAD_BYTES), 'k').invalidReason).toBeNull()
+    expect(makeRow(sized('big.pdf', MAX_UPLOAD_BYTES + 1), 'k').invalidReason).toBe(NOT_DOCX_REASON)
   })
 })

@@ -12,6 +12,8 @@ export interface RunStatus {
   run_id: string
   filename: string
   status: string
+  /** When the run was created (ISO, from GET /run/{id}/status). */
+  started_at?: string
   total_cost: number | null
   total_tokens: number
   input_tokens: number

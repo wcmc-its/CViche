@@ -209,3 +209,27 @@ def test_update_user_accepts_valid_role_and_status_values(client, db):
     db.refresh(second_admin)
     assert second_admin.role == "user"
     assert second_admin.status == "disabled"
+
+
+def test_update_user_blocks_self_demotion_even_with_other_admins(client, db):
+    """An admin cannot demote themselves, even when another admin exists."""
+    from app.main import app
+    from app.auth import require_admin
+    from app.models import User
+
+    me = _seed_lone_admin(db)
+    db.add(User(email="other-admin@example.com", display_name="Other", role="admin", status="active"))
+    db.commit()
+
+    app.dependency_overrides[require_admin] = lambda: SimpleNamespace(
+        id=me.id, role="admin", email=me.email
+    )
+    try:
+        resp = client.put(f"/api/admin/users/{me.id}", json={"role": "user"})
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["message"] == "Cannot remove your own admin role."
+    db.refresh(me)
+    assert me.role == "admin"

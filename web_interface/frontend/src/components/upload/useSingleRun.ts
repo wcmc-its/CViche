@@ -3,6 +3,7 @@ import { getEstimate, uploadFile } from '../../api/upload'
 import type { Estimate } from '../../types'
 import { getCapacity, startRun } from '../../api/runs'
 import { isConsentError } from './useBatchUpload'
+import { MAX_UPLOAD_BYTES, TOO_LARGE_REASON } from './batchRows'
 import type { SubmissionType } from './consentText'
 
 interface SingleRunOptions {
@@ -179,6 +180,11 @@ export function useSingleFile(onChange: () => void, onRefused: (message: string 
     const name = selected.name.toLowerCase()
     if (!name.endsWith('.docx') && !name.endsWith('.pdf')) {
       onRefused('Please select a .docx or .pdf file')
+      clear()
+      return
+    }
+    if (selected.size > MAX_UPLOAD_BYTES) {
+      onRefused(`${TOO_LARGE_REASON}, so it won't be submitted`)
       clear()
       return
     }

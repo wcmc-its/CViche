@@ -149,6 +149,8 @@ async def update_user(
     # Validate: can't remove last admin
     if body.role is not None and body.role != target.role:
         if target.role == "admin" and body.role == "user":
+            if target.id == admin.id:
+                raise validation_error("Cannot remove your own admin role.")
             admin_count = (
                 db.query(func.count(User.id))
                 .filter(User.role == "admin", User.status == "active")
