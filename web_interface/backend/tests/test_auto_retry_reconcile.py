@@ -234,6 +234,37 @@ def test_sweep_does_not_fail_a_run_a_sibling_resumed_mid_sweep(db, monkeypatch):
     assert run.completed_at is None
 
 
+def test_sweep_that_loses_the_retry_claim_dispatches_nothing(db, monkeypatch):
+    """The retry path claims too (#799): if a sibling pod resumes the run after
+    this sweep's query but before its transition, the sweep must back off
+    without launching a second pipeline or resetting any step."""
+    monkeypatch.setenv("CVICHE_AUTO_RETRY_ENABLED", "1")
+    calls = []
+    _patch_launch(monkeypatch, calls)
+    real_resume_info = run_service._resume_info_for_run
+
+    def sibling_resumes_first(run, session):
+        session.query(Run).filter(Run.id == run.id).update(
+            {"started_at": datetime.now(), "attempt_count": 2},
+            synchronize_session=False,
+        )
+        session.commit()
+        return real_resume_info(run, session)
+
+    monkeypatch.setattr(run_service, "_resume_info_for_run", sibling_resumes_first)
+    run = _seed_stale_running_run(db, run_id="RRACE3", attempt_count=1, failed_at=6)
+
+    assert run_service.reconcile_stale_runs(db) == 0
+
+    assert calls == []                       # the loser launched nothing
+    db.refresh(run)
+    assert run.status == "running"
+    assert run.attempt_count == 2            # only the sibling's bump
+    stuck = db.query(Step).filter(Step.run_id == "RRACE3", Step.step_number == 6).one()
+    assert stuck.status == "running"         # the loser did not reset steps
+    assert stuck.error_type == "api_error"
+
+
 def test_launch_resume_releases_the_slot_it_took_for_the_run(db, monkeypatch, tmp_path):
     """The resumed pipeline's thread must release the slot held for *this* run:
     the shutdown drain (#116) waits on slot-holding run ids, so a slot left
