@@ -2029,3 +2029,36 @@ def test_row_zero_header_cell_hosting_nested_list_keeps_the_list(tmp_path):
     doc.save(str(path))
     blob = "\n".join(_element_texts(str(path)))
     assert "Nested abstract entry one" in blob and "Nested abstract entry two" in blob
+
+
+def test_row_zero_header_after_nested_table_stays_a_table_header(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=2, cols=2)
+    cell = outer.cell(0, 0)
+    nested = cell.add_table(rows=2, cols=1)
+    nested.cell(0, 0).text = "Nested record one, synthetic text that is long enough to count as content here."
+    nested.cell(1, 0).text = "Nested record two, synthetic text that is long enough to count as content here."
+    cell.paragraphs[-1].text = "PUBLICATIONS"
+    outer.cell(1, 0).text = "Trailing outer paragraph."
+    path = tmp_path / "hdr_after.docx"
+    doc.save(str(path))
+    els = extract_unified_elements(str(path))["elements"]
+    headers = [e["text"] for e in els if e["type"] == "table_header"]
+    assert headers[:1] == ["PUBLICATIONS"]
+    blob = "\n".join(_element_texts(str(path)))
+    assert "Nested record one" in blob and "Nested record two" in blob
+
+
+def test_multi_column_doubly_nested_table_text_reaches_cell_data(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "Host text"
+    nested = cell.add_table(rows=1, cols=1)
+    nested.cell(0, 0).paragraphs[0].text = "Middle line"
+    inner = nested.cell(0, 0).add_table(rows=1, cols=1)
+    inner.cell(0, 0).text = "Deepest line"
+    path = tmp_path / "deep.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    assert data[0][0]["text"] == "Host text\nMiddle line\nDeepest line"

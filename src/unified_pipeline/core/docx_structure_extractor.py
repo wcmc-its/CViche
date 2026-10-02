@@ -788,6 +788,22 @@ def is_header_left_content_right_row(cell_text: str, header_confidence: float) -
     )
 
 
+def _host_header_first(cell: _Cell, text: str) -> str:
+    """Keep a host cell's own header line first when a nested table precedes it (#1231).
+
+    `text` is in document order, so a nested table ahead of the host's own header
+    paragraph would push that header off line 1 and `looks_like_section_header`
+    would fail, demoting a table that was a `table_header` before the nested text
+    was read. Hoist the cell's own first line only when it is itself header-like
+    and the nested lines would otherwise lead; no text is dropped."""
+    own = next((t for t in (p.strip() for p in get_cell_text(cell).split('\n')) if t), '')
+    lines = text.split('\n')
+    if not own or lines[0].strip() == own or not looks_like_section_header(own)[0]:
+        return text
+    lines.pop(next(i for i, ln in enumerate(lines) if ln.strip() == own))
+    return '\n'.join([own, *lines])
+
+
 def get_table_first_cell_text(table: Table) -> str:
     """Extract text from the first cell of first row of a table."""
     if not table.rows:
@@ -797,7 +813,7 @@ def get_table_first_cell_text(table: Table) -> str:
         return ""
     first_cell = first_row.cells[0]
 
-    cell_text = get_cell_text_with_nested(first_cell).strip()
+    cell_text = _host_header_first(first_cell, get_cell_text_with_nested(first_cell).strip())
 
     # Fallback extraction if needed
     if not cell_text and first_cell._element is not None:
