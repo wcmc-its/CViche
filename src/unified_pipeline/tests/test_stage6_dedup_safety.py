@@ -21,6 +21,8 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.dedup import (  # noqa: E402
+    _DECISION_FIELD_MAX_CHARS,
+    _decision_fields,
     _dates_compatible,
     _distinct_bare_names,
     _drop_is_safe,
@@ -154,6 +156,58 @@ def test_unsafe_drop_records_no_decision():
     phd = {"text": "PhD: Recreational Cartography Studies"}
     deduplicate_entries([phd, ms], decisions=decisions)
     assert decisions == []
+
+
+def test_decision_records_clipped_name_fields_of_both_entries():
+    # #666: the doctor compares the two entries' extracted names.
+    decisions = []
+    dropped = {"text": "Example Optics Journal Reviewer",
+               "extracted_fields": {"journal_name": "Example Optics", "note": "n",
+                                    "year": 2020, "location": "Example City"}}
+    kept = {"text": "European Example Optics Journal Reviewer Journal Reviewer",
+            "extracted_fields": {"journal_name": "European Example Optics"}}
+    deduplicate_entries([dropped, kept], decisions=decisions, code="Q4D")
+    assert len(decisions) == 1
+    assert decisions[0]["dropped_fields"] == {
+        "journal_name": "Example Optics"}
+    assert decisions[0]["kept_fields"] == {"journal_name": "European Example Optics"}
+
+
+def test_decision_name_fields_are_clipped():
+    entry = {"extracted_fields": {"journal_name": "x" * 500}}
+    assert _decision_fields(entry, "Q4D") == {
+        "journal_name": "x" * _DECISION_FIELD_MAX_CHARS}
+
+
+def test_decision_name_fields_follow_the_code():
+    entry = {"extracted_fields": {"institution": "Example Hospital",
+                                  "organization": "Example Society",
+                                  "title": "Example Title", "location": "X"}}
+    assert _decision_fields(entry, "D2") == {"institution": "Example Hospital"}
+    assert _decision_fields(entry, "I") == {"organization": "Example Society"}
+    assert _decision_fields(entry, "S3") == {"title": "Example Title"}
+    assert _decision_fields(entry, "R") == {}
+    assert _decision_fields(entry, None) == {}
+
+
+@pytest.mark.parametrize("code,key", [("I", "organization"), ("D2", "institution"),
+                                      ("S3", "title")])
+def test_deduplicate_entries_writes_the_code_keyed_name_fields(code, key):
+    # #666: the code must reach _decision_fields from the dedup loop itself.
+    decisions = []
+    text = "Example Name Alpha Beta Gamma Delta Epsilon Zeta 2001"
+    dropped = {"text": text, "extracted_fields": {key: "Example Name"}}
+    kept = {"text": text + " Eta",
+            "extracted_fields": {key: "Example Name Instructor Guide"}}
+    deduplicate_entries([dropped, kept], decisions=decisions, code=code)
+    assert len(decisions) == 1
+    assert decisions[0]["dropped_fields"] == {key: "Example Name"}
+    assert decisions[0]["kept_fields"] == {key: "Example Name Instructor Guide"}
+
+
+def test_decision_name_fields_skip_null_and_non_string_values():
+    entry = {"extracted_fields": {"journal_name": None, "organization": 7}}
+    assert _decision_fields(entry, "I") == {}
 
 
 # ------------------------------------- career-progression date-overlap guard
