@@ -193,15 +193,17 @@ _NESTED_DATES_KEY = 'dates_attended'
 
 # Entry-level keys a stage-5 pass writes about the entry's own scalar fields:
 # the institution 5b cleaned and located, the publication record stage 5
-# matched, and which fields either one filled in. These six are every key the
-# 163-CV render set's stage-5d entries carry that its stage-4 entries do not.
+# matched, and which fields either one filled in. The first six were every key
+# the 163-CV render set's stage-5d entries carry that its stage-4 entries do
+# not; `in_press_note` came later (stage 5's in-press title search).
 # On a stage-4 records list the scalars are the LAST record, so these describe
 # that record only and an earlier child does not inherit them: 5b's cleaned
 # name replaces the raw institution cell, so a first B2 record rendered the
 # last record's institution until they were dropped.
 _STAGE5_ENTRY_KEYS = frozenset({
     'enriched_fields', 'enrichment_data', 'enrichment_rejected',
-    'enrichment_source', 'enrichment_status', 'institution_enrichment'})
+    'enrichment_source', 'enrichment_status', 'institution_enrichment',
+    'in_press_note'})
 
 # Render-warning record for a record list that was not fanned out (#1187).
 REJECTED_LIST_CHECK = 'fan_out_record_list_rejected'
