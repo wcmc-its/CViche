@@ -883,6 +883,19 @@ def test_c_role_trails_the_training_type_cell():
 # taxonomy default.
 
 
+@pytest.mark.parametrize("text, expected", [
+    ("1989 Post-doctoral Fellow, Fictional University (Epidemiology)", "1989"),
+    ("1989- Post-doctoral Fellow, Fictional University (Epidemiology)", "1989-Present"),
+])
+def test_normalize_start_only_dates_read_the_entry_source_text(text, expected):
+    """Class 13 (2026-10-02): a 1989 postdoc with no end date rendered
+    "1989-Present"; the source text decides whether the year is left open."""
+    record = _normalize_training_entry(
+        {"text": text, "extracted_fields": {"training_type": "Post-doctoral Fellow",
+                                            "start_date": "1989"}}, "C")
+    assert record.dates == expected
+
+
 def test_normalize_prefers_training_type_over_title():
     """Precedence, both aliases present and non-empty."""
     record = _normalize_training_entry(

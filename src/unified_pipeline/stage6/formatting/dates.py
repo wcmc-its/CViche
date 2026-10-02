@@ -52,12 +52,27 @@ logger = logging.getLogger(__name__)
 # H, R and K4 reach no `format_date_range` caller today -- their renderers
 # format a single date -- so for them this set only fixes what a future
 # range caller would print.
+# A member renders the bare start even when its caller passes no source text.
+# Every other code gets the same rule wherever its caller does pass the
+# entry's text: a start with no end is that year alone, unless the source
+# leaves it open (decision 2026-10-02 on the s7ab autopsy's class 13: a one-
+# year chair, a guest-edited issue or a 1989 postdoc read "-Present"). A
+# caller that passes no text keeps "<start>-Present" for a non-member.
 POINT_IN_TIME_CODES = frozenset({'H', 'R', 'K4', 'P', 'Q2', 'Q3', 'B2'})
+
+
+# The words that close a range as still open, after the record's own year
+# and a dash or "to": "2011 - present", "2011 to current" (decision
+# 2026-10-02, class 13). Anchored on the year because a row routinely says
+# "now Professor at ..." or names "Current Opinion in ..." about something
+# else; a spaced dash followed by text is otherwise a column separator.
+_ONGOING_RANGE_END_WORDS = r'(?:present|current|now)\b'
 
 
 def _source_leaves_year_open(source_text: str, year: int | None) -> bool:
     """True when the source writes `year` as an open range: "2020-",
-    "(2011-", "11/2019- Clinical ...", "2024 -<tab>Member".
+    "(2011-", "11/2019- Clinical ...", "2024 -<tab>Member", or closes it in
+    words: "2011 - present", "2011 to current", "2011 - now".
 
     Stage 4 records "2020-" as a start date with no end date, the same as a
     bare "2020", but the author wrote the open dash on purpose -- it is how a
@@ -68,8 +83,9 @@ def _source_leaves_year_open(source_text: str, year: int | None) -> bool:
     if not source_text or year is None:
         return False
     open_range = re.compile(
-        rf'(?<!\d){year}(?:[-\u2013\u2014](?!\s*\d)|\s+[-\u2013\u2014][ ]*(?:\t|\)|$))',
-        re.MULTILINE)
+        rf'(?<!\d){year}(?:[-\u2013\u2014](?!\s*\d)|\s+[-\u2013\u2014][ ]*(?:\t|\)|$)'
+        rf'|\s*(?:[-\u2013\u2014]|\bto\b)\s*{_ONGOING_RANGE_END_WORDS})',
+        re.MULTILINE | re.IGNORECASE)
     return bool(open_range.search(source_text))
 
 # Date format specifications per WCM template section
@@ -216,16 +232,17 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
     """
     Format a date range according to WCM template requirements.
 
-    A start with no end renders "<start>-Present", except for a
-    `POINT_IN_TIME_CODES` code, which renders the bare start unless
-    `source_text` leaves that year open (#946).
+    A start with no end renders the bare start unless `source_text` leaves
+    that year open, for a `POINT_IN_TIME_CODES` code (#946) and for any code
+    whose caller passes `source_text` (class 13, 2026-10-02). Otherwise it
+    renders "<start>-Present".
 
     Args:
         start_date: Start date string
         end_date: End date string (may be 'present', empty, or a date)
         taxonomy_code: Taxonomy code to determine required format
-        source_text: The entry's source text, read only for a
-            `POINT_IN_TIME_CODES` code with no end date
+        source_text: The entry's source text, read only when there is a
+            start and no end date
 
     Returns:
         Formatted date range string (e.g., "08/17-07/21" or "2017-Present")
@@ -242,7 +259,7 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str,
         # Avoid "Present-Present" when start is already 'Present'
         if formatted_start == 'Present':
             return 'Present'
-        if taxonomy_code in POINT_IN_TIME_CODES:
+        if taxonomy_code in POINT_IN_TIME_CODES or source_text:
             start_year = _parse_date_components(str(start_date).strip())[0]
             if not _source_leaves_year_open(source_text, start_year):
                 return formatted_start
