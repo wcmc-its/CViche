@@ -34,6 +34,8 @@ from ..parsing.dates import _parse_date_components, _year_of_calendar_invalid_da
 #       rows": a year alone on a committee or event row names that year.
 #   Q2  Service on Boards/Committees -- the extramural counterpart of P.
 #   Q3  Grant Reviewing / Study Sections -- a review panel sits per cycle.
+#   B2  Other Educational Experiences -- a workshop, course or conference
+#       attended once; the table's column is "Dates attended" (#1220).
 # Not members, and unchanged: every D code (the D1 rank ladder is decided in
 # sections/positions.py), O and Q1 (leadership posts held for a term), I
 # (memberships are ongoing), Q4/Q4A/Q4B/Q4C (editorial posts held for a
@@ -41,7 +43,7 @@ from ..parsing.dates import _parse_date_components, _year_of_calendar_invalid_da
 # H, R and K4 reach no `format_date_range` caller today -- their renderers
 # format a single date -- so for them this set only fixes what a future
 # range caller would print.
-POINT_IN_TIME_CODES = frozenset({'H', 'R', 'K4', 'P', 'Q2', 'Q3'})
+POINT_IN_TIME_CODES = frozenset({'H', 'R', 'K4', 'P', 'Q2', 'Q3', 'B2'})
 
 
 def _source_leaves_year_open(source_text: str, year: int | None) -> bool:

@@ -107,11 +107,15 @@ def _resolve_b2_dates(fields: Mapping[str, Any], raw_text: str) -> tuple[str, bo
     a start/end range, then a single year field (year, then year_awarded),
     then a year recovered from the entry text. Each step wins outright when
     it has anything at all, so a start date beats a year beats the text.
+
+    A start with no end is one attended occasion, so it renders as the bare
+    date; `raw_text` is passed so a source that writes the range open
+    ("2020-", "present") still renders "<start>-Present" (#1220).
     """
     start = fields.get('start_date', '')
     end = fields.get('end_date', '')
     if start or end:
-        return format_date_range(start, end, B2_TAXONOMY_CODE), False
+        return format_date_range(start, end, B2_TAXONOMY_CODE, raw_text), False
     year = fields.get('year', '') or fields.get('year_awarded', '')
     if year:
         return format_date_for_section(year, B2_TAXONOMY_CODE), False
