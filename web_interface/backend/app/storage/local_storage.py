@@ -250,3 +250,7 @@ class LocalRunStorage(RunStorage):
 
     def exists(self, run_id: str, key: str) -> bool:
         return self._resolve(run_id, key).exists()
+
+    def get_malware_scan_status(self, run_id: str, key: str) -> str | None:
+        # Files on a local disk carry no object tags, so nothing is ever scanned.
+        return None

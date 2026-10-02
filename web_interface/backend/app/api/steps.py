@@ -12,9 +12,11 @@ from app.database import get_db
 from app.models import User
 from app.schemas import StepDetail, LogEntry
 from app.auth import get_current_user, require_admin, visible_cost
+from app.config_loader import get_config
 from app.services import artifact_service, prompt_log_service
 from app.services.run_service import check_run_access
 from app.storage import get_storage
+from app.storage.base import RunStorage
 from app.errors import bad_request, not_found, internal_error, forbidden
 
 logger = logging.getLogger(__name__)
@@ -158,6 +160,52 @@ def get_data_file(
     return FileResponse(str(file_path), filename=download_name)
 
 
+# Off by default (#1333): turn it on only once GuardDuty Malware Protection for
+# S3 is scanning the bucket, or every original download answers 409.
+REQUIRE_MALWARE_SCAN_FLAG = "CVICHE_REQUIRE_MALWARE_SCAN"
+_FLAG_ON = frozenset({"1", "true", "yes", "on"})
+
+# GuardDuty's scan-result tag values. Only NO_THREATS_FOUND is served; the
+# others (UNSUPPORTED, ACCESS_DENIED, FAILED) all mean "not shown to be clean".
+# https://docs.aws.amazon.com/guardduty/latest/ug/monitoring-malware-protection-s3-scans-gdu.html#s3-object-scan-result-value-malware-protection
+MALWARE_SCAN_CLEAN = "NO_THREATS_FOUND"
+MALWARE_SCAN_THREATS_FOUND = "THREATS_FOUND"
+# Matches the "try again in a minute" the 409 tells the user.
+_STILL_SCANNING_RETRY_AFTER_SECONDS = 60
+
+
+def _malware_scan_required() -> bool:
+    flag, _ = get_config("s3", REQUIRE_MALWARE_SCAN_FLAG, default="")
+    return str(flag).strip().lower() in _FLAG_ON
+
+
+def _require_clean_scan(storage: RunStorage, run_id: str, key: str) -> None:
+    """Raise unless GuardDuty tagged this original NO_THREATS_FOUND (#1333).
+
+    An admin opening another user's upload in Word or Acrobat is how a
+    malicious CV would reach a person, so the download waits for the scan.
+    The run itself does not: the pipeline reads the bytes and executes nothing.
+    """
+    status = storage.get_malware_scan_status(run_id, key)
+    if status == MALWARE_SCAN_CLEAN:
+        return
+    if status is None:
+        # errors.conflict() takes no headers, so build its 409 shape here.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "conflict",
+                "message": "This file is still being scanned for malware. Please try again in a minute.",
+            },
+            headers={"Retry-After": str(_STILL_SCANNING_RETRY_AFTER_SECONDS)},
+        )
+    if status == MALWARE_SCAN_THREATS_FOUND:
+        # Run id only: the upload's filename embeds its owner's name.
+        logger.warning("Original-input download refused for run %s: malware scan found a threat", run_id)
+        raise forbidden("This file was flagged by the malware scan and can't be downloaded.")
+    raise forbidden("This file couldn't be scanned for malware, so it can't be downloaded.")
+
+
 @router.get("/run/{run_id}/input")
 def download_input_file(
     run_id: str,
@@ -187,6 +235,8 @@ def download_input_file(
     try:
         if not storage.exists(run_id, key):
             raise not_found("Original upload is not available for this run")
+        if _malware_scan_required():
+            _require_clean_scan(storage, run_id, key)
         # S3 returns a presigned URL that renames the download; local storage
         # returns None (no presigned URLs), so proxy the bytes ourselves.
         url = storage.get_download_url(run_id, key, download_name=original_name)
