@@ -91,6 +91,7 @@ MIN_TITLE_SEARCH_OVERLAP = 0.8
 # Fewer words than this and a title search matches too much; the probe used 4.
 MIN_TITLE_SEARCH_WORDS = 4
 TITLE_SEARCH_MAX_HITS = 3
+PREPRINT_PUBTYPE = 'Preprint'
 # A paper in press is published within a couple of years of the year the CV
 # gives it. Of the 87 corpus matches (2026-10-02) with a CV year, 64 were 0-2
 # years later; the one at 4 years was a different paper by the same group
@@ -657,8 +658,11 @@ class PubMedEnricher:
         finally:
             time.sleep(RATE_LIMIT_DELAY)
         records = self._fetch_pubmed_batch(pmids) if pmids else {}
+        # A preprint is the paper's earlier version, never what "in press"
+        # names (QZWBKQ, dev-239: an "Appl Environ Microbiol, in press" entry
+        # matched its bioRxiv record, PubMed type Preprint).
         scored = [(title_word_overlap(title, [r['title'], r['vernacular_title']]) or 0, r)
-                  for r in records.values()]
+                  for r in records.values() if PREPRINT_PUBTYPE not in r['publication_types']]
         if not scored:
             return
         overlap, best = max(scored, key=lambda pair: pair[0])

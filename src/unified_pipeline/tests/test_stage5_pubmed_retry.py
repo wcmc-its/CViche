@@ -979,3 +979,10 @@ def test_accepted_conference_abstract_is_not_replaced_by_the_journal_paper(tmp_p
     assert session.calls == []
     assert result['taxonomy_code'] == 'S8'
     assert 'in_press_note' not in result and 'enrichment_data' not in result
+
+
+def test_title_search_ignores_a_preprint_record(tmp_path, monkeypatch):
+    # QZWBKQ (dev-239): "App Environ Microbiology, in press" matched the bioRxiv record.
+    xml = _published_xml(pubtypes=('Preprint', 'Journal Article'))
+    result, _, _ = _run_stage5(tmp_path, monkeypatch, _inpress_entry(), _found(xml))
+    assert 'enrichment_data' not in result and 'in_press_note' not in result
