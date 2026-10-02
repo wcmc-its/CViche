@@ -478,6 +478,19 @@ def _is_header_record(fields: dict, text: str) -> bool:
             and all(_is_certification_header_line(line) for line in lines))
 
 
+def _is_clean_specialty_only(fields: dict, text: str) -> bool:
+    """True when the structured path can render this record without losing
+    content: `specialty` is a non-blank string and the entry text holds at
+    most one data line once header lines are filtered (#1234). A list or blank
+    specialty, or a multi-line text, keeps the raw-text reparse, which still
+    sees every line."""
+    specialty = fields.get('specialty')
+    if not isinstance(specialty, str) or not specialty.strip():
+        return False
+    data_lines = [l for l in entry_lines(text) if not _is_certification_header_line(l)]
+    return len(data_lines) <= 1
+
+
 class BoardCertificationSection:
     """Section F2 writers, mixed into `WCMTemplateGenerator`."""
 
@@ -543,11 +556,11 @@ class BoardCertificationSection:
             else:
                 certificate_number = str(certificate_number) if certificate_number else ''
 
-            # Check if we have structured fields. A specialty alone counts
+            # Check if we have structured fields. A clean specialty alone counts
             # (#1234): a record with a specialty and dates but no board name
             # used to fall to the raw-text reparse, which put the whole source
             # line in the name cell.
-            if certifying_board or certificate_number or fields.get('specialty'):
+            if certifying_board or certificate_number or _is_clean_specialty_only(fields, original_text):
                 # Multiple certifications merged into one entry? (#625 thread
                 # 3850459808: considers certifying_board too, not just the
                 # certificate-number count -- see _is_fused_certification.)
@@ -687,15 +700,15 @@ class BoardCertificationSection:
 
     def _warn_skipped_certification_row(self, year: str) -> None:
         """Record a reconstructed row dropped for having neither a specialty
-        nor a certificate number (a bare year line), so the doctor sees it
-        instead of the date vanishing silently (#1234). The sidecar record is
+        nor a certificate number, so the doctor sees it instead of the
+        certification vanishing silently (#1234). The sidecar record is
         logged by `_log_validation_warnings`, so no separate log call."""
         self._section_failures.append({
             "check": SKIPPED_ROW_CHECK,
             "code": "F2",
             "section": "board_certification",
-            "message": ("a board certification line with only a year was "
-                        "skipped (no specialty or certificate number)"),
+            "message": ("a reconstructed board certification row had no "
+                        "specialty or certificate number and was skipped"),
             "evidence": [f"year={year}"],
             "severity": "WARN",
         })
