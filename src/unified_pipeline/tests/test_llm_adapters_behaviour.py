@@ -386,6 +386,11 @@ def test_select_final_json_object_ignores_a_response_that_is_not_json_or_not_tex
         f'{_as_json(_FIRST_ANSWER)}\nNote\n[\n{_as_json(_CORRECTED_ANSWER)}',
         # No line that carries a letter between the objects.
         f'{_as_json(_FIRST_ANSWER)}\n--\n{_as_json(_CORRECTED_ANSWER)}',
+        # One complete object with a stray fence is not two objects.
+        f'{_as_json(_FIRST_ANSWER)}\n```',
+        f'```json\n{_as_json(_FIRST_ANSWER)}',
+        # A truncated outer object: its inner object is not the first answer.
+        '{"entries": {"entry_index": 0}\n\nNote\n\n{"entries": []}',
         # Prose on the same line as an object.
         f'{_as_json(_FIRST_ANSWER)} Oops: {_as_json(_CORRECTED_ANSWER)}',
         f'{_as_json(_FIRST_ANSWER)}\nOops: {_as_json(_CORRECTED_ANSWER)}',
