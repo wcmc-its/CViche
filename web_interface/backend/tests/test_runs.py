@@ -301,8 +301,8 @@ def test_restart_body_is_byte_identical(client, db, seed_simple_mode, run_with_i
     storage = MagicMock()
     monkeypatch.setattr(runs_api, "check_rate_limit", lambda *a: None)
     monkeypatch.setattr(runs_api, "get_storage", lambda: storage)
-    monkeypatch.setattr("app.api.upload.UPLOAD_DIR", tmp_path)
-    monkeypatch.setattr("app.api.upload.get_storage", lambda: storage)
+    monkeypatch.setattr("app.services.run_creation.UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr("app.services.run_creation.get_storage", lambda: storage)
     _auth(client, user)
     resp = client.post(f"/api/run/{run.id}/restart")
     assert resp.status_code == 200, resp.text

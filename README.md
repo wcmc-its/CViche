@@ -330,6 +330,11 @@ These variables control security-sensitive thresholds. They have sensible defaul
 | `CVICHE_LOGIN_RATE_WINDOW` | Login rate limit window duration |
 | `CVICHE_MAX_UPLOAD_MB` | Maximum upload file size |
 | `CVICHE_ALLOWED_ORIGINS` | Comma-separated CORS allowed origins |
+| `CVICHE_EMAIL_INTAKE` | Worker polls S3 `inbound/` for emailed CVs (#1298); off by default |
+| `CVICHE_MAIL_SEND` | Send intake acknowledgement/rejection mail via SESv2; off by default (logged only) |
+| `CVICHE_MAIL_FROM` | Intake mail sender; default `no-reply@cviche.weill.cornell.edu` |
+| `CVICHE_MAIL_REGION` | SES region for intake mail; default `us-east-1` |
+| `CVICHE_PUBLIC_URL` | Base URL for the link in intake mail; default the first `CVICHE_ALLOWED_ORIGINS` origin |
 
 ### Frontend
 
