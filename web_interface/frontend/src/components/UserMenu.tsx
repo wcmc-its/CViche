@@ -20,7 +20,7 @@ export default function UserMenu({ className }: UserMenuProps) {
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
-  // Directory headshot, as Scholars uses; on a 404 (no photo) the name stands alone.
+  // Directory headshot, as Scholars uses; a 404 (no photo) falls back to initials.
   const [photoFailed, setPhotoFailed] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -45,6 +45,14 @@ export default function UserMenu({ className }: UserMenuProps) {
 
   if (!user) return null
 
+  const initials = user.display_name
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => part[0])
+    .slice(0, 2)
+    .join('')
+    .toUpperCase()
+
   const handleLogout = async () => {
     setSigningOut(true)
     try {
@@ -68,13 +76,20 @@ export default function UserMenu({ className }: UserMenuProps) {
         title={user.email}
         className="flex items-center gap-2.5 rounded-lg p-1 text-left focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
       >
-        {user.cwid && !photoFailed && (
+        {user.cwid && !photoFailed ? (
           <img
             src={`${HEADSHOT_BASE}/${encodeURIComponent(user.cwid)}.png?returnGenericOn404=false`}
             alt=""
             onError={() => setPhotoFailed(true)}
             className="h-[30px] w-[30px] shrink-0 rounded-full object-cover bg-sand-300"
           />
+        ) : (
+          <span
+            aria-hidden="true"
+            className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full bg-ink text-xs font-semibold text-sand-100"
+          >
+            {initials || '?'}
+          </span>
         )}
         <span className="leading-tight">
           <span className="block text-sm font-medium text-gray-900">{user.display_name}</span>
