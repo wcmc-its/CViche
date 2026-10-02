@@ -101,6 +101,9 @@ def test_cap_source_names_the_stage4_group_failure_gate_from_the_real_scorer(tmp
     ((scorer.score_lost_source_table, scorer.score_fused_entries), "table_lost"),
     ((scorer.score_under_extracted_records, scorer.score_stage4_group_failures),
      "under_extraction"),
+    ((scorer.score_stage4_group_failures, scorer.score_llm_fallback_served),
+     "stage4_group_failures"),
+    ((scorer.score_fused_entries, scorer.score_llm_fallback_served), "segmentation"),
 ])
 def test_when_gates_tie_at_the_same_cap_the_pointer_names_the_most_specific(fired, lint):
     """#822: the content-loss caps and the stage-4 cap all sit at 84, and the
@@ -151,6 +154,34 @@ def test_a_run_with_fused_entries_and_a_failed_stage4_group_points_at_the_fused_
     assert result["hard_fail_caps_applied"] == [84, 84] and result["totalScore"] == 84
     assert source == rqr.CapSource(
         "several records were fused into one entry", "segmentation")
+
+
+def test_cap_source_names_the_fallback_served_gate_from_the_real_scorer(tmp_path):
+    """#1174: the same 85 GREEN run with one fallback-served stage-4 group is
+    capped at 84, and the report names that gate and its doctor lint."""
+    import json
+    from docx import Document
+
+    (tmp_path / "T1_fields.json").write_text(json.dumps({
+        "cv_owner": {"full_name": "Jane Q. Public"},
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "entries": [{"taxonomy_code": "S1", "extraction_success": True,
+                     "llm_fallback_model": "example.fallback-model-1",
+                     "extracted_fields": {"email": "j@x.org"}}]}))
+    (tmp_path / "T1_classified.json").write_text(json.dumps({"meta": {
+        "total_entries": 4, "duplicate_entries": 0, "code_distribution": {"A": 3, "T": 1}}}))
+    (tmp_path / "T1_entries.json").write_text(json.dumps({"coverage": {"coverage_percentage": 100}}))
+    doc = Document()
+    doc.add_paragraph("clean")
+    row = doc.add_table(rows=1, cols=2).rows[0]
+    row.cells[0].text, row.cells[1].text = "a", "b"
+    doc.save(tmp_path / "T1_wcm.docx")
+
+    result = scorer.score_run(tmp_path, "T1")
+    source = rqr.cap_source(qss.parse_score(result))
+
+    assert (result["raw_score_before_caps"], result["totalScore"]) == (85.0, 84)
+    assert source == rqr.CapSource("a backup model answered part of the run", "llm_fallback_served")
 
 
 def test_every_known_lint_has_a_plain_english_line():

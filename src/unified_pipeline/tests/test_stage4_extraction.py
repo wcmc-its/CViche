@@ -493,6 +493,33 @@ def test_extract_fields_batch_real_implementation_drops_malformed_item(monkeypat
     assert "dropped one malformed LLM entry" in caplog.text
 
 
+def test_extract_fields_batch_stamps_the_entries_of_a_group_the_fallback_served(monkeypatch):
+    """#1174: a served call is a success, so only this stamp records it. The
+    stamp is on the entries of the group the fallback answered, not on other
+    groups, and a normal result leaves no key."""
+    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_ENTRY_FALLBACK_KEY
+
+    entries = [
+        {"text": "hello world", "taxonomy_code": "A1", "element_idx_start": 0, "element_idx_end": 0},
+        {"text": "other group", "taxonomy_code": "B1", "element_idx_start": 1, "element_idx_end": 1},
+    ]
+
+    def fake_call_llm(*, messages, **_kwargs):
+        reply = {"content": json.dumps({"entries": [{"entry_index": 0, "note": "x"}]}),
+                 "cost": 0.0, "total_tokens": 0}
+        if "hello world" in messages[1]["content"]:
+            reply[FALLBACK_SERVED_KEY] = "example.fallback-model-1"
+        return reply
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    by_code = {e["taxonomy_code"]: e for e in result["entries"]}
+    assert by_code["A1"][STAGE4_ENTRY_FALLBACK_KEY] == "example.fallback-model-1"
+    assert STAGE4_ENTRY_FALLBACK_KEY not in by_code["B1"]
+
+
 @pytest.mark.parametrize("timeout_error", [
     ReadTimeoutError(endpoint_url="https://bedrock.example.invalid"),
     ConnectTimeoutError(endpoint_url="https://bedrock.example.invalid"),
