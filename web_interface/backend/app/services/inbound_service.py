@@ -185,6 +185,7 @@ def _notify(parsed: ParsedMessage, verdict: Verdict, result: AutoRunResult | Non
         mailer.send(mailer.processing_notice(
             user.email, runs=result.runs, held=result.held, batch_id=result.batch_id,
             outdated_consent=result.outdated_consent, skipped=sum(parsed.rejected.values()),
+            consent_date=user.consent_date,
         ))
     elif verdict.reason in mailer.REPLYABLE_REASONS:
         mailer.send(mailer.rejection(user.email, verdict.reason))

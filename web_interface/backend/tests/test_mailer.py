@@ -71,8 +71,28 @@ def test_notice_when_everything_is_held():
 def test_notice_for_outdated_consent_says_to_sign_in(monkeypatch):
     monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
     body = _notice(runs=0, held=3, batch_id=None, outdated_consent=True)
-    assert "sign in to cviche to review the updated terms" in body.lower() and "3 CVs are waiting" in body
+    assert "terms have been updated" in body and "sign in to review and accept them" in body
+    assert "https://cviche.example.org/consent" in body and "3 CVs are waiting" in body
+    assert "agreed to" not in body
     assert "Processing" not in body
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"runs": 2, "held": 0}, {"runs": 2, "held": 1}, {"runs": 0, "held": 4}, {"runs": 1, "held": 0, "skipped": 2},
+], ids=["runs", "runs_and_held", "all_held", "skipped"])
+def test_every_accepted_notice_cites_the_agreed_terms_with_the_consent_date(monkeypatch, kwargs):
+    from datetime import datetime
+    monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
+    body = _notice(consent_date=datetime(2026, 9, 3, 14, 5), **kwargs)
+    assert ("These CVs are processed under the CViche terms you agreed to on September 3, 2026: "
+            "https://cviche.example.org/help#data-retention") in body
+
+
+def test_the_terms_sentence_omits_the_date_when_none_is_stored(monkeypatch):
+    monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
+    body = _notice(runs=1, held=0, consent_date=None)
+    assert "terms you agreed to: https://cviche.example.org/help#data-retention" in body
+    assert " on " not in body.split("agreed to")[1].split(":")[0]
 
 
 def test_notices_never_carry_a_filename():

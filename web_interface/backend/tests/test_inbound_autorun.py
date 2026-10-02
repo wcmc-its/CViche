@@ -101,6 +101,13 @@ def test_accepted_cvs_become_one_queued_batch_and_the_reply_links_to_it(db, stor
     assert "one.docx" not in body and "two.docx" not in body
 
 
+def test_the_reply_cites_the_users_stored_consent_date(db, storage, sent, queue, seed_simple_mode):
+    from datetime import datetime
+    _user(db, consent_date=datetime(2026, 8, 6, 9, 0))
+    _send(db, storage, ["one"])
+    assert "terms you agreed to on August 6, 2026: " in sent[0].body and "/help#data-retention" in sent[0].body
+
+
 @pytest.mark.parametrize("chosen, expected", [
     ("own_cv", "own_cv"), ("authorized_admin", "authorized_admin"), (None, "authorized_admin"), ("junk", "authorized_admin"),
 ])
@@ -162,7 +169,7 @@ def test_outdated_consent_holds_everything_and_says_to_sign_in(db, storage, sent
     assert db.query(Run).count() == 0 and db.query(RunBatch).count() == 0 and queue.enqueued == []
     assert set(_statuses(db).values()) == {InboundFileStatus.PENDING}
     body = sent[0].body.lower()
-    assert "sign in to cviche to review the updated terms" in body and "2 cvs are waiting" in body
+    assert "terms have been updated" in body and "sign in to review and accept them" in body and "2 cvs are waiting" in body
     assert "processing" not in body
 
 
