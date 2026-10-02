@@ -48,7 +48,7 @@ Each run's actual cost is recorded on the run and shown in the admin dashboard. 
 
 CViche is **Bedrock-only** -- all LLM traffic stays in AWS Bedrock. Supported model families include Claude (Anthropic), Llama (Meta), and Mistral, via the Converse API; the default is Claude Sonnet 4.6.
 
-Every stage runs Claude Sonnet 4.6 by default except stage 3b, which runs Claude Haiku 4.5. Model selection lives in `src/unified_pipeline/config/llm_config.yaml` (a `default` block plus `stages:` overrides) -- different stages may benefit from different model tiers, with segmentation/classification benefiting most from larger models and formatting stages (5c, 5d) working well with smaller ones. See [LLM_MODELS.md](LLM_MODELS.md) for how to change a stage's model.
+Every stage, including 3b, runs Claude Sonnet 5 by default. Model selection lives in `src/unified_pipeline/config/llm_config.yaml` (a `default` block plus `stages:` overrides) -- different stages may benefit from different model tiers, with segmentation/classification benefiting most from larger models and formatting stages (5c, 5d) working well with smaller ones. See [LLM_MODELS.md](LLM_MODELS.md) for how to change a stage's model.
 
 </details>
 
