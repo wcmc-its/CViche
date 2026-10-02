@@ -938,5 +938,31 @@ def test_uid_owner_surname_with_no_publications_falls_back_to_the_guess():
     assert bibliography._resolve_uid_owner_surname("2003_Quennevillejs_Cv", []) == "Quenneville"
 
 
+def test_uid_owner_surname_is_empty_for_a_run_id():
+    # #457: a letters-only run id is not a surname to bold citation authors by.
+    pubs = [_citation_entry("Qzkmrt AB, Doe J. A study. J Med. 2020.", None, 2020)]
+    assert bibliography._resolve_uid_owner_surname("QZKMRT", pubs) == ""
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q", "-p", "no:cacheprovider"]))
+
+
+def test_in_press_note_is_a_comment_on_the_tracked_citation_even_with_comments_off():
+    # Stage 5 found an "in press" paper in PubMed (in_press_note). The
+    # faculty member decides on the tracked change, so the reason must reach
+    # the docx whatever the pipeline-comments toggle says.
+    gen = _generator()
+    assert gen.emit_comments is False
+    note = "Found in PubMed as PMID 12345678, published 2025; the CV listed it as in press."
+    entry = _citation_entry("Doe J. A study. J. 2025;1:1-2.", "Doe J", 2025)
+    entry.update(enrichment_status="enriched", enrichment_source="title_search",
+                 text="Doe J. A study. J. In press.", in_press_note=note)
+
+    gen._fill_bibliography({"S1": [entry]}, cv_owner={}, document_uid="")
+
+    header_idx = gen._find_paragraph_with_text("Peer-reviewed Research Articles:")
+    para = next(p for p in gen.doc.paragraphs[header_idx:header_idx + 4]
+                if p._p.find(qn("w:ins")) is not None)
+    assert para._p.find(qn("w:del")) is not None
+    assert para._p.find(qn("w:commentRangeStart")) is not None
+    assert [c["text"] for c in gen._comments] == [note]

@@ -32,7 +32,8 @@ Two dimensions are hard-fail gates: a fatal pipeline error or a missing CV
 owner name caps the final score regardless of the other dimensions. A third
 gate -- protected personal data in the rendered docx (#820) -- caps the score
 the same way but carries NO weight (``CAP_ONLY_GATES``), so a clean run's raw
-score is unchanged by its existence.
+score is unchanged by its existence. A fourth, also cap-only, keeps a run in
+which a stage-4 extraction group failed outright out of GREEN (#1174).
 
 Three more cap-only gates (#822) cover source content the pipeline lost before
 the document was written, a thing no weighted dimension measures: an
@@ -78,6 +79,8 @@ import logging
 import re
 import sys
 import zipfile
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -112,6 +115,7 @@ from unified_pipeline.segmentation_regression import (
     find_lost_blocks,
     iter_source_block_lines,
 )
+from unified_pipeline.stage4.error_codes import NO_MATCHING_EXTRACTION
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX, read_stage_errors
 
 logger = logging.getLogger(__name__)
@@ -469,6 +473,97 @@ def stage3b_fallback_ratio_exceeded(stage_3b_data: dict | None) -> tuple[bool, s
         f"entries_classified={stats.get('entries_classified')})")
 
 
+#: A run in which a stage-4 extraction group failed outright cannot score GREEN
+#: (#1174). The cap sits one point under the GREEN band, so the run reads
+#: YELLOW ("human cleanup needed") and the owner-facing "may need cleanup" flag
+#: (`cap` set) comes on. It is derived from BAND_GREEN so the two cannot drift.
+#: Deliberately NOT a graded cap by share of entries lost: nothing measured
+#: supports a threshold (see docs/RUN_DOCTOR_SCORING.md), and a run whose
+#: failed group the recovery pass rescued is flagged here too, because the
+#: rescued entries were read on a different prompt and can carry wrong values.
+STAGE4_GROUP_FAILURE_CAP = BAND_GREEN - 1
+
+
+@dataclass(frozen=True)
+class Stage4GroupFailures:
+    """What stage 4 recorded about taxonomy groups whose extraction call failed.
+
+    ``failed_batches`` is stage 4's own ``stats.failed_batches`` (batches with
+    at least one failed group); the entry counts come from the entries'
+    ``extraction_error``. ``stats.extraction_failed`` is not used: it counts
+    entries still unextracted AFTER the recovery pass, so it reads 0 when every
+    entry of a failed group was rescued.
+    """
+
+    failed_batches: int
+    entries_failed: int
+    entries_rescued: int
+    entries_by_code: dict[str, int]
+    errors: dict[str, int]
+
+    @property
+    def entries_unrecovered(self) -> int:
+        return self.entries_failed - self.entries_rescued
+
+    def summary(self) -> str:
+        codes = ",".join(f"{code}:{n}" for code, n in self.entries_by_code.items())
+        errors = ",".join(f"{error}:{n}" for error, n in self.errors.items())
+        return (
+            f"failed_batches={self.failed_batches}; entries_failed={self.entries_failed} "
+            f"(rescued={self.entries_rescued}, unrecovered={self.entries_unrecovered}); "
+            f"taxonomy_codes={codes or 'none'}; errors={errors or 'none'}")
+
+
+def _is_group_failure(entry: object) -> bool:
+    """Whether the entry carries the error of a failed extraction-group call.
+
+    Every `extraction_error` except NO_MATCHING_EXTRACTION counts, not an
+    allowlist of today's three codes: a code stage 4 adds later is then counted
+    rather than silently missed, which is the gap this gate closes."""
+    if not isinstance(entry, dict):
+        return False
+    error = entry.get("extraction_error")
+    return bool(error) and error != NO_MATCHING_EXTRACTION
+
+
+def _failed_batch_count(stage_4_data: dict) -> int:
+    stats = stage_4_data.get("stats")
+    count = stats.get("failed_batches") if isinstance(stats, dict) else 0
+    return count if isinstance(count, int) and count > 0 else 0
+
+
+def stage4_group_failures(stage_4_data: dict | None) -> Stage4GroupFailures | None:
+    """The failed extraction groups recorded in a stage-4 artifact, or None
+    when it records none (or the artifact is absent or not the expected shape).
+
+    A group's call failing (an invalid reply, a timeout, a provider error such
+    as a content filter) leaves ``extraction_error`` on every entry of the
+    group. The recovery pass then retries those entries; one it fills in gains
+    ``extraction_success=True`` and KEEPS its ``extraction_error``, so
+    ``extraction_success`` alone cannot tell a rescued entry from one that was
+    never touched (#1174: a rescued group read as a clean run). Never raises on
+    a malformed artifact.
+
+    The single source both `score_stage4_group_failures` (the cap) and the
+    doctor's `stage4_group_failures` lint read, so the two cannot disagree
+    about what counts (§1.5)."""
+    if not isinstance(stage_4_data, dict):
+        return None
+    entries = stage_4_data.get("entries")
+    failed = [e for e in entries if _is_group_failure(e)] if isinstance(entries, list) else []
+    failed_batches = _failed_batch_count(stage_4_data)
+    if not failed and not failed_batches:
+        return None
+    return Stage4GroupFailures(
+        failed_batches=failed_batches,
+        entries_failed=len(failed),
+        entries_rescued=sum(1 for e in failed if e.get("extraction_success")),
+        entries_by_code=dict(sorted(
+            Counter(str(e.get("taxonomy_code") or "?") for e in failed).items())),
+        errors=dict(sorted(Counter(str(e["extraction_error"]) for e in failed).items())),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Dimension scorers  -- each returns (penalty_fraction, detail, hard_fail_cap)
 # ---------------------------------------------------------------------------
@@ -668,6 +763,9 @@ def score_protected_data(outputs_dir: Path) -> tuple[float, str, int | None]:
 #: with a verified loss cannot read "ship" but is not pushed toward RED -- none
 #: of these signals says the document is undeliverable, only that source
 #: content did not reach it. Derived from BAND_GREEN so the two cannot drift.
+#: Not shared with `STAGE4_GROUP_FAILURE_CAP` (#1174): that is a separate
+#: policy for a separate signal that happens to land on the same value, and
+#: retuning one should not silently move the other.
 CONTENT_LOSS_CAP = BAND_GREEN - 1
 
 #: Fused entries cap a run only at this count. One fused entry is common and
@@ -696,7 +794,7 @@ def score_under_extracted_records(outputs_dir: Path) -> tuple[float, str, int | 
     other 2 (EKGTXD) were garbled or recovered by stage 6, and that run's lost
     records reach the cap through the fused-entries gate. All 3 runs carrying a
     finding had verified loss somewhere. Outside IPXFBA a finding can fire with
-    nothing lost, so any finding caps."""
+    nothing lost; any finding still caps (a judgement call)."""
     data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
         return 0.0, f"{_missing_or_unreadable_detail('fields.json', reason)}; not evaluated", None
@@ -1363,6 +1461,21 @@ def score_stage3b_fallback_ratio(outputs_dir: Path) -> tuple[float, str, int | N
         else "within threshold", None
 
 
+def score_stage4_group_failures(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Stage 4's failed extraction groups (#1174): a cap-only gate like
+    `score_protected_data`, NOT a scored dimension -- it carries no weight, so
+    a run without a failed group scores exactly what it did before the gate
+    existed. A missing or unreadable ``*_fields.json`` is quiet here: the
+    owner and sparseness dimensions already penalise that absence in full."""
+    data, reason = _load_first(outputs_dir, "*_fields.json")
+    failures = stage4_group_failures(data)
+    if failures is not None:
+        return 1.0, failures.summary(), STAGE4_GROUP_FAILURE_CAP
+    if data is None:
+        return 0.0, _missing_or_unreadable_detail("fields.json", reason), None
+    return 0.0, "no failed extraction group", None
+
+
 # ---------------------------------------------------------------------------
 # Dimension registry  -- single source of truth (name, weight, scorer fn)
 # ---------------------------------------------------------------------------
@@ -1388,12 +1501,25 @@ PROTECTED_DATA_CAP = 25
 #: are exactly what they were before the gate existed -- a batch scored
 #: last month is still comparable to one scored today. Same (fraction,
 #: detail, cap) contract as a dimension scorer; only the cap is read.
+#:
+#: ORDER MATTERS for the four caps that sit at the same value (84): the run
+#: page's "why is this capped" pointer (`run_quality_report.cap_source`) names
+#: the FIRST flag at the binding cap, and flags are written in this order. They
+#: are listed most specific first: the lost-table gate measures the loss against
+#: the delivered docx; the fused-entries gate counts records swallowed in the
+#: extraction (7 of 9 flagged entries real); the under-extraction gate fires on
+#: any finding, including ones that lost nothing; the stage-4 gate (#1174)
+#: reports that a call failed and was retried and measures no loss. So a run
+#: that trips several is pointed at the signal most likely to name what it
+#: actually lost (batch IPXFBA: EKGTXD fires under-extraction and fused, and
+#: PBSGQZ fires fused and stage-4; the verified loss in both is the fused entry).
 CAP_ONLY_GATES = [
     ("Protected personal data absent from rendered docx (HARD-FAIL gate)", score_protected_data),
-    ("Source records lost: entry under-extracted (CAP-ONLY gate)", score_under_extracted_records),
+    ("Source table lost before extraction (CAP-ONLY gate)", score_lost_source_table),
     ("Source records fused: several entries swallowed multiple records (CAP-ONLY gate)",
      score_fused_entries),
-    ("Source table lost before extraction (CAP-ONLY gate)", score_lost_source_table),
+    ("Source records lost: entry under-extracted (CAP-ONLY gate)", score_under_extracted_records),
+    ("Stage-4 extraction group failed (caps below GREEN)", score_stage4_group_failures),
 ]
 
 

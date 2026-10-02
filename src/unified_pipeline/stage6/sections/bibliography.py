@@ -124,6 +124,7 @@ class _CitationEnrichment:
     enrichment_status: str = ''
     enrichment_source: str = ''
     text: str = ''
+    in_press_note: str = ''
 
     @classmethod
     def from_raw(cls, raw) -> '_CitationEnrichment':
@@ -134,6 +135,7 @@ class _CitationEnrichment:
             enrichment_status=_enrichment_field_text(raw.get('enrichment_status')),
             enrichment_source=_enrichment_field_text(raw.get('enrichment_source')),
             text=_enrichment_field_text(raw.get('text')),
+            in_press_note=_enrichment_field_text(raw.get('in_press_note')),
         )
 
 
@@ -431,6 +433,13 @@ class BibliographySection:
                     if enrichment_source:
                         comment = f"Data enriched from {enrichment_source.upper()}. Fields updated: {', '.join(enriched_fields)}"
                         self._add_word_comment(para, comment, author="PubMed Enrichment")
+
+                # Stage 5 found an "in press" paper published. This comment
+                # is for the faculty member deciding on the tracked change,
+                # not a pipeline comment, so it ignores `emit_comments`.
+                if enrichment.in_press_note:
+                    self._add_word_comment(para, enrichment.in_press_note,
+                                           author="PubMed Enrichment", always=True)
 
                 # Add comments from upstream pipeline processes
                 self._add_entry_comments(para, pub)

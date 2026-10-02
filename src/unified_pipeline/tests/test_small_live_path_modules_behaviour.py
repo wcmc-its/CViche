@@ -67,6 +67,12 @@ def test_row_col_dotted_string_splits_into_major_minor():
     assert element_idx_sort_key("22.2") == (22.0, 2.0)
 
 
+def test_row_10_sorts_after_row_2_and_apart_from_row_1():
+    """#1228: stage 2 now writes the index text the model wrote, "474.10" -- a
+    row that is neither row 1 nor before row 2."""
+    assert element_idx_sort_key("474.1") < element_idx_sort_key("474.2") < element_idx_sort_key("474.10")
+
+
 def test_table_n_string_sorts_after_every_plain_index():
     assert element_idx_sort_key("table_3") == (1_000_003.0, 0.0)
 

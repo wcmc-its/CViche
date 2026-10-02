@@ -311,6 +311,45 @@ def test_resolve_licensure_raw_text_dea_is_withheld_npi_reaches_identifiers():
 
 
 # ---------------------------------------------------------------------------
+# #1217: the agency's full name is the DEA label too. A row whose first
+# column spells out "Drug Enforcement Administration" carries no "DEA" token,
+# and the shape tiebreak is off because that column lands in `state`.
+
+
+def test_agency_full_name_in_the_state_field_classifies_as_dea():
+    kind = _classify_licensure_entry(
+        state="Drug Enforcement Administration", license_number="AB1234567",
+        license_type="", original_text="")
+    assert kind == KIND_DEA
+
+
+def test_agency_full_name_in_raw_text_classifies_as_dea_with_a_state_present():
+    """The raw-text path alone, with the state field naming a jurisdiction
+    (so neither the state test nor the shape tiebreak can answer)."""
+    kind = _classify_licensure_entry(
+        state="NY", license_number="AB1234567", license_type="",
+        original_text="Drug Enforcement Administration  AB1234567  2011 - Present")
+    assert kind == KIND_DEA
+
+
+def test_agency_name_variants_classify_as_dea():
+    for name in ("Drug Enforcement Agency", "U.S. DRUG ENFORCEMENT ADMINISTRATION",
+                 "Drug  Enforcement\nAdministration"):
+        kind = _classify_licensure_entry(
+            state=name, license_number="", license_type="", original_text=name)
+        assert kind == KIND_DEA, name
+
+
+def test_a_line_that_only_mentions_drug_enforcement_is_not_dea():
+    """Negative control: the label is the agency's name, not any two of its
+    words -- a licence line about drug-enforcement coursework stays a licence."""
+    kind = _classify_licensure_entry(
+        state="NY", license_number="12345", license_type="",
+        original_text="Drug Enforcement Policy course, NY licence 12345")
+    assert kind == KIND_LICENSE
+
+
+# ---------------------------------------------------------------------------
 # T5.3: the number-shape fallback, uncovered before this round -- only
 # reached when the entry carries no label and (for the NPI/DEA branch) no
 # stated jurisdiction.

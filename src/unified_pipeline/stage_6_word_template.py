@@ -171,7 +171,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     normalize_retired_code,
     segment_already_rendered,
 )
-from unified_pipeline.stage4.schemas import FIELD_SCHEMAS
+from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
@@ -1034,7 +1034,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         entries_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
         mismatch_corrections = 0
         entries = fan_out_multi_record_entries(
-            entries, FIELD_SCHEMAS, warnings=self._section_failures)
+            entries, FIELD_SCHEMAS, warnings=self._section_failures,
+            records_key=STAGE4_RECORDS_KEY)
         for entry in entries:
             code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code)
@@ -1757,12 +1758,17 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             'D3': 'Other Professional Positions',
             'F1': 'Licensure',
             'H': 'HONORS',
-            # Teaching (K codes) - map to specific teaching subsections
+            # Teaching (K codes) - map to specific teaching subsections. Each
+            # string is a substring of the template's own subsection heading
+            # ("Administrative teaching (leadership role ...)", "Continuing
+            # education and professional education as teacher (...)", "Other
+            # education/outreach activities (...)"); a string that matches no
+            # heading sends the segment to the Appendix (#1225).
             'K1': 'Didactic Teaching',
             'K2': 'Clinical Teaching',
-            'K3': 'Mentoring',  # or could go to MENTORING section
-            'K4': 'Curriculum Development',
-            'K5': 'Other Teaching',
+            'K3': 'Administrative teaching',
+            'K4': 'Continuing education',
+            'K5': 'Other education/outreach',
             # Clinical (L codes) - map to clinical subsections
             'L1': 'Clinical Practice',
             'L2': 'Clinical Innovations',
@@ -2546,9 +2552,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         taxonomy_hint = """
 K1: Didactic Teaching (courses, lectures)
 K2: Clinical Teaching (bedside, rounds)
-K3: Mentoring/Advising
-K4: Curriculum Development
-K5: Other Teaching Activities
+K3: Educational Program Leadership (course, residency or fellowship director)
+K4: Continuing Medical Education (CME) & Professional Education
+K5: Community Education or Patient Outreach
 L1: Clinical Practice activities
 L2: Clinical Innovations
 L3: Clinical/Administrative Leadership
