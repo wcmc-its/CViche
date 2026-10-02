@@ -81,3 +81,30 @@ def test_read_failure_is_counted_and_does_not_stop_the_batch(db, monkeypatch, ca
 
     assert (summary.failed, summary.written) == (1, 1)
     assert any(r.exc_info for r in caplog.records)
+
+
+def test_rescore_stale_recomputes_only_runs_on_other_weights(db, monkeypatch):
+    _run(db, "B00001", score=60)
+    _run(db, "B00002", score=70)
+    _run(db, "B00003", score=80)
+    _patch_cache(monkeypatch, {
+        "B00001": {"totalScore": 60, "total_weight": 95},
+        "B00002": {"totalScore": 70, "total_weight": script.TOTAL_WEIGHT},
+        "B00003": {"totalScore": 80, "total_weight": 95},
+    })
+    recomputed = []
+
+    def fake_compute(run_id):
+        recomputed.append(run_id)
+        return None if run_id == "B00003" else {"totalScore": 91, "total_weight": script.TOTAL_WEIGHT}
+    monkeypatch.setattr(script, "compute_and_cache_score", fake_compute)
+
+    dry = script.rescore_stale(db, apply=False)
+    assert (dry.candidates, dry.resolved, dry.written, recomputed) == (3, 2, 0, [])
+
+    summary = script.rescore_stale(db, apply=True)
+
+    assert (summary.resolved, summary.missing, summary.written) == (2, 1, 1)
+    assert sorted(recomputed) == ["B00001", "B00003"]
+    db.expire_all()
+    assert [db.get(Run, i).quality_score for i in ("B00001", "B00002", "B00003")] == [91, 70, 80]
