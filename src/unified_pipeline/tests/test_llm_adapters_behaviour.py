@@ -380,7 +380,11 @@ def test_select_final_json_object_ignores_a_response_that_is_not_json_or_not_tex
         # Text after the last object that is not a fence: a stray bracket, or prose.
         f'{_as_json(_FIRST_ANSWER)}\nfix\n{_as_json(_CORRECTED_ANSWER)}\n]',
         f'{_as_json(_FIRST_ANSWER)}\n\n{_PROSE}\n\n{_as_json(_CORRECTED_ANSWER)}\n\nHope this helps.',
-        # Prose with no line that carries a letter between the objects.
+        # A comma after the earlier object, or an array opened before the later one.
+        f'{_as_json(_FIRST_ANSWER)},\nNote\n{_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)}\nNote\n[{_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)}\nNote\n[\n{_as_json(_CORRECTED_ANSWER)}',
+        # No line that carries a letter between the objects.
         f'{_as_json(_FIRST_ANSWER)}\n--\n{_as_json(_CORRECTED_ANSWER)}',
         # Prose on the same line as an object.
         f'{_as_json(_FIRST_ANSWER)} Oops: {_as_json(_CORRECTED_ANSWER)}',

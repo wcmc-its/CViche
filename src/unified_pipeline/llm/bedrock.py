@@ -361,14 +361,15 @@ def _is_prose_gap(gap: str) -> bool:
     Each object must sit on its own lines: the rest of the line the earlier
     object ends on, and the start of the line the later one begins on, must be
     blank or a fence. So a comma, a semicolon or a bracket next to an object
-    rejects the gap, and so does a gap with no line that carries a letter.
+    rejects the gap. Between them, every line that is not blank or a fence
+    must carry a letter, and at least one such line must exist.
     """
     lines = gap.split("\n")
     if not (_is_blank_or_fence(lines[0]) and _is_blank_or_fence(lines[-1])):
         return False
-    return any(
-        not _is_blank_or_fence(line) and any(ch.isalpha() for ch in line)
-        for line in lines[1:-1]
+    text_lines = [line for line in lines[1:-1] if not _is_blank_or_fence(line)]
+    return bool(text_lines) and all(
+        any(ch.isalpha() for ch in line) for line in text_lines
     )
 
 
