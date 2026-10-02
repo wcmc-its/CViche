@@ -40,6 +40,7 @@ from app.storage import get_storage
 from app.storage.base import StorageKeyExists
 from app.services.batch_service import MAX_BATCH_FILES, get_owned_batch
 from app.services.run_service import UPLOAD_DIR
+from app.services.input_format import detect_input_format_or_none
 from app.services.template_warning import detect_wcm_template
 from app.services.pdf_sandbox import (
     PDF_BUSY_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, PDF_UNREADABLE_MESSAGE, EncryptedPdfError,
@@ -662,6 +663,12 @@ async def upload_cv(
             current_user.email, wcm_template_match_ratio,
         )
 
+    # Was this CV written in the WCM template (filled in) or another format?
+    # Recorded on the run for score comparisons; best-effort, NULL on failure.
+    input_format, input_format_score = await run_in_threadpool(
+        detect_input_format_or_none, extracted
+    )
+
     # Allocate a fresh run id and durably archive the ORIGINAL upload to the
     # run's storage namespace BEFORE creating the run record. The pod-local
     # copy is ephemeral (lost on a pod recycle), so the archive is the run's
@@ -744,6 +751,8 @@ async def upload_cv(
         show_pipeline_comments=1 if include_classification_comments else 0,
         strip_template_instructions=1 if strip_wcm_instructions else 0,
         batch_id=batch_id,
+        input_format=input_format,
+        input_format_score=input_format_score,
     )
     db.add(run)
     _add_pending_steps(db, run_id)

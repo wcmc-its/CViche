@@ -179,6 +179,13 @@ class FeedbackFilterCounts(BaseModel):
     needed: int
 
 
+class InputFormatFilterCounts(BaseModel):
+    """Runs matching each value of the ``input_format`` filter."""
+    wcm: int
+    other: int
+    unknown: int
+
+
 class RunFilterOptions(BaseModel):
     """GET /runs/filter-options: the options each admin runs filter offers."""
     departments: list[FilterCount]
@@ -186,6 +193,7 @@ class RunFilterOptions(BaseModel):
     run_by: list[RunByOption]
     self_count: int
     feedback: FeedbackFilterCounts
+    input_format: InputFormatFilterCounts
 
 
 class PaginatedRuns(BaseModel):

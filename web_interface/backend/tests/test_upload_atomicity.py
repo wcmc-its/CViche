@@ -487,6 +487,51 @@ def test_upload_returns_wcm_template_warning(client, db, seed_simple_mode, tmp_p
     assert db.query(Run).filter(Run.id == body["run_id"]).first().status == "created"
 
 
+# --- input format (WCM template vs other) recorded on the run -----------------
+
+# Synthetic text: the template's own section headings, nothing from a real CV.
+_WCM_TEMPLATE_TEXT = "\n".join([
+    "PERSONAL DATA", "EMPLOYMENT STATUS", "INSTITUTIONAL/HOSPITAL AFFILIATION",
+    "LICENSURE, BOARD CERTIFICATION", "PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES",
+    "EDUCATIONAL CONTRIBUTIONS", "CLINICAL PRACTICE, INNOVATION, and LEADERSHIP",
+    "INSTITUTIONAL LEADERSHIP ACTIVITIES", "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES",
+    "INVITATIONS TO SPEAK/PRESENT", "Synthetic filler line so the text is long enough. " * 12,
+])
+
+
+def _upload_with_text(client, db, tmp_path, extracted, input_format_patch=None):
+    user = _make_user(db)
+    _auth(client, user)
+    patches = [
+        patch("app.api.upload.UPLOAD_DIR", tmp_path),
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", return_value=extracted),
+        patch("app.api.upload.detect_wcm_template", return_value=(False, None)),
+        patch("app.api.upload.get_storage", return_value=MagicMock()),
+    ]
+    if input_format_patch is not None:
+        patches.append(input_format_patch)
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+    assert resp.status_code == 200, resp.text
+    return db.query(Run).filter(Run.id == resp.json()["run_id"]).one()
+
+
+@pytest.mark.parametrize("text, fmt", [(_WCM_TEMPLATE_TEXT, "wcm"), ("Plain CV text. " * 60, "other")],
+                         ids=["wcm", "other"])
+def test_upload_records_input_format_on_the_run(client, db, seed_simple_mode, tmp_path, text, fmt):
+    run = _upload_with_text(client, db, tmp_path, text)
+    assert run.input_format == fmt
+    assert run.input_format_score is not None
+
+
+def test_upload_survives_an_input_format_detector_failure(client, db, seed_simple_mode, tmp_path, caplog):
+    boom = patch("app.services.input_format.detect_input_format", side_effect=RuntimeError("boom"))
+    with caplog.at_level("WARNING", logger="app.services.input_format"):
+        run = _upload_with_text(client, db, tmp_path, _WCM_TEMPLATE_TEXT, boom)
+    assert run.input_format is None and run.input_format_score is None
+    assert any("Input-format detection failed" in r.message for r in caplog.records)
+
+
 # --- #793: bounded read + off-event-loop extraction -------------------------
 
 class _TrackedFile:
@@ -549,9 +594,9 @@ def test_read_bounded_pins_the_size_boundary():
     assert exc_info.value.status_code == 400
 
 
-def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db, seed_simple_mode, tmp_path):
-    """#793 item 3: `_extract_text` and `detect_wcm_template` are dispatched
-    through `run_in_threadpool`, not called synchronously inside the async
+def test_upload_offloads_extraction_and_template_checks_to_threadpool(client, db, seed_simple_mode, tmp_path):
+    """#793 item 3: `_extract_text`, `detect_wcm_template` and
+    `detect_input_format_or_none` are dispatched through `run_in_threadpool`, not called synchronously inside the async
     handler. Reverting either `await run_in_threadpool(fn, ...)` call back to
     a bare `fn(...)` leaves the response unchanged but this test catches it,
     since it asserts run_in_threadpool was the actual dispatch mechanism for
@@ -560,6 +605,7 @@ def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db,
     _auth(client, user)
     extract_mock = MagicMock(return_value="x" * 600)
     detect_mock = MagicMock(return_value=(False, None))
+    format_mock = MagicMock(return_value=(None, None))
     real_run_in_threadpool = upload_module.run_in_threadpool
     dispatched: list[object] = []
 
@@ -572,13 +618,14 @@ def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db,
         patch("app.api.upload._validate_docx_magic", return_value=True),
         patch("app.api.upload._extract_text", extract_mock),
         patch("app.api.upload.detect_wcm_template", detect_mock),
+        patch("app.api.upload.detect_input_format_or_none", format_mock),
         patch("app.api.upload.get_storage", return_value=MagicMock()),
         patch("app.api.upload.run_in_threadpool", spy),
     ]
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 200, resp.text
-    assert dispatched == [extract_mock, detect_mock]
+    assert dispatched == [extract_mock, detect_mock, format_mock]
 
 
 def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode):

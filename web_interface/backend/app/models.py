@@ -215,6 +215,12 @@ class Run(Base):
     # executing image wins), not at upload. NULL for runs that predate the
     # column or when the image was built without a tag.
     image_tag = Column(String(128), nullable=True)
+    # Whether the uploaded CV was written in the WCM faculty CV template ("wcm")
+    # or another format ("other"), and the count of template signals behind it
+    # (app.services.input_format). NULL when undetermined: runs that predate the
+    # columns, unreadable text, or a detector failure at upload.
+    input_format = Column(String(10), nullable=True, index=True)
+    input_format_score = Column(Integer, nullable=True)
     # The batch upload this run belongs to (#1114), NULL for a single upload.
     # Also routes the run's queue token to the batch queue
     # (run_queue.queue_for) and suppresses its Teams "started" card.

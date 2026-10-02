@@ -5,11 +5,12 @@ import {
   buildDepartmentModel,
   buildFeedbackModel,
   buildFacultyModel,
+  buildInputFormatModel,
   buildRunByModel,
   recentRunByIds,
 } from './runFilterOptions'
 import { FEEDBACK_VALUE_LABEL } from './runFeedback'
-import { RUN_BY_SELF, hasActiveFilters, isFeedbackFilter } from './runFilters'
+import { INPUT_FORMAT_VALUE_LABEL, RUN_BY_SELF, hasActiveFilters, isFeedbackFilter, isInputFormatFilter } from './runFilters'
 import type { RunFilterControls, RunFilters } from './runFilters'
 import { SELF_RUN_BY_LABEL } from './runGroups'
 
@@ -23,7 +24,7 @@ interface RunFilterBarProps {
 }
 
 const EMPTY_OPTIONS: RunFilterOptions = { departments: [], faculty: [], run_by: [], self_count: 0,
-  feedback: { given: 0, needed: 0 } }
+  feedback: { given: 0, needed: 0 }, input_format: { wcm: 0, other: 0, unknown: 0 } }
 
 /** Display text for the selected Run by value. */
 export function runByValueLabel(
@@ -45,16 +46,22 @@ function feedbackValueLabel(feedback: string): string {
   return isFeedbackFilter(feedback) ? FEEDBACK_VALUE_LABEL[feedback] : ''
 }
 
+/** Display text for the selected Input format value; '' when unset. */
+function inputFormatValueLabel(inputFormat: string): string {
+  return isInputFormatFilter(inputFormat) ? INPUT_FORMAT_VALUE_LABEL[inputFormat] : ''
+}
+
 function activeChips(filters: RunFilters, runByLabel: string) {
   return [
     { key: 'department' as const, label: 'Department', value: filters.department },
     { key: 'faculty' as const, label: 'Faculty', value: filters.faculty },
     { key: 'runBy' as const, label: 'Run by', value: filters.runBy && runByLabel },
     { key: 'feedback' as const, label: 'Feedback', value: feedbackValueLabel(filters.feedback) },
+    { key: 'inputFormat' as const, label: 'Input format', value: inputFormatValueLabel(filters.inputFormat) },
   ].filter((chip) => chip.value)
 }
 
-/** The four admin filter comboboxes, shown right-aligned in the filter row; `extra` (the Batch filter) follows them. */
+/** The five admin filter comboboxes, shown right-aligned in the filter row; `extra` (the Batch filter) follows them. */
 export function RunFilterCombos({ controls, options, runs, currentUserId, currentUserEmail, extra }: RunFilterBarProps & { extra?: React.ReactNode }) {
   const { filters, setFilter } = controls
   const data = options ?? EMPTY_OPTIONS
@@ -93,6 +100,15 @@ export function RunFilterCombos({ controls, options, runs, currentUserId, curren
         model={buildFeedbackModel(data)}
         searchable={false}
         onPick={(id) => setFilter('feedback', id)}
+      />
+      <RunFilterCombo
+        label="Input format"
+        valueLabel={inputFormatValueLabel(filters.inputFormat) || 'Any'}
+        activeId={filters.inputFormat}
+        placeholder="Input format"
+        model={buildInputFormatModel(data)}
+        searchable={false}
+        onPick={(id) => setFilter('inputFormat', id)}
       />
       {extra}
     </div>

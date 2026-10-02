@@ -450,3 +450,12 @@ def test_foreign_template_instruction_length_cap():
     long_line = "C. Sample Publications (provide " + "complete citation; " * 40 + ")"
     assert len(long_line) > 400
     assert not is_foreign_template_instruction(long_line)
+
+
+def test_template_section_headers_are_normalized_and_cover_the_template():
+    from unified_pipeline.core.template_boilerplate import (
+        normalize_template_text, template_section_headers,
+    )
+    headers = template_section_headers()
+    assert normalize_template_text("1. EMPLOYMENT STATUS:") in headers
+    assert normalize_template_text("A heading no template has") not in headers

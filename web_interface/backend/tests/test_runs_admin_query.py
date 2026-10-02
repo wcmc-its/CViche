@@ -6,7 +6,7 @@ from fastapi import HTTPException
 
 from app.models import Run, User
 from app.services.runs_admin_query import (
-    RunFilters, build_filter_options, filtered_runs_query, parse_run_filters,
+    InputFormatFilter, RunFilters, build_filter_options, filtered_runs_query, parse_run_filters,
 )
 
 
@@ -19,6 +19,16 @@ class TestParseRunFilters:
     def test_bad_feedback_is_422(self):
         with pytest.raises(HTTPException) as exc:
             parse_run_filters(None, None, None, "maybe")
+        assert exc.value.status_code == 422
+
+    def test_input_format_filter_values(self):
+        for value in ("wcm", "other", "unknown"):
+            assert parse_run_filters(None, None, None, None, value).input_format.value == value
+        assert parse_run_filters(None, None, None, None, "").input_format is None
+
+    def test_bad_input_format_is_422(self):
+        with pytest.raises(HTTPException) as exc:
+            parse_run_filters(None, None, None, None, "pdf")
         assert exc.value.status_code == 422
 
     def test_blank_means_no_filter(self):
@@ -106,3 +116,19 @@ def test_faculty_options_are_most_recently_run_first(db, seeded):
 def test_filtered_query_loads_the_user_without_a_lazy_load(db, seeded):
     runs = filtered_runs_query(db, RunFilters(department="Library")).all()
     assert {r.user.display_name for r in runs} == {"Bob Tester"}  # raise_on_sql would raise
+
+
+def test_input_format_filter_selects_by_column_and_unknown_means_null(db, seeded):
+    for run_id, fmt in [("Q00000", "wcm"), ("Q00001", "other"), ("Q00002", "wcm")]:
+        db.query(Run).filter(Run.id == run_id).update({Run.input_format: fmt})
+    db.commit()
+
+    def ids(value):
+        query = filtered_runs_query(db, RunFilters(input_format=value))
+        return sorted(r.id for r in query.all())
+
+    assert ids(InputFormatFilter.WCM) == ["Q00000", "Q00002"]
+    assert ids(InputFormatFilter.OTHER) == ["Q00001"]
+    assert ids(InputFormatFilter.UNKNOWN) == ["Q00003", "Q00004"]
+    assert len(ids(None)) == 5
+
