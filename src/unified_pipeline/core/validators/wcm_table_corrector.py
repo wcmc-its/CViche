@@ -44,7 +44,7 @@ _BOARD = re.compile(
 # membership context.
 _BOARD_NAME = re.compile(r"american board of", re.I)
 _BOARD_CERT_WORD = re.compile(
-    r"board[\s-]*(?:certif|eligible)|\bdiplomates?\b|re-?certif|\bcertifi(?:ed|cation)\b"
+    r"board[\s-]*(?:certif|eligible)|\bdiplomat(?:e|s|es)?\b|re-?certif|\bcertifi(?:ed|cation)\b"
     r"|certificate\s*(?:#|no\b|number)",
     re.I,
 )

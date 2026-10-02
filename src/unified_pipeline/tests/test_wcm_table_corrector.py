@@ -35,6 +35,7 @@ def _code_after(text, hierarchy, code="I"):
         ("Recertification, American Board of Example Medicine, 2033-2043", ["Education"], "H"),
         ("American Board of Example Medicine, 2031", ["Education", "Certifications"], "I"),
         ("Certificate # A12345 Example Board", ["Licensure"], "I"),
+        ("Diplomat | American Board of Example Medicine | 8/2031-present", ["Professional Memberships"], "I"),
         ("Certified by the American Board of Example Medicine", ["Professional Memberships"], "I"),
         ("American Board of Example Medicine, certified 2034", ["Professional Memberships"], "I"),
     ],
@@ -55,7 +56,7 @@ def test_genuine_board_certification_still_becomes_f2(text, hierarchy, code):
         ("Board Certification Examination Committee, American Board of Example Medicine, 2036", ["Honors and Awards"], "H"),
         ("American Board of Example Medicine, Recertification Examination Committee, 2035-2039", ["Committees"], "I"),
         ("American Board of Example Medicine Service Awards, 2037", ["Education"], "H"),
-        ("Diplomatic liaison, American Board of Example Medicine, 2036", ["Societies"], "I"),
+        ("Diplomatic liaison, American Board of Example Medicine", ["Education"], "I"),
     ],
 )
 def test_board_name_alone_or_award_context_is_not_flipped(text, hierarchy, code):
