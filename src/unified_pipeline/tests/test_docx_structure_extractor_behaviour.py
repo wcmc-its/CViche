@@ -489,16 +489,15 @@ def test_extract_table_metadata_basic_shape():
     assert [c["text"] for c in meta["data"][1]] == ["R1C0", "R1C1"]
 
 
-def test_extract_table_metadata_gridspan_repeats_merged_cell():
-    # python-docx repeats the merged _Cell object at every grid column it
-    # spans (verified empirically) -- the reader does not deduplicate this,
-    # so both grid positions carry identical text.
+def test_extract_table_metadata_gridspan_emits_merged_cell_once():
+    # python-docx repeats the merged _Cell at every grid column it spans;
+    # the reader emits each distinct <w:tc> once (#1229), with col counting
+    # logical cells. `cols` stays the layout-grid width.
     doc = Document()
     table = doc.add_table(rows=2, cols=3)
     a = table.cell(0, 0)
     a.text = "Merged Header"
-    b = table.cell(0, 1)
-    a.merge(b)
+    a.merge(table.cell(0, 1))
     table.cell(1, 0).text = "x"
     table.cell(1, 1).text = "y"
     table.cell(1, 2).text = "z"
@@ -507,10 +506,40 @@ def test_extract_table_metadata_gridspan_repeats_merged_cell():
 
     assert meta["cols"] == 3
     row0 = meta["data"][0]
-    assert len(row0) == 3
-    assert row0[0]["text"] == row0[1]["text"] == "Merged Header"
-    assert row0[0]["col"] == 0
-    assert row0[1]["col"] == 1
+    assert [(c["col"], c["text"]) for c in row0] == [(0, "Merged Header"), (1, "")]
+    assert [c["text"] for c in meta["data"][1]] == ["x", "y", "z"]
+
+
+def test_extract_table_metadata_gridspan_stacked_cell_not_split_into_subrows():
+    # A merged cell stacking three lines beside a one-line cell used to be
+    # counted as two aligned 3-line cells by split_merged_cells_in_row (#612).
+    doc = Document()
+    table = doc.add_table(rows=1, cols=3)
+    merged = table.cell(0, 0).merge(table.cell(0, 1))
+    merged.text = "2001 - 2002\nA12345\n(Doe J, Example University)"
+    table.cell(0, 2).text = "Example title"
+
+    row = extract_table_metadata(table, idx="table_0")["data"][0]
+
+    assert len(row) == 2
+    assert len(split_merged_cells_in_row(row)) == 1
+
+
+def test_extract_table_metadata_vertical_merge_still_repeats_down_rows():
+    # A vMerge continuation is a distinct <w:tc> in its own row; only
+    # same-row gridSpan repeats are collapsed.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    top = table.cell(0, 0)
+    top.text = "Spans down"
+    top.merge(table.cell(1, 0))
+    table.cell(0, 1).text = "r0"
+    table.cell(1, 1).text = "r1"
+
+    data = extract_table_metadata(table, idx="table_0")["data"]
+
+    assert [c["text"] for c in data[0]] == ["Spans down", "r0"]
+    assert [c["text"] for c in data[1]] == ["Spans down", "r1"]
 
 
 def test_extract_table_metadata_falls_back_to_itertext_and_lets_its_errors_propagate(monkeypatch):

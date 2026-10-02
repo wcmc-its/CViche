@@ -470,6 +470,21 @@ def is_column_header_row(cell_texts: list[str], marked_repeat_header: bool) -> b
     return _is_column_header_row(" | ".join(sorted(filled)))
 
 
+def _distinct_row_cells(row: _Row) -> list[_Cell]:
+    """The row's cells, one per distinct ``<w:tc>`` (#1229).
+
+    python-docx's ``row.cells`` repeats a gridSpan-merged cell once per layout
+    column it spans, so a merged cell's text would reach stage 2 several
+    times. Dedupe within the row only: a vertically merged cell is a distinct
+    ``<w:tc>`` in each row and keeps its existing row-by-row behaviour.
+    """
+    cells: list[_Cell] = []
+    for cell in row.cells:
+        if not any(cell._tc is kept._tc for kept in cells):
+            cells.append(cell)
+    return cells
+
+
 def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
     """
     Extract table structure and content.
@@ -486,7 +501,7 @@ def extract_table_metadata(table: Table, idx: str) -> dict[str, Any]:
 
     for row_idx, row in enumerate(table.rows):
         cells_data = []
-        for col_idx, cell in enumerate(row.cells):
+        for col_idx, cell in enumerate(_distinct_row_cells(row)):
             # FIX: cell.text sometimes returns empty string for cells with complex formatting
             # or malformed XML (e.g., <w:rPr> inside <w:t> instead of as sibling)
             cell_text = get_cell_text(cell).strip()
