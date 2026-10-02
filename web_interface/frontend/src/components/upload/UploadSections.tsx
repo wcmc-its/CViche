@@ -1,6 +1,7 @@
 import { AlertTriangle } from 'lucide-react'
 import type { Estimate } from '../../types'
 import { formatCost, formatDuration } from '../../utils'
+import { scannedPagesText } from './batchRows'
 import CheckBox from './CheckBox'
 import { ATTESTATIONS } from './consentText'
 import type { SubmissionType } from './consentText'
@@ -142,6 +143,9 @@ export function SingleEstimate({ estimate, showCost }: { estimate: Estimate; sho
         <span className="block text-xs text-amber-700">
           We couldn&apos;t read this document&apos;s text, so the {showCost ? 'time and cost' : 'time'} above {showCost ? 'are' : 'is'} a rough guess, not based on its length.
         </span>
+      )}
+      {!!estimate.scanned_pages?.length && (
+        <span className="block text-xs text-amber-700">{scannedPagesText(estimate.scanned_pages)}</span>
       )}
       <span className="block text-xs">
         You don&apos;t need to wait on this page. Processing continues if you close it, and your results will appear in Runs.

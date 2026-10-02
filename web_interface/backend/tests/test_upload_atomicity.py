@@ -254,6 +254,57 @@ def test_estimate_measures_pdf_text(client, db, seed_simple_mode, filename, cv_p
     assert body["text_characters"] > upload_module.MIN_EXTRACTED_CHARS
 
 
+def test_upload_rejects_mostly_scanned_pdf(client, db, seed_simple_mode, cv_pdf):
+    """#1282: one text page clears MIN_EXTRACTED_CHARS, but a PDF whose
+    image-only pages reach SCANNED_PAGE_REJECT_SHARE is refused, naming them."""
+    user = _make_user(db)
+    _auth(client, user)
+    resp = client.post(
+        "/api/upload",
+        files={"file": ("cv.pdf", cv_pdf(image_pages=(1, 2)), "application/pdf")},
+        data={"submission_type": "own_cv"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["message"].startswith("Pages 2–3 of this PDF are scanned images")
+    assert db.query(Run).count() == 0
+
+
+def test_estimate_names_a_minority_of_scanned_pages(client, db, seed_simple_mode, cv_pdf):
+    """#1282: below the reject share the file is accepted and /estimate
+    names the scanned pages, so the New run page can warn before submit."""
+    user = _make_user(db)
+    _auth(client, user)
+    resp = client.post(
+        "/api/estimate",
+        files={"file": ("cv.pdf", cv_pdf(image_pages=(2,), text_pages=2), "application/pdf")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["scanned_pages"] == [3]
+
+
+def test_upload_records_a_minority_of_scanned_pages(client, db, seed_simple_mode, cv_pdf, tmp_path):
+    """#1282: an accepted PDF's scanned pages are stored on the run, for
+    the run page's warning; a docx's are not (NULL, not "")."""
+    user = _make_user(db)
+    _auth(client, user)
+    patches = [patch("app.api.upload.UPLOAD_DIR", tmp_path),
+               patch("app.api.upload.get_storage", return_value=MagicMock())]
+    resp = _run_patches(patches, lambda: _post_upload(
+        client, "cv.pdf", cv_pdf(image_pages=(2,), text_pages=2), "application/pdf"))
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).scanned_pages == "3"
+
+    patches = _bypass_file_validation(tmp_path) + [patch("app.api.upload.get_storage", return_value=MagicMock())]
+    resp = _run_patches(patches, lambda: _post_upload(
+        client, "cv.docx", b"PK\x03\x04dummy-docx-bytes", DOCX_MIME, data={"confirm_duplicate": "true"}))
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).scanned_pages is None
+
+
+def test_page_ranges_collapses_runs():
+    assert upload_module._page_ranges([2, 3, 4, 7, 9, 10]) == "2–4, 7, 9–10"
+
+
 def test_upload_still_accepts_docx_after_pdf_rejection(client, db, seed_simple_mode, tmp_path):
     """#524 regression, kept through #806: changing what .pdf does must not
     disturb the .docx path."""
@@ -702,7 +753,9 @@ def test_upload_offloads_extraction_and_template_checks_to_threadpool(client, db
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 200, resp.text
-    assert dispatched == [extract_mock, detect_mock, format_mock]
+    # _read_upload_text wraps _extract_text, adding the PDF scanned-page gate (#1282).
+    assert dispatched == [upload_module._read_upload_text, detect_mock, format_mock]
+    extract_mock.assert_called_once()
 
 
 def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode):
@@ -736,7 +789,8 @@ def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode
     )
 
     assert resp.status_code == 200, resp.text
-    assert dispatched == [extract_mock]
+    assert dispatched == [upload_module._read_upload_text]
+    extract_mock.assert_called_once()
 
 
 # --- item 9: render options persisted --------------------------------------

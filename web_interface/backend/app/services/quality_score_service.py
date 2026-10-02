@@ -33,13 +33,14 @@ _SRC = Path(__file__).resolve().parents[4] / "src"
 if _SRC.is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.quality_score import SOURCE_DOCX_SUBDIR  # noqa: E402
+from unified_pipeline.quality_score import RESEARCH_SUMMARY_SUFFIX, SOURCE_DOCX_SUBDIR  # noqa: E402
 from unified_pipeline.stage_errors import STAGE_ERRORS_SUFFIX  # noqa: E402
 
 # Artifacts the scorer reads (see quality_score.py dimension scorers), plus the
-# orchestrator's stage-error record (#745), mirrored to outputs/ like the rest.
+# orchestrator's stage-error record (#745), mirrored to outputs/ like the rest,
+# and the stage-4.5 artifact the fallback gate reads (#1174).
 _NEEDED_SUFFIXES = ("_classified.json", "_fields.json", "_entries.json", ".docx",
-                    STAGE_ERRORS_SUFFIX)
+                    STAGE_ERRORS_SUFFIX, RESEARCH_SUMMARY_SUFFIX)
 
 # The original upload, archived under input/ (upload.py). The scorer reads it
 # only for the lost-source-table gate (#822); a run whose original is not a

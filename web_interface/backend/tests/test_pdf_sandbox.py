@@ -20,7 +20,7 @@ from cryptography.hazmat.primitives import padding
 from app.services import pdf_sandbox
 from app.services.pdf_sandbox import (
     PDF_MAX_PAGES, EncryptedPdfError, PdfBusyError, PdfTooComplexError, UnreadablePdfError,
-    convert_pdf, extract_pdf_text,
+    convert_pdf, extract_pdf_text, read_pdf,
 )
 
 _TEXT = "Professor of Medicine, Example University"
@@ -295,6 +295,22 @@ def test_flate_bomb_hits_the_memory_cap():
 def test_unparseable_pdf_is_unreadable():
     with pytest.raises(UnreadablePdfError):
         extract_pdf_text(b"%PDF-1.4 not really a pdf")
+
+
+def test_read_pdf_reports_image_only_pages(cv_pdf):
+    """#1282: the upload's read counts pages and names the image-only ones
+    by the converter's rule, so the gate and the run agree."""
+    pdf = read_pdf(cv_pdf(image_pages=(2,), text_pages=2))
+    assert (pdf.pages, pdf.image_only_pages) == (3, [3])
+    assert "EDUCATION" in pdf.text
+
+
+@pytest.mark.parametrize("value", ['"text"', "{}", '{"text": "t", "pages": 1, "image_only_pages": ["1"]}'])
+def test_a_wrong_shaped_text_reply_is_unreadable(monkeypatch, cv_pdf, value):
+    reply = f'["ok", {value}]'
+    monkeypatch.setattr(pdf_sandbox, "_CHILD_BOOTSTRAP", f"import sys; sys.stdout.write({reply!r})")
+    with pytest.raises(UnreadablePdfError):
+        read_pdf(cv_pdf())
 
 
 def test_conversion_reports_image_only_pages(cv_pdf, tmp_path):

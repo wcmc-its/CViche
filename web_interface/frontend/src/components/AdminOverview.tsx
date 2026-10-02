@@ -6,6 +6,7 @@ import { exportFeedbackCsv, getAdminRuns } from '../api/admin'
 import { formatCost, formatDate, formatDuration } from '../utils'
 import { parseFeedbackCsv } from './AdminFeedbackInsights'
 import { useCanSeeCost } from '../contexts/AuthContext'
+import WhoSubmitsCard from './WhoSubmitsCard'
 
 const CARD = 'bg-white border border-sand-300 rounded-xl shadow-[0_1px_2px_rgba(60,40,10,0.05)]'
 const MAX_ATTENTION_ROWS = 5
@@ -231,6 +232,9 @@ export default function AdminOverview({
           value={`${stats?.feedback_rate.toFixed(1) ?? '0.0'}%`}
           sublabel="of completed runs"
         />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 items-start">
+        <WhoSubmitsCard split={stats?.submissions} />
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 items-start">
         <NeedsAttention p95={stats?.p95_duration_seconds} />

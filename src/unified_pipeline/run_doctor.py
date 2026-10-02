@@ -49,7 +49,10 @@ Lints, ranked by the severity of the failure class they catch:
 11. dedup_drops           stage-6 dedup decisions whose dropped text is not
                           near-fully contained in the kept entry — at loose
                           thresholds these are distinct records lost, not
-                          duplicates (#227: 7 of 8 drops on 2Q1_ZQ were real)
+                          duplicates (#227: 7 of 8 drops on 2Q1_ZQ were real);
+                          plus an INFO finding for a fully-covered drop whose
+                          extracted name differs from the kept entry's and is
+                          on the page as no cell of its own (#666)
 12. pipe_leaks            raw ' | '-delimited source lines rendered as output
                           paragraphs — verbatim-fallback formatting reaching
                           the faculty-facing document (#208 costs)
@@ -127,6 +130,22 @@ Lints, ranked by the severity of the failure class they catch:
                           empty CV context and the reply was delivered (#1224);
                           WARN on any hit
 
+14l. llm_fallback_served  a call the content filter blocked on the primary
+                          model and the fallback model answered (#1207): it
+                          succeeded, so nothing records an error; stage 4
+                          stamps the entries of the taxonomy group and stage
+                          4.5 lists the calls, and each finding names the
+                          section. WARN: it caps the quality score at 84, one
+                          point under GREEN (#1174)
+
+14m. stage_failure_recorded a stage the driver recorded as failed in
+                          `stage_errors/<uid>_stage_errors.json` (#745), such
+                          as stage 4.5 raising so the research summary is
+                          missing: the quality score reads that record for its
+                          cap-40 gate and the doctor never did. ERROR for a
+                          fatal record (they all are today), WARN otherwise
+                          (#1174)
+
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
 construction lints, because each one on its own caps quality_score.py's final
@@ -194,8 +213,10 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
+from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
 from unified_pipeline.quality_score import stage3b_fallback_ratios
 from unified_pipeline.segmentation_regression import compute_metrics, iter_source_block_lines
+from unified_pipeline.stage_errors import StageError, read_stage_errors, stage_errors_path
 
 # Lint rules and their primitives now live in the doctor/ package (#493).
 # Re-exported here rather than updating callers: five files import 33 names
@@ -323,6 +344,8 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_stage3b_fallback_ratio,
     lint_stage3b_second_pass_errors,
     lint_stage4_group_failures,
+    lint_llm_fallback_served,
+    lint_stage_failure_recorded,
 )
 
 
@@ -396,6 +419,8 @@ KNOWN_LINTS = (
     "stage4_group_failures",
     "python_repr_in_output",
     "llm_refusal_in_output",
+    "llm_fallback_served",
+    "stage_failure_recorded",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -488,6 +513,12 @@ LINT_PREVALENCE = {
     # one older-build census uid whose group call hit a provider error. Same
     # mixed-corpus caveat as duplicate_records above.
     "stage4_group_failures": 0.018,
+    # #1174: the two signals below fire on none of the 163 corpus CVs (126
+    # census + 37 IPXFBA; scripts/doctor_gate.py, 2026-10-02): no stored
+    # artifact predates the provenance field or the stage-error record. The
+    # zero-observed floor, as for pipeline_errors_present above.
+    "llm_fallback_served": 0.001,
+    "stage_failure_recorded": 0.001,
     # python_repr_in_output and llm_refusal_in_output (#1233, #1224): fire
     # counts on the 163 stage-6 renders of the 2026-10 wave-1 corpus (126
     # census + 37 IPXFBA CVs) as rendered by origin/dev e59aaf44, which still
@@ -716,6 +747,9 @@ _ARTIFACTS = {
                              record_lists=("entries",)),
     "stage_4": ArtifactSpec("stage_4_field_extraction", "_fields.json",
                             record_lists=("entries",), object_fields=("cv_owner",)),
+    "stage_4_5": ArtifactSpec("stage_4_5_research_summary", "_research_summary.json",
+                              optional_lists=(STAGE4_5_FALLBACK_CALLS_KEY,),
+                              object_fields=("research_summary",)),
     "stage_5_enrichment": ArtifactSpec("stage_5_enrichment", "_enriched.json",
                                        record_lists=("entries",)),
     "stage_5b": ArtifactSpec("stage_5b_institution_enrichment",
@@ -840,6 +874,22 @@ def _load_json(path: Path | None, label: str | None = None,
     return None
 
 
+def _load_stage_errors(path: Path, on_unreadable: Callable[[str, str], None]) -> list[StageError] | None:
+    """The drivers' stage-failure records for this run (#745), or ``[]`` when
+    the file is absent: a clean run, or one from before the record, leaves
+    none, so absent is not a skip. Present but unreadable or malformed is
+    reported through ``on_unreadable`` like any other artifact, and returns
+    None so `_ready` turns it into the ERROR rather than a silent pass."""
+    if not path.exists():
+        return []
+    try:
+        return read_stage_errors(path)
+    except (OSError, ValueError) as e:
+        logger.warning("run_doctor could not read %s (%s): %s", path, type(e).__name__, e)
+        on_unreadable("stage_errors", f"{type(e).__name__}: {e}")
+        return None
+
+
 def _try(fn, label: str = None, on_unreadable=None):
     """Run a docx-reading loader. Its callers guard on the path existing, so a
     failure here is also present-but-unreadable, reported like _load_json."""
@@ -926,6 +976,8 @@ _VIEW_LABELS = {
     "stage_2": "stage_2",
     "stage_3b": "stage_3b",
     "stage_4": "stage_4",
+    "stage_4_5": "stage_4_5",
+    "stage_errors": "stage_errors",
     "stage_5_enrichment": "stage_5_enrichment",
     "stage_5b": "stage_5b",
     "stage_6_report": "stage_6_report",
@@ -960,7 +1012,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("section_lost", lint_section_lost, ("stage_4", "blocks")),
     LintSpec("enrichment_failures", lint_enrichment_failures, ("stage_5_enrichment",)),
     LintSpec("stage6_render_warnings", lint_stage6_warnings, ("stage_6_report",)),
-    LintSpec("dedup_drops", lint_dedup_drops, ("stage_6_report",)),
+    LintSpec("dedup_drops", lint_dedup_drops, ("stage_6_report",),
+             optional=("blocks",)),
     LintSpec("pipe_leaks", lint_pipe_leaks, ("blocks",)),
     LintSpec("table_shape", lint_table_shape, ("table_rows",)),
     LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),
@@ -978,6 +1031,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("stage4_group_failures", lint_stage4_group_failures, ("stage_4",)),
     LintSpec("python_repr_in_output", lint_python_repr_in_output, ("blocks",)),
     LintSpec("llm_refusal_in_output", lint_llm_refusal_in_output, ("blocks",)),
+    LintSpec("llm_fallback_served", lint_llm_fallback_served, ("stage_4",),
+             optional=("stage_4_5",)),
+    LintSpec("stage_failure_recorded", lint_stage_failure_recorded, ("stage_errors",)),
 )
 
 
@@ -1155,6 +1211,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
     # block-tagged lines with the tag dropped.
     source_block_lines = (_try(lambda: iter_source_block_lines(str(source_path)), "source", _note)
                           if source_path else None)
+    views["stage_errors"] = _load_stage_errors(stage_errors_path(root, uid), _note)
     views["source_block_lines"] = source_block_lines
     views["source_lines"] = (None if source_block_lines is None
                              else [line for _, line in source_block_lines])

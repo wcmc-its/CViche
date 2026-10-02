@@ -588,16 +588,15 @@ def test_extract_table_metadata_basic_shape():
     assert [c["text"] for c in meta["data"][1]] == ["R1C0", "R1C1"]
 
 
-def test_extract_table_metadata_gridspan_repeats_merged_cell():
-    # python-docx repeats the merged _Cell object at every grid column it
-    # spans (verified empirically) -- the reader does not deduplicate this,
-    # so both grid positions carry identical text.
+def test_extract_table_metadata_gridspan_emits_merged_cell_once():
+    # python-docx repeats the merged _Cell at every grid column it spans;
+    # the reader emits each distinct <w:tc> once (#1229), with col counting
+    # logical cells. `cols` stays the layout-grid width.
     doc = Document()
     table = doc.add_table(rows=2, cols=3)
     a = table.cell(0, 0)
     a.text = "Merged Header"
-    b = table.cell(0, 1)
-    a.merge(b)
+    a.merge(table.cell(0, 1))
     table.cell(1, 0).text = "x"
     table.cell(1, 1).text = "y"
     table.cell(1, 2).text = "z"
@@ -606,10 +605,55 @@ def test_extract_table_metadata_gridspan_repeats_merged_cell():
 
     assert meta["cols"] == 3
     row0 = meta["data"][0]
-    assert len(row0) == 3
-    assert row0[0]["text"] == row0[1]["text"] == "Merged Header"
-    assert row0[0]["col"] == 0
-    assert row0[1]["col"] == 1
+    assert [(c["col"], c["text"]) for c in row0] == [(0, "Merged Header"), (1, "")]
+    assert [c["text"] for c in meta["data"][1]] == ["x", "y", "z"]
+
+
+def test_extract_table_metadata_gridspan_stacked_cell_not_split_into_subrows():
+    # A merged cell stacking three lines beside a one-line cell used to be
+    # counted as two aligned 3-line cells by split_merged_cells_in_row (#612).
+    doc = Document()
+    table = doc.add_table(rows=1, cols=3)
+    merged = table.cell(0, 0).merge(table.cell(0, 1))
+    merged.text = "2001 - 2002\nA12345\n(Doe J, Example University)"
+    table.cell(0, 2).text = "Example title"
+
+    row = extract_table_metadata(table, idx="table_0")["data"][0]
+
+    assert len(row) == 2
+    assert len(split_merged_cells_in_row(row)) == 1
+
+
+def test_extract_table_metadata_keeps_distinct_cells_with_equal_text():
+    # Dedupe is by <w:tc> identity, not text: two separate cells that happen
+    # to hold the same text both stay, beside a merged cell.
+    doc = Document()
+    table = doc.add_table(rows=1, cols=4)
+    table.cell(0, 0).merge(table.cell(0, 1)).text = "Merged"
+    table.cell(0, 2).text = "2001"
+    table.cell(0, 3).text = "2001"
+
+    row = extract_table_metadata(table, idx="table_0")["data"][0]
+
+    assert [c["text"] for c in row] == ["Merged", "2001", "2001"]
+    assert [(c["grid_col"], c["grid_span"]) for c in row] == [(0, 2), (2, 1), (3, 1)]
+
+
+def test_extract_table_metadata_vertical_merge_still_repeats_down_rows():
+    # python-docx hands back the top cell's <w:tc> for a continuation row, so
+    # it repeats down the rows; only same-row gridSpan repeats are collapsed.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    top = table.cell(0, 0)
+    top.text = "Spans down"
+    top.merge(table.cell(1, 0))
+    table.cell(0, 1).text = "r0"
+    table.cell(1, 1).text = "r1"
+
+    data = extract_table_metadata(table, idx="table_0")["data"]
+
+    assert [c["text"] for c in data[0]] == ["Spans down", "r0"]
+    assert [c["text"] for c in data[1]] == ["Spans down", "r1"]
 
 
 def test_extract_table_metadata_falls_back_to_itertext_and_lets_its_errors_propagate(monkeypatch):
@@ -1178,6 +1222,105 @@ def test_extract_unified_elements_pre_llm_scrub_is_idempotent(tmp_path):
 
     result = extract_unified_elements(str(docx_path))
     assert result["elements"][0]["text"] == "Date of Birth: [withheld]"
+
+
+def _table_cell_texts(path):
+    elements = extract_unified_elements(str(path))["elements"]
+    return [
+        cell.get("text", "")
+        for el in elements
+        if el.get("data")
+        for row in el["data"]
+        for cell in row
+    ]
+
+
+def test_scrub_cell_below_label_when_the_label_row_merges_a_cell(tmp_path):
+    # #1229: the label row merges its first two columns, the value row does
+    # not. The value sits in layout column 2, which is list index 1 in the
+    # label row once the merged cell is emitted once.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).merge(table.cell(0, 1)).text = "Name"
+    table.cell(0, 2).text = "Date of Birth:"
+    table.cell(1, 0).text = "a"
+    table.cell(1, 1).text = "b"
+    table.cell(1, 2).text = "01/02/1970"
+    docx_path = tmp_path / "label_row_merged.docx"
+    doc.save(str(docx_path))
+
+    texts = _table_cell_texts(docx_path)
+
+    assert "01/02/1970" not in " ".join(texts)
+    assert "a" in texts and "b" in texts
+
+
+def test_scrub_cell_below_label_when_the_value_row_merges_a_cell(tmp_path):
+    # #1229: the value row merges its first two columns; the label sits in
+    # layout column 2 of an unmerged row.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).text = "a"
+    table.cell(0, 1).text = "b"
+    table.cell(0, 2).text = "Date of Birth:"
+    table.cell(1, 0).merge(table.cell(1, 1)).text = "Name"
+    table.cell(1, 2).text = "01/02/1970"
+    docx_path = tmp_path / "value_row_merged.docx"
+    doc.save(str(docx_path))
+
+    texts = _table_cell_texts(docx_path)
+
+    assert "01/02/1970" not in " ".join(texts)
+    assert "Name" in texts
+
+
+def test_scrub_cell_below_label_reaches_a_merged_cell_spanning_the_label_column(
+    tmp_path,
+):
+    # A value cell that merges across the label's column is still "below" it.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).text = "a"
+    table.cell(0, 1).text = "Date of Birth:"
+    table.cell(0, 2).text = "b"
+    table.cell(1, 0).merge(table.cell(1, 1)).text = "01/02/1970"
+    table.cell(1, 2).text = "c"
+    docx_path = tmp_path / "value_spans_label_col.docx"
+    doc.save(str(docx_path))
+
+    assert "01/02/1970" not in " ".join(_table_cell_texts(docx_path))
+
+
+def test_scrub_cell_below_a_merged_label_reaches_its_second_column(tmp_path):
+    # The label cell itself spans layout columns 1-2; the value sits under
+    # the second of them.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).text = "Name"
+    table.cell(0, 1).merge(table.cell(0, 2)).text = "Date of Birth:"
+    table.cell(1, 0).text = "Doe J"
+    table.cell(1, 1).text = ""
+    table.cell(1, 2).text = "01/02/1970"
+    docx_path = tmp_path / "label_merged.docx"
+    doc.save(str(docx_path))
+
+    assert "01/02/1970" not in " ".join(_table_cell_texts(docx_path))
+
+
+def test_scrub_cell_below_survives_a_split_value_row(tmp_path):
+    # The value row is split into several rows (aligned multi-line cells);
+    # the split cells must keep their layout column so the value is found.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=4)
+    for i, text in enumerate(["a", "b", "Date of Birth:", "c"]):
+        table.cell(0, i).text = text
+    table.cell(1, 0).merge(table.cell(1, 1)).text = "x1\nx2\nx3"
+    table.cell(1, 2).text = "01/02/1970\ny2\ny3"
+    table.cell(1, 3).text = "z"
+    docx_path = tmp_path / "value_row_split.docx"
+    doc.save(str(docx_path))
+
+    assert "01/02/1970" not in " ".join(_table_cell_texts(docx_path))
 
 
 def test_extract_unified_elements_scrubs_dob_in_the_cell_below_a_label(tmp_path):
@@ -1980,3 +2123,184 @@ def test_main_writes_both_json_files_as_readable_utf8(tmp_path, monkeypatch):
         assert "José Muñoz" in raw
         assert "\\u00e9" not in raw
         assert json.loads(raw)
+
+
+# ---------------------------------------------------------------------------
+# Tables nested in a table cell (#1231)
+# ---------------------------------------------------------------------------
+
+_NESTED_LINES = [f"Nested record {i}: synthetic citation line." for i in (1, 2, 3)]
+
+
+def _nested_table_docx(tmp_path, outer_cols, host_text="Host paragraph one"):
+    """Outer table; its first cell holds host paragraphs around a 3x1 nested table."""
+    doc = Document()
+    outer = doc.add_table(rows=2, cols=outer_cols)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = host_text
+    nested = cell.add_table(rows=3, cols=1)
+    for i, line in enumerate(_NESTED_LINES):
+        nested.cell(i, 0).text = line
+    cell.add_paragraph("Host paragraph after")
+    outer.cell(1, 0).text = "Trailing outer paragraph."
+    path = tmp_path / f"nested_{outer_cols}.docx"
+    doc.save(str(path))
+    return str(path)
+
+
+def _element_texts(path):
+    out = []
+    for el in extract_unified_elements(path)["elements"]:
+        out.extend(
+            line for line in (el.get("text") or _content_text(el)).split("\n") if line.strip()
+        )
+    return out
+
+
+def _content_text(el):
+    return "\n".join(c.get("text", "") for row in el.get("rows", []) for c in row)
+
+
+def test_single_column_layout_table_emits_nested_table_paragraphs_in_order(tmp_path):
+    texts = _element_texts(_nested_table_docx(tmp_path, 1))
+    assert texts == ["Host paragraph one", *_NESTED_LINES, "Host paragraph after", "Trailing outer paragraph."]
+
+
+def test_multi_column_table_keeps_nested_table_text_in_document_order(tmp_path):
+    path = _nested_table_docx(tmp_path, 2)
+    blob = "\n".join(_element_texts(path))
+    positions = [blob.index(t) for t in ["Host paragraph one", *_NESTED_LINES, "Host paragraph after"]]
+    assert positions == sorted(positions)
+
+
+def test_multi_column_nested_text_reaches_cell_data_when_first_cell_is_not_a_header(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "Lead-in text for the host cell, 2019 2020."
+    nested = cell.add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "Nested only line."
+    outer.cell(0, 1).text = "Right cell"
+    path = tmp_path / "plain.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    assert data[0][0]["text"] == "Lead-in text for the host cell, 2019 2020.\nNested only line."
+
+
+def test_nested_only_cell_keeps_itertext_fallback(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    nested = outer.cell(0, 0).add_table(rows=2, cols=1)
+    nested.cell(0, 0).text = "Alpha line"
+    nested.cell(1, 0).text = "Beta line"
+    outer.cell(0, 1).text = "Right cell"
+    path = tmp_path / "only.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    text = data[0][0]["text"]
+    assert "Alpha line" in text and "Beta line" in text and "\n" not in text
+
+
+def test_nested_multi_cell_row_is_one_space_joined_line(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "Host"
+    nested = cell.add_table(rows=1, cols=2)
+    nested.cell(0, 0).text = "2018"
+    nested.cell(0, 1).text = "Example University"
+    outer.cell(0, 1).text = "Right"
+    path = tmp_path / "wide.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    assert data[0][0]["text"] == "Host\n2018 Example University"
+
+
+def test_single_column_nested_vertical_merge_emits_merged_cell_once(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=1)
+    nested = outer.cell(0, 0).add_table(rows=3, cols=2)
+    nested.cell(0, 0).merge(nested.cell(2, 0)).text = "Merged label"
+    for i in range(3):
+        nested.cell(i, 1).text = f"Value {i}"
+    path = tmp_path / "vmerge.docx"
+    doc.save(str(path))
+    texts = _element_texts(str(path))
+    assert texts.count("Merged label") == 1
+    assert [t for t in texts if t.startswith("Value")] == ["Value 0", "Value 1", "Value 2"]
+
+
+def test_single_column_nested_horizontal_merge_and_deep_nesting(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=1)
+    nested = outer.cell(0, 0).add_table(rows=1, cols=2)
+    nested.cell(0, 0).merge(nested.cell(0, 1)).text = "Wide cell"
+    inner = nested.cell(0, 0).add_table(rows=1, cols=1)
+    inner.cell(0, 0).text = "Doubly nested line"
+    path = tmp_path / "deep.docx"
+    doc.save(str(path))
+    texts = _element_texts(str(path))
+    assert texts.count("Wide cell") == 1
+    assert texts.count("Doubly nested line") == 1
+
+
+def test_nested_row_with_horizontal_merge_is_listed_once_per_line(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "Host"
+    nested = cell.add_table(rows=1, cols=2)
+    nested.cell(0, 0).merge(nested.cell(0, 1)).text = "Spanning text"
+    outer.cell(0, 1).text = "Right"
+    path = tmp_path / "hmerge.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    assert data[0][0]["text"] == "Host\nSpanning text"
+
+
+def test_row_zero_header_cell_hosting_nested_list_keeps_the_list(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "ABSTRACTS"
+    nested = cell.add_table(rows=2, cols=1)
+    nested.cell(0, 0).text = "Nested abstract entry one, synthetic text that is long enough to count as content here."
+    nested.cell(1, 0).text = "Nested abstract entry two, synthetic text that is long enough to count as content here."
+    outer.cell(0, 1).text = ""
+    path = tmp_path / "hdr.docx"
+    doc.save(str(path))
+    blob = "\n".join(_element_texts(str(path)))
+    assert "Nested abstract entry one" in blob and "Nested abstract entry two" in blob
+
+
+def test_row_zero_header_after_nested_table_stays_a_table_header(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=2, cols=2)
+    cell = outer.cell(0, 0)
+    nested = cell.add_table(rows=2, cols=1)
+    nested.cell(0, 0).text = "Nested record one, synthetic text that is long enough to count as content here."
+    nested.cell(1, 0).text = "Nested record two, synthetic text that is long enough to count as content here."
+    cell.paragraphs[-1].text = "PUBLICATIONS"
+    outer.cell(1, 0).text = "Trailing outer paragraph."
+    path = tmp_path / "hdr_after.docx"
+    doc.save(str(path))
+    els = extract_unified_elements(str(path))["elements"]
+    headers = [e["text"] for e in els if e["type"] == "table_header"]
+    assert headers[:1] == ["PUBLICATIONS"]
+    blob = "\n".join(_element_texts(str(path)))
+    assert "Nested record one" in blob and "Nested record two" in blob
+
+
+def test_multi_column_doubly_nested_table_text_reaches_cell_data(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "Host text"
+    nested = cell.add_table(rows=1, cols=1)
+    nested.cell(0, 0).paragraphs[0].text = "Middle line"
+    inner = nested.cell(0, 0).add_table(rows=1, cols=1)
+    inner.cell(0, 0).text = "Deepest line"
+    path = tmp_path / "deep.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    assert data[0][0]["text"] == "Host text\nMiddle line\nDeepest line"

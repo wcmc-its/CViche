@@ -153,9 +153,9 @@ def test_known_lints_has_no_duplicates_and_is_not_empty():
     """Guard the guard: an empty or duplicated tuple would pass the checks above."""
     known = _module().KNOWN_LINTS
     assert len(known) == len(set(known)), f"duplicate entries in KNOWN_LINTS: {known}"
-    assert len(known) == 32, (
+    assert len(known) == 34, (
         f"KNOWN_LINTS changed size ({len(known)}, was 27 -- this change added "
-        f"offschema_fields and implausible_year; #1174 then added stage4_group_failures; #1233/#1224 then added python_repr_in_output and llm_refusal_in_output). That is fine if a lint was genuinely added or "
+        f"offschema_fields and implausible_year; #1174 then added stage4_group_failures; #1233/#1224 then added python_repr_in_output and llm_refusal_in_output; #1174 then added llm_fallback_served and stage_failure_recorded). That is fine if a lint was genuinely added or "
         f"removed -- update this count and say so in the commit message."
     )
 
@@ -272,6 +272,7 @@ def test_known_lints_literal_expected_order():
         "stage3b_second_pass_error", "offschema_fields", "implausible_year",
         "stage4_group_failures",
         "python_repr_in_output", "llm_refusal_in_output",
+        "llm_fallback_served", "stage_failure_recorded",
         "owner_contact_missing", "pipeline_errors_present", "no_output",
     )
 
@@ -559,8 +560,8 @@ def test_every_json_artifact_kind_declares_its_record_shape():
         spec = mod._ARTIFACTS[key]
         assert spec.record_lists or spec.optional_lists, key
     assert set(mod._JSON_ARTIFACTS) == {
-        "stage_1a", "stage_2", "stage_3b", "stage_4", "stage_5_enrichment",
-        "stage_5b", "stage_6_report"}
+        "stage_1a", "stage_2", "stage_3b", "stage_4", "stage_4_5",
+        "stage_5_enrichment", "stage_5b", "stage_6_report"}
 
 
 def test_ten_of_the_surface_is_private():

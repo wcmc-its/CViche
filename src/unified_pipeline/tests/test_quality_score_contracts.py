@@ -45,6 +45,7 @@ from unified_pipeline.quality_score import (  # noqa: E402
     score_cv_owner,
     score_duplicate_ratio,
     score_field_sparseness,
+    score_llm_fallback_served,
     score_no_output,
     score_pipeline_errors,
     score_run,
@@ -53,6 +54,9 @@ from unified_pipeline.quality_score import (  # noqa: E402
     score_stage4_group_failures,
     score_t_bucket,
     stage4_group_failures,
+    FALLBACK_SERVED_CAP,
+    FallbackServedCall,
+    llm_fallback_served,
 )
 from unified_pipeline.stage4.error_codes import (  # noqa: E402
     LLM_PROVIDER_ERROR,
@@ -2200,6 +2204,84 @@ def test_broken_format_page_break_renders_no_whitespace(tmp_path):
     doc.save(tmp_path / "out.docx")
     fraction, detail, cap = score_broken_format(tmp_path)
     assert "raw_tab_paragraphs=1" in detail, detail
+
+
+# --------------------------------------------------------------------- D21c
+# #1174 a call the content-filter fallback served: a cap-only gate (weight 0)
+# read from the provenance stage 4 and stage 4.5 write.
+# --------------------------------------------------------------------- D21c
+
+_FB_MODEL = "example.fallback-model-1"
+
+
+def _fb_entry(code="S1"):
+    return {**_clean_entry(code), "llm_fallback_model": _FB_MODEL}
+
+
+def test_llm_fallback_served_groups_stage_4_entries_by_section_and_lists_4_5_calls():
+    served = llm_fallback_served(
+        _stage4_artifact([_fb_entry("S1"), _fb_entry("S1"), _fb_entry("M2A"), _clean_entry("S1")]),
+        {"llm_fallback_calls": [{"call": "summary_generation", "model": _FB_MODEL}]})
+
+    assert served == [
+        FallbackServedCall("4", "M2A", _FB_MODEL, 1),
+        FallbackServedCall("4", "S1", _FB_MODEL, 2),
+        FallbackServedCall("4.5", "research summary (summary_generation)", _FB_MODEL, 1)]
+    assert served[1].describe() == f"stage 4 S1 on {_FB_MODEL} (2 entries)"
+
+
+@pytest.mark.parametrize("stage_4, stage_4_5", [
+    (None, None), ({}, {}), ({"entries": None}, {"llm_fallback_calls": None}),
+    ({"entries": [None, 3, "x", _clean_entry()]}, {"llm_fallback_calls": [None, {"call": "x"}]}),
+    ([], "x"),
+], ids=repr)
+def test_llm_fallback_served_is_empty_without_provenance_and_never_raises(stage_4, stage_4_5):
+    assert llm_fallback_served(stage_4, stage_4_5) == []
+
+
+def test_score_llm_fallback_served_caps_one_point_under_green(tmp_path):
+    _write_json(tmp_path, "X_fields.json", _stage4_artifact([_fb_entry("S1")]))
+    _write_json(tmp_path, "X_research_summary.json",
+                {"llm_fallback_calls": [{"call": "m1_relevance_score", "model": _FB_MODEL}]})
+
+    fraction, detail, cap = score_llm_fallback_served(tmp_path)
+
+    assert fraction == 1.0
+    assert cap == FALLBACK_SERVED_CAP == qs.BAND_GREEN - 1 == 84
+    assert f"stage 4 S1 on {_FB_MODEL} (1 entries)" in detail
+    assert "stage 4.5 research summary (m1_relevance_score)" in detail
+
+
+def test_score_llm_fallback_served_quiet_without_a_served_call_or_an_artifact(tmp_path):
+    assert score_llm_fallback_served(tmp_path) == (
+        0.0, "no call served by the fallback model", None)
+    _write_json(tmp_path, "X_fields.json", _stage4_artifact([_clean_entry()]))
+    _truncate(tmp_path, "X_fields.json")
+    assert score_llm_fallback_served(tmp_path)[::2] == (0.0, None)
+
+
+def test_llm_fallback_gate_is_cap_only_and_moves_no_raw_score():
+    assert score_llm_fallback_served not in [scorer for _, _, scorer in DIMENSIONS]
+    assert score_llm_fallback_served in [gate for _, gate in CAP_ONLY_GATES]
+    assert TOTAL_WEIGHT == 100
+
+
+def test_score_run_keeps_a_run_with_a_fallback_served_call_out_of_green(tmp_path):
+    """End to end through score_run, like the failed-group gate above: the same
+    85 GREEN run with one served call differs in the cap and nothing else."""
+    clean = score_run(_complete_run_dir(tmp_path))
+    assert (clean["totalScore"], clean["band"]) == (85, "GREEN (ship)")
+
+    _write_json(tmp_path, "X_research_summary.json",
+                {"llm_fallback_calls": [{"call": "summary_generation", "model": _FB_MODEL}]})
+    served = score_run(tmp_path)
+
+    assert served["raw_score_before_caps"] == clean["raw_score_before_caps"]
+    assert served["hard_fail_caps_applied"] == [84]
+    assert served["totalScore"] == 84 and served["band"].startswith("YELLOW")
+    assert served["flags"][0].startswith(
+        "HARD-FAIL cap=84: Call served by the content-filter fallback model (caps below GREEN) (")
+    assert "stage 4.5 research summary (summary_generation)" in served["flags"][0]
 
 
 # --------------------------------------------------------------------- D23

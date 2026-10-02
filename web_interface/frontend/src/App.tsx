@@ -20,6 +20,12 @@ import { Loader2 } from 'lucide-react'
  */
 function RoutedErrorBoundary({ children }: { children: React.ReactNode }) {
   const location = useLocation()
+  // BrowserRouter keeps the window's scroll offset across navigations, so a
+  // run opened from low in the Runs list landed mid-page. Hash links
+  // (#feedback, help anchors) do their own scrolling.
+  useEffect(() => {
+    if (!location.hash) window.scrollTo(0, 0)
+  }, [location.pathname, location.hash])
   return <ErrorBoundary key={location.pathname}>{children}</ErrorBoundary>
 }
 

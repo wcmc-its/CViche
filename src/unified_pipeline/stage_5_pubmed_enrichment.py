@@ -48,6 +48,14 @@ RATE_LIMIT_DELAY = 0.1 if NCBI_API_KEY else 0.34  # 10/s with key, 3/s without
 MAX_ATTEMPTS = 3
 BACKOFF_BASE_SECONDS = 1.0  # 1s, 2s, ... doubling; Retry-After honored when larger
 
+# idconv (#1219): a 429 there outlasted the 3-attempt, ~3 s window in 2 of 8
+# batch CVs and failed every PMCID in the CV. Re-probes showed it throttles
+# intermittently (429, 200, 429, 200 at 15 s spacing). 6 attempts back off
+# 1+2+4+8+16 = 31 s; the total cap bounds that sum plus any Retry-After, so a
+# server asking for longer than the cap fails fast instead of stalling stage 5.
+IDCONV_MAX_ATTEMPTS = 6
+IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS = 60.0
+
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5_enrichment"
 
@@ -64,6 +72,10 @@ ID_CONVERTER_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
 # (retitled on publication) score 0.45-0.57.
 MIN_TITLE_WORD_OVERLAP = 0.4
 
+# Statuses the PMCID path leaves on an entry it could not enrich, which the
+# bare-digits-as-PMID retry (#1219) may still resolve.
+PMCID_PATH_FAILURES = ('pmcid_conversion_failed', 'title_check_failed')
+
 # Words shorter than this carry no signal ("of", "in", "a"); 3 keeps short
 # content words such as "DNA" and "HIV". Preventive, no incident: a stopword
 # proxy, not a measured value.
@@ -79,6 +91,7 @@ MIN_TITLE_SEARCH_OVERLAP = 0.8
 # Fewer words than this and a title search matches too much; the probe used 4.
 MIN_TITLE_SEARCH_WORDS = 4
 TITLE_SEARCH_MAX_HITS = 3
+PREPRINT_PUBTYPE = 'Preprint'
 # A paper in press is published within a couple of years of the year the CV
 # gives it. Of the 87 corpus matches (2026-10-02) with a CV year, 64 were 0-2
 # years later; the one at 4 years was a different paper by the same group
@@ -110,11 +123,26 @@ PUBTYPE_TAXONOMY_CODES = (('Case Reports', 'S6'), ('Review', 'S2'),
                           ('Systematic Review', 'S2'), ('Editorial', 'S2'))
 PUBLISHED_DEFAULT_CODE = 'S1'
 IN_REVIEW_CODE = 'S7'
+# An in-press entry PubMed did not find still is not "In review" (#1166):
+# taxonomy_v7 promotes a paper once accepted. Without a PubMed type to go by,
+# a chapter ("In: ... eds") goes to S4 and anything else to S1. Prompt text
+# alone did not move these: the 2026-09-30 3b A/B left 23 in S7 on web200 and
+# web46 after rule 30 named "in press" explicitly.
+UNMATCHED_CHAPTER_CODE = 'S4'
+UNMATCHED_DEFAULT_CODE = 'S1'
+# "In;" and "(eds Greenwood, ...)" / "(ed Venables)" are both corpus shapes
+# (web200).
+CHAPTER_PATTERN = re.compile(r'\bIn[:;]\s*\S|\(eds?\b|\beds?\.(?=\s|,|$)|\beditors?\b|\bchapter\b', re.I)
 # An in-press entry whose PubMed match another entry already lists as
 # published is a stale duplicate (web200: the same 2006 paper listed both as
 # published and as "in press" in another journal). Compared only against these
 # codes, so a same-titled conference abstract (S8) is not mistaken for it.
 PUBLISHED_ARTICLE_CODES = frozenset({'S1', 'S2', 'S6'})
+# Only an article can be "in press" in the sense PubMed can answer. A
+# conference abstract marked "(Accepted)" (S8) was replaced live by the later
+# journal paper of the same title (SDEBQJ, dev-239, 2026-10-02); a PubMed
+# journal article is no replacement for a chapter or a book either.
+IN_PRESS_ELIGIBLE_CODES = PUBLISHED_ARTICLE_CODES | {IN_REVIEW_CODE}
 # Only an ID-less entry, or one whose DOI PubMed did not know, is searched by
 # title: a CV identifier that resolved to another paper stays rejected.
 _TITLE_SEARCHABLE_STATUSES = frozenset({'no_identifier', 'doi_not_in_pubmed'})
@@ -249,6 +277,7 @@ class PubMedEnricher:
             'title_searches': 0,
             'in_press_resolved': 0,
             'in_press_duplicates': 0,
+            'in_press_promoted': 0,
         }
 
         # (operation, status/exception) classes already logged at ERROR this run
@@ -319,24 +348,33 @@ class PubMedEnricher:
 
         # Process each category
         enriched_entries = []
+        # [N/M] is the parsed progress-bar contract (orchestrator PROGRESS_PATTERNS);
+        # counted in publications so the three lookup paths share one bar.
+        progress_total = len(by_pmid) + len(by_pmcid) + len(by_doi)
 
         # 1. Direct PMID lookups (batch)
         if by_pmid:
             if self.verbose:
                 logger.info(f"\n📚 Fetching {len(by_pmid)} records by PMID...")
             enriched_entries.extend(self._enrich_by_pmid(by_pmid))
+            if self.verbose:
+                logger.info("[%d/%d] publications looked up", len(by_pmid), progress_total)
 
         # 2. PMCID conversions then lookup
         if by_pmcid:
             if self.verbose:
                 logger.info(f"\n🔄 Converting {len(by_pmcid)} PMCIDs to PMIDs...")
             enriched_entries.extend(self._enrich_by_pmcid(by_pmcid))
+            if self.verbose:
+                logger.info("[%d/%d] publications looked up", len(by_pmid) + len(by_pmcid), progress_total)
 
         # 3. DOI searches then lookup
         if by_doi:
             if self.verbose:
                 logger.info(f"\n🔍 Searching PubMed for {len(by_doi)} DOIs...")
-            enriched_entries.extend(self._enrich_by_doi(by_doi))
+            enriched_entries.extend(
+                self._enrich_by_doi(by_doi, progress_base=len(by_pmid) + len(by_pmcid), progress_total=progress_total)
+            )
 
         # 4. Entries without identifiers (pass through unchanged)
         for entry in no_id:
@@ -402,15 +440,17 @@ class PubMedEnricher:
         match = re.search(r'(10\.\d{4,}/[^\s]+)', doi_str)
         return match.group(1).rstrip('.,;') if match else None
 
-    def _enrich_by_pmid(self, entries_with_pmid: list[tuple[dict, str]]) -> list[dict]:
+    def _enrich_by_pmid(
+        self, entries_with_pmid: list[tuple[dict, str]], source: str = 'pmid'
+    ) -> list[dict]:
         """
         Enrich entries by direct PMID lookup.
 
-        Batches requests for efficiency (up to 200 per request).
+        Batches requests for efficiency (up to 200 per request). Entries that
+        share a PMID are each checked against the one record (#1219).
         """
         results = []
-        pmids = [pmid for _, pmid in entries_with_pmid]
-        entry_map = {pmid: entry for entry, pmid in entries_with_pmid}
+        pmids = list(dict.fromkeys(pmid for _, pmid in entries_with_pmid))
 
         # Fetch in batches
         batch_size = 200
@@ -426,9 +466,9 @@ class PubMedEnricher:
                 time.sleep(RATE_LIMIT_DELAY)
 
         # Merge enrichment data into entries
-        for pmid, entry in entry_map.items():
+        for entry, pmid in entries_with_pmid:
             if pmid in all_records:
-                self._accept_record(entry, all_records[pmid], 'pmid')
+                self._accept_record(entry, all_records[pmid], source)
             else:
                 entry['enrichment_status'] = 'lookup_failed'
                 self.stats['failed_lookups'] += 1
@@ -469,9 +509,59 @@ class PubMedEnricher:
                 self.stats['failed_lookups'] += 1
             results.append(entry)
 
+        self._retry_bare_pmcids_as_pmids(results)
         return results
 
-    def _enrich_by_doi(self, entries_with_doi: list[tuple[dict, str]]) -> list[dict]:
+    def _bare_digits_pmid(self, entry: dict) -> str | None:
+        """The PMID-length digit run of a "PMCID" value that has no PMC prefix
+        (#1219: a CV labelled 8-digit PMIDs as PMCIDs). "PMCID-123..." and
+        "PMCID: 123..." are labels, not prefixes; only "PMC" directly
+        followed by a digit marks a real PMCID."""
+        raw = str((entry.get('extracted_fields') or {}).get('pmcid') or '')
+        if re.search(r'PMC\d', raw.upper()):
+            return None
+        match = re.search(r'(?<!\d)\d{7,8}(?!\d)', raw)
+        return match.group(0) if match else None
+
+    @staticmethod
+    def _failure_counts(status: str | None) -> tuple[int, int]:
+        """(failed_lookups, title_mismatches) an entry with this status adds."""
+        failed = status in PMCID_PATH_FAILURES or status == 'lookup_failed'
+        return (1 if failed else 0, 1 if status == 'title_check_failed' else 0)
+
+    def _shift_failure_counts(self, status: str | None, sign: int) -> None:
+        failed, mismatched = self._failure_counts(status)
+        self.stats['failed_lookups'] += sign * failed
+        self.stats['title_mismatches'] += sign * mismatched
+
+    def _retry_bare_pmcids_as_pmids(self, entries: list[dict]) -> None:
+        """Second chance for entries the PMCID path failed or title-rejected
+        whose "PMCID" has no PMC prefix: look the digits up as a PMID. The
+        title check guards the result. An entry the retry does not enrich
+        keeps the status and rejection record it had, so an idconv outage is
+        never recorded as a title rejection."""
+        retry = [(e, self._bare_digits_pmid(e)) for e in entries
+                 if e.get('enrichment_status') in PMCID_PATH_FAILURES]
+        retry = [(e, pmid) for e, pmid in retry if pmid]
+        prior = {id(e): (e['enrichment_status'], e.pop('enrichment_rejected', None))
+                 for e, _ in retry}
+        for entry, _ in retry:
+            self._shift_failure_counts(prior[id(entry)][0], -1)
+        self._enrich_by_pmid(retry, source='pmcid_as_pmid')
+        for entry, _ in retry:
+            status, rejected = prior[id(entry)]
+            if entry['enrichment_status'] == 'enriched':
+                continue
+            self._shift_failure_counts(entry['enrichment_status'], -1)
+            self._shift_failure_counts(status, 1)
+            entry['enrichment_status'] = status
+            entry.pop('enrichment_rejected', None)
+            if rejected:
+                entry['enrichment_rejected'] = rejected
+
+    def _enrich_by_doi(
+        self, entries_with_doi: list[tuple[dict, str]], progress_base: int = 0, progress_total: int | None = None,
+    ) -> list[dict]:
         """
         Enrich entries by DOI search in PubMed, then lookup.
 
@@ -515,6 +605,11 @@ class PubMedEnricher:
                 self.stats['failed_lookups'] += 1
 
             results.append(entry)
+            if self.verbose:
+                logger.info(
+                    "[%d/%d] publications looked up",
+                    progress_base + len(results), progress_total or len(entries_with_doi),
+                )
             time.sleep(RATE_LIMIT_DELAY)
 
         return results
@@ -523,8 +618,11 @@ class PubMedEnricher:
         """An entry the CV calls in press is searched by title when it had no
         usable identifier; once matched by any path it takes PubMed's year,
         leaves S7 for its published code, and carries `in_press_note`, the
-        Word comment stage 6 attaches to the tracked change."""
+        Word comment stage 6 attaches to the tracked change. One PubMed did
+        not match still leaves S7, by its own text (#1166)."""
         for entry in pub_entries:
+            if entry.get('taxonomy_code') not in IN_PRESS_ELIGIBLE_CODES:
+                continue
             fields = entry.get('extracted_fields') or {}
             title = fields.get('title') or fields.get('chapter_title') or ''
             # No title, no way to tell a status from a title that says
@@ -536,6 +634,7 @@ class PubMedEnricher:
             if entry.get('enrichment_status') in _TITLE_SEARCHABLE_STATUSES:
                 self._enrich_by_title(entry, title)
             if entry.get('enrichment_status') != 'enriched':
+                self._promote_unmatched_in_press(entry)
                 continue
             if self._lists_as_published(entry, pub_entries):
                 self._record_in_press_duplicate(entry, phrase)
@@ -559,8 +658,11 @@ class PubMedEnricher:
         finally:
             time.sleep(RATE_LIMIT_DELAY)
         records = self._fetch_pubmed_batch(pmids) if pmids else {}
+        # A preprint is the paper's earlier version, never what "in press"
+        # names (QZWBKQ, dev-239: an "Appl Environ Microbiol, in press" entry
+        # matched its bioRxiv record, PubMed type Preprint).
         scored = [(title_word_overlap(title, [r['title'], r['vernacular_title']]) or 0, r)
-                  for r in records.values()]
+                  for r in records.values() if PREPRINT_PUBTYPE not in r['publication_types']]
         if not scored:
             return
         overlap, best = max(scored, key=lambda pair: pair[0])
@@ -622,6 +724,24 @@ class PubMedEnricher:
                 return True
         return False
 
+    def _promote_unmatched_in_press(self, entry: dict) -> None:
+        """An S7 entry the CV calls in press that PubMed did not match (a
+        non-indexed journal, a chapter, a retitled paper) moves to S4 or S1.
+        Stage 4 extracted it with S7's schema, whose venue key is
+        `target_journal`; the citation renderer reads `journal`."""
+        if entry.get('taxonomy_code') != IN_REVIEW_CODE:
+            return
+        is_chapter = bool(CHAPTER_PATTERN.search(entry.get('text') or ''))
+        code = UNMATCHED_CHAPTER_CODE if is_chapter else UNMATCHED_DEFAULT_CODE
+        entry['taxonomy_code'] = code
+        fields = entry.setdefault('extracted_fields', {})
+        if not is_chapter and not fields.get('journal') and fields.get('target_journal'):
+            fields['journal'] = fields['target_journal']
+        if entry.get('classification_reasoning'):
+            entry['classification_reasoning'] += (
+                f" Moved from {IN_REVIEW_CODE} to {code}: the CV lists it as accepted or in press.")
+        self.stats['in_press_promoted'] += 1
+
     def _record_in_press_duplicate(self, entry: dict, phrase: str) -> None:
         """Stage 6 renders this entry as a tracked deletion, not a replacement:
         replacing it would print the paper twice. Its code and year stay."""
@@ -659,17 +779,37 @@ class PubMedEnricher:
             message += f" | response body: {_sanitize_error(body[:500])}"
         logger.error(message)
 
-    def _get_with_retry(self, url: str, params: dict[str, Any]) -> requests.Response:
+    @staticmethod
+    def _retry_delay(attempt: int, retry_after: str | None) -> float:
+        """Exponential backoff for this attempt, raised to a numeric Retry-After."""
+        delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
+        if retry_after:
+            try:
+                delay = max(delay, float(retry_after))
+            except ValueError:
+                pass  # HTTP-date Retry-After: deliberately ignored, backoff applies
+        return delay
+
+    def _get_with_retry(
+        self,
+        url: str,
+        params: dict[str, Any],
+        max_attempts: int = MAX_ATTEMPTS,
+        total_wait_cap: float | None = None,
+    ) -> requests.Response:
         """
         HTTP GET with retry on transient failures.
 
         Retries 429s, 5xx responses, and connection/timeout errors up to
-        MAX_ATTEMPTS total attempts with exponential backoff (1s, 2s, ...),
-        honoring a Retry-After header when larger. Other HTTP errors
-        (e.g. 404) raise immediately, exactly as before.
+        max_attempts total attempts with exponential backoff (1s, 2s, ...),
+        honoring a Retry-After header when larger. When total_wait_cap is set,
+        a retry whose delay would push the summed waits past it is not taken
+        and the last error raises. Other HTTP errors (e.g. 404) raise
+        immediately, exactly as before.
         """
         last_error = None
-        for attempt in range(MAX_ATTEMPTS):
+        waited = 0.0
+        for attempt in range(max_attempts):
             retry_after = None
             try:
                 response = self.session.get(url, params=params, timeout=30)
@@ -685,16 +825,14 @@ class PubMedEnricher:
             except (requests.ConnectionError, requests.Timeout) as e:
                 last_error = e
 
-            if attempt < MAX_ATTEMPTS - 1:
-                delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
-                if retry_after:
-                    try:
-                        delay = max(delay, float(retry_after))
-                    except ValueError:
-                        pass
+            if attempt < max_attempts - 1:
+                delay = self._retry_delay(attempt, retry_after)
+                if total_wait_cap is not None and waited + delay > total_wait_cap:
+                    break
+                waited += delay
                 if self.verbose:
                     logger.warning(f"    ⏳ Transient API error ({_sanitize_error(last_error)}); "
-                                   f"retry {attempt + 1}/{MAX_ATTEMPTS - 1} in {delay:g}s")
+                                   f"retry {attempt + 1}/{max_attempts - 1} in {delay:g}s")
                 time.sleep(delay)
 
         raise last_error
@@ -849,7 +987,11 @@ class PubMedEnricher:
                 **self._identity_params()
             }
 
-            response = self._get_with_retry(ID_CONVERTER_URL, params)
+            response = self._get_with_retry(
+                ID_CONVERTER_URL, params,
+                max_attempts=IDCONV_MAX_ATTEMPTS,
+                total_wait_cap=IDCONV_RETRY_TOTAL_WAIT_CAP_SECONDS,
+            )
 
             data = response.json()
 
@@ -883,7 +1025,9 @@ class PubMedEnricher:
         """
         params = {
             'db': 'pubmed',
-            'term': f'{doi}[doi]',
+            # Quoted: unquoted, PubMed re-tags the text after '/' as
+            # [Publisher ID] and returns unrelated PMIDs (#1219).
+            'term': f'"{doi.replace(chr(34), "")}"[doi]',
             'retmode': 'json',
             **self._identity_params()
         }

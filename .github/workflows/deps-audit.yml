@@ -60,8 +60,8 @@ jobs:
       # longer appears in either resolved set below):
       #   --no-deps -r requirements.txt                 -> 30 packages audited
       #     (11 declared; adds botocore, pydantic-core, certifi, urllib3)
-      #   --no-deps -r backend/requirements.txt         -> 53 packages audited
-      #     (23 declared; adds starlette, h11, typing_extensions, urllib3, certifi)
+      #   --no-deps -r backend/requirements.txt         -> 54 packages audited
+      #     (54 declared: a full pip freeze since #754, measured 2026-10-02)
       #   --no-deps --disable-pip -r requirements.txt   -> 11 packages audited
       # Transitive dependencies ARE covered. The remaining gap is reproducibility,
       # not coverage: the audited set is whatever pip resolves at audit time

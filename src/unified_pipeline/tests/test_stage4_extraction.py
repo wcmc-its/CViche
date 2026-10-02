@@ -493,6 +493,33 @@ def test_extract_fields_batch_real_implementation_drops_malformed_item(monkeypat
     assert "dropped one malformed LLM entry" in caplog.text
 
 
+def test_extract_fields_batch_stamps_the_entries_of_a_group_the_fallback_served(monkeypatch):
+    """#1174: a served call is a success, so only this stamp records it. The
+    stamp is on the entries of the group the fallback answered, not on other
+    groups, and a normal result leaves no key."""
+    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_ENTRY_FALLBACK_KEY
+
+    entries = [
+        {"text": "hello world", "taxonomy_code": "A1", "element_idx_start": 0, "element_idx_end": 0},
+        {"text": "other group", "taxonomy_code": "B1", "element_idx_start": 1, "element_idx_end": 1},
+    ]
+
+    def fake_call_llm(*, messages, **_kwargs):
+        reply = {"content": json.dumps({"entries": [{"entry_index": 0, "note": "x"}]}),
+                 "cost": 0.0, "total_tokens": 0}
+        if "hello world" in messages[1]["content"]:
+            reply[FALLBACK_SERVED_KEY] = "example.fallback-model-1"
+        return reply
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    by_code = {e["taxonomy_code"]: e for e in result["entries"]}
+    assert by_code["A1"][STAGE4_ENTRY_FALLBACK_KEY] == "example.fallback-model-1"
+    assert STAGE4_ENTRY_FALLBACK_KEY not in by_code["B1"]
+
+
 @pytest.mark.parametrize("timeout_error", [
     ReadTimeoutError(endpoint_url="https://bedrock.example.invalid"),
     ConnectTimeoutError(endpoint_url="https://bedrock.example.invalid"),
@@ -1218,3 +1245,21 @@ def test_other_offschema_values_are_left_as_they_were(monkeypatch):
     (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
     assert STAGE4_RECORDS_KEY not in out["extracted_fields"]
     assert {k: out["extracted_fields"][k] for k in item} == item
+
+
+def test_each_finished_batch_prints_a_progress_bar_line(monkeypatch, capsys, progress_patterns):
+    """The web progress bar sat at its 50% placeholder for all of stage 4:
+    no line matched orchestrator.PROGRESS_PATTERNS until the loop ended.
+    Each finished batch now prints ``[done/total]``, read the way
+    orchestrator.py reads it (first matching pattern wins)."""
+    _stub_owner(monkeypatch)
+    monkeypatch.setattr(extraction, "extract_fields_batch", lambda entries, *a, **k: _batch_result(entries))
+
+    extraction.extract_fields_from_mapped_entries(_entries(3), batch_size=1, workers=2)
+
+    seen = []
+    for line in capsys.readouterr().out.splitlines():
+        match = next((m for p in progress_patterns if (m := p.search(line))), None)
+        if match:
+            seen.append((int(match.group(1)), int(match.group(2))))
+    assert seen == [(1, 3), (2, 3), (3, 3)]

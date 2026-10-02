@@ -46,7 +46,7 @@ function BatchFiles({ batch, showCost, onRunAgain }: BatchFilesProps) {
         <DropZone
           multiple
           compact={batch.rows.length > 0}
-          title="Drop .docx files here"
+          title="Drop .docx or .pdf files here"
           hint={`Up to ${MAX_BATCH_FILES} files. Each one becomes its own run.`}
           onFiles={batch.addFiles}
         />

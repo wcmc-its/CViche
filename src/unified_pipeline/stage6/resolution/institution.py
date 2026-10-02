@@ -14,6 +14,8 @@ import logging
 import re
 from collections.abc import Mapping
 
+from ..normalization.institutions import enrichment_names_the_institution
+
 logger = logging.getLogger(__name__)
 
 _US_STATE_ABBREVS = {
@@ -162,6 +164,9 @@ def _get_institution_location(entry: dict) -> tuple[str, bool]:
             "institution_enrichment is %s, not a mapping; treating as absent",
             type(enrichment).__name__)
         enrichment = {}
+    names_it = enrichment_names_the_institution(entry)
+    if not names_it:
+        enrichment = {}  # a lookup of some other place: its city is not this one's
     if enrichment:
         city = enrichment.get('city', '')
         state = enrichment.get('state', '')
@@ -191,8 +196,11 @@ def _get_institution_location(entry: dict) -> tuple[str, bool]:
             # stage 5b parses an embedded location out rather than adding one.
             return (location, not _location_stated_in_source(entry, *as_stated))
 
-    # Fall back to extracted_fields.location (not from enrichment)
+    # Fall back to extracted_fields.location (not from enrichment) -- unless
+    # stage 5b wrote it there from the lookup just rejected (`enriched_fields`).
     fields = entry.get('extracted_fields') or {}
+    if not names_it and 'location' in (entry.get('enriched_fields') or ()):
+        return ('', False)
     return (fields.get('location', ''), False)  # False = not from enrichment
 
 

@@ -45,7 +45,7 @@ from app.services.input_format import detect_input_format_or_none
 from app.services.template_warning import detect_wcm_template
 from app.services.pdf_sandbox import (
     PDF_BUSY_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, PDF_UNREADABLE_MESSAGE, EncryptedPdfError,
-    PdfBusyError, PdfTooComplexError, UnreadablePdfError, extract_pdf_text,
+    PdfBusyError, PdfTooComplexError, PdfText, UnreadablePdfError, extract_pdf_text, read_pdf,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,12 @@ _ENCRYPTED_PDF_MESSAGE = (
     "This PDF is password-protected, so we can't read it. Please remove the "
     "password, or upload the CV as a .docx."
 )
+
+# A PDF whose image-only (scanned) pages reach this share of its pages is
+# refused at upload (#1282): most of its content would be missing from the
+# output, at full cost. Below it, the run goes ahead and /estimate names the
+# pages so the user decides before submitting.
+SCANNED_PAGE_REJECT_SHARE = 0.5
 
 # Minimum extracted text (characters) for a document to be considered readable.
 # A real CV runs into the thousands of characters; anything below this is almost
@@ -177,11 +183,49 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
         os.unlink(tmp_path)
 
 
-async def _extract_text_or_400(content: bytes, file_ext: str) -> str | None:
-    """`_extract_text` off the event loop (#793), shared by /upload and
+def _page_ranges(pages: list[int]) -> str:
+    """1-based page numbers as ranges: [2, 3, 4, 7] -> "2–4, 7"."""
+    runs: list[list[int]] = []
+    for n in pages:
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in runs)
+
+
+def _reject_mostly_scanned_pdf(pdf: PdfText) -> None:
+    """A 400 naming the scanned pages when they are SCANNED_PAGE_REJECT_SHARE
+    or more of the PDF (#1282). Covers a fully scanned PDF too, with a
+    message that says what to do instead of the generic no-text one."""
+    if not pdf.pages or len(pdf.image_only_pages) < SCANNED_PAGE_REJECT_SHARE * pdf.pages:
+        return
+    logger.info("Rejected mostly scanned PDF (%d of %d pages image-only)",
+                len(pdf.image_only_pages), pdf.pages)
+    noun = "Page" if len(pdf.image_only_pages) == 1 else "Pages"
+    verb = "is a scanned image" if len(pdf.image_only_pages) == 1 else "are scanned images"
+    raise bad_request(
+        f"{noun} {_page_ranges(pdf.image_only_pages)} of this PDF {verb}, so "
+        "their text can't be read. Export the PDF from the original document "
+        "(or run OCR on it) and upload it again, or upload the CV as a .docx."
+    )
+
+
+def _read_upload_text(content: bytes, file_ext: str) -> tuple[str | None, list[int]]:
+    """`_extract_text`, plus a PDF's image-only pages (empty for a docx).
+    Refuses a mostly scanned PDF with a 400."""
+    if file_ext != PDF_EXTENSION:
+        return _extract_text(content, file_ext), []
+    pdf = read_pdf(content)
+    _reject_mostly_scanned_pdf(pdf)
+    return pdf.text, pdf.image_only_pages
+
+
+async def _extract_text_or_400(content: bytes, file_ext: str) -> tuple[str | None, list[int]]:
+    """`_read_upload_text` off the event loop (#793), shared by /upload and
     /estimate: every PDF refusal is a 400, a full PDF sandbox a 503."""
     try:
-        return await run_in_threadpool(_extract_text, content, file_ext)
+        return await run_in_threadpool(_read_upload_text, content, file_ext)
     except EncryptedPdfError:
         raise bad_request(_ENCRYPTED_PDF_MESSAGE)
     except PdfTooComplexError as e:
@@ -324,6 +368,10 @@ class EstimateResponse(BaseModel):
     # True when the document's text couldn't be read and text_characters is
     # the fixed fallback guess, not a measurement (#794).
     text_characters_is_guess: bool = False
+    # A PDF's image-only pages, 1-based, whose text the run can't read
+    # (#1282). Fewer than SCANNED_PAGE_REJECT_SHARE of its pages, or the
+    # file would have been refused.
+    scanned_pages: list[int] = []
 
 
 # Recalibrated after the #881 parallel LLM batches went live (dev-207): the old
@@ -689,7 +737,7 @@ async def upload_cv(
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
     # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
-    extracted = await _extract_text_or_400(content, file_ext)
+    extracted, scanned_pages = await _extract_text_or_400(content, file_ext)
     if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
@@ -791,6 +839,7 @@ async def upload_cv(
         input_format=input_format,
         input_format_score=input_format_score,
         source_sha256=source_sha256,
+        scanned_pages=",".join(map(str, scanned_pages)) or None,
     )
     db.add(run)
     _add_pending_steps(db, run_id)
@@ -882,7 +931,7 @@ async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> 
     # this endpoint used to re-walk the docx paragraphs/tables inline, which
     # could compute a different text_char_count for the same file. Off the
     # event loop, same as /upload (#793).
-    extracted = await _extract_text_or_400(content, file_ext)
+    extracted, scanned_pages = await _extract_text_or_400(content, file_ext)
     if extracted is None:
         # _extract_text already logged the specific read failure (§5.4). No
         # filename here (CODING_STANDARDS §4.7): CV filenames usually carry
@@ -923,6 +972,7 @@ async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> 
         file_size_kb=round(file_size_kb, 1),
         pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
         text_characters_is_guess=extracted is None,
+        scanned_pages=scanned_pages,
     )
 
 

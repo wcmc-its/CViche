@@ -13,6 +13,7 @@ import logging
 import re
 
 from unified_pipeline.config import _normalize_model_id, calculate_cost
+from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY
 from unified_pipeline.llm.retry import (
     _call_with_retry,
     _client_init_lock,
@@ -811,6 +812,7 @@ def _call_on_content_filter_fallback(messages: list, response_format: dict | Non
             f"Bedrock call ended stopReason={CONTENT_FILTERED_STOP_REASON!r} on "
             f"{cfg['model']} and again on the fallback {CONTENT_FILTER_FALLBACK_MODEL}")
     result["cost"] += first_attempt_cost
+    result[FALLBACK_SERVED_KEY] = CONTENT_FILTER_FALLBACK_MODEL
     return result
 
 

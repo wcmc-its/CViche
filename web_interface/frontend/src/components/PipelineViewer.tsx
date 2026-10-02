@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, XCircle, AlertCircle, LifeBuoy } from 'lucide-react'
 import { getRunDataJson, cancelRun, restartRun, retryStep, startRun } from '../api/runs'
 import { runRoutes } from '../api/routes'
-import { formatCost, runningStepCost } from '../utils'
+import { formatCost, formatScannedPages, runningStepCost } from '../utils'
 import { usePipelineRun } from '../hooks/usePipelineRun'
 
 import PipelineHeader from './PipelineHeader'
@@ -333,7 +333,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     <div className="min-h-screen">
       {apiError && <ErrorBanner message={apiError} onDismiss={() => setApiError(null)} />}
 
-      <div className={`mx-auto w-full flex flex-col gap-[18px] px-4 sm:px-7 pt-6 pb-16 ${isComplete && !showDetails ? 'max-w-[1000px]' : 'max-w-[1240px]'}`}>
+      <div className={`mx-auto w-full flex flex-col gap-[18px] px-4 sm:px-7 pt-6 pb-16 ${isComplete ? 'max-w-[1000px]' : 'max-w-[1240px]'}`}>
         {connectionLost && (
           <div className={`${bannerBase} bg-orange-50 border-orange-300`} role="status" aria-live="polite">
             <div className="flex items-center gap-3 max-w-full">
@@ -389,6 +389,15 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           </div>
         )}
 
+        {!!runStatus.scanned_pages?.length && (
+          <div className={`${bannerBase} bg-amber-50 border-amber-300`} role="status">
+            <div className="flex items-center gap-3 max-w-full">
+              <AlertCircle className="h-5 w-5 text-amber-600 flex-shrink-0" aria-hidden="true" />
+              <p className="min-w-0 text-sm font-medium text-amber-800">{formatScannedPages(runStatus.scanned_pages)}</p>
+            </div>
+          </div>
+        )}
+
         {runStatus.status === 'created' && (
           <div className={`${bannerBase} bg-white border-sand-300`} role="status">
             <div className="flex flex-wrap items-center justify-between gap-3 max-w-full">
@@ -426,8 +435,6 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           {isComplete && finalDocxName && <DocxDownloadCard runId={runId} filename={finalDocxName} />}
           {isComplete && !isAdmin && <ReviewNote runId={runId} />}
         </PipelineHeader>
-
-        {isComplete && isAdmin && <RunQualitySections runId={runId} />}
 
         {showDetails && (
           <div className="grid grid-cols-1 gap-[18px] items-start md:grid-cols-[minmax(260px,340px)_minmax(0,1fr)]">
@@ -525,6 +532,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
             </main>
           </div>
         )}
+
+        {/* Below the step details, so "Pipeline details" opens them under the header, not past the score. */}
+        {isComplete && isAdmin && <RunQualitySections runId={runId} />}
 
         {isComplete && (
           <section id="feedback-section">

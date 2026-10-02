@@ -309,7 +309,8 @@ def cv_pdf():
     """Synthetic PDF bytes from the pipeline suite's builder (#806): no PDF
     writer is a dependency, so fixtures are hand-written PDF bytes.
     ``cv_pdf(image_pages=(1,), user_password="pw")`` adds an image-only
-    second page / encrypts it; the first page always carries well over
+    second page / encrypts it; ``text_pages=n`` repeats the text page n
+    times, before any image-only pages. Each text page carries well over
     upload.py's MIN_EXTRACTED_CHARS of text."""
     from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
 
@@ -319,8 +320,8 @@ def cv_pdf():
         for i in range(12)
     ]
 
-    def build(image_pages=(), user_password=None) -> bytes:
-        pages = [text_page] + ([[]] if image_pages else [])
+    def build(image_pages=(), user_password=None, text_pages=1) -> bytes:
+        pages = [text_page] * text_pages + [[]] * len(image_pages)
         return _make_pdf(pages, image_pages=image_pages, user_password=user_password)
 
     return build

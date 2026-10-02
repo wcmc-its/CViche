@@ -72,9 +72,11 @@ from unified_pipeline.stage6.sections.passthrough import (  # noqa: E402
     PASSTHROUGH_CODES,
     PassthroughSection,
 )
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     RENDER_ROUTED_CODES,
     WCMTemplateGenerator,
+    rendered_extraction_coverage,
 )
 
 _APPENDIX_HEADER = "T. APPENDIX"
@@ -581,6 +583,53 @@ def test_reconsider_appendix_entries_real_tail_wires_recovered_codes(tmp_path):
         ("D2", REASON_RECOVERED_UNRENDERED, 1),
         ("ZZ", REASON_NO_RENDER_ROUTE, 1),
     ]
+
+
+
+def _overflow_queued(tmp_path: Path, entry: dict) -> list[dict]:
+    """The entries the real generate() queued for the low-coverage overflow."""
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    queued: list[dict] = []
+    gen._reconsider_appendix_entries = lambda: queued.extend(e for e, _ in gen._appendix_pending)
+    input_path = tmp_path / "in.json"
+    input_path.write_text(json.dumps({"document_uid": "T1299", "entries": [_OWNER_ENTRY, entry]}))
+    gen.generate(str(input_path), str(tmp_path / "out.docx"), research_summary_path=None)
+    return queued
+
+
+def _unrendered_records_entry(**overrides) -> dict:
+    """A T entry whose two stage-4 records carry its whole text, but no
+    fan-out renderer exists for T, so only its own one-word field renders."""
+    words = [f"zeta{chr(97 + i % 26)}{chr(97 + i // 26)}word" for i in range(120)]
+    text = " ".join(words)
+    assert len(text) > 1000  # the non-K/L overflow length gate
+    records = [{"title": " ".join(words[:60])}, {"title": " ".join(words[60:])}]
+    entry = {"text": text, "taxonomy_code": "T", "hierarchy": ["Miscellaneous"],
+             "element_idx_start": 1,
+             "extracted_fields": {"title": words[0], STAGE4_RECORDS_KEY: records},
+             "extraction_coverage": {"extraction_coverage_percent": 100.0,
+                                     "unextracted_words": []}}
+    return {**entry, **overrides}
+
+
+def test_unrendered_stage4_records_do_not_lift_coverage_over_the_overflow(tmp_path):
+    """#1299: stage 4's coverage counts every record it kept, but T has no
+    fan-out renderer, so those records never render. Stage 6 must measure
+    the entry's own fields and send it to the overflow, as before #1265."""
+    queued = _overflow_queued(tmp_path, _unrendered_records_entry())
+    assert [e["text"][:9] for e in queued] == ["zetaaawor"]
+
+
+def test_an_entry_without_stage4_records_keeps_its_stored_coverage(tmp_path):
+    entry = _unrendered_records_entry(extracted_fields={"title": "zetaaaword"})
+    assert _overflow_queued(tmp_path, entry) == []
+
+
+def test_rendered_extraction_coverage_recounts_only_the_entrys_own_fields():
+    entry = _unrendered_records_entry()
+    assert entry["extraction_coverage"]["extraction_coverage_percent"] == 100.0
+    assert rendered_extraction_coverage(entry)["extraction_coverage_percent"] < 1.0
+    assert rendered_extraction_coverage({"text": "x"}) is None
 
 
 # ------------------------------------------------------------------ task 4

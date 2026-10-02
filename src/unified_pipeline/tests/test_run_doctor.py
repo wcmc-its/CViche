@@ -30,6 +30,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: E402
     OUTPUT_LEAK_EVIDENCE_LIMIT,
 )
 from unified_pipeline.doctor.shared import TABLE_ROW_JOINER, docx_body_blocks  # noqa: E402
+from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     MISSED_HEADERS_WARN_COUNT,
@@ -47,6 +48,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
+    lint_llm_fallback_served,
     lint_llm_refusal_in_output,
     lint_missed_headers,
     lint_no_output,
@@ -58,6 +60,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_section_lost,
     lint_stage3b_fallback_ratio,
     lint_stage4_group_failures,
+    lint_stage_failure_recorded,
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_stage6_warnings,
@@ -2085,6 +2088,138 @@ def test_stage4_group_failures_and_the_score_gate_agree_on_the_same_artifact(tmp
         assert bool(lint_stage4_group_failures(artifact)) is expect_flag
 
 
+# --------------------- #1174: llm_fallback_served (cap below GREEN) ----------
+#
+# Synthetic provenance: stage 4 stamps the entries of a taxonomy group the
+# content-filter fallback answered; stage 4.5 lists the calls it served.
+
+_FALLBACK_MODEL = "example.fallback-model-1"
+
+
+def _fallback_entry(code, model=_FALLBACK_MODEL):
+    return {"taxonomy_code": code, "extraction_success": True,
+            "extracted_fields": {"note": "x"}, "llm_fallback_model": model}
+
+
+def test_llm_fallback_served_warns_per_stage_4_section_and_names_the_model():
+    stage4 = {"entries": [_fallback_entry("S1"), _fallback_entry("S1"),
+                          _fallback_entry("M2A"),
+                          {"taxonomy_code": "S1", "extraction_success": True}]}
+    findings = lint_llm_fallback_served(stage4)
+    assert [f["lint"] for f in findings] == ["llm_fallback_served"] * 2
+    assert {f["severity"] for f in findings} == {"WARN"}
+    by_section = {f["evidence"][0]: f["message"] for f in findings}
+    assert set(by_section) == {
+        f"stage 4 M2A on {_FALLBACK_MODEL} (1 entries)",
+        f"stage 4 S1 on {_FALLBACK_MODEL} (2 entries)"}
+    assert all("capped at 84" in f["message"] for f in findings)
+
+
+def test_llm_fallback_served_reports_a_stage_4_5_call_as_the_research_summary():
+    stage4_5 = {"research_summary": {"text": "x"}, "llm_fallback_calls": [
+        {"call": "m1_relevance_score", "model": _FALLBACK_MODEL}]}
+    findings = lint_llm_fallback_served({"entries": []}, stage4_5)
+    assert len(findings) == 1
+    assert findings[0]["message"].startswith(
+        "stage 4.5 research summary (m1_relevance_score): the content filter blocked")
+    assert findings[0]["severity"] == "WARN"
+
+
+def test_llm_fallback_served_quiet_without_provenance_or_on_a_malformed_artifact():
+    assert lint_llm_fallback_served({"entries": [{"taxonomy_code": "S1"}]}) == []
+    assert lint_llm_fallback_served({}, {"research_summary": {}}) == []
+    assert lint_llm_fallback_served({"entries": [None, 3, "x"]}, None) == []
+    assert lint_llm_fallback_served({}, {"llm_fallback_calls": [None, {"call": "x"}]}) == []
+
+
+def test_llm_fallback_served_and_the_score_gate_agree_on_the_same_artifact(tmp_path):
+    """Both read quality_score.llm_fallback_served, so the lint fires exactly
+    when the cap does."""
+    from unified_pipeline.quality_score import FALLBACK_SERVED_CAP, score_llm_fallback_served
+
+    served = {"entries": [_fallback_entry("S1")]}
+    clean = {"entries": [{"taxonomy_code": "S1", "extraction_success": True}]}
+    for artifact, expect_flag in ((served, True), (clean, False)):
+        (tmp_path / "X_fields.json").write_text(json.dumps(artifact))
+        _fraction, _detail, cap = score_llm_fallback_served(tmp_path)
+        assert (cap == FALLBACK_SERVED_CAP) is expect_flag
+        assert bool(lint_llm_fallback_served(artifact)) is expect_flag
+
+
+def test_run_doctor_wires_llm_fallback_served_through_to_the_verdict(tmp_path):
+    """Both artifacts, driven through run_doctor() end to end: deleting the
+    LINT_REGISTRY row or its optional stage_4_5 view fails this."""
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "llm_fallback_served"]
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"][0]["llm_fallback_model"] = _FALLBACK_MODEL
+    fields.write_text(json.dumps(data))
+    summary = root / "stage_4_5_research_summary" / f"{_UID}_cv_research_summary.json"
+    summary.write_text(json.dumps({"research_summary": {"text": "x"}, "llm_fallback_calls": [
+        {"call": "summary_generation", "model": _FALLBACK_MODEL}]}))
+
+    payload = run_doctor(root, _UID)
+
+    found = [f for f in payload["findings"] if f["lint"] == "llm_fallback_served"]
+    assert len(found) == 2
+    assert {f["severity"] for f in found} == {"WARN"}
+    assert any("stage 4.5 research summary (summary_generation)" in f["message"] for f in found)
+    assert payload["counts"]["ERROR"] == 0
+
+
+# ----------------- #1174: stage_failure_recorded (a recorded stage failure) --
+
+def test_stage_failure_recorded_errors_on_a_fatal_stage_4_5_and_says_what_is_missing():
+    record = StageError("4.5", "BedrockContentFilteredError", "ended content_filtered", True)
+    findings = lint_stage_failure_recorded([record])
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["lint"] == "stage_failure_recorded"
+    assert finding["severity"] == "ERROR"
+    assert "stage 4.5 failed (BedrockContentFilteredError" in finding["message"]
+    assert "not because the CV has no research content" in finding["message"]
+    assert finding["evidence"] == [
+        "stage=4.5", "exception=BedrockContentFilteredError", "fatal=True"]
+
+
+def test_stage_failure_recorded_names_any_other_stage_and_grades_a_non_fatal_record_warn():
+    fatal, non_fatal = (StageError("5", "ValueError", "bad", True),
+                        StageError("6", "OSError", "disk", False))
+    first, second = lint_stage_failure_recorded([fatal, non_fatal])
+    assert (first["severity"], second["severity"]) == ("ERROR", "WARN")
+    assert "stage 5 failed (ValueError: bad)" in first["message"]
+    assert "RED" in first["message"] and "RED" not in second["message"]
+
+
+def test_stage_failure_recorded_quiet_on_a_clean_run():
+    assert lint_stage_failure_recorded([]) == []
+
+
+def test_run_doctor_wires_stage_failure_recorded_through_to_the_verdict(tmp_path):
+    """The record the drivers write (#745), read from its real location under
+    the outputs root. A malformed record is the usual unreadable ERROR, not a
+    silent pass."""
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "stage_failure_recorded"]
+    record_stage_outcome(stage_errors_path(root, _UID), "4.5",
+                         StageError.from_exception("4.5", RuntimeError("boom")))
+
+    payload = run_doctor(root, _UID)
+
+    found = [f for f in payload["findings"] if f["lint"] == "stage_failure_recorded"]
+    assert len(found) == 1 and found[0]["severity"] == "ERROR"
+    assert payload["worst_severity"] == "ERROR"
+
+    stage_errors_path(root, _UID).write_text("{not json")
+    broken = [f for f in run_doctor(root, _UID)["findings"]
+              if f["lint"] == "stage_failure_recorded"]
+    assert len(broken) == 1 and broken[0]["severity"] == "ERROR"
+    assert broken[0]["message"].startswith("skipped: unreadable stage_errors")
+
+
 # ------------------------------------------------ #745: no_output (hard fail) -----
 
 def test_no_output_errors_when_stage4_reached_but_nothing_rendered():
@@ -2164,6 +2299,8 @@ def _build_clean_run(tmp_path, uid=_UID):
     _write_stage(root, "stage_5b_institution_enrichment",
                  f"{uid}_cv_institution_enriched.json",
                  {"document_uid": uid, "entries": []})
+    _write_stage(root, "stage_4_5_research_summary", f"{uid}_cv_research_summary.json",
+                 {"document_uid": uid, "research_summary": {"text": "x"}})
 
     output = Document()
     # Real renders carry grants under RESEARCH (section_lost reads the
@@ -2191,12 +2328,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (32), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (34), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 31
+    # stage_failure_recorded skips nothing either: no stage-error record is
+    # the normal clean case, read as an empty list (#1174).
+    assert len(payload["findings"]) == 32
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -2447,6 +2586,24 @@ def test_run_doctor_reemits_sidecar_findings_end_to_end(tmp_path):
     lints = {f["lint"] for f in payload["findings"] if f["severity"] == "WARN"}
     assert "stage6_render_warnings" in lints
     assert "dedup_drops" in lints
+
+
+def test_run_doctor_wires_rendered_blocks_into_dedup_drops_info(tmp_path):
+    """#666: the INFO tier needs the rendered document. `dedup_drops` is
+    registered with `blocks` optional; dropping that wiring leaves the WARN
+    tier working and the INFO tier silently dead, so drive run_doctor()."""
+    root = _build_clean_run(tmp_path)
+    _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
+                 {"document_uid": _UID, "warnings": [],
+                  "dedup_decisions": [
+                      {"code": "Q4D", "metric": "containment=1.00",
+                       "dropped_text": "Example Optics",
+                       "kept_text": "European Example Optics",
+                       "dropped_fields": {"journal_name": "Example Optics"},
+                       "kept_fields": {"journal_name": "European Example Optics"}}]})
+    payload = run_doctor(root, _UID)
+    drops = [f for f in payload["findings"] if f["lint"] == "dedup_drops"]
+    assert [f["severity"] for f in drops] == ["INFO"]
 
 
 def test_run_doctor_hard_fail_gate_makes_an_undeliverable_run_an_error(tmp_path):

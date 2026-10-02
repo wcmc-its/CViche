@@ -281,6 +281,26 @@ def test_grant_number_is_appended_to_award_source_when_absent():
     assert _cells(table)['Award Source:'] == 'NIH (R01 CA123456)'
 
 
+def test_a_pending_grant_renders_its_requested_amount_and_submission_date():
+    """#1299: M2C's schema names the amount `total_funding_requested` and the
+    date `submission_date`. No row read either, so 13 of 14 pending-grant
+    amounts in one CV rendered nowhere. A request is not an award, so the
+    amount does not go under "Total award:"."""
+    fields = {'agency': 'NIH', 'title': 'Pending Kestrel Project',
+              'total_funding_requested': '250000', 'submission_date': '2025-06'}
+    cells = _cells(_generator()._create_grant_table(fields, 'M2C'))
+    assert cells[research_support.TOTAL_REQUESTED_LABEL] == '$250,000'
+    assert cells[research_support.SUBMISSION_DATE_LABEL]
+    assert research_support.TOTAL_AWARD_LABEL not in cells
+
+
+def test_a_grant_without_the_pending_fields_gets_neither_row():
+    cells = _cells(_generator()._create_grant_table(
+        {'agency': 'NIH', 'title': 'Pending Kestrel Project'}, 'M2C'))
+    assert research_support.TOTAL_REQUESTED_LABEL not in cells
+    assert research_support.SUBMISSION_DATE_LABEL not in cells
+
+
 def test_grant_number_alone_becomes_the_award_source_when_there_is_no_agency():
     """With no agency at all the identifier is the whole Award Source value."""
     fields = {'grant_number': 'R01 CA123456', 'title': 'Cancer Immunology Project'}
@@ -2315,7 +2335,7 @@ def test_every_field_the_module_reads_is_declared_on_the_grant_record_type():
 def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     """The other direction: a declared key no reader wants is dead contract.
 
-    All 27 keys, `status` included, are reached through a `fields.get(...)` in
+    All 29 keys, `status` included, are reached through a `fields.get(...)` in
     this module -- `status` from the bucket rules rather than from a rendered
     row. A key left on the record type after its reader is deleted would go on
     suppressing that key's line in the unconsumed-fields diagnostic, silently.
@@ -2323,7 +2343,7 @@ def test_the_grant_record_type_declares_nothing_the_module_never_reads():
     declared_but_unread = research_support.CONSUMED_GRANT_FIELDS - _fields_get_keys()
 
     assert declared_but_unread == set(), sorted(declared_but_unread)
-    assert len(research_support.CONSUMED_GRANT_FIELDS) == 27
+    assert len(research_support.CONSUMED_GRANT_FIELDS) == 29
 
 
 # --- #291: clinical trials render in the grant block ------------------------------
