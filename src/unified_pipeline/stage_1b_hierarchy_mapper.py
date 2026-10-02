@@ -74,9 +74,20 @@ class SectionRecord(TypedDict):
     synthetic: NotRequired[bool]
 
 
+# Typographic quotes and apostrophes folded to their ASCII forms before
+# matching. Stage 1a writes a page-break heading such as "(CONT'D)" with an
+# ASCII apostrophe, while the source line carries a typographic one, so without
+# the fold the node never matched its own line (#916, #1178).
+_PUNCTUATION_FOLD = str.maketrans({
+    "\u2018": "'", "\u2019": "'", "\u201a": "'", "\u201b": "'", "\u02bc": "'",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"', "\u201f": '"',
+})
+
+
 def normalize_text(text: str) -> str:
     """Normalize text for matching (lowercase, strip whitespace, punctuation, etc.)"""
     import re
+    text = text.translate(_PUNCTUATION_FOLD)
     text = re.sub(r'[:\\.,-]', '', text)
     return " ".join(text.lower().strip().split())
 
@@ -147,8 +158,17 @@ def _find_header_element(
     expected_header: str,
     search_start: int,
     search_end: int,
+    partial_floor: int = 0,
+    excluded_headers: frozenset[str] = frozenset(),
+    exact_only: bool = False,
 ) -> tuple[int, int] | None:
     """Locate `expected_header` among elements[search_start:search_end].
+
+    `partial_floor` and `excluded_headers` constrain only PARTIAL matches, never
+    an exact one: a partial match is skipped when its element index is below
+    `partial_floor` or its text is in `excluded_headers` (#1178). An exact
+    paragraph is always accepted, wherever it sits. `exact_only` skips every
+    partial match.
 
     Returns (position in `elements`, element index to report), or None. A
     paragraph whose normalized text IS the header wins over an earlier
@@ -176,6 +196,8 @@ def _find_header_element(
         found = (i, elem.get('unified_idx', elem.get('idx', i)))
         if para_text == expected_header:
             return found
+        if exact_only or found[1] < partial_floor or para_text in excluded_headers:
+            continue
         if first_partial is None and is_header_match(expected_header, para_text, strict=True):
             if len(para_text) > len(expected_header):
                 # The header sits inside a longer paragraph: the old
@@ -211,9 +233,16 @@ def find_header_in_sequence(
     matches: list[tuple[str, int]] = []
     current_search_idx = start_idx
 
-    for expected_header in normalized_sequence:
-        # Search forward from current position
-        hit = _find_header_element(elements, expected_header, current_search_idx, len(elements))
+    last = len(normalized_sequence) - 1
+    for pos, expected_header in enumerate(normalized_sequence):
+        # Search forward from current position. Only the node itself (the last
+        # entry) may match partially: a parent is an anchor, and a later partial
+        # hit on its text sent the child to the next section's same-named line
+        # (#916).
+        hit = _find_header_element(
+            elements, expected_header, current_search_idx, len(elements),
+            exact_only=pos < last,
+        )
         if hit is None:
             # Sequence broken - return None
             return None
@@ -228,7 +257,9 @@ def map_hierarchy_node(
     node: HierarchyNode,
     elements: list[dict[str, Any]],
     parent_path: list[str] | None = None,
-    start_search_idx: int = 0
+    start_search_idx: int = 0,
+    parent_idx: int = 0,
+    top_level_headers: frozenset[str] = frozenset(),
 ) -> tuple[MappedNode, int]:
     """
     Map a single hierarchy node and its children to element indices.
@@ -238,6 +269,10 @@ def map_hierarchy_node(
         elements: List of document elements from structure extractor
         parent_path: Path of parent headers for context
         start_search_idx: Where to start searching in document
+        parent_idx: Element index of the parent's header. The backward
+            fallback accepts a partial match only at or after it (#1178).
+        top_level_headers: Normalized texts of the top-level headers. For a
+            child, the backward fallback never partial-matches one of them.
 
     Returns:
         Tuple of (mapped_node, next_search_idx)
@@ -283,7 +318,12 @@ def map_hierarchy_node(
             # If not found and we didn't start from the beginning,
             # try searching from the beginning (Stage 1a hierarchy may not match document order)
             if element_idx is None and start_search_idx > 0:
-                element_idx = search_for_header(0, start_search_idx)
+                hit = _find_header_element(
+                    elements, normalized_target, 0, start_search_idx,
+                    partial_floor=parent_idx,
+                    excluded_headers=top_level_headers if parent_path else frozenset(),
+                )
+                element_idx = hit[1] if hit is not None else None
 
     # Build mapped node
     mapped_node: MappedNode = {
@@ -303,13 +343,16 @@ def map_hierarchy_node(
         # For synthetic headers, children should search from the original start position
         # because the LLM may have grouped items out of document order
         child_search_start = start_search_idx if is_synthetic else next_search_idx
+        child_parent_idx = parent_idx if element_idx is None else element_idx
 
         for child in node["children"]:
             mapped_child, child_next_idx = map_hierarchy_node(
                 child,
                 elements,
                 current_path,
-                child_search_start
+                child_search_start,
+                child_parent_idx,
+                top_level_headers,
             )
             mapped_children.append(mapped_child)
 
@@ -328,6 +371,13 @@ def map_hierarchy_node(
         mapped_node["children"] = mapped_children
 
     return mapped_node, next_search_idx
+
+
+def top_level_header_texts(hierarchy: list[HierarchyNode]) -> frozenset[str]:
+    """Normalized text of every non-empty top-level header."""
+    return frozenset(
+        normalize_text(n.get("text", "")) for n in hierarchy if n.get("text", "").strip()
+    )
 
 
 def get_first_child_element_idx(children: list[MappedNode]) -> int | None:
@@ -818,8 +868,12 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) 
     mapped_hierarchy: list[MappedNode] = []
     next_search_idx = 0
 
-    for node in hierarchy_data.get("hierarchy", []):
-        mapped_node, next_search_idx = map_hierarchy_node(node, elements, [], next_search_idx)
+    top_level = hierarchy_data.get("hierarchy", [])
+    top_level_headers = top_level_header_texts(top_level)
+    for node in top_level:
+        mapped_node, next_search_idx = map_hierarchy_node(
+            node, elements, [], next_search_idx, top_level_headers=top_level_headers
+        )
         mapped_hierarchy.append(mapped_node)
 
     print(f"✓ Mapped {len(mapped_hierarchy)} top-level sections")
