@@ -5,7 +5,7 @@ import type { ReactNode } from 'react'
 import { act, renderHook } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import {
-  EMPTY_FILTERS, activeStatusPill, applyStatusPill, runsUrlWith, toListParams, toMemberListParams, useBatchFilter,
+  EMPTY_FILTERS, activeStatusPill, applyStatusPill, countPanelFilters, runsUrlWith, toListParams, toMemberListParams, useBatchFilter,
   useRunFilters,
 } from './runFilters'
 
@@ -102,5 +102,15 @@ describe('runsUrlWith', () => {
     const url = new URL(runsUrlWith({ department: 'Test Dept', runBy: 'on_behalf', faculty: '' }), 'https://example.org')
     expect(url.pathname).toBe('/runs')
     expect(Object.fromEntries(url.searchParams)).toEqual({ department: 'Test Dept', run_by: 'on_behalf' })
+  })
+})
+
+describe('countPanelFilters', () => {
+  it('counts the five combos and the batch, but not the status pill', () => {
+    expect(countPanelFilters(EMPTY_FILTERS, '')).toBe(0)
+    expect(countPanelFilters({ ...EMPTY_FILTERS, status: 'failed' }, '')).toBe(0)
+    expect(countPanelFilters({ ...EMPTY_FILTERS, department: 'Medicine', inputFormat: 'wcm' }, '')).toBe(2)
+    const all = { department: 'Medicine', faculty: 'Pat Example', runBy: 'self', feedback: 'given', inputFormat: 'wcm', status: '' }
+    expect(countPanelFilters(all, 'BQXZKD')).toBe(6)
   })
 })
