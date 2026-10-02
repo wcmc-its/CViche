@@ -15,6 +15,17 @@ describe('classifyFailure', () => {
   })
 })
 
+describe('classifyFailure on a duplicate file', () => {
+  it('holds it for confirmation: not retryable, flagged, with the server message', () => {
+    const failure = classifyFailure({ status: 409, code: 'duplicate_file', message: 'Already processed' }, 'x')
+    expect(failure).toEqual({ reason: 'Already processed', retryable: false, duplicate: true })
+  })
+
+  it('treats a 409 with another code as an ordinary permanent failure', () => {
+    expect(classifyFailure({ status: 409, message: 'Conflict' }, 'x').duplicate).toBeUndefined()
+  })
+})
+
 describe('quotaShortfall', () => {
   it('names the runs left this month when the month is shorter than the day', () => {
     expect(quotaShortfall(5, QUOTA)).toBe('You have 3 runs left this month. Remove 2 files, or submit the rest next month.')

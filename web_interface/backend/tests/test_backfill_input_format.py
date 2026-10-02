@@ -1,5 +1,6 @@
 """scripts/backfill_input_format.py -- candidate selection, dry-run vs apply."""
 import importlib.util
+import hashlib
 import io
 from pathlib import Path
 
@@ -20,9 +21,12 @@ WCM_TEXT = "\n".join([
 OTHER_TEXT = "Summary of a career in synthetic studies."
 
 
-def _run(db, run_id, *, fmt=None):
+ALREADY_HASHED = "0" * 64
+
+
+def _run(db, run_id, *, fmt=None, sha=ALREADY_HASHED):
     db.add(Run(id=run_id, filename="cv.docx", file_type="docx", status="complete",
-               input_format=fmt))
+               input_format=fmt, source_sha256=sha))
     db.commit()
 
 
@@ -31,8 +35,9 @@ def _patch_sources(monkeypatch, sources):
         value = sources[run_id]
         if isinstance(value, Exception):
             raise value
-        return value
-    monkeypatch.setattr(script, "read_source_text", fake)
+        return value.encode()
+    monkeypatch.setattr(script, "read_source", fake)
+    monkeypatch.setattr(script, "_extract_text", lambda content, ext: content.decode())
 
 
 def test_dry_run_reports_and_writes_nothing(db, monkeypatch):
@@ -88,3 +93,19 @@ def test_read_failure_is_counted_logged_and_does_not_stop_the_batch(db, monkeypa
 
     assert (summary.failed, summary.other, summary.written) == (1, 1, 1)
     assert "B00001" in caplog.text
+
+
+def test_dry_run_leaves_source_sha256_null_and_apply_fills_it(db, monkeypatch):
+    _run(db, "B00001", fmt="other", sha=None)
+    _patch_sources(monkeypatch, {"B00001": OTHER_TEXT})
+    expected = hashlib.sha256(OTHER_TEXT.encode()).hexdigest()
+
+    dry = script.backfill(db, apply=False, out=io.StringIO())
+    assert (dry.candidates, dry.hashed, dry.written) == (1, 1, 0)
+    assert db.get(Run, "B00001").source_sha256 is None
+
+    applied = script.backfill(db, apply=True, out=io.StringIO())
+    db.expire_all()
+    assert (applied.hashed, applied.written) == (1, 1)
+    assert db.get(Run, "B00001").source_sha256 == expected
+    assert db.get(Run, "B00001").input_format == "other"  # a set format is never recomputed

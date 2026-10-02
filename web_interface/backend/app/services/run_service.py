@@ -75,6 +75,13 @@ UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def latest_run_with_hash(db: Session, sha256: str) -> Run | None:
+    """The most recently started run (any submitter) whose upload hashed to ``sha256``."""
+    return db.scalars(
+        select(Run).where(Run.source_sha256 == sha256).order_by(Run.started_at.desc()).limit(1)
+    ).first()
+
+
 def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> None:
     """Re-fetch a run's original upload from durable storage if the pod-local
     copy is gone (e.g. after a pod recycle), so start/restart/retry survive.

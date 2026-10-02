@@ -10,7 +10,10 @@ import { createBatch, getQueue } from '../api/batches'
 import { getCurrentUser } from '../api/auth'
 import type { BatchEstimate, Estimate, QueueOverview, QuotaInfo, RunStatus, User } from '../types'
 
-vi.mock('../api/upload', () => ({ getEstimate: vi.fn(), getBatchEstimate: vi.fn(), uploadFile: vi.fn() }))
+vi.mock('../api/upload', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api/upload')>()),
+  getEstimate: vi.fn(), getBatchEstimate: vi.fn(), uploadFile: vi.fn(),
+}))
 vi.mock('../api/runs', () => ({ startRun: vi.fn(), getCapacity: vi.fn(), getRunStatus: vi.fn() }))
 vi.mock('../api/batches', () => ({ createBatch: vi.fn(), getQueue: vi.fn() }))
 vi.mock('../api/auth', () => ({ getCurrentUser: vi.fn() }))
@@ -387,6 +390,52 @@ describe('UploadPage batch upload wire', () => {
     expect(vi.mocked(uploadFile).mock.calls[0][1]).toEqual({ stripWcmInstructions: true, submissionType: 'own_cv' })
     expect(startRun).toHaveBeenCalledWith('R1')
     expect(onUploadSuccess).toHaveBeenCalledWith('R1')
+  })
+})
+
+const DUPLICATE_MESSAGE = 'This file was already processed on March 4, 2026. Run it again?'
+const duplicateError = { status: 409, code: 'duplicate_file', message: DUPLICATE_MESSAGE }
+
+describe('UploadPage duplicate file confirmation (#1286)', () => {
+  it('holds a single duplicate, then re-uploads with confirmDuplicate on the next click', async () => {
+    vi.mocked(uploadFile).mockRejectedValueOnce(duplicateError).mockResolvedValueOnce(ok('R1'))
+    await renderPage(IN_PROCESS)
+    await addFiles([docx('a.docx')])
+    tickAttestation()
+    fireEvent.click(button('Start run'))
+    await flush()
+
+    expect(screen.getByRole('alert', { name: 'Duplicate file notice' }).textContent).toContain(DUPLICATE_MESSAGE)
+    expect(startRun).not.toHaveBeenCalled()
+    expect(vi.mocked(uploadFile).mock.calls[0][1].confirmDuplicate).toBeFalsy()
+
+    fireEvent.click(button('Run it again'))
+    await flush()
+    expect(vi.mocked(uploadFile).mock.calls[1][1].confirmDuplicate).toBe(true)
+    expect(startRun).toHaveBeenCalledWith('R1')
+    expect(onUploadSuccess).toHaveBeenCalledWith('R1')
+  })
+
+  it('holds a duplicate batch row, queues the rest, and re-sends only that row on Run it again', async () => {
+    let n = 0
+    vi.mocked(uploadFile).mockImplementation(async (file: File, opts: UploadOptions) => {
+      if (file.name === 'cv_1.docx' && !opts.confirmDuplicate) throw duplicateError
+      n += 1
+      return ok(`R${n}`)
+    })
+    await renderPage()
+    await submitBatch(docxSet(2))
+
+    expect(screen.getByText(DUPLICATE_MESSAGE)).toBeTruthy()
+    expect(screen.queryByText(/Fix it and upload it on its own/)).toBeNull()
+    expect(startRun).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(button('Run it again'))
+    await flush()
+    const resent = vi.mocked(uploadFile).mock.calls.filter(([, o]) => o.confirmDuplicate)
+    expect(resent.map(([f, o]) => [f.name, o.batchId])).toEqual([['cv_1.docx', 'BQXZKD']])
+    expect(startRun).toHaveBeenCalledTimes(2)
+    expect(screen.getByText('All 2 CVs queued')).toBeTruthy()
   })
 })
 

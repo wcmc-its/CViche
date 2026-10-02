@@ -5,7 +5,10 @@ import { useSingleRun } from './useSingleRun'
 import { uploadFile } from '../../api/upload'
 import { getCapacity, startRun } from '../../api/runs'
 
-vi.mock('../../api/upload', () => ({ uploadFile: vi.fn(), getEstimate: vi.fn() }))
+vi.mock('../../api/upload', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../api/upload')>()),
+  uploadFile: vi.fn(), getEstimate: vi.fn(),
+}))
 vi.mock('../../api/runs', () => ({ startRun: vi.fn(), getCapacity: vi.fn() }))
 
 const onUploadSuccess = vi.fn()

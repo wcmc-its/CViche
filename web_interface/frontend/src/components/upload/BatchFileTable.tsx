@@ -38,9 +38,10 @@ interface RowProps {
   showCost: boolean
   editable: boolean
   onRemove: (key: string) => void
+  onRunAgain?: (key: string) => void
 }
 
-function FileRow({ row, index, showCost, editable, onRemove }: RowProps) {
+function FileRow({ row, index, showCost, editable, onRemove, onRunAgain }: RowProps) {
   const status = STATUS[row.invalidReason ? 'invalid' : row.state]
   const note = rowNote(row)
   const bg = row.state === 'failed' ? 'bg-error-50' : row.state === 'uploading' ? 'bg-primary-50' : 'bg-white'
@@ -53,6 +54,11 @@ function FileRow({ row, index, showCost, editable, onRemove }: RowProps) {
       <span className="flex min-w-0 flex-col gap-px">
         <span className={`flex items-center gap-1.5 text-[13px] font-medium ${status.text}`}>{status.icon}{status.label}</span>
         {note && <span className={`pl-[22px] text-xs ${row.state === 'failed' ? 'text-error-700' : 'text-warning-800'}`}>{note}</span>}
+        {row.failure?.duplicate && onRunAgain && (
+          <button type="button" onClick={() => onRunAgain(row.key)} className="pl-[22px] text-left text-xs font-medium text-primary-700 hover:underline">
+            Run it again
+          </button>
+        )}
       </span>
       <span className="flex justify-end">
         {editable && (
@@ -76,10 +82,12 @@ interface BatchFileTableProps {
   showCost: boolean
   editable: boolean
   onRemove: (key: string) => void
+  /** Confirms re-running a row the server refused as already processed (#1286). */
+  onRunAgain?: (key: string) => void
 }
 
 /** Step 2's file table: #, File, Size, Estimate (+ cost for admins), Status, remove. */
-export default function BatchFileTable({ rows, showCost, editable, onRemove }: BatchFileTableProps) {
+export default function BatchFileTable({ rows, showCost, editable, onRemove, onRunAgain }: BatchFileTableProps) {
   return (
     <div className="overflow-x-auto rounded-[10px] border border-sand-200">
       <div className="min-w-[520px]">
@@ -89,7 +97,7 @@ export default function BatchFileTable({ rows, showCost, editable, onRemove }: B
         </div>
         <ul className={rows.length > SCROLL_AFTER_ROWS ? 'max-h-[520px] overflow-y-auto' : ''} aria-label="Files">
           {rows.map((row, i) => (
-            <FileRow key={row.key} row={row} index={i} showCost={showCost} editable={editable} onRemove={onRemove} />
+            <FileRow key={row.key} row={row} index={i} showCost={showCost} editable={editable} onRemove={onRemove} onRunAgain={onRunAgain} />
           ))}
         </ul>
       </div>
