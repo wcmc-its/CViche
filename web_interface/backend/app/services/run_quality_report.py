@@ -45,6 +45,8 @@ _CAP_SOURCE_BY_SCORER = {
         "classification fell back to defaults", "stage3b_fallback_ratio"),
     scorer.score_protected_data: CapSource(
         "protected personal data in the output", "protected_data_in_output"),
+    scorer.score_stage4_group_failures: CapSource(
+        "field extraction failed for a group of entries", "stage4_group_failures"),
 }
 
 # Gate name (as it appears in the scorer's flags) -> its CapSource.
@@ -88,6 +90,9 @@ LINT_EXPLANATIONS = {
     "table_lost": "Tables in the source CV were mostly lost.",
     "date_only_lines": "Lines in the output hold only a date.",
     "stage3b_second_pass_error": "A classification clean-up pass failed, so catch-all entries were left as they were.",
+    "offschema_fields": "Some extracted details were filed under a name no part of the document reads, so they are missing from it.",
+    "implausible_year": "Some dates are a century off, most likely because the CV gave a two-digit year.",
+    "stage4_group_failures": "Reading a group of entries failed and was retried separately, so those entries may be incomplete or hold wrong values.",
     "owner_contact_missing": "The CV owner's name could not be identified, so the document cannot be filed under anyone.",
     "pipeline_errors_present": "A stage failed with an error, so part of the output is missing.",
     "no_output": "The run produced no document.",
