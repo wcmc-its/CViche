@@ -204,6 +204,23 @@ class RunStorage(ABC):
         ...
 
     @abstractmethod
+    def get_global(self, key: str) -> bytes:
+        """Read a top-level object written via put_global, or by something
+        outside the app (SES writes ``inbound/`` mail here, #1298).
+
+        Raises:
+            StorageKeyNotFound: If the object does not exist.
+        """
+        ...
+
+    @abstractmethod
+    def list_global(self, prefix: str) -> list[str]:
+        """Every top-level key under ``prefix`` (a literal key-prefix match,
+        like S3's Prefix), as full relative keys, sorted. ``prefix`` must be
+        non-empty."""
+        ...
+
+    @abstractmethod
     def delete_run(self, run_id: str) -> int:
         """Delete every stored artifact for a run (its whole namespace).
 

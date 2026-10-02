@@ -51,6 +51,14 @@ M_SERIES_TAXONOMY_PREFIX = "M"
 # produce a one-element hierarchy instead of failing at import time.
 NO_HIERARCHY_KEY = "(no hierarchy)"
 
+# Codes the T-validation gate may never move a T entry to. M1 (Research
+# Activities) is consumed only by the stage 4.5 research summary, which
+# paraphrases it, so a T entry recoded M1 (a website, a project note) renders
+# nowhere: RGUNJV 3038/3040 and BMAMWE 1282.. lost 8 records this way
+# (AUTOPSY-s7ab-batch-2026-10-02 class 11). Such an entry keeps T and reaches
+# the Appendix instead.
+T_VALIDATION_FORBIDDEN_CODES = frozenset({"M1"})
+
 
 @dataclass
 class _BatchStats:
@@ -692,12 +700,21 @@ Respond with a JSON array of objects, one per entry:
             # raise TypeError: unhashable type on `in valid_codes` instead of
             # degrading to "T".
             new_code_rejected = not isinstance(raw_new_code, str) or raw_new_code not in valid_codes
+            kept_t_tag = "T-validation confirmed"
             if new_code_rejected:
                 logger.warning(
                     "Stage 3b T-validation: LLM returned unknown taxonomy "
                     "code %r for entry %d; keeping T", raw_new_code, entry_idx
                 )
                 new_code = "T"
+                kept_t_tag = "T-validation: unknown code rejected, kept T"
+            elif raw_new_code in T_VALIDATION_FORBIDDEN_CODES:
+                logger.info(
+                    "Stage 3b T-validation: %s is not a T-validation target "
+                    "(entry %d); keeping T", raw_new_code, entry_idx
+                )
+                new_code = "T"
+                kept_t_tag = f"T-validation: {raw_new_code} not allowed, kept T"
             else:
                 new_code = raw_new_code
             confidence = _normalize_confidence(reclass.get("confidence"), 0.5)
@@ -714,14 +731,14 @@ Respond with a JSON array of objects, one per entry:
                 reclassified_count += 1
             elif old_code == "T" and new_code == "T":
                 # T was confirmed for real, or the LLM proposed a code that
-                # doesn't exist in the taxonomy and got coerced back to T --
+                # doesn't exist in the taxonomy (or one in
+                # T_VALIDATION_FORBIDDEN_CODES) and got coerced back to T --
                 # these are different outcomes (one is agreement, the other
-                # is a rejected hallucination) and must read differently in
+                # is a rejected proposal) and must read differently in
                 # the artifact, not both as "confirmed" (#5.3/#5.10: a
                 # rejected result silently relabelled as a clean one is the
                 # exact failure those rules exist to catch).
-                tag = "T-validation: unknown code rejected, kept T" if new_code_rejected else "T-validation confirmed"
-                updated_entries[entry_idx]["classification_reasoning"] = f"[{tag}] {reasoning}"
+                updated_entries[entry_idx]["classification_reasoning"] = f"[{kept_t_tag}] {reasoning}"
                 updated_entries[entry_idx]["t_validation_applied"] = True
 
         if malformed:

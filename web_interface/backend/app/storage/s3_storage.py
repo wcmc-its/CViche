@@ -209,6 +209,26 @@ class S3RunStorage(RunStorage):
         self._s3.put_object(Bucket=self._bucket, Key=s3_key, Body=data)
         logger.debug("Uploaded s3://%s/%s (%d bytes)", self._bucket, s3_key, len(data))
 
+    def get_global(self, key: str) -> bytes:
+        validate_key(key)
+        _validate_s3_key_text(key, allow_empty=False)
+        s3_key = f"{self._key_prefix()}{key}"
+        try:
+            return self._s3.get_object(Bucket=self._bucket, Key=s3_key)["Body"].read()
+        except self._s3.exceptions.NoSuchKey as e:
+            raise StorageKeyNotFound(f"No such S3 object: s3://{self._bucket}/{s3_key}") from e
+
+    def list_global(self, prefix: str) -> list[str]:
+        validate_key(prefix)
+        _validate_s3_key_text(prefix, allow_empty=False)
+        root = self._key_prefix()
+        keys: list[str] = []
+        for page in self._s3.get_paginator("list_objects_v2").paginate(
+            Bucket=self._bucket, Prefix=f"{root}{prefix}"
+        ):
+            keys.extend(obj["Key"][len(root):] for obj in page.get("Contents", []))
+        return sorted(keys)
+
     def _delete_by_prefix(self, s3_prefix: str) -> int:
         """List and bulk-delete every object under a full S3 key prefix.
 

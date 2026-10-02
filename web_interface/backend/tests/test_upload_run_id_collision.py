@@ -63,10 +63,10 @@ def _auth(client, user):
 
 def _bypass_file_validation(upload_dir):
     return [
-        patch("app.api.upload.UPLOAD_DIR", upload_dir),
-        patch("app.api.upload._validate_docx_magic", return_value=True),
-        patch("app.api.upload._extract_text", return_value=None),
-        patch("app.api.upload.detect_wcm_template", return_value=(False, None)),
+        patch("app.services.run_creation.UPLOAD_DIR", upload_dir),
+        patch("app.services.run_creation._validate_docx_magic", return_value=True),
+        patch("app.services.run_creation._extract_text", return_value=None),
+        patch("app.services.run_creation.detect_wcm_template", return_value=(False, None)),
     ]
 
 
@@ -423,8 +423,8 @@ def test_upload_regenerates_id_on_real_storage_collision(client, db, seed_simple
     local_sentinel_path.write_bytes(local_sentinel_bytes)
 
     patches = _bypass_file_validation(upload_dir)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]))
     for p in patches:
         p.start()
     try:
@@ -478,8 +478,8 @@ def test_upload_manifest_first_blocks_partial_write_on_extension_mismatch(client
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     patches = _bypass_file_validation(upload_dir)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]))
     for p in patches:
         p.start()
     try:
@@ -551,9 +551,9 @@ def test_restart_regenerates_id_on_real_storage_collision(db, tmp_path):
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=storage), \
          patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.get_storage", return_value=storage), \
-         patch("app.api.upload.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]):
+         patch("app.services.run_creation.UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.get_storage", return_value=storage), \
+         patch("app.services.run_creation.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]):
         result = asyncio.run(
             runs_api.restart_run(run_id="ORIGB1", db=db, current_user=user)
         )
@@ -616,8 +616,8 @@ def test_upload_fails_after_exhausting_run_id_attempts(client, db, seed_simple_m
     # as the bound check.
     draw = MagicMock(side_effect=list(colliding_ids))
     patches = _bypass_file_validation(upload_dir)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", draw))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", draw))
     for p in patches:
         p.start()
     try:
@@ -701,8 +701,8 @@ def test_upload_collision_on_content_after_manifest_retries(client, db, seed_sim
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     patches = _bypass_file_validation(upload_dir)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]))
     for p in patches:
         p.start()
     try:
@@ -753,8 +753,8 @@ def test_upload_real_storage_fault_is_not_retried(client, db, seed_simple_mode, 
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     patches = _bypass_file_validation(upload_dir)
-    patches.append(patch("app.api.upload.get_storage", return_value=storage))
-    patches.append(patch("app.api.upload.generate_run_id", draw))
+    patches.append(patch("app.services.run_creation.get_storage", return_value=storage))
+    patches.append(patch("app.services.run_creation.generate_run_id", draw))
     for p in patches:
         p.start()
     try:
@@ -845,10 +845,10 @@ def test_create_run_archive_concurrent_same_first_draw(tmp_path):
         with lock:
             results[n] = (run_id, stored_name, file_path, payload)
 
-    with patch("app.api.upload.UPLOAD_DIR", upload_dir), \
-         patch("app.api.upload.get_storage", return_value=storage), \
-         patch("app.api.upload.generate_run_id", new=draw), \
-         patch("app.api.upload._unlink_best_effort", new=unlink_on_this_pod):
+    with patch("app.services.run_creation.UPLOAD_DIR", upload_dir), \
+         patch("app.services.run_creation.get_storage", return_value=storage), \
+         patch("app.services.run_creation.generate_run_id", new=draw), \
+         patch("app.services.run_creation._unlink_best_effort", new=unlink_on_this_pod):
         threads = [threading.Thread(target=race, args=(n,)) for n in range(_RACING_WRITERS)]
         for t in threads:
             t.start()
@@ -941,8 +941,8 @@ def _restart_env(original, storage, upload_dir, materialize=True, extra=()):
         stack.enter_context(patch.object(runs_api, "get_storage", return_value=storage))
         stack.enter_context(patch("app.services.run_service.get_storage", return_value=storage))
         stack.enter_context(patch.object(runs_api, "UPLOAD_DIR", upload_dir))
-        stack.enter_context(patch("app.api.upload.UPLOAD_DIR", upload_dir))
-        stack.enter_context(patch("app.api.upload.get_storage", return_value=storage))
+        stack.enter_context(patch("app.services.run_creation.UPLOAD_DIR", upload_dir))
+        stack.enter_context(patch("app.services.run_creation.get_storage", return_value=storage))
         for p in extra:
             stack.enter_context(p)
         yield runs_api
@@ -1035,7 +1035,7 @@ def test_restart_real_storage_fault_is_not_retried(db, tmp_path):
     (upload_dir / "ORIGF1.docx").write_bytes(original_bytes)
 
     with _restart_env(original, storage, upload_dir,
-                      extra=[patch("app.api.upload.generate_run_id", draw)]) as runs_api:
+                      extra=[patch("app.services.run_creation.generate_run_id", draw)]) as runs_api:
         with pytest.raises(HTTPException) as exc:
             _restart(runs_api, "ORIGF1", db, user)
 
@@ -1075,7 +1075,7 @@ def test_restart_fails_after_exhausting_run_id_attempts(db, tmp_path, caplog):
     (upload_dir / "ORIGB2.docx").write_bytes(b"PK\x03\x04fake-restarted-docx")
 
     with _restart_env(original, storage, upload_dir,
-                      extra=[patch("app.api.upload.generate_run_id", draw)]) as runs_api:
+                      extra=[patch("app.services.run_creation.generate_run_id", draw)]) as runs_api:
         with pytest.raises(HTTPException) as exc:
             _restart(runs_api, "ORIGB2", db, user)
 
@@ -1204,7 +1204,7 @@ def test_duplicate_restart_creates_independent_children(db, tmp_path):
 
     before = _snapshot_run(original)
     with _restart_env(original, storage, upload_dir,
-                      extra=[patch("app.api.upload.generate_run_id", side_effect=["CHILD1", "CHILD2"])]) as runs_api:
+                      extra=[patch("app.services.run_creation.generate_run_id", side_effect=["CHILD1", "CHILD2"])]) as runs_api:
         first = _restart(runs_api, "ORIGD1", db, user)
         second = _restart(runs_api, "ORIGD1", db, user)
 
