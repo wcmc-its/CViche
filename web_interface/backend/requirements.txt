@@ -1,64 +1,81 @@
-# Direct pins only (#754) -- this is NOT a full `pip freeze`. Most of these
-# are imported directly under app/ (fastapi, uvicorn, sqlalchemy, pydantic,
-# pysaml2, ...) or reachable at runtime through orchestrator.py's imports of
-# unified_pipeline stage modules (tiktoken, via
-# segmentation/chunked_chat_hierarchy_extractor.py). A few are pinned though
-# nothing imports them by name: python-multipart (FastAPI needs it to parse
-# the multipart uploads app/api/upload.py declares with `File(...)`), alembic
-# (migrations; run as a CLI from the backend directory -- see Dockerfile --
-# never imported in app/ code), and websockets (uvicorn is pinned bare, not
-# as `uvicorn[standard]`, so a websocket protocol implementation has to be
-# pinned separately for the app's websocket endpoints to work). pdf2image and
-# pdfplumber are NOT reachable from any code path as of this writing (grepped
-# repo-wide) -- they mirror requirements.txt's pins for the PDF ingestion
-# TECHNICAL_README.md documents, which the pipeline does not yet implement;
-# left in rather than pulled here so a #754 pass doesn't also make a scope
-# call about that gap. Other transitive packages (starlette, h11,
-# typing_extensions, click, sniffio, ...) are left to resolve at install time
-# UNLESS a specific transitive has bitten us, in which case it gets its own
-# pin with a comment explaining why (see anyio and pyopenssl below). A
-# hash-pinned, fully resolved lockfile is #130's scope, not this file's; the
-# 2026-09-09 decision on #754 to instead regenerate this file as a full `pip
-# freeze` from the Docker deps stage is still open and not done here.
-# Versions for packages also listed in the repo-root requirements.txt are kept
-# identical, since the Dockerfile installs both files in a single pip pass.
-fastapi==0.136.3
-# anyio is a transitive dep of fastapi/starlette, normally left to float. Pinned
-# here because it isn't: a routine rebuild with no requirements.txt change (dev
-# build 187 -> 191) silently resolved a newer anyio whose _core/_typedattr.py
-# imports typing_extensions.sentinel. AWS's OTel Python auto-instrumentation
-# sidecar shadows the real typing_extensions with an older bundled copy that
-# lacks it (PYTHONPATH puts /otel-auto-instrumentation-python first), so the
-# app crashed on import before uvicorn ever bound a port -- 3 straight CodeBuild
-# deploys failed on the rollout-status timeout. 4.14.2 is the version already
-# proven running in cviche-dev; bump deliberately, not by drift.
-anyio==4.14.2
-uvicorn==0.49.0
-sqlalchemy==2.0.50
-pydantic==2.13.4
-pdfplumber==0.11.9
-pdf2image==1.17.0
-requests==2.33.0
-tiktoken==0.12.0
-python-multipart==0.0.32
-websockets==16.0
+# Full `pip freeze` of the backend image's deps stage (#754), not a list of
+# direct dependencies: every package the image installs is pinned here, so a
+# rebuild with no change to this file installs the same versions.
+#
+# The Dockerfile installs this file and the repo-root requirements.txt in one
+# pip pass, so the freeze covers both. Packages listed in both files carry
+# the same version; keep them identical.
+#
+# Regenerate after changing any pin (here or in the root requirements.txt),
+# from the repository root:
+#   docker build --platform linux/amd64 --target deps \
+#       -f web_interface/backend/Dockerfile -t cviche-deps .
+#   docker run --rm --platform linux/amd64 cviche-deps pip freeze
+# then replace the pins below with that output and keep the notes.
+# Captured 2026-10-02: python:3.14-slim (Python 3.14.7), pip 26.2.1.
+#
+# A hash-pinned lockfile is #130's scope, not this file's.
+
 alembic==1.18.4
-python-docx==1.2.0
-pymysql==1.1.1
-itsdangerous==2.2.0
-pyyaml==6.0.3
+annotated-doc==0.0.5
+annotated-types==0.8.0
+# anyio: a routine rebuild with no requirements change (dev build 187 -> 191)
+# once resolved a newer anyio whose _core/_typedattr.py imports
+# typing_extensions.sentinel. AWS's OTel Python auto-instrumentation sidecar
+# shadows typing_extensions with an older bundled copy that lacks it
+# (PYTHONPATH puts /otel-auto-instrumentation-python first), so the app
+# crashed on import. Bump deliberately, and check the sidecar still imports.
+anyio==4.14.2
 boto3==1.43.23
-pysaml2==7.5.5
-ldap3==2.9.1
+botocore==1.43.107
 cachetools==7.1.4
-redis==8.0.0
-# Directly imported by app/saml_client.py (x509 / hazmat); pinned here so a
-# standalone backend install does not rely on pysaml2 pulling it transitively.
+certifi==2026.7.22
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+# cryptography: imported directly by app/saml_client.py (x509 / hazmat).
 cryptography==50.0.1
-# pysaml2 7.5.5 requires pyopenssl>=26.0.0 with no upper cap, so this pin is
-# not load-bearing on its own: cryptography==50.0.1 above already forces
-# pyopenssl>=26.4.0 (26.3.0 requires cryptography<50; 26.2.0 and earlier 26.x
-# require cryptography<49). Pinned explicitly anyway, alongside cryptography,
-# so the resolved version is visible in this file rather than only implied by
-# another package's transitive constraint.
-pyopenssl==26.4.0
+defusedxml==0.7.1
+elementpath==4.8.0
+fastapi==0.136.3
+greenlet==3.5.6
+h11==0.16.0
+idna==3.20
+itsdangerous==2.2.0
+jmespath==1.1.0
+ldap3==2.9.1
+lxml==6.1.0
+Mako==1.4.3
+MarkupSafe==3.0.3
+pdf2image==1.17.0
+pdfminer.six==20251230
+pdfplumber==0.11.9
+pillow==12.3.0
+pyasn1==0.6.4
+pycparser==3.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+PyMySQL==1.1.1
+# pyOpenSSL: pysaml2 7.5.5 requires pyopenssl>=26.0.0 with no upper cap;
+# cryptography==50.0.1 forces pyopenssl>=26.4.0. Bump the two together.
+pyOpenSSL==26.4.0
+pypdfium2==5.13.0
+pysaml2==7.5.5
+python-dateutil==2.9.0.post0
+python-docx==1.2.0
+python-multipart==0.0.32
+PyYAML==6.0.3
+redis==8.0.0
+regex==2026.9.29
+requests==2.33.0
+s3transfer==0.18.0
+six==1.17.0
+SQLAlchemy==2.0.50
+starlette==1.7.0
+tiktoken==0.12.0
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+urllib3==2.8.0
+uvicorn==0.49.0
+websockets==16.0
+xmlschema==2.5.1
