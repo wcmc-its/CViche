@@ -92,7 +92,7 @@ class Para:
     text: str
     url: str | None = None
     link_label: str = "Open"
-    bold: bool = False
+    lead: bool = False  # shown before the status list
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,7 +119,7 @@ def _visible(rows: tuple[StatusRow, ...]) -> tuple[StatusRow, ...]:
 
 def render_text(content: EmailContent) -> str:
     blocks = [content.headline, content.greeting]
-    if content.paragraphs[:1] and content.paragraphs[0].bold:
+    if content.paragraphs[:1] and content.paragraphs[0].lead:
         blocks.append(_para_text(content.paragraphs[0]))
         rest = content.paragraphs[1:]
     else:
@@ -157,9 +157,8 @@ def _img(cid: str, width: int, height: int, alt: str, cls: str) -> str:
 
 
 def _para_html(para: Para) -> str:
-    weight = "bold" if para.bold else "normal"
     link = f": {_link(para.url, para.link_label)}" if para.url else ""
-    return _row(f"{escape(para.text)}{link}", f"padding:0 0 14px 0;font-size:15px;line-height:22px;font-weight:{weight};")
+    return _row(f"{escape(para.text)}{link}", f"padding:0 0 14px 0;font-size:15px;line-height:22px;")
 
 
 def _status_row_html(row: StatusRow, first: bool) -> str:
@@ -226,7 +225,7 @@ _STYLE = (
 
 def _card_html(content: EmailContent) -> str:
     paragraphs = content.paragraphs
-    lead = _para_html(paragraphs[0]) if paragraphs and paragraphs[0].bold else ""
+    lead = _para_html(paragraphs[0]) if paragraphs and paragraphs[0].lead else ""
     rest = paragraphs[1:] if lead else paragraphs
     inner = (
         _row(_img(CVICHE_LOGO_CID, CVICHE_LOGO_WIDTH_PX, CVICHE_LOGO_HEIGHT_PX, "CViche", "mark"), "padding:0 0 22px 0;")

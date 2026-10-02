@@ -98,11 +98,11 @@ def processing_notice(
     processing, waiting for the sender in New run, and skipped, with one button.
     Counts only, never a filename."""
     if outdated_consent:
-        paras = [Para("The CViche terms have been updated. Please sign in to review and accept them.", bold=True)]
+        paras = [Para("The CViche terms have been updated. Please sign in to review and accept them.", lead=True)]
         status = (StatusRow(StatusKind.WAITING, held, "Waiting for you in New run"),)
         cta = ("Review the terms", f"{_new_run_url()}{CONSENT_PATH}")
     else:
-        paras = [Para(f"Processing {_cvs(runs)}. Follow progress in Runs.", bold=True)] if runs else []
+        paras = [Para("Follow progress in Runs.", lead=True)] if runs else []
         paras.append(_terms_para(consent_date))
         status = (
             StatusRow(StatusKind.PROCESSING, runs, "Processing"),
@@ -148,7 +148,7 @@ def _cvs(count: int) -> str:
 def rejection(to_addr: str, reason: InboundRejectReason, display_name: str | None = None) -> OutboundMail:
     content = EmailContent(
         "We couldn't accept your email",
-        (Para(f"We couldn't accept your email to CViche. {_REJECTION_TEXT[reason]}", bold=True),),
+        (Para(_REJECTION_TEXT[reason], lead=True),),
         greeting=greeting_for(display_name),
     )
     return _mail(MailKind.REJECTION, to_addr, "CViche couldn't accept your email", content)
@@ -172,14 +172,14 @@ def completion_notice(
 def _single_completion(complete: int, run_id: str) -> EmailContent:
     url = f"{_new_run_url()}run/{run_id}"
     if complete:
-        return EmailContent("Your CV is ready", (), "View your CV", url)
-    return EmailContent("Your CV failed to process", (Para("Open the run to retry it."),), "View your CV", url)
+        return EmailContent("Your CV is ready", (Para("Download it from the run page.", lead=True),), "View your CV", url)
+    return EmailContent("Your CV failed to process", (Para("Open the run to retry it.", lead=True),), "View your CV", url)
 
 
 def _batch_completion(complete: int, failed: int, batch_id: str) -> EmailContent:
     status = (StatusRow(StatusKind.READY, complete, "Ready to download"), StatusRow(StatusKind.FAILED, failed, "Failed"))
     paras = (Para("Open a failed run to retry it."),) if failed else ()
-    return EmailContent("Your CVs are done", paras, "View your CVs", _runs_batch_url(batch_id), status=status)
+    return EmailContent("Your CVs have been converted", paras, "View your CVs", _runs_batch_url(batch_id), status=status)
 
 
 def send(mail: OutboundMail) -> bool:

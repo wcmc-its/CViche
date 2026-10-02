@@ -97,7 +97,7 @@ def test_accepted_cvs_become_one_queued_batch_and_the_reply_links_to_it(db, stor
     assert set(_statuses(db).values()) == {InboundFileStatus.SUBMITTED}
     assert storage.list_global(inbound_service.HELD_PREFIX) == []
     body = sent[0].body
-    assert "Processing 2 CVs" in body and f"/runs?batch={batch.id}" in body and "waiting" not in body
+    assert "Follow progress in Runs." in body and "- 2 processing" in body and f"/runs?batch={batch.id}" in body and "waiting" not in body
     assert "one.docx" not in body and "two.docx" not in body
 
 
@@ -133,7 +133,7 @@ def test_a_previously_processed_file_is_held_never_run(db, storage, sent, queue,
 
     assert _statuses(db) == {"one.docx": InboundFileStatus.PENDING, "two.docx": InboundFileStatus.SUBMITTED}
     assert db.query(Run).count() == 2 and db.query(RunBatch).one().files_submitted == 1
-    assert "Processing 1 CV" in sent[0].body and "- 1 waiting for your confirmation" in sent[0].body
+    assert "- 1 processing" in sent[0].body and "- 1 waiting for your confirmation" in sent[0].body
 
 
 def test_two_identical_files_in_one_message_run_once(db, storage, sent, queue, seed_simple_mode):
@@ -152,7 +152,7 @@ def test_files_beyond_the_remaining_quota_are_held_in_received_order(db, storage
     statuses = _statuses(db)
     assert [statuses[f"{n}.docx"] for n in ("one", "two", "three", "four")] == [
         InboundFileStatus.SUBMITTED, InboundFileStatus.SUBMITTED, InboundFileStatus.PENDING, InboundFileStatus.PENDING]
-    assert "Processing 2 CVs" in sent[0].body and "- 2 waiting for your confirmation" in sent[0].body
+    assert "- 2 processing" in sent[0].body and "- 2 waiting for your confirmation" in sent[0].body
 
 
 def test_a_user_at_their_limit_gets_no_batch_and_every_file_is_held(db, storage, sent, queue, seed_simple_mode):

@@ -1,6 +1,7 @@
 """app/services/mailer.py (#1298): off by default, counts-only bodies, no
 filename ever, header values on one line. SES is never called: boto3.client
 is patched. Addresses are invented."""
+import html
 import logging
 from email import message_from_bytes, policy
 from unittest.mock import MagicMock
@@ -53,14 +54,14 @@ def _notice(**kwargs):
 def test_notice_for_runs_only_links_to_the_batch(monkeypatch):
     monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org/")
     body = _notice(runs=3, held=0)
-    assert "Processing 3 CVs" in body and "https://cviche.example.org/runs?batch=BATCHA" in body
+    assert "Follow progress in Runs." in body and "- 3 processing" in body and "https://cviche.example.org/runs?batch=BATCHA" in body
     assert "waiting" not in body
 
 
 def test_notice_with_held_files_names_new_run_and_keeps_one_button(monkeypatch):
     monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
     body = _notice(runs=2, held=1)
-    assert "Processing 2 CVs" in body and "- 1 waiting for your confirmation in New run" in body
+    assert "- 2 processing" in body and "- 1 waiting for your confirmation in New run" in body
     assert "View your CVs: https://cviche.example.org/runs?batch=BATCHA" in body
     assert body.count("https://cviche.example.org/runs") == 1  # one button; no inline duplicate link
 
@@ -122,7 +123,7 @@ def test_a_ses_error_is_swallowed(ses, monkeypatch):
 
 @pytest.mark.parametrize("reason", sorted(mailer.REPLYABLE_REASONS))
 def test_every_rejection_reply_has_fixed_wording(reason):
-    assert mailer.rejection("pat@med.cornell.edu", reason).body.split("\n\n")[2].startswith("We couldn't accept your email")
+    assert mailer.rejection("pat@med.cornell.edu", reason).body.split("\n\n")[2] == mailer._REJECTION_TEXT[reason]
 
 
 def test_unknown_or_unauthenticated_reasons_are_never_replyable():
@@ -182,7 +183,7 @@ def test_its_banner_is_above_the_card_and_the_wordmark_inside_it():
     html = mailer.completion_notice("pat@med.cornell.edu", complete=2, failed=0, batch_id="BATCHA").html
     head, html = html[:html.index("<body")], html[html.index("<body"):]
     assert html.index("cid:wcm-its-logo") < html.index("border-top:4px solid #B31B1B") < html.index("cid:cviche-logo")
-    assert html.index("cid:cviche-logo") < html.index("Your CVs are done") < html.index("About CViche")
+    assert html.index("cid:cviche-logo") < html.index("Your CVs have been converted") < html.index("About CViche")
     assert html.index("Information Technologies &amp; Services</td>") > html.index("View your CVs")  # signature below the card
     assert "#F3EAD7" in html and 'class="its"' in html and "max-width:480px" in head
 
@@ -199,7 +200,7 @@ def test_every_mail_is_text_plus_html_with_cid_images(ses, monkeypatch):
 
 def test_the_html_is_the_branded_layout(monkeypatch):
     html = mailer.completion_notice("pat@med.cornell.edu", complete=2, failed=0, batch_id="BATCHA").html
-    assert "#B31B1B" in html and "Your CVs are done" in html and "View your CVs" in html
+    assert "#B31B1B" in html and "Your CVs have been converted" in html and "View your CVs" in html
     assert "max-width:600px" in html and "About CViche" in html
     assert "paa2013" not in html and "mailto:support@med.cornell.edu" in html and templates.HELPDESK_ARTICLE_URL.replace("&", "&amp;") in html
     assert "If you have questions, read the" in html and "Weill Cornell Medicine Information Technologies &amp; Services" in html
@@ -339,3 +340,44 @@ def test_the_button_is_a_filled_red_vml_and_anchor_pair():
     html = mailer.completion_notice("pat@med.cornell.edu", complete=2, failed=0, batch_id="BATCHA").html
     assert 'fillcolor="#B31B1B"' in html and "background-color:#B31B1B" in html and "border-radius:6px" in html
     assert "<!--[if mso]>" in html and "<!--[if !mso]><!-->" in html
+
+
+def _blocks(mail):
+    return mail.body.split("\n\n")
+
+
+def test_round_two_copy_per_email(monkeypatch):
+    monkeypatch.setenv("CVICHE_PUBLIC_URL", "https://cviche.example.org")
+    processing = mailer.processing_notice("pat@med.cornell.edu", runs=3, held=1, skipped=1, batch_id="BATCHA")
+    assert _blocks(processing)[2] == "Follow progress in Runs." and "Processing 3 CVs" not in processing.body
+    assert "is waiting" not in processing.body and "could not be used" not in processing.body
+    done = mailer.completion_notice("pat@med.cornell.edu", complete=2, failed=1, batch_id="BATCHA")
+    assert _blocks(done)[2].startswith("- 2 ready") and _blocks(done)[3] == "Open a failed run to retry it."
+    clean = mailer.completion_notice("pat@med.cornell.edu", complete=2, failed=0, batch_id="BATCHA")
+    assert "retry" not in clean.body
+    ready = mailer.completion_notice("pat@med.cornell.edu", complete=1, failed=0, batch_id="BATCHA", single_run_id="RUNAAA")
+    assert _blocks(ready)[2] == "Download it from the run page."
+    failed = mailer.completion_notice("pat@med.cornell.edu", complete=0, failed=1, batch_id="BATCHA", single_run_id="RUNAAA")
+    assert _blocks(failed)[2] == "Open the run to retry it."
+    held = mailer.processing_notice("pat@med.cornell.edu", runs=0, held=2, outdated_consent=True)
+    assert "are waiting for you" not in held.body and "- 2 waiting for you in New run" in held.body
+
+
+def test_leads_are_regular_weight_in_html():
+    held = mailer.processing_notice("pat@med.cornell.edu", runs=0, held=2, outdated_consent=True)
+    cell = held.html[:held.html.index("The CViche terms have been updated")].rsplit("<td", 1)[1]
+    assert "font-weight:bold" not in cell
+
+
+def test_rejection_leads_are_the_short_reason_alone():
+    for reason in mailer.REPLYABLE_REASONS:
+        mail = mailer.rejection("pat@med.cornell.edu", reason)
+        assert "We couldn't accept your email to CViche" not in mail.body and html.escape(mailer._REJECTION_TEXT[reason]) in mail.html
+
+
+def test_html_puts_the_lead_before_the_status_list_and_other_copy_after():
+    mail = mailer.processing_notice("pat@med.cornell.edu", runs=2, held=0, batch_id="BATCHA")
+    page = mail.html[mail.html.index("<body"):]
+    assert page.index("Follow progress in Runs.") < page.index(">Processing</td>") < page.index("These CVs are processed")
+    done = mailer.completion_notice("pat@med.cornell.edu", complete=1, failed=1, batch_id="BATCHA").html
+    assert done.index("Ready to download") < done.index("Open a failed run to retry it.")
