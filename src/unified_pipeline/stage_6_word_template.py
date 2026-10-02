@@ -153,6 +153,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     RENDER_PIECE_MIN_CHARS,
     RENDER_PIECE_WINDOW,
     RENDER_TOKEN_MIN_COUNT,
+    RECLASSIFY_MIN_TOKEN_COVERAGE,
     RENDER_TOKEN_OVERLAP,
     RETIRED_TAXONOMY_CODES,
     UNRENDERED_MIN_RECORD_LINES,
@@ -167,9 +168,13 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     _norm,
     _record_lines,
     _record_rendered,
+    _record_tokens,
     _value_is_datelike,
+    _whole_record_rendered,
     normalize_retired_code,
     segment_already_rendered,
+    segments_cover_source,
+    t_recovery_lines,
 )
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
@@ -207,8 +212,11 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     TeachingSection,
 )
 from unified_pipeline.stage6.sections.appendix import (
+    APPENDIX_MAX_CHARS,
+    _TRUNCATION_MARKER as APPENDIX_TRUNCATION_MARKER,
     APPENDIX_INTRO_TEXT,
     UnmappedEntry,
+    _appendix_drop_reason,
     build_appendix_diversion_warnings,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
@@ -562,6 +570,42 @@ def parse_reclassified_segments(
             resolved = (original_code if original_code != '?' else None) if code == _KEEP_SENTINEL else code
             segments.append((segment_text, resolved))
     return segments or None
+
+
+def _t_line_is_scaffolding(line: str, entry: dict) -> bool:
+    """Whether the Appendix's own filter would drop this line of a T entry
+    (template furniture, a confirmed header row, ...). Recovery must not
+    resurrect what the Appendix deliberately omits (#1230)."""
+    return _appendix_drop_reason(
+        line, line, 'T',
+        entry.get('classification_reasoning')) is not None
+
+
+def _recovery_candidates(code: str, entry: dict) -> list[str]:
+    """Lines of an entry the unrendered-record pass should look for.
+
+    A fused multi-record entry (two or more record-shaped lines) for any code.
+    A T entry longer than the Appendix cap is the exception: the cap cut
+    everything past `APPENDIX_MAX_CHARS`, so every record-shaped or dated line
+    of it is a candidate (`t_recovery_lines`), and a single-record entry
+    qualifies (#1230). A T entry the cap did not cut renders whole and has none.
+    """
+    text = str(entry.get('text') or '')
+    if code == 'T':
+        if len(text) <= APPENDIX_MAX_CHARS:
+            return []
+        return t_recovery_lines(text)
+    records = _record_lines(text)
+    return records if len(records) >= UNRENDERED_MIN_RECORD_LINES else []
+
+
+def _other_entry_line_tokens(entries_by_code: dict) -> list[set]:
+    """`_record_tokens` of every line of every non-T entry (#1230). A T line
+    whose tokens all sit in one of them is a record that has its own entry."""
+    return [_record_tokens(line)
+            for code, entries in entries_by_code.items() if code != 'T'
+            for entry in entries
+            for line in str(entry.get('text') or '').split('\n') if line.strip()]
 
 
 def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
@@ -1420,7 +1464,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             "check": RECLASSIFY_FAILURE_STAT,
             "code": None,
             "section": "appendix",
-            "message": (f"{failures} appendix entry reclassification(s) failed; "
+            "message": (f"{failures} appendix entry reclassification(s) failed or "
+                        "came back incomplete; "
                         "those entries stayed in the appendix whole instead of "
                         "being split and routed to their sections"),
             "evidence": [f"{RECLASSIFY_FAILURE_STAT}={failures}"],
@@ -2616,8 +2661,16 @@ Now analyze the text above:"""
             )
             self.llm_usage.add(llm_result)
 
-            return parse_reclassified_segments(
+            segments = parse_reclassified_segments(
                 llm_result["content"], original_code)
+            if segments and not segments_cover_source(
+                    [segment for segment, _ in segments], text):
+                # A reply that summarises instead of splitting would write its
+                # summary line as a record and lose the rest (#1230): keep the
+                # source entry whole, same as an LLM failure.
+                self._record_incomplete_reclassification()
+                return None
+            return segments
 
         except LLMOutageError:  # provider down past the outage budget (#810): fail the run, don't degrade
             raise
@@ -2631,6 +2684,14 @@ Now analyze the text above:"""
         would otherwise leave every appendix entry unsplit with no record."""
         logger.warning("LLM reclassification failed; entry stays in "
                        "the appendix unsplit", exc_info=True)
+        self.stats[RECLASSIFY_FAILURE_STAT] += 1
+
+    def _record_incomplete_reclassification(self) -> None:
+        """Log and count one reply rejected for not covering its source (#1230).
+        Counted with the failures: the entry stays whole in the appendix."""
+        logger.warning("LLM reclassification covered under %.0f%% of the "
+                       "entry's text; entry stays in the appendix whole",
+                       RECLASSIFY_MIN_TOKEN_COVERAGE * 100)
         self.stats[RECLASSIFY_FAILURE_STAT] += 1
 
     def _insert_reconsidered_segment(self, text: str, taxonomy_code: str,
@@ -2935,20 +2996,35 @@ Now analyze the text above:"""
         if self.recover_unrendered_records:
             line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line)))
                                for line in out_lines]
+            # A line the Appendix cap cut may have lost the tail of its record
+            # (#1230): it vouches only for a line it carries in full.
+            t_line_token_sets = [_record_tokens(line) for line in out_lines
+                                 if not line.endswith(APPENDIX_TRUNCATION_MARKER)]
+            t_cut_token_sets = [_record_tokens(line) for line in out_lines
+                                if line.endswith(APPENDIX_TRUNCATION_MARKER)]
+            # A T entry can repeat a table whose rows are also entries of their
+            # own that render (#1230): a line such a row carries in full is not
+            # lost, however the render reformatted it.
+            t_cut_token_sets += _other_entry_line_tokens(entries_by_code)
 
             for code, entries in entries_by_code.items():
-                if code == 'T':
-                    # Appendix catch-all — _fill_appendix already carries these.
-                    continue
                 for entry in entries:
-                    records = _record_lines(entry.get('text'))
-                    if len(records) < UNRENDERED_MIN_RECORD_LINES:
+                    records = _recovery_candidates(code, entry)
+                    if not records:
                         continue  # not a fused multi-record entry
                     fields = entry.get('extracted_fields') or {}
                     coverage = (entry.get('extraction_coverage') or {}).get(
                         'extraction_coverage_percent', 0)
                     for line in records:
-                        if _record_rendered(line, haystack, line_token_sets) is not False:
+                        if code == 'T' and _t_line_is_scaffolding(line, entry):
+                            continue
+                        if code == 'T':
+                            rendered = _whole_record_rendered(
+                                line, haystack, t_line_token_sets, t_cut_token_sets)
+                        else:
+                            rendered = _record_rendered(
+                                line, haystack, line_token_sets)
+                        if rendered is not False:
                             # Rendered (possibly reformatted), or too short to
                             # verify either way — never re-insert.
                             continue
@@ -2986,6 +3062,7 @@ Now analyze the text above:"""
                         # precisely because they near-duplicate a kept one, so
                         # exact-squash matching is not enough.
                         haystack += "\x00" + _squash(line)
+                        t_line_token_sets.append(_record_tokens(line))
                         line_token_sets.append(
                             set(_RENDER_TOKEN_RE.findall(_norm(line))))
                         self.stats['unrendered_records_recovered'] += 1

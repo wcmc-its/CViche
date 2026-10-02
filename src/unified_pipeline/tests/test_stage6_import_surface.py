@@ -144,6 +144,7 @@ RELOCATED_BY_398_RESIDUE = {
     ),
     "unified_pipeline.stage6.render_check": (
         "RECORD_DATE_LINE_MIN_CHARS",
+        "RECLASSIFY_MIN_TOKEN_COVERAGE",
         "RENDER_PIECE_MIN_CHARS",
         "RENDER_PIECE_WINDOW",
         "RENDER_TOKEN_MIN_COUNT",
@@ -161,9 +162,13 @@ RELOCATED_BY_398_RESIDUE = {
         "_norm",
         "_record_lines",
         "_record_rendered",
+        "_record_tokens",
         "_value_is_datelike",
+        "_whole_record_rendered",
         "normalize_retired_code",
         "segment_already_rendered",
+        "segments_cover_source",
+        "t_recovery_lines",
     ),
 }
 
@@ -213,7 +218,7 @@ def test_relocated_name_resolves_in_its_new_home(home, name):
 
 
 def test_the_relocated_surface_is_not_silently_empty():
-    assert len(_RELOCATED_CASES) == 29, (
+    assert len(_RELOCATED_CASES) == 34, (
         "the #398-residue relocation pin changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )

@@ -118,6 +118,9 @@ inputs, and its current appendix has a single entry under that heading, so
 Numbering restarts under each heading. Bodies are capped at
 `APPENDIX_MAX_CHARS` characters, the marker that shows the cut included: the
 appendix is a pointer back to the original document, not a second copy of it.
+The cap is not what keeps a T entry's records: `_recover_unrendered_records`
+re-scans T entries too (#1230) and writes every record line the cap cut, in
+full, as an uncapped bullet.
 """
 import logging
 import re
