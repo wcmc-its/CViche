@@ -370,6 +370,7 @@ async def get_run_status(
         error_message=run.error_message,
         cv_owner_name=run.cv_owner_name,
         run_by=run_by_summary(run.user) if current_user.role == "admin" else None,
+        scanned_pages=run.scanned_page_numbers,
         steps=step_summaries
     )
 
@@ -602,6 +603,7 @@ async def restart_run(
         show_track_changes=original_run.show_track_changes,
         show_pipeline_comments=original_run.show_pipeline_comments,
         strip_template_instructions=original_run.strip_template_instructions,
+        scanned_pages=original_run.scanned_pages,  # same file, same pages (#1282)
     )
     db.add(new_run)
 

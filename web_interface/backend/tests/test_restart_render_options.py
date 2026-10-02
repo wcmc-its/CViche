@@ -38,6 +38,7 @@ def test_restart_inherits_render_options(db, tmp_path):
         show_track_changes=0,
         show_pipeline_comments=1,
         strip_template_instructions=0,
+        scanned_pages="2,4",
     )
     db.add(original)
     db.commit()
@@ -70,5 +71,6 @@ def test_restart_inherits_render_options(db, tmp_path):
     assert new_run.show_track_changes == 0, "restart must inherit track-changes OFF"
     assert new_run.show_pipeline_comments == 1, "restart must inherit comments ON"
     assert new_run.strip_template_instructions == 0, "restart must inherit strip-instructions OFF"
+    assert new_run.scanned_pages == "2,4", "restart must keep the file's scanned pages (#1282)"
     # And the previously-inherited field still works.
     assert new_run.submission_type == "standard"
