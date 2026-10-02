@@ -35,6 +35,7 @@ from unified_pipeline.core.text_norm import (
 from ..shared import (
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
+    TABLE_ROW_JOINER,
     _entry_pieces,
     _finding,
     _haystacks,
@@ -1250,3 +1251,125 @@ def lint_date_only_lines(blocks: list[tuple[str, str]]) -> list[dict]:
         f"{len(lines)} body paragraph(s) are only a date -- a record's date "
         f"column split from its payload and rendered as its own line",
         [line[:100] for line in lines[:DATE_ONLY_LINES_SAMPLES]])]
+
+
+# Lints 14f/14g: text that is not CV content reaching the delivered document
+# (#1233, #1224). Neither one has a benign form, so both WARN on a single hit
+# and carry no threshold: a threshold would only hide the first occurrence.
+#
+# Both read the same rendered blocks `lint_pipe_leaks` does. `_table_lines`
+# lists every cell of a row and then the row joined by `TABLE_ROW_JOINER`, so a
+# leaked cell appears twice in a table block; splitting on it and dropping the
+# repeat counts each cell once.
+OUTPUT_LEAK_EXCERPT_CHARS = 100
+OUTPUT_LEAK_EVIDENCE_LIMIT = 5
+
+# A quoted Python/JSON string literal, escapes allowed.
+_QUOTED_LITERAL = r"""(?:'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*")"""
+
+# What `str()` of a dict or list prints. The dict key is an identifier-shaped
+# quoted name followed by a colon (`{'start_date': ...`); the list opens on a
+# quoted string and continues or closes (`['a', ...`, `["it's"]`). A list whose
+# first string holds an apostrophe prints with double quotes, so both quote
+# styles count. Tuples and bare numeric lists are not covered: nothing in the
+# corpus renders them, and `('` / `[1, 2]` are common in real citations.
+_PYTHON_REPR_RES = (
+    re.compile(r"""\{\s*(?:'[A-Za-z_][\w ]{0,40}'|"[A-Za-z_][\w ]{0,40}")\s*:"""),
+    re.compile(r"\[\s*" + _QUOTED_LITERAL + r"\s*[,\]]"),
+)
+
+# Chat-assistant meta text. Each phrase is specific to a model talking to its
+# user, not to a person writing a CV: the bare forms ("I can't", "please
+# provide", "as an AI") are not enough on their own -- a publication title can
+# open "I can't" or say "ChatGPT as an AI assistant in ...", the WCM template
+# itself says "please provide Visa type", and an AI researcher's CV says "as an
+# AI researcher". "As an AI language model" counts only in the model's own
+# first-person form ("..., I cannot ..."). The first and sixth below are the
+# two MYAXRH printed (stage 4.5 called the model with an empty CV context); the
+# rest are the standard refusal and request-for-input openers, with no corpus
+# hit of their own.
+# ponytail: a phrase list. Ceiling: a refusal worded outside these openers
+# passes. Upgrade path: the artifact-side check #1224 names (stage 4.5 with
+# `context_used.entry_count == 0` and `generation_method == "llm_generated"`),
+# which needs no wording at all.
+_REFUSAL_VERBS = (r"(?:access|provide|generate|write|create|summari[sz]e|"
+                  r"assist|complete|fulfill)")
+_LLM_REFUSAL_RES = (
+    re.compile(r"\bI (?:do not|don['’]t) have access to\b", re.IGNORECASE),
+    re.compile(r"\bI(?: am|['’]m) (?:unable|not able) to " + _REFUSAL_VERBS
+               + r"\b", re.IGNORECASE),
+    re.compile(r"\bI (?:cannot|can['’]t|can not) " + _REFUSAL_VERBS + r"\b",
+               re.IGNORECASE),
+    re.compile(r"\bas an AI (?:language model|assistant),?\s+I\b"
+               r"|\bas an AI,\s+I\b", re.IGNORECASE),
+    re.compile(r"\bI(?:['’]m| am) sorry,? but\b|\bI apologi[sz]e,? but\b",
+               re.IGNORECASE),
+    re.compile(r"\bCV CONTEXT\b[^.\n]{0,40}\b(?:empty|blank|missing)\b",
+               re.IGNORECASE),
+    re.compile(r"\bplease provide the (?:actual |complete |full |original )?"
+               r"(?:CV|curriculum vitae|resume)\b", re.IGNORECASE),
+    re.compile(r"\b(?:included|provided|attached|shared) (?:in|with) your "
+               r"(?:message|request|prompt)\b", re.IGNORECASE),
+    re.compile(r"\bI(?:['’]ll| will) be (?:happy|glad) to "
+               r"(?:draft|write|help|generate|create|assist)\b", re.IGNORECASE),
+)
+
+
+def _distinct_segments(text: object) -> list[str]:
+    """The non-empty ' | '-separated pieces of a block's lines, in order, each
+    once -- so a table row's joined line repeats nothing its cell lines said."""
+    pieces = (piece.strip()
+              for line in str(text or "").split("\n")
+              for piece in line.split(TABLE_ROW_JOINER))
+    return list(dict.fromkeys(piece for piece in pieces if piece))
+
+
+def _pattern_excerpts(blocks: list[tuple[str, str]],
+                      patterns: tuple[re.Pattern, ...]) -> list[str]:
+    """One excerpt per distinct matched text, in document order: the next
+    `OUTPUT_LEAK_EXCERPT_CHARS` characters from the earliest match in a line or
+    table cell, deduplicated per block, so two cells that print the same repr
+    after different leading text share one excerpt. The Appendix is scanned
+    too: a leak there is as wrong on the page as one in a section."""
+    excerpts: list[str] = []
+    for _, text in blocks:
+        hits: dict[str, None] = {}
+        for segment in _distinct_segments(text):
+            matches = [m for m in (p.search(segment) for p in patterns) if m]
+            if matches:
+                start = min(m.start() for m in matches)
+                hits[segment[start:start + OUTPUT_LEAK_EXCERPT_CHARS]] = None
+        excerpts.extend(hits)
+    return excerpts
+
+
+def lint_python_repr_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
+    """A Python dict or list repr rendered as document text (#1233). A date
+    field arrived as `{'start_date': ..., 'end_date': ...}` and a renderer
+    that expected a string called `str()` on it; `<year>-{'start_date': ...}`
+    reached four IPXFBA CVs' board-certification and invited-talk rows with no
+    doctor finding. WARN on any hit."""
+    leaks = _pattern_excerpts(blocks, _PYTHON_REPR_RES)
+    if not leaks:
+        return []
+    return [_finding(
+        "python_repr_in_output", "WARN",
+        f"{len(leaks)} distinct Python dict/list repr text(s) in the output "
+        "-- a structured field was written with str() instead of being "
+        "formatted",
+        leaks[:OUTPUT_LEAK_EVIDENCE_LIMIT])]
+
+
+def lint_llm_refusal_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
+    """Model refusal or request-for-input text rendered as document text
+    (#1224). Stage 4.5 called the model with an empty CV context and the reply
+    ("I don't have access to specific CV details ...") became the Research
+    Activities paragraph of MYAXRH; no lint saw it. WARN on any hit."""
+    refusals = _pattern_excerpts(blocks, _LLM_REFUSAL_RES)
+    if not refusals:
+        return []
+    return [_finding(
+        "llm_refusal_in_output", "WARN",
+        f"{len(refusals)} distinct language-model refusal or "
+        "request-for-input text(s) rendered in the output",
+        refusals[:OUTPUT_LEAK_EVIDENCE_LIMIT])]

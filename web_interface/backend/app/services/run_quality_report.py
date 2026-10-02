@@ -88,6 +88,8 @@ LINT_EXPLANATIONS = {
     "table_lost": "Tables in the source CV were mostly lost.",
     "date_only_lines": "Lines in the output hold only a date.",
     "stage3b_second_pass_error": "A classification clean-up pass failed, so catch-all entries were left as they were.",
+    "python_repr_in_output": "Raw program data, such as curly braces around quoted field names, was written into the document instead of a formatted value.",
+    "llm_refusal_in_output": "The document contains the AI model's reply asking for more information instead of CV content.",
     "owner_contact_missing": "The CV owner's name could not be identified, so the document cannot be filed under anyone.",
     "pipeline_errors_present": "A stage failed with an error, so part of the output is missing.",
     "no_output": "The run produced no document.",

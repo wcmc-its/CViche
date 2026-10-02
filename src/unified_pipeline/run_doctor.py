@@ -91,6 +91,17 @@ Lints, ranked by the severity of the failure class they catch:
                           meta.stats: it failed and left its entries
                           unchanged; WARN, the run completes (#818)
 
+14f. python_repr_in_output a Python dict or list repr rendered as document text
+                          (`<year>-{'start_date': ..., 'end_date': ...}`):
+                          a structured field was `str()`-ed into a cell
+                          instead of formatted (#1233); WARN on any hit
+
+14g. llm_refusal_in_output language-model refusal or request-for-input text
+                          rendered as document text ("I don't have access to
+                          specific CV details ..."): stage 4.5 summarised an
+                          empty CV context and the reply was delivered (#1224);
+                          WARN on any hit
+
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
 construction lints, because each one on its own caps quality_score.py's final
@@ -259,8 +270,10 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_duplicate_records,
+    lint_llm_refusal_in_output,
     lint_output_hygiene,
     lint_pipe_leaks,
+    lint_python_repr_in_output,
     lint_section_lost,
     lint_stage6_warnings,
     lint_table_shape,
@@ -350,6 +363,8 @@ KNOWN_LINTS = (
     "table_lost",
     "date_only_lines",
     "stage3b_second_pass_error",
+    "python_repr_in_output",
+    "llm_refusal_in_output",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -428,6 +443,14 @@ LINT_PREVALENCE = {
     # 0.001 floor; this row now carries its own measured value rather than
     # borrowing theirs.
     "invented_records": 0.011,
+    # python_repr_in_output and llm_refusal_in_output (#1233, #1224): fire
+    # counts on the 163 stage-6 renders of the 2026-10 wave-1 corpus (126
+    # census + 37 IPXFBA CVs) as rendered by origin/dev e59aaf44, which still
+    # has both defects: 10 CVs carry a dict or list repr, 1 (MYAXRH) a refusal.
+    # Not comparable to the rows above (different corpus, defects present),
+    # and both should fall toward zero as the renderers are fixed.
+    "python_repr_in_output": 0.061,
+    "llm_refusal_in_output": 0.006,
 }
 
 
@@ -898,6 +921,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("table_lost", lint_table_lost, ("source_block_lines", "stage_2")),
     LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
     LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
+    LintSpec("python_repr_in_output", lint_python_repr_in_output, ("blocks",)),
+    LintSpec("llm_refusal_in_output", lint_llm_refusal_in_output, ("blocks",)),
 )
 
 
