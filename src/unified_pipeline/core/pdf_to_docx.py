@@ -990,7 +990,7 @@ def _write_docx(paras: list[_Para], docx_path: Path) -> None:
     doc.save(str(docx_path))
 
 
-def _is_image_only(page: Page) -> bool:
+def is_image_only_page(page: Page) -> bool:
     return len(page.chars) < IMAGE_ONLY_MAX_CHARS and len(page.images) > 0
 
 
@@ -1004,7 +1004,7 @@ def _read_pages(pdf_path: str | Path) -> tuple[list[list[_Line]], list[float], l
             for number, page in enumerate(pdf.pages, start=1):
                 pages.append(_page_lines(page))
                 heights.append(float(page.height))
-                if _is_image_only(page):
+                if is_image_only_page(page):
                     image_only.append(number)
                 # Drop the page's parsed objects (chars, words, layout) once
                 # its lines are taken, so peak memory tracks one page, not

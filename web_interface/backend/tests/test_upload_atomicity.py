@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import logging
+import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -253,6 +254,38 @@ def test_estimate_measures_pdf_text(client, db, seed_simple_mode, filename, cv_p
     assert body["text_characters"] > upload_module.MIN_EXTRACTED_CHARS
 
 
+def test_upload_rejects_mostly_scanned_pdf(client, db, seed_simple_mode, cv_pdf):
+    """#1282: one text page clears MIN_EXTRACTED_CHARS, but a PDF whose
+    image-only pages reach SCANNED_PAGE_REJECT_SHARE is refused, naming them."""
+    user = _make_user(db)
+    _auth(client, user)
+    resp = client.post(
+        "/api/upload",
+        files={"file": ("cv.pdf", cv_pdf(image_pages=(1, 2)), "application/pdf")},
+        data={"submission_type": "own_cv"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["message"].startswith("Pages 2–3 of this PDF are scanned images")
+    assert db.query(Run).count() == 0
+
+
+def test_estimate_names_a_minority_of_scanned_pages(client, db, seed_simple_mode, cv_pdf):
+    """#1282: below the reject share the file is accepted and /estimate
+    names the scanned pages, so the New run page can warn before submit."""
+    user = _make_user(db)
+    _auth(client, user)
+    resp = client.post(
+        "/api/estimate",
+        files={"file": ("cv.pdf", cv_pdf(image_pages=(2,), text_pages=2), "application/pdf")},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["scanned_pages"] == [3]
+
+
+def test_page_ranges_collapses_runs():
+    assert upload_module._page_ranges([2, 3, 4, 7, 9, 10]) == "2–4, 7, 9–10"
+
+
 def test_upload_still_accepts_docx_after_pdf_rejection(client, db, seed_simple_mode, tmp_path):
     """#524 regression, kept through #806: changing what .pdf does must not
     disturb the .docx path."""
@@ -487,6 +520,127 @@ def test_upload_returns_wcm_template_warning(client, db, seed_simple_mode, tmp_p
     assert db.query(Run).filter(Run.id == body["run_id"]).first().status == "created"
 
 
+# --- input format (WCM template vs other) recorded on the run -----------------
+
+# Synthetic text: the template's own section headings, nothing from a real CV.
+_WCM_TEMPLATE_TEXT = "\n".join([
+    "PERSONAL DATA", "EMPLOYMENT STATUS", "INSTITUTIONAL/HOSPITAL AFFILIATION",
+    "LICENSURE, BOARD CERTIFICATION", "PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES",
+    "EDUCATIONAL CONTRIBUTIONS", "CLINICAL PRACTICE, INNOVATION, and LEADERSHIP",
+    "INSTITUTIONAL LEADERSHIP ACTIVITIES", "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES",
+    "INVITATIONS TO SPEAK/PRESENT", "Synthetic filler line so the text is long enough. " * 12,
+])
+
+
+def _upload_with_text(client, db, tmp_path, extracted, input_format_patch=None):
+    user = _make_user(db)
+    _auth(client, user)
+    patches = [
+        patch("app.api.upload.UPLOAD_DIR", tmp_path),
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", return_value=extracted),
+        patch("app.api.upload.detect_wcm_template", return_value=(False, None)),
+        patch("app.api.upload.get_storage", return_value=MagicMock()),
+    ]
+    if input_format_patch is not None:
+        patches.append(input_format_patch)
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+    assert resp.status_code == 200, resp.text
+    return db.query(Run).filter(Run.id == resp.json()["run_id"]).one()
+
+
+@pytest.mark.parametrize("text, fmt", [(_WCM_TEMPLATE_TEXT, "wcm"), ("Plain CV text. " * 60, "other")],
+                         ids=["wcm", "other"])
+def test_upload_records_input_format_on_the_run(client, db, seed_simple_mode, tmp_path, text, fmt):
+    run = _upload_with_text(client, db, tmp_path, text)
+    assert run.input_format == fmt
+    assert run.input_format_score is not None
+
+
+def test_upload_survives_an_input_format_detector_failure(client, db, seed_simple_mode, tmp_path, caplog):
+    boom = patch("app.services.input_format.detect_input_format", side_effect=RuntimeError("boom"))
+    with caplog.at_level("WARNING", logger="app.services.input_format"):
+        run = _upload_with_text(client, db, tmp_path, _WCM_TEMPLATE_TEXT, boom)
+    assert run.input_format is None and run.input_format_score is None
+    assert any("Input-format detection failed" in r.message for r in caplog.records)
+
+
+# --- #1286: ask before re-processing a file already run -----------------------
+
+_DUP_BYTES = b"PK\x03\x04synthetic-duplicate-bytes"
+_DUP_SHA = hashlib.sha256(_DUP_BYTES).hexdigest()
+
+
+def _seed_prior_run(db, owner, run_id="P00001", sha=_DUP_SHA, started=datetime(2026, 3, 4, 10, 0)):
+    db.add(Run(id=run_id, filename="old.docx", file_type="docx", status="complete",
+               user_id=owner.id, started_at=started, source_sha256=sha))
+    db.commit()
+
+
+def _dup_upload(client, tmp_path, data=None):
+    """Upload the duplicate bytes with a real LocalRunStorage; returns (response, storage)."""
+    root = tmp_path / uuid.uuid4().hex
+    root.mkdir()
+    storage, _, patches = _real_storage_patches(root)
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", _DUP_BYTES, DOCX_MIME, data))
+    return resp, root
+
+
+def test_upload_stores_source_sha256(client, db, seed_simple_mode, tmp_path):
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path)
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).source_sha256 == _DUP_SHA
+
+
+def test_duplicate_upload_stops_without_creating_or_archiving(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other)
+    _auth(client, _make_user(db))
+    resp, root = _dup_upload(client, tmp_path)
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "duplicate_file"
+    assert "March 4, 2026" in detail["message"]
+    assert db.query(Run).count() == 1  # only the seeded prior run
+    assert [p for p in root.rglob("*") if p.is_file()] == []  # nothing archived or written locally
+
+
+def test_confirm_duplicate_proceeds(client, db, seed_simple_mode, tmp_path):
+    _seed_prior_run(db, _make_user(db, email="other@example.com"))
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path, {"confirm_duplicate": "true"})
+
+    assert resp.status_code == 200, resp.text
+    assert db.query(Run).filter(Run.source_sha256 == _DUP_SHA).count() == 2
+
+
+def test_duplicate_notice_hides_other_submitters_run_from_non_admin(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other, run_id="ZZ9999")
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path)
+
+    assert resp.status_code == 409
+    assert "run_id" not in resp.json()["detail"]
+    for leaked in ("ZZ9999", "other@example.com", "Test User"):
+        assert leaked not in resp.text
+
+
+def test_duplicate_notice_shows_run_id_to_admin_and_to_its_own_submitter(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other, run_id="ZZ9999")
+    admin = _make_user(db, email="admin@example.com", role="admin")
+    _auth(client, admin)
+    assert _dup_upload(client, tmp_path)[0].json()["detail"]["run_id"] == "ZZ9999"
+
+    me = _make_user(db, email="me@example.com")
+    _seed_prior_run(db, me, run_id="MINE01", started=datetime(2026, 5, 1))
+    _auth(client, me)
+    assert _dup_upload(client, tmp_path)[0].json()["detail"]["run_id"] == "MINE01"
+
+
 # --- #793: bounded read + off-event-loop extraction -------------------------
 
 class _TrackedFile:
@@ -549,9 +703,9 @@ def test_read_bounded_pins_the_size_boundary():
     assert exc_info.value.status_code == 400
 
 
-def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db, seed_simple_mode, tmp_path):
-    """#793 item 3: `_extract_text` and `detect_wcm_template` are dispatched
-    through `run_in_threadpool`, not called synchronously inside the async
+def test_upload_offloads_extraction_and_template_checks_to_threadpool(client, db, seed_simple_mode, tmp_path):
+    """#793 item 3: `_extract_text`, `detect_wcm_template` and
+    `detect_input_format_or_none` are dispatched through `run_in_threadpool`, not called synchronously inside the async
     handler. Reverting either `await run_in_threadpool(fn, ...)` call back to
     a bare `fn(...)` leaves the response unchanged but this test catches it,
     since it asserts run_in_threadpool was the actual dispatch mechanism for
@@ -560,6 +714,7 @@ def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db,
     _auth(client, user)
     extract_mock = MagicMock(return_value="x" * 600)
     detect_mock = MagicMock(return_value=(False, None))
+    format_mock = MagicMock(return_value=(None, None))
     real_run_in_threadpool = upload_module.run_in_threadpool
     dispatched: list[object] = []
 
@@ -572,13 +727,16 @@ def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db,
         patch("app.api.upload._validate_docx_magic", return_value=True),
         patch("app.api.upload._extract_text", extract_mock),
         patch("app.api.upload.detect_wcm_template", detect_mock),
+        patch("app.api.upload.detect_input_format_or_none", format_mock),
         patch("app.api.upload.get_storage", return_value=MagicMock()),
         patch("app.api.upload.run_in_threadpool", spy),
     ]
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 200, resp.text
-    assert dispatched == [extract_mock, detect_mock]
+    # _read_upload_text wraps _extract_text, adding the PDF scanned-page gate (#1282).
+    assert dispatched == [upload_module._read_upload_text, detect_mock, format_mock]
+    extract_mock.assert_called_once()
 
 
 def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode):
@@ -612,7 +770,8 @@ def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode
     )
 
     assert resp.status_code == 200, resp.text
-    assert dispatched == [extract_mock]
+    assert dispatched == [upload_module._read_upload_text]
+    extract_mock.assert_called_once()
 
 
 # --- item 9: render options persisted --------------------------------------

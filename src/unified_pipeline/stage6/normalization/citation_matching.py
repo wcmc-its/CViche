@@ -115,3 +115,72 @@ def _append_missing_stage5d_values(
     if not additions:
         return formatted_citation
     return f"{formatted_citation} " + " ".join(additions)
+
+
+#: The "et al." that closes a Vancouver author list.
+_ET_AL_RE = re.compile(r"\bet al\.?", re.IGNORECASE)
+
+#: A normalized author list item that is initials alone ("Perri G, M"): stage
+#: 4 split one author in two, and the list would render that damage (24 of
+#: 205 truncated lists on the pilot CVs, #1259).
+_LONE_INITIALS_RE = re.compile(r"(?:^|,\s*)[A-Z]{1,3}\s*(?:,|$)")
+
+
+#: A word of `target_name` that can be the owner's surname: 3+ characters,
+#: not all capitals (initials), not a credential or suffix.
+_NAME_WORD_RE = re.compile(r"[^\W\d_][\w'-]{2,}")
+_NOT_A_SURNAME = frozenset({"phd", "jr", "sr", "msc", "mph", "facp", "frcp"})
+
+
+def _stage5d_cut_owner(formatted_citation: str, authors: str, target_name: str) -> bool:
+    """Whether stage 5d's citation lost the CV owner's name (#1259): a word
+    of `target_name` that stage 4's raw `authors` names is not in the
+    citation. Only such a citation gets its author list back: across the
+    163-CV wave-1 farm, restoring every cut list rewrote 1,117 lines from
+    stage-4 lists that are often damaged ("de Groot M" -> "Groot D M", role
+    labels as authors), and lost the owner from 10 of them."""
+    words = {w.casefold() for w in _NAME_WORD_RE.findall(target_name)
+             if not w.isupper() and w.casefold() not in _NOT_A_SURNAME}
+
+    def names(word: str, text: str) -> bool:
+        return bool(re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text.casefold()))
+    return any(names(w, authors) and not names(w, formatted_citation) for w in words)
+
+
+def _restore_stage5d_authors(formatted_citation: str, authors: str) -> str:
+    """`formatted_citation` with stage 4's full author list in place of an
+    "et al." stage 5d added (#1259).
+
+    The 5d prompt's "first 6 authors, et al." rule cut 206 author lists on
+    11 of the 12 pilot CVs and removed the CV owner's own name from 84 of
+    them. When the source list (stage 4's `authors`, already normalized) has
+    no "et al." of its own, everything up to the citation's first "et al."
+    is its author segment, and the source list replaces it. A "." before
+    that "et al." means it is not in the author segment (a Vancouver author
+    list has none; "In: Topol E, et al., eds." follows the title), and the
+    citation is left alone. The rest of the
+    5d citation is kept as it is.
+    """
+    match = _ET_AL_RE.search(formatted_citation)
+    if not authors or not match or _ET_AL_RE.search(authors) \
+            or _LONE_INITIALS_RE.search(authors) \
+            or "." in formatted_citation[:match.start()]:
+        return formatted_citation
+    if not _same_list_start(formatted_citation[:match.start()], authors):
+        return formatted_citation
+    rest = formatted_citation[match.end():].lstrip(" .")
+    return f"{authors.rstrip('. ')}. {rest}"
+
+
+def _surnames(author_list: str) -> list[str]:
+    """The first word of each comma-separated author, casefolded."""
+    return [item.split()[0].casefold() for item in author_list.split(",") if item.split()]
+
+
+def _same_list_start(cut_segment: str, authors: str) -> bool:
+    """Whether the source list starts with the authors 5d kept, by surname.
+    On the wave-1 farm a source list that disagreed was a damaged one: a
+    misspelled owner ("Yianoutsos" for 5d's "Yiannoutsos") and a consortium
+    name run together, both of which the restore would have printed."""
+    kept = _surnames(cut_segment)
+    return bool(kept) and _surnames(authors)[:len(kept)] == kept

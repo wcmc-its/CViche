@@ -1,8 +1,9 @@
 import { useState } from 'react'
-import { getEstimate, uploadFile } from '../../api/upload'
+import { getEstimate, isDuplicateError, uploadFile } from '../../api/upload'
 import type { Estimate } from '../../types'
 import { getCapacity, startRun } from '../../api/runs'
 import { isConsentError } from './useBatchUpload'
+import { MAX_UPLOAD_BYTES, TOO_LARGE_REASON } from './batchRows'
 import type { SubmissionType } from './consentText'
 
 interface SingleRunOptions {
@@ -20,6 +21,8 @@ export interface SingleRun {
   acknowledged: boolean
   setAcknowledged: (value: boolean) => void
   pendingStart: { runId: string } | null
+  /** The server already ran this exact file (#1286); its message, held until the user re-submits to run it again. */
+  pendingDuplicate: string | null
   /** Upload `file` and start it; or, with a run already held, start that run. */
   start: (file: File) => Promise<void>
   /** Forget any held run (a new file was chosen or the file was removed). */
@@ -50,6 +53,9 @@ export function useSingleRun({ stripWcmInstructions, submissionType, onUploadSuc
   // pile of duplicate "Pending" rows for one file (issue #177). null = nothing
   // to retry; the upload path runs normally.
   const [pendingStart, setPendingStart] = useState<{ runId: string } | null>(null)
+  // The upload was refused as a duplicate of an earlier run, so NO run exists.
+  // The next click re-uploads with confirm_duplicate set. null = no duplicate pending.
+  const [pendingDuplicate, setPendingDuplicate] = useState<string | null>(null)
 
   // Kick off the (paid) pipeline run for an already-uploaded run, then hand off.
   const beginRun = async (runId: string) => {
@@ -89,8 +95,8 @@ export function useSingleRun({ stripWcmInstructions, submissionType, onUploadSuc
     return true
   }
 
-  const uploadAndStart = async (file: File) => {
-    const data = await uploadFile(file, { stripWcmInstructions, submissionType })
+  const uploadAndStart = async (file: File, confirmDuplicate: boolean) => {
+    const data = await uploadFile(file, { stripWcmInstructions, submissionType, confirmDuplicate: confirmDuplicate || undefined })
     // Blank-template heuristic tripped: don't start the run yet. Surface the
     // warning and require the acknowledgement checkbox before the next click
     // (which spends a paid run). The upload itself already created the run.
@@ -119,6 +125,8 @@ export function useSingleRun({ stripWcmInstructions, submissionType, onUploadSuc
       await restartHeld(pendingStart.runId, START_FAILED)
       return
     }
+    const confirmDuplicate = pendingDuplicate !== null
+    setPendingDuplicate(null)
     setUploading(true)
     setError(null)
     if (!(await hasCapacity())) {
@@ -126,8 +134,12 @@ export function useSingleRun({ stripWcmInstructions, submissionType, onUploadSuc
       return
     }
     try {
-      await uploadAndStart(file)
+      await uploadAndStart(file, confirmDuplicate)
     } catch (err: any) {
+      if (isDuplicateError(err)) {
+        setPendingDuplicate(err.message)
+        return
+      }
       if (isConsentError(err)) {
         onConsentRequired()
         return
@@ -145,9 +157,10 @@ export function useSingleRun({ stripWcmInstructions, submissionType, onUploadSuc
     setPendingWarning(null)
     setAcknowledged(false)
     setPendingStart(null)
+    setPendingDuplicate(null)
   }
 
-  return { uploading, error, setError, pendingWarning, acknowledged, setAcknowledged, pendingStart, start, reset }
+  return { uploading, error, setError, pendingWarning, acknowledged, setAcknowledged, pendingStart, pendingDuplicate, start, reset }
 }
 
 export interface SingleFile {
@@ -179,6 +192,11 @@ export function useSingleFile(onChange: () => void, onRefused: (message: string 
     const name = selected.name.toLowerCase()
     if (!name.endsWith('.docx') && !name.endsWith('.pdf')) {
       onRefused('Please select a .docx or .pdf file')
+      clear()
+      return
+    }
+    if (selected.size > MAX_UPLOAD_BYTES) {
+      onRefused(`${TOO_LARGE_REASON}, so it won't be submitted`)
       clear()
       return
     }

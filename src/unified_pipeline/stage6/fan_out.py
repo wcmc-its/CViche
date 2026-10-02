@@ -35,6 +35,20 @@ What is deliberately NOT fanned out:
   duration}]`: `title` is the session's own name and no K4 renderer reads it, so
   each child would render the parent's activity title and the date and lose the
   session title).
+
+A second, separate source of records (`records_key`, stage 4's
+`STAGE4_RECORDS_KEY`, handed in by stage 6 like the schema): when the LLM
+returned 2+ items for one entry, stage 4 keeps them all there and leaves the
+entry's scalar fields as the LAST item, which is all the entry rendered before.
+`_stage4_children` splits that list with its own rules, since the parent is
+known to be the last record: the last child is the parent, scalars and text
+as they stand, and every earlier child is its own record alone. The children then
+render everything the parent rendered plus the earlier records, so none of the
+guards above that compare a child against the entry's TEXT apply; only the
+ones about what a child can render do (a code missing from `_RENDERED_FIELDS`,
+a stage-5 rendering, a record with no rendered value). A declined list is
+handed to the generic rules above as if that key were absent, so they decide
+what they decided before the key existed.
 """
 from __future__ import annotations
 
@@ -99,7 +113,7 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'H': frozenset({'award_name', 'date', 'granting_body'}),
     'I': frozenset({'end_date', 'membership_type', 'organization', 'start_date'}),
     'K1': frozenset({'course_code', 'course_title', 'institution', 'role'}),
-    'L3': frozenset({'end_date', 'institution', 'leadership_role', 'start_date'}),
+    'L3': frozenset({'end_date', 'institution', 'leadership_role', 'start_date', 'unit_program'}),
     'M2A': frozenset({'agency', 'annual_funding', 'end_date', 'grant_number', 'notes', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'status', 'title', 'total_funding'}),
     'M2B': frozenset({'agency', 'end_date', 'grant_number', 'notes', 'percent_effort', 'pi_name', 'pi_role', 'start_date', 'status', 'title', 'total_funding'}),
     'M2C': frozenset({'agency', 'grant_number', 'notes', 'pi_name', 'pi_role', 'status', 'title'}),
@@ -107,7 +121,7 @@ _RENDERED_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
     'N2': frozenset({'agency', 'end_date', 'grant_number', 'grant_title', 'role', 'start_date'}),
     'N3A': frozenset({'mentee_level', 'mentee_name', 'research_focus', 'start_date'}),
     'N3B': frozenset({'current_position', 'end_date', 'mentee_level', 'mentee_name', 'start_date'}),
-    'O': frozenset({'end_date', 'institution', 'leadership_role', 'start_date'}),
+    'O': frozenset({'division_department', 'end_date', 'institution', 'leadership_role', 'start_date'}),
     'P': frozenset({'committee_name', 'end_date', 'institution', 'role', 'start_date'}),
     'Q1': frozenset({'end_date', 'organization', 'role', 'start_date'}),
     'Q2': frozenset({'committee_name', 'end_date', 'organization', 'role', 'start_date'}),
@@ -176,6 +190,21 @@ _RENDERED_DATE_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
                      'start_date', 'end_date'}),
 })
 _NESTED_DATES_KEY = 'dates_attended'
+
+# Entry-level keys a stage-5 pass writes about the entry's own scalar fields:
+# the institution 5b cleaned and located, the publication record stage 5
+# matched, and which fields either one filled in. The first six were every key
+# the 163-CV render set's stage-5d entries carry that its stage-4 entries do
+# not; `in_press_note` and `in_press_superseded` came later (stage 5's in-press
+# title search).
+# On a stage-4 records list the scalars are the LAST record, so these describe
+# that record only and an earlier child does not inherit them: 5b's cleaned
+# name replaces the raw institution cell, so a first B2 record rendered the
+# last record's institution until they were dropped.
+_STAGE5_ENTRY_KEYS = frozenset({
+    'enriched_fields', 'enrichment_data', 'enrichment_rejected',
+    'enrichment_source', 'enrichment_status', 'institution_enrichment',
+    'in_press_note', 'in_press_superseded'})
 
 # Render-warning record for a record list that was not fanned out (#1187).
 REJECTED_LIST_CHECK = 'fan_out_record_list_rejected'
@@ -389,11 +418,72 @@ def _declined_record_lists(entry: Mapping[str, Any], schema: frozenset[str]) -> 
             **_rejected_record_lists(fields, schema)}
 
 
-def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dict[str, Any]] | None:
+def _renders_something(record: Mapping[str, Any], rendered: frozenset[str]) -> bool:
+    """Whether `record` holds a value under a field its section writes."""
+    return any(not _is_blank(record.get(key)) for key in rendered)
+
+
+def _stage4_children(entry: Mapping[str, Any], fields: Mapping[str, Any],
+                     records_key: str) -> list[dict[str, Any]] | None:
+    """One child per record stage 4 kept under `records_key`, or None.
+
+    The parent's scalars ARE the last record, so the last child is the parent
+    itself: its scalars as they stand (a stage-5 addition included) and its
+    whole text, so every stage-6 check that weighs a rendered row against the
+    entry's text (the low-coverage overflow that re-emits a narrative the
+    row does not carry, `_recover_unrendered_records`) sees what it saw
+    before. It carries no `FANNED_OUT_FROM` either, so dedup weighs it as it
+    weighed the parent. Every earlier child is its record alone, with its own
+    segment or built line, and without the parent's `_STAGE5_ENTRY_KEYS`: a
+    scalar or an enrichment inherited from the last record would put that
+    record's value on another one. Declined for a code whose section
+    renders the text rather than the fields, for an entry a stage-5 formatter
+    rendered whole, and when a record holds no value its section writes (its
+    row would be empty).
+    """
+    rendered = _RENDERED_FIELDS.get(str(entry.get('taxonomy_code')))
+    records = fields[records_key]
+    if rendered is None or any(fields.get(k) for k in _FORMATTED_KEYS):
+        return None
+    if not all(_renders_something(record, rendered) for record in records):
+        return None
+    texts = _child_texts(entry.get('text'), records)
+    bare = {key: value for key, value in entry.items() if key not in _STAGE5_ENTRY_KEYS}
+    earlier = [_child(bare, copy.deepcopy(dict(record)), text, records_key, i, len(records))
+               for i, (record, text) in enumerate(zip(records[:-1], texts))]
+    last = copy.deepcopy(dict(entry))
+    last['extracted_fields'] = {key: value for key, value in last['extracted_fields'].items()
+                                if key != records_key}
+    return [*earlier, last]
+
+
+def _fan_out_stage4_records(entry: Mapping[str, Any], schema: frozenset[str],
+                            records_key: str) -> tuple[list[dict[str, Any]] | None, Mapping[str, Any]]:
+    """`(children, entry)`: the children of an entry carrying stage 4's
+    records list, when `_stage4_children` splits it, and the entry the generic
+    rules should see otherwise -- `entry` without that key, so a declined
+    list changes nothing. An entry whose own scalars also hold a record list
+    is left to the generic rules, which split that list as before."""
+    fields = entry['extracted_fields']
+    own = {key: value for key, value in fields.items() if key != records_key}
+    if _is_dict_list(fields[records_key]) and not _record_keys(own, schema):
+        children = _stage4_children(entry, fields, records_key)
+        if children is not None:
+            return children, entry
+    return None, {**entry, 'extracted_fields': own}
+
+
+def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str],
+                   records_key: str | None = None) -> list[dict[str, Any]] | None:
     """The children of `entry`, or None when it is not a multi-record entry."""
     fields = entry.get('extracted_fields')
     if not isinstance(fields, Mapping):
         return None
+    if records_key is not None and records_key in fields:
+        children, entry = _fan_out_stage4_records(entry, schema, records_key)
+        if children is not None:
+            return children
+        fields = entry['extracted_fields']
     keys = _record_keys(fields, schema)
     if len(keys) != 1 or any(fields.get(k) for k in _FORMATTED_KEYS):
         return None
@@ -414,7 +504,8 @@ def _fan_out_entry(entry: Mapping[str, Any], schema: frozenset[str]) -> list[dic
 def fan_out_multi_record_entries(
         entries: Sequence[Mapping[str, Any]],
         schema_fields: Mapping[str, Mapping[str, Any]],
-        warnings: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        warnings: list[dict[str, Any]] | None = None,
+        records_key: str | None = None) -> list[dict[str, Any]]:
     """`entries` with every multi-record entry replaced, in place and in order,
     by one child per record. Everything else is returned untouched.
 
@@ -428,13 +519,17 @@ def fan_out_multi_record_entries(
     refused it, or a later guard declined the entry -- is not dropped silently
     (#1187): for a code in `_LIST_LOST_WHEN_KEPT_WHOLE`, when `warnings` is given, one render-warning dict per (code, list
     key) is appended to it (`REJECTED_LIST_CHECK`).
+
+    `records_key` names the list stage 4 keeps when the LLM returned several
+    records for one entry (`stage4.schemas.STAGE4_RECORDS_KEY`); None splits
+    no such list. `_stage4_children` says how that list fans out.
     """
     out: list[dict[str, Any]] = []
     rejected: dict[tuple[str, str], list[list[str]]] = {}
     for entry in entries:
         code = entry.get('taxonomy_code')
         schema = _record_schema(code, frozenset(schema_fields.get(code, {}).get('fields', ())))
-        children = _fan_out_entry(entry, schema)
+        children = _fan_out_entry(entry, schema, records_key)
         if children is None and code in _LIST_LOST_WHEN_KEPT_WHOLE:
             for key, stray in _declined_record_lists(entry, schema).items():
                 rejected.setdefault((str(code), key), []).append(stray)

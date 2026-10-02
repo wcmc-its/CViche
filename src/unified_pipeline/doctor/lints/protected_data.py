@@ -60,6 +60,22 @@ from ..shared import _finding, _output_section_header
 _DEA_VALUE_RE = re.compile(r'\b[A-Za-z]{2}[A-Za-z0-9]{7}\b')
 _DEA_LABEL_PRESENT_RE = re.compile(r'\bdea\b', re.IGNORECASE)
 
+# The label gate above is also what let two real leaks through (#1217): a DEA
+# number written into a state-licence row has no "DEA" token in its block --
+# the row's first column spelled out the agency, or the reader fused the
+# number into another credential's number cell. Without a label the loose
+# shape would match every nine-letter word, so a block that does NOT name DEA
+# is probed with the real format only: two letters then seven DIGITS, bounded
+# so it cannot be cut out of a longer token. Calibrated before it was made
+# ungated: rendered over the 163-CV corpus, the only bare tokens of this
+# shape inside the Licensure section were the two leaked DEA numbers; every
+# other hit sat in the Bibliography, Research or Mentoring sections. A state
+# licence or certificate number that happens to share the shape WOULD be a
+# finding here -- the cost of a false positive is a hard-fail the reviewer
+# can read in the document, the cost of a miss is a leaked identifier.
+_DEA_NUMBER_VALUE_RE = re.compile(
+    r'(?<![A-Za-z0-9])[A-Za-z]{2}\d{7}(?![A-Za-z0-9])')
+
 # The Personal Data table's own "Home address:" row is a static template
 # label too, unlike every OTHER row of this lint's full policy (DOB, SSN,
 # spouse, ... only ever appear because the SOURCE cv's free text used that
@@ -91,6 +107,14 @@ _HOME_CONTACT_LABEL_ONLY_RE = re.compile(
 # next row's bare label never does.
 _HOME_CONTACT_LABEL_RE = re.compile(
     r'home\s*(?:address|phone|telephone|tel\.?)\s*:', re.IGNORECASE)
+
+
+def _dea_value_matches(block_text: str) -> list[re.Match[str]]:
+    """DEA-shaped values in one Licensure-section block: the loose shape when
+    the block names DEA, the real format alone when it does not (#1217)."""
+    probe = (_DEA_VALUE_RE if _DEA_LABEL_PRESENT_RE.search(block_text)
+             else _DEA_NUMBER_VALUE_RE)
+    return list(probe.finditer(block_text))
 
 
 def _home_contact_value_leaked(block_text: str) -> bool:
@@ -223,7 +247,8 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
         # ("Born January 2, 1970" -> "Born January") would carry part of
         # the value into a Teams card. The bare-SSN and visa value shapes
         # are ALL_CODES policy rows, so they are found here in any section.
-        for match in _pii_matches(stripped, _scan_scope(section)):
+        for match in _pii_matches(stripped, _scan_scope(section),
+                                  personal_data=section == _PERSONAL_DATA_SECTION):
             if (match.category == CAT_HOME_CONTACT
                     and _HOME_CONTACT_LABEL_ONLY_RE.match(
                         stripped[match.start:match.end])):
@@ -245,9 +270,8 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
                     f"protected personal data ({CAT_HOME_CONTACT}) found in "
                     f"{where} -- value withheld from this finding"))
 
-        if (_is_licensure_section(section)
-                and _DEA_LABEL_PRESENT_RE.search(stripped)):
-            for _match in _DEA_VALUE_RE.finditer(stripped):
+        if _is_licensure_section(section):
+            for _match in _dea_value_matches(stripped):
                 findings.append(_finding(
                     "protected_data_in_output", "ERROR",
                     f"protected personal data ({CAT_DEA}) found in {where} "

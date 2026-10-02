@@ -41,14 +41,6 @@ export default function UserMenu({ className }: UserMenuProps) {
 
   if (!user) return null
 
-  const initials = user.display_name
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((part) => part[0])
-    .slice(0, 2)
-    .join('')
-    .toUpperCase()
-
   const handleLogout = async () => {
     setSigningOut(true)
     try {
@@ -72,15 +64,9 @@ export default function UserMenu({ className }: UserMenuProps) {
         title={user.email}
         className="flex items-center gap-2.5 rounded-lg p-1 text-left focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
       >
-        <span
-          aria-hidden="true"
-          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full bg-ink text-xs font-semibold text-sand-100"
-        >
-          {initials || '?'}
-        </span>
-        <span className="hidden md:block leading-tight">
+        <span className="leading-tight">
           <span className="block text-sm font-medium text-gray-900">{user.display_name}</span>
-          {user.role === 'admin' && <span className="block text-xs text-gray-500">Admin</span>}
+          <span className="block text-xs text-gray-500">{user.role === 'admin' ? 'Admin' : 'Member'}</span>
         </span>
       </button>
 

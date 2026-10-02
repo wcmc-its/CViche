@@ -117,6 +117,16 @@ _PROTECTED = _SECTION_HEADER_SET | {
 }
 
 
+def template_section_headers() -> frozenset[str]:
+    """The WCM template's top-level section headings, normalized for matching."""
+    return frozenset(_SECTION_HEADER_SET)
+
+
+def normalize_template_text(text: str) -> str:
+    """*text* as this module compares it: case, bullets, numbering, colons stripped."""
+    return _normalize(text)
+
+
 def is_template_instruction(text: str) -> bool:
     """Return True if *text* is WCM-template instruction boilerplate.
 

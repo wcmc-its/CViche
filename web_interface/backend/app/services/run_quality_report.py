@@ -45,6 +45,16 @@ _CAP_SOURCE_BY_SCORER = {
         "classification fell back to defaults", "stage3b_fallback_ratio"),
     scorer.score_protected_data: CapSource(
         "protected personal data in the output", "protected_data_in_output"),
+    scorer.score_under_extracted_records: CapSource(
+        "a large entry was only partly read, so its records are missing", "under_extraction"),
+    scorer.score_fused_entries: CapSource(
+        "several records were fused into one entry", "segmentation"),
+    scorer.score_lost_source_table: CapSource(
+        "a source table never reached the output", "table_lost"),
+    scorer.score_stage4_group_failures: CapSource(
+        "field extraction failed for a group of entries", "stage4_group_failures"),
+    scorer.score_llm_fallback_served: CapSource(
+        "a backup model answered part of the run", "llm_fallback_served"),
 }
 
 # Gate name (as it appears in the scorer's flags) -> its CapSource.
@@ -88,6 +98,13 @@ LINT_EXPLANATIONS = {
     "table_lost": "Tables in the source CV were mostly lost.",
     "date_only_lines": "Lines in the output hold only a date.",
     "stage3b_second_pass_error": "A classification clean-up pass failed, so catch-all entries were left as they were.",
+    "offschema_fields": "Some extracted details were filed under a name no part of the document reads, so they are missing from it.",
+    "implausible_year": "Some dates are a century off, most likely because the CV gave a two-digit year.",
+    "stage4_group_failures": "Reading a group of entries failed and was retried separately, so those entries may be incomplete or hold wrong values.",
+    "llm_fallback_served": "The usual AI model declined part of this CV, so a backup model wrote that section; check it.",
+    "stage_failure_recorded": "A stage of the run failed, so whatever it produced, such as the research summary, is missing.",
+    "python_repr_in_output": "Raw program data, such as curly braces around quoted field names, was written into the document instead of a formatted value.",
+    "llm_refusal_in_output": "The document contains the AI model's reply asking for more information instead of CV content.",
     "owner_contact_missing": "The CV owner's name could not be identified, so the document cannot be filed under anyone.",
     "pipeline_errors_present": "A stage failed with an error, so part of the output is missing.",
     "no_output": "The run produced no document.",

@@ -30,6 +30,7 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage2_helpers_behaviour.py -p no:cacheprovider
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -55,6 +56,9 @@ remove_subset_delimiters = stage2.remove_subset_delimiters
 recover_unclaimed_table_rows = stage2.recover_unclaimed_table_rows
 _dedup_idx_key = stage2._dedup_idx_key
 filter_extraction_noise = stage2.filter_extraction_noise
+parse_delimiter_reply = stage2.parse_delimiter_reply
+delimiter_index_text = stage2.delimiter_index_text
+row_range_entry = stage2.row_range_entry
 
 
 # --------------------------------------------------------- get_hierarchy_path
@@ -672,6 +676,57 @@ def test_recover_unclaimed_table_rows_separator_only_row_not_recovered():
     assert [r["element_idx_start"] for r in recovered] == ["9.4"]
 
 
+# ------------------------------------- parse_delimiter_reply / delimiter_index_text
+
+def test_parse_delimiter_reply_keeps_the_text_of_a_row_index_ending_in_zero():
+    """#1228: 474.10 is row 10 of table 474. json.loads gives the float 474.1,
+    which is row 1; the literal is the only thing that names row 10."""
+    delimiter = parse_delimiter_reply('[{"element_idx_start": 474.10, "element_idx_end": 474.11}]')[0]
+    assert delimiter_index_text(delimiter["element_idx_start"]) == "474.10"
+    assert delimiter_index_text(delimiter["element_idx_end"]) == "474.11"
+    assert delimiter["element_idx_start"] == 474.1  # still a number to anything that does arithmetic
+
+
+def test_parse_delimiter_reply_leaves_ints_strings_and_confidence_as_they_were():
+    reply = parse_delimiter_reply(
+        '{"delimiters": [{"element_idx_start": 12, "element_idx_end": "9.10", "confidence": 0.90}]}')
+    delimiter = reply["delimiters"][0]
+    assert (delimiter["element_idx_start"], delimiter["element_idx_end"]) == (12, "9.10")
+    assert (delimiter_index_text(12), delimiter_index_text("9.10")) == ("12", "9.10")
+    assert delimiter["confidence"] == 0.9
+    assert json.dumps(delimiter["confidence"]) == "0.9"  # the artifact is written as it always was
+
+
+def test_row_range_entry_reads_row_10_and_row_1_as_two_different_rows():
+    lookup = {f"474.{r}": _row(f"474.{r}", f"row {r} alpha", parent_idx=474) for r in range(12)}
+    entry, claimed = row_range_entry("474.10", "474.11", lookup, 0.9)
+    assert claimed == ["474.10", "474.11"]
+    assert entry["text"] == "row 10 alpha\nrow 11 alpha"
+    assert entry["element_idx_start"] == "474.10"
+
+
+def test_remove_subset_delimiters_keeps_pseudo_row_10_apart_from_pseudo_row_1():
+    """A merged row split into pseudo-rows is keyed "<table>.<row>.<k>". Read as
+    one float, "92.5.10" is 92.5.1 and the tenth line was dropped as a duplicate
+    of the first; "92.5.2" also sorted after it."""
+    kept = remove_subset_delimiters([
+        _d("92.5.10", "92.5.10", "tenth line of the cell"), _d("92.5.1", "92.5.1", "first line of the cell"),
+        _d("92.5.2", "92.5.2", "second line of the cell"),
+    ])
+    assert [d["element_idx_start"] for d in kept] == ["92.5.1", "92.5.2", "92.5.10"]
+
+
+def test_remove_subset_delimiters_keeps_row_1_row_10_and_the_pairs_between_apart():
+    """The keys the delimiter handling now produces ("474.10", not "474.1") are
+    distinct to remove_subset_delimiters: nothing here contains anything else."""
+    kept = remove_subset_delimiters([
+        _d("474.1", "474.1", "row 1"), _d("474.2", "474.3", "rows 2-3"), _d("474.10", "474.11", "rows 10-11"),
+    ])
+    assert [(d["element_idx_start"], d["element_idx_end"]) for d in kept] == [
+        ("474.1", "474.1"), ("474.2", "474.3"), ("474.10", "474.11"),
+    ]
+
+
 # ---------------------------------------------------------------- _dedup_idx_key
 
 def test_dedup_idx_key_malformed_strings_fall_back_to_string_identity():
@@ -682,6 +737,16 @@ def test_dedup_idx_key_malformed_strings_fall_back_to_string_identity():
 
 def test_dedup_idx_key_plain_numeric_string_without_dot_converts():
     assert _dedup_idx_key("42") == (42.0, 0.0)
+
+
+def test_dedup_idx_key_row_10_is_not_row_1():
+    assert _dedup_idx_key("474.10") == (474.0, 10.0)
+    assert _dedup_idx_key("474.10") != _dedup_idx_key("474.1")
+
+
+def test_dedup_idx_key_pseudo_row_10_is_not_pseudo_row_1():
+    assert _dedup_idx_key("92.5.10") == (92.0, 5.0, 10.0)
+    assert _dedup_idx_key("92.5.10") != _dedup_idx_key("92.5.1")
 
 
 # ------------------------------------------------------- filter_extraction_noise

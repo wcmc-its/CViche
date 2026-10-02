@@ -4,9 +4,10 @@ export type {
   RunBy, RunListScope, RunListParams, FilterCount, RunByOption, RunFilterOptions,
   QualityBand, DoctorSeverity, QualityDimension, DoctorFindingGroup, RunDoctorReport,
   RunQualityReport, RunReviewNote, RunFeedbackSummary, FeedbackReviewer, RunFeedbackFilter,
+  RunInputFormatFilter, RunStatusFilter, StatusFilterCounts,
 } from './runs'
 export type { FeedbackFormData, FeedbackDetail, WcmSection } from './feedback'
-export type { Stats, AdminUser, AdminRun, AdminRunsResponse, QualityScoreResult, SystemConfig, FeedbackData, AggregatedScores } from './admin'
+export type { Stats, SubmissionSplit, DepartmentSubmissions, ConsentPublishPreview, AdminUser, AdminRun, AdminRunsResponse, QualityScoreResult, SystemConfig, FeedbackData, AggregatedScores } from './admin'
 export type { Estimate } from './upload'
 export type {
   BatchSummary, BatchStatusCounts, BatchRunRow, BatchDetail, QueueLane, QueueOverview,
