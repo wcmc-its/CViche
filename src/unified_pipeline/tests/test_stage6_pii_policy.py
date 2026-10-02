@@ -2108,6 +2108,8 @@ def test_1223_the_dash_form_outside_a_family_block_in_an_appendix_entry_is_kept(
     ("Children: Kim Example\nawarded the prize", "awarded the prize"),
     ("Children: Kim Example\nSee 12 Example Street", "See 12 Example Street"),
     ("Children: Kim Example\nBob", "Bob"),
+    # the whole line must be the list: a line that goes on in prose is not one
+    ("Children: Kim (1971)\nBob (1973) attends Example School", "Bob (1973) attends Example School"),
     # a category that has no list (a spouse, a date of birth) never takes the next line
     ("Spouse: Pat Example\nKim Example", "Kim Example"),
     ("Date of Birth: 01/02/1970\nKim Example", "Kim Example"),
