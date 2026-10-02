@@ -874,24 +874,23 @@ def test_5d_batch_progress_lines_are_monotonic_and_unspliced(tmp_path, monkeypat
 
     out = capsys.readouterr().out.splitlines()
     total = len(_MANY_CITATIONS)
-    marker = f"/{total} ("
-    progress = [line for line in out if "Processing batch" in line and marker in line]
-    # The line is never "[N/M]" bracketed (that would match orchestrator.py
-    # pattern 3) -- "Processing batch N/M (" is the exact shape checked.
+    marker = f"/{total}] batches formatted ("
+    progress = [line for line in out if marker in line]
     assert len(progress) == total
-    nums = [int(line.split("Processing batch ")[1].split("/")[0]) for line in progress]
+    nums = [int(line.split("[")[1].split("/")[0]) for line in progress]
     assert nums == list(range(1, total + 1))
-    # Each batch's block is one atomic print: "Processing batch..." then "Parsed...".
+    # Each batch's block is one atomic print: "[N/M] batches formatted..." then "Parsed...".
     for i, line in enumerate(out):
-        if "Processing batch" in line and marker in line:
+        if marker in line:
             assert out[i + 1].strip().startswith("Parsed"), out[i:i + 2]
 
 
-def test_5d_batch_progress_does_not_match_progress_patterns(capsys, progress_patterns):
+def test_5d_batch_progress_line_is_read_by_progress_patterns(capsys, progress_patterns):
     # Drive the REAL printer (mrj4001's point #1 on PR #918: a hand-typed
     # literal here can't catch a future reword of the printer's own
     # wording). The patterns come from orchestrator.py's source, pinned in
-    # conftest.py's progress_patterns fixture.
+    # conftest.py's progress_patterns fixture. The line used to match none
+    # of them, so the web bar sat at its placeholder for all of 5d.
     printer = s5d._batch_progress_printer(10)
     filler = s5d._BatchResult(id_to_formatted=None, id_to_entry={"CIT-0001": {}}, usage=None)
     five_cited = s5d._BatchResult(
@@ -901,10 +900,11 @@ def test_5d_batch_progress_does_not_match_progress_patterns(capsys, progress_pat
     )
     printer(0, filler)
     printer(0, filler)
-    printer(0, five_cited)  # 3rd completion -> "Processing batch 3/10 (5 citations)..."
-    out = capsys.readouterr().out
-    line = next(l for l in out.splitlines() if l.strip().startswith("Processing batch 3/10"))
-    assert not any(p.search(line) for p in progress_patterns)
+    printer(0, five_cited)  # 3rd completion -> "[3/10] batches formatted (5 citations)"
+    line = capsys.readouterr().out.splitlines()[-1]
+    match = next(m for p in progress_patterns if (m := p.search(line)))
+    assert (int(match.group(1)), int(match.group(2))) == (3, 10)
+    assert line.endswith("(5 citations)")
 
 
 def test_5d_batches_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):
@@ -977,7 +977,7 @@ def test_5d_batch_progress_prints_only_from_the_calling_thread(tmp_path, monkeyp
     finally:
         monkeypatch.setattr(sys, "stdout", real_stdout)
 
-    assert "Processing batch" in registered.getvalue()
+    assert "batches formatted" in registered.getvalue()
     assert leak.getvalue() == ""
 
 
@@ -1134,7 +1134,7 @@ def test_5d_empty_llm_text_with_usage_prints_no_parsed_line_and_logs_nothing(tmp
         )
     out = capsys.readouterr().out
     assert "Parsed" not in out
-    assert "Processing batch" in out
+    assert "batches formatted" in out
     assert not [r for r in caplog.records if "Could not parse" in r.getMessage()]
 
     s5d.run_stage_5d(

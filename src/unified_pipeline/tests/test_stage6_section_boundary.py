@@ -565,9 +565,9 @@ def test_dispatch_codes_cover_render_routed_codes_exactly(tmp_path):
     recorded: list[tuple[str, frozenset]] = []
     real_render_section = gen._render_section
 
-    def _spy(label, fn, codes=frozenset()):
+    def _spy(label, fn, codes=frozenset(), **kwargs):
         recorded.append((label, codes))
-        return real_render_section(label, fn, codes)
+        return real_render_section(label, fn, codes, **kwargs)
 
     gen._render_section = _spy
     _render(gen, tmp_path, [_personal_data_entry()])
@@ -577,3 +577,22 @@ def test_dispatch_codes_cover_render_routed_codes_exactly(tmp_path):
     assert union == RENDER_ROUTED_CODES - {'A'}
     assert sum(len(c) for c in code_sets) == len(union), \
         "dispatch code sets must be pairwise disjoint"
+
+
+def test_each_dispatched_section_logs_a_progress_bar_line(tmp_path, caplog, progress_patterns):
+    """Stage 6 printed nothing orchestrator.PROGRESS_PATTERNS could read, so
+    the web bar sat at its placeholder through the render. Every dispatched
+    section -- failed or not, via _render_section's finally -- logs
+    ``[done/total] sections rendered``, read the way orchestrator.py reads it."""
+    gen = _new_generator()
+    with caplog.at_level(logging.INFO, logger="unified_pipeline.stage_6_word_template"):
+        _render(gen, tmp_path, [_personal_data_entry()])
+
+    seen = []
+    for r in caplog.records:
+        match = next((m for p in progress_patterns if (m := p.search(r.getMessage()))), None)
+        if match:
+            seen.append((int(match.group(1)), int(match.group(2))))
+    total = seen[0][1]
+    assert total > 1
+    assert seen == [(n, total) for n in range(1, total + 1)]

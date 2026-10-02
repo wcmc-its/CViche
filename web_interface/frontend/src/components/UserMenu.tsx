@@ -3,6 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { LogOut } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 
+const HEADSHOT_BASE = 'https://directory.weill.cornell.edu/api/v1/person/profile'
+
 interface UserMenuProps {
   /** Extra classes for the wrapper, e.g. to position the trigger. */
   className?: string
@@ -18,6 +20,8 @@ export default function UserMenu({ className }: UserMenuProps) {
   const navigate = useNavigate()
   const [open, setOpen] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
+  // Directory headshot, as Scholars uses; a 404 (no photo) falls back to initials.
+  const [photoFailed, setPhotoFailed] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
   // Close on outside click or Escape.
@@ -72,12 +76,21 @@ export default function UserMenu({ className }: UserMenuProps) {
         title={user.email}
         className="flex items-center gap-2.5 rounded-lg p-1 text-left focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none"
       >
-        <span
-          aria-hidden="true"
-          className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full bg-ink text-xs font-semibold text-sand-100"
-        >
-          {initials || '?'}
-        </span>
+        {user.cwid && !photoFailed ? (
+          <img
+            src={`${HEADSHOT_BASE}/${encodeURIComponent(user.cwid)}.png?returnGenericOn404=false`}
+            alt=""
+            onError={() => setPhotoFailed(true)}
+            className="h-[30px] w-[30px] shrink-0 rounded-full object-cover bg-sand-300"
+          />
+        ) : (
+          <span
+            aria-hidden="true"
+            className="flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-full bg-ink text-xs font-semibold text-sand-100"
+          >
+            {initials || '?'}
+          </span>
+        )}
         <span className="hidden md:block leading-tight">
           <span className="block text-sm font-medium text-gray-900">{user.display_name}</span>
           {user.role === 'admin' && <span className="block text-xs text-gray-500">Admin</span>}

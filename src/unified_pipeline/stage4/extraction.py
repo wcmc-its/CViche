@@ -19,7 +19,7 @@ from typing import Any, Callable, NamedTuple, NotRequired, TypedDict
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
+from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
 from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.llm.retry import LLMOutageError
 
@@ -996,8 +996,11 @@ def _extract_batches(
             batch, batch_idx, len(batches), cv_owner_name=cv_owner_name, cancel_check=cancel_check,
         )
 
-    # No on_result: extraction.py has no print() calls needing thread-routed stdout.
-    return map_in_order(run_batch, list(enumerate(batches)), workers=workers)
+    return map_in_order(
+        run_batch, list(enumerate(batches)), workers=workers,
+        # [N/M] is the parsed progress-bar contract (orchestrator PROGRESS_PATTERNS).
+        on_result=make_progress_printer(lambda done, _i, _r: [f"[{done}/{len(batches)}] batches extracted"]),
+    )
 
 
 def _split_skippable_entries(

@@ -279,13 +279,14 @@ def _format_batch(batch: list[dict]) -> _BatchResult:
 
 
 def _batch_progress_printer(total_batches: int) -> Callable[[int, _BatchResult], None]:
-    """``Processing batch N/M (K citations)...`` then ``Parsed N`` when a
-    parse ran, via the shared make_progress_printer (#923). The wording
-    matches none of orchestrator.PROGRESS_PATTERNS -- pinned by
-    test_5d_batch_progress_does_not_match_progress_patterns.
+    """``[N/M] batches formatted (K citations)`` then ``Parsed N`` when a
+    parse ran, via the shared make_progress_printer (#923). The ``[N/M]``
+    line is a parsed contract -- orchestrator.py's PROGRESS_PATTERNS read
+    it into the progress bar; pinned by
+    test_5d_batch_progress_line_is_read_by_progress_patterns.
     """
     def format_lines(done: int, _index: int, result: _BatchResult) -> list[str]:
-        lines = [f"\n  Processing batch {done}/{total_batches} ({len(result.id_to_entry)} citations)..."]
+        lines = [f"\n  [{done}/{total_batches}] batches formatted ({len(result.id_to_entry)} citations)"]
         if result.id_to_formatted is not None:
             lines.append(f"  Parsed {len(result.id_to_formatted)} formatted citations")
         return lines

@@ -1272,7 +1272,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             ('bibliography', frozenset({'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'}), lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
         ]
         # In dispatch order; research_support returns the T goals rows it placed in a grant table (#958).
-        section_results = {label: self._render_section(label, fn, codes) for label, codes, fn in section_dispatch}
+        section_results = {label: self._render_section(label, fn, codes, progress=(done, len(section_dispatch)))
+                           for done, (label, codes, fn) in enumerate(section_dispatch, 1)}
         research_summary_rendered = bool(section_results['research_summary'])
 
         # Fill passthrough sections (Employment Status, Institutional Affiliation,
@@ -1428,7 +1429,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         }]
 
     def _render_section(self, label: str, fn: Callable[[], Any],
-                         codes: frozenset[str] = frozenset()) -> Any:  # noqa: ANN401
+                         codes: frozenset[str] = frozenset(),
+                         progress: tuple[int, int] | None = None) -> Any:  # noqa: ANN401
         """Call one section-dispatch entry, isolating a raise to this section
         only (#565). Returns fn()'s result on success; on any Exception it
         logs the traceback, records a severity-carrying failure onto
@@ -1445,6 +1447,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         the record (§5.4) -- an isolated section must fail loudly, or the
         isolation trades a whole-document crash for a silent partial render,
         which is worse.
+
+        *progress* ``(done, total)`` logs ``[done/total] sections rendered``
+        once the section finishes, failed or not -- the parsed progress-bar
+        contract (orchestrator PROGRESS_PATTERNS).
         """
         try:
             return fn()
@@ -1462,6 +1468,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             })
             self._failed_section_codes |= codes
             return None
+        finally:
+            if progress is not None:
+                logger.info("[%d/%d] sections rendered", *progress)
 
     def _write_render_warnings_sidecar(self, output_path: str, document_uid: str,
                                         warnings: list[dict[str, Any]], dedup_decisions: list[dict[str, Any]]) -> None:

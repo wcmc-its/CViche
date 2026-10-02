@@ -1162,3 +1162,21 @@ def test_a_single_item_recovery_drops_the_count_an_earlier_pass_wrote(monkeypatc
     assert STAGE4_RECORDS_RETURNED_KEY not in out
     assert out["extracted_fields"] == _SINGLE_ITEM
     assert list(out)[-1] == "llm_recovery_applied"
+
+
+def test_each_finished_batch_prints_a_progress_bar_line(monkeypatch, capsys, progress_patterns):
+    """The web progress bar sat at its 50% placeholder for all of stage 4:
+    no line matched orchestrator.PROGRESS_PATTERNS until the loop ended.
+    Each finished batch now prints ``[done/total]``, read the way
+    orchestrator.py reads it (first matching pattern wins)."""
+    _stub_owner(monkeypatch)
+    monkeypatch.setattr(extraction, "extract_fields_batch", lambda entries, *a, **k: _batch_result(entries))
+
+    extraction.extract_fields_from_mapped_entries(_entries(3), batch_size=1, workers=2)
+
+    seen = []
+    for line in capsys.readouterr().out.splitlines():
+        match = next((m for p in progress_patterns if (m := p.search(line))), None)
+        if match:
+            seen.append((int(match.group(1)), int(match.group(2))))
+    assert seen == [(1, 3), (2, 3), (3, 3)]
