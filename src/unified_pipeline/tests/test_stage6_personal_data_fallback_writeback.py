@@ -130,11 +130,12 @@ def _rendered_name(docx_path) -> str:
     raise AssertionError("Name: paragraph not found in output")
 
 
-def _render(tmp_path, entries, original_doc_path=None, cv_owner=None) -> dict:
+def _render(tmp_path, entries, original_doc_path=None, cv_owner=None,
+            document_uid="TESTPDWB") -> dict:
     gen = WCMTemplateGenerator(verbose=False)
     gen._reconsider_appendix_entries = lambda: None
     ip, op = tmp_path / "in.json", tmp_path / "out.docx"
-    payload = {"document_uid": "TESTPDWB", "entries": entries}
+    payload = {"document_uid": document_uid, "entries": entries}
     if cv_owner is not None:
         payload["cv_owner"] = cv_owner
     ip.write_text(json.dumps(payload))
@@ -870,6 +871,23 @@ def test_name_precedence(tmp_path, case, cv_owner, entries, expected):
     _rows, _gen = _render(case_dir, entries=entries, cv_owner=cv_owner)
 
     assert _rendered_name(case_dir / "out.docx") == expected, case
+
+
+@pytest.mark.parametrize("run_id", ["QZKMRT", "AB1CDE"])
+def test_a_run_id_is_never_printed_as_the_name(tmp_path, run_id):
+    """#457: a web run's uid IS its run id. With no name from cv_owner, the
+    A entries or the source, the cover must read as missing, not "Qzkmrt"."""
+    _rows, _gen = _render(tmp_path, entries=[], cv_owner={"last_name": run_id},
+                          document_uid=run_id)
+
+    assert _rendered_name(tmp_path / "out.docx") == ""
+
+
+def test_a_run_id_does_not_displace_a_name_cv_owner_supplied(tmp_path):
+    _rows, _gen = _render(tmp_path, entries=[], cv_owner={"full_name": "Jane Q. Example"},
+                          document_uid="QZKMRT")
+
+    assert _rendered_name(tmp_path / "out.docx") == "Jane Q. Example"
 
 
 # --------------------------------------------------------------------------
