@@ -10,4 +10,5 @@ export interface Estimate {
   file_size_kb: number
   pricing_model: string | null
   text_characters_is_guess: boolean
+  scanned_pages?: number[]
 }

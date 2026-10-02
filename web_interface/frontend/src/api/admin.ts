@@ -1,6 +1,6 @@
 import { api } from './client'
 import { adminRoutes } from './routes'
-import type { Stats, AdminUser, AdminRunsResponse, QualityScoreResult, SystemConfig } from '../types'
+import type { Stats, AdminUser, AdminRunsResponse, QualityScoreResult, SystemConfig, ConsentPublishPreview } from '../types'
 
 export async function getAdminStats(): Promise<Stats> {
   return api.get<Stats>(adminRoutes.stats())
@@ -37,4 +37,12 @@ export async function exportFeedbackCsv(): Promise<Response> {
 
 export async function deleteFeedback(feedbackId: number): Promise<void> {
   await api.delete(adminRoutes.feedback(feedbackId))
+}
+
+export async function getConsentPublishPreview(): Promise<ConsentPublishPreview> {
+  return api.get<ConsentPublishPreview>(adminRoutes.consentPublish())
+}
+
+export async function publishConsentVersion(version: string): Promise<ConsentPublishPreview> {
+  return api.post<ConsentPublishPreview>(adminRoutes.consentPublish(), { version })
 }

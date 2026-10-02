@@ -1,11 +1,15 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, renderHook } from '@testing-library/react'
-import { useSingleRun } from './useSingleRun'
+import { useSingleFile, useSingleRun } from './useSingleRun'
+import { MAX_UPLOAD_BYTES } from './batchRows'
 import { uploadFile } from '../../api/upload'
 import { getCapacity, startRun } from '../../api/runs'
 
-vi.mock('../../api/upload', () => ({ uploadFile: vi.fn(), getEstimate: vi.fn() }))
+vi.mock('../../api/upload', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../api/upload')>()),
+  uploadFile: vi.fn(), getEstimate: vi.fn(),
+}))
 vi.mock('../../api/runs', () => ({ startRun: vi.fn(), getCapacity: vi.fn() }))
 
 const onUploadSuccess = vi.fn()
@@ -61,5 +65,17 @@ describe('useSingleRun', () => {
     expect(uploadFile).toHaveBeenCalledTimes(1)
     expect(startRun).toHaveBeenCalledWith('R1')
     expect(onUploadSuccess).toHaveBeenCalledWith('R1')
+  })
+})
+
+describe('useSingleFile', () => {
+  it("refuses a file over the size cap without estimating it", async () => {
+    const big = new File(['x'], 'big.docx')
+    Object.defineProperty(big, 'size', { value: MAX_UPLOAD_BYTES + 1 })
+    const onRefused = vi.fn()
+    const { result } = renderHook(() => useSingleFile(vi.fn(), onRefused))
+    await act(() => result.current.pick(big))
+    expect(onRefused).toHaveBeenCalledWith(expect.stringMatching(/Larger than 10 MB/))
+    expect(result.current.file).toBeNull()
   })
 })

@@ -1771,6 +1771,25 @@ def test_content_filtered_empty_falls_back_once_to_sonnet_4_6(
     assert result["cost"] == pytest.approx(fallback_cost + filtered_cost)
 
 
+def test_fallback_served_result_names_the_model_that_answered_and_a_normal_one_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The write-only provenance key (#1174): stage 4 and 4.5 read it to record
+    that the fallback served the call. Absent on an ordinary Sonnet 5 result."""
+    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY
+
+    ok = _converse_response("hello", input_tokens=10, output_tokens=5)
+    fake = _FakeBedrockClient(_filtered_empty_pair() + [ok])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: fake)
+    served = bedrock._handle_bedrock(_USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+    assert served[FALLBACK_SERVED_KEY] == bedrock.CONTENT_FILTER_FALLBACK_MODEL
+
+    plain = _FakeBedrockClient([_converse_response("hi", input_tokens=10, output_tokens=5)])
+    monkeypatch.setattr(bedrock, "_get_bedrock_client", lambda: plain)
+    assert FALLBACK_SERVED_KEY not in bedrock._handle_bedrock(
+        _USER_MSG, None, _bedrock_cfg(model=SONNET_5))
+
+
 def test_content_filtered_fallback_request_drops_sonnet_5_only_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

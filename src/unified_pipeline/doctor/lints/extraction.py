@@ -41,7 +41,12 @@ from unified_pipeline.stage4.coercion import (
     IDENTIFIER_TAXONOMY_CODES,
     find_single_closed_range,
 )
-from unified_pipeline.stage4.schemas import FIELD_SCHEMA_CONFIG_PATH, FIELD_SCHEMAS
+from unified_pipeline.stage4.schemas import (
+    FIELD_SCHEMA_CONFIG_PATH,
+    FIELD_SCHEMAS,
+    NUMBERED_FIELD_RE,
+    STAGE4_RECORDS_KEY,
+)
 from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
 from unified_pipeline.stage_5d_citation_formatter import PUBLICATION_CODES
 from unified_pipeline.core.text_norm import (
@@ -946,11 +951,6 @@ _OFFSCHEMA_SKIPPED_CODES = (frozenset({PERSONAL_DATA_CODE}) | _TEXT_RENDERED_COD
 _IDENTIFIER_KEYS = frozenset({"pmid", "pmcid", "doi"})
 _PERCENT_EFFORT_KEY = "percent_effort"
 
-#: `<declared field>_<n>`: a numbered second copy of a schema field, which is
-#: a second record (`organization_2` held the second column of a two-column
-#: memberships list).
-_NUMBERED_FIELD_RE = re.compile(r"^(?P<field>.+)_\d+$")
-
 
 class OffschemaValue(NamedTuple):
     """One non-empty value under a key no renderer reads."""
@@ -992,7 +992,8 @@ def _fanned_out_keys(entry: _FieldsEntry) -> frozenset[str]:
     disagree with the renderer about which lists render."""
     probe = {"taxonomy_code": entry.code, "text": entry.text,
              "extracted_fields": dict(entry.fields)}
-    children = fan_out_multi_record_entries([probe], FIELD_SCHEMAS)
+    children = fan_out_multi_record_entries([probe], FIELD_SCHEMAS,
+                                            records_key=STAGE4_RECORDS_KEY)
     return frozenset(child[FANNED_OUT_FROM]["key"] for child in children
                      if FANNED_OUT_FROM in child)
 
@@ -1004,7 +1005,7 @@ def _is_record_shaped(key: str, value: object, declared: frozenset[str]) -> bool
         return all(isinstance(item, Mapping) for item in value)
     if isinstance(value, Mapping):
         return bool(set(value) & declared)
-    numbered = _NUMBERED_FIELD_RE.match(key)
+    numbered = NUMBERED_FIELD_RE.match(key)
     return bool(numbered and numbered.group("field") in declared)
 
 

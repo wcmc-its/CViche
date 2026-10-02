@@ -1273,3 +1273,43 @@ def test_stage_6_renders_nothing_for_the_skipped_summary_run_stage_4_5_writes(mo
     gen = WCMTemplateGenerator(verbose=False)
     assert gen._fill_research_summary(json.loads(Path(out_path).read_text())) is False
     assert gen.stats["entries_inserted"] == 0
+
+
+def test_run_stage_4_5_records_each_call_the_fallback_served(monkeypatch, tmp_path):
+    """#1174: both calls (the M1 relevance score and the generation) are
+    served by the fallback here; the artifact lists them, by call name."""
+    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_5_FALLBACK_CALLS_KEY
+
+    def fake_call_llm(*, messages, **_kwargs):
+        reply = {"content": '{"score": 0.1, "reasoning": "weak"}'
+                 if _SCORE_PROMPT_MARKER in messages[0]["content"]
+                 else "A synthetic research summary paragraph.",
+                 "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.0,
+                 FALLBACK_SERVED_KEY: "example.fallback-model-1"}
+        return reply
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+    inp = _write_fields_json(tmp_path, "TEST12", [
+        {"taxonomy_code": "M1", "text": "Keywords only"},
+        {"taxonomy_code": "M2A", "text": "Grant",
+         "extracted_fields": {"title": "R01 Study", "agency": "NIH"}}])
+
+    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text())
+
+    assert out[STAGE4_5_FALLBACK_CALLS_KEY] == [
+        {"call": "m1_relevance_score", "model": "example.fallback-model-1"},
+        {"call": "summary_generation", "model": "example.fallback-model-1"}]
+
+
+def test_run_stage_4_5_writes_no_fallback_record_when_none_was_served(monkeypatch, tmp_path):
+    from unified_pipeline.llm_provenance import STAGE4_5_FALLBACK_CALLS_KEY
+
+    monkeypatch.setattr(stage_4_5, "call_llm", lambda **_kw: {
+        "content": "A synthetic research summary paragraph.",
+        "prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2, "cost": 0.0})
+    inp = _write_fields_json(tmp_path, "TEST13", [
+        {"taxonomy_code": "M2A", "text": "Grant",
+         "extracted_fields": {"title": "R01 Study", "agency": "NIH"}}])
+
+    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text())
+
+    assert STAGE4_5_FALLBACK_CALLS_KEY not in out

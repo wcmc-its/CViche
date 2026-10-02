@@ -535,6 +535,89 @@ def test_filter_options_feedback_counts_cascade(client, db, seed_simple_mode):
     assert body["self_count"] == 0
 
 
+@pytest.mark.parametrize("value, expected", [
+    ("running", ["ADM006"]),
+    ("failed", ["ADM005"]),
+    ("red", ["ADM003"]),
+])
+def test_scope_all_status_filter(client, db, seed_simple_mode, value, expected):
+    users = _seed_feedback_view(db)
+    db.get(Run, "ADM006").status = "running"
+    db.get(Run, "ADM003").quality_band = "RED"
+    db.commit()
+    _auth(client, users["admin"])
+    resp = client.get(f"/api/runs?scope=all&status={value}")
+    assert _ids(resp) == expected
+    assert resp.json()["total"] == len(expected)
+
+
+def test_scope_all_run_by_on_behalf_and_its_option_count(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    _auth(client, users["admin"])
+    assert _ids(client.get("/api/runs?scope=all&run_by=on_behalf")) == [
+        "ADM006", "ADM005", "ADM004", "ADM003", "ADM002"]
+    assert client.get("/api/runs/filter-options?scope=all").json()["on_behalf_count"] == 5
+
+
+def test_scope_mine_status_filter_sees_only_own_runs(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    db.get(Run, "ADM001").status = "failed"  # Alice's own Jane run
+    db.get(Run, "ADM004").status = "running"  # Bob's
+    db.commit()
+    _auth(client, users["alice"])
+    assert _ids(client.get("/api/runs?status=failed")) == ["ADM001"]
+    assert _ids(client.get("/api/runs?status=running")) == []
+    _auth(client, users["bob"])
+    # Alice's failed run is not Bob's to see.
+    assert _ids(client.get("/api/runs?status=failed")) == []
+    assert _ids(client.get("/api/runs?status=running")) == ["ADM004"]
+
+
+def test_my_status_counts_never_include_other_users_runs(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    db.get(Run, "ADM001").status = "failed"  # Alice's
+    db.get(Run, "ADM004").status = "running"  # Bob's
+    db.commit()
+    _auth(client, users["alice"])
+    alice = client.get("/api/runs/my-status-counts").json()
+    assert alice["all"] == len(_ids(client.get("/api/runs")))
+    assert (alice["failed"], alice["running"], alice["red"]) == (1, 0, 0)
+    _auth(client, users["bob"])
+    bob = client.get("/api/runs/my-status-counts").json()
+    assert bob["all"] == len(_ids(client.get("/api/runs")))
+    assert (bob["failed"], bob["running"]) == (0, 1)
+
+
+def test_scope_all_runs_carry_cost_for_admins(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    db.get(Run, "ADM001").total_cost = 2.5
+    db.commit()
+    _auth(client, users["admin"])
+    costs = {r["run_id"]: r["total_cost"] for r in client.get("/api/runs?scope=all").json()["runs"]}
+    assert costs["ADM001"] == 2.5
+
+
+def test_filter_options_cascade_applies_the_status_filter(client, db, seed_simple_mode):
+    users = _seed_admin_view(db)
+    db.get(Run, "ADM006").status = "running"
+    db.commit()
+    _auth(client, users["admin"])
+    body = client.get("/api/runs/filter-options?scope=all&status=running").json()
+    assert [(f["value"], f["count"]) for f in body["faculty"]] == [("Omar Testperson", 1)]
+    assert body["status"]["all"] == 6  # the pill counts ignore the status filter itself
+
+
+def test_red_status_is_admin_only_and_bad_status_is_422(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    _auth(client, users["alice"])
+    assert client.get("/api/runs?status=red").status_code == 403
+    assert client.get("/api/runs?scope=all&status=red").status_code == 403
+    assert client.get("/api/runs?status=green").status_code == 422
+    _auth(client, users["admin"])
+    assert client.get("/api/runs?scope=all&status=green").status_code == 422
+    assert client.get("/api/runs/filter-options?scope=all&status=red").status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Run score: list columns (admin), run-quality report (admin), review note
 # ---------------------------------------------------------------------------
@@ -702,3 +785,46 @@ def test_run_list_filters_to_one_batch_in_either_scope(client, db, seed_simple_m
     body = client.get(f"/api/runs?scope={scope}&batch_id=BATCHA").json()
     assert sorted(r["run_id"] for r in body["runs"]) == ["INBATA", "INBATB"]
     assert body["total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# input_format filter: GET /runs?scope=all&input_format= and filter-options
+# ---------------------------------------------------------------------------
+
+def _seed_input_formats(db):
+    users = _seed_admin_view(db)
+    for run_id, fmt in [("ADM001", "wcm"), ("ADM002", "other"), ("ADM003", "wcm"), ("ADM004", "other")]:
+        db.query(Run).filter(Run.id == run_id).update({Run.input_format: fmt})
+    db.commit()  # ADM005 and ADM006 stay NULL
+    return users
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("wcm", ["ADM003", "ADM001"]),
+    ("other", ["ADM004", "ADM002"]),
+    ("unknown", ["ADM006", "ADM005"]),
+])
+def test_scope_all_input_format_filter(client, db, seed_simple_mode, value, expected):
+    users = _seed_input_formats(db)
+    _auth(client, users["admin"])
+    resp = client.get(f"/api/runs?scope=all&input_format={value}")
+    assert _ids(resp) == expected
+    assert resp.json()["total"] == len(expected)
+
+
+def test_input_format_filter_rejects_unknown_value(client, db, seed_simple_mode):
+    users = _seed_input_formats(db)
+    _auth(client, users["admin"])
+    assert client.get("/api/runs?scope=all&input_format=docx").status_code == 422
+
+
+def test_filter_options_input_format_counts_cascade(client, db, seed_simple_mode):
+    users = _seed_input_formats(db)
+    _auth(client, users["admin"])
+    counts = client.get("/api/runs/filter-options?scope=all").json()["input_format"]
+    assert counts == {"wcm": 2, "other": 2, "unknown": 2}
+    # Other filters narrow the counts; the input_format filter itself does not.
+    narrowed = client.get(
+        "/api/runs/filter-options?scope=all&department=Library&input_format=wcm").json()
+    assert narrowed["input_format"] == {"wcm": 1, "other": 1, "unknown": 0}
+

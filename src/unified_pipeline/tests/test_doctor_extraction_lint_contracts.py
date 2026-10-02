@@ -70,6 +70,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
 from unified_pipeline.doctor.shared import (  # noqa: E402
     _LINE_SENTINEL, _haystacks, _piece_in_template, _template_haystack)
 from unified_pipeline.segmentation_regression import _norm  # noqa: E402
+from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY  # noqa: E402
 
 
 # ==========================================================================
@@ -1155,6 +1156,30 @@ def test_offschema_a_record_list_fan_out_declines_is_warn():
         {"committee_name": "Beta Panel", "role": "Member"}]},
         text="Alpha Board Chair\tBeta Panel Member Gamma")
     assert [f["severity"] for f in _offschema(entry)] == ["WARN"]
+
+
+def test_offschema_stage4_records_fan_out_splits_is_not_reported():
+    """Stage 4 keeps every record the LLM returned under `stage4_records`, and
+    stage 6 hands that key to fan-out, which renders each as its own row."""
+    entry = _anchored("I", {"organization": "Society B", STAGE4_RECORDS_KEY: [
+        {"organization": "Society A", "membership_type": "Member"},
+        {"organization": "Society B", "membership_type": "Fellow"}]},
+        text="Societies: Society A Member\tSociety B Fellow")
+    # "Societies" is held by no field, so the generic list rule would decline;
+    # only the stage-4 records path splits this entry.
+    assert _offschema(entry) == []
+
+
+def test_offschema_stage4_records_fan_out_declines_is_warn():
+    """A record with no value its section writes makes fan-out decline the
+    whole list, so the records are never read."""
+    entry = _anchored("I", {"organization": "Society B", STAGE4_RECORDS_KEY: [
+        {"notes": "Founding member"},
+        {"organization": "Society B", "membership_type": "Fellow"}]},
+        text="Founding member\tSociety B Fellow")
+    findings = _offschema(entry)
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert f"`{STAGE4_RECORDS_KEY}`" in findings[0]["message"]
 
 
 @pytest.mark.parametrize("entry", [

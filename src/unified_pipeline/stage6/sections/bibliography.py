@@ -40,7 +40,7 @@ import inspect
 import logging
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, List
@@ -125,6 +125,7 @@ class _CitationEnrichment:
     enrichment_source: str = ''
     text: str = ''
     in_press_note: str = ''
+    in_press_superseded: bool = False
 
     @classmethod
     def from_raw(cls, raw) -> '_CitationEnrichment':
@@ -136,6 +137,7 @@ class _CitationEnrichment:
             enrichment_source=_enrichment_field_text(raw.get('enrichment_source')),
             text=_enrichment_field_text(raw.get('text')),
             in_press_note=_enrichment_field_text(raw.get('in_press_note')),
+            in_press_superseded=raw.get('in_press_superseded') is True,
         )
 
 
@@ -404,9 +406,15 @@ class BibliographySection:
             if pubs_sorted:
                 _insert_before_anchor("")
 
-            for citation_num, pub in enumerate(pubs_sorted, start=1):
-                citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
+            citation_num = 0
+            for pub in pubs_sorted:
                 enrichment = _CitationEnrichment.from_raw(pub)
+                if enrichment.in_press_superseded:
+                    # Takes no citation number: accepting the deletion leaves none.
+                    self._insert_superseded_citation(_insert_before_anchor, enrichment)
+                    continue
+                citation_num += 1
+                citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
                 original_text = enrichment.text
                 enrichment_status = enrichment.enrichment_status
 
@@ -445,6 +453,19 @@ class BibliographySection:
                 self._add_entry_comments(para, pub)
 
                 self.stats['entries_inserted'] += 1
+
+    def _insert_superseded_citation(self, insert_paragraph: Callable[[], Paragraph],
+                                    enrichment: _CitationEnrichment) -> None:
+        """An "in press" entry stage 5 found already listed as published:
+        the CV's text as one tracked deletion carrying the note, so the faculty
+        member accepts or rejects dropping it. With track changes off the
+        accepted state is shown, which is no paragraph at all."""
+        if not self.emit_track_changes or not enrichment.text:
+            return
+        para = insert_paragraph()
+        self._add_track_change_deletion(para, enrichment.text, author="PubMed Enrichment")
+        self._add_word_comment(para, enrichment.in_press_note,
+                               author="PubMed Enrichment", always=True)
 
     def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: str | None, cv_owner_last_name: str = '') -> None:
         """

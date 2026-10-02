@@ -426,6 +426,18 @@ def _lost_lines(substantive: list[str], entries: list[Entry]) -> list[str]:
     return lost
 
 
+def count_mega_entries(entries: list[Entry]) -> int:
+    """Pure: how many content entries pack MEGA_ENTRY_MIN_RECORDS or more
+    record-like lines, i.e. several records fused into one entry. Shared by
+    ``compute_metrics`` and the quality score's fused-entries gate, so the
+    doctor's ``mega_entries`` flag and the score cannot count differently."""
+    return sum(
+        1 for e in entries
+        if e.get("element_type") not in ("header", "break")
+        and sum(1 for line in str(e.get("text", "")).split("\n")
+                if looks_like_record(line)) >= MEGA_ENTRY_MIN_RECORDS)
+
+
 def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -> Metrics:
     """Pure: structural metrics for one CV from its source lines + stage
     1a/2 outputs. Everything the compare/lint verdicts read comes from here."""
@@ -454,12 +466,7 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
         seen.add(key)
 
     # --- mega-entries: several record-like lines fused into one entry
-    mega = 0
-    for e in content:
-        records = sum(1 for line in str(e.get("text", "")).split("\n")
-                      if looks_like_record(line))
-        if records >= MEGA_ENTRY_MIN_RECORDS:
-            mega += 1
+    mega = count_mega_entries(entries)
 
     header_titles: list[str] = []
     _walk_headers(stage1a.get("hierarchy"), header_titles)

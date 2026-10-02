@@ -85,10 +85,18 @@ TITLE_SEARCH_MAX_HITS = 3
 # with a near-identical title.
 IN_PRESS_YEAR_WINDOW = range(-1, 3)
 
-# "accepted" counts only for publication, not "accepted for presentation" or
-# "accepted as a poster/abstract".
+# "accepted" counts only in a status shape: followed by punctuation, a date,
+# "for publication" or "author manuscript". Every corpus "accepted" in an S
+# entry has one of those shapes (2026-10-02, 60 CVs), while PubMed's 1,599
+# titles with the word mostly use it as a verb ("accepted by", "accepted as a
+# standard"), and "accepted for presentation" / "Accepted abstract" are
+# conference items. "in press" likewise needs punctuation, a year, PMID,
+# doi or "in" after it (every corpus shape, "In press PMID: ...", "[In Press
+# in the 2022 Proceedings"); PubMed titles hold "in Press Releases" (PMID
+# 27978540), "in press conference", "in press-fit", "in Press Ganey".
 IN_PRESS_PATTERN = re.compile(
-    r'\b(in[\s-]press|accepted(?!\s+(?:for|as)\s+(?:an?\s+)?(?:presentation|poster|oral|abstract|talk))'
+    r'\b(in[\s-]press(?=\s*(?:[^\w\s-]|\d|$|pmid\b|doi\b|in\b))'
+    r'|accepted(?=\s*(?:[^\w\s]|\d|$)|\s+for\s+publication|\s+author\s+manuscript)'
     r'|(?:e-?pub|online)\s+ahead\s+of\s+print)\b', re.I)
 # An entry that also says it is still under review is not in press (4 of the
 # 63 probe entries said both).
@@ -102,18 +110,41 @@ PUBTYPE_TAXONOMY_CODES = (('Case Reports', 'S6'), ('Review', 'S2'),
                           ('Systematic Review', 'S2'), ('Editorial', 'S2'))
 PUBLISHED_DEFAULT_CODE = 'S1'
 IN_REVIEW_CODE = 'S7'
+# An in-press entry PubMed did not find still is not "In review" (#1166):
+# taxonomy_v7 promotes a paper once accepted. Without a PubMed type to go by,
+# a chapter ("In: ... eds") goes to S4 and anything else to S1. Prompt text
+# alone did not move these: the 2026-09-30 3b A/B left 23 in S7 on web200 and
+# web46 after rule 30 named "in press" explicitly.
+UNMATCHED_CHAPTER_CODE = 'S4'
+UNMATCHED_DEFAULT_CODE = 'S1'
+# "In;" and "(eds Greenwood, ...)" / "(ed Venables)" are both corpus shapes
+# (web200).
+CHAPTER_PATTERN = re.compile(r'\bIn[:;]\s*\S|\(eds?\b|\beds?\.(?=\s|,|$)|\beditors?\b|\bchapter\b', re.I)
+# An in-press entry whose PubMed match another entry already lists as
+# published is a stale duplicate (web200: the same 2006 paper listed both as
+# published and as "in press" in another journal). Compared only against these
+# codes, so a same-titled conference abstract (S8) is not mistaken for it.
+PUBLISHED_ARTICLE_CODES = frozenset({'S1', 'S2', 'S6'})
 # Only an ID-less entry, or one whose DOI PubMed did not know, is searched by
 # title: a CV identifier that resolved to another paper stays rejected.
 _TITLE_SEARCHABLE_STATUSES = frozenset({'no_identifier', 'doi_not_in_pubmed'})
 
 
-def in_press_phrase(text: str) -> str | None:
+def in_press_phrase(text: str, title: str = '') -> str | None:
     """The phrase that marks the entry as in press, lowercased, or None when
-    there is none or the entry also says it is still under review."""
-    match = IN_PRESS_PATTERN.search(text or '')
-    if not match or NOT_YET_ACCEPTED_PATTERN.search(text):
+    there is none or the entry also says it is still under review.
+
+    A phrase inside the title ("Socially accepted norms") is not a status, so
+    the text must hold more matches than the title does. Counting, not
+    deleting the title from the text, because stage 4's title rarely equals
+    the CV's spelling of it exactly (case, punctuation, truncation). Status
+    phrases trail the citation, so the last match is the one reported."""
+    text = text or ''
+    matches = IN_PRESS_PATTERN.findall(text)
+    if (len(matches) <= len(IN_PRESS_PATTERN.findall(title or ''))
+            or NOT_YET_ACCEPTED_PATTERN.search(text)):
         return None
-    return re.sub(r'\s+', ' ', match.group(1).lower())
+    return re.sub(r'\s+', ' ', matches[-1].lower())
 
 
 def _folded_words(text: str, min_len: int) -> set[str]:
@@ -147,6 +178,15 @@ def plausible_publication_year(cv_year: str | int | None, pubmed_year: int | Non
     if not match or not pubmed_year:
         return True
     return pubmed_year - int(match.group(1)) in IN_PRESS_YEAR_WINDOW
+
+
+def _same_title(a: str, b: str) -> bool:
+    """Overlap against the longer title, so one title nested in the other
+    does not count as the same paper."""
+    words_a, words_b = _title_words(a), _title_words(b)
+    if not words_a or not words_b:
+        return False
+    return len(words_a & words_b) / max(len(words_a), len(words_b)) >= MIN_TITLE_SEARCH_OVERLAP
 
 
 def published_taxonomy_code(publication_types: list[str]) -> str:
@@ -218,6 +258,8 @@ class PubMedEnricher:
             'api_errors': 0,
             'title_searches': 0,
             'in_press_resolved': 0,
+            'in_press_duplicates': 0,
+            'in_press_promoted': 0,
         }
 
         # (operation, status/exception) classes already logged at ERROR this run
@@ -508,18 +550,25 @@ class PubMedEnricher:
         """An entry the CV calls in press is searched by title when it had no
         usable identifier; once matched by any path it takes PubMed's year,
         leaves S7 for its published code, and carries `in_press_note`, the
-        Word comment stage 6 attaches to the tracked change."""
+        Word comment stage 6 attaches to the tracked change. One PubMed did
+        not match still leaves S7, by its own text (#1166)."""
         for entry in pub_entries:
             fields = entry.get('extracted_fields') or {}
             title = fields.get('title') or fields.get('chapter_title') or ''
-            # The phrase must sit outside the title: "Socially accepted norms"
-            # is a title, not a status.
-            phrase = in_press_phrase((entry.get('text') or '').replace(title, ' '))
+            # No title, no way to tell a status from a title that says
+            # "(in press)" (letters, corrigenda) or ends "accepted." -- and no
+            # title search either.
+            phrase = title and in_press_phrase(entry.get('text') or '', title)
             if not phrase:
                 continue
             if entry.get('enrichment_status') in _TITLE_SEARCHABLE_STATUSES:
                 self._enrich_by_title(entry, title)
-            if entry.get('enrichment_status') == 'enriched':
+            if entry.get('enrichment_status') != 'enriched':
+                self._promote_unmatched_in_press(entry)
+                continue
+            if self._lists_as_published(entry, pub_entries):
+                self._record_in_press_duplicate(entry, phrase)
+            else:
                 self._record_in_press_resolution(entry, phrase)
 
     def _enrich_by_title(self, entry: dict, title: str) -> None:
@@ -580,6 +629,54 @@ class PubMedEnricher:
         entry['in_press_note'] = (f"Found in PubMed as PMID {pmid}{published}; "
                                   f"the CV listed it as {phrase}.")
         self.stats['in_press_resolved'] += 1
+
+    def _lists_as_published(self, entry: dict, pub_entries: list[dict]) -> bool:
+        """Whether another published-article entry of this CV is the paper
+        `entry` was matched to: the same PMID, or a title clearing
+        MIN_TITLE_SEARCH_OVERLAP measured against the LONGER title, with the
+        same year. Both guards are corpus incidents (2026-10-02): 7 of 8
+        title-only candidates were same-group papers in another year, and
+        web228's 2018 Sci Rep meta-analysis has a short title nested inside
+        the in-press paper's, which a shorter-title overlap scores as a match."""
+        enrichment = entry.get('enrichment_data') or {}
+        pmid, year = enrichment.get('pubmed_pmid'), enrichment.get('pubmed_year')
+        for other in pub_entries:
+            if other is entry or other.get('taxonomy_code') not in PUBLISHED_ARTICLE_CODES:
+                continue
+            fields = other.get('extracted_fields') or {}
+            if pmid and str(fields.get('pmid')) == str(pmid):
+                return True
+            if (year and str(fields.get('year')) == str(year)
+                    and _same_title(fields.get('title') or '', enrichment.get('pubmed_title') or '')):
+                return True
+        return False
+
+    def _promote_unmatched_in_press(self, entry: dict) -> None:
+        """An S7 entry the CV calls in press that PubMed did not match (a
+        non-indexed journal, a chapter, a retitled paper) moves to S4 or S1.
+        Stage 4 extracted it with S7's schema, whose venue key is
+        `target_journal`; the citation renderer reads `journal`."""
+        if entry.get('taxonomy_code') != IN_REVIEW_CODE:
+            return
+        is_chapter = bool(CHAPTER_PATTERN.search(entry.get('text') or ''))
+        code = UNMATCHED_CHAPTER_CODE if is_chapter else UNMATCHED_DEFAULT_CODE
+        entry['taxonomy_code'] = code
+        fields = entry.setdefault('extracted_fields', {})
+        if not is_chapter and not fields.get('journal') and fields.get('target_journal'):
+            fields['journal'] = fields['target_journal']
+        if entry.get('classification_reasoning'):
+            entry['classification_reasoning'] += (
+                f" Moved from {IN_REVIEW_CODE} to {code}: the CV lists it as accepted or in press.")
+        self.stats['in_press_promoted'] += 1
+
+    def _record_in_press_duplicate(self, entry: dict, phrase: str) -> None:
+        """Stage 6 renders this entry as a tracked deletion, not a replacement:
+        replacing it would print the paper twice. Its code and year stay."""
+        pmid = (entry.get('enrichment_data') or {}).get('pubmed_pmid')
+        entry['in_press_superseded'] = True
+        entry['in_press_note'] = (f"Already listed as published (PMID {pmid}); "
+                                  f"the CV also listed it as {phrase}.")
+        self.stats['in_press_duplicates'] += 1
 
     def _identity_params(self) -> dict[str, str]:
         """NCBI identification params; email omitted when not configured."""

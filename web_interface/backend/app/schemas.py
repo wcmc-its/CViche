@@ -179,13 +179,32 @@ class FeedbackFilterCounts(BaseModel):
     needed: int
 
 
+class InputFormatFilterCounts(BaseModel):
+    """Runs matching each value of the ``input_format`` filter."""
+    wcm: int
+    other: int
+    unknown: int
+
+
+class StatusFilterCounts(BaseModel):
+    """Runs behind each status pill (every filter applies except ``status``)."""
+    all: int
+    running: int
+    awaiting_feedback: int
+    failed: int
+    red: int
+
+
 class RunFilterOptions(BaseModel):
     """GET /runs/filter-options: the options each admin runs filter offers."""
     departments: list[FilterCount]
     faculty: list[FacultyOption]
     run_by: list[RunByOption]
     self_count: int
+    on_behalf_count: int
+    status: StatusFilterCounts
     feedback: FeedbackFilterCounts
+    input_format: InputFormatFilterCounts
 
 
 class PaginatedRuns(BaseModel):
@@ -480,6 +499,20 @@ class AdminStepAvg(BaseModel):
     avg_seconds: float
 
 
+class DepartmentSubmissions(BaseModel):
+    """Runs one department's submitters filed, by who submitted them."""
+    department: str | None  # None: the submitter has no ED department ("Unknown")
+    own_cv: int
+    on_behalf: int
+
+
+class SubmissionSplit(BaseModel):
+    """Who submits CVs: faculty themselves (own_cv) vs on their behalf (authorized_admin)."""
+    own_cv: int = 0
+    on_behalf: int = 0
+    departments: list[DepartmentSubmissions] = []
+
+
 class AdminStats(BaseModel):
     """Overview statistics for the admin dashboard."""
     total_runs: int
@@ -492,6 +525,7 @@ class AdminStats(BaseModel):
     p95_duration_seconds: int | None = None
     # Per-stage average duration over completed runs, in pipeline order.
     step_avg_seconds: list[AdminStepAvg] = []
+    submissions: SubmissionSplit = SubmissionSplit()
 
 
 class AdminUser(BaseModel):
@@ -702,6 +736,18 @@ class AdminConfigResponse(BaseModel):
     rate_limit_monthly: int = 50
     consent_version: str = "1.0"
     auth_mode: str = "simple"
+
+
+class ConsentPublishPreview(BaseModel):
+    """What publishing the next consent version would do, before it is published."""
+    current_version: str
+    next_version: str
+    users_to_reconsent: int  # active users whose consent_version is not next_version
+
+
+class ConsentPublishRequest(BaseModel):
+    """The version the admin was shown; must still be the next version."""
+    version: str
 
 
 class AdminConfigUpdate(BaseModel):

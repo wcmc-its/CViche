@@ -158,6 +158,35 @@ class TestQueueRunTransitions:
         assert result.won is False
         assert result.status == "running"
 
+    def test_claim_queued_records_the_executing_image_tag(self, db, monkeypatch):
+        """The tag is stamped at the claim (the worker's image), not at upload."""
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-1.2026-01-01.00.00.00.abcd1234")
+        self._seed_run(db)
+        claim_queued("QRT001")
+        assert self._reload(db).image_tag == "dev-1.2026-01-01.00.00.00.abcd1234"
+
+    def test_claim_queued_with_no_image_tag_records_null_and_still_wins(self, db, monkeypatch):
+        monkeypatch.delenv("CVICHE_IMAGE_TAG", raising=False)
+        self._seed_run(db, image_tag="stale-tag")
+        assert claim_queued("QRT001").won is True
+        assert self._reload(db).image_tag is None
+
+    def test_empty_image_tag_env_is_treated_as_unset(self, monkeypatch):
+        """A Dockerfile built without --build-arg bakes in an empty ENV."""
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "")
+        assert run_service.current_image_tag() is None
+
+    def test_whitespace_image_tag_env_is_treated_as_unset(self, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "   ")
+        assert run_service.current_image_tag() is None
+
+    def test_claim_run_as_running_records_the_image_tag(self, db, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
+        self._seed_run(db, status="created")
+        assert run_service.claim_run_as_running(db, "QRT001", Run.status == "created") is True
+        db.commit()
+        assert self._reload(db).image_tag == "dev-2.tag"
+
     def test_claim_queued_reports_none_for_an_unknown_run(self, db):
         result = claim_queued("NOSUCH")
         assert result == ClaimResult(won=False, status=None, file_type=None, resume_from_step=None)

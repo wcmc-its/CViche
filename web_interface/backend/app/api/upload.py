@@ -35,21 +35,25 @@ from app.services.config_service import (
     ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
     get_estimated_run_cost, get_estimate_model_name,
 )
-from app.errors import bad_request, internal_error
+from app.services.run_service import latest_run_with_hash
+from app.errors import bad_request, duplicate_file, internal_error
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
 from app.services.batch_service import MAX_BATCH_FILES, get_owned_batch
 from app.services.run_service import UPLOAD_DIR
+from app.services.input_format import detect_input_format_or_none
 from app.services.template_warning import detect_wcm_template
 from app.services.pdf_sandbox import (
     PDF_BUSY_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, PDF_UNREADABLE_MESSAGE, EncryptedPdfError,
-    PdfBusyError, PdfTooComplexError, UnreadablePdfError, extract_pdf_text,
+    PdfBusyError, PdfTooComplexError, PdfText, UnreadablePdfError, extract_pdf_text, read_pdf,
 )
 
 logger = logging.getLogger(__name__)
 ZIP_MAGIC = b"PK\x03\x04"
 PDF_MAGIC = b"%PDF-"
 PDF_EXTENSION = ".pdf"
+# How the duplicate notice words the date a file was last processed.
+DUPLICATE_DATE_FORMAT = "%B %-d, %Y"
 
 # Extensions the upload API accepts, matching the frontend's guard
 # (UploadPage.tsx's processFile). A PDF is stored and archived as-is; the
@@ -67,6 +71,12 @@ _ENCRYPTED_PDF_MESSAGE = (
     "This PDF is password-protected, so we can't read it. Please remove the "
     "password, or upload the CV as a .docx."
 )
+
+# A PDF whose image-only (scanned) pages reach this share of its pages is
+# refused at upload (#1282): most of its content would be missing from the
+# output, at full cost. Below it, the run goes ahead and /estimate names the
+# pages so the user decides before submitting.
+SCANNED_PAGE_REJECT_SHARE = 0.5
 
 # Minimum extracted text (characters) for a document to be considered readable.
 # A real CV runs into the thousands of characters; anything below this is almost
@@ -173,11 +183,49 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
         os.unlink(tmp_path)
 
 
-async def _extract_text_or_400(content: bytes, file_ext: str) -> str | None:
-    """`_extract_text` off the event loop (#793), shared by /upload and
+def _page_ranges(pages: list[int]) -> str:
+    """1-based page numbers as ranges: [2, 3, 4, 7] -> "2–4, 7"."""
+    runs: list[list[int]] = []
+    for n in pages:
+        if runs and n == runs[-1][1] + 1:
+            runs[-1][1] = n
+        else:
+            runs.append([n, n])
+    return ", ".join(str(a) if a == b else f"{a}–{b}" for a, b in runs)
+
+
+def _reject_mostly_scanned_pdf(pdf: PdfText) -> None:
+    """A 400 naming the scanned pages when they are SCANNED_PAGE_REJECT_SHARE
+    or more of the PDF (#1282). Covers a fully scanned PDF too, with a
+    message that says what to do instead of the generic no-text one."""
+    if not pdf.pages or len(pdf.image_only_pages) < SCANNED_PAGE_REJECT_SHARE * pdf.pages:
+        return
+    logger.info("Rejected mostly scanned PDF (%d of %d pages image-only)",
+                len(pdf.image_only_pages), pdf.pages)
+    noun = "Page" if len(pdf.image_only_pages) == 1 else "Pages"
+    verb = "is a scanned image" if len(pdf.image_only_pages) == 1 else "are scanned images"
+    raise bad_request(
+        f"{noun} {_page_ranges(pdf.image_only_pages)} of this PDF {verb}, so "
+        "their text can't be read. Export the PDF from the original document "
+        "(or run OCR on it) and upload it again, or upload the CV as a .docx."
+    )
+
+
+def _read_upload_text(content: bytes, file_ext: str) -> tuple[str | None, list[int]]:
+    """`_extract_text`, plus a PDF's image-only pages (empty for a docx).
+    Refuses a mostly scanned PDF with a 400."""
+    if file_ext != PDF_EXTENSION:
+        return _extract_text(content, file_ext), []
+    pdf = read_pdf(content)
+    _reject_mostly_scanned_pdf(pdf)
+    return pdf.text, pdf.image_only_pages
+
+
+async def _extract_text_or_400(content: bytes, file_ext: str) -> tuple[str | None, list[int]]:
+    """`_read_upload_text` off the event loop (#793), shared by /upload and
     /estimate: every PDF refusal is a 400, a full PDF sandbox a 503."""
     try:
-        return await run_in_threadpool(_extract_text, content, file_ext)
+        return await run_in_threadpool(_read_upload_text, content, file_ext)
     except EncryptedPdfError:
         raise bad_request(_ENCRYPTED_PDF_MESSAGE)
     except PdfTooComplexError as e:
@@ -320,6 +368,10 @@ class EstimateResponse(BaseModel):
     # True when the document's text couldn't be read and text_characters is
     # the fixed fallback guess, not a measurement (#794).
     text_characters_is_guess: bool = False
+    # A PDF's image-only pages, 1-based, whose text the run can't read
+    # (#1282). Fewer than SCANNED_PAGE_REJECT_SHARE of its pages, or the
+    # file would have been refused.
+    scanned_pages: list[int] = []
 
 
 # Recalibrated after the #881 parallel LLM batches went live (dev-207): the old
@@ -557,6 +609,46 @@ def commit_run_or_compensate(
         )
 
 
+def _reject_unconfirmed_duplicate(db: Session, sha256: str, user: User) -> None:
+    """Stop with a 409 when any run (any submitter) already holds this file's hash.
+
+    Non-admins get only the date; the run id goes to admins and to the run's own
+    submitter, never anyone else's. Raised before anything is archived or charged."""
+    latest = latest_run_with_hash(db, sha256)
+    if latest is None:
+        return
+    processed_on = latest.started_at.strftime(DUPLICATE_DATE_FORMAT)
+    can_see_run = user.role == "admin" or latest.user_id == user.id
+    raise duplicate_file(
+        f"This file was already processed on {processed_on}. Run it again?",
+        processed_on,
+        latest.id if can_see_run else None,
+    )
+
+
+def _archive_or_502(
+    content: bytes,
+    file_ext: str,
+    build_manifest: Callable[[str, str], bytes],
+    write_local: Callable[[Path], None],
+) -> tuple[str, str, Path, bytes]:
+    """create_run_archive, with a storage failure turned into the 502 that creates no run (#170)."""
+    try:
+        return create_run_archive(content, file_ext, build_manifest, write_local)
+    except Exception as e:
+        logger.error("Durable archive of upload failed; aborting upload: %s", e)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "storage_unavailable",
+                "message": (
+                    "We couldn't store your file securely, so no run was created. "
+                    "Please try again in a moment."
+                ),
+            },
+        )
+
+
 def _add_pending_steps(db: Session, run_id: str) -> None:
     """Stage one pending Step row per STEP_REGISTRY entry for a new run."""
     for step_def in STEP_REGISTRY:
@@ -587,6 +679,8 @@ async def upload_cv(
     # The batch this file belongs to (#1114), from POST /batches. Optional:
     # absent, the run is a single upload exactly as before.
     batch_id: str | None = Form(None),
+    # Set by the UI after the user agrees to re-process a file already run (#1286).
+    confirm_duplicate: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -634,11 +728,16 @@ async def upload_cv(
         logger.warning("[SECURITY] Rejected upload: file claims .docx but magic bytes do not match (user=%s)", current_user.email)
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
 
+    # Same bytes already run by anyone? Ask first (nothing archived or charged yet).
+    source_sha256 = hashlib.sha256(content).hexdigest()
+    if not confirm_duplicate:
+        _reject_unconfirmed_duplicate(db, source_sha256, current_user)
+
     # Reject documents we can't read (scanned images, password-protected, blank).
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
     # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
-    extracted = await _extract_text_or_400(content, file_ext)
+    extracted, _ = await _extract_text_or_400(content, file_ext)
     if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
@@ -662,6 +761,12 @@ async def upload_cv(
             current_user.email, wcm_template_match_ratio,
         )
 
+    # Was this CV written in the WCM template (filled in) or another format?
+    # Recorded on the run for score comparisons; best-effort, NULL on failure.
+    input_format, input_format_score = await run_in_threadpool(
+        detect_input_format_or_none, extracted
+    )
+
     # Allocate a fresh run id and durably archive the ORIGINAL upload to the
     # run's storage namespace BEFORE creating the run record. The pod-local
     # copy is ephemeral (lost on a pod recycle), so the archive is the run's
@@ -681,7 +786,7 @@ async def upload_cv(
             "stored_as": stored_name,
             "file_type": file_ext[1:],
             "size_bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
+            "sha256": source_sha256,
             "content_type": file.content_type,
             "uploaded_at": datetime.now().isoformat(),
             "user_email": current_user.email,
@@ -691,22 +796,9 @@ async def upload_cv(
         with open(path, "xb") as f:
             f.write(content)
 
-    try:
-        run_id, stored_name, file_path, manifest = create_run_archive(
-            content, file_ext, _build_manifest, _write_local,
-        )
-    except Exception as e:
-        logger.error("Durable archive of upload failed; aborting upload: %s", e)
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": "storage_unavailable",
-                "message": (
-                    "We couldn't store your file securely, so no run was created. "
-                    "Please try again in a moment."
-                ),
-            },
-        )
+    run_id, stored_name, file_path, manifest = _archive_or_502(
+        content, file_ext, _build_manifest, _write_local,
+    )
     storage = get_storage()
 
     # Cross-run, browsable-by-submitter index: the same manifest keyed under the
@@ -744,6 +836,9 @@ async def upload_cv(
         show_pipeline_comments=1 if include_classification_comments else 0,
         strip_template_instructions=1 if strip_wcm_instructions else 0,
         batch_id=batch_id,
+        input_format=input_format,
+        input_format_score=input_format_score,
+        source_sha256=source_sha256,
     )
     db.add(run)
     _add_pending_steps(db, run_id)
@@ -835,7 +930,7 @@ async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> 
     # this endpoint used to re-walk the docx paragraphs/tables inline, which
     # could compute a different text_char_count for the same file. Off the
     # event loop, same as /upload (#793).
-    extracted = await _extract_text_or_400(content, file_ext)
+    extracted, scanned_pages = await _extract_text_or_400(content, file_ext)
     if extracted is None:
         # _extract_text already logged the specific read failure (§5.4). No
         # filename here (CODING_STANDARDS §4.7): CV filenames usually carry
@@ -876,6 +971,7 @@ async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> 
         file_size_kb=round(file_size_kb, 1),
         pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
         text_characters_is_guess=extracted is None,
+        scanned_pages=scanned_pages,
     )
 
 

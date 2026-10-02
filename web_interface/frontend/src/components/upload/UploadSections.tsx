@@ -113,6 +113,18 @@ export function TemplateWarning({ acknowledged, onAcknowledge }: TemplateWarning
   )
 }
 
+/** The server already ran this exact file; the next click on the footer button runs it again. */
+export function DuplicateNotice({ message }: { message: string }) {
+  return (
+    <section className="bg-amber-50 border border-amber-300 rounded-lg p-4" role="alert" aria-label="Duplicate file notice">
+      <div className="flex items-start gap-3">
+        <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" aria-hidden="true" />
+        <p className="text-sm text-amber-800">{message}</p>
+      </div>
+    </section>
+  )
+}
+
 /** The single run's estimate block, as before batch upload. */
 export function SingleEstimate({ estimate, showCost }: { estimate: Estimate; showCost: boolean }) {
   return (
@@ -129,6 +141,11 @@ export function SingleEstimate({ estimate, showCost }: { estimate: Estimate; sho
       {estimate.text_characters_is_guess && (
         <span className="block text-xs text-amber-700">
           We couldn&apos;t read this document&apos;s text, so the {showCost ? 'time and cost' : 'time'} above {showCost ? 'are' : 'is'} a rough guess, not based on its length.
+        </span>
+      )}
+      {!!estimate.scanned_pages?.length && (
+        <span className="block text-xs text-amber-700">
+          {estimate.scanned_pages.length === 1 ? 'Page' : 'Pages'} {estimate.scanned_pages.join(', ')} of this PDF {estimate.scanned_pages.length === 1 ? 'is a scanned image' : 'are scanned images'}, so {estimate.scanned_pages.length === 1 ? 'its' : 'their'} text can&apos;t be read and will be missing from the output.
         </span>
       )}
       <span className="block text-xs">

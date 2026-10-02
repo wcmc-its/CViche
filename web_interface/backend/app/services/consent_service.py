@@ -6,8 +6,10 @@ fields, and managing the commit/rollback transaction. The route handler is
 left with request parsing, dependency wiring, and response shaping.
 """
 import logging
+import re
 from datetime import datetime, timezone
 
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.consent import ConsentDocument, get_current_consent_document
@@ -74,3 +76,32 @@ def record_consent(
     )
 
     return document
+
+
+# A published consent version is "<major>.<minor>", e.g. "1.2".
+_CONSENT_VERSION_RE = re.compile(r"^(\d+)\.(\d+)$")
+
+# User.status of an account that can sign in and upload.
+ACTIVE_USER_STATUS = "active"
+
+
+def next_consent_version(current: str) -> str:
+    """The version a publish moves to: the minor number plus one ("1.1" -> "1.2",
+    "1.9" -> "1.10"; compared as integers, never as decimals). Raises ValueError
+    for a current version that is not "<major>.<minor>"."""
+    match = _CONSENT_VERSION_RE.match(current.strip())
+    if match is None:
+        raise ValueError(f'Consent version "{current}" is not in <major>.<minor> form.')
+    return f"{match.group(1)}.{int(match.group(2)) + 1}"
+
+
+def count_users_to_reconsent(db: Session, version: str) -> int:
+    """Active users who would have to agree again if ``version`` were current:
+    those whose consent_version differs, including users who never consented
+    (a NULL version, which SQL's != would silently skip)."""
+    return (
+        db.query(func.count(User.id))
+        .filter(User.status == ACTIVE_USER_STATUS,
+                or_(User.consent_version.is_(None), User.consent_version != version))
+        .scalar() or 0
+    )

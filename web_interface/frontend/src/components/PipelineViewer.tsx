@@ -402,6 +402,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           runId={runId}
           filename={runStatus.filename}
           title={isComplete ? runStatus.cv_owner_name?.trim() || runStatus.filename : undefined}
+          runDate={runStatus.started_at}
           runByName={isAdmin ? runStatus.run_by?.display_name : null}
           status={runStatus.status}
           steps={runStatus.steps}
@@ -411,6 +412,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           inputTokens={runStatus.input_tokens}
           outputTokens={runStatus.output_tokens}
           elapsedSeconds={localElapsedSeconds}
+          estimatedSeconds={runStatus.estimated_duration_seconds}
           isCancelling={isCancelling}
           onCancel={handleCancel}
           onBack={onBack}

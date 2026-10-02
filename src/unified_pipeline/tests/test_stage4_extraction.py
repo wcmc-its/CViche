@@ -493,6 +493,33 @@ def test_extract_fields_batch_real_implementation_drops_malformed_item(monkeypat
     assert "dropped one malformed LLM entry" in caplog.text
 
 
+def test_extract_fields_batch_stamps_the_entries_of_a_group_the_fallback_served(monkeypatch):
+    """#1174: a served call is a success, so only this stamp records it. The
+    stamp is on the entries of the group the fallback answered, not on other
+    groups, and a normal result leaves no key."""
+    from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_ENTRY_FALLBACK_KEY
+
+    entries = [
+        {"text": "hello world", "taxonomy_code": "A1", "element_idx_start": 0, "element_idx_end": 0},
+        {"text": "other group", "taxonomy_code": "B1", "element_idx_start": 1, "element_idx_end": 1},
+    ]
+
+    def fake_call_llm(*, messages, **_kwargs):
+        reply = {"content": json.dumps({"entries": [{"entry_index": 0, "note": "x"}]}),
+                 "cost": 0.0, "total_tokens": 0}
+        if "hello world" in messages[1]["content"]:
+            reply[FALLBACK_SERVED_KEY] = "example.fallback-model-1"
+        return reply
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+
+    result = extraction.extract_fields_batch(entries, 0, 1)
+
+    by_code = {e["taxonomy_code"]: e for e in result["entries"]}
+    assert by_code["A1"][STAGE4_ENTRY_FALLBACK_KEY] == "example.fallback-model-1"
+    assert STAGE4_ENTRY_FALLBACK_KEY not in by_code["B1"]
+
+
 @pytest.mark.parametrize("timeout_error", [
     ReadTimeoutError(endpoint_url="https://bedrock.example.invalid"),
     ConnectTimeoutError(endpoint_url="https://bedrock.example.invalid"),
@@ -1162,6 +1189,62 @@ def test_a_single_item_recovery_drops_the_count_an_earlier_pass_wrote(monkeypatc
     assert STAGE4_RECORDS_RETURNED_KEY not in out
     assert out["extracted_fields"] == _SINGLE_ITEM
     assert list(out)[-1] == "llm_recovery_applied"
+
+
+# --- a second record under an off-schema key (#1245) -------------------------
+
+def _one_item_reply(code_text: str, code: str, item: dict):
+    entry = {"text": code_text, "taxonomy_code": code, "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"entries": [{"entry_index": 0, **item}]})
+    return entry, reply
+
+
+def test_a_numbered_schema_field_is_a_second_record_that_fans_out(monkeypatch):
+    # A two-column memberships row: the model kept the second column under
+    # `organization_2`, which no renderer reads.
+    from unified_pipeline.stage4.schemas import FIELD_SCHEMAS
+    from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
+    entry, reply = _one_item_reply("Glade Society 1999-2001 Fern Guild", "I", {
+        "organization": "Glade Society", "start_date": "1999", "end_date": "2001",
+        "organization_2": "Fern Guild"})
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+
+    first, second = out["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert first == {"organization": "Glade Society", "start_date": "1999", "end_date": "2001"}
+    # The parent's dates belong to the first column only.
+    assert second == {"organization": "Fern Guild"}
+    assert STAGE4_RECORDS_RETURNED_KEY not in out  # the model returned one item
+    children = fan_out_multi_record_entries([out], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+    assert [c["extracted_fields"]["organization"] for c in children] == ["Glade Society", "Fern Guild"]
+
+
+def test_an_object_sharing_schema_keys_is_the_parent_at_another_venue(monkeypatch):
+    entry, reply = _one_item_reply("Heron talk, Ashby Dinner, 2016; Wren Seminar, 2017", "R", {
+        "title": "Heron talk", "location": "Ashby", "date": "2016",
+        "additional_presentation": {"location": "Wren Seminar", "date": "2017"}})
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+
+    first, second = out["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert (first["title"], first["location"]) == ("Heron talk", "Ashby")
+    assert "additional_presentation" not in first
+    assert (second["title"], second["location"]) == ("Heron talk", "Wren Seminar")
+    assert "2017" in (second.get("date"), second.get("start_date"))
+
+
+def test_other_offschema_values_are_left_as_they_were(monkeypatch):
+    # A one-fact key, an object sharing no schema key and a record list are
+    # not a second record here: a list is fan-out's to split (#1187).
+    item = {"organization": "Glade Society", "honors": "Fellow", "contact": {"phone": "x"},
+            "roles": [{"organization": "Fern Guild"}]}
+    entry, reply = _one_item_reply("Glade Society, Fellow", "I", item)
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    assert STAGE4_RECORDS_KEY not in out["extracted_fields"]
+    assert {k: out["extracted_fields"][k] for k in item} == item
 
 
 def test_each_finished_batch_prints_a_progress_bar_line(monkeypatch, capsys, progress_patterns):
