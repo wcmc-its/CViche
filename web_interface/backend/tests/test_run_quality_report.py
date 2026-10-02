@@ -98,6 +98,7 @@ def test_cap_source_names_the_stage4_group_failure_gate_from_the_real_scorer(tmp
     ((scorer.score_fused_entries, scorer.score_stage4_group_failures), "segmentation"),
     ((scorer.score_under_extracted_records, scorer.score_fused_entries), "segmentation"),
     ((scorer.score_lost_source_table, scorer.score_under_extracted_records), "table_lost"),
+    ((scorer.score_lost_source_table, scorer.score_fused_entries), "table_lost"),
     ((scorer.score_under_extracted_records, scorer.score_stage4_group_failures),
      "under_extraction"),
 ])

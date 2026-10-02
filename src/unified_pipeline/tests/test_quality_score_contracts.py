@@ -2292,6 +2292,20 @@ def test_a_lost_table_below_the_line_floor_does_not_cap(tmp_path):
     assert f"worst_lost_table_lines={qs.LOST_TABLE_CAP_MIN_LINES - 1}" in detail
 
 
+def test_the_worst_of_several_lost_tables_decides_the_cap(tmp_path):
+    _unrelated_entries(tmp_path)
+    big = qs.LOST_TABLE_CAP_MIN_LINES + 2
+    small = [[f"Beta entry number {i} about example teaching topics"]
+             for i in range(qs.LOST_TABLE_CAP_MIN_LINES - 1)]
+    large = [[f"Alpha record number {i} about example research topics"] for i in range(big)]
+    (tmp_path / qs.SOURCE_DOCX_SUBDIR).mkdir()
+    _make_docx(["Body paragraph of an example curriculum vitae."], tables=[small, large]).save(
+        tmp_path / qs.SOURCE_DOCX_SUBDIR / "cv.docx")
+    _, detail, cap = qs.score_lost_source_table(tmp_path)
+    assert cap == qs.CONTENT_LOSS_CAP
+    assert f"worst_lost_table_lines={big}" in detail
+
+
 def test_a_source_table_that_stage_2_kept_does_not_cap(tmp_path):
     n = qs.LOST_TABLE_CAP_MIN_LINES + 3
     _write_json(tmp_path, "X_entries.json", {"entries": [
