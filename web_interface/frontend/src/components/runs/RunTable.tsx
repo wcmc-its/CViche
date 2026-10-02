@@ -344,7 +344,7 @@ export default function RunTable(props: RunTableProps) {
             {isAdmin && <th className={`${CELL} text-left text-xs font-medium text-gray-500 w-[170px]`}>Run by</th>}
             <SortHeader field="status" label="Status" width="w-[120px]" {...header} />
             {isAdmin && <SortHeader field="quality_score" label="Score" width="w-[84px]" {...header} />}
-            <SortHeader field="started_at" label="Last run" width="w-[130px]" {...header} />
+            <SortHeader field="started_at" label="Started" width="w-[130px]" {...header} />
             <SortHeader field="total_duration_seconds" label="Duration" align="right" width="w-[72px]" {...header} />
             {showCost && <SortHeader field="total_cost" label="Cost" align="right" width="w-[56px]" {...header} />}
             <SortHeader field="feedback" label="Feedback" align="center" width="w-[150px]" {...header} />
