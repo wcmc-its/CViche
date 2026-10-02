@@ -173,7 +173,8 @@ class LeadershipSection:
                 fields.get('division_department'), role)
             start_date = fields.get('start_date') or ''
             end_date = fields.get('end_date') or ''
-            dates = format_date_range(start_date, end_date, taxonomy_code) or ''
+            dates = format_date_range(start_date, end_date, taxonomy_code,
+                                      original_text) or ''
 
             # Check if this entry contains multiple items (newline-separated)
             lines = entry_lines(original_text)

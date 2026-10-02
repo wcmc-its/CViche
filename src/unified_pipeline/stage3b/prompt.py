@@ -90,7 +90,7 @@ def build_taxonomy_codes_for_prompt(
 # template names its own version, and exposed here so callers can attach it
 # to classification telemetry/artifacts to identify exactly which rules
 # version produced a given run's output.
-CLASSIFICATION_RULES_VERSION = "2.6.0"
+CLASSIFICATION_RULES_VERSION = "2.7.0"
 
 _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE = """You are an expert at classifying academic CV entries into a standardized taxonomy.
 
@@ -271,18 +271,24 @@ B. RESEARCH INTERESTS, IDENTIFIERS, AND GRAY LITERATURE
 6. GRAY LITERATURE, TECHNICAL REPORTS, AND "OTHER PUBLICATIONS"
    - Carefully distinguish S5, S7, and Q2; "Other Publications" is
      often a mix and should NOT all become S5 by default.
-   - S5 = Technical reports & standards:
+   - S5 = Non-peer-reviewed research publications (technical reports,
+     standards, and gray literature):
      * Official standards and specifications (ISO, HL7, W3C, etc.)
      * Implementation guides, clinical practice guidelines from
        professional societies
      * Government or institutional technical reports with formal
        publication/report numbers.
-   - S7 = Working papers & other gray literature:
      * White papers, policy briefs, issue briefs, fact sheets
      * Consortium working documents, discussion papers
      * Preprints (arXiv, bioRxiv, medRxiv)
+     * The CV owner's own completed dissertation or thesis (unless it
+       was published as a book → S3)
+   - S7 = In review ONLY -- manuscripts not yet accepted:
      * Manuscripts explicitly marked "in preparation", "submitted",
        "under review", "in revision"
+     * NOT gray literature, preprints, or dissertations (→ S5), and NOT
+       papers marked "accepted" or "in press" (→ their publication type,
+       e.g. S1).
    - Q2 = Service-related products:
      * Regulatory comments, advisory board statements, committee
        recommendations, task force reports when the primary context
@@ -551,7 +557,7 @@ E. SERVICE, MEMBERSHIP, ADVOCACY, AND POLICY (P, Q1–Q4, H, I)
       * Schools, churches, community groups, rotary clubs, local
         governments, patient advocacy groups.
       * Public forums, town halls, community health fairs.
-    - Op-eds: Op-eds in newspapers/mass media → S9 or S7 (gray lit).
+    - Op-eds: Op-eds in newspapers/mass media → S9.
     - Patient education materials (brochures, handouts) → S5.
 
 24. POLICY TESTIMONY & REGULATORY ENGAGEMENT (Q2)
@@ -637,17 +643,24 @@ F. PUBLICATIONS AND SCHOLARLY OUTPUT (S0–S9, M2D)
         - "Edited by [Name]"
       * Special issues of journals where they are issue editors.
 
-30. TECHNICAL REPORTS, STANDARDS, AND GRAY LITERATURE (S5 VS S7)
-    - S5 = Technical reports and standards:
+30. TECHNICAL REPORTS, STANDARDS, AND GRAY LITERATURE (S5) VS IN REVIEW (S7)
+    - S5 = Non-peer-reviewed research publications:
       * Official guidelines and standards documents (ISO, HL7, W3C,
         ACMG clinical guidelines, etc.).
       * Institutional or governmental technical reports with clear
         report/status identifiers.
-    - S7 = Working papers and informal scholarly outputs:
       * White papers, policy briefs, issue briefs, fact sheets.
       * Consortium working documents and position papers.
-      * Preprints and manuscripts "submitted", "under review",
-        "in preparation", "in revision" when cited as such.
+      * Preprints, even when also submitted to a journal.
+      * The CV owner's own completed dissertation or thesis.
+    - S7 = In review: manuscripts "submitted", "under review",
+      "in preparation", "in revision" when cited as such. S7 renders
+      under the CV template's "In review" header, so nothing already
+      published or publicly released belongs here.
+    - "Accepted", "in press", "forthcoming" or "Epub ahead of print"
+      means peer review is over: classify by publication type (S1, S2,
+      S6, or S3 for a book chapter), NOT S7, even though it is not yet
+      in print.
 
 31. CASE REPORTS (S6)
     - S6 = Formal case reports or case series:

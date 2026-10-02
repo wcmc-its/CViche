@@ -1349,7 +1349,7 @@ class ResearchSupportSection:
             ('Project title:', title),
             *cost_rows,
             ('Non-financial support:', fields.get('non_financial_support', '')),
-            ('Duration of support:', self._format_grant_duration(fields, code)),
+            ('Duration of support:', self._format_grant_duration(fields, code, raw_text)),
             ('Name of Principal Investigator:', pi_name),
             ('Your role:', role),
             ('Your percent (%) effort:', percent_effort),
@@ -1412,14 +1412,16 @@ class ResearchSupportSection:
         return table
 
     def _format_grant_duration(
-        self, fields: GrantFields, taxonomy_code: str = 'M2A'
+        self, fields: GrantFields, taxonomy_code: str = 'M2A', source_text: str = ''
     ) -> str:
         """Format grant duration according to WCM requirements.
 
         Grants use mm/yy format per the template.
         Clinical trials may use 'date' instead of 'start_date'.
+        `source_text` is the entry's text: a start-only grant renders its
+        start alone unless the source leaves it open (class 13).
         """
         start = fields.get('start_date', '') or fields.get('date', '')
         end = fields.get('end_date', '')
 
-        return format_date_range(start, end, taxonomy_code)
+        return format_date_range(start, end, taxonomy_code, source_text)

@@ -1108,3 +1108,19 @@ def test_a_header_row_drop_is_written_to_the_render_warnings():
         "evidence": ["element_idx_start=7"],
         "severity": "INFO",
     }]
+
+
+
+# --- class 13 (2026-10-02): memberships are left out of the bare-year rule ----
+# A start-only membership is usually ongoing, so it keeps "-Present" even
+# when the source gives only a join year (Paul, 2026-10-02).
+
+def test_start_only_membership_keeps_present_without_an_open_dash():
+    entry = {
+        "text": "Fictional Society of Examples, Charter Member, 1981",
+        "extracted_fields": {"organization": "Fictional Society of Examples",
+                             "membership_type": "Charter Member",
+                             "start_date": "1981"},
+    }
+    rows = _render_memberships([entry])
+    assert [row[1] for row in rows] == ["1981-Present"]

@@ -726,6 +726,49 @@ def test_run_stage_2_flat_hierarchy_sorts_headers_content_and_breaks(tmp_path, m
     assert on_disk == output_data
 
 
+def test_run_stage_2_promotes_a_heading_stage_1b_could_not_place(tmp_path, monkeypatch):
+    _redirect_output_manager(monkeypatch, tmp_path)
+
+    doc = Document()
+    for text in ["Jane Researcher", "TALKS", "Talk one, 2001", "POSTERS (selected)", "Poster one, 2002"]:
+        doc.add_paragraph(text)
+    docx_path = tmp_path / "unlocated.docx"
+    doc.save(docx_path)
+
+    # 1b kept POSTERS in its hierarchy but found no line for it, so the
+    # TALKS section runs over the POSTERS line.
+    hpath = _write_hierarchy(
+        tmp_path, "unlocated_h.json", "TESTUID3",
+        hierarchy_with_indices=[
+            {"text": "TALKS", "level": "H1", "element_idx": 1, "synthetic": False, "children": []},
+            {"text": "POSTERS", "level": "H1", "element_idx": None, "synthetic": False, "children": []},
+        ],
+        section_boundaries=[
+            {"hierarchy": ["TALKS"], "element_idx_start": 1, "element_idx_end": 4, "has_children": False},
+        ],
+    )
+    _route_call_llm(monkeypatch, {
+        "Personal Data": [{"element_idx_start": 0, "element_idx_end": 0, "element_type": "paragraph", "confidence": 0.9}],
+        "TALKS": [
+            {"element_idx_start": 2, "element_idx_end": 2, "element_type": "paragraph", "confidence": 0.9},
+            {"element_idx_start": 4, "element_idx_end": 4, "element_type": "paragraph", "confidence": 0.9},
+        ],
+    })
+
+    output_data, output_path = stage2.run_stage_2(str(docx_path), str(hpath))
+
+    assert [(e["element_idx_start"], e["element_type"], e["hierarchy"]) for e in output_data["entries"]] == [
+        (0, "paragraph", ["Personal Data"]),
+        (1, "header", ["TALKS"]),
+        (2, "paragraph", ["TALKS"]),
+        (3, "header", ["POSTERS"]),
+        (4, "paragraph", ["POSTERS"]),
+    ]
+    assert output_data["coverage"]["header_entries"] == 2
+    assert output_data["coverage"]["break_entries"] == 0
+    assert json.loads(output_path.read_text()) == output_data
+
+
 def test_run_stage_2_strip_template_instructions_true_drops_instruction_entry(tmp_path, monkeypatch):
     _redirect_output_manager(monkeypatch, tmp_path)
 
