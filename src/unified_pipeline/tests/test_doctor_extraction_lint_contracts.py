@@ -1164,7 +1164,7 @@ def test_offschema_a_record_list_fan_out_declines_is_warn():
     _anchored("R", {"pmid": "123"}),                           # stage-4 identifiers
     _anchored("R", {"pmcid": "PMC1"}),
     _anchored("R", {"doi": "10.1/x"}),
-    _anchored("R1", {"target_name": "Doe J"}),                 # stage-4 target name
+    _anchored("R1", {"extra": "x"}),                           # no schema at all
     _anchored("M2C", {"percent_effort": "5%"}),                # stage-4 effort
     _anchored("H", {"date_range": "2001-2003"}),               # date-named
     _anchored("H", {"start_date_1": "2001"}),                  # numbered date
@@ -1173,7 +1173,7 @@ def test_offschema_a_record_list_fan_out_declines_is_warn():
     _anchored("I", {"extra": None}),
     _anchored("I", {"extra": []}),
     _anchored("I", {"extra": {}}),
-    _anchored("A", {"fax": "555-0100"}),                       # personal data
+    _anchored("A", {"school": "Example School"}),              # personal data
     _anchored("T", {"extra": "x"}),                            # text-rendered
     _anchored("K2", {"extra": "x"}),
     _anchored("S1", {"other_id": "x"}),                        # publication (5d)

@@ -938,13 +938,11 @@ _OFFSCHEMA_SKIPPED_CODES = (frozenset({PERSONAL_DATA_CODE}) | _TEXT_RENDERED_COD
 
 #: Keys stage 4's own post-processing writes onto entries whose schema may
 #: not declare them -- bookkeeping, not a value the model misfiled:
-#: `owner_name.add_target_names` sets `target_name` on S and R* entries, and
-#: `coercion.apply_regex_post_processing` sets the identifiers on S,
-#: `IDENTIFIER_TAXONOMY_CODES` and `percent_effort` on M2*. Only the codes
-#: this lint inspects are listed: S, N4 (text-rendered) and the `orcid` codes
-#: A and S0 are skipped above.
-_TARGET_NAME_KEY = "target_name"
-_TARGET_NAME_CODE_PREFIX = "R"
+#: `coercion.apply_regex_post_processing` sets the identifiers on S and
+#: `IDENTIFIER_TAXONOMY_CODES`, and `percent_effort` on M2*. Only what this
+#: lint can see is listed: S, N4 and the `orcid` codes A and S0 are skipped
+#: above, and `owner_name.add_target_names`' `target_name` lands only on S
+#: and on R codes that either declare it (R) or have no schema at all.
 _IDENTIFIER_KEYS = frozenset({"pmid", "pmcid", "doi"})
 _PERCENT_EFFORT_KEY = "percent_effort"
 
@@ -980,8 +978,6 @@ def _declared_fields() -> dict[str, frozenset[str]]:
 
 def _stage4_bookkeeping_keys(code: str) -> frozenset[str]:
     keys: set[str] = set()
-    if code.startswith(_TARGET_NAME_CODE_PREFIX):
-        keys.add(_TARGET_NAME_KEY)
     if code in IDENTIFIER_TAXONOMY_CODES:
         keys |= _IDENTIFIER_KEYS
     if code.startswith(GRANT_EFFORT_TAXONOMY_PREFIX):
