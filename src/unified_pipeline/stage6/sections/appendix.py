@@ -108,7 +108,7 @@ like `_BARE_YEAR_RE`). A signature block ("(Date) (Signature of Candidate)",
 structural artifact AND `_is_signature_block` finds nothing in the text but
 dates, blanks, the owner's own name tokens (`_owner_signature_tokens`, read from
 the `cv_owner` stage 6 already holds) and the words Date, Signature, Signed and
-the phrase "Signature of Candidate". `_DATE_STAMP_RE` now also takes a numeric date, parentheses,
+the phrase "Signature of Candidate", with at least one of those words present. `_DATE_STAMP_RE` now also takes a numeric date, parentheses,
 and a full date alone on its line.
 
 What was dropped is reported ONCE, as a single Word comment on the introductory
@@ -403,12 +403,10 @@ class OwnerTokens(NamedTuple):
     """The owner's word tokens for the signature-block shape (#1221).
 
     `removable` is everything the shape may subtract from a line: name words,
-    credentials ("MD", "FACP") and single initials. `names` is only the name words
-    longer than one character, the one kind that counts as OWNER EVIDENCE: a
-    credential or an initial alone must never make a record line a signature."""
+    credentials ("MD", "FACP") and single initials. They are only subtracted, never
+    evidence: a signature block needs a Date, Signature or Signed word."""
 
     removable: frozenset[str] = frozenset()
-    names: frozenset[str] = frozenset()
 
 
 def _name_words(value: object) -> set[str]:
@@ -420,38 +418,28 @@ def _name_words(value: object) -> set[str]:
 def _owner_signature_tokens(cv_owner: Mapping[str, object] | None) -> OwnerTokens:
     """Lower-cased word tokens of the owner name stage 6 already carries in
     `cv_owner` (periods dropped, so "D.V.M." and "DVM" agree), plus the initial
-    of each (#1221). Name evidence is the first, middle and last name words only;
-    the credentials after the first comma of `full_name_with_credentials` are
-    removable but never evidence."""
+    of each (#1221)."""
     owner = cv_owner or {}
-    names: set[str] = set()
+    removable = _name_words(owner.get("full_name_with_credentials"))
     for field in _OWNER_NAME_FIELDS:
-        names |= _name_words(owner.get(field))
-    full = owner.get("full_name_with_credentials")
-    names |= _name_words(full.split(",")[0] if isinstance(full, str) else None)
-    removable = _name_words(full) | names
+        removable |= _name_words(owner.get(field))
     # A name written with a middle initial ("Jane Q. Doe" as "J. Doe") still has the
     # owner's tokens: an initial of any owner token counts as one.
     removable |= {token[0] for token in removable}
-    return OwnerTokens(frozenset(removable), frozenset(n for n in names if len(n) > 1))
+    return OwnerTokens(frozenset(removable))
 
 
 def _is_signature_block(text: str, owner_tokens: OwnerTokens) -> bool:
     """True when, once dates, blanks and the owner's name tokens are removed,
-    nothing is left but the signature vocabulary, and a date, "Signature",
-    "Signed" or a name word of the owner is present (#1221). A real record carries
-    some other word, so it never matches, and a credential or an initial alone is
-    not a name word ("PhD, May 2019" is a degree record)."""
+    nothing is left but the signature vocabulary, and at least one Date,
+    Signature or Signed word remains (#1221). A real record carries some other
+    word, so it never matches, and a name plus a date alone is not enough
+    ("PhD, May 2019" is a degree record)."""
     body = _SIGNATURE_PHRASE_RE.sub("signature", text.lower())
     body = _SIGNATURE_DATE_RE.sub(" ", _BLANK_RUN_RE.sub(" ", body))
     words = _WORD_RE.findall(body.replace(".", ""))
-    if not words:
-        return False
     rest = [w for w in words if w not in owner_tokens.removable]
-    if any(w not in _SIGNATURE_VOCAB for w in rest):
-        return False
-    names_owner = any(w in owner_tokens.names for w in words)
-    return bool(rest) or (names_owner and bool(_SIGNATURE_DATE_RE.search(text)))
+    return bool(rest) and all(w in _SIGNATURE_VOCAB for w in rest)
 
 
 _KIND_SHAPE = {

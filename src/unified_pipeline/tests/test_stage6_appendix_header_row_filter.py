@@ -1123,6 +1123,7 @@ def test_signature_blocks_are_dropped_with_both_signals(text, sentence):
     ("Date of Birth: 01/02/1970", "Signature block."),
     ("Signed: Pat Roe, MD", "Signature line."),  # a name that is not the owner's
     ("Jane Q. Doe", "Signature line."),  # a bare name has no date or signature word
+    ("March 3, 2021   Jane Q. Doe", "Structural artifact."),  # owner name plus date alone
     ("Of", "Signature line."),
     ("Candidate of Medicine, 06/15/2010", "Structural artifact."),
     # Degree candidacy lines hold a date and the owner's credential.
@@ -1136,6 +1137,16 @@ def test_signature_blocks_are_dropped_with_both_signals(text, sentence):
 ])
 def test_signature_shape_never_drops_a_real_record(text, sentence):
     assert _sig(text, _confirmed(sentence)) is None
+
+
+@pytest.mark.parametrize("text, lead", [
+    ("(Date)\t(Signature of Candidate)", "Signature line with placeholder."),
+    ("Signed:   Jane Q. Doe, MD", "Signed line."),
+    ("Date: ____ Signature ____", "Document footer."),
+])
+def test_each_reasoning_word_alone_is_a_signature_signal(text, lead):
+    # Raw reasoning without "structural artifact": each alternative must carry it.
+    assert _sig(text, f"[T-validation confirmed] {lead}") == DROP_SIGNATURE_BLOCK
 
 
 @pytest.mark.parametrize("lead", [
@@ -1191,7 +1202,6 @@ def test_date_stamp_shape_never_drops_a_record_that_holds_a_date(text):
 
 def test_owner_signature_tokens_normalise_periods_and_tolerate_missing_owner():
     assert {"jane", "q", "doe", "md", "facp", "j", "d", "m", "f"} <= _OWNER_TOKENS.removable
-    assert _OWNER_TOKENS.names == {"jane", "doe"}  # no credential, no initial
     assert _owner_signature_tokens(None) == OwnerTokens()
     assert _owner_signature_tokens({"first_name": None}) == OwnerTokens()
 
