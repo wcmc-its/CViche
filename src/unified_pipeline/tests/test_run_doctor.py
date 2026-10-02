@@ -1927,12 +1927,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (28), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (30), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 27
+    assert len(payload["findings"]) == 29
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -2383,6 +2383,53 @@ def test_run_doctor_wires_wrong_start_date_through_to_the_verdict(tmp_path):
     assert len(hits) == 1
     assert hits[0]["severity"] == "WARN"
     assert "98" in hits[0]["message"]
+
+
+def test_run_doctor_wires_offschema_fields_through_to_the_verdict(tmp_path):
+    """The LINT_REGISTRY row must hand the lint stage 4; invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "I", "element_type": "paragraph",
+        "element_idx_start": 97, "text": "Society A\tSociety B",
+        "extracted_fields": {"organization": "Society A",
+                             "organization_2": "Society B"}})
+    fields.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "offschema_fields"]
+    assert len(hits) == 1
+    assert hits[0]["severity"] == "WARN"
+    assert hits[0]["evidence"] == ["entry 97: Society B"]
+
+
+def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
+    """The LINT_REGISTRY row must hand the lint stage 4; invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "R", "element_type": "paragraph",
+        "element_idx_start": 96, "text": "Invited talk, Example City 11/02",
+        "extracted_fields": {"title": "Invited talk", "date": "1902-11"}})
+    fields.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "implausible_year"]
+    assert len(hits) == 1
+    assert hits[0]["severity"] == "WARN"
+    assert "entry 96 (R): date=1902" in hits[0]["message"]
+
+
+def test_field_lint_prevalence_is_the_measured_wave1_fraction():
+    """Measured 2026-10-02 over the 163-CV wave-1 stage-4 farm (one fire per
+    CV at any severity); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["offschema_fields"] == round(37 / 163, 3)
+    assert LINT_PREVALENCE["implausible_year"] == round(6 / 163, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):

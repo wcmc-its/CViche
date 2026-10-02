@@ -1758,12 +1758,17 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             'D3': 'Other Professional Positions',
             'F1': 'Licensure',
             'H': 'HONORS',
-            # Teaching (K codes) - map to specific teaching subsections
+            # Teaching (K codes) - map to specific teaching subsections. Each
+            # string is a substring of the template's own subsection heading
+            # ("Administrative teaching (leadership role ...)", "Continuing
+            # education and professional education as teacher (...)", "Other
+            # education/outreach activities (...)"); a string that matches no
+            # heading sends the segment to the Appendix (#1225).
             'K1': 'Didactic Teaching',
             'K2': 'Clinical Teaching',
-            'K3': 'Mentoring',  # or could go to MENTORING section
-            'K4': 'Curriculum Development',
-            'K5': 'Other Teaching',
+            'K3': 'Administrative teaching',
+            'K4': 'Continuing education',
+            'K5': 'Other education/outreach',
             # Clinical (L codes) - map to clinical subsections
             'L1': 'Clinical Practice',
             'L2': 'Clinical Innovations',
@@ -2547,9 +2552,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         taxonomy_hint = """
 K1: Didactic Teaching (courses, lectures)
 K2: Clinical Teaching (bedside, rounds)
-K3: Mentoring/Advising
-K4: Curriculum Development
-K5: Other Teaching Activities
+K3: Educational Program Leadership (course, residency or fellowship director)
+K4: Continuing Medical Education (CME) & Professional Education
+K5: Community Education or Patient Outreach
 L1: Clinical Practice activities
 L2: Clinical Innovations
 L3: Clinical/Administrative Leadership
