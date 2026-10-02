@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import UploadPage from './UploadPage'
+import { SingleEstimate } from './upload/UploadSections'
 import { getBatchEstimate, getEstimate, uploadFile } from '../api/upload'
 import type { UploadOptions, UploadResult } from '../api/upload'
 import { getCapacity, getRunStatus, startRun } from '../api/runs'
@@ -609,5 +610,17 @@ describe('UploadPage quota', () => {
     await flush()
     expect(getCurrentUser).toHaveBeenCalledTimes(2)
     expect(screen.getByText('8 of 10 runs left today · 50 of 50 this month')).toBeTruthy()
+  })
+})
+
+describe('SingleEstimate scanned pages (#1282)', () => {
+  it('names the PDF pages whose text cannot be read', () => {
+    render(<SingleEstimate estimate={{ ...EST, scanned_pages: [3, 5] }} showCost={false} />)
+    expect(screen.getByText(/Pages 3, 5 of this PDF are scanned images/)).toBeTruthy()
+  })
+
+  it('says nothing when no page is scanned', () => {
+    render(<SingleEstimate estimate={EST} showCost={false} />)
+    expect(screen.queryByText(/scanned image/)).toBeNull()
   })
 })
