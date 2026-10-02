@@ -465,7 +465,7 @@ def test_a_stage5d_et_al_the_source_lacks_gets_the_whole_source_list():
 
 @pytest.mark.parametrize('citation, authors', [
     # the owner is still in 5d's citation: a cut list alone is left as 5d wrote it
-    ('Ash A, Gorse GM, et al. A title. 2020.', _EIGHT_AUTHORS),
+    ('Ash A, Birch B, Gorse GM, et al. A title. 2020.', 'Ash A, Birch B, Gorse G M, Holly H'),
     # the source itself says "et al."
     ('Ash A, Birch B, et al. A title. 2020.', 'Ash A, Birch B, Gorse G, et al'),
     # the "et al." is the editors', after the title
