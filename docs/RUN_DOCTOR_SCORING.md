@@ -14,7 +14,8 @@ The doctor does not compute a 0-100 score. It reports all five of the quality
 score's hard-fail gates, each as an ERROR lint that calls the scorer's own
 predicate, so the two cannot drift apart — that is the whole overlap. A sixth
 cap, stage 4's failed extraction groups (below), stops short of RED and so is a
-WARN lint on the same shared predicate.
+WARN lint on the same shared predicate; so is a seventh, a call the
+content-filter fallback served.
 
 ## Part 1: the doctor's verdict
 
@@ -173,8 +174,40 @@ confirmation that the gate is calibrated.
   What it deliberately does not do: grade the cap by the share of entries left
   unextracted. No measurement supports a threshold, and a failed group is
   rare (3 of 163 corpus CVs), so a flat cap is the claim the evidence supports.
-  It also does not see a call served by the Sonnet 4.6 content-filter fallback
-  (#1207) that succeeded, because stage 4 does not record which model answered.
+  A call served by the Sonnet 4.6 content-filter fallback (#1207) that
+  succeeded is not a failed group; the next gate counts it.
+
+### The fallback-served cap (not a hard fail)
+
+- **cap 84** — `llm_fallback_served()`: when a Sonnet-5 call ends
+  `content_filtered`, `llm/bedrock.py` retries it once on Sonnet 4.6 (#1207).
+  The retry succeeds, so nothing marks an error. The result carries
+  `served_by_fallback_model`; stage 4 copies it onto the entries of the
+  taxonomy group that call served (`llm_fallback_model`), and stage 4.5 lists
+  its served calls under `llm_fallback_calls` in its artifact. Both are
+  write-only provenance: nothing downstream reads them except this gate and
+  the doctor. Cap-only gate in `CAP_ONLY_GATES`, weight 0, at `BAND_GREEN - 1`
+  like the failed-group gate: the output came from a model the stage was not
+  tuned on, so the run reads YELLOW. Not RED, because the call succeeded.
+  Doctor lint: `llm_fallback_served` (WARN, one finding per section: the
+  taxonomy code, or the research summary call).
+
+  What it does not see: a fallback-served call in stage 2, 3b, 5d or 6, or in
+  stage 4's recovery pass, because those stages do not record the model; and a
+  call that the fallback also filtered, which is a failed group (above) or a
+  recorded stage failure (below).
+
+### A recorded stage failure
+
+`lint_stage_failure_recorded` (doctor lint `stage_failure_recorded`) reports a
+stage the driver recorded as failed in `stage_errors/<uid>_stage_errors.json`
+(#745). `score_pipeline_errors` already reads that record for its cap-40 gate;
+the doctor did not, so a run could score RED with a clean doctor. A fatal
+record is an ERROR, like the gate it mirrors, and a non-fatal one a WARN. For
+stage 4.5 the finding says the research summary is missing because the stage
+raised, as opposed to a CV with no research content. Whether a missing summary
+should fail a web run at all is a separate decision (#1174) and is not made
+here.
 
 ### Bands
 

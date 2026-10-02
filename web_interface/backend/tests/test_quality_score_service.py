@@ -43,6 +43,27 @@ def test_stage_error_record_reaches_the_scorer(monkeypatch):
     assert seen["names"] == ["R1_fields.json", "R1_stage_errors.json"]
 
 
+def test_research_summary_artifact_reaches_the_scorer(monkeypatch):
+    """#1174: the fallback-served gate reads stage 4.5's provenance, so the
+    artifact has to be copied into the dir the scorer reads."""
+    storage = _Storage({
+        "outputs/R1_fields.json": b"{}",
+        "outputs/R1_research_summary.json": b"{}",
+        "outputs/R1_enriched.json": b"{}",
+    })
+    seen = {}
+
+    def _score_run(outputs_dir, run_id):
+        seen["names"] = sorted(p.name for p in Path(outputs_dir).iterdir())
+        return {"totalScore": 84}
+
+    monkeypatch.setattr(svc, "get_storage", lambda: storage)
+    monkeypatch.setattr("unified_pipeline.quality_score.score_run", _score_run)
+
+    assert svc.compute_and_cache_score("R1") == {"totalScore": 84}
+    assert seen["names"] == ["R1_fields.json", "R1_research_summary.json"]
+
+
 # --- parsed snapshot and the runs.quality_* columns --------------------------
 
 def _cached(total=72, raw=72.4, caps=(), dims=None, flags=()):

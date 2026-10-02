@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_provenance import FALLBACK_SERVED_KEY, STAGE4_ENTRY_FALLBACK_KEY
 
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
@@ -378,6 +379,14 @@ def _entry_with_extraction(entry: dict[str, Any], extraction: _EntryExtraction,
     if extraction.records_returned >= _MIN_RECORDS_PER_ENTRY:
         result[STAGE4_RECORDS_RETURNED_KEY] = extraction.records_returned
     return result
+
+
+def _fallback_flags(llm_result: dict[str, Any]) -> dict[str, Any]:
+    """The entry flag recording which model answered, when the content-filter
+    fallback served the group's call (#1174); empty otherwise. Write-only: the
+    doctor and the quality score read it, nothing downstream does."""
+    model = llm_result.get(FALLBACK_SERVED_KEY)
+    return {STAGE4_ENTRY_FALLBACK_KEY: model} if model else {}
 
 # =============================================================================
 # LLM-ASSISTED RECOVERY FOR MESSY TABLE STRUCTURES
@@ -901,7 +910,7 @@ def extract_fields_batch(
                     # reply holds for this entry -- see _extract_entry_items.
                     extraction = _extract_entry_items(
                         entry.get("text", ""), extraction_map[i], entry.get("taxonomy_code", ""))
-                    all_extracted.append(_entry_with_extraction(entry, extraction, {}))
+                    all_extracted.append(_entry_with_extraction(entry, extraction, _fallback_flags(llm_result)))
                 else:
                     # No extraction found - mark as failed
                     all_extracted.append({
