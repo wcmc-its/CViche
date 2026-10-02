@@ -1009,12 +1009,16 @@ def _is_record_shaped(key: str, value: object, declared: frozenset[str]) -> bool
 
 
 def _holds_a_non_date_value(entry: _FieldsEntry, keys: frozenset[str]) -> bool:
-    """Whether any of `keys` other than a date-named one holds a value: the
-    renderer has a name, title or role to write, so it does not fall back to
-    the entry's raw text. On the 163-CV wave-1 farm the off-schema values of
-    entries without one were 189 of 287, and the rendered docx held every
-    string of 160 of those; on the pilot, the 4 such values were three record
-    lists (#1187) and one F2 note whose text renders elsewhere."""
+    """Whether any of `keys` other than a date-named one holds a value. When
+    none does, the section renderers have no name, title or role to write and
+    fall back to the entry's raw text (see `fan_out`'s module docstring). That
+    text usually carries a one-fact value: on the 163-CV wave-1 farm the
+    rendered docx held every string of 151 of the 169 such values. It does
+    not reliably carry a record-shaped one: only 9 of the 20 there, and whole
+    appointments, consultantships and degrees under an off-schema key were
+    missing from the pilot's and wave-1's rendered docx (#1187). So
+    `_offschema_values` uses this to drop only the one-fact values of such
+    an entry."""
     return any(not _is_blank(entry.fields.get(key)) for key in keys
                if not _DATE_NAMED_KEY_RE.search(key))
 
@@ -1023,25 +1027,27 @@ def _offschema_values(entry: _FieldsEntry, declared_by_code: dict[str, frozenset
                       ) -> dict[str, OffschemaValue]:
     """`{key: value}` for this entry's non-empty, non-date keys that are in
     neither schema, not rendered for its code, not stage-4 bookkeeping, and
-    not a record list stage 6 fans out. An entry none of whose schema or
-    rendered keys holds a value other than a date reports nothing: the
-    section renderers fall back to its raw text (see `fan_out`'s module
-    docstring), which carries every value stage 4 took from it."""
+    not a record list stage 6 fans out. On an entry none of whose schema or
+    rendered keys holds a value other than a date, a one-fact value is left
+    out, because the raw text the entry renders from usually carries it; a
+    record-shaped value is always reported, because that text does not
+    carry a whole record (see `_holds_a_non_date_value`)."""
     if entry.code in _OFFSCHEMA_SKIPPED_CODES:
         return {}
     declared = declared_by_code.get(entry.code, frozenset())
     schema_keys = declared | _RENDERED_FIELDS.get(entry.code, frozenset())
-    if not _holds_a_non_date_value(entry, schema_keys):
-        return {}
     readable = schema_keys | _stage4_bookkeeping_keys(entry.code)
     candidates = {key: value for key, value in entry.fields.items()
                   if key not in readable and not _is_blank(value)
                   and not _DATE_NAMED_KEY_RE.search(key)}
     for key in _fanned_out_keys(entry):
         candidates.pop(key, None)
-    return {key: OffschemaValue(entry.element_idx, value,
+    hits = {key: OffschemaValue(entry.element_idx, value,
                                 _is_record_shaped(key, value, declared))
             for key, value in candidates.items()}
+    renders_from_text = not _holds_a_non_date_value(entry, schema_keys)
+    return {key: hit for key, hit in hits.items()
+            if hit.record_shaped or not renders_from_text}
 
 
 class OffschemaSummary(NamedTuple):

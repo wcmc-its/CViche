@@ -1180,14 +1180,36 @@ def test_offschema_a_record_list_fan_out_declines_is_warn():
     _anchored("S1", {"notes": "x"}),
     _anchored("K1", {"description": "x"}),                     # teaching (5c)
     _fields_entry("I", {"extra": "x"}),                            # renders its text:
-    _fields_entry("I", {"start_date": "2001", "organization_2": "B"}),  # no non-date
-    _fields_entry("I", {"organization": "", "end_date": "2001", "extra": "x"}),  # value
+    _fields_entry("I", {"start_date": "2001", "extra": "x"}),      # a one-fact value
+    _fields_entry("I", {"organization": "", "end_date": "2001", "extra": "x"}),  # skipped
     _anchored("S8", {"journal_or_source": "x"}),
     _fields_entry("I", "not an object"),                           # malformed fields
     _fields_entry("I", None),
 ])
 def test_offschema_silent_when_a_renderer_or_a_rule_accounts_for_the_key(entry):
     assert _offschema(entry) == []
+
+
+@pytest.mark.parametrize("fields", [
+    {"start_date": "2001", "appointments": [
+        {"title": "Lecturer", "institution": "Example College"}]},  # list of objects
+    {"start_date": "2001", "organization_2": "Society B"},           # numbered field
+    {"end_date": "2001", "extra": {"organization": "Society B"}},    # schema-key object
+])
+def test_offschema_record_on_an_entry_rendering_its_text_is_warn(fields):
+    """The raw text an entry with only dates falls back to does not carry a
+    whole record, so the one-fact skip never covers a record-shaped value."""
+    findings = _offschema(_fields_entry("I", fields))
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert "1 holds a whole record" in findings[0]["message"]
+
+
+def test_offschema_entry_rendering_its_text_reports_its_record_but_not_its_fact():
+    findings = _offschema(_fields_entry("D1", {
+        "start_date": "2001", "note": "visiting",
+        "appointments": [{"title": "Lecturer"}, {"title": "Reader"}]}))
+    assert [(f["severity"], f["message"].split("`")[1]) for f in findings] == [
+        ("WARN", "appointments")]
 
 
 def test_field_lint_constants_are_pinned():

@@ -447,10 +447,12 @@ LINT_PREVALENCE = {
     # borrowing theirs.
     "invented_records": 0.011,
     # Both measured 2026-10-02 on the 163-CV wave-1 stage-4 farm, one fire
-    # per CV at any severity: offschema_fields 30/163 (16 of 23 sampled
-    # findings a value missing from the rendered docx), implausible_year
-    # 6/163 (every one of its 17 findings a hand-checked wrong century).
-    "offschema_fields": 0.184,
+    # per CV at any severity: offschema_fields 37/163 (16 of 23 sampled
+    # findings a value missing from the rendered docx, before record-shaped
+    # values on text-rendered entries were reported too: 20 more values, 11
+    # with a string the docx lacks), implausible_year 6/163 (every one of
+    # its 17 findings a hand-checked wrong century).
+    "offschema_fields": 0.227,
     "implausible_year": 0.037,
 }
 
