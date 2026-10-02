@@ -330,24 +330,33 @@ _CELL_LABEL_AFTER_NUMBER_RE = re.compile(
 _PHONE_LABEL_CELL = 'cell'
 _PHONE_LABEL_HOME = 'home'
 # A cell keyword counts at the block level only when it is written as a label
-# (#1222): "(cell)", "Mobile telephone:", "Cell phone 212-...", or trailing a
-# number "212-555-0100 cell" -- never as a word inside an organisation or
-# department name ("Department of Cellular and Integrative Physiology",
-# "Cell Biology"), which routed the office phone to Cell phone.
+# (#1222): "(cell)", "Cellphone:", "Cell - 212-...", "Mobile Ph:", "Cell
+# (preferred):", or trailing a number "212-555-0100 cell" -- never as a word
+# inside an organisation or department name ("Department of Cellular Example
+# Studies", "Cell Biology"), which routed the office phone to Cell phone.
+# Blanks inside a label stay on one line.
 _CELL_KEYWORD = rf'(?:{_CELL_WORDS}|mob)'
-_CELL_PHONE_NOUNS = r'(?:\s*(?:phone|telephone|tel|no|number|#))*'
+_CELL_BLOCK_COMBINED = r'(?:[ \t]*/[ \t]*(?:home|work|office|text|sms))?'
+_CELL_BLOCK_NOUNS = r'(?:[ \t]*(?:phone|telephone|tel|ph|no|number|#))*'
+_CELL_BLOCK_QUALIFIER = r'(?:[ \t]*\([^)\n]{0,20}\))?'
+_CELL_BLOCK_LABEL_END = r'[ \t]*(?:[:.]|(?:[-\u2013\u2014][ \t]*)?(?=[+(]?\d))'
 _CELL_KEYWORD_AS_LABEL_RE = re.compile(
     rf'\({_CELL_KEYWORD}\)'
-    rf'|\b{_CELL_KEYWORD}\b{_COMBINED_WITH_ANOTHER_KIND}{_CELL_PHONE_NOUNS}'
-    r'\s*(?:[:.]|(?=[+(]?\d))'
+    rf'|\b{_CELL_KEYWORD}{_CELL_BLOCK_COMBINED}{_CELL_BLOCK_NOUNS}'
+    rf'{_CELL_BLOCK_QUALIFIER}{_CELL_BLOCK_LABEL_END}'
     rf'|\d\)?[ ]*[-,;]?[ ]*{_CELL_KEYWORD}\b(?![ ]+[a-z])',
     re.IGNORECASE,
 )
-# A work-contact label (#1222): office, work or business, then "address" or a
-# phone word within the same label. A bare "work" or "business" elsewhere in
-# the entry ("Business School") is not a contact label.
-_WORK_CONTACT_LABEL_RE = re.compile(
-    r'\b(?:office|work|business)\b[^\n:;]{0,25}\b(?:address|phone|telephone|tel|number)\b',
+# A work-contact label names its own slot (#1222): an address noun for the
+# Office address, an address or phone noun for the Office telephone (a work
+# address block carries its phone). The noun must directly follow office, work
+# or business, so "Business School, Tel." and "Office Fax Number" are not
+# labels, and a residence or mailing line never ranks an address.
+_WORK_ADDRESS_LABEL_RE = re.compile(
+    r'\b(?:office|work|business|hospital)\s+(?:mailing\s+)?address\b',
+    re.IGNORECASE)
+_WORK_PHONE_LABEL_RE = re.compile(
+    r'\b(?:office|work)\s+(?:address|phone|telephone|tel)\b',
     re.IGNORECASE)
 # A number found in the text is the extracted one when the two digit strings
 # agree once a country prefix (at most three digits, ITU E.164) is ignored.
@@ -418,21 +427,35 @@ def _cell_and_home_signals(phone: _JsonValue, text: str,
             _label_word_present('home', text, pii_fragments))
 
 
-def _office_slot_candidate(current: str | None, current_is_labelled: bool,
-                           candidate: str | None,
-                           text: str) -> tuple[str | None, bool]:
-    """(office address or phone, whether it carries a work-contact label)
-    after offering `candidate`, the value of an entry whose lowercased text
-    is `text`.
+@dataclass
+class _SlotRank:
+    """Whether an Office slot's value carries a work-contact label, and the
+    entry that supplied it."""
+    labelled: bool = False
+    source: dict | None = None
 
-    The first value still wins its slot, except that a value carrying the
-    label outranks an unlabelled one (#1222): a banner line or a bare
-    institution name read as an address came first and blocked the labelled
-    Work address that followed."""
-    is_labelled = bool(_WORK_CONTACT_LABEL_RE.search(text))
-    if current and not (is_labelled and not current_is_labelled):
-        return current, current_is_labelled
-    return candidate or current, is_labelled
+
+def _offer_office_slot(current: str | None, rank: _SlotRank,
+                       candidate: str | None, entry: dict,
+                       label_re: re.Pattern[str],
+                       unconsumed: list[dict]) -> str | None:
+    """The slot value after offering `candidate`, taken from `entry`.
+
+    The first value still wins its slot, except that a value whose entry
+    carries the slot's own label outranks an unlabelled one (#1222): a banner
+    line or a bare institution name read as an address came first and blocked
+    the labelled Work address that followed. A displaced value's entry is
+    handed back to `unconsumed`, so the post-render recovery can place it."""
+    is_labelled = bool(label_re.search(entry.get('text', '')))
+    if not candidate:
+        return current
+    if current and not (is_labelled and not rank.labelled
+                        and rank.source is not None):
+        return current
+    if rank.source is not None and all(e is not rank.source for e in unconsumed):
+        unconsumed.append(rank.source)
+    rank.labelled, rank.source = is_labelled, entry
+    return candidate
 
 
 # #946: consumer mail domains. An address at one of these is the owner's
@@ -777,7 +800,8 @@ class PersonalDataSection:
         office_phone = None
         cell_phone = None
         home_phone = None
-        office_address, office_address_is_labelled, office_phone_is_labelled = None, False, False
+        office_address = None
+        address_rank, phone_rank = _SlotRank(), _SlotRank()
         home_address = None
 
         # A entries that reach none of the six slots below are consumed by
@@ -873,8 +897,10 @@ class PersonalDataSection:
                     if not home_phone:
                         home_phone = _phone_cell_text(extracted_phone, 'home')
                 elif has_work or not office_phone:
-                    office_phone, office_phone_is_labelled = _office_slot_candidate(
-                        office_phone, office_phone_is_labelled, _phone_cell_text(extracted_phone, 'office'), text)
+                    office_phone = _offer_office_slot(
+                        office_phone, phone_rank,
+                        _phone_cell_text(extracted_phone, 'office'), entry,
+                        _WORK_PHONE_LABEL_RE, unconsumed)
 
             # Classify address by type
             if extracted_address:
@@ -892,8 +918,10 @@ class PersonalDataSection:
                     if not home_address:
                         home_address = _address_cell_text(extracted_address, 'home')
                 elif 'office' in text or 'work' in text or 'business' in text or not office_address:
-                    office_address, office_address_is_labelled = _office_slot_candidate(
-                        office_address, office_address_is_labelled, _address_cell_text(extracted_address, 'office'), text)
+                    office_address = _offer_office_slot(
+                        office_address, address_rank,
+                        _address_cell_text(extracted_address, 'office'), entry,
+                        _WORK_ADDRESS_LABEL_RE, unconsumed)
 
             # Classify email by type
             if extracted_email:
