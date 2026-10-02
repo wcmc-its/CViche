@@ -877,3 +877,29 @@ def test_write_of_exactly_the_limit_is_accepted(ten_byte_limit, tmp_path):
     storage = LocalRunStorage(base_dir=str(tmp_path))
     storage.put_file("run1", "a.bin", b"x" * 10)
     assert storage.get_file("run1", "a.bin") == b"x" * 10
+
+
+def test_s3_list_global_strips_the_store_prefix_and_get_global_reads_it():
+    """#1298: SES writes inbound mail at {prefix}/inbound/...; the poller lists and reads it."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "list_objects_v2",
+        {"Contents": [{"Key": "cviche/inbound/b"}, {"Key": "cviche/inbound/a"}]},
+        {"Bucket": "test-bucket", "Prefix": "cviche/inbound/"},
+    )
+    stub.add_response(
+        "get_object", {"Body": StreamingBody(io.BytesIO(b"raw"), 3)},
+        {"Bucket": "test-bucket", "Key": "cviche/inbound/a"},
+    )
+    stub.add_client_error("get_object", service_error_code="NoSuchKey", http_status_code=404)
+    with stub:
+        assert storage.list_global("inbound/") == ["inbound/a", "inbound/b"]
+        assert storage.get_global("inbound/a") == b"raw"
+        with pytest.raises(StorageKeyNotFound):
+            storage.get_global("inbound/gone")
+
+
+def test_s3_list_global_refuses_an_empty_prefix():
+    with pytest.raises(ValueError):
+        _storage().list_global("")
