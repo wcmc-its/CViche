@@ -198,8 +198,9 @@ def test_scan_flag_off_never_reads_the_scan_tag(client, db, seed_simple_mode, mo
     assert store.scan_lookups == 0
 
 
-def test_scan_flag_on_clean_original_is_served(client, db, seed_simple_mode, monkeypatch):
-    monkeypatch.setenv(_SCAN_FLAG, "1")
+@pytest.mark.parametrize("flag_value", ["1", "TRUE", " on "])
+def test_scan_flag_on_clean_original_is_served(client, db, seed_simple_mode, monkeypatch, flag_value):
+    monkeypatch.setenv(_SCAN_FLAG, flag_value)
     store, resp = _scanned_download(client, db, monkeypatch, "-scan-clean", "NO_THREATS_FOUND")
     assert resp.status_code == 307
     assert store.scan_lookups == 1
