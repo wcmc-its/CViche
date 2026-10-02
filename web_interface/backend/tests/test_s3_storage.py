@@ -903,3 +903,43 @@ def test_s3_list_global_strips_the_store_prefix_and_get_global_reads_it():
 def test_s3_list_global_refuses_an_empty_prefix():
     with pytest.raises(ValueError):
         _storage().list_global("")
+
+
+def test_malware_scan_status_reads_the_guardduty_tag_on_the_run_key():
+    """#1333: the verdict comes from the GuardDutyMalwareScanStatus tag on the
+    same key get_file/exists use, not from any other tag on the object."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "get_object_tagging",
+        {"TagSet": [{"Key": "owner", "Value": "x"},
+                    {"Key": "GuardDutyMalwareScanStatus", "Value": "NO_THREATS_FOUND"}]},
+        expected_params={"Bucket": "test-bucket", "Key": "cviche/runs/run1/input/run1.docx"},
+    )
+    with stub:
+        assert storage.get_malware_scan_status("run1", "input/run1.docx") == "NO_THREATS_FOUND"
+    stub.assert_no_pending_responses()
+
+
+def test_malware_scan_status_is_none_when_not_tagged_yet():
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response("get_object_tagging", {"TagSet": [{"Key": "owner", "Value": "x"}]})
+    with stub:
+        assert storage.get_malware_scan_status("run1", "input/run1.docx") is None
+    stub.assert_no_pending_responses()
+
+
+def test_malware_scan_status_accessdenied_propagates_not_none():
+    """A missing s3:GetObjectTagging grant must not read as "not scanned yet"."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("get_object_tagging", service_error_code="AccessDenied", http_status_code=403)
+    with stub, pytest.raises(ClientError):
+        storage.get_malware_scan_status("run1", "input/run1.docx")
+
+
+def test_local_storage_has_no_malware_scan_status(tmp_path):
+    store = LocalRunStorage(base_dir=str(tmp_path))
+    store.put_file("run1", "input/run1.docx", b"x")
+    assert store.get_malware_scan_status("run1", "input/run1.docx") is None

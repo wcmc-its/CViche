@@ -133,7 +133,8 @@ If External Secrets Operator isn't an option, the fallback is to provision `Secr
         "s3:GetObject",
         "s3:PutObject",
         "s3:DeleteObject",
-        "s3:GetObjectAcl"
+        "s3:GetObjectAcl",
+        "s3:GetObjectTagging"
       ],
       "Resource": "arn:aws:s3:::wcm-cviche-storage/cviche/*"
     },
@@ -148,6 +149,8 @@ If External Secrets Operator isn't an option, the fallback is to provision `Secr
   ]
 }
 ```
+
+`s3:GetObjectTagging` lets the backend read the `GuardDutyMalwareScanStatus` tag before it serves a run's original upload. It is only needed once `CVICHE_REQUIRE_MALWARE_SCAN` is on (#1333).
 
 #### Trust policy
 

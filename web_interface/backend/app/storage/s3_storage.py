@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 # surfaces as an outage rather than a user-facing 404 (#790).
 _NOT_FOUND_CODES = frozenset({"NoSuchKey", "404"})
 
+# The object tag GuardDuty Malware Protection for S3 writes its scan result to
+# (#1333). Its values are listed beside the download gate in app/api/steps.py.
+# https://docs.aws.amazon.com/guardduty/latest/ug/monitor-enable-s3-object-tagging-malware-protection.html
+MALWARE_SCAN_STATUS_TAG = "GuardDutyMalwareScanStatus"
+
 # boto3's own defaults (~60s connect, ~60s read, botocore's own retry policy)
 # are effectively unbounded relative to the request budget that actually
 # matters: create_run_archive (app/api/upload.py) issues up to 2 put_object
@@ -379,3 +384,13 @@ class S3RunStorage(RunStorage):
             if isinstance(translated, StorageKeyNotFound):
                 return False
             raise
+
+    def get_malware_scan_status(self, run_id: str, key: str) -> str | None:
+        # A ClientError (AccessDenied without s3:GetObjectTagging, an outage)
+        # propagates: an unreadable tag is not the same as "not scanned yet".
+        s3_key = self._s3_key(run_id, key)
+        response = self._s3.get_object_tagging(Bucket=self._bucket, Key=s3_key)
+        for tag in response["TagSet"]:
+            if tag["Key"] == MALWARE_SCAN_STATUS_TAG:
+                return tag["Value"]
+        return None

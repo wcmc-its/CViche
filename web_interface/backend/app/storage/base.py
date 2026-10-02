@@ -322,3 +322,17 @@ class RunStorage(ABC):
             True if the file exists, False otherwise.
         """
         ...
+
+    @abstractmethod
+    def get_malware_scan_status(self, run_id: str, key: str) -> str | None:
+        """Read the verdict GuardDuty Malware Protection tagged a file with (#1333).
+
+        Args:
+            run_id: The run identifier.
+            key: Relative path within the run's storage.
+
+        Returns:
+            The object's GuardDutyMalwareScanStatus tag value, or None when it
+            has no such tag: not scanned yet, or a backend with no object tags.
+        """
+        ...

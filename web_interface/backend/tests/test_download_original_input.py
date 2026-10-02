@@ -156,3 +156,89 @@ def test_header_injection_stripped_from_upload_name(client, db, seed_simple_mode
     cd = resp.headers["content-disposition"]
     assert "\r" not in cd and "\n" not in cd
     assert "x-injected" not in {k.lower() for k in resp.headers}
+
+
+# --- #1333: serve the original only once GuardDuty has tagged it clean ----------
+
+_SCAN_FLAG = "CVICHE_REQUIRE_MALWARE_SCAN"
+_SYNTHETIC_NAME = "Synthetic Person CV.docx"
+
+
+class _ScannedS3Storage(_S3Storage):
+    """An S3 store whose objects carry a GuardDutyMalwareScanStatus tag."""
+
+    def __init__(self, files, scan_status):
+        super().__init__(files)
+        self.scan_status = scan_status
+        self.scan_lookups = 0
+
+    def get_malware_scan_status(self, run_id, key):
+        self.scan_lookups += 1
+        return self.scan_status
+
+
+def _scanned_download(client, db, monkeypatch, suffix, scan_status):
+    user, run = _user_and_run(db, suffix=suffix, filename=_SYNTHETIC_NAME)
+    _auth(client, user)
+    store = _ScannedS3Storage({f"input/{run.id}.docx": b"x"}, scan_status)
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: store)
+    return store, client.get(f"/api/run/{run.id}/input", follow_redirects=False)
+
+
+def test_scan_flag_off_never_reads_the_scan_tag(client, db, seed_simple_mode, monkeypatch):
+    monkeypatch.delenv(_SCAN_FLAG, raising=False)
+    store, resp = _scanned_download(client, db, monkeypatch, "-scan-off", None)
+    assert resp.status_code == 307
+    assert store.scan_lookups == 0
+
+
+def test_scan_flag_on_clean_original_is_served(client, db, seed_simple_mode, monkeypatch):
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    store, resp = _scanned_download(client, db, monkeypatch, "-scan-clean", "NO_THREATS_FOUND")
+    assert resp.status_code == 307
+    assert store.scan_lookups == 1
+
+
+def test_scan_flag_on_untagged_original_is_409_still_scanning(client, db, seed_simple_mode, monkeypatch):
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    _, resp = _scanned_download(client, db, monkeypatch, "-scan-none", None)
+    assert resp.status_code == 409
+    assert "still being scanned" in resp.json()["detail"]["message"]
+
+
+def test_scan_flag_on_threat_is_403_and_logs_run_id_not_filename(
+        client, db, seed_simple_mode, monkeypatch, caplog):
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    with caplog.at_level("WARNING", logger=steps_mod.logger.name):
+        _, resp = _scanned_download(client, db, monkeypatch, "-scan-bad", "THREATS_FOUND")
+    assert resp.status_code == 403
+    assert "flagged by the malware scan" in resp.json()["detail"]["message"]
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("run-input-scan-bad" in w for w in warnings)
+    assert not any("Synthetic Person" in w for w in warnings)
+
+
+def test_scan_flag_on_unscannable_original_is_403(client, db, seed_simple_mode, monkeypatch):
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+    _, resp = _scanned_download(client, db, monkeypatch, "-scan-unsup", "UNSUPPORTED")
+    assert resp.status_code == 403
+    assert "couldn't be scanned" in resp.json()["detail"]["message"]
+
+
+def test_scan_flag_on_unreadable_tag_fails_closed_with_500(client, db, seed_simple_mode, monkeypatch):
+    """No s3:GetObjectTagging grant (or an outage) refuses the download; it is
+    not mistaken for "still scanning" and the original is not served."""
+    monkeypatch.setenv(_SCAN_FLAG, "1")
+
+    class _NoTagAccess(_ScannedS3Storage):
+        def get_malware_scan_status(self, run_id, key):
+            raise PermissionError("AccessDenied: s3:GetObjectTagging")
+
+    user, run = _user_and_run(db, suffix="-scan-iam", filename=_SYNTHETIC_NAME)
+    _auth(client, user)
+    store = _NoTagAccess({f"input/{run.id}.docx": b"x"}, None)
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: store)
+
+    resp = client.get(f"/api/run/{run.id}/input", follow_redirects=False)
+    assert resp.status_code == 500
+    assert store.asked_name is None  # no presigned URL was issued
