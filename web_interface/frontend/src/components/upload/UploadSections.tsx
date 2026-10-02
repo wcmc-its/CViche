@@ -143,6 +143,11 @@ export function SingleEstimate({ estimate, showCost }: { estimate: Estimate; sho
           We couldn&apos;t read this document&apos;s text, so the {showCost ? 'time and cost' : 'time'} above {showCost ? 'are' : 'is'} a rough guess, not based on its length.
         </span>
       )}
+      {!!estimate.scanned_pages?.length && (
+        <span className="block text-xs text-amber-700">
+          {estimate.scanned_pages.length === 1 ? 'Page' : 'Pages'} {estimate.scanned_pages.join(', ')} of this PDF {estimate.scanned_pages.length === 1 ? 'is a scanned image' : 'are scanned images'}, so {estimate.scanned_pages.length === 1 ? 'its' : 'their'} text can&apos;t be read and will be missing from the output.
+        </span>
+      )}
       <span className="block text-xs">
         You don&apos;t need to wait on this page. Processing continues if you close it, and your results will appear in Runs.
       </span>
