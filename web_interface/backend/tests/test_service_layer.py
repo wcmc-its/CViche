@@ -218,6 +218,24 @@ class TestQueueRunTransitions:
         steps = {s.step_number: s.status for s in db.query(Step).filter(Step.run_id == "QRT001").all()}
         assert steps == {1: "error", 2: "complete"}, "only the still-running step is touched"
 
+    def test_mark_failed_of_the_last_run_of_an_email_batch_sends_the_completion_email(self, db, monkeypatch):
+        from app.models import RunBatch, User
+        from app.services import batch_completion, mailer
+        from tests.conftest import TestingSessionLocal
+        monkeypatch.setattr(batch_completion, "SessionLocal", TestingSessionLocal)
+        mails = []
+        monkeypatch.setattr(mailer, "send", lambda mail: mails.append(mail) or True)
+        user = User(email="pat@med.cornell.edu", display_name="Pat Example")
+        db.add(user)
+        db.commit()
+        db.add(RunBatch(id="BATCHA", user_id=user.id, files_submitted=1, source="email"))
+        db.commit()
+        self._seed_run(db, status="running", batch_id="BATCHA")
+
+        mark_failed("QRT001", "worker crashed", from_statuses=("running",))
+
+        assert [m.subject for m in mails] == ["Your CV failed to process"]
+
     def test_mark_failed_is_a_noop_when_status_does_not_match(self, db):
         self._seed_run(db, status="complete")
         rowcount = mark_failed("QRT001", "too late", from_statuses=("running", "queued"))

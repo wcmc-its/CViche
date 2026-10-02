@@ -19,10 +19,10 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.consent import has_current_consent
-from app.models import InboundFile, InboundFileStatus, User
+from app.models import BatchSource, InboundFile, InboundFileStatus, RunBatch, User
 from app.pipeline import concurrency, run_queue
 from app.rate_limiter import check_rate_limit
-from app.services import batch_service, notifications
+from app.services import batch_completion, batch_service, notifications
 from app.services.run_creation import RunRequest, create_run_from_bytes, duplicate_info
 from app.services.run_service import flip_to_queued, revert_queued
 from app.storage.base import RunStorage
@@ -115,7 +115,7 @@ def auto_run(db: Session, storage: RunStorage, user: User, items: list[InboundFi
     budget = _runnable_count(db, user, len(_fresh_items(db, user, items)))
     if budget == 0:
         return AutoRunResult(0, len(items))
-    batch = batch_service.create_batch(db, user, budget)
+    batch = batch_service.create_batch(db, user, budget, source=BatchSource.EMAIL)
     notifications.notify_batch_submitted(
         notifications.BatchFacts(id=batch.id, files_submitted=batch.files_submitted),
         submitter=user.display_name or user.email,
@@ -128,4 +128,17 @@ def auto_run(db: Session, storage: RunStorage, user: User, items: list[InboundFi
         # A duplicate is refused by the upload core itself (confirm_duplicate stays False).
         if _run_item(db, storage, user, item, request):
             started += 1
+    _settle_batch(db, batch, started)
     return AutoRunResult(started, len(items) - started, batch.id)
+
+
+def _settle_batch(db: Session, batch: RunBatch, started: int) -> None:
+    """Record how many runs the batch really holds (a file the upload core
+    refused never became one), then send the completion email if they all
+    finished while the others were still being created. The batch is not
+    complete before this: fewer runs than ``files_submitted`` means still creating."""
+    if started != batch.files_submitted:
+        batch.files_submitted = started
+        db.commit()
+    if started:
+        batch_completion.send_if_batch_complete(db, batch.id)

@@ -1,5 +1,5 @@
 """Outbound mail through SESv2 (#1298): the acknowledgement and rejection
-replies for emailed CVs. Plain text only.
+replies for emailed CVs, as multipart text + HTML (the logo inline by CID).
 
 Off by default: ``CVICHE_MAIL_SEND`` must be truthy, or a send is only logged
 at INFO (the kind of message, never a body or an address). A send failure is
@@ -12,14 +12,18 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
+from email.message import EmailMessage
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from app.config_loader import get_config
 from app.models import InboundRejectReason
 from app.services import notifications
+from app.services.email_templates import (
+    LOGO_FILES, BadgeKind, EmailContent, Para, StatusKind, StatusRow, greeting_for, render_html, render_text,
+)
 
 if TYPE_CHECKING:
     from botocore.client import BaseClient
@@ -42,6 +46,7 @@ _LINE_BREAKS = re.compile(r"[\r\n]+")
 class MailKind(StrEnum):
     ACKNOWLEDGEMENT = "acknowledgement"
     REJECTION = "rejection"
+    COMPLETION = "completion"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +55,7 @@ class OutboundMail:
     to_addr: str
     subject: str
     body: str
+    html: str = ""
 
 
 # What a sender is told when their (authenticated, known) email is refused.
@@ -86,41 +92,99 @@ def _runs_batch_url(batch_id: str) -> str:
 def processing_notice(
     to_addr: str, *, runs: int, held: int, batch_id: str | None = None,
     outdated_consent: bool = False, skipped: int = 0, consent_date: datetime | None = None,
+    display_name: str | None = None,
 ) -> OutboundMail:
-    """The reply to an accepted message: how many CVs are processing (with a link
-    to their batch in Runs) and how many wait for the sender in New run. Counts
-    only, never a filename."""
-    lines = []
+    """The reply to an accepted message: a status list of how many CVs are
+    processing, waiting for the sender in New run, and skipped, with one button.
+    Counts only, never a filename."""
     if outdated_consent:
-        lines.append("The CViche terms have been updated. Please sign in to review and accept them: "
-                     f"{_new_run_url()}{CONSENT_PATH}")
-        lines.append(f"Your {_cvs(held)} {'is' if held == 1 else 'are'} waiting for you in New run: {_new_run_url()}")
+        paras = [Para("The CViche terms have been updated. Please sign in to review and accept them.", lead=True)]
+        status = (StatusRow(StatusKind.WAITING, held, "Waiting for you in New run"),)
+        cta = ("Review the terms", f"{_new_run_url()}{CONSENT_PATH}")
     else:
-        if runs:
-            lines.append(f"Processing {_cvs(runs)}. Follow progress in Runs: {_runs_batch_url(batch_id)}")
-        if held:
-            lines.append(f"{_cvs(held)} {'is' if held == 1 else 'are'} waiting for your confirmation "
-                         f"in New run: {_new_run_url()}")
-    if not outdated_consent:
-        when = f" on {consent_date.strftime(CONSENT_DATE_FORMAT)}" if consent_date else ""
-        lines.append(f"These CVs are processed under the CViche terms you agreed to{when}: "
-                     f"{_new_run_url()}{TERMS_PATH}")
-    if skipped:
-        lines.append(f"{skipped} other attachment(s) could not be used and were skipped.")
-    return OutboundMail(
-        MailKind.ACKNOWLEDGEMENT, to_addr, f"CViche received {_cvs(runs + held)}", "\n\n".join(lines) + "\n",
-    )
+        paras = [Para("Follow progress in Runs.", lead=True)] if runs else []
+        paras.append(_terms_para(consent_date))
+        status = (
+            StatusRow(StatusKind.PROCESSING, runs, "Processing"),
+            StatusRow(StatusKind.WAITING, held, "Waiting for your confirmation in New run"),
+            StatusRow(StatusKind.SKIPPED, skipped, f"{_plural(skipped, 'Attachment')} skipped"),
+        )
+        cta = ((_cv_button(runs), _runs_batch_url(batch_id)) if runs else ("Open New run", _new_run_url()))
+    badge = BadgeKind.CLOCK if runs and not outdated_consent else BadgeKind.EXCLAMATION
+    content = EmailContent(_processing_headline(runs, held, outdated_consent), tuple(paras), *cta,
+                           greeting=greeting_for(display_name), status=status, badge=badge)
+    return _mail(MailKind.ACKNOWLEDGEMENT, to_addr, f"CViche received {_cvs(runs + held)}", content)
+
+
+def _terms_para(consent_date: datetime | None) -> Para:
+    when = f" on {consent_date.strftime(CONSENT_DATE_FORMAT)}" if consent_date else ""
+    return Para(f"These CVs are processed under the CViche terms you agreed to{when}",
+                f"{_new_run_url()}{TERMS_PATH}", "Read the terms")
+
+
+def _plural(count: int, noun: str) -> str:
+    return noun if count == 1 else f"{noun}s"
+
+
+def _cv_button(count: int) -> str:
+    return "View your CV" if count == 1 else "View your CVs"
+
+
+def _processing_headline(runs: int, held: int, outdated_consent: bool) -> str:
+    if outdated_consent:
+        return "Please accept the updated terms"
+    if runs:
+        return "Your CV is being processed" if runs == 1 and not held else "Your CVs are being processed"
+    return "Your CV is waiting for you" if held == 1 else "Your CVs are waiting for you"
+
+
+def _mail(kind: MailKind, to_addr: str, subject: str, content: EmailContent) -> OutboundMail:
+    return OutboundMail(kind, to_addr, subject, render_text(content), render_html(content))
 
 
 def _cvs(count: int) -> str:
     return f"{count} CV" if count == 1 else f"{count} CVs"
 
 
-def rejection(to_addr: str, reason: InboundRejectReason) -> OutboundMail:
-    return OutboundMail(
-        MailKind.REJECTION, to_addr, "CViche couldn't accept your email",
-        f"We couldn't accept your email to CViche. {_REJECTION_TEXT[reason]}\n",
+def rejection(to_addr: str, reason: InboundRejectReason, display_name: str | None = None) -> OutboundMail:
+    content = EmailContent(
+        "We couldn't accept your email",
+        (Para(_REJECTION_TEXT[reason], lead=True),), badge=BadgeKind.CROSS,
+        greeting=greeting_for(display_name),
     )
+    return _mail(MailKind.REJECTION, to_addr, "CViche couldn't accept your email", content)
+
+
+def completion_notice(
+    to_addr: str, *, complete: int, failed: int, batch_id: str, single_run_id: str | None = None,
+    display_name: str | None = None,
+) -> OutboundMail:
+    """Sent once when every run of an emailed batch is terminal (#1298). Counts
+    only, never a filename or a score. ``single_run_id`` is the lone run of a
+    one-CV batch: that email links to the run itself."""
+    if single_run_id is not None:
+        content = _single_completion(complete, single_run_id)
+    else:
+        content = _batch_completion(complete, failed, batch_id)
+    content = replace(content, greeting=greeting_for(display_name))
+    return _mail(MailKind.COMPLETION, to_addr, content.headline, content)
+
+
+def _single_completion(complete: int, run_id: str) -> EmailContent:
+    url = f"{_new_run_url()}run/{run_id}"
+    if complete:
+        return EmailContent("Your CV is ready", (Para("Download it from the run page.", lead=True),), "View your CV", url,
+                            badge=BadgeKind.CHECK_GREEN)
+    return EmailContent("Your CV failed to process", (Para("Open the run to retry it.", lead=True),), "View your CV", url,
+                        badge=BadgeKind.CROSS)
+
+
+def _batch_completion(complete: int, failed: int, batch_id: str) -> EmailContent:
+    status = (StatusRow(StatusKind.READY, complete, "Ready to download"), StatusRow(StatusKind.FAILED, failed, "Failed"))
+    paras = (Para("Open a failed run to retry it."),) if failed else ()
+    badge = BadgeKind.CHECK_AMBER if failed else BadgeKind.CHECK_GREEN
+    return EmailContent("Your CVs have been converted", paras, "View your CVs", _runs_batch_url(batch_id),
+                        status=status, badge=badge)
 
 
 def send(mail: OutboundMail) -> bool:
@@ -133,18 +197,34 @@ def send(mail: OutboundMail) -> bool:
 
     sender, _ = get_config("mail", "CVICHE_MAIL_FROM", default=DEFAULT_MAIL_FROM)
     try:
+        raw = build_message(mail, one_line(sender)).as_bytes()
         _client().send_email(
             FromEmailAddress=one_line(sender),
             Destination={"ToAddresses": [one_line(mail.to_addr)]},
-            Content={"Simple": {
-                "Subject": {"Data": one_line(mail.subject), "Charset": "UTF-8"},
-                "Body": {"Text": {"Data": mail.body, "Charset": "UTF-8"}},
-            }},
+            Content={"Raw": {"Data": raw}},
         )
-    except (BotoCoreError, ClientError) as e:
+    except (BotoCoreError, ClientError, OSError) as e:
         logger.warning("SES send failed for a %s message: %s", mail.kind, type(e).__name__)
         return False
     return True
+
+
+def build_message(mail: OutboundMail, sender: str) -> EmailMessage:
+    """multipart/related (HTML + the CID logos it references, and only those)
+    inside multipart/alternative's HTML part. Every header value is one line."""
+    message = EmailMessage()
+    message["Subject"] = one_line(mail.subject)
+    message["From"] = sender
+    message["To"] = one_line(mail.to_addr)
+    message.set_content(mail.body)
+    if mail.html:
+        message.add_alternative(mail.html, subtype="html")
+        html_part = message.get_payload()[1]
+        for cid, path in LOGO_FILES.items():
+            if f"cid:{cid}" in mail.html:
+                html_part.add_related(path.read_bytes(), maintype="image", subtype="png", cid=f"<{cid}>",
+                                      filename=path.name, disposition="inline")
+    return message
 
 
 def _client() -> BaseClient:

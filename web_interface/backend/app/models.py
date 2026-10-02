@@ -251,6 +251,12 @@ class Run(Base):
     metrics = relationship("RunMetrics", back_populates="run", uselist=False, lazy="raise_on_sql", passive_deletes=True)
 
 
+class BatchSource(StrEnum):
+    """``run_batches.source`` (#1298)."""
+    WEB = "web"
+    EMAIL = "email"
+
+
 class RunBatch(Base):
     """One batch upload (#1114): a set of runs a user submitted together.
 
@@ -266,6 +272,11 @@ class RunBatch(Base):
     created_at = Column(DateTime, nullable=False, server_default=func.now())
     # Valid files the user selected when creating the batch.
     files_submitted = Column(Integer, nullable=False)
+    # Where the batch came from (#1298): only an "email" batch gets the
+    # completion email.
+    source = Column(String(10), nullable=False, default=BatchSource.WEB, server_default=BatchSource.WEB)
+    # Set once, by a conditional UPDATE, by whichever pod sends the completion email.
+    completion_notified_at = Column(DateTime, nullable=True)
 
     user = relationship("User", lazy="raise_on_sql")
 
