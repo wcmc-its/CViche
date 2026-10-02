@@ -125,6 +125,11 @@ CHAPTER_PATTERN = re.compile(r'\bIn[:;]\s*\S|\(eds?\b|\beds?\.(?=\s|,|$)|\bedito
 # published and as "in press" in another journal). Compared only against these
 # codes, so a same-titled conference abstract (S8) is not mistaken for it.
 PUBLISHED_ARTICLE_CODES = frozenset({'S1', 'S2', 'S6'})
+# Only an article can be "in press" in the sense PubMed can answer. A
+# conference abstract marked "(Accepted)" (S8) was replaced live by the later
+# journal paper of the same title (SDEBQJ, dev-239, 2026-10-02); a PubMed
+# journal article is no replacement for a chapter or a book either.
+IN_PRESS_ELIGIBLE_CODES = PUBLISHED_ARTICLE_CODES | {IN_REVIEW_CODE}
 # Only an ID-less entry, or one whose DOI PubMed did not know, is searched by
 # title: a CV identifier that resolved to another paper stays rejected.
 _TITLE_SEARCHABLE_STATUSES = frozenset({'no_identifier', 'doi_not_in_pubmed'})
@@ -537,6 +542,8 @@ class PubMedEnricher:
         Word comment stage 6 attaches to the tracked change. One PubMed did
         not match still leaves S7, by its own text (#1166)."""
         for entry in pub_entries:
+            if entry.get('taxonomy_code') not in IN_PRESS_ELIGIBLE_CODES:
+                continue
             fields = entry.get('extracted_fields') or {}
             title = fields.get('title') or fields.get('chapter_title') or ''
             # No title, no way to tell a status from a title that says
