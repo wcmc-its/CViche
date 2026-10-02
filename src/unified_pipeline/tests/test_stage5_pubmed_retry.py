@@ -636,6 +636,23 @@ def test_bare_digit_pmcid_title_rejected_via_idconv_is_retried_as_pmid(monkeypat
     assert enricher.stats['failed_lookups'] == 0
 
 
+def test_title_rejected_via_idconv_and_again_as_pmid_keeps_the_idconv_rejection(monkeypatch):
+    other = _article_xml('Something Entirely Different Here').replace(
+        f'<PMID>{PMID}</PMID>'.encode(), b'<PMID>11112222</PMID>')
+    enricher, _, _ = _make(monkeypatch, [
+        FakeResponse(200, json_data={'records': [{'pmcid': f'PMC{BARE_PMID}', 'pmid': '11112222'}]}),
+        FakeResponse(200, content=other),
+        FakeResponse(200, content=PUBMED_XML),
+    ])
+    entry = _titled(UNRELATED_TITLE, pmcid=BARE_PMID)
+    [result] = enricher._enrich_by_pmcid([(entry, f'PMC{BARE_PMID}')])
+    assert result['enrichment_status'] == 'title_check_failed'
+    assert result['enrichment_rejected']['source'] == 'pmcid_conversion'
+    assert result['enrichment_rejected']['pubmed_pmid'] == '11112222'
+    assert enricher.stats['title_mismatches'] == 1
+    assert enricher.stats['failed_lookups'] == 1
+
+
 def test_prefixed_pmcid_is_never_tried_as_a_pmid(monkeypatch):
     enricher, session, _ = _make(monkeypatch, [_idconv_error_response()])
     entry = _titled('A test article', pmcid=f'PMC{BARE_PMID}')
