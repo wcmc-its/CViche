@@ -691,8 +691,12 @@ SOURCE_DOCX_SUBDIR = "source"
 def score_under_extracted_records(outputs_dir: Path) -> tuple[float, str, int | None]:
     """Cap-only gate: a large multi-record entry whose stage-4 extraction covered
     under 40% of it, so its other records vanish (#822). The doctor's
-    `under_extraction` lint, called as is: 4 of 4 findings in batch IPXFBA were
-    real record loss (MYAXRH, ZGNARO, EKGTXD)."""
+    `under_extraction` lint, called as is. In batch IPXFBA its 4 findings were
+    all true positives, but only 2 lost records outright (MYAXRH, ZGNARO); the
+    other 2 (EKGTXD) were garbled or recovered by stage 6, and that run's lost
+    records reach the cap through the fused-entries gate. All 3 runs carrying a
+    finding had verified loss somewhere. Outside IPXFBA a finding can fire with
+    nothing lost, so any finding caps."""
     data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
         return 0.0, f"{_missing_or_unreadable_detail('fields.json', reason)}; not evaluated", None

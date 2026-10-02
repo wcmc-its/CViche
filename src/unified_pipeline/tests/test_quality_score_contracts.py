@@ -2111,7 +2111,8 @@ def test_lost_table_gate_ignores_an_unreadable_source(tmp_path, caplog):
     with caplog.at_level(logging.WARNING):
         _, detail, cap = qs.score_lost_source_table(tmp_path)
     assert cap is None and "not evaluated" in detail
-    assert "could not read source docx" in caplog.text
+    # The scored dir sits right after the label, not only inside the exception text.
+    assert f"could not read source docx {tmp_path / qs.SOURCE_DOCX_SUBDIR / 'cv.docx'} (" in caplog.text
 
 
 def test_lost_table_gate_ignores_an_ambiguous_source(tmp_path, caplog):
@@ -2127,6 +2128,7 @@ def test_lost_table_gate_ignores_an_ambiguous_source(tmp_path, caplog):
         _, detail, cap = qs.score_lost_source_table(tmp_path)
     assert cap is None and "not evaluated" in detail
     assert "found multiple source docx" in caplog.text
+    assert str(tmp_path) in caplog.text
 
 
 def test_content_loss_gates_are_registered_and_weightless():

@@ -156,7 +156,8 @@ pushed toward RED. No weighted dimension measures lost content; these call the
 doctor's own signals, restricted to the ones batch IPXFBA hand-checked as real.
 
 - `score_under_extracted_records()` — the doctor's `under_extraction` lint, any
-  finding (4 of 4 real in IPXFBA).
+  finding (in IPXFBA all 4 findings were true positives, but only 2 lost
+  records outright; outside IPXFBA a finding can fire with nothing lost).
 - `score_fused_entries()` — `mega_entries` (`count_mega_entries`) at
   `MEGA_ENTRIES_CAP_MIN` (2) or more entries; one fused entry is common and
   harmless, so the threshold is a count (7 of 9 flagged entries were real).
