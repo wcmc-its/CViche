@@ -772,8 +772,7 @@ class PersonalDataSection:
         office_phone = None
         cell_phone = None
         home_phone = None
-        office_address = None
-        office_address_is_labelled = False
+        office_address, office_address_is_labelled = None, False
         home_address = None
 
         # A entries that reach none of the six slots below are consumed by
@@ -889,8 +888,7 @@ class PersonalDataSection:
                         home_address = _address_cell_text(extracted_address, 'home')
                 elif 'office' in text or 'work' in text or 'business' in text or not office_address:
                     office_address, office_address_is_labelled = _office_address_candidate(
-                        office_address, office_address_is_labelled,
-                        extracted_address, text)
+                        office_address, office_address_is_labelled, extracted_address, text)
 
             # Classify email by type
             if extracted_email:
