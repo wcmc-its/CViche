@@ -1192,6 +1192,38 @@ def test_scrub_cell_below_label_reaches_a_merged_cell_spanning_the_label_column(
     assert "01/02/1970" not in " ".join(_table_cell_texts(docx_path))
 
 
+def test_scrub_cell_below_a_merged_label_reaches_its_second_column(tmp_path):
+    # The label cell itself spans layout columns 1-2; the value sits under
+    # the second of them.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    table.cell(0, 0).text = "Name"
+    table.cell(0, 1).merge(table.cell(0, 2)).text = "Date of Birth:"
+    table.cell(1, 0).text = "Doe J"
+    table.cell(1, 1).text = ""
+    table.cell(1, 2).text = "01/02/1970"
+    docx_path = tmp_path / "label_merged.docx"
+    doc.save(str(docx_path))
+
+    assert "01/02/1970" not in " ".join(_table_cell_texts(docx_path))
+
+
+def test_scrub_cell_below_survives_a_split_value_row(tmp_path):
+    # The value row is split into several rows (aligned multi-line cells);
+    # the split cells must keep their layout column so the value is found.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=4)
+    for i, text in enumerate(["a", "b", "Date of Birth:", "c"]):
+        table.cell(0, i).text = text
+    table.cell(1, 0).merge(table.cell(1, 1)).text = "x1\nx2\nx3"
+    table.cell(1, 2).text = "01/02/1970\ny2\ny3"
+    table.cell(1, 3).text = "z"
+    docx_path = tmp_path / "value_row_split.docx"
+    doc.save(str(docx_path))
+
+    assert "01/02/1970" not in " ".join(_table_cell_texts(docx_path))
+
+
 def test_extract_unified_elements_scrubs_dob_in_the_cell_below_a_label(tmp_path):
     # Round 3 (#847 residual): a two-row FORM table -- a label row, its
     # value directly BELOW it in the same column, not beside it in the

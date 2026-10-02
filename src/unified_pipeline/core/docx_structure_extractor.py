@@ -234,6 +234,21 @@ def _fit_lines_to_slots(lines: list[str], slots: int) -> list[str]:
     return lines + [""] * (slots - len(lines))
 
 
+_GRID_KEYS = ("grid_col", "grid_span")
+
+
+def _carry_grid_metadata(source_row: list[Any], new_row: list[Any]) -> None:
+    """Copy each source cell's layout-column keys onto the cell built at the
+    same position, so a split row still maps its cells to layout columns
+    (`_cell_at_grid_col`). Metadata only; the text is untouched."""
+    for src, new in zip(source_row, new_row):
+        if new is src or not isinstance(src, dict) or not isinstance(new, dict):
+            continue
+        for key in _GRID_KEYS:
+            if key in src:
+                new.setdefault(key, src[key])
+
+
 def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, min_newlines: int = 2) -> list[list[dict[str, Any]]]:
     """
     Split a table row into multiple rows if any cell contains merged content.
@@ -358,6 +373,7 @@ def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, mi
                     # Don't duplicate non-split cells - often labels that shouldn't repeat
                     new_row.append({"text": ""})
 
+        _carry_grid_metadata(row, new_row)
         split_rows.append(new_row)
 
     padded_cols = {i for i, sp in enumerate(cell_splits) if sp is not None and len(sp) < max_splits}
@@ -1008,6 +1024,24 @@ def _cell_at_grid_col(row: list[Any], grid_col: int) -> dict[str, Any] | None:
     return None
 
 
+def _scrub_cells_below(
+    next_row: list[Any], label: dict[str, Any], col_idx: int, category: str
+) -> None:
+    """Scrub each distinct cell of `next_row` overlapping any layout column
+    the label cell covers (a merged label spans several)."""
+    start = label.get("grid_col", col_idx)
+    seen: set[int] = set()
+    for grid_col in range(start, start + label.get("grid_span", 1)):
+        below = _cell_at_grid_col(next_row, grid_col)
+        if not isinstance(below, dict) or id(below) in seen:
+            continue
+        seen.add(id(below))
+        if isinstance(below.get("text"), str):
+            below["text"] = redact_pre_llm_value_of_category(
+                below["text"], category, cross_boundary=True
+            )
+
+
 def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
     """Round 3 (#847 residual): a two-row FORM table -- a label cell
     ("Date of Birth") with its value directly below it in the SAME COLUMN
@@ -1018,7 +1052,7 @@ def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
     pairs: a cell that is nothing but a bare DOB/SSN label, with no value
     ALREADY resolved beside it in its own row (`_row_already_resolved`),
     has its value, if any, scrubbed out of the cell directly BELOW it
-    (same column index) in the next row. `cross_boundary=True`: a cell one
+    (same layout column, every column a merged label spans) in the next row. `cross_boundary=True`: a cell one
     row down is a lower-confidence position than the same row, so its
     value must open that cell and be a whole date -- "Appointed
     07/01/2005" or "Date of Appointment: 07/01/2005" below a blank "Date
@@ -1033,11 +1067,7 @@ def _scrub_pre_llm_pii_column(rows: list[Any]) -> None:
             category = pre_llm_bare_label_category(cell.get("text"))
             if category is None or _row_already_resolved(row, col_idx):
                 continue
-            below = _cell_at_grid_col(next_row, cell.get("grid_col", col_idx))
-            if isinstance(below, dict) and isinstance(below.get("text"), str):
-                below["text"] = redact_pre_llm_value_of_category(
-                    below["text"], category, cross_boundary=True
-                )
+            _scrub_cells_below(next_row, cell, col_idx, category)
 
 
 def _scrub_pre_llm_value_of_category_in_element(el: dict[str, Any], category: str) -> None:
