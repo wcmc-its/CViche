@@ -1810,6 +1810,20 @@ def test_grant_duration_with_no_end_date_reads_as_present():
     assert gen._format_grant_duration({}, 'M2A') == ''
 
 
+@pytest.mark.parametrize('text, expected', [
+    ('2011 Fictional Pilot Study Award', '2011'),
+    ('2011- Fictional Pilot Study Award', '2011-Present'),
+])
+def test_grant_table_start_only_duration_reads_the_entry_source_text(text, expected):
+    """Class 13 (2026-10-02): a start-only grant rendered "<year>-Present"
+    whatever its source said; the Duration row now reads the entry's text."""
+    fields = {'agency': 'Fictional Fund', 'title': 'Fictional Pilot Study',
+              'start_date': '2011'}
+    table = _generator()._create_grant_table(fields, 'M2B', entry=_entry('M2B', text=text,
+                                                                         **fields))
+    assert _cells(table)['Duration of support:'] == expected
+
+
 @pytest.mark.parametrize('code', ['M2A', 'M2B', 'M2C'])
 def test_grant_duration_is_identical_across_the_three_m2_codes(code):
     """M2A/M2B/M2C share one date format, so the bucket cannot change the string.

@@ -286,16 +286,18 @@ def _split_date_range(dates: str) -> tuple[str, str]:
     return halves[0].strip(), (halves[1].strip() if len(halves) > 1 else '')
 
 
-def _membership_dates_cell(start_date: str, end_date: str) -> str:
+def _membership_dates_cell(start_date: str, end_date: str, source_text: str) -> str:
     """The ONE place a section I date cell is formatted (#476 review).
 
     Both the single- and multi-membership paths end here, so equivalent
     memberships cannot render different date formats depending on which branch
-    the entry took.
+    the entry took. `source_text` is the entry's text, which tells a bare
+    start year from an open "1990-" range (class 13).
     """
     if not (start_date or end_date):
         return ''
-    return format_date_range(start_date, end_date, _MEMBERSHIPS_TAXONOMY_CODE)
+    return format_date_range(start_date, end_date, _MEMBERSHIPS_TAXONOMY_CODE,
+                             source_text)
 
 
 def _tokens(text: str) -> list[str]:
@@ -625,7 +627,7 @@ def _single_membership_row(fields: dict, original_text: str) -> tuple[str, str, 
             start_date, end_date = _split_date_range(recovered.dates)
 
     return (_organization_cell(membership_type, organization),
-            _membership_dates_cell(start_date, end_date),
+            _membership_dates_cell(start_date, end_date, original_text),
             fallback_fired)
 
 
@@ -739,7 +741,8 @@ class MembershipsSection:
                     self._add_table_row(
                         table,
                         [_organization_cell(mem_type, org),
-                         _membership_dates_cell(*_split_date_range(dates))],
+                         _membership_dates_cell(*_split_date_range(dates),
+                                                original_text)],
                         entry=entry,
                     )
                 continue

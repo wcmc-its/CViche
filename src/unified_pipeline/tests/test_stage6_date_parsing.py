@@ -627,6 +627,58 @@ def test_an_unreadable_year_is_never_searched_for():
     assert _source_leaves_year_open("None- Committee", None) is False
 
 
+# --- class 13 (2026-10-02): every code reads the source text it is given ----
+
+_NON_POINT_CODES = ["C", "D1", "I", "K3", "M2B", "O", "Q1", "Q4B", "Q4D"]
+
+
+@pytest.mark.parametrize("code", _NON_POINT_CODES)
+def test_any_code_given_its_source_renders_a_lone_start_as_that_year(code):
+    """A one-year chair, a guest-edited issue or a 1989 postdoc read
+    "<year>-Present" because only `POINT_IN_TIME_CODES` read the source."""
+    assert format_date_range("2011", "", code, "2011 Chair, Fictional Working Group") == "2011"
+
+
+@pytest.mark.parametrize("code", _NON_POINT_CODES)
+def test_any_code_keeps_present_when_its_source_leaves_the_year_open(code):
+    assert format_date_range("2011", "", code, "2011- Chair, Fictional Working Group") \
+        == "2011-Present"
+
+
+@pytest.mark.parametrize("source_text", [
+    "2011 - present Chair, Fictional Working Group",
+    "Chair, Fictional Working Group, 2011 to present",
+    "2011 \u2013 Current\tChair, Fictional Working Group",
+    "Chair, Fictional Working Group (2011 - NOW)",
+])
+@pytest.mark.parametrize("code", ["P", "Q1"])
+def test_a_source_that_ends_the_year_in_present_current_or_now_keeps_present(source_text, code):
+    """A spaced dash with text after it is a column separator, except when
+    that text is a word that leaves the range open."""
+    assert format_date_range("2011", "", code, source_text) == "2011-Present"
+
+
+@pytest.mark.parametrize("source_text", [
+    "2011 President, Fictional Society",
+    "2011 - Presentation Committee, Fictional Society",
+    "2011 - Nowell Lecture Committee, Fictional Society",
+    "2011 Chair, Fictional Working Group; now Professor at Fictional University",
+    "Reviewer, Current Fictional Opinion, 2011",
+    "2009 - present Member; 2011 Chair, Fictional Working Group",
+])
+def test_present_current_or_now_that_does_not_end_this_year_does_not_count(source_text):
+    """Not the whole word, not after this record's year, or about something
+    else ("now Professor at ...", a journal named "Current ...")."""
+    assert format_date_range("2011", "", "Q1", source_text) == "2011"
+
+
+@pytest.mark.parametrize("code", _NON_POINT_CODES)
+def test_a_caller_that_passes_no_source_still_gets_present(code):
+    """The rule reaches only the callers that pass the entry's text; the rest
+    (positions, mentoring, clinical practice, education) are unchanged."""
+    assert format_date_range("2011", "", code) == "2011-Present"
+
+
 # --- #1233: a {start_date, end_date} mapping is a range, never its repr -------
 
 @pytest.mark.parametrize("code, value, expected", [
