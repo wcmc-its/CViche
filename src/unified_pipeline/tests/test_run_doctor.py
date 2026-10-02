@@ -2333,7 +2333,7 @@ def test_field_lint_prevalence_is_the_measured_wave1_fraction():
     """Measured 2026-10-02 over the 163-CV wave-1 stage-4 farm (one fire per
     CV at any severity); a new measurement updates both sides."""
     from unified_pipeline.run_doctor import LINT_PREVALENCE
-    assert LINT_PREVALENCE["offschema_fields"] == round(42 / 163, 3)
+    assert LINT_PREVALENCE["offschema_fields"] == round(30 / 163, 3)
     assert LINT_PREVALENCE["implausible_year"] == round(6 / 163, 3)
 
 

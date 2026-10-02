@@ -39,10 +39,11 @@ from unified_pipeline.stage4.coercion import (
     DATE_RANGE_TAXONOMY_CODES,
     GRANT_EFFORT_TAXONOMY_PREFIX,
     IDENTIFIER_TAXONOMY_CODES,
-    IDENTIFIER_TAXONOMY_PREFIX,
     find_single_closed_range,
 )
 from unified_pipeline.stage4.schemas import FIELD_SCHEMA_CONFIG_PATH, FIELD_SCHEMAS
+from unified_pipeline.stage_5c_teaching_formatter import TEACHING_CODES
+from unified_pipeline.stage_5d_citation_formatter import PUBLICATION_CODES
 from unified_pipeline.core.text_norm import (
     SUBSTANTIVE_LINE_CHARS,
     looks_like_record,
@@ -926,14 +927,14 @@ def _evidence_value(value: object) -> str:
 #: it, and quoting its values as evidence would put protected data in a report
 #: mirrored to S3. The text-rendered codes (`fan_out._TEXT_RENDERED_CODES`,
 #: which include T): their section writes the entry's text, not its fields,
-#: so a value under any key is in the document already.
-_OFFSCHEMA_SKIPPED_CODES = frozenset({PERSONAL_DATA_CODE}) | _TEXT_RENDERED_CODES
-
-#: Publications (S1-S9) are skipped too: stage 5d renders each from its
-#: `formatted_citation`, and the off-schema keys stage 4 leaves on them are
-#: citation identifiers (`other_id`, `journal_or_source`) that travel inside
-#: that citation. Known miss: a contribution note under S1 `notes` (PFBSNH).
-_OFFSCHEMA_SKIPPED_CODE_PREFIX = IDENTIFIER_TAXONOMY_PREFIX
+#: so a value under any key is in the document already. The codes a stage-5
+#: formatter rewrites whole from the entry's text -- teaching (5c's
+#: `formatted_text`) and publications (5d's `formatted_citation`): the
+#: off-schema keys stage 4 leaves on them (`other_id`, `journal_or_source`,
+#: a K1 `description`) travel inside that rendering. Known miss: a
+#: contribution note under S1 `notes` (PFBSNH).
+_OFFSCHEMA_SKIPPED_CODES = (frozenset({PERSONAL_DATA_CODE}) | _TEXT_RENDERED_CODES
+                            | frozenset(TEACHING_CODES) | frozenset(PUBLICATION_CODES))
 
 #: Keys stage 4's own post-processing writes onto entries whose schema may
 #: not declare them -- bookkeeping, not a value the model misfiled:
@@ -1011,17 +1012,32 @@ def _is_record_shaped(key: str, value: object, declared: frozenset[str]) -> bool
     return bool(numbered and numbered.group("field") in declared)
 
 
+def _holds_a_non_date_value(entry: _FieldsEntry, keys: frozenset[str]) -> bool:
+    """Whether any of `keys` other than a date-named one holds a value: the
+    renderer has a name, title or role to write, so it does not fall back to
+    the entry's raw text. On the 163-CV wave-1 farm the off-schema values of
+    entries without one were 189 of 287, and the rendered docx held every
+    string of 160 of those; on the pilot, the 4 such values were three record
+    lists (#1187) and one F2 note whose text renders elsewhere."""
+    return any(not _is_blank(entry.fields.get(key)) for key in keys
+               if not _DATE_NAMED_KEY_RE.search(key))
+
+
 def _offschema_values(entry: _FieldsEntry, declared_by_code: dict[str, frozenset[str]],
                       ) -> dict[str, OffschemaValue]:
     """`{key: value}` for this entry's non-empty, non-date keys that are in
     neither schema, not rendered for its code, not stage-4 bookkeeping, and
-    not a record list stage 6 fans out."""
-    if (entry.code in _OFFSCHEMA_SKIPPED_CODES
-            or entry.code.startswith(_OFFSCHEMA_SKIPPED_CODE_PREFIX)):
+    not a record list stage 6 fans out. An entry none of whose schema or
+    rendered keys holds a value other than a date reports nothing: the
+    section renderers fall back to its raw text (see `fan_out`'s module
+    docstring), which carries every value stage 4 took from it."""
+    if entry.code in _OFFSCHEMA_SKIPPED_CODES:
         return {}
     declared = declared_by_code.get(entry.code, frozenset())
-    readable = (declared | _RENDERED_FIELDS.get(entry.code, frozenset())
-                | _stage4_bookkeeping_keys(entry.code))
+    schema_keys = declared | _RENDERED_FIELDS.get(entry.code, frozenset())
+    if not _holds_a_non_date_value(entry, schema_keys):
+        return {}
+    readable = schema_keys | _stage4_bookkeeping_keys(entry.code)
     candidates = {key: value for key, value in entry.fields.items()
                   if key not in readable and not _is_blank(value)
                   and not _DATE_NAMED_KEY_RE.search(key)}

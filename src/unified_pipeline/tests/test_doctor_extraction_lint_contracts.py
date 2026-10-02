@@ -1074,8 +1074,23 @@ def _offschema(*entries):
     return lint_offschema_fields({"entries": list(entries)})
 
 
+# One non-date schema value per code, so the entry renders from its fields
+# rather than falling back to its raw text (the lint skips that case).
+_ANCHOR = {"R": {"title": "Talk one"}, "I": {"organization": "Society A"},
+           "D1": {"title": "Lecturer"}, "P": {"institution": "Example College"},
+           "N3B": {"mentee_name": "A. Mentee"}, "B1": {"degree": "BA"},
+           "K1": {"course_title": "Course"}, "S1": {"title": "Paper"},
+           "S8": {"title": "Paper"}, "R1": {"title": "Talk"}, "M2C": {"title": "Grant"},
+           "H": {"award_name": "Prize"}, "A": {"name": "Owner"},
+           "T": {"title": "x"}, "K2": {"title": "x"}}
+
+
+def _anchored(code, fields, **kwargs):
+    return _fields_entry(code, {**_ANCHOR[code], **fields}, **kwargs)
+
+
 def test_offschema_record_dict_sharing_a_schema_key_is_warn():
-    findings = _offschema(_fields_entry("R", {
+    findings = _offschema(_anchored("R", {
         "title": "Talk one",
         "additional_entry": {"title": "Talk two", "location": "Springfield"}}))
     assert len(findings) == 1
@@ -1089,35 +1104,35 @@ def test_offschema_record_dict_sharing_a_schema_key_is_warn():
 
 
 def test_offschema_dict_sharing_no_schema_key_is_info():
-    findings = _offschema(_fields_entry("R", {"extra": {"colour": "blue"}}))
+    findings = _offschema(_anchored("R", {"extra": {"colour": "blue"}}))
     assert [f["severity"] for f in findings] == ["INFO"]
 
 
 def test_offschema_numbered_schema_field_is_warn():
-    findings = _offschema(_fields_entry(
+    findings = _offschema(_anchored(
         "I", {"organization": "Society A", "organization_2": "Society B"}))
     assert [f["severity"] for f in findings] == ["WARN"]
     assert "`organization_2`" in findings[0]["message"]
 
 
 def test_offschema_numbered_key_off_the_schema_is_info():
-    findings = _offschema(_fields_entry("I", {"widget_2": "Society B"}))
+    findings = _offschema(_anchored("I", {"widget_2": "Society B"}))
     assert [f["severity"] for f in findings] == ["INFO"]
 
 
 def test_offschema_single_record_list_is_warn():
-    findings = _offschema(_fields_entry("D1", {"appointments": [
+    findings = _offschema(_anchored("D1", {"appointments": [
         {"title": "Lecturer", "institution": "Example College"}]}))
     assert [f["severity"] for f in findings] == ["WARN"]
 
 
 def test_offschema_list_of_strings_is_info():
-    findings = _offschema(_fields_entry("D1", {"keywords": ["one", "two"]}))
+    findings = _offschema(_anchored("D1", {"keywords": ["one", "two"]}))
     assert [f["severity"] for f in findings] == ["INFO"]
 
 
 def test_offschema_scalar_is_info_and_names_the_fact():
-    findings = _offschema(_fields_entry("B1", {"degree": "BA", "honors": "with distinction"}))
+    findings = _offschema(_anchored("B1", {"degree": "BA", "honors": "with distinction"}))
     assert [f["severity"] for f in findings] == ["INFO"]
     assert "each holds one fact" in findings[0]["message"]
     assert findings[0]["evidence"] == ["entry 11: with distinction"]
@@ -1125,7 +1140,7 @@ def test_offschema_scalar_is_info_and_names_the_fact():
 
 def test_offschema_a_record_list_fan_out_splits_is_not_reported():
     """Stage 6 renders each record of this list as its own child entry."""
-    entry = _fields_entry("P", {"committees": [
+    entry = _anchored("P", {"committees": [
         {"committee_name": "Alpha Board", "role": "Chair"},
         {"committee_name": "Beta Panel", "role": "Member"}]},
         text="Alpha Board Chair\tBeta Panel Member")
@@ -1135,7 +1150,7 @@ def test_offschema_a_record_list_fan_out_splits_is_not_reported():
 def test_offschema_a_record_list_fan_out_declines_is_warn():
     """Same list, but the text holds a token no rendered field carries, so
     fan-out keeps the entry whole and the list is never read."""
-    entry = _fields_entry("P", {"committees": [
+    entry = _anchored("P", {"committees": [
         {"committee_name": "Alpha Board", "role": "Chair"},
         {"committee_name": "Beta Panel", "role": "Member"}]},
         text="Alpha Board Chair\tBeta Panel Member Gamma")
@@ -1143,26 +1158,31 @@ def test_offschema_a_record_list_fan_out_declines_is_warn():
 
 
 @pytest.mark.parametrize("entry", [
-    _fields_entry("I", {"organization": "Society A"}),             # built-in schema key
-    _fields_entry("R", {"scope": "National"}),                     # config-only, extract false
-    _fields_entry("N3B", {"thesis_title": "Example thesis"}),     # built-in only
-    _fields_entry("R", {"pmid": "123"}),                           # stage-4 identifiers
-    _fields_entry("R", {"pmcid": "PMC1"}),
-    _fields_entry("R", {"doi": "10.1/x"}),
-    _fields_entry("R1", {"target_name": "Doe J"}),                 # stage-4 target name
-    _fields_entry("M2C", {"percent_effort": "5%"}),                # stage-4 effort
-    _fields_entry("H", {"date_range": "2001-2003"}),               # date-named
-    _fields_entry("H", {"start_date_1": "2001"}),                  # numbered date
-    _fields_entry("B1", {"dates_attended": {"start_date": "1990"}}),
-    _fields_entry("I", {"extra": ""}),                             # blank values
-    _fields_entry("I", {"extra": None}),
-    _fields_entry("I", {"extra": []}),
-    _fields_entry("I", {"extra": {}}),
-    _fields_entry("A", {"fax": "555-0100"}),                       # personal data
-    _fields_entry("T", {"extra": "x"}),                            # text-rendered
-    _fields_entry("K2", {"extra": "x"}),
-    _fields_entry("S1", {"other_id": "x"}),                        # publication
-    _fields_entry("S8", {"journal_or_source": "x"}),
+    _anchored("I", {"organization": "Society A"}),             # built-in schema key
+    _anchored("R", {"scope": "National"}),                     # config-only, extract false
+    _anchored("N3B", {"thesis_title": "Example thesis"}),     # built-in only
+    _anchored("R", {"pmid": "123"}),                           # stage-4 identifiers
+    _anchored("R", {"pmcid": "PMC1"}),
+    _anchored("R", {"doi": "10.1/x"}),
+    _anchored("R1", {"target_name": "Doe J"}),                 # stage-4 target name
+    _anchored("M2C", {"percent_effort": "5%"}),                # stage-4 effort
+    _anchored("H", {"date_range": "2001-2003"}),               # date-named
+    _anchored("H", {"start_date_1": "2001"}),                  # numbered date
+    _anchored("B1", {"dates_attended": {"start_date": "1990"}}),
+    _anchored("I", {"extra": ""}),                             # blank values
+    _anchored("I", {"extra": None}),
+    _anchored("I", {"extra": []}),
+    _anchored("I", {"extra": {}}),
+    _anchored("A", {"fax": "555-0100"}),                       # personal data
+    _anchored("T", {"extra": "x"}),                            # text-rendered
+    _anchored("K2", {"extra": "x"}),
+    _anchored("S1", {"other_id": "x"}),                        # publication (5d)
+    _anchored("S1", {"notes": "x"}),
+    _anchored("K1", {"description": "x"}),                     # teaching (5c)
+    _fields_entry("I", {"extra": "x"}),                            # renders its text:
+    _fields_entry("I", {"start_date": "2001", "organization_2": "B"}),  # no non-date
+    _fields_entry("I", {"organization": "", "end_date": "2001", "extra": "x"}),  # value
+    _anchored("S8", {"journal_or_source": "x"}),
     _fields_entry("I", "not an object"),                           # malformed fields
     _fields_entry("I", None),
 ])
@@ -1177,12 +1197,12 @@ def test_field_lint_constants_are_pinned():
 
 
 def test_offschema_a_key_merely_containing_date_is_not_a_date_key():
-    findings = _offschema(_fields_entry("I", {"candidate": "x", "update": "y"}))
+    findings = _offschema(_anchored("I", {"candidate": "x", "update": "y"}))
     assert [f["message"].split("`")[1] for f in findings] == ["candidate", "update"]
 
 
 def test_offschema_list_mixing_objects_and_strings_is_info():
-    findings = _offschema(_fields_entry("D1", {"appointments": [
+    findings = _offschema(_anchored("D1", {"appointments": [
         {"title": "Lecturer"}, "Reader"]}))
     assert [f["severity"] for f in findings] == ["INFO"]
 
@@ -1195,9 +1215,9 @@ def test_offschema_config_comment_entries_and_null_fields_are_tolerated(
         "I": {"fields": {"region": {"extract": False}}},
         "R": {"fields": None}}}))
     monkeypatch.setattr(extraction_lints, "FIELD_SCHEMA_CONFIG_PATH", config)
-    assert _offschema(_fields_entry("I", {"region": "North"})) == []
+    assert _offschema(_anchored("I", {"region": "North"})) == []
     # `scope` is declared only by the real config file, not the built-ins.
-    assert len(_offschema(_fields_entry("R", {"scope": "National"}))) == 1
+    assert len(_offschema(_anchored("R", {"scope": "National"}))) == 1
 
 
 def test_offschema_a_rendered_field_outside_both_schemas_is_not_reported(monkeypatch):
@@ -1205,15 +1225,15 @@ def test_offschema_a_rendered_field_outside_both_schemas_is_not_reported(monkeyp
     this key'; no code needs it today, so plant one."""
     monkeypatch.setattr(extraction_lints, "_RENDERED_FIELDS",
                         {"I": frozenset({"chapter"})})
-    assert _offschema(_fields_entry("I", {"chapter": "Local"})) == []
-    assert len(_offschema(_fields_entry("I", {"region": "Local"}))) == 1
+    assert _offschema(_anchored("I", {"chapter": "Local"})) == []
+    assert len(_offschema(_anchored("I", {"region": "Local"}))) == 1
 
 
 def test_offschema_one_finding_per_code_and_key_sorted_with_capped_evidence():
-    entries = [_fields_entry("N3B", {"outcome": f"result {i}"}, idx=i)
+    entries = [_anchored("N3B", {"outcome": f"result {i}"}, idx=i)
                for i in range(FIELD_EVIDENCE_MAX_VALUES + 2)]
-    entries.append(_fields_entry("B1", {"honors": "cum laude"}, idx=90))
-    entries.append(_fields_entry("B1", {"honors": "magna"}, idx=91))
+    entries.append(_anchored("B1", {"honors": "cum laude"}, idx=90))
+    entries.append(_anchored("B1", {"honors": "magna"}, idx=91))
     findings = _offschema(*entries)
     assert [f["message"].split(":")[0] for f in findings] == [
         "2 B1 entries", f"{FIELD_EVIDENCE_MAX_VALUES + 2} N3B entries"]
@@ -1223,16 +1243,16 @@ def test_offschema_one_finding_per_code_and_key_sorted_with_capped_evidence():
 
 def test_offschema_warn_when_any_value_of_the_key_is_a_record():
     findings = _offschema(
-        _fields_entry("R", {"additional_entry": "free text"}, idx=1),
-        _fields_entry("R", {"additional_entry": {"title": "Talk"}}, idx=2),
-        _fields_entry("R", {"additional_entry": {"title": "Talk 2"}}, idx=3))
+        _anchored("R", {"additional_entry": "free text"}, idx=1),
+        _anchored("R", {"additional_entry": {"title": "Talk"}}, idx=2),
+        _anchored("R", {"additional_entry": {"title": "Talk 2"}}, idx=3))
     assert [f["severity"] for f in findings] == ["WARN"]
     assert "2 hold a whole record" in findings[0]["message"]
 
 
 def test_offschema_evidence_value_is_truncated():
     long_value = "x" * (FIELD_EVIDENCE_VALUE_CHARS + 50)
-    findings = _offschema(_fields_entry("I", {"extra": long_value}))
+    findings = _offschema(_anchored("I", {"extra": long_value}))
     assert findings[0]["evidence"] == [
         "entry 11: " + "x" * FIELD_EVIDENCE_VALUE_CHARS]
 
@@ -1241,11 +1261,11 @@ def test_offschema_reads_the_config_file_and_fails_closed_without_it(monkeypatch
     monkeypatch.setattr(extraction_lints, "FIELD_SCHEMA_CONFIG_PATH",
                         tmp_path / "absent.json")
     with pytest.raises(FileNotFoundError):
-        _offschema(_fields_entry("I", {"organization": "Society A"}))
+        _offschema(_anchored("I", {"organization": "Society A"}))
 
 
 def test_offschema_leaves_the_entry_alone():
-    entry = _fields_entry("P", {"committees": [
+    entry = _anchored("P", {"committees": [
         {"committee_name": "Alpha Board", "role": "Chair"},
         {"committee_name": "Beta Panel", "role": "Member"}]},
         text="Alpha Board Chair\tBeta Panel Member")
