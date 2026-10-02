@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from app.models import Run, User
 from app.services.runs_admin_query import (
     InputFormatFilter, RunFilters, StatusFilter, build_filter_options, filtered_runs_query,
-    parse_run_filters, status_clause,
+    my_status_counts, parse_run_filters,
 )
 
 
@@ -179,24 +179,10 @@ def test_status_running_lists_queued_and_running_runs(db, status_runs):
     assert _status_ids(db, StatusFilter.RUNNING) == ["Q00003", "Q00004"]
 
 
-def test_status_failed_lists_every_run_of_a_faculty_member_with_a_failure(db, status_runs):
-    assert _status_ids(db, StatusFilter.FAILED) == ["Q00000", "Q00001", "Q00002"]
-    # The failed rerun is outside the department filter but still flags the group.
-    assert _status_ids(db, StatusFilter.FAILED, department="Library") == ["Q00002"]
-
-
-def test_status_failed_without_owner_matches_only_the_failed_run(db, status_runs):
-    db.query(Run).filter(Run.id.in_(["Q00000", "Q00001", "Q00002"])).update(
-        {Run.cv_owner_name: None})
-    db.commit()
+def test_status_failed_lists_only_the_failed_runs(db, status_runs):
+    # Jane's clean runs (Q00000, Q00002) stay out: the visible top row of a group is a failed run.
     assert _status_ids(db, StatusFilter.FAILED) == ["Q00001"]
-
-
-def test_status_failed_scoped_to_one_user_ignores_other_users_failures(db, seeded, status_runs):
-    _, bob = seeded
-    ids = sorted(r.id for r in db.query(Run).filter(
-        status_clause(StatusFilter.FAILED, owner_user_id=bob.id)).all())
-    assert ids == ["Q00001"]  # Alice's failure does not flag Bob's Jane run
+    assert _status_ids(db, StatusFilter.FAILED, department="Library") == []
 
 
 def test_status_red_is_the_red_score_band(db, status_runs):
@@ -210,10 +196,19 @@ def test_status_composes_with_other_filters(db, status_runs):
 
 def test_status_counts_ignore_status_but_apply_other_filters(db, status_runs):
     everything = build_filter_options(db, RunFilters(status=StatusFilter.RED)).status
-    assert (everything.all, everything.running, everything.failed, everything.red) == (5, 2, 3, 1)
+    assert (everything.all, everything.running, everything.failed, everything.red) == (5, 2, 1, 1)
     assert everything.awaiting_feedback == 2  # Q00000 and Q00002 are complete with no feedback
     library = build_filter_options(db, RunFilters(department="Library")).status
-    assert (library.all, library.running, library.failed, library.red, library.awaiting_feedback) == (2, 1, 1, 1, 1)
+    assert (library.all, library.running, library.failed, library.red, library.awaiting_feedback) == (2, 1, 0, 1, 1)
+
+
+def test_my_status_counts_cover_only_that_users_runs(db, seeded, status_runs):
+    alice, bob = seeded
+    # Alice: Q00000 (own_cv, complete, no feedback) + Q00001 (failed).
+    mine = my_status_counts(db, alice.id)
+    assert (mine.all, mine.running, mine.failed, mine.red, mine.awaiting_feedback) == (2, 0, 1, 0, 1)
+    theirs = my_status_counts(db, bob.id)
+    assert (theirs.all, theirs.running, theirs.failed) == (2, 1, 0)  # Q00002 is RED but red is admin only
 
 
 def test_other_facets_honour_the_status_filter(db, status_runs):

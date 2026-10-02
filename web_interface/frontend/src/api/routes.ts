@@ -46,6 +46,8 @@ export const runRoutes = {
    *  admin scope/filter query string, see buildRunListQuery) */
   list: (offset: number, limit: number, extra = '') =>
     `/api/runs?offset=${offset}&limit=${limit}${extra ? `&${extra}` : ''}`,
+  /** GET /api/runs/my-status-counts  (any user; counts over the caller's own runs only) */
+  myStatusCounts: () => '/api/runs/my-status-counts' as const,
   /** GET /api/runs/filter-options?:params  (admin; caller passes a pre-built query string) */
   filterOptions: (params: string) => `/api/runs/filter-options?${params}` as const,
   /** GET /api/runs/feedback-status */

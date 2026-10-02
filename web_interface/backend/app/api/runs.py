@@ -14,7 +14,7 @@ from app.database import get_db
 from app.models import Run, RunState, Step, User
 from app.schemas import (
     RunFilterOptions, RunStatus, RunSummary, StepSummary, PaginatedRuns,
-    CapacityResponse, RunActionResponse, RestartRunResponse,
+    CapacityResponse, RunActionResponse, RestartRunResponse, StatusFilterCounts,
     RunFeedbackSummary, RunQualityReport, RunReviewNote,
 )
 from app.pipeline.orchestrator import PipelineOrchestrator
@@ -31,7 +31,7 @@ from app.errors import not_found, bad_request, conflict, forbidden
 from app.services.runs_admin_query import (
     RunScope, StatusFilter, build_filter_options, empty_feedback_summary, feedback_clause,
     filtered_runs_query, load_feedback_summaries, parse_feedback_filter,
-    parse_run_filters, parse_status_filter, run_by_summary, status_clause,
+    my_status_counts, parse_run_filters, parse_status_filter, run_by_summary, status_clause,
 )
 from app.services import quality_score_service
 from app.services.run_quality_report import build_run_quality_report, columns_need_cleanup
@@ -218,6 +218,15 @@ def get_run_filter_options(
         db, parse_run_filters(run_by, faculty, department, feedback, input_format, status))
 
 
+@router.get("/runs/my-status-counts", response_model=StatusFilterCounts)
+def get_my_status_counts(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> StatusFilterCounts:
+    """The status pill counts over the caller's own runs (any role): never other users' runs."""
+    return my_status_counts(db, current_user.id)
+
+
 def _run_summary(current_user: User, run: Run, all_scope: bool,
                  feedback: RunFeedbackSummary) -> RunSummary:
     return RunSummary(
@@ -249,7 +258,7 @@ def _my_runs_query(db: Session, current_user: User, feedback: str | None,
     if status_filter is StatusFilter.RED:
         raise forbidden("The red-score filter is admin only")
     for clause in (feedback_clause(parse_feedback_filter(feedback)),
-                   status_clause(status_filter, owner_user_id=current_user.id)):
+                   status_clause(status_filter)):
         if clause is not None:
             query = query.filter(clause)
     return query
@@ -278,8 +287,7 @@ async def list_runs(
     three, and ``input_format`` ("wcm" = written in the WCM CV template, "other",
     "unknown" = not classified), are ignored under scope=mine. ``feedback`` ("given" = any reviewer left
     feedback, "needed" = complete with none) and ``status`` ("running" = queued or
-    running, "failed" = failed, plus every run of a faculty member with a failed
-    one; "red" = score band RED, admin only: 403 under scope=mine) apply in both
+    running, "failed" = failed; "red" = score band RED, admin only: 403 under scope=mine) apply in both
     scopes. Every run
     carries a ``feedback`` summary; scope=all adds the reviewer list.
     ``batch_id`` (#1114) narrows either scope to one batch's runs; every row

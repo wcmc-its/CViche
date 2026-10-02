@@ -1,5 +1,6 @@
+import { useEffect, useRef, useState } from 'react'
 import { X } from 'lucide-react'
-import type { RunByOption, RunFilterOptions, RunSummary } from '../../types'
+import type { RunByOption, RunFilterOptions, RunSummary, StatusFilterCounts } from '../../types'
 import RunFilterCombo from './RunFilterCombo'
 import {
   buildDepartmentModel,
@@ -69,19 +70,50 @@ function activeChips(filters: RunFilters, runByLabel: string) {
 
 interface StatusPillsProps {
   controls: RunFilterControls
-  /** Filter-options, for the pill counts; null for members, who have none. */
-  options: RunFilterOptions | null
+  /** The pill counts: filter-options' for admins, the caller's own for members; null until loaded. */
+  counts: StatusFilterCounts | null
   isAdmin: boolean
 }
 
-/** The single-select status pills above the table. Never wrap: they scroll sideways on a narrow screen. */
-export function StatusPills({ controls, options, isAdmin }: StatusPillsProps) {
+/** Width of the right-edge fade, in px. */
+const FADE_PX = 28
+
+/** True while the row has more pills hidden off its right edge. */
+function useMoreToRight(ref: React.RefObject<HTMLDivElement | null>): boolean {
+  const [more, setMore] = useState(false)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const update = () => setMore(el.scrollLeft + el.clientWidth < el.scrollWidth - 1)
+    update()
+    el.addEventListener('scroll', update, { passive: true })
+    window.addEventListener('resize', update)
+    return () => {
+      el.removeEventListener('scroll', update)
+      window.removeEventListener('resize', update)
+    }
+  }, [ref])
+  return more
+}
+
+/** The single-select status pills above the table. Never wrap: they scroll sideways on a narrow
+ *  screen, with a fade at the right edge while more are hidden. */
+export function StatusPills({ controls, counts, isAdmin }: StatusPillsProps) {
   const active = activeStatusPill(controls.filters)
+  const rowRef = useRef<HTMLDivElement>(null)
+  const more = useMoreToRight(rowRef)
+  const mask = more ? `linear-gradient(to right, #000 calc(100% - ${FADE_PX}px), transparent)` : undefined
   return (
-    <div role="group" aria-label="Show runs" className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1">
+    <div
+      ref={rowRef}
+      role="group"
+      aria-label="Show runs"
+      style={{ maskImage: mask, WebkitMaskImage: mask }}
+      className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1"
+    >
       {STATUS_PILLS.filter((pill) => isAdmin || !pill.adminOnly).map((pill) => {
         const on = pill.id === active
-        const count = options?.status[pill.id]
+        const count = counts?.[pill.id]
         return (
           <button
             key={pill.id}

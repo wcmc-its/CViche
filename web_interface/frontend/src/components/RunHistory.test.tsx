@@ -3,11 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import RunHistory from './RunHistory'
-import { getRunFilterOptions, getRuns } from '../api/runs'
+import { getMyStatusCounts, getRunFilterOptions, getRuns } from '../api/runs'
 import { getBatch, getQueue, listBatches } from '../api/batches'
 import type { BatchDetail, BatchSummary, RunFilterOptions, RunSummary, User } from '../types'
 
-vi.mock('../api/runs', () => ({ getRuns: vi.fn(), getRunFilterOptions: vi.fn() }))
+vi.mock('../api/runs', () => ({ getRuns: vi.fn(), getRunFilterOptions: vi.fn(), getMyStatusCounts: vi.fn() }))
 vi.mock('../api/batches', () => ({ listBatches: vi.fn(), getBatch: vi.fn(), getQueue: vi.fn() }))
 
 // Invented user; a non-admin, who has no admin filters but does see their own batches.
@@ -52,6 +52,7 @@ async function renderAt(url: string) {
 beforeEach(() => {
   currentUser = MEMBER
   vi.mocked(getRuns).mockResolvedValue({ runs: [RUN], total: 1, has_more: false })
+  vi.mocked(getMyStatusCounts).mockResolvedValue({ all: 5, running: 1, awaiting_feedback: 2, failed: 0, red: 0 })
   vi.mocked(listBatches).mockResolvedValue([SUMMARY])
   vi.mocked(getBatch).mockResolvedValue(DETAIL)
   vi.mocked(getQueue).mockResolvedValue({ dispatch_mode: 'queue', single: null, batch: null })
@@ -98,11 +99,14 @@ const pill = (name: string) => screen.getByRole('button', { name: new RegExp(`^$
 const lastParams = () => vi.mocked(getRuns).mock.lastCall![2]
 
 describe('RunHistory status pills', () => {
-  it('shows a member the pills that apply to them, without counts or Red score', async () => {
+  it('shows a member the pills that apply to them, with counts of their own runs and no Red score', async () => {
     await renderAt('/runs')
     const group = screen.getByRole('group', { name: 'Show runs' })
     expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(
-      ['All faculty', 'Running', 'Awaiting feedback', 'Had failures'])
+      ['All faculty5', 'Running1', 'Awaiting feedback2', 'Had failures0'])
+    expect(getRunFilterOptions).not.toHaveBeenCalled()
+    // Members get no Input format (or any other admin) filter.
+    expect(screen.queryByRole('button', { name: /^Input format:/ })).toBeNull()
     expect(pill('All faculty').getAttribute('aria-pressed')).toBe('true')
   })
 
@@ -122,6 +126,14 @@ describe('RunHistory status pills', () => {
   it('ignores ?status=red for a member', async () => {
     await renderAt('/runs?status=red')
     expect(lastParams()).toEqual({})
+  })
+
+  it('shows an admin the Input format filter', async () => {
+    currentUser = ADMIN
+    vi.mocked(getRunFilterOptions).mockResolvedValue(OPTIONS)
+    await renderAt('/runs')
+    expect(screen.getByRole('button', { name: /^Input format:/ })).toBeTruthy()
+    expect(getMyStatusCounts).not.toHaveBeenCalled()
   })
 
   it('shows an admin all five pills with counts and sends the pill with the other filters', async () => {

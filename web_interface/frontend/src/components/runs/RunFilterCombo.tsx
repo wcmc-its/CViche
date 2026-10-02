@@ -23,6 +23,7 @@ interface RunFilterComboProps {
 
 interface Visible {
   pins: ComboOption[]
+  recent: ComboOption[]
   shown: ComboOption[]
   matchCount: number
 }
@@ -31,6 +32,7 @@ function visibleOptions(model: ComboModel, query: string): Visible {
   const matches = model.items.filter((item) => matchesQuery(item, query))
   return {
     pins: query ? [] : model.pinned,
+    recent: query ? [] : model.recent ?? [],
     shown: matches.slice(0, LIST_LIMIT),
     matchCount: matches.length,
   }
@@ -80,8 +82,8 @@ export default function RunFilterCombo({ label, valueLabel, activeId, placeholde
   const listId = `${uid}-list`
   const optionId = (index: number) => `${uid}-opt-${index}`
 
-  const { pins, shown, matchCount } = useMemo(() => visibleOptions(model, query.trim().toLowerCase()), [model, query])
-  const flat = [...pins, ...shown]
+  const { pins, recent, shown, matchCount } = useMemo(() => visibleOptions(model, query.trim().toLowerCase()), [model, query])
+  const flat = [...pins, ...recent, ...shown]
 
   const close = (returnFocus: boolean) => {
     setOpen(false)
@@ -136,8 +138,14 @@ export default function RunFilterCombo({ label, valueLabel, activeId, placeholde
       />
     ))
 
-  const sectionTitle = (title: string) => (
-    <li role="presentation" className="px-2 pt-2 pb-1 text-[11px] font-semibold text-gray-500 tracking-wider uppercase">
+  // A group that follows another gets a divider line above its heading.
+  const sectionTitle = (title: string, divider: boolean) => (
+    <li
+      role="presentation"
+      className={`px-2 pt-2 pb-1 text-[11px] font-semibold text-gray-500 tracking-wider uppercase ${
+        divider ? 'mt-1.5 border-t border-sand-200 pt-2.5' : ''
+      }`}
+    >
       {title}
     </li>
   )
@@ -187,8 +195,10 @@ export default function RunFilterCombo({ label, valueLabel, activeId, placeholde
           </div>
           <ul id={listId} role="listbox" aria-label={label} className="max-h-[340px] overflow-auto p-1.5">
             {renderRows(pins, 0)}
-            {shown.length > 0 && sectionTitle(query.trim() ? 'Matches' : 'All')}
-            {renderRows(shown, pins.length)}
+            {recent.length > 0 && sectionTitle('Recent', pins.length > 0)}
+            {renderRows(recent, pins.length)}
+            {shown.length > 0 && sectionTitle(query.trim() ? 'Matches' : 'All', pins.length + recent.length > 0)}
+            {renderRows(shown, pins.length + recent.length)}
             {flat.length === 0 && (
               <li role="presentation" className="px-2 py-3.5 text-[13px] text-gray-500">
                 No matches. Search by name, CWID or email.

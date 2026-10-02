@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { FileText, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
-import { getRuns, getRunFilterOptions } from '../api/runs'
+import { getMyStatusCounts, getRuns, getRunFilterOptions } from '../api/runs'
 import { listBatches } from '../api/batches'
-import type { BatchSummary, RunFilterOptions, RunSummary } from '../types'
+import type { BatchSummary, RunFilterOptions, RunSummary, StatusFilterCounts } from '../types'
 import ErrorBanner from './ErrorBanner'
 import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 import RunTable from './runs/RunTable'
@@ -72,6 +72,8 @@ interface FilterRowProps {
   isAdmin: boolean
   controls: RunFilterControls
   options: RunFilterOptions | null
+  /** Status pill counts: the filter-options' for admins, the caller's own for members. */
+  statusCounts: StatusFilterCounts | null
   runs: RunSummary[]
   currentUserId: number | undefined
   currentUserEmail: string | undefined
@@ -82,7 +84,7 @@ interface FilterRowProps {
 
 /** The status pills, the filter combos (admin filters, then Batch for anyone with a batch) and the active chips.
  *  The pills are hidden in a batch view, which they do not filter. */
-function RunFilterRow({ isAdmin, batches, batchId, setBatch, currentUserEmail, ...bar }: FilterRowProps) {
+function RunFilterRow({ isAdmin, batches, batchId, setBatch, currentUserEmail, statusCounts, ...bar }: FilterRowProps) {
   const batchCombo = (batches.length > 0 || batchId) && (
     <BatchFilterCombo batches={batches} batchId={batchId} currentUserId={bar.currentUserId} onPick={setBatch} />
   )
@@ -90,7 +92,7 @@ function RunFilterRow({ isAdmin, batches, batchId, setBatch, currentUserEmail, .
   const batchChip = batchId ? { value: selected ? batchLabel(selected) : batchId, onRemove: () => setBatch('') } : undefined
   return (
     <div className="mt-6">
-      {!batchId && <StatusPills controls={bar.controls} options={isAdmin ? bar.options : null} isAdmin={isAdmin} />}
+      {!batchId && <StatusPills controls={bar.controls} counts={statusCounts} isAdmin={isAdmin} />}
       {(isAdmin || batchCombo) && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           {isAdmin
@@ -115,6 +117,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const [loading, setLoading] = useState(true)
   const [total, setTotal] = useState(0)
   const [filterOptions, setFilterOptions] = useState<RunFilterOptions | null>(null)
+  const [myCounts, setMyCounts] = useState<StatusFilterCounts | null>(null)
   const [currentPage, setCurrentPage] = useState(0)
   const [pageFilterKey, setPageFilterKey] = useState(filterKey)
   const [sortField, setSortField] = useState<SortField>('started_at')
@@ -158,6 +161,16 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
     return () => { cancelled = true }
   }, [isAdmin, filters])
 
+  // Members have no filter-options: their pill counts come from their own runs only.
+  useEffect(() => {
+    if (isAdmin) return
+    let cancelled = false
+    getMyStatusCounts()
+      .then((data) => { if (!cancelled) setMyCounts(data) })
+      .catch((err) => { console.error('Error fetching status counts:', err) })
+    return () => { cancelled = true }
+  }, [isAdmin, filterKey])
+
   useEffect(() => {
     fetchRuns(currentPage * PAGE_SIZE).then(() => {
       setLoading(false)
@@ -192,7 +205,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
     )
   }
 
-  const filterBarProps = { controls, options: filterOptions, runs, currentUserId: user?.user_id }
+  const filterBarProps = { controls, options: filterOptions, statusCounts: isAdmin ? filterOptions?.status ?? null : myCounts, runs, currentUserId: user?.user_id }
 
   if (runs.length === 0 && !error && !hasActiveFilters(controls.filters) && !batchId) {
     return (

@@ -559,18 +559,42 @@ def test_scope_all_run_by_on_behalf_and_its_option_count(client, db, seed_simple
     assert client.get("/api/runs/filter-options?scope=all").json()["on_behalf_count"] == 5
 
 
-def test_scope_mine_status_filter_sees_only_own_failures(client, db, seed_simple_mode):
+def test_scope_mine_status_filter_sees_only_own_runs(client, db, seed_simple_mode):
     users = _seed_feedback_view(db)
     db.get(Run, "ADM001").status = "failed"  # Alice's own Jane run
     db.get(Run, "ADM004").status = "running"  # Bob's
     db.commit()
     _auth(client, users["alice"])
-    assert _ids(client.get("/api/runs?status=failed")) == ["ADM002", "ADM001"]
+    assert _ids(client.get("/api/runs?status=failed")) == ["ADM001"]
     assert _ids(client.get("/api/runs?status=running")) == []
     _auth(client, users["bob"])
-    # Alice's failed Jane run does not flag Bob's Jane run (ADM003).
+    # Alice's failed run is not Bob's to see.
     assert _ids(client.get("/api/runs?status=failed")) == []
     assert _ids(client.get("/api/runs?status=running")) == ["ADM004"]
+
+
+def test_my_status_counts_never_include_other_users_runs(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    db.get(Run, "ADM001").status = "failed"  # Alice's
+    db.get(Run, "ADM004").status = "running"  # Bob's
+    db.commit()
+    _auth(client, users["alice"])
+    alice = client.get("/api/runs/my-status-counts").json()
+    assert alice["all"] == len(_ids(client.get("/api/runs")))
+    assert (alice["failed"], alice["running"], alice["red"]) == (1, 0, 0)
+    _auth(client, users["bob"])
+    bob = client.get("/api/runs/my-status-counts").json()
+    assert bob["all"] == len(_ids(client.get("/api/runs")))
+    assert (bob["failed"], bob["running"]) == (0, 1)
+
+
+def test_scope_all_runs_carry_cost_for_admins(client, db, seed_simple_mode):
+    users = _seed_feedback_view(db)
+    db.get(Run, "ADM001").total_cost = 2.5
+    db.commit()
+    _auth(client, users["admin"])
+    costs = {r["run_id"]: r["total_cost"] for r in client.get("/api/runs?scope=all").json()["runs"]}
+    assert costs["ADM001"] == 2.5
 
 
 def test_filter_options_cascade_applies_the_status_filter(client, db, seed_simple_mode):

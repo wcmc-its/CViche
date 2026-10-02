@@ -14,8 +14,8 @@ run-by lists while the department list stays complete.
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sqlalchemy import ColumnElement, and_, case, func, or_, select
-from sqlalchemy.orm import Query, Session, aliased, contains_eager
+from sqlalchemy import ColumnElement, and_, case, func, select
+from sqlalchemy.orm import Query, Session, contains_eager
 
 from app.errors import validation_error
 from app.services.input_format import INPUT_FORMAT_OTHER, INPUT_FORMAT_WCM
@@ -184,23 +184,16 @@ def input_format_clause(input_format: InputFormatFilter | None) -> ColumnElement
     return Run.input_format == input_format.value
 
 
-def status_clause(status: StatusFilter | None, *,
-                  owner_user_id: int | None = None) -> ColumnElement[bool] | None:
+def status_clause(status: StatusFilter | None) -> ColumnElement[bool] | None:
     """The predicate for the ``status`` filter (None = not filtering).
 
-    Failed lists the failed runs AND every run of a faculty member (same CV owner
-    name) who has one, so a grouped row whose earlier rerun failed is kept, as the
-    table groups by owner. ``owner_user_id`` limits "has a failed run" to that
-    user's own runs (scope=mine must not read other users' runs)."""
+    Failed lists the failed runs themselves, not the rest of their faculty
+    member's group: a group's visible top row is then always a failed run, so the
+    table matches the pill and its count."""
     if status is StatusFilter.RUNNING:
         return Run.status.in_(ACTIVE_RUN_STATES)
     if status is StatusFilter.FAILED:
-        failed = aliased(Run)
-        failed_owners = select(failed.cv_owner_name).where(
-            failed.status == RunState.FAILED, failed.cv_owner_name.isnot(None))
-        if owner_user_id is not None:
-            failed_owners = failed_owners.where(failed.user_id == owner_user_id)
-        return or_(Run.status == RunState.FAILED, Run.cv_owner_name.in_(failed_owners))
+        return Run.status == RunState.FAILED
     if status is StatusFilter.RED:
         return Run.quality_band == BAND_RED
     return None
@@ -302,10 +295,12 @@ def _submission_type_count(db: Session, filters: RunFilters, submission_type: st
     )
 
 
-def _status_counts(db: Session, filters: RunFilters) -> StatusFilterCounts:
+def _status_counts(db: Session, filters: RunFilters, *,
+                   owner_user_id: int | None = None) -> StatusFilterCounts:
     """Runs per pill. Applies every filter except ``status`` (the pills are one
-    choice among themselves); ``awaiting_feedback`` is the feedback=needed count."""
-    total, running, failed, red, awaiting = (
+    choice among themselves); ``awaiting_feedback`` is the feedback=needed count.
+    ``owner_user_id`` counts only that user's own runs (the member view)."""
+    query = (
         db.query(func.count(Run.id),
                  func.count(case((status_clause(StatusFilter.RUNNING), 1))),
                  func.count(case((status_clause(StatusFilter.FAILED), 1))),
@@ -313,10 +308,19 @@ def _status_counts(db: Session, filters: RunFilters) -> StatusFilterCounts:
                  func.count(case((_needs_feedback(), 1))))
         .select_from(Run).outerjoin(User, Run.user_id == User.id)
         .filter(*_clauses(filters, skip_status=True))
-        .one()
     )
+    if owner_user_id is not None:
+        query = query.filter(Run.user_id == owner_user_id)
+    total, running, failed, red, awaiting = query.one()
     return StatusFilterCounts(all=total, running=running, awaiting_feedback=awaiting,
                               failed=failed, red=red)
+
+
+def my_status_counts(db: Session, user_id: int) -> StatusFilterCounts:
+    """The status pill counts over one member's own runs only. ``red`` is the
+    admin score band, so it is always 0 here."""
+    counts = _status_counts(db, RunFilters(), owner_user_id=user_id)
+    return counts.model_copy(update={"red": 0})
 
 
 def _feedback_counts(db: Session, filters: RunFilters) -> FeedbackFilterCounts:

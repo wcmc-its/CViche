@@ -145,8 +145,7 @@ export type RunFeedbackFilter = 'given' | 'needed'
 /** Whether the uploaded CV was written in the WCM CV template; 'unknown' = not classified. */
 export type RunInputFormatFilter = 'wcm' | 'other' | 'unknown'
 
-/** Status pills: 'running' = queued or running; 'failed' = failed, plus every run of a
- *  faculty member with a failed one; 'red' = score band RED (admin only: 403 under scope 'mine'). */
+/** Status pills: 'running' = queued or running; 'failed' = failed runs; 'red' = score band RED (admin only: 403 under scope 'mine'). */
 export type RunStatusFilter = 'running' | 'failed' | 'red'
 
 export interface RunListParams {
