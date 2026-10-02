@@ -184,8 +184,68 @@ def test_cap_source_names_the_fallback_served_gate_from_the_real_scorer(tmp_path
     assert source == rqr.CapSource("a backup model answered part of the run", "llm_fallback_served")
 
 
-def test_every_known_lint_has_a_plain_english_line():
-    assert set(KNOWN_LINTS) <= set(rqr.LINT_EXPLANATIONS)
+def test_every_known_lint_has_plain_wording():
+    assert set(KNOWN_LINTS) <= set(rqr.LINT_COPY)
+
+
+def test_every_scorer_row_has_plain_wording():
+    names = [n for n, _w, _f in scorer.DIMENSIONS] + [n for n, _f in scorer.CAP_ONLY_GATES]
+    assert set(names) == set(rqr.ROW_COPY_BY_GATE_NAME)
+
+
+def test_dimension_rows_carry_their_wording_and_whether_they_can_cap():
+    raw = _score(total=90, raw=90.0, caps=[], flags=[])
+    raw["dimensionScores"] = [
+        {"name": OWNER_GATE, "score": 15.0, "max": 15},
+        {"name": "Duplicate-entry ratio (de-dup / fragmentation health)", "score": 8.0, "max": 10},
+        {"name": "Duplicate entries", "score": 8.0, "max": 10},  # an older scorer's name
+    ]
+
+    dims = rqr.build_run_quality_report("R1", raw, None).dimensions
+
+    assert [(d.label, d.can_cap) for d in dims] == [
+        ("Faculty name and contact", True), ("No duplicate entries", False), (None, False)]
+    assert dims[1].if_lost.startswith("Check that repeated entries")
+
+
+def test_fired_zero_weight_gates_are_listed_and_weighted_caps_are_not():
+    flags = [
+        f"HARD-FAIL cap=25: {OWNER_GATE} (fraction=1.00)",
+        "HARD-FAIL cap=84: Source table lost before extraction (CAP-ONLY gate) (worst=6)",
+        "HARD-FAIL cap=84: Call served by the content-filter fallback model (caps below GREEN) (x)",
+        "HARD-FAIL cap=99: unknown gate",
+    ]
+    report = rqr.build_run_quality_report("R1", _score(caps=[25, 84, 84], flags=flags), None)
+
+    assert [(g.label, g.cap, g.lint) for g in report.gates_fired] == [
+        ("Source tables read in full", 84, "table_lost"),
+        ("Usual AI model used throughout", 84, "llm_fallback_served"),
+    ]
+
+
+def test_a_clean_run_lists_no_gates():
+    clean = rqr.build_run_quality_report("R1", _score(total=95, raw=95.0, caps=[], flags=[]), None)
+    assert clean.gates_fired == []
+
+
+FATAL_GATE = "Pipeline/API errors present (HARD-FAIL gate)"
+
+
+@pytest.mark.parametrize("doctor_lints, cap_lint", [
+    (["stage_failure_recorded"], "stage_failure_recorded"),
+    (["stage_failure_recorded", "pipeline_errors_present"], "pipeline_errors_present"),
+    (["table_shape"], "pipeline_errors_present"),
+])
+def test_a_fatal_cap_points_at_stage_failure_recorded_when_that_is_the_finding_shown(
+        doctor_lints, cap_lint):
+    score = _score(total=40, raw=80.0, caps=[40], flags=[f"HARD-FAIL cap=40: {FATAL_GATE} (fraction=1.00)"])
+    doctor = {"findings": [_finding(lint, "ERROR") for lint in doctor_lints]}
+
+    report = rqr.build_run_quality_report("R1", score, doctor)
+
+    assert report.cap_lint == cap_lint
+    tied = [g.lint for g in report.doctor.findings if g.caps_score]
+    assert tied == ([cap_lint] if cap_lint in doctor_lints else [])
 
 
 def test_cap_source_is_recovered_from_the_matching_flag():
@@ -231,7 +291,15 @@ def test_doctor_groups_collapse_instances_and_order_rarest_first():
 def test_doctor_unmeasured_lint_has_null_prevalence_and_falls_back_to_the_doctor_message():
     report = rqr.summarize_doctor({"findings": [_finding("brand_new_lint", message="Something new")]})
     group = report.findings[0]
-    assert (group.prevalence, group.message) == (None, "Something new")
+    assert (group.prevalence, group.message, group.title, group.what_to_do) == (
+        None, "Something new", None, None)
+
+
+def test_doctor_rows_carry_the_lint_wording():
+    group = rqr.summarize_doctor({"findings": [_finding("under_extraction")]}).findings[0]
+    assert (group.title, group.what_to_do) == (
+        "Big entry mostly unread", "Compare the entry with the source and add the missing records.")
+    assert group.message == rqr.LINT_COPY["under_extraction"].explanation
 
 
 def test_doctor_not_run_lints_are_counted_not_listed_and_junk_is_skipped():
@@ -271,5 +339,5 @@ def test_report_degrades_each_part_to_null_independently():
     assert no_doctor.band == "GREEN" and no_doctor.cap is None and no_doctor.doctor is None
 
     nothing = rqr.build_run_quality_report("R1", None, None)
-    assert nothing.model_dump(exclude={"run_id", "provisional", "dimensions"}) == {
-        k: None for k in nothing.model_dump(exclude={"run_id", "provisional", "dimensions"})}
+    assert nothing.model_dump(exclude={"run_id", "provisional", "dimensions", "gates_fired"}) == {
+        k: None for k in nothing.model_dump(exclude={"run_id", "provisional", "dimensions", "gates_fired"})}

@@ -85,10 +85,31 @@ export interface RunSummary {
 export type QualityBand = 'GREEN' | 'YELLOW' | 'RED'
 export type DoctorSeverity = 'ERROR' | 'WARN' | 'INFO'
 
-export interface QualityDimension {
+/** Plain wording for a score row; every field is null for a row named by an
+ *  older scorer build. */
+export interface ScoreRowWording {
+  /** The scorer's technical name. */
   name: string
+  label: string | null
+  /** What the row checks. */
+  checks: string | null
+  /** How the row loses points, or the cap it applies. */
+  scoring: string | null
+  /** What to do when it loses points. */
+  if_lost: string | null
+}
+
+export interface QualityDimension extends ScoreRowWording {
   weight: number
   points: number
+  can_cap: boolean
+}
+
+/** A weight-0 score row whose cap fired. */
+export interface QualityGate extends ScoreRowWording {
+  cap: number
+  /** The doctor lint that reports the same condition. */
+  lint: string
 }
 
 export interface DoctorFindingGroup {
@@ -97,6 +118,9 @@ export interface DoctorFindingGroup {
   severity: DoctorSeverity
   /** Plain-English explanation of the lint. */
   message: string
+  /** Plain title; null for a lint with no wording yet. */
+  title: string | null
+  what_to_do: string | null
   /** Instances of this lint in the run. */
   count: number
   /** Share of runs the lint fires on (0-1); null when unmeasured. */
@@ -132,6 +156,8 @@ export interface RunQualityReport {
   data_complete: boolean | null
   /** Weighted dimensions in the scorer's order. */
   dimensions: QualityDimension[]
+  /** Weight-0 rows whose cap fired. */
+  gates_fired: QualityGate[]
   doctor: RunDoctorReport | null
 }
 

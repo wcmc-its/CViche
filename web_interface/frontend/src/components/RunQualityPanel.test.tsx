@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, render, screen } from '@testing-library/react'
-import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, RunQualitySections } from './RunQualityPanel'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { EMPTY_REPORT_RETRIES, EMPTY_REPORT_RETRY_MS, RunQualitySections, seenOn } from './RunQualityPanel'
 import { getRunQuality } from '../api/runs'
 import type { RunQualityReport } from '../types'
 
@@ -13,7 +13,7 @@ vi.mock('../api/runs', () => ({
 const EMPTY: RunQualityReport = {
   run_id: 'ABCDEF', score: null, band: null, band_meaning: null, provisional: true,
   cap: null, cap_reason: null, cap_lint: null, earned: null, total_weight: null,
-  data_complete: null, dimensions: [], doctor: null,
+  data_complete: null, dimensions: [], gates_fired: [], doctor: null,
 }
 const SCORED: RunQualityReport = { ...EMPTY, score: 87, band: 'GREEN', band_meaning: 'Ship', earned: 87, total_weight: 95 }
 
@@ -68,19 +68,74 @@ describe('RunQualitySections', () => {
     expect(getRunQuality).toHaveBeenCalledTimes(1)
   })
 
-  it('links the cap banner lint to its Run Doctor row', async () => {
-    const lint = 'missing_required_section'
+  it('links the cap banner to its Run Doctor row by the plain title', async () => {
+    const lint = 'owner_contact_missing'
     vi.mocked(getRunQuality).mockResolvedValue({
-      ...SCORED, cap: 60, cap_reason: 'Hard fail', cap_lint: lint,
+      ...SCORED, cap: 25, cap_reason: 'owner name missing', cap_lint: lint,
       doctor: {
         counts: { error: 1, warn: 0, info: 0 }, not_run: 0,
-        findings: [{ lint, severity: 'ERROR', message: 'A section is missing', count: 1, prevalence: null, caps_score: true }],
+        findings: [{ lint, severity: 'ERROR', message: 'No name', title: 'Owner name not found', what_to_do: 'Rerun.', count: 1, prevalence: null, caps_score: true }],
       },
     })
     const { container } = render(<RunQualitySections runId="ABCDEF" />)
     await flush()
-    const link = screen.getByRole('link', { name: lint })
+    const link = screen.getByRole('link', { name: 'Owner name not found' })
     const target = link.getAttribute('href')!.slice(1)
     expect(container.querySelector(`[id="${target}"]`)).toBeTruthy()
+  })
+
+  it('shows a finding as title, what to do, and Once / N times', async () => {
+    const finding = { severity: 'WARN' as const, message: 'm', what_to_do: 'Delete the repeat.', prevalence: 0.12, caps_score: false }
+    vi.mocked(getRunQuality).mockResolvedValue({
+      ...SCORED,
+      doctor: {
+        counts: { error: 0, warn: 2, info: 0 }, not_run: 0,
+        findings: [
+          { ...finding, lint: 'duplicate_records', title: 'Repeated numbered entry', count: 1 },
+          { ...finding, lint: 'pipe_leaks', title: null, what_to_do: null, count: 3 },
+        ],
+      },
+    })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    expect(screen.getByText('Repeated numbered entry')).toBeTruthy()
+    expect(screen.getByText('Delete the repeat.')).toBeTruthy()
+    expect(screen.getByText('Once')).toBeTruthy()
+    expect(screen.getByText('3 times')).toBeTruthy()
+    expect(screen.getByText('pipe_leaks')).toBeTruthy()
+    expect(screen.getAllByText('Seen on 12% of runs')).toHaveLength(2)
+  })
+
+  it('opens a row card on focus and lists a fired gate with its cap', async () => {
+    const wording = { checks: 'Checks tables.', scoring: 'Caps at 84.', if_lost: 'Re-enter rows.' }
+    vi.mocked(getRunQuality).mockResolvedValue({
+      ...SCORED,
+      dimensions: [{ name: 'Sparse tables', label: 'Tables filled in', weight: 12, points: 10, can_cap: false, ...wording }],
+      gates_fired: [{ name: 'Lost table gate', label: 'Source tables read in full', cap: 84, lint: 'table_lost', ...wording }],
+    })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    expect(screen.queryByRole('tooltip')).toBeNull()
+    fireEvent.focus(screen.getByText('Tables filled in').parentElement!)
+    expect(screen.getByRole('tooltip').textContent).toContain('Scored as \u201cSparse tables\u201d \u00b7 weight 12')
+    expect(screen.getByRole('link', { name: 'Caps score at 84' }).getAttribute('href')).toBe('#doctor-lint-table_lost')
+  })
+
+  it('reads a rate that rounds to 0% as under 1%', () => {
+    expect([seenOn(0.001), seenOn(0.005), seenOn(0.12)]).toEqual(['under 1%', '1%', '12%'])
+  })
+
+  it('labels a gate card as cap-only', async () => {
+    vi.mocked(getRunQuality).mockResolvedValue({
+      ...SCORED,
+      dimensions: [{ name: 'Dup', label: null, weight: 10, points: 10, can_cap: false, checks: null, scoring: null, if_lost: null }],
+      gates_fired: [{ name: 'Gate', label: 'Source tables read in full', cap: 84, lint: 'table_lost', checks: null, scoring: null, if_lost: 'Re-enter rows.' }],
+    })
+    render(<RunQualitySections runId="ABCDEF" />)
+    await flush()
+    fireEvent.focus(screen.getByText('Source tables read in full').parentElement!)
+    const card = screen.getByRole('tooltip').textContent
+    expect(card).toContain('If it fires:')
+    expect(card).toContain('caps only, no points')
   })
 })

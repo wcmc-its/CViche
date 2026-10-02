@@ -768,10 +768,27 @@ QualityBand = Literal["GREEN", "YELLOW", "RED"]
 
 
 class QualityDimension(BaseModel):
-    """One weighted scorer dimension: ``points`` earned out of ``weight``."""
-    name: str
+    """One weighted scorer dimension: ``points`` earned out of ``weight``. The
+    wording fields are null for a row named by an older scorer build."""
+    name: str  # the scorer's technical name
     weight: int
     points: float
+    label: str | None = None  # plain label
+    checks: str | None = None  # what the row checks
+    scoring: str | None = None  # how it loses points, or the cap it applies
+    if_lost: str | None = None  # what to do when it loses points
+    can_cap: bool = False
+
+
+class QualityGate(BaseModel):
+    """A weight-0 score row whose cap fired; it carries no points."""
+    name: str
+    cap: int
+    lint: str  # the doctor lint that reports the same condition
+    label: str | None = None
+    checks: str | None = None
+    scoring: str | None = None
+    if_lost: str | None = None
 
 
 class DoctorSeverityCounts(BaseModel):
@@ -786,6 +803,8 @@ class DoctorFindingGroup(BaseModel):
     lint: str
     severity: DoctorSeverity  # the most severe of the lint's instances
     message: str  # plain-English explanation of the lint
+    title: str | None = None  # plain title; null for a lint with no wording yet
+    what_to_do: str | None = None
     count: int  # instances of this lint in the run
     prevalence: float | None = None  # share of runs it fires on; None if unmeasured
     caps_score: bool = False  # this lint is the gate behind the run's applied cap
@@ -812,6 +831,7 @@ class RunQualityReport(BaseModel):
     total_weight: int | None = None
     data_complete: bool | None = None
     dimensions: list[QualityDimension] = []
+    gates_fired: list[QualityGate] = []  # weight-0 rows whose cap fired
     doctor: RunDoctorReport | None = None
 
 
