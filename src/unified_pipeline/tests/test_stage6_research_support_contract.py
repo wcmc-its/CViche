@@ -645,6 +645,7 @@ VALUED_ROLE_EFFORT_ROWS = [
     'Percent Effort | Part time',
     'Role and percent effort:   Example Co-I (unfunded)',
     'Percent effort 35%',
+    'Percent effort 5%',
     'Percent effort (35%)',
     'Percent Effort\t35',
     'Role in project PI, 35% effort',
@@ -808,12 +809,16 @@ def test_a_value_past_the_search_window_is_not_a_role_effort_header(text):
 
 
 @pytest.mark.parametrize('padding, is_header', [
-    (ROLE_EFFORT_HEADER_WINDOW - len('role in project'), True),
-    (ROLE_EFFORT_HEADER_WINDOW - len('role in project') + 1, False),
+    # 'role in project' is 15 characters. The numbers are literals on purpose: a
+    # test built from ROLE_EFFORT_HEADER_WINDOW would move with the constant and
+    # pin nothing.
+    (45, True),
+    (46, False),
 ])
 def test_the_header_phrase_has_to_end_inside_the_search_window(padding, is_header):
     """The window is 60 characters: a phrase ending at 60 counts, one ending at 61 does not."""
     text = 'Example Agency'.ljust(padding) + 'role in project'
+    assert len(text) == (60 if is_header else 61)
 
     assert is_role_effort_header(text) is is_header
 
