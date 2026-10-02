@@ -58,6 +58,7 @@ from ..formatting import (
     _set_cell_vertical_alignment,
     _set_font,
     _set_table_border,
+    format_date_for_section,
     format_date_range,
 )
 from ..normalization import (
@@ -144,6 +145,9 @@ class GrantFields(TypedDict, total=False):
     # `annual_direct_costs` above is the older spelling, kept as the first read.
     annual_funding: str | int | float | None
     total_funding: str | int | float | None
+    # M2C's schema spells a pending grant's amount and date these two ways (#1299).
+    total_funding_requested: str | int | float | None
+    submission_date: str | None
     pi_name: str | None
     principal_investigator: str | None
     date: str | None
@@ -967,6 +971,10 @@ TOTAL_AWARD_LABEL = 'Total award:'
 STATUS_LABEL = 'Status:'
 NOTES_LABEL = 'Notes:'
 CO_INVESTIGATORS_LABEL = 'Co-Investigators:'
+# A pending grant's amount is a request, not an award, so it gets its own label
+# rather than "Total award:" (#1299, the #982 rule).
+TOTAL_REQUESTED_LABEL = 'Total requested:'
+SUBMISSION_DATE_LABEL = 'Submitted:'
 
 
 def _optional_grant_rows(
@@ -980,6 +988,10 @@ def _optional_grant_rows(
     its own keeps them without touching the PI cell; a value identical to the
     resolved PI is dropped, since it would repeat the row above it.
 
+    Total requested and Submitted (#1299) carry the two M2C schema fields
+    nothing else reads: a pending grant's requested amount and its submission
+    date.
+
     Status and Notes (#982) keep a grant's own status word and labelled remark
     ("Update: withdrawn"), which reached no cell before. Major project goals
     (major_goals, description or narrative) is the older optional row, moved here
@@ -992,6 +1004,12 @@ def _optional_grant_rows(
     co_investigators = str(fields.get('co_investigators') or '').strip()
     if co_investigators and co_investigators.lower() != (pi_name or '').strip().lower():
         rows.append((CO_INVESTIGATORS_LABEL, co_investigators))
+    requested = _format_currency(fields.get('total_funding_requested'))
+    if requested:
+        rows.append((TOTAL_REQUESTED_LABEL, requested))
+    submitted = format_date_for_section(fields.get('submission_date') or '', 'M2C')
+    if submitted:
+        rows.append((SUBMISSION_DATE_LABEL, submitted))
     status = str(fields.get('status') or '').strip()
     if status:
         rows.append((STATUS_LABEL, status))
