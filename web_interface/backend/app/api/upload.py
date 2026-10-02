@@ -737,7 +737,7 @@ async def upload_cv(
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
     # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
-    extracted, _ = await _extract_text_or_400(content, file_ext)
+    extracted, scanned_pages = await _extract_text_or_400(content, file_ext)
     if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
@@ -839,6 +839,7 @@ async def upload_cv(
         input_format=input_format,
         input_format_score=input_format_score,
         source_sha256=source_sha256,
+        scanned_pages=",".join(map(str, scanned_pages)) or None,
     )
     db.add(run)
     _add_pending_steps(db, run_id)

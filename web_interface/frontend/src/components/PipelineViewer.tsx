@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, XCircle, AlertCircle, LifeBuoy } from 'lucide-react'
 import { getRunDataJson, cancelRun, restartRun, retryStep, startRun } from '../api/runs'
 import { runRoutes } from '../api/routes'
-import { formatCost, runningStepCost } from '../utils'
+import { formatCost, formatScannedPages, runningStepCost } from '../utils'
 import { usePipelineRun } from '../hooks/usePipelineRun'
 
 import PipelineHeader from './PipelineHeader'
@@ -385,6 +385,15 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                 <p className="min-w-0 text-sm font-medium text-orange-800 [overflow-wrap:anywhere]">Pipeline was cancelled {runStatus.error_message && ` — ${runStatus.error_message}`}</p>
               </div>
               <button onClick={handleRestart} disabled={isRestarting} className="shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 disabled:opacity-55">Restart with file</button>
+            </div>
+          </div>
+        )}
+
+        {!!runStatus.scanned_pages?.length && (
+          <div className={`${bannerBase} bg-amber-50 border-amber-300`} role="status">
+            <div className="flex items-center gap-3 max-w-full">
+              <AlertCircle className="h-5 w-5 text-amber-600 flex-shrink-0" aria-hidden="true" />
+              <p className="min-w-0 text-sm font-medium text-amber-800">{formatScannedPages(runStatus.scanned_pages)}</p>
             </div>
           </div>
         )}

@@ -145,3 +145,10 @@ export function formatRelativeDate(dateStr: string | null): { display: string; t
   // >= 24 hours: absolute date, no tooltip
   return { display: formatDate(dateStr) }
 }
+
+/** The run page's warning for a PDF's scanned pages (#1282). */
+export function formatScannedPages(pages: number[]): string {
+  const one = pages.length === 1
+  return `${one ? 'Page' : 'Pages'} ${pages.join(', ')} of this PDF ${one ? 'is a scanned image' : 'are scanned images'}, `
+    + `so ${one ? 'its' : 'their'} text couldn't be read and is missing from the output.`
+}
