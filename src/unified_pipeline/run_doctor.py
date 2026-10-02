@@ -15,7 +15,9 @@ Lints, ranked by the severity of the failure class they catch:
                           source table (web207's lost personal-data table)
 2. missed_headers         ALL-CAPS bold header-like source lines absent from
                           the 1a hierarchy AND every entry hierarchy path
-                          ('PROFESSIONAL EXPERIENCE' demoted to content)
+                          ('PROFESSIONAL EXPERIENCE' demoted to content); a
+                          Heading-styled line that is not ALL-CAPS is
+                          reported at INFO and never escalates the run
 3. bucket_status          grant status vs the funding subsection the grant
                           actually rendered under in the stage-6 document
                           (the #214 rebucketing rules)
@@ -90,6 +92,40 @@ Lints, ranked by the severity of the failure class they catch:
                           fragment_reconnection) recorded `error` in
                           meta.stats: it failed and left its entries
                           unchanged; WARN, the run completes (#818)
+
+14f. offschema_fields     a stage-4 value under a key that is in neither
+                          field schema, not rendered for its code, not
+                          stage-4 bookkeeping, and not a record list fan-out
+                          splits -- no renderer reads it, so it never reaches
+                          the document (TXTATQ's `organization_2`: 6
+                          memberships); WARN for a whole record, INFO for one
+                          fact (#817)
+
+14g. implausible_year     a stage-4 date-named field whose year is below
+                          1930 (or 10 years before the owner's earliest
+                          degree) and that the entry's text never writes --
+                          a two-digit year given the wrong century (YOXXOH's
+                          talks from the 2000s rendered in the 1900s); WARN
+
+14h. stage4_group_failures a stage-4 taxonomy group's extraction call failed
+                          (invalid reply, timeout, provider error such as a
+                          content filter): its entries were written empty and
+                          the recovery pass retried them, so the failure hides
+                          in the artifact -- `extraction_error` on the entries
+                          and `stats.failed_batches`, never an `error` key.
+                          WARN: it caps the quality score at 84, one point
+                          under GREEN, not into the RED band (#1174)
+
+14i. python_repr_in_output a Python dict or list repr rendered as document text
+                          (`<year>-{'start_date': ..., 'end_date': ...}`):
+                          a structured field was `str()`-ed into a cell
+                          instead of formatted (#1233); WARN on any hit
+
+14j. llm_refusal_in_output language-model refusal or request-for-input text
+                          rendered as document text ("I don't have access to
+                          specific CV details ..."): stage 4.5 summarised an
+                          empty CV context and the reply was delivered (#1224);
+                          WARN on any hit
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -212,7 +248,9 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
+    lint_implausible_year,
     lint_invented_records,
+    lint_offschema_fields,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
     lint_wrong_start_date,
@@ -259,8 +297,10 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_duplicate_records,
+    lint_llm_refusal_in_output,
     lint_output_hygiene,
     lint_pipe_leaks,
+    lint_python_repr_in_output,
     lint_section_lost,
     lint_stage6_warnings,
     lint_table_shape,
@@ -282,6 +322,7 @@ from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_pipeline_errors,
     lint_stage3b_fallback_ratio,
     lint_stage3b_second_pass_errors,
+    lint_stage4_group_failures,
 )
 
 
@@ -350,6 +391,11 @@ KNOWN_LINTS = (
     "table_lost",
     "date_only_lines",
     "stage3b_second_pass_error",
+    "offschema_fields",
+    "implausible_year",
+    "stage4_group_failures",
+    "python_repr_in_output",
+    "llm_refusal_in_output",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -428,6 +474,28 @@ LINT_PREVALENCE = {
     # 0.001 floor; this row now carries its own measured value rather than
     # borrowing theirs.
     "invented_records": 0.011,
+    # Both measured 2026-10-02 on the 163-CV wave-1 stage-4 farm, one fire
+    # per CV at any severity: offschema_fields 37/163 (16 of 23 sampled
+    # findings a value missing from the rendered docx, before record-shaped
+    # values on text-rendered entries were reported too: 20 more values, 11
+    # with a string the docx lacks), implausible_year 6/163 (every one of
+    # its 17 findings a hand-checked wrong century).
+    "offschema_fields": 0.227,
+    "implausible_year": 0.037,
+    # #1174: 3 of 163 corpus CVs (the 126-CV census farm + the 37 uids of the
+    # 2026-10-02 IPXFBA batch, scripts/doctor_gate.py, measured 2026-10-02):
+    # two batch uids whose stage-4 group call returned two JSON objects, and
+    # one older-build census uid whose group call hit a provider error. Same
+    # mixed-corpus caveat as duplicate_records above.
+    "stage4_group_failures": 0.018,
+    # python_repr_in_output and llm_refusal_in_output (#1233, #1224): fire
+    # counts on the 163 stage-6 renders of the 2026-10 wave-1 corpus (126
+    # census + 37 IPXFBA CVs) as rendered by origin/dev e59aaf44, which still
+    # has both defects: 10 CVs carry a dict or list repr, 1 (MYAXRH) a refusal.
+    # Not comparable to the rows above (different corpus, defects present),
+    # and both should fall toward zero as the renderers are fixed.
+    "python_repr_in_output": 0.061,
+    "llm_refusal_in_output": 0.006,
 }
 
 
@@ -520,6 +588,13 @@ def _is_single_column(tbl) -> bool:
     return all(len(_logical_cells(row)) == 1 for row in tbl.rows)
 
 
+#: An enumeration token followed by a TAB ('I.<tab>OVERVIEW OF ...'): the tab
+#: separates the numeral from the title, it does not split a label from a
+#: value, so the line is still a header candidate (#1232). Roman numeral or a
+#: single letter only: an arabic numeral is rejected by the digit-free rule.
+_ENUM_TAB_RE = re.compile(r"^(\s*(?:[IVXLCivxlc]+|[A-Za-z])\.)\s*\t\s*")
+
+
 def iter_header_candidates(docx_path: str) -> list[str]:
     """Header-looking source lines: short, letters-only, ALL-CAPS bold (or
     styled as a Heading), from top-level paragraphs and single-column table
@@ -533,7 +608,7 @@ def iter_header_candidates(docx_path: str) -> list[str]:
     candidates: List[str] = []
 
     def consider(para):
-        text = para.text.strip()
+        text = _ENUM_TAB_RE.sub(r"\1 ", para.text.strip(), count=1)
         if not 3 <= len(text) <= 60:
             return
         if not any(ch.isalpha() for ch in text) or any(ch.isdigit() for ch in text):
@@ -898,6 +973,11 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("table_lost", lint_table_lost, ("source_block_lines", "stage_2")),
     LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
     LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
+    LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",)),
+    LintSpec("implausible_year", lint_implausible_year, ("stage_4",)),
+    LintSpec("stage4_group_failures", lint_stage4_group_failures, ("stage_4",)),
+    LintSpec("python_repr_in_output", lint_python_repr_in_output, ("blocks",)),
+    LintSpec("llm_refusal_in_output", lint_llm_refusal_in_output, ("blocks",)),
 )
 
 

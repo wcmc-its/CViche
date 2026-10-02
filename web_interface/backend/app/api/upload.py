@@ -29,28 +29,48 @@ from app.schemas import UploadResponse
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.auth import can_see_cost, get_current_user, visible_cost
 from app.rate_limiter import check_rate_limit
-from app.config_loader import get_config_value
+from app.consent import require_current_consent
 from app.services.config_service import (
     MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
     ESTIMATE_RATE_LIMIT_MAX, ESTIMATE_RATE_LIMIT_WINDOW_SECONDS,
     get_estimated_run_cost, get_estimate_model_name,
 )
-from app.errors import bad_request, internal_error
+from app.services.run_service import latest_run_with_hash
+from app.errors import bad_request, duplicate_file, internal_error
 from app.storage import get_storage
 from app.storage.base import StorageKeyExists
+from app.services.batch_service import MAX_BATCH_FILES, get_owned_batch
 from app.services.run_service import UPLOAD_DIR
+from app.services.input_format import detect_input_format_or_none
 from app.services.template_warning import detect_wcm_template
+from app.services.pdf_sandbox import (
+    PDF_BUSY_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, PDF_UNREADABLE_MESSAGE, EncryptedPdfError,
+    PdfBusyError, PdfTooComplexError, UnreadablePdfError, extract_pdf_text,
+)
 
 logger = logging.getLogger(__name__)
 ZIP_MAGIC = b"PK\x03\x04"
+PDF_MAGIC = b"%PDF-"
+PDF_EXTENSION = ".pdf"
+# How the duplicate notice words the date a file was last processed.
+DUPLICATE_DATE_FORMAT = "%B %-d, %Y"
 
-# Extensions the upload API accepts, matching the frontend's ".docx only" guard
-# (UploadPage.tsx's dropzone caption and error, HelpPage.tsx's "accepts .docx
-# ... files only"). PDF was accepted here until #524: every downstream reader
-# (stage 1a/1b/2's docx_structure_extractor, stage 2, stage 6) is python-docx
-# only, so a PDF upload always died at stage 1a. PDF ingest via a conversion
-# step is tracked separately as #806, not implemented here.
-ALLOWED_UPLOAD_EXTENSIONS = (".docx",)
+# Extensions the upload API accepts, matching the frontend's guard
+# (UploadPage.tsx's processFile). A PDF is stored and archived as-is; the
+# orchestrator converts it to the run's private docx copy before stage 1a
+# (#806), since every pipeline reader is python-docx only (#524).
+ALLOWED_UPLOAD_EXTENSIONS = (".docx", PDF_EXTENSION)
+_UNSUPPORTED_TYPE_HINT = (
+    "Only .docx and .pdf files are supported. "
+    "Please convert your file to .docx or .pdf before uploading."
+)
+# A PDF child slot frees within PDF_TEXT_TIMEOUT_SECONDS at worst and ~4 s
+# for the largest real CV, so a retry this much later usually lands.
+_PDF_BUSY_RETRY_AFTER_SECONDS = 10
+_ENCRYPTED_PDF_MESSAGE = (
+    "This PDF is password-protected, so we can't read it. Please remove the "
+    "password, or upload the CV as a .docx."
+)
 
 # Minimum extracted text (characters) for a document to be considered readable.
 # A real CV runs into the thousands of characters; anything below this is almost
@@ -82,6 +102,11 @@ def _estimate_char_count(extracted: str | None) -> int:
 # 37 entries and 7.2 MB uncompressed; a zip bomb declares gigabytes.
 _DOCX_MAX_ENTRIES = 1000
 _DOCX_MAX_UNCOMPRESSED_BYTES = 256 * 1024 * 1024
+
+
+def _validate_pdf_magic(content: bytes) -> bool:
+    """Check if content starts with the PDF header."""
+    return content[:len(PDF_MAGIC)] == PDF_MAGIC
 
 
 def _validate_docx_magic(content: bytes) -> bool:
@@ -117,9 +142,20 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
     Returns the extracted text, an empty string when the file is readable but
     contains no text (scan/blank), or ``None`` when the document could not be
     read at all (a known python-docx read failure, see ``_DOCX_READ_ERRORS``).
-    Callers treat ``None`` as "cannot determine" and skip the guard rather than
-    block a possibly-valid upload.
+    Callers treat ``None`` as "cannot determine" and skip the guard rather
+    than block a possibly-valid upload.
+
+    A PDF never fails open (#806): the run's conversion uses the same parser
+    under the same limits, so a PDF this cannot read, the run cannot either.
+
+    Raises:
+        EncryptedPdfError: a password-protected PDF.
+        PdfTooComplexError: a PDF over pdf_sandbox's page, memory or time limit.
+        UnreadablePdfError: any other PDF parse failure.
+        PdfBusyError: every PDF child slot is taken.
     """
+    if file_ext == PDF_EXTENSION:
+        return extract_pdf_text(content)
     if file_ext != ".docx":
         return None
     with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
@@ -139,6 +175,27 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
         return None
     finally:
         os.unlink(tmp_path)
+
+
+async def _extract_text_or_400(content: bytes, file_ext: str) -> str | None:
+    """`_extract_text` off the event loop (#793), shared by /upload and
+    /estimate: every PDF refusal is a 400, a full PDF sandbox a 503."""
+    try:
+        return await run_in_threadpool(_extract_text, content, file_ext)
+    except EncryptedPdfError:
+        raise bad_request(_ENCRYPTED_PDF_MESSAGE)
+    except PdfTooComplexError as e:
+        logger.warning("Rejected PDF over a parse limit: %s", e)
+        raise bad_request(PDF_TOO_COMPLEX_MESSAGE)
+    except UnreadablePdfError as e:
+        logger.warning("Rejected unreadable PDF: %s", e)
+        raise bad_request(PDF_UNREADABLE_MESSAGE)
+    except PdfBusyError:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "pdf_busy", "message": PDF_BUSY_MESSAGE},
+            headers={"Retry-After": str(_PDF_BUSY_RETRY_AFTER_SECONDS)},
+        )
 
 
 # Bytes read per chunk while bounding an upload body (#793): large enough that
@@ -296,30 +353,33 @@ def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
     return time_min, time_max
 
 
-_RUN_ID_ALPHABET = string.ascii_uppercase + string.digits
+# Letters only: a code read aloud or retyped never confuses O/0 or I/1.
+_RUN_ID_ALPHABET = string.ascii_uppercase
 
 
 def generate_run_id() -> str:
-    """Generate a unique 6-character run ID like 'A1B2C3'.
+    """Generate a unique 6-character run ID like 'QZKMRT'.
 
-    Draws each of the 6 characters uniformly from A-Z0-9 (36 symbols) via
-    secrets.choice, giving 36**6 ~= 2.18e9 equally-likely ids. This narrows
+    Draws each of the 6 characters uniformly from A-Z (26 symbols) via
+    secrets.choice, giving 26**6 ~= 3.09e8 equally-likely ids. Ids issued
+    before letters-only (A-Z0-9) stay valid: every consumer accepts the
+    wider set. The A-Z0-9 generator itself narrowed
     the alphabet from the prior generator's: `secrets.token_urlsafe(4)[:6]
     .upper()` emitted base64url output (which can include `-` and `_`)
     case-folded onto 38 symbols, and truncating to 6 chars from a 4-byte
     (32-bit) draw left the 6th character able to take only 4 distinct
     values -- collapsing the last position to ~4 outcomes and the whole id
     to ~2e8 effective values instead of the nominal 36**6 (#685). Every
-    existing consumer already accepts the narrower `^[A-Z0-9]{6}$` set --
+    existing consumer already accepts the narrower `^[A-Z]{6}$` set --
     steps.py's `_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")` is a
     superset -- so no consumer needed a change.
 
-    Six base-36 characters stay the canonical run id (#797 decision,
+    Six characters stay the canonical run id (#797 decision,
     2026-09-09): a collision now costs a redraw in create_run_archive, never
     an overwrite, so the id width sets only the redraw rate. With N existing
-    runs a fresh draw collides with probability ~N / 36**6: ~4.6e-5 at 1e5
-    runs, ~4.6e-4 at 1e6, ~4.6e-3 at 1e7. Migration trigger: when the run
-    table approaches ~1e6 rows (redraws near 5e-4 per upload), move to a
+    runs a fresh draw collides with probability ~N / 26**6: ~3.2e-4 at 1e5
+    runs, ~3.2e-3 at 1e6. Migration trigger: when the run table approaches
+    ~1e5 rows (redraws near 3e-4 per upload), move to a
     UUID/ULID canonical id with this 6-char form kept as a display id --
     widening touches Run.id (String(10)), artifact basenames and download
     URLs. Exhaustion of every redraw is logged at ERROR by both callers of
@@ -501,6 +561,59 @@ def commit_run_or_compensate(
         )
 
 
+def _reject_unconfirmed_duplicate(db: Session, sha256: str, user: User) -> None:
+    """Stop with a 409 when any run (any submitter) already holds this file's hash.
+
+    Non-admins get only the date; the run id goes to admins and to the run's own
+    submitter, never anyone else's. Raised before anything is archived or charged."""
+    latest = latest_run_with_hash(db, sha256)
+    if latest is None:
+        return
+    processed_on = latest.started_at.strftime(DUPLICATE_DATE_FORMAT)
+    can_see_run = user.role == "admin" or latest.user_id == user.id
+    raise duplicate_file(
+        f"This file was already processed on {processed_on}. Run it again?",
+        processed_on,
+        latest.id if can_see_run else None,
+    )
+
+
+def _archive_or_502(
+    content: bytes,
+    file_ext: str,
+    build_manifest: Callable[[str, str], bytes],
+    write_local: Callable[[Path], None],
+) -> tuple[str, str, Path, bytes]:
+    """create_run_archive, with a storage failure turned into the 502 that creates no run (#170)."""
+    try:
+        return create_run_archive(content, file_ext, build_manifest, write_local)
+    except Exception as e:
+        logger.error("Durable archive of upload failed; aborting upload: %s", e)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "storage_unavailable",
+                "message": (
+                    "We couldn't store your file securely, so no run was created. "
+                    "Please try again in a moment."
+                ),
+            },
+        )
+
+
+def _add_pending_steps(db: Session, run_id: str) -> None:
+    """Stage one pending Step row per STEP_REGISTRY entry for a new run."""
+    for step_def in STEP_REGISTRY:
+        step = Step(
+            run_id=run_id,
+            step_number=step_def.number,
+            stage_id=step_def.stage_id,
+            step_name=step_def.name,
+            status="pending"
+        )
+        db.add(step)
+
+
 @router.post("/upload", response_model=UploadResponse)
 async def upload_cv(
     file: UploadFile = File(...),
@@ -515,21 +628,23 @@ async def upload_cv(
     # record whether the submitter was the faculty member or an administrator
     # who attested to having the faculty member's permission.
     submission_type: Literal["own_cv", "authorized_admin"] = Form(...),
+    # The batch this file belongs to (#1114), from POST /batches. Optional:
+    # absent, the run is a single upload exactly as before.
+    batch_id: str | None = Form(None),
+    # Set by the UI after the user agrees to re-process a file already run (#1286).
+    confirm_duplicate: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Upload a CV file and create a new pipeline run."""
 
     # Check consent at upload time (not just page visit)
-    current_consent_version = str(get_config_value(db, "consent_version") or "1.0")
-    if current_user.consent_version != current_consent_version:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "consent_required",
-                "message": "Please review and accept the updated consent terms.",
-            },
-        )
+    require_current_consent(db, current_user)
+
+    # A batch_id must name one of the caller's own batches (404 for unknown
+    # and someone else's alike) -- checked before anything is read or archived.
+    if batch_id is not None:
+        get_owned_batch(db, batch_id, current_user)
 
     # Validate file type
     if not file.filename:
@@ -546,10 +661,7 @@ async def upload_cv(
 
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
-        raise bad_request(
-            f"Unsupported file type: {file_ext}. Only .docx files are supported. "
-            "Please convert your file to .docx before uploading."
-        )
+        raise bad_request(f"Unsupported file type: {file_ext}. {_UNSUPPORTED_TYPE_HINT}")
 
     # Check rate limit (after file validation so bad uploads don't count)
     rate_limit_error = check_rate_limit(current_user, db)
@@ -561,20 +673,28 @@ async def upload_cv(
     content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
     # Validate magic bytes match claimed extension
+    if file_ext == PDF_EXTENSION and not _validate_pdf_magic(content):
+        logger.warning("[SECURITY] Rejected upload: file claims .pdf but magic bytes do not match (user=%s)", current_user.email)
+        raise bad_request("File content does not match .pdf format. The file may be corrupted or mislabeled.")
     if file_ext == ".docx" and not _validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected upload: file claims .docx but magic bytes do not match (user=%s)", current_user.email)
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
+
+    # Same bytes already run by anyone? Ask first (nothing archived or charged yet).
+    source_sha256 = hashlib.sha256(content).hexdigest()
+    if not confirm_duplicate:
+        _reject_unconfirmed_duplicate(db, source_sha256, current_user)
 
     # Reject documents we can't read (scanned images, password-protected, blank).
     # These pass the magic-byte check but yield no text, so they would burn LLM
     # calls and return empty output with no explanation to the user. Fail open
     # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
-    extracted = await run_in_threadpool(_extract_text, content, file_ext)
+    extracted = await _extract_text_or_400(content, file_ext)
     if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
             "We couldn't read any text from this file. It may be a scanned image, "
-            "password-protected, or empty. Please upload a text-based Word document."
+            "password-protected, or empty. Please upload a text-based Word document or PDF."
         )
 
     # Cheap, no-LLM check: does this look like the *blank* WCM CV template?
@@ -592,6 +712,12 @@ async def upload_cv(
             "Upload looks like a blank WCM template (user=%s, match_ratio=%s)",
             current_user.email, wcm_template_match_ratio,
         )
+
+    # Was this CV written in the WCM template (filled in) or another format?
+    # Recorded on the run for score comparisons; best-effort, NULL on failure.
+    input_format, input_format_score = await run_in_threadpool(
+        detect_input_format_or_none, extracted
+    )
 
     # Allocate a fresh run id and durably archive the ORIGINAL upload to the
     # run's storage namespace BEFORE creating the run record. The pod-local
@@ -612,7 +738,7 @@ async def upload_cv(
             "stored_as": stored_name,
             "file_type": file_ext[1:],
             "size_bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
+            "sha256": source_sha256,
             "content_type": file.content_type,
             "uploaded_at": datetime.now().isoformat(),
             "user_email": current_user.email,
@@ -622,22 +748,9 @@ async def upload_cv(
         with open(path, "xb") as f:
             f.write(content)
 
-    try:
-        run_id, stored_name, file_path, manifest = create_run_archive(
-            content, file_ext, _build_manifest, _write_local,
-        )
-    except Exception as e:
-        logger.error("Durable archive of upload failed; aborting upload: %s", e)
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": "storage_unavailable",
-                "message": (
-                    "We couldn't store your file securely, so no run was created. "
-                    "Please try again in a moment."
-                ),
-            },
-        )
+    run_id, stored_name, file_path, manifest = _archive_or_502(
+        content, file_ext, _build_manifest, _write_local,
+    )
     storage = get_storage()
 
     # Cross-run, browsable-by-submitter index: the same manifest keyed under the
@@ -674,19 +787,13 @@ async def upload_cv(
         show_track_changes=1 if include_track_changes else 0,
         show_pipeline_comments=1 if include_classification_comments else 0,
         strip_template_instructions=1 if strip_wcm_instructions else 0,
+        batch_id=batch_id,
+        input_format=input_format,
+        input_format_score=input_format_score,
+        source_sha256=source_sha256,
     )
     db.add(run)
-
-    # Create step records (all pending initially)
-    for step_def in STEP_REGISTRY:
-        step = Step(
-            run_id=run_id,
-            step_number=step_def.number,
-            stage_id=step_def.stage_id,
-            step_name=step_def.name,
-            status="pending"
-        )
-        db.add(step)
+    _add_pending_steps(db, run_id)
 
     commit_run_or_compensate(db, run_id, current_user.email, file_path)
 
@@ -701,33 +808,42 @@ async def upload_cv(
     )
 
 
-@router.post("/estimate", response_model=EstimateResponse)
-async def estimate_processing(
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """
-    Estimate cost and time for processing a CV file.
+class BatchEstimateFile(BaseModel):
+    """One file of a multi-file /estimate (#1114): its estimate, or the
+    reason it could not be estimated -- the same 400 message /estimate gives
+    for that file alone (unsupported type, too large, unreadable PDF...)."""
+    filename: str
+    estimate: EstimateResponse | None = None
+    error: str | None = None
 
-    This endpoint analyzes the document to estimate:
-    - Number of tokens (based on document text)
-    - Estimated cost range (based on token count and LLM pricing)
-    - Estimated time range (based on token count and processing patterns)
 
-    The file is not saved - this is just for estimation.
-    """
-    # Validate file type
+class BatchEstimateResponse(BaseModel):
+    """Multi-file /estimate (#1114): a row per file plus totals over the
+    files that could be estimated. Cost fields are None for non-admins, as
+    on the single-file response (#1111)."""
+    files: list[BatchEstimateFile]
+    estimated_time_seconds_min: int
+    estimated_time_seconds_max: int
+    estimated_cost_min: float | None
+    estimated_cost_max: float | None
+    num_steps: int
+    pricing_model: str | None
+
+
+def _estimate_file_ext(file: UploadFile) -> str:
+    """The file's lower-cased extension, or a 400 for a missing name or an
+    unsupported type."""
     if not file.filename:
         raise bad_request("No filename provided")
-
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
-        raise bad_request(
-            f"Unsupported file type: {file_ext}. Only .docx files are supported. "
-            "Please convert your file to .docx before uploading."
-        )
+        raise bad_request(f"Unsupported file type: {file_ext}. {_UNSUPPORTED_TYPE_HINT}")
+    return file_ext
 
+
+def _check_estimate_limits(current_user: User, db: Session) -> None:
+    """Both /estimate budgets, raising their 429. A call counts once against
+    each, however many files it carries (#1114)."""
     # Per-pod, per-user in-memory budget (#795), checked first since it's
     # cheaper than the DB-backed check below -- a user already over it never
     # costs a query. Both checks run before the body is read (_read_bounded)
@@ -744,11 +860,18 @@ async def estimate_processing(
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
 
+
+async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> EstimateResponse:
+    """Read, validate and size one file for /estimate; raises the same 400s
+    /upload would for an unreadable or mislabeled file."""
     # Read file content in bounded chunks so an oversized body is never fully
     # buffered before being rejected (#793).
     content = await _read_bounded(file, MAX_UPLOAD_SIZE)
 
     # Validate magic bytes
+    if file_ext == PDF_EXTENSION and not _validate_pdf_magic(content):
+        logger.warning("[SECURITY] Rejected estimate: file claims .pdf but magic bytes do not match")
+        raise bad_request("File content does not match .pdf format. The file may be corrupted or mislabeled.")
     if file_ext == ".docx" and not _validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected estimate: file claims .docx but magic bytes do not match")
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
@@ -759,7 +882,7 @@ async def estimate_processing(
     # this endpoint used to re-walk the docx paragraphs/tables inline, which
     # could compute a different text_char_count for the same file. Off the
     # event loop, same as /upload (#793).
-    extracted = await run_in_threadpool(_extract_text, content, file_ext)
+    extracted = await _extract_text_or_400(content, file_ext)
     if extracted is None:
         # _extract_text already logged the specific read failure (§5.4). No
         # filename here (CODING_STANDARDS §4.7): CV filenames usually carry
@@ -796,8 +919,80 @@ async def estimate_processing(
         estimated_time_seconds_min=time_min,
         estimated_time_seconds_max=time_max,
         num_steps=num_stages,
-        filename=file.filename,
+        filename=file.filename or "",
         file_size_kb=round(file_size_kb, 1),
         pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
         text_characters_is_guess=extracted is None,
     )
+
+
+async def _estimate_batch_file(file: UploadFile, current_user: User) -> BatchEstimateFile:
+    """One row of a multi-file /estimate. A 400 for this file becomes the
+    row's ``error`` so one bad file doesn't cost the whole batch its quote;
+    any other failure (a full PDF sandbox's 503) still fails the call."""
+    filename = file.filename or ""
+    try:
+        file_ext = _estimate_file_ext(file)
+        estimate = await _estimate_one(file, file_ext, current_user)
+    except HTTPException as e:
+        if e.status_code != 400:
+            raise
+        return BatchEstimateFile(filename=filename, error=e.detail["message"])
+    return BatchEstimateFile(filename=filename, estimate=estimate)
+
+
+def _sum_cost(values: list[float | None]) -> float | None:
+    """Total of per-file costs, or None when they are hidden (non-admin)."""
+    if any(value is None for value in values):
+        return None
+    return round(sum(value for value in values if value is not None), 3)
+
+
+def _batch_totals(rows: list[BatchEstimateFile], current_user: User) -> BatchEstimateResponse:
+    estimates = [row.estimate for row in rows if row.estimate is not None]
+    return BatchEstimateResponse(
+        files=rows,
+        estimated_time_seconds_min=sum(e.estimated_time_seconds_min for e in estimates),
+        estimated_time_seconds_max=sum(e.estimated_time_seconds_max for e in estimates),
+        estimated_cost_min=_sum_cost([e.estimated_cost_min for e in estimates]),
+        estimated_cost_max=_sum_cost([e.estimated_cost_max for e in estimates]),
+        num_steps=len(STEP_REGISTRY),
+        pricing_model=get_estimate_model_name() if can_see_cost(current_user) else None,
+    )
+
+
+@router.post("/estimate", response_model=EstimateResponse | BatchEstimateResponse)
+async def estimate_processing(
+    file: UploadFile | None = File(None),
+    # Up to MAX_BATCH_FILES files at once, for a batch upload (#1114): one
+    # call against both rate limits, a row per file plus totals.
+    files: list[UploadFile] | None = File(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> EstimateResponse | BatchEstimateResponse:
+    """
+    Estimate cost and time for processing a CV file.
+
+    This endpoint analyzes the document to estimate:
+    - Number of tokens (based on document text)
+    - Estimated cost range (based on token count and LLM pricing)
+    - Estimated time range (based on token count and processing patterns)
+
+    One file as ``file`` answers an EstimateResponse, as it always has; up to
+    MAX_BATCH_FILES as ``files`` answers a BatchEstimateResponse. Nothing is
+    saved - this is just for estimation.
+    """
+    if files is None:
+        if file is None:
+            raise bad_request("No file provided")
+        file_ext = _estimate_file_ext(file)
+        _check_estimate_limits(current_user, db)
+        return await _estimate_one(file, file_ext, current_user)
+
+    if file is not None:
+        raise bad_request("Send one file as `file` or several as `files`, not both.")
+    if len(files) > MAX_BATCH_FILES:
+        raise bad_request(f"At most {MAX_BATCH_FILES} files can be estimated at once.")
+    _check_estimate_limits(current_user, db)
+    rows = [await _estimate_batch_file(each, current_user) for each in files]
+    return _batch_totals(rows, current_user)

@@ -10,7 +10,7 @@ This pipeline parses academic/faculty CVs (Word documents) and produces structur
 - Classifies entries to a 20-category taxonomy with 59 codes
 
 **What it doesn't do:**
-- Parse PDFs (Word .docx only)
+- Parse PDFs directly (the stages read Word .docx only; the web upload and `scripts/pdf_to_docx.py` convert a PDF to .docx first)
 - Handle non-English CVs
 - Process job descriptions or resumes (academic CVs only)
 

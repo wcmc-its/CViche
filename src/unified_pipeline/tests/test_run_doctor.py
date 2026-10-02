@@ -24,8 +24,12 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 from docx import Document  # noqa: E402
 
-from unified_pipeline.quality_score import score_cv_owner  # noqa: E402
-from unified_pipeline.doctor.lints.render import DATE_ONLY_LINES_WARN_COUNT  # noqa: E402
+from unified_pipeline.quality_score import _TEMPLATE_DOCX_PATH, score_cv_owner  # noqa: E402
+from unified_pipeline.doctor.lints.render import (  # noqa: E402
+    DATE_ONLY_LINES_WARN_COUNT,
+    OUTPUT_LEAK_EVIDENCE_LIMIT,
+)
+from unified_pipeline.doctor.shared import TABLE_ROW_JOINER, docx_body_blocks  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     MISSED_HEADERS_WARN_COUNT,
@@ -43,14 +47,17 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_date_only_lines,
     lint_duplicate_passages,
     lint_enrichment_failures,
+    lint_llm_refusal_in_output,
     lint_missed_headers,
     lint_no_output,
     lint_output_hygiene,
     lint_owner_contact_missing,
     lint_pipe_leaks,
     lint_pipeline_errors,
+    lint_python_repr_in_output,
     lint_section_lost,
     lint_stage3b_fallback_ratio,
+    lint_stage4_group_failures,
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_stage6_warnings,
@@ -132,6 +139,30 @@ def test_segmentation_lint_quiet_on_clean_extraction():
     assert lint_segmentation(source, _STAGE1A, stage2) == []
 
 
+def test_segmentation_lint_quiet_on_a_dob_line_stage_2_withheld():
+    """#1232: the pre-LLM scrub (#847) puts '[withheld]' where the source
+    line has the date. On a short CV that one line took coverage under the
+    97% threshold."""
+    dob = "Date of Birth: January 2, 1970"
+    source = ["GRANTS", dob, _GRANT_FSMB, _GRANT_TEMPLETON, _GRANT_NBME]
+    stage2 = {"entries": [_entry("Date of Birth: [withheld]", start=1),
+                          _entry(_GRANT_FSMB, start=2),
+                          _entry(_GRANT_TEMPLETON, start=3),
+                          _entry(_GRANT_NBME, start=4)]}
+    assert lint_segmentation(source, _STAGE1A, stage2) == []
+
+
+def test_segmentation_lint_evidence_never_quotes_a_withheld_dob():
+    """A date-of-birth line that really is lost is reported, but the evidence
+    in the run's `_doctor.json` is the scrubbed line (#1232)."""
+    source = ["Date of Birth: January 2, 1970", _GRANT_FSMB]
+    findings = lint_segmentation(source, _STAGE1A,
+                                 {"entries": [_entry(_GRANT_FSMB, start=1)]})
+    coverage = next(f for f in findings if f["message"].startswith("coverage"))
+    assert coverage["evidence"] == ["Date of Birth: [withheld]"]
+    assert "1970" not in coverage["message"]
+
+
 def test_table_lost_lint_is_one_warn_per_run_with_worst_table_evidence():
     stage2 = {"entries": [_entry(_GRANT_FSMB, start=1)]}
     small = [f"lost contact line {i} zebra" for i in range(3)]
@@ -157,6 +188,35 @@ def test_run_doctor_missed_headers_gets_the_stage4_owner_name(tmp_path):
     payload = run_doctor(root, _UID)
     missed = [f["evidence"] for f in payload["findings"] if f["lint"] == "missed_headers"]
     assert missed == [["MENTORING"]]
+
+
+def test_missed_headers_heading_styled_lines_never_escalate_the_run():
+    """#1232: a line that is not ALL-CAPS reached the candidate list through
+    its Heading style alone (record titles, journal names, contact lines). A
+    CV that styles its records Heading 1 must not read as a WARN storm, and
+    the lines stay reported."""
+    weak = [f"Example Record {name}" for name in
+            ("Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta", "Theta")]
+    assert len(weak) > MISSED_HEADERS_WARN_COUNT
+    findings = lint_missed_headers(weak, _STAGE1A, {"entries": []})
+    assert [f["evidence"][0] for f in findings] == weak
+    assert {f["severity"] for f in findings} == {"INFO"}
+
+
+def test_missed_headers_only_all_caps_candidates_set_the_run_severity():
+    """Weak candidates are not counted toward the WARN threshold, and an
+    ALL-CAPS candidate still takes the run severity from ITS OWN count."""
+    weak = [f"Example Record {name}" for name in ("Alpha", "Beta", "Gamma")]
+    few = [f"SECTION {chr(65 + i)}" for i in range(MISSED_HEADERS_WARN_COUNT - 1)]
+    found = lint_missed_headers(few + weak, _STAGE1A, {"entries": []})
+    assert {f["severity"] for f in found} == {"INFO"}, \
+        "five strong lines plus weak ones stay under the threshold"
+
+    many = [f"SECTION {chr(65 + i)}" for i in range(MISSED_HEADERS_WARN_COUNT)]
+    found = lint_missed_headers(many + weak, _STAGE1A, {"entries": []})
+    by_line = {f["evidence"][0]: f["severity"] for f in found}
+    assert {by_line[line] for line in many} == {"WARN"}
+    assert {by_line[line] for line in weak} == {"INFO"}
 
 
 def test_run_doctor_reports_a_lost_source_table(tmp_path):
@@ -302,6 +362,23 @@ def test_iter_header_candidates_skips_a_leading_role_marker_name(tmp_path):
     assert iter_header_candidates(str(path)) == [
         "PI. RESPONSIBILITIES", "Dr. PUBLICATIONS", "Pi. Notes",
         "Dr. Jane Sample GRANTS AND AWARDS", "Ms. Research Support GRANTS"]
+
+
+def test_iter_header_candidates_flattens_the_tab_after_an_enumeration_token(tmp_path):
+    """#1232: 'I.<tab>OVERVIEW OF ...' is a header whose numeral is tab-
+    separated from its title, not a label/value data row, so it is a candidate
+    (with the tab read as a space). Any other tab still means a data row."""
+    doc = Document()
+    doc.add_paragraph("I. \tOVERVIEW OF EXAMPLE DUTIES,").runs[0].bold = True
+    doc.add_paragraph("AND EXAMPLE RESEARCH").runs[0].bold = True
+    doc.add_paragraph("B.\tTEACHING", style="Heading 2")
+    doc.add_paragraph("I.\tTITLE\tVALUE", style="Heading 2")        # second tab
+    doc.add_paragraph("ACTIVE\t\t\tEXAMPLELAND", style="Heading 2")  # data row
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert iter_header_candidates(str(path)) == [
+        "I. OVERVIEW OF EXAMPLE DUTIES,", "AND EXAMPLE RESEARCH", "B. TEACHING"]
 
 
 _MH_STAGE4 = {"cv_owner": {"first_name": "Jane", "middle_name": "Q", "last_name": "Sample"}}
@@ -1255,6 +1332,194 @@ def test_date_only_lines_is_a_registered_lint():
                for spec in LINT_REGISTRY)
 
 
+# ------- lints 14f/14g: repr and refusal text in the output (#1233, #1224)
+
+_REPR_DICT = "{'start_date': '2010', 'end_date': '2020'}"
+
+
+def _table_block(*rows):
+    """A table block the way `docx_body_blocks` writes it: each cell on its
+    own line, then each multi-cell row again joined the way `_table_lines`
+    joins it."""
+    lines = []
+    for cells in rows:
+        lines += list(cells)
+        if len(cells) > 1:
+            lines.append(TABLE_ROW_JOINER.join(cells))
+    return ("table", "\n".join(lines))
+
+
+def test_python_repr_flags_a_dict_repr_glued_to_a_year():
+    blocks = [("p", "G. LICENSURE, BOARD CERTIFICATION"),
+              _table_block(("Example Board", f"2000-{_REPR_DICT}"))]
+    findings = lint_python_repr_in_output(blocks)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "python_repr_in_output" and f["severity"] == "WARN"
+    assert f["message"].startswith("1 distinct Python dict/list repr text(s)")
+    assert f["evidence"] == [_REPR_DICT]
+
+
+def test_python_repr_counts_a_table_cell_once_not_again_for_its_joined_row():
+    """One repr in the first cell (the joined row then carries text after it)
+    and one in the last (it does not): neither is counted a second time."""
+    other = "{'start_date': '2015', 'end_date': '2016'}"
+    blocks = [_table_block((_REPR_DICT, "Example Talk"), ("Other Talk", other))]
+    findings = lint_python_repr_in_output(blocks)
+    assert findings[0]["message"].startswith("2 distinct")
+    assert findings[0]["evidence"] == [_REPR_DICT, other]
+
+
+def test_python_repr_counts_a_cell_of_a_real_docx_table_once():
+    """`_table_block` imitates `docx_body_blocks`; this reads the real thing, so
+    the dedupe cannot drift from how `_table_lines` joins a row."""
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].paragraphs[0].text = _REPR_DICT
+    table.rows[0].cells[1].paragraphs[0].text = "Example Talk"
+    findings = lint_python_repr_in_output(docx_body_blocks(doc))
+    assert findings[0]["message"].startswith("1 distinct")
+    assert findings[0]["evidence"] == [_REPR_DICT]
+
+
+@pytest.mark.parametrize("text", [
+    "['Example course A', 'Example course B']",
+    '["Women\'s health", \'Example course\']',
+    "['2001-01', '2003-03']-['2002-02', '2004-04']",
+    '{"start_date": "2010", "end_date": "2020"}',
+    "[{'start_date': '2010'}]",
+])
+def test_python_repr_flags_each_shape_str_of_a_container_prints(text):
+    findings = lint_python_repr_in_output([("p", f"Example row | {text}")])
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"]
+
+
+@pytest.mark.parametrize("text", [
+    "[1] Doe J, Roe R. Example title. J Example. 2020;1:1-9. [2] Doe J.",
+    "Uptake of [3H]-thymidine was measured in {n=12} wells.",
+    "Doe J [Ed.]. Example Handbook. Cohort [n=40], set {a, b}.",
+    "Example Center for Health (CEH) ('Example Study', 2020)",
+    "https://example.org/a[0]/b",
+    "",
+])
+def test_python_repr_ignores_ordinary_brackets_braces_and_quotes(text):
+    assert lint_python_repr_in_output([("p", text), ("table", text)]) == []
+
+
+def test_python_repr_scans_the_appendix_too():
+    blocks = [("p", "T. APPENDIX"), ("p", f"1. Example entry {_REPR_DICT}")]
+    assert len(lint_python_repr_in_output(blocks)) == 1
+
+
+def test_python_repr_caps_the_evidence_and_still_counts_every_hit():
+    dicts = [f"{{'start_date': '20{i:02d}'}}" for i in range(OUTPUT_LEAK_EVIDENCE_LIMIT + 2)]
+    findings = lint_python_repr_in_output([("p", d) for d in dicts])
+    assert findings[0]["message"].startswith(f"{len(dicts)} distinct")
+    assert findings[0]["evidence"] == dicts[:OUTPUT_LEAK_EVIDENCE_LIMIT]
+    assert len(findings[0]["evidence"]) == 5  # the cap itself, not the constant
+
+
+# The shape MYAXRH rendered (#1224), with invented names. Every sentence below
+# is one the model wrote to the user, not text a CV owner wrote.
+_REFUSAL = (
+    "I don't have access to specific CV details for Example Person beyond "
+    "what you've indicated would be provided, and no actual CV content was "
+    'included in your message. The "CV CONTEXT" section appears empty.\n\n'
+    "Please provide the actual CV content or research details for Example "
+    "Person, and I'll be happy to draft a concise summary paragraph.")
+
+
+def test_llm_refusal_flags_the_text_stage_4_5_rendered_for_an_empty_context():
+    blocks = [("p", "Research Activities: In a paragraph (up to 300 words)"),
+              ("p", _REFUSAL)]
+    findings = lint_llm_refusal_in_output(blocks)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "llm_refusal_in_output" and f["severity"] == "WARN"
+    assert f["message"].startswith("2 distinct language-model refusal")
+    assert f["evidence"][0].startswith("I don't have access to")
+
+
+@pytest.mark.parametrize("sentence", [
+    "I do not have access to the document.",
+    "I don\u2019t have access to the document.",
+    "I am unable to access the CV text.",
+    "I'm not able to summarize this without more detail.",
+    "I cannot provide a summary of this researcher.",
+    "I can't generate that paragraph.",
+    "As an AI language model, I have nothing to summarise.",
+    "As an AI assistant I cannot see the CV.",
+    "As an AI, I have no record of this researcher.",
+    "I'm sorry, but there is nothing here to work with.",
+    "I apologize, but the context is blank.",
+    'The "CV CONTEXT" section is missing.',
+    "Please provide the full CV and I will start.",
+    "No details were provided in your message.",
+    "I will be glad to write the paragraph once I have the CV.",
+])
+def test_llm_refusal_flags_each_standard_refusal_opener(sentence):
+    findings = lint_llm_refusal_in_output([("p", f"Example heading\n{sentence}")])
+    assert [f["severity"] for f in findings] == ["WARN"]
+    assert findings[0]["evidence"]
+
+
+@pytest.mark.parametrize("text", [
+    "I Can't Sleep Anymore: A Case Series. J Example. 2020;1:1-9.",
+    "If yes, please provide Visa type (Examples: J-1, H-1B):",
+    "As an AI researcher she builds models of example outcomes.",
+    "Example Chatbot as an AI assistant in clinical documentation: a review.",
+    "Example Tool as an AI language model in medical education. J Example.",
+    "Dr. Doe is unable to attend; please provide feedback to the chair.",
+    "The CV context for this hire was reviewed by the committee.",
+    "She cannot be reached by phone, and she writes every weekday.",
+    "",
+])
+def test_llm_refusal_ignores_first_person_and_polite_text_in_a_real_cv(text):
+    assert lint_llm_refusal_in_output([("p", text), ("table", text)]) == []
+
+
+def test_neither_lint_fires_on_the_pristine_wcm_template():
+    """The template's own scaffolding ("please provide Visa type", every field
+    label) is on every rendered CV, so a phrase it contains would fire
+    corpus-wide."""
+    from docx import Document as OpenDocument
+    blocks = docx_body_blocks(OpenDocument(str(_TEMPLATE_DOCX_PATH)))
+    assert blocks
+    assert lint_python_repr_in_output(blocks) == []
+    assert lint_llm_refusal_in_output(blocks) == []
+
+
+def test_repr_and_refusal_lints_are_registered_lints():
+    from unified_pipeline.run_doctor import KNOWN_LINTS, LINT_REGISTRY
+    for lint_id, rule in (("python_repr_in_output", lint_python_repr_in_output),
+                          ("llm_refusal_in_output", lint_llm_refusal_in_output)):
+        assert lint_id in KNOWN_LINTS
+        assert any(spec.lint_id == lint_id and spec.rule is rule
+                   and spec.inputs == ("blocks",) for spec in LINT_REGISTRY)
+
+
+def test_run_doctor_wires_repr_and_refusal_through_to_the_verdict(tmp_path):
+    """#1233 / #1224 end to end: a real docx table cell and a real paragraph,
+    read through `read_docx_blocks`, reach the verdict as one WARN each."""
+    root = _build_clean_run(tmp_path)
+    docx_path = next((root / "stage_6_wcm_documents").glob(f"{_UID}*_wcm.docx"))
+    doc = Document(str(docx_path))
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].paragraphs[0].text = "Example Board"
+    table.rows[0].cells[1].paragraphs[0].text = f"2000-{_REPR_DICT}"
+    doc.add_paragraph(_REFUSAL)
+    doc.save(str(docx_path))
+
+    payload = run_doctor(root, _UID)
+
+    by_lint = {f["lint"]: f for f in payload["findings"]}
+    assert by_lint["python_repr_in_output"]["severity"] == "WARN"
+    assert by_lint["python_repr_in_output"]["evidence"] == [_REPR_DICT]
+    assert by_lint["llm_refusal_in_output"]["severity"] == "WARN"
+    assert payload["counts"]["ERROR"] == 0
+
+
 # ------------------------------------------------------ lint 12: pipe leaks
 
 def test_pipe_leaks_flags_multi_pipe_paragraphs_not_tables():
@@ -1749,6 +2014,77 @@ def test_stage3b_fallback_ratio_boundary_at_the_threshold():
     assert len(lint_stage3b_fallback_ratio(just_over)) == 1
 
 
+# ------------------------- #1174: stage4_group_failures (cap below GREEN) ----
+#
+# Synthetic stand-ins for the shapes the batch autopsy found: a group the
+# recovery pass rescued in full (extraction_failed reads 0, so the stats
+# alone hide it) and a group left with one entry still unextracted.
+
+def _failed_group_entry(code, rescued, error="llm_response_invalid"):
+    return {"taxonomy_code": code, "extraction_error": error,
+            "extraction_success": rescued, "llm_recovery_applied": rescued,
+            "extracted_fields": {"note": "x"} if rescued else {}}
+
+
+def test_stage4_group_failures_warns_on_a_fully_rescued_group_and_names_its_code():
+    stage4 = {"entries": [_failed_group_entry("P", True) for _ in range(8)],
+              "stats": {"failed_batches": 1, "extraction_failed": 0}}
+    findings = lint_stage4_group_failures(stage4)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["lint"] == "stage4_group_failures"
+    assert finding["severity"] == "WARN"
+    assert "8 entries lost their first extraction" in finding["message"]
+    assert "rescued 8 and left 0" in finding["message"]
+    assert "capped at 84" in finding["message"]
+    assert finding["evidence"] == [
+        "taxonomy codes (entries): P=8",
+        "errors (entries): llm_response_invalid=8",
+        "stats.failed_batches=1",
+    ]
+
+
+def test_stage4_group_failures_reports_the_entries_left_without_fields():
+    stage4 = {"entries": [_failed_group_entry("M2A", True) for _ in range(3)]
+              + [_failed_group_entry("M2A", False)],
+              "stats": {"failed_batches": 1, "extraction_failed": 1}}
+    message = lint_stage4_group_failures(stage4)[0]["message"]
+    assert "4 entries lost" in message and "rescued 3 and left 1" in message
+
+
+def test_stage4_group_failures_quiet_on_a_clean_or_older_artifact():
+    clean = {"entries": [{"taxonomy_code": "P", "extraction_success": True,
+                          "extracted_fields": {"note": "x"}}],
+             "stats": {"failed_batches": 0}}
+    assert lint_stage4_group_failures(clean) == []
+    # an artifact from before stage 4 recorded failed_batches / extraction_error
+    assert lint_stage4_group_failures({"entries": [{"taxonomy_code": "P"}]}) == []
+    assert lint_stage4_group_failures({}) == []
+
+
+def test_stage4_group_failures_quiet_on_a_per_entry_miss():
+    from unified_pipeline.stage4.error_codes import NO_MATCHING_EXTRACTION
+
+    miss = {"taxonomy_code": "A1", "extraction_success": False, "extracted_fields": {},
+            "extraction_error": NO_MATCHING_EXTRACTION}
+    assert lint_stage4_group_failures({"entries": [miss], "stats": {"failed_batches": 0}}) == []
+
+
+def test_stage4_group_failures_and_the_score_gate_agree_on_the_same_artifact(tmp_path):
+    """Both read quality_score.stage4_group_failures, so the lint fires exactly
+    when the cap does -- the doctor reports the gate, not a second definition."""
+    from unified_pipeline.quality_score import (
+        STAGE4_GROUP_FAILURE_CAP, score_stage4_group_failures)
+
+    failed = {"entries": [_failed_group_entry("P", True)], "stats": {"failed_batches": 1}}
+    clean = {"entries": [{"taxonomy_code": "P", "extraction_success": True}]}
+    for artifact, expect_flag in ((failed, True), (clean, False)):
+        (tmp_path / "X_fields.json").write_text(json.dumps(artifact))
+        _fraction, _detail, cap = score_stage4_group_failures(tmp_path)
+        assert (cap == STAGE4_GROUP_FAILURE_CAP) is expect_flag
+        assert bool(lint_stage4_group_failures(artifact)) is expect_flag
+
+
 # ------------------------------------------------ #745: no_output (hard fail) -----
 
 def test_no_output_errors_when_stage4_reached_but_nothing_rendered():
@@ -1855,12 +2191,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (27), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (32), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 26
+    assert len(payload["findings"]) == 31
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -2224,6 +2560,29 @@ def test_run_doctor_wires_stage3b_fallback_ratio_through_to_the_verdict(tmp_path
     assert fallback[0]["severity"] == "ERROR"
 
 
+def test_run_doctor_wires_stage4_group_failures_through_to_the_verdict(tmp_path):
+    """A stage-4 artifact with a rescued failed group, driven through
+    run_doctor() end to end -- not just lint_stage4_group_failures(). Deleting
+    the LINT_REGISTRY row leaves every rule-level test above green and fails
+    this."""
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "stage4_group_failures"]
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"][0].update({"extraction_error": "llm_response_invalid",
+                               "llm_recovery_applied": True})
+    data["stats"] = {"failed_batches": 1, "extraction_failed": 0}
+    fields.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    found = [f for f in payload["findings"] if f["lint"] == "stage4_group_failures"]
+    assert len(found) == 1
+    assert found[0]["severity"] == "WARN"
+    assert payload["counts"]["ERROR"] == 0
+
+
 def test_run_doctor_wires_invented_records_through_to_the_verdict(tmp_path):
     """A5IZ6Q (#829), driven through run_doctor() end to end -- not just
     lint_invented_records() in isolation, the way every rule-level test in
@@ -2288,6 +2647,53 @@ def test_run_doctor_wires_wrong_start_date_through_to_the_verdict(tmp_path):
     assert len(hits) == 1
     assert hits[0]["severity"] == "WARN"
     assert "98" in hits[0]["message"]
+
+
+def test_run_doctor_wires_offschema_fields_through_to_the_verdict(tmp_path):
+    """The LINT_REGISTRY row must hand the lint stage 4; invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "I", "element_type": "paragraph",
+        "element_idx_start": 97, "text": "Society A\tSociety B",
+        "extracted_fields": {"organization": "Society A",
+                             "organization_2": "Society B"}})
+    fields.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "offschema_fields"]
+    assert len(hits) == 1
+    assert hits[0]["severity"] == "WARN"
+    assert hits[0]["evidence"] == ["entry 97: Society B"]
+
+
+def test_run_doctor_wires_implausible_year_through_to_the_verdict(tmp_path):
+    """The LINT_REGISTRY row must hand the lint stage 4; invented values."""
+    root = _build_clean_run(tmp_path)
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"].append({
+        "taxonomy_code": "R", "element_type": "paragraph",
+        "element_idx_start": 96, "text": "Invited talk, Example City 11/02",
+        "extracted_fields": {"title": "Invited talk", "date": "1902-11"}})
+    fields.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    hits = [f for f in payload["findings"] if f["lint"] == "implausible_year"]
+    assert len(hits) == 1
+    assert hits[0]["severity"] == "WARN"
+    assert "entry 96 (R): date=1902" in hits[0]["message"]
+
+
+def test_field_lint_prevalence_is_the_measured_wave1_fraction():
+    """Measured 2026-10-02 over the 163-CV wave-1 stage-4 farm (one fire per
+    CV at any severity); a new measurement updates both sides."""
+    from unified_pipeline.run_doctor import LINT_PREVALENCE
+    assert LINT_PREVALENCE["offschema_fields"] == round(37 / 163, 3)
+    assert LINT_PREVALENCE["implausible_year"] == round(6 / 163, 3)
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
@@ -2472,6 +2878,76 @@ def test_missed_headers_true_positive_still_fires_after_814():
     found = lint_missed_headers(["PROFESSIONAL SOCIETIES"], stage1a, {"entries": []})
     assert len(found) == 1
     assert "PROFESSIONAL SOCIETIES" in found[0]["message"]
+
+
+# -------------------------------------- #1232: header spellings stage 1a
+# normalises, and a wrapped header it copy-edited
+
+def test_missed_headers_folds_a_typographic_apostrophe():
+    """A page-break running header is spelled with a curly apostrophe in the
+    source and an ASCII one in the 1a node: the header WAS detected."""
+    ascii_node = {"hierarchy": [{"text": "LOCAL (CONT'D)", "children": []}]}
+    assert lint_missed_headers(["LOCAL (CONT\u2019D)"], ascii_node, {"entries": []}) == []
+    curly_node = {"hierarchy": [{"text": "LOCAL (CONT\u2019D)", "children": []}]}
+    assert lint_missed_headers(["LOCAL (CONT'D)"], curly_node, {"entries": []}) == []
+    found = lint_missed_headers(["OTHER (CONT\u2019D)"], ascii_node, {"entries": []})
+    assert len(found) == 1
+
+
+def test_missed_headers_ignores_a_leading_asterisk_or_bullet_marker():
+    stage1a = {"hierarchy": [{"text": "TENURE REVIEWS", "children": []},
+                             {"text": "JOURNAL REVIEWS (WITHIN RANK)", "children": []}]}
+    assert lint_missed_headers(["*TENURE REVIEWS"], stage1a, {"entries": []}) == []
+    assert lint_missed_headers(["\u2022 JOURNAL REVIEWS (WITHIN RANK):"], stage1a,
+                               {"entries": []}) == []
+    assert len(lint_missed_headers(["*GRANT REVIEWS"], stage1a, {"entries": []})) == 1
+
+
+def test_missed_headers_ignores_a_trailing_empty_value_but_not_a_real_one():
+    """1a promotes 'SPECIALTY BOARD STATUS: N/A' as the label alone."""
+    stage1a = {"hierarchy": [{"text": "SPECIALTY BOARD STATUS", "children": []}]}
+    assert lint_missed_headers(["SPECIALTY BOARD STATUS: N/A"], stage1a,
+                               {"entries": []}) == []
+    assert len(lint_missed_headers(["SPECIALTY BOARD STATUS: CERTIFIED"], stage1a,
+                                   {"entries": []})) == 1
+
+
+_COPY_EDITED_TITLE = "OVERVIEW OF EXAMPLE ACCOMPLISHMENTS IN TEACHING, SERVICE AND RESEARCH"
+
+
+def test_missed_headers_matches_a_wrapped_header_that_1a_copy_edited():
+    """The source wraps one header over two lines and misspells a word in the
+    first; 1a joins them and corrects it. The joined text is then neither
+    equal to, nor a prefix or suffix of, the node (the second line alone is
+    under the length-ratio guard), so only a near-copy match recognises it."""
+    stage1a = {"hierarchy": [{"text": _COPY_EDITED_TITLE, "children": []}]}
+    candidates = ["I. OVERVEIW OF EXAMPLE ACCOMPLISHMENTS IN TEACHING,",
+                  "SERVICE AND RESEARCH"]
+    assert lint_missed_headers(candidates, stage1a, {"entries": []}) == []
+
+
+def test_missed_headers_quiet_on_a_tab_led_wrapped_header_read_from_a_docx(tmp_path):
+    """The wire for the tab-led wrapped header: the reader must pair the
+    tab-led first line with its continuation, and the lint must then match
+    the joined text to the node 1a copy-edited."""
+    doc = Document()
+    doc.add_paragraph("I. \tOVERVEIW OF EXAMPLE ACCOMPLISHMENTS IN TEACHING,").runs[0].bold = True
+    doc.add_paragraph("SERVICE AND RESEARCH").runs[0].bold = True
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    stage1a = {"hierarchy": [{"text": "I. " + _COPY_EDITED_TITLE, "children": []}]}
+    candidates = iter_header_candidates(str(path))
+    assert len(candidates) == 2
+    assert lint_missed_headers(candidates, stage1a, {"entries": []}) == []
+
+
+def test_missed_headers_near_copy_match_does_not_silence_a_different_header():
+    stage1a = {"hierarchy": [{"text": _COPY_EDITED_TITLE, "children": []}]}
+    candidates = ["OVERVIEW OF EXAMPLE ACCOMPLISHMENTS IN TEACHING,",
+                  "AND UNRELATED COMMITTEE SERVICE"]
+    found = lint_missed_headers(candidates, stage1a, {"entries": []})
+    assert [f["evidence"] for f in found] == [["AND UNRELATED COMMITTEE SERVICE"]]
 
 
 # ---------------------------------------------------- round-2 F1: a standalone

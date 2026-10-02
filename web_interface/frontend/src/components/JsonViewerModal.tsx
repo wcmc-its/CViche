@@ -110,7 +110,7 @@ export default function JsonViewerModal({
               href={downloadUrl}
               download
               aria-label={`Download ${filename}`}
-              className="inline-flex items-center gap-1.5 px-3 py-1 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+              className="inline-flex items-center gap-1.5 px-3 py-1 text-sm bg-blue-500 text-white rounded hover:bg-blue-600 focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none"
             >
               <Download size={14} />
               <span>Download</span>
@@ -119,7 +119,7 @@ export default function JsonViewerModal({
               ref={closeButtonRef}
               onClick={onClose}
               aria-label="Close JSON viewer"
-              className="text-gray-500 hover:text-gray-700 p-1 rounded focus:ring-2 focus:ring-blue-500 focus:outline-none"
+              className="text-gray-500 hover:text-gray-700 p-1 rounded focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:outline-none"
             >
               <X size={24} />
             </button>

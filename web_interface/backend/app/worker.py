@@ -22,6 +22,14 @@ exception, this consumer reclaims its own pending entries immediately
 ``RUN_TIMEOUT_S`` is stopped by its own watchdog (see ``_watchdog_fire``)
 rather than only by the pod's ``terminationGracePeriodSeconds``. v1 does not
 auto-resume a run this worker itself walked away from mid-execution.
+
+Queues (#1114): ``CVICHE_WORKER_STREAMS`` (``run_queue.worker_queues``) names
+the queues this worker reads, in priority order -- unset, the single-run queue
+only, exactly the pre-#1114 loop. A worker with several (the flex pool:
+``single,batch``) reclaims and polls each in order without blocking and blocks
+only on the first when every one is empty (``_read_next``), so a single run
+always goes ahead of a batch run on a worker that frees up. Every entry is
+handled, ACKed, requeued and dead-lettered on the queue it came from.
 """
 import asyncio
 import logging
@@ -30,6 +38,7 @@ import signal
 import socket
 import threading
 from pathlib import Path
+from typing import NamedTuple
 
 from sqlalchemy import select
 
@@ -38,6 +47,7 @@ from app.database import SessionLocal
 from app.logging_config import configure_logging
 from app.models import Run, RunState
 from app.pipeline import run_queue
+from app.pipeline.run_queue import Queue
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.services.run_service import UPLOAD_DIR, _materialize_input_if_missing, claim_queued, mark_failed
 
@@ -67,6 +77,9 @@ RUN_TIMEOUT_S = run_queue.RUN_TIMEOUT_S
 HEARTBEAT_INTERVAL_S = 15
 READY_FILE = Path("/tmp/worker-ready")
 HEARTBEAT_FILE = Path("/tmp/worker-heartbeat")
+# What loop() reads when main() is bypassed (tests): the single-run queue only,
+# the same as an unset CVICHE_WORKER_STREAMS.
+DEFAULT_QUEUES: tuple[Queue, ...] = (run_queue.SINGLE,)
 
 
 def _log(event: str, run_id: str, entry_id: str, **kv: object) -> None:
@@ -131,7 +144,7 @@ def _fail_if_still_running(run_id: str) -> None:
         )
 
 
-def _watchdog_fire(entry_id: str, run_id: str) -> None:
+def _watchdog_fire(entry_id: str, run_id: str, queue: Queue = run_queue.SINGLE) -> None:
     """Fires only if a run outlives RUN_TIMEOUT_S. The stage thread it is
     stuck in cannot be killed (the per-stage timeout cancels the await, not
     the thread -- orchestrator._get_stage_timeout_seconds), so this marks the
@@ -151,7 +164,7 @@ def _watchdog_fire(entry_id: str, run_id: str) -> None:
             run_id, f"Run exceeded {RUN_TIMEOUT_S}s on the worker and was stopped",
             from_statuses=(RunState.RUNNING,),
         ) > 0
-        run_queue.ack(entry_id)
+        run_queue.ack(entry_id, queue)
         logger.error(
             "run_timeout run_id=%s consumer=%s entry_id=%s timeout_s=%s row_failed=%s",
             run_id, CONSUMER, entry_id, RUN_TIMEOUT_S, row_failed,
@@ -175,10 +188,12 @@ def _heartbeat_while_running(stop: threading.Event) -> None:
         _touch(HEARTBEAT_FILE)
 
 
-def _execute_guarded(entry_id: str, run_id: str, file_type: str, start_step: int | None) -> None:
+def _execute_guarded(
+    entry_id: str, run_id: str, file_type: str, start_step: int | None, queue: Queue,
+) -> None:
     """Wrap one run's execution with the run watchdog and the in-flight
     heartbeat, then re-check the row before handle()'s own ACK."""
-    watchdog = threading.Timer(RUN_TIMEOUT_S, _watchdog_fire, args=(entry_id, run_id))
+    watchdog = threading.Timer(RUN_TIMEOUT_S, _watchdog_fire, args=(entry_id, run_id, queue))
     watchdog.daemon = True
     watchdog.start()
     heartbeat_stop = threading.Event()
@@ -193,7 +208,9 @@ def _execute_guarded(entry_id: str, run_id: str, file_type: str, start_step: int
     _fail_if_still_running(run_id)
 
 
-def _dead_letter_poison_entry(entry_id: str, fields: dict[str, str], run_id: str, deliveries: int) -> None:
+def _dead_letter_poison_entry(
+    entry_id: str, fields: dict[str, str], run_id: str, deliveries: int, queue: Queue,
+) -> None:
     """A2: a poison entry can reach the delivery cap while its run is either
     still `queued` (every pre-claim attempt failed) or `running` (the row won
     a claim but 3+ post-claim ACK attempts then failed), so both are failed
@@ -206,14 +223,16 @@ def _dead_letter_poison_entry(entry_id: str, fields: dict[str, str], run_id: str
         run_id, f"Dead-lettered after {deliveries} deliveries",
         from_statuses=(RunState.QUEUED, RunState.RUNNING),
     ) > 0
-    run_queue.dead_letter(entry_id, fields)
+    run_queue.dead_letter(entry_id, fields, queue)
     logger.error(
         "dead_lettered run_id=%s consumer=%s entry_id=%s deliveries=%s prior_status=%s row_failed=%s",
         run_id, CONSUMER, entry_id, deliveries, prior_status, row_failed,
     )
 
 
-def handle(entry_id: str, fields: dict[str, str], *, reclaimed: bool = False) -> None:
+def handle(
+    entry_id: str, fields: dict[str, str], *, reclaimed: bool = False, queue: Queue = run_queue.SINGLE,
+) -> None:
     try:
         token = run_queue.WorkToken.from_entry(entry_id, fields)
     except run_queue.BadToken:
@@ -221,17 +240,17 @@ def handle(entry_id: str, fields: dict[str, str], *, reclaimed: bool = False) ->
         # write access) and unvalidated at this point, so it must not be
         # interpolated raw into a text log line (log-line injection).
         logger.warning("skipped_bad_token entry_id=%s consumer=%s fields=%r", entry_id, CONSUMER, fields)
-        run_queue.ack(entry_id)
+        run_queue.ack(entry_id, queue)
         return
     run_id = token.run_id
 
     if reclaimed:
-        deliveries = run_queue.delivery_count(entry_id)
+        deliveries = run_queue.delivery_count(entry_id, queue)
         _log("reclaimed", run_id, entry_id, deliveries=deliveries)
         if run_queue.exceeds_delivery_cap(deliveries):
             # DB first: if this write fails, the entry stays pending and
             # comes back on the next reclaim instead of vanishing into the DLQ.
-            _dead_letter_poison_entry(entry_id, fields, run_id, deliveries)
+            _dead_letter_poison_entry(entry_id, fields, run_id, deliveries, queue)
             return
 
     # Outside the ACKing try: a DB error here must leave the entry pending, so
@@ -243,16 +262,21 @@ def handle(entry_id: str, fields: dict[str, str], *, reclaimed: bool = False) ->
             _log("skipped_not_queued", run_id, entry_id, status=claim.status)
             return
         _log("claimed", run_id, entry_id)
-        _execute_guarded(entry_id, run_id, claim.file_type, claim.resume_from_step)
+        _execute_guarded(entry_id, run_id, claim.file_type, claim.resume_from_step, queue)
     finally:
         # Success and handled failure both ACK; only a process death or a DB
         # error before the claim decided leaves the entry pending -- exactly
         # what XAUTOCLAIM and own-PEL reclaim exist for.
-        run_queue.ack(entry_id)
-        _log("acked", run_id, entry_id)
+        run_queue.ack(entry_id, queue)
+        _log("acked", run_id, entry_id, queue=queue.name)
 
 
-Entry = tuple[str, dict[str, str]]
+class Entry(NamedTuple):
+    """One delivered entry and the queue it came from -- the queue every
+    ACK/requeue/dead-letter of it must go back to."""
+    queue: Queue
+    entry_id: str
+    fields: dict[str, str]
 
 
 def _process_owed(entries: list[Entry], *, context: str) -> list[Entry]:
@@ -263,16 +287,17 @@ def _process_owed(entries: list[Entry], *, context: str) -> list[Entry]:
     DB does not itself inflate the entry's delivery count and risk a spurious
     dead-letter purely from retrying (B1)."""
     still_owed = []
-    for entry_id, fields in entries:
+    for entry in entries:
         try:
-            handle(entry_id, fields, reclaimed=True)
+            handle(entry.entry_id, entry.fields, reclaimed=True, queue=entry.queue)
         except Exception:
-            logger.exception("worker %s: %s entry_id=%s still failing; will retry", CONSUMER, context, entry_id)
-            still_owed.append((entry_id, fields))
+            logger.exception("worker %s: %s entry_id=%s still failing; will retry",
+                             CONSUMER, context, entry.entry_id)
+            still_owed.append(entry)
     return still_owed
 
 
-def _reclaim_own_pending() -> list[Entry]:
+def _reclaim_own_pending(queues: tuple[Queue, ...] = DEFAULT_QUEUES) -> list[Entry]:
     """At worker startup, and again whenever nothing is already known to be
     owed (see loop()): fetch entries this consumer already owns in the PEL
     -- most often a same-pod restart, which keeps the same CONSUMER
@@ -280,14 +305,46 @@ def _reclaim_own_pending() -> list[Entry]:
     (RUN_TIMEOUT_S plus margin, N2). This is the only place that re-fetches from Redis (one
     XCLAIM per entry); a failure processing an entry is retried directly via
     _process_owed instead of coming back through here, so a prolonged outage
-    never re-XCLAIMs the same entry on every retry."""
-    entries = run_queue.reclaim_own_pending(CONSUMER)
-    for entry_id, _ in entries:
-        logger.info("reclaiming own pending entry_id=%s consumer=%s at startup", entry_id, CONSUMER)
+    never re-XCLAIMs the same entry on every retry. Covers every queue this
+    worker reads."""
+    entries = [
+        Entry(queue, entry_id, fields)
+        for queue in queues
+        for entry_id, fields in run_queue.reclaim_own_pending(CONSUMER, queue)
+    ]
+    for entry in entries:
+        logger.info("reclaiming own pending entry_id=%s consumer=%s queue=%s at startup",
+                    entry.entry_id, CONSUMER, entry.queue.name)
     return _process_owed(entries, context="reclaimed")
 
 
-def loop() -> None:
+def _autoclaim_next(queues: tuple[Queue, ...]) -> Entry | None:
+    """XAUTOCLAIM sweep over every queue this worker reads, in order: the
+    first entry another consumer left pending past MIN_IDLE_MS."""
+    for queue in queues:
+        claimed = run_queue.autoclaim_one(CONSUMER, queue)
+        if claimed is not None:
+            return Entry(queue, *claimed)
+    return None
+
+
+def _read_next(queues: tuple[Queue, ...]) -> Entry | None:
+    """The next never-delivered entry, by queue priority. One queue: the
+    blocking read on it alone, exactly the pre-#1114 loop. Several: each is
+    polled in order without blocking, so a waiting single run is always taken
+    before a batch run; only when every one is empty does this block
+    (BLOCK_MS) -- on the first queue, the one whose arrivals must not wait."""
+    if len(queues) > 1:
+        for queue in queues:
+            delivered = run_queue.read_one(CONSUMER, queue, block=False)
+            if delivered is not None:
+                return Entry(queue, *delivered)
+    first = queues[0]
+    delivered = run_queue.read_one(CONSUMER, first)
+    return Entry(first, *delivered) if delivered is not None else None
+
+
+def loop(queues: tuple[Queue, ...] = DEFAULT_QUEUES) -> None:
     # B1: an own-PEL entry whose processing fails here (DB/Valkey still down)
     # must not be abandoned after one immediate retry -- left in this
     # consumer's own PEL it would otherwise strand until MIN_IDLE_MS elapses
@@ -299,7 +356,7 @@ def loop() -> None:
     # failure left no specific entry in hand.
     owed: list[Entry] | None
     try:
-        owed = _reclaim_own_pending()
+        owed = _reclaim_own_pending(queues)
     except Exception:
         logger.exception("worker %s: startup own-PEL reclaim failed", CONSUMER)
         owed = None
@@ -309,16 +366,16 @@ def loop() -> None:
             owed = _process_owed(owed, context="pending")
         elif owed is None:
             try:
-                owed = _reclaim_own_pending()
+                owed = _reclaim_own_pending(queues)
             except Exception:
                 logger.exception("worker %s: pending own-PEL reclaim failed", CONSUMER)
                 owed = None
         entry = None
         try:
-            entry = run_queue.autoclaim_one(CONSUMER)
+            entry = _autoclaim_next(queues)
             reclaimed = entry is not None
             if entry is None:
-                entry = run_queue.read_one(CONSUMER)
+                entry = _read_next(queues)
             if entry is None:
                 continue
             if shutting_down.is_set():
@@ -327,11 +384,11 @@ def loop() -> None:
                 # rather than starting a new run during drain -- the next
                 # (non-draining) worker picks it up within seconds instead of
                 # waiting out MIN_IDLE_MS.
-                new_entry_id = run_queue.requeue(*entry)
+                new_entry_id = run_queue.requeue(entry.entry_id, entry.fields, entry.queue)
                 logger.info("shutdown: requeued entry_id=%s as new_entry_id=%s before claiming",
-                            entry[0], new_entry_id)
+                            entry.entry_id, new_entry_id)
                 continue
-            handle(*entry, reclaimed=reclaimed)
+            handle(entry.entry_id, entry.fields, reclaimed=reclaimed, queue=entry.queue)
         except Exception:
             # A DB or Valkey blip must not crash-loop the pod: the entry in hand
             # is still pending (handle only ACKs after the claim decided), so
@@ -354,6 +411,19 @@ def main() -> int:
         logger.error("worker refusing to start: CVICHE_REDIS_URL set=%s CVICHE_STORAGE_BACKEND=%s "
                      "(both required: outputs must cross pods via S3)", bool(url), backend)
         return 2
+    try:
+        queues = run_queue.worker_queues()
+    except ValueError:
+        logger.exception("worker refusing to start: CVICHE_WORKER_STREAMS is invalid")
+        return 2
+    # Every run's terminal Teams card is posted from here, not the backend
+    # (CVICHE_DISPATCH_MODE=queue), so a worker without the webhook drops them
+    # all silently. Warn, don't refuse: notifications are best-effort.
+    from app.services.notifications import validate_configuration
+    notif_status = validate_configuration()
+    if not notif_status["valid"]:
+        logger.warning("worker %s will post no Teams run cards: CVICHE_TEAMS_WEBHOOK_URL "
+                       "configured=%s valid=%s", CONSUMER, notif_status["configured"], notif_status["valid"])
     # Publish side of the broker only, wired like app.main's lifespan; the
     # backend replicas run the subscriber that fans out to WebSockets.
     from app.pipeline import orchestrator as orchestrator_module
@@ -362,15 +432,16 @@ def main() -> int:
     broker = broker_from_env()
     event_emitter.set_broker(broker)
     orchestrator_module.set_broker(broker)
-    run_queue.ensure_group()
+    for queue in queues:
+        run_queue.ensure_group(queue)
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda *_: shutting_down.set())
     # Readiness only after every startup check above (including ensure_group,
     # which proves Valkey is actually reachable) has passed -- a rollout must
     # not count a pod as available before that.
     _touch(READY_FILE)
-    logger.info("worker %s started (stream=%s group=%s)", CONSUMER, run_queue.STREAM, run_queue.GROUP)
-    loop()
+    logger.info("worker %s started (queues=%s)", CONSUMER, ",".join(queue.name for queue in queues))
+    loop(queues)
     logger.info("worker %s stopped", CONSUMER)
     return 0
 

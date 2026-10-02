@@ -493,6 +493,26 @@ class TestSubsectionMenteeShapedTableProtection841:
         rows = [tuple(c.text for c in r.cells) for r in table.rows[1:]]
         assert rows == [("2020-2023", "Director, Wound Care Program", "NYP Weill Cornell")]
 
+    def test_l3_table_row_names_the_unit_program_before_the_institution(self):
+        gen, table = _fake_doc_with_table(
+            "Clinical Leadership",
+            ["Title", "Institution/Location", "Dates (yyyy)"],
+        )
+        entry = {
+            "text": "",
+            "extracted_fields": {
+                "leadership_role": "Medical Director",
+                "unit_program": "Kestrel Step-Down Unit",
+                "institution": "Harrowgate Hospital",
+                "start_date": "2020",
+                "end_date": "2023",
+            },
+        }
+        gen._fill_clinical_practice({"L3": [entry]})
+
+        rows = [tuple(c.text for c in r.cells) for r in table.rows[1:]]
+        assert rows == [("2020-2023", "Medical Director", "Kestrel Step-Down Unit, Harrowgate Hospital")]
+
     # --- (c) funding table still rejected, L2/L3 (L1 exists) -------------
 
     def test_l2_award_source_table_is_rejected_and_falls_back_to_bullets(self):

@@ -10,9 +10,14 @@ answer different questions.
 | Number? | **no number at all** | yes |
 | Where it runs | orchestrator post-run, `stage_7_doctor/<uid>_doctor.json` | `quality_score_service`, cached at `runs/{id}/quality_score.json` |
 
-The doctor does not compute a 0-100 score. It reports *two* of the quality
-score's hard-fail gates so the two cannot drift apart — that is the whole
-overlap.
+The doctor does not compute a 0-100 score. It reports all five of the quality
+score's hard-fail gates, each as an ERROR lint that calls the scorer's own
+predicate, so the two cannot drift apart — that is the whole overlap. A sixth
+cap, stage 4's failed extraction groups (below), stops short of RED and so is a
+WARN lint on the same shared predicate. Three more caps (#822, below) cover
+source content lost before the document was written; they also stop one point
+under GREEN, and each calls the signal behind an existing doctor lint
+(`under_extraction`, `segmentation`, `table_lost`).
 
 ## Part 1: the doctor's verdict
 
@@ -54,8 +59,10 @@ unchanged verdict was never evidence of no regression. These are static
 constants and go stale as the pipeline improves — #440 replaces them with a
 live corpus baseline.
 
-The two hard-fail lints are ERROR by construction — each one on its own caps
-the quality score into the RED band.
+The five hard-fail lints (`no_output`, `owner_contact_missing`,
+`protected_data_in_output`, `pipeline_errors_present`, `stage3b_fallback_ratio`)
+are ERROR by construction — each one on its own caps the quality score into
+the RED band.
 
 ### Step 3 — roll up
 
@@ -88,11 +95,11 @@ the ones that fire many times, so they consumed half the report.
 `src/unified_pipeline/quality_score.py`
 
 Each dimension returns a penalty fraction in `[0, 1]`. Weighted, normalized
-against total weight (95), so a fully-penalized run scores 0 and a clean run
+against total weight (100), so a fully-penalized run scores 0 and a clean run
 scores 100:
 
 ```python
-raw   = 100 * (1 - sum(weight_i * fraction_i) / 95)
+raw   = 100 * (1 - sum(weight_i * fraction_i) / 100)
 final = min(raw, *hard_fail_caps)     # caps only ever lower it
 score = round(max(0, final))
 ```
@@ -107,15 +114,20 @@ score = round(max(0, final))
 | 12 | Sparse tables in output docx | `0.6*(sparse_table_ratio/0.25) + 0.4*((global_empty_ratio-0.10)/0.40)`, over tables carrying CV content only: a table whose every non-empty cell is template text is skipped, and 0 if none remain (#452) |
 | 10 | Duplicate-entry ratio | 0 at ≤0.10, linear to 0.4 at 0.30, to 0.8 at 0.50, 1.0 above; +0.1 if entries coverage >130% |
 | 10 | Raw-tab / prompt-echo artifacts | `0.6*(raw_tab_paragraphs/20) + 0.4*(echo_paragraphs/15)` |
-| 8 | Field-extraction sparseness | `0.5*((allnull_or_zerocov/total)/0.10) + 0.5*((1-success_rate)/0.10)` |
+| 13 | Field-extraction sparseness | `0.5*((allnull_or_zerocov/total)/0.10) + 0.5*((1-success_rate)/0.10)` |
 
 All fractions clamp to `[0, 1]`. A dimension whose artifact is missing scores
 1.0 (full penalty); a missing docx scores 0.5.
 
-### The two hard-fail caps
+### The five hard-fail caps
 
-A cap is a ceiling on the final score, applied after the weighted sum:
+A cap is a ceiling on the final score, applied after the weighted sum. When
+several fire, the lowest wins. Only the first two (owner, fatal error) also
+carry weight as dimensions; the other three are weight-0 gates, so adding them
+moved no clean run's raw score.
 
+- **cap 20** — `no_output_produced()`: no rendered docx at all. Nothing to
+  deliver (#745). Doctor lint: `no_output`.
 - **cap 25** — `cv_owner_name_missing()`: no usable `full_name`, and not both
   `first_name` and `last_name`. The document cannot be delivered under anyone's
   name. Also trips when `*_fields.json` is absent entirely.
@@ -123,11 +135,86 @@ A cap is a ceiling on the final score, applied after the weighted sum:
   in the scanned JSON: `name 'x' is not defined`, `Traceback (most recent call
   last)`, `NameError:`, `UnboundLocalError:`, `KeyError:`. Means a stage broke,
   not that a lookup came back empty.
+- **cap 25** — `score_protected_data()`: protected personal data (date of
+  birth, SSN and the other #820 label/value shapes) reached the rendered docx.
+  Cap-only gate in `CAP_ONLY_GATES`, not in `DIMENSIONS`. It runs the same scan
+  as the doctor's `protected_data_in_output` lint (#825).
+- **cap 40** — `stage3b_fallback_ratio_exceeded()`: more than
+  `STAGE3B_FALLBACK_RATIO_THRESHOLD` (5%) of stage 3b's classification batches,
+  or of its entries, fell back to a default code (#810). These failures are
+  recorded as numbers in `meta.stats`, which the error-string scan above cannot
+  see. Same cap as a fatal error, since both mean a stage produced output that
+  looks real but isn't. Doctor lint: `stage3b_fallback_ratio`. The 5% is a
+  starting calibration, not a fitted percentile.
 
-Both predicates live in `quality_score.py` and are imported by `run_doctor.py`
-for its `owner_contact_missing` / `pipeline_errors_present` lints, so the doctor
-reports the gate rather than a second definition of it. What that buys is that they cannot drift apart — **not** independent
+Every predicate lives in `quality_score.py` (or, for protected data, in the
+shared lint it calls), and the doctor's matching lint uses the same function,
+so the doctor reports the gate rather than a second definition of it. What that buys is that they cannot drift apart — **not** independent
 confirmation that the gate is calibrated.
+
+### The stage-4 group-failure cap (not a hard fail)
+
+- **cap 84** — `stage4_group_failures()`: stage 4 extracts one taxonomy group per
+  LLM call, and a call that fails (an invalid reply, a timeout, a provider
+  error such as a content filter) writes `extraction_error` on every entry of
+  the group (#1174). The recovery pass then retries those entries on their own
+  prompt; one it fills in keeps its `extraction_error` and gains
+  `extraction_success=True`, so neither `stats.extraction_failed` (counted after
+  recovery) nor the error-string scan above (it reads only a key named exactly
+  `error`) sees a group that was rescued in full. Cap-only gate in
+  `CAP_ONLY_GATES`, weight 0, so no clean run's raw score moves. The cap is
+  `BAND_GREEN - 1`: a run with a failed group cannot be GREEN, and reads
+  YELLOW. Doctor lint: `stage4_group_failures` (WARN, evidence names the
+  taxonomy codes, the cause, and how many entries were rescued).
+
+  What it counts: entries whose `extraction_error` is set, other than the
+  per-entry "No matching extraction in LLM response" (a successful call whose
+  reply omitted one entry, already counted by the sparseness dimension), plus
+  `stats.failed_batches > 0`. A rescued group counts: the rescued entries were
+  read on a different prompt and can carry wrong values.
+
+  What it deliberately does not do: grade the cap by the share of entries left
+  unextracted. No measurement supports a threshold, and a failed group is
+  rare (3 of 163 corpus CVs), so a flat cap is the claim the evidence supports.
+  It also does not see a call served by the Sonnet 4.6 content-filter fallback
+  (#1207) that succeeded, because stage 4 does not record which model answered.
+
+### The three content-loss caps (#822)
+
+Cap-only gates like protected data (`CAP_ONLY_GATES`, weight 0, so no run's raw
+score moves), but soft: each caps a run at `CONTENT_LOSS_CAP` (84, one point
+under GREEN), so a run that lost source content cannot read "ship" and is not
+pushed toward RED. No weighted dimension measures lost content; these call the
+doctor's own signals, restricted to the ones batch IPXFBA hand-checked as real.
+
+- `score_under_extracted_records()` — the doctor's `under_extraction` lint, any
+  finding (in IPXFBA all 4 findings were true positives, but only 2 lost
+  records outright; outside IPXFBA a finding can fire with nothing lost).
+- `score_fused_entries()` — `mega_entries` (`count_mega_entries`) at
+  `MEGA_ENTRIES_CAP_MIN` (2) or more entries; one fused entry is common and
+  harmless, so the threshold is a count (7 of 9 flagged entries were real).
+- `score_lost_source_table()` — the primitive behind `table_lost`
+  (`find_lost_blocks`), worst lost table at `LOST_TABLE_CAP_MIN_LINES` (5) or
+  more lines. It reads the original uploaded `.docx` from the
+  `SOURCE_DOCX_SUBDIR` (`source/`) of the scored directory; the web service
+  stages `input/*.docx` there and `score_one.py --source` does the same. With no
+  readable source the gate is not evaluated, so a score computed without it can
+  sit above the web app's.
+
+Both thresholds were fitted to one batch and are named in the code to be revisited.
+
+Which cap the run page names when several sit at 84: the three content-loss caps
+and the stage-4 cap share a value, and the run page's reason and doctor-lint
+pointer (`run_quality_report.cap_source`) is the first matching flag, in
+`CAP_ONLY_GATES` order. The order is most specific first: lost table (the loss
+is measured against the delivered docx), fused entries (a count of swallowed
+records), under-extraction (fires on any finding, including ones that lost
+nothing), then stage 4's failed group (a call failed and was retried; no loss is
+measured). The score and band do not depend on the order, only the pointer.
+In batch IPXFBA it decides two runs: EKGTXD (under-extraction and fused entries)
+and PBSGQZ (fused entries and a stage-4 failure) both point at the fused-entries
+reason, which is where their verified loss is (EKGTXD's two under-extraction
+findings lost no records).
 
 ### Bands
 

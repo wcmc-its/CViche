@@ -187,6 +187,41 @@ def test_totals_sum_over_every_batch_across_threads(monkeypatch):
     assert len(out["entries"]) == 10
 
 
+def _stub_owner_billing(monkeypatch, cost=0.25, prompt_tokens=30, completion_tokens=12):
+    """An owner-name stub that bills `usage` the way the real call does."""
+    def billed(document_uid, mapped_entries, docx_path=None, usage=None):
+        usage.add({"cost": cost, "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens})
+        return dict(_NO_OWNER)
+
+    monkeypatch.setattr(extraction, "extract_cv_owner_name", billed)
+    monkeypatch.setattr(extraction, "infer_cv_owner_location", lambda entries: {})
+
+
+def test_owner_name_call_cost_and_tokens_fold_into_stage_totals(monkeypatch):
+    """#1177: the owner-name call's cost was discarded, so stage 4 reported low."""
+    _stub_owner_billing(monkeypatch)
+    monkeypatch.setattr(
+        extraction, "extract_fields_batch",
+        lambda entries, batch_idx, total, cv_owner_name, cancel_check=None:
+            _batch_result(entries, cost=0.5, tokens=100),
+    )
+
+    out = extraction.extract_fields_from_mapped_entries(_entries(4), batch_size=2, workers=1)
+
+    assert out["total_cost"] == pytest.approx(0.5 * 2 + 0.25)
+    assert out["total_tokens"] == 100 * 2 + 42
+
+
+def test_owner_name_cost_survives_the_no_valid_entries_early_out(monkeypatch):
+    _stub_owner_billing(monkeypatch)
+    entries = [{"text": "", "element_idx": 0, "taxonomy_code": "A1"}]
+
+    out = extraction.extract_fields_from_mapped_entries(entries, batch_size=5)
+
+    assert out["total_cost"] == pytest.approx(0.25)
+    assert out["total_tokens"] == 42
+
+
 def test_workers_one_is_strictly_serial_and_ordered(monkeypatch):
     _stub_owner(monkeypatch)
     order: list[int] = []
@@ -942,3 +977,244 @@ def test_postdoc_training_prompt_asks_for_a_role_and_keeps_the_other_fields():
     listed = [name.strip() for name in field_line.split(",")]
     assert listed == ["training_type", "specialty", "institution", "start_date", "end_date", "role"]
     assert "- role: " in prompt
+
+
+# ---------------------------------------------------------------------------
+# A reply that holds several items for ONE entry keeps every item. Each used to
+# overwrite the one before it in both parsers, so only the last survived.
+# Invented values.
+# ---------------------------------------------------------------------------
+
+from unified_pipeline.stage4.schemas import (  # noqa: E402
+    STAGE4_RECORDS_KEY,
+    STAGE4_RECORDS_RETURNED_KEY,
+)
+
+_MULTI_TEXT = "Glade Board chair, Fern Council member and Moss Panel member at Ashby University"
+_SINGLE_TEXT = "Member, Heron Committee, Ashby University"
+
+
+def _p_entries() -> list[dict]:
+    return [
+        {"text": _MULTI_TEXT, "taxonomy_code": "P", "element_idx_start": 4, "element_idx_end": 4},
+        {"text": _SINGLE_TEXT, "taxonomy_code": "P", "element_idx_start": 5, "element_idx_end": 5},
+    ]
+
+
+_MULTI_ITEMS = [
+    {"committee_name": "Glade Board", "role": "Chair", "institution": "Ashby University"},
+    {"committee_name": "Fern Council", "role": "Member", "institution": "Ashby University"},
+    {"committee_name": "Moss Panel", "role": "Member", "institution": "Ashby University"},
+]
+_SINGLE_ITEM = {"committee_name": "Heron Committee", "role": "Member", "institution": "Ashby University"}
+
+
+def _reply(content: dict, cost: float = 0.01) -> dict:
+    return {"content": json.dumps(content), "cost": cost, "total_tokens": 3}
+
+
+def _batch_reply_with_three_items_for_entry_0(**kwargs) -> dict:
+    return _reply({"entries": [
+        *({"entry_index": 0, **item} for item in _MULTI_ITEMS),
+        {"entry_index": 1, **_SINGLE_ITEM},
+    ]})
+
+
+def test_validate_raw_extractions_keeps_every_item_per_entry_in_reply_order():
+    grouped = extraction._validate_raw_extractions([
+        {"entry_index": 0, "role": "first"},
+        {"entry_index": 1, "role": "other"},
+        {"role": "no index"},  # malformed -- dropped
+        {"entry_index": 0, "role": "second"},
+    ], "P")
+    assert grouped == {0: [{"role": "first"}, {"role": "second"}], 1: [{"role": "other"}]}
+    with pytest.raises(KeyError):  # a plain dict: a missing index is not an empty list
+        grouped[2]
+
+
+def test_the_records_keys_are_a_persisted_artifact_contract():
+    # Written into <uid>_fields.json and read back by stage 6 (and by any
+    # later reader of a stored run), so the names are pinned, not just shared.
+    assert (STAGE4_RECORDS_KEY, STAGE4_RECORDS_RETURNED_KEY) == (
+        "stage4_records", "stage4_records_returned")
+
+
+def test_batch_reply_with_several_items_for_one_entry_keeps_them_all(monkeypatch):
+    monkeypatch.setattr(extraction, "call_llm", _batch_reply_with_three_items_for_entry_0)
+    multi, _ = extraction.extract_fields_batch(_p_entries(), 0, 1)["entries"]
+
+    fields = multi["extracted_fields"]
+    assert [r["committee_name"] for r in fields[STAGE4_RECORDS_KEY]] == [
+        "Glade Board", "Fern Council", "Moss Panel"]
+    # The entry's own scalars stay the last item, which is all it kept before.
+    assert {k: v for k, v in fields.items() if k != STAGE4_RECORDS_KEY} == _MULTI_ITEMS[-1]
+    assert multi[STAGE4_RECORDS_RETURNED_KEY] == 3
+
+
+def test_multi_record_coverage_is_measured_over_every_record(monkeypatch):
+    monkeypatch.setattr(extraction, "call_llm", _batch_reply_with_three_items_for_entry_0)
+    multi, _ = extraction.extract_fields_batch(_p_entries(), 0, 1)["entries"]
+    last_only = extraction.calculate_unextracted_content(_MULTI_TEXT, _MULTI_ITEMS[-1])
+    union = multi["extraction_coverage"]
+    assert union["extraction_coverage_percent"] > last_only["extraction_coverage_percent"]
+    assert "glade" in last_only["unextracted_words"]
+    assert "glade" not in union["unextracted_words"]
+
+
+def test_a_single_item_entry_is_exactly_what_it_was_before(monkeypatch):
+    monkeypatch.setattr(extraction, "call_llm", _batch_reply_with_three_items_for_entry_0)
+    _, single = extraction.extract_fields_batch(_p_entries(), 0, 1)["entries"]
+    expected = {
+        **_p_entries()[1],
+        "extracted_fields": _SINGLE_ITEM,
+        "extraction_success": True,
+        "extraction_coverage": extraction.calculate_unextracted_content(_SINGLE_TEXT, _SINGLE_ITEM),
+    }
+    assert json.dumps(single) == json.dumps(expected)
+
+
+def test_every_record_is_cleaned_not_only_the_last(monkeypatch):
+    # normalize_dates splits a range on each item; an earlier one used to be
+    # dropped before any cleaning ran, so this pins that it is cleaned too.
+    def reply(**kwargs):
+        return _reply({"entries": [
+            {"entry_index": 0, "committee_name": "Glade Board", "dates": "1999-2001"},
+            {"entry_index": 0, "committee_name": "Fern Council", "dates": "2002-2004"},
+        ]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (entry,) = extraction.extract_fields_batch(_p_entries()[:1], 0, 1)["entries"]
+    first, last = entry["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert (first["start_date"], first["end_date"]) == ("1999", "2001")
+    assert (last["start_date"], last["end_date"]) == ("2002", "2004")
+
+
+def test_only_the_last_record_is_offered_the_entry_text(monkeypatch):
+    # The text's one closed range is filled into the last record, as it was
+    # into the one record the entry kept before, and into no earlier record.
+    entry = {"text": "Fern Council; Glade Board 2001-2005", "taxonomy_code": "P",
+             "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"entries": [{"entry_index": 0, "committee_name": "Fern Council",
+                                    "role": ["Chair", "Member"]},
+                                   {"entry_index": 0, "committee_name": "Glade Board"}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    first, last = out["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert first == {"committee_name": "Fern Council", "role": "Chair; Member"}  # coerced, not dated
+    assert (last["start_date"], last["end_date"]) == ("2001", "2005")
+    assert sorted(out["reformatted_fields"]) == ["end_date", "start_date"]
+
+
+def test_records_that_cover_the_entry_skip_the_recovery_call(monkeypatch):
+    # The last item alone covers a fifth of a long dated entry, which sends it
+    # to recovery; the five items together cover all of it.
+    records = [{"committee_name": f"{name} Committee", "description": f"{detail} oversight", "start_date": "2015"}
+               for name, detail in [("Glade", "budgetary"), ("Fern", "curricular"), ("Moss", "editorial"),
+                                    ("Heron", "procedural"), ("Wren", "technical")]]
+    text = "; ".join(f"{r['committee_name']}, {r['description']}, 2015 to present" for r in records)
+    text += " -- standing appointments"
+    entry = {"text": text, "taxonomy_code": "P", "element_idx_start": 0, "element_idx_end": 0}
+    assert len(text) >= 200
+    last_alone = {"text": text, "extracted_fields": records[-1],
+                  "extraction_coverage": extraction.calculate_unextracted_content(text, records[-1])}
+    assert extraction.needs_llm_recovery(last_alone)
+    calls = []
+
+    def reply(**kwargs):
+        calls.append(kwargs)
+        return _reply({"entries": [{"entry_index": 0, **record} for record in records]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    assert not extraction.needs_llm_recovery(out)
+    assert len(calls) == 1
+    assert out[STAGE4_RECORDS_RETURNED_KEY] == 5
+
+
+def test_recovery_reply_with_several_items_for_one_id_keeps_them_all(monkeypatch):
+    entry = {**_p_entries()[0], STAGE4_RECORDS_RETURNED_KEY: 9}
+
+    def reply(**kwargs):
+        return _reply({"recovered_entries": [
+            {"entry_id": "4_4", "fields": item} for item in _MULTI_ITEMS[:2]]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.attempt_llm_recovery([entry])["entries"]
+    assert [r["committee_name"] for r in out["extracted_fields"][STAGE4_RECORDS_KEY]] == [
+        "Glade Board", "Fern Council"]
+    assert out["extracted_fields"]["committee_name"] == "Fern Council"
+    assert out[STAGE4_RECORDS_RETURNED_KEY] == 2
+    assert out["llm_recovery_applied"] is True
+
+
+def test_a_single_item_recovery_drops_the_count_an_earlier_pass_wrote(monkeypatch):
+    entry = {**_p_entries()[0], STAGE4_RECORDS_RETURNED_KEY: 3,
+             "extracted_fields": {**_MULTI_ITEMS[-1], STAGE4_RECORDS_KEY: _MULTI_ITEMS}}
+
+    def reply(**kwargs):
+        return _reply({"recovered_entries": [{"entry_id": "4_4", "fields": _SINGLE_ITEM}]})
+
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.attempt_llm_recovery([entry])["entries"]
+    assert STAGE4_RECORDS_RETURNED_KEY not in out
+    assert out["extracted_fields"] == _SINGLE_ITEM
+    assert list(out)[-1] == "llm_recovery_applied"
+
+
+# --- a second record under an off-schema key (#1245) -------------------------
+
+def _one_item_reply(code_text: str, code: str, item: dict):
+    entry = {"text": code_text, "taxonomy_code": code, "element_idx_start": 0, "element_idx_end": 0}
+
+    def reply(**kwargs):
+        return _reply({"entries": [{"entry_index": 0, **item}]})
+    return entry, reply
+
+
+def test_a_numbered_schema_field_is_a_second_record_that_fans_out(monkeypatch):
+    # A two-column memberships row: the model kept the second column under
+    # `organization_2`, which no renderer reads.
+    from unified_pipeline.stage4.schemas import FIELD_SCHEMAS
+    from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
+    entry, reply = _one_item_reply("Glade Society 1999-2001 Fern Guild", "I", {
+        "organization": "Glade Society", "start_date": "1999", "end_date": "2001",
+        "organization_2": "Fern Guild"})
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+
+    first, second = out["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert first == {"organization": "Glade Society", "start_date": "1999", "end_date": "2001"}
+    # The parent's dates belong to the first column only.
+    assert second == {"organization": "Fern Guild"}
+    assert STAGE4_RECORDS_RETURNED_KEY not in out  # the model returned one item
+    children = fan_out_multi_record_entries([out], FIELD_SCHEMAS, records_key=STAGE4_RECORDS_KEY)
+    assert [c["extracted_fields"]["organization"] for c in children] == ["Glade Society", "Fern Guild"]
+
+
+def test_an_object_sharing_schema_keys_is_the_parent_at_another_venue(monkeypatch):
+    entry, reply = _one_item_reply("Heron talk, Ashby Dinner, 2016; Wren Seminar, 2017", "R", {
+        "title": "Heron talk", "location": "Ashby", "date": "2016",
+        "additional_presentation": {"location": "Wren Seminar", "date": "2017"}})
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+
+    first, second = out["extracted_fields"][STAGE4_RECORDS_KEY]
+    assert (first["title"], first["location"]) == ("Heron talk", "Ashby")
+    assert "additional_presentation" not in first
+    assert (second["title"], second["location"]) == ("Heron talk", "Wren Seminar")
+    assert "2017" in (second.get("date"), second.get("start_date"))
+
+
+def test_other_offschema_values_are_left_as_they_were(monkeypatch):
+    # A one-fact key, an object sharing no schema key and a record list are
+    # not a second record here: a list is fan-out's to split (#1187).
+    item = {"organization": "Glade Society", "honors": "Fellow", "contact": {"phone": "x"},
+            "roles": [{"organization": "Fern Guild"}]}
+    entry, reply = _one_item_reply("Glade Society, Fellow", "I", item)
+    monkeypatch.setattr(extraction, "call_llm", reply)
+    (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
+    assert STAGE4_RECORDS_KEY not in out["extracted_fields"]
+    assert {k: out["extracted_fields"][k] for k in item} == item

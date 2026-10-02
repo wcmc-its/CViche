@@ -68,6 +68,34 @@ def test_owner_name_extraction_lets_a_real_bug_propagate(monkeypatch):
         )
 
 
+def test_owner_name_call_result_is_added_to_the_usage_even_when_the_reply_is_unparseable(monkeypatch):
+    """#1177: a billed reply that fails to parse still costs money."""
+    usage = owner_name.LlmUsage()
+    monkeypatch.setattr(
+        owner_name, "call_llm",
+        lambda **kwargs: dict(_llm_result("not valid json", cost=0.002), prompt_tokens=7, completion_tokens=3),
+    )
+
+    result = owner_name._run_owner_name_llm(["synthetic line"], usage)
+
+    assert result is None
+    assert usage.cost == pytest.approx(0.002)
+    assert usage.prompt_tokens == 7 and usage.completion_tokens == 3
+
+
+def test_extract_cv_owner_name_bills_both_tiers_to_the_same_usage(monkeypatch, tmp_path):
+    """Body tier finds no name, so the side-channel tier makes a second call."""
+    usage = owner_name.LlmUsage()
+    monkeypatch.setattr(owner_name, "call_llm", lambda **kw: _llm_result(json.dumps({}), cost=0.01))
+    monkeypatch.setattr(owner_name, "_owner_side_channel_content_lines", lambda uid, path: (["synthetic"], "sdt"))
+    docx = tmp_path / "synthetic.docx"
+    docx.write_bytes(b"x")
+
+    owner_name.extract_cv_owner_name("web001", [{"text": "synthetic entry"}], docx_path=str(docx), usage=usage)
+
+    assert usage.cost == pytest.approx(0.02)
+
+
 def test_owner_name_extraction_still_falls_back_on_malformed_json(monkeypatch):
     """An expected LLM/parsing failure still degrades to the uid fallback."""
 
@@ -347,6 +375,110 @@ def test_narrative_body_name_outranks_side_channel_name(monkeypatch, tmp_path):
 
     assert result["full_name"] == body_person
     assert len(prompts) == 1, "the side channel is not reached once the body tier names anyone"
+
+
+def _name_bearing_first_entry():
+    """Stage 2 can fuse the name line, the contact lines and a text box's prose
+    into one 500+ char first entry (#457)."""
+    return {"text": _INVENTED_NAME + _NARRATIVE_FILLER * 6}
+
+
+def test_long_name_bearing_first_entry_is_in_the_window_when_a_later_entry_is_short(monkeypatch):
+    """The case #1033 declined: a short entry used to drop the long first one."""
+    prompts = []
+    monkeypatch.setattr(owner_name, "call_llm", _name_from_prompt_llm(prompts))
+    entries = [
+        _name_bearing_first_entry(),
+        {"text": "Chair, Example Committee"},
+        {"text": "LONGLATERMARKER" + _NARRATIVE_FILLER * 6},
+        {"text": "Member, Example Board"},
+    ]
+    assert len(entries[0]["text"]) > owner_name.OWNER_NAME_ENTRY_MAX_CHARS
+
+    result = owner_name.extract_cv_owner_name("web000", entries)
+
+    assert result["last_name"] == "Vantrell"
+    assert _window_lines(prompts) == [
+        entries[0]["text"][: owner_name.OWNER_NAME_ENTRY_MAX_CHARS],
+        "Chair, Example Committee",
+        "Member, Example Board",
+    ]
+    assert "LONGLATERMARKER" not in prompts[0], "later long entries are still skipped"
+
+
+def test_window_puts_the_truncated_first_entry_ahead_of_the_short_ones():
+    cap = owner_name.OWNER_NAME_ENTRY_MAX_CHARS
+    entries = [{"text": "F" * cap}, {"text": "short one"}, {"text": "X" * (cap + 5)}]
+
+    assert owner_name._owner_name_window(entries) == ["F" * cap, "short one"]
+
+
+def test_window_first_entry_is_the_first_non_empty_one():
+    cap = owner_name.OWNER_NAME_ENTRY_MAX_CHARS
+    entries = [{"text": "  "}, {}, {"text": "F" * (cap + 40)}, {"text": "short one"}]
+
+    assert owner_name._owner_name_window(entries) == ["F" * cap, "short one"]
+
+
+def test_window_with_a_short_first_entry_does_not_repeat_it():
+    entries = [{"text": "first short"}, {"text": "second short"}]
+
+    assert owner_name._owner_name_window(entries) == ["first short", "second short"]
+
+
+def test_window_first_entry_beyond_the_twelfth_is_not_reachable():
+    """A long entry past the window is not 'the first': the window is unchanged."""
+    cap = owner_name.OWNER_NAME_ENTRY_MAX_CHARS
+    entries = [{"text": f"Line{i}"} for i in range(owner_name.OWNER_NAME_WINDOW_ENTRIES)]
+    entries.append({"text": "L" * cap})
+
+    assert owner_name._owner_name_window(entries) == [
+        f"Line{i}" for i in range(owner_name.OWNER_NAME_WINDOW_ENTRIES)
+    ]
+
+
+# ---------------------------------------------------------------------------
+# fallback_from_uid: a run id is never written in as the surname (#457)
+# ---------------------------------------------------------------------------
+
+def _empty_name_llm(monkeypatch):
+    monkeypatch.setattr(owner_name, "call_llm", lambda **kw: _llm_result(json.dumps({})))
+
+
+@pytest.mark.parametrize("run_id", [
+    "QZKMRT",      # letters-only, as generate_run_id issues since #1192
+    "AB1CDE",      # the A-Z0-9 generation before it
+    "AB_CDE",      # urlsafe-base64 era: would otherwise yield the surname "CDE"
+    "QZKMRT_cv",   # a run id with the _cv suffix the fallback strips
+    "QZKMRT_CV",
+])
+def test_a_run_id_is_not_written_in_as_the_surname(monkeypatch, run_id):
+    _empty_name_llm(monkeypatch)
+
+    result = owner_name.extract_cv_owner_name(run_id, [{"text": "synthetic entry"}])
+
+    assert result["last_name"] == ""
+
+
+def test_a_run_id_is_not_written_in_as_the_surname_when_there_are_no_entries(monkeypatch):
+    _empty_name_llm(monkeypatch)
+
+    assert owner_name.extract_cv_owner_name("QZKMRT", [])["last_name"] == ""
+
+
+@pytest.mark.parametrize("uid, expected", [
+    ("2097_Doe_Cv", "Doe"),          # filename-style stem: the heuristic's purpose
+    ("QZKMRT_2015_Doe", "Doe"),      # run-id prefix is stripped, a name remains
+    ("Doe", "Doe"),                  # bare mixed-case stem, shorter than a run id
+    ("Zephyr", "Zephyr"),            # six letters but not uppercase: not a run id
+    ("web151", ""),                  # identifier with digits: the isalpha guard
+])
+def test_the_uid_fallback_still_serves_filename_style_uids(monkeypatch, uid, expected):
+    _empty_name_llm(monkeypatch)
+
+    result = owner_name.extract_cv_owner_name(uid, [{"text": "synthetic entry"}])
+
+    assert result["last_name"] == expected
 
 
 def test_location_response_null_city_and_state_read_as_empty():

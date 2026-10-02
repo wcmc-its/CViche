@@ -199,6 +199,40 @@ def test_queue_stats_with_redis_merges_stream_depth_and_pending(client, db, monk
     assert body["db"] == {"queued": 0, "running": 0, "oldest_queued_age_s": None, "oldest_running_age_s": None}
 
 
+def test_queue_stats_reports_the_batch_stream_beside_the_single_one(client, db, monkeypatch):
+    """#1114: ``queues`` has each stream's depth, pending, lag and
+    dead-letter count; the top-level fields stay the single stream's."""
+    import fakeredis
+    from app.pipeline import run_queue
+
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
+    monkeypatch.setenv("CVICHE_DISPATCH_MODE", "queue")
+    r = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer(), decode_responses=True)
+    monkeypatch.setattr(run_queue, "_client", lambda: r)
+    monkeypatch.setattr(run_queue, "_producer_client", lambda: r)
+    run_queue.ensure_group(run_queue.SINGLE)
+    run_queue.ensure_group(run_queue.BATCH)
+    run_queue.enqueue("QS_SINGLE")
+    run_queue.enqueue("QS_BATCH_A", run_queue.BATCH)
+    run_queue.enqueue("QS_BATCH_B", run_queue.BATCH)
+    run_queue.enqueue("QS_BATCH_C", run_queue.BATCH)
+    batch_entry_id, fields = run_queue.read_one("flex-1", run_queue.BATCH, block=False)
+    run_queue.dead_letter(batch_entry_id, fields, run_queue.BATCH)
+
+    resp = _admin_get(client, "/api/admin/queue/stats")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    single = body["queues"]["single"]
+    assert {key: body[key] for key in single} == single, "top-level fields are still the single stream's"
+    assert (single["stream_length"], single["pending"], single["consumers"], single["dead"]) == (1, 0, 0, 0)
+    batch = body["queues"]["batch"]
+    assert (batch["stream_length"], batch["pending"], batch["consumers"], batch["dead"]) == (2, 0, 1, 1)
+    # lag is whatever the server reports for the batch group (fakeredis's own
+    # lag arithmetic is not Valkey's), read from the batch stream, not single.
+    assert batch["lag"] == r.xinfo_groups(run_queue.BATCH_STREAM)[0]["lag"]
+
+
 def test_queue_stats_answers_200_when_valkey_is_unreachable(client, db, monkeypatch):
     """The endpoint that diagnoses a stuck queue must not 500 when Valkey is the
     problem: the DB view still answers, with a stable error code -- never the
@@ -211,7 +245,7 @@ def test_queue_stats_answers_200_when_valkey_is_unreachable(client, db, monkeypa
     monkeypatch.setenv("CVICHE_DISPATCH_MODE", "queue")
     _seed_queue_view(db)
 
-    def down():
+    def down(queue):
         raise redis.exceptions.ConnectionError("Error 111 connecting to valkey:6379")
     monkeypatch.setattr(run_queue, "stats", down)
 
@@ -292,3 +326,20 @@ def test_compute_score_returns_score_evidence(client, db, monkeypatch):
     assert body["totalScore"] == 20
     assert body["data_complete"] is False
     assert body["missing_evidence"] == ["docx: no docx found"]
+
+
+def test_compute_score_writes_the_run_quality_columns(client, db, monkeypatch):
+    """The rescore endpoint copies score, band and cap onto the run row."""
+    from app.api import admin_routes
+    from app.models import Run
+
+    _seed_mixed_status_runs(db)
+    capped = {**_INCOMPLETE_SCORE, "totalScore": 25, "raw_score_before_caps": 80.0,
+              "hard_fail_caps_applied": [25]}
+    monkeypatch.setattr(admin_routes, "compute_and_cache_score", lambda _rid: capped)
+
+    assert _admin_post(client, "/api/admin/run/SF_COMPLETE/score").status_code == 200
+
+    db.expire_all()
+    run = db.get(Run, "SF_COMPLETE")
+    assert (run.quality_score, run.quality_band, run.quality_cap) == (25, "RED", 25)

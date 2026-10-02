@@ -445,6 +445,42 @@ def test_a_non_string_editors_value_cannot_reach_the_stage5d_safety_net():
         'Doe J. A Chapter. In: Book. Acme Press; 2020.')
 
 
+_EIGHT_AUTHORS = 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G M, Holly H'
+
+
+def _stage5d(citation, authors, target_name='Gorse GM'):
+    return resolve_publication({'extracted_fields': {
+        'formatted_citation': citation, 'formatting_source': 'stage_5d_llm',
+        'authors': authors, 'target_name': target_name}}).formatted_citation
+
+
+def test_a_stage5d_et_al_the_source_lacks_gets_the_whole_source_list():
+    """#1259: 5d's "first 6, et al." rule cut the CV owner (here the
+    seventh author, Gorse) from their own citation. Stage 4's list replaces
+    the author segment; the rest of 5d's citation is kept."""
+    assert _stage5d('Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, et al. A title. J Wood. 2020;1:2-3.',
+                    _EIGHT_AUTHORS) == (
+        'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse GM, Holly H. A title. J Wood. 2020;1:2-3.')
+
+
+@pytest.mark.parametrize('citation, authors', [
+    # the owner is still in 5d's citation: a cut list alone is left as 5d wrote it
+    ('Ash A, Birch B, Gorse GM, et al. A title. 2020.', 'Ash A, Birch B, Gorse G M, Holly H'),
+    # the source itself says "et al."
+    ('Ash A, Birch B, et al. A title. 2020.', 'Ash A, Birch B, Gorse G, et al'),
+    # the "et al." is the editors', after the title
+    ('Ash A. A chapter. In: Birch B, et al., eds. A book. 2020.', 'Ash A, Gorse G'),
+    # stage 4 split an author in two ("Perri, G., M"): its list would render that
+    ('Ash A, Birch B, et al. A title. 2020.', 'Ash, A, Birch, B, Perri, G., M, Gorse, G'),
+    # the source list does not start with the authors 5d kept (a misspelling)
+    ('Ash A, Birch B, et al. A title. 2020.', 'Ash A, Brich B, Cedar C, Gorse GM'),
+    # no source list at all
+    ('Ash A, Birch B, et al. A title. 2020.', ''),
+])
+def test_a_stage5d_citation_is_left_alone_otherwise(citation, authors):
+    assert _stage5d(citation, authors) == citation
+
+
 # ---------------------------------------------------------------------------
 # Drift guard against stage 4's own schemas
 # ---------------------------------------------------------------------------

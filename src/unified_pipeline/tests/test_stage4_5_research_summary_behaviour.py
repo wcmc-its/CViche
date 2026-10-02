@@ -875,6 +875,92 @@ def test_current_context_tag_appears_in_current_work_requirement():
     assert CURRENT_CONTEXT_TAG in CURRENT_WORK_REQUIREMENT
 
 
+# --- generate_summary_unless_withheld (#1224; call_llm stubbed) ---------------------
+
+_REPLY_USAGE = {"prompt_tokens": 7, "completion_tokens": 9, "total_tokens": 16, "cost": 0.003}
+
+
+def _stub_reply(monkeypatch, content):
+    """call_llm returns `content`; the list records each call so tests can count them."""
+    calls = []
+
+    def fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        return {"content": content, **_REPLY_USAGE}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+    return calls
+
+
+@pytest.mark.parametrize("blank_context", ["", "   ", "\n\t \n"])
+def test_blank_context_makes_no_llm_call_and_returns_empty_summary(monkeypatch, blank_context):
+    """The defect: a blank context still went to the model, which answered with a
+    refusal that stage 6 then rendered as the Research Activities paragraph."""
+    calls = _stub_reply(monkeypatch, "I don't have access to specific CV details for Jane Doe.")
+
+    text, method, usage = stage_4_5.generate_summary_unless_withheld(blank_context, "Jane Doe")
+
+    assert calls == []
+    assert (text, method, usage) == ("", stage_4_5.GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT, {})
+
+
+def test_non_blank_context_returns_the_generated_summary(monkeypatch):
+    calls = _stub_reply(monkeypatch, "  Doe's lab studies widget dynamics.  ")
+
+    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets", "Jane Doe")
+
+    assert len(calls) == 1
+    assert text == "Doe's lab studies widget dynamics."
+    assert method == stage_4_5.GENERATION_METHOD_LLM
+    assert usage["cost"] == 0.003
+
+
+@pytest.mark.parametrize("reply", [
+    "I don't have access to specific CV details for Jane Doe. Please provide the CV.",
+    "I do not have enough information to write this summary.",
+    "I cannot write a summary without the CV context.",
+    "I can't produce a research summary from an empty context.",
+    "I'm unable to summarize research that was not provided.",
+    "I am unable to generate this paragraph.",
+    "I am not able to see any CV content.",
+    "I apologize, but the CV context appears to be empty.",
+    "I apologise, but the context section is blank.",
+    "I'm sorry, but no CV content was provided.",
+    "I’m sorry, but no CV content was provided.",       # curly apostrophe
+    "I don’t have access to specific CV details.",
+    "  i DON'T have the details needed.",                   # leading space, any case
+])
+def test_refusal_opening_reply_is_withheld_but_its_cost_is_kept(monkeypatch, reply):
+    """A refusal can also come back for a non-blank context (a policy refusal, a
+    context the model reads as empty). It is withheld the same way, and the spend
+    is still returned so the stage's cost total stays honest."""
+    _stub_reply(monkeypatch, reply)
+
+    text, method, usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets", "Jane Doe")
+
+    assert text == ""
+    assert method == stage_4_5.GENERATION_METHOD_REFUSED
+    assert usage["cost"] == 0.003
+
+
+@pytest.mark.parametrize("reply", [
+    "Doe's research program studies widget dynamics, and the work cannot be done without imaging.",
+    "Jane Doe does not use animal models; her lab develops computational methods.",
+    "Immunology research led by Dr. Doe focuses on widget signalling.",   # opens with "I" but is no refusal
+    "Investigations by Doe's group, including ones I'm told were pioneering, ...",
+    "This work could not have proceeded without R01 support.",
+    'Doe studies why patients with asthma say "I cannot breathe" during exacerbations.',  # refusal words mid-text
+])
+def test_real_summary_is_never_mistaken_for_a_refusal(monkeypatch, reply):
+    """The pattern is anchored to the reply's opening first-person phrase: a summary
+    that merely contains 'cannot', 'does not' or an I-initial word is kept."""
+    _stub_reply(monkeypatch, reply)
+
+    text, method, _usage = stage_4_5.generate_summary_unless_withheld("[GRANT-M2A] R01 Widgets", "Jane Doe")
+
+    assert text == reply
+    assert method == stage_4_5.GENERATION_METHOD_LLM
+
+
 # --- run_stage_4_5 end-to-end (call_llm stubbed) ----------------------------------
 
 def _write_fields_json(tmp_path, document_uid, entries, cv_owner=None):
@@ -1108,3 +1194,82 @@ def test_run_stage_4_5_calls_send_no_call_site_max_tokens(monkeypatch, tmp_path)
 
     assert len(seen) == 2
     assert all("max_tokens" not in kw for kw in seen)
+
+
+# Entries whose section weight is at or below the -0.85 cut, so none reaches the context.
+_LOW_VALUE_ENTRIES = [
+    {"taxonomy_code": "T", "text": "A whole synthetic CV that collapsed into one catch-all entry " * 20,
+     "extracted_fields": {}},
+    {"taxonomy_code": "A", "text": "Name: Jane Doe", "extracted_fields": {}},
+    {"taxonomy_code": "D1", "text": "Assistant Professor, Example University, 2015-present", "extracted_fields": {}},
+]
+
+
+def _no_llm_call_allowed(monkeypatch):
+    def fake_call_llm(**_kwargs):
+        raise AssertionError("stage 4.5 must not call the LLM when no context reaches it (#1224)")
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+
+
+def test_run_stage_4_5_skips_the_llm_when_no_entry_reaches_the_context(monkeypatch, tmp_path):
+    """#1224 (MYAXRH): a CV whose entries are all low-weight codes gives an empty
+    context. The run records that, spends nothing, and writes an empty summary
+    rather than the model's refusal."""
+    _no_llm_call_allowed(monkeypatch)
+    inp = _write_fields_json(tmp_path, "TEST08", _LOW_VALUE_ENTRIES,
+                             cv_owner={"first_name": "Jane", "last_name": "Doe"})
+
+    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=True)).read_text())
+
+    summary = out["research_summary"]
+    assert summary["generation_method"] == stage_4_5.GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT
+    assert summary["text"] == ""
+    assert (summary["word_count"], summary["char_count"]) == (0, 0)
+    assert out["context_used"] == {"entry_count": 0, "top_codes": []}
+    assert out["total_cost"] == 0.0 and out["total_tokens"] == 0
+
+
+def test_run_stage_4_5_blank_context_from_blank_valid_entries_also_skips(monkeypatch, tmp_path):
+    """Weighted entries can exist yet build_context_string filters every one (no
+    text, or a grant with no title). The context is just as empty, so the same skip."""
+    _no_llm_call_allowed(monkeypatch)
+    entries = [{"taxonomy_code": "M2A", "text": "Grant", "extracted_fields": {"title": "None"}},
+               {"taxonomy_code": "H", "text": "", "extracted_fields": {}}]
+    inp = _write_fields_json(tmp_path, "TEST09", entries)
+
+    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text())
+
+    assert out["context_used"]["entry_count"] == 2   # weighted entries exist ...
+    assert out["research_summary"]["generation_method"] == stage_4_5.GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT
+    assert out["research_summary"]["text"] == ""     # ... but nothing usable reached the prompt
+
+
+def test_run_stage_4_5_withholds_a_refusal_reply_and_still_counts_its_cost(monkeypatch, tmp_path):
+    def fake_call_llm(*, messages, **_kwargs):
+        assert _SCORE_PROMPT_MARKER not in messages[0]["content"]   # no M1, so no scoring call
+        return {"content": "I'm unable to write this summary from the context given.",
+                "prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30, "cost": 0.005}
+    monkeypatch.setattr(stage_4_5, "call_llm", fake_call_llm)
+    inp = _write_fields_json(
+        tmp_path, "TEST10",
+        [{"taxonomy_code": "M2A", "text": "Grant", "extracted_fields": {"title": "R01 Study", "agency": "NIH"}}])
+
+    out = json.loads(Path(run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)).read_text())
+
+    assert out["research_summary"]["generation_method"] == stage_4_5.GENERATION_METHOD_REFUSED
+    assert out["research_summary"]["text"] == ""
+    assert out["total_cost"] == 0.005 and out["total_tokens"] == 30
+
+
+def test_stage_6_renders_nothing_for_the_skipped_summary_run_stage_4_5_writes(monkeypatch, tmp_path):
+    """The wire: the real stage-4.5 output for an empty context is the document
+    stage 6 reads, and stage 6 reports that it rendered no summary paragraph."""
+    from unified_pipeline.stage_6_word_template import WCMTemplateGenerator
+
+    _no_llm_call_allowed(monkeypatch)
+    inp = _write_fields_json(tmp_path, "TEST11", _LOW_VALUE_ENTRIES)
+    out_path = run_stage_4_5(str(inp), str(tmp_path / "out.json"), verbose=False)
+
+    gen = WCMTemplateGenerator(verbose=False)
+    assert gen._fill_research_summary(json.loads(Path(out_path).read_text())) is False
+    assert gen.stats["entries_inserted"] == 0

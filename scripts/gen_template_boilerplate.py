@@ -84,6 +84,12 @@ WCM_2020_SECTION_HEADERS = [
     "HONORS AND AWARDS",
     "BIBLIOGRAPHY",
 ]
+# The 2020-2022 faculty revisions (#829) share the October 2022 headers but
+# named the presentations section differently over time.
+WCM_2020_2022_SECTION_HEADERS = WCM_SECTION_HEADERS + [
+    "INVITED AND/OR PEER-SELECTED PRESENTATIONS",
+    "INVITED PRESENTATIONS",
+]
 WCM_2012_SECTION_HEADERS = [
     "A. GENERAL INFORMATION",
     "B. EDUCATIONAL BACKGROUND",
@@ -103,6 +109,12 @@ WCM_2012_SECTION_HEADERS = [
 # `textutil -convert docx`), since python-docx cannot read .doc.
 TEMPLATES = [
     ("wcm_cv_template_faculty_october_2022_final.docx", WCM_SECTION_HEADERS),
+    ("wcm_cv_template_faculty_2022-07.docx", WCM_2020_2022_SECTION_HEADERS),
+    ("wcm_cv_template_faculty_2021-06.docx", WCM_2020_2022_SECTION_HEADERS),
+    ("wcm_cv_template_faculty_2021-01-27.docx", WCM_2020_2022_SECTION_HEADERS),
+    ("wcm_cv_template_faculty_2021-01.docx", WCM_2020_2022_SECTION_HEADERS),
+    ("wcm_cv_template_faculty_2020-12.docx", WCM_2020_2022_SECTION_HEADERS),
+    ("wcm_cv_template_faculty_2020-07.docx", WCM_2020_2022_SECTION_HEADERS),
     ("wcm_cv_template_for_website_2020.docx", WCM_2020_SECTION_HEADERS),
     ("curriculum_vitae_format_2012.docx", WCM_2012_SECTION_HEADERS),
 ]

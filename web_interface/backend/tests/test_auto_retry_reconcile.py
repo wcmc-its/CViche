@@ -185,6 +185,21 @@ def test_resumed_run_is_not_stale_on_the_next_sweep(db, monkeypatch):
     assert run.started_at > datetime.now() - timedelta(minutes=1)
 
 
+def test_resume_restamps_the_image_tag_of_the_resuming_process(db, monkeypatch):
+    """A run resumed after a deploy shows the image that resumed it."""
+    monkeypatch.setenv("CVICHE_AUTO_RETRY_ENABLED", "1")
+    monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-new.tag")
+    _patch_launch(monkeypatch, [])
+    run = _seed_stale_running_run(db, run_id="RTAG01", attempt_count=1)
+    run.image_tag = "dev-old.tag"
+    db.commit()
+
+    run_service.reconcile_stale_runs(db)
+
+    db.refresh(run)
+    assert run.image_tag == "dev-new.tag"
+
+
 def test_sweep_with_a_stale_snapshot_loses_the_claim(db, monkeypatch):
     """Two pods read the same stale run. The first resumes it; the second still
     holds the started_at it read, so both its retry and its fail path lose the
@@ -232,6 +247,37 @@ def test_sweep_does_not_fail_a_run_a_sibling_resumed_mid_sweep(db, monkeypatch):
     db.refresh(run)
     assert run.status == "running"
     assert run.completed_at is None
+
+
+def test_sweep_that_loses_the_retry_claim_dispatches_nothing(db, monkeypatch):
+    """The retry path claims too (#799): if a sibling pod resumes the run after
+    this sweep's query but before its transition, the sweep must back off
+    without launching a second pipeline or resetting any step."""
+    monkeypatch.setenv("CVICHE_AUTO_RETRY_ENABLED", "1")
+    calls = []
+    _patch_launch(monkeypatch, calls)
+    real_resume_info = run_service._resume_info_for_run
+
+    def sibling_resumes_first(run, session):
+        session.query(Run).filter(Run.id == run.id).update(
+            {"started_at": datetime.now(), "attempt_count": 2},
+            synchronize_session=False,
+        )
+        session.commit()
+        return real_resume_info(run, session)
+
+    monkeypatch.setattr(run_service, "_resume_info_for_run", sibling_resumes_first)
+    run = _seed_stale_running_run(db, run_id="RRACE3", attempt_count=1, failed_at=6)
+
+    assert run_service.reconcile_stale_runs(db) == 0
+
+    assert calls == []                       # the loser launched nothing
+    db.refresh(run)
+    assert run.status == "running"
+    assert run.attempt_count == 2            # only the sibling's bump
+    stuck = db.query(Step).filter(Step.run_id == "RRACE3", Step.step_number == 6).one()
+    assert stuck.status == "running"         # the loser did not reset steps
+    assert stuck.error_type == "api_error"
 
 
 def test_launch_resume_releases_the_slot_it_took_for_the_run(db, monkeypatch, tmp_path):

@@ -5,4 +5,8 @@ metadata:
   name: cviche-backend-hpa
 spec:
   minReplicas: 2
-  maxReplicas: 4
+  # Was 4. In queue mode the backend runs no pipelines (10-14m CPU per pod
+  # through the 37-run batch IPXFBA), so extra replicas serve nothing. But a
+  # one-minute spike on one pod reads as 200%+ of the 150m request and scaled
+  # to 4, and each replica requests 512Mi on the 2-node group (#1214).
+  maxReplicas: 2

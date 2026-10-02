@@ -257,8 +257,9 @@ def _record_would_be_lost(dropped_entry: dict, kept_entry: dict,
             or _names_a_sibling(kept_entry, kept_fields, rendered, name)):
         return not any(_names_record(entry.get('text') or '', name)
                        for entry in others)
-    if _distinct_bare_names(dropped_entry, kept_entry,
-                            name, _record_name(kept_fields, rendered)):
+    if (_distinct_bare_names(dropped_entry, kept_entry,
+                             name, _record_name(kept_fields, rendered))
+            or _other_journal_same_row(dropped_entry, kept_entry, name, kept_fields)):
         return not any(_lists_name(entry, name) for entry in others)
     return False
 
@@ -309,6 +310,41 @@ def _distinct_bare_names(dropped_entry: dict, kept_entry: dict,
                 and _significant_words(name) != _significant_words(kept_name))
 
 
+# `_other_journal_same_row`: the field that names a journal, and what a row
+# keeps of its text once that name is cut out (its letters: a role and a
+# status such as "Ad hoc ... Present", no dates, no punctuation).
+_JOURNAL_NAME_FIELD = 'journal_name'
+_NON_LETTERS_RE = re.compile(r'[^a-z]')
+
+
+def _row_residue(text: str, name: str) -> str | None:
+    """The letters of `text` left once the first run of `name`'s words is cut
+    out; None when `name` is not in `text` as a run of words."""
+    pattern = _word_run_pattern(name)
+    if not pattern or not re.search(pattern, text.lower()):
+        return None
+    return _NON_LETTERS_RE.sub('', re.sub(pattern, '', text.lower(), count=1))
+
+
+def _other_journal_same_row(dropped_entry: dict, kept_entry: dict,
+                            name: str, kept_fields: dict) -> bool:
+    """True when both entries are a row for a journal, the rows say the same
+    thing about it (role and status; the dates may differ) and the journal
+    names differ in a significant word: "Ad hoc Widgets, 2013-" beside "Ad hoc
+    Widgets Quarterly, 2013-" are two journals, and "Gizmos" is not "Acme
+    Gizmos". Unlike `_distinct_bare_names` the text may hold more than the
+    name, but only what both rows hold. A journal's name is exact where a
+    committee's is not ("Acme University, Review Committee" is "Review
+    Committee"), which is why this stops at journals."""
+    kept_name = kept_fields.get(_JOURNAL_NAME_FIELD)
+    dropped_residue = _row_residue(dropped_entry.get('text') or '', name)
+    return bool(isinstance(kept_name, str)
+                and (dropped_entry.get('extracted_fields') or {}).get(_JOURNAL_NAME_FIELD) == name
+                and dropped_residue is not None
+                and dropped_residue == _row_residue(kept_entry.get('text') or '', kept_name)
+                and _significant_words(name) != _significant_words(kept_name))
+
+
 # `_lists_name`: the separators between the items of a listed text.
 _LIST_ITEM_SEPARATOR_RE = re.compile(r'[,;:|\t\n]')
 
@@ -350,6 +386,23 @@ def _names_record(text: str, name: str) -> bool:
 def _alnum(text: str) -> str:
     """Lowercased letters and digits only: punctuation and spacing ignored."""
     return re.sub(r'[^a-z0-9]', '', text.lower())
+
+
+# A mentee "name" that names nobody: template placeholders the CV left unfilled.
+_PLACEHOLDER_NAMES = frozenset({'', 'na', 'none', 'tbd', 'tba'})
+
+
+def _different_mentees(dropped_entry: dict, kept_entry: dict) -> bool:
+    """#1181: True when both entries name a mentee and the names differ.
+
+    WCM mentee tables repeat the same field labels for every mentee, so two
+    residents at one site score as near-duplicates whatever their names
+    (jaccard 0.92 on FINSIS). A person's name is not reworded between two
+    copies of one record the way a title is, so a different name is a
+    different mentee."""
+    names = {_alnum(str((entry.get('extracted_fields') or {}).get('mentee_name') or ''))
+             for entry in (dropped_entry, kept_entry)}
+    return len(names) == 2 and not names & _PLACEHOLDER_NAMES
 
 
 def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
@@ -402,6 +455,8 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
     if verbatim:
         return not _record_would_be_lost(dropped_entry, kept_entry, code,
                                          document, True, dropped_ids or set())
+    if _different_mentees(dropped_entry, kept_entry):
+        return False  # #1181: a different mentee is a different record
     if not _dates_compatible(dropped_entry.get('text') or '',
                              kept_entry.get('text') or ''):
         return False  # #666: a different date is a different record
@@ -415,6 +470,167 @@ def _drop_is_safe(dropped_entry: dict, kept_entry: dict,
         return not _record_would_be_lost(dropped_entry, kept_entry, code,
                                          document, False, dropped_ids or set())
     return len(_record_lines(dropped_entry.get('text', ''))) >= UNRENDERED_MIN_RECORD_LINES
+
+
+# A recovered table row's cell separator, as `recover_unclaimed_table_rows`
+# (stage_2_entry_extraction.py, #420) always renders one: " | " when a
+# physical table row's cells are joined, or a bare "\t" on the
+# tab-separated fallback path. A row with more than two physical columns
+# (Label, StartDate, EndDate) survives as one string with MORE than one
+# separator in it -- `_recovered_row_value_cells` below relies on that to
+# split every value cell out on its own, not just the first.
+_CELL_SEPARATOR_RE = re.compile(r'[|\t]')
+
+
+def _recovered_row_value_cells(text: str) -> list[str]:
+    """Every VALUE cell of a stage-2 structurally recovered table row's raw
+    text (`recover_unclaimed_table_rows`, #420): every cell after the row's
+    own first cell (its label), split on `_CELL_SEPARATOR_RE`.
+
+    A recovered row is usually one label and one value ("Award Source: |
+    Fictional Research Foundation"), but `recover_unclaimed_table_rows`
+    joins the WHOLE physical table row regardless of column count -- a
+    3-column row (Label, StartDate, EndDate) survives as one string with
+    TWO separators in it ("Duration of support: | 00/2021 | 00/2022"), and
+    both halves of that date range are their own value cell, checked
+    independently by `recovered_row_already_rendered` below rather than
+    rejoined into one string: a rejoined "00/2021 | 00/2022" can never match
+    the rendered document verbatim, since nothing renders the raw separator
+    character, so treating it as a single cell would only ever hide a real
+    match, never produce a false one.
+
+    A row with no separator at all (malformed -- `recover_unclaimed_table_rows`
+    always emits label|value) has no label to split off, so the whole text
+    is itself the one value cell: there is no safer fallback, and returning
+    no cells at all would make the caller treat the row as vacuously safe to
+    drop (see `recovered_row_already_rendered`'s own `if not cells` guard).
+    """
+    cells = [c.strip() for c in _CELL_SEPARATOR_RE.split(text or '')]
+    return cells[1:] if len(cells) > 1 else cells
+
+
+def _is_trivial_value_cell(cell: str) -> bool:
+    """A value cell with no alphanumeric character (blank, or
+    separator/punctuation-only -- e.g. the empty second cell of
+    "Non-financial support: | ") carries no content that dropping the row
+    could lose, so it never has to be found rendered anywhere. Symmetrically,
+    it must never by itself justify a drop either: a row whose every cell is
+    trivial has nothing confirmed rendered and stays (the `if not cells`
+    guard in `recovered_row_already_rendered`)."""
+    return not any(ch.isalnum() for ch in cell)
+
+
+def _collapse_and_fold(text: str) -> str:
+    """Casefold + whitespace-COLLAPSED (never whitespace-deleted)
+    normalization for `recovered_row_already_rendered`'s containment check.
+
+    Deliberately not this module's own `_squash` (whitespace-FREE, used by
+    `_drop_is_safe` above): `recovered_row_already_rendered` joins every
+    already-rendered line of the document into ONE string before searching
+    it, and a `_squash`-style join would delete the very whitespace that
+    keeps two unrelated adjacent lines apart -- gluing "...Foundation" and
+    "1%..." into "...Foundation1%..." risks a match that never existed as
+    contiguous rendered text. Collapsing each run of whitespace to a single
+    space keeps a real word boundary at every line join instead of removing
+    it. Kept as its own small copy rather than importing
+    `normalization/pii.py`'s near-identical `_collapse_whitespace`, for the
+    same reason `_value_contained_in_text` below doesn't import that
+    module's containment helper either: that module decides whether a value
+    is PROTECTED personal data, a data-governance question; this one decides
+    whether a value RENDERED, a content-loss question, and the two must stay
+    free to diverge (module docstring: nothing here may import
+    `stage_6_word_template`, and the same boundary applies one level down to
+    the PII module).
+    """
+    return re.sub(r'\s+', ' ', str(text or '')).strip().casefold()
+
+
+def _value_contained_in_text(value: str, text: str) -> bool:
+    """Whitespace-collapsed, case-folded containment of `value` in `text`,
+    aligned on a word boundary at BOTH ends: an alphanumeric edge of `value`
+    may not sit against another alphanumeric character in `text`.
+
+    Without the boundary, '5%' is a literal substring of '25%', and '2021'
+    is a literal substring of '20215' at the TRAILING edge -- a short value
+    from one record could read as "already rendered" merely because a
+    longer, unrelated value happens to contain the same characters, at
+    either end. Same shape as `normalization/pii.py`'s
+    `_pii_containment_pattern`, kept as its own copy for the reason
+    `_collapse_and_fold` above gives.
+    """
+    folded_value = _collapse_and_fold(value)
+    if not folded_value:
+        return False
+    folded_text = _collapse_and_fold(text)
+    body = re.escape(folded_value)
+    lead = r'(?<![a-z0-9])' if folded_value[0].isalnum() else ''
+    trail = r'(?![a-z0-9])' if folded_value[-1].isalnum() else ''
+    return re.search(lead + body + trail, folded_text) is not None
+
+
+def recovered_row_already_rendered(entry: dict, rendered_lines: list[str]) -> bool:
+    """True when a stage-2 structurally-recovered table row (#420,
+    `recover_unclaimed_table_rows`) is safe to drop from the Appendix because
+    EVERY non-trivial value cell of its own raw text already appears,
+    verbatim (word-boundary, whitespace-collapsed, case-folded), somewhere
+    in the document's ALREADY-RENDERED body -- never the Appendix itself,
+    which has not been written yet when this runs (`_drop_recovered_row_duplicates`,
+    stage_6_word_template.py, always calls this before
+    `_add_remaining_to_appendix`).
+
+    A row with zero non-trivial value cells (its only content is a bare
+    label) is never dropped by this: there is no value to confirm, so
+    "confirmed rendered" cannot be true, and the row stays. Because this
+    only ever REQUIRES more matches before allowing a drop, it can never
+    treat an unrendered value as rendered -- the one failure mode that
+    would actually lose content.
+
+    Deliberately provenance-blind (round 3): earlier rounds required a
+    row's raw text to ALSO be a verbatim substring of one specific parent
+    entry (`recovered_row_duplicates_parent`, now removed), then scoped the
+    render check to that one parent's own rendered block
+    (`_parent_rendered_block`, also removed) -- both meant to stop an
+    unrelated entry's render from vouching for a row it had nothing to do
+    with. That scoping was itself the bug: it picked the first rendered
+    block carrying ANY one of a parent's identifying field values, and a
+    value shared across records -- most commonly a funding agency, shared
+    across a faculty member's own grants -- resolved two different parents
+    to the SAME block. A grant whose own table rendered nothing for a field
+    could still have its recovered row dropped because a same-agency
+    sibling's block happened to match: real content loss, the exact failure
+    this function exists to prevent, and no content-keyed scoping is safe
+    against it, because `extracted_fields` carries no way to tell two
+    records' shared values apart.
+
+    The fix drops the identity question entirely: this never asks WHICH
+    entry rendered a value, only whether the value is somewhere in the
+    document the reader will already see. That is also the actual guarantee
+    an Appendix drop needs -- a duplicate line adds noise, a missing one
+    loses content, and "printed by a different record" is still printed.
+    A row can therefore be dropped even when the match is coincidental (two
+    grants that happen to share one field's exact text); the trade is a
+    little provenance precision for a rule that is unconditionally simpler
+    and unconditionally content-safe. The inverse case -- a value stage 6
+    REFORMATS on the way to a render slot (a raw "00/2021" cell rendered as
+    "2021") -- will not verbatim-match and so is correctly NOT confirmed:
+    the row stays, printed once more than strictly necessary. Content
+    duplication, never content loss, is the only direction this function is
+    allowed to be wrong in.
+
+    `entry.get('recovered_row')` gates this exactly as every earlier round
+    did: only stage 2's structural backstop sets that flag, so an ordinary
+    model-attested entry that happens to be a text subset of another still
+    goes through `deduplicate_entries`'s Jaccard/containment path above,
+    never this one.
+    """
+    if not entry.get('recovered_row'):
+        return False
+    cells = [c for c in _recovered_row_value_cells(entry.get('text', '') or '')
+             if not _is_trivial_value_cell(c)]
+    if not cells:
+        return False
+    rendered_text = '\n'.join(rendered_lines)
+    return all(_value_contained_in_text(cell, rendered_text) for cell in cells)
 
 
 def deduplicate_entries(entries: list[dict], verbose: bool = False,

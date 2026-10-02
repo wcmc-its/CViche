@@ -143,7 +143,7 @@ export default function ConsentPage() {
                   type="checkbox"
                   checked={agreed}
                   onChange={(e) => setAgreed(e.target.checked)}
-                  className="mt-1 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                  className="mt-1 h-4 w-4 rounded border-gray-300 text-primary-600 focus-visible:ring-primary-500"
                 />
                 <span className="text-sm text-gray-700">
                   I have read the information above and consent to participate in the CViche pilot program.
@@ -157,7 +157,7 @@ export default function ConsentPage() {
             <button
               type="submit"
               disabled={!agreed || submitting}
-              className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none flex items-center justify-center gap-2"
+              className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none flex items-center justify-center gap-2"
             >
               {submitting ? (
                 <>

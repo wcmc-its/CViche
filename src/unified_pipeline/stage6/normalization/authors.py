@@ -291,3 +291,14 @@ def _normalize_author_names(authors: str) -> str:
         result != original,
     )
     return result
+
+
+#: A capital initial followed by a space and another lone capital ("D M").
+_SPACED_INITIAL_RE = re.compile(r"\b([A-Z]) (?=[A-Z]\b)")
+
+
+def _join_spaced_initials(authors: str) -> str:
+    """"Maahs, D M" -> "Maahs, DM": `_normalize_author_names`' pair parser
+    reads only joined initials, and turned "Maahs, D M" into "Maahs M, D"
+    (#1259, stage-4 author lists on JFBPNC)."""
+    return _SPACED_INITIAL_RE.sub(r"\1", authors)

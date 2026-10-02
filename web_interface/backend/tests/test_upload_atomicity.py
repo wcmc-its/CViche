@@ -16,6 +16,7 @@ import hashlib
 import io
 import json
 import logging
+import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
@@ -191,22 +192,19 @@ def _real_storage_patches(tmp_path):
     ("cv.txt", ".txt"),
     ("cv.DOC", ".doc"),   # suffix is lower-cased before the check
     ("cv", ""),           # no suffix at all -> "Unsupported file type: ."
-    ("cv.pdf", ".pdf"),   # #524: PDF is no longer accepted at the API
-    ("cv.PDF", ".pdf"),   # suffix is lower-cased before the check
 ])
 def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_path, filename, reported_ext):
     """PR #779 review thread web_interface/backend/tests/test_upload_atomicity.py item 1
 
-    A filename whose suffix is not .docx is rejected with the exact 400
+    A filename whose suffix is not .docx or .pdf is rejected with the exact 400
     message from upload.py:325-328, BEFORE the rate limiter is consulted
     (upload.py:328 -- "after file validation so bad uploads don't count") and
     before any storage write; no Run row is created. An empty filename cannot
     be tested through multipart: FastAPI itself 422s a file part with no
     filename before the endpoint's "No filename provided" guard runs.
 
-    #524: .pdf is now rejected the same as any other unsupported extension
-    (ALLOWED_UPLOAD_EXTENSIONS == (".docx",)), matching the frontend's
-    .docx-only guard -- every downstream reader is python-docx only.
+    #806: .pdf is accepted again (the orchestrator converts it); .doc stays
+    rejected.
     """
     user = _make_user(db)
     _auth(client, user)
@@ -224,8 +222,8 @@ def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_
     assert resp.json()["detail"] == {
         "error": "bad_request",
         "message": (
-            f"Unsupported file type: {reported_ext}. Only .docx files are supported. "
-            "Please convert your file to .docx before uploading."
+            f"Unsupported file type: {reported_ext}. Only .docx and .pdf files are supported. "
+            "Please convert your file to .docx or .pdf before uploading."
         ),
     }
     rate_limit.assert_not_called()
@@ -234,35 +232,31 @@ def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_
     assert list(tmp_path.iterdir()) == []
 
 
-# --- G-524: PDF rejected at both API validators (#524, #525) ----------------
+# --- #806: PDF accepted at both API validators -------------------------------
 
 @pytest.mark.parametrize("filename", ["cv.pdf", "cv.PDF"])
-def test_estimate_rejects_pdf(client, db, seed_simple_mode, filename):
-    """#524/#525: /estimate (upload.py:~511) applies the same
-    ALLOWED_UPLOAD_EXTENSIONS gate as /upload, so a PDF can no longer reach
-    the (now-deleted) pypdf-import branch. Uppercase suffix (cv.PDF) covers
-    the same lower-casing the extension check applies before the gate."""
+def test_estimate_measures_pdf_text(client, db, seed_simple_mode, filename, cv_pdf):
+    """#806: /estimate applies the same ALLOWED_UPLOAD_EXTENSIONS gate as
+    /upload and sizes a PDF from its real extracted text, not the fixed
+    fallback guess. Uppercase suffix (cv.PDF) covers the lower-casing the
+    extension check applies before the gate."""
     user = _make_user(db)
     _auth(client, user)
 
     resp = client.post(
         "/api/estimate",
-        files={"file": (filename, b"%PDF-1.4 dummy pdf content", "application/pdf")},
+        files={"file": (filename, cv_pdf(), "application/pdf")},
     )
 
-    assert resp.status_code == 400, resp.text
-    assert resp.json()["detail"] == {
-        "error": "bad_request",
-        "message": (
-            "Unsupported file type: .pdf. Only .docx files are supported. "
-            "Please convert your file to .docx before uploading."
-        ),
-    }
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["text_characters_is_guess"] is False
+    assert body["text_characters"] > upload_module.MIN_EXTRACTED_CHARS
 
 
 def test_upload_still_accepts_docx_after_pdf_rejection(client, db, seed_simple_mode, tmp_path):
-    """#524 regression: rejecting .pdf must not disturb the .docx path -- the
-    ONLY accepted extension is unchanged."""
+    """#524 regression, kept through #806: changing what .pdf does must not
+    disturb the .docx path."""
     user = _make_user(db)
     _auth(client, user)
     patches = _bypass_file_validation(tmp_path)
@@ -427,12 +421,11 @@ def test_extract_text_lets_an_unexpected_error_surface():
 
 
 def test_extract_text_returns_none_for_unrecognized_extension():
-    """#524: _extract_text's if/elif now only names .docx. Any other
-    extension (e.g. the deleted .pdf arm) falls through to the final
-    ``return None`` with no attempt at extraction -- "cannot determine",
-    not "read and found nothing." Guards the deletion of the .pdf branch
-    against silently returning "" instead."""
-    assert _extract_text(b"%PDF-1.4 dummy", ".pdf") is None
+    """_extract_text names only .docx and .pdf. Any other extension falls
+    through to the final ``return None`` with no attempt at extraction --
+    "cannot determine", not "read and found nothing." (A corrupt PDF is not
+    this case: it raises UnreadablePdfError, #806.)"""
+    assert _extract_text(b"PK\x03\x04 an old binary .doc", ".doc") is None
 
 
 def test_upload_rejects_password_protected_document(client, db, seed_simple_mode, tmp_path):
@@ -493,6 +486,127 @@ def test_upload_returns_wcm_template_warning(client, db, seed_simple_mode, tmp_p
     detect.assert_called_once()
     assert detect.call_args.args[0] == extracted  # reuses the extracted text, no re-parse
     assert db.query(Run).filter(Run.id == body["run_id"]).first().status == "created"
+
+
+# --- input format (WCM template vs other) recorded on the run -----------------
+
+# Synthetic text: the template's own section headings, nothing from a real CV.
+_WCM_TEMPLATE_TEXT = "\n".join([
+    "PERSONAL DATA", "EMPLOYMENT STATUS", "INSTITUTIONAL/HOSPITAL AFFILIATION",
+    "LICENSURE, BOARD CERTIFICATION", "PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES",
+    "EDUCATIONAL CONTRIBUTIONS", "CLINICAL PRACTICE, INNOVATION, and LEADERSHIP",
+    "INSTITUTIONAL LEADERSHIP ACTIVITIES", "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES",
+    "INVITATIONS TO SPEAK/PRESENT", "Synthetic filler line so the text is long enough. " * 12,
+])
+
+
+def _upload_with_text(client, db, tmp_path, extracted, input_format_patch=None):
+    user = _make_user(db)
+    _auth(client, user)
+    patches = [
+        patch("app.api.upload.UPLOAD_DIR", tmp_path),
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", return_value=extracted),
+        patch("app.api.upload.detect_wcm_template", return_value=(False, None)),
+        patch("app.api.upload.get_storage", return_value=MagicMock()),
+    ]
+    if input_format_patch is not None:
+        patches.append(input_format_patch)
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+    assert resp.status_code == 200, resp.text
+    return db.query(Run).filter(Run.id == resp.json()["run_id"]).one()
+
+
+@pytest.mark.parametrize("text, fmt", [(_WCM_TEMPLATE_TEXT, "wcm"), ("Plain CV text. " * 60, "other")],
+                         ids=["wcm", "other"])
+def test_upload_records_input_format_on_the_run(client, db, seed_simple_mode, tmp_path, text, fmt):
+    run = _upload_with_text(client, db, tmp_path, text)
+    assert run.input_format == fmt
+    assert run.input_format_score is not None
+
+
+def test_upload_survives_an_input_format_detector_failure(client, db, seed_simple_mode, tmp_path, caplog):
+    boom = patch("app.services.input_format.detect_input_format", side_effect=RuntimeError("boom"))
+    with caplog.at_level("WARNING", logger="app.services.input_format"):
+        run = _upload_with_text(client, db, tmp_path, _WCM_TEMPLATE_TEXT, boom)
+    assert run.input_format is None and run.input_format_score is None
+    assert any("Input-format detection failed" in r.message for r in caplog.records)
+
+
+# --- #1286: ask before re-processing a file already run -----------------------
+
+_DUP_BYTES = b"PK\x03\x04synthetic-duplicate-bytes"
+_DUP_SHA = hashlib.sha256(_DUP_BYTES).hexdigest()
+
+
+def _seed_prior_run(db, owner, run_id="P00001", sha=_DUP_SHA, started=datetime(2026, 3, 4, 10, 0)):
+    db.add(Run(id=run_id, filename="old.docx", file_type="docx", status="complete",
+               user_id=owner.id, started_at=started, source_sha256=sha))
+    db.commit()
+
+
+def _dup_upload(client, tmp_path, data=None):
+    """Upload the duplicate bytes with a real LocalRunStorage; returns (response, storage)."""
+    root = tmp_path / uuid.uuid4().hex
+    root.mkdir()
+    storage, _, patches = _real_storage_patches(root)
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", _DUP_BYTES, DOCX_MIME, data))
+    return resp, root
+
+
+def test_upload_stores_source_sha256(client, db, seed_simple_mode, tmp_path):
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path)
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).source_sha256 == _DUP_SHA
+
+
+def test_duplicate_upload_stops_without_creating_or_archiving(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other)
+    _auth(client, _make_user(db))
+    resp, root = _dup_upload(client, tmp_path)
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "duplicate_file"
+    assert "March 4, 2026" in detail["message"]
+    assert db.query(Run).count() == 1  # only the seeded prior run
+    assert [p for p in root.rglob("*") if p.is_file()] == []  # nothing archived or written locally
+
+
+def test_confirm_duplicate_proceeds(client, db, seed_simple_mode, tmp_path):
+    _seed_prior_run(db, _make_user(db, email="other@example.com"))
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path, {"confirm_duplicate": "true"})
+
+    assert resp.status_code == 200, resp.text
+    assert db.query(Run).filter(Run.source_sha256 == _DUP_SHA).count() == 2
+
+
+def test_duplicate_notice_hides_other_submitters_run_from_non_admin(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other, run_id="ZZ9999")
+    _auth(client, _make_user(db))
+    resp, _ = _dup_upload(client, tmp_path)
+
+    assert resp.status_code == 409
+    assert "run_id" not in resp.json()["detail"]
+    for leaked in ("ZZ9999", "other@example.com", "Test User"):
+        assert leaked not in resp.text
+
+
+def test_duplicate_notice_shows_run_id_to_admin_and_to_its_own_submitter(client, db, seed_simple_mode, tmp_path):
+    other = _make_user(db, email="other@example.com")
+    _seed_prior_run(db, other, run_id="ZZ9999")
+    admin = _make_user(db, email="admin@example.com", role="admin")
+    _auth(client, admin)
+    assert _dup_upload(client, tmp_path)[0].json()["detail"]["run_id"] == "ZZ9999"
+
+    me = _make_user(db, email="me@example.com")
+    _seed_prior_run(db, me, run_id="MINE01", started=datetime(2026, 5, 1))
+    _auth(client, me)
+    assert _dup_upload(client, tmp_path)[0].json()["detail"]["run_id"] == "MINE01"
 
 
 # --- #793: bounded read + off-event-loop extraction -------------------------
@@ -557,9 +671,9 @@ def test_read_bounded_pins_the_size_boundary():
     assert exc_info.value.status_code == 400
 
 
-def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db, seed_simple_mode, tmp_path):
-    """#793 item 3: `_extract_text` and `detect_wcm_template` are dispatched
-    through `run_in_threadpool`, not called synchronously inside the async
+def test_upload_offloads_extraction_and_template_checks_to_threadpool(client, db, seed_simple_mode, tmp_path):
+    """#793 item 3: `_extract_text`, `detect_wcm_template` and
+    `detect_input_format_or_none` are dispatched through `run_in_threadpool`, not called synchronously inside the async
     handler. Reverting either `await run_in_threadpool(fn, ...)` call back to
     a bare `fn(...)` leaves the response unchanged but this test catches it,
     since it asserts run_in_threadpool was the actual dispatch mechanism for
@@ -568,6 +682,7 @@ def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db,
     _auth(client, user)
     extract_mock = MagicMock(return_value="x" * 600)
     detect_mock = MagicMock(return_value=(False, None))
+    format_mock = MagicMock(return_value=(None, None))
     real_run_in_threadpool = upload_module.run_in_threadpool
     dispatched: list[object] = []
 
@@ -580,13 +695,14 @@ def test_upload_offloads_extraction_and_template_check_to_threadpool(client, db,
         patch("app.api.upload._validate_docx_magic", return_value=True),
         patch("app.api.upload._extract_text", extract_mock),
         patch("app.api.upload.detect_wcm_template", detect_mock),
+        patch("app.api.upload.detect_input_format_or_none", format_mock),
         patch("app.api.upload.get_storage", return_value=MagicMock()),
         patch("app.api.upload.run_in_threadpool", spy),
     ]
     resp = _run_patches(patches, lambda: _post_dummy_upload(client))
 
     assert resp.status_code == 200, resp.text
-    assert dispatched == [extract_mock, detect_mock]
+    assert dispatched == [extract_mock, detect_mock, format_mock]
 
 
 def test_estimate_offloads_extraction_to_threadpool(client, db, seed_simple_mode):
@@ -1142,3 +1258,151 @@ def test_upload_requires_current_consent(client, db, seed_simple_mode, tmp_path,
     rate_limit.assert_not_called()
     storage.put_file_exclusive.assert_not_called()
     assert db.query(Run).count() == 0
+
+
+# --- #1114: batch upload ------------------------------------------------------
+
+def _add_batch(db, owner, batch_id="BATCHA"):
+    from app.models import RunBatch
+    db.add(RunBatch(id=batch_id, user_id=owner.id, files_submitted=2))
+    db.commit()
+
+
+def test_upload_with_the_callers_batch_id_puts_the_run_in_the_batch(client, db, seed_simple_mode, tmp_path):
+    user = _make_user(db)
+    _add_batch(db, user)
+    _auth(client, user)
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
+                                                      data={"batch_id": "BATCHA"}))
+
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).batch_id == "BATCHA"
+
+
+def test_upload_without_a_batch_id_is_a_single_run(client, db, seed_simple_mode, tmp_path):
+    user = _make_user(db)
+    _auth(client, user)
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+
+    resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    assert resp.status_code == 200, resp.text
+    assert db.get(Run, resp.json()["run_id"]).batch_id is None
+
+
+@pytest.mark.parametrize("batch_owner", ["nobody", "someone else", "admin"])
+def test_upload_into_a_batch_the_caller_does_not_own_is_refused_before_storage(
+    client, db, seed_simple_mode, tmp_path, batch_owner,
+):
+    """A batch_id must name one of the caller's own batches. Another user's
+    batch answers the same 404 as one that doesn't exist, as GET
+    /batches/{id} does, so /upload discloses no batch's existence (the caller
+    is an admin in the last arm -- admins see every batch, but only the
+    submitter adds runs)."""
+    uploader = _make_user(db, role="admin" if batch_owner == "admin" else "user")
+    if batch_owner != "nobody":
+        _add_batch(db, _make_user(db, email="sam@example.com"))
+    _auth(client, uploader)
+    storage = MagicMock()
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+
+    resp = _run_patches(patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy", DOCX_MIME,
+                                                      data={"batch_id": "BATCHA"}))
+
+    assert resp.status_code == 404, resp.text
+    assert resp.json()["detail"] == {"error": "not_found", "message": "Batch not found"}
+    storage.put_file_exclusive.assert_not_called()
+    assert db.query(Run).count() == 0
+
+
+def _post_estimates(client, *names):
+    return client.post(
+        "/api/estimate",
+        files=[("files", (name, b"PK\x03\x04dummy-docx-bytes", "application/octet-stream")) for name in names],
+    )
+
+
+@pytest.mark.parametrize("role, cost_visible", [("admin", True), ("user", False)])
+def test_estimate_many_files_returns_a_row_per_file_and_totals(client, db, seed_simple_mode, role, cost_visible):
+    user = _make_user(db, role=role)
+    _auth(client, user)
+    patches = [
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", return_value="x" * 4000),
+    ]
+
+    resp = _run_patches(patches, lambda: _post_estimates(client, "a.docx", "b.docx", "c.docx"))
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [row["filename"] for row in body["files"]] == ["a.docx", "b.docx", "c.docx"]
+    assert all(row["error"] is None for row in body["files"])
+    one = body["files"][0]["estimate"]
+    assert body["estimated_time_seconds_min"] == 3 * one["estimated_time_seconds_min"]
+    assert body["estimated_time_seconds_max"] == 3 * one["estimated_time_seconds_max"]
+    if cost_visible:
+        assert body["estimated_cost_min"] == pytest.approx(3 * one["estimated_cost_min"])
+        assert body["pricing_model"]
+    else:
+        assert (body["estimated_cost_min"], body["estimated_cost_max"], one["estimated_cost_min"]) == (None, None, None)
+        assert body["pricing_model"] is None
+
+
+def test_estimate_many_files_reports_a_bad_file_on_its_row_and_totals_the_rest(client, db, seed_simple_mode):
+    user = _make_user(db)
+    _auth(client, user)
+    patches = [
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", return_value="x" * 4000),
+    ]
+
+    resp = _run_patches(patches, lambda: _post_estimates(client, "a.docx", "notes.txt"))
+
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()["files"]
+    assert rows[1]["estimate"] is None
+    assert rows[1]["error"].startswith("Unsupported file type: .txt.")
+    assert resp.json()["estimated_time_seconds_min"] == rows[0]["estimate"]["estimated_time_seconds_min"]
+
+
+def test_estimate_many_files_counts_as_one_call_against_the_estimate_limit(client, db, seed_simple_mode):
+    user = _make_user(db)
+    _auth(client, user)
+    one_call = upload_module._EstimatePerUserWindow(max_calls=1, window_seconds=300)
+    patches = [
+        patch("app.api.upload._estimate_rate_limiter", one_call),
+        patch("app.api.upload._validate_docx_magic", return_value=True),
+        patch("app.api.upload._extract_text", return_value="x" * 4000),
+    ]
+
+    def two_calls():
+        names = [f"cv{n}.docx" for n in range(upload_module.MAX_BATCH_FILES)]
+        return _post_estimates(client, *names), _post_estimates(client, "again.docx")
+
+    batch_resp, next_resp = _run_patches(patches, two_calls)
+
+    assert batch_resp.status_code == 200, batch_resp.text
+    assert len(batch_resp.json()["files"]) == upload_module.MAX_BATCH_FILES
+    assert next_resp.status_code == 429
+
+
+def test_estimate_refuses_more_than_fifty_files_or_both_shapes_at_once(client, db, seed_simple_mode):
+    user = _make_user(db)
+    _auth(client, user)
+    names = [f"cv{n}.docx" for n in range(upload_module.MAX_BATCH_FILES + 1)]
+
+    too_many = _post_estimates(client, *names)
+    both = client.post("/api/estimate", files=[
+        ("file", ("a.docx", b"PK", "application/octet-stream")),
+        ("files", ("b.docx", b"PK", "application/octet-stream")),
+    ])
+    neither = client.post("/api/estimate", data={"unrelated": "x"})
+
+    assert too_many.status_code == 400
+    assert both.status_code == 400
+    assert neither.status_code == 400

@@ -33,7 +33,7 @@ const DT = 'pt-3 sm:py-3 sm:border-b sm:border-sand-200 font-semibold text-gray-
 const DD = 'pb-3 sm:py-3 border-b border-sand-200'
 
 const gettingStartedTiles = [
-  ['.docx only', 'Convert PDFs in Word or Google Docs first'],
+  ['.docx or .pdf', "Text-based PDFs work best; scanned pages can't be read"],
   ['2–6 minutes', 'Longer CVs with many publications can take more'],
   ['No charge to you', 'AI processing is covered by the Library'],
 ]
@@ -43,8 +43,9 @@ const faqs: { q: string; a: React.ReactNode }[] = [
     q: 'What file formats does CViche accept?',
     a: (
       <>
-        CViche accepts .docx (Microsoft Word) files only. If your CV is in PDF, .doc, or another format,
-        please convert it to .docx before uploading.
+        CViche accepts .docx (Microsoft Word) and .pdf files. Text-based PDFs work best: a scanned page is
+        only an image, so its text can't be read. If your CV is in .doc or another format, please convert it
+        to .docx before uploading.
       </>
     ),
   },
@@ -67,7 +68,7 @@ const faqs: { q: string; a: React.ReactNode }[] = [
     a: (
       <>
         Yes. Upload the same file again from the main page. Each upload creates a new run. Your previous runs
-        are saved in the run history table below the upload area.
+        are saved on the Runs page.
       </>
     ),
   },
@@ -171,7 +172,7 @@ export default function HelpPage() {
               <div className="space-y-3">
                 <p>
                   CViche is a tool that converts your CV into the standard Weill Cornell Medicine (WCM) institutional
-                  format. Upload your CV as a Word document, and CViche uses AI to extract, organize, and reformat your
+                  format. Upload your CV as a Word document or PDF, and CViche uses AI to extract, organize, and reformat your
                   academic record into the correct structure.
                 </p>
                 <p>
@@ -198,8 +199,9 @@ export default function HelpPage() {
               </div>
               <div className="space-y-3">
                 <p>
-                  CViche accepts Word documents (.docx format). If your CV is in PDF or another format, convert it to
-                  .docx first using Microsoft Word or Google Docs.
+                  CViche accepts Word documents (.docx) and PDFs (.pdf). Text-based PDFs work best; scanned pages
+                  can't be read. If your CV is in .doc or another format, convert it to .docx first using Microsoft
+                  Word or Google Docs.
                 </p>
                 <p>
                   After uploading, you will see a real-time progress view showing each step of the pipeline as it
@@ -217,7 +219,7 @@ export default function HelpPage() {
               <div className="space-y-3">
                 <p>
                   When processing completes, you will receive a Word document (.docx) formatted in the WCM institutional
-                  CV template. Download this file from the Output Files section of your run page.
+                  CV template. Download this file from the Download card on the run page.
                 </p>
                 <p>
                   The CV Insights panel shows a summary of what CViche extracted: number of publications found, sections
@@ -294,7 +296,7 @@ export default function HelpPage() {
                           aria-expanded={open}
                           aria-controls={`faq-panel-${i}`}
                           onClick={() => setOpenFaq(open ? null : i)}
-                          className="flex w-full items-center justify-between gap-3 py-3 text-left font-semibold text-gray-900 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-600"
+                          className="flex w-full items-center justify-between gap-3 py-3 text-left font-semibold text-gray-900 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-600"
                         >
                           {item.q}
                           <ChevronDown

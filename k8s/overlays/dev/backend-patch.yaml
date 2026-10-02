@@ -26,7 +26,10 @@ spec:
         - name: backend # Must match the name in base/deployment.yaml
           resources:
             requests:
-              cpu: "300m"
+              # Was 300m. Lowered so 6 workers plus a rolling-update surge fit
+              # the 2-node cviche node group (max size 2): the backend no longer runs pipelines in queue mode and uses 6-8m
+              # (kubectl top, 2026-10-01). Limits unchanged.
+              cpu: "150m"
               memory: "512Mi"
             # Burstable: limits raised to 2 vCPU / 2Gi so a pod can absorb 3
             # concurrent runs (CVICHE_MAX_CONCURRENT_RUNS below). Requests kept
@@ -43,6 +46,11 @@ spec:
             # ceiling is the pub/sub->Streams + worker migration.
             - name: CVICHE_MAX_CONCURRENT_RUNS
               value: "3"
+            # Runs go to the Valkey queue and execute on cviche-worker pods
+            # (#701). CVICHE_MAX_CONCURRENT_RUNS only applies in in_process
+            # mode; rollback is deleting this entry.
+            - name: CVICHE_DISPATCH_MODE
+              value: "queue"
           # CVICHE_BLOCK_COHERENCE_REPAIR (and any other pipeline-behaviour
           # flag shared with the worker) comes from the cviche-pipeline-flags
           # ConfigMap below, not a literal env entry here -- see its comment

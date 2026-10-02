@@ -27,7 +27,10 @@ from unified_pipeline.stage6.dedup import (  # noqa: E402
     _lists_name,
     _names_a_sibling,
     _names_record,
+    _other_journal_same_row,
     _record_name,
+    recovered_row_already_rendered,
+    _row_residue,
 )
 from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS  # noqa: E402
 from unified_pipeline.stage_6_word_template import deduplicate_entries  # noqa: E402
@@ -241,6 +244,39 @@ def test_fused_prose_without_fields_is_still_dropped():
     one, fused = {"text": _ONE_MENTEE}, {"text": _FUSED_MENTEES}
     assert deduplicate_entries([one, fused], code="N3B",
                                document=[one, fused]) == [fused]
+
+
+# #1181: WCM label|value mentee tables share every label, so two residents at
+# one site with overlapping periods score as duplicates. Synthetic names.
+def _mentee_table(name: str, period: str) -> dict:
+    text = (f"Name | {name}\nSite/Position | Harbor Institute - Resident\n"
+            f"Expected Mentoring Period (mm/yyyy-mm/yyyy) | {period}\n"
+            "Project/Accomplishments** | Case report on widget toxicity\n"
+            "Goals/expected Outcomes | Abstract submission, Poster Presentation\n"
+            "Type of Supervision (Research, clinical, teaching, leadership) | Research")
+    return {"text": text, "extracted_fields": {"mentee_name": name}}
+
+
+def test_distinct_mentees_in_label_value_tables_kept():
+    first = _mentee_table("Avery Quill", "11/2024 – 11/2026")
+    second = _mentee_table("Blair Sprocket", "01/2025 – 06/2026")
+    document = [first, second]
+    assert deduplicate_entries(document, code="N3A", document=document) == document
+
+
+def test_same_mentee_written_two_ways_still_dropped():
+    # Case and punctuation are not a different person.
+    first = _mentee_table("Avery O'Quill", "11/2024 – 11/2026")
+    second = _mentee_table("avery o’ quill", "11/2024 – 11/2026")
+    assert len(deduplicate_entries([first, second], code="N3A",
+                                   document=[first, second])) == 1
+
+
+def test_placeholder_mentee_table_still_dropped():
+    first = _mentee_table("Avery Quill", "11/2024 – 11/2026")
+    blank = _mentee_table("N/A", "11/2024 – 11/2026")
+    assert deduplicate_entries([first, blank], code="N3A",
+                               document=[first, blank]) == [first]
 
 
 def test_distinct_committee_memberships_mentioned_in_passing_kept():
@@ -593,6 +629,254 @@ def test_an_empty_rendered_field_vouches_for_nothing():
     assert _drop_is_safe(sub, kept, "M2A", [kept, sub]) is False
 
 
+# ---------------------------------------- recovered-row appendix drop (A5IZ6Q)
+#
+# `recover_unclaimed_table_rows` (stage 2, #420) emits one entry per table
+# row no delimiter claimed, independently of whatever delimiter DID claim
+# the surrounding table. A wide table-level delimiter spanning several
+# element indices (a whole grant's label/value block) and the individual
+# rows inside it can both survive as separate entries: the fused parent
+# classifies into a render-routed code (e.g. M2B) and renders structurally,
+# while each single-field recovered row is too sparse to classify as
+# anything but T and is otherwise a verbatim duplicate of content the reader
+# already saw. `deduplicate_entries` above never sees the pair -- parent and
+# row land in different taxonomy-code groups, and dedup only compares within
+# one.
+#
+# Round 3 (simplify, LEAD directive): earlier rounds scoped the drop to one
+# specific parent entry, first by raw-text containment then by resolving
+# that same parent's own rendered block. Both were removed after a shared
+# value (an agency common to two grants) was shown to resolve two different
+# parents to the same block, which could drop a row whose OWN content never
+# rendered. `recovered_row_already_rendered` is provenance-blind: it checks
+# only whether the row's own value is already printed anywhere in the
+# document's rendered body -- never which entry printed it.
+
+def test_recovered_row_dropped_when_its_value_is_already_rendered():
+    row = {"text": "Award Source: | Fictional Research Foundation",
+           "recovered_row": True}
+    rendered = ["Award Source:", "Fictional Research Foundation"]
+    assert recovered_row_already_rendered(row, rendered)
+
+
+def test_recovered_row_kept_when_its_value_is_not_rendered_anywhere():
+    row = {"text": "Non-financial support: | Conference travel support",
+           "recovered_row": True}
+    rendered = ["Award Source:", "Fictional Research Foundation"]
+    assert not recovered_row_already_rendered(row, rendered)
+
+
+def test_non_recovered_row_never_dropped_even_when_its_text_is_rendered():
+    # Only stage 2's structural backstop sets `recovered_row` -- an ordinary
+    # model-attested entry goes through deduplicate_entries's own
+    # Jaccard/containment path above, never this one.
+    row = {"text": "Award Source: | Fictional Research Foundation"}
+    rendered = ["Award Source:", "Fictional Research Foundation"]
+    assert not recovered_row_already_rendered(row, rendered)
+
+
+def test_recovered_row_label_cell_excluded_from_confirmation():
+    # Only the VALUE half of "Label: | Value" may confirm a drop -- the
+    # label is always excluded. A grant table writes every row's label
+    # unconditionally, value or not (CLAUDE.md "Stage 6 drops unnamed
+    # fields" is the adjacent failure mode: a fixed-slot renderer still
+    # writes the label even when the value cell is blank), so treating the
+    # label as a value cell would let a blank-value row read as "confirmed"
+    # merely because its label text is everywhere in the document.
+    row = {"text": "Non-financial support: | ", "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["Non-financial support:"])
+
+
+def test_recovered_row_all_blank_value_cells_never_confirmed():
+    row = {"text": "Non-financial support: |  | ", "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["anything at all"])
+
+
+def test_recovered_row_no_separator_falls_back_to_whole_text_as_the_value():
+    # A row with no separator at all is malformed --
+    # recover_unclaimed_table_rows always emits label|value -- but there is
+    # no label to split off, so the whole text is the one value cell.
+    row = {"text": "StandaloneValue2024", "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["StandaloneValue2024"])
+    assert not recovered_row_already_rendered(row, ["nothing relevant here"])
+
+
+# ------------------------------------------- multi-cell rows (>2 columns)
+#
+# `recover_unclaimed_table_rows` joins the WHOLE physical table row with
+# " | ", regardless of column count -- a 3-column row (Label, StartDate,
+# EndDate) survives as one string with TWO separators in it. Each half is
+# its own value cell and is checked independently.
+
+def test_recovered_row_multi_cell_value_all_cells_confirmed_drops_the_row():
+    row = {"text": "Duration of support: | 2021 | 2022", "recovered_row": True}
+    assert recovered_row_already_rendered(
+        row, ["Duration of support:", "2021", "2022"])
+
+
+def test_recovered_row_multi_cell_value_one_unconfirmed_cell_keeps_the_row():
+    row = {"text": "Duration of support: | 2021 | 2022", "recovered_row": True}
+    # "2022" never rendered anywhere -- the row must stay even though "2021"
+    # did; joining the two cells back into "2021 | 2022" before searching
+    # would never match a real render either (nothing renders a raw " | "),
+    # so cells are checked separately rather than rejoined.
+    assert not recovered_row_already_rendered(row, ["Duration of support:", "2021"])
+
+
+# ------------------------------------------------- tab-separated fallback path
+#
+# `recover_unclaimed_table_rows` renders " | " when it joins a physical
+# table row's cells, but a bare "\t" on its non-table fallback path --
+# `_CELL_SEPARATOR_RE` must split on both, not just "|".
+
+def test_recovered_row_tab_separated_value_matches():
+    row = {"text": "Award Source:\tFictional Research Foundation",
+           "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["Fictional Research Foundation"])
+
+
+def test_recovered_row_tab_separated_unrendered_value_stays():
+    row = {"text": "Award Source:\tFictional Research Foundation",
+           "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["something unrelated"])
+
+
+# ------------------------------------- trivial cell beside a confirmed cell
+#
+# `_is_trivial_value_cell` (dedup.py) filters a blank OR punctuation-only
+# cell OUT before confirmation is checked, so it can never itself supply
+# evidence -- but symmetrically it must never BLOCK a drop a sibling
+# non-trivial cell already confirms either.
+
+def test_recovered_row_punctuation_only_cell_does_not_block_a_drop():
+    row = {"text": "Non-financial support: | -- | Fictional Research Foundation",
+           "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["Fictional Research Foundation"])
+
+
+def test_recovered_row_blank_cell_does_not_block_a_drop():
+    row = {"text": "Non-financial support: |  | Fictional Research Foundation",
+           "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["Fictional Research Foundation"])
+
+
+# ------------------------------------- non-alphanumeric edge of the value
+#
+# A leading non-alphanumeric character (a currency symbol) needs no LEADING
+# boundary: '$' itself can never be part of the digit run that would create
+# a false partial-number match the way an adjacent alnum char could, so a
+# raw "$15,000.00" is still confirmed by a render that prefixes it with a
+# currency code -- the boundary only has to hold on the alnum-adjacent
+# trailing edge (already covered above).
+
+def test_recovered_row_currency_value_matches_with_a_prefixed_currency_code():
+    row = {"text": "Annual direct costs: | $15,000.00", "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["US$15,000.00"])
+
+
+# --------------------------------------------- normalization (§ LEAD item 1)
+#
+# "normalized: casefold, collapsed whitespace, word-boundary match on both
+# sides" -- each clause has its own test.
+
+def test_recovered_row_value_matches_case_insensitively():
+    row = {"text": "Award Source: | fictional research foundation",
+           "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["FICTIONAL RESEARCH FOUNDATION"])
+
+
+def test_recovered_row_value_matches_despite_irregular_whitespace():
+    row = {"text": "Award Source: |  Fictional   Research Foundation ",
+           "recovered_row": True}
+    assert recovered_row_already_rendered(row, ["Fictional Research Foundation"])
+
+
+def test_recovered_row_value_not_glued_across_a_rendered_line_join():
+    # Every rendered line is joined into one string before searching it.
+    # Collapsing whitespace (never squashing it away entirely) keeps a real
+    # word boundary at that join: "...Foundation" ending one line and
+    # "1%..." starting the next must not satisfy a value like "foundation1"
+    # that never existed as contiguous rendered text.
+    row = {"text": "Label: | foundation1", "recovered_row": True}
+    assert not recovered_row_already_rendered(
+        row, ["...Fictional Research Foundation", "1% effort..."])
+
+
+def test_recovered_row_value_not_matched_inside_a_longer_trailing_run():
+    # '2021' must not match the leading digits of '20215' -- the boundary
+    # has to hold at the TRAILING edge of the value, not just the leading
+    # one (a mutant dropping only the trailing lookahead survived earlier
+    # rounds' coverage).
+    row = {"text": "Duration of support: | 2021", "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["20215"])
+
+
+def test_recovered_row_value_not_matched_inside_a_longer_leading_run():
+    # '2021' must not match the trailing digits of '12021' -- the LEADING
+    # edge of the value.
+    row = {"text": "Duration of support: | 2021", "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["12021"])
+
+
+def test_recovered_row_currency_value_matches_with_trailing_boundary():
+    row = {"text": "Annual direct costs: | $15,000.00", "recovered_row": True}
+    assert recovered_row_already_rendered(
+        row, ["Annual direct costs:", "$15,000.00"])
+    assert not recovered_row_already_rendered(
+        row, ["$15,000.005"])
+
+
+# ------------------------------------------ shared-agency cross-vouching
+#
+# The exact repro that sank round 2's parent-block scoping: two grants share
+# an agency. Grant A's own render legitimately carries dates/effort; grant
+# B's recovered rows must stay when B's OWN value is not printed anywhere,
+# and a shared digit run (A's "25%" vs B's "5%") must not cross-match.
+
+def test_shared_agency_grant_with_unrendered_value_is_not_vouched_for():
+    rendered = [
+        "National Institutes of Health", "Alpha Sequencing Initiative",
+        "Duration of support:", "2019-2020",
+        "Your percent (%) effort:", "25%",
+        "National Institutes of Health", "Beta Imaging Cohort",
+        "Duration of support:", "",
+        "Your percent (%) effort:", "",
+    ]
+    row_effort_b = {"text": "Your percent (%) effort: | 5%", "recovered_row": True}
+    assert not recovered_row_already_rendered(row_effort_b, rendered)
+
+
+def test_five_percent_does_not_match_inside_twenty_five_percent():
+    row = {"text": "Your percent (%) effort: | 5%", "recovered_row": True}
+    assert not recovered_row_already_rendered(
+        row, ["Your percent (%) effort:", "25%"])
+
+
+# -------------------------------------------------- accepted trade-off
+#
+# Removing per-parent scoping means a match is accepted regardless of WHICH
+# record actually printed it -- documented in `recovered_row_already_rendered`'s
+# own docstring as the deliberate trade for a simpler, unconditionally
+# content-safe rule. The one direction this is allowed to be wrong in is
+# duplication, never loss: a value stage 6 reformats on the way to a render
+# slot (a raw "00/2021" cell rendered as "2021") will not verbatim-match, so
+# the row correctly stays rather than being wrongly dropped.
+
+def test_recovered_row_value_confirmed_by_an_unrelated_records_render():
+    # By design (see the module docstring): this never asks WHICH record
+    # rendered a value, only whether it is already visible in the document.
+    row = {"text": "Your percent (%) effort: | 25%", "recovered_row": True}
+    rendered = ["A completely different grant", "Your percent (%) effort:", "25%"]
+    assert recovered_row_already_rendered(row, rendered)
+
+
+def test_recovered_row_reformatted_date_value_is_not_confirmed_and_stays():
+    # Stage 6 reformats "00/2021-00/2022" to "2021-2022" -- this function
+    # does no date parsing, so the row stays (extra duplication, never lost
+    # content) rather than being dropped on a value that never rendered
+    # verbatim.
+    row = {"text": "Duration of support: | 00/2021-00/2022", "recovered_row": True}
+    assert not recovered_row_already_rendered(row, ["Duration of support:", "2021-2022"])
 def test_postdoc_training_role_vouches_for_a_fused_record():
     """#946: `role` renders on the C type line, so dedup's rendered-words set for C
     includes it (the field is consumed here as well as by the section renderer)."""
@@ -817,3 +1101,93 @@ def test_distinct_bare_names(dropped_text, kept_text, kept_name, distinct):
 ])
 def test_lists_name_needs_the_exact_name(entry, listed):
     assert _lists_name(entry, "Widgets") is listed
+
+
+# ------------ #666: a journal row that says more than the bare name
+# "Ad hoc Widgets, 2013-" beside "Ad hoc Widgets Quarterly, 2013-": the rows
+# say the same thing about two journals.
+
+def _journal_row(text: str, name: str) -> dict:
+    return {"taxonomy_code": "Q4D", "text": text, "extracted_fields": {"journal_name": name}}
+
+
+def test_dated_row_for_a_short_journal_name_is_kept_beside_a_longer_one():
+    kept = _journal_row("Ad hoc Widgets Quarterly\t2013- Present", "Widgets Quarterly")
+    short = _journal_row("Ad hoc Widgets\t2013- Present", "Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is False
+    assert deduplicate_entries([kept, short], code="Q4D",
+                               document=[kept, short]) == [kept, short]
+
+
+def test_journal_rows_with_different_dates_are_kept():
+    kept = _journal_row("2021-2023 Ad Hoc Reviewer, Gadget Widgets", "Gadget Widgets")
+    short = _journal_row("2021 Ad Hoc Reviewer, Widgets", "Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is False
+
+
+def test_journal_row_that_says_less_than_the_kept_row_is_still_dropped():
+    # The kept row also names an editorial role, so the two rows are not the
+    # same statement about two journals.
+    kept = _journal_row("Ad hoc reviewer and editor, Widgets Quarterly, 2013- Present",
+                        "Widgets Quarterly")
+    short = _journal_row("Ad hoc reviewer, Widgets, 2013- Present", "Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is True
+
+
+def test_journal_row_naming_the_same_journal_reworded_is_still_dropped():
+    kept = _journal_row("Ad hoc reviewer, The Widgets, 2013- Present", "The Widgets")
+    short = _journal_row("Ad hoc reviewer, Widgets, 2013- Present", "Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short]) is True
+
+
+def test_journal_row_another_entry_lists_exactly_is_still_dropped():
+    kept = _journal_row("Ad hoc Widgets Quarterly\t2013- Present", "Widgets Quarterly")
+    short = _journal_row("Ad hoc Widgets\t2013- Present", "Widgets")
+    copy = _journal_row("Widgets", "Widgets")
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short, copy]) is True
+    assert _drop_is_safe(short, kept, "Q4D", [kept, short, copy], {id(copy)}) is False
+
+
+def test_committee_row_with_an_institution_prefix_is_still_dropped():
+    # A committee's name is descriptive: the prefixed name is the same committee.
+    def row(text, name):
+        return {"taxonomy_code": "Q2", "text": text,
+                "extracted_fields": {"committee_name": name}}
+    kept = row("Acme University, Clinic Services Committee\t2012-2014",
+               "Acme University, Clinic Services Committee")
+    short = row("Clinic Services Committee\t2012-2014", "Clinic Services Committee")
+    assert _drop_is_safe(short, kept, "Q2", [kept, short]) is True
+
+
+@pytest.mark.parametrize("dropped_fields,kept_fields,same_row", [
+    ({"journal_name": "Widgets"}, {"journal_name": "Widgets Quarterly"}, True),
+    ({"journal_name": "Widgets"}, {"journal_name": "The Widgets"}, False),  # same words
+    ({"title": "Widgets"}, {"journal_name": "Widgets Quarterly"}, False),  # not a journal row
+    ({"journal_name": "Widgets"}, {"title": "Widgets Quarterly"}, False),
+    ({"journal_name": "Widgets"}, {"journal_name": None}, False),
+    ({"journal_name": "Widgets"}, {"journal_name": "Gizmo Review"}, False),  # not in the kept text
+    ({"journal_name": "Widgets"}, {"journal_name": ["Widgets Quarterly"]}, False),  # not a string
+])
+def test_other_journal_same_row_table(dropped_fields, kept_fields, same_row):
+    dropped = {"text": "Ad hoc Widgets 2013", "extracted_fields": dropped_fields}
+    kept = {"text": "Ad hoc Widgets Quarterly 2013", "extracted_fields": kept_fields}
+    assert _other_journal_same_row(dropped, kept, "Widgets", kept_fields) is same_row
+
+
+def test_two_rows_that_do_not_hold_their_names_are_not_the_same_row():
+    # Neither text holds its journal's name, so neither has a residue to compare.
+    dropped = {"text": "Ad hoc 2013", "extracted_fields": {"journal_name": "Widgets"}}
+    kept = {"text": "Ad hoc 2013", "extracted_fields": {"journal_name": "Gizmo Review"}}
+    assert _other_journal_same_row(dropped, kept, "Widgets", kept["extracted_fields"]) is False
+
+
+@pytest.mark.parametrize("text,name,residue", [
+    ("Ad hoc Widgets\t2013- Present", "Widgets", "adhocpresent"),
+    ("AD HOC, widgets.", "Widgets", "adhoc"),
+    ("Widgets, Widgets", "Widgets", "widgets"),  # the first run only
+    ("Ad hoc Gizmo", "Widgets", None),  # name not in the text
+    ("Ad hoc Widgetsmith", "Widgets", None),  # a longer word is not the name
+    ("Ad hoc Widgets", "--", None),  # a name without words
+])
+def test_row_residue(text, name, residue):
+    assert _row_residue(text, name) == residue

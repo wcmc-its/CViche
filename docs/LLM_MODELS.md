@@ -6,7 +6,7 @@
 ## TL;DR
 
 - **Provider:** AWS Bedrock — the only supported provider (#953). CViche is Bedrock-only, and all LLM traffic stays in AWS Bedrock; see [docs/BEDROCK_DATA_PROTECTION.md](BEDROCK_DATA_PROTECTION.md) for what AWS states about that boundary.
-- **Model:** Claude Sonnet 5 (`us.anthropic.claude-sonnet-5`) for every live pipeline stage except 3b, which runs on Haiku 4.5. Decision and evidence: `docs/adr/0001-sonnet-5-default-model.md`.
+- **Model:** Claude Sonnet 5 (`us.anthropic.claude-sonnet-5`) for every live pipeline stage, including 3b since 2026-10-01. Decisions and evidence: `docs/adr/0001-sonnet-5-default-model.md` and `docs/adr/0002-stage-3b-on-sonnet-5.md`.
 - Configured in [`src/unified_pipeline/config/llm_config.yaml`](../src/unified_pipeline/config/llm_config.yaml).
 - Bedrock bills Claude models at the **same per-token price as Anthropic's direct API** — there is no cost penalty for staying on Bedrock.
 
@@ -108,7 +108,7 @@ Bedrock bills `us.` (regional cross-region inference) profiles at **1.1× the di
 | Model | Input | Output |
 |---|---|---|
 | Claude Sonnet 4.6 (active) | $3.30 | $16.50 |
-| Claude Haiku 4.5 (stage 3b) | $1.10 | $5.50 |
+| Claude Haiku 4.5 | $1.10 | $5.50 |
 | Claude Opus 4.7 | $5.50 | $27.50 |
 
 Cache reads (0.1× input) and writes (1.25× input) scale from these regional input prices.

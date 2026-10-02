@@ -1,0 +1,75 @@
+# cviche-worker-flex (#1114): the flex worker pool. A copy of deployment.yaml
+# (read that file for why each setting is what it is) with four deliberate
+# differences, and no others -- test_worker.py's
+# test_flex_worker_manifest_differs_from_the_worker_only_where_intended
+# fails on any other drift:
+#   1. the name and the app label/selector (two Deployments must never select
+#      each other's pods);
+#   2. CVICHE_WORKER_STREAMS=single,batch: reads the single-run queue first and
+#      the batch queue only when no single run waits (app/worker.py). Only
+#      flex workers read the batch queue, so this pool's replica count is the
+#      cap on batch runs executing at once;
+#   3. replicas: 0 here, so an overlay that does not patch this Deployment
+#      (prod today) runs no flex worker. The dev overlay sets the real count.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-worker-flex
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: cviche-worker-flex
+  minReadySeconds: 30
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: cviche-worker-flex
+      annotations:
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+    spec:
+      serviceAccountName: cviche-sa
+
+      containers:
+        - name: worker
+          image: backend # Dynamically updated by Kustomize via CodeBuild
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "docker-entrypoint.sh"]
+          args: ["worker"]
+          env:
+            - name: CVICHE_RUN_MIGRATIONS
+              value: "0" # Alembic owns schema; the backend's initContainer runs migrations
+            - name: CVICHE_INIT_DB
+              value: "0" # No metadata.create_all() DDL at boot (#191)
+            - name: CVICHE_WORKER_STREAMS
+              value: "single,batch" # single-run queue first, then the batch queue (#1114)
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/worker-ready"]
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec:
+              command:
+                - python3
+                - -c
+                - "import os,sys,time; sys.exit(0 if time.time() - os.stat('/tmp/worker-heartbeat').st_mtime < 90 else 1)"
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 3
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      terminationGracePeriodSeconds: 5700

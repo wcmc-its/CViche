@@ -1,11 +1,20 @@
 import { api } from './client'
+import type { ApiError } from './client'
 import { uploadRoutes } from './routes'
-import type { Estimate } from '../types'
+import type { BatchEstimate, Estimate } from '../types'
 
 export async function getEstimate(file: File): Promise<Estimate> {
   const formData = new FormData()
   formData.append('file', file)
   return api.post<Estimate>(uploadRoutes.estimate(), formData)
+}
+
+/** One /estimate call for several files (a batch): a row per file plus totals.
+ *  Counts once against the estimate rate limit however many files it carries. */
+export async function getBatchEstimate(files: File[]): Promise<BatchEstimate> {
+  const formData = new FormData()
+  for (const file of files) formData.append('files', file)
+  return api.post<BatchEstimate>(uploadRoutes.estimate(), formData)
 }
 
 export interface UploadResult {
@@ -22,12 +31,24 @@ export interface UploadResult {
 }
 
 // Output-rendering options the user picks at upload (issue #153) plus the
-// per-upload role attestation. Track changes is not an option any more: the
-// backend Form default (ON) applies.
+// per-upload role attestation. Track changes is not an option: it is always
+// on (Paul, 2026-10-01) and sent explicitly on every upload.
 export interface UploadOptions {
-  includeClassificationComments: boolean
   stripWcmInstructions: boolean
   submissionType: 'own_cv' | 'authorized_admin'
+  /** The batch this file joins (POST /api/batches); absent for a single upload. */
+  batchId?: string
+  /** Resend of a file the server already ran, after the user agreed to run it again. */
+  confirmDuplicate?: boolean
+}
+
+const HTTP_CONFLICT = 409
+const DUPLICATE_FILE_CODE = 'duplicate_file'
+
+/** POST /upload refused because this exact file was already processed (#1286); err.message says when. */
+export function isDuplicateError(err: unknown): boolean {
+  const { status, code } = (err ?? {}) as Partial<ApiError>
+  return status === HTTP_CONFLICT && code === DUPLICATE_FILE_CODE
 }
 
 export async function uploadFile(file: File, options: UploadOptions): Promise<UploadResult> {
@@ -36,7 +57,9 @@ export async function uploadFile(file: File, options: UploadOptions): Promise<Up
   formData.append('submission_type', options.submissionType)
   // FastAPI bool Form parsing accepts 'true'/'false' (and 1/0). Send explicit
   // strings so an unchecked box is transmitted as false rather than omitted.
-  formData.append('include_classification_comments', String(options.includeClassificationComments))
   formData.append('strip_wcm_instructions', String(options.stripWcmInstructions))
+  formData.append('include_track_changes', 'true')
+  if (options.batchId) formData.append('batch_id', options.batchId)
+  if (options.confirmDuplicate) formData.append('confirm_duplicate', 'true')
   return api.post<UploadResult>(uploadRoutes.upload(), formData)
 }

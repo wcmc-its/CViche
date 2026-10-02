@@ -14,6 +14,7 @@ import JsonViewerModal from './JsonViewerModal'
 import CancelConfirmModal from './CancelConfirmModal'
 import ErrorBanner from './ErrorBanner'
 import FeedbackForm from './FeedbackForm'
+import { RunQualitySections, ReviewNote } from './RunQualityPanel'
 import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 
 interface PipelineViewerProps {
@@ -361,9 +362,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         {runStatus.status === 'failed' && (
           <div className={`${bannerBase} bg-red-50 border-red-300`} role="alert">
             <div className="flex flex-wrap items-center justify-between gap-3 max-w-full">
-              <div className="flex items-center gap-3">
+              <div className="flex min-w-0 items-center gap-3">
                 <XCircle className="h-5 w-5 text-red-600 flex-shrink-0" />
-                <p className="text-sm font-medium text-red-800">Pipeline failed {runStatus.error_message && ` — ${runStatus.error_message}`}</p>
+                <p className="min-w-0 text-sm font-medium text-red-800 [overflow-wrap:anywhere]">Pipeline failed {runStatus.error_message && ` — ${runStatus.error_message}`}</p>
               </div>
               <div className="flex flex-wrap shrink-0 gap-2">
                 {runStatus.steps?.some((s) => s.status === 'error') && (
@@ -379,9 +380,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         {runStatus.status === 'cancelled' && (
           <div className={`${bannerBase} bg-orange-50 border-orange-300`} role="status">
             <div className="flex flex-wrap items-center justify-between gap-3 max-w-full">
-              <div className="flex items-center gap-3">
+              <div className="flex min-w-0 items-center gap-3">
                 <AlertCircle className="h-5 w-5 text-orange-600 flex-shrink-0" />
-                <p className="text-sm font-medium text-orange-800">Pipeline was cancelled {runStatus.error_message && ` — ${runStatus.error_message}`}</p>
+                <p className="min-w-0 text-sm font-medium text-orange-800 [overflow-wrap:anywhere]">Pipeline was cancelled {runStatus.error_message && ` — ${runStatus.error_message}`}</p>
               </div>
               <button onClick={handleRestart} disabled={isRestarting} className="shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 disabled:opacity-55">Restart with file</button>
             </div>
@@ -400,6 +401,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         <PipelineHeader
           runId={runId}
           filename={runStatus.filename}
+          title={isComplete ? runStatus.cv_owner_name?.trim() || runStatus.filename : undefined}
+          runDate={runStatus.started_at}
+          runByName={isAdmin ? runStatus.run_by?.display_name : null}
           status={runStatus.status}
           steps={runStatus.steps}
           stepProgress={stepProgress}
@@ -408,6 +412,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           inputTokens={runStatus.input_tokens}
           outputTokens={runStatus.output_tokens}
           elapsedSeconds={localElapsedSeconds}
+          estimatedSeconds={runStatus.estimated_duration_seconds}
           isCancelling={isCancelling}
           onCancel={handleCancel}
           onBack={onBack}
@@ -419,7 +424,10 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
             {isComplete ? 'Your CV is ready to download.' : ''}
           </p>
           {isComplete && finalDocxName && <DocxDownloadCard runId={runId} filename={finalDocxName} />}
+          {isComplete && !isAdmin && <ReviewNote runId={runId} />}
         </PipelineHeader>
+
+        {isComplete && isAdmin && <RunQualitySections runId={runId} />}
 
         {showDetails && (
           <div className="grid grid-cols-1 gap-[18px] items-start md:grid-cols-[minmax(260px,340px)_minmax(0,1fr)]">
@@ -462,7 +470,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                           role="tab"
                           aria-selected={selected}
                           onClick={t.onSelect}
-                          className={`-mb-px border-b-2 px-0.5 py-2 font-medium focus:ring-2 focus:ring-primary-500 focus:outline-none ${
+                          className={`-mb-px border-b-2 px-0.5 py-2 font-medium focus-visible:ring-2 focus-visible:ring-primary-500 focus-visible:outline-none ${
                             selected ? 'border-ink text-gray-900' : 'border-transparent text-gray-500 hover:text-gray-900'
                           }`}
                         >
@@ -482,8 +490,8 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                         <dl className="text-sm">
                           {summaryRows.map((r) => (
                             <div key={r.label} className="flex items-baseline justify-between gap-6 border-b border-sand-200 py-2.5">
-                              <dt className="text-gray-600 shrink-0">{r.label}</dt>
-                              <dd className="min-w-0 truncate text-right font-semibold text-gray-900" title={r.value}>{r.value}</dd>
+                              <dt className="text-gray-600 shrink-0 max-w-[40%] [overflow-wrap:anywhere]">{r.label}</dt>
+                              <dd className="min-w-0 text-right font-semibold text-gray-900 [overflow-wrap:anywhere]">{r.value}</dd>
                             </div>
                           ))}
                         </dl>
@@ -494,7 +502,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                           <div className="bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg p-4">
                             <div className="flex items-start gap-4">
                               <MapPin className="h-6 w-6 text-purple-600 flex-shrink-0 mt-0.5" />
-                              <div className="flex-1">
+                              <div className="flex-1 min-w-0 [overflow-wrap:anywhere]">
                                 <div className="font-medium text-gray-900 mb-1">Inferred CV Owner Location</div>
                                 {cvInsights.cv_owner?.full_name && <div className="text-sm text-gray-600 mb-2"><span className="font-medium">CV Owner:</span> {cvInsights.cv_owner.full_name}</div>}
                                 <div className="text-sm text-gray-700">

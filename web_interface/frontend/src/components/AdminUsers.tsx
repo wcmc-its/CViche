@@ -1,10 +1,13 @@
 import { useState, useEffect } from 'react'
-import { Loader2, Shield, User as UserIcon, Ban, Check, Pencil, X } from 'lucide-react'
+import { Loader2, Shield, User as UserIcon, Ban, Check, Pencil, X, AlertTriangle } from 'lucide-react'
 import type { AdminUser } from '../types'
 import { getAdminUsers, updateAdminUser } from '../api/admin'
 import { formatDateShort, formatCost } from '../utils'
+import { useAuth } from '../contexts/AuthContext'
+import { demotionBlock, isWcmEmail } from './adminUserRules'
 
 export default function AdminUsers() {
+  const currentUserId = useAuth().user?.user_id
   const [users, setUsers] = useState<AdminUser[]>([])
   const [loading, setLoading] = useState(true)
   const [editingId, setEditingId] = useState<number | null>(null)
@@ -33,6 +36,16 @@ export default function AdminUsers() {
       setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)))
     } catch (err: any) {
       setError(err.message || 'Failed to update user status')
+    }
+  }
+
+  const toggleRole = async (user: AdminUser) => {
+    setError(null)
+    try {
+      const updated = await updateAdminUser(user.id, { role: user.role === 'admin' ? 'user' : 'admin' })
+      setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)))
+    } catch (err: any) {
+      setError(err.message || 'Failed to update role')
     }
   }
 
@@ -123,24 +136,42 @@ export default function AdminUsers() {
                     ? Math.round((user.feedback_count / user.completed_run_count) * 100)
                     : null
 
+                const isAdmin = user.role === 'admin'
+                const blocked = demotionBlock(user, users, currentUserId)
+
                 return (
                   <tr key={user.id} className={user.status === 'disabled' ? 'bg-gray-50 opacity-60' : ''}>
                     <td className="px-4 py-3 whitespace-nowrap">
                       <div className="text-sm font-medium text-gray-900">{user.display_name}</div>
-                      <div className="text-xs text-gray-500">{user.email}</div>
+                      <div className="flex items-center gap-2 text-xs text-gray-500">
+                        {user.email}
+                        {!isWcmEmail(user.email) && (
+                          <span
+                            title="This address is not on a WCM domain"
+                            className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-1.5 py-px text-[11px] font-medium text-amber-700"
+                          >
+                            <AlertTriangle className="w-3 h-3" aria-hidden="true" />
+                            Non-WCM
+                          </span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap">
-                      {user.role === 'admin' ? (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
-                          <Shield className="w-3 h-3" aria-hidden="true" />
-                          Admin
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
-                          <UserIcon className="w-3 h-3" aria-hidden="true" />
-                          User
-                        </span>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => toggleRole(user)}
+                        disabled={blocked !== null}
+                        title={blocked ?? (isAdmin ? 'Switch to Member' : 'Switch to Admin')}
+                        aria-label={`${isAdmin ? 'Admin' : 'Member'}: switch ${user.display_name} to ${isAdmin ? 'Member' : 'Admin'}`}
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed ${
+                          isAdmin
+                            ? 'bg-purple-100 text-purple-700 enabled:hover:bg-purple-200'
+                            : 'bg-gray-100 text-gray-600 enabled:hover:bg-gray-200'
+                        }`}
+                      >
+                        {isAdmin ? <Shield className="w-3 h-3" aria-hidden="true" /> : <UserIcon className="w-3 h-3" aria-hidden="true" />}
+                        {isAdmin ? 'Admin' : 'Member'}
+                      </button>
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-right text-sm text-gray-700">
                       {user.runs_today}
@@ -187,7 +218,7 @@ export default function AdminUsers() {
                             onChange={(e) =>
                               setEditLimits((prev) => ({ ...prev, daily: e.target.value }))
                             }
-                            className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none"
+                            className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
                           />
                           <label className="sr-only" htmlFor={`monthly-${user.id}`}>Monthly limit</label>
                           <input
@@ -199,7 +230,7 @@ export default function AdminUsers() {
                             onChange={(e) =>
                               setEditLimits((prev) => ({ ...prev, monthly: e.target.value }))
                             }
-                            className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none"
+                            className="w-16 text-xs border border-gray-300 rounded px-1.5 py-1 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
                           />
                           <button
                             onClick={() => saveLimits(user)}
@@ -230,10 +261,10 @@ export default function AdminUsers() {
                     <td className="px-4 py-3 whitespace-nowrap text-center">
                       <button
                         onClick={() => toggleStatus(user)}
-                        className={`text-xs font-medium px-3 py-1 rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-1 ${
+                        className={`text-xs font-medium px-3 py-1 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 ${
                           user.status === 'active'
-                            ? 'text-red-600 hover:bg-red-50 focus:ring-red-400'
-                            : 'text-green-600 hover:bg-green-50 focus:ring-green-400'
+                            ? 'text-red-600 hover:bg-red-50 focus-visible:ring-red-400'
+                            : 'text-green-600 hover:bg-green-50 focus-visible:ring-green-400'
                         }`}
                         aria-label={user.status === 'active' ? `Disable ${user.display_name}` : `Enable ${user.display_name}`}
                       >

@@ -28,9 +28,12 @@ from app.schemas import (
     QualityScoreResult,
     QueueDbView,
     QueueStatsResponse,
+    QueueStreamStats,
 )
 from app.services.admin_service import get_step_avg_seconds, get_users_with_stats, get_single_user_stats
-from app.services.quality_score_service import get_cached_score, compute_and_cache_score
+from app.services.quality_score_service import (
+    get_cached_score, compute_and_cache_score, persist_score_columns,
+)
 from app.audit_events import RUN_DELETED
 from app.services.run_service import delete_run_and_artifacts, find_run, reap_orphaned_created_runs, queue_db_view
 from app.config_loader import get_config as read_config  # a route below is named get_config
@@ -146,6 +149,8 @@ async def update_user(
     # Validate: can't remove last admin
     if body.role is not None and body.role != target.role:
         if target.role == "admin" and body.role == "user":
+            if target.id == admin.id:
+                raise validation_error("Cannot remove your own admin role.")
             admin_count = (
                 db.query(func.count(User.id))
                 .filter(User.role == "admin", User.status == "active")
@@ -305,6 +310,10 @@ def get_queue_stats(
     has claimed yet -- so a non-zero lag does not by itself rule stranding
     out.
 
+    The top-level stream fields are the single-run queue's (unchanged since
+    #701); ``queues`` repeats them per queue, adding the batch stream and its
+    dead-letter count (#1114).
+
     Plain ``def``: both ``queue_db_view`` (sync Session) and ``run_queue``'s
     Valkey calls (sync redis-py) are blocking, so FastAPI runs this in the
     threadpool instead of stalling the event loop (#701 admin_routes.py
@@ -318,7 +327,7 @@ def get_queue_stats(
     if not url:
         return QueueStatsResponse(enabled=True, db=db_view, error="valkey_not_configured")
     try:
-        stats = run_queue.stats()
+        per_queue = {queue.name: run_queue.stats(queue) for queue in run_queue.QUEUES_BY_NAME.values()}
     except redis.exceptions.RedisError as e:
         # The endpoint that diagnoses a stuck queue must still answer when
         # Valkey itself is the problem. The exception's own text can carry a
@@ -326,7 +335,10 @@ def get_queue_stats(
         # only to the log, never the response.
         logger.warning("Queue stats unavailable: %s: %s", type(e).__name__, e)
         return QueueStatsResponse(enabled=True, db=db_view, error="valkey_unavailable")
-    return QueueStatsResponse(enabled=True, db=db_view, **stats)
+    return QueueStatsResponse(
+        enabled=True, db=db_view, **per_queue[run_queue.SINGLE.name],
+        queues={name: QueueStreamStats(**stats) for name, stats in per_queue.items()},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -490,6 +502,8 @@ def compute_run_score(
     result = compute_and_cache_score(run_id)
     if not result:
         raise not_found("No scorable outputs available for this run")
+
+    persist_score_columns(db, run_id, result)
 
     return QualityScoreResult(
         run_id=run_id,

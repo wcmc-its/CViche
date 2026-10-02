@@ -19,7 +19,12 @@ Two fields can be enriched, and each is attributed separately:
 
 `dates_attended` arrives in three different shapes from field extraction (flat
 `dates_attended_start_date`, a nested dict, or plain `start_date`), and all
-three are tried before the range is formatted.
+three are tried before the range is formatted. When none yields a range, a
+STRING `dates_attended` is written as stage 4 gave it (#1187).
+
+The degree cell is "Degree, field of study" as the template asks: `major` /
+`field_of_study`, then stage 4's `discipline`, each only when the text so far
+does not already hold it (#1187).
 
 `_degree_is_in_progress` and its `_IN_PROGRESS_DEGREE_PATTERN` vocabulary are
 here because a year in the "Year Awarded" column asserts the degree was
@@ -74,6 +79,22 @@ from ..sorting import sort_entries_reverse_chronological
 logger = logging.getLogger(__name__)
 
 
+_NON_ALNUM_RUN = re.compile(r'[^a-z0-9]+')
+
+
+def _words(text: str) -> str:
+    """`text` lowercased with every run of punctuation/space as one space, so
+    "Ph.D., Neuro-science" and "ph d neuro science" compare equal."""
+    return _NON_ALNUM_RUN.sub(' ', text.lower()).strip()
+
+
+def _already_in(part: str, whole: str) -> bool:
+    """Whether `part` appears in `whole` as whole words, case- and
+    punctuation-insensitively."""
+    needle = _words(part)
+    return bool(needle) and f' {needle} ' in f' {_words(whole)} '
+
+
 def _field_text(value: object) -> str:
     """Coerce one raw stage-4 education field to plain text.
 
@@ -89,6 +110,29 @@ def _field_text(value: object) -> str:
     if isinstance(value, str):
         return value
     return str(value)
+
+
+def _with_discipline(degree: str, fields: Mapping) -> str:
+    """The degree cell with stage 4's `discipline` appended ("PhD, Neuroscience"),
+    which the WCM template's "Degree, include field of study" column asks for
+    (#1187). Never repeated when the degree text already holds it."""
+    discipline = _field_text(fields.get('discipline')).strip()
+    if not discipline or _already_in(discipline, degree):
+        return degree
+    return f"{degree}, {discipline}" if degree else discipline
+
+
+def _string_dates_attended(fields: Mapping, year_awarded: str) -> str:
+    """A string `dates_attended`, formatted like every other B1 Dates cell
+    (mm/yyyy), for the Dates cell when no start/end range could be built
+    (#1187). Empty when it only repeats the Year Awarded cell, so the cell is
+    filled only if it adds information. Not run through format_date_range: a
+    bare "2010" must not become an invented "2010-Present"."""
+    value = fields.get('dates_attended')
+    if not isinstance(value, str) or not value.strip():
+        return ''
+    text = format_date_for_section(value.strip(), 'B1')
+    return '' if text.strip() == str(year_awarded or '').strip() else text
 
 
 class EducationSection:
@@ -190,6 +234,10 @@ class EducationSection:
             if not degree and not institution:
                 continue
 
+            # After the skip test above: a discipline alone must not create a
+            # row that was skipped before.
+            degree = _with_discipline(degree, fields)
+
             # Location from enrichment
             location, location_is_enriched = _get_institution_location(entry)
             location = _field_text(location)
@@ -212,7 +260,6 @@ class EducationSection:
                 dates = format_date_range(start, end, 'B1')
             else:
                 dates = ''
-
             # Year awarded - try to extract from raw text if missing
             year_awarded = fields.get('year_awarded') or fields.get('year') or end or ''
             year_is_enriched = False
@@ -227,6 +274,9 @@ class EducationSection:
             # Format year_awarded - B1 uses mm/yyyy but year awarded column is just yyyy
             if year_awarded:
                 year_awarded = format_date_for_section(year_awarded, 'H')  # H uses yyyy format
+
+            if not dates:
+                dates = _string_dates_attended(fields, year_awarded)
 
             # A degree that is still in progress ("expected May 2026", a future
             # award year, etc.) must NOT be presented as a conferred year. Mark it

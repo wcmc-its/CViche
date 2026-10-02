@@ -266,3 +266,202 @@ def test_221_recovery_keeps_fused_licence_lines_with_nine_letter_words():
     assert "665533" in joined, "the sibling licence line was lost with it"
     assert not any("AB1234567" in t for t in texts), \
         "the DEA number leaked into the document"
+
+
+# ---------------------------------------------------------------------------
+# 5. #1217: two shapes the label/shape classifier let a DEA number through.
+#
+#    (a) the row is labelled with the agency's FULL NAME, so no "DEA" token
+#        exists and the stated "state" turns the shape tiebreak off;
+#    (b) the reader fused a DEA number into ANOTHER credential's number cell,
+#        so the entry that holds it is a perfectly good licence.
+# ---------------------------------------------------------------------------
+
+_AGENCY = "Drug Enforcement Administration"
+
+
+def _agency_row_entry(number="AB1234567"):
+    return {
+        "taxonomy_code": "F1",
+        "text": f"{_AGENCY}   {number}   2011 - Present",
+        "extracted_fields": {"state_country": _AGENCY, "license_number": number,
+                             "issue_date": "2011", "expiration_date": "present"},
+    }
+
+
+def _fused_number_entry(number="#12345A, #12345B, 1234567890, #AB1234567"):
+    return {
+        "taxonomy_code": "F1",
+        "text": "Licensed Physician, Example State | #12345A\n #12345B\n 1234567890\n"
+                " #AB1234567 | 2005-Present",
+        "extracted_fields": {"state_country": "Example State",
+                             "license_number": number,
+                             "issue_date": "2005", "expiration_date": "present"},
+    }
+
+
+def _all_cell_text(gen):
+    return "\n".join(c.text for t in gen.doc.tables for r in t.rows for c in r.cells)
+
+
+def test_agency_named_row_is_withheld_not_rendered_as_a_licence():
+    state_licence = {"taxonomy_code": "F1", "text": "State of Example 99887",
+                     "extracted_fields": {"state_country": "State of Example",
+                                          "license_number": "99887"}}
+    result = _resolve_licensure([_agency_row_entry(), state_licence])
+    assert result.dea_withheld is True
+    assert result.identifiers.dea is None
+    assert [r.number for r in result.licenses] == ["99887"]
+
+
+def test_agency_named_row_render_has_no_number_and_records_the_notice():
+    gen = _generator()
+    gen._fill_licensure([_agency_row_entry()])
+    assert "AB1234567" not in _all_cell_text(gen)
+    assert _AGENCY not in _all_cell_text(gen)
+    assert [i.category for i in gen._pii_result.withheld] == [CAT_DEA]
+
+
+def test_a_dea_token_fused_into_a_licence_number_cell_is_cut_out_and_withheld():
+    entry = _fused_number_entry()
+    result = _resolve_licensure([entry])
+    assert result.dea_withheld is True
+    assert [(r.state, r.number) for r in result.licenses] == [
+        ("Example State", "#12345A, #12345B, 1234567890")]
+    # the #221 recovery pass re-reads this text: the DEA line is gone from it
+    assert "AB1234567" not in entry["text"]
+
+
+def test_fused_dea_token_is_cut_wherever_it_sits_in_the_cell():
+    for cell, expected in (
+        ("AB1234567, 12345A, 67890B", "12345A, 67890B"),
+        ("12345A, AB1234567, 67890B", "12345A, 67890B"),
+        ("12345A 67890B AB1234567", "12345A 67890B"),
+        ("12345A; #AB1234567", "12345A"),
+    ):
+        result = _resolve_licensure([_fused_number_entry(cell)])
+        assert result.dea_withheld is True, cell
+        assert result.licenses[0].number == expected, cell
+
+
+def test_fused_dea_token_render_has_no_number_and_records_the_notice():
+    gen = _generator()
+    gen._fill_licensure([_fused_number_entry()])
+    text = _all_cell_text(gen)
+    assert "AB1234567" not in text
+    assert "#12345A, #12345B, 1234567890" in text
+    assert [i.category for i in gen._pii_result.withheld] == [CAT_DEA]
+
+
+def test_221_recovery_does_not_reinsert_a_dea_line_fused_into_a_licence_entry():
+    """The entry classifies as a LICENCE, so nothing blanks its text unless
+    the fused-token branch does: the recovery pass re-reads `entry['text']`
+    and would put this record-shaped DEA line back as a verbatim bullet."""
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "F1",
+        "text": "\n".join([
+            "State of Example | License #12345A | Issued 05/2016 | Expires 05/2026",
+            "Controlled Substance Registration | #AB1234567 | Issued 05/2016 | Expires 05/2026",
+        ]),
+        "extracted_fields": {"state_country": "State of Example",
+                             "license_number": "#12345A, #AB1234567",
+                             "issue_date": "2016", "expiration_date": "2026"},
+    }
+    gen._fill_licensure([entry])
+    gen._recover_unrendered_records({"F1": [entry]})
+    full = "\n".join([p.text for p in gen.doc.paragraphs] + [_all_cell_text(gen)])
+    assert "AB1234567" not in full, "the fused DEA number leaked into the document"
+
+
+def test_a_lone_dea_shaped_number_beside_a_stated_state_is_still_a_licence():
+    """The #573 guard is kept: shape alone cannot tell a licence number from
+    a DEA number when the row names a jurisdiction and holds one token."""
+    entry = _fused_number_entry("AB1234567")
+    result = _resolve_licensure([entry])
+    assert result.dea_withheld is False
+    assert result.licenses[0].number == "AB1234567"
+
+
+def test_a_multi_token_number_cell_without_a_dea_token_is_untouched():
+    entry = _fused_number_entry("12345A, B")
+    text_before = entry["text"]
+    result = _resolve_licensure([entry])
+    assert result.dea_withheld is False
+    assert result.licenses[0].number == "12345A, B"
+    assert entry["text"] == text_before
+
+
+def test_a_nine_letter_word_in_a_number_cell_is_not_cut():
+    result = _resolve_licensure([_fused_number_entry("Wisconsin, 12345A")])
+    assert result.dea_withheld is False
+    assert result.licenses[0].number == "Wisconsin, 12345A"
+
+
+# ---------------------------------------------------------------------------
+# 6. #1217, the NPI slot: the fused-cell cut must cover an NPI-labelled entry
+#    too. If the stacked credential column lists the NPI first, the NPI entry
+#    is the one that receives every number, DEA included.
+# ---------------------------------------------------------------------------
+
+def _npi_entry(number, *, labelled_by="text"):
+    entry = {
+        "taxonomy_code": "F1",
+        "text": f"NPI | {number}",
+        "extracted_fields": {"license_number": number},
+    }
+    if labelled_by == "type":
+        entry["text"] = f"Identifier | {number}"
+        entry["extracted_fields"]["license_type"] = "NPI"
+    return entry
+
+
+def _dea_npi_table_cells(gen):
+    for table in gen.doc.tables:
+        if any("dea number" in r.cells[0].text.lower() for r in table.rows):
+            return {r.cells[0].text.lower(): r.cells[1].text for r in table.rows}
+    raise AssertionError("template's DEA/NPI table not found")
+
+
+def test_a_dea_token_fused_into_an_npi_number_cell_is_cut_out_and_withheld():
+    for labelled_by in ("text", "type"):
+        entry = _npi_entry("1234567890, AB1234567", labelled_by=labelled_by)
+        result = _resolve_licensure([entry])
+        assert result.identifiers.npi == "1234567890", labelled_by
+        assert result.dea_withheld is True, labelled_by
+        assert result.licenses == ()
+        assert "AB1234567" not in entry["text"], labelled_by
+
+
+def test_a_lone_dea_shaped_number_in_an_npi_entry_is_not_an_npi():
+    """Unlike a licence cell, one token is enough here: an NPI is ten or
+    eleven digits, so a DEA-shaped value is not the NPI wherever it sits."""
+    entry = _npi_entry("AB1234567")
+    result = _resolve_licensure([entry])
+    assert not result.identifiers.npi
+    assert result.dea_withheld is True
+    assert "AB1234567" not in entry["text"]
+
+
+def test_an_npi_entry_that_holds_only_an_npi_is_untouched():
+    entry = _npi_entry("1234567890")
+    text_before = entry["text"]
+    result = _resolve_licensure([entry])
+    assert result.identifiers.npi == "1234567890"
+    assert result.dea_withheld is False
+    assert entry["text"] == text_before
+
+
+def test_a_fused_npi_cell_render_has_no_dea_number_and_records_the_notice():
+    gen = _generator()
+    gen._fill_licensure([_npi_entry("1234567890, AB1234567")])
+    assert "AB1234567" not in _all_cell_text(gen)
+    assert _dea_npi_table_cells(gen)["npi number: (optional)"] == "1234567890"
+    assert [i.category for i in gen._pii_result.withheld] == [CAT_DEA]
+
+
+def test_a_clean_npi_entry_still_fills_the_slot_in_either_order_beside_a_cut_one():
+    for order in (("AB1234567", "1234567890"), ("1234567890", "AB1234567")):
+        result = _resolve_licensure([_npi_entry(n) for n in order])
+        assert result.identifiers.npi == "1234567890", order
+        assert result.dea_withheld is True, order

@@ -12,6 +12,8 @@ import {
 import type { SystemConfig } from '../types'
 import { getAdminConfig, updateAdminConfig } from '../api/admin'
 import { adminRoutes } from '../api/routes'
+import { isWcmEmail } from './adminUserRules'
+import { limitsChanged } from './adminConfigState'
 
 export default function AdminConfig() {
   const [config, setConfig] = useState<SystemConfig | null>(null)
@@ -182,6 +184,14 @@ export default function AdminConfig() {
               >
                 <div className="flex items-center gap-2">
                   <span className="text-sm text-gray-700">{email}</span>
+                  {!isWcmEmail(email) && (
+                    <span
+                      title="This address is not on a WCM domain"
+                      className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-1.5 py-px text-[11px] font-medium text-amber-700"
+                    >
+                      Non-WCM
+                    </span>
+                  )}
                   {isAdmin && (
                     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-100 text-purple-700">
                       <Shield className="w-2.5 h-2.5" aria-hidden="true" />
@@ -230,12 +240,12 @@ export default function AdminConfig() {
             placeholder="user@med.cornell.edu"
             value={newUserEmail}
             onChange={(e) => setNewUserEmail(e.target.value)}
-            className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none"
+            className="flex-1 text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
           />
           <button
             type="submit"
             disabled={!newUserEmail.trim() || saving}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500"
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
           >
             {saving ? (
               <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
@@ -264,7 +274,7 @@ export default function AdminConfig() {
               min="1"
               value={rateLimitDaily}
               onChange={(e) => setRateLimitDaily(e.target.value)}
-              className="w-24 text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none"
+              className="w-24 text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
             />
           </div>
           <div>
@@ -277,21 +287,23 @@ export default function AdminConfig() {
               min="1"
               value={rateLimitMonthly}
               onChange={(e) => setRateLimitMonthly(e.target.value)}
-              className="w-24 text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none"
+              className="w-24 text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
             />
           </div>
-          <button
-            onClick={saveRateLimits}
-            disabled={saving}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500"
-          >
-            {saving ? (
-              <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-            ) : (
-              <Save className="w-4 h-4" aria-hidden="true" />
-            )}
-            Save
-          </button>
+          {limitsChanged(config, rateLimitDaily, rateLimitMonthly) && (
+            <button
+              onClick={saveRateLimits}
+              disabled={saving}
+              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
+            >
+              {saving ? (
+                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+              ) : (
+                <Save className="w-4 h-4" aria-hidden="true" />
+              )}
+              Save
+            </button>
+          )}
         </div>
       </section>
 
@@ -311,13 +323,13 @@ export default function AdminConfig() {
               type="text"
               value={consentVersion}
               onChange={(e) => setConsentVersion(e.target.value)}
-              className="w-32 text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none"
+              className="w-32 text-sm border border-gray-300 rounded-lg px-3 py-2 focus-visible:ring-1 focus-visible:ring-primary-500 focus:border-primary-500 focus-visible:outline-none"
             />
           </div>
           <button
             onClick={saveConsentVersion}
             disabled={saving || consentVersion === config.consent_version}
-            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500"
+            className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded-lg hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
           >
             {saving ? (
               <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
@@ -340,7 +352,7 @@ export default function AdminConfig() {
             <button
               key={type}
               onClick={() => handleExport(type)}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors focus:outline-none focus:ring-2 focus:ring-primary-500"
+              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500"
             >
               <Download className="w-4 h-4" aria-hidden="true" />
               {type.charAt(0).toUpperCase() + type.slice(1)}

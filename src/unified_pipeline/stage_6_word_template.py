@@ -57,6 +57,7 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm_client import LlmUsage
 from unified_pipeline.llm.retry import LLMOutageError
 from unified_pipeline.core.render_check import entry_fragments, entry_lines
 # Every name below is re-exported from this module by being imported here: it is
@@ -145,6 +146,7 @@ from unified_pipeline.stage6.dedup import (  # noqa: F401
     _entry_title_words,
     _significant_words,
     deduplicate_entries,
+    recovered_row_already_rendered,
 )
 from unified_pipeline.stage6.render_check import (  # noqa: F401
     RECORD_DATE_LINE_MIN_CHARS,
@@ -169,7 +171,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     normalize_retired_code,
     segment_already_rendered,
 )
-from unified_pipeline.stage4.schemas import FIELD_SCHEMAS
+from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
 from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
@@ -666,7 +668,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     def __init__(self, template_path: str = None, verbose: bool = True,
                  emit_track_changes: bool = True, emit_comments: bool = False,
                  strip_template_instructions: bool = True,
-                 recover_unrendered_records: bool = True):
+                 recover_unrendered_records: bool = True,
+                 llm_usage: LlmUsage | None = None):
+        # Priced result of every call_llm this render makes (geographic scope,
+        # appendix reclassification). The caller passes its own to read the
+        # total back; run_stage6 returns a path, so there is no other channel
+        # for it (#1177).
+        self.llm_usage = llm_usage if llm_usage is not None else LlmUsage()
         # Find a valid template path
         self.template_path = self._find_template(template_path)
         self.verbose = verbose
@@ -888,6 +896,20 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     # uniquely identifies the box and nothing else.
     _INSTRUCTION_BOX_SIGNATURE = "when preparing the wcm cv template"
 
+    def _is_instruction_box_table(self, tbl: Table) -> bool:
+        """True when `tbl` is the WCM template's gray "instruction box" —
+        matched by its distinctive header text rather than by index, so a
+        real content table is never mistaken for it.
+
+        Shared by `_remove_instruction_box` (deletes it) and
+        `_rendered_output_lines` (round 4, A5IZ6Q: can be asked to skip it
+        entirely rather than reading its boilerplate as rendered content).
+        """
+        text = " ".join(
+            cell.text for row in tbl.rows for cell in row.cells
+        ).lower()
+        return self._INSTRUCTION_BOX_SIGNATURE in text
+
     def _remove_instruction_box(self) -> None:
         """Remove the leading gray "instruction box" table(s) from self.doc.
 
@@ -900,10 +922,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         """
         removed = 0
         for tbl in list(self.doc.tables):
-            text = " ".join(
-                cell.text for row in tbl.rows for cell in row.cells
-            ).lower()
-            if self._INSTRUCTION_BOX_SIGNATURE in text:
+            if self._is_instruction_box_table(tbl):
                 tbl._element.getparent().remove(tbl._element)
                 removed += 1
         if removed and self.verbose:
@@ -1014,7 +1033,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         """
         entries_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
         mismatch_corrections = 0
-        entries = fan_out_multi_record_entries(entries, FIELD_SCHEMAS)
+        entries = fan_out_multi_record_entries(
+            entries, FIELD_SCHEMAS, warnings=self._section_failures,
+            records_key=STAGE4_RECORDS_KEY)
         for entry in entries:
             code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code)
@@ -1089,6 +1110,62 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             section_names=TAXONOMY_TO_SECTION)
         self._appendix_withheld_entry_indexes = set()
 
+    def _drop_recovered_row_duplicates(
+        self, entries: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Filter a structurally recovered table row (#420) out of `entries`
+        when every non-trivial value cell of its own raw text is already
+        printed somewhere in the document ALREADY rendered (A5IZ6Q).
+
+        Split out of `generate()` (#3.2a) purely so the lookup this needs
+        doesn't grow that function further -- the filtering itself is new
+        with this method, not a relocation.
+
+        `recover_unclaimed_table_rows` (stage_2_entry_extraction.py) emits
+        one entry per table row no delimiter claimed, independently of
+        whatever delimiter DID claim the surrounding table -- so a wide,
+        multi-row table delimiter (one grant's whole label/value block) and
+        the individual rows inside it can both survive as separate entries
+        under different taxonomy codes, and each single-field recovered row
+        is otherwise a verbatim duplicate of content the reader already saw.
+        `deduplicate_entries` never sees the pair (parent and row land in
+        different taxonomy-code groups) and `segment_already_rendered` is
+        tuned for a segment against its OWN entry's `extracted_fields`, not
+        an unrelated entry's raw text -- see `recovered_row_already_rendered`
+        (`stage6/dedup.py`) for the actual check.
+
+        Round 3 (simplify, per-parent scoping removed): earlier rounds first
+        scoped a row to the one parent entry its raw text came from, then
+        confirmed that SAME parent's own rendered block. Content loss was
+        still reachable through it -- two grants sharing an agency could
+        resolve to the same rendered block, so a grant whose own table
+        rendered nothing for a field could still lose its recovered row to
+        a same-agency sibling's render. `recovered_row_already_rendered` is
+        provenance-blind by design: it asks only whether the row's own value
+        is printed anywhere in the document already rendered (never the
+        Appendix, not yet written), which is the actual guarantee this drop
+        needs and cannot lose content the reader hasn't already seen it.
+
+        Round 4 (content-loss fix): this call excludes the WCM template's own
+        gray instruction box from that "already rendered" haystack, which
+        `generate()` deletes only much later (after every content-search fill
+        has run -- see `_remove_instruction_box`'s call site). Before this
+        fix, a recovered row whose value happened to match the box's own
+        prompt text (it literally reads "...enter 'Not Applicable' or
+        'N/A'"... "'Local' refers to..." ... "04/2022") was vouched for by
+        the box, dropped here, and then the box itself was deleted before
+        save -- the value then appeared nowhere in the output. Excluding the
+        box can only ever make this drop MORE conservative (fewer false
+        "already rendered" verdicts), never less, so it cannot itself cause
+        content loss. `_recover_unrendered_records` (the other
+        `_rendered_output_lines` caller, below) does not opt into this
+        exclusion: its own box-text-vouching exposure predates this branch
+        entirely and is unaudited, out-of-scope blast radius for this fix.
+        """
+        rendered_lines = self._rendered_output_lines(exclude_instruction_box=True)
+        return [e for e in entries
+                if not recovered_row_already_rendered(e, rendered_lines)]
+
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None, discover_original_doc: bool = True) -> str:
         """
@@ -1132,9 +1209,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if primary:
                 logger.info(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
-        # Original-document discovery and the Stage 4.5 research-summary load
-        # are lifted out to their own helpers (#820 R3, pure moves -- §3.2):
-        # identical bodies, no behaviour change.
+        # Original-document discovery and the Stage 4.5 research-summary load are
+        # lifted out to their own helpers (#820 R3, pure moves -- §3.2): identical bodies, no behaviour change.
         original_doc_path = self._resolve_original_doc_path(
             document_uid, original_doc_path, discover_original_doc)
         research_summary_data = self._load_research_summary_data(
@@ -1228,6 +1304,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         for code, entries in entries_by_code.items():
             if code not in mapped_codes:
                 unmapped_entries.extend(e for e in entries if id(e) not in consumed_ids)
+        unmapped_entries = self._drop_recovered_row_duplicates(unmapped_entries)  # #420/A5IZ6Q
 
         # A stays in mapped_codes, but NOT because its entries are all consumed
         # -- that was the old assumption here and the corpus refutes it (145 of
@@ -1545,6 +1622,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 temperature=0.0,
                 response_format={"type": "json_object"}
             )
+            self.llm_usage.add(llm_result)
 
             result = json.loads(llm_result["content"])
             scope = result.get('scope', 'National')
@@ -1680,12 +1758,17 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             'D3': 'Other Professional Positions',
             'F1': 'Licensure',
             'H': 'HONORS',
-            # Teaching (K codes) - map to specific teaching subsections
+            # Teaching (K codes) - map to specific teaching subsections. Each
+            # string is a substring of the template's own subsection heading
+            # ("Administrative teaching (leadership role ...)", "Continuing
+            # education and professional education as teacher (...)", "Other
+            # education/outreach activities (...)"); a string that matches no
+            # heading sends the segment to the Appendix (#1225).
             'K1': 'Didactic Teaching',
             'K2': 'Clinical Teaching',
-            'K3': 'Mentoring',  # or could go to MENTORING section
-            'K4': 'Curriculum Development',
-            'K5': 'Other Teaching',
+            'K3': 'Administrative teaching',
+            'K4': 'Continuing education',
+            'K5': 'Other education/outreach',
             # Clinical (L codes) - map to clinical subsections
             'L1': 'Clinical Practice',
             'L2': 'Clinical Innovations',
@@ -2469,9 +2552,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         taxonomy_hint = """
 K1: Didactic Teaching (courses, lectures)
 K2: Clinical Teaching (bedside, rounds)
-K3: Mentoring/Advising
-K4: Curriculum Development
-K5: Other Teaching Activities
+K3: Educational Program Leadership (course, residency or fellowship director)
+K4: Continuing Medical Education (CME) & Professional Education
+K5: Community Education or Patient Outreach
 L1: Clinical Practice activities
 L2: Clinical Innovations
 L3: Clinical/Administrative Leadership
@@ -2531,6 +2614,7 @@ Now analyze the text above:"""
                 # trailing records (#209); the 16K DEFAULT_MAX_TOKENS floor still
                 # bounds a runaway. Never add a tighter cap back.
             )
+            self.llm_usage.add(llm_result)
 
             return parse_reclassified_segments(
                 llm_result["content"], original_code)
@@ -2756,7 +2840,7 @@ Now analyze the text above:"""
 
         return [code for _, code, _ in remaining]
 
-    def _rendered_output_lines(self) -> List[str]:
+    def _rendered_output_lines(self, *, exclude_instruction_box: bool = False) -> list[str]:
         """Every rendered text line of the in-memory document: body paragraphs
         plus table cells. Two render-time divergences from run_doctor's
         read_docx_blocks (which walks only top-level tables, cell by cell):
@@ -2766,15 +2850,32 @@ Now analyze the text above:"""
         together the way one source line does. Extra lines only ever ADD
         matches — fewer false "absent" verdicts, never more; the offline
         doctor may still WARN on rows this pass correctly judged rendered
-        (reconciling lint 8's semantics is PR #223 scope)."""
-        lines: List[str] = []
+        (reconciling lint 8's semantics is PR #223 scope).
 
-        def add(text: str):
+        `exclude_instruction_box`: skip any table `_is_instruction_box_table`
+        identifies, rather than reading its boilerplate as rendered content.
+        Callers that run before `_remove_instruction_box` (generate() strips
+        the box only after every content-search-based fill, so its own text
+        is still in `self.doc` at that point -- see that call site's
+        comment) and then treat "already rendered" as license to DROP
+        content must opt in, or the box's own prompt text (e.g. "...enter
+        'Not Applicable' or 'N/A'"..."'Local' refers to..."..."04/2022") can
+        vouch for a real value that merely happens to match it, the value
+        gets dropped, and the box is then deleted before save -- the value
+        then appears nowhere in the output (round 4, A5IZ6Q). Default off:
+        a caller that only ADDS content on an "unrendered" verdict
+        (`_recover_unrendered_records`) loses nothing by leaving box text in
+        the haystack, and changing that caller's matching behaviour is a
+        separate, unaudited concern outside this flag's purpose.
+        """
+        lines: list[str] = []
+
+        def add(text: str) -> None:
             for ln in str(text or '').split('\n'):
                 if ln.strip():
                     lines.append(ln)
 
-        def walk_table(tbl):
+        def walk_table(tbl: Table) -> None:
             for row in tbl.rows:
                 cell_texts = []
                 for cell in row.cells:
@@ -2789,6 +2890,8 @@ Now analyze the text above:"""
         for para in self.doc.paragraphs:
             add(para.text)
         for tbl in self.doc.tables:
+            if exclude_instruction_box and self._is_instruction_box_table(tbl):
+                continue
             walk_table(tbl)
         return lines
 
@@ -3573,7 +3676,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
                strip_template_instructions: bool = True,
                recover_unrendered_records: bool = True,
                original_doc_path: str | None = None,
-               discover_original_doc: bool = True) -> str:
+               discover_original_doc: bool = True,
+               llm_usage: LlmUsage | None = None) -> str:
     r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -3643,6 +3747,8 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         discover_original_doc: False renders with no source document when
             original_doc_path is None, skipping that guess (#732). Only
             scripts/render_gate.py passes it; default True.
+        llm_usage: Optional LlmUsage the render's call_llm results are added
+            to, so a driver can report stage 6's cost (#1177).
 
     Returns:
         Path to generated document
@@ -3653,6 +3759,7 @@ def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = 
         emit_comments=emit_comments,
         strip_template_instructions=strip_template_instructions,
         recover_unrendered_records=recover_unrendered_records,
+        llm_usage=llm_usage,
     )
     return generator.generate(input_path, output_path, original_doc_path=original_doc_path,
                               discover_original_doc=discover_original_doc)

@@ -16,8 +16,11 @@ Self-contained: no DB, no LLM calls. Loads the bundled WCM template like
 test_stage6_funding_appendix.py does.
 """
 
+import ast
+import inspect
 import json
 import sys
+import textwrap
 import unicodedata
 from pathlib import Path
 
@@ -682,6 +685,114 @@ def test_reconsider_insert_failure_falls_back_to_appendix(monkeypatch):
     assert any("Custodian of Improbable Ledgers" in t for t in texts)
 
 
+# ------------------------------------- K3/K4/K5 teaching anchors (#1225)
+
+# The template's own K subsection headings, written out here rather than read
+# back from the map under test: `_get_wcm_section_header` once returned strings
+# that were substrings of no heading ("Curriculum Development", "Other
+# Teaching"), so K4/K5 segments fell to the Appendix, and K3's "Mentoring"
+# matched the MENTORING section instead of "Administrative teaching".
+_K_SUBSECTION_HEADINGS = {
+    "K1": "Didactic teaching",
+    "K2": "Clinical teaching",
+    "K3": "Administrative teaching",
+    "K4": "Continuing education and professional education",
+    "K5": "Other education/outreach activities",
+}
+
+
+def _heading_above(gen, text):
+    """Text of the nearest bold paragraph above the first paragraph holding
+    `text` -- the subsection heading that bullet sits under."""
+    paras = gen.doc.paragraphs
+    idx = next(i for i, p in enumerate(paras) if text in p.text)
+    for para in reversed(paras[:idx]):
+        if para.text.strip() and para.runs and para.runs[0].bold:
+            return para.text.strip()
+    return None
+
+
+def _section_header_map_codes():
+    """Every code `_get_wcm_section_header` maps explicitly. The map is a local
+    of that method, so read its keys from the source instead of copying them
+    into the test, where the copy could drift from the map."""
+    tree = ast.parse(textwrap.dedent(
+        inspect.getsource(WCMTemplateGenerator._get_wcm_section_header)))
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == "subsection_map"
+                        for t in node.targets)):
+            return list(ast.literal_eval(node.value))
+    raise AssertionError("subsection_map not found in _get_wcm_section_header")
+
+
+@pytest.mark.parametrize("code", sorted(_K_SUBSECTION_HEADINGS))
+def test_reconsidered_k_segment_lands_under_its_own_template_subsection(code):
+    gen = _generator()
+    segment = f"Synthetic {code} teaching segment, Example University, 2015"
+
+    assert gen._insert_reconsidered_segment(segment, code) is True
+
+    assert _heading_above(gen, segment).startswith(_K_SUBSECTION_HEADINGS[code])
+
+
+def test_every_section_header_map_code_anchors_in_the_blank_template():
+    codes = _section_header_map_codes()
+    assert {"K3", "K4", "K5"} <= set(codes), "map harvest is vacuous"
+    gen = _generator()
+
+    unanchored = [c for c in codes
+                  if not gen._insert_reconsidered_segment(
+                      f"Synthetic {c} segment, Example University", c)]
+
+    assert unanchored == []
+
+
+@pytest.mark.parametrize("code", ["K3", "K4", "K5"])
+def test_table_cell_overflow_for_k3_k4_k5_stays_in_the_teaching_section(code):
+    """The third `_get_wcm_section_header` caller: a K entry whose paragraph
+    sits in a table cell is inserted at the end of the teaching section, and
+    queued for the Appendix only when no header resolves."""
+    gen = _generator()
+    cell_para = gen.doc.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0]
+    text = f"Synthetic {code} overflow prose, Example University, 2015"
+    gen._overflow_entries = [(
+        {"taxonomy_code": code, "text": text,
+         "extraction_coverage": {"extraction_coverage_percent": 12}},
+        cell_para, code)]
+
+    gen._route_overflow_entries()
+
+    assert gen._appendix_pending == []
+    assert gen.stats["overflow_bullets_added"] == 1
+    texts = [p.text for p in gen.doc.paragraphs]
+    start = next(i for i, t in enumerate(texts) if t.strip() == "EDUCATIONAL CONTRIBUTIONS")
+    end = next(i for i, t in enumerate(texts) if t.startswith("CLINICAL PRACTICE, INNOVATION"))
+    assert start < texts.index(text) < end
+
+
+def test_reconsider_prompt_names_k3_k4_k5_by_their_taxonomy_labels(monkeypatch):
+    """The prompt's code hint was stale in the same way as the anchors (K3
+    "Mentoring/Advising", K4 "Curriculum Development"), so the model coded
+    segments to meanings the taxonomy does not give those codes (#1225)."""
+    prompts = []
+
+    def fake_llm(*args, **kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return {**_PRICED_LLM_RESULT, "content": "D1: Synthetic position"}
+
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm", fake_llm)
+    taxonomy = json.loads(
+        (_SRC / "unified_pipeline" / "core" / "taxonomy_v7.json").read_text())
+    labels = {c["code"]: c["label"] for c in taxonomy["codes"]}
+
+    _generator()._reclassify_entry_segments("Synthetic position, Example University", "D1")
+
+    hint_lines = prompts[0].splitlines()
+    for code in ("K3", "K4", "K5"):
+        assert any(line.startswith(f"{code}: {labels[code]}") for line in hint_lines)
+
+
 def test_option_off_restores_old_behavior():
     gen = _generator(recover_unrendered_records=False)
     before = len(gen.doc.paragraphs)
@@ -830,6 +941,55 @@ def test_stage6_llm_outage_propagates_but_other_errors_default(monkeypatch, call
 
     monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm", blip)
     assert run() == ("National" if call == "geographic_scope" else None)
+
+
+_PRICED_LLM_RESULT = {"content": '{"scope": "National"}', "cost": 0.125,
+                      "prompt_tokens": 11, "completion_tokens": 5,
+                      "cache_read_tokens": 2, "cache_write_tokens": 1}
+
+
+@pytest.mark.parametrize("call", ["geographic_scope", "reclassify"])
+def test_stage6_llm_calls_are_added_to_the_generators_usage(monkeypatch, call):
+    """#1177: stage 6 reported no cost at all; both of its call_llm sites now
+    feed the generator's LlmUsage."""
+    gen = _generator()
+    gen.cv_owner_location = {"primary_location": {"institution": "Example Medical College",
+                                                  "city": "Springfield", "state": "ZZ"}}
+    entry = {"text": "Visiting Lecturer", "extracted_fields": {"organization": "Example Institute"}}
+    monkeypatch.setattr("unified_pipeline.stage_6_word_template.call_llm",
+                        lambda *args, **kwargs: dict(_PRICED_LLM_RESULT))
+
+    if call == "geographic_scope":
+        gen._classify_geographic_scope(entry)
+    else:
+        gen._reclassify_entry_segments("Visiting Lecturer, Example Institute, 2010", "P")
+
+    assert gen.llm_usage.cost == pytest.approx(0.125)
+    assert gen.llm_usage.prompt_tokens == 11
+    assert gen.llm_usage.completion_tokens == 5
+    assert gen.llm_usage.cache_read_tokens == 2
+    assert gen.llm_usage.cache_write_tokens == 1
+
+
+def test_run_stage6_hands_the_callers_usage_to_the_generator(monkeypatch):
+    from unified_pipeline import stage_6_word_template as stage6
+    from unified_pipeline.llm_client import LlmUsage
+
+    seen = {}
+
+    class _FakeGenerator:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+        def generate(self, *args, **kwargs):
+            return "unused.docx"
+
+    monkeypatch.setattr(stage6, "WCMTemplateGenerator", _FakeGenerator)
+    usage = LlmUsage()
+
+    stage6.run_stage6("unused.json", llm_usage=usage)
+
+    assert seen["llm_usage"] is usage
 
 
 def test_remaining_appendix_intro_is_the_shared_accurate_banner():

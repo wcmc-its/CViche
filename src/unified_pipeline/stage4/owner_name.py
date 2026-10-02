@@ -2,7 +2,7 @@
 
 Moved verbatim from `stage_4_field_extractor.py` (#498), which re-exports every
 name here. `extract_cv_owner_name` carries the uid surname fallback
-(`fallback_from_uid`, #457/#464) unchanged.
+(`fallback_from_uid`, #457/#464); it refuses a run id (`core.run_id`).
 """
 
 import json
@@ -16,7 +16,8 @@ from docx.opc.exceptions import PackageNotFoundError
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from unified_pipeline.core.docx_structure_extractor import extract_owner_side_channel
-from unified_pipeline.llm_client import call_llm
+from unified_pipeline.core.run_id import is_run_id
+from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.llm.retry import RETRYABLE_ERRORS, LLMOutageError
 
 logger = logging.getLogger(__name__)
@@ -81,7 +82,9 @@ Return JSON with:
 If you cannot determine a field, return an empty string for it."""
 
 
-def _run_owner_name_llm(content_lines: list[str]) -> dict[str, str] | None:
+def _run_owner_name_llm(
+    content_lines: list[str], usage: LlmUsage | None = None,
+) -> dict[str, str] | None:
     """Run the owner-name extraction prompt over `content_lines`, joined with
     newlines. Returns the validated 6-field dict on success, or None on any of
     the narrowed failure modes `extract_cv_owner_name` degrades to
@@ -91,6 +94,10 @@ def _run_owner_name_llm(content_lines: list[str]) -> dict[str, str] | None:
     Pure with respect to CV-owner state: callers decide what to do with the
     result. Used for both the body-derived tier and the #456 side-channel
     tier, so the two never drift into different prompts or validation.
+
+    `usage`, when given, receives the call's priced result as soon as the call
+    returns -- before parsing -- so a billed reply that then fails to parse or
+    validate (and degrades to None) still counts toward the stage's cost (#1177).
     """
     content_block = "\n".join(content_lines)
     prompt = _build_owner_name_prompt(content_block)
@@ -101,6 +108,9 @@ def _run_owner_name_llm(content_lines: list[str]) -> dict[str, str] | None:
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"}
         )
+
+        if usage is not None:
+            usage.add(llm_result)
 
         response_text = llm_result["content"]
         parsed = json.loads(response_text)
@@ -176,26 +186,32 @@ def _owner_name_window(mapped_entries: list[dict[str, Any]]) -> list[str]:
     entries that is short enough to be a header-style line (under
     OWNER_NAME_ENTRY_MAX_CHARS).
 
-    When that filter selects nothing -- a narrative CV whose stage 2 output is
-    a few very long entries -- return each of those entries truncated to
-    OWNER_NAME_ENTRY_MAX_CHARS instead of dropping them (#457): the owner's
-    name sits at the top of the document, so a prefix is usable where an empty
-    window meant name extraction never ran. A CV with at least one short entry
-    keeps the pre-#457 window exactly, so no CV that already had a window sees
-    its prompt change.
+    The owner's name sits at the top of the document, so the first non-empty
+    entry is always in the window: truncated to OWNER_NAME_ENTRY_MAX_CHARS when
+    it is long, ahead of the short entries (#457). Stage 2 can fuse the name
+    line with the contact lines and a text box's prose into one entry of 500+
+    characters, and dropping it for being long sent the model nothing but
+    committee roles.
+
+    When no entry is short -- a narrative CV whose stage 2 output is a few very
+    long entries -- every one of them is returned truncated instead of dropped.
+    A CV whose first entry is short keeps the pre-#457 window exactly.
     """
     texts = [entry.get('text', '').strip() for entry in mapped_entries[:OWNER_NAME_WINDOW_ENTRIES]]
     texts = [text for text in texts if text]
     short = [text for text in texts if len(text) < OWNER_NAME_ENTRY_MAX_CHARS]
-    if short:
-        return short
-    return [text[:OWNER_NAME_ENTRY_MAX_CHARS] for text in texts]
+    if not short:
+        return [text[:OWNER_NAME_ENTRY_MAX_CHARS] for text in texts]
+    if len(texts[0]) >= OWNER_NAME_ENTRY_MAX_CHARS:
+        return [texts[0][:OWNER_NAME_ENTRY_MAX_CHARS], *short]
+    return short
 
 
 def extract_cv_owner_name(
     document_uid: str,
     mapped_entries: list[dict[str, Any]],
     docx_path: str | None = None,
+    usage: LlmUsage | None = None,
 ) -> dict[str, str]:
     """
     Extract CV owner's name using LLM from the first chunk of CV content.
@@ -215,6 +231,10 @@ def extract_cv_owner_name(
             `fallback_from_uid`. None (the default) reproduces pre-#456
             behavior exactly; every existing caller that does not pass it
             is unaffected.
+        usage: Optional LlmUsage that receives every owner-name call_llm
+            result (body tier and side-channel tier), so the caller can fold
+            the cost into stage 4's total (#1177). The returned dict stays the
+            six name fields -- it is persisted as `cv_owner`.
 
     Returns:
         Dict with 'first_name', 'middle_name', 'last_name', 'suffix',
@@ -249,14 +269,19 @@ def extract_cv_owner_name(
             uid_clean = re.sub(r'_cv$', '', document_uid, flags=re.IGNORECASE)
             # Remove random prefix like "WSP0KQ_"
             uid_clean = re.sub(r'^[A-Z0-9]{6}_', '', uid_clean)
+            # A run id is an identifier, not a name (#457). The isalpha() test
+            # below stopped telling the two apart when #1192 made run ids
+            # letters-only, so a web run's every name miss wrote the id in.
+            if is_run_id(uid_clean):
+                return
             parts = uid_clean.split('_')
             # A year token, without the regex engine. Also strictly correct
             # where the regex was not: Python's '$' matches before a trailing
             # newline, so re.match(r'^\d{4}$', '2026\n') is a match.
             name_parts = [p for p in parts
                           if not (len(p) == 4 and p.isdigit()) and len(p) > 1]
-            # Only a purely alphabetic token can be a surname. 'web151' and
-            # 'I5NKUG' are identifiers, not names.
+            # Only a purely alphabetic token can be a surname. 'web151' is an
+            # identifier, not a name (a run id is refused above).
             if name_parts and name_parts[-1].isalpha():
                 result['last_name'] = name_parts[-1]
 
@@ -279,7 +304,7 @@ def extract_cv_owner_name(
         lines, channel = _owner_side_channel_content_lines(document_uid, docx_path)
         if not lines:
             return False
-        side_result = _run_owner_name_llm(lines)
+        side_result = _run_owner_name_llm(lines, usage)
         if side_result and side_result['last_name']:
             result.update(side_result)
             logger.info(
@@ -294,7 +319,7 @@ def extract_cv_owner_name(
             fallback_from_uid()
         return result
 
-    body_result = _run_owner_name_llm(first_entries[:10])
+    body_result = _run_owner_name_llm(first_entries[:10], usage)
     if body_result is not None:
         result.update(body_result)
 

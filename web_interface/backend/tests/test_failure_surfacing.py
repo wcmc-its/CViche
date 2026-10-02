@@ -501,6 +501,59 @@ def test_execute_step_success_without_a_record_writes_none(monkeypatch, tmp_path
 
 
 # ---------------------------------------------------------------------------
+# Admin runs view: stage 4 persists the inferred CV owner on the run
+# ---------------------------------------------------------------------------
+
+def test_stage_4_completion_persists_cv_owner_name(monkeypatch, tmp_path):
+    from app.pipeline import orchestrator as orch
+
+    async def ok(stage_id, cv_path):
+        return {"cost": 0.0, "output_files": ["/x/abc123_fields.json"]}
+
+    o, _ = _orchestrator_for_step(monkeypatch, tmp_path, ok)
+    run = o.db.query.return_value.filter.return_value.first.return_value
+    monkeypatch.setattr(orch, "read_cv_owner_name", lambda db, run_id, files: "Jane Testperson")
+
+    asyncio.run(o.execute_step(6, "4", "cv.docx"))
+
+    assert run.cv_owner_name == "Jane Testperson"
+
+
+def test_other_stages_do_not_read_cv_owner(monkeypatch, tmp_path):
+    from app.pipeline import orchestrator as orch
+
+    async def ok(stage_id, cv_path):
+        return {"cost": 0.0, "output_files": []}
+
+    o, _ = _orchestrator_for_step(monkeypatch, tmp_path, ok)
+    calls = []
+    monkeypatch.setattr(orch, "read_cv_owner_name", lambda *a: calls.append(a))
+
+    asyncio.run(o.execute_step(7, "4.5", "cv.docx"))
+
+    assert calls == []
+
+
+def test_cv_owner_read_failure_logs_and_does_not_fail_the_step(monkeypatch, tmp_path, caplog):
+    from app.pipeline import orchestrator as orch
+
+    async def ok(stage_id, cv_path):
+        return {"cost": 0.0, "output_files": ["/x/abc123_fields.json"]}
+
+    def boom(db, run_id, files):
+        raise OSError("storage down")
+
+    o, _ = _orchestrator_for_step(monkeypatch, tmp_path, ok)
+    monkeypatch.setattr(orch, "read_cv_owner_name", boom)
+
+    with caplog.at_level("WARNING"):
+        asyncio.run(o.execute_step(6, "4", "cv.docx"))  # must not raise
+
+    record = next(r for r in caplog.records if "cv_owner_name" in r.getMessage())
+    assert record.exc_info is not None
+
+
+# ---------------------------------------------------------------------------
 # #592: run.error_message is a fixed user-facing message, never str(exc)
 # ---------------------------------------------------------------------------
 

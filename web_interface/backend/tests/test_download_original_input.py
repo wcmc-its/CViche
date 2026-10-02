@@ -79,6 +79,22 @@ def test_owner_downloads_original_with_its_upload_name(client, db, seed_simple_m
     assert "wordprocessingml" in resp.headers["content-type"]
 
 
+def test_pdf_run_downloads_the_original_pdf(client, db, seed_simple_mode, monkeypatch):
+    """#806: a PDF run's original is the PDF itself (the converted docx is a
+    pipeline-internal copy), served from input/<run>.pdf as application/pdf."""
+    user, run = _user_and_run(db, suffix="-pdf", filename="my cv.pdf", file_type="pdf")
+    _auth(client, user)
+    monkeypatch.setattr(steps_mod, "get_storage",
+                        lambda: _LocalStorage({f"input/{run.id}.pdf": b"%PDF-1.4 original bytes"}))
+
+    resp = client.get(f"/api/run/{run.id}/input")
+    assert resp.status_code == 200, resp.text
+    assert resp.content == b"%PDF-1.4 original bytes"
+    assert resp.headers["content-type"] == "application/pdf"
+    assert resp.headers["content-disposition"] == (
+        "attachment; filename*=utf-8''" + quote("my cv.pdf", safe=""))
+
+
 def test_s3_path_redirects_and_renames_via_presigned_url(client, db, seed_simple_mode, monkeypatch):
     user, run = _user_and_run(db, suffix="-s3")
     _auth(client, user)

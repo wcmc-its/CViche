@@ -5,6 +5,18 @@ export interface User {
   role: string
   consent_version: string | null
   default_submission_type: string | null
+  /** Run quota from GET /api/auth/me; null limits mean unlimited. */
+  quota?: QuotaInfo | null
+}
+
+export interface QuotaInfo {
+  daily_limit: number | null
+  daily_used: number
+  daily_remaining: number | null
+  monthly_limit: number | null
+  monthly_used: number
+  monthly_remaining: number | null
+  is_admin: boolean
 }
 
 export interface ConsentStatus {

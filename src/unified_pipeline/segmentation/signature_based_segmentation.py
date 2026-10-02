@@ -22,7 +22,7 @@ from dataclasses import dataclass, asdict
 from docx import Document
 from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.llm.retry import LLMOutageError
 
 # Import locked headers for secondary confidence boost
@@ -560,7 +560,8 @@ def compute_prominence_score(signature_group: list[dict]) -> float:
 # STEP 5: LLM Classification of Signature Groups
 # ============================================================================
 
-def classify_signature_groups_with_llm(signature_groups: dict[str, list[dict]], max_groups: int = 100) -> dict[str, dict]:
+def classify_signature_groups_with_llm(signature_groups: dict[str, list[dict]], max_groups: int = 100,
+                                       usage: LlmUsage | None = None) -> dict[str, dict]:
     """
     Send signature groups to LLM for H1/H2/H3 classification.
 
@@ -569,6 +570,7 @@ def classify_signature_groups_with_llm(signature_groups: dict[str, list[dict]], 
         max_groups: Maximum number of signature groups to send to LLM (default 100)
                    Groups are pre-filtered by prominence score to stay within limits
 
+    usage: optional LlmUsage the call's priced result is added to (#1177)
     Returns: {signature_hash: {level, confidence, reasoning}}
     """
 
@@ -762,6 +764,8 @@ Classify each group based on FORMATTING ONLY."""
         },
         temperature=0.1
     )
+    if usage is not None:
+        usage.add(llm_result)
 
     result = json.loads(llm_result["content"])
 
@@ -1002,7 +1006,7 @@ def ensure_personal_data_first(hierarchy: list[dict]) -> list[dict]:
 # STEP 6: Build Final Hierarchy
 # ============================================================================
 
-def normalize_hierarchy_with_llm(headers: list[dict], pass_number: int = 1) -> list[dict]:
+def normalize_hierarchy_with_llm(headers: list[dict], pass_number: int = 1, usage: LlmUsage | None = None) -> list[dict]:
     """
     Use GPT to normalize the hierarchy based on semantic meaning.
 
@@ -1012,6 +1016,7 @@ def normalize_hierarchy_with_llm(headers: list[dict], pass_number: int = 1) -> l
     Args:
         headers: The hierarchy to normalize
         pass_number: 1 for first pass (can add synthetic headers), 2 for second pass (no synthetic headers)
+        usage: optional LlmUsage the call's priced result is added to (#1177)
     """
 
     # Build the input list for GPT
@@ -1261,6 +1266,8 @@ No commentary."""
             ]
         )
 
+        if usage is not None:
+            usage.add(llm_result)
         corrected_text = llm_result["content"].strip()
 
         logger.debug("OUTPUT FROM LLM:\n%s", corrected_text)
@@ -1519,11 +1526,11 @@ def restore_sub_label_document_order(hierarchy: list[dict], lines: list[str]) ->
     return hierarchy
 
 
-def validate_headers_vs_entries(headers: list[dict]) -> list[dict]:
+def validate_headers_vs_entries(headers: list[dict], usage: LlmUsage | None = None) -> list[dict]:
     """
     Validate each header to assess confidence that it's truly a header vs an entry.
     Uses LLM to provide header_likelihood and entry_likelihood percentages.
-    Filters out headers with entry_likelihood > 60%.
+    Filters out headers with entry_likelihood > 60%. ``usage`` receives the call's priced result (#1177).
     """
 
     system_prompt = """You are an expert classifier whose job is to determine whether each line is a true CV section header
@@ -1637,6 +1644,8 @@ Do NOT add extra commentary."""
             ]
         )
 
+        if usage is not None:
+            usage.add(llm_result)
         output_text = llm_result["content"].strip()
 
         # Parse the output to extract likelihoods
@@ -1950,7 +1959,8 @@ def segment_cv_with_signatures(docx_path: str, output_path: str | None = None) -
 
     # Step 4-5: LLM classification
     print(f"\nStep 5: Classifying {len(signature_groups)} signature groups with LLM...")
-    classifications = classify_signature_groups_with_llm(signature_groups)
+    usage = LlmUsage()
+    classifications = classify_signature_groups_with_llm(signature_groups, usage=usage)
 
     print("  ✓ Classifications:")
     for sig_hash, cls in classifications.items():
@@ -1973,16 +1983,16 @@ def segment_cv_with_signatures(docx_path: str, output_path: str | None = None) -
     hierarchy = ensure_personal_data_first(hierarchy)
 
     # Step 7: Validate headers vs entries (filter out table headers and specific items first)
-    hierarchy = validate_headers_vs_entries(hierarchy)
+    hierarchy = validate_headers_vs_entries(hierarchy, usage=usage)
     print()
 
     # Step 8: Normalize hierarchy with GPT (after filtering, so GPT only sees clean headers)
-    hierarchy = normalize_hierarchy_with_llm(hierarchy)
+    hierarchy = normalize_hierarchy_with_llm(hierarchy, usage=usage)
     print()
 
     # Step 9: Second pass of hierarchy normalization to further refine structure
     print("\nStep 9: Second pass of hierarchy normalization...")
-    hierarchy = normalize_hierarchy_with_llm(hierarchy, pass_number=2)
+    hierarchy = normalize_hierarchy_with_llm(hierarchy, pass_number=2, usage=usage)
     print()
 
     # Show structure
@@ -2006,7 +2016,10 @@ def segment_cv_with_signatures(docx_path: str, output_path: str | None = None) -
                 if cls['level'] != 'NOT_HEADER'
             ),
             'top_level_sections': len(hierarchy),
-            'processing_method': 'signature_based_segmentation_with_llm'
+            'processing_method': 'signature_based_segmentation_with_llm',
+            'extraction_cost': usage.cost,
+            'extraction_input_tokens': usage.prompt_tokens,
+            'extraction_output_tokens': usage.completion_tokens,
         },
         'hierarchy': hierarchy,
         'signature_groups_summary': [

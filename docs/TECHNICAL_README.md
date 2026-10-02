@@ -1170,7 +1170,7 @@ USE_TAXONOMY_MAPPING = True          # Use LLM mappings
 | Model | Input | Output |
 |-------|-------|--------|
 | Claude Sonnet 4.6 (default, all stages except 3b) | $3.00 | $15.00 |
-| Claude Haiku 4.5 (stage 3b) | $1.00 | $5.00 |
+| Claude Haiku 4.5 | $1.00 | $5.00 |
 | Claude Opus 4.7 | $15.00 | $75.00 |
 
 Full pricing table, including older Claude generations and non-Anthropic Bedrock models, is in `src/unified_pipeline/config.py`'s `PRICING` dict.
@@ -1290,7 +1290,7 @@ client = boto3.client("bedrock-runtime", region_name=...)
 
 ### Cost Optimization Strategies
 
-1. **Use Claude Haiku 4.5** for cost-sensitive stages (stage 3b already defaults to it)
+1. **Use Claude Haiku 4.5** for cost-sensitive stages
 2. **Minimal extraction** for non-publication codes
 3. **Batch processing** groups entries by code
 4. **Skip enrichment** if not needed (run stages 1-4 only)

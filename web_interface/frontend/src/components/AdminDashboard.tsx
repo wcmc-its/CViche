@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import type { Stats } from '../types'
 import { getAdminStats } from '../api/admin'
@@ -11,10 +12,18 @@ import AdminConfig from './AdminConfig'
 const TABS = ['Overview', 'Runs', 'Feedback', 'Settings'] as const
 type TabName = typeof TABS[number]
 
+/** Query param that opens a tab directly, e.g. /admin?tab=Feedback. */
+const TAB_PARAM = 'tab'
+
+function tabFromParam(value: string | null): TabName {
+  return TABS.find((tab) => tab === value) ?? 'Overview'
+}
+
 export default function AdminDashboard() {
   const [stats, setStats] = useState<Stats | null>(null)
   const [loading, setLoading] = useState(true)
-  const [activeTab, setActiveTab] = useState<TabName>('Overview')
+  const [searchParams] = useSearchParams()
+  const [activeTab, setActiveTab] = useState<TabName>(() => tabFromParam(searchParams.get(TAB_PARAM)))
 
   const fetchStats = async () => {
     try {
@@ -47,7 +56,7 @@ export default function AdminDashboard() {
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`-mb-px whitespace-nowrap px-3 py-2 border-b-2 text-sm transition-colors focus:outline-none focus-visible:text-gray-900 ${
+              className={`-mb-px whitespace-nowrap px-3 py-2 border-b-2 text-sm transition-colors focus-visible:outline-none focus-visible:text-gray-900 ${
                 activeTab === tab
                   ? 'border-ink text-gray-900 font-medium'
                   : 'border-transparent text-gray-500 hover:text-gray-700'

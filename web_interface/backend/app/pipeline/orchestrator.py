@@ -19,7 +19,7 @@ import io
 from pathlib import Path
 from datetime import datetime
 from typing import Any
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -34,6 +34,7 @@ sys.path.insert(0, str(PARENT_DIR / 'src'))
 from app.models import Run, Step, Log
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.pipeline.event_emitter import event_emitter
+from app.services.cv_owner_service import CV_OWNER_STAGE_ID, read_cv_owner_name
 from app.storage import get_storage
 from app.storage.base import RunStorage
 from app.config_loader import get_config
@@ -62,6 +63,15 @@ from unified_pipeline.stage_6_word_template import run_stage6
 from unified_pipeline.stage_errors import StageError, record_stage_outcome, stage_errors_path
 from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
 from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.llm_client import LlmUsage
+from app.services.pdf_sandbox import (
+    PDF_BUSY_RUN_MESSAGE, PDF_TOO_COMPLEX_MESSAGE, ConversionResult, PdfBusyError,
+    PdfTooComplexError, convert_pdf,
+)
+
+# An upload with this suffix is converted, not copied, into the run's private
+# docx (#806); upload.py stores a PDF as {run_id}.pdf.
+_PDF_SUFFIX = ".pdf"
 
 
 def _now() -> float:
@@ -135,6 +145,10 @@ def user_facing_error(exc: BaseException, resuming: bool) -> str:
     chain = list(_exception_chain(exc))
     if any(isinstance(e, LLMOutageError) for e in chain):
         return LLM_OUTAGE_MESSAGE
+    if isinstance(exc, PdfTooComplexError):
+        return PDF_TOO_COMPLEX_MESSAGE
+    if isinstance(exc, PdfBusyError):
+        return PDF_BUSY_RUN_MESSAGE
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
         return STAGE_TIMEOUT_MESSAGE
     err_text = str(exc).lower()
@@ -570,12 +584,31 @@ class PipelineOrchestrator:
         # replaced at the start of every execute_step.
         self._stage_guard = _StageGuard()
 
+        # Set by _copy_to_pipeline_input when the upload is a PDF (#806).
+        self.pdf_conversion: ConversionResult | None = None
+
     async def log(self, step_number: int, message: str, level: str = "INFO"):
         """Log a message to database and emit via WebSocket."""
         log_entry = Log(run_id=self.run_id, step_number=step_number, level=level, message=message)
         self.db.add(log_entry)
         self.db.commit()
         await event_emitter.emit_log(self.run_id, step_number, message, level)
+
+    async def _track_llm_cost(self, step_number: int, cost: float, tokens: Mapping) -> float:
+        """Record one stage's reported LLM cost on the run; returns the cost.
+
+        ``tokens`` carries prompt/completion/cache_read/cache_write token
+        counts under those key prefixes (a stage's own metadata dict works);
+        a stage that reports cost only passes ``{}``. Nothing is recorded for
+        a zero cost.
+        """
+        if cost > 0:
+            input_tokens = tokens.get('prompt_tokens', 0)
+            output_tokens = tokens.get('completion_tokens', 0)
+            await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                   cache_read_tokens_delta=tokens.get('cache_read_tokens', 0),
+                                   cache_write_tokens_delta=tokens.get('cache_write_tokens', 0))
+        return cost
 
     async def update_cost(self, step_number: int, cost_delta: float, tokens_delta: int = 0,
                           input_tokens_delta: int = 0, output_tokens_delta: int = 0,
@@ -648,11 +681,36 @@ class PipelineOrchestrator:
                 / self.run_id / f"{self.document_uid}.docx")
 
     def _copy_to_pipeline_input(self) -> str:
-        """Copy the uploaded file into this run's input directory; return its path."""
+        """Materialize this run's private docx from the upload; return its path.
+
+        A docx is copied. A PDF is converted (#806), in pdf_sandbox's
+        limited child process: the upload itself stays the original
+        (download-original and restart read it by file_type), and every
+        stage downstream sees only this docx.
+        """
         dest_path = self._pipeline_input_path()
         dest_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(self.file_path, dest_path)
+        if Path(self.file_path).suffix.lower() == _PDF_SUFFIX:
+            self.pdf_conversion = convert_pdf(self.file_path, dest_path)
+        else:
+            shutil.copy2(self.file_path, dest_path)
         return str(dest_path)
+
+    async def _warn_image_only_pages(self) -> None:
+        """Name a converted PDF's image-only pages in the run log (#536):
+        their text never reaches the pipeline, so the output silently lacks
+        it otherwise. Logged under the first stage, which the user sees first,
+        and on a run's first attempt only: a retry or resume re-converts but
+        the step-1 log already carries the warning."""
+        if self.pdf_conversion is None or not self.pdf_conversion.image_only_pages:
+            return
+        pages = ", ".join(str(n) for n in self.pdf_conversion.image_only_pages)
+        await self.log(
+            STEP_REGISTRY[0].number,
+            f"PDF page(s) {pages} contain only images (likely scanned), so their "
+            "text could not be read and is missing from the output.",
+            "WARNING",
+        )
 
     def _get_output_paths(self) -> dict[str, Path]:
         """Get expected output file paths for each stage."""
@@ -703,6 +761,26 @@ class PipelineOrchestrator:
                     "Failed to mirror output %s to storage for run %s: %s",
                     path_str, self.run_id, e,
                 )
+
+    def _persist_cv_owner_name(self, step: Step) -> None:
+        """Store stage 4's inferred CV owner on ``runs.cv_owner_name``.
+
+        The admin runs list filters on it. Best-effort: a failure here logs a
+        warning and never fails the run (the name is display metadata).
+        """
+        try:
+            name = read_cv_owner_name(self.db, self.run_id, step.output_files)
+            if name is None:
+                return
+            run = self.db.query(Run).filter(Run.id == self.run_id).first()
+            if run is None:
+                return
+            run.cv_owner_name = name
+            self.db.commit()
+        except Exception:
+            logger.warning("Could not persist cv_owner_name for run %s",
+                           self.run_id, exc_info=True)
+            self.db.rollback()
 
     def _stage_errors_path(self) -> Path:
         return stage_errors_path(self.pipeline_output_dir, self.document_uid)
@@ -857,8 +935,12 @@ class PipelineOrchestrator:
             if start_step_number is None:
                 await self._notify_started(run)
 
-            # Copy file to pipeline input directory
-            cv_path = self._copy_to_pipeline_input()
+            # Copy (or, for a PDF, convert) the upload to the pipeline input dir
+            # Off the loop: a PDF conversion can wait for a sandbox slot and
+            # then run for minutes, and the loop must keep serving events.
+            cv_path = await asyncio.to_thread(self._copy_to_pipeline_input)
+            if start_step_number is None:
+                await self._warn_image_only_pages()
 
             if start_step_number is not None:
                 # May lower the resume point if an earlier output is unrecoverable.
@@ -905,11 +987,12 @@ class PipelineOrchestrator:
             # Best-effort, run off the event loop; never affects run status.
             score = None
             try:
-                import asyncio
-                from app.services.quality_score_service import compute_and_cache_score
+                from app.services.quality_score_service import compute_and_cache_score, persist_score_columns
                 score = await asyncio.get_running_loop().run_in_executor(
                     None, compute_and_cache_score, self.run_id
                 )
+                # On this thread: self.db must not be touched from the executor.
+                persist_score_columns(self.db, self.run_id, score)
             except Exception as e:
                 logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
 
@@ -1199,6 +1282,8 @@ class PipelineOrchestrator:
                 None, self._persist_outputs_to_storage, result.get("output_files", [])
             )
             await asyncio.to_thread(self._record_stage_outcome, stage_id, None)
+            if stage_id == CV_OWNER_STAGE_ID:
+                self._persist_cv_owner_name(step)
 
             await self.log(step_number, f"Completed Stage {stage_id} in {duration}s")
             await event_emitter.emit_step_complete(
@@ -1435,7 +1520,9 @@ class PipelineOrchestrator:
                 output_files.append(str(output_file))
 
                 await self.log(step_number, f"Extracted {len(hierarchy)} top-level sections, {total_headers} total headers")
-                await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens)
+                await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                       cache_read_tokens_delta=stats.get('extraction_cache_read_tokens', 0),
+                                       cache_write_tokens_delta=stats.get('extraction_cache_write_tokens', 0))
 
             elif stage_id == '1b':
                 # Stage 1b: Hierarchy Mapping (no LLM)
@@ -1589,16 +1676,7 @@ class PipelineOrchestrator:
                 method = research_info.get('method', 'generated')
                 await self.log(step_number, f"Research summary {method}, M1 score: {research_info.get('m1_score', 0):.2f}")
 
-                # Track LLM cost for stage 4.5
-                cost = stage45_data.get('total_cost', 0)
-                input_tokens = stage45_data.get('prompt_tokens', 0)
-                output_tokens = stage45_data.get('completion_tokens', 0)
-                cache_read_tokens = stage45_data.get('cache_read_tokens', 0)
-                cache_write_tokens = stage45_data.get('cache_write_tokens', 0)
-                if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
-                                           cache_read_tokens_delta=cache_read_tokens,
-                                           cache_write_tokens_delta=cache_write_tokens)
+                cost = await self._track_llm_cost(step_number, stage45_data.get('total_cost', 0), stage45_data)
 
             elif stage_id == '5':
                 # Stage 5: PubMed Enrichment
@@ -1636,6 +1714,12 @@ class PipelineOrchestrator:
                 self.stage_outputs['5b'] = stage5b_output_path
                 output_files.append(stage5b_output_path)
 
+                # Track LLM cost for stage 5b (the stage reports cost only, no tokens)
+                with open(stage5b_output_path, 'r') as f:
+                    stage5b_data = json.load(f)
+                cost = await self._track_llm_cost(
+                    step_number, stage5b_data.get('institution_enrichment_stats', {}).get('cost', 0), {})
+
                 await self.log(step_number, "Institution enrichment complete")
 
             elif stage_id == '5c':
@@ -1663,15 +1747,7 @@ class PipelineOrchestrator:
                 with open(stage5c_output_path, 'r') as f:
                     stage5c_data = json.load(f)
                 stage5c_meta = stage5c_data.get('stage_5c', {})
-                cost = stage5c_meta.get('total_cost', 0)
-                input_tokens = stage5c_meta.get('prompt_tokens', 0)
-                output_tokens = stage5c_meta.get('completion_tokens', 0)
-                cache_read_tokens = stage5c_meta.get('cache_read_tokens', 0)
-                cache_write_tokens = stage5c_meta.get('cache_write_tokens', 0)
-                if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
-                                           cache_read_tokens_delta=cache_read_tokens,
-                                           cache_write_tokens_delta=cache_write_tokens)
+                cost = await self._track_llm_cost(step_number, stage5c_meta.get('total_cost', 0), stage5c_meta)
 
                 await self.log(step_number, "Teaching entries formatted")
 
@@ -1704,15 +1780,7 @@ class PipelineOrchestrator:
                 with open(stage5d_output_path, 'r') as f:
                     stage5d_data = json.load(f)
                 stage5d_meta = stage5d_data.get('stage_5d', {})
-                cost = stage5d_meta.get('total_cost', 0)
-                input_tokens = stage5d_meta.get('prompt_tokens', 0)
-                output_tokens = stage5d_meta.get('completion_tokens', 0)
-                cache_read_tokens = stage5d_meta.get('cache_read_tokens', 0)
-                cache_write_tokens = stage5d_meta.get('cache_write_tokens', 0)
-                if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
-                                           cache_read_tokens_delta=cache_read_tokens,
-                                           cache_write_tokens_delta=cache_write_tokens)
+                cost = await self._track_llm_cost(step_number, stage5d_meta.get('total_cost', 0), stage5d_meta)
 
                 await self.log(step_number, "Citations formatted")
 
@@ -1735,11 +1803,13 @@ class PipelineOrchestrator:
 
                 emit_track_changes, emit_comments, strip_template_instructions = self._render_options()
 
+                stage6_usage = LlmUsage()
                 stage6_output_path = await self._run_with_stdout_capture(
                     run_stage6,
                     step_number,
                     input_path=input_path,
                     verbose=True,
+                    llm_usage=stage6_usage,
                     emit_track_changes=emit_track_changes,
                     emit_comments=emit_comments,
                     strip_template_instructions=strip_template_instructions,
@@ -1757,6 +1827,9 @@ class PipelineOrchestrator:
                     f"{self.document_uid}_render_warnings.json")
                 if sidecar.is_file():
                     output_files.append(str(sidecar))
+
+                # Track LLM cost for stage 6 (geographic scope + appendix reclassification)
+                cost = await self._track_llm_cost(step_number, stage6_usage.cost, stage6_usage.token_totals())
 
                 await self.log(step_number, f"WCM template generated: {Path(stage6_output_path).name}")
 

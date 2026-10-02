@@ -15,6 +15,9 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base, get_db
 
 from app.ed_group_lookup import (
+    DEPARTMENT_MAX_LENGTH,
+    fetch_ed_department,
+    pick_department,
     check_ed_membership,
     get_cached_membership,
     set_cached_membership,
@@ -1988,3 +1991,94 @@ class TestEmptyAccessGroupFailsClosed:
         assert response.status_code == 302
         assert "error=directory_unavailable" in response.headers["location"]
         mock_check_ed.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Department from ED (Runs admin view)
+# ---------------------------------------------------------------------------
+
+
+class TestPickDepartment:
+    def test_primary_department_wins(self):
+        attrs = {
+            "weillCornellEduPrimaryDepartment": ["Library"],
+            "weillCornellEduDepartment": ["Security", "Library"],
+        }
+        assert pick_department(attrs) == "Library"
+
+    def test_falls_back_to_first_listed_department(self):
+        assert pick_department({"weillCornellEduDepartment": ["  Medicine ", "Other"]}) == "Medicine"
+
+    def test_blank_or_missing_is_none(self):
+        assert pick_department({}) is None
+        assert pick_department({"weillCornellEduPrimaryDepartment": ["  "]}) is None
+
+    def test_truncated_to_column_width(self):
+        value = "D" * (DEPARTMENT_MAX_LENGTH + 40)
+        assert len(pick_department({"weillCornellEduPrimaryDepartment": [value]})) == DEPARTMENT_MAX_LENGTH
+
+
+class TestFetchEdDepartment:
+    @patch("app.ed_group_lookup._bind")
+    def test_reads_primary_department(self, mock_bind):
+        conn = mock_bind.return_value.__enter__.return_value
+        conn.entries = [MagicMock(entry_attributes_as_dict={
+            "weillCornellEduPrimaryDepartment": ["Pediatrics"]})]
+        assert fetch_ed_department("abc1234", LDAP_PARAMS["cfg"]) == "Pediatrics"
+        kwargs = conn.search.call_args.kwargs
+        assert kwargs["search_filter"] == "(uid=abc1234)"
+
+    @patch("app.ed_group_lookup._bind")
+    def test_no_entry_is_none(self, mock_bind):
+        conn = mock_bind.return_value.__enter__.return_value
+        conn.entries = []
+        assert fetch_ed_department("abc1234", LDAP_PARAMS["cfg"]) is None
+
+    @patch("app.ed_group_lookup._bind", side_effect=EdUnavailableError("down"))
+    def test_ed_error_is_swallowed_and_logged(self, _mock_bind, caplog):
+        assert fetch_ed_department("abc1234", LDAP_PARAMS["cfg"]) is None
+        assert any(r.exc_info for r in caplog.records)
+
+
+class TestAcsStoresDepartment:
+    @patch.dict(os.environ, _ED_ENV)
+    @patch("app.api.saml_routes.fetch_ed_department", return_value="Pediatrics")
+    @patch("app.api.saml_routes.check_ed_membership")
+    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.api.saml_routes.extract_user_attrs")
+    def test_department_stored_on_login(
+        self, mock_extract, mock_get_client, mock_check_ed, _mock_dept,
+        client, db, seed_ed_enabled
+    ):
+        clear_cache()
+        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+        mock_extract.return_value = {"cwid": "test0001", "email": "test@med.cornell.edu", "display_name": "Test User"}
+        mock_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=False)
+
+        response = client.post("/api/saml/acs", data={"SAMLResponse": "dummy", "RelayState": "/"},
+                               follow_redirects=False)
+        assert response.status_code == 302
+        assert db.query(User).filter(User.cwid == "test0001").one().department == "Pediatrics"
+
+    @patch.dict(os.environ, _ED_ENV)
+    @patch("app.api.saml_routes.fetch_ed_department", return_value=None)
+    @patch("app.api.saml_routes.check_ed_membership")
+    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.api.saml_routes.extract_user_attrs")
+    def test_missing_department_leaves_null_and_keeps_existing(
+        self, mock_extract, mock_get_client, mock_check_ed, _mock_dept,
+        client, db, seed_ed_enabled
+    ):
+        clear_cache()
+        db.add(User(cwid="test0001", email="test@med.cornell.edu", display_name="Test User",
+                    role="user", auth_method="saml", department="Kept Dept"))
+        db.commit()
+        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+        mock_extract.return_value = {"cwid": "test0001", "email": "test@med.cornell.edu", "display_name": "Test User"}
+        mock_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=False)
+
+        response = client.post("/api/saml/acs", data={"SAMLResponse": "dummy", "RelayState": "/"},
+                               follow_redirects=False)
+        assert response.status_code == 302
+        db.expire_all()
+        assert db.query(User).filter(User.cwid == "test0001").one().department == "Kept Dept"

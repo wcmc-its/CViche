@@ -2,7 +2,7 @@
 
 Covers the full reader surface *not* already exercised by
 test_docx_structure_extractor_tracked_changes.py: get_paragraph_text (plain
-multi-run join), get_cell_text (multi-paragraph join), extract_paragraph_metadata
+multi-run join; a text box's mc:Choice/mc:Fallback copies read once, #1236), get_cell_text (multi-paragraph join), extract_paragraph_metadata
 (style/outline, bold-representative, italic/underline/size, alignment, indent,
 list numbering), _is_date_column, split_merged_cells_in_row (no-split /
 double-newline / aligned-line / date-column-padding branches),
@@ -40,8 +40,9 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 from docx.enum.text import WD_ALIGN_PARAGRAPH  # noqa: E402
 from docx.oxml import parse_xml  # noqa: E402
-from docx.oxml.ns import nsdecls  # noqa: E402
+from docx.oxml.ns import nsdecls, qn  # noqa: E402
 from docx.shared import Inches, Pt  # noqa: E402
+from docx.text.paragraph import Paragraph  # noqa: E402
 
 from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
     _is_date_column,
@@ -99,6 +100,104 @@ def test_get_cell_text_joins_multiple_paragraphs():
     cell.add_paragraph("Line two")
 
     assert get_cell_text(cell) == "Line one\nLine two"
+
+
+# --------------------------------------------------------------------------
+# get_paragraph_text: a text box is read once (#1236)
+# --------------------------------------------------------------------------
+
+_MC_FALLBACK = '{http://schemas.openxmlformats.org/markup-compatibility/2006}Fallback'
+_TEXT_BOX_NS = (
+    f'{nsdecls("w")} '
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+    'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+    'xmlns:v="urn:schemas-microsoft-com:vml"'
+)
+
+
+def _text_box_run(choice_text, fallback_text):
+    """A <w:r> holding a Word text box the way Word stores it: an
+    mc:AlternateContent whose mc:Choice is the DrawingML copy and whose
+    mc:Fallback is the VML copy. Pass None to leave a branch out."""
+
+    def box_content(text):
+        return f'<w:txbxContent><w:p><w:r><w:t>{text}</w:t></w:r></w:p></w:txbxContent>'
+
+    choice = fallback = ''
+    if choice_text is not None:
+        choice = (
+            '<mc:Choice Requires="wps"><w:drawing><wps:wsp><wps:txbx>'
+            f'{box_content(choice_text)}</wps:txbx></wps:wsp></w:drawing></mc:Choice>'
+        )
+    if fallback_text is not None:
+        fallback = (
+            '<mc:Fallback><w:pict><v:shape><v:textbox>'
+            f'{box_content(fallback_text)}</v:textbox></v:shape></w:pict></mc:Fallback>'
+        )
+    return parse_xml(f'<w:r {_TEXT_BOX_NS}><mc:AlternateContent>{choice}{fallback}</mc:AlternateContent></w:r>')
+
+
+def test_get_paragraph_text_reads_a_text_box_once_not_its_choice_and_fallback_copies():
+    doc = Document()
+    para = doc.add_paragraph("Name line ")
+    para._p.append(_text_box_run("Synthetic summary.", "Synthetic summary."))
+
+    assert get_paragraph_text(para) == "Name line Synthetic summary."
+
+
+def test_get_paragraph_text_reads_the_choice_branch_when_the_copies_differ():
+    doc = Document()
+    para = doc.add_paragraph()
+    para._p.append(_text_box_run("Choice copy", "Fallback copy"))
+
+    assert get_paragraph_text(para) == "Choice copy"
+
+
+@pytest.mark.parametrize("choice_text, fallback_text", [(None, "Lone fallback"), ("Lone choice", None)])
+def test_get_paragraph_text_reads_the_one_branch_a_text_box_has(choice_text, fallback_text):
+    doc = Document()
+    para = doc.add_paragraph()
+    para._p.append(_text_box_run(choice_text, fallback_text))
+
+    assert get_paragraph_text(para) == (choice_text or fallback_text)
+
+
+def test_get_paragraph_text_keeps_the_text_around_each_of_several_text_boxes():
+    doc = Document()
+    para = doc.add_paragraph("A ")
+    para._p.append(_text_box_run("one", "one"))
+    para.add_run(" B ")
+    para._p.append(_text_box_run("two", "two"))
+    para.add_run(" C")
+
+    assert get_paragraph_text(para) == "A one B two C"
+
+
+def test_get_paragraph_text_on_a_paragraph_inside_a_fallback_reads_that_paragraph():
+    # The Fallback is skipped only when it lies BELOW the paragraph being
+    # read: asked directly for a text box's inner paragraph, the reader still
+    # returns that paragraph's own text.
+    doc = Document()
+    para = doc.add_paragraph()
+    para._p.append(_text_box_run("Synthetic summary.", "Synthetic summary."))
+    fallback = para._p.find('.//' + _MC_FALLBACK)
+    inner = Paragraph(fallback.find('.//' + qn('w:p')), para._parent)
+
+    assert get_paragraph_text(inner) == "Synthetic summary."
+
+
+def test_extract_unified_elements_emits_a_text_box_paragraph_once(tmp_path):
+    # The wire: the stage 1a/1b/2 element stream, not just the helper.
+    doc = Document()
+    doc.add_paragraph("Synthetic Name, MD")
+    anchor = doc.add_paragraph()
+    anchor._p.append(_text_box_run("Synthetic summary.", "Synthetic summary."))
+    path = tmp_path / "text_box.docx"
+    doc.save(str(path))
+
+    elements = extract_unified_elements(str(path))["elements"]
+
+    assert [e["text"] for e in elements] == ["Synthetic Name, MD", "Synthetic summary."]
 
 
 # --------------------------------------------------------------------------

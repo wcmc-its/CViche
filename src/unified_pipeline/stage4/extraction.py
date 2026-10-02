@@ -13,20 +13,28 @@ function in play (the #496 split-state lesson).
 
 import json
 import logging
-from typing import Any, Callable, NotRequired, TypedDict
+from collections import defaultdict
+from typing import Any, Callable, NamedTuple, NotRequired, TypedDict
 
 from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
-from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.llm.retry import LLMOutageError
 
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
 from unified_pipeline.stage4.coercion import (
+    ReformattedFields,
     apply_regex_post_processing,
     coerce_field_value_types,
     normalize_dates,
+)
+from unified_pipeline.stage4.error_codes import (
+    LLM_PROVIDER_ERROR,
+    LLM_RESPONSE_INVALID,
+    LLM_TIMEOUT,
+    NO_MATCHING_EXTRACTION,
 )
 from unified_pipeline.stage4.owner_name import (
     add_target_names,
@@ -36,20 +44,15 @@ from unified_pipeline.stage4.owner_name import (
 from unified_pipeline.stage4.schemas import (
     FIELD_DESCRIPTIONS,
     FIELD_SCHEMA_VERSION,
+    NUMBERED_FIELD_RE,
+    STAGE4_RECORDS_KEY,
+    STAGE4_RECORDS_RETURNED_KEY,
     get_active_schemas,
     get_field_schema,
     get_taxonomy_label,
 )
 
 logger = logging.getLogger(__name__)
-
-# Stable error-code strings for extraction_error / llm_recovery_error fields.
-# A caller can branch on these programmatically; str(exception) is for the
-# log line only (via logger.exception, which records the full traceback),
-# never for a field another stage or the frontend reads.
-LLM_RESPONSE_INVALID = "llm_response_invalid"
-LLM_TIMEOUT = "llm_timeout"
-LLM_PROVIDER_ERROR = "llm_provider_error"
 
 # I/O-bound stage (LLM round trips, not CPU); the default is sized under the
 # per-pod semaphore so one run cannot starve the others admitted alongside it
@@ -223,6 +226,159 @@ def calculate_unextracted_content(original_text: str, extracted_fields: dict[str
         "total_extracted_words": len(extracted_from_original)
     }
 
+
+# A reply holding at least this many items for one entry is a multi-record
+# reply: every item is kept under STAGE4_RECORDS_KEY instead of the last one
+# overwriting the rest.
+_MIN_RECORDS_PER_ENTRY = 2
+
+# The source text an earlier record of a multi-record entry is cleaned
+# against: none, so the regex pass fills nothing from the entry's text into it.
+_NO_ENTRY_TEXT = ""
+
+
+class _EntryExtraction(NamedTuple):
+    """What the reply's items for one entry become on that entry."""
+
+    fields: dict[str, Any]
+    reformatted: ReformattedFields
+    coverage: UnextractedContentReport
+    records_returned: int
+
+
+def _clean_item(entry_text: str, item_fields: dict[str, Any],
+                taxonomy_code: str) -> tuple[dict[str, Any], ReformattedFields]:
+    """One reply item's fields, coerced, date-normalized and regex-completed.
+
+    Declared `dict[str, Any]`, not `ExtractedFields`: the input is unvalidated
+    LLM JSON, and coerce/normalize rebuild the dict through variable keys,
+    which no TypedDict can express. `apply_regex_post_processing` is where the
+    shape is named (its signature returns `ExtractedFields`).
+    """
+    fields = coerce_field_value_types(item_fields)
+    fields = normalize_dates(fields)
+    cleaned, reformatted = apply_regex_post_processing(entry_text, fields, taxonomy_code)
+    return dict(cleaned), reformatted
+
+
+def _union_of_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """Every record's values under a key unique to its record, so coverage is
+    measured over all of them and no record's value hides another's."""
+    return {f"{index}.{key}": value
+            for index, record in enumerate(records)
+            for key, value in record.items()}
+
+
+def _offschema_records(fields: dict[str, Any], taxonomy_code: str,
+                       ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """`(fields, extra)`: `fields` without the off-schema keys that hold a
+    whole second record, and those records (#1245). Nothing renders a key
+    outside the code's schema, so each record was dropped from the output.
+
+    - `<field>_<n>` keys: the numbered fields alone make record n. The
+      parent's other fields are not copied: in a two-column list the parent's
+      date belongs to the first column only.
+    - an object under a key outside the schema, sharing a key with it
+      (`additional_entry`, `additional_presentation`, `additional_period`):
+      the parent's fields with the object's laid over them, since it most
+      often repeats the parent at another venue or period.
+
+    A list of records is left alone: fan-out splits it, or declines it with a
+    warning (#1187).
+    """
+    schema = set(get_field_schema(taxonomy_code).get("fields") or ())
+    numbered: dict[str, dict[str, Any]] = {}
+    nested: list[dict[str, Any]] = []
+    kept: dict[str, Any] = {}
+    for key, value in fields.items():
+        match = NUMBERED_FIELD_RE.match(key)
+        if key in schema:
+            kept[key] = value
+        elif match and match.group("field") in schema:
+            if not _is_blank(value):
+                numbered.setdefault(match.group("n"), {})[match.group("field")] = value
+        elif isinstance(value, dict) and schema & set(value):
+            nested.append(value)
+        else:
+            kept[key] = value
+    extra = [record for _, record in sorted(numbered.items(), key=lambda kv: int(kv[0]))]
+    extra += [{**kept, **record} for record in nested]
+    return kept, extra
+
+
+def _is_blank(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _with_offschema_records(cleaned: list[tuple[dict[str, Any], ReformattedFields]],
+                            taxonomy_code: str,
+                            ) -> list[tuple[dict[str, Any], ReformattedFields]]:
+    """Each cleaned record followed by the records `_offschema_records` takes
+    out of it, each cleaned without the entry's text, as an earlier record of
+    a multi-record entry is."""
+    out = []
+    for fields, reformatted in cleaned:
+        kept, extra = _offschema_records(fields, taxonomy_code)
+        out.append((kept, reformatted))
+        out += [_clean_item(_NO_ENTRY_TEXT, record, taxonomy_code) for record in extra]
+    return out
+
+
+def _extract_entry_items(entry_text: str, items: list[dict[str, Any]],
+                         taxonomy_code: str) -> _EntryExtraction:
+    """The reply's items for one entry, in reply order, as that entry's fields.
+
+    One item is the entry's fields, exactly as before. With 2+ items the
+    entry's scalar fields stay the last item, as they were when the last item
+    overwrote the others, every item is also kept under STAGE4_RECORDS_KEY for
+    `stage6/fan_out.py` to split, and coverage is measured over all of them.
+
+    The regex pass fills a value it finds once in the entry's text (a PMID, a
+    percent effort, the one closed date range). With several records that
+    value belongs to one of them at most, so only the last record, the one
+    the entry kept before, is offered the text; an earlier one gets the
+    text-free cleanups alone.
+
+    A second record the model filed under an off-schema key follows the
+    record it came from (`_offschema_records`). `records_returned` stays the
+    count of items the model returned.
+    """
+    cleaned = [_clean_item(_NO_ENTRY_TEXT, dict(item), taxonomy_code) for item in items[:-1]]
+    cleaned.append(_clean_item(entry_text, dict(items[-1]), taxonomy_code))
+    last_reformatted = cleaned[-1][1]
+    cleaned = _with_offschema_records(cleaned, taxonomy_code)
+    last_fields = cleaned[-1][0]
+    if len(cleaned) < _MIN_RECORDS_PER_ENTRY:
+        coverage = calculate_unextracted_content(entry_text, last_fields)
+        return _EntryExtraction(last_fields, last_reformatted, coverage, len(items))
+    records = [fields for fields, _ in cleaned]
+    fields = {**last_fields, STAGE4_RECORDS_KEY: records}
+    coverage = calculate_unextracted_content(entry_text, _union_of_records(records))
+    return _EntryExtraction(fields, last_reformatted, coverage, len(items))
+
+
+def _entry_with_extraction(entry: dict[str, Any], extraction: _EntryExtraction,
+                           flags: dict[str, Any]) -> dict[str, Any]:
+    """`entry` carrying `extraction`, then `flags`, then the reformatted
+    fields and the multi-record count when there are any.
+
+    A count an earlier pass wrote is dropped first: the recovery pass replaces
+    the batch pass's fields, and its own reply decides the count.
+    """
+    result = {key: value for key, value in entry.items()
+              if key != STAGE4_RECORDS_RETURNED_KEY}
+    result.update({
+        "extracted_fields": extraction.fields,
+        "extraction_success": True,
+        "extraction_coverage": extraction.coverage,
+        **flags,
+    })
+    if extraction.reformatted:
+        result["reformatted_fields"] = extraction.reformatted
+    if extraction.records_returned >= _MIN_RECORDS_PER_ENTRY:
+        result[STAGE4_RECORDS_RETURNED_KEY] = extraction.records_returned
+    return result
+
 # =============================================================================
 # LLM-ASSISTED RECOVERY FOR MESSY TABLE STRUCTURES
 # =============================================================================
@@ -392,42 +548,21 @@ def attempt_llm_recovery(
         if validated.recovery_notes:
             logger.info("Recovery notes: %s", validated.recovery_notes[:100])
 
-        # Match recovered entries back to original entries by exact id.
-        recovered_by_id = {rec.entry_id: rec for rec in validated.recovered_entries}
+        # Match recovered entries back to original entries by exact id. The
+        # prompt asks for every record an entry holds, so one id can carry
+        # several items; all of them are kept, in reply order.
+        recovered_by_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for rec in validated.recovered_entries:
+            recovered_by_id[rec.entry_id].append(rec.fields)
 
         recovered_entries = []
         for entry in entries:
             matched = recovered_by_id.get(_recovery_entry_id(entry))
 
             if matched:
-                # Coerce off-type LLM values before regex/downstream consumers.
-                # Declared `Any`, not `ExtractedFields`: this is the untyped
-                # side of the bridge -- `matched.fields` is unvalidated
-                # recovery-LLM JSON, and coerce/normalize below rebuild the
-                # dict through variable keys, which no TypedDict can express.
-                # `apply_regex_post_processing` is where the shape is named
-                # (its signature returns `ExtractedFields`).
-                recovered_fields: Any = coerce_field_value_types(dict(matched.fields))
-                # Normalize dates
-                recovered_fields = normalize_dates(recovered_fields)
-                entry_text = entry.get("text", "")
-                # Apply regex post-processing
-                recovered_fields, reformatted = apply_regex_post_processing(
-                    entry_text, recovered_fields, taxonomy_code
-                )
-                # Recalculate coverage
-                new_coverage = calculate_unextracted_content(entry_text, recovered_fields)
-
-                entry_result = {
-                    **entry,
-                    "extracted_fields": recovered_fields,
-                    "extraction_success": True,
-                    "extraction_coverage": new_coverage,
-                    "llm_recovery_applied": True
-                }
-                if reformatted:
-                    entry_result["reformatted_fields"] = reformatted
-                recovered_entries.append(entry_result)
+                extraction = _extract_entry_items(entry.get("text", ""), matched, taxonomy_code)
+                recovered_entries.append(
+                    _entry_with_extraction(entry, extraction, {"llm_recovery_applied": True}))
             else:
                 # No matching recovery - keep original
                 recovered_entries.append({
@@ -642,14 +777,15 @@ Return JSON with format:
     return prompt
 
 
-def _validate_raw_extractions(raw_extractions: list[Any], code: str) -> dict[int, dict[str, Any]]:
-    """Validate raw LLM extraction items at the external trust boundary.
+def _validate_raw_extractions(raw_extractions: list[Any], code: str) -> dict[int, list[dict[str, Any]]]:
+    """Validate raw LLM extraction items at the external trust boundary, and
+    group them by `entry_index`, in reply order.
 
-    Pure move out of extract_fields_batch's per-code loop (function-size
-    ratchet, docs/CODING_STANDARDS.md #3.x) -- same validation, same drop-and-
-    warn on a malformed item, same map shape; not a behavior change.
+    A malformed item is dropped with a warning. Every valid item is kept: a
+    reply that holds several items for one entry (one per record of a
+    multi-record entry) used to keep only the last of them.
     """
-    extraction_map: dict[int, dict[str, Any]] = {}
+    extraction_map: dict[int, list[dict[str, Any]]] = defaultdict(list)
     for raw_item in raw_extractions:
         try:
             validated_item = _ExtractedEntryFields.model_validate(raw_item)
@@ -659,8 +795,9 @@ def _validate_raw_extractions(raw_extractions: list[Any], code: str) -> dict[int
                 code, exc,
             )
             continue
-        extraction_map[validated_item.entry_index] = validated_item.model_dump(exclude={"entry_index"})
-    return extraction_map
+        extraction_map[validated_item.entry_index].append(
+            validated_item.model_dump(exclude={"entry_index"}))
+    return dict(extraction_map)
 
 
 def extract_fields_batch(
@@ -760,45 +897,18 @@ def extract_fields_batch(
             # Merge using explicit indices to avoid mismapping
             for i, entry in enumerate(code_entries):
                 if i in extraction_map:
-                    extracted_fields: Any = extraction_map[i]  # untyped LLM JSON -- see attempt_llm_recovery
-
-                    # Coerce off-type LLM values (e.g. list-valued strings) before
-                    # any string/number consumer (regex post-processing, downstream
-                    # stages) touches them -- see coerce_field_value_types().
-                    extracted_fields = coerce_field_value_types(extracted_fields)
-
-                    # Apply date normalization to split ranges into start_date/end_date
-                    extracted_fields = normalize_dates(extracted_fields)
-
-                    # Apply regex post-processing and track reformatted values
-                    original_text = entry.get("text", "")
-                    taxonomy_code = entry.get("taxonomy_code", "")
-                    extracted_fields, reformatted_fields = apply_regex_post_processing(
-                        original_text, extracted_fields, taxonomy_code
-                    )
-
-                    # Calculate unextracted content for quality assurance
-                    unextracted_info = calculate_unextracted_content(original_text, extracted_fields)
-
-                    entry_result = {
-                        **entry,
-                        "extracted_fields": extracted_fields,
-                        "extraction_success": True,
-                        "extraction_coverage": unextracted_info
-                    }
-
-                    # Add reformatted_fields if any reformatting occurred
-                    if reformatted_fields:
-                        entry_result["reformatted_fields"] = reformatted_fields
-
-                    all_extracted.append(entry_result)
+                    # Coerce, date-normalize and regex-complete every item the
+                    # reply holds for this entry -- see _extract_entry_items.
+                    extraction = _extract_entry_items(
+                        entry.get("text", ""), extraction_map[i], entry.get("taxonomy_code", ""))
+                    all_extracted.append(_entry_with_extraction(entry, extraction, {}))
                 else:
                     # No extraction found - mark as failed
                     all_extracted.append({
                         **entry,
                         "extracted_fields": {},
                         "extraction_success": False,
-                        "extraction_error": "No matching extraction in LLM response"
+                        "extraction_error": NO_MATCHING_EXTRACTION
                     })
 
         except (ReadTimeoutError, ConnectTimeoutError):
@@ -899,15 +1009,22 @@ def extract_fields_batch(
     }
 
 
+def _usage_total_tokens(usage: LlmUsage) -> int:
+    """`call_llm`'s own `total_tokens` definition (prompt + completion) over an
+    accumulated LlmUsage, so owner-name tokens add into stage 4's total_tokens."""
+    return usage.prompt_tokens + usage.completion_tokens
+
+
 def _extract_and_log_cv_owner_name(
     document_uid: str,
     mapped_entries: list[dict[str, Any]],
     docx_path: str | None,
+    usage: LlmUsage,
 ) -> dict[str, Any]:
     """Call `extract_cv_owner_name` and log the result when a last name was
     found. Pure move out of `extract_fields_from_mapped_entries` (#456-R3
-    §3.2a) -- same call, same kwargs, same logging."""
-    cv_owner_name = extract_cv_owner_name(document_uid, mapped_entries, docx_path=docx_path)
+    §3.2a) -- same call, same logging; `usage` collects the call's cost (#1177)."""
+    cv_owner_name = extract_cv_owner_name(document_uid, mapped_entries, docx_path=docx_path, usage=usage)
     if cv_owner_name.get('last_name'):
         logger.info(
             "CV Owner: %s (last name: %s)",
@@ -1016,7 +1133,8 @@ def extract_fields_from_mapped_entries(
     logger.info("Field schemas: v%s (%d taxonomy codes)", FIELD_SCHEMA_VERSION, len(schemas))
 
     # Extract CV owner's name for target_name identification
-    cv_owner_name = _extract_and_log_cv_owner_name(document_uid, mapped_entries, docx_path)
+    owner_name_usage = LlmUsage()
+    cv_owner_name = _extract_and_log_cv_owner_name(document_uid, mapped_entries, docx_path, owner_name_usage)
 
     # Location inference runs *after* extraction -- see the call site below.
 
@@ -1029,8 +1147,8 @@ def extract_fields_from_mapped_entries(
         logger.warning("No valid entries to process")
         return {
             "entries": skipped_entries,
-            "total_cost": 0.0,
-            "total_tokens": 0,
+            "total_cost": owner_name_usage.cost,
+            "total_tokens": _usage_total_tokens(owner_name_usage),
             "success": True
         }
 
@@ -1136,8 +1254,8 @@ def extract_fields_from_mapped_entries(
         "entries": all_entries,
         "cv_owner": cv_owner_name,  # Include CV owner info in output
         "cv_owner_location": cv_owner_location,  # Include location context for geographic scope
-        "total_cost": total_cost + location_cost,
-        "total_tokens": total_tokens + location_tokens,
+        "total_cost": total_cost + location_cost + owner_name_usage.cost,
+        "total_tokens": total_tokens + location_tokens + _usage_total_tokens(owner_name_usage),
         "cache_read_tokens": total_cache_read_tokens,
         "cache_write_tokens": total_cache_write_tokens,
         "stats": {

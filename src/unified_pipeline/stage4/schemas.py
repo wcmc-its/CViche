@@ -10,6 +10,7 @@ never sees the lazy initialisation (the #496 split-state lesson). Reach it as
 `unified_pipeline.stage4.schemas._LOADED_SCHEMAS` or not at all.
 """
 
+import re
 import copy
 import json
 import logging
@@ -111,6 +112,24 @@ def load_field_schemas_from_config(config_path: str | None = None) -> dict[str, 
 # Schema version info
 FIELD_SCHEMA_VERSION = "1.1"
 FIELD_SCHEMA_CONFIG_PATH = Path(__file__).parent.parent / "config" / "field_schemas_v1.1.json"
+
+# When the LLM returns 2+ items for ONE entry (a paragraph listing several
+# trainees, committees or societies), stage 4 keeps every item, in reply order,
+# as a list under this `extracted_fields` key; the entry's own scalar fields
+# stay the LAST item, as they were before every item was kept. Not a schema
+# field: `stage6/fan_out.py` splits the list into one row per record, and stage
+# 6 hands it this name because nothing under `stage6/` may import `stage4`.
+STAGE4_RECORDS_KEY = "stage4_records"
+
+# The entry-level count of items the reply held for the entry, written only
+# when it is 2 or more, so the multi-record shape stays visible downstream.
+STAGE4_RECORDS_RETURNED_KEY = "stage4_records_returned"
+
+# `<schema field>_<n>`: a numbered second copy of a schema field, which the
+# model uses for a second record (`organization_2` held the second column of
+# a two-column memberships list, #1245). Stage 4 splits it into its own
+# record; the doctor's `offschema_fields` lint reports what is left.
+NUMBERED_FIELD_RE = re.compile(r"^(?P<field>.+)_(?P<n>\d+)$")
 
 # ============================================================================
 # Field Extraction Schemas by Taxonomy Code

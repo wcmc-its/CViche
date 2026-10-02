@@ -98,6 +98,51 @@ def test_restart_archives_input_to_storage(db, tmp_path):
     assert db.query(Run).filter(Run.id == new_run_id).first() is not None
 
 
+def test_restart_of_a_pdf_run_reconverts(db, tmp_path, monkeypatch, cv_pdf):
+    """#806: restart forks the ORIGINAL PDF forward (input/<new>.pdf,
+    file_type "pdf"), so the new run's orchestrator converts it afresh into
+    its own docx copy -- no docx from the old run is reused."""
+    from docx import Document
+    from app.api import runs as runs_api
+    from app.models import Run
+    from app.pipeline import orchestrator as orch
+
+    user, original = _make_original(db)
+    original.file_type, original.filename = "pdf", "my cv.pdf"
+    db.commit()
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    pdf_bytes = cv_pdf()
+    (upload_dir / "ORIGAR.pdf").write_bytes(pdf_bytes)
+    storage = MagicMock()
+
+    with patch.object(runs_api, "check_run_access", return_value=original), \
+         patch.object(runs_api, "check_rate_limit", return_value=None), \
+         patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
+         patch.object(runs_api, "get_storage", return_value=storage), \
+         patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
+         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
+         patch("app.api.upload.get_storage", return_value=storage):
+        new_run_id = asyncio.run(
+            runs_api.restart_run(run_id="ORIGAR", db=db, current_user=user)
+        )["run_id"]
+
+    assert db.get(Run, new_run_id).file_type == "pdf"
+    archived = {c.args[1]: c.args[2] for c in storage.put_file_exclusive.call_args_list}
+    assert archived[f"input/{new_run_id}.pdf"] == pdf_bytes
+
+    monkeypatch.setattr(orch, "PARENT_DIR", tmp_path / "repo")
+    o = orch.PipelineOrchestrator(new_run_id, upload_dir / f"{new_run_id}.pdf", db)
+    try:
+        dest = o._copy_to_pipeline_input()
+        assert dest.endswith(f"word/{new_run_id}/{new_run_id}.docx")
+        assert o.pdf_conversion is not None
+        assert "EDUCATION" in [p.text for p in Document(dest).paragraphs]
+    finally:
+        import shutil
+        shutil.rmtree(o.web_output_dir, ignore_errors=True)
+
+
 def test_restart_aborts_when_archive_fails(db, tmp_path):
     """A failed durable archive is fatal: no run row, 502 surfaced (like /upload)."""
     from app.api import runs as runs_api

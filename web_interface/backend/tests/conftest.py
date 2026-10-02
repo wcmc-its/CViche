@@ -76,6 +76,15 @@ def _no_teams_webhook_leak(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_live_ed_department_lookup(monkeypatch):
+    """The SAML ACS now reads the user's department from ED after the
+    membership check. Tests that enable ED and patch only check_ed_membership
+    must not fall through to a real LDAP bind; a test that asserts on the
+    department patches this name itself."""
+    monkeypatch.setattr("app.api.saml_routes.fetch_ed_department", lambda cwid, cfg: None)
+
+
+@pytest.fixture(autouse=True)
 def _reset_estimate_rate_limiter():
     """/estimate's per-pod, in-memory, per-user counter (#795) is a process
     global, unlike the per-test in-memory DB above -- without this, one
@@ -293,3 +302,25 @@ def _guard_real_prompt_logs_untouched():
         f"cleanup than the one seeded file a test intended to remove: "
         f"{sorted(removed)[:10]}"
     )
+
+
+@pytest.fixture
+def cv_pdf():
+    """Synthetic PDF bytes from the pipeline suite's builder (#806): no PDF
+    writer is a dependency, so fixtures are hand-written PDF bytes.
+    ``cv_pdf(image_pages=(1,), user_password="pw")`` adds an image-only
+    second page / encrypts it; the first page always carries well over
+    upload.py's MIN_EXTRACTED_CHARS of text."""
+    from unified_pipeline.tests.test_pdf_to_docx import _make_pdf
+
+    text_page = [
+        (i == 0, 12 if i == 0 else 10, 72, 720 - 16 * i,
+         "EDUCATION" if i == 0 else f"Entry {i}: Doctor of Medicine, Example University, New York, 2019")
+        for i in range(12)
+    ]
+
+    def build(image_pages=(), user_password=None) -> bytes:
+        pages = [text_page] + ([[]] if image_pages else [])
+        return _make_pdf(pages, image_pages=image_pages, user_password=user_password)
+
+    return build
