@@ -711,6 +711,13 @@ class TestStage4Records:
             records[1] = {'description': 'nothing a P row writes'}
         assert _fan4(entry) == [entry]
 
+    @pytest.mark.parametrize('value', [['Glade Board', 'Fern Council'], [_committee('Glade Board')]],
+                             ids=['strings', 'one_record'])
+    def test_a_value_that_is_not_two_or_more_records_is_left_alone(self, value):
+        entry = _stage4_entry(copy.deepcopy(_THREE_COMMITTEES))
+        entry['extracted_fields'][_RECORDS] = value
+        assert _fan4(entry) == [entry]
+
     def test_a_declined_list_is_not_split_by_the_generic_rules(self):
         # The second record writes nothing in a P row, so this list declines;
         # the generic rules, handed it, would split it into an empty row.
