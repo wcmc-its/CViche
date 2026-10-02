@@ -26,7 +26,7 @@ IMAGE_TAG_ENV = "CVICHE_IMAGE_TAG"
 def current_image_tag() -> str | None:
     """The tag of the image this process runs, or None when it was built
     without one (local dev, or an image built before #1239)."""
-    return os.environ.get(IMAGE_TAG_ENV) or None
+    return os.environ.get(IMAGE_TAG_ENV, "").strip() or None
 
 
 logger = logging.getLogger(__name__)
@@ -755,7 +755,8 @@ def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set)
     guarantees the winning row is actually modified.
 
     ``status_criteria`` are SQLAlchemy expressions on ``Run.status``; ``also_set``
-    are extra columns written in the same statement. Does not commit: the caller
+    are extra columns written in the same statement. Also stamps ``image_tag``
+    with the executing image (#1239). Does not commit: the caller
     commits on a win, and on a loss holds nothing to undo.
     """
     result = db.query(Run).filter(Run.id == run_id, *status_criteria).update(

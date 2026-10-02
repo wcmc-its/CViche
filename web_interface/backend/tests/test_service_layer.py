@@ -176,6 +176,10 @@ class TestQueueRunTransitions:
         monkeypatch.setenv("CVICHE_IMAGE_TAG", "")
         assert run_service.current_image_tag() is None
 
+    def test_whitespace_image_tag_env_is_treated_as_unset(self, monkeypatch):
+        monkeypatch.setenv("CVICHE_IMAGE_TAG", "   ")
+        assert run_service.current_image_tag() is None
+
     def test_claim_run_as_running_records_the_image_tag(self, db, monkeypatch):
         monkeypatch.setenv("CVICHE_IMAGE_TAG", "dev-2.tag")
         self._seed_run(db, status="created")
