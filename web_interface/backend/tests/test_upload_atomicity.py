@@ -449,6 +449,15 @@ def _complex_field(*instr_runs: str) -> str:
 @pytest.mark.parametrize("label, parts, expected", [
     ("plain docx", {}, None),
     ("vbaProject.bin", {"word/vbaProject.bin": b"\x00" * 64}, upload_validation.ActiveContent.MACRO),
+    ("vbaProject.bin under a backslash zip name", {"word\\vbaProject.bin": b"\x00" * 64},
+     upload_validation.ActiveContent.MACRO),
+    ("VBA project under another name, found by its relationship", {
+        "word/foo.bin": b"\x00" * 64,
+        "word/_rels/document.xml.rels": (
+            "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>"
+            "<Relationship Id='rId99' Type='http://schemas.microsoft.com/office/2006/relationships/vbaProject'"
+            " Target='foo.bin'/></Relationships>"),
+    }, upload_validation.ActiveContent.MACRO),
     ("https attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "https://evil.example/x.dotm")},
      upload_validation.ActiveContent.EXTERNAL_LINK),
     ("UNC attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "\\\\10.0.0.1\\s\\x.dotm")},
@@ -459,6 +468,8 @@ def _complex_field(*instr_runs: str) -> str:
      upload_validation.ActiveContent.EXTERNAL_LINK),
     ("file URL naming a host", {_SETTINGS_RELS: _rels("attachedTemplate", "file://evil.example/x.dotm")},
      upload_validation.ActiveContent.EXTERNAL_LINK),
+    ("file: with a backslash UNC", {_SETTINGS_RELS: _rels("attachedTemplate", "file:\\\\evil.example\\s\\x.dotm")},
+     upload_validation.ActiveContent.EXTERNAL_LINK),
     ("forward-slash UNC attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "//evil.example/s/x.dotm")},
      upload_validation.ActiveContent.EXTERNAL_LINK),
     ("ftp attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "FTP://evil.example/x.dotm")},
@@ -467,6 +478,8 @@ def _complex_field(*instr_runs: str) -> str:
      upload_validation.ActiveContent.EXTERNAL_LINK),
     ("file:/// attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file:///C:/x.dotm")}, None),
     ("file://localhost attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file://localhost/x.dotm")},
+     None),
+    ("file://LocalHost attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "file://LocalHost/x.dotm")},
      None),
     ("Macintosh HD attachedTemplate", {_SETTINGS_RELS: _rels("attachedTemplate", "Macintosh%20HD:Users:x.dotx")},
      None),

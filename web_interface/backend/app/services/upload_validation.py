@@ -90,6 +90,7 @@ class ActiveContent(StrEnum):
 
 
 _VBA_PROJECT_BASENAME = "vbaproject.bin"
+_VBA_PROJECT_TYPE_SUFFIX = "/vbaproject"
 _RELS_SUFFIX = ".rels"
 _WORD_PART_PREFIX = "word/"
 _XML_SUFFIX = ".xml"
@@ -132,8 +133,12 @@ def _scan_docx(zf: zipfile.ZipFile) -> ActiveContent | None:
     if any(_basename(e.filename) == _VBA_PROJECT_BASENAME for e in entries):
         return ActiveContent.MACRO
     for entry in entries:
-        name = entry.filename.lower()
-        if name.endswith(_RELS_SUFFIX) and _has_network_relationship(_parse_part(zf, entry)):
+        if not entry.filename.lower().endswith(_RELS_SUFFIX):
+            continue
+        root = _parse_part(zf, entry)
+        if _has_vba_relationship(root):
+            return ActiveContent.MACRO
+        if _has_network_relationship(root):
             return ActiveContent.EXTERNAL_LINK
     for entry in entries:
         name = entry.filename.lower()
@@ -157,6 +162,15 @@ def _parse_part(zf: zipfile.ZipFile, entry: zipfile.ZipInfo) -> etree._Element |
     except _PART_READ_ERRORS:
         logger.warning("Active-content scan skipped an unreadable part", exc_info=True)
         return None
+
+
+def _has_vba_relationship(root: etree._Element | None) -> bool:
+    """A relationship to a VBA project, whatever the part is named: the
+    basename check in _scan_docx misses one stored as, say, word/foo.bin."""
+    if root is None:
+        return False
+    return any((rel.get("Type") or "").lower().endswith(_VBA_PROJECT_TYPE_SUFFIX)
+               for rel in root.iter("{*}Relationship"))
 
 
 def _has_network_relationship(root: etree._Element | None) -> bool:
