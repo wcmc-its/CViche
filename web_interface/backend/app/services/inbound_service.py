@@ -30,7 +30,7 @@ from app.services.inbound_mail import (
     Attachment, AttachmentReject, ParsedMessage, UnparseableMessage, is_wcm_address, parse_message,
 )
 from app.services.upload_validation import (
-    MIN_EXTRACTED_CHARS, PDF_EXTENSION, _extract_text, _validate_docx_magic, is_mostly_scanned,
+    MIN_EXTRACTED_CHARS, PDF_EXTENSION, _extract_text, _validate_docx_magic, docx_active_content, is_mostly_scanned,
 )
 from app.services.pdf_sandbox import EncryptedPdfError, PdfBusyError, PdfTooComplexError, UnreadablePdfError, read_pdf
 from app.storage.base import RunStorage
@@ -97,11 +97,13 @@ def _screen_sender(db: Session, parsed: ParsedMessage) -> Verdict:
 
 
 def _readable_reject(att: Attachment) -> AttachmentReject | None:
-    """The upload validators /upload applies to bytes: zip-bomb bound and docx
-    structure, the PDF sandbox, and the minimum text length."""
+    """The upload validators /upload applies to bytes: zip-bomb bound, docx
+    structure and active content, the PDF sandbox, and the minimum text length."""
     ext = "." + att.filename.rsplit(".", 1)[-1].lower()
     if ext == ".docx" and not _validate_docx_magic(att.content):
         return AttachmentReject.NOT_A_REAL_FILE
+    if ext == ".docx" and docx_active_content(att.content) is not None:
+        return AttachmentReject.ACTIVE_CONTENT
     try:
         if ext == PDF_EXTENSION:
             pdf = read_pdf(att.content)

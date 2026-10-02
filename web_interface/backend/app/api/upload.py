@@ -335,6 +335,8 @@ async def _estimate_one(file: UploadFile, file_ext: str, current_user: User) -> 
     if file_ext == ".docx" and not run_creation._validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected estimate: file claims .docx but magic bytes do not match")
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
+    if file_ext == ".docx":
+        await run_creation._reject_active_docx_content(content)
 
     file_size_kb = len(content) / 1024
 
