@@ -525,6 +525,12 @@ class TestDivisionDepartmentReachesTheInstitutionCell:
                                 institution="Zorblax Division, Quuxville General Hospital"))
         assert rows == [("Chief", "Zorblax Division, Quuxville General Hospital", _O_DATES)]
 
+    def test_a_division_differing_only_in_case_is_not_repeated(self):
+        rows = _o_rows(_o_entry(leadership_role="Chief, Zorblax Division",
+                                division_department="zorblax division",
+                                institution="Quuxville General Hospital"))
+        assert rows == [("Chief, Zorblax Division", "Quuxville General Hospital", _O_DATES)]
+
     def test_function_words_do_not_make_a_division_new(self):
         # "Division of Zorblax" says nothing "Chief, Zorblax Division" does not.
         rows = _o_rows(_o_entry(leadership_role="Chief, Zorblax Division",

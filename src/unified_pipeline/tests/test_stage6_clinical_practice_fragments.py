@@ -349,6 +349,17 @@ def test_l3_unit_program_the_role_already_names_is_not_repeated():
     assert added == ["", "Director, Kestrel Step-Down Unit, Harrowgate Hospital, 2015-2020"]
 
 
+def test_l3_unit_program_the_institution_already_names_is_not_repeated():
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Medical Director", leadership_role="Medical Director",
+                unit_program="Kestrel Step-Down Unit",
+                institution="Kestrel Step-Down Unit, Harrowgate Hospital",
+                start_date="2015", end_date="2020")],
+    )
+    assert added == ["", "Medical Director, Kestrel Step-Down Unit, Harrowgate Hospital, 2015-2020"]
+
+
 def test_l3_unit_program_is_not_rendered_again_as_a_source_fragment():
     """The unit is in the composed bullet, so the same unit flattened out of
     the source row after the role is not appended as its own bullet."""
