@@ -99,8 +99,14 @@ A, APPENDIX, CONTENT = "A", "T", "S4"
 DENIED, ALLOWED = True, False
 
 
+def _probe_matches(text: str, code: str):
+    """The matches `run_pii_pass` finds in an entry of `code`: the same scope,
+    and the Personal Data block's own dash-label rule for an A-coded entry."""
+    return _pii_matches(text, _entry_scope(code, RENDER_ROUTED_CODES), personal_data=code == A)
+
+
 def _denied(text: str, code: str) -> bool:
-    return bool(_pii_fragments(text, _entry_scope(code, RENDER_ROUTED_CODES)))
+    return bool(_probe_matches(text, code))
 
 
 # --------------------------------------------------------------------------
@@ -113,6 +119,9 @@ def _denied(text: str, code: str) -> bool:
 _ALL = {A: DENIED, APPENDIX: DENIED, CONTENT: DENIED}
 _PERSONAL_ONLY = {A: DENIED, APPENDIX: DENIED, CONTENT: ALLOWED}
 _NEVER = {A: ALLOWED, APPENDIX: ALLOWED, CONTENT: ALLOWED}
+#: A dash family label with no `Family` label ahead of it (#1223): withheld in
+#: the Personal Data block only.
+_DASH_PERSONAL_DATA_ONLY = {A: DENIED, APPENDIX: ALLOWED, CONTENT: ALLOWED}
 
 PROBE_TABLE = [
     # --- #820's 16 DOB shapes ------------------------------------------
@@ -230,7 +239,10 @@ PROBE_TABLE = [
     ("Spouse and Children: Pat Example; Kim, Lee", CAT_SPOUSE, _ALL),
     ("Wife/Children: Pat Example, Kim", CAT_SPOUSE, _ALL),
     ("Names of Children: Kim (1990), Lee (1992)", CAT_CHILDREN, _PERSONAL_ONLY),
-    ("Name of Spouse \u2013 A Documentary Film Review", None, _NEVER),
+    # #1223: an A-coded entry is the Personal Data block, which holds no
+    # titles, so this #473 control is withheld there only
+    # (`_DASH_PERSONAL_DATA_ONLY`).
+    ("Name of Spouse \u2013 A Documentary Film Review", CAT_SPOUSE, _DASH_PERSONAL_DATA_ONLY),
     # #1223: family prose with no label, and the wider family label.
     ("Married (Pat), two children (Kim and Lee)", CAT_SPOUSE, _PERSONAL_ONLY),
     ("2 children (Kim and Lee)", CAT_CHILDREN, _PERSONAL_ONLY),
@@ -243,11 +255,16 @@ PROBE_TABLE = [
     ("Three children's hospitals (a survey)", None, _NEVER),
     ("the clinic, born 1970, was founded", None, _NEVER),
     ("Family Medicine: A Review", None, _NEVER),
-    # The dash form is accepted only under a `Family` label, so these stay
-    # clean whatever the destination (see the #1223 section below).
-    ("Children - A Review of the Literature", None, _NEVER),
-    ("Spouse- A Documentary Film Review", None, _NEVER),
-    ("Family- wise error rate in gene association studies", None, _NEVER),
+    # The dash form is accepted under a `Family` label at A and T, and with no
+    # label at all in an A-coded entry (the Personal Data block holds no
+    # titles). So these title-shaped controls are withheld at A, and stay
+    # clean at T and in a routed entry (see the #1223 section below).
+    ("Children - A Review of the Literature", CAT_CHILDREN, _DASH_PERSONAL_DATA_ONLY),
+    ("Spouse- A Documentary Film Review", CAT_SPOUSE, _DASH_PERSONAL_DATA_ONLY),
+    ("Family- wise error rate in gene association studies", CAT_FAMILY, _DASH_PERSONAL_DATA_ONLY),
+    # A spelled-out child count, with no spouse span ahead of it to cover it.
+    ("two children (Kim and Lee)", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("three sons (Bob, Cy and Dee)", CAT_CHILDREN, _PERSONAL_ONLY),
 ]
 
 
@@ -269,8 +286,7 @@ def test_probe_table(text, category, dest, expected):
     assert _denied(text, dest) is expected, (
         f"{text!r} at {dest}: expected {'denied' if expected else 'allowed'}")
     if expected:
-        scope = _entry_scope(dest, RENDER_ROUTED_CODES)
-        assert [m.category for m in _pii_matches(text, scope)] == [category]
+        assert [m.category for m in _probe_matches(text, dest)] == [category]
 
 
 def test_every_policy_row_has_a_probe_that_reaches_it():
@@ -509,12 +525,22 @@ def test_1041_child_count_inside_prose_is_not_withheld(text):
     "Visa\u2014free travel policy review",
     "Visa\u2013sponsored scholars program",
     # Rows left colon-only: their labels open real titles.
-    "Spouse \u2013 A Documentary Film Review",
     "Honorarium - Grand Rounds lecture",
 ])
 def test_1041_dash_joined_non_pii_line_is_not_newly_withheld(text):
     assert not _denied(text, A)
     assert not _denied(text, APPENDIX)
+
+
+def test_1041_the_spouse_title_control_is_withheld_only_in_the_personal_data_block():
+    """#1223 took the dash form of a children / spouse / family label in an
+    A-coded entry (the Personal Data block, which holds no titles), so this
+    #1041 control is withheld there. In an Appendix-bound entry, which can
+    hold a title, it still needs a `Family` label ahead of it."""
+    text = "Spouse \u2013 A Documentary Film Review"
+    assert _denied(text, A)
+    assert not _denied(text, APPENDIX)
+    assert not _denied(text, CONTENT)
 
 
 @pytest.mark.parametrize("label", [
