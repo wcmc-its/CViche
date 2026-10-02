@@ -969,3 +969,13 @@ def test_fallback_leaves_submitted_and_non_s7_entries_alone(tmp_path, monkeypatc
     chapter_s3 = _unmatched(f'Garcia M. {INPRESS_TITLE}. Springer. In press.', code='S3')
     result, _, _ = _run_stage5(tmp_path, monkeypatch, chapter_s3, _NO_HITS)
     assert result['taxonomy_code'] == 'S3'
+
+
+def test_accepted_conference_abstract_is_not_replaced_by_the_journal_paper(tmp_path, monkeypatch):
+    # SDEBQJ (dev-239): "Organization for Human Brain Mapping ... (Accepted)." on
+    # an S8 abstract was title-searched and overwritten by the later article.
+    entry = _inpress_entry(text=f'Garcia M. {INPRESS_TITLE}. OHBM, Vancouver. (Accepted).', code='S8')
+    result, session, _ = _run_stage5(tmp_path, monkeypatch, entry, _found())
+    assert session.calls == []
+    assert result['taxonomy_code'] == 'S8'
+    assert 'in_press_note' not in result and 'enrichment_data' not in result
