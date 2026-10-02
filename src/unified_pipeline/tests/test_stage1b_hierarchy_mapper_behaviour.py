@@ -1160,3 +1160,266 @@ def test_map_hierarchy_node_fallback_search_prefers_the_exact_paragraph():
     }
     mapped, _ = map_hierarchy_node(node, elements, [], 0)
     assert mapped["children"][0]["element_idx"] == 2
+
+
+# ------------------------------------------- #916 / #1178: typographic fold,
+# partial-only backward bound, exact-only sequence anchors
+
+def test_normalize_text_folds_typographic_quotes_and_apostrophes():
+    assert normalize_text("Example (CONT’D)") == normalize_text("Example (CONT'D)")
+    assert normalize_text("“Example” heading") == normalize_text('"Example" heading')
+
+
+def test_map_hierarchy_node_page_break_heading_matches_its_typographic_line():
+    # Stage 1a writes "(CONT'D)" with an ASCII apostrophe; the source line has
+    # a typographic one. The node must bind to that line, not its base heading.
+    elements = [
+        _elem(0, "Example Group"),
+        _elem(1, "body line"),
+        _elem(2, "Example Group (CONT’D)"),
+        _elem(3, "body line"),
+    ]
+    mapped, _ = map_hierarchy_node({"text": "Example Group (CONT'D)", "level": "H2"}, elements, [], 3)
+    assert mapped["element_idx"] == 2
+
+
+def test_backward_fallback_rejects_a_partial_match_before_the_parent():
+    # "Teaching Assistant" only contains the child's text and sits before the
+    # parent's own heading, so it is not the child's line.
+    elements = [_elem(0, "Teaching Assistant"), _elem(1, "Service"), _elem(2, "body")]
+    child, _ = map_hierarchy_node(
+        {"text": "Teaching", "level": "H2"}, elements, ["Service"], 2, parent_idx=1
+    )
+    assert child["element_idx"] is None
+
+
+def test_backward_fallback_keeps_an_exact_match_before_the_parent():
+    # The same bound must not touch an exact heading line (#1178 attempt 1).
+    elements = [_elem(0, "Local"), _elem(1, "Service"), _elem(2, "body")]
+    child, _ = map_hierarchy_node(
+        {"text": "Local", "level": "H2"}, elements, ["Service"], 2, parent_idx=1
+    )
+    assert child["element_idx"] == 0
+
+
+def test_backward_fallback_does_not_partial_match_a_top_level_heading():
+    elements = [_elem(0, "Teaching"), _elem(1, "body")]
+    node = {"text": "Teaching Assignments", "level": "H2"}
+    barred, _ = map_hierarchy_node(
+        node, elements, ["Service"], 1, top_level_headers=frozenset({"teaching"})
+    )
+    allowed, _ = map_hierarchy_node(node, elements, ["Service"], 1)
+    assert barred["element_idx"] is None
+    assert allowed["element_idx"] == 0
+
+
+def test_find_header_in_sequence_needs_an_exact_parent_anchor():
+    elements = [_elem(0, "Research Notes"), _elem(1, "Beta Grants")]
+    assert find_header_in_sequence(elements, ["Research", "Beta Grants"], 0) is None
+    elements[0] = _elem(0, "Research")
+    assert find_header_in_sequence(elements, ["Research", "Beta Grants"], 0) == [
+        ("Research", 0), ("Beta Grants", 1),
+    ]
+
+
+def test_map_hierarchy_node_child_is_not_sent_past_a_later_partial_parent_hit():
+    # Beta's own line (2) sits right at the cursor. A later "Research Notes"
+    # line must not become the parent anchor that drags Beta to the second
+    # "Beta Grants" at 5 (#916 sequence-match path).
+    elements = [
+        _elem(0, "Research"),
+        _elem(1, "Alpha Grants"),
+        _elem(2, "Beta Grants"),
+        _elem(3, "body line"),
+        _elem(4, "Research Notes"),
+        _elem(5, "Beta Grants"),
+    ]
+    node = {
+        "text": "Research",
+        "level": "H1",
+        "children": [
+            {"text": "Alpha Grants", "level": "H2"},
+            {"text": "Beta Grants", "level": "H2"},
+        ],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert [c["element_idx"] for c in mapped["children"]] == [1, 2]
+
+
+def test_run_stage_1b_passes_the_top_level_headers_to_the_backward_fallback(tmp_path, monkeypatch):
+    _redirect_output_manager(monkeypatch, tmp_path)
+    doc = Document()
+    doc.add_paragraph("Teaching")
+    doc.add_paragraph("body line")
+    docx_path = tmp_path / "toplevel_wire_cv.docx"
+    doc.save(docx_path)
+    hierarchy = {
+        "document_uid": "WIRE",
+        "hierarchy": [
+            {"text": "Teaching", "level": "H1", "children": []},
+            {"text": "Absent Parent", "level": "H1",
+             "children": [{"text": "Teaching Assignments", "level": "H2"}]},
+        ],
+    }
+    hierarchy_path = tmp_path / "toplevel_wire_hierarchy.json"
+    hierarchy_path.write_text(json.dumps(hierarchy))
+
+    output_data, _ = stage1b.run_stage_1b(str(docx_path), str(hierarchy_path))
+
+    child = output_data["hierarchy_with_indices"][1]["children"][0]
+    assert child["element_idx"] is None
+
+
+def test_map_hierarchy_node_mapped_parent_is_not_re_searched_for_the_sequence():
+    # The parent is mapped at 0, so Beta must not look for a second "Research"
+    # line at 4 and take the "Beta Grants" after it (#916 sequence-match path).
+    elements = [
+        _elem(0, "Research"),
+        _elem(1, "Alpha Grants"),
+        _elem(2, "Beta Grants"),
+        _elem(3, "body line"),
+        _elem(4, "Research"),
+        _elem(5, "Beta Grants"),
+    ]
+    node = {
+        "text": "Research",
+        "level": "H1",
+        "children": [
+            {"text": "Alpha Grants", "level": "H2"},
+            {"text": "Beta Grants", "level": "H2"},
+        ],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert [c["element_idx"] for c in mapped["children"]] == [1, 2]
+
+
+def test_fallback_prefers_an_exact_line_behind_the_cursor_to_a_forward_fragment():
+    # The bare "Research" ahead is only a fragment of the header; the exact
+    # line behind the cursor is the node's own.
+    elements = [
+        _elem(0, "Pending Research Grants"),
+        _elem(1, "body line"),
+        _elem(2, "Research"),
+        _elem(3, "body line"),
+    ]
+    mapped, _ = map_hierarchy_node({"text": "Pending Research Grants", "level": "H1"}, elements, [], 1)
+    assert mapped["element_idx"] == 0
+
+
+def test_fallback_keeps_a_forward_partial_that_is_more_than_a_fragment():
+    # "Local talks" holds the whole header, so it still beats an
+    # earlier exact "Local" (that out-of-order case is not widened).
+    elements = [
+        _elem(0, "Local"),
+        _elem(1, "body line"),
+        _elem(2, "Local talks"),
+    ]
+    mapped, _ = map_hierarchy_node({"text": "Local", "level": "H2"}, elements, [], 1)
+    assert mapped["element_idx"] == 2
+
+
+def test_map_hierarchy_node_child_floor_is_the_mapped_parent_line():
+    # The parent maps to line 1; the child's only match is a partial line
+    # before it. The recursion must hand the child the parent's line as the
+    # partial floor, not 0 (#1178).
+    elements = [_elem(0, "Teaching Assistant"), _elem(1, "Service"), _elem(2, "body line")]
+    node = {"text": "Service", "level": "H1", "children": [{"text": "Teaching", "level": "H2"}]}
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["element_idx"] == 1
+    assert mapped["children"][0]["element_idx"] is None
+
+
+def test_map_hierarchy_node_top_level_node_may_partial_match_a_top_level_heading():
+    # The top-level exclusion protects only children; a top-level node has no
+    # parent path, so it keeps the partial match.
+    elements = [_elem(0, "Teaching"), _elem(1, "body line")]
+    mapped, _ = map_hierarchy_node(
+        {"text": "Teaching Assignments", "level": "H1"}, elements, [], 1,
+        top_level_headers=frozenset({"teaching"}),
+    )
+    assert mapped["element_idx"] == 0
+
+
+def test_map_hierarchy_node_child_is_not_bound_to_an_earlier_top_level_section():
+    # #1178's own shape: a child heading must not bind onto an earlier
+    # top-level section whose heading text it merely contains; the child
+    # stays unmapped and its parent stays a leaf with its body.
+    elements = [
+        _elem(0, "Presentations"),
+        _elem(1, "body line"),
+        _elem(2, "Publications"),
+        _elem(3, "PosterPresentations:"),
+        _elem(4, "body line"),
+    ]
+    pubs = {
+        "text": "Publications",
+        "level": "H1",
+        "children": [{"text": "Poster Presentations", "level": "H2"}],
+    }
+    tops = frozenset({"presentations", "publications"})
+    first, nxt = map_hierarchy_node({"text": "Presentations", "level": "H1"}, elements, [], 0, top_level_headers=tops)
+    second, _ = map_hierarchy_node(pubs, elements, [], nxt, top_level_headers=tops)
+    assert first["element_idx"] == 0
+    assert second["element_idx"] == 2
+    assert second["children"][0]["element_idx"] is None
+    sections = compute_section_boundaries([first, second], doc_length=len(elements))
+    pubs_section = next(s for s in sections if s["hierarchy"] == ["Publications"])
+    assert not pubs_section["has_children"]
+    assert (pubs_section["element_idx_start"], pubs_section["element_idx_end"]) == (2, 4)
+
+
+def test_fallback_takes_a_forward_fragment_when_no_exact_line_is_behind_the_cursor():
+    # No exact "Pending Grants" line exists anywhere and no bounded partial
+    # exists behind the cursor, so the forward fragment "Grants" is the node's
+    # only line and must be kept.
+    elements = [
+        _elem(0, "Intro"),
+        _elem(1, "body line"),
+        _elem(2, "Research"),
+        _elem(3, "Grants"),
+        _elem(4, "body line"),
+    ]
+    node = {
+        "text": "Research",
+        "level": "H1",
+        "children": [{"text": "Pending Grants", "level": "H2"}],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 2)
+    assert mapped["element_idx"] == 2
+    assert mapped["children"][0]["element_idx"] == 3
+
+
+def test_synthetic_parent_child_still_uses_the_sequence_anchor():
+    elements = [
+        _elem(0, "Teaching"),
+        _elem(1, "body line"),
+        _elem(2, "Awards"),
+        _elem(3, "Teaching"),
+        _elem(4, "body line"),
+    ]
+    node = {
+        "text": "Awards",
+        "level": "H1",
+        "text_metadata": {"synthetic": True},
+        "children": [{"text": "Teaching", "level": "H2"}],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["element_idx"] is None
+    assert mapped["children"][0]["element_idx"] == 3
+
+
+def test_child_may_partial_match_its_mapped_parents_own_line():
+    elements = [
+        _elem(0, "Intro"),
+        _elem(1, "body line"),
+        _elem(2, "Training: Undergraduate:"),
+        _elem(3, "body line"),
+    ]
+    node = {
+        "text": "Training",
+        "level": "H1",
+        "children": [{"text": "Undergraduate", "level": "H2"}],
+    }
+    mapped, _ = map_hierarchy_node(node, elements, [], 0)
+    assert mapped["element_idx"] == 2
+    assert mapped["children"][0]["element_idx"] == 2
