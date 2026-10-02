@@ -19,6 +19,8 @@ from types import MappingProxyType
 import re
 from typing import Dict
 
+from unified_pipeline.core.two_digit_year import expand_two_digit_year
+
 # Month name -> month number, for the date parser below. Includes the common
 # 3-4 letter abbreviations CVs use ("Aug", "Sept"). Distinct from _MONTH_NAMES
 # further down, which is the reverse (number -> name) for range formatting.
@@ -36,12 +38,6 @@ _MONTH_NAME_TO_NUM = MappingProxyType({
 # back to the same (year, None, None) a season gets, making "Foo 2021" and
 # "Fall 2016" indistinguishable).
 _SEASON_TOKENS = frozenset({'spring', 'summer', 'fall', 'autumn', 'winter'})
-
-# Century pivot for a two-digit year (mm/dd/yy, #867): yy <= this reads as
-# 20yy, above it as 19yy. A constant rather than the clock (§7.4). CV dates
-# are almost all past events, so it sits well below strptime's 68.
-TWO_DIGIT_YEAR_PIVOT = 30
-
 
 # The keywords that mean "still ongoing" wherever a CV omits an end date.
 # Single source of truth, shared by formatting/dates.py (rendering) and
@@ -75,7 +71,8 @@ def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int |
     month is still trustworthy, and an impossible month (2021-13) drops the
     whole date, since nothing about it can be.
 
-    A two-digit year (mm/dd/yy, #867) resolves through `TWO_DIGIT_YEAR_PIVOT`;
+    A two-digit year (mm/dd/yy, #867) resolves through `expand_two_digit_year`
+    (core/two_digit_year.py, shared with stage 4);
     a bare mm/yy stays unparsed, since it may be a day rather than a year.
     """
     s = str(date_str or '').strip()
@@ -92,8 +89,7 @@ def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int |
     # MM/DD/YY / MM-DD-YY (#867): two-digit year, century read off the pivot.
     m = re.fullmatch(r'(\d{1,2})[-/](\d{1,2})[-/](\d{2})', s)
     if m:
-        yy = int(m.group(3))
-        year = (2000 if yy <= TWO_DIGIT_YEAR_PIVOT else 1900) + yy
+        year = expand_two_digit_year(int(m.group(3)))
         return _validate_full_date(year, int(m.group(1)), int(m.group(2)))
     # YYYY-MM / YYYY/MM (disjoint from MM/YYYY below: 4-digit lead vs 4-digit tail)
     m = re.fullmatch(r'(\d{4})[-/](\d{1,2})', s)
