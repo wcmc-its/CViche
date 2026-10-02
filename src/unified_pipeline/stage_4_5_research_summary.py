@@ -560,6 +560,37 @@ Generate only the research summary paragraph (150-200 words max), no additional 
     return result_text, usage
 
 
+# generation_method values the generator writes into the stage-4.5 output (#1224).
+GENERATION_METHOD_LLM = "llm_generated"
+GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT = "skipped_empty_context"
+GENERATION_METHOD_REFUSED = "refused_by_model"
+
+# The generation prompt demands third person, so a reply that opens by saying "I do not /
+# cannot / am unable / apologize" is the model declining, not the requested paragraph.
+# Anchored at the start so a real summary that mentions "cannot" later is never matched.
+REFUSAL_OPENER_PATTERN = re.compile(
+    r"\s*I(?:\s+(?:do\s+not|cannot|apologi[sz]e)|\s+(?:don|can)['’]t|"
+    r"\s+am\s+(?:unable|not\s+able|sorry)|['’]m\s+(?:unable|not\s+able|sorry))\b",
+    re.IGNORECASE)
+
+
+def generate_summary_unless_withheld(context: str, cv_owner_name: str) -> tuple[str, str, dict]:
+    """Generate the research summary, or return an empty one that stage 6 renders as nothing.
+
+    Returns (summary_text, generation_method, usage). A blank context makes no LLM call:
+    the model has nothing to summarize and answers with a refusal that would otherwise be
+    rendered as the owner's Research Activities paragraph (MYAXRH, #1224). A reply that
+    opens as a refusal is withheld the same way. Stage 6 skips a summary under its length
+    floor, so the section stays the template's own empty heading.
+    """
+    if not context.strip():
+        return "", GENERATION_METHOD_SKIPPED_EMPTY_CONTEXT, {}
+    summary, usage = generate_research_summary(context, cv_owner_name)
+    if REFUSAL_OPENER_PATTERN.match(summary):
+        return "", GENERATION_METHOD_REFUSED, usage
+    return summary, GENERATION_METHOD_LLM, usage
+
+
 def _resolve_stage_4_5_input_file(input_path: str) -> Path:
     """input_path as a literal path, or else the first *_fields.json-shaped
     match for it under a stage 4/5/5b output directory."""
@@ -693,8 +724,8 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
             print(f"  Context length: {len(context)} chars")
 
         # Generate summary
-        research_summary, gen_usage = generate_research_summary(context, cv_owner_name)
-        generation_method = "llm_generated"
+        # A blank context makes no LLM call, and a refusal-shaped reply is withheld (#1224).
+        research_summary, generation_method, gen_usage = generate_summary_unless_withheld(context, cv_owner_name)
 
         # Track usage from generation call
         if gen_usage:
@@ -705,7 +736,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
             total_cost += gen_usage.get('cost', 0.0)
 
         if verbose:
-            print(f"\nGenerated summary ({len(research_summary)} chars):")
+            print(f"\nSummary ({generation_method}, {len(research_summary)} chars):")
             print(f"  {research_summary[:200]}...")
 
     # total_cost was accumulated from llm_result['cost'] on each call above,
@@ -718,7 +749,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
 
     # Capture original M1 content for traceability
     original_m1_content = None
-    if m1_entries and generation_method == "llm_generated":
+    if m1_entries and generation_method == GENERATION_METHOD_LLM:
         # We generated new content, so track what was replaced
         original_m1_content = {
             "entries": [
