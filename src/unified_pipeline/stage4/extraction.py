@@ -19,7 +19,7 @@ from botocore.exceptions import ConnectTimeoutError, ReadTimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
-from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm_client import LlmUsage, call_llm
 from unified_pipeline.llm.retry import LLMOutageError
 
 from unified_pipeline.stage4.code_check import quarantine_invalid_taxonomy_codes
@@ -899,15 +899,22 @@ def extract_fields_batch(
     }
 
 
+def _usage_total_tokens(usage: LlmUsage) -> int:
+    """`call_llm`'s own `total_tokens` definition (prompt + completion) over an
+    accumulated LlmUsage, so owner-name tokens add into stage 4's total_tokens."""
+    return usage.prompt_tokens + usage.completion_tokens
+
+
 def _extract_and_log_cv_owner_name(
     document_uid: str,
     mapped_entries: list[dict[str, Any]],
     docx_path: str | None,
+    usage: LlmUsage,
 ) -> dict[str, Any]:
     """Call `extract_cv_owner_name` and log the result when a last name was
     found. Pure move out of `extract_fields_from_mapped_entries` (#456-R3
-    §3.2a) -- same call, same kwargs, same logging."""
-    cv_owner_name = extract_cv_owner_name(document_uid, mapped_entries, docx_path=docx_path)
+    §3.2a) -- same call, same logging; `usage` collects the call's cost (#1177)."""
+    cv_owner_name = extract_cv_owner_name(document_uid, mapped_entries, docx_path=docx_path, usage=usage)
     if cv_owner_name.get('last_name'):
         logger.info(
             "CV Owner: %s (last name: %s)",
@@ -1016,7 +1023,8 @@ def extract_fields_from_mapped_entries(
     logger.info("Field schemas: v%s (%d taxonomy codes)", FIELD_SCHEMA_VERSION, len(schemas))
 
     # Extract CV owner's name for target_name identification
-    cv_owner_name = _extract_and_log_cv_owner_name(document_uid, mapped_entries, docx_path)
+    owner_name_usage = LlmUsage()
+    cv_owner_name = _extract_and_log_cv_owner_name(document_uid, mapped_entries, docx_path, owner_name_usage)
 
     # Location inference runs *after* extraction -- see the call site below.
 
@@ -1029,8 +1037,8 @@ def extract_fields_from_mapped_entries(
         logger.warning("No valid entries to process")
         return {
             "entries": skipped_entries,
-            "total_cost": 0.0,
-            "total_tokens": 0,
+            "total_cost": owner_name_usage.cost,
+            "total_tokens": _usage_total_tokens(owner_name_usage),
             "success": True
         }
 
@@ -1136,8 +1144,8 @@ def extract_fields_from_mapped_entries(
         "entries": all_entries,
         "cv_owner": cv_owner_name,  # Include CV owner info in output
         "cv_owner_location": cv_owner_location,  # Include location context for geographic scope
-        "total_cost": total_cost + location_cost,
-        "total_tokens": total_tokens + location_tokens,
+        "total_cost": total_cost + location_cost + owner_name_usage.cost,
+        "total_tokens": total_tokens + location_tokens + _usage_total_tokens(owner_name_usage),
         "cache_read_tokens": total_cache_read_tokens,
         "cache_write_tokens": total_cache_write_tokens,
         "stats": {
