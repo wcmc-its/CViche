@@ -334,8 +334,8 @@ def _validate_json_response(content, response_format):
         return False
 
 
-# A markdown code fence, as _strip_markdown_fences and Claude write it. Lines
-# that start with it separate two answers without being prose (#1218).
+# A markdown code fence, as _strip_markdown_fences and Claude write it. A line
+# that starts with it is a separator, not prose (#1218).
 _FENCE_MARKER = "```"
 
 # A self-correcting response holds the answer plus its correction: fewer than
@@ -343,11 +343,32 @@ _FENCE_MARKER = "```"
 _MIN_OBJECTS_FOR_SELF_CORRECTION = 2
 
 
-def _holds_prose(gap: str) -> bool:
-    """True when `gap` has text beyond whitespace and markdown fence lines."""
+def _is_blank_or_fence(line: str) -> bool:
+    """True for an empty line or a markdown fence line (```, ```json)."""
+    stripped = line.strip()
+    return not stripped or stripped.startswith(_FENCE_MARKER)
+
+
+def _holds_text(edge: str) -> bool:
+    """True when `edge`, the text before the first or after the last object,
+    has anything beyond whitespace and markdown fence lines."""
+    return not all(_is_blank_or_fence(line) for line in edge.splitlines())
+
+
+def _is_prose_gap(gap: str) -> bool:
+    """True when `gap`, the text between two objects, is a line of prose.
+
+    Each object must sit on its own lines: the rest of the line the earlier
+    object ends on, and the start of the line the later one begins on, must be
+    blank or a fence. So a comma, a semicolon or a bracket next to an object
+    rejects the gap, and so does a gap with no line that carries a letter.
+    """
+    lines = gap.split("\n")
+    if not (_is_blank_or_fence(lines[0]) and _is_blank_or_fence(lines[-1])):
+        return False
     return any(
-        line.strip() and not line.strip().startswith(_FENCE_MARKER)
-        for line in gap.splitlines()
+        not _is_blank_or_fence(line) and any(ch.isalpha() for ch in line)
+        for line in lines[1:-1]
     )
 
 
@@ -355,28 +376,31 @@ def _objects_separated_by_prose(text: str) -> list[str] | None:
     """Split `text` into the top-level JSON objects it is made of, or None.
 
     Returns the objects (as source text, in order) only when the text is
-    nothing but complete objects with prose between each pair, e.g. an answer,
-    a line saying the model noticed a mistake, then the corrected answer.
-    Anything else is None, so genuinely malformed text stays malformed: text
-    that does not start at an object, an object that is truncated or not
-    valid, and two objects with no prose between them (which may be two
-    distinct records rather than a correction).
+    nothing but complete objects, each on its own lines, with a line of prose
+    between each pair, e.g. an answer, a line saying the model noticed a
+    mistake, then the corrected answer. Only whitespace and fence lines may
+    come before the first object or after the last. Anything else is None, so
+    genuinely malformed text stays malformed: an object that is truncated or
+    not valid, text around the objects, and objects joined by anything other
+    than prose (adjacent, comma- or semicolon-separated, or the elements of an
+    array), which may be distinct records rather than a correction.
     """
     start = text.find("{")
-    if start == -1 or _holds_prose(text[:start]):
+    if start == -1 or _holds_text(text[:start]):
         return None
     decoder = json.JSONDecoder()
     objects: list[str] = []
-    while start != -1:
+    while True:
         try:
             _, end = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
             return None
         objects.append(text[start:end])
         start = text.find("{", end)
-        if start != -1 and not _holds_prose(text[end:start]):
+        if start == -1:
+            return None if _holds_text(text[end:]) else objects
+        if not _is_prose_gap(text[end:start]):
             return None
-    return objects
 
 
 def _select_final_json_object(content: str | None, response_format: dict | None,

@@ -294,10 +294,12 @@ def _self_correcting_shapes() -> dict[str, str]:
         "outer_stripped": f"{first}\n```\n\n{_PROSE}\n\n```json\n{second}",
         # No fence anywhere.
         "unfenced": f"{first}\n\n{_PROSE}\n\n{second}",
+        # A closing fence after the last object that no opening fence matches.
+        "trailing_fence": f"{first}\n\n{_PROSE}\n\n{second}\n```",
     }
 
 
-@pytest.mark.parametrize("shape", ["fenced", "outer_stripped", "unfenced"])
+@pytest.mark.parametrize("shape", ["fenced", "outer_stripped", "unfenced", "trailing_fence"])
 def test_select_final_json_object_takes_the_corrected_answer(shape: str) -> None:
     content = _self_correcting_shapes()[shape]
     with pytest.raises(json.JSONDecodeError):
@@ -367,6 +369,22 @@ def test_select_final_json_object_ignores_a_response_that_is_not_json_or_not_tex
         f'{_as_json(_FIRST_ANSWER)}\n\nHope this helps.',
         # A brace in the prose that does not open an object.
         f'{_as_json(_FIRST_ANSWER)}\n\nUse the {{placeholder}} form.\n\n{_as_json(_CORRECTED_ANSWER)}',
+        # Records joined by a comma or a semicolon, not by prose: a list of
+        # records without its brackets.
+        f'{_as_json(_FIRST_ANSWER)}, {_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)},\n{_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)};\n{_as_json(_CORRECTED_ANSWER)}',
+        # Prose, then an array: its elements are not the answer.
+        f'{_as_json(_FIRST_ANSWER)}\nNote\n[{_as_json(_FIRST_ANSWER)}, {_as_json(_CORRECTED_ANSWER)}]',
+        f'{_as_json(_FIRST_ANSWER)}\nNote\n[{_as_json(_CORRECTED_ANSWER)}]',
+        # Text after the last object that is not a fence: a stray bracket, or prose.
+        f'{_as_json(_FIRST_ANSWER)}\nfix\n{_as_json(_CORRECTED_ANSWER)}\n]',
+        f'{_as_json(_FIRST_ANSWER)}\n\n{_PROSE}\n\n{_as_json(_CORRECTED_ANSWER)}\n\nHope this helps.',
+        # Prose with no line that carries a letter between the objects.
+        f'{_as_json(_FIRST_ANSWER)}\n--\n{_as_json(_CORRECTED_ANSWER)}',
+        # Prose on the same line as an object.
+        f'{_as_json(_FIRST_ANSWER)} Oops: {_as_json(_CORRECTED_ANSWER)}',
+        f'{_as_json(_FIRST_ANSWER)}\nOops: {_as_json(_CORRECTED_ANSWER)}',
     ],
 )
 def test_select_final_json_object_keeps_malformed_text_malformed(content: str) -> None:
