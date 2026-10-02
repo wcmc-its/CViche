@@ -676,16 +676,94 @@ def test_a_grant_row_carrying_a_value_is_not_a_role_effort_header(text):
     "Your role in the project (including percent effort):",
     'Percent Effort:',
     'Percent Effort: |',
+    'Percent Effort: |\n',
+    'Percent Effort: |\n\n   \n',
 ])
 def test_a_bare_header_phrase_or_blank_label_is_still_filtered(text):
     """The template header sentence, and a label whose value cell is blank, go.
 
-    The blank label carries nothing to lose; dropping it keeps an empty
-    "Percent Effort:" line out of the Appendix, as before.
+    The blank label carries nothing to lose when nothing is below it; dropping
+    it keeps an empty "Percent Effort:" line out of the Appendix, as before.
     """
     kept, _messages = filter_role_effort_headers([{'text': text}], {})
 
     assert kept == []
+
+
+# A first line that is a blank label ("Percent Effort:", "Percent Effort: |"),
+# with the fragment's own value rows under it. Stage 2 splits a label|value grant
+# into fragments that begin at the effort row, so the rows below the label are the
+# grant's cost and dates. Dropping the fragment as a header lost them (#1227).
+BLANK_LABEL_WITH_VALUED_ROWS = [
+    'Percent Effort: |\nTotal Direct Costs: | $12,345',
+    'Percent Effort:\nTotal Direct Costs: | $12,345',
+    'Percent Effort: |\nYears Inclusive: | 01/01/2031 - 12/31/2031\n'
+    'Total Direct Costs: | $12,345',
+    "Your role in the project (including percent effort):\nTotal Direct Costs: | $12,345",
+]
+
+
+@pytest.mark.parametrize('text', BLANK_LABEL_WITH_VALUED_ROWS)
+def test_a_blank_label_with_valued_rows_below_it_is_not_a_role_effort_header(text):
+    """The rows under the label are not `<project> <effort>` pairs, so it is a grant.
+
+    The filter only reads pairs out of a header; anything else under the first
+    line is content it would drop unread.
+    """
+    lookup = {}
+    entries = [{'text': text}]
+    kept, messages = filter_role_effort_headers(entries, lookup)
+
+    assert kept == entries
+    assert lookup == {}
+    assert messages == []
+
+
+def test_one_row_that_is_not_a_pair_keeps_the_whole_entry():
+    """Every row under the first line has to be a pair, not just one of them."""
+    lookup = {}
+    entries = [{'text': "Individual's role in project including percent effort\n"
+                        'Project Alpha 0.01\n'
+                        'Total Direct Costs: | $12,345'}]
+    kept, messages = filter_role_effort_headers(entries, lookup)
+
+    assert kept == entries
+    assert lookup == {}
+    assert messages == []
+
+
+@pytest.mark.parametrize('text', [
+    'Funding Agency: | Example Agency\nPercent Effort: |',
+    # Pair-shaped rows below, and the first digit past character 60 of the entry,
+    # so neither the digit rule nor the pair rule can be what keeps it: only
+    # reading the phrase off the FIRST line does.
+    'Funding Agency: | Example Agency\nPercent Effort Example Long Project Name Here 0.5',
+])
+def test_a_phrase_on_a_later_line_is_not_a_role_effort_header(text):
+    """The 60-character window ends with the first line, not 60 characters in."""
+    entries = [{'text': text}]
+    kept, _messages = filter_role_effort_headers(entries, {})
+
+    assert kept == entries
+
+
+def test_a_blank_label_with_pairs_below_it_is_a_header_and_the_pairs_are_read():
+    """A header whose first line ends in a colon, over its project/effort pairs.
+
+    The pairs are harvested and the entry goes, whitespace-only rows between
+    them included.
+    """
+    lookup = {}
+    entries = [{'text': 'Your role in the project (including percent effort):\n'
+                        '\n'
+                        '   \n'
+                        'Project Alpha 0.01\n'
+                        '  Project Beta 25  '}]
+    kept, messages = filter_role_effort_headers(entries, lookup)
+
+    assert kept == []
+    assert lookup == {'project alpha': '1%', 'project beta': '25%'}
+    assert messages == ['  Filtered role/effort header entry, extracted 2 effort values']
 
 
 def test_a_phrase_past_the_search_window_does_not_make_a_header():
@@ -724,6 +802,20 @@ def test_a_valued_effort_row_reaches_the_appendix_through_the_section():
     gen = _sectioned_generator()
     fragment = _entry('M2A', text='Percent Effort: | 35\nTotal Direct Costs: | $12,345',
                       percent_effort='35%', total_funding='$12,345')
+    gen._fill_research_support({'M2A': [fragment]}, current_year=TEST_YEAR)
+
+    assert [e['text'] for e in gen._declined_grant_entries] == [fragment['text']]
+
+
+def test_a_blank_effort_label_with_value_rows_reaches_the_appendix_through_the_section():
+    """The wire for the blank-label fragment: cost and dates are not dropped.
+
+    Same route as the valued row above: no title, agency or grant number, so
+    `_create_grant_table` declines it and the whole fragment, cost row included,
+    is on the list `generate()` sends to the Appendix."""
+    gen = _sectioned_generator()
+    fragment = _entry('M2A', text='Percent Effort: |\nTotal Direct Costs: | $12,345',
+                      total_funding='$12,345')
     gen._fill_research_support({'M2A': [fragment]}, current_year=TEST_YEAR)
 
     assert [e['text'] for e in gen._declined_grant_entries] == [fragment['text']]

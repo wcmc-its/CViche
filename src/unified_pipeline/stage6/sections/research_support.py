@@ -369,8 +369,8 @@ def is_role_effort_header(text: str) -> bool:
 
     The header is the entry's FIRST line, a bare phrase such as "Individual's
     role in project including percent effort", with the "<project> <effort>"
-    pairs on the lines below it. Two things this refuses that the old
-    first-60-characters test accepted, both of which silently dropped real
+    pairs on the lines below it. Three things this refuses that the old
+    first-60-characters test accepted, each of which silently dropped real
     grant values (#1227):
 
     * a phrase that only appears on a later line -- "Years Inclusive: | ...",
@@ -382,17 +382,32 @@ def is_role_effort_header(text: str) -> bool:
       35%" or "Role in project PI, 35% effort": the header sentence is words
       only, so a digit in the searched window marks a grant row.
 
-    A label with a blank value ("Percent Effort:") carries nothing to lose and
-    still counts as a header row. The decision is made on text shape, not on
-    the stage-4 fields, because the real header row has fields too: stage 4
-    reads a `title` and a `percent_effort` off its first project line.
+    One more refusal comes from the lines BELOW the first: every non-blank one
+    must be a "<project> <effort>" pair (`PROJECT_EFFORT_LINE_RE`), the only
+    thing `filter_role_effort_headers` reads out of a header. A first line that
+    is a blank label ("Percent Effort: |") with "Total Direct Costs: | ..." under
+    it is a grant fragment, not a header, and the filter would otherwise drop
+    those rows with it. So a header is removed only when nothing is left under
+    it or everything under it is a pair the filter reads. (A pair whose effort
+    `normalize_percent_effort` rejects, such as 0, is still removed with it and
+    adds nothing to the lookup, as before.) A blank label on its own, with
+    nothing below it, still counts as a header row: there is nothing to lose
+    and it keeps an empty line out of the Appendix.
+
+    The decision is made on text shape, not on the stage-4 fields, because the
+    real header row has fields too: stage 4 reads a `title` and a
+    `percent_effort` off its first project line.
     """
-    first_line = text.split('\n', 1)[0][:ROLE_EFFORT_HEADER_WINDOW]
-    if not ROLE_EFFORT_HEADER_RE.search(first_line):
+    first_line, _, body = text.partition('\n')
+    window = first_line[:ROLE_EFFORT_HEADER_WINDOW]
+    if not ROLE_EFFORT_HEADER_RE.search(window):
         return False
-    if ROLE_EFFORT_DIGIT_RE.search(first_line):
+    if ROLE_EFFORT_DIGIT_RE.search(window):
         return False
-    return not ROLE_EFFORT_FIELD_ROW_RE.search(first_line)
+    if ROLE_EFFORT_FIELD_ROW_RE.search(window):
+        return False
+    body_lines = [line.strip() for line in body.split('\n') if line.strip()]
+    return all(PROJECT_EFFORT_LINE_RE.search(line) for line in body_lines)
 
 
 def filter_role_effort_headers(
