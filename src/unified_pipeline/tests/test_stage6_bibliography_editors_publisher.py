@@ -1081,14 +1081,33 @@ def test_an_int_is_a_value_for_a_scalar_field_and_a_repr_for_a_prose_one(field):
     ({'start_date': 'Fall term'}, False, 'Fall term'),
     ({'start_date': '', 'end_date': ''}, False, ''),
     ({}, True, ''),
-    # An end with no start reads as no duration at all rather than
-    # "-2021" -- current behaviour, pinned because nothing else states it.
-    ({'end_date': '2021'}, False, ''),
+    # An end with no start renders as its year, the same way (class 2);
+    # it used to render an empty cell.
+    ({'end_date': '2021'}, False, '2021'),
+    ({'start_date': None, 'end_date': '2002-12'}, False, '2002'),
+    ({'start_date': '', 'end_date': '2006-06-21'}, True, '2006'),
 ])
 def test_format_mentee_duration_covers_every_branch(fields, ongoing, expected):
-    """Every branch: start+end, start alone (ongoing or past), neither,
-    plus the end-alone shape."""
-    assert _format_mentee_duration(fields, ongoing=ongoing) == expected
+    """Every branch: start+end, start alone (ongoing or past), end alone,
+    neither. The source text names no date, so nothing renders as written."""
+    assert _format_mentee_duration(fields, ongoing=ongoing,
+                                   source_text='Example mentee') == expected
+
+
+@pytest.mark.parametrize('fields,source_text,expected', [
+    # The CV's own "1999-02" (1999 to 2002), stored as a year-month end date,
+    # renders as written rather than as the wrong single year 1999.
+    ({'end_date': '1999-02'}, 'Example mentee, MS 1999-02', '1999-02'),
+    ({'start_date': '1999-02'}, 'Example mentee (1999-02)', '1999-02'),
+    # Part of a longer number in the source is not the value as written.
+    ({'end_date': '1999-02'}, 'Example mentee 1999-021', '1999'),
+    ({'end_date': '1999-02'}, 'Example mentee 1999-02/03', '1999'),
+    ({'end_date': '1999-02'}, 'Example mentee ref 31999-02', '1999'),
+])
+def test_format_mentee_duration_keeps_a_single_date_written_in_the_source(
+        fields, source_text, expected):
+    assert _format_mentee_duration(fields, ongoing=False,
+                                   source_text=source_text) == expected
 
 
 # ---------------------------------------------------------------------------

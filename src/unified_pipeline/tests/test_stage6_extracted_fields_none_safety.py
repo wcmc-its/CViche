@@ -221,6 +221,7 @@ def test_partition_moves_start_only_mentee_when_source_leaves_range_open(text, e
     "2019 Ada Lovelace, MD thesis; now Assistant Professor",
     "Ada Lovelace, Summer student 2019. Current position: Resident",
     "Ada Lovelace, 2019 - Excellence Award winner",
+    "Ada Lovelace, MD 2019; Fellow - now Assistant Professor",
     "Ada Lovelace, class of 2019, present address withheld",
 ])
 def test_partition_keeps_start_only_mentee_with_a_lone_year_in_past(text):
@@ -289,6 +290,32 @@ def test_start_only_past_mentee_renders_bare_year_under_past_mentees():
     assert _body_after(gen.doc, "Current Mentees:", 1) == [('tbl', 'Grace Hopper')]
     assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '2007'
     assert _mentoring_period_cell(gen.doc, 'Grace Hopper') == '2021-present'
+
+
+def test_end_only_past_mentee_renders_bare_year():
+    """Class 2: an end date with no start renders that year, not an empty
+    Mentoring Period cell."""
+    gen = _mentoring_doc()
+    entry = _mentee('N3B', 'Ada Lovelace', start_date=None, end_date='2004-12')
+    entry['text'] = "Ada Lovelace, MPH 2004"
+
+    gen._fill_mentoring({'N3B': [entry]})
+
+    assert _body_after(gen.doc, "Past Mentees:", 1) == [('tbl', 'Ada Lovelace')]
+    assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '2004'
+
+
+def test_end_only_period_written_in_source_renders_as_written():
+    """The renderer hands the entry's text to the period formatter: a CV's
+    own "1999-02" range, stored as a year-month end date, renders as the
+    author wrote it, not as the single year 1999."""
+    gen = _mentoring_doc()
+    entry = _mentee('N3B', 'Ada Lovelace', start_date=None, end_date='1999-02')
+    entry['text'] = "Ada Lovelace, MS 1999-02"
+
+    gen._fill_mentoring({'N3B': [entry]})
+
+    assert _mentoring_period_cell(gen.doc, 'Ada Lovelace') == '1999-02'
 
 
 def test_start_only_mentee_moved_to_current_renders_open_range():

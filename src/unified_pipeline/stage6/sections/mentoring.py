@@ -430,7 +430,8 @@ def _normalize_mentee(entry: Mapping[str, Any], *, ongoing: bool) -> MenteeRecor
     return MenteeRecord(
         name=_text(fields.get('name') or fields.get('mentee_name')),
         site_position=site_position,
-        mentoring_period=_format_mentee_duration(fields, ongoing=ongoing),
+        mentoring_period=_format_mentee_duration(
+            fields, ongoing=ongoing, source_text=_text(entry.get('text'))),
         project=project,
         current_position=_text(fields.get('current_position')),
         supervision_type=supervision_type,
