@@ -157,6 +157,24 @@ class LocalRunStorage(RunStorage):
         path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_write(path, data)
 
+    def get_global(self, key: str) -> bytes:
+        validate_key(key)
+        path = self._safe_path(key)
+        if not path.is_file():
+            raise StorageKeyNotFound(f"No such file: {key}")
+        return path.read_bytes()
+
+    def list_global(self, prefix: str) -> list[str]:
+        if not prefix or not prefix.strip("/"):
+            raise ValueError("list prefix must be non-empty")
+        validate_key(prefix)
+        base = self._base.resolve()
+        return sorted(
+            str(path.relative_to(base))
+            for path in base.rglob("*")
+            if path.is_file() and str(path.relative_to(base)).startswith(prefix)
+        )
+
     def _delete_tree(self, path: Path) -> int:
         """Recursively delete a directory tree, returning the file count removed.
 

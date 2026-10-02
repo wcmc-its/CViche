@@ -56,7 +56,7 @@ def _mentee(**fields):
     fields.setdefault("mentee_name", "Brian Wood")
     gen = _generator()
     anchor = gen.doc.add_paragraph("Past Mentees:")._element
-    record = _normalize_mentee({"extracted_fields": fields})
+    record = _normalize_mentee({"extracted_fields": fields}, ongoing=True)
     return _cells(gen._create_mentee_table(record, anchor))
 
 
@@ -127,19 +127,19 @@ def test_award_already_in_the_project_text_is_not_repeated():
 def test_a_role_line_fills_type_of_supervision_when_nothing_else_does():
     # #983: "Role: MPH Advisor" folded into the mentee entry had no field or row.
     entry = {"text": "Jane Roe, 2019-2021\tRole: MPH Advisor", "extracted_fields": {"mentee_name": "Jane Roe"}}
-    assert _normalize_mentee(entry).supervision_type == "MPH Advisor"
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "MPH Advisor"
 
 
 def test_a_role_line_is_added_to_the_inferred_supervision_type():
     entry = {"text": "Jane Roe, 2019-2021\tRole: PhD Advisor", "extracted_fields": {"mentee_level": "PhD"}}
-    assert _normalize_mentee(entry).supervision_type == "Research (PhD Advisor)"
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research (PhD Advisor)"
 
 
 def test_a_role_line_is_added_to_an_extracted_supervision_type():
     entry = {"text": "Jane Roe\nRole: Thesis Advisor", "extracted_fields": {"supervision_type": "Research"}}
-    assert _normalize_mentee(entry).supervision_type == "Research (Thesis Advisor)"
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research (Thesis Advisor)"
     entry = {"text": "Jane Roe\tRole: research", "extracted_fields": {"supervision_type": "Research"}}
-    assert _normalize_mentee(entry).supervision_type == "Research"
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research"
 
 
 def test_the_template_supervision_row_beats_the_level_inference():
@@ -147,16 +147,16 @@ def test_the_template_supervision_row_beats_the_level_inference():
     entry = {"text": "Name | Jane Roe\nSite/Position | Cornell - Resident\n"
                      "Type of Supervision (Research, clinical, teaching, leadership) | Research + Teaching",
              "extracted_fields": {"mentee_level": "Resident"}}
-    assert _normalize_mentee(entry).supervision_type == "Research + Teaching"
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research + Teaching"
 
 
 def test_an_empty_template_supervision_row_falls_back_to_inference():
     entry = {"text": "Name | Jane Roe\nType of Supervision (Research, clinical, teaching, leadership) | \n"
                      "Name | Next Mentee",
              "extracted_fields": {"mentee_level": "Resident"}}
-    assert _normalize_mentee(entry).supervision_type == "Clinical"
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Clinical"
 
 
 def test_without_a_role_line_supervision_type_is_inferred_as_before():
     entry = {"text": "Jane Roe, PhD student; her role: none", "extracted_fields": {"mentee_level": "PhD"}}
-    assert _normalize_mentee(entry).supervision_type == "Research"
+    assert _normalize_mentee(entry, ongoing=True).supervision_type == "Research"

@@ -27,7 +27,7 @@ from types import MappingProxyType
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Dict, List, Any, Literal, Optional, Tuple
+from typing import Dict, List, Any, Literal, NamedTuple, Optional, Tuple
 from collections.abc import Callable
 from datetime import datetime
 from collections import defaultdict
@@ -178,7 +178,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
 )
 from unified_pipeline.stage4.extraction import UnextractedContentReport, calculate_unextracted_content
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
-from unified_pipeline.stage6.fan_out import fan_out_multi_record_entries
+from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS, fan_out_multi_record_entries
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
@@ -219,6 +219,7 @@ from unified_pipeline.stage6.sections.appendix import (
     UnmappedEntry,
     _appendix_drop_reason,
     build_appendix_diversion_warnings,
+    is_t_validation_recoded_m1,
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 
@@ -645,6 +646,140 @@ def _pick_mismatch_target(expected_codes: list[str]) -> str | None:
     return min(candidates)
 
 
+# Stage 4.5's `generation_method` when its summary IS the CV's own M1 text,
+# joined verbatim (stage_4_5_research_summary.py); any other method paraphrases.
+# Duplicated rather than imported: stage 6 reads the stage 4.5 artifact as its contract.
+_SUMMARY_METHOD_VERBATIM_M1 = "existing_content"
+
+
+def _recoded_m1_appendix_entries(entries_by_code: dict[str, list[dict]],
+                                 mapped_codes: set[str],
+                                 research_summary_data: dict | None) -> list[dict]:
+    """M1 entries stage 3b's T-validation recoded from T, bound for the
+    Appendix because the rendered research summary paraphrases M1 and so
+    carries none of them (AUTOPSY-s7ab-batch-2026-10-02 class 11). Empty when
+    M1 is already unmapped -- every M1 entry then reaches the Appendix through
+    `generate()`'s unmapped-code loop -- or when the summary is the M1 text verbatim."""
+    if 'M1' not in mapped_codes:
+        return []
+    summary_info = (research_summary_data or {}).get('research_summary') or {}
+    if summary_info.get('generation_method') == _SUMMARY_METHOD_VERBATIM_M1:
+        return []
+    return [e for e in entries_by_code.get('M1', []) if is_t_validation_recoded_m1(e)]
+
+
+# Rendered fields that nearly every record family carries -- when, where, in
+# what capacity -- so holding one says nothing about whether a record is the
+# target code's kind. A K1 course has a `role`, a K5 talk a `location`, and
+# both are rendered by R; without this set either one would pass as fitting
+# R. Read against `_RENDERED_FIELDS`, so a field outside it is never an anchor.
+_REROUTE_GENERIC_FIELDS = frozenset({
+    'date', 'start_date', 'end_date', 'year', 'location', 'role', 'notes', 'status',
+})
+
+# Targets whose renderer is filled by fields narrower than "any rendered,
+# non-generic one". A grant table renders a `title`, but so does nearly every
+# publication, position and talk; a grant is named by its funder or award
+# number. BMAMWE idx 932: a commentary (S2, title only) rerouted to M2C
+# rendered an otherwise empty Pending Funding table.
+_GRANT_ANCHOR_FIELDS = frozenset({'agency', 'grant_number'})
+_REROUTE_ANCHOR_OVERRIDES = MappingProxyType({
+    'M2A': _GRANT_ANCHOR_FIELDS, 'M2B': _GRANT_ANCHOR_FIELDS, 'M2C': _GRANT_ANCHOR_FIELDS,
+})
+
+# Outcomes of a hierarchy-mismatch reroute, one render-warnings record each
+# (per assigned -> target pair). A refusal keeps the classifier's code.
+REROUTE_ACCEPTED_SAME_FAMILY = 'accepted_same_family'
+REROUTE_ACCEPTED_CROSS_FAMILY = 'accepted_cross_family'
+REROUTE_REFUSED_FIELDS = 'refused_fields_do_not_fit'
+
+# Render-warnings `check` value for every reroute record, and each outcome's
+# severity: an accepted cross-family move is a low-confidence guess that moved
+# content between sections, so it reaches the doctor as WARN.
+REROUTE_CHECK = 'hierarchy_mismatch_reroute'
+_REROUTE_SEVERITY = MappingProxyType({
+    REROUTE_ACCEPTED_SAME_FAMILY: 'INFO',
+    REROUTE_ACCEPTED_CROSS_FAMILY: 'WARN',
+    REROUTE_REFUSED_FIELDS: 'INFO',
+})
+
+
+class RerouteDecision(NamedTuple):
+    """One hierarchy-mismatch reroute stage 6 applied or refused."""
+    element_idx_start: object
+    assigned_code: str
+    target_code: str
+    outcome: str
+
+
+def _is_blank_value(value: object) -> bool:
+    """None, an empty dict, or a string that is only whitespace (a list is
+    read item by item by `_filled_field_names`)."""
+    if isinstance(value, str):
+        return not value.strip()
+    return value is None or value == {}
+
+
+def _filled_field_names(entry: Mapping[str, Any]) -> frozenset[str]:
+    """Names of the entry's non-blank stage-4 fields, including those of any
+    record dicts it still holds in a list (a list fan-out declined)."""
+    fields = entry.get('extracted_fields')
+    if not isinstance(fields, Mapping):
+        return frozenset()
+    names: set[str] = set()
+    for key, value in fields.items():
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, Mapping):
+                    names |= _filled_field_names({'extracted_fields': item})
+        elif not _is_blank_value(value):
+            names.add(key)
+    return frozenset(names)
+
+
+def _fields_fit_reroute_target(entry: Mapping[str, Any], target_code: str) -> bool:
+    """Whether the target code's renderer can write this record (class 3 of
+    AUTOPSY-s7ab-batch-2026-10-02): it must hold a non-blank field the target
+    renders (`_RENDERED_FIELDS`) beyond the generic date/place/role ones, or
+    for a grant target an agency or award number. A mentee or a course
+    rerouted to S8 holds no author or title, and rendered as a bare numbered
+    item. True when the target renders the entry's text rather
+    than its fields, or the entry has no stage-4 fields, as before this check."""
+    rendered = _RENDERED_FIELDS.get(target_code)
+    filled = _filled_field_names(entry)
+    if rendered is None or not filled:
+        return True
+    anchors = _REROUTE_ANCHOR_OVERRIDES.get(target_code, rendered - _REROUTE_GENERIC_FIELDS)
+    return bool(filled & anchors)
+
+
+def reroute_warnings(decisions: list[RerouteDecision]) -> list[dict[str, Any]]:
+    """One render-warnings record per (outcome, assigned, target), naming the
+    entries by element_idx_start only (never CV text). Sorted, so the sidecar
+    is deterministic."""
+    grouped: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for decision in decisions:
+        key = (decision.outcome, decision.assigned_code, decision.target_code)
+        grouped[key].append(str(decision.element_idx_start))
+    return [{
+        'check': REROUTE_CHECK,
+        'code': assigned,
+        'section': None,
+        'message': (f"hierarchy-mismatch reroute {assigned}->{target} {outcome.replace('_', ' ')}: "
+                    f"{len(idxs)} entr{'y' if len(idxs) == 1 else 'ies'}"),
+        'evidence': [f"element_idx_start {idx}" for idx in idxs],
+        'severity': _REROUTE_SEVERITY[outcome],
+    } for (outcome, assigned, target), idxs in sorted(grouped.items())]
+
+
+def _record_reroute(decisions: list[RerouteDecision] | None, entry: Mapping[str, Any],
+                    assigned_code: str, target_code: str, outcome: str) -> None:
+    """Append one reroute decision when the caller collects them."""
+    if decisions is not None:
+        decisions.append(RerouteDecision(entry.get('element_idx_start'), assigned_code,
+                                         target_code, outcome))
+
+
 def _merge_appendix_diversion_warnings(
     issues: list[dict], written: list[UnmappedEntry], recovered: list[str],
 ) -> list[dict]:
@@ -853,7 +988,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             f"  - {FALLBACK_TEMPLATES}"
         )
 
-    def _correct_mismatch_if_needed(self, entry: Dict, assigned_code: str) -> str:
+    def _correct_mismatch_if_needed(self, entry: Dict, assigned_code: str,
+                                    decisions: list[RerouteDecision] | None = None) -> str:
         """Correct taxonomy code routing when hierarchy mismatch flag indicates a likely misclassification.
 
         Conservative correction rules:
@@ -864,10 +1000,18 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
           say which one it means, and the longest-code pick only favoured the
           two-character code (#946 item 3: 200 corpus reroutes, most wrong).
         - Cross-family reroutes (e.g., C→K1): only applied when the LLM's confidence
-          was low (< 0.7), since the content analysis may have been uncertain.
+          was low (< 0.7), since the content analysis may have been uncertain,
+          and the record's stage-4 fields fit the target's renderer
+          (`_fields_fit_reroute_target`): mentee, course and committee
+          records rerouted to S8 rendered as bare numbered items, 28 of them
+          on 2 of 10 CVs (class 3, AUTOPSY-s7ab-batch-2026-10-02).
         - Never: a status-routed code (`_STATUS_ROUTED_CODES`, S7), or a
           heading whose expected codes tie across WCM sections
           (`_pick_mismatch_target`) (#946).
+
+        Every reroute applied, and every cross-family one refused for its
+        fields, is appended to *decisions* (`reroute_warnings` turns them into
+        render-warnings records).
 
         Returns:
             The (possibly corrected) taxonomy code to use for routing.
@@ -902,15 +1046,26 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                       f"(same family, hierarchy-guided) [{entry.get('text', '')[:60]}...]")
             entry['taxonomy_code_original'] = assigned_code
             entry['taxonomy_code'] = best_expected
+            _record_reroute(decisions, entry, assigned_code, best_expected,
+                            REROUTE_ACCEPTED_SAME_FAMILY)
             return best_expected
 
         # Cross-family: only if LLM confidence was low
         if confidence < 0.7:
+            if not _fields_fit_reroute_target(entry, best_expected):
+                logger.info("    Mismatch correction refused: %s→%s (cross-family, "
+                            "fields do not fit the target) [element_idx_start %s]",
+                            assigned_code, best_expected, entry.get('element_idx_start'))
+                _record_reroute(decisions, entry, assigned_code, best_expected,
+                                REROUTE_REFUSED_FIELDS)
+                return assigned_code
             if self.verbose:
                 logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
                       f"(cross-family, low confidence {confidence:.2f}) [{entry.get('text', '')[:60]}...]")
             entry['taxonomy_code_original'] = assigned_code
             entry['taxonomy_code'] = best_expected
+            _record_reroute(decisions, entry, assigned_code, best_expected,
+                            REROUTE_ACCEPTED_CROSS_FAMILY)
             return best_expected
 
         return assigned_code
@@ -1098,15 +1253,17 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         """
         entries_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
         mismatch_corrections = 0
+        reroutes: list[RerouteDecision] = []
         entries = fan_out_multi_record_entries(
             entries, FIELD_SCHEMAS, warnings=self._section_failures,
             records_key=STAGE4_RECORDS_KEY)
         for entry in entries:
             code = normalize_retired_code(entry)
-            code = self._correct_mismatch_if_needed(entry, code)
+            code = self._correct_mismatch_if_needed(entry, code, reroutes)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
             entries_by_code[code].append(entry)
+        self._section_failures.extend(reroute_warnings(reroutes))
 
         if self.verbose:
             logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
@@ -1360,11 +1517,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # summary, or the template lacks a RESEARCH ACTIVITIES header), the M1
         # entries would otherwise render nowhere AND be excluded from the appendix
         # by being 'mapped' — a silent content loss (#317, C0ZGFW). Route them to
-        # the appendix safety net instead. No-op when the summary rendered.
+        # the appendix safety net instead; when it rendered, only T-validation's M1 recodes go.
         if not research_summary_rendered:
             mapped_codes.discard('M1')
-
-        unmapped_entries: list[dict] = []
+        unmapped_entries = _recoded_m1_appendix_entries(entries_by_code, mapped_codes, research_summary_data)
 
         # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260) and claimed goals rows (#958).
         for code, entries in entries_by_code.items():

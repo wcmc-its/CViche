@@ -178,3 +178,28 @@ def test_classify_entries_batch_renders_real_taxonomy_reference(monkeypatch):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def _rule_block(start_marker: str, end_marker: str) -> str:
+    text = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE
+    start = text.index(start_marker)
+    return text[start:text.index(end_marker, start)]
+
+
+def test_s7_rules_mean_in_review_only_matching_its_template_header():
+    """#1166: stage 6 renders S7 under the WCM template's "In review"
+    header, and taxonomy_v7.json defines S7 as not-yet-accepted
+    manuscripts. The rules once also sent gray literature, preprints and
+    op-eds to S7, so a published dissertation rendered as "In review"."""
+    for s7 in (_rule_block("   - S7 = ", "   - Q2 = "),
+               _rule_block("    - S7 = ", "31. CASE REPORTS")):
+        assert "under review" in s7
+        for gray in ("White papers", "policy briefs", "Preprints (arXiv"):
+            assert gray not in s7
+    s5 = _rule_block("   - S5 = ", "   - S7 = ")
+    for gray in ("White papers", "Preprints", "dissertation"):
+        assert gray in s5
+    assert "or S7 (gray lit)" not in _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE
+    # The A/B on #1173 left 28 "in press" entries in S7 while only the
+    # section-6 summary said otherwise; rule 30 must say it too.
+    assert '"in press"' in _rule_block("    - S7 = ", "31. CASE REPORTS")

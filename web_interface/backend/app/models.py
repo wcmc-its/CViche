@@ -345,3 +345,70 @@ class RunMetrics(Base):
     computed_at = Column(DateTime, server_default=func.now())
 
     run = relationship("Run", back_populates="metrics", lazy="raise_on_sql")
+
+
+class InboundMessageStatus(StrEnum):
+    """``inbound_messages.status`` (#1298)."""
+    ACCEPTED = "accepted"
+    REJECTED = "rejected"
+    # Read from S3 but not yet decided: the poller crashed or failed mid-message.
+    FAILED = "failed"
+
+
+class InboundRejectReason(StrEnum):
+    """Why a whole message was dropped (``inbound_messages.reject_reason``).
+
+    Never carries a filename, subject or address (CODING_STANDARDS 4.7)."""
+    UNPARSEABLE = "unparseable"
+    NOT_AUTHENTICATED = "not_authenticated"
+    SPAM_OR_VIRUS = "spam_or_virus"
+    SENDER_DOMAIN = "sender_domain"
+    UNKNOWN_USER = "unknown_user"
+    NEVER_CONSENTED = "never_consented"
+    USER_DISABLED = "user_disabled"
+    NOT_IN_ACCESS_GROUP = "not_in_access_group"
+    NO_VALID_ATTACHMENTS = "no_valid_attachments"
+    TOO_MANY_FILES = "too_many_files"
+    INBOX_FULL = "inbox_full"
+    PROCESSING_ERROR = "processing_error"
+
+
+class InboundFileStatus(StrEnum):
+    """``inbound_files.status`` (#1298)."""
+    PENDING = "pending"
+    SUBMITTED = "submitted"
+    DISCARDED = "discarded"
+    EXPIRED = "expired"
+
+
+class InboundMessage(Base):
+    """One raw message SES wrote under ``inbound/`` (#1298). Unique on the S3
+    key so a re-poll never reads the same message twice."""
+    __tablename__ = "inbound_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    s3_key = Column(String(512), nullable=False, unique=True)
+    message_id = Column(String(255), nullable=True)
+    from_addr = Column(String(255), nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    received_at = Column(DateTime, nullable=False, server_default=func.now())
+    status = Column(String(20), nullable=False)
+    reject_reason = Column(String(120), nullable=True)
+    file_count = Column(Integer, nullable=False, default=0)
+
+
+class InboundFile(Base):
+    """One CV held in a user's inbox, waiting for them to submit it (#1298)."""
+    __tablename__ = "inbound_files"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    inbound_message_id = Column(Integer, ForeignKey("inbound_messages.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    filename = Column(String(255), nullable=False)
+    size_bytes = Column(Integer, nullable=False)
+    sha256 = Column(String(64), nullable=False)
+    # Global storage prefix holding the bytes; deleted on discard/expiry.
+    storage_key = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False, default=InboundFileStatus.PENDING)
+    run_id = Column(String(10), ForeignKey("runs.id"), nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())

@@ -76,13 +76,19 @@ def get_current_consent_document(db: Session) -> ConsentDocument:
     )
 
 
+def has_current_consent(db: Session, user: User) -> bool:
+    """Whether ``user`` has accepted the current consent version (the one
+    comparison require_current_consent and the emailed-CV intake both use)."""
+    current_version = str(get_config_value(db, "consent_version") or DEFAULT_CONSENT_VERSION)
+    return user.consent_version == current_version
+
+
 def require_current_consent(db: Session, user: User) -> None:
     """Raise 403 ``consent_required`` unless ``user`` has accepted the current
     consent version. The first check of every request that starts work on a
     CV: /upload, and POST /batches (#1114), which would otherwise create a
     batch and post its Teams card for a user every upload then refuses."""
-    current_version = str(get_config_value(db, "consent_version") or DEFAULT_CONSENT_VERSION)
-    if user.consent_version != current_version:
+    if not has_current_consent(db, user):
         raise HTTPException(
             status_code=403,
             detail={
