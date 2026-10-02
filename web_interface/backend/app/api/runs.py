@@ -204,6 +204,7 @@ def get_run_filter_options(
     faculty: str | None = Query(None),
     department: str | None = Query(None),
     feedback: str | None = Query(None),
+    input_format: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_admin),
 ) -> RunFilterOptions:
@@ -212,7 +213,8 @@ def get_run_filter_options(
     Each facet's counts apply the other filters but not its own."""
     if scope != RunScope.ALL:
         raise bad_request("filter-options is only available with scope=all")
-    return build_filter_options(db, parse_run_filters(run_by, faculty, department, feedback))
+    return build_filter_options(
+        db, parse_run_filters(run_by, faculty, department, feedback, input_format))
 
 
 def _run_summary(current_user: User, run: Run, all_scope: bool,
@@ -246,6 +248,7 @@ async def list_runs(
     faculty: str | None = Query(None),
     department: str | None = Query(None),
     feedback: str | None = Query(None),
+    input_format: str | None = Query(None),
     batch_id: str | None = Query(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -255,7 +258,8 @@ async def list_runs(
     scope=mine (default): the current user's runs. scope=all (admin only): every
     user's runs, optionally filtered by run_by (user id or "self"), faculty (the
     CV owner's name) and department (the running user's ED department); those
-    three are ignored under scope=mine. ``feedback`` ("given" = any reviewer left
+    three, and ``input_format`` ("wcm" = written in the WCM CV template, "other",
+    "unknown" = not classified), are ignored under scope=mine. ``feedback`` ("given" = any reviewer left
     feedback, "needed" = complete with none) applies in both scopes. Every run
     carries a ``feedback`` summary; scope=all adds the reviewer list.
     ``batch_id`` (#1114) narrows either scope to one batch's runs; every row
@@ -264,7 +268,8 @@ async def list_runs(
     all_scope = scope == RunScope.ALL
     if all_scope:
         require_admin(current_user)
-        query = filtered_runs_query(db, parse_run_filters(run_by, faculty, department, feedback))
+        query = filtered_runs_query(
+            db, parse_run_filters(run_by, faculty, department, feedback, input_format))
     else:
         query = db.query(Run).filter(Run.user_id == current_user.id)
         mine_feedback = feedback_clause(parse_feedback_filter(feedback))

@@ -702,3 +702,46 @@ def test_run_list_filters_to_one_batch_in_either_scope(client, db, seed_simple_m
     body = client.get(f"/api/runs?scope={scope}&batch_id=BATCHA").json()
     assert sorted(r["run_id"] for r in body["runs"]) == ["INBATA", "INBATB"]
     assert body["total"] == 2
+
+
+# ---------------------------------------------------------------------------
+# input_format filter: GET /runs?scope=all&input_format= and filter-options
+# ---------------------------------------------------------------------------
+
+def _seed_input_formats(db):
+    users = _seed_admin_view(db)
+    for run_id, fmt in [("ADM001", "wcm"), ("ADM002", "other"), ("ADM003", "wcm"), ("ADM004", "other")]:
+        db.query(Run).filter(Run.id == run_id).update({Run.input_format: fmt})
+    db.commit()  # ADM005 and ADM006 stay NULL
+    return users
+
+
+@pytest.mark.parametrize("value, expected", [
+    ("wcm", ["ADM003", "ADM001"]),
+    ("other", ["ADM004", "ADM002"]),
+    ("unknown", ["ADM006", "ADM005"]),
+])
+def test_scope_all_input_format_filter(client, db, seed_simple_mode, value, expected):
+    users = _seed_input_formats(db)
+    _auth(client, users["admin"])
+    resp = client.get(f"/api/runs?scope=all&input_format={value}")
+    assert _ids(resp) == expected
+    assert resp.json()["total"] == len(expected)
+
+
+def test_input_format_filter_rejects_unknown_value(client, db, seed_simple_mode):
+    users = _seed_input_formats(db)
+    _auth(client, users["admin"])
+    assert client.get("/api/runs?scope=all&input_format=docx").status_code == 422
+
+
+def test_filter_options_input_format_counts_cascade(client, db, seed_simple_mode):
+    users = _seed_input_formats(db)
+    _auth(client, users["admin"])
+    counts = client.get("/api/runs/filter-options?scope=all").json()["input_format"]
+    assert counts == {"wcm": 2, "other": 2, "unknown": 2}
+    # Other filters narrow the counts; the input_format filter itself does not.
+    narrowed = client.get(
+        "/api/runs/filter-options?scope=all&department=Library&input_format=wcm").json()
+    assert narrowed["input_format"] == {"wcm": 1, "other": 1, "unknown": 0}
+

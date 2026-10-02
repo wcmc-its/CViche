@@ -1,6 +1,6 @@
 import type { RunFilterOptions, RunSummary } from '../../types'
 import { formatRelativeDate } from '../../utils'
-import { RUN_BY_SELF } from './runFilters'
+import { INPUT_FORMAT_VALUE_LABEL, RUN_BY_SELF } from './runFilters'
 import { FEEDBACK_VALUE_LABEL } from './runFeedback'
 import { SELF_RUN_BY_LABEL } from './runGroups'
 
@@ -65,6 +65,20 @@ export function buildFeedbackModel(options: RunFilterOptions): ComboModel {
       { id: '', label: 'Any', search: '' },
       { id: 'given', label: FEEDBACK_VALUE_LABEL.given, count: options.feedback.given, search: '' },
       { id: 'needed', label: FEEDBACK_VALUE_LABEL.needed, count: options.feedback.needed, search: '' },
+    ],
+    items: [],
+  }
+}
+
+/** Any / WCM template / Other format / Not classified, with counts from filter-options; all pinned, no search. */
+export function buildInputFormatModel(options: RunFilterOptions): ComboModel {
+  const { wcm, other, unknown } = options.input_format
+  return {
+    pinned: [
+      { id: '', label: 'Any', search: '' },
+      { id: 'wcm', label: INPUT_FORMAT_VALUE_LABEL.wcm, count: wcm, search: '' },
+      { id: 'other', label: INPUT_FORMAT_VALUE_LABEL.other, count: other, search: '' },
+      { id: 'unknown', label: INPUT_FORMAT_VALUE_LABEL.unknown, count: unknown, search: '' },
     ],
     items: [],
   }

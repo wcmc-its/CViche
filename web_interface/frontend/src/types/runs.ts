@@ -142,10 +142,14 @@ export type RunListScope = 'mine' | 'all'
  *  honoured only with scope 'all' (admin); `run_by` is a user id or 'self'. */
 export type RunFeedbackFilter = 'given' | 'needed'
 
+/** Whether the uploaded CV was written in the WCM CV template; 'unknown' = not classified. */
+export type RunInputFormatFilter = 'wcm' | 'other' | 'unknown'
+
 export interface RunListParams {
   scope?: RunListScope
   /** 'given' = any reviewer left feedback; 'needed' = complete run with none. Both scopes. */
   feedback?: RunFeedbackFilter
+  input_format?: RunInputFormatFilter
   run_by?: number | 'self'
   faculty?: string
   department?: string
@@ -173,6 +177,8 @@ export interface RunFilterOptions {
   self_count: number
   /** Runs per feedback filter value; applies every filter except feedback. */
   feedback: { given: number; needed: number }
+  /** Runs per input-format filter value; applies every filter except input format. */
+  input_format: { wcm: number; other: number; unknown: number }
 }
 
 export interface FeedbackStatus {
