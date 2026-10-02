@@ -51,6 +51,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_pipeline_errors,
     lint_section_lost,
     lint_stage3b_fallback_ratio,
+    lint_stage4_group_failures,
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_stage6_warnings,
@@ -1749,6 +1750,77 @@ def test_stage3b_fallback_ratio_boundary_at_the_threshold():
     assert len(lint_stage3b_fallback_ratio(just_over)) == 1
 
 
+# ------------------------- #1174: stage4_group_failures (cap below GREEN) ----
+#
+# Synthetic stand-ins for the shapes the batch autopsy found: a group the
+# recovery pass rescued in full (extraction_failed reads 0, so the stats
+# alone hide it) and a group left with one entry still unextracted.
+
+def _failed_group_entry(code, rescued, error="llm_response_invalid"):
+    return {"taxonomy_code": code, "extraction_error": error,
+            "extraction_success": rescued, "llm_recovery_applied": rescued,
+            "extracted_fields": {"note": "x"} if rescued else {}}
+
+
+def test_stage4_group_failures_warns_on_a_fully_rescued_group_and_names_its_code():
+    stage4 = {"entries": [_failed_group_entry("P", True) for _ in range(8)],
+              "stats": {"failed_batches": 1, "extraction_failed": 0}}
+    findings = lint_stage4_group_failures(stage4)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["lint"] == "stage4_group_failures"
+    assert finding["severity"] == "WARN"
+    assert "8 entries lost their first extraction" in finding["message"]
+    assert "rescued 8 and left 0" in finding["message"]
+    assert "capped at 84" in finding["message"]
+    assert finding["evidence"] == [
+        "taxonomy codes (entries): P=8",
+        "errors (entries): llm_response_invalid=8",
+        "stats.failed_batches=1",
+    ]
+
+
+def test_stage4_group_failures_reports_the_entries_left_without_fields():
+    stage4 = {"entries": [_failed_group_entry("M2A", True) for _ in range(3)]
+              + [_failed_group_entry("M2A", False)],
+              "stats": {"failed_batches": 1, "extraction_failed": 1}}
+    message = lint_stage4_group_failures(stage4)[0]["message"]
+    assert "4 entries lost" in message and "rescued 3 and left 1" in message
+
+
+def test_stage4_group_failures_quiet_on_a_clean_or_older_artifact():
+    clean = {"entries": [{"taxonomy_code": "P", "extraction_success": True,
+                          "extracted_fields": {"note": "x"}}],
+             "stats": {"failed_batches": 0}}
+    assert lint_stage4_group_failures(clean) == []
+    # an artifact from before stage 4 recorded failed_batches / extraction_error
+    assert lint_stage4_group_failures({"entries": [{"taxonomy_code": "P"}]}) == []
+    assert lint_stage4_group_failures({}) == []
+
+
+def test_stage4_group_failures_quiet_on_a_per_entry_miss():
+    from unified_pipeline.stage4.error_codes import NO_MATCHING_EXTRACTION
+
+    miss = {"taxonomy_code": "A1", "extraction_success": False, "extracted_fields": {},
+            "extraction_error": NO_MATCHING_EXTRACTION}
+    assert lint_stage4_group_failures({"entries": [miss], "stats": {"failed_batches": 0}}) == []
+
+
+def test_stage4_group_failures_and_the_score_gate_agree_on_the_same_artifact(tmp_path):
+    """Both read quality_score.stage4_group_failures, so the lint fires exactly
+    when the cap does -- the doctor reports the gate, not a second definition."""
+    from unified_pipeline.quality_score import (
+        STAGE4_GROUP_FAILURE_CAP, score_stage4_group_failures)
+
+    failed = {"entries": [_failed_group_entry("P", True)], "stats": {"failed_batches": 1}}
+    clean = {"entries": [{"taxonomy_code": "P", "extraction_success": True}]}
+    for artifact, expect_flag in ((failed, True), (clean, False)):
+        (tmp_path / "X_fields.json").write_text(json.dumps(artifact))
+        _fraction, _detail, cap = score_stage4_group_failures(tmp_path)
+        assert (cap == STAGE4_GROUP_FAILURE_CAP) is expect_flag
+        assert bool(lint_stage4_group_failures(artifact)) is expect_flag
+
+
 # ------------------------------------------------ #745: no_output (hard fail) -----
 
 def test_no_output_errors_when_stage4_reached_but_nothing_rendered():
@@ -1855,12 +1927,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (27), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (28), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 26
+    assert len(payload["findings"]) == 27
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
@@ -2222,6 +2294,29 @@ def test_run_doctor_wires_stage3b_fallback_ratio_through_to_the_verdict(tmp_path
                if f["lint"] == "stage3b_fallback_ratio"]
     assert len(fallback) == 1
     assert fallback[0]["severity"] == "ERROR"
+
+
+def test_run_doctor_wires_stage4_group_failures_through_to_the_verdict(tmp_path):
+    """A stage-4 artifact with a rescued failed group, driven through
+    run_doctor() end to end -- not just lint_stage4_group_failures(). Deleting
+    the LINT_REGISTRY row leaves every rule-level test above green and fails
+    this."""
+    root = _build_clean_run(tmp_path)
+    assert not [f for f in run_doctor(root, _UID)["findings"]
+                if f["lint"] == "stage4_group_failures"]
+    fields = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    data = json.loads(fields.read_text())
+    data["entries"][0].update({"extraction_error": "llm_response_invalid",
+                               "llm_recovery_applied": True})
+    data["stats"] = {"failed_batches": 1, "extraction_failed": 0}
+    fields.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    found = [f for f in payload["findings"] if f["lint"] == "stage4_group_failures"]
+    assert len(found) == 1
+    assert found[0]["severity"] == "WARN"
+    assert payload["counts"]["ERROR"] == 0
 
 
 def test_run_doctor_wires_invented_records_through_to_the_verdict(tmp_path):

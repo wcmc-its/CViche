@@ -32,6 +32,14 @@ classifications passed this gate clean. It reads the ratio from
 `quality_score.stage3b_fallback_ratio_exceeded`, the same reason
 `lint_pipeline_errors` reads its pattern from the scorer.
 
+`lint_stage4_group_failures` (#1174) is the same shape for stage 4: a taxonomy
+group whose extraction call failed (an invalid reply, a timeout, a provider
+error such as a content filter) leaves `extraction_error` on its entries and
+`stats.failed_batches` on the artifact, never an `error` key, so
+`lint_pipeline_errors` cannot see it, and the recovery pass hides it further by
+refilling the entries. It is a WARN, not an ERROR: its score cap stops short
+of RED (`quality_score.STAGE4_GROUP_FAILURE_CAP`).
+
 The transitive-exclusivity fixpoint returned no exclusive helpers at all: this
 domain's only external references are `Dict`/`List`, `_finding`, and the two
 scorer names, all of which already live outside `run_doctor.py`. Nothing moved
@@ -43,9 +51,11 @@ from unified_pipeline.quality_score import (
     FATAL_ERROR_PATTERN,
     NO_OUTPUT_CAP,
     STAGE3B_FALLBACK_HARD_FAIL_CAP,
+    STAGE4_GROUP_FAILURE_CAP,
     iter_error_fields,
     no_output_produced,
     stage3b_fallback_ratio_exceeded,
+    stage4_group_failures,
 )
 
 from ..shared import _finding
@@ -142,6 +152,42 @@ def lint_stage3b_second_pass_errors(stage_3b: dict) -> list[dict]:
         f"{len(errored)} stage-3b second pass(es) errored and left their "
         f"entries unchanged (T entries stay T / fragments stay unreconnected)",
         errored)]
+
+
+# --------------------------------------------------------------------------
+# The cap-84 gate: a stage-4 extraction group failed (#1174).
+
+
+def lint_stage4_group_failures(stage_4: dict) -> list[dict]:
+    """The quality score's stage-4 group-failure gate: an extraction call for a
+    taxonomy group failed, so its entries were written empty and the recovery
+    pass had to retry them. `quality_score.stage4_group_failures` reads the
+    artifact for both, so the doctor reports the gate rather than a second
+    definition of it.
+
+    WARN, not ERROR: the cap keeps the run out of GREEN (84) but does not put
+    it in the RED do-not-deliver band, and a group the recovery pass rescued
+    is still a delivered document. Evidence names the taxonomy codes, so the
+    reader knows which section to check. An artifact with no such failure, or
+    from before the stage recorded one, is not a finding."""
+    failures = stage4_group_failures(stage_4)
+    if failures is None:
+        return []
+    codes = ", ".join(f"{code}={n}" for code, n in failures.entries_by_code.items())
+    errors = ", ".join(f"{error}={n}" for error, n in failures.errors.items())
+    evidence = [
+        f"taxonomy codes (entries): {codes or 'none'}",
+        f"errors (entries): {errors or 'none'}",
+        f"stats.failed_batches={failures.failed_batches}",
+    ]
+    return [_finding(
+        "stage4_group_failures", "WARN",
+        f"stage-4 extraction failed for a taxonomy group: {failures.entries_failed} "
+        f"entries lost their first extraction, the recovery pass rescued "
+        f"{failures.entries_rescued} and left {failures.entries_unrecovered} without "
+        f"extracted fields — the quality score is capped at "
+        f"{STAGE4_GROUP_FAILURE_CAP} (never GREEN)",
+        evidence)]
 
 
 # --------------------------------------------------------------------------

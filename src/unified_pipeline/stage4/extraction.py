@@ -28,6 +28,12 @@ from unified_pipeline.stage4.coercion import (
     coerce_field_value_types,
     normalize_dates,
 )
+from unified_pipeline.stage4.error_codes import (
+    LLM_PROVIDER_ERROR,
+    LLM_RESPONSE_INVALID,
+    LLM_TIMEOUT,
+    NO_MATCHING_EXTRACTION,
+)
 from unified_pipeline.stage4.owner_name import (
     add_target_names,
     extract_cv_owner_name,
@@ -42,14 +48,6 @@ from unified_pipeline.stage4.schemas import (
 )
 
 logger = logging.getLogger(__name__)
-
-# Stable error-code strings for extraction_error / llm_recovery_error fields.
-# A caller can branch on these programmatically; str(exception) is for the
-# log line only (via logger.exception, which records the full traceback),
-# never for a field another stage or the frontend reads.
-LLM_RESPONSE_INVALID = "llm_response_invalid"
-LLM_TIMEOUT = "llm_timeout"
-LLM_PROVIDER_ERROR = "llm_provider_error"
 
 # I/O-bound stage (LLM round trips, not CPU); the default is sized under the
 # per-pod semaphore so one run cannot starve the others admitted alongside it
@@ -798,7 +796,7 @@ def extract_fields_batch(
                         **entry,
                         "extracted_fields": {},
                         "extraction_success": False,
-                        "extraction_error": "No matching extraction in LLM response"
+                        "extraction_error": NO_MATCHING_EXTRACTION
                     })
 
         except (ReadTimeoutError, ConnectTimeoutError):
