@@ -45,7 +45,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, TypedDict
 
-from .citation_matching import _append_missing_stage5d_values, _restore_stage5d_authors
+from .citation_matching import (
+    _append_missing_stage5d_values,
+    _restore_stage5d_authors,
+    _stage5d_cut_owner,
+)
 from .authors import _join_spaced_initials, _normalize_author_names
 
 #: The value `extracted_fields['formatting_source']` carries when stage 5d's
@@ -235,11 +239,12 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     if formatted_citation and fields.get('formatting_source') == _STAGE_5D_FORMATTING_SOURCE:
         # 5d's "first 6, et al." rule cut the CV owner from their own
         # citations; stage 4 kept the whole list (#1259).
-        source_authors = _normalize_author_names(
-            _join_spaced_initials(_text(fields.get('authors'))))
+        raw_authors = _text(fields.get('authors'))
+        if _stage5d_cut_owner(formatted_citation, raw_authors, _text(fields.get('target_name'))):
+            formatted_citation = _restore_stage5d_authors(
+                formatted_citation, _normalize_author_names(_join_spaced_initials(raw_authors)))
         formatted_citation = _append_missing_stage5d_values(
-            _restore_stage5d_authors(formatted_citation, source_authors),
-            editors, publisher)
+            formatted_citation, editors, publisher)
     else:
         formatted_citation = ''
 
