@@ -139,8 +139,8 @@ def test_a_certificate_number_then_a_year_is_not_a_phone_number(tmp_path):
     phone number, so a CV with no contact details lost 4.5 points."""
     fraction, detail, _ = _no_contact_score(
         tmp_path,
-        "Example Board of Medicine, Certificate #123456 2017 - present",
-        "License 654321 2019, Example State")
+        "Example Board of Medicine, Certificate #123456 2005, Example State",
+        "License 654321 2012, Example Agency")
     assert "source_contact=False" in detail
     assert fraction == 0.0
 

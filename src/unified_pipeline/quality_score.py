@@ -581,7 +581,7 @@ _CONTACT_KEY_RE = re.compile(
 # penalized. The phone shape is a standalone token so DOIs, PMIDs and grant
 # numbers (which carry 3-3-4 digit runs inside "/" or "." tokens) don't match.
 # The area code needs its own separator (or parentheses): a six-digit
-# certification number followed by a year ("#123456 2017 - present") is not a
+# certification number followed by a year ("#123456 2005") is not a
 # phone number, and without that rule it read as one (#822, batch IPXFBA).
 # ponytail: email/phone only; a source whose ONLY contact is a postal address
 # (2 of the 126 corpus CVs) reads as blank, so a missed address goes
@@ -725,15 +725,15 @@ def _source_block_lines(outputs_dir: Path) -> list[tuple[int, str]] | None:
     candidates = sorted((outputs_dir / SOURCE_DOCX_SUBDIR).glob("*.docx"))
     if len(candidates) != 1:
         if candidates:
-            logger.warning("quality_score found multiple source docx: %s",
-                           ", ".join(c.name for c in candidates))
+            logger.warning("quality_score found multiple source docx in %s: %s",
+                           outputs_dir, ", ".join(c.name for c in candidates))
         return None
     try:
         return iter_source_block_lines(str(candidates[0]))
     except (OSError, zipfile.BadZipFile, KeyError, ValueError, PackageNotFoundError,
             XMLSyntaxError) as e:
         logger.warning("quality_score could not read source docx %s (%s: %s)",
-                       candidates[0].name, type(e).__name__, e)
+                       candidates[0], type(e).__name__, e)
         return None
 
 

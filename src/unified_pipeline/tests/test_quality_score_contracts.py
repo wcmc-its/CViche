@@ -2104,7 +2104,7 @@ def test_lost_table_gate_is_not_evaluated_without_a_source_docx(tmp_path):
     assert "not evaluated" in detail
 
 
-def test_lost_table_gate_ignores_an_unreadable_or_ambiguous_source(tmp_path, caplog):
+def test_lost_table_gate_ignores_an_unreadable_source(tmp_path, caplog):
     _unrelated_entries(tmp_path)
     (tmp_path / qs.SOURCE_DOCX_SUBDIR).mkdir()
     (tmp_path / qs.SOURCE_DOCX_SUBDIR / "cv.docx").write_bytes(b"not a zip")
@@ -2113,9 +2113,20 @@ def test_lost_table_gate_ignores_an_unreadable_or_ambiguous_source(tmp_path, cap
     assert cap is None and "not evaluated" in detail
     assert "could not read source docx" in caplog.text
 
-    _make_docx(["x"]).save(tmp_path / qs.SOURCE_DOCX_SUBDIR / "second.docx")
-    _, detail, cap = qs.score_lost_source_table(tmp_path)
+
+def test_lost_table_gate_ignores_an_ambiguous_source(tmp_path, caplog):
+    """Two readable originals: either alone would cap, so taking the first (or
+    any) of them would fire; the gate must refuse to guess."""
+    _unrelated_entries(tmp_path)
+    _source_docx_with_table(tmp_path, qs.LOST_TABLE_CAP_MIN_LINES)
+    rows = [[f"Alpha record number {i} about example research topics"]
+            for i in range(qs.LOST_TABLE_CAP_MIN_LINES)]
+    _make_docx(["Second example curriculum vitae."], tables=[rows]).save(
+        tmp_path / qs.SOURCE_DOCX_SUBDIR / "second.docx")
+    with caplog.at_level(logging.WARNING):
+        _, detail, cap = qs.score_lost_source_table(tmp_path)
     assert cap is None and "not evaluated" in detail
+    assert "found multiple source docx" in caplog.text
 
 
 def test_content_loss_gates_are_registered_and_weightless():
