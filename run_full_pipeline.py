@@ -25,7 +25,7 @@ Arguments:
     --stage STAGE : Run ONLY this stage: '1a', '1b', '2', '3a', '3b', '3', '4', '4.5', '5', '5b', '5c', '5d', or '6'. Default: run all
 
 The model is not a CLI argument. Each stage resolves its own from
-llm_config.yaml (stage_3b is deliberately on Haiku), so there is no single model
+llm_config.yaml (any stage can override the default), so there is no single model
 to override; the summary reports which ones actually served the run.
 
 Example:
