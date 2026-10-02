@@ -17,6 +17,11 @@ export function inFlightText(limit: number = MAX_UPLOADS_IN_FLIGHT): string {
 }
 
 export const NOT_DOCX_REASON = 'Not a .docx file'
+/** Client copy of the backend upload cap (CVICHE_MAX_UPLOAD_MB, default 10; MAX_UPLOAD_SIZE in
+ *  backend/app/services/config_service.py). The backend does not expose it to the client, so keep the two in step. */
+export const MAX_UPLOAD_MB = 10
+export const MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
+export const TOO_LARGE_REASON = `Larger than ${MAX_UPLOAD_MB} MB`
 export const PERMANENT_FAILURE_SUFFIX = 'Fix it and upload it on its own.'
 /** Reason shown for a failure with no server message (the request never got an answer). */
 export const INTERRUPTED_REASON = 'Upload interrupted'
@@ -55,14 +60,20 @@ export interface BatchRow {
   failure: RowFailure | null
 }
 
-/** A new row; a non-.docx file is marked "won't be submitted" at once. `key` must be unique on the page. */
+/** Why a chosen file can't be submitted (wrong type, over the size cap); null when it can. */
+export function fileInvalidReason(file: File): string | null {
+  if (!file.name.toLowerCase().endsWith('.docx')) return NOT_DOCX_REASON
+  return file.size > MAX_UPLOAD_BYTES ? TOO_LARGE_REASON : null
+}
+
+/** A new row; a file that fails the client checks is marked "won't be submitted" at once. `key` must be unique on the page. */
 export function makeRow(file: File, key: string, estimate: Estimate | null | undefined = undefined): BatchRow {
-  const isDocx = file.name.toLowerCase().endsWith('.docx')
+  const invalidReason = fileInvalidReason(file)
   return {
     key,
     file,
-    invalidReason: isDocx ? null : NOT_DOCX_REASON,
-    estimate: isDocx ? estimate : null,
+    invalidReason,
+    estimate: invalidReason ? null : estimate,
     state: 'ready',
     runId: null,
     failure: null,

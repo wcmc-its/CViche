@@ -1980,3 +1980,184 @@ def test_main_writes_both_json_files_as_readable_utf8(tmp_path, monkeypatch):
         assert "José Muñoz" in raw
         assert "\\u00e9" not in raw
         assert json.loads(raw)
+
+
+# ---------------------------------------------------------------------------
+# Tables nested in a table cell (#1231)
+# ---------------------------------------------------------------------------
+
+_NESTED_LINES = [f"Nested record {i}: synthetic citation line." for i in (1, 2, 3)]
+
+
+def _nested_table_docx(tmp_path, outer_cols, host_text="Host paragraph one"):
+    """Outer table; its first cell holds host paragraphs around a 3x1 nested table."""
+    doc = Document()
+    outer = doc.add_table(rows=2, cols=outer_cols)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = host_text
+    nested = cell.add_table(rows=3, cols=1)
+    for i, line in enumerate(_NESTED_LINES):
+        nested.cell(i, 0).text = line
+    cell.add_paragraph("Host paragraph after")
+    outer.cell(1, 0).text = "Trailing outer paragraph."
+    path = tmp_path / f"nested_{outer_cols}.docx"
+    doc.save(str(path))
+    return str(path)
+
+
+def _element_texts(path):
+    out = []
+    for el in extract_unified_elements(path)["elements"]:
+        out.extend(
+            line for line in (el.get("text") or _content_text(el)).split("\n") if line.strip()
+        )
+    return out
+
+
+def _content_text(el):
+    return "\n".join(c.get("text", "") for row in el.get("rows", []) for c in row)
+
+
+def test_single_column_layout_table_emits_nested_table_paragraphs_in_order(tmp_path):
+    texts = _element_texts(_nested_table_docx(tmp_path, 1))
+    assert texts == ["Host paragraph one", *_NESTED_LINES, "Host paragraph after", "Trailing outer paragraph."]
+
+
+def test_multi_column_table_keeps_nested_table_text_in_document_order(tmp_path):
+    path = _nested_table_docx(tmp_path, 2)
+    blob = "\n".join(_element_texts(path))
+    positions = [blob.index(t) for t in ["Host paragraph one", *_NESTED_LINES, "Host paragraph after"]]
+    assert positions == sorted(positions)
+
+
+def test_multi_column_nested_text_reaches_cell_data_when_first_cell_is_not_a_header(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "Lead-in text for the host cell, 2019 2020."
+    nested = cell.add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "Nested only line."
+    outer.cell(0, 1).text = "Right cell"
+    path = tmp_path / "plain.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    assert data[0][0]["text"] == "Lead-in text for the host cell, 2019 2020.\nNested only line."
+
+
+def test_nested_only_cell_keeps_itertext_fallback(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    nested = outer.cell(0, 0).add_table(rows=2, cols=1)
+    nested.cell(0, 0).text = "Alpha line"
+    nested.cell(1, 0).text = "Beta line"
+    outer.cell(0, 1).text = "Right cell"
+    path = tmp_path / "only.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    text = data[0][0]["text"]
+    assert "Alpha line" in text and "Beta line" in text and "\n" not in text
+
+
+def test_nested_multi_cell_row_is_one_space_joined_line(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "Host"
+    nested = cell.add_table(rows=1, cols=2)
+    nested.cell(0, 0).text = "2018"
+    nested.cell(0, 1).text = "Example University"
+    outer.cell(0, 1).text = "Right"
+    path = tmp_path / "wide.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    assert data[0][0]["text"] == "Host\n2018 Example University"
+
+
+def test_single_column_nested_vertical_merge_emits_merged_cell_once(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=1)
+    nested = outer.cell(0, 0).add_table(rows=3, cols=2)
+    nested.cell(0, 0).merge(nested.cell(2, 0)).text = "Merged label"
+    for i in range(3):
+        nested.cell(i, 1).text = f"Value {i}"
+    path = tmp_path / "vmerge.docx"
+    doc.save(str(path))
+    texts = _element_texts(str(path))
+    assert texts.count("Merged label") == 1
+    assert [t for t in texts if t.startswith("Value")] == ["Value 0", "Value 1", "Value 2"]
+
+
+def test_single_column_nested_horizontal_merge_and_deep_nesting(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=1)
+    nested = outer.cell(0, 0).add_table(rows=1, cols=2)
+    nested.cell(0, 0).merge(nested.cell(0, 1)).text = "Wide cell"
+    inner = nested.cell(0, 0).add_table(rows=1, cols=1)
+    inner.cell(0, 0).text = "Doubly nested line"
+    path = tmp_path / "deep.docx"
+    doc.save(str(path))
+    texts = _element_texts(str(path))
+    assert texts.count("Wide cell") == 1
+    assert texts.count("Doubly nested line") == 1
+
+
+def test_nested_row_with_horizontal_merge_is_listed_once_per_line(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "Host"
+    nested = cell.add_table(rows=1, cols=2)
+    nested.cell(0, 0).merge(nested.cell(0, 1)).text = "Spanning text"
+    outer.cell(0, 1).text = "Right"
+    path = tmp_path / "hmerge.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    assert data[0][0]["text"] == "Host\nSpanning text"
+
+
+def test_row_zero_header_cell_hosting_nested_list_keeps_the_list(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "ABSTRACTS"
+    nested = cell.add_table(rows=2, cols=1)
+    nested.cell(0, 0).text = "Nested abstract entry one, synthetic text that is long enough to count as content here."
+    nested.cell(1, 0).text = "Nested abstract entry two, synthetic text that is long enough to count as content here."
+    outer.cell(0, 1).text = ""
+    path = tmp_path / "hdr.docx"
+    doc.save(str(path))
+    blob = "\n".join(_element_texts(str(path)))
+    assert "Nested abstract entry one" in blob and "Nested abstract entry two" in blob
+
+
+def test_row_zero_header_after_nested_table_stays_a_table_header(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=2, cols=2)
+    cell = outer.cell(0, 0)
+    nested = cell.add_table(rows=2, cols=1)
+    nested.cell(0, 0).text = "Nested record one, synthetic text that is long enough to count as content here."
+    nested.cell(1, 0).text = "Nested record two, synthetic text that is long enough to count as content here."
+    cell.paragraphs[-1].text = "PUBLICATIONS"
+    outer.cell(1, 0).text = "Trailing outer paragraph."
+    path = tmp_path / "hdr_after.docx"
+    doc.save(str(path))
+    els = extract_unified_elements(str(path))["elements"]
+    headers = [e["text"] for e in els if e["type"] == "table_header"]
+    assert headers[:1] == ["PUBLICATIONS"]
+    blob = "\n".join(_element_texts(str(path)))
+    assert "Nested record one" in blob and "Nested record two" in blob
+
+
+def test_multi_column_doubly_nested_table_text_reaches_cell_data(tmp_path):
+    doc = Document()
+    outer = doc.add_table(rows=1, cols=2)
+    cell = outer.cell(0, 0)
+    cell.paragraphs[0].text = "Host text"
+    nested = cell.add_table(rows=1, cols=1)
+    nested.cell(0, 0).paragraphs[0].text = "Middle line"
+    inner = nested.cell(0, 0).add_table(rows=1, cols=1)
+    inner.cell(0, 0).text = "Deepest line"
+    path = tmp_path / "deep.docx"
+    doc.save(str(path))
+    data = extract_table_metadata(Document(str(path)).tables[0], "table_0")["data"]
+    assert data[0][0]["text"] == "Host text\nMiddle line\nDeepest line"

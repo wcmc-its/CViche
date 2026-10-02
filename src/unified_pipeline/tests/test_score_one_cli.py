@@ -105,6 +105,42 @@ def test_artifacts_are_flattened_out_of_stage_subdirs(tmp_path, monkeypatch):
     ], seen
 
 
+def test_source_docx_is_staged_under_the_scorers_source_subdir(tmp_path, monkeypatch):
+    """#822: --source reaches the scorer as source/<name>, beside (not among)
+    the flat artifacts, so the lost-source-table gate can read it."""
+    cli = _load_cli()
+    seen = {}
+
+    def _capture(outputs_dir, run_id):
+        seen["names"] = sorted(p.name for p in Path(outputs_dir).iterdir())
+        seen["source"] = sorted(p.name for p in (Path(outputs_dir) / "source").iterdir())
+        return _REPORT
+
+    monkeypatch.setattr(cli, "score_run", _capture)
+    _stage_artifacts(tmp_path)
+    source = tmp_path / "original_cv.docx"
+    source.write_bytes(b"docx bytes")
+
+    assert cli.main([str(tmp_path), "web05", "--source", str(source)]) == 0
+    assert seen["source"] == ["original_cv.docx"]
+    assert "source" in seen["names"]
+
+
+def test_without_source_the_scorer_gets_no_source_subdir(tmp_path, monkeypatch):
+    cli = _load_cli()
+    seen = {}
+
+    def _capture(outputs_dir, run_id):
+        seen["has_source"] = (Path(outputs_dir) / "source").exists()
+        return _REPORT
+
+    monkeypatch.setattr(cli, "score_run", _capture)
+    _stage_artifacts(tmp_path)
+
+    assert cli.main([str(tmp_path), "web05"]) == 0
+    assert seen["has_source"] is False
+
+
 def test_stage_error_record_is_collected_for_the_scorer(tmp_path, monkeypatch):
     """#745: the drivers' stage-error record lives in its own dir beside the
     stage_* dirs; it must reach the flattened dir the scorer reads, or a
@@ -123,6 +159,27 @@ def test_stage_error_record_is_collected_for_the_scorer(tmp_path, monkeypatch):
 
     assert cli.main([str(tmp_path), "web05"]) == 0
     assert "web05_stage_errors.json" in seen["names"], seen
+
+
+def test_research_summary_artifact_is_collected_for_the_scorer(tmp_path, monkeypatch):
+    """#1174: the fallback-served gate reads stage 4.5's provenance from the
+    research summary artifact; it must reach the flattened dir the scorer reads,
+    or a stage-4.5 call the backup model served never caps the score."""
+    cli = _load_cli()
+    seen = {}
+
+    def _capture(outputs_dir, run_id):
+        seen["names"] = sorted(p.name for p in Path(outputs_dir).iterdir())
+        return _REPORT
+
+    monkeypatch.setattr(cli, "score_run", _capture)
+    _stage_artifacts(tmp_path)
+    (tmp_path / "stage_4_5_research_summary").mkdir()
+    (tmp_path / "stage_4_5_research_summary" / "web05_research_summary.json").write_text(
+        "{}", encoding="utf-8")
+
+    assert cli.main([str(tmp_path), "web05"]) == 0
+    assert "web05_research_summary.json" in seen["names"], seen
 
 
 def test_no_artifacts_exits_nonzero_instead_of_scoring_an_empty_dir(tmp_path, capsys, monkeypatch):

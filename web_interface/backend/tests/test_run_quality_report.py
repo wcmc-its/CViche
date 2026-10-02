@@ -46,6 +46,22 @@ def test_cap_source_parses_the_real_scorers_flag_text(tmp_path):
         "No rendered output produced at all (HARD-FAIL gate)"]
 
 
+@pytest.mark.parametrize("gate, lint", [
+    (scorer.score_under_extracted_records, "under_extraction"),
+    (scorer.score_fused_entries, "segmentation"),
+    (scorer.score_lost_source_table, "table_lost"),
+])
+def test_each_content_loss_cap_points_at_the_lint_that_reports_it(gate, lint):
+    """#822: a content-loss cap on the run page names its own gate and the doctor
+    lint to read next, recovered from the flag text the scorer really writes."""
+    name = next(n for n, fn in scorer.CAP_ONLY_GATES if fn is gate)
+    flag = f"HARD-FAIL cap={scorer.CONTENT_LOSS_CAP}: {name} (detail)"
+    snapshot = qss.parse_score(_score(total=scorer.CONTENT_LOSS_CAP, raw=92.0,
+                                      caps=(scorer.CONTENT_LOSS_CAP,), flags=[flag]))
+    source = rqr.cap_source(snapshot)
+    assert source is not None and source.lint == lint
+
+
 def test_cap_source_names_the_stage4_group_failure_gate_from_the_real_scorer(tmp_path):
     """#1174: a run that would score exactly 85 GREEN but for one failed
     stage-4 extraction group is capped at 84, and the report names that gate
@@ -76,6 +92,96 @@ def test_cap_source_names_the_stage4_group_failure_gate_from_the_real_scorer(tmp
     assert source == rqr.CapSource(
         "field extraction failed for a group of entries", "stage4_group_failures")
     assert source in rqr.CAP_SOURCE_BY_GATE_NAME.values()
+
+
+@pytest.mark.parametrize("fired, lint", [
+    ((scorer.score_fused_entries, scorer.score_stage4_group_failures), "segmentation"),
+    ((scorer.score_under_extracted_records, scorer.score_fused_entries), "segmentation"),
+    ((scorer.score_lost_source_table, scorer.score_under_extracted_records), "table_lost"),
+    ((scorer.score_lost_source_table, scorer.score_fused_entries), "table_lost"),
+    ((scorer.score_under_extracted_records, scorer.score_stage4_group_failures),
+     "under_extraction"),
+    ((scorer.score_stage4_group_failures, scorer.score_llm_fallback_served),
+     "stage4_group_failures"),
+    ((scorer.score_fused_entries, scorer.score_llm_fallback_served), "segmentation"),
+])
+def test_when_gates_tie_at_the_same_cap_the_pointer_names_the_most_specific(fired, lint):
+    """#822: the content-loss caps and the stage-4 cap all sit at 84, and the
+    pointer is the first matching flag. Flags are written in CAP_ONLY_GATES
+    order, as score_run writes them, so this pins that order."""
+    assert scorer.CONTENT_LOSS_CAP == scorer.STAGE4_GROUP_FAILURE_CAP
+    cap = scorer.CONTENT_LOSS_CAP
+    flags = [f"HARD-FAIL cap={cap}: {name} (detail)"
+             for name, fn in scorer.CAP_ONLY_GATES if fn in fired]
+    assert len(flags) == 2
+    snapshot = qss.parse_score(_score(total=cap, raw=92.0, caps=(cap, cap), flags=flags))
+    source = rqr.cap_source(snapshot)
+    assert source is not None and source.lint == lint
+
+
+def test_a_run_with_fused_entries_and_a_failed_stage4_group_points_at_the_fused_entries(tmp_path):
+    """The same tie through the real scorer (#822, #1174): two fused entries and
+    one failed stage-4 group both cap at 84; the report names the fused-entries
+    gate, not the stage-4 one."""
+    import json
+    from docx import Document
+
+    fused = {"element_type": "table_row", "text": "\n".join(
+        f"Example Grant {i} Title Words Here | Example Agency | 2011-2014 | Role: PI"
+        for i in range(3))}
+    (tmp_path / "T1_fields.json").write_text(json.dumps({
+        "cv_owner": {"full_name": "Jane Q. Public"},
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "stats": {"failed_batches": 1},
+        "entries": [{"taxonomy_code": "P", "extraction_success": True,
+                     "extraction_error": "llm_response_invalid",
+                     "extracted_fields": {"email": "j@x.org"}}]}))
+    (tmp_path / "T1_classified.json").write_text(json.dumps({"meta": {
+        "total_entries": 4, "duplicate_entries": 0, "code_distribution": {"A": 3, "T": 1}}}))
+    (tmp_path / "T1_entries.json").write_text(json.dumps({
+        "coverage": {"coverage_percentage": 100}, "entries": [fused, fused]}))
+    doc = Document()
+    doc.add_paragraph("clean")
+    row = doc.add_table(rows=1, cols=2).rows[0]
+    row.cells[0].text, row.cells[1].text = "a", "b"
+    doc.save(tmp_path / "T1_wcm.docx")
+
+    result = scorer.score_run(tmp_path, "T1")
+    source = rqr.cap_source(qss.parse_score(result))
+
+    assert [f.split(": ")[1].split(" (")[0].split(":")[0] for f in result["flags"]] == [
+        "Source records fused", "Stage-4 extraction group failed"]
+    assert result["hard_fail_caps_applied"] == [84, 84] and result["totalScore"] == 84
+    assert source == rqr.CapSource(
+        "several records were fused into one entry", "segmentation")
+
+
+def test_cap_source_names_the_fallback_served_gate_from_the_real_scorer(tmp_path):
+    """#1174: the same 85 GREEN run with one fallback-served stage-4 group is
+    capped at 84, and the report names that gate and its doctor lint."""
+    import json
+    from docx import Document
+
+    (tmp_path / "T1_fields.json").write_text(json.dumps({
+        "cv_owner": {"full_name": "Jane Q. Public"},
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "entries": [{"taxonomy_code": "S1", "extraction_success": True,
+                     "llm_fallback_model": "example.fallback-model-1",
+                     "extracted_fields": {"email": "j@x.org"}}]}))
+    (tmp_path / "T1_classified.json").write_text(json.dumps({"meta": {
+        "total_entries": 4, "duplicate_entries": 0, "code_distribution": {"A": 3, "T": 1}}}))
+    (tmp_path / "T1_entries.json").write_text(json.dumps({"coverage": {"coverage_percentage": 100}}))
+    doc = Document()
+    doc.add_paragraph("clean")
+    row = doc.add_table(rows=1, cols=2).rows[0]
+    row.cells[0].text, row.cells[1].text = "a", "b"
+    doc.save(tmp_path / "T1_wcm.docx")
+
+    result = scorer.score_run(tmp_path, "T1")
+    source = rqr.cap_source(qss.parse_score(result))
+
+    assert (result["raw_score_before_caps"], result["totalScore"]) == (85.0, 84)
+    assert source == rqr.CapSource("a backup model answered part of the run", "llm_fallback_served")
 
 
 def test_every_known_lint_has_a_plain_english_line():
