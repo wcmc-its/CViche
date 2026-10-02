@@ -3,11 +3,12 @@ import { FileText, Loader2, ChevronLeft, ChevronRight } from 'lucide-react'
 import { getMyStatusCounts, getRuns, getRunFilterOptions } from '../api/runs'
 import { listBatches } from '../api/batches'
 import type { BatchSummary, RunFilterOptions, RunSummary, StatusFilterCounts } from '../types'
+import { NARROW_FILTERS_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import ErrorBanner from './ErrorBanner'
 import { useAuth, useCanSeeCost } from '../contexts/AuthContext'
 import RunTable from './runs/RunTable'
-import { ActiveFilterChips, RunFilterCombos, StatusPills } from './runs/RunFilterBar'
-import { hasActiveFilters, toListParams, toMemberListParams, useBatchFilter, useRunFilters } from './runs/runFilters'
+import { ActiveFilterChips, FiltersPanel, RunFilterCombos, StatusPills } from './runs/RunFilterBar'
+import { countPanelFilters, hasActiveFilters, toListParams, toMemberListParams, useBatchFilter, useRunFilters } from './runs/runFilters'
 import type { RunFilterControls } from './runs/runFilters'
 import { BatchFilterCombo, batchLabel } from './runs/BatchFilter'
 import BatchView from './runs/BatchView'
@@ -85,8 +86,10 @@ interface FilterRowProps {
 /** The status pills, the filter combos (admin filters, then Batch for anyone with a batch) and the active chips.
  *  The pills are hidden in a batch view, which they do not filter. */
 function RunFilterRow({ isAdmin, batches, batchId, setBatch, currentUserEmail, statusCounts, ...bar }: FilterRowProps) {
+  const narrow = useMediaQuery(NARROW_FILTERS_QUERY)
+  const inPanel = isAdmin && narrow
   const batchCombo = (batches.length > 0 || batchId) && (
-    <BatchFilterCombo batches={batches} batchId={batchId} currentUserId={bar.currentUserId} onPick={setBatch} />
+    <BatchFilterCombo batches={batches} batchId={batchId} currentUserId={bar.currentUserId} onPick={setBatch} fullWidth={inPanel} />
   )
   const selected = batches.find((b) => b.id === batchId)
   const batchChip = batchId ? { value: selected ? batchLabel(selected) : batchId, onRemove: () => setBatch('') } : undefined
@@ -95,7 +98,11 @@ function RunFilterRow({ isAdmin, batches, batchId, setBatch, currentUserEmail, s
       {!batchId && <StatusPills controls={bar.controls} counts={statusCounts} isAdmin={isAdmin} />}
       {(isAdmin || batchCombo) && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          {isAdmin
+          {inPanel ? (
+            <FiltersPanel activeCount={countPanelFilters(bar.controls.filters, batchId)}>
+              <RunFilterCombos {...bar} currentUserEmail={currentUserEmail} extra={batchCombo} stacked />
+            </FiltersPanel>
+          ) : isAdmin
             ? <RunFilterCombos {...bar} currentUserEmail={currentUserEmail} extra={batchCombo} />
             : <div className="flex flex-wrap gap-2 sm:ml-auto">{batchCombo}</div>}
         </div>

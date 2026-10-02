@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Clock, CheckCircle2, Check, Lock, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronRight } from 'lucide-react'
 import { formatRelativeDate } from '../../utils'
+import { PHONE_QUERY, useMediaQuery } from '../../hooks/useMediaQuery'
 import type { RunSummary } from '../../types'
 import { OWNER_UNKNOWN_LABEL, earlierRunHasFeedback, runByFilterValue, runByLabel } from './runGroups'
 import { FEEDBACK_VALUE_LABEL, feedbackGivenTitle, feedbackState } from './runFeedback'
@@ -57,6 +58,15 @@ function statusLabel(status: string): string {
     default:
       return 'Pending'
   }
+}
+
+function StatusBadge({ status }: { status: string }) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      <StatusIcon status={status} />
+      <span className={`text-sm ${statusLabelColor(status)}`}>{statusLabel(status)}</span>
+    </span>
+  )
 }
 
 function formatDuration(seconds: number | null): string {
@@ -218,10 +228,7 @@ function RunRow({ run, firstCell, earlier = false, earlierGiven = false, isAdmin
         </td>
       )}
       <td className={`${CELL} text-left`}>
-        <span className="inline-flex items-center gap-1">
-          <StatusIcon status={run.status} />
-          <span className={`text-sm ${statusLabelColor(run.status)}`}>{statusLabel(run.status)}</span>
-        </span>
+        <StatusBadge status={run.status} />
       </td>
       {isAdmin && (
         <td className={`${CELL} text-left text-sm`}>
@@ -303,9 +310,88 @@ function GroupCell({ group, expanded, isAdmin, onToggle, onFilter, onOpenBatch }
   )
 }
 
-/** Runs grouped by faculty member: latest run per row, earlier reruns behind a chevron. */
-export default function RunTable(props: RunTableProps) {
-  const { groups, isAdmin, showCost, sortField, sortDir, onSort } = props
+interface CardProps {
+  run: RunSummary
+  /** Name line (faculty or filename) and file line; an earlier run shows only the file. */
+  head: React.ReactNode
+  earlier?: boolean
+  isAdmin: boolean
+  onSelectRun: (runId: string) => void
+}
+
+/** One run as a stacked card (phones): name, file, then status, score (admin) and started date. */
+function RunCard({ run, head, earlier = false, isAdmin, onSelectRun }: CardProps) {
+  const { display, tooltip } = formatRelativeDate(run.started_at)
+  const bg = run.status === 'running' ? 'bg-primary-50' : earlier ? 'bg-sand-50' : 'bg-white'
+  return (
+    <li
+      onClick={() => onSelectRun(run.run_id)}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onSelectRun(run.run_id) } }}
+      tabIndex={0}
+      role="link"
+      className={`cursor-pointer border-b border-sand-200 px-4 py-3 last:border-b-0 hover:bg-sand-50 ${bg}`}
+    >
+      {head}
+      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+        <StatusBadge status={run.status} />
+        {isAdmin && <ScoreCell run={run} earlier={earlier} />}
+        <span title={tooltip} className="text-gray-500">{display}</span>
+      </div>
+    </li>
+  )
+}
+
+/** The card's file line: one ellipsised line, full name on hover, and the Batch tag. */
+function CardFile({ run, label, onOpenBatch }: { run: RunSummary; label?: string; onOpenBatch: (batchId: string) => void }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <span title={run.filename} className="min-w-0 truncate text-[13px] text-gray-500">{label ?? run.filename}</span>
+      <BatchTag batchId={run.batch_id} onOpenBatch={onOpenBatch} />
+    </div>
+  )
+}
+
+function CardGroupHead({ group, expanded, isAdmin, onToggle, onFilter, onOpenBatch }: GroupCellProps) {
+  const { owner, latest, older } = group
+  const runCount = older.length + 1
+  const nameClass = 'min-w-0 break-words text-left text-sm font-semibold text-gray-900 [overflow-wrap:anywhere]'
+  return (
+    <div className="flex items-start gap-2">
+      {older.length > 0 && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onToggle() }}
+          aria-expanded={expanded}
+          aria-label={`${expanded ? 'Hide' : 'Show'} ${older.length} earlier ${older.length === 1 ? 'run' : 'runs'}`}
+          className="-ml-1 flex h-[22px] w-[22px] flex-none items-center justify-center rounded-md text-gray-500 hover:bg-sand-200"
+        >
+          <ChevronRight className={`w-3.5 h-3.5 transition-transform ${expanded ? 'rotate-90' : ''}`} aria-hidden="true" />
+        </button>
+      )}
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          {owner && isAdmin ? (
+            <button
+              type="button"
+              title="Show only this faculty member"
+              onClick={(e) => { e.stopPropagation(); onFilter('faculty', owner) }}
+              className={`${nameClass} ${LINK_HOVER}`}
+            >
+              {owner}
+            </button>
+          ) : (
+            <span title={owner ? undefined : latest.filename} className={nameClass}>{owner ?? latest.filename}</span>
+          )}
+          {runCount > 1 && <span className="rounded-full bg-sand-100 px-2 py-px text-xs text-gray-500">{runCount} runs</span>}
+        </div>
+        <CardFile run={latest} label={owner ? undefined : OWNER_UNKNOWN_LABEL} onOpenBatch={onOpenBatch} />
+      </div>
+    </div>
+  )
+}
+
+/** Phones: the same groups as the table, one card per run, earlier reruns behind the chevron. */
+function RunCardList({ groups, isAdmin, onSelectRun, onFilter, onOpenBatch }: RunTableProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const toggle = (key: string) =>
     setExpanded((prev) => {
@@ -314,6 +400,44 @@ export default function RunTable(props: RunTableProps) {
       else next.add(key)
       return next
     })
+  return (
+    <ul>
+      {groups.flatMap((group) => {
+        const isOpen = expanded.has(group.key)
+        const head = (
+          <CardGroupHead group={group} expanded={isOpen} isAdmin={isAdmin} onToggle={() => toggle(group.key)} onFilter={onFilter} onOpenBatch={onOpenBatch} />
+        )
+        const earlier = isOpen
+          ? group.older.map((run) => (
+              <RunCard
+                key={run.run_id}
+                run={run}
+                earlier
+                isAdmin={isAdmin}
+                onSelectRun={onSelectRun}
+                head={<div className="pl-6"><CardFile run={run} onOpenBatch={onOpenBatch} /></div>}
+              />
+            ))
+          : []
+        return [<RunCard key={group.latest.run_id} run={group.latest} head={head} isAdmin={isAdmin} onSelectRun={onSelectRun} />, ...earlier]
+      })}
+    </ul>
+  )
+}
+
+/** Runs grouped by faculty member: latest run per row, earlier reruns behind a chevron. */
+export default function RunTable(props: RunTableProps) {
+  const { groups, isAdmin, showCost, sortField, sortDir, onSort } = props
+  const phone = useMediaQuery(PHONE_QUERY)
+  const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const toggle = (key: string) =>
+    setExpanded((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  if (phone) return <RunCardList {...props} />
   const header = { sortField, sortDir, onSort }
   const rowProps = {
     isAdmin,

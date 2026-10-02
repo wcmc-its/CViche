@@ -18,6 +18,8 @@ interface RunFilterComboProps {
   model: ComboModel
   /** False for short fixed lists: the search box stays for keyboard use but is not shown. */
   searchable?: boolean
+  /** Fill the width of the parent (the narrow-screen Filters panel) instead of sizing to the caption. */
+  fullWidth?: boolean
   onPick: (id: string) => void
 }
 
@@ -71,7 +73,7 @@ function OptionRow({ id, option, active, highlighted, onPick, onHover }: OptionR
 }
 
 /** Searchable single-select popover (combobox + listbox) for one admin run filter. */
-export default function RunFilterCombo({ label, valueLabel, activeId, placeholder, model, searchable = true, onPick }: RunFilterComboProps) {
+export default function RunFilterCombo({ label, valueLabel, activeId, placeholder, model, searchable = true, fullWidth = false, onPick }: RunFilterComboProps) {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [highlight, setHighlight] = useState(0)
@@ -151,7 +153,7 @@ export default function RunFilterCombo({ label, valueLabel, activeId, placeholde
   )
 
   return (
-    <div ref={rootRef} className="relative flex-none">
+    <div ref={rootRef} className={`relative ${fullWidth ? 'w-full' : 'flex-none'}`}>
       <button
         ref={buttonRef}
         type="button"
@@ -162,7 +164,7 @@ export default function RunFilterCombo({ label, valueLabel, activeId, placeholde
           setQuery('')
           setHighlight(0)
         }}
-        className={`flex h-9 max-w-[260px] items-center gap-1.5 whitespace-nowrap rounded-lg border bg-white pl-3 pr-2.5 text-[13px] text-gray-500 hover:border-sand-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
+        className={`flex h-9 items-center ${fullWidth ? 'w-full' : 'max-w-[260px]'} gap-1.5 whitespace-nowrap rounded-lg border bg-white pl-3 pr-2.5 text-[13px] text-gray-500 hover:border-sand-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${
           activeId ? 'border-ink' : 'border-sand-400'
         }`}
       >
@@ -171,7 +173,7 @@ export default function RunFilterCombo({ label, valueLabel, activeId, placeholde
         <ChevronDown className="h-3.5 w-3.5 flex-none text-gray-500" aria-hidden="true" />
       </button>
       {open && (
-        <div className="absolute right-0 top-[42px] z-dropdown w-80 max-w-[calc(100vw-2rem)] overflow-hidden rounded-[10px] border border-sand-300 bg-white shadow-[0_12px_32px_rgba(60,40,10,0.14)]">
+        <div className={`absolute top-[42px] z-dropdown ${fullWidth ? 'inset-x-0' : 'right-0 w-80 max-w-[calc(100vw-2rem)]'} overflow-hidden rounded-[10px] border border-sand-300 bg-white shadow-[0_12px_32px_rgba(60,40,10,0.14)]`}>
           <div className={searchable ? 'flex h-[42px] items-center gap-2 border-b border-sand-200 px-3' : 'sr-only'}>
             <Search className="h-[15px] w-[15px] text-gray-500" aria-hidden="true" />
             <input

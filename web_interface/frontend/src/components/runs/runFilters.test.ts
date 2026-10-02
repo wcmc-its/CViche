@@ -5,7 +5,7 @@ import type { ReactNode } from 'react'
 import { act, renderHook } from '@testing-library/react'
 import { MemoryRouter, useLocation } from 'react-router-dom'
 import {
-  EMPTY_FILTERS, activeStatusPill, applyStatusPill, toListParams, toMemberListParams, useBatchFilter,
+  EMPTY_FILTERS, activeStatusPill, applyStatusPill, countPanelFilters, toListParams, toMemberListParams, useBatchFilter,
   useRunFilters,
 } from './runFilters'
 
@@ -94,5 +94,15 @@ describe('status pills', () => {
     expect(member.result.current.search).toContain('status=failed')
     expect(toMemberListParams({ ...EMPTY_FILTERS, status: 'red', feedback: 'needed' })).toEqual({ feedback: 'needed' })
     expect(toMemberListParams({ ...EMPTY_FILTERS, status: 'running' })).toEqual({ status: 'running' })
+  })
+})
+
+describe('countPanelFilters', () => {
+  it('counts the five combos and the batch, but not the status pill', () => {
+    expect(countPanelFilters(EMPTY_FILTERS, '')).toBe(0)
+    expect(countPanelFilters({ ...EMPTY_FILTERS, status: 'failed' }, '')).toBe(0)
+    expect(countPanelFilters({ ...EMPTY_FILTERS, department: 'Medicine', inputFormat: 'wcm' }, '')).toBe(2)
+    const all = { department: 'Medicine', faculty: 'Pat Example', runBy: 'self', feedback: 'given', inputFormat: 'wcm', status: '' }
+    expect(countPanelFilters(all, 'BQXZKD')).toBe(6)
   })
 })
