@@ -411,6 +411,21 @@ def test_1071_dob_label_parenthetical_and_race_ethnicity_are_findings():
             for f in lint_protected_data_in_output(body)] == ["date of birth"]
 
 
+def test_1223_unlabelled_family_prose_is_a_finding_in_the_appendix_only():
+    """#1223: the lint reads the same policy rows, so the labelless family
+    shapes the pass now cuts are findings if one ever reaches the Appendix --
+    and a title that merely starts the same way is not."""
+    appendix = [_p("T. APPENDIX"), _p("Married (Pat), two children (Kim and Lee)"),
+                _p("Kim born [withheld]"), _p("2 children (Kim and Lee)"),
+                _p("Children - A Review of the Literature"), _p("Married couples (n=40)")]
+    messages = [f["message"] for f in lint_protected_data_in_output(appendix)]
+    assert [m.split("(")[1].split(")")[0] for m in messages] == [
+        "spouse", "date or place of birth", "children / dependents"]
+    assert all("Pat" not in m and "Kim" not in m for m in messages)
+    body = [_p("HONORS"), _p("Married (Pat), two children (Kim and Lee)")]
+    assert lint_protected_data_in_output(body) == []
+
+
 def test_unambiguous_label_is_a_finding_in_any_section():
     body = [_p("HONORS"), _p("Award; Date of Birth: 01/02/1970")]
     findings = lint_protected_data_in_output(body)
