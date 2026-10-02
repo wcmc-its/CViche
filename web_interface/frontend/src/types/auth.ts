@@ -1,5 +1,7 @@
 export interface User {
   user_id: number
+  /** WCM CWID (SSO identity); null for non-SSO accounts. Keys the directory headshot. */
+  cwid?: string | null
   email: string
   display_name: string
   role: string

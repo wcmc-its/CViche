@@ -1245,3 +1245,21 @@ def test_other_offschema_values_are_left_as_they_were(monkeypatch):
     (out,) = extraction.extract_fields_batch([entry], 0, 1)["entries"]
     assert STAGE4_RECORDS_KEY not in out["extracted_fields"]
     assert {k: out["extracted_fields"][k] for k in item} == item
+
+
+def test_each_finished_batch_prints_a_progress_bar_line(monkeypatch, capsys, progress_patterns):
+    """The web progress bar sat at its 50% placeholder for all of stage 4:
+    no line matched orchestrator.PROGRESS_PATTERNS until the loop ended.
+    Each finished batch now prints ``[done/total]``, read the way
+    orchestrator.py reads it (first matching pattern wins)."""
+    _stub_owner(monkeypatch)
+    monkeypatch.setattr(extraction, "extract_fields_batch", lambda entries, *a, **k: _batch_result(entries))
+
+    extraction.extract_fields_from_mapped_entries(_entries(3), batch_size=1, workers=2)
+
+    seen = []
+    for line in capsys.readouterr().out.splitlines():
+        match = next((m for p in progress_patterns if (m := p.search(line))), None)
+        if match:
+            seen.append((int(match.group(1)), int(match.group(2))))
+    assert seen == [(1, 3), (2, 3), (3, 3)]

@@ -342,24 +342,33 @@ class PubMedEnricher:
 
         # Process each category
         enriched_entries = []
+        # [N/M] is the parsed progress-bar contract (orchestrator PROGRESS_PATTERNS);
+        # counted in publications so the three lookup paths share one bar.
+        progress_total = len(by_pmid) + len(by_pmcid) + len(by_doi)
 
         # 1. Direct PMID lookups (batch)
         if by_pmid:
             if self.verbose:
                 logger.info(f"\n📚 Fetching {len(by_pmid)} records by PMID...")
             enriched_entries.extend(self._enrich_by_pmid(by_pmid))
+            if self.verbose:
+                logger.info("[%d/%d] publications looked up", len(by_pmid), progress_total)
 
         # 2. PMCID conversions then lookup
         if by_pmcid:
             if self.verbose:
                 logger.info(f"\n🔄 Converting {len(by_pmcid)} PMCIDs to PMIDs...")
             enriched_entries.extend(self._enrich_by_pmcid(by_pmcid))
+            if self.verbose:
+                logger.info("[%d/%d] publications looked up", len(by_pmid) + len(by_pmcid), progress_total)
 
         # 3. DOI searches then lookup
         if by_doi:
             if self.verbose:
                 logger.info(f"\n🔍 Searching PubMed for {len(by_doi)} DOIs...")
-            enriched_entries.extend(self._enrich_by_doi(by_doi))
+            enriched_entries.extend(
+                self._enrich_by_doi(by_doi, progress_base=len(by_pmid) + len(by_pmcid), progress_total=progress_total)
+            )
 
         # 4. Entries without identifiers (pass through unchanged)
         for entry in no_id:
@@ -544,7 +553,9 @@ class PubMedEnricher:
             if rejected:
                 entry['enrichment_rejected'] = rejected
 
-    def _enrich_by_doi(self, entries_with_doi: list[tuple[dict, str]]) -> list[dict]:
+    def _enrich_by_doi(
+        self, entries_with_doi: list[tuple[dict, str]], progress_base: int = 0, progress_total: int | None = None,
+    ) -> list[dict]:
         """
         Enrich entries by DOI search in PubMed, then lookup.
 
@@ -588,6 +599,11 @@ class PubMedEnricher:
                 self.stats['failed_lookups'] += 1
 
             results.append(entry)
+            if self.verbose:
+                logger.info(
+                    "[%d/%d] publications looked up",
+                    progress_base + len(results), progress_total or len(entries_with_doi),
+                )
             time.sleep(RATE_LIMIT_DELAY)
 
         return results
