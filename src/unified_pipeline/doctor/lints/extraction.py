@@ -62,12 +62,13 @@ from unified_pipeline.stage6.normalization.institutions import (
 )
 from unified_pipeline.stage6.fan_out import (
     FANNED_OUT_FROM,
+    _FORMATTED_KEYS,
     _RENDERED_FIELDS,
     _TEXT_RENDERED_CODES,
     _is_blank,
     fan_out_multi_record_entries,
 )
-from unified_pipeline.core.two_digit_year import TWO_DIGIT_YEAR_PIVOT
+from unified_pipeline.core.two_digit_year import TWO_DIGIT_YEAR_PIVOT, expand_two_digit_year
 from unified_pipeline.stage6.normalization.pii import (
     CAT_HOME_CONTACT,
     SCOPE_PERSONAL_AND_APPENDIX,
@@ -483,6 +484,47 @@ def _fields_rendered(entry: dict, lines: list[str], evidence: Stage4Evidence) ->
                > RENDERED_FIELDS_MAJORITY * len(values) for line in lines)
 
 
+#: A letter or digit run of a squashed rendered line.
+_LINE_RUN_RE = re.compile(r"[a-z]+|\d+")
+
+#: Entry words (5+ letters) a one-value record's line may lack and still be
+#: its rendering: one, a role or label word its section heading carries
+#: ("reviewer" under "Journal Reviewing"). Two would clear the #1092 shape,
+#: a label whose few-word detail ("Over 100 procedures performed") was lost.
+SOLE_VALUE_MAX_MISSING_TOKENS = 1
+
+
+def _sole_value_rendered(entry: dict, lines: list[str],
+                         evidence: Stage4Evidence) -> bool:
+    """Whether a record with ONE value outside its date fields -- too few for
+    `_fields_rendered` -- still rendered: a line made only of the entry's own
+    text (every letter and digit run of it is in the entry) carries the
+    value, and lacks at most `SOLE_VALUE_MAX_MISSING_TOKENS` of the entry's
+    words. The value may be one other records share: the line is this
+    entry's.
+    EBYSBC OTBUCZ Q4D 110, a role cell then a journal and its years, renders
+    as the reviewing table's "<journal> | <year>-Present" row, missing only
+    the role word "reviewer", which the section heading says; the journal is
+    also one its citations name. A label whose detail was dropped (#1092)
+    leaves two or more of the entry's words missing."""
+    record = evidence.records.get(_span(entry))
+    if not record or not record.get("extraction_success"):
+        return False
+    fields = {k: v for k, v in (record.get("extracted_fields") or {}).items()
+              if k not in UNWRITTEN_CATEGORY_FIELDS and not _DATE_NAMED_KEY_RE.search(k)}
+    values = {squash(v) for v in _nonempty_field_values(fields)
+              if not _is_date_only_text(v)} - {""}
+    if len(values) != 1:
+        return False
+    value = next(iter(values))
+    text = str(entry.get("text") or "")
+    own, tokens = squash(text), _long_word_tokens(text)
+    return any(_value_on_line(value, line)
+               and all(run in own for run in _LINE_RUN_RE.findall(line))
+               and sum(1 for t in tokens if t not in line) <= SOLE_VALUE_MAX_MISSING_TOKENS
+               for line in lines)
+
+
 def _personal_data_withheld(entry: dict) -> bool:
     """A Personal Data ('A') entry that carries a value the withhold policy
     removes at render time (date of birth, marital status, home contact):
@@ -506,10 +548,12 @@ def _classified_entry_rendered(entry: dict, haystacks: Haystack, lines: list[str
                                evidence: Stage4Evidence | None) -> bool | None:
     """`_entry_rendered`'s verdict for a stage-3b entry, widened by what stage 4
     knows: None (not judged) for a policy-withheld Personal Data entry, True
-    when its extracted field values surfaced (#890)."""
+    when its extracted field values surfaced (#890), or its one value did
+    with nothing worth a verdict missing (`_sole_value_rendered`)."""
     if _personal_data_withheld(entry):
         return None
-    if evidence is not None and _fields_rendered(entry, lines, evidence):
+    if evidence is not None and (_fields_rendered(entry, lines, evidence)
+                                 or _sole_value_rendered(entry, lines, evidence)):
         return True
     return _entry_rendered(entry.get("text"), haystacks.text, haystacks.tokens, shared)
 
@@ -947,20 +991,26 @@ def lint_wrong_start_date(stage4: dict) -> list[dict]:
 
 # --------------------------------------------------------------------------
 # Field values stage 4 extracted that the document cannot show: a value filed
-# under a key no renderer reads, and a year given the wrong century. Both read
-# stage 4 only, never the docx -- the value is already wrong or unreachable
-# there, and reading the rendered text would add a match step that can only
-# lose precision (four-digit numbers below 1930 sit in citation page ranges).
+# under a key no renderer reads, and a year given the wrong century or taken
+# from somewhere other than the entry's text. All read stage 4, never the
+# docx -- the value is already wrong or unreachable there, and reading the
+# rendered text would add a match step that can only lose precision
+# (four-digit numbers below 1930 sit in citation page ranges). The year lints
+# also read the text a stage-5 formatter wrote for the whole entry, which is
+# what stage 6 renders in place of its date fields (`_year_renders`).
 
 
 class _FieldsEntry(NamedTuple):
-    """The four things the field lints read off one stage-4 entry, read once
+    """The five things the field lints read off one stage-4 entry, read once
     at the artifact boundary instead of by `.get()` in every helper (§8.1).
-    `fields` is empty when `extracted_fields` is absent or not an object."""
+    `fields` is empty when `extracted_fields` is absent or not an object.
+    `element_idx_end` completes the span a later stage's copy of the entry
+    is found by (`_span`)."""
     element_idx: object
     code: str
     text: str
     fields: Mapping[str, object]
+    element_idx_end: object = None
 
 
 def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
@@ -970,7 +1020,8 @@ def _fields_entries(stage4: dict) -> list[_FieldsEntry]:
         entries.append(_FieldsEntry(
             raw.get("element_idx_start"), str(raw.get("taxonomy_code") or ""),
             str(raw.get("text") or ""),
-            fields if isinstance(fields, Mapping) else {}))
+            fields if isinstance(fields, Mapping) else {},
+            raw.get("element_idx_end")))
     return entries
 
 
@@ -1220,13 +1271,86 @@ def _year_in_text(year: int, text: str) -> bool:
     return re.search(rf"(?<!\d){year}", text) is not None
 
 
+#: "1985-89", "2011-2", "1993-994", "1986,88": a range or list whose later
+#: year is written as the last one to three digits of its four-digit start's.
+_RANGE_SHORTHAND_RE = re.compile(r"(?<!\d)(\d{4})\s*[-\u2013\u2014,]\s*(\d{1,3})(?!\d)")
+
+#: A two-digit year token: two digits ending a number, right after a slash
+#: (stage 4's own `_TWO_DIGIT_YEAR_PREFIX` shapes, `stage4/coercion.py`,
+#: widened to any slash: "3/14/06", "0415/08", "6//12"), an apostrophe
+#: ("'04"), a fiscal year ("FY97"), or a dot after a digit ("5.21.09").
+#: Lookbehinds, so the day of "m/d/yy" does not consume the year's prefix.
+_TWO_DIGIT_YEAR_TOKEN_RE = re.compile(
+    r"(?:(?<=/)|(?<=['\u2018\u2019])|(?<=FY)|(?<=FY )|(?<=\d\.))(\d{2})(?!\d)",
+    re.IGNORECASE)
+
+#: "64-66": a range of two two-digit years standing alone -- not a run of
+#: dash-joined numbers, where "3-24-11-26" (Mar 2024 to Nov 2026) has no
+#: year "11".
+_TWO_DIGIT_RANGE_RE = re.compile(r"(?<![\d\-/.])(\d{2})\s*[-\u2013]\s*(\d{2})(?![\d\-/])")
+
+#: A two-digit year after a season word: "(Fall Sem., 06)".
+_SEASON_TWO_DIGIT_YEAR_RE = re.compile(
+    r"\b(?:spring|summer|fall|autumn|winter)\b\D{0,8}?(\d{2})(?!\d)", re.IGNORECASE)
+
+#: A letter l or capital I that a scanned source has in place of a year's
+#: leading 1 ("l987").
+_OCR_LEADING_ONE_RE = re.compile(r"(?<![A-Za-z])[lI](?=\d{3}(?!\d))")
+
+
+def _range_shorthand_ends(text: str) -> set[int]:
+    """The end years of every range shorthand in `text`: the start's
+    leading digits, completed by the written tail, moved one decade or
+    century on when that falls before the start ("1998-02" ends 2002)."""
+    ends = set()
+    for start, tail in _RANGE_SHORTHAND_RE.findall(text):
+        unit = 10 ** len(tail)
+        end = int(start) // unit * unit + int(tail)
+        ends.add(end + unit if end < int(start) else end)
+    return ends
+
+
+def _two_digit_years(text: str) -> set[int]:
+    """Every two-digit year (0-99) `text` writes as a date token."""
+    years = {int(yy) for pattern in (_TWO_DIGIT_YEAR_TOKEN_RE, _SEASON_TWO_DIGIT_YEAR_RE)
+             for yy in pattern.findall(text)}
+    for first, second in _TWO_DIGIT_RANGE_RE.findall(text):
+        years |= {int(first), int(second)}
+    return years
+
+
+def _year_written(year: int, text: str) -> bool:
+    """The entry's text states this year in its century: in four digits
+    (`_year_in_text`), as a two-digit year token the shared century pivot
+    reads as this year, or as a range shorthand's end. "9/68" states 1968 --
+    the right century, so not implausible_year's (s7ab QZWBKQ: all 7 of its
+    hits were such dates) -- and "11/02" states 2002, never 1902."""
+    yy = year % 100
+    return (_year_in_text(year, text)
+            or (expand_two_digit_year(yy) == year and yy in _two_digit_years(text))
+            or year in _range_shorthand_ends(text))
+
+
+def _year_in_source(year: int, text: str) -> bool:
+    """The entry's text states this year in any century -- whether the
+    century is right is implausible_year's question: its four digits
+    anywhere, a scanned "l987" included, so a year fused into a longer digit
+    run on either side counts ("04/081997", "Example20232024Total"); its
+    last two digits as a two-digit year token or a stand-alone two-digit
+    range ("5/31/34" states 2034, "64-66" both years); or a range
+    shorthand's end ("2011-2")."""
+    text = _OCR_LEADING_ONE_RE.sub("1", text)
+    return (str(year) in text or year % 100 in _two_digit_years(text)
+            or year in _range_shorthand_ends(text))
+
+
 def _earliest_degree_year(entries: list[_FieldsEntry]) -> int | None:
     """The earliest plausible degree year a B1 entry both extracts and writes
     in its own text -- a degree year that is itself a wrong century, or that
     the text never states, cannot set the floor."""
     years = [year for entry in entries if entry.code == ACADEMIC_DEGREE_CODE
              for _, year in _date_field_years(entry.fields)
-             if year >= IMPLAUSIBLE_YEAR_FLOOR and _year_in_text(year, entry.text)]
+             if year >= IMPLAUSIBLE_YEAR_FLOOR and _year_written(year, entry.text)]
     return min(years, default=None)
 
 
@@ -1241,20 +1365,78 @@ def _year_floor(entries: list[_FieldsEntry]) -> YearFloor:
                      "no two-digit year resolves below it")
 
 
-def lint_implausible_year(stage4: dict) -> list[dict]:
+def _formatter_texts(stage5d: dict | None) -> dict[tuple, str]:
+    """{span: the text a stage-5 formatter wrote for the whole entry} from
+    the stage-5d artifact, stage 6's input, which also carries 5c's
+    teaching prose. A span two entries share is dropped, as in
+    `_stage4_evidence`; no artifact is no texts."""
+    entries = (stage5d or {}).get("entries", [])
+    span_counts = Counter(_span(e) for e in entries)
+    texts = {}
+    for e in entries:
+        fields = e.get("extracted_fields")
+        if not isinstance(fields, Mapping) or span_counts[_span(e)] != 1:
+            continue
+        text = " ".join(str(fields[key]) for key in _FORMATTED_KEYS if fields.get(key))
+        if text:
+            texts[_span(e)] = text
+    return texts
+
+
+def _year_renders(year: int, entry: _FieldsEntry,
+                  formatted: Mapping[tuple, str]) -> bool:
+    """Whether a stage-4 year can reach the page: not when a stage-5
+    formatter rewrote the whole entry without it, since stage 6 renders that
+    text and not the date field (EBYSBC MIFYLG 234: stage 4 wrote a 1900
+    date the text does not have, 5c wrote the text's own year, and the docx
+    shows 5c's)."""
+    text = formatted.get((entry.element_idx, entry.element_idx_end))
+    return text is None or _year_in_text(year, text)
+
+
+#: A year above this is no date a CV record can carry: no grant, term or
+#: appointment ends in the 22nd century. Fixed, not "now + N", so a run's
+#: findings do not depend on the day it is doctored (§7.4); a typo just past
+#: the current year ("2091") is not caught.
+IMPLAUSIBLE_YEAR_CEILING = 2100
+
+
+def _ceiling_finding(entry: _FieldsEntry, above: list[tuple[str, int]]) -> dict:
+    """INFO when the entry's text writes every such year -- a source typo
+    stage 4 copied faithfully, which a reviewer should still see (EBYSBC
+    VNUAHA 175: an end year mistyped by its first digit) -- WARN when stage
+    4 wrote one the text does not."""
+    typo = all(_year_in_text(year, entry.text) for _, year in above)
+    return _finding(
+        "implausible_year", "INFO" if typo else "WARN",
+        f"entry {entry.element_idx} ({entry.code}): "
+        f"{', '.join(f'{key}={year}' for key, year in above)} -- after "
+        f"{IMPLAUSIBLE_YEAR_CEILING}, no year a record can carry; "
+        + ("the entry's text writes it, a source typo" if typo
+           else "not written in the entry's text"),
+        [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]])
+
+
+def lint_implausible_year(stage4: dict, stage5d: dict | None = None) -> list[dict]:
     """A year in a stage-4 date-named field that is below the owner's floor
-    (`YearFloor`) and that the entry's own text never writes in four digits:
-    a two-digit year given the wrong century, rendered as extracted. WARN,
-    one finding per entry. Report-only: the value is not repaired. Code A is
-    skipped, since its dates are personal data, not records."""
+    (`YearFloor`) and that the entry's own text never states
+    (`_year_written`): a two-digit year given the wrong century, rendered as
+    extracted. WARN, one finding per entry. Also a year above
+    `IMPLAUSIBLE_YEAR_CEILING` (`_ceiling_finding`). A year a stage-5
+    formatter replaced is not judged (`_year_renders`; optional `stage5d`).
+    Report-only: the value is not repaired. Code A is skipped, since its
+    dates are personal data, not records."""
     entries = _fields_entries(stage4)
     floor = _year_floor(entries)
+    formatted = _formatter_texts(stage5d)
     findings = []
     for entry in entries:
         if entry.code == PERSONAL_DATA_CODE:
             continue
-        bad = [f"{key}={year}" for key, year in _date_field_years(entry.fields)
-               if year < floor.year and not _year_in_text(year, entry.text)]
+        years = [(key, year) for key, year in _date_field_years(entry.fields)
+                 if _year_renders(year, entry, formatted)]
+        bad = [f"{key}={year}" for key, year in years
+               if year < floor.year and not _year_written(year, entry.text)]
         if bad:
             findings.append(_finding(
                 "implausible_year", "WARN",
@@ -1262,6 +1444,62 @@ def lint_implausible_year(stage4: dict) -> list[dict]:
                 f"before {floor.year} ({floor.reason}) and not written in the "
                 f"entry's text; most likely a two-digit year given the wrong "
                 f"century",
+                [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
+        above = [(key, year) for key, year in years if year > IMPLAUSIBLE_YEAR_CEILING]
+        if above:
+            findings.append(_ceiling_finding(entry, above))
+    return findings
+
+
+# --- year_not_in_source -------------------------------------------------------
+#
+# The stage-4 model sometimes writes a year the entry never states, inside the
+# plausible band implausible_year leaves alone, so it renders looking right:
+# the start year of the entry before it in the same batch (EBYSBC VVRTUC
+# 43/45: an open-ended "Month YYYY -" start), or a misread short date
+# (HFAJCC 392: an mm/dd/yy start; YYVHNN 480: an M-YY-MM-YY range). Stage
+# 4 now repairs part of this itself: the century repair (#1267) moves a 19yy
+# year whose two digits the text carries, and `repair_year_not_in_source`
+# (stage4/coercion.py, #1348) re-derives a dated year from a source date in
+# the same month, which fixes HFAJCC 392 and VVRTUC 43 on new runs. This lint
+# is the safety net for what those repairs cannot reach: bare years, M-YY-MM-
+# YY runs (YYVHNN 480), and a dated value whose month the text gives no date
+# for.
+
+#: Codes year_not_in_source does not judge: code A (personal data, as in
+#: implausible_year), and the publication codes. A citation's year renders
+#: through stage 5d's citation and stage 5's PubMed record, and on the
+#: 63-run EBYSBC farm none of the 8 publication hits was a wrong year: each
+#: was a citation split across entries (its year on the next one), a
+#: corrected source typo (a dropped or transposed digit) or a bare two-digit
+#: year.
+_YEAR_NOT_IN_SOURCE_SKIPPED_CODES = frozenset({PERSONAL_DATA_CODE, *PUBLICATION_CODES})
+
+
+def lint_year_not_in_source(stage4: dict, stage5d: dict | None = None) -> list[dict]:
+    """A year in a stage-4 date-named field, from the owner's floor up to
+    `IMPLAUSIBLE_YEAR_CEILING` (implausible_year reports the years outside
+    that band), that the entry's text does not state (`_year_in_source`):
+    stage 4 took it from somewhere else. WARN, one finding per entry.
+    Skipped: `_YEAR_NOT_IN_SOURCE_SKIPPED_CODES`, and a year a stage-5
+    formatter replaced (`_year_renders`). Report-only."""
+    entries = _fields_entries(stage4)
+    floor = _year_floor(entries)
+    formatted = _formatter_texts(stage5d)
+    findings = []
+    for entry in entries:
+        if entry.code in _YEAR_NOT_IN_SOURCE_SKIPPED_CODES:
+            continue
+        bad = [f"{key}={year}" for key, year in _date_field_years(entry.fields)
+               if floor.year <= year <= IMPLAUSIBLE_YEAR_CEILING
+               and not _year_in_source(year, entry.text)
+               and _year_renders(year, entry, formatted)]
+        if bad:
+            findings.append(_finding(
+                "year_not_in_source", "WARN",
+                f"entry {entry.element_idx} ({entry.code}): {', '.join(bad)} -- "
+                f"the entry's text states no such year, in four digits or as "
+                f"a two-digit year; stage 4 took it from elsewhere",
                 [entry.text[:FIELD_EVIDENCE_VALUE_CHARS]]))
     return findings
 

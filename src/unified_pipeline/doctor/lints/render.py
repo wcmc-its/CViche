@@ -32,6 +32,7 @@ from unified_pipeline.core.text_norm import (
     looks_like_record,
     norm,
 )
+from unified_pipeline.stage6.sections.honors import _ORG_ROLE_WORDS
 
 from ..shared import (
     RENDER_TOKEN_MIN_COUNT,
@@ -757,13 +758,36 @@ _NUMBERED_LINE_RE = re.compile(r"^\s*\d+\.\s")
 _VENUE_DATE_RE = re.compile(r";\s*(?:19|20)\d{2}\b[^;.\n]*;")
 
 
+#: Sentence ends between two venue-date wedges that make the text between
+#: them a second citation's body: its author list and its title each end in
+#: one. One abstract presented at several meetings has only the next
+#: meeting's place and name there, at most one sentence end before an "also
+#: presented at". On the 63-run EBYSBC farm the 10 flagged items of EOSAFF
+#: and ZGBCIT (both findings verified false) and 3 more on JNATFN and VGHNZD
+#: were that shape; the one item left, on BMHBJZ, is two abstracts.
+FUSED_CITATION_GAP_SENTENCES = 2
+
+
+def _fuses_citations(line: str) -> bool:
+    """Whether a numbered item holds a second citation, not just a second
+    venue: some gap between consecutive venue-date wedges carries
+    `FUSED_CITATION_GAP_SENTENCES` sentence ends (`_SENTENCE_BOUNDARY_RE`,
+    so an initial or "Dr." is not one)."""
+    wedges = list(_VENUE_DATE_RE.finditer(line))
+    return any(
+        len(_SENTENCE_BOUNDARY_RE.findall(line, left.end(), right.start()))
+        >= FUSED_CITATION_GAP_SENTENCES
+        for left, right in zip(wedges, wedges[1:]))
+
+
 def lint_pipe_leaks(blocks: List[Tuple[str, str]]) -> List[Dict]:
     """Verbatim-fallback formatting reaching the output document: paragraphs
     carrying multiple raw ' | ' field separators, clusters of single-pipe
     bullets under one section, and numbered citations fusing several
-    venue-date patterns (#208 rendered costs). Paragraph blocks only:
-    _table_lines synthesizes ' | ' row joins by design. The appendix is
-    excluded — it is verbatim-by-contract."""
+    citations' venue-date patterns (#208 rendered costs) -- not one abstract
+    listing the meetings it was presented at (`_fuses_citations`). Paragraph
+    blocks only: _table_lines synthesizes ' | ' row joins by design. The
+    appendix is excluded — it is verbatim-by-contract."""
     multi: List[str] = []
     fused: List[str] = []
     clusters: Dict[str, List[str]] = {}
@@ -790,7 +814,7 @@ def lint_pipe_leaks(blocks: List[Tuple[str, str]]) -> List[Dict]:
         elif seps == 1 and line.startswith("•"):
             clusters.setdefault(section or "?", []).append(line[:100])
         if (seps < PIPE_LEAK_MIN_SEPS and _NUMBERED_LINE_RE.match(line)
-                and len(_VENUE_DATE_RE.findall(line)) >= 2):
+                and _fuses_citations(line)):
             fused.append(f"[{section or '?'}] {line[:100]}")
     findings = []
     if multi:
@@ -829,26 +853,21 @@ _SENTENCE_BOUNDARY_RE = re.compile(r"(?<!\bDr)(?<!\b[A-Z])\.\s+[A-Z]")
 HONORS_ORG_MIN_CHARS = 8
 
 
-# What may remain of a name once its org is removed for the org to count as
-# "fabricated from the name" (#889): only an award word and/or digits (a year).
-# Stripped with sub() and tested for emptiness, never fullmatch() over a
-# starred alternation -- that shape backtracks exponentially on runs of years.
-_AWARD_ORG_LEFTOVER_RE = re.compile(
-    r"award|prize|fellow(?:ship)?|scholarship|list"
-    r"|\d+|[\s,.;:()\-\u2013\u2014/&]+",
-    re.IGNORECASE)
-
-
 def _org_fabricated_from_name(org: str, name: str) -> bool:
-    """True when `name` is `org` plus nothing but an award word and/or a
-    year -- the org column was copied out of the name (#229/#889). An award
-    merely NAMED AFTER its grantor ("<org> Postdoc Travel Award") has other
-    words left over and is legitimate."""
-    org_n, name_n = norm(org), norm(name)
-    if org_n not in name_n:
+    """True when the organization was cut out of the award name (#229/#887):
+    it occurs inside the name and carries what no grantor's own name does --
+    a digit (a year belongs in the date column) or a trailing holder's role
+    word (`_ORG_ROLE_WORDS`): "College of Example Studies 2015 Outstanding
+    Thesis" from "... Thesis Award". An award named after its grantor ("<org>
+    Fellowship" granted by <org>) is legitimate whatever else its name says:
+    every such hit was a real award in batch 4 (#889: 20 of 23) and on the
+    63-run EBYSBC farm (5 of 5), and stage 6's own fallback has refused to
+    derive an org from the award name that way since #979."""
+    org_n = norm(org)
+    if not org_n or org_n not in norm(name):
         return False
-    leftover = name_n.replace(org_n, " ", 1)
-    return not _AWARD_ORG_LEFTOVER_RE.sub("", leftover)
+    return (any(ch.isdigit() for ch in org_n)
+            or org_n.split()[-1].strip(".,;") in _ORG_ROLE_WORDS)
 
 
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
@@ -897,6 +916,19 @@ class _HonorsTableShape(NamedTuple):
     non_blank_rows: int
 
 
+def _honors_header(tbl: list[list[str]]) -> list[str] | None:
+    """The normalized header row of an honors/awards table with at least one
+    data row, or None when `tbl` is not one (no 'name of award'/'date
+    awarded' header)."""
+    if len(tbl) < 2 or not tbl[0]:
+        return None
+    header = [norm(cell) for cell in tbl[0]]
+    header_all = " ".join(header)
+    if "name of award" not in header_all and "date awarded" not in header_all:
+        return None
+    return header
+
+
 def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
     """One table's honors-shape defects (#229), or None when it is not an
     honors/awards table at all (no 'name of award'/'date awarded' header).
@@ -904,13 +936,9 @@ def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
     (#816's `honors_malformed_rows`/`honors_rows`) sums the SAME per-row
     predicate the finding below is built from, not a second definition of
     'malformed'."""
-    if len(tbl) < 2 or not tbl[0]:
+    header = _honors_header(tbl)
+    if header is None:
         return None
-    header = [norm(cell) for cell in tbl[0]]
-    header_all = " ".join(header)
-    if "name of award" not in header_all and "date awarded" not in header_all:
-        return None
-
     name_i = _alias_col(header, _AWARD_NAME_ALIASES)
     org_i = _alias_col(header, _AWARD_ORG_ALIASES)
     date_i = _alias_col(header, _AWARD_DATE_ALIASES)
@@ -963,12 +991,123 @@ def honors_table_totals(tables: list[list[list[str]]]) -> tuple[int, int]:
     return malformed, total
 
 
-def lint_table_shape(tables: list[list[list[str]]]) -> list[dict]:
+# --- honors rows split off one award ------------------------------------------
+#
+# A CV that writes an award on one line and its "Organization - date", or the
+# paper it was given for, on the next reaches stage 6 as ONE H entry holding
+# ONE stage-4 award, and the honors parser renders every line as an award of
+# its own (EBYSBC ZDCXIV-02: 24 entries, 43 rows). A row is traced to its
+# entry by text, so the count is a floor: a row whose name more than one
+# entry's text carries ("University of X") is traced to none.
+
+#: The taxonomy code whose entries the honors table renders.
+HONORS_CODE = "H"
+
+#: Split-off entries a finding lists as evidence (the malformed-row finding
+#: lists 6 defects).
+HONORS_SPLIT_EVIDENCE_MAX = 6
+
+
+class _HonorsEntry(NamedTuple):
+    """One stage-4 H entry as the split check reads it: its index, the
+    punctuation-free keys of its text's lines and tab cells, and how many
+    awards stage 4 extracted from it."""
+    element_idx: object
+    line_keys: tuple[str, ...]
+    awards: int
+
+
+class HonorsSplit(NamedTuple):
+    """An H entry that renders as more honors rows than stage 4 has awards."""
+    element_idx: object
+    rows: int
+    awards: int
+
+
+def _row_key(text: str) -> str:
+    return _PASSAGE_PUNCT_RE.sub("", norm(text))
+
+
+def _stage4_award_count(fields: object) -> int:
+    """How many awards stage 4 extracted for one entry: the longest list of
+    objects among its fields (`stage4_records`, or an off-schema list such
+    as `awards`, which a fused award list fills), else one."""
+    if not isinstance(fields, Mapping):
+        return 1
+    return max((len(value) for value in fields.values()
+                if isinstance(value, list) and value
+                and all(isinstance(item, Mapping) for item in value)), default=1)
+
+
+def _honors_entries(stage4: dict) -> list[_HonorsEntry]:
+    entries = []
+    for raw in stage4.get("entries", []):
+        if raw.get("taxonomy_code") != HONORS_CODE:
+            continue
+        parts = re.split(r"[\n\t]", str(raw.get("text") or ""))
+        entries.append(_HonorsEntry(
+            raw.get("element_idx_start"),
+            tuple(key for key in map(_row_key, parts) if key),
+            _stage4_award_count(raw.get("extracted_fields"))))
+    return entries
+
+
+def _row_owner(name: str, entries: list[_HonorsEntry]) -> int | None:
+    """Position in `entries` of the one entry whose text has a line holding
+    this row's name, or None when no entry, or more than one, does. The
+    whole cell is the key, a " — 04/2003" stage 6 kept from the source
+    line included: it is what tells one "University of X" line from
+    another."""
+    key = _row_key(name)
+    if not key:
+        return None
+    owners = [pos for pos, entry in enumerate(entries)
+              if any(key in line for line in entry.line_keys)]
+    return owners[0] if len(owners) == 1 else None
+
+
+def honors_split_entries(tables: list[list[list[str]]],
+                         stage4: dict) -> list[HonorsSplit]:
+    """The H entries whose rows in the honors table outnumber the awards
+    stage 4 extracted from them: one award rendered as several rows."""
+    entries = _honors_entries(stage4)
+    rows: Counter = Counter()
+    for tbl in tables:
+        header = _honors_header(tbl)
+        name_i = None if header is None else _alias_col(header, _AWARD_NAME_ALIASES)
+        if name_i is None:
+            continue
+        for row in tbl[1:]:
+            if name_i < len(row) and row[name_i]:
+                owner = _row_owner(row[name_i], entries)
+                if owner is not None:
+                    rows[owner] += 1
+    return [HonorsSplit(entry.element_idx, rows[pos], entry.awards)
+            for pos, entry in enumerate(entries) if rows[pos] > entry.awards]
+
+
+def _honors_split_finding(splits: list[HonorsSplit]) -> dict:
+    """WARN, unlike the malformed-row finding: each split row is a record
+    that is not one (EBYSBC: 4 of 63 farm runs, each a verified finding)."""
+    extra = sum(split.rows - split.awards for split in splits)
+    return _finding(
+        "table_shape", "WARN",
+        f"honors table: {extra} row(s) split off {len(splits)} award "
+        f"entr{'y' if len(splits) == 1 else 'ies'} -- one stage-4 award "
+        f"renders as several rows",
+        [f"entry {split.element_idx} ({HONORS_CODE}): {split.rows} rows from "
+         f"{split.awards} stage-4 award(s)"
+         for split in splits[:HONORS_SPLIT_EVIDENCE_MAX]])
+
+
+def lint_table_shape(tables: list[list[list[str]]],
+                     stage4: dict | None = None) -> list[dict]:
     """Honors-like tables whose rows are mis-shaped (#229): the stage-6
     multi-award fallback puts citation blobs in the name cell, leaks state
     abbreviations into the organization column, leaves the date column empty
-    while the year sits in the name, and duplicates the organization inside
-    the name."""
+    while the year sits in the name, and cuts the organization out of the
+    name. With `stage4` (optional), also an award rendered as several rows
+    (`honors_split_entries`)."""
     findings = []
     for tbl in tables:
         shape = _honors_table_shape(tbl)
@@ -984,6 +1123,9 @@ def lint_table_shape(tables: list[list[list[str]]]) -> list[dict]:
             f"honors table: {len(shape.defective_rows)}/{shape.non_blank_rows} "
             f"row(s) malformed ({len(shape.defects)} defect(s))",
             shape.defects[:6]))
+    splits = honors_split_entries(tables, stage4) if stage4 else []
+    if splits:
+        findings.append(_honors_split_finding(splits))
     return findings
 
 

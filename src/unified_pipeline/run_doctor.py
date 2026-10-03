@@ -17,7 +17,9 @@ Lints, ranked by the severity of the failure class they catch:
                           the 1a hierarchy AND every entry hierarchy path
                           ('PROFESSIONAL EXPERIENCE' demoted to content); a
                           Heading-styled line that is not ALL-CAPS is
-                          reported at INFO and never escalates the run
+                          reported at INFO and never escalates the run; a
+                          line of the Personal Data block (CV title,
+                          employer) is not a header
 3. bucket_status          grant status vs the funding subsection the grant
                           actually rendered under in the stage-6 document
                           (the #214 rebucketing rules)
@@ -55,13 +57,16 @@ Lints, ranked by the severity of the failure class they catch:
                           on the page as no cell of its own (#666)
 12. pipe_leaks            raw ' | '-delimited source lines rendered as output
                           paragraphs — verbatim-fallback formatting reaching
-                          the faculty-facing document (#208 costs)
+                          the faculty-facing document (#208 costs) — and
+                          numbered items fusing two citations, not one
+                          abstract listing the meetings it was presented at
 13. table_shape           honors-table rows that are mis-shaped: citation
                           blobs in the name cell, empty date column with a
                           year in the name, state-abbrev organizations,
-                          organization duplicated inside the name (#229) --
+                          an organization cut out of the name (#229) --
                           the malformed-row count moved to the `metrics`
-                          block (#816); the finding itself stays INFO
+                          block (#816); that finding stays INFO. With stage
+                          4, also one award rendered as several rows: WARN
 14. duplicate_passages    stretches of 3+ CONSECUTIVE rendered blocks that
                           appear twice in the output document — one record
                           reaching the faculty-facing docx more than once
@@ -108,7 +113,10 @@ Lints, ranked by the severity of the failure class they catch:
                           1930 (or 10 years before the owner's earliest
                           degree) and that the entry's text never writes --
                           a two-digit year given the wrong century (YOXXOH's
-                          talks from the 2000s rendered in the 1900s); WARN
+                          talks from the 2000s rendered in the 1900s); WARN.
+                          Also a year after 2100: INFO when the source has
+                          the typo, WARN when it does not. A year a stage-5
+                          formatter replaced (stage 5d) is not judged
 
 14h. stage4_group_failures a stage-4 taxonomy group's extraction call failed
                           (invalid reply, timeout, provider error such as a
@@ -166,6 +174,18 @@ Lints, ranked by the severity of the failure class they catch:
                           faculty rank, VNUAHA's paragraphs of 2-3 roles).
                           WARN when a left-out clause, mentee, degree year or
                           number is on no rendered line, INFO otherwise
+14q. year_not_in_source   a stage-4 date-named field whose year, inside
+                          implausible_year's band, the entry's text states in
+                          no form -- four digits, a two-digit year, a range
+                          shorthand -- so stage 4 took it from elsewhere
+                          (VVRTUC: two appointments given the start year of
+                          the entry before them; HFAJCC: an mm/dd/yy start
+                          read as a year the text lacks); WARN. Publication
+                          codes are not judged. Since #1348 stage 4 re-derives
+                          a dated year from a same-month source date (both
+                          examples above), so this catches what that repair
+                          cannot: bare years, M-YY-MM-YY runs, and a month the
+                          text gives no date for
 
 Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
@@ -297,6 +317,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_taxonomy_code_coverage,
     lint_under_extraction,
     lint_wrong_start_date,
+    lint_year_not_in_source,
     unrouted_code_counts,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
@@ -448,6 +469,7 @@ KNOWN_LINTS = (
     "owner_missing_from_citation",
     "etal_added",
     "multi_record_coverage",
+    "year_not_in_source",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -546,6 +568,12 @@ LINT_PREVALENCE = {
     # zero-observed floor, as for pipeline_errors_present above.
     "llm_fallback_served": 0.001,
     "stage_failure_recorded": 0.001,
+    # 11 of the 63 runs of the EBYSBC/s7ab/pilot farm (scripts/doctor_gate.py
+    # over origin/dev c3d87c5f renders, 2026-10-02), one fire per CV at any
+    # severity; another small mixed corpus, as for duplicate_records. That
+    # stage-4 output predates #1348's year_not_in_source repair in stage 4,
+    # so this overstates the rate on runs built after it.
+    "year_not_in_source": 0.175,
     # python_repr_in_output and llm_refusal_in_output (#1233, #1224): fire
     # counts on the 163 stage-6 renders of the 2026-10 wave-1 corpus (126
     # census + 37 IPXFBA CVs) as rendered by origin/dev e59aaf44, which still
@@ -797,6 +825,8 @@ _ARTIFACTS = {
                                        record_lists=("entries",)),
     "stage_5b": ArtifactSpec("stage_5b_institution_enrichment",
                              "_institution_enriched.json", record_lists=("entries",)),
+    "stage_5d": ArtifactSpec("stage_5d_citation_formatted",
+                             "_citation_formatted.json", record_lists=("entries",)),
     "stage_6_docx": ArtifactSpec("stage_6_wcm_documents", "_wcm.docx"),
     "stage_6_report": ArtifactSpec("stage_6_wcm_documents", "_render_warnings.json",
                                    optional_lists=("warnings", "dedup_decisions")),
@@ -1023,6 +1053,7 @@ _VIEW_LABELS = {
     "stage_errors": "stage_errors",
     "stage_5_enrichment": "stage_5_enrichment",
     "stage_5b": "stage_5b",
+    "stage_5d": "stage_5d",
     "stage_6_report": "stage_6_report",
     "blocks": "stage_6_docx",
     "deleted_blocks": "stage_6_docx",
@@ -1059,7 +1090,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("dedup_drops", lint_dedup_drops, ("stage_6_report",),
              optional=("blocks",)),
     LintSpec("pipe_leaks", lint_pipe_leaks, ("blocks",)),
-    LintSpec("table_shape", lint_table_shape, ("table_rows",)),
+    LintSpec("table_shape", lint_table_shape, ("table_rows",),
+             optional=("stage_4",)),
     LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),
     LintSpec("duplicate_records", lint_duplicate_records, ("blocks",)),
     LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",),
@@ -1072,7 +1104,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("date_only_lines", lint_date_only_lines, ("blocks",)),
     LintSpec("stage3b_second_pass_error", lint_stage3b_second_pass_errors, ("stage_3b",)),
     LintSpec("offschema_fields", lint_offschema_fields, ("stage_4",)),
-    LintSpec("implausible_year", lint_implausible_year, ("stage_4",)),
+    LintSpec("implausible_year", lint_implausible_year, ("stage_4",),
+             optional=("stage_5d",)),
     LintSpec("stage4_group_failures", lint_stage4_group_failures, ("stage_4",)),
     LintSpec("python_repr_in_output", lint_python_repr_in_output, ("blocks",)),
     LintSpec("llm_refusal_in_output", lint_llm_refusal_in_output, ("blocks",)),
@@ -1083,6 +1116,8 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
              ("stage_4", "blocks")),
     LintSpec("etal_added", lint_etal_added, ("stage_4", "blocks")),
     LintSpec("multi_record_coverage", lint_multi_record_coverage, ("stage_4", "blocks")),
+    LintSpec("year_not_in_source", lint_year_not_in_source, ("stage_4",),
+             optional=("stage_5d",)),
 )
 
 

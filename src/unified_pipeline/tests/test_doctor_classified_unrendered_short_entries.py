@@ -31,10 +31,11 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     _classified_entry_rendered,
     _entry_rendered,
     _fields_rendered,
+    _sole_value_rendered,
     _stage4_evidence,
     lint_classified_unrendered,
 )
-from unified_pipeline.doctor.shared import _haystacks  # noqa: E402
+from unified_pipeline.doctor.shared import _LINE_SENTINEL, _haystacks  # noqa: E402
 
 
 # The two entries #537 was filed against, verbatim.
@@ -162,6 +163,68 @@ def test_one_label_value_is_not_enough_the_1092_shape():
                                             "start_date": "2000-09"})]}
     blocks = [_SPACER, ("p", "Sample Clinical Program")]
     assert len(lint_classified_unrendered(stage3b, blocks, stage4)) == 1
+
+
+# EBYSBC OTBUCZ Q4D 110's shape: a one-value record whose reviewing-table row
+# misses only the role word the section heading carries. Its journal is also
+# the journal a citation names, so the value is shared across records.
+_REVIEWER_TEXT = "Ad hoc reviewer\tGizmology 2011 to present"
+_REVIEWER_STAGE4 = {"entries": [
+    _record(110, "Q4D", {"journal_name": "Gizmology",
+                         "start_date": "2011", "end_date": "present"}),
+    _record(300, "S1", {"journal": "Gizmology", "year": "2009"})]}
+_CITATION = ("p", "1. Doe J. Gizmology at present. Widget Journal. 2009;3:1-9.")
+
+
+def test_one_value_record_renders_when_its_line_lacks_only_the_role_word():
+    stage3b = {"entries": [_entry(110, "Q4D", _REVIEWER_TEXT)]}
+    row = ("table", "Gizmology | 2011-Present")
+    assert len(lint_classified_unrendered(stage3b, [_SPACER, _CITATION])) == 1, "control"
+    assert lint_classified_unrendered(stage3b, [_SPACER, _CITATION, row],
+                                      _REVIEWER_STAGE4) == []
+
+
+def test_one_value_record_needs_a_line_made_of_its_own_text():
+    """The citation carries the value and every entry word but one too, but
+    also words this entry does not have: it is another record's line, not
+    this one's rendering."""
+    stage3b = {"entries": [_entry(110, "Q4D", _REVIEWER_TEXT)]}
+    assert len(lint_classified_unrendered(stage3b, [_SPACER, _CITATION],
+                                          _REVIEWER_STAGE4)) == 1
+
+
+def test_one_value_record_needs_its_value_on_the_line():
+    """A row of the entry's own text that lost the journal, the record's one
+    value, is not its rendering, however few words it lacks."""
+    stage3b = {"entries": [_entry(110, "Q4D", _REVIEWER_TEXT)]}
+    row = ("table", "Ad hoc reviewer | 2011-Present")
+    assert len(lint_classified_unrendered(stage3b, [_SPACER, row],
+                                          _REVIEWER_STAGE4)) == 1
+
+
+def test_one_value_probe_needs_a_successful_extraction():
+    stage3b = {"entries": [_entry(110, "Q4D", _REVIEWER_TEXT)]}
+    failed = {"entries": [
+        _record(110, "Q4D", {"journal_name": "Gizmology", "start_date": "2011",
+                             "end_date": "present"}, success=False),
+        *_REVIEWER_STAGE4["entries"][1:]]}
+    row = ("table", "Gizmology | 2011-Present")
+    assert len(lint_classified_unrendered(stage3b, [_SPACER, _CITATION, row], failed)) == 1
+
+
+def test_one_value_probe_takes_only_a_one_value_record():
+    """With two values, "the value" would be whichever one a set yields
+    first, so the verdict would follow the hash seed. A two-value record is
+    `_fields_rendered`'s to judge, even on a line that carries both."""
+    entry = _entry(110, "Q4D", "Ad hoc reviewer\tGizmology and Widgetry 2011 to present")
+    lines = _haystacks([("table", "Gizmology and Widgetry | 2011-Present")]).text \
+        .split(_LINE_SENTINEL)
+
+    def probe(fields):
+        return _sole_value_rendered(entry, lines, _stage4_evidence(
+            {"entries": [_record(110, "Q4D", {**fields, "start_date": "2011"})]}, None))
+    assert probe({"journal_name": "Gizmology"}) is True, "control: one value"
+    assert probe({"journal_name": "Gizmology", "other_journal": "Widgetry"}) is False
 
 
 def test_values_scattered_over_different_lines_are_not_one_record():
