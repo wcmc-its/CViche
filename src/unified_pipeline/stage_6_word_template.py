@@ -178,7 +178,12 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
 )
 from unified_pipeline.stage4.extraction import UnextractedContentReport, calculate_unextracted_content
 from unified_pipeline.stage4.schemas import FIELD_SCHEMAS, STAGE4_RECORDS_KEY
-from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS, fan_out_multi_record_entries
+from unified_pipeline.stage6.fan_out import (
+    _RENDERED_FIELDS,
+    fan_out_multi_record_entries,
+    record_scope,
+    record_text,
+)
 from unified_pipeline.stage6.pii_pass import (  # noqa: F401
     PII_REDACTED_NOTICE,
     WITHHELD_COMMENT_AUTHOR,
@@ -1884,6 +1889,16 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
     def _classify_geographic_scope(self, entry: Dict) -> str:
         """Classify an entry's geographic scope as Regional, National, or International.
 
+        A record fanned out of a multi-record entry keeps the scope its CV
+        heading names unless the classifier, asked about that record alone,
+        puts it in another country (`fan_out.record_scope`, EBYSBC E34). Any
+        other entry takes the classifier's answer.
+        """
+        return record_scope(entry, self._classify_activity_scope(entry))
+
+    def _classify_activity_scope(self, entry: dict) -> str:
+        """Classify one activity's geographic scope as Regional, National, or International.
+
         Uses LLM (gpt-5.1) to intelligently determine if an activity is in the same
         metropolitan area as the CV owner's institution(s), leveraging the model's
         geographic knowledge.
@@ -1901,7 +1916,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         fields = entry.get('extracted_fields', {}) or {}
         entry_location = fields.get('location', '') or fields.get('city', '') or ''
         entry_org = fields.get('organization', '') or fields.get('institution', '') or ''
-        entry_text = entry.get('text', '')
+        # A fanned-out record's own text, not its parent's (`fan_out.record_text`).
+        entry_text = record_text(entry)
 
         # Build a location string for the activity
         activity_location = entry_org or entry_location or entry_text[:200]
