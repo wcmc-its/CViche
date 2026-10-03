@@ -15,6 +15,7 @@ Run with:
 """
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from docx import Document
@@ -34,6 +35,7 @@ from unified_pipeline.stage6.sections.board_certification import (  # noqa: E402
     _is_fused_certification,
     _reconstruct_certification_rows,
     _split_multi,
+    _with_recertification,
 )
 
 
@@ -1262,7 +1264,7 @@ class TestDictValuedCertificationDates:
 
     def test_a_dict_recertification_date_reads_as_the_range(self):
         fields = {"year_certified": "2001", "recertification_date": _RECERT_RANGE}
-        assert _format_certification_date_str(fields) == "2001-2008-2018"
+        assert _format_certification_date_str(fields) == "2001 (recertified 2008-2018)"
 
     def test_the_dict_renders_the_same_as_the_equivalent_string(self):
         as_dict = {"year_certified": "2001", "recertification_date": _RECERT_RANGE}
@@ -1272,14 +1274,14 @@ class TestDictValuedCertificationDates:
     def test_a_dict_with_no_year_certified_is_just_the_range(self):
         assert _format_certification_date_str({"recertification_date": _RECERT_RANGE}) == "2008-2018"
 
-    def test_a_string_recertification_date_is_unchanged(self):
+    def test_a_string_recertification_date_is_named_as_a_recertification(self):
         fields = {"year_certified": "2001", "recertification_date": "2008"}
-        assert _format_certification_date_str(fields) == "2001-2008"
+        assert _format_certification_date_str(fields) == "2001 (recertified 2008)"
 
     def test_a_dict_year_certified_never_renders_as_its_repr(self):
         fields = {"year_certified": {"start_date": "2001", "end_date": "2003"},
                   "recertification_date": "2008"}
-        assert _format_certification_date_str(fields) == "2001-2003-2008"
+        assert _format_certification_date_str(fields) == "2001-2003 (recertified 2008)"
 
     def test_the_dates_cell_never_holds_a_python_repr(self):
         gen = _generator()
@@ -1293,7 +1295,7 @@ class TestDictValuedCertificationDates:
             "text": "Example Board of Testing",
         }])
         assert _rows_after_board(gen) == [
-            ("Example Board of Testing", "A12345", "2001-2008-2018"),
+            ("Example Board of Testing", "A12345", "2001 (recertified 2008-2018)"),
         ]
 
 
@@ -1356,3 +1358,93 @@ class TestRangeValuedRecertificationDoesNotReorderRows:
             _certification("Example Newer Board", "1999", _SHARED_RANGE),
         ]
         assert _board_order(entries) == ["Example Newer Board", "Example Older Board"]
+
+
+class TestRecertificationIsNeverTheRangeEnd:
+    """EBYSBC E33 (#1245): "certified 2005, recertified 2015" rendered
+    "2005-2015", which reads as a certification that lapsed in 2015. The
+    recertification year is named as an event; only "Present" and a year
+    after the current one (an expiry) still end a range."""
+
+    def _dates(self, **fields):
+        return _format_certification_date_str(fields)
+
+    def test_a_past_recertification_year_is_not_the_range_end(self):
+        assert self._dates(year_certified="2005", recertification_date="2015") == "2005 (recertified 2015)"
+
+    def test_a_full_date_recertification_reads_as_its_year(self):
+        assert self._dates(year_certified="2007-08-21", recertification_date="2017") == "2007 (recertified 2017)"
+
+    def test_present_still_ends_the_range(self):
+        assert self._dates(year_certified="2003", recertification_date="present") == "2003-Present"
+
+    def test_a_future_year_is_an_expiry_and_ends_the_range(self):
+        future = str(datetime.now().year + 4)
+        assert self._dates(year_certified="2008", recertification_date=future) == f"2008-{future}"
+
+    def test_the_expiry_boundary_is_the_year_after_the_current_one(self):
+        assert _with_recertification("2008", "2027", current_year=2026) == "2008-2027"
+        assert _with_recertification("2008", "2026", current_year=2026) == "2008 (recertified 2026)"
+
+    def test_the_current_year_is_a_recertification_not_an_expiry(self):
+        this_year = str(datetime.now().year)
+        assert self._dates(year_certified="2008", recertification_date=this_year) == f"2008 (recertified {this_year})"
+
+    def test_several_recertification_years_are_listed_not_ranged(self):
+        assert self._dates(year_certified="1990", recertification_date="2000, 2010") == "1990 (recertified 2000, 2010)"
+
+    def test_free_text_is_labelled_not_glued_on_as_an_end(self):
+        assert self._dates(year_certified="1980", recertification_date="not required") == "1980 (recertification: not required)"
+
+    def test_a_recertification_equal_to_the_certification_year_is_dropped(self):
+        assert self._dates(year_certified="2011", recertification_date="2011") == "2011"
+
+    def test_a_recertification_alone_still_renders(self):
+        assert self._dates(recertification_date="2009") == "2009"
+
+    def test_a_stated_end_date_still_wins(self):
+        assert self._dates(start_date="2011", end_date="present", year_certified="2011",
+                           recertification_date="2021") == "2011-Present"
+
+    def test_a_range_the_source_line_writes_itself_is_kept(self):
+        fields = {"year_certified": "2013", "recertification_date": "2023"}
+        assert _format_certification_date_str(fields, "Example Board 2013 - 2023") == "2013-2023"
+
+    def test_a_slash_pair_in_the_source_line_is_kept_as_written(self):
+        fields = {"year_certified": "2000", "recertification_date": "2003"}
+        assert _format_certification_date_str(fields, "Example Course 2000/2003") == "2000-2003"
+
+    def test_a_source_line_naming_the_recertification_is_not_a_range(self):
+        fields = {"year_certified": "2005", "recertification_date": "2015"}
+        assert (_format_certification_date_str(fields, "Example Board, 2005, recertified 2015")
+                == "2005 (recertified 2015)")
+
+    def test_the_rendered_row_keeps_a_range_its_source_line_states(self):
+        gen = _generator()
+        entry = _certification("Example Board of Testing", "2013", "2023")
+        entry["text"] = "Example Board of Testing 2013-2023"
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [("Example Board of Testing", "A12345", "2013-2023")]
+
+    def _fused_row(self, text):
+        # Two "board"s in the name route the entry to the text reparse.
+        gen = _generator()
+        gen._fill_board_certification([{"text": text, "extracted_fields": {
+            "certifying_board": "Board of Example and Board of Sample",
+            "certificate_number": "A12345",
+            "year_certified": "2013", "recertification_date": "2023"}}])
+        return _rows_after_board(gen)
+
+    def test_the_reparse_backfill_reads_the_source_line(self):
+        # One reparsed row with no date: filled from the structured fields.
+        assert self._fused_row("Example Specialty 2013-2023")[0][2] == "2013-2023"
+
+    def test_the_structured_fallback_reads_the_source_line(self):
+        # Reparse recovers nothing: the whole entry renders from its fields.
+        assert self._fused_row("Example Specialty 2013-2023 | Example Note") == [
+            ("Board of Example and Board of Sample", "A12345", "2013-2023")]
+
+    def test_the_dates_cell_names_the_recertification(self):
+        gen = _generator()
+        gen._fill_board_certification([_certification("Example Board of Testing", "2005", "2015")])
+        assert _rows_after_board(gen) == [("Example Board of Testing", "A12345", "2005 (recertified 2015)")]

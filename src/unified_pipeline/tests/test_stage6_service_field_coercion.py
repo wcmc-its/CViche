@@ -989,3 +989,44 @@ def test_q1_organization_field_wins_over_the_aliases(tmp_path):
 ])
 def test_organization_left_in_text(text, role, start, end, expected):
     assert _organization_left_in_text(text, role, start, end) == expected
+
+
+def _q2_role_cell(**entry_keys):
+    """Render one role-less Q2 entry through `_fill_service_boards` and return
+    its Role cell."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    entry = _entry("Q2", organization="Fictional Clinic Network", start_date="2014")
+    entry.update(entry_keys)
+    gen._fill_service_boards([entry])
+    rows = list(_rows_containing(gen.doc, "Fictional Clinic Network"))
+    assert len(rows) == 1
+    return rows[0][1]
+
+
+def test_q2_without_a_role_is_not_made_a_member_under_a_non_committee_heading():
+    """EBYSBC CXRYCF-05 / #1254 point 3: consulting engagements listed under a
+    program heading rendered as committee memberships."""
+    assert _q2_role_cell(hierarchy=["Fictional Program Consultation"]) == ""
+
+
+def test_q2_without_a_role_or_a_heading_leaves_the_role_blank():
+    assert _q2_role_cell() == ""
+
+
+@pytest.mark.parametrize("heading", [
+    "National Committees", "Advisory Boards", "Fictional Council", "COMMITTEE SERVICE"])
+def test_q2_without_a_role_under_a_committee_heading_defaults_to_member(heading):
+    assert _q2_role_cell(hierarchy=["Professional Service", heading]) == "Member"
+
+
+def test_q2_extracted_role_is_kept_under_any_heading():
+    assert _q2_role_cell(hierarchy=["Fictional Program Consultation"],
+                         extracted_fields={"organization": "Fictional Clinic Network",
+                                           "role": "Consultant"}) == "Consultant"
+
+
+def test_q2_without_a_role_whose_own_line_names_a_committee_defaults_to_member():
+    """A committee listed under a generic heading is still a membership."""
+    assert _q2_role_cell(hierarchy=["Professional Service"],
+                         text="Fictional Clinic Network Research Committee 2014") == "Member"

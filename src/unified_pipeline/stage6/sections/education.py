@@ -24,7 +24,8 @@ STRING `dates_attended` is written as stage 4 gave it (#1187).
 
 The degree cell is "Degree, field of study" as the template asks: `major` /
 `field_of_study`, then stage 4's `discipline`, each only when the text so far
-does not already hold it (#1187).
+does not already hold it (#1187). Stage 4's off-schema `honors` follows in
+parentheses, under the same rule (#817).
 
 `_degree_is_in_progress` and its `_IN_PROGRESS_DEGREE_PATTERN` vocabulary are
 here because a year in the "Year Awarded" column asserts the degree was
@@ -122,6 +123,31 @@ def _with_discipline(degree: str, fields: Mapping) -> str:
     return f"{degree}, {discipline}" if degree else discipline
 
 
+# Stage 4 keeps a degree's Latin honors and honor societies under `honors`, a
+# key the B1 schema does not define, and no column read it: the honors reached
+# neither Education nor Honors (EBYSBC E14, VVRTUC-02).
+HONORS_KEY = 'honors'
+
+
+def _honors_text(fields: Mapping) -> str:
+    """Stage 4's off-schema B1 `honors`, as one string: a string as given, a
+    list of strings comma-joined. Anything else yields ''."""
+    value = fields.get(HONORS_KEY)
+    if isinstance(value, list):
+        value = ', '.join(item.strip() for item in value if isinstance(item, str) and item.strip())
+    return value.strip() if isinstance(value, str) else ''
+
+
+def _with_honors(degree: str, fields: Mapping) -> str:
+    """The degree cell with the degree's honors after it in parentheses
+    ("AB (summa cum laude)"), so they read as a distinction of that degree and
+    not as a field of study. Never repeated when the cell already holds them."""
+    honors = _honors_text(fields)
+    if not honors or _already_in(honors, degree):
+        return degree
+    return f"{degree} ({honors})" if degree else honors
+
+
 def _string_dates_attended(fields: Mapping, year_awarded: str) -> str:
     """A string `dates_attended`, formatted like every other B1 Dates cell
     (mm/yyyy), for the Dates cell when no start/end range could be built
@@ -133,6 +159,28 @@ def _string_dates_attended(fields: Mapping, year_awarded: str) -> str:
         return ''
     text = format_date_for_section(value.strip(), 'B1')
     return '' if text.strip() == str(year_awarded or '').strip() else text
+
+
+def _year_awarded(fields: Mapping, end: object, raw_text: str, *, degree_named: bool) -> tuple[object, bool]:
+    """The Year Awarded value before formatting, and whether it was recovered
+    from raw text (shown as a "Text Extraction" insertion).
+
+    Stage 4's `year_awarded`/`year` always win. The two fallbacks -- the end
+    of the attendance range, then a year found in the raw text -- infer an
+    award, so they apply only when the row names a degree. A row with no
+    degree (schooling, a year of study, a major alone) has nothing that was
+    awarded, and filling the column from its attendance end asserted a degree
+    year the CV never states (EBYSBC E33: HZGJFM-06, ZDCXIV-08).
+    """
+    stated = fields.get('year_awarded') or fields.get('year')
+    if stated or not degree_named:
+        return stated or '', False
+    if end:
+        return end, False
+    extracted_year = _extract_year_from_text(raw_text) if raw_text else None
+    if extracted_year:
+        return extracted_year, True
+    return '', False
 
 
 class EducationSection:
@@ -236,7 +284,7 @@ class EducationSection:
 
             # After the skip test above: a discipline alone must not create a
             # row that was skipped before.
-            degree = _with_discipline(degree, fields)
+            degree = _with_honors(_with_discipline(degree, fields), fields)
 
             # Location from enrichment
             location, location_is_enriched = _get_institution_location(entry)
@@ -260,16 +308,9 @@ class EducationSection:
                 dates = format_date_range(start, end, 'B1')
             else:
                 dates = ''
-            # Year awarded - try to extract from raw text if missing
-            year_awarded = fields.get('year_awarded') or fields.get('year') or end or ''
-            year_is_enriched = False
-
-            # If year_awarded is still empty, try to extract from raw text
-            if not year_awarded and raw_text:
-                extracted_year = _extract_year_from_text(raw_text)
-                if extracted_year:
-                    year_awarded = extracted_year
-                    year_is_enriched = True  # Mark as enriched since we extracted it
+            year_awarded, year_is_enriched = _year_awarded(
+                fields, end, raw_text, degree_named=bool(_field_text(fields.get('degree')).strip()),
+            )
 
             # Format year_awarded - B1 uses mm/yyyy but year awarded column is just yyyy
             if year_awarded:
