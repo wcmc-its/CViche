@@ -29,6 +29,7 @@ from typing import NamedTuple
 
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.llm.retry import LLMOutageError
+from unified_pipeline.core.text_norm import is_placeholder_title
 from unified_pipeline.core.batch_pool import make_batches, make_progress_printer, map_in_order, workers_from_config
 
 logger = logging.getLogger(__name__)
@@ -201,6 +202,47 @@ def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str,
         logger.warning("Could not parse LLM JSON output: %s (response preview: %s...)", e, llm_output[:500])
 
     return id_to_formatted
+
+
+# The extracted fields 5d copies onto an entry that lacks them.
+_COPIED_FIELDS = ('authors', 'title', 'journal', 'year', 'volume', 'issue', 'pages', 'doi', 'book_title')
+# Two or more periods with only spacing between: what removing a title leaves.
+_REPEATED_PERIODS_RE = re.compile(r'(?:\s*\.){2,}')
+
+
+def _without_placeholder(citation: str, placeholder: str) -> str:
+    """`citation` with the placeholder title cut out, or '' when nothing is left."""
+    cleaned = _REPEATED_PERIODS_RE.sub('.', citation.replace(placeholder, '')).strip(' .')
+    return f"{cleaned}." if cleaned else ''
+
+
+def apply_formatted_fields(entry: dict, formatted_data: dict) -> bool:
+    """Write one LLM reply onto its entry; True when it stored a citation.
+
+    The citation always; each extracted field only where the entry has none.
+    A bracketed placeholder title the source does not carry ("[Title not
+    provided]") is never written, and is cut out of the citation (#446:
+    EBYSBC HFAJCC-05, XWNZWW-02): stage 6 then sees an entry with no title."""
+    fields = entry.setdefault('extracted_fields', {})
+    formatted_data = dict(formatted_data)
+    title = formatted_data.get('title')
+    citation = formatted_data.get('formatted_citation')
+    if is_placeholder_title(title, entry.get('text') or ''):
+        formatted_data.pop('title')
+        if isinstance(citation, str):
+            formatted_data['formatted_citation'] = _without_placeholder(citation, title.strip().rstrip('.'))
+            if not formatted_data['formatted_citation']:
+                formatted_data.pop('formatted_citation')
+    stored = 'formatted_citation' in formatted_data
+    if stored:
+        fields['formatted_citation'] = formatted_data['formatted_citation']
+        fields['formatting_source'] = 'stage_5d_llm'
+    for field in _COPIED_FIELDS:
+        if formatted_data.get(field):
+            existing = fields.get(field, '')
+            if not existing or existing == 'NONE':
+                fields[field] = formatted_data[field]
+    return stored
 
 
 def call_llm_formatter(raw_content: str) -> tuple:
@@ -391,23 +433,8 @@ def run_stage_5d(input_path: str, output_path: str = None,
         # same as the {} (parsed, found nothing) case.
         for entry_id, formatted_data in (result.id_to_formatted or {}).items():
             entry = result.id_to_entry.get(entry_id)
-            if entry:
-                if 'extracted_fields' not in entry:
-                    entry['extracted_fields'] = {}
-
-                # Store the formatted citation
-                if 'formatted_citation' in formatted_data:
-                    entry['extracted_fields']['formatted_citation'] = formatted_data['formatted_citation']
-                    entry['extracted_fields']['formatting_source'] = 'stage_5d_llm'
-                    formatted_count += 1
-
-                # Also update individual fields if they were extracted
-                for field in ['authors', 'title', 'journal', 'year', 'volume', 'issue', 'pages', 'doi', 'book_title']:
-                    if field in formatted_data and formatted_data[field]:
-                        # Only update if we don't already have this field or it's empty
-                        existing = entry['extracted_fields'].get(field, '')
-                        if not existing or existing == 'NONE':
-                            entry['extracted_fields'][field] = formatted_data[field]
+            if entry and apply_formatted_fields(entry, formatted_data):
+                formatted_count += 1
 
     # Add stage metadata
     data['stage_5d'] = {
