@@ -33,10 +33,10 @@ const QUEUE: QueueOverview = {
 const flush = () => act(async () => { for (let i = 0; i < 5; i++) await Promise.resolve() })
 const onSelectRun = vi.fn()
 
-async function renderView(detail: BatchDetail = BATCH, isAdmin = true) {
+async function renderView(detail: BatchDetail = BATCH, allRunsView = true) {
   vi.mocked(getBatch).mockResolvedValue(detail)
   vi.mocked(getQueue).mockResolvedValue(QUEUE)
-  render(<BatchView batchId={detail.id} isAdmin={isAdmin} currentUserId={7} onSelectRun={onSelectRun} />)
+  render(<BatchView batchId={detail.id} allRunsView={allRunsView} currentUserId={7} onSelectRun={onSelectRun} />)
   await flush()
 }
 
@@ -76,7 +76,7 @@ describe('BatchView', () => {
     expect(onSelectRun.mock.calls.map(([id]) => id)).toEqual(['RUNAAA', 'RUNBBB'])
   })
 
-  it('shows the Score column to admins only', async () => {
+  it('shows the Score column in the all-runs view (admin or staff) only', async () => {
     await renderView(BATCH, true)
     expect(screen.getByText('Score')).toBeTruthy()
     expect(within(lines()[0]).getByText('88')).toBeTruthy()
@@ -162,7 +162,7 @@ describe('BatchView', () => {
   it("says the batch can't be shown when the API answers 404", async () => {
     vi.mocked(getBatch).mockRejectedValue({ status: 404, message: 'Batch not found' })
     vi.mocked(getQueue).mockResolvedValue(QUEUE)
-    render(<BatchView batchId="NOPENO" isAdmin={false} currentUserId={7} onSelectRun={onSelectRun} />)
+    render(<BatchView batchId="NOPENO" allRunsView={false} currentUserId={7} onSelectRun={onSelectRun} />)
     await flush()
     expect(screen.getByText("This batch doesn't exist, or you don't have access to it.")).toBeTruthy()
   })

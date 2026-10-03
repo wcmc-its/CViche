@@ -79,7 +79,7 @@ function formatDuration(seconds: number | null): string {
 
 interface RunTableProps {
   groups: RunGroup[]
-  isAdmin: boolean
+  allRunsView: boolean
   showCost: boolean
   currentUserId: number | undefined
   sortField: SortField
@@ -157,17 +157,17 @@ function ScoreCell({ run, earlier }: { run: RunSummary; earlier: boolean }) {
 
 interface FeedbackCellProps {
   run: RunSummary
-  isAdmin: boolean
+  allRunsView: boolean
   currentUserId: number | undefined
   /** An older run of the same faculty member has feedback. */
   earlierGiven: boolean
 }
 
-function FeedbackCell({ run, isAdmin, currentUserId, earlierGiven }: FeedbackCellProps) {
-  switch (feedbackState(run, currentUserId, isAdmin, earlierGiven)) {
+function FeedbackCell({ run, allRunsView, currentUserId, earlierGiven }: FeedbackCellProps) {
+  switch (feedbackState(run, currentUserId, allRunsView, earlierGiven)) {
     case 'given':
       return (
-        <span title={feedbackGivenTitle(run, isAdmin)} className="inline-flex items-center gap-1 text-xs font-medium text-gray-700">
+        <span title={feedbackGivenTitle(run, allRunsView)} className="inline-flex items-center gap-1 text-xs font-medium text-gray-700">
           <Check className="w-3.5 h-3.5 flex-none text-green-600" aria-hidden="true" />
           Feedback given
         </span>
@@ -196,7 +196,7 @@ interface RowProps extends Omit<RunTableProps, 'groups' | 'sortField' | 'sortDir
   earlierGiven?: boolean
 }
 
-function RunRow({ run, firstCell, earlier = false, earlierGiven = false, isAdmin, showCost, currentUserId, onSelectRun, onFilter }: RowProps) {
+function RunRow({ run, firstCell, earlier = false, earlierGiven = false, allRunsView, showCost, currentUserId, onSelectRun, onFilter }: RowProps) {
   const { display, tooltip } = formatRelativeDate(run.started_at)
   const muted = earlier ? 'text-gray-500' : ''
   const runBy = runByLabel(run, currentUserId)
@@ -211,7 +211,7 @@ function RunRow({ run, firstCell, earlier = false, earlierGiven = false, isAdmin
       className={`cursor-pointer transition-colors border-b border-sand-200 last:border-b-0 hover:bg-sand-50 ${bg}`}
     >
       <td className={`${CELL} text-left`}>{firstCell}</td>
-      {isAdmin && (
+      {allRunsView && (
         <td className={`${CELL} text-left text-sm ${earlier ? 'text-gray-500' : 'text-gray-700'}`}>
           {runBy && runByValue ? (
             <button
@@ -230,7 +230,7 @@ function RunRow({ run, firstCell, earlier = false, earlierGiven = false, isAdmin
       <td className={`${CELL} text-left`}>
         <StatusBadge status={run.status} />
       </td>
-      {isAdmin && (
+      {allRunsView && (
         <td className={`${CELL} text-left text-sm`}>
           <ScoreCell run={run} earlier={earlier} />
         </td>
@@ -245,7 +245,7 @@ function RunRow({ run, firstCell, earlier = false, earlierGiven = false, isAdmin
         </td>
       )}
       <td className={`${CELL} text-left ${muted}`}>
-        <FeedbackCell run={run} isAdmin={isAdmin} currentUserId={currentUserId} earlierGiven={earlierGiven} />
+        <FeedbackCell run={run} allRunsView={allRunsView} currentUserId={currentUserId} earlierGiven={earlierGiven} />
       </td>
     </tr>
   )
@@ -254,13 +254,13 @@ function RunRow({ run, firstCell, earlier = false, earlierGiven = false, isAdmin
 interface GroupCellProps {
   group: RunGroup
   expanded: boolean
-  isAdmin: boolean
+  allRunsView: boolean
   onToggle: () => void
   onFilter: (key: RunFilterKey, value: string) => void
   onOpenBatch: (batchId: string) => void
 }
 
-function GroupCell({ group, expanded, isAdmin, onToggle, onFilter, onOpenBatch }: GroupCellProps) {
+function GroupCell({ group, expanded, allRunsView, onToggle, onFilter, onOpenBatch }: GroupCellProps) {
   const { owner, latest, older } = group
   const runCount = older.length + 1
   return (
@@ -282,7 +282,7 @@ function GroupCell({ group, expanded, isAdmin, onToggle, onFilter, onOpenBatch }
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           {owner ? (
-            isAdmin ? (
+            allRunsView ? (
               <button
                 type="button"
                 title="Show only this faculty member"
@@ -315,12 +315,12 @@ interface CardProps {
   /** Name line (faculty or filename) and file line; an earlier run shows only the file. */
   head: React.ReactNode
   earlier?: boolean
-  isAdmin: boolean
+  allRunsView: boolean
   onSelectRun: (runId: string) => void
 }
 
 /** One run as a stacked card (phones): name, file, then status, score (admin) and started date. */
-function RunCard({ run, head, earlier = false, isAdmin, onSelectRun }: CardProps) {
+function RunCard({ run, head, earlier = false, allRunsView, onSelectRun }: CardProps) {
   const { display, tooltip } = formatRelativeDate(run.started_at)
   const bg = run.status === 'running' ? 'bg-primary-50' : earlier ? 'bg-sand-50' : 'bg-white'
   return (
@@ -334,7 +334,7 @@ function RunCard({ run, head, earlier = false, isAdmin, onSelectRun }: CardProps
       {head}
       <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
         <StatusBadge status={run.status} />
-        {isAdmin && <ScoreCell run={run} earlier={earlier} />}
+        {allRunsView && <ScoreCell run={run} earlier={earlier} />}
         <span title={tooltip} className="text-gray-500">{display}</span>
       </div>
     </li>
@@ -351,7 +351,7 @@ function CardFile({ run, label, onOpenBatch }: { run: RunSummary; label?: string
   )
 }
 
-function CardGroupHead({ group, expanded, isAdmin, onToggle, onFilter, onOpenBatch }: GroupCellProps) {
+function CardGroupHead({ group, expanded, allRunsView, onToggle, onFilter, onOpenBatch }: GroupCellProps) {
   const { owner, latest, older } = group
   const runCount = older.length + 1
   const nameClass = 'min-w-0 break-words text-left text-sm font-semibold text-gray-900 [overflow-wrap:anywhere]'
@@ -370,7 +370,7 @@ function CardGroupHead({ group, expanded, isAdmin, onToggle, onFilter, onOpenBat
       )}
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-2">
-          {owner && isAdmin ? (
+          {owner && allRunsView ? (
             <button
               type="button"
               title="Show only this faculty member"
@@ -391,7 +391,7 @@ function CardGroupHead({ group, expanded, isAdmin, onToggle, onFilter, onOpenBat
 }
 
 /** Phones: the same groups as the table, one card per run, earlier reruns behind the chevron. */
-function RunCardList({ groups, isAdmin, onSelectRun, onFilter, onOpenBatch }: RunTableProps) {
+function RunCardList({ groups, allRunsView, onSelectRun, onFilter, onOpenBatch }: RunTableProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const toggle = (key: string) =>
     setExpanded((prev) => {
@@ -405,7 +405,7 @@ function RunCardList({ groups, isAdmin, onSelectRun, onFilter, onOpenBatch }: Ru
       {groups.flatMap((group) => {
         const isOpen = expanded.has(group.key)
         const head = (
-          <CardGroupHead group={group} expanded={isOpen} isAdmin={isAdmin} onToggle={() => toggle(group.key)} onFilter={onFilter} onOpenBatch={onOpenBatch} />
+          <CardGroupHead group={group} expanded={isOpen} allRunsView={allRunsView} onToggle={() => toggle(group.key)} onFilter={onFilter} onOpenBatch={onOpenBatch} />
         )
         const earlier = isOpen
           ? group.older.map((run) => (
@@ -413,13 +413,13 @@ function RunCardList({ groups, isAdmin, onSelectRun, onFilter, onOpenBatch }: Ru
                 key={run.run_id}
                 run={run}
                 earlier
-                isAdmin={isAdmin}
+                allRunsView={allRunsView}
                 onSelectRun={onSelectRun}
                 head={<div className="pl-6"><CardFile run={run} onOpenBatch={onOpenBatch} /></div>}
               />
             ))
           : []
-        return [<RunCard key={group.latest.run_id} run={group.latest} head={head} isAdmin={isAdmin} onSelectRun={onSelectRun} />, ...earlier]
+        return [<RunCard key={group.latest.run_id} run={group.latest} head={head} allRunsView={allRunsView} onSelectRun={onSelectRun} />, ...earlier]
       })}
     </ul>
   )
@@ -427,7 +427,7 @@ function RunCardList({ groups, isAdmin, onSelectRun, onFilter, onOpenBatch }: Ru
 
 /** Runs grouped by faculty member: latest run per row, earlier reruns behind a chevron. */
 export default function RunTable(props: RunTableProps) {
-  const { groups, isAdmin, showCost, sortField, sortDir, onSort } = props
+  const { groups, allRunsView, showCost, sortField, sortDir, onSort } = props
   const phone = useMediaQuery(PHONE_QUERY)
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const toggle = (key: string) =>
@@ -440,7 +440,7 @@ export default function RunTable(props: RunTableProps) {
   if (phone) return <RunCardList {...props} />
   const header = { sortField, sortDir, onSort }
   const rowProps = {
-    isAdmin,
+    allRunsView,
     showCost,
     currentUserId: props.currentUserId,
     onSelectRun: props.onSelectRun,
@@ -448,13 +448,13 @@ export default function RunTable(props: RunTableProps) {
   }
   return (
     <div className="overflow-x-auto">
-      <table className={`w-full table-fixed ${isAdmin ? 'min-w-[1000px]' : 'min-w-[640px]'}`}>
+      <table className={`w-full table-fixed ${allRunsView ? 'min-w-[1000px]' : 'min-w-[640px]'}`}>
         <thead className="sticky top-0 z-header bg-sand-50 border-b border-sand-200">
           <tr>
-            <SortHeader field="cv" label={isAdmin ? 'Faculty (subject)' : 'CV'} {...header} />
-            {isAdmin && <th className={`${CELL} text-left text-xs font-medium text-gray-500 w-[170px]`}>Run by</th>}
+            <SortHeader field="cv" label={allRunsView ? 'Faculty (subject)' : 'CV'} {...header} />
+            {allRunsView && <th className={`${CELL} text-left text-xs font-medium text-gray-500 w-[170px]`}>Run by</th>}
             <SortHeader field="status" label="Status" width="w-[120px]" {...header} />
-            {isAdmin && <SortHeader field="quality_score" label="Score" width="w-[84px]" {...header} />}
+            {allRunsView && <SortHeader field="quality_score" label="Score" width="w-[84px]" {...header} />}
             <SortHeader field="started_at" label="Started" width="w-[130px]" {...header} />
             <SortHeader field="total_duration_seconds" label="Duration" align="right" width="w-[72px]" {...header} />
             {showCost && <SortHeader field="total_cost" label="Cost" align="right" width="w-[56px]" {...header} />}
@@ -473,7 +473,7 @@ export default function RunTable(props: RunTableProps) {
                   <GroupCell
                     group={group}
                     expanded={isOpen}
-                    isAdmin={isAdmin}
+                    allRunsView={allRunsView}
                     onToggle={() => toggle(group.key)}
                     onFilter={props.onFilter}
                     onOpenBatch={props.onOpenBatch}

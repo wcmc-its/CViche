@@ -51,7 +51,7 @@ from ..formatting import (
 )
 from ..normalization import _get_cleaned_institution_name
 from ..parsing import _extract_year_from_text
-from ..resolution import _get_institution_location
+from ..resolution import _get_institution_location, _location_remainder
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -163,15 +163,18 @@ def _normalize_other_education_entry(entry: Mapping[str, Any]) -> OtherEducation
 def _b2_institution_content(record: OtherEducationRecord) -> list[tuple[str, bool, str]]:
     """The runs of the institution cell: (text, is_tracked_insertion, author).
     An enriched location is a tracked insertion after the institution; an
-    extracted one is plain text joined onto it."""
-    if record.location and record.location_is_enriched:
+    extracted one is plain text joined onto it. Only the part of the location
+    the institution does not already say is added (`_location_remainder`):
+    a row whose institution IS the place no longer repeats it (#1257)."""
+    location = _location_remainder(record.location, record.institution)
+    if location and record.location_is_enriched:
         if record.institution:
             return [(record.institution, False, ""),
-                    (f", {record.location}", True, INSTITUTION_ENRICHMENT_REASON)]
-        return [(record.location, True, INSTITUTION_ENRICHMENT_REASON)]
-    if record.location:
-        institution_full = (f"{record.institution}, {record.location}"
-                            if record.institution else record.location)
+                    (f", {location}", True, INSTITUTION_ENRICHMENT_REASON)]
+        return [(location, True, INSTITUTION_ENRICHMENT_REASON)]
+    if location:
+        institution_full = (f"{record.institution}, {location}"
+                            if record.institution else location)
         return [(institution_full, False, "")]
     return [(record.institution, False, "")]
 

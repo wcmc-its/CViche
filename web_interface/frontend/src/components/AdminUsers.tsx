@@ -214,7 +214,7 @@ export default function AdminUsers() {
                         onClick={() => toggleRole(user)}
                         disabled={blocked !== null}
                         title={blocked ?? (isAdmin ? 'Switch to Member' : 'Switch to Admin')}
-                        aria-label={`${isAdmin ? 'Admin' : 'Member'}: switch ${user.display_name} to ${isAdmin ? 'Member' : 'Admin'}`}
+                        aria-label={`${isAdmin ? 'Admin' : user.role === 'staff' ? 'Staff' : 'Member'}: switch ${user.display_name} to ${isAdmin ? 'Member' : 'Admin'}`}
                         className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 disabled:cursor-not-allowed ${
                           isAdmin
                             ? 'bg-purple-100 text-purple-700 enabled:hover:bg-purple-200'
@@ -222,7 +222,7 @@ export default function AdminUsers() {
                         }`}
                       >
                         {isAdmin ? <Shield className="w-3 h-3" aria-hidden="true" /> : <UserIcon className="w-3 h-3" aria-hidden="true" />}
-                        {isAdmin ? 'Admin' : 'Member'}
+                        {isAdmin ? 'Admin' : user.role === 'staff' ? 'Staff' : 'Member'}
                       </button>
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-right text-sm text-gray-700">

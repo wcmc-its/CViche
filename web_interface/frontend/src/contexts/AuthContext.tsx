@@ -144,3 +144,29 @@ export function useAuth() {
 export function useCanSeeCost(): boolean {
   return useAuth().user?.role === 'admin'
 }
+
+/** Admin-only writes and pages (settings, users, deletes). Same test as the
+ *  backend's require_admin. */
+export function useIsAdmin(): boolean {
+  return useAuth().user?.role === 'admin'
+}
+
+/** Read-only view of every user's runs: the all-runs list, "Run by", run quality,
+ *  stage JSON, and feedback insights. Admin or staff;
+ *  mirrors the backend's can_view_all_runs. Grants reads only -- writes stay on
+ *  useIsAdmin, cost on useCanSeeCost. */
+export function useCanViewAllRuns(): boolean {
+  const role = useAuth().user?.role
+  return role === 'admin' || role === 'staff'
+}
+
+/** Whether `user` may act on a run (start, cancel, restart, retry, submit
+ *  feedback): its owner or an admin, the same rule as the backend's default
+ *  check_run_access. Staff read any run but act only on their own. A plain
+ *  user only ever loads their own runs, and the API omits `run_by` for them,
+ *  so the owner test applies to staff alone. */
+export function canActOnRun(user: User | null, runOwnerId: number | null | undefined): boolean {
+  if (!user) return false
+  if (user.role !== 'staff') return true
+  return runOwnerId === user.user_id
+}

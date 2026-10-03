@@ -245,6 +245,7 @@ Your CV and the converted output are accessible only to:
 
 - **You** (the person who uploaded it)
 - **CViche administrators** (project team members with admin access)
+- **Designated staff** with read-only access to all runs
 
 Your data is used solely for the CViche pilot project. Feedback responses are anonymized in aggregate reporting. Your CV is stored securely and is not shared outside the project team.
 
