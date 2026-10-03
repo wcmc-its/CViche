@@ -96,6 +96,27 @@ def test_validate_output_clean_doc_returns_empty_list():
     assert _generator_for(doc)._validate_output() == []
 
 
+def _empty_teaching_doc() -> Document:
+    doc = Document()
+    doc.add_paragraph("EDUCATIONAL CONTRIBUTIONS")
+    doc.add_paragraph("CLINICAL PRACTICE")
+    return doc
+
+
+def test_empty_teaching_section_warns_only_when_a_teaching_code_was_given():
+    """#1221: a CV with no K entry has nothing to show under EDUCATIONAL
+    CONTRIBUTIONS, so the empty-section check is not a finding there."""
+    def checks(entries_by_code):
+        warnings = _generator_for(_empty_teaching_doc())._validate_output(entries_by_code)
+        return [w["check"] for w in warnings]
+
+    assert checks({"K2": [{}]}) == ["no_visible_teaching_content"]
+    assert checks({"K5": [{}], "H": [{}]}) == ["no_visible_teaching_content"]
+    assert checks({"H": [{}], "N3B": [{}]}) == []
+    assert checks({}) == []
+    assert checks(None) == ["no_visible_teaching_content"]  # no entries to hand: as before
+
+
 # ------------------------------------------------- warnings go to the logger
 
 def test_comment_failure_logs_via_project_logger_not_print(caplog, capsys):

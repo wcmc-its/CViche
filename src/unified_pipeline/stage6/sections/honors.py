@@ -26,6 +26,10 @@ is testable on strings alone.
                                     month "..., August 2025." leaves behind
     _extract_organization_from_award finds the granting body by institutional
                                     keyword, in several passes
+    _record_date                    the date cell stage 4's fields give,
+                                    off-schema ranges and lists included
+    _is_one_award_over_lines        whether several lines are one award
+                                    rather than a list of them (#1245)
     parse_honor_entry               the whole entry -> `list[HonorRecord]`
     HonorsSection._add_honors_row   the only part that touches the table
 
@@ -93,7 +97,13 @@ except ImportError as exc:
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
     ) from exc
 
-from ..formatting import _clear_table_data, _set_font, format_date_for_section
+from ..fan_out import FANNED_OUT_FROM
+from ..formatting import (
+    _clear_table_data,
+    _set_font,
+    format_date_for_section,
+    format_date_range,
+)
 from ..normalization import _strip_org_tail
 from ..parsing import _is_table_header_entry
 from ..sorting import sort_entries_reverse_chronological
@@ -475,6 +485,63 @@ def _field_text(fields: Mapping, *names: str) -> str:
     return ''
 
 
+# Keys outside the H schema (whose only date field is `date`) that stage 4
+# writes an award's several dates under: a list of years or of
+# `{start_date, end_date}` spans, or one string of them (#1245, EBYSBC E15).
+_DATE_LIST_KEYS = ('dates', 'additional_dates')
+
+# What separates the dates in a string-valued `dates` ("2019; 2020; 2021").
+_DATE_LIST_SPLIT_RE = re.compile(r'[;,]')
+
+# How the date cell joins several dates.
+_DATE_LIST_JOIN = ', '
+
+
+def _date_list_text(value: object) -> str:
+    """Every date a `_DATE_LIST_KEYS` value holds, H-formatted and joined
+    into one cell, or '' when it holds none."""
+    if isinstance(value, str):
+        items: Sequence = _DATE_LIST_SPLIT_RE.split(value)
+    elif isinstance(value, list):
+        items = value
+    else:
+        return ''
+    cells = []
+    for item in items:
+        if isinstance(item, Mapping):
+            cells.append(format_date_for_section(item, 'H'))
+        elif item is not None and str(item).strip():
+            cells.append(format_date_for_section(str(item).strip(), 'H'))
+    return _DATE_LIST_JOIN.join(cell for cell in cells if cell)
+
+
+def _record_date(fields: Mapping) -> str:
+    """The date cell stage 4's fields give the record, H-formatted, or ''.
+
+    The H schema's one date field is `date` (or `year`), and it wins when
+    set. Stage 4 also writes an award's dates under keys the schema does not
+    name, and reading `date` alone left those rows with an empty or partial
+    date cell (#1245, EBYSBC E15: KDAZOM-04, VVRTUC-03, EOSAFF-01, OTBUCZ-01,
+    HZGJFM-02, BZZNRL-06): a `start_date`/`end_date` range renders as the
+    range, and failing that a `_DATE_LIST_KEYS` list renders every date in
+    it. An `end_date` with no `start_date` closes the range `date` opens
+    (XWNZWW-09); next to a `start_date` of its own, `date` is the award's
+    date and the span is not.
+    """
+    date = _field_text(fields, 'date', 'year')
+    start = _field_text(fields, 'start_date')
+    end = _field_text(fields, 'end_date')
+    if date and (start or not end):
+        return format_date_for_section(date, 'H')
+    if date or start or end:
+        return format_date_range(start or date, end, 'H')
+    for key in _DATE_LIST_KEYS:
+        listed = _date_list_text(fields.get(key))
+        if listed:
+            return listed
+    return ''
+
+
 def _honor_columns(line: str) -> HonorRecord | None:
     """The columns a '|'-joined line names, or None if it names none.
 
@@ -622,23 +689,151 @@ def _order_years(years: Sequence[str]) -> list[str]:
     return list(reversed(years))
 
 
+# A date a line ends with in the numeric forms `_split_award_year` does not
+# read: "... Award — 06/11/2019", "... Award — 05/2018".
+_TRAILING_NUMERIC_DATE_RE = re.compile(
+    r'(?:^|[\s,(])((?:\d{1,2}/){1,2}(?:19|20)\d{2})\s*[).]?\s*$')
+
+
+def _line_date(line: str) -> str:
+    """The date one line of a fused entry names for itself, or ''."""
+    _, found = _split_award_year(line)
+    if found:
+        return found
+    match = _TRAILING_NUMERIC_DATE_RE.search(line)
+    return match.group(1) if match else ''
+
+
+# A date as an entry's text names it, keyed by its start year: a year, or a
+# range read once by its first year ("2003–2004", "1996-97"), so the end of
+# a range is not counted as a second date. A month or a day written around
+# the year ("05/03/2015") names the same year.
+_TEXT_DATE_RE = re.compile(
+    r'(?<!\d)((?:19|20)\d{2})(?!\d)(?:\s*[-–]\s*(?:(?:19|20)\d{2}|\d{2})(?!\d))?')
+
+
+def _start_years(text: str) -> set[str]:
+    """The start year of every date `text` names."""
+    return {match.group(1) for match in _TEXT_DATE_RE.finditer(text)}
+
+
+# A word of an award name, for comparing one with a line of the entry's
+# text regardless of case, spacing, quote style or punctuation.
+_WORD_RE = re.compile(r'[a-z0-9]+')
+
+
+def _words(text: str) -> set[str]:
+    return set(_WORD_RE.findall(text.casefold()))
+
+
+def _names_award(line: str, award_name: str) -> bool:
+    """Whether `line` names stage 4's award: every word of `award_name` is
+    in it. On words rather than a substring, because a curly apostrophe or
+    a double space in the source hid the award's own line from a substring
+    test against stage 4's straight-quoted, single-spaced name (ZDCXIV 282,
+    VYICGW 41)."""
+    award_words = _words(award_name)
+    return bool(award_words) and award_words <= _words(line)
+
+
+def _has_date_cell(line: str) -> bool:
+    """Whether `_parse_honor_lines` reads a date cell in this one part: a
+    bare year, a tab-joined row whose last cell is a bare year, or a '|' row
+    with a date column. The same parse, so the two cannot disagree on what
+    a date cell is; a '|' shape the parser does not recognise yields its
+    second cell as a "year", which counts only when it is a date."""
+    _, cells = _parse_honor_lines([line])
+    return any(_is_date_column(cell) for cell in cells)
+
+
+def _is_one_award_over_lines(lines: Sequence[str], award_name: str,
+                             date: str) -> bool:
+    """Whether an entry's several lines are ONE award, the one stage 4
+    extracted, rather than a list of awards (ZDCXIV-02).
+
+    One award written over several lines reads "Award", then "Organization —
+    MM/YYYY", or a poster title and its author list before the dated line.
+    Two facts mark that shape: every date the text names is one of the
+    record's own (`date`, already formatted), and no line both names stage
+    4's award and dates it -- the date sits on a continuation line, or stage
+    4 assembled the name from several lines.
+
+    Anything else is left to the multi-award reading, as before:
+    - an entry with no stage-4 award has no line to tie the others to, and
+      the one-award reading would put the whole raw text in one name cell;
+    - a list of awards names several dates (ZDCXIV-03's one award won in
+      three years; VYICGW 50's two awards, each with its own year);
+    - a list that names no date has nothing to tie a line to the record;
+    - a list whose only date is on the line naming stage 4's award is a list
+      in which stage 4 extracted that one award (RKJGSG 63.1 in the 61-CV
+      farm: twelve awards, the last alone dated). `_names_award` is on
+      words, so a curly quote or a double space in the source does not hide
+      the award's line and collapse such a list;
+    - a list with a line the delimiter contract reads as a date cell
+      (`_has_date_cell`). A bare year can be every award's, and a tab or
+      '|' date column is its own row's: "YYYY\\nAward A\\nAward B",
+      "Award A\\nAward B\\nYYYY", "Award A\\tYYYY\\nAward B" and
+      "Award A | YYYY\\nAward B" each lost every award but stage 4's when
+      read as one award.
+
+    A date written in free text on a line that does not name stage 4's
+    award ("Award A\\nAward B - YYYY") still reads as one award: that is
+    the "Award" / "Organization - date" shape this function exists for, and
+    nothing in the text tells the two apart.
+    """
+    if not award_name:
+        return False
+    if any(_has_date_cell(line) for line in lines):
+        return False
+    text_years = _start_years('\n'.join(lines))
+    if not text_years or not text_years <= _start_years(date):
+        return False
+    return not any(_names_award(line, award_name) and _start_years(line)
+                   for line in lines)
+
+
+def _comparable(text: str) -> str:
+    """`text` with case, runs of whitespace and edge punctuation ignored."""
+    return ' '.join(text.split()).strip(' .,;:').casefold()
+
+
+def _is_granting_body_line(record: HonorRecord, granting_body: str) -> bool:
+    """Whether a parsed part is nothing but the entry's granting body.
+
+    A CV can write the organization on its own line above the award, or
+    above the same award won in several years (ZDCXIV-02, idx 277/278). That
+    line is the award's organization cell, which stage 4 already extracted,
+    not an award of its own.
+    """
+    return (bool(granting_body) and not record.organization and not record.date
+            and _comparable(record.award) == _comparable(granting_body))
+
+
 def _records_for_award_list(awards: Sequence[HonorRecord],
                             years: Sequence[str],
                             award_name: str,
                             granting_body: str,
                             date: str) -> list[HonorRecord]:
-    """Records for an entry that fused several awards into one text."""
+    """Records for an entry that fused several awards into one text.
+
+    `date` is stage 4's date for the record, already formatted
+    (`_record_date`).
+    """
     ordered_years = _order_years(years)
     records: list[HonorRecord] = []
     for i, parsed in enumerate(awards):
         # Stage 4 extracted clean fields for (at most) one award of the fused
         # entry — use them for the line they belong to instead of re-parsing
-        # it from raw text (#229).
-        if award_name and award_name.lower() in parsed.award.lower():
+        # it from raw text (#229). Every line that names that award gets its
+        # name, but a line's own date beats stage 4's one date: an award won
+        # in three years is written as three lines, and all three rendered
+        # stage 4's year (ZDCXIV-03).
+        if _names_award(parsed.award, award_name):
+            own_date = parsed.date or _line_date(parsed.award)
             records.append(HonorRecord(
                 award_name,
                 granting_body or _extract_organization_from_award(parsed.award),
-                format_date_for_section(date, 'H') if date else ''))
+                format_date_for_section(own_date, 'H') if own_date else date))
             continue
 
         # The line's own date column if it named one, else the corresponding
@@ -668,7 +863,8 @@ def _record_for_single_award(fallback_text: str,
                              columns: HonorRecord | None,
                              award_name: str,
                              granting_body: str,
-                             date: str) -> HonorRecord:
+                             date: str,
+                             stated_date: str) -> HonorRecord:
     """The record for an entry that holds one award, from stage 4's fields.
 
     `columns` is the column tuple `_honor_columns` recognised when the whole
@@ -686,23 +882,30 @@ def _record_for_single_award(fallback_text: str,
     a third honor mid-word and lost the year) -- an entry whose
     pipe shape the parser declined to guess at still renders as its own
     text, which is the contract the module docstring states.
+
+    `date` is the date stage 4's fields give the record, already formatted
+    (`_record_date`), and wins over any date read from the text.
+    `stated_date` is the H schema's own `date` field alone: only when it and
+    the line's date column are both empty is a year peeled off the name, as
+    before stage 4's off-schema dates were read -- a date-only fragment
+    ("1971- 1972.") still leaves an empty name cell rather than repeating
+    its date there.
     """
     if not award_name:
         award_name = columns.award if columns is not None else fallback_text
     if columns is not None:
         granting_body = granting_body or columns.organization
-        date = date or columns.date
 
-    # If no extracted date, parse the inline year out of the name
-    # (leading "2021 Award ...", range, or trailing "... 2021.");
-    # fall back to the original text for the year alone.
-    if not date:
-        award_name, date = _split_award_year(award_name)
-        if not date:
-            _, date = _split_award_year(fallback_text)
-
-    if date:
-        date = format_date_for_section(date, 'H')
+    # The text's own date: the line's date column, else the inline year
+    # parsed out of the name (leading "2021 Award ...", range, or trailing
+    # "... 2021."), else the original text's year alone.
+    found = stated_date or (columns.date if columns is not None else '')
+    if not found:
+        award_name, found = _split_award_year(award_name)
+        if not found:
+            _, found = _split_award_year(fallback_text)
+    if not date and found:
+        date = format_date_for_section(found, 'H')
 
     # Extract organization if field extraction didn't provide one
     if not granting_body:
@@ -731,23 +934,38 @@ def parse_honor_entry(entry: Mapping) -> list[HonorRecord]:
     An entry that fused several awards into one text yields one record per
     award; anything else yields exactly one record built from stage 4's
     extracted fields, falling back to parsing the raw text.
+
+    Three things keep one stage-4 record from splitting into several rows
+    (#1245, EBYSBC E15). A fan-out child (`FANNED_OUT_FROM`) is one record
+    by construction, and its text can be the ' | ' line fan-out built from
+    its own fields, so it is never split (ZCTARO-04: "Award | Org | YYYY-MM |
+    YYYY-MM" rendered as four rows). A line that is only the granting body
+    is that record's organization, not an award. And lines that are one
+    award written over several lines are read as that award, not as a list
+    (`_is_one_award_over_lines`, ZDCXIV-02).
     """
     fields = entry.get('extracted_fields') or {}
     original_text = str(entry.get('text') or '')
 
     award_name = _field_text(fields, 'award_name')
     granting_body = _field_text(fields, 'granting_body', 'organization')
-    date = _field_text(fields, 'date', 'year')
+    stated_date = _field_text(fields, 'date', 'year')
+    date = _record_date(fields)
 
     # Check if this entry contains multiple awards (newline-separated).
     # This happens when multiple honors were merged during extraction.
     # #476: '\n' and '|' boundaries; the extracted column cells are passed so
     # a single award's own "Award | Organization | Year" cell join is not
     # mistaken for two awards -- see _entry_parts.
-    parts = _entry_parts(original_text, (granting_body, date))
+    if entry.get(FANNED_OUT_FROM):
+        parts = [original_text]  # one record by construction: never split
+    else:
+        parts = _entry_parts(original_text, (granting_body, stated_date))
     awards, years = _parse_honor_lines(parts)
+    awards = [award for award in awards
+              if not _is_granting_body_line(award, granting_body)]
 
-    if len(awards) > 1:
+    if len(awards) > 1 and not _is_one_award_over_lines(parts, award_name, date):
         return _records_for_award_list(awards, years, award_name,
                                        granting_body, date)
     # What the single-award record falls back to: the entry's own parts
@@ -762,7 +980,7 @@ def parse_honor_entry(entry: Mapping) -> list[HonorRecord]:
     columns = (awards[0] if len(awards) == 1
                and (awards[0].organization or awards[0].date) else None)
     return [_record_for_single_award(fallback_text, columns, award_name,
-                                     granting_body, date)]
+                                     granting_body, date, stated_date)]
 
 
 # A year or a year range, in either of the two dash characters CVs use.
