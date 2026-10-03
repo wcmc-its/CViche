@@ -13,6 +13,7 @@ The line against `render.py` is which side of the comparison is the subject.
 These five are about the extracted record; the render lints are about the page.
 `lint_classified_unrendered` reads the output blocks, but only to decide whether
 a 3b classification survived -- the finding is about the classification.
+`lint_offschema_fields` reads them only to grade the stage-4 values it found.
 
 The thirteen constants, regexes and helpers below them are used by nothing else
 in `run_doctor.py`, so they move together and stop being module-global.
@@ -87,6 +88,7 @@ from ..shared import (
     _LINE_SENTINEL,
     RENDER_TOKEN_MIN_COUNT,
     RENDER_TOKEN_OVERLAP,
+    TABLE_ROW_JOINER,
     _entry_pieces,
     _finding,
     _haystacks,
@@ -992,12 +994,14 @@ def lint_wrong_start_date(stage4: dict) -> list[dict]:
 # --------------------------------------------------------------------------
 # Field values stage 4 extracted that the document cannot show: a value filed
 # under a key no renderer reads, and a year given the wrong century or taken
-# from somewhere other than the entry's text. All read stage 4, never the
-# docx -- the value is already wrong or unreachable there, and reading the
-# rendered text would add a match step that can only lose precision
-# (four-digit numbers below 1930 sit in citation page ranges). The year lints
-# also read the text a stage-5 formatter wrote for the whole entry, which is
-# what stage 6 renders in place of its date fields (`_year_renders`).
+# from somewhere other than the entry's text. All find the value in stage 4 --
+# it is already wrong or unreachable there. The year lints never read the
+# docx: matching rendered text could only lose them precision (four-digit
+# numbers below 1930 sit in citation page ranges). They do read the text a
+# stage-5 formatter wrote for the whole entry, which is what stage 6 renders in
+# place of its date fields (`_year_renders`). `offschema_fields` reads the
+# docx, when the run has one, only to grade what stage 4 showed it (#1245):
+# see `_grade_value`.
 
 
 class _FieldsEntry(NamedTuple):
@@ -1051,35 +1055,157 @@ def _evidence_value(value: object) -> str:
 # fact lost in CYOFWJ, JNATFN and WIANVH). #817 is the field-level loss
 # measurement this is the cheap, key-set-only slice of.
 
-#: Codes the lint does not inspect. A (personal data): the #820 PII pass owns
-#: it, and quoting its values as evidence would put protected data in a report
-#: mirrored to S3. The text-rendered codes (`fan_out._TEXT_RENDERED_CODES`,
-#: which include T): their section writes the entry's text, not its fields,
-#: so a value under any key is in the document already. The codes a stage-5
-#: formatter rewrites whole from the entry's text -- teaching (5c's
-#: `formatted_text`) and publications (5d's `formatted_citation`): the
-#: off-schema keys stage 4 leaves on them (`other_id`, `journal_or_source`,
-#: a K1 `description`) travel inside that rendering. Known miss: a
-#: contribution note under S1 `notes` (PFBSNH).
-_OFFSCHEMA_SKIPPED_CODES = (frozenset({PERSONAL_DATA_CODE}) | _TEXT_RENDERED_CODES
-                            | frozenset(TEACHING_CODES) | frozenset(PUBLICATION_CODES))
+#: Codes the lint does not inspect. The text-rendered codes
+#: (`fan_out._TEXT_RENDERED_CODES`, which include T): their section writes the
+#: entry's text, not its fields, so a value under any key is in the document
+#: already. The codes a stage-5 formatter rewrites whole from the entry's text
+#: -- teaching (5c's `formatted_text`) and publications (5d's
+#: `formatted_citation`): the off-schema keys stage 4 leaves on them
+#: (`other_id`, `journal_or_source`, a K1 `description`) travel inside that
+#: rendering. Known miss: a contribution note under S1 `notes` (PFBSNH).
+#: Personal Data (A) is inspected, but only against the document (see
+#: `_personal_value_withheld`).
+_OFFSCHEMA_SKIPPED_CODES = (_TEXT_RENDERED_CODES | frozenset(TEACHING_CODES)
+                            | frozenset(PUBLICATION_CODES))
 
 #: Keys stage 4's own post-processing writes onto entries whose schema may
 #: not declare them -- bookkeeping, not a value the model misfiled:
 #: `coercion.apply_regex_post_processing` sets the identifiers on S and
 #: `IDENTIFIER_TAXONOMY_CODES`, and `percent_effort` on M2*. Only what this
-#: lint can see is listed: S, N4 and the `orcid` codes A and S0 are skipped
-#: above, and `owner_name.add_target_names`' `target_name` lands only on S
-#: and on R codes that either declare it (R) or have no schema at all.
+#: lint can see is listed: S, N4 and S0 are skipped above, and
+#: `owner_name.add_target_names`' `target_name` lands only on S and on R codes
+#: that either declare it (R) or have no schema at all. The `orcid` the same
+#: pass sets on A is not listed: no section writes an A entry's ORCID, so it
+#: is lost like any other off-schema value (SJWASY in batch EBYSBC).
 _IDENTIFIER_KEYS = frozenset({"pmid", "pmcid", "doi"})
 _PERCENT_EFFORT_KEY = "percent_effort"
 
+#: The one date key the schema of a code whose section writes a single date
+#: declares (H, R). A `start_date`/`end_date` range or a `dates` list on such a
+#: code renames no key the schema has, and the honors renderer reads `date`
+#: alone: H ranges filed that way rendered with an empty date cell (batch
+#: EBYSBC class E15: KDAZOM, VVRTUC, EOSAFF, OTBUCZ). Every other code's
+#: date-named keys stay out unless they hold a list (`_is_offschema_date`).
+_SINGLE_DATE_KEY = "date"
+
+#: How the rendered document bears on one off-schema value (`_grade_value`).
+#: SHOWN: on a line of its own record -- not lost, so not reported. ELSEWHERE:
+#: the document shows it, but not with its record. ABSENT: the document does
+#: not show it where it belongs. UNGRADED: no document to grade against, or
+#: a whole record, which is reported whatever the page shows (#1187).
+GRADE_SHOWN = "shown"
+GRADE_ELSEWHERE = "elsewhere"
+GRADE_ABSENT = "absent"
+GRADE_UNGRADED = "ungraded"
+
+#: The words of the WCM Personal Data table's address and telephone rows
+#: (Office address, Office telephone, Cell phone; Home address is withheld).
+#: An A value under a key carrying one as a word (`office_phone`,
+#: `street_address`, `research_address`) had a row to fill, and in batch
+#: EBYSBC those rows rendered empty (YYVHNN, ZCTARO). One under `fax`,
+#: `website` or `orcid` had no row. Nor, in effect, did one under an email
+#: key: the renderer reads every email key it knows, so an email left over
+#: is a second address of a kind whose row the first one fills
+#: (`secondary_email`, the low-severity AQAJHD-12). `_absence_is_a_loss`.
+PERSONAL_DATA_ROW_WORDS = frozenset({"address", "phone", "telephone"})
+
+#: Evidence for a Personal Data value, in place of the value itself: the
+#: document goes to S3 with the doctor report, and the #820 PII pass, not
+#: this lint, decides what of the owner's data may be shown.
+PERSONAL_VALUE_EVIDENCE = "(Personal Data value, not quoted)"
+
 
 class OffschemaValue(NamedTuple):
-    """One non-empty value under a key no renderer reads."""
+    """One non-empty value under a key no renderer reads. `records` is how
+    many whole records it holds (each object of a record list), 0 for one
+    fact; `grade` is `_grade_value`'s verdict; `warn` is whether it alone
+    makes its finding WARN -- a whole record, or `_absence_is_a_loss`."""
     element_idx: object
     value: object
-    record_shaped: bool
+    records: int
+    grade: str
+    warn: bool
+    personal: bool
+
+
+class OutputLine(NamedTuple):
+    """One rendered unit of text -- a paragraph, a table cell, a table row
+    joined across its cells (`_table_lines`), or a whole form table
+    (`_is_form_table`) -- in the forms a value is matched in: squashed, for a
+    value whole (`_value_on_line`); its letters and digits alone, in order
+    (`_alnum`), for an anchor value a renderer split across cells or
+    re-punctuated (the honors renderer moves an award name's tail into the
+    organization cell, XWNZWW); and its word set, for a value the document re-punctuates
+    (stage 5b writes a B1 `location` of "Town, Country" into the institution
+    cell as "Town City, Country": ZCTARO)."""
+    squashed: str
+    alnum: str
+    words: frozenset[str]
+
+
+class RenderedDocument(NamedTuple):
+    """What `_grade_value` reads besides the entry: the document's lines and
+    form tables (`OutputLine`); every stage-4 record's string values
+    (`_alnum`, one set per record), which say whether an anchor value is the
+    entry's alone (`_distinctive`); and the squashed values the Personal
+    Data entries hold -- the owner's own contact details, which Personal
+    Data renders."""
+    lines: tuple[OutputLine, ...]
+    record_values: tuple[frozenset[str], ...]
+    owner_values: frozenset[str]
+
+
+def _alnum(text: str) -> str:
+    """The text's letters and digits alone, lowercased, in order."""
+    return "".join(_DEDUP_TOKEN_RE.findall(norm(text)))
+
+
+def _alnum_values(fields: Mapping[str, object]) -> frozenset[str]:
+    return frozenset(filter(None, map(_alnum, _nonempty_field_values(dict(fields)))))
+
+
+def _output_line(text: str) -> OutputLine:
+    return OutputLine(squash(text), _alnum(text),
+                      frozenset(_alphanumeric_tokens(text)))
+
+
+def _is_form_table(kind: str, lines: list[str]) -> bool:
+    """A table every joined row of which is a "Label: | value" pair: one
+    record's form -- a grant, a mentee -- whose rows belong together, so a
+    value in one row is shown with the name in another (ZCTARO's N3B
+    `awards` in the Project/Accomplishments row of its mentee's table)."""
+    rows = [line for line in lines if TABLE_ROW_JOINER in line]
+    return kind == "table" and bool(rows) and all(
+        row.split(TABLE_ROW_JOINER)[0].rstrip().endswith(":") for row in rows)
+
+
+def _form_unit(lines: list[OutputLine]) -> OutputLine:
+    """A form table's lines as one unit. Joined with `_LINE_SENTINEL`, so an
+    anchor or a value still matches inside one line only -- across rows,
+    "Program" ending one and "Award source:" opening the next read as a
+    "Program Award" that is in neither (OTBUCZ). No word set: every word
+    of the form at once would show most short values somewhere in it."""
+    return OutputLine(_LINE_SENTINEL.join(line.squashed for line in lines),
+                      _LINE_SENTINEL.join(line.alnum for line in lines), frozenset())
+
+
+def _rendered_document(stage4: dict, blocks: list[tuple[str, str]] | None,
+                       ) -> RenderedDocument | None:
+    """None without the docx: every value is then UNGRADED."""
+    if blocks is None:
+        return None
+    units: list[OutputLine] = []
+    for kind, text in blocks:
+        texts = [line for line in str(text).split("\n") if line.strip()]
+        lines = [_output_line(line) for line in texts]
+        units.extend(lines)
+        if _is_form_table(kind, texts):
+            units.append(_form_unit(lines))
+    entries = _fields_entries(stage4)
+    owner = frozenset(value for entry in entries if entry.code == PERSONAL_DATA_CODE
+                      for value in map(squash, _nonempty_field_values(dict(entry.fields))))
+    return RenderedDocument(tuple(units), tuple(_alnum_values(e.fields) for e in entries),
+                            owner)
 
 
 def _declared_fields() -> dict[str, frozenset[str]]:
@@ -1132,6 +1258,16 @@ def _is_record_shaped(key: str, value: object, declared: frozenset[str]) -> bool
     return bool(numbered and numbered.group("field") in declared)
 
 
+def _record_count(key: str, value: object, declared: frozenset[str]) -> int:
+    """Whole records under this key: every object of a record list, else one
+    for any other record shape, 0 for one fact (#1245: XELRLZ's `appointments`
+    list of three was reported as one record). A date-named key holds a date
+    of its record, never a record of its own."""
+    if _DATE_NAMED_KEY_RE.search(key) or not _is_record_shaped(key, value, declared):
+        return 0
+    return len(value) if isinstance(value, list) else 1
+
+
 def _holds_a_non_date_value(entry: _FieldsEntry, keys: frozenset[str]) -> bool:
     """Whether any of `keys` other than a date-named one holds a value. When
     none does, the section renderers have no name, title or role to write and
@@ -1147,11 +1283,192 @@ def _holds_a_non_date_value(entry: _FieldsEntry, keys: frozenset[str]) -> bool:
                if not _DATE_NAMED_KEY_RE.search(key))
 
 
+def _is_offschema_date(key: str, value: object, declared: frozenset[str]) -> bool:
+    """Whether a date-named key is a candidate at all. Most are left out: they
+    name a date the schema declares under another name, and the renderers
+    fall back to them (R reads `start_date` when `date` is empty). Two shapes
+    are not renames: any date key on a code whose schema declares only
+    `_SINGLE_DATE_KEY`, and a list of dates or periods on any code -- a
+    second term, which no renderer reads (batch EBYSBC: VNUAHA's O
+    `additional_dates`, BZZNRL's H `dates`)."""
+    schema_dates = {name for name in declared if _DATE_NAMED_KEY_RE.search(name)}
+    return schema_dates == {_SINGLE_DATE_KEY} or isinstance(value, list)
+
+
+def _personal_value_withheld(key: str, value: object) -> bool:
+    """A Personal Data value the withhold policy keeps out of the document
+    (date or place of birth, spouse, children, home contact, ...), asked of
+    the policy as the labelled line it would be ("place of birth: <value>"):
+    its absence is the PII pass working, not a loss (#820, #821)."""
+    label = key.replace("_", " ")
+    return bool(_pii_matches(f"{label}: {' '.join(_leaf_strings(value))}",
+                             SCOPE_PERSONAL_AND_APPENDIX))
+
+
+def _anchor_values(entry: _FieldsEntry, keys: frozenset[str]) -> list[str]:
+    """The entry's values under `keys` -- the ones its section writes -- that
+    can say which line is its own: not a date, not template scaffolding."""
+    return [leaf for key in keys if not _DATE_NAMED_KEY_RE.search(key)
+            for leaf in _leaf_strings(entry.fields.get(key))
+            if leaf.strip() and not _is_date_only_text(leaf)
+            and not _piece_in_template(squash(leaf))]
+
+
+def _carries(line: OutputLine, value: str) -> bool:
+    """Whether the line carries an anchor value: in order, letters and
+    digits alone, when it is at least `RENDERED_FIELDS_MIN_VALUE_CHARS`
+    long; as words of the line when shorter ("PhD")."""
+    anchor = _alnum(value)
+    if len(anchor) >= RENDERED_FIELDS_MIN_VALUE_CHARS:
+        return anchor in line.alnum
+    words = set(_alphanumeric_tokens(value))
+    return bool(words) and words <= line.words
+
+
+def _distinctive(value: str, entry: _FieldsEntry, document: RenderedDocument) -> bool:
+    """An anchor value at least `RENDERED_FIELDS_MIN_VALUE_CHARS` long that
+    sits inside no other stage-4 record's value. Wider than
+    `Stage4Evidence.shared_values`' equality on purpose: one of ZCTARO's N3A
+    entries has a `site_position` that sits inside its siblings' longer
+    ones ("<program>" beside "<degree>, <program> - <school>"), and their
+    rows show the very institution the entry lost."""
+    anchor = _alnum(value)
+    if len(anchor) < RENDERED_FIELDS_MIN_VALUE_CHARS:
+        return False
+    holders = sum(any(anchor in held for held in values)
+                  for values in document.record_values)
+    return holders <= int(any(anchor in held for held in _alnum_values(entry.fields)))
+
+
+def _independent_values(values: list[str]) -> list[str]:
+    """`values` less any that another of them holds (`_alnum`): a
+    `mentee_level` of "<degree>" beside a `site_position` of "<degree>
+    Program" is one piece of evidence, not two, and on ZCTARO both sit on
+    every sibling row that names the same program."""
+    forms = [_alnum(value) for value in values]
+    return [value for i, (value, form) in enumerate(zip(values, forms))
+            if not any(form in other and (form != other or j < i)
+                       for j, other in enumerate(forms) if j != i)]
+
+
+def _record_lines(entry: _FieldsEntry, keys: frozenset[str],
+                  document: RenderedDocument) -> list[OutputLine]:
+    """The entry's own lines, wherever stage 6 put them: every line carrying
+    one of its `_distinctive` anchor values; failing any, every line
+    carrying more than `RENDERED_FIELDS_MAJORITY` of its anchor values, when
+    it has at least `RENDERED_FIELDS_MIN_VALUES` (`_fields_rendered`'s
+    co-location test: ZCTARO's B1 degree and institution, each held by other
+    records too, sit together only on the degree's row). Empty when neither
+    finds a line."""
+    anchors = _anchor_values(entry, keys)
+    distinctive = [value for value in anchors if _distinctive(value, entry, document)]
+    if distinctive:
+        return [line for line in document.lines
+                if any(_carries(line, value) for value in distinctive)]
+    anchors = _independent_values(anchors)
+    if len(anchors) < RENDERED_FIELDS_MIN_VALUES:
+        return []
+    return [line for line in document.lines
+            if sum(_carries(line, value) for value in anchors)
+            > RENDERED_FIELDS_MAJORITY * len(anchors)]
+
+
+def _value_leaves(value: object) -> list[str]:
+    """The value's non-blank strings (`_leaf_strings`), or the value itself
+    written out when it holds none (a number `_leaf_strings` does not read)."""
+    return [leaf for leaf in _leaf_strings(value) if leaf.strip()] or [str(value)]
+
+
+def _value_years(value: object) -> frozenset[str]:
+    return frozenset(year for leaf in _leaf_strings(value)
+                     for year in _FOUR_DIGIT_YEAR_RE.findall(leaf))
+
+
+def _shown_on(value: object, line: OutputLine, date_key: bool) -> bool:
+    """Whether the line shows the value. A date: every four-digit year in it,
+    as a word of the line (one with none has nothing to lose). Anything
+    else: every string in it, whole (`_value_on_line`) or as all of its
+    words."""
+    if date_key:
+        return _value_years(value) <= line.words
+    return all(_value_on_line(squash(leaf), line.squashed)
+               or set(_alphanumeric_tokens(leaf)) <= line.words
+               for leaf in _value_leaves(value))
+
+
+def _grade_value(entry: _FieldsEntry, key: str, value: object, keys: frozenset[str],
+                 document: RenderedDocument) -> str | None:
+    """How the document bears on one off-schema value (`GRADE_*`), or None
+    when it cannot say. A Personal Data value's own line is any line:
+    Personal Data is one table of the owner's details. An owner's contact
+    detail on another record (a page header's email fused into an O entry,
+    MRJDWE) is SHOWN when the document shows it anywhere. A date is judged
+    only on its record's lines, since its year on any other line is a
+    coincidence: None when the record's line cannot be found."""
+    date_key = bool(_DATE_NAMED_KEY_RE.search(key))
+    personal = entry.code == PERSONAL_DATA_CODE
+    own = document.lines if personal else _record_lines(entry, keys, document)
+    if any(_shown_on(value, line, date_key) for line in own):
+        return GRADE_SHOWN
+    if date_key:
+        return GRADE_ABSENT if own else None
+    shown_anywhere = any(_shown_on(value, line, False) for line in document.lines)
+    if shown_anywhere and isinstance(value, str) and squash(value) in document.owner_values:
+        return GRADE_SHOWN
+    return GRADE_ELSEWHERE if shown_anywhere else GRADE_ABSENT
+
+
+def _absence_is_a_loss(entry: _FieldsEntry, key: str, value: object) -> bool:
+    """Whether a `GRADE_ABSENT` value is CV content the document lost (WARN)
+    rather than only a value the page does not carry (INFO). A date: yes --
+    it was judged on its own record's line. A Personal Data value: when its
+    key names a row of the Personal Data table (`PERSONAL_DATA_ROW_WORDS`).
+    Anything else: when the entry's own text states it -- at least
+    `RENDER_TOKEN_OVERLAP` of the words of each of its strings, not every
+    word, since stage 4 rewrites a date inside a value (WIANVH's F2
+    `notes`). The model's own remark on an entry (BMAMWE's N3B `note` that
+    no mentee was named) is not content of the CV."""
+    if _DATE_NAMED_KEY_RE.search(key):
+        return True
+    if entry.code == PERSONAL_DATA_CODE:
+        return bool(set(key.split("_")) & PERSONAL_DATA_ROW_WORDS)
+    text_words = set(_alphanumeric_tokens(entry.text))
+    leaves = [set(_alphanumeric_tokens(leaf)) for leaf in _value_leaves(value)]
+    return all(words and len(words & text_words) / len(words) >= RENDER_TOKEN_OVERLAP
+               for words in leaves)
+
+
+def _offschema_candidates(entry: _FieldsEntry, declared: frozenset[str],
+                          readable: frozenset[str], graded: bool) -> dict[str, object]:
+    """The entry's non-empty values under a key nothing reads: in neither
+    schema, not rendered for its code, not stage-4 bookkeeping, not a record
+    list stage 6 fans out, and -- for a date-named key -- one of
+    `_is_offschema_date`'s shapes. A date and a Personal Data value are only
+    candidates when there is a document to grade them against (`graded`):
+    without it a date is far more often a rename than a loss, and a Personal
+    Data value more often withheld than lost."""
+    if entry.code == PERSONAL_DATA_CODE and not graded:
+        return {}
+    candidates: dict[str, object] = {}
+    for key, value in entry.fields.items():
+        if key in readable or _is_blank(value):
+            continue
+        if _DATE_NAMED_KEY_RE.search(key) and not (
+                graded and _is_offschema_date(key, value, declared)):
+            continue
+        if entry.code == PERSONAL_DATA_CODE and _personal_value_withheld(key, value):
+            continue
+        candidates[key] = value
+    for key in _fanned_out_keys(entry):
+        candidates.pop(key, None)
+    return candidates
+
+
 def _offschema_values(entry: _FieldsEntry, declared_by_code: dict[str, frozenset[str]],
-                      ) -> dict[str, OffschemaValue]:
-    """`{key: value}` for this entry's non-empty, non-date keys that are in
-    neither schema, not rendered for its code, not stage-4 bookkeeping, and
-    not a record list stage 6 fans out. On an entry none of whose schema or
+                      document: RenderedDocument | None) -> dict[str, OffschemaValue]:
+    """`{key: value}` for this entry's `_offschema_candidates`, each counted
+    (`_record_count`) and graded (`_grade_value`), less what the document
+    shows on its record's own line. On an entry none of whose schema or
     rendered keys holds a value other than a date, a one-fact value is left
     out, because the raw text the entry renders from usually carries it; a
     record-shaped value is always reported, because that text does not
@@ -1161,17 +1478,27 @@ def _offschema_values(entry: _FieldsEntry, declared_by_code: dict[str, frozenset
     declared = declared_by_code.get(entry.code, frozenset())
     schema_keys = declared | _RENDERED_FIELDS.get(entry.code, frozenset())
     readable = schema_keys | _stage4_bookkeeping_keys(entry.code)
-    candidates = {key: value for key, value in entry.fields.items()
-                  if key not in readable and not _is_blank(value)
-                  and not _DATE_NAMED_KEY_RE.search(key)}
-    for key in _fanned_out_keys(entry):
-        candidates.pop(key, None)
-    hits = {key: OffschemaValue(entry.element_idx, value,
-                                _is_record_shaped(key, value, declared))
-            for key, value in candidates.items()}
-    renders_from_text = not _holds_a_non_date_value(entry, schema_keys)
-    return {key: hit for key, hit in hits.items()
-            if hit.record_shaped or not renders_from_text}
+    personal = entry.code == PERSONAL_DATA_CODE
+    renders_from_text = not personal and not _holds_a_non_date_value(entry, schema_keys)
+    hits: dict[str, OffschemaValue] = {}
+    for key, value in _offschema_candidates(entry, declared, readable,
+                                            document is not None).items():
+        records = _record_count(key, value, declared)
+        if records:
+            grade = GRADE_UNGRADED
+        elif renders_from_text:
+            continue
+        elif document is None:
+            grade = GRADE_UNGRADED
+        else:
+            grade = _grade_value(entry, key, value, schema_keys, document)
+        if grade in (GRADE_SHOWN, None):
+            continue
+        warn = bool(records) or (grade == GRADE_ABSENT
+                                 and _absence_is_a_loss(entry, key, value))
+        hits[key] = OffschemaValue(entry.element_idx, value, records, grade, warn,
+                                   personal)
+    return hits
 
 
 class OffschemaSummary(NamedTuple):
@@ -1182,32 +1509,60 @@ class OffschemaSummary(NamedTuple):
     evidence: list[str]
 
 
+def _one_fact_outcome(key: str, hits: list[OffschemaValue]) -> str:
+    """The message's account of one-fact values: lost without a document to
+    say otherwise, or what the document showed."""
+    absent = sum(hit.grade == GRADE_ABSENT for hit in hits)
+    if absent:
+        where = ("not on its record's line" if _DATE_NAMED_KEY_RE.search(key)
+                 else "nowhere in the document")
+        return f"{absent} of them {where}"
+    if all(hit.grade == GRADE_UNGRADED for hit in hits):
+        return "missing from the output"
+    return "the document shows it, but not with its record"
+
+
 def _offschema_summary(code: str, key: str,
                        hits: list[OffschemaValue]) -> OffschemaSummary:
-    """WARN when any value is a whole record, INFO when each is one fact."""
-    records = sum(hit.record_shaped for hit in hits)
+    """WARN when any value is a whole record or a lost fact (`OffschemaValue
+    .warn`), INFO when each is one fact the document shows elsewhere, that
+    no document graded, or whose absence `_absence_is_a_loss` discounts."""
+    records = sum(hit.records for hit in hits)
     noun = "entry" if len(hits) == 1 else "entries"
-    lost = (f"{records} {'holds' if records == 1 else 'hold'} a whole record"
-            if records else "each holds one fact of its record")
+    if records:
+        lost = (f"{records} whole record{'' if records == 1 else 's'} under it, "
+                f"missing from the output")
+    else:
+        lost = f"each holds one fact of its record, {_one_fact_outcome(key, hits)}"
     return OffschemaSummary(
-        "WARN" if records else "INFO",
+        "WARN" if any(hit.warn for hit in hits) else "INFO",
         f"{len(hits)} {code} {noun}: `{key}` is outside the {code} schema and "
-        f"no renderer reads it -- {lost}, missing from the output (#817)",
-        [f"entry {hit.element_idx}: {_evidence_value(hit.value)}"
+        f"no renderer reads it -- {lost} (#817)",
+        [f"entry {hit.element_idx}: "
+         f"{PERSONAL_VALUE_EVIDENCE if hit.personal else _evidence_value(hit.value)}"
          for hit in hits[:FIELD_EVIDENCE_MAX_VALUES]])
 
 
-def lint_offschema_fields(stage4: dict) -> list[dict]:
+def lint_offschema_fields(stage4: dict,
+                          blocks: list[tuple[str, str]] | None = None) -> list[dict]:
     """A non-empty stage-4 value under a key that is in neither field schema
     (built-in or config, any `extract` flag), not in `fan_out._RENDERED_FIELDS`
     for its code, not stage-4 bookkeeping, and not a record list fan-out
     splits: nothing reads it, so it never reaches the document. One finding
-    per (code, key); date-named keys are left out (two-thirds of the corpus's
-    off-schema keys are dates a schema names differently)."""
+    per (code, key). Date-named keys are left out unless
+    `_is_offschema_date` says otherwise (two-thirds of the corpus's off-schema
+    keys are dates a schema names differently).
+
+    `blocks` (optional: the rendered docx, `w:ins` text included) grades each
+    one-fact value (`_grade_value`): one its record's own line shows is not
+    reported, one the document shows nowhere raises the finding to WARN
+    (#1245). Without it the lint reads stage 4 alone, as before, and leaves
+    out dates and Personal Data."""
     declared_by_code = _declared_fields()
+    document = _rendered_document(stage4, blocks)
     groups: dict[tuple[str, str], list[OffschemaValue]] = {}
     for entry in _fields_entries(stage4):
-        for key, hit in _offschema_values(entry, declared_by_code).items():
+        for key, hit in _offschema_values(entry, declared_by_code, document).items():
             groups.setdefault((entry.code, key), []).append(hit)
     return [_finding("offschema_fields", *_offschema_summary(code, key, hits))
             for (code, key), hits in sorted(groups.items())]
