@@ -265,6 +265,19 @@ PROBE_TABLE = [
     # A spelled-out child count, with no spouse span ahead of it to cover it.
     ("two children (Kim and Lee)", CAT_CHILDREN, _PERSONAL_ONLY),
     ("three sons (Bob, Cy and Dee)", CAT_CHILDREN, _PERSONAL_ONLY),
+    # #1223 (EBYSBC): the "Married:" and "Grandchildren" labels, colon form in
+    # Personal Data and the Appendix, dash form in the Personal Data block.
+    ("Married: Pat Example, Ed.D.", CAT_SPOUSE, _PERSONAL_ONLY),
+    ("Grandchildren: Kim, Lee", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("Great-grandchildren: Kim", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("Great Grandchildren: Kim", CAT_CHILDREN, _PERSONAL_ONLY),
+    ("Grandchildren – Kim Example, Lee, Bob, Cy", CAT_CHILDREN, _DASH_PERSONAL_DATA_ONLY),
+    ("Married - Pat Example", CAT_SPOUSE, _DASH_PERSONAL_DATA_ONLY),
+    # ...whose negative controls: the words inside another word or a sentence.
+    ("Unmarried: a cohort study", None, _NEVER),
+    ("Newly married: outcomes of a survey", None, _NEVER),
+    ("Grandchildren raising grandparents", None, _NEVER),
+    ("Married couples: a review", None, _NEVER),
 ]
 
 
@@ -2179,3 +2192,107 @@ def test_1223_the_price_of_the_continuation_is_an_unlabelled_neighbour_after_the
     assert _withheld_residual("Date of Birth: 01/02/1970\tUS citizen")[0] == ""
     assert _withheld_residual("Children: Kim Example\nUS Citizen")[0] == ""
 
+
+
+# --------------------------------------------------------------------------
+# #1223 (EBYSBC, EQADVR): the "Married:" and "Grandchildren" family labels, and
+# a "Born:" label whose place of birth sits past a semicolon or a column gap.
+# The spacing is the corpus's own (a semicolon, an en dash, tabs, a 5-space
+# gap); every name and place is synthetic.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, categories", [
+    ("Married: Pat Example, Ed.D.", [CAT_SPOUSE]),
+    ("Grandchildren – Kim Example, Lee, Bob, Cy", [CAT_CHILDREN]),
+    ("Great-grandchildren - Kim, Lee", [CAT_CHILDREN]),
+    ("Married – Pat Example", [CAT_SPOUSE]),
+    # a family list whose members each sit in a cell of their own
+    ("Grandchildren:\tKim Example\tLee Example\tBob Example", [CAT_CHILDREN]),
+    ("Married:\tPat Example\tEd.D.", [CAT_SPOUSE]),
+    # ...or go on over the next lines of the entry
+    ("Grandchildren: Kim Example\nLee Example", [CAT_CHILDREN]),
+    # the place of birth after the date the pre-LLM scrub already replaced
+    (f"Born: {PRE_LLM_PLACEHOLDER}; Exampleville, Examplestan", [CAT_BIRTH]),
+    (f"Born: {PRE_LLM_PLACEHOLDER}     Exampleville, Examplestan", [CAT_BIRTH]),
+    (f"Born: {PRE_LLM_PLACEHOLDER}\tExampleville, Examplestan", [CAT_BIRTH]),
+])
+def test_1223_ebysbc_family_and_birth_labels_withhold_the_whole_value(text, categories):
+    residual, withheld = _withheld_residual(text, code=A)
+    assert residual == ""
+    assert [item.category for item in withheld] == categories
+
+
+def test_1223_ebysbc_the_birth_fragment_carries_the_place_for_the_provenance_check():
+    """The Personal Data writer denies an extracted address by containment in
+    the pass's own fragments (`_from_pii_fragment`): the place of birth stage 4
+    lifted into `address` has to be inside the birth fragment, or the Office
+    address catch-all takes it."""
+    entry = {"text": f"Born: {PRE_LLM_PLACEHOLDER}; Exampleville, Examplestan",
+             "taxonomy_code": A, "extracted_fields": {"address": "Exampleville, Examplestan"}}
+    _run({A: [entry]})
+    assert any("Exampleville, Examplestan" in fragment for fragment in entry["_pii_fragments"])
+
+
+@pytest.mark.parametrize("text, kept", [
+    # the next labelled cell is the next field, never the birth label's value
+    (f"Born: {PRE_LLM_PLACEHOLDER};\tCitizenship: US", "Citizenship: US"),
+    # a line break is the one boundary the source drew
+    (f"Born: {PRE_LLM_PLACEHOLDER}\nOffice phone 212-555-0100", "Office phone 212-555-0100"),
+    ("Married: Pat Example\nOffice phone 212-555-0100", "Office phone 212-555-0100"),
+])
+def test_1223_ebysbc_the_continuation_still_stops_where_the_next_field_begins(text, kept):
+    residual, withheld = _withheld_residual(text, code=A)
+    assert residual.endswith(kept) and "Exampleville" not in residual
+    assert withheld
+
+
+def test_1223_ebysbc_a_home_address_cut_runs_over_a_married_label_as_before():
+    """Why the two labels are shape rows: as label rows they would join the
+    known-field vocabulary a home-address cut stops at part-way through its
+    value, and the spouse's name after "Married:" (which opens mid-fragment,
+    so matches nothing itself) would render. The cut may only grow."""
+    residual, withheld = _withheld_residual(
+        "Home Address:     12 Example St Springfield Married: Pat Example")
+    assert residual == ""
+    assert [item.category for item in withheld] == [CAT_HOME_CONTACT]
+
+
+@pytest.mark.parametrize("text", [
+    "Grandchildren – A Review of Kinship Care",
+    "Married - A Documentary Film Review",
+])
+def test_1223_ebysbc_the_dash_form_outside_a_family_block_in_an_appendix_entry_is_kept(text):
+    """An Appendix-bound entry can hold a title: the dash form needs a
+    `Family` label ahead of it there, as the children and spouse rows do."""
+    assert _withheld_residual(text, code=APPENDIX) == (text, [])
+
+
+def test_1223_ebysbc_the_dash_form_under_a_family_label_in_an_appendix_entry_is_withheld():
+    text = "Family:\n     Married – Pat Example\n     Grandchildren – Kim, Lee"
+    residual, withheld = _withheld_residual(text, code=APPENDIX)
+    assert "Pat" not in residual and "Kim" not in residual
+    assert [item.category for item in withheld] == [CAT_FAMILY, CAT_SPOUSE, CAT_CHILDREN]
+
+
+@pytest.mark.parametrize("text", [
+    "Married: Pat Example",
+    "Grandchildren: Kim (2010), Lee (2012)",
+    f"Born: {PRE_LLM_PLACEHOLDER}; Exampleville",
+])
+def test_1223_ebysbc_a_routed_content_entry_is_untouched(text):
+    """All three are Personal Data / Appendix rows: a routed entry keeps its
+    text (the "Born:" label is the ambiguous-title row, not the DOB row)."""
+    assert _withheld_residual(text, code=CONTENT) == (text, [])
+
+
+@pytest.mark.parametrize("text, expected", [
+    # The new rows are render-time only: a DOB after them keeps its value scrub.
+    ("Married: Pat Example, Date of Birth: 01/02/1970",
+     f"Married: Pat Example, Date of Birth: {PRE_LLM_PLACEHOLDER}"),
+    ("Grandchildren: Kim Example DOB: 01/02/2010",
+     f"Grandchildren: Kim Example DOB: {PRE_LLM_PLACEHOLDER}"),
+    ("Born: 01/02/1970; Exampleville, Examplestan",
+     f"Born: {PRE_LLM_PLACEHOLDER}; Exampleville, Examplestan"),
+])
+def test_1223_ebysbc_the_pre_llm_value_scrub_is_unchanged(text, expected):
+    assert redact_pre_llm_values(text) == expected

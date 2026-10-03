@@ -15,6 +15,7 @@ import functools
 import json
 import re
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Dict, List, NamedTuple, Tuple
@@ -1373,3 +1374,271 @@ def lint_llm_refusal_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
         f"{len(refusals)} distinct language-model refusal or "
         "request-for-input text(s) rendered in the output",
         refusals[:OUTPUT_LEAK_EVIDENCE_LIMIT])]
+
+
+# Lint 14n, owner_missing_from_citation, and its sibling etal_added (#1259):
+# each publication read against its OWN rendered bibliography line. Stage 5d's
+# prompt cuts an author list to "first 6 authors, et al.", and the #1292 owner
+# restore declines whenever stage 4's author list is damaged, so the CV owner
+# disappears from their own citation; the co-authors after the sixth go on
+# every cut list. The whole-page probes above cannot see either, because the
+# owner's name is on every other line: batch EBYSBC (2026-10-02) carried 20
+# owner-cut citations on 14 CVs and about 150 co-author cuts on 27, and
+# nothing fired.
+
+#: The taxonomy letter of a publication, and of the output section stage 6
+#: prints every publication under (`_SECTION_HEADING_PREFIXES`).
+_BIBLIOGRAPHY_LETTER = "S"
+
+#: A matching token: 3+ letters or digits, so a year, a volume and a page
+#: range count and an author's initials do not.
+_CITATION_TOKEN_RE = re.compile(r"[^\W_]{3,}")
+
+#: A rendered line and a publication entry pair when they share at least
+#: CITATION_MATCH_MIN_TOKENS tokens and those are at least
+#: CITATION_MATCH_MIN_SHARE of the line's own: the line reformats the source
+#: citation, so nearly every token it prints is the source's (a PubMed
+#: rebuild adds a few). The floor keeps a numbered line that is a year and
+#: little else from pairing with every citation of that year. On the 63-run
+#: EBYSBC/s7ab/pilot farm rendered from origin/dev c3d87c5f, 8,870 of 8,998
+#: publication entries pair; for a share anywhere from 0.5 to 0.7 and a floor
+#: from 2 to 6, the 112 owner findings change by at most one and the 706
+#: etal_added findings by at most two.
+CITATION_MATCH_MIN_TOKENS = 4
+CITATION_MATCH_MIN_SHARE = 0.6
+
+#: A word of a name: letters only.
+_NAME_WORD_RE = re.compile(r"[^\W\d_]+")
+
+#: The shortest surname word judged. A two-letter word is an author's
+#: initials as often as a name ("Example LI"); no owner on the farm has a
+#: surname that short, so it is left unjudged rather than guessed at.
+OWNER_SURNAME_MIN_CHARS = 3
+
+#: A surname word this long still counts as shown one letter off: a PubMed
+#: rebuild prints PubMed's spelling of the owner's name (NDXXAD: a letter
+#: doubled), which is the owner, not their absence.
+OWNER_SPELLING_TOLERANCE_MIN_CHARS = 6
+
+#: An "et al." that closes an author list. "et al.," does not: a source that
+#: elides the middle of its list goes on after it ("A, B, et al., Owner X").
+_ET_AL_CLOSE_RE = re.compile(r"\bet\s+al\b(?!\.?\s*,)", re.IGNORECASE)
+
+#: A source that elides authors itself: "et al.", "et.al.", "and colleagues",
+#: "and col.", or an ellipsis. A rendered "et al." then reproduces it.
+_SOURCE_ELISION_RE = re.compile(
+    r"\bet\.?\s*al\b|\band\s+col(?:l(?:eagues)?)?\b|\u2026|\.\.\.", re.IGNORECASE)
+
+#: A talk the source says was given with others ("co-presented with",
+#: "co-presenter"): the owner presented it whether or not the line names them.
+_CO_PRESENTED_RE = re.compile(r"\bco-?\s?present(?:ed|er|ers|ing)?\b", re.IGNORECASE)
+
+#: Contact data a source line can carry. The owner's surname inside an email
+#: address does not credit them (MRJDWE).
+_EMAIL_OR_URL_RE = re.compile(r"\S+@\S+|\bhttps?://\S+|\bwww\.\S+", re.IGNORECASE)
+
+#: Characters of the rendered line quoted as evidence.
+CITATION_EVIDENCE_CHARS = 160
+
+
+class RenderedCitation(NamedTuple):
+    """One publication entry and the bibliography line it rendered as, read
+    once at the artifact boundary (§8.1). `line` is the accepted-changes
+    text -- `docx_body_blocks` keeps `w:ins` and drops `w:delText` -- with
+    its citation number removed. `authors` is stage 4's own value, or ''
+    when it is absent or not text."""
+    element_idx: object
+    code: str
+    source: str
+    authors: str
+    line: str
+
+
+def _bibliography_lines(blocks: list[tuple[str, str]]) -> list[str]:
+    """The numbered paragraphs under the BIBLIOGRAPHY heading, numbers
+    removed: stage 6 prints each publication as one ("12. Author A, ...").
+    The Appendix's numbered verbatim entries are not citations it wrote."""
+    lines: list[str] = []
+    letter = None
+    for kind, text in blocks:
+        if kind != "p":
+            continue
+        if _output_section_header(text):
+            letter = _section_letter(text) or letter
+        elif letter == _BIBLIOGRAPHY_LETTER and _NUMBERED_LINE_RE.match(text):
+            lines.append(_NUMBERED_LINE_RE.sub("", text, count=1).strip())
+    return lines
+
+
+def _citation_tokens(text: str) -> frozenset[str]:
+    return frozenset(_CITATION_TOKEN_RE.findall(norm(text)))
+
+
+def _pair_lines(sources: list[frozenset[str]],
+                lines: list[frozenset[str]]) -> dict[int, int]:
+    """Source index -> line index, one to one. Every pair over both
+    thresholds is ranked by its Dice overlap (shared tokens over both sizes,
+    so of an abstract and the paper that followed it, each keeps its own
+    line) and taken best first; ties go to the earlier source and line."""
+    ranked = []
+    for i, source in enumerate(sources):
+        for j, line in enumerate(lines):
+            shared = len(source & line)
+            if (shared >= CITATION_MATCH_MIN_TOKENS
+                    and shared >= CITATION_MATCH_MIN_SHARE * len(line)):
+                ranked.append((-2 * shared / (len(source) + len(line)), i, j))
+    pairs: dict[int, int] = {}
+    taken: set[int] = set()
+    for _, i, j in sorted(ranked):
+        if i not in pairs and j not in taken:
+            pairs[i] = j
+            taken.add(j)
+    return pairs
+
+
+def _rendered_citations(stage4: dict,
+                        blocks: list[tuple[str, str]]) -> list[RenderedCitation]:
+    """Every stage-4 publication paired with its bibliography line. One that
+    pairs with no line (routed elsewhere, dropped as a duplicate, superseded)
+    is not judged: whether it rendered at all is classified_unrendered's
+    question."""
+    entries = [e for e in stage4.get("entries", [])
+               if str(e.get("taxonomy_code") or "").startswith(_BIBLIOGRAPHY_LETTER)]
+    lines = _bibliography_lines(blocks)
+    pairs = _pair_lines([_citation_tokens(str(e.get("text") or "")) for e in entries],
+                        [_citation_tokens(line) for line in lines])
+    citations = []
+    for i, entry in enumerate(entries):
+        if i not in pairs:
+            continue
+        fields = entry.get("extracted_fields")
+        authors = fields.get("authors") if isinstance(fields, Mapping) else None
+        citations.append(RenderedCitation(
+            entry.get("element_idx_start"), str(entry.get("taxonomy_code")),
+            str(entry.get("text") or ""), authors if isinstance(authors, str) else "",
+            lines[pairs[i]]))
+    return citations
+
+
+def _owner_surname_words(stage4: dict) -> frozenset[str]:
+    """The words of `cv_owner.last_name` the lint judges (OWNER_SURNAME_MIN_CHARS)."""
+    owner = stage4.get("cv_owner")
+    surname = owner.get("last_name") if isinstance(owner, Mapping) else None
+    if not isinstance(surname, str):
+        return frozenset()
+    return frozenset(word for word in _NAME_WORD_RE.findall(norm(surname))
+                     if len(word) >= OWNER_SURNAME_MIN_CHARS)
+
+
+def _one_edit_apart(a: str, b: str) -> bool:
+    """Whether two different words are one substitution, insertion or
+    deletion apart."""
+    if len(a) > len(b):
+        a, b = b, a
+    if a == b or len(b) - len(a) > 1:
+        return False
+    i = 0
+    while i < len(a) and a[i] == b[i]:
+        i += 1
+    if len(a) == len(b):
+        return a[i + 1:] == b[i + 1:]
+    return a[i:] == b[i + 1:]
+
+
+def _names_owner(text: str, owner: frozenset[str]) -> bool:
+    """Whether `text` holds a word of the owner's surname, exactly."""
+    return bool(owner & set(_NAME_WORD_RE.findall(norm(text))))
+
+
+def _shows_owner(text: str, owner: frozenset[str]) -> bool:
+    """`_names_owner`, or a word one letter off a long surname word
+    (OWNER_SPELLING_TOLERANCE_MIN_CHARS). Lenient on the rendered side only:
+    the lint fires when the source credits the owner exactly and the line
+    shows no form of them."""
+    words = set(_NAME_WORD_RE.findall(norm(text)))
+    return bool(owner & words) or any(
+        _one_edit_apart(word, name)
+        for name in owner if len(name) >= OWNER_SPELLING_TOLERANCE_MIN_CHARS
+        for word in words)
+
+
+def _author_list_end(line: str) -> int | None:
+    """Where an "et al." closes the line's author list, or None. One after a
+    "." is not in the author list -- a Vancouver author list holds no ".",
+    and "In: Editor A, et al. eds." follows the title -- the same rule
+    `_restore_stage5d_authors` applies to this text."""
+    match = _ET_AL_CLOSE_RE.search(line)
+    if match is None or "." in line[:match.start()]:
+        return None
+    return match.start()
+
+
+def _owner_credit(citation: RenderedCitation, owner: frozenset[str]) -> str | None:
+    """How the source credits the CV owner with this publication, or None:
+    stage 4's author list, else the source text (a credit such as "(including
+    X)" that stage 4 left out of `authors`, or a list it damaged), else a talk
+    the source says was co-presented."""
+    if _names_owner(citation.authors, owner):
+        return "stage 4's author list names the CV owner"
+    if _names_owner(_EMAIL_OR_URL_RE.sub(" ", citation.source), owner):
+        return "the source citation names the CV owner"
+    if _CO_PRESENTED_RE.search(citation.source):
+        return "the source says the CV owner co-presented this talk"
+    return None
+
+
+def _owner_missing_message(citation: RenderedCitation,
+                           owner: frozenset[str]) -> str | None:
+    """The finding's message when the source credits the owner and the
+    rendered author list does not show them, else None. Only the author list
+    is read when an "et al." closes it, so a name left in a trailing note
+    ("Presented by X") does not count as an author."""
+    credit = _owner_credit(citation, owner)
+    end = _author_list_end(citation.line)
+    if credit is None or _shows_owner(citation.line[:end], owner):
+        return None
+    cut = "" if end is None else " (its author list is cut to 'et al.')"
+    return (f"entry {citation.element_idx} ({citation.code}): {credit}, but the "
+            f"rendered citation does not name them{cut}")
+
+
+def lint_owner_missing_from_citation(stage4: dict,
+                                     blocks: list[tuple[str, str]]) -> list[dict]:
+    """One WARN per publication whose source credits the CV owner
+    (`_owner_credit`) and whose own rendered bibliography line does not name
+    them (#1259). The owner is `cv_owner.last_name`; with none, nothing is
+    judged -- owner_contact_missing reports that run."""
+    owner = _owner_surname_words(stage4)
+    if not owner:
+        return []
+    findings = []
+    for citation in _rendered_citations(stage4, blocks):
+        message = _owner_missing_message(citation, owner)
+        if message is not None:
+            findings.append(_finding(
+                "owner_missing_from_citation", "WARN", message,
+                [citation.line[:CITATION_EVIDENCE_CHARS]]))
+    return findings
+
+
+def lint_etal_added(stage4: dict, blocks: list[tuple[str, str]]) -> list[dict]:
+    """One INFO per rendered citation whose author list ends in "et al."
+    (`_author_list_end`) where the source text elides no author
+    (`_SOURCE_ELISION_RE`): co-authors cut, the stage 5d "first 6" rule (#1259).
+    A citation that also lost the owner is owner_missing_from_citation's
+    WARN, not reported again here."""
+    owner = _owner_surname_words(stage4)
+    findings = []
+    for citation in _rendered_citations(stage4, blocks):
+        end = _author_list_end(citation.line)
+        if (end is None or _SOURCE_ELISION_RE.search(citation.source)
+                or (owner and _owner_missing_message(citation, owner))):
+            continue
+        kept = len([name for name in citation.line[:end].split(",") if name.strip()])
+        findings.append(_finding(
+            "etal_added", "INFO",
+            f"entry {citation.element_idx} ({citation.code}): the rendered "
+            f"citation keeps {kept} author(s) and then 'et al.', where the "
+            f"source elides no author",
+            [citation.line[:CITATION_EVIDENCE_CHARS]]))
+    return findings

@@ -481,6 +481,22 @@ def test_a_stage5d_citation_is_left_alone_otherwise(citation, authors):
     assert _stage5d(citation, authors) == citation
 
 
+def test_a_damaged_stage4_list_gives_way_to_the_cvs_own_line() -> None:
+    """#1259 on the EBYSBC batch: stage 4 split an author ("Gorse, G" read
+    as "G" and "Gorse"), so its list is not printed. The entry's own `text`
+    still holds the run; the authors after 5d's six come from it."""
+    resolved = resolve_publication({
+        'text': '12. Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse G M, Holly H. A title. J Wood 2020.',
+        'extracted_fields': {
+            'formatted_citation': 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, et al. A title. J Wood. 2020.',
+            'formatting_source': 'stage_5d_llm',
+            'authors': 'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, G, Gorse, Holly H',
+            'target_name': 'Gorse GM'}})
+
+    assert resolved.formatted_citation == (
+        'Ash A, Birch B, Cedar C, Daly D, Elm E, Fir F, Gorse GM, Holly H. A title. J Wood. 2020.')
+
+
 # ---------------------------------------------------------------------------
 # Drift guard against stage 4's own schemas
 # ---------------------------------------------------------------------------

@@ -17,6 +17,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from unified_pipeline.stage6.parsing import (
     _is_mentee_record,
     _is_mentoring_outcome,
@@ -557,3 +559,26 @@ def test_a_copy_dropped_in_an_earlier_group_does_not_vouch_for_the_record() -> N
             "text": "Gizmo Clinic  PI: Dr Quill (1 of 2 Sites)  $222,222"}
     assert _m2a_titles([longer, copy] + _fused_grant_entries()) == [
         "Harbor Widget Initiative", "Gizmo Clinic"]
+
+
+# --- #666 (EBYSBC KDAZOM-03, DPEHSZ-01): a session given again on another date --
+# Invented. Courses (K1), other teaching (K4) and talks (R) repeat one title on
+# other dates; dedup reads their extracted dates the way it reads an
+# appointment's. The text carries no date, so only the fields tell them apart.
+
+@pytest.mark.parametrize("code, first, second", [
+    ("K1", {"start_date": "2029", "end_date": "2029"}, {"start_date": "2031", "end_date": "2031"}),
+    ("K4", {"date": "2031-02-11"}, {"date": "2031-04-08"}),
+    ("R", {"date": "2031-02"}, {"date": "2031-04"}),
+])
+def test_dedup_keeps_one_session_given_on_two_dates(code, first, second) -> None:
+    text = "Widget teaching session, Example University, Harbor City"
+    entries = [{"taxonomy_code": code, "element_idx_start": index, "text": text,
+                "extracted_fields": dates}
+               for index, dates in enumerate((first, second))]
+    gen = WCMTemplateGenerator(verbose=False)
+    grouped, _, decisions = gen._dedup_grouped_entries(gen._group_entries_by_code(entries))
+    assert len(grouped[code]) == 2 and decisions == []
+    entries[1]["extracted_fields"] = dict(first)
+    grouped, _, _ = gen._dedup_grouped_entries(gen._group_entries_by_code(entries))
+    assert len(grouped[code]) == 1

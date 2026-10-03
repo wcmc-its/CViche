@@ -142,6 +142,7 @@ SECTIONS_LOGGER_SEVERITY_CONTRACT = {
     '  Found name from table: %s': 'debug',
     '  Found phone from address block: %s': 'debug',
     '  Found phone from table: %s': 'debug',
+    '  Moved %d mentees from Current to Past (ended before %d)': 'info',
     '  Moved %d mentees from Past to Current (end_date=present)': 'info',
     '  No Clinical Innovations table found, inserting as bullet points': 'warning',
     '  No Clinical Leadership table found, inserting as bullet points': 'warning',
@@ -388,7 +389,7 @@ def test_sections_logger_severity_contract_is_not_silently_empty():
     fails this guard until it is added to the contract table on purpose.
     """
     text_level_records, by_file_function = _sections_logger_severity_map()
-    assert len(text_level_records) == 122, (
+    assert len(text_level_records) == 123, (
         "literal call-site count under stage6/sections/ changed -- update "
         "the table (and SECTIONS_LOGGER_DUPLICATE_TEXT_MULTIPLICITY if a "
         "text now repeats)"

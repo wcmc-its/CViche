@@ -92,6 +92,37 @@ def test_award_source_is_untouched_when_no_grant_number_was_extracted():
     assert _grant(agency="NIH")["Award Source:"] == "NIH"
 
 
+# --- the mentee's site_position is not cut to its level (class E14, EBYSBC) ------
+
+def test_a_site_position_that_contains_the_level_renders_whole():
+    # Rendered "Fellow" and lost the fellowship type: 12 rows on one CV.
+    rows = _mentee(mentee_level="Fellow", site_position="Fictional Nephrology Fellow")
+    assert rows["Site/Position:"] == "Fictional Nephrology Fellow"
+
+
+def test_a_site_position_that_contains_the_level_in_another_case_renders_whole():
+    rows = _mentee(mentee_level="Assistant Professor",
+                   site_position="assistant professor, Fictional Mentoring Committee")
+    assert rows["Site/Position:"] == "assistant professor, Fictional Mentoring Committee"
+
+
+def test_a_site_position_and_a_level_that_differ_still_combine():
+    rows = _mentee(mentee_level="PhD", site_position="Thesis")
+    assert rows["Site/Position:"] == "PhD - Thesis"
+
+
+def test_a_level_that_is_only_part_of_a_word_is_not_contained():
+    # "Postdoc" inside "Postdoctoral advisor" is another word, so the two
+    # combine as values that differ rather than the level being dropped.
+    rows = _mentee(mentee_level="Postdoc", site_position="Postdoctoral advisor")
+    assert rows["Site/Position:"] == "Postdoc - Postdoctoral advisor"
+
+
+def test_either_value_alone_renders_as_it_is():
+    assert _mentee(mentee_level="Fellow")["Site/Position:"] == "Fellow"
+    assert _mentee(site_position="Fictional Fellow")["Site/Position:"] == "Fictional Fellow"
+
+
 # --- the mentee's awards ride in Project/Accomplishments ------------------------
 
 def test_mentee_awards_are_appended_to_project_accomplishments():

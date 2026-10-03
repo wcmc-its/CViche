@@ -68,25 +68,41 @@ POINT_IN_TIME_CODES = frozenset({'H', 'R', 'K4', 'P', 'Q2', 'Q3', 'B2'})
 # else; a spaced dash followed by text is otherwise a column separator.
 _ONGOING_RANGE_END_WORDS = r'(?:present|current|now)\b'
 
+# A month, or a month and a day, written after the year with dots:
+# "2014.01", "2014.01.15". A CV that dates its rows this way writes an open
+# range "2014.01 - <journal>" (EBYSBC autopsy, class E9: three editorial
+# boards read as one-time because the year was not followed by the dash).
+_DOTTED_MONTH_DAY = r'(?:\.\d{1,2}){0,2}'
+
 
 def _source_leaves_year_open(source_text: str, year: int | None) -> bool:
     """True when the source writes `year` as an open range: "2020-",
-    "(2011-", "11/2019- Clinical ...", "2024 -<tab>Member", or closes it in
-    words: "2011 - present", "2011 to current", "2011 - now".
+    "(2011-", "11/2019- Clinical ...", "2024 -<tab>Member", "2014.01- ...",
+    or closes it in words: "2011 - present", "2011 to current", "2011 - now".
 
     Stage 4 records "2020-" as a start date with no end date, the same as a
     bare "2020", but the author wrote the open dash on purpose -- it is how a
     CV says "since 2020". A dash with a space on both sides and text after it
-    ("2023 - Excellence Award") is a column separator, not an open range, so
-    it does not count.
+    ("Award winner, 2023 - Excellence Award") is a column separator, not an
+    open range, so it does not count -- except at the very start of the
+    entry. "2021 - Member, ..." and "2014.01 - Editorial Board, ..." open
+    the entry with the year and a dash: that is the CV's date column saying
+    "since 2021" (class E9, EBYSBC autopsy). It also covers "2021 -<tab>",
+    whose tab the reader turns into a space before this text is stored, so
+    the tab rule above never sees it. A digit after the dash is a closed
+    range ("2021 - 2023 Member") and does not count.
     """
     if not source_text or year is None:
         return False
+    year_token = rf'(?<!\d){year}{_DOTTED_MONTH_DAY}'
     open_range = re.compile(
-        rf'(?<!\d){year}(?:[-\u2013\u2014](?!\s*\d)|\s+[-\u2013\u2014][ ]*(?:\t|\)|$)'
+        rf'{year_token}(?:[-\u2013\u2014](?!\s*\d)|\s+[-\u2013\u2014][ ]*(?:\t|\)|$)'
         rf'|\s*(?:[-\u2013\u2014]|\bto\b)\s*{_ONGOING_RANGE_END_WORDS})',
         re.MULTILINE | re.IGNORECASE)
-    return bool(open_range.search(source_text))
+    entry_opens_with_open_year = re.compile(
+        rf'\A\s*{year_token}\s+[-\u2013\u2014][ \t]*(?=[^\s\d])')
+    return bool(open_range.search(source_text)
+                or entry_opens_with_open_year.match(source_text))
 
 # Date format specifications per WCM template section
 # Format codes: 'mm/yyyy', 'mm/yy', 'yyyy', 'mm/dd/yyyy'
@@ -278,14 +294,27 @@ _MONTH_NAMES = MappingProxyType({
     '9': 'September',
 })
 
+# A range whose two ends read the same: "2011-2011", "2011 to 2011",
+# "March 2006 to March 2006" (EBYSBC autopsy, class E21). Stage 5c writes the
+# first shape for a one-year course; the second comes out of the day being
+# dropped below from "2006-03-21 to 2006-03-23". Not inside a longer token:
+# "R01-2011-2011" and "1990-1990s" are left alone.
+_SAME_VALUE_RANGE_RE = re.compile(
+    rf'(?<![\w-])((?:(?:{"|".join(sorted(set(_MONTH_NAMES.values())))}) )?\d{{4}})'
+    rf'\s*(?:[-\u2013\u2014]|\bto\b)\s*\1(?![\w-])')
+
+
 def normalize_iso_dates_in_text(text: str) -> str:
-    """Replace ISO-format dates in free text with human-readable equivalents.
+    """Replace ISO-format dates in free text with human-readable equivalents,
+    then collapse a range whose two ends read the same to one value.
 
     Handles patterns the Stage 5c LLM sometimes produces:
       2021-03-01  -> March 2021
       2019-08-01–2019-09-01  -> August 2019–September 2019
       2018-08  -> August 2018
       2012-06–2012-07  -> June 2012–July 2012
+      2006-03-21 to 2006-03-23  -> March 2006
+      2011-2011  -> 2011
     """
     if not text:
         return text
@@ -301,4 +330,4 @@ def normalize_iso_dates_in_text(text: str) -> str:
     # YYYY-MM (no day)
     text = re.sub(r'\b(\d{4})[-/](0?[1-9]|1[0-2])\b', _iso_to_readable, text)
 
-    return text
+    return _SAME_VALUE_RANGE_RE.sub(r'\1', text)

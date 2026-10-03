@@ -80,6 +80,7 @@ except ImportError as exc:
 from ..formatting import _set_cell_text, _set_font
 from ..normalization import (
     CAT_HOME_CONTACT,
+    CAT_PLACE_OF_BIRTH,
     WithheldItem,
     _address_cell_text,
     _from_pii_fragment,
@@ -429,6 +430,53 @@ def _cell_and_home_signals(phone: _JsonValue, text: str,
             _label_word_present('home', text, pii_fragments))
 
 
+#: The words that place an entry's address at a workplace: the Office
+#: catch-all in `_fill_personal_data` routes on them, and an entry carrying
+#: one is never read as a home banner (`_address_is_home`).
+_WORK_PLACE_WORDS = ('office', 'work', 'business')
+
+
+def _labels_a_number_home(phone: _JsonValue, text: str) -> bool:
+    """Whether the entry labels one of its phone numbers home: a home-marked
+    segment of the stage-4 value ("555-0100 (h); 555-0101 (w)",
+    `_HOME_PHONE_MARKER`), or a home label right before a number in the text
+    ("Ph (h): 555-0100", `_LABELLED_NUMBER_RE`)."""
+    if isinstance(phone, str) and _HOME_PHONE_MARKER.search(phone):
+        return True
+    return any(match.group('home') for match in _LABELLED_NUMBER_RE.finditer(text))
+
+
+def _address_is_home(text: str, pii_fragments: list[str], phone: _JsonValue) -> bool:
+    """Whether the entry's address goes to the home slot, which #821
+    withholds: the entry says "home", or it labels one of its numbers home
+    and names no workplace (`_WORK_PLACE_WORDS`). A banner that gives a home
+    number beside an unlabelled street address gives the home address; the
+    Office catch-all rendered it as the Office address (#1223, EBYSBC
+    MRJDWE-01)."""
+    if _label_word_present('home', text, pii_fragments):
+        return True
+    return (_labels_a_number_home(phone, text)
+            and not any(word in text for word in _WORK_PLACE_WORDS))
+
+
+#: A birth word in an entry's text or its withheld fragments: "Born",
+#: "Date of Birth", "Birthplace", "DOB".
+_BIRTH_WORD_RE = re.compile(r'\b(?:born\b|birth|dob\b)', re.IGNORECASE)
+
+
+def _address_is_birthplace(text: str, pii_fragments: list[str]) -> bool:
+    """Whether the entry's only address is the place on its birth line, so
+    it fills no Office cell (#1223, EBYSBC EQADVR-02): a birth word in the
+    text or in a fragment the pii pass cut, and no address or workplace word
+    (`_WORK_PLACE_WORDS`) to say the value is a contact address. "Born:
+    <date>" on one line and the place on the next, or "Born <date>; <place>"
+    with no colon, leave the place in the residual, and the Office catch-all
+    rendered it as the Office address."""
+    if any(word in text for word in (*_WORK_PLACE_WORDS, 'address')):
+        return False
+    return any(_BIRTH_WORD_RE.search(part) for part in (text, *pii_fragments))
+
+
 def _without_home_numbers(entry: dict) -> dict:
     """`entry`, or a copy whose text lacks every number a home label ("(h)",
     "h:", "Home tel") introduces (#1222). The pii pass cuts only the home
@@ -480,6 +528,42 @@ def _office_slot_ranks(unconsumed: list[dict]) -> tuple[_SlotRank, _SlotRank]:
     """The (address, telephone) ranking state for the two Office slots."""
     return (_SlotRank(_WORK_ADDRESS_LABEL_RE, _address_cell_text, unconsumed),
             _SlotRank(_WORK_PHONE_LABEL_RE, _phone_cell_text, unconsumed))
+
+
+class _AddressContext(NamedTuple):
+    """What the address routing reads from one entry: its lowercased text,
+    the fragments the pii pass cut from it, its stage-4 phone value, and the
+    entry itself (the Office slot ranking records it)."""
+    text: str
+    pii_fragments: list[str]
+    phone: _JsonValue
+    entry: dict
+
+
+def _route_address(address: _JsonValue, ctx: _AddressContext, home_address: str | None,
+                   office_address: str | None, address_rank: _SlotRank,
+                   withheld: list[WithheldItem]) -> tuple[str | None, str | None, bool]:
+    """(home_address, office_address, birthplace_withheld) after routing one
+    entry's stage-4 `address`; lifted out of `_fill_personal_data` (#1223).
+
+    A dict that names its own halves fills both slots from them instead of
+    forcing the whole thing into whichever one the raw text happened to label
+    (#442); a dict that names no slot is one address and is routed by the
+    raw text, same as a string. A place of birth fills no slot: it is
+    recorded on `withheld`, and the True third value makes the caller count
+    the entry consumed, since the recovery pass would render its residual,
+    the place (#1223, EBYSBC EQADVR-02)."""
+    if _labels_its_own_address_slots(address):
+        return (home_address or _address_cell_text(address, 'home'),
+                office_address or _address_cell_text(address, 'office'), False)
+    if _address_is_home(ctx.text, ctx.pii_fragments, ctx.phone):
+        return home_address or _address_cell_text(address, 'home'), office_address, False
+    if _address_is_birthplace(ctx.text, ctx.pii_fragments):
+        withheld.append(WithheldItem(CAT_PLACE_OF_BIRTH, _PERSONAL_DATA_SECTION_LABEL, None))
+        return home_address, office_address, True
+    if any(word in ctx.text for word in _WORK_PLACE_WORDS) or not office_address:
+        office_address = address_rank.offer(office_address, address, ctx.entry)
+    return home_address, office_address, False
 
 
 # #946: consumer mail domains. An address at one of these is the owner's
@@ -666,21 +750,37 @@ def _phone_digit_count(text: str) -> int:
     return sum(c.isdigit() for c in _EXTENSION.sub('', text))
 
 
-def _drop_home_phone_segments(value: str | None,
-                              withheld: list[WithheldItem]) -> str | None:
-    """`value` with every home-marked number segment removed (#730, #821),
-    each recorded on `withheld`; None when nothing non-home remains. A value
-    with no home segment is returned untouched, so a well-formed number is
-    never re-joined or reformatted. A segment carrying both an office and a
-    home marker with no separator between them is dropped whole."""
-    if not value:
+def _is_home_segment(segment: str, text: str) -> bool:
+    """Whether the source labels one number of a phone value home: a home
+    marker in the segment itself ("555-0100 (h)", `_HOME_PHONE_MARKER`), or,
+    given the entry's `text`, a home label right before the number there
+    (`_nearest_phone_label`, the label a single number is routed by)."""
+    return bool(_HOME_PHONE_MARKER.search(segment)) or (
+        bool(text) and _nearest_phone_label(_PhoneNumber.parse(segment), text) == _PHONE_LABEL_HOME)
+
+
+def _drop_home_phone_segments(value: _JsonValue | None, withheld: list[WithheldItem],
+                              text: str = '') -> _JsonValue | None:
+    """`value` with every home number segment removed (#730, #821;
+    `_is_home_segment`, which reads `text` when given), each recorded on
+    `withheld`; None when nothing non-home remains. A value with no home
+    segment is returned untouched, so a well-formed number is never
+    re-joined or reformatted. A segment carrying both an office and a home
+    marker with no separator between them is dropped whole. A structured
+    (dict or list) value names its own slots and is returned untouched
+    (`_labels_its_own_phone_slots`).
+
+    The entry path passes its text (#1223, EBYSBC MRJDWE-01): a combined
+    value ("555-0100 (h); 555-0101 (w)") pairs with no single number in the
+    text, so it took the Office telephone whole, home number included."""
+    if not value or not isinstance(value, str):
         return value
     segments = _PHONE_SEGMENT_SPLIT.split(value)
-    kept = [seg for seg in segments if not _HOME_PHONE_MARKER.search(seg)]
+    kept = [seg for seg in segments if not _is_home_segment(seg, text)]
     if len(kept) == len(segments):
         return value
     for seg in segments:
-        if _HOME_PHONE_MARKER.search(seg):
+        if _is_home_segment(seg, text):
             _withhold_home_row(_FIELD_HOME_PHONE, seg, seg, withheld)
     kept = [seg.strip() for seg in kept if seg.strip()]
     return '; '.join(kept) or None
@@ -840,6 +940,7 @@ class PersonalDataSection:
             text = entry.get('text', '').lower()
             slots_before = (work_email, personal_email, office_phone,
                             cell_phone, office_address, home_address)
+            birthplace_withheld = False
 
             # Values stage 4 lifted out of a protected-personal-data fragment
             # are not contact details and must not reach the template. web07's
@@ -857,7 +958,7 @@ class PersonalDataSection:
             pii_fragments = entry.get('_pii_fragments', [])
 
             # Determine type based on original text labels
-            extracted_phone = fields.get('phone')
+            extracted_phone = _drop_home_phone_segments(fields.get('phone'), self._pii_result.withheld, text)
             extracted_address = fields.get('address')
             email_key = next((key for key in _EMAIL_FIELD_KEYS if fields.get(key)), None)
             extracted_email = fields.get(email_key) if email_key else None
@@ -925,21 +1026,9 @@ class PersonalDataSection:
 
             # Classify address by type
             if extracted_address:
-                if _labels_its_own_address_slots(extracted_address):
-                    # The dict names its own halves, so fill both slots from it
-                    # instead of forcing the whole thing into whichever one the
-                    # raw text happened to label (#442). A dict that names no
-                    # slot is one address and falls through to the raw-text
-                    # routing below, same as a string.
-                    if not home_address:
-                        home_address = _address_cell_text(extracted_address, 'home')
-                    if not office_address:
-                        office_address = _address_cell_text(extracted_address, 'office')
-                elif _label_word_present('home', text, pii_fragments):
-                    if not home_address:
-                        home_address = _address_cell_text(extracted_address, 'home')
-                elif 'office' in text or 'work' in text or 'business' in text or not office_address:
-                    office_address = address_rank.offer(office_address, extracted_address, entry)
+                home_address, office_address, birthplace_withheld = _route_address(
+                    extracted_address, _AddressContext(text, pii_fragments, fields.get('phone'), entry),
+                    home_address, office_address, address_rank, self._pii_result.withheld)
 
             # Classify email by type
             if extracted_email:
@@ -959,8 +1048,8 @@ class PersonalDataSection:
             # that sets only home_phone reaches the document nowhere and is
             # genuinely unconsumed. Two corpus entries are in exactly that
             # state.
-            if (work_email, personal_email, office_phone, cell_phone,
-                    office_address, home_address) == slots_before:
+            if not birthplace_withheld and (work_email, personal_email, office_phone, cell_phone,
+                                            office_address, home_address) == slots_before:
                 unconsumed.append(entry)
 
         # Handed to the post-render recovery pass, which is the only point at
