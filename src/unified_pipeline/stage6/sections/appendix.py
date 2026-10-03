@@ -111,6 +111,27 @@ the `cv_owner` stage 6 already holds) and the words Date, Signature, Signed and
 the phrase "Signature of Candidate", with at least one of those words present. `_DATE_STAMP_RE` now also takes a numeric date, parentheses,
 and a full date alone on its line.
 
+Page furniture is the last T check (#1221, EBYSBC class E24): the source's
+running headers and footers, its Word field-code text, a lone "Page", revision
+stamps and "<SECTION> (Continued):" headers (`is_page_furniture`), plus a
+"References available on request" line (`_ON_REQUEST_RE`). Like the rule line
+these match on text alone, because 3b's wording for them varies too much to key
+on, and the shape is strict: once field-code instructions, page numbers, dates,
+the owner's own name tokens and a small furniture vocabulary are removed,
+nothing may be left, and the line must have carried a field code, a page, CV or
+revision word, or the owner's name. A line with any other word in it is kept,
+and so is one holding a citation's volume and pages, a phone number or a number
+of five digits or more.
+Two two-signal shapes widen with it: a column-header row whose cells are
+separated by single spaces (`_is_label_only_row`), and a label followed only by
+a parenthesised directive ("Sample Statement: (to be completed by ...)").
+
+The same furniture test keeps an A-coded orphan out of the post-render recovery
+(stage 6's `_unconsumed_personal_data_batch`), and decides the severity of the
+"A ... recovered into the Appendix" warning: INFO when every recovered A line is
+furniture, a school or affiliation line, a profile URL or a label left bare once
+its value was withheld (`is_routine_recovered_line`), WARN otherwise.
+
 What was dropped is reported ONCE, as a single Word comment on the introductory
 paragraph, rather than per entry -- N comments saying so is itself noise.
 
@@ -149,6 +170,7 @@ from ...core.template_boilerplate import (
 )
 from ..formatting import _set_font
 from ..normalization import _clean_inline_tabs
+from ..normalization.pii import _BARE_PHONE_SHAPE
 from ..render_check import _is_column_header_row
 
 logger = logging.getLogger(__name__)
@@ -194,6 +216,8 @@ DROP_DATE_STAMP = "date-stamp"
 DROP_SECTION_HEADER = "section-header"
 DROP_RULE_LINE = "rule-line"
 DROP_SIGNATURE_BLOCK = "signature-block"
+DROP_PAGE_FURNITURE = "page-furniture"
+DROP_ON_REQUEST = "on-request"
 DROP_REASONS = (
     DROP_BLANK,
     DROP_TEMPLATE_INSTRUCTION,
@@ -211,6 +235,8 @@ DROP_REASONS = (
     DROP_SECTION_HEADER,
     DROP_RULE_LINE,
     DROP_SIGNATURE_BLOCK,
+    DROP_PAGE_FURNITURE,
+    DROP_ON_REQUEST,
 )
 
 # The taxonomy code this whole module exists for (CODING_STANDARDS.md 8.2:
@@ -324,7 +350,8 @@ _HEADER_ROW_MAX_CELL_WORDS = 8
 _KIND_REASONING = {
     DROP_CV_TITLE: re.compile(r"(?:document|cv|curriculum vitae)[^.;]{0,25}(?:title|header)"),
     DROP_DATE_STAMP: re.compile(r"date (?:stamp|line|marker)|revision date|timestamp"),
-    DROP_COLUMN_HEADER: re.compile(r"(?:column|table)?\s*header row|column header"),
+    # "column labels": stage 3b's "header line with only column labels" (#1221).
+    DROP_COLUMN_HEADER: re.compile(r"(?:column|table)?\s*header row|column header|column labels?\b"),
     DROP_SECTION_HEADER: re.compile(
         # The verdict must be a SECTION header/label, not a looser
         # "structural header" (which also described a name line, an
@@ -334,7 +361,7 @@ _KIND_REASONING = {
         # label (#530): "structural header/category label", "subsection marker".
         r"|header/category label|subsection marker"
     ),
-    DROP_TEMPLATE_INSTRUCTION: re.compile(r"instruction (?:text|line)|broken header"),
+    DROP_TEMPLATE_INSTRUCTION: re.compile(r"instruction (?:text|line|placeholder)|broken header"),
 }
 
 
@@ -370,13 +397,42 @@ def _is_section_label_text(text: str) -> bool:
     return len(body.split()) <= _SECTION_HEADER_MAX_WORDS
 
 
-def _is_label_only_row(text: str) -> bool:
-    """A multi-cell row whose every cell is a short, digit-free label -- the
-    shape of a table header the vocabulary heuristic (`_is_column_header_row`)
-    missed. Any digit means data (a year, a count), so the row is kept."""
-    cells = [c for c in _HEADER_CELL_SPLIT_RE.split(text) if c and c.strip()]
-    if len(cells) < 2 or any(ch.isdigit() for ch in text):
+# A header row whose cells reached stage 6 joined by single spaces ("Project
+# Sponsor Role Percent Period", #1221): one line of capitalised words, with only
+# connectors or symbols between them.
+_LABEL_RUN_MIN_WORDS = 3
+_LABEL_RUN_MAX_WORDS = 12
+_LABEL_RUN_CONNECTORS = frozenset({"of", "and", "or", "by", "in", "for", "the", "to", "&", "#", "/", "-"})
+_SENTENCE_PUNCTUATION = ".,;:"
+
+
+def _is_heading_words(words: Sequence[str]) -> bool:
+    """Every word is capitalised or a connector, as in a heading or a label."""
+    return all(word[0].isupper() or word.lower() in _LABEL_RUN_CONNECTORS for word in words)
+
+
+def _is_label_run(text: str) -> bool:
+    """One line of three to twelve words, each capitalised or a connector, with
+    no sentence punctuation: a header row's labels side by side."""
+    words = text.split()
+    if "\n" in text or not _LABEL_RUN_MIN_WORDS <= len(words) <= _LABEL_RUN_MAX_WORDS:
         return False
+    if any(ch in text for ch in _SENTENCE_PUNCTUATION):
+        return False
+    capitalised = [word for word in words if word[0].isupper()]
+    return len(capitalised) >= _LABEL_RUN_MIN_WORDS and _is_heading_words(words)
+
+
+def _is_label_only_row(text: str) -> bool:
+    """A multi-cell row whose every cell is a short, digit-free label, or one
+    line of labels (`_is_label_run`) -- the shape of a table header the
+    vocabulary heuristic (`_is_column_header_row`) missed. Any digit means data
+    (a year, a count), so the row is kept."""
+    if any(ch.isdigit() for ch in text):
+        return False
+    cells = [c for c in _HEADER_CELL_SPLIT_RE.split(text) if c and c.strip()]
+    if len(cells) < 2:
+        return _is_label_run(text)
     return all(len(c.split()) <= _HEADER_ROW_MAX_CELL_WORDS for c in cells)
 
 
@@ -402,14 +458,38 @@ def _is_wrapped_instruction_tail(text: str) -> bool:
     return closes_unopened or bool(_AUTHOR_DIRECTIVE_RE.search(body))
 
 
-class OwnerTokens(NamedTuple):
-    """The owner's word tokens for the signature-block shape (#1221).
+# A form label followed only by the template's own directive in parentheses
+# ("Sample Statement:  (to be completed by the applicant; please be brief.)",
+# #1221).
+# Digit-free, so a label holding a real value in parentheses is kept.
+_LABELLED_DIRECTIVE_RE = re.compile(
+    r"^[^()\d:]{1,60}:\s*\(\s*(?:to\s+be\s+(?:written|completed|provided|filled)"
+    r"|please|provide|describe|list|include|limit)\b[^()\d]*\)\.?$",
+    re.IGNORECASE,
+)
 
-    `removable` is everything the shape may subtract from a line: name words,
+
+def _is_template_directive(text: str) -> bool:
+    """A wrapped instruction tail (#530) or a labelled directive (#1221)."""
+    return _is_wrapped_instruction_tail(text) or bool(_LABELLED_DIRECTIVE_RE.match(text.strip()))
+
+
+class OwnerTokens(NamedTuple):
+    """The owner's word tokens for the signature-block and page-furniture
+    shapes (#1221).
+
+    `removable` is everything a shape may subtract from a line: name words,
     credentials ("MD", "FACP") and single initials. They are only subtracted, never
-    evidence: a signature block needs a Date, Signature or Signed word."""
+    evidence: a signature block needs a Date, Signature or Signed word.
+
+    `names` (the first, middle and last name words of two letters or more) and
+    `initials` (the first letter of each of those words, however short) let the
+    page-furniture shape count the owner's name as evidence that a line is a
+    running header, alone or written behind up to three initials ("JQDoe")."""
 
     removable: frozenset[str] = frozenset()
+    names: frozenset[str] = frozenset()
+    initials: frozenset[str] = frozenset()
 
 
 def _name_words(value: object) -> set[str]:
@@ -424,12 +504,18 @@ def _owner_signature_tokens(cv_owner: Mapping[str, object] | None) -> OwnerToken
     of each (#1221)."""
     owner = cv_owner or {}
     removable = _name_words(owner.get("full_name_with_credentials"))
+    name_words: set[str] = set()
     for field in _OWNER_NAME_FIELDS:
-        removable |= _name_words(owner.get(field))
+        name_words |= _name_words(owner.get(field))
+    removable |= name_words
     # A name written with a middle initial ("Jane Q. Doe" as "J. Doe") still has the
     # owner's tokens: an initial of any owner token counts as one.
     removable |= {token[0] for token in removable}
-    return OwnerTokens(frozenset(removable))
+    return OwnerTokens(
+        frozenset(removable),
+        frozenset(word for word in name_words if len(word) > 1),
+        frozenset(word[0] for word in name_words),
+    )
 
 
 def _is_signature_block(text: str, owner_tokens: OwnerTokens) -> bool:
@@ -445,8 +531,157 @@ def _is_signature_block(text: str, owner_tokens: OwnerTokens) -> bool:
     return bool(rest) and all(w in _SIGNATURE_VOCAB for w in rest)
 
 
+# #1221 (EBYSBC E24): page furniture. The source's running headers and footers,
+# its page-number and date fields, a lone "Page" and its revision stamps reach
+# the Appendix T-coded, under reasoning too varied to key on. None of it is CV
+# content under any code, so `is_page_furniture` matches on text alone.
+#
+# Word field-code instruction text a .doc conversion leaves in the runs as
+# literal text: a switch with its argument ('\* MERGEFORMAT', '\@ "MMMM d,
+# yyyy"', '\h', '\r 1') ...
+_FIELD_SWITCH_RE = re.compile(r'\\[*@#!]\s*(?:"[^"]*"|[A-Za-z]+)?|\\[a-z]\b(?:\s+\d+)?')
+# ... the field names, which Word writes in capitals (so "Page" or "Date" as a
+# word is not one), removed once the line holds a field code ...
+_FIELD_NAME_RE = re.compile(r"\b(?:PAGE|NUMPAGES|SECTIONPAGES|MERGEFORMAT|SEQ|SHAPE|DATE|CHAPTER)\b")
+# ... and the names that are a field code even without a switch ("Page PAGE 14").
+_SWITCHLESS_FIELD_NAME_RE = re.compile(r"\b(?:PAGE|NUMPAGES|SECTIONPAGES|MERGEFORMAT)\b")
+# "P a g e": a PDF header's letter-spaced word.
+_SPACED_PAGE_RE = re.compile(r"\bp\s+a\s+g\s+e\b", re.IGNORECASE)
+_POSSESSIVE_RE = re.compile(r"['’]s\b")
+# A page number, arabic, ordinal or roman ("26", "3rd", "iv"), or a date's day,
+# month or year once its separators are gone. Four digits at most, so a ZIP code
+# or a phone number written without separators is not one.
+_PAGE_NUMBER_RE = re.compile(r"\d{1,4}(?:st|nd|rd|th)?|[ivx]{1,4}")
+# Numbers no page furniture holds: a citation's volume, issue and pages
+# ("2011;7:101-109") or a phone number. A line with either is record content.
+_RECORD_NUMBER_RE = re.compile(r"\d\s*[;:]\s*\d|" + _BARE_PHONE_SHAPE)
+# Words that show a line is furniture: a page, the CV's title, a revision stamp.
+# Not "pages" or "pg": "Pages 12-19" is a citation's page range.
+_FURNITURE_EVIDENCE_WORDS = frozenset({
+    "page", "cv", "curriculum", "vitae", "vita",
+    "revised", "revision", "updated", "update", "version", "prepared",
+})
+# Words such a line may also hold, which are no evidence by themselves.
+_FURNITURE_FILLER_WORDS = frozenset({
+    "of", "date", "dated", "last", "as", "on", "name", "p",
+    "january", "jan", "february", "feb", "march", "mar", "april", "apr", "may",
+    "june", "jun", "july", "jul", "august", "aug", "september", "sep", "sept",
+    "october", "oct", "november", "nov", "december", "dec",
+})
+# "SAMPLE APPOINTMENTS (Continued):": the label a section repeats at the top of
+# each page it runs onto. The label must read as a heading (`_is_continued_header`):
+# a few capitalised words, no comma or sentence, so a record that ends
+# "(continued)" is kept.
+_CONTINUED_HEADER_RE = re.compile(
+    r"^(?P<label>[^\d()]{2,80})\(\s*(?:continued|cont(?:'d|’d|\.)?)\s*\)\s*:?$", re.IGNORECASE)
+_CONTINUED_LABEL_MAX_WORDS = 6
+# "References: Available on Request" (the label may sit in another cell).
+_ON_REQUEST_RE = re.compile(
+    r"^(?:references?\s*:?\s*)?(?:are\s+)?available\s+(?:up)?on\s+request\.?$", re.IGNORECASE)
+# How many of the owner's initials a running header runs together ("JQDoe").
+_MAX_FUSED_INITIALS = 3
+
+
+def _names_owner(word: str, owner_tokens: OwnerTokens) -> bool:
+    """*word* is one of the owner's name words, alone or behind up to three of
+    the owner's initials ("jqdoe" for an owner Jane Q. Doe)."""
+    for name in owner_tokens.names:
+        prefix = word[:-len(name)]
+        if (word.endswith(name) and len(prefix) <= _MAX_FUSED_INITIALS
+                and all(ch in owner_tokens.initials for ch in prefix)):
+            return True
+    return False
+
+
+def _is_fused_initials(word: str, owner_tokens: OwnerTokens) -> bool:
+    """Two or three of the owner's initials run together ("jqd")."""
+    return (2 <= len(word) <= _MAX_FUSED_INITIALS
+            and all(ch in owner_tokens.initials for ch in word))
+
+
+def _is_continued_header(text: str) -> bool:
+    """A section heading repeated with "(Continued)" (#1221): up to six words,
+    each capitalised or a connector, with no sentence punctuation."""
+    match = _CONTINUED_HEADER_RE.match(text)
+    if not match:
+        return False
+    label = match.group("label")
+    words = label.split()
+    return (0 < len(words) <= _CONTINUED_LABEL_MAX_WORDS
+            and not any(ch in label for ch in _SENTENCE_PUNCTUATION)
+            and _is_heading_words(words))
+
+
+def is_page_furniture(text: str, owner_tokens: OwnerTokens = OwnerTokens()) -> bool:
+    """True when *text* is page furniture (#1221): a "(Continued)" header, or a
+    line that, once Word field-code instructions, page numbers, dates, the
+    owner's name tokens and `_FURNITURE_FILLER_WORDS` are removed, holds nothing
+    else, and that held a field code, a `_FURNITURE_EVIDENCE_WORDS` word or the
+    owner's name. A bare date range or "May 1981" has no evidence and is kept; a
+    line with any other word in it ("Example Lab, Page 2"), a citation's volume
+    and pages, a phone number or a number of five digits or more is kept."""
+    stripped = text.strip()
+    if _is_continued_header(stripped):
+        return True
+    has_field = bool(_FIELD_SWITCH_RE.search(stripped) or _SWITCHLESS_FIELD_NAME_RE.search(stripped))
+    if has_field:
+        stripped = _FIELD_NAME_RE.sub(" ", _FIELD_SWITCH_RE.sub(" ", stripped))
+    if _RECORD_NUMBER_RE.search(stripped):
+        return False
+    body = _POSSESSIVE_RE.sub("", _SPACED_PAGE_RE.sub(" page ", stripped).lower().replace(".", ""))
+    evidence = has_field
+    for word in _WORD_RE.findall(body):
+        if word in _FURNITURE_EVIDENCE_WORDS or _names_owner(word, owner_tokens):
+            evidence = True
+        elif not (word in _FURNITURE_FILLER_WORDS or word in owner_tokens.removable
+                  or _PAGE_NUMBER_RE.fullmatch(word) or _is_fused_initials(word, owner_tokens)):
+            return False
+    return evidence
+
+
+def _furniture_reason(text: str, owner_tokens: OwnerTokens) -> str | None:
+    """`DROP_PAGE_FURNITURE` or `DROP_ON_REQUEST` for a T entry's text, else
+    None (#1221)."""
+    if is_page_furniture(text, owner_tokens):
+        return DROP_PAGE_FURNITURE
+    if _ON_REQUEST_RE.match(text.strip().rstrip("|").strip()):
+        return DROP_ON_REQUEST
+    return None
+
+
+# A recovered A line that needs no reviewer's attention (#1221): a school or
+# affiliation line that names no rank or role ...
+_AFFILIATION_LINE_RE = re.compile(
+    r"^(?:current\s+|primary\s+)?(?:school|affiliation|institution|university|college|department)"
+    r"\s*:\s*[^\d:]+$",
+    re.IGNORECASE,
+)
+_RANK_WORD_RE = re.compile(
+    r"\b(?:professor|instructor|lecturer|fellow|resident|chair|chief|director|dean|head"
+    r"|scientist|investigator|attending|physician|adjunct|emeritus|president|officer)\b",
+    re.IGNORECASE,
+)
+# ... a profile URL, with or without its label ...
+_PROFILE_URL_RE = re.compile(r"^(?:[A-Za-z ]{1,20}:\s*)?(?:https?://|www\.)\S+$", re.IGNORECASE)
+# ... or a label left bare once the PII pass withheld its value ("Contact
+# Details:"); the withheld-data notice beside it says what was removed.
+_BARE_LABEL_RE = re.compile(r"^[^\d:]{1,40}:$")
+
+
+def is_routine_recovered_line(text: str, owner_tokens: OwnerTokens = OwnerTokens()) -> bool:
+    """True when a recovered A line holds nothing a reviewer must act on
+    (#1221): page furniture (the owner's name, the CV title, a running header),
+    a school or affiliation line naming no rank, a profile URL, or a bare
+    label. A rank, a family line or a phone number is not routine."""
+    stripped = text.strip()
+    if _AFFILIATION_LINE_RE.match(stripped):
+        return not _RANK_WORD_RE.search(stripped)
+    return bool(is_page_furniture(stripped, owner_tokens)
+                or _PROFILE_URL_RE.match(stripped) or _BARE_LABEL_RE.match(stripped))
+
+
 _KIND_SHAPE = {
-    DROP_TEMPLATE_INSTRUCTION: _is_wrapped_instruction_tail,
+    DROP_TEMPLATE_INSTRUCTION: _is_template_directive,
     DROP_CV_TITLE: lambda t: bool(_CV_TITLE_RE.match(t)),
     DROP_DATE_STAMP: lambda t: bool(_DATE_STAMP_RE.match(t)),
     DROP_COLUMN_HEADER: _is_label_only_row,
@@ -498,6 +733,15 @@ class UnmappedEntry(TypedDict, total=False):
 AppendixLine = tuple[UnmappedEntry, str]
 
 
+class RecoveredLine(NamedTuple):
+    """One bullet `_add_remaining_to_appendix` wrote into the Appendix: the
+    taxonomy code that classified it and the text the reader sees. The text
+    decides the A warning's severity (#1221)."""
+
+    code: str
+    text: str
+
+
 # Why a taxonomy code's entries were diverted to the Appendix (#531,
 # #531-R2). Named constants rather than inline strings because they are a
 # comparison target for `_appendix_diversion_reason` and, once emitted, a
@@ -521,6 +765,14 @@ _DECLINED_GRANT_CODES = frozenset({'M2A', 'M2B', 'M2C'})
 # member), the structured render for it simply did not find this specific
 # record. Applies regardless of the code's own routing status.
 REASON_RECOVERED_UNRENDERED = "recovered_unrendered"
+
+# The severities an `appendix_diversion` warning carries into the sidecar,
+# which `lint_stage6_warnings` re-emits as is (#1221).
+SEVERITY_INFO = "INFO"
+SEVERITY_WARN = "WARN"
+# The Personal Data code: its recovered lines are mostly the owner's own banner,
+# so only its warning is split by what the lines hold.
+_PERSONAL_DATA_CODE = "A"
 
 # Stage 4 (`stage4/code_check.py`, #651) re-coded this entry to T because its
 # stage 3b code is not in taxonomy_v7.json. Distinct from REASON_NO_RENDER_ROUTE
@@ -680,7 +932,9 @@ class AppendixDiversionWarning(TypedDict):
     keys `lint_stage6_warnings` cannot recover from `message` alone: `code`
     and `count`. `evidence` is always `[]` by design -- this check reports a
     count, never entry text (PII surface; the Appendix itself already
-    carries the text)."""
+    carries the text). `severity` is what `lint_stage6_warnings` re-emits:
+    INFO only for recovered A lines that are all routine (#1221), WARN
+    otherwise."""
 
     check: str
     code: str
@@ -689,6 +943,7 @@ class AppendixDiversionWarning(TypedDict):
     reason: str
     message: str
     evidence: list[str]
+    severity: str
 
 
 def _appendix_diversion_reason(code: str, render_routed_codes: frozenset[str],
@@ -722,9 +977,10 @@ def _appendix_diversion_reason(code: str, render_routed_codes: frozenset[str],
 
 def build_appendix_diversion_warnings(
     written: Sequence[UnmappedEntry],
-    recovered_codes: Sequence[str],
+    recovered: Sequence[RecoveredLine],
     render_routed_codes: frozenset[str],
     passthrough_codes: frozenset[str],
+    owner_tokens: OwnerTokens = OwnerTokens(),
 ) -> list[AppendixDiversionWarning]:
     """One `appendix_diversion` warning per (taxonomy code, reason) pair
     actually present in the Appendix (#531, #531-R2 finding F1). Two input
@@ -733,12 +989,18 @@ def build_appendix_diversion_warnings(
     - *written*: the entries `_fill_appendix` put on the page as NUMBERED
       lines, i.e. AFTER `_appendix_drop_reason` filtering. Reason is
       `_appendix_diversion_reason`'s routing-based split.
-    - *recovered_codes*: one taxonomy code per "bullet" line
+    - *recovered*: one `RecoveredLine` per "bullet" line
       `_add_remaining_to_appendix` wrote on behalf of
       `_reconsider_appendix_entries` / `_recover_unrendered_records` --
       always REASON_RECOVERED_UNRENDERED, regardless of the code's own
       routing status, since these exist because a specific record did not
       render, not because its code lacks a route.
+
+    Every warning is WARN except one: the recovered A warning is INFO when
+    every recovered A line is routine (`is_routine_recovered_line`, which
+    reads *owner_tokens* for the owner's name) -- a name banner, a school
+    line or a profile URL says nothing went wrong (#1221). Numbered T lines
+    need no such split: page furniture is dropped before they are counted.
 
     *passthrough_codes* (`stage6/sections/passthrough.py`'s
     `PASSTHROUGH_CODES`, #531-R3 task 4) is threaded through to
@@ -767,12 +1029,17 @@ def build_appendix_diversion_warnings(
         else:
             reason = _appendix_diversion_reason(code, render_routed_codes, passthrough_codes)
         counts[(code, reason)] += 1
-    for code in recovered_codes:
-        counts[(code or "?", REASON_RECOVERED_UNRENDERED)] += 1
+    routine: Counter[str] = Counter()
+    for line in recovered:
+        code = line.code or "?"
+        counts[(code, REASON_RECOVERED_UNRENDERED)] += 1
+        if code == _PERSONAL_DATA_CODE and is_routine_recovered_line(line.text, owner_tokens):
+            routine[code] += 1
 
     warnings: list[AppendixDiversionWarning] = []
     for code, reason in sorted(counts):
         count = counts[(code, reason)]
+        all_routine = reason == REASON_RECOVERED_UNRENDERED and routine[code] == count
         warnings.append({
             "check": "appendix_diversion",
             "code": code,
@@ -781,6 +1048,7 @@ def build_appendix_diversion_warnings(
             "reason": reason,
             "message": _diversion_message(code, count, reason, passthrough_codes),
             "evidence": [],
+            "severity": SEVERITY_INFO if all_routine else SEVERITY_WARN,
         })
     return warnings
 
@@ -809,6 +1077,9 @@ def _appendix_drop_reason(
     and additionally needs the text's own positive shape. *owner_tokens* (the
     owner name stage 6 holds, see `_owner_signature_tokens`) lets the signature-block
     shape recognise "Signed: <owner>" (#1221); empty skips that recognition.
+    A T entry nothing above caught last meets `_furniture_reason` (#1221):
+    page furniture, which also reads *owner_tokens* for a running header, and
+    "References available on request".
     """
     if not text.strip():
         return DROP_BLANK
@@ -839,7 +1110,8 @@ def _appendix_drop_reason(
     # Last, so every older check keeps the drop it already claimed; only
     # entries nothing else caught reach the two-signal residual test.
     if taxonomy_code == _APPENDIX_TAXONOMY_CODE:
-        return _confirmed_structural_reason(text, reasoning, owner_tokens)
+        return (_confirmed_structural_reason(text, reasoning, owner_tokens)
+                or _furniture_reason(text, owner_tokens))
     return None
 
 
