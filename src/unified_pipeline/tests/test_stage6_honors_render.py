@@ -180,3 +180,178 @@ def test_single_award_with_no_granting_body_renders_empty_org_887():
     rows = _render_honors([entry])
     assert rows == [["College of Education 2015 Outstanding Thesis Award",
                      "", "2016"]]
+
+
+# --------------------------------------------------------------------------
+# #1245 / EBYSBC class E15: dates under keys outside the H schema, and one
+# stage-4 award record split into several rows. Every value is invented.
+# --------------------------------------------------------------------------
+
+def _h_entry(text, **fields):
+    return {"taxonomy_code": "H", "text": text, "extracted_fields": fields}
+
+
+def test_a_start_end_range_renders_when_the_schema_date_is_empty():
+    """KDAZOM-04 / VVRTUC-03 / OTBUCZ-01 shape: stage 4 put the range under
+    start_date/end_date and left `date` empty; the text's "2011-13" is not a
+    year the text fallback can read, so the cell used to be empty."""
+    rows = _render_honors([
+        _h_entry("Imaginary Teaching Prize, Fictional Board 2011-13",
+                 award_name="Imaginary Teaching Prize",
+                 granting_body="Fictional Board", date=None,
+                 start_date="2011", end_date="2013"),
+        _h_entry("Pretend Honor Roll, Made-up School 2017-",
+                 award_name="Pretend Honor Roll", granting_body="Made-up School",
+                 start_date="2017-09", end_date="present"),
+    ])
+    assert rows == [
+        ["Pretend Honor Roll", "Made-up School", "2017-Present"],
+        ["Imaginary Teaching Prize", "Fictional Board", "2011-2013"],
+    ]
+
+
+def test_an_end_date_with_no_start_closes_the_range_date_opens():
+    """XWNZWW-09 shape: `date` plus an `end_date` and no `start_date` is one range. Next to a
+    start_date of its own, `date` is the award's date and wins."""
+    rows = _render_honors([
+        _h_entry("Named in Pretend Directory 2001-2004",
+                 award_name="Named in Pretend Directory", granting_body="Imaginary Press",
+                 date="2001", end_date="2004"),
+        _h_entry("2016 Made-up Fellow, Fictional Institute (2016-2017)",
+                 award_name="Made-up Fellow", granting_body="Fictional Institute",
+                 date="2016", start_date="2016", end_date="2017"),
+    ])
+    assert rows == [
+        ["Made-up Fellow", "Fictional Institute", "2016"],
+        ["Named in Pretend Directory", "Imaginary Press", "2001-2004"],
+    ]
+
+
+def test_a_dates_list_renders_every_date_it_holds():
+    """HZGJFM-02 (a list of spans) and BZZNRL-06 (a '; ' string): the text
+    fallback kept only the last year, or none for a "1993-94" span."""
+    rows = _render_honors([
+        _h_entry("Pretend Top Clinician 1993-94, 2008-2009",
+                 award_name="Pretend Top Clinician", date=None,
+                 dates=[{"start_date": "1993", "end_date": "1994"},
+                        {"start_date": "2008", "end_date": "2009"}]),
+        _h_entry("Imaginary Teaching Award, 2012, 2013",
+                 award_name="Imaginary Teaching Award", date=None,
+                 dates="2012; 2013"),
+        _h_entry("Fictional Prize",
+                 award_name="Fictional Prize", additional_dates="2008; 2007"),
+    ])
+    assert [row[2] for row in rows] == [
+        "1993-1994, 2008-2009", "2012, 2013", "2008, 2007"]
+
+
+def test_each_line_of_one_award_won_in_several_years_keeps_its_own_year():
+    """ZDCXIV-03: every line naming stage 4's award rendered stage 4's one
+    date. ZDCXIV-02: the organization's own line above them rendered as an
+    award of its own."""
+    rows = _render_honors([_h_entry(
+        "Fictional College of Pretend Studies\n"
+        "Made-up Faculty Award — 06/11/2019\n"
+        "Made-up Faculty Award — 05/14/2018",
+        award_name="Made-up Faculty Award",
+        granting_body="Fictional College of Pretend Studies",
+        date="2019-06-11", additional_dates="2018-05-14")])
+    assert rows == [
+        ["Made-up Faculty Award", "Fictional College of Pretend Studies", "2019"],
+        ["Made-up Faculty Award", "Fictional College of Pretend Studies", "2018"],
+    ]
+
+
+def test_one_award_written_over_several_lines_is_one_row():
+    """ZDCXIV-02: "Award", then "Organization — date", or a poster title and
+    its authors above the dated line, rendered one row per line."""
+    rows = _render_honors([
+        _h_entry("Imaginary Pharmacy Scholarship\n"
+                 "Fictional University, College of Pretend — 07/09/2010",
+                 award_name="Imaginary Pharmacy Scholarship",
+                 granting_body="Fictional University, College of Pretend",
+                 date="2010-07-09"),
+        _h_entry("Pretend Poster Prize Runner-up\n"
+                 "A Made-up Study of Widget Costs\n"
+                 "Doe J, Roe R, Poe Q\n"
+                 "Imaginary Congress of Widgets, Nowhere — 03/2012",
+                 award_name="Pretend Poster Prize Runner-up",
+                 granting_body="Imaginary Congress of Widgets", date="2012"),
+        _h_entry("Imaginary Counseling Contest\nFirst Prize — 02/2009",
+                 award_name="First Prize, Imaginary Counseling Contest",
+                 granting_body="Pretend Society", date="2009-02"),
+    ])
+    assert rows == [
+        ["Pretend Poster Prize Runner-up", "Imaginary Congress of Widgets", "2012"],
+        ["Imaginary Pharmacy Scholarship",
+         "Fictional University, College of Pretend", "2010"],
+        ["First Prize, Imaginary Counseling Contest", "Pretend Society", "2009"],
+    ]
+
+
+def test_a_list_whose_only_date_is_on_the_extracted_award_keeps_every_award():
+    """The guard on the one-row reading: stage 4 extracted the last award of
+    a fused list, and that award's own line is the only dated one. A curly
+    quote in the source must not hide that line (stage 4 wrote a straight
+    one), which would collapse the list into its last award."""
+    rows = _render_honors([_h_entry(
+        "Pretend Mentoring Certificate\n"
+        "Imaginary Service Medal\n"
+        "Doe’s Neighbourhood Service Prize | 2015",
+        award_name="Doe's Neighbourhood Service Prize", date="2015")])
+    assert [row[0] for row in rows] == [
+        "Pretend Mentoring Certificate", "Imaginary Service Medal",
+        "Doe's Neighbourhood Service Prize"]
+    assert rows[2][2] == "2015"
+
+
+def test_an_undated_list_is_still_read_as_a_list():
+    rows = _render_honors([_h_entry(
+        "Pretend Teaching Prize\nImaginary Service Medal",
+        award_name="Pretend Teaching Prize")])
+    assert [row[0] for row in rows] == [
+        "Pretend Teaching Prize", "Imaginary Service Medal"]
+
+
+def test_a_list_naming_years_the_record_does_not_have_stays_a_list():
+    """Stage 4's award is on an undated line here, so only the dates tie
+    the other lines to it -- and they are not the record's own."""
+    rows = _render_honors([_h_entry(
+        "Pretend Teaching Prize\nImaginary Service Medal 2014\n"
+        "Fictional Research Cup 2011",
+        award_name="Pretend Teaching Prize", date="2016")])
+    assert sorted(row[0] for row in rows) == [
+        "Fictional Research Cup", "Imaginary Service Medal",
+        "Pretend Teaching Prize"]
+
+
+def test_a_fanned_out_child_is_one_row_with_its_own_dates():
+    """ZCTARO-04: fan-out gives the first record the built line "Award | Org |
+    YYYY-MM | YYYY-MM", which the '|' parser split into four rows, and the
+    parent kept the first award's year from the raw text."""
+    from unified_pipeline.stage4.schemas import STAGE4_RECORDS_KEY
+    first = {"award_name": "Pretend Investigator",
+             "granting_body": "Imaginary Foundation, Nowhere",
+             "date": None, "start_date": "1998-03", "end_date": "2002-08"}
+    last = {"award_name": "Senior Made-up Scholar",
+            "granting_body": "Fictional Coalition",
+            "date": None, "start_date": "2003-09", "end_date": "2007-05"}
+    entry = {"taxonomy_code": "H", "element_idx_start": 7,
+             "text": "1998.03 - 2002.08 Pretend Investigator, Imaginary "
+                     "Foundation, Nowhere 2003.09 - 2007.05 Senior "
+                     "Made-up Scholar, Fictional Coalition",
+             "extracted_fields": {**last, STAGE4_RECORDS_KEY: [first, last]}}
+    grouped = WCMTemplateGenerator(verbose=False)._group_entries_by_code([entry])
+    assert _render_honors(grouped["H"]) == [
+        ["Senior Made-up Scholar", "Fictional Coalition", "2003-2007"],
+        ["Pretend Investigator", "Imaginary Foundation, Nowhere", "1998-2002"],
+    ]
+
+
+def test_a_date_only_fragment_keeps_an_empty_name_cell():
+    """A stage-2 date continuation coded H: the range now comes from stage
+    4's fields, and the fragment is still peeled off the name cell rather
+    than repeated there."""
+    rows = _render_honors([_h_entry("1971- 1972.", award_name=None,
+                                    start_date="1971", end_date="1972")])
+    assert rows == [["", "", "1971-1972"]]
