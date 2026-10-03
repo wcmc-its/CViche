@@ -637,6 +637,9 @@ def test_other_codes_still_read_a_start_only_record_as_ongoing(code):
     "2021.07- Member, Quality Committee",
     "2021.07 -\tMember, Quality Committee",
     "Member, Quality Committee, 2021.07 - present",
+    # A two-digit year after a slashed month, or month and day.
+    "Member, Quality Committee 6/01/21-",
+    "11/21- Member, Quality Committee",
 ])
 def test_point_in_time_keeps_present_when_the_source_leaves_the_year_open(source_text):
     assert format_date_range("2021", "", "P", source_text) == "2021-Present"
@@ -652,6 +655,10 @@ def test_point_in_time_keeps_present_when_the_source_leaves_the_year_open(source
     "2021-22 Member, Quality Committee",
     "2019- Member, Quality Committee",           # a different year left open
     "12021- Quality Committee",                  # not the year, part of a number
+    "3/21/2022- Member, Quality Committee",      # 21 is the day, not the year
+    "6/01/21 Member, Quality Committee",         # a slashed date with no dash
+    "2019/06/21- Member, Quality Committee",     # 21 is a day after a year
+    "11/2021-22 Member, Quality Committee",      # a closed range
 ])
 def test_point_in_time_bare_year_when_the_source_does_not_leave_it_open(source_text):
     assert format_date_range("2021", "", "P", source_text) == "2021"

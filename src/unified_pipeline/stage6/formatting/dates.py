@@ -45,8 +45,8 @@ logger = logging.getLogger(__name__)
 #   Q3  Grant Reviewing / Study Sections -- a review panel sits per cycle.
 #   B2  Other Educational Experiences -- a workshop, course or conference
 #       attended once; the table's column is "Dates attended" (#1220).
-# Not members, and unchanged: every D code (the D1 rank ladder is decided in
-# sections/positions.py), O and Q1 (leadership posts held for a term), I
+# Not members, and unchanged: every D code (sections/positions.py passes the
+# entry's text, and decides the D1 rank ladder and the latest D1 rank there), O and Q1 (leadership posts held for a term), I
 # (memberships are ongoing), Q4/Q4A/Q4B/Q4C (editorial posts held for a
 # term), and Q4D (a journal reviewer lists the year reviewing began).
 # H, R and K4 reach no `format_date_range` caller today -- their renderers
@@ -68,6 +68,12 @@ POINT_IN_TIME_CODES = frozenset({'H', 'R', 'K4', 'P', 'Q2', 'Q3', 'B2'})
 # else; a spaced dash followed by text is otherwise a column separator.
 _ONGOING_RANGE_END_WORDS = r'(?:present|current|now)\b'
 
+# A two-digit year after a slashed month, or month and day: "6/04-",
+# "6/01/04-" (a D1 row in the s7ab batch whose source opens a 2004 start this
+# way). The slash is required, so "2021-22" never reads 2022 as written, and
+# no digit or slash may precede it, so "2019/06/21-" never reads 2021.
+_SLASHED_TWO_DIGIT_YEAR = r'(?<![\d/])\d{{1,2}}/(?:\d{{1,2}}/)?{yy:02d}'
+
 # A month, or a month and a day, written after the year with dots:
 # "2014.01", "2014.01.15". A CV that dates its rows this way writes an open
 # range "2014.01 - <journal>" (EBYSBC autopsy, class E9: three editorial
@@ -77,8 +83,8 @@ _DOTTED_MONTH_DAY = r'(?:\.\d{1,2}){0,2}'
 
 def _source_leaves_year_open(source_text: str, year: int | None) -> bool:
     """True when the source writes `year` as an open range: "2020-",
-    "(2011-", "11/2019- Clinical ...", "2024 -<tab>Member", "2014.01- ...",
-    or closes it in words: "2011 - present", "2011 to current", "2011 - now".
+    "(2011-", "11/2019- Clinical ...", "6/01/04-", "2024 -<tab>Member",
+    "2014.01- ...", or closes it in words: "2011 - present", "2011 to current", "2011 - now".
 
     Stage 4 records "2020-" as a start date with no end date, the same as a
     bare "2020", but the author wrote the open dash on purpose -- it is how a
@@ -94,7 +100,8 @@ def _source_leaves_year_open(source_text: str, year: int | None) -> bool:
     """
     if not source_text or year is None:
         return False
-    year_token = rf'(?<!\d){year}{_DOTTED_MONTH_DAY}'
+    year_token = (rf'(?:(?<!\d){year}{_DOTTED_MONTH_DAY}|'
+                  + _SLASHED_TWO_DIGIT_YEAR.format(yy=year % 100) + ')')
     open_range = re.compile(
         rf'{year_token}(?:[-\u2013\u2014](?!\s*\d)|\s+[-\u2013\u2014][ ]*(?:\t|\)|$)'
         rf'|\s*(?:[-\u2013\u2014]|\bto\b)\s*{_ONGOING_RANGE_END_WORDS})',
