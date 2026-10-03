@@ -39,6 +39,9 @@ to a specific bug fix:
   - Class 2 of the 2026-10-02 s7ab autopsy: a "1999-02" source range stored
     whole as a year-month date, and an "01/09" MM/YY date read as 2001-09.
     See the two sections after the century repair.
+  - #1205 slice (a), EBYSBC class E12: a grant's own goal statement reached
+    `notes` for some grants and not for identical siblings. See the last
+    section.
 
 Self-contained: no LLM calls, no I/O, no PII.
 """
@@ -485,3 +488,123 @@ def test_month_slash_year_reading_left_alone_when_text_does_not_show_it(text, fi
 
     assert {key: updated.get(key) for key in fields} == fields
     assert reformatted == {}
+
+
+# --- #1205 (a): a grant's own goal statement reaches notes ------------------
+
+_GOAL_NOTES_REASON = "Copied the grant's own goal statement into notes"
+
+
+@pytest.mark.parametrize(
+    "text,expected_notes",
+    [
+        # a label on its own segment
+        ("Example Foundation\tWidget Study\tGoal: To test widgets in the field.\tRole: PI",
+         "Goal: To test widgets in the field."),
+        # a label after the title on the same line
+        ("Example Foundation\tWidget Study Goals: To test widgets in the field.",
+         "Goals: To test widgets in the field."),
+        # a sentence opening after a title with no period between them
+        ("Example Foundation\tWidget Study The goal of this fund is to test widgets.",
+         "The goal of this fund is to test widgets."),
+        # a sentence after a period, with an adjective, past tense
+        ("Example Foundation 2001-2004. Widget Study. The main goal of this project was to test widgets.",
+         "The main goal of this project was to test widgets."),
+        # "This goal of this ..." and odd capitals still open a sentence
+        ("Example Foundation\tThis Goal Of The study is to test widgets.",
+         "This Goal Of The study is to test widgets."),
+        # a label holding a goal sentence starts at the label
+        ("Example Foundation\tGoals: The goal of this project is to test widgets.",
+         "Goals: The goal of this project is to test widgets."),
+        # a mid-sentence goal keeps its whole segment
+        ("Example Foundation\tWidget Study\tMy role is analysis, towards the goal of testing widgets.",
+         "My role is analysis, towards the goal of testing widgets."),
+        # the statement stops at the end of its line
+        ("Example Foundation Goal: To test widgets in the field.\nFunded through 2030",
+         "Goal: To test widgets in the field."),
+        # the statement stops at a role label on its line
+        ("Example Foundation\tThe goal of this study is to test widgets. Role: Co-Investigator",
+         "The goal of this study is to test widgets."),
+    ],
+)
+def test_grant_goal_statement_fills_empty_notes(text, expected_notes):
+    updated, reformatted = apply_regex_post_processing(text, {"title": "Widget Study", "notes": None}, "M2B")
+
+    assert updated["notes"] == expected_notes
+    assert reformatted["notes"] == {
+        "original": None, "reformatted": expected_notes, "reason": _GOAL_NOTES_REASON}
+
+
+@pytest.mark.parametrize("code", ["M2A", "M2B", "M2C"])
+def test_grant_goal_statement_applies_to_every_code_with_notes(code):
+    updated, _ = apply_regex_post_processing(
+        "Example Foundation\tGoal: To test widgets in the field.", {}, code)
+
+    assert updated["notes"] == "Goal: To test widgets in the field."
+
+
+@pytest.mark.parametrize("code", ["M2D", "M2", "H", "S1"])
+def test_grant_goal_statement_left_alone_for_codes_without_notes(code):
+    updated, reformatted = apply_regex_post_processing(
+        "Example Foundation\tGoal: To test widgets in the field.", {}, code)
+
+    assert "notes" not in updated
+    assert "notes" not in reformatted
+
+
+@pytest.mark.parametrize(
+    "notes,expected",
+    [
+        ("Extended to 2030", "Extended to 2030. Goal: To test widgets in the field."),
+        ("Extended to 2030.", "Extended to 2030. Goal: To test widgets in the field."),
+    ],
+)
+def test_grant_goal_statement_appended_to_other_notes(notes, expected):
+    updated, reformatted = apply_regex_post_processing(
+        "Example Foundation\tGoal: To test widgets in the field.", {"notes": notes}, "M2B")
+
+    assert updated["notes"] == expected
+    assert reformatted["notes"]["original"] == notes
+
+
+@pytest.mark.parametrize(
+    "notes",
+    [
+        "Goal: To test widgets in the field.",
+        # same words, different punctuation, case and spacing
+        "Example Foundation;  goal - to test widgets in the field",
+    ],
+)
+def test_grant_goal_statement_already_in_notes_is_not_repeated(notes):
+    updated, reformatted = apply_regex_post_processing(
+        "Example Foundation\tGoal: To test widgets in the field.", {"notes": notes}, "M2B")
+
+    assert updated["notes"] == notes
+    assert "notes" not in reformatted
+
+
+@pytest.mark.parametrize(
+    "text,fields",
+    [
+        # "major goal(s)" is stage 6's major_goals row
+        ("Example Foundation\tThe major goal of this project is to test widgets.", {}),
+        ("Example Foundation\tMajor Goals: To test widgets in the field.", {}),
+        # two goal segments: which record owns which is unknown
+        ("Widget Study\tGoal: To test widgets.\nGadget Study\tGoal: To test gadgets.", {}),
+        ("Widget Study Goal: To test widgets.\nGadget Study Goal: To test gadgets.", {}),
+        # no goal statement: a title phrase, and a lower-case "the goal of this"
+        ("Example Foundation\tImproving Goals of Care Conversations", {}),
+        ("Example Foundation\tAimed at the goal of this consortium", {}),
+        # a stray label too short to be a statement
+        ("Example Foundation\tGoal: TBD", {}),
+        # the statement only repeats the title
+        ("Example Foundation\tThe goal of this study is to test widgets",
+         {"title": "The Goal of this Study is to Test Widgets"}),
+        ("", {}),
+    ],
+)
+def test_grant_goal_statement_left_alone_when_absent_or_ambiguous(text, fields):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), "M2B")
+
+    assert updated.get("notes") is None
+    assert "notes" not in reformatted

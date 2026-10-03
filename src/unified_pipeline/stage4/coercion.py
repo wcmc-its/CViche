@@ -207,6 +207,7 @@ class ReformattedFields(TypedDict, total=False):
     expiration_date: ReformattedField
     issue_date: ReformattedField
     launch_date: ReformattedField
+    notes: ReformattedField
     orcid: ReformattedField
     percent_effort: ReformattedField
     pmcid: ReformattedField
@@ -1018,6 +1019,126 @@ def _normalize_grant_effort(original_text: str, updated: ExtractedFields, reform
     }
 
 
+#: Codes whose active schema declares `notes`, so a goal statement has a field
+#: to land in. Hand-kept for the same module-boundary reason as
+#: DATE_RANGE_TAXONOMY_CODES; computed from get_active_schemas() on origin/dev
+#: @ 0964c263 (2026-10-02).
+GRANT_NOTES_TAXONOMY_CODES = ('M2A', 'M2B', 'M2C')
+
+# A grant's own goal statement (#1205 slice a). Stage 4 put it in `notes` for
+# some grants and not for identical siblings in the same CV, so the same source
+# shape rendered with a Notes row or without one. Three shapes, measured over
+# the EBYSBC/s7ab/pilot farm (63 runs):
+# - a label, "Goal: To ..." / "Goals: ...", which may follow other text on its
+#   line ("<title> Goal: To ...");
+# - a sentence opening "The|This [main|overall|...] goal(s) of this|the|our|my
+#   ...". The capital T is what makes it a sentence start ("<title> The goal
+#   of this fund ..." carries no period), so only "goal(s) of" and the
+#   adjective are case-insensitive;
+# - a mid-sentence "the goal of <verb>ing" ("My role is ..., with the goal of
+#   testing ..."). Its sentence has no clean start, so the whole source
+#   segment is the statement, which is what stage 4 put in `notes` for the
+#   siblings of that shape.
+# "major goal(s)" is left alone: stage 6's research_support.parse_major_goals
+# reads that phrase into `major_goals` and renders its own row, so taking it
+# here as well would print the goal twice. Mirrors
+# research_support._MAJOR_GOALS_ANCHOR_PATTERN (stage 4 may not import stage 6).
+_GOAL_LABEL_PATTERN = re.compile(r'(?<![\w-])goals?[ \t]*:', re.IGNORECASE)
+_GOAL_SENTENCE_PATTERN = re.compile(
+    r'(?<![\w-])(?:The|This)\s+'
+    r'(?:(?i:main|overall|primary|central|principal|ultimate|long[- ]term)\s+)?'
+    r'(?i:goals?\s+of\s+(?:this|the|our|my))\b'
+)
+_GOAL_GERUND_PATTERN = re.compile(r'(?<![\w-])goals?\s+of\s+[a-z]+ing\b', re.IGNORECASE)
+_MAJOR_GOALS_PATTERN = re.compile(r'\bmajor\s+(?:goals?|gals)\b', re.IGNORECASE)
+# A grant entry's fields are tab- or line-separated; one goal statement never
+# spans two of them in the farm.
+_SOURCE_SEGMENT_SEPARATOR = re.compile(r'[\t\n]')
+# A role label after the statement on the same line ("<goal>. Role: PI") is
+# the grant's role, which has its own field and row; the statement stops before
+# it, as stage 6's MAJOR_GOALS_VALUE_END_RE does.
+_GOAL_STATEMENT_END = re.compile(r'\s+(?=(?:your\s+)?role\s*:)', re.IGNORECASE)
+# Shorter than this is a stray label, not a statement; matches the bar stage 6
+# sets for its Major project goals row (`len(goals.strip()) > 10`).
+_MIN_GOAL_STATEMENT_CHARS = 11
+_SENTENCE_END_CHARS = '.!?;:'
+_GOAL_NOTES_REASON = "Copied the grant's own goal statement into notes"
+
+
+def _comparable_text(value: str) -> str:
+    """`value` as lower-case words only, so a copy that differs in quoting,
+    punctuation or whitespace still compares equal."""
+    return ' '.join(re.findall(r'\w+', value.lower()))
+
+
+def _goal_segment(text: str) -> str | None:
+    """The one source segment that states a goal, or None when none or several do.
+
+    Several goal segments in one entry usually mean several grants, and stage 4
+    offers the entry's text to its last record only, so no one segment can be
+    assigned safely.
+    """
+    candidates = [
+        segment for segment in _SOURCE_SEGMENT_SEPARATOR.split(text)
+        if _GOAL_LABEL_PATTERN.search(segment)
+        or _GOAL_SENTENCE_PATTERN.search(segment)
+        or _GOAL_GERUND_PATTERN.search(segment)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _find_grant_goal_statement(original_text: str) -> str | None:
+    """The goal statement in a grant entry's own text, verbatim, or None.
+
+    Starts at the earliest goal label or goal sentence in its segment, so a
+    title sharing the segment stays out; a mid-sentence goal keeps the whole
+    segment. It ends at the segment's end or at a role label, whichever comes
+    first. Text that names a "major goal(s)" is stage 6's (see the patterns
+    above) and gives None.
+    """
+    if not original_text or _MAJOR_GOALS_PATTERN.search(original_text):
+        return None
+    segment = _goal_segment(original_text)
+    if segment is None:
+        return None
+    starts = [match.start() for match in (_GOAL_LABEL_PATTERN.search(segment),
+                                          _GOAL_SENTENCE_PATTERN.search(segment)) if match]
+    statement = _GOAL_STATEMENT_END.split(segment[min(starts, default=0):], maxsplit=1)[0].strip()
+    return statement if len(statement) >= _MIN_GOAL_STATEMENT_CHARS else None
+
+
+def _fill_grant_goal_notes(original_text: str, updated: ExtractedFields,
+                           reformatted: ReformattedFields) -> None:
+    """Put the grant's goal statement in `notes` when `notes` does not hold it (#1205).
+
+    An empty `notes` takes the statement; a `notes` holding something else
+    keeps it and gains the statement after it. A statement that only repeats
+    the title is skipped, as stage 6 drops a note equal to the title.
+    """
+    statement = _find_grant_goal_statement(original_text)
+    if statement is None:
+        return
+    goal = _comparable_text(statement)
+    title = _comparable_text(str(updated.get('title') or ''))
+    if title and goal in title:
+        return
+    notes = str(updated.get('notes') or '').strip()
+    if goal in _comparable_text(notes):
+        return
+    if not notes:
+        merged = statement
+    elif notes.endswith(tuple(_SENTENCE_END_CHARS)):
+        merged = f'{notes} {statement}'
+    else:
+        merged = f'{notes}. {statement}'
+    reformatted['notes'] = {
+        'original': updated.get('notes'),
+        'reformatted': merged,
+        'reason': _GOAL_NOTES_REASON,
+    }
+    updated['notes'] = merged
+
+
 def apply_regex_post_processing(
     original_text: str,
     extracted_fields: ExtractedFields,
@@ -1075,6 +1196,11 @@ def apply_regex_post_processing(
     # Extract percent effort/FTE for grant entries
     if taxonomy_code.startswith(GRANT_EFFORT_TAXONOMY_PREFIX):
         _normalize_grant_effort(original_text, updated, reformatted)
+
+    # Copy a grant's own goal statement into notes, so identical sibling
+    # grants render alike (#1205)
+    if taxonomy_code in GRANT_NOTES_TAXONOMY_CODES:
+        _fill_grant_goal_notes(original_text, updated, reformatted)
 
     # Re-read a two-digit-year date stage 4 took the wrong way round
     # ("01/09" as 2001-09), then split a "1999-02" range stored whole in one
