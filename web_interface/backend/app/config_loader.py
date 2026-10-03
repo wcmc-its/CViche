@@ -81,6 +81,8 @@ def seed_system_config(db: Session) -> None:
         "ed_enabled": json.dumps(config.get("ed", {}).get("enabled", False)),
         "ed_access_group": json.dumps(config.get("ed", {}).get("access_group", "")),
         "ed_admin_group": json.dumps(config.get("ed", {}).get("admin_group", "")),
+        # Empty/unset = nobody is staff (read-only elevated role, UserRole.STAFF).
+        "ed_staff_group": json.dumps(config.get("ed", {}).get("staff_group", "")),
         "ed_contact_name": json.dumps(config.get("ed", {}).get("contact_name", "")),
         "ed_contact_email": json.dumps(config.get("ed", {}).get("contact_email", "")),
     }

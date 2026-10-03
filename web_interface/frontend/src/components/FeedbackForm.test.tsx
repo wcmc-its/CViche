@@ -14,6 +14,7 @@ vi.mock('../api/feedback', () => ({
 
 vi.mock('../contexts/AuthContext', () => ({
   useAuth: () => ({ user: { role: 'user' } }),
+  useCanViewAllRuns: () => false,
 }))
 
 const SUBMISSION = {

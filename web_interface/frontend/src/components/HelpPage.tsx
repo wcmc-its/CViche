@@ -76,8 +76,8 @@ const faqs: { q: string; a: React.ReactNode }[] = [
     q: 'Is my data secure?',
     a: (
       <>
-        Your uploaded CV is stored on a secure WCM server and is only accessible to you and CViche
-        administrators. However, the text of the CV is sent to a third-party AI service for processing:
+        Your uploaded CV is stored on a secure WCM server and is only accessible to you, CViche
+        administrators, and designated staff with read-only access. However, the text of the CV is sent to a third-party AI service for processing:
         Anthropic&apos;s Claude, running on Amazon Bedrock. AWS states that Bedrock does not share CV text or
         AI output with Anthropic or any other model provider, and does not use it to train models.
         Before the text is sent, CViche removes the dates of birth and Social Security numbers it
@@ -262,8 +262,8 @@ export default function HelpPage() {
                 </dd>
                 <dt className={DT}>Who can access it</dt>
                 <dd className={DD}>
-                  You can see your own runs. CViche administrators (the Library
-                  development team) can see all runs. Access requires WCM single sign-on; there is no public or
+                  You can see your own runs. CViche administrators and designated staff with read-only access
+                  can see all runs, including the original CV and output document. Access requires WCM single sign-on; there is no public or
                   anonymous access.
                 </dd>
                 <dt className={DT}>How it is used</dt>

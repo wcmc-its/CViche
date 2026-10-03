@@ -694,6 +694,61 @@ def test_b2_institution_none_sentinel_is_blank():
     assert gen.doc.tables[0].rows[1].cells[1].text == ''
 
 
+def test_b2_institution_that_is_the_place_is_not_repeated():
+    """#1257: a conference row whose source names only a city gets the city
+    as its institution AND its location; the cell said it twice."""
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Annual Example Meeting, Riverton, OR, 2019',
+         'extracted_fields': {'program_name': 'Annual Example Meeting',
+                              'institution': 'Riverton, OR', 'location': 'Riverton, OR',
+                              'year': '2019'}}])
+
+    cell = gen.doc.tables[0].rows[1].cells[1]
+    assert cell.text == 'Riverton, OR'
+    assert _insertions(cell) == []
+
+
+def test_b2_cleaned_city_gains_only_the_state():
+    """Stage 5b cleans the place-only institution down to its city; the
+    location adds the state, not the city again."""
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Annual Example Meeting, Riverton, OR, 2019',
+         'extracted_fields': {'program_name': 'Annual Example Meeting',
+                              'institution': 'Riverton, OR', 'year': '2019'},
+         'institution_enrichment': {'cleaned_name': 'Riverton', 'city': 'Riverton',
+                                    'state': 'Oregon', 'country_code': 'US'}}])
+
+    assert gen.doc.tables[0].rows[1].cells[1].text == 'Riverton, OR'
+
+
+def test_b2_enriched_state_after_a_bare_city_is_the_only_insertion():
+    """The source said the city; only the state the lookup added is marked."""
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Summer Course, Riverton, 2019',
+         'extracted_fields': {'program_name': 'Summer Course',
+                              'institution': 'Riverton', 'year': '2019'},
+         'institution_enrichment': {'cleaned_name': 'Riverton', 'city': 'Riverton',
+                                    'state': 'Oregon', 'country_code': 'US'}}])
+
+    cell = gen.doc.tables[0].rows[1].cells[1]
+    assert cell.text == 'Riverton'  # python-docx text skips w:ins
+    assert _insertions(cell) == [('Institution Enrichment', ', OR')]
+
+
+def test_b2_location_already_trailing_the_institution_is_not_appended():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Certificate, Some College, Riverton, OR',
+         'extracted_fields': {'program_name': 'Certificate',
+                              'institution': 'Some College, Riverton, OR',
+                              'location': 'Riverton, OR'}}])
+
+    assert gen.doc.tables[0].rows[1].cells[1].text == 'Some College, Riverton, OR'
+
+
 # --- patents: row counts, ordering, instruction removal --------------------------
 
 def _patent(text: str, **fields) -> dict:

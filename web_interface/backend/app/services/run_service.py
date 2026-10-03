@@ -11,7 +11,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
-from app.models import Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics
+from app.models import Run, RunState, Step, User, Log, LLMUsage, Feedback, RunMetrics, can_view_all_runs
 from app.errors import not_found, forbidden
 from app.config_loader import get_config
 from app.pipeline import concurrency, run_queue
@@ -776,7 +776,8 @@ def claim_run_as_running(db: Session, run_id: str, *status_criteria, **also_set)
     return result == 1
 
 
-def check_run_access(run_id: str, current_user: User, db: Session, *, eager=()) -> Run:
+def check_run_access(run_id: str, current_user: User, db: Session, *, eager=(),
+                     read_only: bool = False) -> Run:
     """Verify run exists and user has access. Returns the Run.
 
     Pass *eager* a sequence of SQLAlchemy loader options (e.g.
@@ -784,9 +785,15 @@ def check_run_access(run_id: str, current_user: User, db: Session, *, eager=()) 
     access query. This is required before touching any relationship attribute,
     since they are declared ``lazy="raise_on_sql"``.
 
+    *read_only* is the caller's promise that the route only reads the run.
+    Only then may a non-owner staff user through (``can_view_all_runs``); the
+    default keeps every other caller -- start, cancel, restart, retry, feedback
+    submit -- at owner-or-admin, so a route that forgets to say stays strict.
+
     Raises:
         HTTPException 404 if run not found.
-        HTTPException 403 if user does not own the run and is not admin.
+        HTTPException 403 if user does not own the run and is not admin (or,
+        with read_only=True, is neither admin nor staff).
     """
     query = db.query(Run).filter(Run.id == run_id)
     for option in eager:
@@ -794,9 +801,11 @@ def check_run_access(run_id: str, current_user: User, db: Session, *, eager=()) 
     run = query.first()
     if not run:
         raise not_found("Run not found")
-    if current_user.role != "admin" and run.user_id != current_user.id:
-        raise forbidden("Access denied")
-    return run
+    if current_user.role == "admin" or run.user_id == current_user.id:
+        return run
+    if read_only and can_view_all_runs(current_user):
+        return run
+    raise forbidden("Access denied")
 
 
 # ============================================================

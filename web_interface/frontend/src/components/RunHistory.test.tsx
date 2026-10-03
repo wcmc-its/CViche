@@ -18,7 +18,11 @@ const MEMBER: User = {
 }
 const ADMIN: User = { ...MEMBER, user_id: 1, role: 'admin' }
 let currentUser: User = MEMBER
-vi.mock('../contexts/AuthContext', () => ({ useAuth: () => ({ user: currentUser }), useCanSeeCost: () => false }))
+vi.mock('../contexts/AuthContext', () => ({
+  useAuth: () => ({ user: currentUser }),
+  useCanSeeCost: () => false,
+  useCanViewAllRuns: () => currentUser.role === 'admin' || currentUser.role === 'staff',
+}))
 
 const SUMMARY: BatchSummary = {
   id: 'BQXZKD',

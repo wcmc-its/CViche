@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, NavLink, useLocation } from 'react-router-dom'
 import { HelpCircle, Menu, X } from 'lucide-react'
-import { useAuth } from '../contexts/AuthContext'
+import { useCanViewAllRuns } from '../contexts/AuthContext'
 import { useInbox } from '../contexts/InboxContext'
 import { NARROW_HEADER_QUERY, useMediaQuery } from '../hooks/useMediaQuery'
 import UserMenu from './UserMenu'
@@ -35,13 +35,13 @@ function NewRunLabel() {
 }
 
 interface NarrowMenuProps {
-  isAdmin: boolean
+  showDashboard: boolean
   onRunPage: boolean
 }
 
 /** Below ~480px: the main tabs and Help behind one button. Escape or a pick closes it and
  *  returns focus to the button; opening moves focus to the first link. */
-function NarrowMenu({ isAdmin, onRunPage }: NarrowMenuProps) {
+function NarrowMenu({ showDashboard, onRunPage }: NarrowMenuProps) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -92,7 +92,7 @@ function NarrowMenu({ isAdmin, onRunPage }: NarrowMenuProps) {
           <nav aria-label="Main">
             <NavLink to="/runs" className={({ isActive }) => menuItemClass({ isActive: isActive || onRunPage })}>Runs</NavLink>
             <NavLink to="/" end className={menuItemClass}><NewRunLabel /></NavLink>
-            {isAdmin && <NavLink to="/admin" className={menuItemClass}>Dashboard</NavLink>}
+            {showDashboard && <NavLink to="/admin" className={menuItemClass}>Dashboard</NavLink>}
             <NavLink to="/help" className={menuItemClass}>Help</NavLink>
           </nav>
         </div>
@@ -103,8 +103,8 @@ function NarrowMenu({ isAdmin, onRunPage }: NarrowMenuProps) {
 
 /** Top bar on every signed-in page: logo, main tabs, Help, account (#1112). */
 export default function AppHeader() {
-  const { user } = useAuth()
-  const isAdmin = user?.role === 'admin'
+  // Admin, or staff (read-only: the dashboard shows staff Feedback only).
+  const showDashboard = useCanViewAllRuns()
   // A run page belongs under Runs even though its path is /run/:id.
   const onRunPage = useLocation().pathname.startsWith('/run/')
   const narrow = useMediaQuery(NARROW_HEADER_QUERY)
@@ -117,7 +117,7 @@ export default function AppHeader() {
         </Link>
         {narrow ? (
           <>
-            <NarrowMenu isAdmin={isAdmin} onRunPage={onRunPage} />
+            <NarrowMenu showDashboard={showDashboard} onRunPage={onRunPage} />
             <UserMenu />
           </>
         ) : (
@@ -125,7 +125,7 @@ export default function AppHeader() {
             <nav aria-label="Main" className="flex h-full min-w-0 overflow-x-auto [scrollbar-width:none]">
               <NavLink to="/runs" className={({ isActive }) => tabClass({ isActive: isActive || onRunPage })}>Runs</NavLink>
               <NavLink to="/" end className={tabClass}><NewRunLabel /></NavLink>
-              {isAdmin && <NavLink to="/admin" className={tabClass}>Dashboard</NavLink>}
+              {showDashboard && <NavLink to="/admin" className={tabClass}>Dashboard</NavLink>}
             </nav>
             <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-5">
               <Link

@@ -160,6 +160,18 @@ def test_header_injection_stripped_from_upload_name(client, db, seed_simple_mode
     assert "x-injected" not in {k.lower() for k in resp.headers}
 
 
+def test_staff_downloads_another_users_original(client, db, seed_simple_mode, monkeypatch):
+    """Staff (read-only) read every run's detail, the original included."""
+    _, run = _user_and_run(db, suffix="-staff-own")
+    staff, _ = _user_and_run(db, role="staff", suffix="-staff")
+    _auth(client, staff)
+    monkeypatch.setattr(steps_mod, "get_storage",
+                        lambda: _LocalStorage({f"input/{run.id}.docx": b"PK\x03\x04 docx bytes"}))
+
+    resp = client.get(f"/api/run/{run.id}/input")
+    assert resp.status_code == 200, resp.text
+
+
 # --- #1333: serve the original only once GuardDuty has tagged it clean ----------
 
 _SCAN_FLAG = "CVICHE_REQUIRE_MALWARE_SCAN"
