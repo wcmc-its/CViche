@@ -183,11 +183,13 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     """Read one raw bibliography entry and return the record a renderer prints.
 
     `entry` is raw stage-4/stage-5 JSON and carries more than this reads
-    (`enrichment_status`, `text`, `classification_reasoning`, the taxonomy
-    code), which is why it is annotated as the mapping it is rather than a
-    TypedDict that would describe only part of it. The three keys taken here
-    are `extracted_fields` (`PublicationFields`), `enrichment_data`
-    (`PubMedEnrichment`) and `enriched_fields`.
+    (`enrichment_status`, `classification_reasoning`, the taxonomy code),
+    which is why it is annotated as the mapping it is rather than a
+    TypedDict that would describe only part of it. The keys taken here are
+    `extracted_fields` (`PublicationFields`), `enrichment_data`
+    (`PubMedEnrichment`), `enriched_fields`, and `text` -- the CV's own
+    line, which the stage-5d owner restore reads when stage 4's author list
+    is damaged (#1259), coerced by `_text` like any other value.
 
     Each is guarded with `or` and then a type check, not with a `.get`
     default (#659): a default only applies when the key is *absent*, so an
