@@ -22,7 +22,7 @@ CURRENT_YEAR = datetime.now().year
 # A hierarchy heading that says the grant is an application, not an award
 # (#981). Whole words: "Grants Pending Review" matches, "Impending" does not.
 # Under such a heading a date range is the proposed project period, so it says
-# nothing about whether the grant ended or is running. "Grants Applied" and
+# nothing about whether the grant ended or is running. "Grants Applied For" and
 # "Grant Applications" name applications too (EBYSBC E7: fifteen applications
 # under an "applied" heading were filed as completed awards); "Proposals
 # Submitted" was already covered by "submitted".

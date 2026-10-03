@@ -233,7 +233,7 @@ PERCENT_EFFORT_PRECISION = Decimal('0.01')
 OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
 
 # The first four-digit run in an end date: the year both date rebuckets have
-# always read ("2012-09-14", "June 2015", "2015-16").
+# always read ("2016-10-21", "June 2015", "2015-16").
 END_DATE_FOUR_DIGIT_YEAR_RE = re.compile(r'(\d{4})')
 # A nonzero digit: what makes a `total_funding` value an amount rather than an
 # empty "$" or a placeholder.

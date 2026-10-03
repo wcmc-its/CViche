@@ -2499,7 +2499,7 @@ def test_an_empty_section_label_is_no_status(status):
 
 
 @pytest.mark.parametrize('status', [
-    'Pending', 'Submitted/Pending', 'Pending (none yet)', 'Funded', 'No-cost extension',
+    'Pending', 'Submitted/Under review', 'Pending (none yet)', 'Funded', 'No-cost extension',
     'Not funded', 'Nonetheless pending', '',
 ])
 def test_a_real_status_is_not_an_empty_section_label(status):
@@ -2585,7 +2585,7 @@ def test_a_pending_move_still_happens_without_an_awarded_closed_period(entry):
     ('4/15/14', 2014),
     ('03/31/11', 2011),
     ('9-30-28', 2028),
-    ('2012-09-14', 2012),
+    ('2016-10-21', 2016),
     ('June 2015', 2015),
     ('2015-16', 2015),
     ('7/31/1', None),
