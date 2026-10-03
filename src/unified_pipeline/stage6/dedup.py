@@ -470,6 +470,9 @@ def _different_institution(code: str | None, dropped_fields: dict,
 # Outreach, VYICGW-02 Research, RNKYST-01 Executive Committee). An
 # abbreviation maps to the word it shortens. "Board" is not one: "Chair and
 # Treasurer, Board of Governors" is still the chair.
+# ponytail: a closed word list read off the fields. A qualifier not on it
+# ("Regional", a spelled-out "Codirector") still lets the drop through; if
+# that recurs, stage 4 should extract the rank as a field of its own.
 _RANK_QUALIFIERS = MappingProxyType({
     'assistant': 'assistant', 'asst': 'assistant',
     'associate': 'associate', 'assoc': 'associate', 'asso': 'associate',
@@ -879,6 +882,9 @@ def _verbatim_contained(text: str, container: str) -> bool:
 # of the rows below it (#985). So such a line standing between the two
 # entries, in the same source section, makes them two records. A name with a
 # single year is not a group line: "Grand Rounds 2030" is a record.
+# ponytail: a group line is recognised by shape alone. One whose year sits on
+# the group's first row ("2002 Course A ...") is not seen; the upgrade is #985,
+# carrying the group line into the rows below it as context.
 _GROUP_HEADED_CODES = frozenset({'K1', 'K2', 'K3', 'K4', 'K5', 'R'})
 _GROUP_YEAR_RANGE = (r'(?:19|20)\d{2}\s*(?:[-–—]|to)\s*'
                      r'(?:(?:19|20)\d{2}|present|current)')
