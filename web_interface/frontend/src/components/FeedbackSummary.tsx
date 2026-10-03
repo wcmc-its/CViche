@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import type { FeedbackDetail, WcmSection } from '../types'
 import { getRunFeedbackAll } from '../api/feedback'
-import { useAuth } from '../contexts/AuthContext'
+import { useCanViewAllRuns } from '../contexts/AuthContext'
 import { formatDate } from '../utils'
 import ErrorBanner from './ErrorBanner'
 import {
@@ -132,7 +132,8 @@ function SubmissionCard({ feedback, sectionNames }: { feedback: FeedbackDetail; 
 /** Read-only feedback on a run: every submission, newest first. Shown once the viewer has reviewed it. */
 export default function FeedbackSummary({ runId, sections }: { runId: string; sections: WcmSection[] }) {
   const sectionNames = new Map(sections.map((s) => [s.section_id, s.section_name]))
-  const isAdmin = useAuth().user?.role === 'admin'
+  // Admin or staff: both open the dashboard's Feedback tab.
+  const canOpenAllFeedback = useCanViewAllRuns()
   const [submissions, setSubmissions] = useState<FeedbackDetail[] | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -151,7 +152,7 @@ export default function FeedbackSummary({ runId, sections }: { runId: string; se
     <section className={CARD} aria-label="Feedback">
       <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 mb-4">
         <h2 className="text-[17px] font-semibold text-gray-900">Feedback</h2>
-        {isAdmin && (
+        {canOpenAllFeedback && (
           <Link to={ALL_FEEDBACK_HREF} className="text-[13px] text-primary-700 hover:underline">
             All feedback
           </Link>

@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { Loader2 } from 'lucide-react'
 import type { Stats } from '../types'
 import { getAdminStats } from '../api/admin'
+import { useIsAdmin } from '../contexts/AuthContext'
 import AdminOverview from './AdminOverview'
 import AdminUsers from './AdminUsers'
 import AdminSubmissions from './AdminSubmissions'
@@ -11,19 +12,26 @@ import AdminConfig from './AdminConfig'
 
 const TABS = ['Overview', 'Runs', 'Feedback', 'Settings'] as const
 type TabName = typeof TABS[number]
+// Staff (read-only) get Feedback Insights only: Overview and Runs carry cost
+// (#1111), Settings is user management and config.
+const STAFF_TABS: readonly TabName[] = ['Feedback']
 
 /** Query param that opens a tab directly, e.g. /admin?tab=Feedback. */
 const TAB_PARAM = 'tab'
 
-function tabFromParam(value: string | null): TabName {
-  return TABS.find((tab) => tab === value) ?? 'Overview'
+/** The tab the param names, if this viewer has it; else their first tab, so
+ *  /admin?tab=Runs never opens a cost tab for staff. */
+function tabFromParam(value: string | null, tabs: readonly TabName[]): TabName {
+  return tabs.find((tab) => tab === value) ?? tabs[0]
 }
 
 export default function AdminDashboard() {
+  const isAdmin = useIsAdmin()
+  const tabs = isAdmin ? TABS : STAFF_TABS
   const [stats, setStats] = useState<Stats | null>(null)
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(isAdmin)
   const [searchParams] = useSearchParams()
-  const [activeTab, setActiveTab] = useState<TabName>(() => tabFromParam(searchParams.get(TAB_PARAM)))
+  const [activeTab, setActiveTab] = useState<TabName>(() => tabFromParam(searchParams.get(TAB_PARAM), tabs))
 
   const fetchStats = async () => {
     try {
@@ -36,8 +44,8 @@ export default function AdminDashboard() {
   }
 
   useEffect(() => {
-    fetchStats()
-  }, [])
+    if (isAdmin) fetchStats()
+  }, [isAdmin])
 
   if (loading) {
     return (
@@ -52,7 +60,7 @@ export default function AdminDashboard() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-8">
         <h1 className="text-[26px] font-semibold text-gray-900">Dashboard</h1>
         <nav className="mt-5 flex gap-1 overflow-x-auto border-b border-sand-350" aria-label="Admin tabs">
-          {TABS.map((tab) => (
+          {tabs.map((tab) => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}

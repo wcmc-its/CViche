@@ -60,7 +60,8 @@ def list_batches(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> BatchListResponse:
-    """Batches the caller may see -- their own, or every one for an admin --
+    """Batches the caller may see -- their own, or every one for an admin or
+    staff --
     newest first. Feeds the Runs page's Batch filter."""
     return BatchListResponse(batches=batch_service.list_batches(db, current_user))
 
