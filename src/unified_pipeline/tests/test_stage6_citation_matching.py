@@ -349,6 +349,7 @@ def test_a_given_name_5d_shortened_is_not_a_cut_owner() -> None:
     ('Ash A, Network LRSN', 'Ash A; for the Lantern Research Network.', True),
     ('Ash A, 3rd GI, Wren W', 'Ash A, Gorse GI 3rd, Wren W.', True),
     ('Ash A, Jr, Wren W', 'Ash A, Jr, Wren W.', True),
+    ('Ash A, Sr GI, Wren W', 'Ash A, Gorse GI Sr, Wren W.', True),
     ('Ash A, Gorse GHIJ', 'Ash A, Gorse GHIJ.', False),
     # a three-letter initials group is never checked against the line
     ('Ash A, Gorse GHI, Wren W', 'Ash A, Gorse G.H.I., Wren W.', False),
