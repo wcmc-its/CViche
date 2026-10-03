@@ -661,17 +661,21 @@ _TWO_DIGIT_CENTURY_REASON = 'Re-derived the century of a two-digit source year'
 
 def _recentury_year(year_match: re.Match[str], original_text: str) -> str:
     """The year `year_match` matched in a date value, moved to 20yy when the
-    LLM read it off a two-digit token in `original_text` and put it in the
+    LLM put a year the text writes as 20yy, or as a two-digit token, in the
     wrong century; otherwise the matched year unchanged.
 
     The year moves only when the 19xx year is not written out anywhere in
-    the text (so the text does not support it) and the text carries its two
-    digits as a two-digit year token. The shared pivot then decides the
-    century, so "5/65" still reads as 1965 and nothing changes.
+    the text (so the text does not support it), and then either the text
+    writes 20yy in full ("6/30/2014" stored as 1914, #1248) or it carries
+    the two digits as a two-digit year token. For the token the shared
+    pivot decides the century, so "5/65" still reads as 1965 and nothing
+    changes.
     """
     year, yy = year_match.group(0), year_match.group(1)
     if re.search(rf'(?<!\d){year}(?!\d)', original_text):
         return year
+    if re.search(rf'(?<!\d)20{yy}(?!\d)', original_text):
+        return f'20{yy}'
     if not re.search(rf'{_TWO_DIGIT_YEAR_PREFIX}{yy}(?!\d)', original_text):
         return year
     return str(expand_two_digit_year(int(yy)))
@@ -723,6 +727,134 @@ def repair_two_digit_year_century(
             'original': value,
             'reformatted': str(repaired),
             'reason': _TWO_DIGIT_CENTURY_REASON,
+        }
+
+
+#: A stored date value that names a month: "1997-03" or "1997-03-01".
+_DATED_VALUE_PATTERN = re.compile(r'(\d{4})-(\d{2})(?:-(\d{2}))?')
+
+#: The first three letters of each month name, in calendar order: a matched
+#: month name maps to its number by them.
+_MONTH_NAME_PREFIXES = (
+    'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec',
+)
+
+#: A numeric source date: m/d/yy, m/d/yyyy, m/yy or m/yyyy. The day is
+#: optional. The year is matched at any length up to four digits so that a
+#: cut-off year ("05/01/202") counts as a date whose year is unreadable.
+_NUMERIC_SOURCE_DATE_PATTERN = re.compile(
+    r'(?<![\d/])(\d{1,2})/(?:(\d{1,2})/)?(\d{1,4})(?![\d/])')
+
+#: The year lengths a numeric source date can be read from.
+_READABLE_YEAR_LENGTHS = (2, 4)
+
+#: A month-name source date with a four-digit year: "June 2011",
+#: "Nov. 4, 2015", "Sept 15 2004". Only a month's full name or its usual
+#: abbreviation counts, so "Marine 2010" or "Junior 2015" is not a date.
+_NAMED_SOURCE_DATE_PATTERN = re.compile(
+    r'\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?'
+    r'|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b'
+    r'\.?\s+(?:(\d{1,2}),?\s+)?(\d{4})(?!\d)',
+    re.IGNORECASE,
+)
+
+_YEAR_NOT_IN_SOURCE_REASON = 'Re-derived a year the source text does not contain'
+_YEAR_NOT_IN_SOURCE_NULLED_REASON = (
+    'Cleared a year the source text does not contain and gives no single year for')
+
+
+def _source_writes_year(year: str, original_text: str) -> bool:
+    """True when `original_text` has `year` written out, or its last two
+    digits as a number of their own ("10/01/98", "'98", "1997-98")."""
+    return bool(
+        re.search(rf'(?<!\d){year}(?!\d)', original_text)
+        or re.search(rf'(?<!\d){year[2:]}(?!\d)', original_text)
+    )
+
+
+def _source_years_for_month(
+    month: int, day: int | None, original_text: str
+) -> set[int | None]:
+    """Every year `original_text` gives a date in `month` (and on `day`, when
+    both the value and the source date carry a day); None stands for a
+    matching date whose year is cut off or otherwise unreadable."""
+    years: set[int | None] = set()
+    for match in _NUMERIC_SOURCE_DATE_PATTERN.finditer(original_text):
+        source_month, source_day, source_year = match.groups()
+        if int(source_month) != month:
+            continue
+        if day is not None and source_day is not None and int(source_day) != day:
+            continue
+        if len(source_year) not in _READABLE_YEAR_LENGTHS:
+            years.add(None)
+        elif len(source_year) == 4:
+            years.add(int(source_year))
+        else:
+            years.add(expand_two_digit_year(int(source_year)))
+    for match in _NAMED_SOURCE_DATE_PATTERN.finditer(original_text):
+        month_name, source_day, source_year = match.groups()
+        if _MONTH_NAME_PREFIXES.index(month_name[:3].lower()) + 1 != month:
+            continue
+        if day is not None and source_day is not None and int(source_day) != day:
+            continue
+        years.add(int(source_year))
+    return years
+
+
+def _year_not_in_source_repair(value: str, original_text: str) -> tuple[str | None, str] | None:
+    """`(repaired value, reason)` for a dated `value` whose year the source
+    text does not contain, or None to leave it alone.
+
+    Left alone: a value without a month (a bare year carries nothing to
+    re-derive it from), a year the text writes in full or as its two digits,
+    a value whose month the text gives no date for -- an entry split across
+    elements can carry its year in a neighbour, and nothing here can tell
+    that from a wrong year -- and a value whose month the text gives a date
+    with an unreadable year for ("05/01/202"): the stored year may be the
+    LLM's reading of it. Re-derived when the text's dates in that month (and
+    on that day) all give one year; cleared when they give more than one.
+    """
+    dated = _DATED_VALUE_PATTERN.fullmatch(value.strip())
+    if dated is None:
+        return None
+    year, month, day = dated.groups()
+    if _source_writes_year(year, original_text):
+        return None
+    source_years = _source_years_for_month(
+        int(month), int(day) if day else None, original_text)
+    if not source_years or None in source_years:
+        return None
+    if len(source_years) > 1:
+        return None, _YEAR_NOT_IN_SOURCE_NULLED_REASON
+    (source_year,) = source_years
+    return f'{source_year}{value.strip()[4:]}', _YEAR_NOT_IN_SOURCE_REASON
+
+
+def repair_year_not_in_source(
+    original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
+) -> None:
+    """Re-derive, or clear, a dated field's year the source text does not
+    contain.
+
+    The stage-4 LLM sometimes writes a year the entry never states: "3/01/17"
+    stored as 1997-03-01, or "June 2011" stored with the previous entry's
+    year (class E26, 2026-10-02 EBYSBC autopsy: HFAJCC, VVRTUC). The year is
+    plausible, so nothing downstream sees it. Runs after the century repair,
+    so a year that repair moved is already supported. An empty
+    `original_text` (an earlier record of a multi-record entry) gives no
+    source date, so it changes nothing.
+    """
+    for field_name in DATE_FIELD_NAMES:
+        value = updated.get(field_name)
+        if not isinstance(value, str):
+            continue
+        repair = _year_not_in_source_repair(value, original_text)
+        if repair is None:
+            continue
+        repaired, reason = repair
+        updated[field_name] = repaired
+        reformatted[field_name] = {
+            'original': value, 'reformatted': repaired or '', 'reason': reason,
         }
 
 
@@ -847,6 +979,73 @@ def reread_month_slash_year(
         updated[field_name] = reread
         reformatted[field_name] = {
             'original': value, 'reformatted': reread, 'reason': _MONTH_SLASH_YEAR_REASON,
+        }
+
+
+#: An "M-YY-MM-YY" source range: four dash-joined numbers, month and
+#: two-digit year twice ("3-21-11-24", March 2021 to November 2024).
+#: Four groups cannot be an m-d-yy date, which has three.
+_MONTH_YEAR_DASH_RANGE_PATTERN = re.compile(
+    r'(?<![\d/.-])(\d{1,2})-(\d{2})-(\d{1,2})-(\d{2})(?![\d/.-])')
+
+_MONTH_YEAR_DASH_RANGE_REASON = 'Re-read an M-YY-MM-YY source range stage 4 read as M-D-YY'
+
+#: The months of the year, for checking a number read as one.
+_MONTHS_OF_YEAR = range(1, 13)
+
+
+def _month_year_dash_range_reading(
+    start_value: str, original_text: str
+) -> tuple[str, str] | None:
+    """(start, end) for the one "M-YY-MM-YY" range in `original_text` when
+    stage 4 stored its first three numbers as an M-D-YY start date
+    ("3-21-11-24" as 2011-03-21); None when the text does not show that.
+
+    It is the misreading only when the text has exactly one such range, the
+    stored start is that M-D-YY reading, its year is not written out in the
+    text, both months are months, and the range does not run backwards.
+    """
+    ranges = _MONTH_YEAR_DASH_RANGE_PATTERN.findall(original_text)
+    if len(ranges) != 1:
+        return None
+    start_month, start_yy, end_month, end_yy = (int(number) for number in ranges[0])
+    misread = f'{expand_two_digit_year(end_month)}-{start_month:02d}-{start_yy:02d}'
+    if start_value.strip() != misread:
+        return None
+    if re.search(rf'(?<!\d){misread[:4]}(?!\d)', original_text):
+        return None
+    if start_month not in _MONTHS_OF_YEAR or end_month not in _MONTHS_OF_YEAR:
+        return None
+    start_year, end_year = expand_two_digit_year(start_yy), expand_two_digit_year(end_yy)
+    if (start_year, start_month) > (end_year, end_month):
+        return None
+    return f'{start_year}-{start_month:02d}', f'{end_year}-{end_month:02d}'
+
+
+def reread_month_year_dash_range(
+    original_text: str, updated: ExtractedFields, reformatted: ReformattedFields
+) -> None:
+    """Re-read an "M-YY-MM-YY" source range stage 4 read as an M-D-YY date.
+
+    "3-21-11-24" is March 2021 to November 2024; the LLM stored the start
+    as 2011-03-21, ten years early (class E26, 2026-10-02 EBYSBC autopsy:
+    YYVHNN). Both range fields are rewritten from the source range
+    (`_month_year_dash_range_reading`).
+    """
+    start_value = updated.get('start_date')
+    if not isinstance(start_value, str):
+        return
+    reading = _month_year_dash_range_reading(start_value, original_text)
+    if reading is None:
+        return
+    for field_name, new_value in zip(_RANGE_FIELD_NAMES, reading):
+        original = updated.get(field_name)
+        if original == new_value:
+            continue
+        updated[field_name] = new_value
+        reformatted[field_name] = {
+            'original': original, 'reformatted': new_value,
+            'reason': _MONTH_YEAR_DASH_RANGE_REASON,
         }
 
 
@@ -1083,10 +1282,16 @@ def apply_regex_post_processing(
     reread_month_slash_year(original_text, updated, reformatted)
     if taxonomy_code in DATE_RANGE_TAXONOMY_CODES:
         split_year_short_range(original_text, updated, reformatted)
+        reread_month_year_dash_range(original_text, updated, reformatted)
 
     # Move a 19xx year read off a two-digit source year ("10/08") to 20xx.
     # Before the range repair, so it compares against the corrected start.
     repair_two_digit_year_century(original_text, updated, reformatted)
+
+    # Re-derive (or clear) a dated year the text does not contain at all
+    # ("3/01/17" stored as 1997-03-01). After the century repair, which may
+    # already have moved it to a year the text supports.
+    repair_year_not_in_source(original_text, updated, reformatted)
 
     # Restore a dropped end_date when the schema declares both dates and the
     # source text unambiguously carries the closed range (#556)

@@ -327,6 +327,15 @@ _CENTURY_REASON = "Re-derived the century of a two-digit source year"
         ("Example Prize '04", {"year": 1904}, {"year": 2004}),
         # a 5-digit number in the text is not the 4-digit year written out
         ("Example grant 19031, awarded 5/03", {"date": "1903-05"}, {"date": "2003-05"}),
+        # the text writes 20yy in full; the value has it as 19yy (#1248)
+        (
+            "Example Award, dates 7/1/10 - 6/30/2014",
+            {"start_date": "2010-07-01", "end_date": "1914-06-30"},
+            {"start_date": "2010-07-01", "end_date": "2014-06-30"},
+        ),
+        ("Example lecture, April 2006", {"date": "1906-04"}, {"date": "2006-04"}),
+        # ... and a bare year, which has no month to re-derive it from
+        ("Example committee, 2010 - 2014", {"end_date": "1914"}, {"end_date": "2014"}),
     ],
 )
 def test_two_digit_source_year_moves_to_the_pivot_century(text, fields, expected):
@@ -356,6 +365,10 @@ def test_two_digit_century_repair_records_what_it_changed():
         ("Example grant 9/1/27-8/31/32", {"start_date": "2027-09-01", "end_date": "2032-08-31"}),
         # the 19xx year is written out in the text, so the text supports it
         ("Example Society, founded 1903; member 5/03", {"date": "1903"}),
+        # ... even when the text also writes the 20yy year
+        ("Example Society, founded 1903, renamed 2003", {"date": "1903"}),
+        # 20yy inside a longer number is not the year written out
+        ("Example Society, ref 120031", {"date": "1903"}),
         # no two-digit token at all
         ("Example Society, early member", {"date": "1903"}),
         # the two digits are part of a longer number, not a year token
@@ -485,3 +498,168 @@ def test_month_slash_year_reading_left_alone_when_text_does_not_show_it(text, fi
 
     assert {key: updated.get(key) for key in fields} == fields
     assert reformatted == {}
+
+
+# --- Year the source text does not contain (class E26, #1248) --------------
+
+_YEAR_NOT_IN_SOURCE_REASON = "Re-derived a year the source text does not contain"
+_YEAR_NOT_IN_SOURCE_NULLED_REASON = (
+    "Cleared a year the source text does not contain and gives no single year for")
+
+
+@pytest.mark.parametrize(
+    "text,fields,expected",
+    [
+        # m/d/yy: the month and day match, the year does not
+        (
+            "Example Foundation grant 03/01/17 - 02/28/24",
+            {"start_date": "1997-03-01", "end_date": "2024-02-28"},
+            {"start_date": "2017-03-01", "end_date": "2024-02-28"},
+        ),
+        # month name and 4-digit year: another entry's year in the value
+        (
+            "Example Professor (current) June 2011 -",
+            {"start_date": "1968-06", "end_date": "current"},
+            {"start_date": "2011-06", "end_date": "current"},
+        ),
+        # month name, day and year; abbreviated month with a period
+        ("Example lecture, November 4, 2015", {"date": "1900-11-04"}, {"date": "2015-11-04"}),
+        ("Example lecture, Dec. 2016", {"date": "1995-12"}, {"date": "2016-12"}),
+        ("Example lecture, Sept 15 2004", {"date": "1990-09-15"}, {"date": "2004-09-15"}),
+        # m/yyyy
+        ("Example lecture 3/2011", {"date": "1987-03"}, {"date": "2011-03"}),
+        # a source date without a day still gives the year of a dated value
+        ("Example lecture, May 2014", {"date": "1990-05-02"}, {"date": "2014-05-02"}),
+        # the text's two dates in that month give two years: cleared
+        (
+            "Example lecture, May 2014 and May 2015",
+            {"date": "1990-05"},
+            {"date": None},
+        ),
+    ],
+)
+def test_year_not_in_source_is_re_derived_from_the_text(text, fields, expected):
+    updated, _ = apply_regex_post_processing(text, dict(fields), "R")
+
+    assert {key: updated[key] for key in expected} == expected
+
+
+def test_year_not_in_source_repair_records_what_it_changed():
+    _, reformatted = apply_regex_post_processing(
+        "Example Foundation grant 03/01/17 - 02/28/24",
+        {"start_date": "1997-03-01", "end_date": "2024-02-28"}, "M2A")
+
+    assert reformatted == {"start_date": {
+        "original": "1997-03-01", "reformatted": "2017-03-01",
+        "reason": _YEAR_NOT_IN_SOURCE_REASON}}
+
+
+def test_year_not_in_source_clearing_records_an_empty_string():
+    _, reformatted = apply_regex_post_processing(
+        "Example lecture, May 2014 and May 2015", {"date": "1990-05"}, "R")
+
+    assert reformatted == {"date": {
+        "original": "1990-05", "reformatted": "",
+        "reason": _YEAR_NOT_IN_SOURCE_NULLED_REASON}}
+
+
+@pytest.mark.parametrize(
+    "text,fields",
+    [
+        # the year is written out in the text
+        ("Example lecture, June 2011; founded 1968", {"start_date": "1968-06"}),
+        # its two digits are in the text as a number of their own
+        ("Example lecture 6/68, renewed June 2011", {"start_date": "1968-06"}),
+        ("Example committee 1967-68, June 2011", {"start_date": "1968-06"}),
+        # a bare year carries no month to re-derive it from
+        ("Example lecture, June 2011", {"start_date": "1968"}),
+        # the text gives no date in the value's month: the year may sit in a
+        # neighbouring element, so it is left alone
+        ("Example lecture, June 2011", {"date": "1968-08"}),
+        ("Example lecture, Symposium for residents", {"date": "2008-08"}),
+        # a word that starts like a month name is not one
+        ("Example Institute of Marine 2016", {"date": "1995-03"}),
+        ("Example Award, Junior 2015", {"date": "1995-06"}),
+        # a date in another month is not this date
+        ("Example grant 04/01/17", {"start_date": "1997-03-01"}),
+        # a date on another day of that month is not this date
+        ("Example grant 03/02/17", {"start_date": "1997-03-01"}),
+        ("Example lecture, November 5, 2015", {"date": "1900-11-04"}),
+        # a date inside a longer slash run, or after another digit, is not one
+        ("Example ref 9/03/01/17", {"start_date": "1997-03-01"}),
+        ("Example ref 112/1/17", {"start_date": "1997-12-01"}),
+        # a matching date with a cut-off year: the value may be its reading
+        ("Example grant 05/01/2021-05/01/202", {"end_date": "2026-05-01"}),
+        # not a date value
+        ("Example lecture, June 2011", {"date": "1968-06-01-02"}),
+        ("Example lecture, June 2011", {"year": 1968}),
+        # no text to check against (an earlier record of a multi-record entry)
+        ("", {"start_date": "1968-06"}),
+    ],
+)
+def test_year_not_in_source_repair_leaves_these_alone(text, fields):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), "R")
+
+    assert {key: updated.get(key) for key in fields} == fields
+    assert reformatted == {}
+
+
+# --- M-YY-MM-YY source range read as an M-D-YY date (class E26) -------------
+
+_MONTH_YEAR_DASH_RANGE_REASON = "Re-read an M-YY-MM-YY source range stage 4 read as M-D-YY"
+
+
+def test_month_year_dash_range_read_as_a_date_is_re_read():
+    updated, reformatted = apply_regex_post_processing(
+        "Example contract 3-21-11-24 $10,000",
+        {"start_date": "2011-03-21", "end_date": "2024"}, "M2B")
+
+    assert (updated["start_date"], updated["end_date"]) == ("2021-03", "2024-11")
+    assert reformatted == {
+        "start_date": {"original": "2011-03-21", "reformatted": "2021-03",
+                       "reason": _MONTH_YEAR_DASH_RANGE_REASON},
+        "end_date": {"original": "2024", "reformatted": "2024-11",
+                     "reason": _MONTH_YEAR_DASH_RANGE_REASON},
+    }
+
+
+@pytest.mark.parametrize(
+    "text,fields,code",
+    [
+        # the start was read right already
+        ("Example contract 3-21-11-24", {"start_date": "2021-03", "end_date": "2024-11"}, "M2B"),
+        # the start is neither the M-D-YY misreading nor the range's start
+        ("Example contract 3-21-11-24", {"start_date": "2020-01", "end_date": "2024"}, "M2B"),
+        # an M-D-YY date, three numbers: not the four-number range
+        ("Example contract 3-21-11", {"start_date": "2011-03-21"}, "M2B"),
+        # the misread start year is written out in the text
+        ("Example contract 3-21-11-24, renewed 2011", {"start_date": "2011-03-21"}, "M2B"),
+        # two such ranges: ambiguous
+        ("Example 3-21-11-24 and 1-20-3-21", {"start_date": "2011-03-21"}, "M2B"),
+        # the third number cannot be a month
+        ("Example contract 3-21-14-24", {"start_date": "2014-03-21"}, "M2B"),
+        # the range would run backwards
+        ("Example contract 3-24-11-21", {"start_date": "2011-03-24"}, "M2B"),
+        # part of a longer dash or slash run
+        ("Example ref 7-3-21-11-24", {"start_date": "2011-03-21"}, "M2B"),
+        # no start date stored at all
+        ("Example contract 3-21-11-24", {"start_date": None, "end_date": "2024"}, "M2B"),
+        # not a date-range code
+        ("Example contract 3-21-11-24", {"date": "2011-03-21"}, "R"),
+    ],
+)
+def test_month_year_dash_range_left_alone_when_text_does_not_show_it(text, fields, code):
+    updated, reformatted = apply_regex_post_processing(text, dict(fields), code)
+
+    assert {key: updated.get(key) for key in fields} == fields
+    assert reformatted == {}
+
+
+def test_month_year_dash_range_records_only_the_fields_it_changed():
+    _, reformatted = apply_regex_post_processing(
+        "Example contract 3-21-11-24",
+        {"start_date": "2011-03-21", "end_date": "2024-11"}, "M2B")
+
+    assert reformatted == {"start_date": {
+        "original": "2011-03-21", "reformatted": "2021-03",
+        "reason": _MONTH_YEAR_DASH_RANGE_REASON}}
