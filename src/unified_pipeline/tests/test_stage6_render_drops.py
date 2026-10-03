@@ -25,6 +25,9 @@ from unified_pipeline.stage6.parsing import (
     _is_orphan_fragment,
 )
 from unified_pipeline.stage6.fan_out import _RENDERED_FIELDS
+from unified_pipeline.stage6.sections.other_education import (
+    _normalize_other_education_entry,
+)
 from unified_pipeline.stage_6_word_template import (
     _REROUTE_ANCHOR_OVERRIDES,
     _SAME_FAMILY_KIND_FIELDS,
@@ -34,6 +37,7 @@ from unified_pipeline.stage_6_word_template import (
     REROUTE_CHECK,
     REROUTE_REFUSED_FIELDS,
     REROUTE_REFUSED_MENTEE,
+    PRECOLLEGIATE_REROUTE_CHECK,
     WCMTemplateGenerator,
 )
 
@@ -582,3 +586,85 @@ def test_dedup_keeps_one_session_given_on_two_dates(code, first, second) -> None
     entries[1]["extracted_fields"] = dict(first)
     grouped, _, _ = gen._dedup_grouped_entries(gen._group_entries_by_code(entries))
     assert len(grouped[code]) == 1
+
+
+# --- EBYSBC class E33 (HZGJFM-06): pre-collegiate schooling is not a degree ----
+# A B1 row with no degree that names a school before college rendered in the
+# degree table with an empty Year Awarded. It goes to B2. Invented values.
+
+def _b1(institution: str | None, degree: str | None = None, idx: int = 12,
+        text: str = "Example entry 1990-1994") -> dict:
+    return {"text": text, "taxonomy_code": "B1", "element_idx_start": idx,
+            "extracted_fields": {"degree": degree, "institution": institution,
+                                 "discipline": None, "year": None,
+                                 "dates_attended": {"start_date": "1990",
+                                                    "end_date": "1994"}}}
+
+
+def _precollegiate_records(gen: WCMTemplateGenerator) -> list[dict]:
+    return [w for w in gen._section_failures if w["check"] == PRECOLLEGIATE_REROUTE_CHECK]
+
+
+@pytest.mark.parametrize("institution", [
+    "Example High School, Springfield", "Example Secondary School",
+    "Example Preparatory School", "Example Prep School", "Example Parochial Schools",
+    "Gymnasium Example", "Lycee Example", "Lyc\u00e9e Example", "Liceo Example",
+    "Example Junior High School"])
+def test_degree_less_precollegiate_row_moves_to_other_education(institution: str) -> None:
+    entry = _b1(institution)
+    gen, code = _gen_and_code(entry)
+    assert code == "B2", institution
+    assert (entry["taxonomy_code"], entry["taxonomy_code_original"]) == ("B2", "B1")
+    [record] = _precollegiate_records(gen)
+    assert (record["code"], record["severity"]) == ("B1", "INFO")
+    assert "B1->B2" in record["message"]
+    assert record["evidence"] == ["element_idx_start 12"]
+
+
+@pytest.mark.parametrize("entry", [
+    _b1("Example High School", degree="Diploma"),
+    _b1("Example University"),
+    _b1("Example College of Arts and Sciences"),
+    _b1("Example Medical School"),
+    _b1("Example Graduate School"),
+    _b1("Example Academy"),
+    _b1(None, text="Example University, 1990-1994"),
+], ids=["named-degree", "university", "college", "medical-school",
+        "graduate-school", "academy", "text-names-no-school"])
+def test_named_degree_or_college_row_stays_in_b1(entry: dict) -> None:
+    gen, code = _gen_and_code(entry)
+    assert code == "B1"
+    assert entry["taxonomy_code"] == "B1" and "taxonomy_code_original" not in entry
+    assert _precollegiate_records(gen) == []
+
+
+def test_text_is_read_when_stage4_names_no_institution() -> None:
+    entry = _b1("  ", text="Example High School, Springfield 1990-1994")
+    assert _gen_and_code(entry)[1] == "B2"
+
+
+def test_moves_are_one_record_by_index_without_entry_text() -> None:
+    gen = WCMTemplateGenerator(verbose=False)
+    groups = gen._group_entries_by_code([
+        _b1("Example High School", idx=3), _b1("Example University", idx=4),
+        _b1("Example Secondary School", idx=5)])
+    assert sorted(groups) == ["B1", "B2"] and len(groups["B2"]) == 2
+    [record] = _precollegiate_records(gen)
+    assert record["evidence"] == ["element_idx_start 3", "element_idx_start 5"]
+    assert "2 entries" in record["message"]
+    assert "Example" not in json.dumps(record)
+
+
+def test_moved_row_keeps_its_attendance_dates_in_other_education() -> None:
+    # B2 reads flat start/end keys; a moved row holds B1's nested dates.
+    gen = WCMTemplateGenerator(verbose=False)
+    [moved] = gen._group_entries_by_code([_b1("Example High School")])["B2"]
+    record = _normalize_other_education_entry(moved)
+    assert record.institution.startswith("Example High School")
+    assert "1990" in record.dates and "1994" in record.dates
+    assert record.dates_from_text is False
+    flat = {"text": "", "extracted_fields": {
+        "program_name": "Course X", "start_date": "2001", "end_date": "2002",
+        "dates_attended": {"start_date": "1990", "end_date": "1994"}}}
+    flat_dates = _normalize_other_education_entry(flat).dates
+    assert "2001" in flat_dates and "1990" not in flat_dates
